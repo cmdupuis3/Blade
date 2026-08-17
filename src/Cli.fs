@@ -1549,16 +1549,19 @@ let private runIdeEvalTests () : TH.BlockResult =
         (code, (parts |> List.filter (fun p -> p <> "")), raw)
     let entryDir = Directory.GetCurrentDirectory()
     try
-        // 1. The base case: a declaration is kept, and its binding comes back
-        // with the IR-concrete type and the printed value beside it.
-        let (code, responses, _) = drive [ evalReq 1 "nb" "let x = 2"; shutdownReq ]
-        let name = "eval keeps a declaration and echoes its typed binding"
+        // 1. The base case: a declaration is kept SILENTLY -- a cell displays
+        // its "return value" (a trailing bare expression) and nothing else, so
+        // the binding's value is read back by a later bare-identifier cell.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let x = 2"; evalReq 2 "nb" "x"; shutdownReq ]
+        let name = "eval keeps a declaration silently; a bare identifier reads it back"
         match responses with
-        | [r] when code = 0 && r.Contains "\"id\":1" && r.Contains "\"kept\":true"
-                   && r.Contains "\"exitCode\":0" && r.Contains "\"lane\":\"interp\""
-                   && r.Contains "\"elapsedMs\":"
-                   && r.Contains "{\"name\":\"x\",\"type\":\"Int64\",\"value\":\"2\"}"
-                   && r.Contains "\"diagnostics\":[]" ->
+        | [decl; probe] when code = 0 && decl.Contains "\"id\":1" && decl.Contains "\"kept\":true"
+                             && decl.Contains "\"exitCode\":0" && decl.Contains "\"lane\":\"interp\""
+                             && decl.Contains "\"elapsedMs\":"
+                             && decl.Contains "\"bindings\":[]"
+                             && decl.Contains "\"diagnostics\":[]"
+                             && probe.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"2\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1588,10 +1591,10 @@ let private runIdeEvalTests () : TH.BlockResult =
                     evalReq 3 "nb" "let x = 5"; evalReq 4 "nb" "y"; shutdownReq ]
         let name = "rebinding a name splices in place and dependents recompute"
         match responses with
-        | [_; before; rebind; after] when code = 0
-                                          && before.Contains "\"value\":\"20\""
-                                          && rebind.Contains "{\"name\":\"x\",\"type\":\"Int64\",\"value\":\"5\"}"
-                                          && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"50\"}" ->
+        | [_; _; rebind; after] when code = 0
+                                     && rebind.Contains "\"kept\":true"
+                                     && rebind.Contains "\"bindings\":[]"
+                                     && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"50\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1689,7 +1692,7 @@ let private runIdeEvalTests () : TH.BlockResult =
         // 9. The display cap travels with the value: a notebook shows what the
         // REPL shows, five entries per bracket level and then `...`.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let v = [1, 2, 3, 4, 5, 6, 7]"; shutdownReq ]
+            drive [ evalReq 1 "nb" "[1, 2, 3, 4, 5, 6, 7]"; shutdownReq ]
         let name = "binding values carry the REPL's display elision"
         match responses with
         | [r] when code = 0 && r.Contains "\"value\":\"[1, 2, 3, 4, 5, ...]\"" ->
@@ -1706,26 +1709,28 @@ let private runIdeEvalTests () : TH.BlockResult =
         else
             record name TH.Fail (sprintf "%d newline-separated parts" (raw.Split('\n').Length))
 
-        // 11. A function declaration has no run output at all; its binding
-        // still carries the signature the REPL would have echoed.
+        // 11. A function declaration is silent like any declaration; a bare
+        // reference to it still carries the signature the REPL would have
+        // echoed, answered from the declaration's own binding.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "function twice(p) = p * 2"; evalReq 2 "nb" "twice"; shutdownReq ]
-        let name = "a function binding reports its signature and no value"
+        let name = "a bare function reference reports its signature and no value"
         match responses with
         | [decl; probe] when code = 0
-                             && decl.Contains "{\"name\":\"twice\",\"type\":\"(Float64) -> Float64\",\"value\":\"\"}"
+                             && decl.Contains "\"kept\":true" && decl.Contains "\"bindings\":[]"
                              && probe.Contains "{\"name\":\"twice\",\"type\":\"(Float64) -> Float64\",\"value\":\"\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
         // 12. A :paste-shaped cell declares several names at once. All of them
-        // are bindings this cell made, in source order.
+        // bind -- silently. A later cell reads any of them back.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let m = 3\nlet n = m + 4"; shutdownReq ]
-        let name = "a multi-declaration cell reports every name it bound"
+            drive [ evalReq 1 "nb" "let m = 3\nlet n = m + 4"; evalReq 2 "nb" "n"; shutdownReq ]
+        let name = "a multi-declaration cell is silent and binds every name"
         match responses with
-        | [r] when code = 0
-                   && r.Contains "\"bindings\":[{\"name\":\"m\",\"type\":\"Int64\",\"value\":\"3\"},{\"name\":\"n\",\"type\":\"Int64\",\"value\":\"7\"}]" ->
+        | [decls; probe] when code = 0
+                              && decls.Contains "\"kept\":true" && decls.Contains "\"bindings\":[]"
+                              && probe.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"7\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1756,16 +1761,18 @@ let private runIdeEvalTests () : TH.BlockResult =
         // diagnostic as well as on stderr -- a client that builds its error
         // card from the first diagnostic would otherwise have nothing to say.
         let (code, responses, _) =
-            drive [ evalReq 1 "nb" "let z = 1 / 0"; evalReq 2 "nb" "let ok = 6"; shutdownReq ]
+            drive [ evalReq 1 "nb" "let z = 1 / 0"; evalReq 2 "nb" "let ok = 6"
+                    evalReq 3 "nb" "ok"; shutdownReq ]
         let name = "a runtime panic is not kept and names itself"
         match responses with
-        | [panic; after] when code = 0
-                              && panic.Contains "\"kept\":false" && panic.Contains "\"exitCode\":1"
-                              && panic.Contains "\"lane\":\"interp\"" && panic.Contains "\"bindings\":[]"
-                              && panic.Contains "\"stderr\":\"error[BL8007]"
-                              && panic.Contains "\"severity\":\"error\",\"line\":1,\"col\":1"
-                              && panic.Contains "integer division or modulo by zero"
-                              && after.Contains "{\"name\":\"ok\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+        | [panic; after; probe] when code = 0
+                                     && panic.Contains "\"kept\":false" && panic.Contains "\"exitCode\":1"
+                                     && panic.Contains "\"lane\":\"interp\"" && panic.Contains "\"bindings\":[]"
+                                     && panic.Contains "\"stderr\":\"error[BL8007]"
+                                     && panic.Contains "\"severity\":\"error\",\"line\":1,\"col\":1"
+                                     && panic.Contains "integer division or modulo by zero"
+                                     && after.Contains "\"kept\":true"
+                                     && probe.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1774,7 +1781,8 @@ let private runIdeEvalTests () : TH.BlockResult =
         // Classified as one declaration the cell passed through whole and the
         // file grammar rejected its last line (BL1999 "Expected declaration");
         // classified as one expression its FIRST line would have been the thing
-        // that failed. It is neither: it is three statements.
+        // that failed. It is neither: it is three statements -- and the cell
+        // displays exactly ONE value, its trailing expression's.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "let t1 = 2\nlet t2 = 3\nt1 + t2"
                     evalReq 2 "nb" "t2"; shutdownReq ]
@@ -1782,50 +1790,44 @@ let private runIdeEvalTests () : TH.BlockResult =
         match responses with
         | [mixed; after] when code = 0
                               && mixed.Contains "\"kept\":true" && mixed.Contains "\"diagnostics\":[]"
-                              && mixed.Contains "{\"name\":\"t1\",\"type\":\"Int64\",\"value\":\"2\"}"
-                              && mixed.Contains "{\"name\":\"t2\",\"type\":\"Int64\",\"value\":\"3\"}"
-                              && mixed.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"5\"}"
+                              && mixed.Contains "\"bindings\":[{\"name\":\"\",\"type\":\"Int64\",\"value\":\"5\"}]"
                               // The declarations JOINED the session; only the
                               // expression was transient.
                               && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"3\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
-        // 16. Interleaving, and the ORDER contract: every statement runs where
-        // the user wrote it, and every expression's value comes back in that
-        // same order. A whole-array `bindings` equality rather than a set of
-        // `Contains`, because order is the property under test.
+        // 16. Interleaving: every statement runs where the user wrote it (the
+        // mid-cell expression too -- its effects land), but only the FINAL
+        // statement displays, and here the final statement is `r * 2`. A
+        // whole-array `bindings` equality, because "exactly one echo" is the
+        // property under test.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "let p = 10\nlet q = p * 2\nq + 1\nlet r = q + p\nr * 2"
                     shutdownReq ]
-        let name = "an interleaved decl/expr/decl/expr cell reports its values in order"
+        let name = "an interleaved cell displays only its final expression"
         let expectedOrder =
-            "\"bindings\":[{\"name\":\"p\",\"type\":\"Int64\",\"value\":\"10\"},"
-            + "{\"name\":\"q\",\"type\":\"Int64\",\"value\":\"20\"},"
-            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"21\"},"
-            + "{\"name\":\"r\",\"type\":\"Int64\",\"value\":\"30\"},"
-            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"60\"}]"
+            "\"bindings\":[{\"name\":\"\",\"type\":\"Int64\",\"value\":\"60\"}]"
         match responses with
         | [r] when code = 0 && r.Contains "\"kept\":true" && r.Contains expectedOrder ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
         // 17. The regression the split must not cause: an expression-only cell
-        // still evaluates against the session without joining it, whether it
-        // holds one expression or several.
+        // still evaluates against the session without joining it. Only the
+        // last expression displays; the earlier one runs for effect.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "let e1 = 4"; evalReq 2 "nb" "e1 + 1\ne1 * 2"
                     evalReq 3 "nb" "e1 + 1\ne1 * 2"; shutdownReq ]
-        let name = "an expression-only cell echoes every value and joins nothing"
-        let twoValues =
-            "\"bindings\":[{\"name\":\"\",\"type\":\"Int64\",\"value\":\"5\"},"
-            + "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"8\"}]"
+        let name = "an expression-only cell echoes its final value and joins nothing"
+        let finalValue =
+            "\"bindings\":[{\"name\":\"\",\"type\":\"Int64\",\"value\":\"8\"}]"
         match responses with
         | [_; first; again] when code = 0
-                                 && first.Contains "\"kept\":true" && first.Contains twoValues
+                                 && first.Contains "\"kept\":true" && first.Contains finalValue
                                  // Re-running echoes again rather than diffing
                                  // to silence -- nothing was kept to diff against.
-                                 && again.Contains twoValues ->
+                                 && again.Contains finalValue ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1907,13 +1909,15 @@ let private runIdeEvalTests () : TH.BlockResult =
                          + "    | zero -> zero\n    | zero :: s -> zero :: 1.0\n"
                          + "    | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0\n"
                          + "reduce(seq, (+))")
-                    shutdownReq ]
+                    evalReq 2 "nb" "seq"; shutdownReq ]
         let name = "a let rec statement stays whole and binds its own name"
         match responses with
-        | [r] when code = 0 && r.Contains "\"kept\":true"
-                   && r.Contains "{\"name\":\"seq\",\"type\":\"Array<Float64 like Idx<4>>\""
-                   && not (r.Contains "\"name\":\"rec\"")
-                   && r.Contains "{\"name\":\"\",\"type\":\"Float64\",\"value\":\"6.125\"}" ->
+        | [r; probe] when code = 0 && r.Contains "\"kept\":true"
+                          && not (r.Contains "\"name\":\"rec\"")
+                          && r.Contains "{\"name\":\"\",\"type\":\"Float64\",\"value\":\"6.125\"}"
+                          // The rebindable name is `seq`, not `rec`: a later
+                          // bare-identifier cell reads the array back.
+                          && probe.Contains "{\"name\":\"\",\"type\":\"Array<Float64 like Idx<4>>\"" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1928,7 +1932,9 @@ let private runIdeEvalTests () : TH.BlockResult =
         match responses with
         | [write; after] when code = 0
                               && write.Contains "\"kept\":true"
-                              && write.Contains "{\"name\":\"arr\",\"type\":\"Array<Float64 like Idx<3>>\",\"value\":\"[9.0, 2.0, 3.0]\"}"
+                              // A reassignment is a statement: silent, and the
+                              // write persists for the next cell to read.
+                              && write.Contains "\"bindings\":[]"
                               && after.Contains "\"value\":\"[9.0, 2.0, 3.0]\"" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
@@ -1960,9 +1966,9 @@ let private runIdeEvalTests () : TH.BlockResult =
         // function must not be able to fail IR validation.
         //
         // What is pinned is the CONTRACT, not the spelling of the rendered
-        // type: the cell succeeds and carries NO diagnostics. The declaration
-        // cell before it pins the type echo the checker produces, which is what
-        // a client actually displays.
+        // type: the cell succeeds and carries NO diagnostics. The bare
+        // reference pins the type echo the checker produces, which is what a
+        // client actually displays.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "from stats import mean"
                     evalReq 2 "nb" "function covariance(a: T^1, b: T^1) where comm(a, b) = { (a - mean(a)) * (b - mean(b)) }"
@@ -1973,13 +1979,13 @@ let private runIdeEvalTests () : TH.BlockResult =
         match responses with
         | [_; decl; bare; after] when code = 0
                                       && decl.Contains "\"diagnostics\":[]"
-                                      && decl.Contains "{\"name\":\"covariance\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
                                       && bare.Contains "\"exitCode\":0"
                                       && bare.Contains "\"diagnostics\":[]"
+                                      && bare.Contains "{\"name\":\"covariance\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
                                       && not (bare.Contains "BL6001")
                                       // The session survives it: a later cell
                                       // still evaluates against the same state.
-                                      && after.Contains "{\"name\":\"after\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+                                      && after.Contains "\"kept\":true" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 

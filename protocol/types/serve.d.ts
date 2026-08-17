@@ -142,7 +142,11 @@ export type CheckResponse = CheckPayload & { id: number; tier: Tier };
 /** A `checkCells` response additionally carries one window per input cell. */
 export type CheckCellsResponse = CheckResponse & { windows: CellWindow[] };
 
-/** One value the submission left bound, already rendered for display. */
+/** One displayed value, already rendered for display. A cell reports at most
+ *  ONE: its final statement, when that statement is a bare expression — under
+ *  `name: ""`, or under the declaration's own name when the expression is a
+ *  bare identifier naming a session function (the signature echo).
+ *  Declarations and reassignments report nothing. */
 export interface EvalBinding {
   name: string;
   type: string;

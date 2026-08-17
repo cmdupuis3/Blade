@@ -213,11 +213,14 @@ add "serve channel: frames are LIFTED OUT of stdout (never shown twice)" (fun ()
     (not (r.Stdout.Contains F.Sentinel) && not (r.Stdout.Contains "blade-display")), r.Stdout)
 
 add "serve channel: the submission is still kept and typed as usual" (fun () ->
-    let r = evalOnce "import display as d\nlet ok = d.emit(\"image/png\", \"AA==\")"
-    let b = r.Bindings |> List.tryFind (fun b -> b.Name = "ok")
+    // The emitting call as the cell's final bare expression: the one display
+    // slot a cell has. (A `let ok = d.emit(...)` spelling is kept too, but
+    // declarations report no bindings.)
+    let r = evalOnce "import display as d\nd.emit(\"image/png\", \"AA==\")"
+    let b = r.Bindings |> List.tryFind (fun b -> b.Name = "")
     match b with
     | Some b -> (r.Kept && b.Type = "Bool" && b.Value = "true"), sprintf "kept=%b type=%s value=%s" r.Kept b.Type b.Value
-    | None -> false, sprintf "no 'ok' binding in %A" r.Bindings)
+    | None -> false, sprintf "no anonymous echo in %A" r.Bindings)
 
 add "serve channel: a non-emitting submission has an empty Display" (fun () ->
     let r = evalOnce "let x = 1"

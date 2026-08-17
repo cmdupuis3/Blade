@@ -594,9 +594,13 @@ type CandidateOutcome =
 
 // The structured result the notebook lane speaks.
 
-/// One (re)bound name, with its concrete type and its ELIDED display value.
-/// A bare expression yields a single entry with `Name = ""` -- the transient
-/// wrapper's name, stripped exactly as the interactive echo strips it.
+/// One displayed value, with its concrete type and its ELIDED display value.
+/// The notebook lane reports at most ONE entry: the cell's final statement,
+/// when that statement is a bare expression -- under `Name = ""` (the
+/// transient wrapper's name, stripped exactly as the interactive echo strips
+/// it), or under the declaration's own name when the expression is a bare
+/// identifier naming a session function (the signature echo). Declarations
+/// and reassignments display nothing.
 type Binding =
     { Name: string
       Type: string
@@ -1249,54 +1253,57 @@ type ReplSession(runCwd: string) =
             let placements =
                 slots |> List.map (fun s ->
                     { Index = s.Index; Prefix = s.Prefix; PrefixRow = s.PrefixRow; SubLine = s.SubLine })
-            // A statement that is nothing but an identifier NAMING A FUNCTION
-            // echoes from the declaration -- its own name and the checker's
-            // rendering of the signature -- exactly as a one-statement cell
-            // holding the same text does. Without this the wrapper answered
-            // instead, anonymously and in raw IR (`Arrow<T, T -> T>` where the
-            // declaring cell had rendered `(T^1, T^1) -> T^1`), so the SAME
-            // function read two different ways depending on which cell it sat
-            // in. An identifier naming a VALUE keeps the anonymous echo: it
-            // has a printed value to show, which is the thing being asked for.
+            // A cell DISPLAYS only its "return value": the final statement,
+            // and only when that statement is a bare expression. Declarations
+            // and reassignments run silently -- their work shows through later
+            // reads, not through an echo -- and a mid-cell expression still
+            // runs where it was written (its effects and display frames land)
+            // but does not echo either. This is the notebook's display rule
+            // alone: the interactive REPL front end drives the candidate API
+            // directly and keeps its per-declaration echoes.
             //
-            // `distinct` because that echo can now COLLIDE with the statement
-            // that declared it: a cell holding `function gen ... ` and then
-            // `gen` has two statements naming the same binding, and reporting
-            // it twice puts the same output in the cell twice. Only exact
-            // duplicates collapse, so two anonymous echoes (distinct transient
-            // wrappers) both survive, and a cell that declares a name twice
-            // reports the one binding that actually survived the splice.
+            // A final statement that is nothing but an identifier NAMING A
+            // FUNCTION echoes from the declaration -- its own name and the
+            // checker's rendering of the signature -- exactly as a
+            // one-statement cell holding the same text does. Without this the
+            // wrapper answered instead, anonymously and in raw IR
+            // (`Arrow<T, T -> T>` where the declaring cell had rendered
+            // `(T^1, T^1) -> T^1`). An identifier naming a VALUE keeps the
+            // anonymous echo: it has a printed value to show, which is the
+            // thing being asked for.
+            let lastExpr = slots |> List.tryLast |> Option.filter (fun s -> s.Transient)
             let report (info: Map<string, ReplTypes.Info>) =
-                slots
-                |> List.collect (fun s ->
-                    match s.NamedIdent with
-                    | Some n when (match Map.tryFind n info with
-                                   | Some (ReplTypes.RFunc _) -> true
-                                   | _ -> false) -> [ (n, n) ]
-                    | _ -> s.Names)
-                |> List.distinct
+                match lastExpr with
+                | Some s ->
+                    (match s.NamedIdent with
+                     | Some n when (match Map.tryFind n info with
+                                    | Some (ReplTypes.RFunc _) -> true
+                                    | _ -> false) -> [ (n, n) ]
+                     | _ -> s.Names)
+                | None -> []
             let reads =
-                slots
-                |> List.collect (fun s ->
-                    (s.Names |> List.map snd) @ Option.toList s.NamedIdent)
+                match lastExpr with
+                | Some s -> (s.Names |> List.map snd) @ Option.toList s.NamedIdent
+                | None -> []
             evalWith candidate placements None reads report (Some committed)
         elif declRe.IsMatch head then
             let (candidate, idx) = this.DeclarationCandidate trimmed
-            // A :paste block may declare several names; every one of them is a
-            // binding this submission made, and the LAST is what the REPL echoes.
-            // Top-level only -- a function body's locals are not this
-            // submission's bindings (see topLevelBindingNames).
-            let names = topLevelBindingNames trimmed
-            let target = List.tryLast names
+            // Declarations are silent (see the mixed lane's display rule): the
+            // cell shows its trailing expression or nothing. With no name to
+            // read back, printOnly is empty and the run formats no values --
+            // which is what keeps a declaration-heavy cell cheap. The
+            // declaration still EVALUATES exactly as before (effects and
+            // `|> compute` are program semantics, not display).
             evalWith candidate [ { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = leadPad + 1 } ]
-                     target names (fun _ -> names |> List.map (fun n -> (n, n))) (Some candidate)
+                     None [] (fun _ -> []) (Some candidate)
         elif assignRe.IsMatch head then
             let (candidate, idx, hidden, row) = this.AssignmentCandidate trimmed
-            let root = (assignRe.Match head).Groups.[1].Value
+            // A reassignment is a statement, not a value ask: silent, like a
+            // declaration. The mutation itself persists (the wrapper commits).
             evalWith candidate
                      [ { Index = idx; Prefix = (sprintf "let %s = " hidden).Length
                          PrefixRow = row; SubLine = leadPad + 1 } ]
-                     (Some root) [ root; hidden ] (fun _ -> [ (root, root) ]) (Some candidate)
+                     None [] (fun _ -> []) (Some candidate)
         else
             // A bare identifier naming a session FUNCTION can't be let-bound
             // just to echo it; its signature comes straight from the
@@ -1315,10 +1322,23 @@ type ReplSession(runCwd: string) =
                 { blank with Bindings = [ { Name = n; Type = s; Value = "" } ] }
             | None ->
                 let (candidate, idx, transient, row) = this.ExpressionCandidate trimmed
+                // The probe above lowers the session WITHOUT the wrapper and
+                // can fail where the candidate itself lowers fine (an import
+                // the bare-session lowering rejects, say). The run's own type
+                // map is the reliable authority: an identifier that turns out
+                // to name a function still echoes from the declaration, not
+                // the wrapper -- the same rule the mixed lane applies.
                 evalWith candidate
                          [ { Index = idx; Prefix = (sprintf "let %s = " transient).Length
                              PrefixRow = row; SubLine = leadPad + 1 } ]
-                         (Some transient) [ transient ] (fun _ -> [ ("", transient) ]) None
+                         (Some transient) [ transient ]
+                         (fun info ->
+                             match ident with
+                             | Some n when (match Map.tryFind n info with
+                                            | Some (ReplTypes.RFunc _) -> true
+                                            | _ -> false) -> [ (n, n) ]
+                             | _ -> [ ("", transient) ])
+                         None
 
 // Whole-notebook assembly: many cells in, one source out.
 //
