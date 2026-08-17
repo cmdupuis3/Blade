@@ -1,0 +1,30 @@
+// TEST: JVP C7 Pipeline Branch Stage
+// The examples/03 conditioning pipeline, differentiated: a calibration
+// stage composed with a deadband, which is an `if` kernel. Two things are
+// load-bearing here beyond the fusion -- the stage kernels are module-level
+// `let` LAMBDAS (neither a `function` nor an intrinsic, so fusion has to
+// resolve them through the module scope), and so are the `object_for`
+// values themselves.
+// calibrate is 2x+0.1; the deadband zeroes anything with |value| < 0.1.
+// r = [0.05, 0.5, -0.05, 1.0] calibrates to [0.2, 1.1, 0.0, 2.1], and the
+// third cell is the one the deadband kills: primal 0.2+1.1+0+2.1 = 3.4.
+// The tangent is 2 wherever the band passes and 0 where it clamps: 3*2 = 6.
+import ad as ad
+
+type I = Idx<4>
+
+let calibrate = lambda(x) -> 2.0 * x + 0.1
+// |x| < 0.1 written as x^2 < 0.01 so the kernel stays a single branch
+let deadband = lambda(x) -> if x * x < 0.01 then 0.0 else x
+let o_cal = object_for(calibrate)
+let o_dead = object_for(deadband)
+
+function f(r: Array<Float like I>) -> Float = {
+    let m = (o_cal >>@ o_dead) <@> r |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([0.05, 0.5, -0.05, 1.0], [1.0, 1.0, 1.0, 1.0])
+// EXPECT: v = 3.4
+// EXPECT: t = 6

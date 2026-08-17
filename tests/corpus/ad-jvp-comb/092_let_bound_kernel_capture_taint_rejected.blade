@@ -1,0 +1,32 @@
+// TEST: A Let-Bound Kernel's CAPTURE Taints Its Binding (rejects)
+// The taint walk treated a let-bound `object_for(kern)` as opaque -- the
+// binding gets no tangent of its own, so the arm returned without looking at
+// the kernel at all. But the kernel CAPTURES: here the map's only route to the
+// differentiable parameter `s` runs through the capture, not through the
+// operand (`table` is a module constant). Untainted, `m` was constant and the
+// program compiled to t = 0 -- a silently wrong tangent where the truth is 6.
+// (The `0.0 * s` term is what kept the "does not depend on any differentiable
+// parameter" refusal from firing and hiding the hole; without it that refusal
+// fired and was simply untrue.)
+//
+// The walk now visits the kernel body's captures, so `m` is differentiable and
+// the map rule refuses the module-constant OPERAND by name -- the same refusal
+// the inline `object_for(...) <@> table` spelling has always given. A named
+// refusal, not a zero. 093 pins that a capture DOES differentiate once its
+// operand is a proper parameter.
+// ERROR: BL5501
+// ERROR-CONTAINS: named array PARAMETER with a declared index type
+import ad as ad
+
+type I = Idx<3>
+
+let table = [1.0, 2.0, 3.0]
+
+function f(s: Float) -> Float = {
+    let L = object_for(lambda(x: Float) -> x * s)
+    let m = L <@> table |> compute
+    m(0) + m(1) + m(2) + 0.0 * s
+}
+
+let (v, t) = ad.jvp(f)(2.0, 1.0)
+v

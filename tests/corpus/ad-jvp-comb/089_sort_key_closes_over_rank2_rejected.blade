@@ -1,0 +1,21 @@
+// TEST: C7 Sort Key May Not Close Over A RANK-2 Array (rejects)
+// The other half of 088's hole: the closure set was built from the rank-1
+// index-type map, so a rank-2 differentiable parameter was invisible to it.
+// `b(0)(0) = -1` makes the key descending here, and the permutation depends on
+// b -- a dependence the permutation-as-data rule drops. Refuse instead.
+// ERROR: BL5501
+// ERROR-CONTAINS: key that reads ONLY the sorted element
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>, b: Array<Float like I, I>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> x * b(0)(0))
+    s(0) * 2.0
+}
+
+let (v, t) = ad.jvp(f)([3.0, 1.0, 2.0],
+                       [[-1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                       [1.0, 0.0, 0.0],
+                       [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+v

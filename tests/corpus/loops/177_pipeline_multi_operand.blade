@@ -1,0 +1,12 @@
+// TEST: Pipeline Multi Operand
+// Regression: a pipeline whose first stage takes TWO operands used to emit
+// `const size_t* multi__s1_extents = arr0.extents;` with `arr0` undeclared --
+// the unnamed-operand hazard, reached through the compose path. Fusion keeps
+// the first stage's arity (only the stages after it consume a single
+// intermediate) so the whole thing is one rank-2 outer map, 2*ai*bj.
+let A = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let g = lambda(x) -> x * 2.0
+let k2 = lambda(x, y) -> x * y
+let multi = (object_for(k2) >>@ object_for(g)) <@> (A, B) |> compute
+// EXPECT: multi = [[20, 40, 60], [40, 80, 120], [60, 120, 180]]

@@ -1,0 +1,30 @@
+// TEST: JVP Rank-1 Kernel, Centered Product (Row Variance)
+// The third rung: the body is ARRAY-valued in the middle. The product rule
+// runs elementwise over fibers, the array-minus-scalar broadcast carries a
+// row tangent against a scalar tangent, and the outer fold collapses it.
+// This is the shape the comoment family is built out of.
+// Row variance is (1/n) sum (a_k - m)^2, whose derivative in a_k is
+// (2/n)(a_k - m).
+// a = [[1,2,3],[4,5,6]] -> var = [2/3, 2/3]; v = 2/3 + 2*(2/3) = 2.
+// seed [[1,0,0],[0,1,0]]:
+//   row 0 perturbs a_0 = 1 against mean 2 -> (2/3)(-1) = -2/3
+//   row 1 perturbs a_1 = 5 against mean 5 -> (2/3)(0)  =  0
+//   t = -2/3 + 2*0 = -2/3.
+import ad as ad
+
+type R = Idx<2>
+type C = Idx<3>
+
+function f(a: Array<Float like R, C>) -> Float = {
+    let s = method_for(a) <@>
+        lambda(row: T^1) ->
+            reduce((row - reduce(row, (+)) / extents(row)) * (row - reduce(row, (+)) / extents(row)), (+)) / extents(row)
+        |> compute
+    s(0) + 2.0 * s(1)
+}
+
+let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                       [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+// WARN: BL4003
+// EXPECT: v = 2
+// EXPECT: t = -0.6666666666666666

@@ -1,0 +1,32 @@
+// TEST: JVP Covariance Matrix -- Rank-1 Kernel Calling A Rank-1 Helper
+// The two prerequisites composed, and the shape the comoment unroller will
+// emit: a two-operand map over the ROWS of one table, whose kernel is a call
+// to an expression-bodied helper taking two rank-1 parameters. The kernel
+// parameters are substituted by row reads first, then the helper's body is
+// substituted for the call, then the result differentiates -- so the emitted
+// tangent mentions neither the helper nor the kernel parameters.
+// x = [1,2,3] (centered [-1,0,1]); y = [2,4,6] (centered [-2,0,2]).
+// cov(0,0) = 2/3, cov(0,1) = 4/3; v = 2/3 + 3*(4/3) = 14/3.
+// seed perturbs a(0,0) only. With u = centered x, w = centered y and
+// du = [2/3, -1/3, -1/3]:
+//   d cov(0,0) = (2/3) u_0            = -2/3
+//   d cov(0,1) = (1/3) (du . w)       = (1/3)(-4/3 - 2/3) = -2/3
+//   t = -2/3 + 3*(-2/3) = -8/3.
+import ad as ad
+
+type R = Idx<2>
+type C = Idx<3>
+
+function covariance(x: T^1, y: T^1) -> T^0 =
+    reduce((x - reduce(x, (+)) / extents(x)) * (y - reduce(y, (+)) / extents(y)), (+)) / extents(x)
+
+function f(a: Array<Float like R, C>) -> Float = {
+    let cov = method_for(a, a) <@> lambda(x: T^1, y: T^1) -> covariance(x, y) |> compute
+    cov(0, 0) + 3.0 * cov(0, 1)
+}
+
+let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
+                       [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+// WARN: BL4003
+// EXPECT: v = 4.666666666666667
+// EXPECT: t = -2.6666666666666665

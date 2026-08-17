@@ -1,0 +1,41 @@
+// TEST: C7 Sort With Duplicate Keys -- The Tie Convention Is Pinned
+// At a tie the permutation is not unique, and the derivative of a sort is
+// only defined up to which of the equal elements is called "first". The
+// primal sort emits `std::stable_sort`, so ties keep INPUT ORDER -- and
+// because both AD legs gather through the permutation the primal itself
+// produced, they inherit that convention for free rather than re-deriving
+// (and possibly re-breaking) it. These pins are the record of that.
+//
+// a = [3.0, 1.0, 3.0, 1.0, 2.0, 3.0]   three 3.0s and two 1.0s
+// stable perm = [1, 3, 4, 0, 2, 5]:
+//   the two 1.0s (indices 1, 3) take slots 0, 1 in input order,
+//   2.0 (index 4) takes slot 2,
+//   the three 3.0s (indices 0, 2, 5) take slots 3, 4, 5 in input order.
+// f = 1*s0 + 2*s1 + 3*s2 + 4*s3 + 5*s4 + 6*s5
+//   = 1*1 + 2*1 + 3*2 + 4*3 + 5*3 + 6*3 = 54
+// invperm = [3, 0, 4, 1, 2, 5], so dA = [4, 1, 5, 2, 3, 6]:
+// the tied 3.0s at indices 0, 2, 5 collect the DISTINCT weights 4, 5, 6.
+import ad as ad
+
+type I = Idx<6>
+
+function f(a: Array<Float like I>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> x)
+    s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0
+      + s(3) * 4.0 + s(4) * 5.0 + s(5) * 6.0
+}
+
+let mut da = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], da)
+// EXPECT: gv = 54
+// EXPECT: da = [4, 1, 5, 2, 3, 6]
+
+// Forward agrees tie-for-tie: seeding one member of a tie group must pick
+// out that member's own slot weight, not an average over the group.
+let (v0, t0) = ad.jvp(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+let (v2, t2) = ad.jvp(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], [0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+let (v5, t5) = ad.jvp(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+// EXPECT: v0 = 54
+// EXPECT: t0 = 4
+// EXPECT: t2 = 5
+// EXPECT: t5 = 6

@@ -1,0 +1,32 @@
+// TEST: JVP Route A -- Pack Kernel At Arity 3 (SymIdx<3, 3> both legs)
+// The same `object_for` VALUE as 075 applied to three operands: one kernel
+// declaration, a different unrolling per apply site. At r = 3 the recursion
+// expands two arms before reaching the base, and the comm group expands to
+// three names, so both legs allocate the rank-3 triangle (10 canonical cells
+// of the dense 27) rather than the cube.
+//
+// packprod(x, y, z) = x*y*z at a = [1, 2, 3]. m(0,1,2) = m(2,1,0) = 6 (the
+// mirrored read proves the tangent is a genuine symmetric array, not a
+// triangle read as if it were dense), m(1,1,2) = 12 -> primal 24.
+// Seed e0: dm(0,1,2) = dm(2,1,0) = a1*a2 = 6, dm(1,1,2) = 0 -> tangent 12.
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(packprod) <@> (a, a, a) |> compute
+    m(0, 1, 2) + m(2, 1, 0) + m(1, 1, 2)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// WARN: BL4003
+// EXPECT: v = 24
+// EXPECT: t = 12

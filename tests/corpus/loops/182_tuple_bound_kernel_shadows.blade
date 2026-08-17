@@ -1,0 +1,32 @@
+// TEST: A Tuple-Destructured Kernel Name Shadows The Module One
+// Pipeline fusion threads an env of names bound to loop objects and kernel
+// lambdas. Its block fold updated that env only for single-name `let`s; a
+// NON-PatVar pattern was threaded untouched, so `let (inc, dec) = ...` left the
+// MODULE-level `inc` visible and `inc <$> a` fused the wrong kernel -- the body
+// returned [2, 3, 4] (the module `x + 1`) where the local says x * 10.
+// Both patterns now drop every name their pattern binds; the local rebind is
+// then resolved the ordinary way, downstream of fusion.
+type I = Idx<3>
+
+let inc = lambda(x) -> x + 1.0
+
+function apply_local(a: Array<Float like I>) -> Array<Float like I> = {
+    let (inc, dec) = (lambda(x) -> x * 10.0, lambda(x) -> x - 1.0)
+    inc <$> a |> compute
+}
+
+// The control: a single-name rebind, which the PatVar arm always shadowed.
+function apply_single(a: Array<Float like I>) -> Array<Float like I> = {
+    let inc = lambda(x) -> x * 10.0
+    inc <$> a |> compute
+}
+
+let data = [1.0, 2.0, 3.0]
+let tup = apply_local(data)
+let sing = apply_single(data)
+// EXPECT: tup = [10, 20, 30]
+// EXPECT: sing = [10, 20, 30]
+
+// And the module kernel itself still fuses where nothing shadows it.
+let plain = inc <$> data |> compute
+// EXPECT: plain = [2, 3, 4]

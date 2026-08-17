@@ -1,0 +1,29 @@
+// TEST: Kernel-Body Helper Calls Nest Two Deep Over Two Operands
+// `energy` calls `scaled`, which calls `center`: the substitution recurses
+// through the chain (the depth cap and the by-name recursion check are what
+// keep that total). Both kernel parameters are substituted by indexed reads
+// first, so the helper bodies differentiate over the reads, not over names
+// that no longer exist.
+// energy(x, y) = (2(x-1))^2 + y*x, mapped over the outer product (a, b).
+// a = [1,2,3], b = [4,5,6]:
+//   m(0,1) = 4*0 + 5*1 = 5;  m(2,0) = 4*4 + 4*3 = 28;  v = 33.
+// seed da = [1,0,0], db = 0:
+//   dm(0,1) = 8*(a0-1)*1 + b1*1 = 0 + 5 = 5;  dm(2,0) = 0;  t = 5.
+import ad as ad
+
+type I = Idx<3>
+
+function center(x: Float) -> Float = x - 1.0
+function scaled(x: Float) -> Float = center(x) * 2.0
+function energy(x: Float, w: Float) -> Float = scaled(x) * scaled(x) + w * x
+
+function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let m = method_for(a, b) <@> lambda(x, y) -> energy(x, y) |> compute
+    m(0, 1) + m(2, 0)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [4.0, 5.0, 6.0],
+                       [1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+// WARN: BL4003
+// EXPECT: v = 33
+// EXPECT: t = 5

@@ -1,0 +1,37 @@
+// TEST: JVP Route A -- Unrolled Pack Kernel Equals The Hand-Written Twin
+// The identity Route A rests on, pinned rather than assumed: differentiating
+// `object_for(<pack kernel>) <@> (a, a)` and differentiating the fixed-arity
+// lambda a user would have written by hand must agree on BOTH legs, to the
+// bit. Residuals rather than values, so a drift in either direction shows up
+// as a non-zero pin instead of two pins that happen to move together.
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function packed(a: Array<Float like I>) -> Float = {
+    let m = object_for(packprod) <@> (a, a) |> compute
+    m(0, 2) + m(2, 0) + m(1, 1)
+}
+
+function hand(a: Array<Float like I>) -> Float = {
+    let m = method_for(a, a) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+    m(0, 2) + m(2, 0) + m(1, 1)
+}
+
+// WARN: BL4003
+let (vp, tp) = ad.jvp(packed)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+let (vh, th) = ad.jvp(hand)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+let dv = vp - vh
+let dt = tp - th
+// EXPECT: dv = 0
+// EXPECT: dt = 0
+// EXPECT: vp = 10
+// EXPECT: tp = 6

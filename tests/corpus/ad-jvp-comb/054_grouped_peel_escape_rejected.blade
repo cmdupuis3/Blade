@@ -1,0 +1,24 @@
+// TEST: Grouped Peel Escaping To A Callee Rejected (rejects)
+// Same rule from the other side: handing the group-space value to another
+// function is not reducing it away either. The rewrite refuses rather than
+// dropping the `group_by` let (which is what makes the lowering possible) and
+// leaving the callee's argument dangling.
+import ad as ad
+
+type R = Idx<4>
+
+function total(x: Array<Float64 like RaggedIdx<_>>) -> Float = reduce(x, (+))
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    total(m)
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 1]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, kk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: is not reduced away

@@ -1,0 +1,19 @@
+// TEST: Compose Even Kernel Unfused (rejects)
+// ERROR: BL4015
+// Coverage restored after pipeline fusion (C7, generalized to the primal).
+// 170 and 166 reach the compact-class inheritance gate through `>>@` and
+// `<$>`; both of those spellings now FUSE into a direct apply before
+// typecheck, so those files -- which still reject, and still pin BL4015 --
+// exercise the DIRECT seam (164's) rather than the composed one they were
+// written for. This file keeps the composed seams live by using a stage
+// kernel fusion DECLINES: a block-bodied named function has no expression
+// to inline, so the pipeline survives to the compose/functor arms intact.
+// Same setup as 170: stage 1 (odd, v*2.0) inherits the antisymmetric class
+// legitimately; stage 2 (even, v*v) must refuse it.
+let A = [1.0, 2.0, 3.0, 4.0]
+let g = lambda(x, y) where comm(x, y) -> x - y
+let C = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
+function even_blocky(v: Float) -> Float = { v * v }
+let o1 = object_for(lambda(v) -> v * 2.0)
+let o2 = object_for(even_blocky)
+let out = (o1 >>@ o2) <@> C |> compute

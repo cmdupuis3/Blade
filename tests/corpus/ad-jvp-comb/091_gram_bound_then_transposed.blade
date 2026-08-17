@@ -1,0 +1,45 @@
+// TEST: C6 Gram Bound To Its Own Let, Then Transposed
+// The spelling 090 steers users to. Each statement gets an IDENTITY cotangent
+// reader, so the gram arm sees the plain `__g_gg` buffer it is written for and
+// the transpose's index swap rides on the SEPARATE flow into `gg`.
+//
+// gram(a, b)(i, j) = sum_k a(i,k) b(j,k), so with
+//   a = [[1,2,3],[4,5,6]],  b = [[1,0,1],[0,1,0]]
+//   G = [[4, 2], [10, 5]]   and   g = G^T = [[4, 10], [2, 5]]
+// loss = g(0,1)*2 + g(1,0) = 20 + 2 = 22.
+// The cotangent on g is dg = [[0,2],[1,0]], so on G it is dG = dg^T = [[0,1],[2,0]]:
+//   da(i,k) = sum_j dG(i,j) b(j,k) = [[0,1,0],[2,0,2]]
+//   db(j,k) = sum_i dG(i,j) a(i,k) = [[8,10,12],[1,2,3]]
+// Reading the cotangent buffer WITHOUT the swap answers the untransposed
+// gradient instead -- [[0,2,0],[1,0,1]] / [[4,5,6],[2,4,6]] -- which is 020's
+// answer to a different question and looks entirely plausible.
+import ad as ad
+
+type I = Idx<2>
+type K = Idx<3>
+
+function floss(a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {
+    let gg = gram(a, b)
+    let g = transpose(gg, [0, 1])
+    g(0, 1) * 2.0 + g(1, 0)
+}
+
+let a0 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let b0 = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let mut da = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut db = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let gv = ad.grad(floss)(a0, b0, da, db)
+// EXPECT: gv = 22
+// EXPECT: da = [[0, 1, 0], [2, 0, 2]]
+// EXPECT: db = [[8, 10, 12], [1, 2, 3]]
+
+// The differential gate: forward tangent along a seed must equal the reverse
+// gradient contracted with it, exactly.
+let sa = [[0.5, -1.0, 0.25], [2.0, 0.0, -0.5]]
+let sb = [[1.0, 1.0, 0.0], [0.0, -1.0, 2.0]]
+let (jp, jt) = ad.jvp(floss)(a0, b0, sa, sb)
+let dot1 = reduce(reduce(da * sa, (+)), (+))
+let dot2 = reduce(reduce(db * sb, (+)), (+))
+let resid = jt - (dot1 + dot2)
+// EXPECT: jp = 22
+// EXPECT: resid = 0

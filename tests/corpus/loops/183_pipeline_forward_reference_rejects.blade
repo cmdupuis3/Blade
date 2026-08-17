@@ -1,0 +1,16 @@
+// TEST: A Pipeline Stage May Not Forward-Reference Its Kernel (rejects)
+// "A body sees only names bound before it" is the language's visibility rule
+// (BL2001; mutual recursion is refused by it too). Pipeline fusion resolved
+// stage kernels through a WHOLE-MODULE map, so it inlined `inc` and `dbl` from
+// below and the program compiled and ran -- fusion laundering a forward
+// reference the checker would have caught. The plain call spelling
+// (`let y = inc(2.0)` above `function inc`) always said BL2001; this must too.
+// Resolution is now position-aware: a decl sees the prefix above it, plus
+// itself.
+// ERROR: BL2001
+// ERROR-CONTAINS: Unbound variable: inc
+let A = [1.0, 2.0, 3.0]
+let r = (object_for(inc) >>@ object_for(dbl)) <@> A |> compute
+r
+function inc(x: Float) -> Float = x + 1.0
+function dbl(x: Float) -> Float = x * 2.0

@@ -104,17 +104,66 @@ where the only available spelling of the license is two independent groups
 the extra elements are exactly the per-dimension swaps `per_dim_swap_not_symmetry`
 refutes. **Do not take the escape.**
 
-**Tranche-1 disposition: tangent outputs are DENSE.** The primal loop is
-untouched and keeps its triangular storage and r! iteration saving; only the
-derived tangent leg goes dense. That is a bounded, ≤ r! cost on one leg, and it
-is correct. Symmetry inheritance becomes its own rung (C5), gated on ask #1.
+### 1a. RESOLVED (2026-08-16, probe-verified): E1 is blocked, and the
+### symmetry is exploitable anyway — via `range<SymIdx>`, with no compiler ask
 
-One unverified extrapolation to probe before building: `tuples/011:22` pins one
-zip against one `Tuple<2>` parameter; two zips against two `Tuple<2>` parameters
-(the shape above) is the natural extension but is **not** pinned anywhere.
-Note also that nested tuple *operands* are not co-iteration — `object_for(
-lambda(p: Tuple<2>, q: Tuple<2>)) <@> ((A,B),(C,D))` iterates **all four**
-arrays as a rank-4 outer product (`tuples/012:47-56`). Only `zip` pairs.
+Everything above this heading is superseded on two counts. The measurements:
+
+**E1 multi-slot does not exist.** `method_for(zip(A,Ȧ), zip(B,Ḃ))` is refused at
+`src/TypeCheck.fs:4013-4021` — *"zip cannot appear as one operand of a
+multi-array loop"*. So §2.5's central forward rule is blocked for **n ≥ 2
+regardless of symmetry**, and the "tranche-1 DENSE disposition" above does not
+work either: there was never a dense E1 fallback to retreat to. Consequently
+**compiler ask #1 (BL3999 on `Tuple<N>`) is not the binding constraint** — the
+zip-operand gate fails first, at `TypeCheck.fs:11306`, before BL3999 is ever
+reached. Relaxing BL3999 alone buys nothing; drop it from the critical path.
+
+**The symmetry IS exploitable, with zero compiler changes.** Use E2 (capture-
+read) with a *virtual* loop over the canonical index space:
+
+```blade
+// primal:  method_for(A, A) <@> lambda(x, y) where comm(x, y) -> k(x, y)
+// tangent: one operand, canonical cells only, values and tangents captured
+method_for(range<SymIdx<2, N>>) <@> lambda(p0, p1) -> <tangent body>
+```
+
+Verified end to end: `SymIdx<2,3>` allocates **6 cells, not 9**
+(`static constexpr size_t ..._symm[2] = {1,1}`, `allocate<...>`, inner bound
+`__i1 < 3 - __i0`, mirrored reads through `canon_fold`), the readback is a
+genuine symmetric array (`sym(0,2) = sym(2,0)`), and every cell — mirrors
+included — matches the dense computation to the printed digit, in both the
+compiled and interpreted lanes. The full r! saving survives on the tangent leg.
+
+**Three conventions the recipe rests on** (none pinned by any existing corpus
+test — pin them before building):
+
+1. **`range<SymIdx<r,N>>` hands the kernel PREFIX OFFSETS, not canonical
+   indices**: `canonical[m] = p₀ + p₁ + … + p_m`. Verified at r = 2 and r = 3.
+   A naive `A(p0) * A(p1)` therefore computes the *wrong values silently*;
+   the emitter must prefix-sum.
+2. **Write `SymIdx<r, N>` INLINE.** A named alias hard-errors (BL4003, *"slot
+   expects 'I' but argument has type 'S2'"*). Inline, the params are untagged
+   `Int64` and merely warn — so generated code needs `// WARN: BL4003` pins,
+   and an `(i : I)` cast does not help (BL3001).
+3. **Emit no `where comm`** on the range kernel: it is accepted and silently
+   discarded (virtual operands erase, so no identity group exists to key on).
+
+**Soundness gate, load-bearing.** `range<SymIdx>` allocates symmetric storage
+*unconditionally* — the compiler does not check that the body is symmetric. The
+emitter may use it **only** when the primal carries a STRUCTURAL `comm`
+judgment, which is exactly `tangent_joint_swap`'s hypothesis and exactly what
+`semantic_hypothesis_insufficient` forbids relaxing.
+
+**Bonus: one code path covers both cases.** Non-symmetric primal ⇒
+`method_for(range<I>, range<I>)` with the identical capture-by-index body. So
+the range route also routes around the E1 blockage for the dense case, which is
+what makes C2 buildable at all. C5 therefore folds INTO C2 rather than
+deferring behind an ask.
+
+Note for reference: nested tuple *operands* are not co-iteration —
+`object_for(lambda(p: Tuple<2>, q: Tuple<2>)) <@> ((A,B),(C,D))` iterates all
+four arrays as a rank-4 outer product (`tuples/012:47-56`). Only `zip` pairs,
+and only in a single-operand loop.
 
 ---
 
@@ -139,11 +188,11 @@ Summary (difficulty: FREE / MECHANICAL / DESIGN / BLOCKED):
 | `reynolds` | MECHANICAL | DESIGN | joint permutation; recompute the plan |
 | `gram` | MECHANICAL | **MECHANICAL** | both adjoints are matmuls (BLAS) |
 | `group_by` / `group_keys` | MECHANICAL | **BLOCKED** (T2) | no ungroup surface |
-| `sort` | DESIGN | DESIGN | key-over-zip unverified |
+| `sort` | **SHIPPED** | **SHIPPED** | permutation as data (§2.17b) |
 | `>>@`, `@>>`, `<$>` | DESIGN | **skip — inline** | Tuple<N> element typing |
 | `>>=` | MECHANICAL–DESIGN | skip | it is a `let` in disguise |
 | `<\|>` (choice) | **BLOCKED** | **BLOCKED** | discontinuous; **SKIP** (§2.13) |
-| `Poly<T^k>` / arity-poly | **BLOCKED** | **BLOCKED** | architecture (§2.19) |
+| `Poly<T^k>` / arity-poly | **SHIPPED** (Route A) | **BLOCKED** (maps) | unroll at the apply site (§2.19b) |
 | `align` / `stencil` | n/a | n/a | paper surface, zero users |
 
 ### 2.1 `pure` / `|> compute`
@@ -451,6 +500,29 @@ base case would inject a spurious 1. Pin it.
 
 ### 2.10 `>>@` / `@>>` — pipelines
 
+> **SHIPPED (2026-08-16, C7): fuse-then-differentiate, forward mode.**
+> The fallback in 2.10.2 is the implementation, and it turned out not to be a
+> fallback: `Grad.fs`'s `fusePipelines`/`fuseKernels` collapse `>>@`, `@>>` and
+> `<$>` into a single map over the composed kernel *before* the tangent walker
+> runs, so the walker never learns a pipeline rule and all three of its seams
+> (`staticExtentOf`, `walkExpr`, `tangentOfExpr`) close at once. Compiler ask #2
+> (`Tuple<N>` element typing) is **off** C7's critical path — see the C7 entry
+> in §4 for what shipped, what it refuses, and where the recompute cost lands.
+> Pinned in `tests/corpus/ad-jvp-comb/023`–`035`.
+>
+> **And then generalized past AD.** The same rewrite now runs for EVERY program
+> (`Grad.fuseProgram`, called from `TypeCheck.fs` immediately before
+> `Grad.expand`), because it is not only an AD enabler — it repairs five
+> verified primal codegen holes: three-stage chains emitting
+> `three__s1[__i0] = ((void)0);`, multi-operand pipelines reading an undeclared
+> `arr0`, and `let p = o1 >>@ o2`, `f <$> c` and `c1 @>> c2` each dying BL7004
+> "in expression position" inside a function body (the first of those also
+> reporting `IRComposeApply: Composition did not resolve to IRComposeObj …
+> IR-builder bug`). Pinned in `tests/corpus/loops/176`–`180`. Every value in
+> the pre-existing pipeline corpus and in `examples/03` is byte-identical
+> across the change; what moved is the emitted C++, which loses the per-stage
+> staged buffer in favour of one loop.
+
 1. **Semantics.** `>>@ : ObjectLoop × ObjectLoop → ObjectLoop` composes kernels
    then applies; `@>> : Computation × Computation → Computation` applies then
    composes over the same MethodLoop; both associative with `object_for(id)` as
@@ -483,20 +555,35 @@ base case would inject a spurious 1. Pin it.
    `object_for(f) >>@ object_for(g)` into a single kernel `lambda(x) -> g(f(x))`
    and apply §2.5. Same answer, no new machinery, loses only the staging. This
    should be the *shipped* behavior; the staged rule is an optimization, not a
-   capability.
+   capability. **This is what shipped** (2026-08-16), and it is more than a
+   fallback: it also carries `where comm(...)` through the fusion (with the
+   clause's parameter references renamed alongside the parameters), so C5's
+   triangular tangent storage survives a pipeline for free.
 3. **REV.** The adjoint reverses the composition, `adj(g∘f) = adj(f) ∘ adj(g)`,
    and each adjoint stage needs its own stage's **primal input**. Threading the
    primal forward as a pair and then running the reversed pipeline means
    materializing the intermediate array per stage — a tape by another name;
-   recomputing the prefix per stage is O(depth²). Meanwhile grad already inlines
-   same-module callees (`Grad.fs:46`) and would produce the correct straight-line
-   adjoint for free once the pipeline is fused. → **do not build a reverse
-   pipeline rule; fuse and inline.**
-4. **Machinery.** Tuple-state kernels; `Tuple<N>` element-type inference
-   (compiler ask #2); a stage-kernel differentiator.
+   recomputing the prefix per stage is O(depth²).
+   **CORRECTED (2026-08-16, measured).** This section used to say grad "would
+   produce the correct straight-line adjoint for free once the pipeline is
+   fused". That holds only for the **scalar straight-line fragment**. A pipeline
+   over a *map* fuses into a map, and grad refuses `<@>` outright — C2 is
+   forward-only — so `ad.grad` on a fused pipeline still stops at the blanket
+   combinator refusal (BL5500), exactly as it did before fusion. Fusing buys
+   reverse mode nothing until a C2-reverse rule exists, and no such rule is
+   planned (§4 C6). → **do not build a reverse pipeline rule**; the reverse
+   refusal on mapped pipelines is load-bearing, not an oversight.
+4. **Machinery.** *As shipped:* `asKernelLambda` (the four kernel spellings,
+   shared with §2.5's `normKern`), `fuseKernels` (alpha-rename + substitute +
+   carry the renamed `where`), `fusePipelinesEnv` (the bottom-up rewrite, with a
+   module/let environment so stages hidden behind names still resolve).
+   Tuple-state kernels and `Tuple<N>` element-type inference (compiler ask #2)
+   are what the *staged* rule would need — an optimization, not a capability.
    Note `<$>` inherits a pre-existing hole: CodeGen refuses `<$>` over a `<|:>`
-   fallback (`CodeGen.fs:15388-15393`).
-5. FWD **DESIGN** (blocked below `Float64`); REV **skip — inline**.
+   fallback (`CodeGen.fs:15388-15393`); that refusal is untouched.
+5. FWD **SHIPPED** (fused; the staged form remains DESIGN, blocked below
+   `Float64`); REV **skip — and see the correction in 3 above: fusing does not
+   hand reverse mode a rule.**
 6. **Storage.** Pipeline kernels are rank-0 (rank-0 convergence,
    `formalism.md:1059-1063`); no comm to inherit.
 
@@ -615,7 +702,26 @@ test on the data.
    nothing to state.
 6. n/a.
 
-### 2.14 `<|:>` — storage branching: **the retired quote's grouping is wrong; this one is FREE**
+### 2.14 `<|:>` — storage branching: **the retired quote's grouping is wrong; the AD rule is FREE**
+
+> **Measured 2026-08-16.** The AD rule below is right and is implemented in C1.
+> What the section missed: `<|:>` **in a function body** was refused by the C++
+> back end for the PRIMAL too — `BL7004: <|:> (allocated-fallback) in
+> expression position -- it combines whole arrays; bind it and materialize
+> with |> compute` — because `a <|:> b |> compute` parses as
+> `a <|:> (b |> compute)`, leaving the fallback in expression position. The
+> corpus only exercised it at module level (`fallback/001-003`), which takes a
+> different emission path.
+>
+> **Closed 2026-08-16** by the expression-position emitter unification. A
+> function-body `let`, a function RETURN, and an elementwise operand slot all
+> now route `<|:>` through `genFallbackMaterialize` (in its forced spelling —
+> a bare `IRFallback` binding DEFERS, which is right at module level and would
+> register an undeclared name in a body). The fallback's result also stopped
+> BORROWING an operand's extents table, which the return position would
+> otherwise have turned into a dangling shape. Pinned by `fallback/009` (body
+> let), `fallback/010` (return + nested arithmetic). The form is usable inside
+> a differentiated function today; the tangent rule stays free and admitted.
 
 1. **Semantics.** `A <|:> B` reads `A(i)` **if allocated**, else `B(i)`, checked
    per curry level; A's layout dominates iteration order; symmetric A requires
@@ -756,16 +862,218 @@ test on the data.
    the `gk` **binding by name**. `sql.md:256-261` documents exactly the property
    this needs (same-`gk` co-iteration), so primal and tangent grouped views
    co-iterate by construction. Linear gather.
-   `sort(A, key)`: the tangent must apply the *same* permutation. There is no
+   `sort(A, key)`: the tangent must apply the *same* permutation. ~~There is no
    "sort by another array's order" form; the plausible route is sorting
-   `zip(A, Ȧ)` under a key reading only the value half, which is **unverified**
-   (no corpus pin) → DESIGN.
-3. **REV.** The adjoint is a scatter back through the grouping, and there is **no
-   ungroup surface** and no `<|:>`-analogue for `RaggedIdx`. → **BLOCKED at
-   Tier-2**; Tier-1, with ragged storage in the lane as the real difficulty.
-4. **Machinery.** `gk` hoisting to a named binding; ragged lane support.
-5. FWD `group_by` **MECHANICAL**, `sort` **DESIGN**; REV **BLOCKED at Tier-2**.
+   `zip(A, Ȧ)` under a key reading only the value half, which is unverified
+   (no corpus pin) → DESIGN.~~ **SUPERSEDED; shipped 2026-08-16 by the
+   permutation-as-data route, not by key-over-zip — see 2.17b.**
+3. **REV.** ~~The adjoint is a scatter back through the grouping, and there is
+   **no ungroup surface**~~ — **OVERSTATED; corrected 2026-08-16, probe-verified
+   (see 2.17a).** An ungroup exists today as an ordinary gather.
+4. **Machinery.** `gk` hoisting to a named binding; see 2.17a for the rest.
+5. FWD `group_by` **MECHANICAL** (confirmed against finite differences),
+   `sort` **SHIPPED** (§2.17b); REV **MECHANICAL for factorable kernels**, gated
+   on one small compiler addition; **BLOCKED** for non-factorable ones.
 6. **Storage.** RaggedIdx; no comm.
+
+### 2.17a Reverse-mode `group_by`, corrected — carry the grouping, don't invert it
+
+The user's framing ("carry the grouping through as data rather than needing an
+inverse") is right, though not by the mechanism first proposed.
+
+**What does NOT work: `GroupKeys` as a value.** It is an opaque runtime CSR
+structure (`Types.fs:789`, `IR.fs:1139`) emitted as `void*` (`CodeGen.fs:1376`)
+whose entire state lives in *name-keyed C++ locals* — `<name>__ngroups`,
+`<name>__offsets`, `<name>__perm` (`CodeGen.fs:14710-14715`) — and same-`gk`
+co-iteration is discharged by NAME IDENTITY on the expression
+(`TypeCheck.fs:14797-14814`), not by type. So returning `gk` in a tuple, passing
+it as a parameter, or even `let gk2 = gk` all fail; the last three are **silent
+miscompiles** (raw g++ "undeclared symbol", not Blade diagnostics). Making this
+work means making `GroupKeys` a first-class runtime value — a language change.
+Corollary: the spec's "reuse the `gk` binding by name" is not a convenience, it
+is **mandatory**.
+
+**What DOES work: group the ROW INDICES by the same `gk`.** `group_by(rows, gk)`
+over an `Int64` index array gives the permutation as ordinary data, `zip(gv, gr)`
+co-iterates values with their source rows in one kernel, and a grouped array
+reads at a computed `(bucket, rank)`. Probe: `method_for(zip(bi, ki)) <@>
+lambda(b,k) -> gv(b,k)` reproduces `v` exactly. **That is the ungroup** — an
+ordinary gather, no new primitive.
+
+**The composite reverse rule** (never "adjoint of `group_by` alone" — grouped
+*outputs* have no consumers, `CodeGen.fs:11993`), for
+`out = method_for(group_by(v, gk)) <@> λr. K(r)`:
+
+```
+v̄(i) += ō(b(i)) · (∂K/∂r_k)(row b(i))   at k = rank(i);   0 when b(i) < 0
+```
+
+- **Factorable K** (sum, mean, count, product, max, logsumexp — any K whose
+  member partial is `φ(vᵢ, A_{b(i)})` for per-group aggregates `A` a forward
+  peel can produce): `v̄` is a **dense gather through `b`**, which is exactly
+  `ad/012`'s shape whose scatter adjoint already ships. **No ragged cotangent
+  storage, no new adjoint machinery** — the difficulty the old verdict named is
+  avoided rather than solved. Verified: a hand-written `Σ_g c_g·mean(group g)`
+  matches finite differences to 1.7e-9, and the same pipeline with the grouping
+  made explicit differentiates **today** through the existing lane, agreeing
+  with the rule to the last digit.
+- **Non-factorable K**: needs a row at a computed outer index, which emits a
+  bare `double*` with no length outside module-level literal rows. Honest
+  refusal.
+
+**What actually blocks it**, replacing "no ungroup surface": (1) no surface
+accessor for the CSR arrays — a `group_bucket(gk) : Array<Int64 like SourceIdx>`
+is one TypeCheck arm plus one CodeGen arm inverting perm/offsets in a single
+pass (`-1` for negative-key-dropped rows); (2) the AD transform has no
+combinator rules at all yet — `group_by` is not specially blocked, it is behind
+the whole C-track (a plain dense map hits the same refusal); (3) grouped and
+dense operands cannot co-iterate in one peel (BL7004) — two passes, harmless.
+
+### 2.17b `sort`, shipped — carry the permutation, don't invert it
+
+**Status: SHIPPED both modes, 2026-08-16** (`src/Grad.fs`, C7). This replaces
+§2.17's `sort` entry, which proposed sorting `zip(A, Ȧ)` under a key reading
+only the value half and rated it DESIGN. That route was never built: it needs a
+key that sees a tuple, and it only ever serves forward mode. The shipped route
+is the same move 2.17a makes for grouping — **carry the structure as data
+rather than inverting it** — and it serves both modes from one mechanism.
+
+**Why a sort is differentiable at all.** `sort` is *piecewise constant* in its
+input. Off the tie set, a small perturbation of `A` moves the VALUES but not
+which original slot lands where, so on each piece the sort is exactly the linear
+map "gather through a fixed permutation":
+
+```
+s(i) = A(perm(i))    ⇒   tangent  ṡ(i) = Ȧ(perm(i))
+                     ⇒   adjoint  Ā(j) += s̄(invperm(j))
+```
+
+The question "what is the derivative *of the key*" is **N/A**: the permutation
+is locally constant in `A`, and the set where it changes (exact ties) is measure
+zero. At a tie the primal is not differentiable either, and the subgradient
+convention is the standard one — take the permutation the primal actually took.
+
+**What the pre-pass emits.** `sort` does not hand back its permutation, so
+`preNormalizeBody` materializes one, by sorting the row indices under the same
+key instead of the values:
+
+```blade
+let s = sort(A, key)
+// becomes:
+let __sx_s = method_for(range<I>) <@> lambda(i: I) -> i |> compute
+let __sp_s = sort(__sx_s, lambda(i: I) -> A(i))
+let __si_s = sort(__sx_s, lambda(i: I) -> __sp_s(i))   // reverse mode only
+let s      = sort(A, key)                              // primal, UNCHANGED
+```
+
+The primal is kept verbatim rather than rewritten to a gather: it is already
+correct, and leaving it alone keeps the change off the codegen path entirely.
+
+- **FORWARD** — the tangent is the co-gather
+  `method_for(__sp_s) <@> lambda(i: I) -> __t_A(i) |> compute`.
+- **REVERSE** — the adjoint would be a *scatter*, which the language has no
+  primitive for. Inverting the permutation turns it back into a gather, and the
+  inverse comes from a **second sort** of the same index array keyed on the
+  permutation's own values. `adjointOfInit` then emits the ordinary
+  accumulation `__g_A(j) += __g_s(__si_s(j))`. **No scatter primitive, no new
+  runtime surface.**
+
+**The by-name discipline (2.17a's rule, again).** `__sp_s` is shared *by name*
+between the primal, the tangent leg, and the adjoint leg. This is what makes
+ties safe for free: the emitter uses `std::stable_sort`
+(`CodeGen.fs:materializeSortForm`), so ties keep input order, and because every
+leg gathers through the permutation the primal itself produced, no leg can
+re-derive — and re-break — that convention. Verified: for
+`A = [3, 1, 3, 1, 2, 3]` the permutation is `[1, 3, 4, 0, 2, 5]`, and the three
+tied `3.0`s at indices 0, 2, 5 collect *distinct* gradient weights
+(`tests/corpus/ad-jvp-comb/037`).
+
+Composition reuses the plumbing rather than re-emitting it, so
+`ad.jvp(ad.grad(f))` (HVP) works through a sort — pinned in `036`.
+
+**v1 limitations, each an explicit refusal (never a silent zero):**
+
+| Limitation | Why |
+|---|---|
+| The key reads **only the sorted element** | A key closing over a second differentiable array makes the permutation depend on it, and permutation-as-data drops that dependence. Matches the documented signature `sort : Array<T like I> × (T → K)`. |
+| The sort must be the **whole initializer of a `let`** | The permutation binding is emitted *beside* the sort; an expression-position sort has no statement to be expanded at. |
+| The operand must be a **named rank-1 array** | The expansion has to spell `range<I>` and annotate the gather lambdas, so it needs a declared index type. |
+| The index type must be a **named alias** | The expansion spells `I` three times, and every syntactic occurrence of an anonymous `Idx<n>` gets its own nominal identity by design. Only an alias gives them one. (The C2 map rule is unaffected — it spells the index type once.) |
+| ~~A **sorted callee cannot be inlined**~~ **Lifted** | `renameExpr` is now exhaustive over the whole expression grammar (nested binders shadow; genuine capture refuses), so the permutation plumbing renames with everything else. Pinned by `ad-jvp-comb/041` (sort in an inlined callee, both modes) and `042` (callee lambda reusing the caller's name). |
+| Second-order **forward-over-forward** through a sort | `ad.jvp(ad.jvp(f))` re-maps over `__sp_s`, a local, and `tangentOfMap` resolves index types for *parameters* only. Forward-over-reverse (HVP) is fine. |
+
+All lambda params in the expansion are **explicitly annotated**: an unannotated
+index-typed key param is miscompiled to `double` today.
+
+**Interpreter.** The differential lane needed one fix: `resolveUnaryKernel`
+(`src/Interp/Loops.fs`) called `callCallable`, which passes *no* captures, so a
+sort key reading the array being keyed on (`lambda(i: I) -> a(i)`) could not see
+`a` and threw mid-comparison — surfacing as `List.sortWith`'s opaque "failed to
+compare two elements". It now binds declared captures from the site env, exactly
+as `materializeObjectForApp` already documented needing to.
+
+### 2.17c Grouped peels, shipped — auto-lower the peel, never allocate the group axis
+
+**Status: SHIPPED both modes, 2026-08-16** (`lowerGroupedPeels`, `src/Grad.fs`).
+2.17a proved the composite reverse rule by hand-writing its result; this makes
+the pre-pass write it, so the NATURAL spelling differentiates:
+
+```blade
+let gk = group_keys(k)
+let g  = group_by(v, gk)
+let m  = method_for(g) <@> lambda(r) -> reduce(r, (+)) / extents(r) |> compute
+reduce(m * w, (+))
+```
+
+**The dichotomy is GROUP-LINEAR, not "factorable".** 2.17a's factorable list
+(sum, mean, count, product, max, logsumexp) conflates two regimes, and only the
+first of them needs no group axis at all:
+
+- **Class L, group-linear.** `L = Σ_g w_g·A_g` with `A_g = init + Σ_{i∈g} φ(vᵢ)`
+  sum-decomposable and `w_g` a group-space value not derived from the peel. Then
+  `L = init·Σ_g w_g + Σ_i w_{b(i)}·φ(vᵢ)` — **one loop over the SOURCE index
+  space**, the group axis surviving only as the subscript `b(i)`. Nothing is
+  allocated, so nothing needs a compile-time group count. Kernels: `reduce(r,
+  (+))`, `reduce(r, (+)) / extents(r)`, `extents(r)`.
+- **Class A.** Product, max, logsumexp, variance, anything nonlinear in the
+  aggregate, and any broadcast-back `Σ_i f(vᵢ − m_{b(i)})`: these need `A_g`
+  materialized, i.e. a group-space accumulator, i.e. `replicate` at a
+  **compile-time** count (BL3999). A grouping does not have one. Named refusal,
+  not the generic extent message.
+
+**Empty groups are exactly the static-count regimes** — inverted, which makes
+the gate sharp. Dynamic discovery only manufactures a group it saw a row for;
+`Idx<N>` / `EnumIdx` element keys are POSITIONAL and have slots nothing lands
+in. The language already decides the empty fold (sql.md §10: `reduce(A, op,
+init)` returns `init`), so: positional keys accept a SUM carrying an explicit
+init (the rewrite folds `init·N`, or `init·reduce(W, (+))`, in exactly) and
+refuse one without; positional keys refuse a MEAN outright, because an empty
+group's mean is 0/0 and no init defines it. Discovered keys accept everything
+with a zero/absent init. An unresolvable key element type refuses rather than
+guessing — guessing "discovered" for a positional space is the direction that
+silently NaNs.
+
+**`guard` is the drop mask, and it must wrap the SUBSCRIPT too.** A negative key
+drops its row and `group_bucket` reports −1. `guard(b(i) ≥ 0, φ)` zeroes the
+contribution in both lanes (zeroing is linear, so it is already in `LinearForm`)
+— but neither lane keeps the group-space READS inside it: reverse mode's
+quotient rule emits `cot / __gn(b(i))` with the divisor hoisted out, and the
+weight leg's adjoint is a scatter `__g_W(b(i)) += …`. At `b(i) = −1` those are
+an out-of-range read and an out-of-range **write**. Clamping the subscript with
+an inner `guard(b(i) ≥ 0, b(i))` is exact — the outer guard has already zeroed
+whatever flows through — and it is what closed the interpreter/compiled
+divergence (the compiled lane had been reading OOB and getting away with it).
+
+**Deliberately NOT done:** teaching `staticExtentOf` about `ExprGroupBy`. The
+group axis must stay extent-unknown so a peel this rewrite declined keeps
+refusing loudly. The rewrite is additive: it fires on the shapes above and
+leaves every other body byte-identical.
+
+Corpus: `tests/corpus/ad-jvp-comb/043`–`061`. `046` is the differential gate —
+the auto-lowered peel pins 018's hand-lowered numbers to the digit. `047` pins
+the primal against the natural peel as a THRESHOLDED boolean: the rewrite
+reassociates the summation (rows, not groups), which for a weighted mean moves
+the last bits (2.84e-14 measured).
 
 ### 2.18 `>>=` and `<$>`
 
@@ -778,14 +1086,29 @@ test on the data.
    lambda to differentiate the body — which is the same capability §2.5 needs.
    `<$>` is a post-map on a computation and needs pair threading, i.e. §2.10's
    `Tuple<N>` problem, or fusion into the producing kernel.
-3. **REV.** Skip — inline (§2.10.3).
-4. **Machinery.** Continuation-lambda body differentiation.
-5. `>>=` **MECHANICAL–DESIGN**; `<$>` **DESIGN**. Right-distribution **fails**
+   **SHIPPED (2026-08-16, C7): `<$>` takes the fusion route.** Its LEFT operand
+   is the SECOND stage, so `f <$> c` fuses into c's kernel; over an
+   already-materialized array `f <$> A` is the trivial map `method_for(A) <@> f`.
+   Telling those two apart is the one place fusion consults array-ness (declared
+   parameter types and structurally-array bindings), and anything it cannot
+   classify declines rather than guessing. `>>=` is unchanged: still refused,
+   still a separate item.
+3. **REV.** Skip — inline (§2.10.3), and note the correction there: a fused
+   mapped pipeline is still refused in reverse.
+4. **Machinery.** Continuation-lambda body differentiation (`>>=` only; `<$>`
+   needs nothing beyond §2.10's fusion).
+5. `>>=` **MECHANICAL–DESIGN**; `<$>` **SHIPPED (fused)**. Right-distribution **fails**
    for this monad (`formalism.md:1083-1087`) — any rewrite that reassociates a
    bind chain must not assume it.
 6. n/a.
 
-### 2.19 Rank-polymorphic / `Poly<T^k>` pack kernels — **BLOCKED by architecture**
+### 2.19 Rank-polymorphic / `Poly<T^k>` pack kernels — ~~BLOCKED by architecture~~ **SUPERSEDED by §2.19b**
+
+> The analysis below concluded "unconstructible before typecheck". Its premise
+> is false and §2.19b says why: the arity is *written at the apply site*, so it
+> is readable from the surface AST, pre-typecheck, exactly where the transform
+> already stands. Kept for the record.
+
 
 1. **Semantics.** Arity polymorphism varies the *number* of inputs, and the
    arity determines output rank, loop depth, and symmetry
@@ -803,6 +1126,148 @@ test on the data.
    blockage (`formalism.md:776`, the poly `for args in SymIdx<arity(args), N>`
    form).
 6. n/a.
+
+### 2.19a Shipped (2026-08-16): the two prerequisites the pack track sits on
+
+2.19's blockage is about *arity* — the pack's `n` is unknown before typecheck.
+Everything a pack kernel does *once its arity is fixed* was blocked
+independently, by two gaps that had nothing to do with arity. Both are now
+closed, so the unroller's output (an n-ary lambda over rank-1 parameters) is
+differentiable the moment it exists.
+
+**C8-i — user-function calls inside kernel bodies.** `hoistCalls` stops at a
+lambda, so a helper called from a kernel body never reached the statement-level
+inliner and both sweeps refused it as an unknown call. `Grad.kernelCallBody` is
+the expression-level twin of `inlineCall`: same admissibility gates
+(same-module, non-static, no mut parameters, matching arity), one shared
+`maxInlineDepth`, expression-bodied callees only. Substitution rides
+`substParam`/`substKern`, whose declining catch-all is the alpha-safety proof —
+it refuses to cross any binder it cannot prove safe. Only the derivative side
+substitutes; the primal keeps its call.
+
+Self-recursion is read off the *declaration* (a body that names itself), not off
+the substitution path: a path revisits a name innocently whenever a helper is
+nested inside itself through an argument, which `mean(x - mean(x))` does.
+Mutual recursion is BL2001 in the language, but this pass runs before typecheck,
+so the depth cap is what stops it here.
+
+The reverse lane has the same gap by a different route — `grad` refuses maps
+outright, but `hoistCalls` also walks past `pure`/`compute`/`guard`, which
+`adjointOf` does descend into — and got the same arm.
+
+**C8-ii — rank-carrying kernel parameters.** A parameter annotated `T^k` is
+bound to a rank-k FIBER, so the tangent loop iterates the operand's LEADING
+axes only (its index types minus the trailing k) and the parameter's read is
+the partial application `A(i...)`. The element-read arm never counted indices,
+so a fiber tangents to the same partial application of `__t_A` for free.
+`reduce` inside a kernel body stays where it is (the pre-pass never descends
+into a kernel) and differentiates by the linear fold rule; `walkExpr` carries an
+`inKernel` flag so a fold is admitted THERE and nowhere else.
+
+Refusals, all named: a parameter rank not strictly below its operand's rank; a
+rank-carrying parameter over a `halo`/`range` operand (a window is not a fiber);
+`reynolds` with rank-carrying parameters (symmetrization permutes reads between
+slots, shape-safe only for rank-0 elements); a non-additive or lambda fold
+kernel inside a kernel body; and `axes = n` inside a kernel body. The C5
+`range<SymIdx>` fast path is gated to all-rank-0 explicitly — its prefix offsets
+index cells, and a fiber is not a cell.
+
+**Reverse mode gets neither half of C8-ii, and cannot want it:** `grad` refuses
+`<@>` in `walkExpr` before any kernel body is reached, so there is no rank-1
+kernel-body path to build. No new refusal was added for it; the existing
+combinator-operator message is the wall.
+
+**The former wall, and it was never an AD gap (fixed 2026-08-16).** A tangent
+whose primal factors contain a same-module call *over a fiber* —
+`mean((x - mean(x)) * (y - mean(y)))`, i.e. `mean` nested inside
+array-arithmetic rather than wrapping the whole body — produced a correct AST
+that the EMITTER could not render: an inline row view in an elementwise-map
+operand position emitted an undeclared `arr0`. It reproduced with no `ad` in the
+program at all (`method_for(range<R>) <@> lambda(i) -> reduce((a(i) - mean(a(i)))
+* (a(i) - mean(a(i))), (+))`, now `tests/corpus/loops/176`), so it belonged to
+the loop-form "blessed position" gap and was fixed there.
+
+The cause was one slot away from where the family had been patched before. An
+array/scalar broadcast lowers to `IRApp(IRObjectFor ..., [row])` — a synthesized
+loop APPLICATION, not one of the three `Arrays` lists — and its emitter names
+operands by the same `IRVar`-lookup-else-`arr<i>` rule with no auto-materialize
+arm at all. `liftLoopAppOperand` gives those argument slots the loop-form
+hoisting rule. Corpus test 085 is the nested-helper covariance kernel, pinned to
+071's digits: factoring `mean` out of `covariance` must not move one. The 071
+shape — fold the helper's internals into a single expression-bodied helper over
+the fibers — is no longer a workaround, just the other spelling.
+
+### 2.19b Shipped (2026-08-16): Route A, the surface unroller
+
+**The premise §2.19 got wrong.** The arity is not a typecheck output that the
+transform has to wait for — it is *written at the apply site*.
+`object_for(comoment) <@> (A, A)` says two, `<@> (A, A, A)` says three, in the
+surface AST, before any judgment runs. Both map spellings already normalize
+their operand tuple to a list in `tangentOfMap`, so the count is in hand at the
+exact seam the pack kernel is refused at. What actually blocked pack kernels was
+mundane: one formal parameter for n operands (an arity-mismatch check), and a
+`match arity(a) with ...` BLOCK body (the kernel normalizer refuses blocks).
+
+**What ships.** `Grad.tryUnrollPackKernel` expands a `Poly<...>` kernel at the
+apply site into the fixed-arity **inline lambda** a user could have written:
+
+```
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = { match arity(a) with ... }
+object_for(packprod) <@> (A, A)
+   ==>   method_for(A, A) <@> lambda(p0, p1) where comm(p0, p1) -> p0 * p1
+```
+
+An inline lambda, never a minted declaration: nothing enters the module, there
+is no name to collide, and the spelling is one the corpus already proves end to
+end. It is the surface twin of `IR.specializeFunction`, which does the same job
+post-typecheck for the primal — pack views as (slot, offset), `arity(...)`
+folded to a literal, `a[k]` resolved to the k-th expanded parameter, recursive
+calls re-entered on the tail view, `match arity` reduced to its one live arm.
+The two are deliberately separate passes over different representations, and
+the primal machinery is untouched (`blade test arity` is byte-identical).
+
+**The comm group is the load-bearing part.** A clause declared over the pack has
+to be *expanded* over the new parameter names. The C5 symmetric-tangent gate
+accepts a comm group only when it covers the kernel's full parameter-name set;
+a clause still naming the vanished pack covers nothing, the gate declines
+silently, and the tangent falls to the dense path — the r! saving lost with no
+diagnostic. Verified in the emitted C++ rather than asserted: at r = 2 and r = 3
+both the primal and the tangent allocation inside `f__jvp` carry a `{1,…,1}`
+symmetry class and run the triangular loop (`ad-jvp-comb/075`, `/077`); the
+comm-less twin `/076` emits no `_symm` at all.
+
+**Recursion terminates by arity.** Each `head :: tail` shortens the view, so the
+expansion is bounded; a 256-arm budget is the backstop for a kernel that
+recurses on an unchanged view. A kernel with **no base arm reachable at the
+requested arity** refuses with its own code, **BL5502** — a property of the
+kernel at that arity, identical in both modes, fixed in the kernel rather than
+in the differentiated function, which is why it is not folded into
+BL5500/BL5501.
+
+**Named refusals, all pinned.** A **multi-pack** kernel (or a pack beside free
+parameters): a `<@>` operand list is flat and says nothing about which operands
+fill which slot, so it is refused rather than guessed (`/082`). The **pack
+former** `method_for(range<Idx<arity(a)>>) <@> lambda(k) -> a[k]`: the
+type-position `arity(a)` *is* folded to a literal first (substituted wherever
+the extent expression is mechanical, never left pointing at a parameter that is
+about to stop existing), and the refusal lands on the dynamic subscript, which
+has no parameter to resolve to (`/081`). Reverse mode inherits the existing
+map refusal verbatim, unchanged and un-mislabelled (`/083`).
+
+**Both call seams.** The direct spelling `object_for(pack) <@> ops` unrolls in
+`tangentOfMap`; the wrapper spelling `object_for(lambda(x, y) -> pack(x, y))`
+(the docs' covariance form, arity/022) unrolls in `kernelCallBody` at the call's
+argument count. `/084` pins that the two agree.
+
+**The comoment family lands, in one spelling.** `ad-jvp-comb/079` differentiates
+the rank-1 pack comoment over the rows of a 2-D table — pack unrolling, C8
+rank-carrying parameters, and the in-kernel additive fold composed — and agrees
+with both 071's hand-written twin and a central-difference check. It is written
+with its reductions **inline** rather than through a `mean` helper, because
+`mean(<array expression>)` inside kernel-body array arithmetic hits the arr0
+blessed-position gap described at the end of §2.19a. That gap is the emitter's
+and bites the hand-written twin identically; the unroller neither causes nor
+cures it.
 
 ### 2.20 Recursive arrays and `let rec` (for completeness)
 
@@ -933,17 +1398,52 @@ Extend grad's front end to *lower* the C1 linear closure into lane statements
 (so grad stops refusing programs it could handle), add the four adjoints above,
 and stop.
 
-**C7 — pipelines** (`>>@`, `@>>`, `<$>`), forward only, dimensionless `Float64`
-rank-0, gated on ask #2. Until then ship the **fuse-then-differentiate** fallback
-(§2.10.2), which gives the identical answer with no new machinery. The staged
-rule is an optimization, not a capability — do not let it gate the tranche.
+**C7 — pipelines** (`>>@`, `@>>`, `<$>`), forward only. **SHIPPED 2026-08-16 via
+fuse-then-differentiate** (§2.10.2), and ask #2 turned out not to gate it at all:
+the staged `Tuple<N>` rule is an optimization, and the fusion needs none of it.
+
+*What it covers.* Both compose spellings and the functor map, at any chain
+length, with any first-stage arity, in module scope and in function bodies, with
+stages reached through `let`- and module-level bindings (including
+`let k = lambda(...)`, which is neither a `function` nor an intrinsic and so is
+invisible to `asKernelLambda` without the environment). `where comm(...)` on the
+first stage is carried through — with its parameter references renamed alongside
+the parameters — so C5's triangular tangent storage survives a pipeline.
+
+*What it refuses*, each with its own message rather than the misleading
+"reduce source has no statically-known extent" that used to mask all of them:
+a stage after the first whose arity is not 1; a block-bodied stage kernel; a
+`reynolds(...)` stage (symmetrization does not commute with composition, and
+fusion has no expansion to inline); a `>>@` operand that does not resolve to an
+`object_for`; `@>>` over two structurally different loops; a `<$>` right operand
+that resolves to neither a map application nor a named array; a second-stage
+`where` clause (its parameter does not survive the fusion, and an omp licence is
+never dropped silently); and any pipeline under `ad.grad` (§2.10.3).
+`>>=` and `<$>`-over-`<|:>` keep their pre-existing refusals.
+
+*The cost.* Fusion inlines, so a second stage that names its parameter k times
+evaluates the first stage k times (`g(y) = y*y` over `f` becomes `f(x)*f(x)`).
+Against that it deletes the per-stage staged buffer the old path allocated, so
+for the common shapes it is a net win in both allocations and passes. Binding
+the intermediate instead would need block-bodied kernels, which
+`asKernelLambda` refuses — deferred, and cheap to revisit if a real pipeline
+ever pays for it.
+
+*Not only AD.* The rewrite is a whole-program surface normalization
+(`Grad.fuseProgram`), so the primal gets it too — see the note at the head of
+§2.10 for the five codegen holes that closes.
 
 **Skipped, with justification recorded:**
 - **`<|>`** — discontinuous, and its pathological set is its design point
   (§2.13). Keep the refusal; improve the message.
-- **`Poly<T^k>` / arity-polymorphic kernels** — the transform's pre-typecheck
-  slot makes the tangent parameter list unconstructible (§2.19).
-- **`sort`** — key-over-zip is unverified (§2.17).
+- ~~**`Poly<T^k>` / arity-polymorphic kernels** — the transform's pre-typecheck
+  slot makes the tangent parameter list unconstructible (§2.19).~~ **SHIPPED
+  forward mode** 2026-08-16 (Route A, §2.19b): the premise was wrong — the
+  arity is written at the apply site, so it is readable *before* typecheck, and
+  the kernel unrolls into a fixed-arity lambda there.
+- ~~**`sort`** — key-over-zip is unverified (§2.17).~~ **SHIPPED both modes**
+  2026-08-16 by a different route than the one skipped here: not key-over-zip,
+  but the permutation carried as data (§2.17b).
 - **`align` / `stencil`** — paper surface: AST + Lowering + TypeCheck arms, zero
   users (§2.9).
 - **Complex / Wirtinger** — inherits `plan-forward-mode-ad.md:249`.
@@ -1015,7 +1515,10 @@ rule is an optimization, not a capability — do not let it gate the tranche.
    ask #1.
 3. Is `!m` over a Bool mask array spellable and lowered (§2.14.3)? No corpus pin
    exists.
-4. Can `sort(zip(A,Ȧ), key)` take a key reading only the value half (§2.17)?
+4. ~~Can `sort(zip(A,Ȧ), key)` take a key reading only the value half (§2.17)?~~
+   **MOOT** — `sort` shipped in both modes without needing an answer: the
+   permutation is carried as data instead of being re-derived from a zipped
+   sort (§2.17b).
 5. Does the `omp` licence rewrite (`diagnostics/060:18-23`, `tuples/014`) survive
    onto a kernel whose parameter count **doubled**, or is it position-sensitive in
    a way the doubling breaks?

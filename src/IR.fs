@@ -6360,13 +6360,72 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
               | t -> t)
          | [] -> IRTScalar ETFloat64)
 
+    // -- Rank-changing assembly combinators (formalism 2.6) ---------------
+    // `stack(A1..An)` adds a fresh LEADING axis of extent n over the operands'
+    // (identical -- TypeCheck enforces it) shape; `join(A1..An, d)` keeps the
+    // shape and SUMS the extents on axis d. Both used to sit in the untyped
+    // list below, with each consumer that needed an element type reaching PAST
+    // the node to its first operand instead (CodeGen's `inferElemTypeStrict`
+    // has a two-line arm doing exactly that, and says so).
+    //
+    // That was survivable while every consumer reached past. It stopped being
+    // survivable once `isStatementShapedArraysArg` -- the ONE predicate behind
+    // the function-body, RETURN and loop-operand hoisting routes -- gated on
+    // the node being ARRAY-TYPED. `stack(x, y) * 2.0` failed that test, so the
+    // stack was left inline in the broadcast's operand slot and the emitted
+    // nest read an `arr0` nothing had declared (module scope and function body
+    // alike). Reaching past the node cannot fix that: the hoist needs a type
+    // for the NAME it mints, which is the operand type plus a rank change.
+    //
+    // This mirrors `TypeCheck.inferStack` / `inferJoin` arithmetic-for-
+    // arithmetic. It is not a second check: by the time IR exists those two
+    // have already REFUSED non-array operands, rank disagreement and off-axis
+    // extent clashes, so every shape reaching here is validated. The
+    // synthesized axis carries Id 0 -- an IR-level axis has no source-level
+    // identity to preserve, and its consumers read Extent / IxKind / Symmetry,
+    // never the id. An operand `typeOf` cannot reconstruct leaves the node
+    // untyped, exactly as before.
+    | IRStack (first :: _ as es) ->
+        (match typeOf first with
+         | ArrayElem a ->
+             let leadIdx =
+                 { Id = 0; Rank = 1; Extent = IRLit (IRLitInt (int64 es.Length))
+                   Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                   Kind = SDimension; Dependencies = [] }
+             mkArrayArrow (leadIdx :: a.IndexTypes) a.ElemType None
+         | _ -> IRTUnit)
+    | IRJoin ((first :: _ as es), dim) ->
+        (match typeOf first with
+         | ArrayElem a when dim >= 0 && dim < a.IndexTypes.Length ->
+             let dimExtents =
+                 es |> List.map (fun e ->
+                     match typeOf e with
+                     | ArrayElem at when dim < at.IndexTypes.Length -> Some at.IndexTypes.[dim].Extent
+                     | _ -> None)
+             // The literal sum when every operand's axis extent is static (the
+             // common case, and what pins depend on); the runtime addition
+             // chain otherwise. Same two-branch rule as `inferJoin`.
+             let joinedExtent =
+                 match dimExtents |> List.map (function Some (IRLit (IRLitInt n)) -> Some n | _ -> None) with
+                 | statics when statics |> List.forall Option.isSome ->
+                     IRLit (IRLitInt (statics |> List.sumBy Option.get))
+                 | _ ->
+                     match dimExtents |> List.choose id with
+                     | [] -> a.IndexTypes.[dim].Extent
+                     | xs -> xs |> List.reduce (fun l r -> IRBinOp (IRElementwise, IRAdd, l, r))
+             let joined = { a.IndexTypes.[dim] with Extent = joinedExtent; Tag = None }
+             mkArrayArrow
+                 (a.IndexTypes |> List.mapi (fun d ix -> if d = dim then joined else ix))
+                 a.ElemType None
+         | _ -> IRTUnit)
+
     // -- Deliberately untyped (loop objects, combinator/emission-internal
     //    markers -- not runtime values with a simple type). Enumerated with
     //    no wildcard so a NEW variant demands a typing decision here.
     | IRMethodFor _ | IRObjectFor _ | IRReynolds _ | IRArrayProduct _
     | IRComposeObj _ | IRCompose _
     | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _ | IRDiag _
-    | IRZip _ | IRAlign _ | IRStack _ | IRJoin _
+    | IRZip _ | IRAlign _ | IRStack [] | IRJoin ([], _)
     | IRTupleCons _ | IRTupleDecons _ | IRPolyIndex _ | IRPolyTail _ | IRReplicate _
     | IRVirtualReverse _ | IRBlocked _ | IRZero ->
         IRTUnit
@@ -6411,6 +6470,142 @@ let isInlineForm (e: IRExpr) : bool =
     | IRCompute (IRApplyCombinator _) -> true
     | _ -> false
 
+/// Nodes whose ONLY emitter is `genBinding` -- they declare an extents table,
+/// call `allocate<>`, and run a fill nest, which is a STATEMENT SEQUENCE.
+/// `exprToCppCore` has no rendering for any of them: it answers either the
+/// unhandled-node sentinel (BL7001) or a hand-written refusal (BL7004 for
+/// `<|:>`). So wherever one of these lands in an expression position -- a
+/// function-body `let`, a function RETURN, or a loop form's `Arrays` slot --
+/// the only correct move is to bind it to a name and let `genBinding` emit it.
+///
+/// This is the single predicate behind all three of those routings. It lives
+/// in IR.fs rather than beside CodeGen's `isMaterializedFreshArray` (where the
+/// emitter-side neighbours are) for one hard reason: `liftExpr` below consumes
+/// it, and IR.fs precedes CodeGen.fs in Blade.fsproj's compile order. One
+/// definition read by both sides beats two that can drift apart.
+///
+/// Deliberate EXCLUSIONS, each of which would be a behavior change rather than
+/// a gap closure:
+///   * IRReduce / IRReduceCompute -- statement-shaped, but both already own
+///     dedicated arms at every site this predicate feeds, and those arms do
+///     more than bind-and-emit (the array-valued/scalar split for IRReduce,
+///     `nestedTupleReturn` for the fused join). A catch-all that ran first
+///     would silently drop that work.
+///   * IRApplyCombinator / IRComposeApply -- DEFERRED forms with no name behind
+///     them until a forcing site runs; they have their own arms for exactly
+///     that reason.
+///   * every view/projection form -- they render inline correctly today.
+let isStatementShaped (e: IRExpr) : bool =
+    match e with
+    // Data-dependent cardinality forms.
+    | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
+    // Shape-changing / contraction forms.
+    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _
+    | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _ -> true
+    // Whole-array eager unary forms.
+    | IRArrayNegate _ | IRArrayConjugate _ -> true
+    // Grouping: the `group_keys` CSR tables and the two accessors that read
+    // them back out. All four hang a name-suffix ABI off the binding's name.
+    | IRGroupKeys _ | IRGroupBy _ | IRGroupBucket _ | IRGroupSizes _ -> true
+    // Array literals: extents table + allocate + per-element init.
+    | IRArrayLit _ -> true
+    // The DEFERRING family. `genBinding` answers these with a comment and a
+    // DeferredComputations entry rather than code, so binding one of them
+    // BARE registers a name with no declaration behind it. They must be
+    // routed in their FORCED spelling -- see `forceDeferringForm`.
+    | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
+    | _ -> false
+
+/// The four forms whose emission `genBinding` DEFERS: it records the value in
+/// `DeferredComputations` and emits only a `// <deferred ...>` comment, leaving
+/// materialization to a later `|> compute` that reaches `genComputeBinding`.
+///
+/// A function body and a loop form's `Arrays` slot both LACK such a forcing
+/// site -- the callee is the last scope that can force (a caller receives a
+/// VALUE, never a lazy combinator), and a loop nest subscripts its operand by
+/// name in the very statement it is built into. Binding one of these bare in
+/// either position therefore reproduces exactly the `'__v27' was not declared`
+/// failure that `genFuncBodyScoped`'s IRApplyCombinator arm now raises a loud
+/// invariant about.
+///
+/// So we hoist the FORCED shape. This is also what keeps the hoist free of the
+/// extents-ALIASING hazard: `isFreshPoolForm` documents that these four BORROW
+/// an operand's `.extents` pointer, and a bare hoist would put a second
+/// borrowing wrapper into a deterministic-dealloc frame that already plans to
+/// free the lender. `IRCompute` routes to the materializing emitter instead,
+/// which builds a real pool -- and, since this change, its own extents table.
+///
+/// `isDeferringForm` is the MEMBERSHIP test and `forceDeferringForm` the
+/// transform. They are split because not every consumer wants the transform:
+/// genBinding's `|> compute` peel has to SUBTRACT this family from
+/// `isStatementShaped` (forcing them there would route them back to the emitter
+/// that defers, making the compute a no-op), and subtracting a set is only
+/// honest if it names the same set.
+let isDeferringForm (e: IRExpr) : bool =
+    match e with
+    | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
+    | _ -> false
+
+let forceDeferringForm (e: IRExpr) : IRExpr =
+    if isDeferringForm e then IRCompute e else e
+
+/// The CSR-TABLE grouping members of `isStatementShaped`: `group_keys` and the
+/// `group_by` that reads it. Named for the same reason as `isDeferringForm` --
+/// the one consumer that must subtract them (genBinding's `|> compute` peel,
+/// where a grouping is not a spelling the surface produces and genComputeBinding
+/// has no arm to fall back on) should say which set it is subtracting rather
+/// than re-listing constructors.
+///
+/// The two ACCESSORS -- IRGroupBucket / IRGroupSizes -- are deliberately NOT
+/// here. They materialize an ordinary array and peel like any other eager form.
+let isGroupTableForm (e: IRExpr) : bool =
+    match e with
+    | IRGroupKeys _ | IRGroupBy _ -> true
+    | _ -> false
+
+/// `isStatementShaped` through an explicit `|> compute`. The user's own force
+/// is the SAME routing problem, not a different one: `sequence(a, b) |> compute`
+/// as a body let arrives as `IRCompute(IRSequence ...)`, which matches neither
+/// the bare-node arms nor `IRCompute(IRApplyCombinator)`, so it fell to the
+/// default arm's inline rendering and the IRSequence sentinel -- the identical
+/// BL7001 the unwrapped spelling raised. The wrapper is passed THROUGH to
+/// `genBinding` rather than peeled here: `genComputeBinding` is where the
+/// deferring family's materializing emitters live, and genBinding's own
+/// eager-peel arm handles the rest.
+let isStatementShapedValue (e: IRExpr) : bool =
+    match e with
+    | IRCompute inner -> isStatementShaped inner
+    | _ -> isStatementShaped e
+
+/// The inline forms a loop form's `Arrays` slot AUTO-MATERIALIZES on the
+/// codegen side. They are the blessed positions `liftExpr`'s header comment
+/// refers to, and hoisting one would route it away from a path that already
+/// works -- so they are subtracted from the `isStatementShaped` lift below.
+/// The list is exactly what CodeGen's auto-materialize arm knows; anything
+/// else in that slot falls through to an undeclared `arr<i>`.
+let isArraysSlotAutoMaterialized (e: IRExpr) : bool =
+    match e with
+    | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ -> true
+    | _ -> false
+
+/// The `Arrays`-slot half of `isStatementShaped`: statement-shaped, NOT already
+/// auto-materialized there, and genuinely ARRAY-TYPED.
+///
+/// The type test is the same guard `isNestedLoopComputeArg` applies, and it is
+/// load-bearing in one direction only -- it can never suppress a real hoist,
+/// because a loop form's `Arrays` slot holds arrays by construction. What it
+/// prevents is a hoist that would be actively harmful if the slot ever did hold
+/// something else: minting a let for an `IRGroupKeys` would put a `gk` outside
+/// the whitelist of blessed positions BL3017 enforces, turning a program that
+/// compiled into one that is refused. IREigh is the same story from the other
+/// side (tuple-typed, so no surface spelling reaches this slot). Keeping the
+/// test here means neither has to be special-cased out of `isStatementShaped`,
+/// where both belong for the function-body and RETURN routings.
+let isStatementShapedArraysArg (e: IRExpr) : bool =
+    isStatementShaped e
+    && not (isArraysSlotAutoMaterialized e)
+    && (match typeOf e with ArrayElem _ -> true | _ -> false)
+
 /// A loop-form array operand (in a method_for / apply-combinator / compose-apply
 /// `Arrays` list) that is itself a forced or inline elementwise computation --
 /// e.g. the left input `A * B` of a chained positional op `A * B * C`, which
@@ -6447,6 +6642,14 @@ let private isNestedLoopComputeArg (e: IRExpr) : bool =
     // `m.solve(A, b) * 2.0` is the same shape as the matmul line above, and
     // ARRAY-typed (unlike eigh), so it genuinely can occupy an `Arrays` slot.
     | IRSolve _ -> true
+    // `gram(A, B) * 2.0` -- the same shape again, and its omission was a plain
+    // oversight rather than a decision. `isInlineForm`'s header says IRGram
+    // "enters only via the `gram` keyword's let-RHS", but that premise is
+    // false for a CONSUMED gram: the operand slot of an elementwise op is an
+    // ordinary expression position, and the nest read an `arr0` it never
+    // declared. IRGram allocates one fresh pool with its own extents table, so
+    // it hoists exactly like IRMatmul beside it.
+    | IRGram _ -> true
     // IREigh is deliberately ABSENT, and its absence is a decision rather than
     // an omission: an eigh node is TUPLE-typed, and a loop form's `Arrays` slot
     // holds arrays. There is no surface spelling that puts a tuple where the
@@ -6637,6 +6840,59 @@ let liftChildIncludingLoopApp (builder: IRBuilder) (child: IRExpr) : (IRId * IRT
     | _ ->
         let (b, e) = liftChild builder inner
         (peeled @ b, e)
+
+/// Lift an ARGUMENT of a synthesized elementwise loop application
+/// (`IRApp(IRObjectFor ..., args)`, what an array/scalar broadcast `x - s`
+/// lowers to). Its emitter -- `genObjectForApplication` -- spells each operand
+/// by looking the arg up as an `IRVar` in `ctx.VarNames` and falling back to
+/// the placeholder `arr<i>`, exactly like a loop form's `Arrays` list, and it
+/// has no auto-materialize arm at all. So an arg that is not already a named
+/// binding leaves the nest reading an identifier that was never declared
+/// (`error: 'arr0' was not declared in this scope`).
+///
+/// The failing shape is an INLINE ROW VIEW: `a(i) - mean(a(i))` inside a kernel
+/// body, where the broadcast's array operand is the partial index `a(i)` rather
+/// than a rank-1 parameter. Naming it in a `let` is what writing the
+/// intermediate binding by hand already does.
+///
+/// The predicate set is deliberately the SAME one the `IRMethodFor` /
+/// `IRApplyCombinator` / `IRComposeApply` arms apply to their `Arrays` slots
+/// (`isArrayFieldAccess`, `isNestedLoopComputeArg`, `isInlineArrayLitArg`,
+/// `isArrayValuedSelect`, `isNestedLoopFormArg`, `isStatementShapedArraysArg`)
+/// -- the operand-naming rule is shared, so the hoisting rule has to be -- PLUS
+/// `isInlineForm`, which the loop forms exempt only because codegen
+/// auto-materializes mask/intersect/union/unique in an `Arrays` slot and this
+/// emitter does not.
+///
+/// `isStatementShapedArraysArg` is the fourth consumer of the one predicate the
+/// three sibling arms already share, and it is here because "same predicate
+/// set" was a claim this lane did not actually satisfy when it was added: a
+/// hand-copied list omitted it, so `stack(x, y) * 2.0` in a function body still
+/// reached `genObjectForApplication` as a bare IRStack and the nest read an
+/// `arr0` nothing declared. Everything statement-shaped that is not already
+/// covered above enters through that one name -- IRStack and IRJoin, and the
+/// DEFERRING family (`<|:>` / sequence / guard / choice), which hoists in its
+/// FORCED spelling for the reason `forceDeferringForm` gives: bound bare, its
+/// emitter records a deferral and declares no name at all.
+let liftLoopAppOperand (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    let needsName =
+        match inner with
+        | IRArrayLit _ -> true
+        | e ->
+            isInlineForm e || isArrayFieldAccess e || isNestedLoopComputeArg e
+            || isInlineArrayLitArg e || isArrayValuedSelect e || isNestedLoopFormArg e
+            || isStatementShapedArraysArg e
+    if needsName then
+        let id = builder.FreshId()
+        // IRArrayLit carries its array type in the node rather than through
+        // `typeOf` (mirroring liftChildIncludingArrayLit).
+        let ty = match inner with IRArrayLit (_, arrTy) -> mkArrayLike arrTy | _ -> typeOf inner
+        // Identity for everything but the deferring family, exactly as in the
+        // three sibling arms.
+        (peeled @ [(id, ty, forceDeferringForm inner)], IRVar (id, ty))
+    else
+        (peeled, inner)
 
 /// Lift a list of children, accumulating bindings.
 let liftChildren (builder: IRBuilder) (children: IRExpr list) : (IRId * IRType * IRExpr) list * IRExpr list =
@@ -6870,9 +7126,19 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         // extended helper that lifts both inline forms and IRArrayLit.
         let fn' = liftExpr builder fn
         let args' = args |> List.map (liftExpr builder)
+        // A SYNTHESIZED LOOP APPLICATION (`IRApp(IRObjectFor ...)`, the shape
+        // an array/scalar broadcast lowers to) does not consume its args as
+        // ordinary call arguments: they are the loop's ARRAY OPERANDS, named
+        // positionally by genObjectForApplication. They need the loop-form
+        // Arrays hoisting rule, not the call-argument one -- see
+        // `liftLoopAppOperand`.
+        let liftArg =
+            match fn' with
+            | IRObjectFor _ -> liftLoopAppOperand builder
+            | _ -> liftChildIncludingArrayLit builder
         let (binds, argsFinal) =
             args' |> List.fold (fun (accB, accA) a ->
-                let (b, a') = liftChildIncludingArrayLit builder a
+                let (b, a') = liftArg a
                 (accB @ b, accA @ [a'])) ([], [])
         wrapLets binds (IRApp (fn', argsFinal, retTy))
     | IRJoin (arrs, dim) ->
@@ -7005,10 +7271,18 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
-                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner
+                   // Statement-shaped forms (gram, decompact, transpose, the
+                   // <|:> / sequence family, ...) have no inline rendering, so
+                   // left in this slot the nest peels an `arr<i>` that was
+                   // never declared. Hoist to a let-RHS, minus the four the
+                   // codegen-side auto-materialize already covers. The
+                   // deferring members hoist in their FORCED spelling -- a
+                   // bare one would bind a name genBinding never declares.
+                   || isStatementShapedArraysArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
-                    (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
+                    (accB @ peeled @ [(id, ty, forceDeferringForm inner)], accA @ [IRVar (id, ty)])
                 else
                     (accB @ peeled, accA @ [inner])) ([], [])
         wrapLets binds (IRMethodFor { info with Arrays = arraysFinal })
@@ -7022,10 +7296,18 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
-                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner
+                   // Statement-shaped forms (gram, decompact, transpose, the
+                   // <|:> / sequence family, ...) have no inline rendering, so
+                   // left in this slot the nest peels an `arr<i>` that was
+                   // never declared. Hoist to a let-RHS, minus the four the
+                   // codegen-side auto-materialize already covers. The
+                   // deferring members hoist in their FORCED spelling -- a
+                   // bare one would bind a name genBinding never declares.
+                   || isStatementShapedArraysArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
-                    (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
+                    (accB @ peeled @ [(id, ty, forceDeferringForm inner)], accA @ [IRVar (id, ty)])
                 else
                     (accB @ peeled, accA @ [inner])) ([], [])
         wrapLets binds (IRApplyCombinator { info with Loop = loop'; Kernel = kernel'; Arrays = arraysFinal })
@@ -7039,10 +7321,18 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             arrays' |> List.fold (fun (accB, accA) a ->
                 let (peeled, inner) = peelLetChain a
                 if isArrayFieldAccess inner || isNestedLoopComputeArg inner || isInlineArrayLitArg inner
-                   || isArrayValuedSelect inner || isNestedLoopFormArg inner then
+                   || isArrayValuedSelect inner || isNestedLoopFormArg inner
+                   // Statement-shaped forms (gram, decompact, transpose, the
+                   // <|:> / sequence family, ...) have no inline rendering, so
+                   // left in this slot the nest peels an `arr<i>` that was
+                   // never declared. Hoist to a let-RHS, minus the four the
+                   // codegen-side auto-materialize already covers. The
+                   // deferring members hoist in their FORCED spelling -- a
+                   // bare one would bind a name genBinding never declares.
+                   || isStatementShapedArraysArg inner then
                     let id = builder.FreshId()
                     let ty = typeOf inner
-                    (accB @ peeled @ [(id, ty, inner)], accA @ [IRVar (id, ty)])
+                    (accB @ peeled @ [(id, ty, forceDeferringForm inner)], accA @ [IRVar (id, ty)])
                 else
                     (accB @ peeled, accA @ [inner])) ([], [])
         wrapLets binds (IRComposeApply { info with Composition = composition'; InputArrays = arraysFinal })

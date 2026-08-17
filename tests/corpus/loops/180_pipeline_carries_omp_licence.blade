@@ -1,0 +1,17 @@
+// TEST: Pipeline Carries Omp Licence
+// Fusion alpha-renames the first stage's parameters, which would leave
+// `omp(g: 1)` naming a parameter that no longer exists. The clause's
+// variable references are RENAMED alongside the parameters rather than
+// dropped: a parallelism licence is part of what the user declared, and the
+// omp census invariant says a dropped `omp` is never silent.
+// This file pins the VALUES; the pragma itself is visible in the emitted C++
+// (`#pragma omp parallel for schedule(dynamic)` on the ragged row loop), which
+// a corpus EXPECT cannot see.
+// Row sums 6/9/30, doubled by the second stage.
+let lens: Array<Int64 like Idx<3>> = [3, 2, 4]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
+
+let stage1 = object_for(lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)))
+let stage2 = object_for(lambda(s) -> s * 2.0)
+let piped = (stage1 >>@ stage2) <@> r |> compute
+// EXPECT: piped = [12, 18, 60]

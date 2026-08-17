@@ -1,0 +1,37 @@
+// TEST: C6 Gram Adjoint Is Two Grams (Tier-2)
+// The best reverse rule in the C-track: for G = gram(A, B), both adjoints
+// are themselves grams of transposes -- dA += gram(dG, B^T),
+// dB += gram(dG^T, A^T) -- emitted as surface gram, so the BLAS route
+// covers the backward pass exactly as it covers the forward. The jvp side
+// is the bilinear rule gram(dA, B) + gram(A, dB), each term bound to its
+// own temp (an array-add of gram NODES hits the flat-elementwise
+// emitter's unnamed-operand hazard; named temps also keep both terms
+// BLAS-routed).
+// dG = [[0,2],[1,0]] from the loss reads; hand-derived adjoints below.
+import ad as ad
+
+type I = Idx<2>
+type K = Idx<3>
+
+function floss(a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {
+    let g = gram(a, b)
+    g(0, 1) * 2.0 + g(1, 0)
+}
+
+let a0 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let b0 = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let mut da = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut db = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let gv = ad.grad(floss)(a0, b0, da, db)
+// EXPECT: gv = 14
+// EXPECT: da = [[0, 2, 0], [1, 0, 1]]
+// EXPECT: db = [[4, 5, 6], [2, 4, 6]]
+// jvp agreement with random seeds on BOTH operands
+let sa = [[0.5, -1.0, 0.25], [2.0, 0.0, -0.5]]
+let sb = [[1.0, 1.0, 0.0], [0.0, -1.0, 2.0]]
+let (jp, jt) = ad.jvp(floss)(a0, b0, sa, sb)
+let dot1 = reduce(reduce(da * sa, (+)), (+))
+let dot2 = reduce(reduce(db * sb, (+)), (+))
+let resid = jt - (dot1 + dot2)
+// EXPECT: jp = 14
+// EXPECT: resid = 0

@@ -1,0 +1,15 @@
+// TEST: JVP C1 Guard Zeroes Its Tangent
+// Zeroing is linear -- d(c ? e : 0) = c ? de : 0 -- so the tangent carries
+// the SAME condition, and a guarded-off branch contributes no tangent
+// rather than an unguarded derivative. Both polarities pinned.
+import ad as ad
+
+function on(x: Float) -> Float = guard(true, x * x)
+function off(x: Float) -> Float = guard(false, x * x)
+
+let (von, ton) = ad.jvp(on)(3.0, 1.0)
+let (voff, toff) = ad.jvp(off)(3.0, 1.0)
+// EXPECT: von = 9
+// EXPECT: ton = 6
+// EXPECT: voff = 0
+// EXPECT: toff = 0

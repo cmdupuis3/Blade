@@ -1,0 +1,42 @@
+// TEST: JVP Covariance -- Rank-1 Kernel Calling A Helper That Calls A Helper
+// 071's kernel with `mean` factored out of `covariance`, which is how anyone
+// would actually write it -- and the shape 2.19a recorded as a KNOWN WALL:
+// the tangent's primal factors contain a same-module call OVER A FIBER
+// (`mean` nested inside the array arithmetic rather than wrapping the whole
+// body), so the substituted tangent puts an inline row view in an
+// elementwise-map operand position. The AST was always correct; the EMITTER
+// rendered the operand as an undeclared `arr0`. It was never an AD gap -- it
+// reproduces with no `ad` in the program (tests/corpus/loops/176), and it is
+// fixed where it lives, in the loop-form operand hoist.
+//
+// Pinned to 071's numbers on purpose: factoring `mean` out of `covariance`
+// must not move a digit.
+// x = [1,2,3] (centered [-1,0,1]); y = [2,4,6] (centered [-2,0,2]).
+// cov(0,0) = 2/3, cov(0,1) = 4/3; v = 2/3 + 3*(4/3) = 14/3.
+// seed perturbs a(0,0) only, so with du = [2/3, -1/3, -1/3]:
+//   d cov(0,0) = (2/3) u_0      = -2/3
+//   d cov(0,1) = (1/3) (du . w) = -2/3
+//   t = -2/3 + 3*(-2/3) = -8/3.
+import ad as ad
+
+type R = Idx<2>
+type C = Idx<3>
+
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+
+function covariance(x: T^1, y: T^1) -> T^0 = mean((x - mean(x)) * (y - mean(y)))
+
+function f(a: Array<Float like R, C>) -> Float = {
+    let cov = method_for(a, a) <@> lambda(x: T^1, y: T^1) -> covariance(x, y) |> compute
+    cov(0, 0) + 3.0 * cov(0, 1)
+}
+
+let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
+                       [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+// WARN: BL4003
+// Both kernel slots receive `a`, and factoring `mean` out makes the kernel
+// deduce commutative where 071's single expression did not -- a pin, not a
+// behaviour change: the storage stays dense either way.
+// WARN: BL4010
+// EXPECT: v = 4.666666666666667
+// EXPECT: t = -2.6666666666666665

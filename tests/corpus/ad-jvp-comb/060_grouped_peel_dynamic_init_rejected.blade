@@ -1,0 +1,26 @@
+// TEST: Nonzero Init Over Dynamically-Discovered Keys Rejected (rejects)
+// The mirror of 051. An init contributes `init * <group count>` to the loss,
+// and the rewrite folds that in EXACTLY -- which it can only do when the
+// group count is a compile-time number. Positional keys have one; discovered
+// keys do not learn theirs until the grouping runs.
+//
+// Nothing is lost: discovered keys never produce an empty group, so the init
+// has no empty fold to define, and dropping it (or writing 0.0) is the same
+// loss. The refusal says which of the two to reach for.
+import ad as ad
+
+type R = Idx<4>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 7.0) |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 1]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, kk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: not known until run time

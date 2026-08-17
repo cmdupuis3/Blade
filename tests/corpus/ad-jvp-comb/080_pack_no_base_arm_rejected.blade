@@ -1,0 +1,27 @@
+// TEST: Pack Kernel With No Reachable Base Arm Rejected (rejects)
+// Unrolling a pack kernel is bounded by arity: each `head :: tail` step
+// shortens the view, so the recursion terminates iff some arm on the way
+// down matches. This kernel has ONLY an `| 2 ->` arm, and its own recursive
+// call re-enters at arity 1, where `match arity(a)` finds no guard-free
+// case. That is a property of the KERNEL at this arity -- the same refusal
+// in forward and reverse mode, fixed in the kernel rather than in the
+// differentiated function -- so it carries its own code, BL5502, instead of
+// the generic BL5500/BL5501 elaboration errors.
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 2 -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(packprod) <@> (a, a) |> compute
+    m(0, 2)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// ERROR: BL5502
+// ERROR-CONTAINS: has NO arm for arity 1

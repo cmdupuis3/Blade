@@ -1,0 +1,14 @@
+// TEST: JVP C1 Stack
+// stack adds a leading axis with a FRESH symmetry class, so nothing is
+// claimed across it and the tangent is simply the stack of tangents.
+// f = a0 * b1 at a=[2,3], b=[4,5]: 10; seed a=[1,0] -> b1 = 5.
+import ad as ad
+
+function f(a: Array<Float like Idx<2>>, b: Array<Float like Idx<2>>) -> Float = {
+    let s = stack(a, b)
+    s(0, 0) * s(1, 1)
+}
+
+let (v, t) = ad.jvp(f)([2.0, 3.0], [4.0, 5.0], [1.0, 0.0], [0.0, 0.0])
+// EXPECT: v = 10
+// EXPECT: t = 5

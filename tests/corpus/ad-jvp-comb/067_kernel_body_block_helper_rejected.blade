@@ -1,0 +1,22 @@
+// TEST: Block-Bodied Kernel-Body Helper Rejected (rejects)
+// A block body is a statement list, and an expression position cannot hold
+// one. The statement-level inliner CAN splice a block callee (it has
+// statements to splice into); this one cannot, so it refuses by name rather
+// than reaching the generic unknown-call message.
+import ad as ad
+
+type I = Idx<3>
+
+function center(x: Float) -> Float = {
+    let c = x - 1.0
+    c
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let sq = method_for(a) <@> lambda(x) -> center(x) * center(x) |> compute
+    reduce(sq, (+))
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// ERROR: BL5501
+// ERROR-CONTAINS: only EXPRESSION-bodied same-module functions can be substituted into a kernel

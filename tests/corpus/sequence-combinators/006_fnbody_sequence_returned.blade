@@ -1,0 +1,37 @@
+// TEST: Fnbody Sequence Returned
+// ----------------------------------------------------------------------------
+// The RETURN-position twin of 005, and the sharpest test in this group: making
+// it merely COMPILE produced a program that segfaulted, and both causes are
+// specific to a sequence escaping its frame.
+//
+//  1. SHAPE. genComputeBinding's IRSequence arm declared a frame-local
+//     `size_t <name>_extents[R]`. `Array<T,R>` stores only a POINTER to that
+//     table, so the returned wrapper's shape dangled and the auto-printer's
+//     first `.extents[0]` read took an access violation. This is exactly the
+//     bug commit 7905b36 fixed across the 14 materialize*Form builders; the
+//     IRSequence arm was missed then because no IRSequence could be returned.
+//     It now uses the same `emitExtentsTable` helper.
+//
+//  2. STORAGE. Unlike every other form in the statement-shaped family, a
+//     sequence's result ALIASES its inputs instead of copying them -- the
+//     emitter assembles `<name>[i] = <name>_i`, which is why isFreshPoolForm
+//     refuses to call a sequence a fresh-pool barrier. Sparing only the
+//     returned name from the scope's frees would delete the children out from
+//     under the value that just escaped, so the per-child pools are spared too.
+//
+// A wrong answer to either shows up as garbage rows or a crash, never as an
+// arithmetic slip, so the pins below are load-bearing as shape assertions.
+// ----------------------------------------------------------------------------
+type Three = Idx<3>
+type Two = Idx<2>
+
+function stack_two(x: Array<Float64 like Three>) -> Array<Float64 like Two, Three> = {
+    let L = method_for(x)
+    sequence(L <@> lambda(v) -> v + 10.0, L <@> lambda(v) -> v * 2.0) |> compute
+}
+
+let A: Array<Float64 like Three> = [1.0, 2.0, 3.0]
+let s = stack_two(A)
+let rows = reduce(s, (+))
+// EXPECT: s = [11.0, 12.0, 13.0, 2.0, 4.0, 6.0]
+// EXPECT: rows = [36.0, 12.0]

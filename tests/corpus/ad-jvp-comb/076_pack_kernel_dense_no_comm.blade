@@ -1,0 +1,36 @@
+// TEST: JVP Route A -- Arity-Poly Pack Kernel Without comm (dense both legs)
+// The comm-LESS twin of 075 (arity/029's shape under ad.jvp): the same
+// recursive pack kernel, the same `(a, a)` application, no `where comm(a)`.
+// The unrolled lambda then carries no clause either, the C5 gate declines,
+// and BOTH legs are the dense 3x3 -- which is the correct answer, just not
+// the compacted one. Pinned so the storage decision stays a consequence of
+// the declaration rather than of the unroller's mood.
+//
+// The scalar readings are necessarily the same as 075's (the kernel IS
+// symmetric, only its declaration is silent about it); what differs is the
+// emitted allocation, and the pair 075/076 is the A/B that shows expanding
+// the comm group is what buys the triangle.
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(packprod) <@> (a, a) |> compute
+    m(0, 2) + m(2, 0) + m(1, 1)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// The late-tier deduction sees the pack invariant and offers the pin 075
+// takes; observationally inert, so the values below are the dense proof.
+// WARN: BL4010
+// WARN: BL4003
+// EXPECT: v = 10
+// EXPECT: t = 6

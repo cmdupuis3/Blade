@@ -1,0 +1,22 @@
+// TEST: JVP C7 Pipeline Compose Meth
+// The other half of the duality: compose the COMPUTATIONS rather than the
+// kernel objects. Both sides must iterate the same loop object -- that is
+// checked, not assumed (035 pins the refusal) -- and then `@>>` is the same
+// fusion as `>>@`, so the same 29/18.
+import ad as ad
+
+type I = Idx<3>
+
+function s1(x: Float) -> Float = x + 1.0
+function s2(y: Float) -> Float = y * y
+
+function f(a: Array<Float like I>) -> Float = {
+    let L = method_for(a)
+    let m = (L <@> s1) @>> (L <@> s2) |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: v = 29
+// EXPECT: t = 18

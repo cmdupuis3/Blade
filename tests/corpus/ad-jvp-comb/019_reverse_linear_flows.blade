@@ -1,0 +1,41 @@
+// TEST: C6 Reverse Flows Through The Linear Closure
+// grad now differentiates combinator-built array locals whose form has a
+// transposed reindexing: an ALIAS flows whole-buffer (previously refused --
+// the refusal existed because no adjoint did), STACK peels the member
+// position, TRANSPOSE applies the same swap (self-inverse). Cotangent
+// buffers are sized from the structural dims env.
+// flin = s(0,0)*3 + s(1,1)*5 with s = stack(alias(x), y):
+// value 1*3 + 4*5 = 23; dx = [3, 0]; dy = [0, 5].
+// ftr = t(0,1)*10 with t = transpose(m): value m(1,0)*10 = 30;
+// dm = [[0,0],[10,0]].
+import ad as ad
+
+type I = Idx<2>
+
+function flin(x: Array<Float like I>, y: Array<Float like I>) -> Float = {
+    let b = x
+    let s = stack(b, y)
+    s(0, 0) * 3.0 + s(1, 1) * 5.0
+}
+
+function ftr(m: Array<Float like I, I>) -> Float = {
+    let t = transpose(m, [0, 1])
+    t(0, 1) * 10.0
+}
+
+// WARN: BL4003
+let mut dx = [0.0, 0.0]
+let mut dy = [0.0, 0.0]
+let lv = ad.grad(flin)([1.0, 2.0], [3.0, 4.0], dx, dy)
+let mut dm = [[0.0, 0.0], [0.0, 0.0]]
+let tv = ad.grad(ftr)([[1.0, 2.0], [3.0, 4.0]], dm)
+// EXPECT: lv = 23
+// EXPECT: dx = [3, 0]
+// EXPECT: dy = [0, 5]
+// EXPECT: tv = 30
+// EXPECT: dm = [[0, 0], [10, 0]]
+// forward agreement through the same forms
+let (jl, tl) = ad.jvp(flin)([1.0, 2.0], [3.0, 4.0], [1.0, 0.0], [0.0, 1.0])
+let lresid = tl - (dx(0) + dy(1))
+// EXPECT: jl = 23
+// EXPECT: lresid = 0

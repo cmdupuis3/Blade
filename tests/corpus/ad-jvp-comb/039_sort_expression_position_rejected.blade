@@ -1,0 +1,18 @@
+// TEST: C7 Sort Must Bind A Let (rejects)
+// The permutation the derivative gathers through is materialized as its own
+// binding, emitted BESIDE the sort -- so the sort needs a statement position
+// to be expanded at. A sort buried in an expression has none, and is refused
+// where the message can say so rather than reaching the sweeps' generic
+// "unsupported expression form".
+// ERROR: BL5501
+// ERROR-CONTAINS: whole initializer of a `let`
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>) -> Float = {
+    sort(a, lambda(x: Float) -> x)(0) * 2.0
+}
+
+let (v, t) = ad.jvp(f)([3.0, 1.0, 2.0], [1.0, 0.0, 0.0])
+v

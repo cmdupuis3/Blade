@@ -1,0 +1,39 @@
+// TEST: Auto-Lowered Grouped Peel, Group-Weighted Mean (both modes)
+// The consumption that makes the pattern useful: `reduce(m * W, (+))`, with
+// W a GROUP-space array of weights. It factors to
+// `sum_i (W_{b(i)} / n_{b(i)}) * v_i`, so BOTH legs stay differentiable --
+// the value leg through the bucket map, and the weight leg because W is read
+// at `b(i)` inside the same source loop, which makes its adjoint a scatter.
+//
+// dc is the per-group means, which is the derivative every weighted-average
+// loss wants and the one a materialized group axis would have been needed
+// for under the old route.
+import ad as ad
+
+type R = Idx<6>
+type G = Idx<3>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>, cw: Array<Float64 like G>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    reduce(m * cw, (+))
+}
+
+let v0: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 2, 1, 0]
+let c0: Array<Float64 like G> = [2.0, 5.0, -1.0]
+// WARN: BL4003
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dc = [0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(v0, kk, c0, dv, dc)
+// EXPECT: gv = 201.666666666667
+// EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, -1, 2.5, 0.666666666666667]
+// EXPECT: dc = [33.3333333333333, 35, 40]
+
+let seed: Array<Float64 like R> = [1.0, 0.0, -2.0, 3.0, 0.5, 0.25]
+let (jp, jt) = ad.jvp(loss)(v0, kk, c0, seed, [0.0, 0.0, 0.0])
+let dot = reduce(dv * seed, (+))
+let resid = jt - dot
+// EXPECT: jp = 201.666666666667
+// EXPECT: resid = 0

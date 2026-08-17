@@ -1,0 +1,21 @@
+// TEST: Recursive Kernel-Body Helper Rejected (rejects)
+// A kernel body is SUBSTITUTED, not taped, so a self-recursive callee has no
+// finite expansion. It is caught by reading the DECLARATION (a body that
+// names itself), not by tracking the substitution path: a path revisits a
+// name innocently whenever a helper is nested inside itself through an
+// argument, as `mean((x - mean(x)) * ...)` does. The depth cap alone would
+// report a much less useful "exceeded depth 32".
+import ad as ad
+
+type I = Idx<3>
+
+function loopy(x: Float) -> Float = x * loopy(x)
+
+function f(a: Array<Float like I>) -> Float = {
+    let sq = method_for(a) <@> lambda(x) -> loopy(x) |> compute
+    sq(0)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// ERROR: BL5501
+// ERROR-CONTAINS: 'loopy' is recursive (its own body names 'loopy')

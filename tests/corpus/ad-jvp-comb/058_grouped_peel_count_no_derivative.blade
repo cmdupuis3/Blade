@@ -1,0 +1,27 @@
+// TEST: Per-Group Count Peel Carries No Derivative (rejects)
+// `extents(r)` is group-linear too -- it lowers to one unit per surviving
+// row -- but its gradient is identically zero, and its primal is an Int64
+// count, which cannot meet a Float weight. So the ONLY thing a count peel
+// can be is a loss that no differentiable parameter reaches.
+//
+// This test gates the lowering all the same: WITHOUT the rewrite the peel
+// dies earlier, at "reduce source 'm' has no statically-known extent". Seeing
+// the dependence check instead is proof the count kernel lowered cleanly and
+// then hit the honest wall, one seam further on.
+import ad as ad
+
+type R = Idx<6>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
+    reduce(m, (+))
+}
+
+let v0: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 2, 1, 0]
+let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(v0, kk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: does not depend on any differentiable parameter

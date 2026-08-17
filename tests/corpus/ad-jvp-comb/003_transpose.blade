@@ -1,0 +1,14 @@
+// TEST: JVP C1 Transpose
+// A hard permutation: the tangent is the SAME permutation of the tangent
+// array, so the seed's (1,0) entry lands at the read's (0,1).
+// f = 10 * m(1,0); m(1,0) = 3 -> 30. Seed has 1.0 at (1,0) -> 10.
+import ad as ad
+
+function f(m: Array<Float like Idx<2>, Idx<2>>) -> Float = {
+    let mt = transpose(m, [0, 1])
+    mt(0, 1) * 10.0
+}
+
+let (v, t) = ad.jvp(f)([[1.0, 2.0], [3.0, 4.0]], [[0.0, 0.0], [1.0, 0.0]])
+// EXPECT: v = 30
+// EXPECT: t = 10

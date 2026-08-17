@@ -1,0 +1,25 @@
+// TEST: Positional Keys, Per-Group Sum Without An Init Rejected (rejects)
+// `Idx<N>` keys admit EMPTY groups, and the language leaves the empty fold
+// DELIBERATELY undefined without an init (BL8003 at run time). The rewrite
+// will not pick a value the language refused to pick, so it refuses too --
+// with the steer, because adding the init is a one-token fix that makes the
+// whole loss exact (see 051).
+import ad as ad
+
+type R = Idx<4>
+type GK = Idx<3>
+
+function loss(v: Array<Float64 like R>, pk: Array<GK like R>) -> Float = {
+    let gk = group_keys(pk)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let sk: Array<GK like R> = [2, 0, 2, 0]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, sk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: can have EMPTY groups
+// ERROR-CONTAINS: reduce(r, (+), 0.0)

@@ -1,0 +1,33 @@
+// TEST: JVP Route A -- Pack Kernel Reached Through A Lambda Wrapper
+// The docs' covariance spelling (arity/022): the map kernel is an ordinary
+// two-parameter lambda whose BODY calls the pack function. The unrolling then
+// happens at the kernel-body call rule rather than at the kernel itself --
+// the callee is expanded at the CALL's argument count and its parameters
+// meet the lambda's, which is the same expansion arriving one seam later.
+//
+// The wrapper carries no `where` clause, so this is the dense path (as the
+// primal is for the same spelling); 075 is the compacted twin. Same numbers
+// as 076 on both legs, which is the point: the two seams must not disagree.
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(lambda(x, y) -> packprod(x, y)) <@> (a, a) |> compute
+    m(0, 2) + m(2, 0) + m(1, 1)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// The suggestion lands on the WRAPPER's `(x, y)` here, not on the pack.
+// WARN: BL4010
+// WARN: BL4003
+// EXPECT: v = 10
+// EXPECT: t = 6

@@ -1,0 +1,46 @@
+// TEST: Auto-Lowered Grouped Peel With The Keys As A Parameter
+// The spelling a per-call loss actually wants (021's): the keys arrive as an
+// argument and the grouping is built INSIDE the differentiated function, so
+// the same compiled loss regroups on every call. `group_keys` may not cross
+// a call boundary (BL3017), so there is nowhere else to build it.
+//
+// Regrouping is the point: two key sets, two partitions, two different
+// gradients out of one function. The keys are Int data, so the whole
+// group_keys / group_bucket / extents chain is constant plumbing and where
+// it gets built cannot move a derivative -- these are 018's numbers again.
+import ad as ad
+
+type R = Idx<5>
+
+function loss(v: Array<Float like R>, k: Array<Int64 like R>, cw: Array<Float like Idx<2>>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    reduce(m * cw, (+))
+}
+
+let v0 = [10.0, 20.0, 30.0, 40.0, 50.0]
+let c0 = [2.0, 5.0]
+
+let ka: Array<Int64 like R> = [0, 1, 0, 0, 1]
+// WARN: BL4003
+let mut dva = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dca = [0.0, 0.0]
+let ga = ad.grad(loss)(v0, ka, c0, dva, dca)
+// EXPECT: ga = 228.333333333333
+// EXPECT: dva = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
+// EXPECT: dca = [26.6666666666667, 35]
+
+let kb: Array<Int64 like R> = [0, 0, 0, 1, 1]
+let mut dvb = [0.0, 0.0, 0.0, 0.0, 0.0]
+let mut dcb = [0.0, 0.0]
+let gb = ad.grad(loss)(v0, kb, c0, dvb, dcb)
+// EXPECT: gb = 265
+// EXPECT: dvb = [0.666666666666667, 0.666666666666667, 0.666666666666667, 2.5, 2.5]
+// EXPECT: dcb = [20, 45]
+
+let (jp, jt) = ad.jvp(loss)(v0, kb, c0, [1.0, 0.0, -2.0, 3.0, 0.5], [0.0, 0.0])
+let dot = reduce(dvb * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
+let resid = jt - dot
+// EXPECT: jp = 265
+// EXPECT: resid = 0

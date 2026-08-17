@@ -1,0 +1,58 @@
+// TEST: C7 Sort Reverse -- The Inverse Permutation Is A Second Sort
+// The adjoint of a sort is a SCATTER, dA(perm(i)) += ds(i) -- but scattering
+// needs a primitive the language does not have. Inverting the permutation
+// instead turns it back into an ordinary gather, dA(j) += ds(invperm(j)),
+// and the inverse comes from a SECOND sort of the same index array keyed on
+// the permutation's own values. No new primitive, and the reverse leg reads
+// the SAME permutation the primal took.
+//
+// Same f and data as 035. perm = [1, 3, 4, 0, 2], so invperm = [3, 0, 4, 1, 2]
+// and dA(j) = w(invperm(j)) = [4, 1, 5, 2, 3]: a(0)=3.0 is the 4th smallest,
+// so it lands at sorted slot 3 and collects weight 4, and so on.
+import ad as ad
+
+type I = Idx<5>
+
+function f(a: Array<Float like I>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> x)
+    s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
+}
+
+let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(f)([3.0, 1.0, 4.0, 1.5, 2.0], da)
+// EXPECT: gv = 42
+// EXPECT: da = [4, 1, 5, 2, 3]
+
+// The differential gate: a directional derivative built from the reverse
+// gradient must equal the forward tangent along the same seed, exactly.
+let (jv, jt) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
+let dirderiv = da(0) * 0.1 + da(1) * (-0.2) + da(2) * 0.3 + da(3) * 0.05 + da(4) * (-0.15)
+let resid = jt - dirderiv
+// EXPECT: jv = 42
+// EXPECT: jt = 1.35
+// EXPECT: resid = 0
+
+// Forward-over-reverse composes through a sort: `ad.jvp(ad.grad(g))` re-runs
+// the pre-pass over a body this pass already expanded, so the plumbing must
+// be REUSED by name rather than re-emitted (a second, independently sorted
+// permutation would be the same order here and hide the bug -- what it would
+// actually break is the collision guard).
+// g = s0^2 + 2 s1 + 3 s2 + 4 s3 over a = [3, 1, 4, 2]:
+// sorted [1, 2, 3, 4], perm = [1, 3, 0, 2], invperm = [2, 0, 3, 1].
+// dg/ds = [2*s0, 2, 3, 4] = [2, 2, 3, 4], so grad = dg/ds o invperm
+//       = [3, 2, 4, 2].
+// Only s0 is nonlinear (d2g/ds0^2 = 2) and s0 = a(perm(0)) = a(1), so the
+// Hessian is 2 at (1,1) alone and the HVP along e1 is [0, 2, 0, 0].
+type J = Idx<4>
+
+function g(a: Array<Float like J>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> x)
+    s(0) * s(0) + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0
+}
+
+let mut gg = [0.0, 0.0, 0.0, 0.0]
+let mut tgg = [0.0, 0.0, 0.0, 0.0]
+let (hp, ht) = ad.jvp(ad.grad(g))([3.0, 1.0, 4.0, 2.0], gg, [0.0, 1.0, 0.0, 0.0], tgg)
+// EXPECT: hp = 30
+// EXPECT: gg = [3, 2, 4, 2]
+// EXPECT: tgg = [0, 2, 0, 0]

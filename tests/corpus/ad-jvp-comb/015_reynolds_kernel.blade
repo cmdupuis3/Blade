@@ -1,0 +1,29 @@
+// TEST: JVP C4 Reynolds Kernels, Both Signs
+// reynolds(g) expands BEFORE differentiation -- sum_sigma sign * g(x_sigma)
+// with each param substituted by its slot's read -- so the ordinary
+// expression rule differentiates the symmetrized sum, and seeds travel
+// with their values under the JOINT permutation by construction.
+// K+ = x*y^2 + y*x^2; K- = x*y^2 - y*x^2. At x=a0=1, y=b1=4:
+// K+ = 16+4 = 20, dK+/da0 = b1^2 + 2*a0*b1 = 24;
+// K- = 16-4 = 12, dK-/da0 = b1^2 - 2*a0*b1 = 8.
+import ad as ad
+
+type I = Idx<3>
+
+function fsym(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let m = method_for(a, b) <@> reynolds(lambda(x, y) -> x * y * y) |> compute
+    m(0, 1)
+}
+
+function fanti(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let m = method_for(a, b) <@> reynolds(lambda(x, y) -> x * y * y, Antisymmetric) |> compute
+    m(0, 1)
+}
+
+// WARN: BL4003
+let (vp, tp) = ad.jvp(fsym)([1.0, 2.0, 3.0], [3.0, 4.0, 5.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+let (vm, tm) = ad.jvp(fanti)([1.0, 2.0, 3.0], [3.0, 4.0, 5.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+// EXPECT: vp = 20
+// EXPECT: tp = 24
+// EXPECT: vm = 12
+// EXPECT: tm = 8

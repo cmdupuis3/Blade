@@ -285,6 +285,15 @@ module Codes =
             // so a reject test can assert WHICH transform refused -- the two
             // subsets deliberately diverge (overwrites, if/match) past v1.
             "BL5501", "jvp elaboration error"
+            // BL5502: an arity-polymorphic (`Poly<...>`) kernel that cannot be
+            // UNROLLED at the arity its apply site asks for -- the recursion
+            // reached an arity with no guard-free `match arity(...)` arm, it
+            // destructured a pack that was already empty, or it ran past the
+            // unroll budget without shrinking. Distinct from BL5500/BL5501
+            // because it is a property of the KERNEL at that arity, identical
+            // in forward and reverse mode, and fixed in the kernel (add a base
+            // arm) rather than in the differentiated function.
+            "BL5502", "arity-polymorphic kernel cannot be unrolled at this arity"
             "BL5600", "sgs elaboration error"
             "BL5700", "display elaboration error"
             // BL6xxx: IR validation
@@ -359,6 +368,7 @@ module Codes =
                 | "BL5400" -> PhElaborate "spectra"
                 | "BL5500" -> PhElaborate "grad"
                 | "BL5501" -> PhElaborate "grad"   // jvp runs inside the grad pass
+                | "BL5502" -> PhElaborate "grad"   // the pack unroller runs there too
                 | "BL5600" -> PhElaborate "sgs"
                 | "BL5700" -> PhElaborate "display"
                 | _ -> PhElaborate "ml"

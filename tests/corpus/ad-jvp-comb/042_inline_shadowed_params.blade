@@ -1,0 +1,25 @@
+// TEST: Inlined Callee Lambda Reuses The Caller's Name
+// The callee's map kernel binds `q` -- the same name as the caller's
+// parameter, which the inliner renames the callee's `p` TO. The rename
+// walker must shadow correctly: `q` inside the lambda is the lambda's own
+// binder, and since the callee's `p` never occurs under it there is no
+// capture, so this compiles (an eager name-clash check would spuriously
+// refuse every callee reusing short names like x/i/k). jv = 1+4+9+1 = 15,
+// jt = 2*(1+2+3) = 12.
+import ad as ad
+
+type I = Idx<3>
+
+function inner_fn(p: Array<Float like I>) -> Float = {
+    let m = method_for(p) <@> lambda(q) -> q * q |> compute
+    reduce(m, (+))
+}
+
+function outer_fn(q: Array<Float like I>) -> Float = {
+    let t = inner_fn(q)
+    t + 1.0
+}
+
+let (jv, jt) = ad.jvp(outer_fn)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
+// EXPECT: jv = 15
+// EXPECT: jt = 12

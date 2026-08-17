@@ -1,0 +1,29 @@
+// TEST: Grouped Peel With A Per-Group Product Rejected (rejects)
+// The dichotomy the rewrite turns on is not "factorable", it is SUM-
+// DECOMPOSABLE. A per-group product does not distribute back over the source
+// axis: `prod_{i in g} v_i` needs the group's own aggregate held somewhere,
+// which means a group-space accumulator, which means allocating over the
+// group axis -- and `replicate` needs a COMPILE-TIME count (BL3999), which a
+// grouping never has.
+//
+// So this is refused by NAME rather than reaching the generic
+// "no statically-known extent" message, which would have described the wall
+// as an extent problem when it is a decomposability problem.
+import ad as ad
+
+type R = Idx<4>
+
+function loss(v: Array<Float64 like R>, k: Array<Int64 like R>) -> Float = {
+    let gk = group_keys(k)
+    let g = group_by(v, gk)
+    let m = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (*)) |> compute
+    reduce(m, (+))
+}
+
+let vv: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0]
+let kk: Array<Int64 like R> = [0, 1, 0, 1]
+let mut dv = [0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(loss)(vv, kk, dv)
+// ERROR: BL5500
+// ERROR-CONTAINS: is not sum-decomposable
+// ERROR-CONTAINS: needs the group axis MATERIALIZED

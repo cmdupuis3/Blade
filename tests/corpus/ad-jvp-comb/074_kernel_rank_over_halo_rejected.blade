@@ -1,0 +1,16 @@
+// TEST: Rank-Carrying Kernel Parameter Over A Halo Operand Rejected (rejects)
+// A halo/range operand is already virtual: it hands the kernel a WINDOW or an
+// index, which is non-differentiable data with no fiber to read. Declaring a
+// rank on that parameter asks for something the traversal cannot supply.
+import ad as ad
+
+type R = Idx<4>
+
+function f(a: Array<Float like R>) -> Float = {
+    let s = method_for(halo<R, [-1, 0, 1]>) <@> lambda(w: T^1) -> a(w(0)) |> compute
+    s(0)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0, 4.0], [1.0, 0.0, 0.0, 0.0])
+// ERROR: BL5501
+// ERROR-CONTAINS: rank-carrying kernel parameters are differentiable over NAMED array operands only
