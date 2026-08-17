@@ -9350,6 +9350,52 @@ let suppressAllocName (n: string) : unit =
     | None -> ()
     | Some frame -> frame.SuppressNames <- Set.add n frame.SuppressNames
 
+/// A cursor into the live frame's registration list, and its companion that
+/// spares EVERYTHING registered after it (`suppressAllocsSince`).
+///
+/// Why the pair exists rather than another `suppressAllocName` call. A RETURN
+/// position lifts its value into a `__retN` and must spare that value's storage
+/// from the scope's frees, but "that value's storage" is not always one pool
+/// named `__retN`: `materializeEighForm` declares TWO under derived names
+/// (`__retN__q` / `__retN__lam`) and binds `__retN` to a make_tuple of the two
+/// wrappers, and `genSequenceBinding` declares one per child (`__retN_0`, ...).
+/// Sparing only the binding name emitted `deallocate(...)` for the real pools
+/// and then returned wrappers pointing at freed memory -- a use-after-free the
+/// caller reads as garbage (eigh reproduces it whenever the BLAS route is live;
+/// the synthesized Jacobi fallback hides it by never taking this arm).
+///
+/// Naming conventions are not a sound basis for the spare decision -- every
+/// multi-pool form invents its own suffixes, and the next one to be added would
+/// reintroduce the bug silently. What IS sound is the registration record
+/// itself: an allocation emitted while the return binding was being rendered
+/// belongs to the returned value. Mark the list, render, spare the delta.
+///
+/// The trade this makes is deliberate and one-directional. A form that
+/// registers a genuine SCRATCH pool inside its own emission would now leak that
+/// pool for the frame's lifetime instead of freeing it. A leak bounded by one
+/// call is strictly preferable to handing the caller a dangling pointer, and
+/// the frame's other allocations (everything registered before the mark) are
+/// unaffected, so nothing that used to be freed on the ordinary let path stops
+/// being freed.
+///
+/// The FRAME is captured with the cursor rather than re-read at the suppress
+/// call: an emitter that pushed a nested scope and left it live would otherwise
+/// stamp the suppression onto the wrong frame.
+let allocRegistrationMark () : (AllocScope * int) option =
+    match currentAllocScope () with
+    | None -> None
+    | Some frame -> Some (frame, List.length frame.Allocs)
+
+let suppressAllocsSince (mark: (AllocScope * int) option) : unit =
+    match mark with
+    | None -> ()
+    | Some (frame, before) ->
+        let now = List.length frame.Allocs
+        // Newest-FIRST list, so the delta is the prefix.
+        if now > before then
+            for a in frame.Allocs |> List.truncate (now - before) do
+                frame.SuppressNames <- Set.add (trackedAllocName a) frame.SuppressNames
+
 let registeredAllocNames () : string list =
     match currentAllocScope () with
     | None -> []
@@ -19215,23 +19261,27 @@ or return a scalar and materialize at the call site"
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType r
                 Value = forceDeferringForm r; IsConst = false; IsMutable = true
             }
+            // EVERY allocation this binding registers leaves with the value;
+            // free everything the frame held before it. Sparing the delta
+            // rather than the NAME `__retN` is what covers the multi-pool
+            // members of the family, and covers them without a per-form list:
+            //
+            //   * IREigh declares `__retN__q` / `__retN__lam` and binds
+            //     `__retN` to a make_tuple of those two wrappers. Freeing them
+            //     here returned a tuple of dangling pointers (live only on the
+            //     BLAS route -- the Jacobi fallback never reaches this arm).
+            //   * IRSequence ALIASES its inputs rather than copying them: the
+            //     emitter assembles `<name>[i] = <name>_i`, so the returned
+            //     array's cells ARE the per-child pools (`isFreshPoolForm`
+            //     documents exactly this, which is why it refuses to call a
+            //     sequence a fresh-pool barrier).
+            //
+            // Both used to need their own suffix-reconstructing arm here; the
+            // mark/spare pair in `allocRegistrationMark` states the rule once
+            // and the next multi-pool form inherits it.
+            let allocMark = allocRegistrationMark ()
             let (retCode, _) = genBinding bodyCtx tempBinding builder
-            // The materialized pool leaves with the value; free everything else.
-            suppressAllocName retVarName
-            // IRSequence is the one member of this family whose result ALIASES
-            // its inputs rather than copying them: the emitter assembles
-            // `<name>[i] = <name>_i`, so the returned array's cells ARE the
-            // per-child pools (isFreshPoolForm documents exactly this, which is
-            // why it refuses to call a sequence a fresh-pool barrier). Sparing
-            // only `__retN` would free those children out from under the value
-            // that just escaped -- a use-after-free the caller reads as garbage
-            // rows. The child names are the emitter's own `<name>_<i>`
-            // convention, so they are derivable here without threading anything
-            // back out of genBinding.
-            (match (match r with IRCompute inner -> inner | e -> e) with
-             | IRSequence elems ->
-                 elems |> List.iteri (fun i _ -> suppressAllocName (sprintf "%s_%d" retVarName i))
-             | _ -> ())
+            suppressAllocsSince allocMark
             stmts @ retCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
         | _ ->
             // Return-extent ABI (supersedes the stage-2b guard): a

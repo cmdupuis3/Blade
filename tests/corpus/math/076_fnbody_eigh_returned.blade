@@ -1,0 +1,41 @@
+// TEST: Fnbody Eigh Returned
+// ----------------------------------------------------------------------------
+// eigh as a helper's WHOLE ANSWER -- the one linalg form whose result is TWO
+// pools plus a naming tuple, and the reason the statement-shaped RETURN arm
+// spares a registration DELTA rather than the binding name.
+//
+// `materializeEighForm` declares `<binding>__q` and `<binding>__lam` and binds
+// `<binding>` to a `make_tuple` of the two wrappers. A return arm that spared
+// only `__retN` emitted `deallocate(...)` for both pools and then returned the
+// tuple of freed wrappers, so the caller's `Q` / `LAM` read reclaimed memory.
+// Nothing in the NAME of either pool says it belongs to the return; what says
+// so is that it was registered while the return binding was being rendered.
+//
+// BOTH ROUTES, one set of pins. With the BLAS gate off (the suite default) the
+// elaborator synthesizes Jacobi and this file exercises the ordinary tuple
+// return; with OPENBLAS_DIR set it takes `blade_eigh_dense_d` and reaches
+// `materializeEighForm`, which is the arm that used to dangle. A DIAGONAL
+// operand is what makes one pin serve both: the eigenvalues are the diagonal
+// entries exactly (no rotation to round), the shim reverses LAPACK's ascending
+// order into Blade's descending one, and Q is a 0/1 permutation. Q itself is
+// not pinned as an array -- LAPACK writes a signed zero where Jacobi writes a
+// plain one, and the two individual entries pinned below are the sign-free part
+// of the same fact.
+// ----------------------------------------------------------------------------
+import math as m
+type N3 = Idx<3>
+
+function spectrum(S: Array<Float64 like N3, N3>) = {
+    m.eigh(S)
+}
+
+let S: Array<Float64 like N3, N3> = [[1.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 3.0]]
+let (Q, LAM) = spectrum(S)
+// Read both pools AFTER the helper returned: the whole point of the test.
+let q10 = Q(1, 0)
+let q21 = Q(2, 1)
+let lam_sum = reduce(LAM, (+))
+// EXPECT: LAM = [5, 3, 1]
+// EXPECT: q10 = 1
+// EXPECT: q21 = 1
+// EXPECT: lam_sum = 9
