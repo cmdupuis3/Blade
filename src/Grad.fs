@@ -2068,6 +2068,81 @@ let rec private bindsPipelineValue (v: Expr) : bool =
     | ExprKind.ExprTyped (i, _) -> bindsPipelineValue i
     | _ -> false
 
+/// Is there a pipeline operator anywhere in `e`? The rewrite below rebuilds
+/// every node it walks, so a body with no `>>@` / `@>>` / `<$>` in it comes back
+/// structurally equal and freshly allocated -- for EVERY declaration of EVERY
+/// program, since fusion runs universally, and again in the AD lane over bodies
+/// the universal pass already fused. This pre-scan makes those cases return the
+/// original term, reference-identical.
+///
+/// Skipping is sound because a DECLINED pipeline keeps its operator: a body the
+/// rewrite would have left alone still answers true here and still gets walked.
+/// Coverage matches `mentionsDeep`'s (a superset of what the rewrite descends
+/// into), leaves listed by name so a new grammar node is an incomplete-match
+/// warning rather than a silent "nothing here".
+let rec private containsPipelineOp (e: Expr) : bool =
+    let any = List.exists containsPipelineOp
+    let opt o = match o with Some x -> containsPipelineOp x | None -> false
+    match e.Kind with
+    | ExprKind.ExprBinOp (_, (OpComposeObj | OpComposeMeth | OpFunctor), _, _) -> true
+    | ExprKind.ExprBinOp (_, _, l, r) -> containsPipelineOp l || containsPipelineOp r
+    | ExprKind.ExprUnaryOp (_, i) -> containsPipelineOp i
+    | ExprKind.ExprApp (f, args) -> containsPipelineOp f || any args
+    | ExprKind.ExprTupleIndex (t, i) -> containsPipelineOp t || containsPipelineOp i
+    | ExprKind.ExprField (t, _) -> containsPipelineOp t
+    | ExprKind.ExprLambda (ps, _, b) ->
+        (ps |> List.exists (fun p -> opt p.Default)) || containsPipelineOp b
+    | ExprKind.ExprLet (bnd, b) -> containsPipelineOp bnd.Value || containsPipelineOp b
+    | ExprKind.ExprMatch (s, cases) ->
+        containsPipelineOp s || (cases |> List.exists (fun c -> opt c.Guard || containsPipelineOp c.Body))
+    | ExprKind.ExprIf (c, t, f) ->
+        containsPipelineOp c || containsPipelineOp t || containsPipelineOp f
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprStack es
+    | ExprKind.ExprSequence es | ExprKind.ExprZip es | ExprKind.ExprMethodFor es
+    | ExprKind.ExprGroupKeys es -> any es
+    | ExprKind.ExprAlign (es, _) | ExprKind.ExprJoin (es, _) -> any es
+    | ExprKind.ExprBlock (ss, fe) -> (ss |> List.exists stmtContainsPipelineOp) || opt fe
+    | ExprKind.ExprObjectFor k -> containsPipelineOp k
+    | ExprKind.ExprDotDot (l, h) -> containsPipelineOp l || containsPipelineOp h
+    | ExprKind.ExprBlocked (_, b) -> containsPipelineOp b
+    | ExprKind.ExprHalo (_, o) -> containsPipelineOp o
+    | ExprKind.ExprPure i | ExprKind.ExprCompute i | ExprKind.ExprRead i
+    | ExprKind.ExprRank i | ExprKind.ExprUnique i | ExprKind.ExprGroupBucket i
+    | ExprKind.ExprExtents i | ExprKind.ExprStatic i | ExprKind.ExprTyped (i, _)
+    | ExprKind.ExprTranspose (i, _, _) | ExprKind.ExprDecompact (i, _)
+    | ExprKind.ExprPartialApp (_, i, _) | ExprKind.ExprReynolds (i, _) -> containsPipelineOp i
+    | ExprKind.ExprGuard (l, r) | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
+    | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r)
+    | ExprKind.ExprIntersect (l, r) | ExprKind.ExprUnion (l, r)
+    | ExprKind.ExprContains (l, r) | ExprKind.ExprGroupBy (l, r)
+    | ExprKind.ExprSort (l, r) | ExprKind.ExprGram (l, r)
+    | ExprKind.ExprAssign (l, r) -> containsPipelineOp l || containsPipelineOp r
+    | ExprKind.ExprReduce (a, k, i, ax) ->
+        containsPipelineOp a || containsPipelineOp k || opt i || opt ax
+    | ExprKind.ExprStruct (_, fields, spread) ->
+        (fields |> List.exists (fun (_, fe) -> containsPipelineOp fe)) || opt spread
+    | ExprKind.ExprFor (src, _, k) ->
+        (match src with
+         | ForArrays (es, inc) -> any es || opt inc
+         | ForKernel k2 -> containsPipelineOp k2)
+        || opt k
+    | ExprKind.ExprRecArray d ->
+        containsPipelineOp d.SliceExpr
+        || (match d.SeedArm with Some (_, se) -> containsPipelineOp se | None -> false)
+    | ExprKind.ExprVar _ | ExprKind.ExprLit _ | ExprKind.ExprWildcard
+    | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
+    | ExprKind.ExprArity _ | ExprKind.ExprNth | ExprKind.ExprZero
+    | ExprKind.ExprSection _ -> false
+
+and private stmtContainsPipelineOp (s: Stmt) : bool =
+    match s with
+    | StmtSpanned (inner, _) -> stmtContainsPipelineOp inner
+    | StmtLet b -> containsPipelineOp b.Value
+    | StmtExpr ex -> containsPipelineOp ex
+    | StmtAssign (l, _, r) -> containsPipelineOp l || containsPipelineOp r
+    | StmtForIn (_, r, body) ->
+        containsPipelineOp r || (body |> List.exists stmtContainsPipelineOp)
+
 /// The rewrite. Bottom-up over one body, threading `env` (names bound to
 /// loop objects, computations, compose values and kernel lambdas -- whatever
 /// a pipeline operand might hide behind) and `arrays` (names known to hold
@@ -2228,6 +2303,7 @@ let private fusePipelinesEnv (ctx: Ctx) (env0: Map<string, Expr>) (arrays0: Set<
 /// parameter shadows one. Array-typed parameters seed the `<$>`
 /// array-vs-computation decision.
 let private fuseFunctionBody (ctx: Ctx) (fd: FunctionDecl) : Expr * string list =
+    if not (containsPipelineOp fd.Body) then (fd.Body, []) else
     let paramNames = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
     let env =
         ctx.ModuleLoopVals
@@ -5453,6 +5529,7 @@ let fuseProgram (program: Program) : Program =
                     // Visible to its own body: everything declared above, plus
                     // itself (self-recursion is legal; mutual recursion is not).
                     funcDecls <- Map.add fd.Name fd funcDecls
+                    if not (containsPipelineOp fd.Body) then d else
                     let ctx = ctxNow ()
                     let ps = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
                     let paramArrays =
@@ -5469,11 +5546,15 @@ let fuseProgram (program: Program) : Program =
                             (Set.union (Set.difference arrays ps) paramArrays)
                             fd.Body
                     { d with Value = DeclFunction { fd with Body = body } }
+                // `noteBinding` runs either way: the env has to stay accurate
+                // even for the bindings the pre-scan skipped rewriting.
                 | DeclLet b ->
+                    if not (containsPipelineOp b.Value) then (noteBinding b.Pattern b.Value; d) else
                     let v, _ = fusePipelinesEnv (ctxNow ()) env arrays b.Value
                     noteBinding b.Pattern v
                     { d with Value = DeclLet { b with Value = v } }
                 | DeclStatic b ->
+                    if not (containsPipelineOp b.Value) then (noteBinding b.Pattern b.Value; d) else
                     let v, _ = fusePipelinesEnv (ctxNow ()) env arrays b.Value
                     noteBinding b.Pattern v
                     { d with Value = DeclStatic { b with Value = v } }
