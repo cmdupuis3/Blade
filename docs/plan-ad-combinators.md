@@ -192,7 +192,7 @@ Summary (difficulty: FREE / MECHANICAL / DESIGN / BLOCKED):
 | `>>@`, `@>>`, `<$>` | DESIGN | **skip — inline** | Tuple<N> element typing |
 | `>>=` | MECHANICAL–DESIGN | skip | it is a `let` in disguise |
 | `<\|>` (choice) | **BLOCKED** | **BLOCKED** | discontinuous; **SKIP** (§2.13) |
-| `Poly<T^k>` / arity-poly | **BLOCKED** | **BLOCKED** | architecture (§2.19) |
+| `Poly<T^k>` / arity-poly | **SHIPPED** (Route A) | **BLOCKED** (maps) | unroll at the apply site (§2.19b) |
 | `align` / `stencil` | n/a | n/a | paper surface, zero users |
 
 ### 2.1 `pure` / `|> compute`
@@ -1102,7 +1102,13 @@ the last bits (2.84e-14 measured).
    bind chain must not assume it.
 6. n/a.
 
-### 2.19 Rank-polymorphic / `Poly<T^k>` pack kernels — **BLOCKED by architecture**
+### 2.19 Rank-polymorphic / `Poly<T^k>` pack kernels — ~~BLOCKED by architecture~~ **SUPERSEDED by §2.19b**
+
+> The analysis below concluded "unconstructible before typecheck". Its premise
+> is false and §2.19b says why: the arity is *written at the apply site*, so it
+> is readable from the surface AST, pre-typecheck, exactly where the transform
+> already stands. Kept for the record.
+
 
 1. **Semantics.** Arity polymorphism varies the *number* of inputs, and the
    arity determines output rank, loop depth, and symmetry
@@ -1181,6 +1187,78 @@ no `ad` in the program at all (`method_for(range<R>) <@> lambda(i) -> reduce((a(
 "blessed position" gap, not here. The workaround is the shape corpus test 071
 pins: fold the helper's internals into one expression-bodied helper over the
 fibers.
+
+### 2.19b Shipped (2026-08-16): Route A, the surface unroller
+
+**The premise §2.19 got wrong.** The arity is not a typecheck output that the
+transform has to wait for — it is *written at the apply site*.
+`object_for(comoment) <@> (A, A)` says two, `<@> (A, A, A)` says three, in the
+surface AST, before any judgment runs. Both map spellings already normalize
+their operand tuple to a list in `tangentOfMap`, so the count is in hand at the
+exact seam the pack kernel is refused at. What actually blocked pack kernels was
+mundane: one formal parameter for n operands (an arity-mismatch check), and a
+`match arity(a) with ...` BLOCK body (the kernel normalizer refuses blocks).
+
+**What ships.** `Grad.tryUnrollPackKernel` expands a `Poly<...>` kernel at the
+apply site into the fixed-arity **inline lambda** a user could have written:
+
+```
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = { match arity(a) with ... }
+object_for(packprod) <@> (A, A)
+   ==>   method_for(A, A) <@> lambda(p0, p1) where comm(p0, p1) -> p0 * p1
+```
+
+An inline lambda, never a minted declaration: nothing enters the module, there
+is no name to collide, and the spelling is one the corpus already proves end to
+end. It is the surface twin of `IR.specializeFunction`, which does the same job
+post-typecheck for the primal — pack views as (slot, offset), `arity(...)`
+folded to a literal, `a[k]` resolved to the k-th expanded parameter, recursive
+calls re-entered on the tail view, `match arity` reduced to its one live arm.
+The two are deliberately separate passes over different representations, and
+the primal machinery is untouched (`blade test arity` is byte-identical).
+
+**The comm group is the load-bearing part.** A clause declared over the pack has
+to be *expanded* over the new parameter names. The C5 symmetric-tangent gate
+accepts a comm group only when it covers the kernel's full parameter-name set;
+a clause still naming the vanished pack covers nothing, the gate declines
+silently, and the tangent falls to the dense path — the r! saving lost with no
+diagnostic. Verified in the emitted C++ rather than asserted: at r = 2 and r = 3
+both the primal and the tangent allocation inside `f__jvp` carry a `{1,…,1}`
+symmetry class and run the triangular loop (`ad-jvp-comb/075`, `/077`); the
+comm-less twin `/076` emits no `_symm` at all.
+
+**Recursion terminates by arity.** Each `head :: tail` shortens the view, so the
+expansion is bounded; a 256-arm budget is the backstop for a kernel that
+recurses on an unchanged view. A kernel with **no base arm reachable at the
+requested arity** refuses with its own code, **BL5502** — a property of the
+kernel at that arity, identical in both modes, fixed in the kernel rather than
+in the differentiated function, which is why it is not folded into
+BL5500/BL5501.
+
+**Named refusals, all pinned.** A **multi-pack** kernel (or a pack beside free
+parameters): a `<@>` operand list is flat and says nothing about which operands
+fill which slot, so it is refused rather than guessed (`/082`). The **pack
+former** `method_for(range<Idx<arity(a)>>) <@> lambda(k) -> a[k]`: the
+type-position `arity(a)` *is* folded to a literal first (substituted wherever
+the extent expression is mechanical, never left pointing at a parameter that is
+about to stop existing), and the refusal lands on the dynamic subscript, which
+has no parameter to resolve to (`/081`). Reverse mode inherits the existing
+map refusal verbatim, unchanged and un-mislabelled (`/083`).
+
+**Both call seams.** The direct spelling `object_for(pack) <@> ops` unrolls in
+`tangentOfMap`; the wrapper spelling `object_for(lambda(x, y) -> pack(x, y))`
+(the docs' covariance form, arity/022) unrolls in `kernelCallBody` at the call's
+argument count. `/084` pins that the two agree.
+
+**The comoment family lands, in one spelling.** `ad-jvp-comb/079` differentiates
+the rank-1 pack comoment over the rows of a 2-D table — pack unrolling, C8
+rank-carrying parameters, and the in-kernel additive fold composed — and agrees
+with both 071's hand-written twin and a central-difference check. It is written
+with its reductions **inline** rather than through a `mean` helper, because
+`mean(<array expression>)` inside kernel-body array arithmetic hits the arr0
+blessed-position gap described at the end of §2.19a. That gap is the emitter's
+and bites the hand-written twin identically; the unroller neither causes nor
+cures it.
 
 ### 2.20 Recursive arrays and `let rec` (for completeness)
 
@@ -1349,8 +1427,11 @@ ever pays for it.
 **Skipped, with justification recorded:**
 - **`<|>`** — discontinuous, and its pathological set is its design point
   (§2.13). Keep the refusal; improve the message.
-- **`Poly<T^k>` / arity-polymorphic kernels** — the transform's pre-typecheck
-  slot makes the tangent parameter list unconstructible (§2.19).
+- ~~**`Poly<T^k>` / arity-polymorphic kernels** — the transform's pre-typecheck
+  slot makes the tangent parameter list unconstructible (§2.19).~~ **SHIPPED
+  forward mode** 2026-08-16 (Route A, §2.19b): the premise was wrong — the
+  arity is written at the apply site, so it is readable *before* typecheck, and
+  the kernel unrolls into a fixed-arity lambda there.
 - ~~**`sort`** — key-over-zip is unverified (§2.17).~~ **SHIPPED both modes**
   2026-08-16 by a different route than the one skipped here: not key-over-zip,
   but the permutation carried as data (§2.17b).

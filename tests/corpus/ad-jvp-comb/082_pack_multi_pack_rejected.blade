@@ -1,0 +1,29 @@
+// TEST: Multi-Pack Kernel Rejected At A Map Apply Site (rejects)
+// arity/032's two-pack kernel, met by `<@>`. The primal reads the per-slot
+// arities off a tuple-as-pack call shape (`g((1.0, 2.0), (5.0, 6.0))`), which
+// says which arguments fill which pack. A map apply site has no such
+// spelling: `<@> (a, a)` is ONE flat operand list, and dividing it between
+// two `Poly<...>` slots would be a guess. Refused by name rather than
+// guessed -- and refused as an ordinary jvp limit (BL5501), not as BL5502:
+// nothing about the kernel's recursion failed, there is simply no arity to
+// unroll it at.
+import ad as ad
+
+type I = Idx<3>
+
+function g(a: Poly<T^0>, b: Poly<T^0>) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let h :: t = a
+             h + b[0] }
+    | _ -> { let h :: t = a
+             h * g(t, b) }
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(g) <@> (a, a) |> compute
+    m(0, 2)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// ERROR: BL5501
+// ERROR-CONTAINS: supports exactly ONE `Poly<...>` pack parameter

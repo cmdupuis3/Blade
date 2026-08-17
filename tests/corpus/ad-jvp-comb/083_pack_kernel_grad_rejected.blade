@@ -1,0 +1,26 @@
+// TEST: Pack Kernel Under ad.grad Inherits The Map Refusal (rejects)
+// Reverse mode refuses every `<@>` map today, and a pack kernel is a map
+// like any other -- so it inherits that refusal verbatim. Pinned because the
+// interesting failure mode is the other one: an unroller that ran first
+// would have to be careful not to turn "grad does not do maps" into an
+// unrolling crash or a mislabelled BL5502.
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(packprod) <@> (a, a) |> compute
+    m(0, 2) + m(1, 1)
+}
+
+let g = ad.grad(f)([1.0, 2.0, 3.0])
+// ERROR: BL5500
+// ERROR-CONTAINS: loop-object combinator operators

@@ -1,0 +1,39 @@
+// TEST: JVP Route A -- Arity-Poly Pack Kernel, Symmetric Tangent Storage
+// The arity-poly analog of 013. `packprod` is a `Poly<T^0>` pack kernel whose
+// body is a `match arity(a)` block over a `head :: tail` recursion -- two
+// things the map rule refuses outright (one formal parameter for two
+// operands, and a block body). The unroller expands it at the apply site's
+// operand count into the fixed-arity inline lambda
+// `lambda(p0, p1) where comm(p0, p1) -> p0 * p1`, and the ordinary C5 rule
+// then differentiates that.
+//
+// The comm group is what this pins. It is declared over the PACK, so it has
+// to be expanded over the two new parameter names or the C5 gate (which
+// compares the group against the full parameter-name set) declines and the
+// tangent silently falls to the dense path. Verified in the emitted C++:
+// f__jvp allocates BOTH the primal and the tangent with a {1, 1} symmetry
+// class and runs both loops over the `3 - i` triangle.
+//
+// packprod(x, y) = x * y at a = [1, 2, 3]: m(0,2) = m(2,0) = 3, m(1,1) = 4,
+// so the primal is 10. Seed e0: dm(0,2) = dm(2,0) = a2 = 3, dm(1,1) = 0 -> 6.
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(packprod) <@> (a, a) |> compute
+    m(0, 2) + m(2, 0) + m(1, 1)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// WARN: BL4003
+// EXPECT: v = 10
+// EXPECT: t = 6

@@ -1,0 +1,32 @@
+// TEST: Pack Former With A Dynamic Subscript Rejected (rejects)
+// The pack-FORMER spelling (arity/015): a former over
+// `range<Idx<arity(args)>>` whose kernel reads `args[k]` at the loop
+// ordinal. Two things happen here, and the order matters.
+//
+// First, `arity(args)` in TYPE position is folded to the literal 2 -- the
+// unroller substitutes it wherever the extent expression is mechanical,
+// rather than leaving an `arity` pointing at a parameter that is about to
+// stop existing. (Had it not, the refusal below would name the type, not the
+// subscript.)
+//
+// Second, `args[k]` is refused: the differentiated form has one PARAMETER
+// per pack element, so a subscript that is only known per iteration has
+// nothing to resolve to. The message names the `head :: tail` recursion,
+// which is the spelling 075-078 differentiate.
+import ad as ad
+
+type I = Idx<3>
+
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> args[k] |> compute
+    reduce(terms, (+))
+}
+
+function f(a: Array<Float like I>) -> Float = {
+    let m = object_for(polySum) <@> (a, a) |> compute
+    m(0, 2)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
+// ERROR: BL5501
+// ERROR-CONTAINS: reads its pack at a NON-LITERAL index

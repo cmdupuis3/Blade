@@ -1,0 +1,57 @@
+// TEST: JVP Route A -- Rank-1 Pack Comoment (the covariance matrix)
+// The acceptance shape: a `Poly<T^1>` pack whose elements are rank-1 FIBERS,
+// mapped over the rows of a 2-D table. Three mechanisms compose here --
+// the unroller (pack -> a two-parameter lambda), rank-carrying kernel
+// parameters (each expanded parameter inherits the pack's `T^1`, so the loop
+// peels rows rather than elements), and the additive reduce rule inside the
+// kernel body -- and the answer must match 071, which computes the same
+// covariance from a hand-written rank-1 helper.
+//
+// The kernel is written with its reductions INLINE rather than through a
+// `mean` helper: `mean(<array expression>)` inside kernel-body array
+// arithmetic hits the pre-existing arr0 blessed-position gap in the emitter
+// (plan-ad-combinators.md 2.19a), which is orthogonal to the unrolling and
+// bites the hand-written twin identically.
+//
+// x = [1,2,3] (centered [-1,0,1]); y = [2,4,6] (centered [-2,0,2]).
+// cov(0,0) = 2/3, cov(0,1) = 4/3; v = 2/3 + 3*(4/3) = 14/3.
+// Seed perturbs a(0,0) only; the finite-difference check below is the
+// independent route (two direct calls to the primal, no AD on that side),
+// pinned as a thresholded boolean because the FD residual is a
+// catastrophic-cancellation quantity.
+import ad as ad
+
+type R = Idx<2>
+type C = Idx<3>
+
+function cprod(a: Poly<T^1>) -> T^1 = {
+    match arity(a) with
+    | 1 -> { let h :: t = a
+             h - reduce(h, (+)) / extents(h) }
+    | _ -> { let h :: t = a
+             (h - reduce(h, (+)) / extents(h)) * cprod(t) }
+}
+
+function comoment(a: Poly<T^1>) where comm(a) -> T^0 = {
+    let h :: t = a
+    reduce(cprod(a), (+)) / extents(h)
+}
+
+function f(a: Array<Float like R, C>) -> Float = {
+    let cov = object_for(comoment) <@> (a, a) |> compute
+    cov(0, 0) + 3.0 * cov(0, 1)
+}
+
+// WARN: BL4003
+let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
+                       [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+let presid = v - f([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])
+let h = 0.000001
+let fplus = f([[1.0 + h, 2.0, 3.0], [2.0, 4.0, 6.0]])
+let fminus = f([[1.0 - h, 2.0, 3.0], [2.0, 4.0, 6.0]])
+let fd = (fplus - fminus) / (2.0 * h)
+let agree = abs(fd - t) < 0.000001 * (abs(t) + 1.0)
+// EXPECT: v = 4.666666666666667
+// EXPECT: t = -2.6666666666666665
+// EXPECT: presid = 0
+// EXPECT: agree = true

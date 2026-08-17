@@ -615,6 +615,17 @@
         "docs/plan-forward-mode-ad.md"
       ]
     },
+    "BL5502": {
+      "title": "arity-polymorphic kernel cannot be unrolled at this arity",
+      "explanation": "Differentiating an arity-polymorphic (`Poly<...>`) kernel expands it at the apply site's operand count into a fixed-arity lambda, following the `head :: tail` recursion down to a base arm. This kernel has no base arm reachable at that arity: `match arity(...)` came back round to an arity with no guard-free case, a `head :: tail` destructured a pack that was already empty, or the expansion ran past its budget without shrinking. Distinct from BL5500/BL5501 because it is a property of the KERNEL at that arity -- identical in forward and reverse mode -- rather than a limit of the transform.",
+      "fix": "Add the missing base arm to the kernel (`| 0 -> ...` or `| 1 -> ...`), or a catch-all, so the recursion stops before the pack is exhausted at the arity the apply site asks for.",
+      "examples": [
+        "tests/corpus/ad-jvp-comb/080_pack_no_base_arm_rejected.blade"
+      ],
+      "docs": [
+        "docs/plan-ad-combinators.md"
+      ]
+    },
     "BL5600": {
       "title": "sgs elaboration error",
       "explanation": "The `sgs` elaborator refused a construct: a non-static window or block size, a window that does not divide the domain, or an unknown op.",
