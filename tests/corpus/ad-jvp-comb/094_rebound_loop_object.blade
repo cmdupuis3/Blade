@@ -1,0 +1,38 @@
+// TEST: A Re-Bound Loop Object Resolves To The LATEST Preceding Binding
+// Let-bound loop objects are resolved at their APPLICATION sites, from a map
+// the sweep carried. That map was collected up front over the whole body,
+// FIRST-WINS -- so a body that re-`let`s the same name over a different loop
+// resolved the SECOND apply to the FIRST loop, and r2's tangent iterated `a`
+// instead of `b`. (Last-wins is equally wrong, in the mirror direction: it
+// would break r1.) The map is now threaded through the sweep, so an apply site
+// sees the latest binding PRECEDING it.
+//
+// f(a, b) = sum(a^2) + sum(b^2); at a = [1,2,3], b = [10,20,30] that is
+// 14 + 1400 = 1414. df = 2*sum(a*da) + 2*sum(b*db).
+import ad as ad
+
+type I = Idx<3>
+
+function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let L = method_for(a)
+    let r1 = L <@> lambda(x) -> x * x |> compute
+    let L = method_for(b)
+    let r2 = L <@> lambda(x) -> x * x |> compute
+    reduce(r1, (+)) + reduce(r2, (+))
+}
+
+// WARN: BL4003
+// Both loops seeded: 2*a(0)*1 + 2*b(2)*1 = 2 + 60 = 62 (first-wins gave 4).
+let (p, t) = ad.jvp(f)([1.0, 2.0, 3.0], [10.0, 20.0, 30.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0])
+// EXPECT: p = 1414
+// EXPECT: t = 62
+
+// The FIRST loop alone: 2*a(1) = 4. This is the one last-wins would break.
+let (p1, t1) = ad.jvp(f)([1.0, 2.0, 3.0], [10.0, 20.0, 30.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0])
+// EXPECT: p1 = 1414
+// EXPECT: t1 = 4
+
+// The SECOND loop alone: 2*b(0) = 20. First-wins gave 2*a(0) = 2.
+let (p2, t2) = ad.jvp(f)([1.0, 2.0, 3.0], [10.0, 20.0, 30.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0])
+// EXPECT: p2 = 1414
+// EXPECT: t2 = 20

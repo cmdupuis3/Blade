@@ -4601,11 +4601,41 @@ let rec private tangentOfLit (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         |> Result.map (fun ts -> inheritSpan e (ExprArrayLit ts))
     | _ -> tangentOfExpr rc e
 
+/// The loop-object environment AFTER `s`. Loop-object bindings are resolved at
+/// their APPLICATION sites, so the environment has to be position-aware: a body
+/// may re-`let` the same name over a different loop, and the sweep is what
+/// decides which one an apply site sees.
+///
+/// Both wrong answers are reachable from a whole-body map. First-wins (the
+/// predecessor) resolved the SECOND `let L = method_for(b)` to the first loop,
+/// so `r2`'s tangent iterated `a`. Last-wins would break the first apply the
+/// same way. Only "the latest binding preceding this statement" is right, and
+/// that is what folding this over the statement list gives.
+///
+/// A `let` that rebinds the name to something that is NOT a loop object must
+/// REMOVE it, or the stale loop would keep answering.
+let private noteLoopBinding (rc: RevCtx) (s: NStmt) : RevCtx =
+    match s with
+    | NLet (n, _, ({ Kind = ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ } as value)) ->
+        { rc with LoopBindings = Map.add n value rc.LoopBindings }
+    | NLet (n, _, _) when Map.containsKey n rc.LoopBindings ->
+        { rc with LoopBindings = Map.remove n rc.LoopBindings }
+    | _ -> rc
+
+/// Sweep a statement list in order, threading the loop-object environment.
+/// Returns the context AFTER the list (the final expression's tangent is built
+/// against it) and the interleaved statements.
+let rec private tangentOfStmts (rc: RevCtx) (ss: NStmt list) : Result<RevCtx * NStmt list, string> =
+    ss |> List.fold (fun acc s ->
+        acc |> Result.bind (fun (rcCur, out) ->
+            tangentOfStmt rcCur s |> Result.map (fun s2 -> (noteLoopBinding rcCur s, out @ s2))))
+        (Ok (rc, []))
+
 /// Tangent-interleaved form of one forward statement. The tangent
 /// ASSIGNMENT precedes its primal so it reads pre-assignment values;
 /// tangent LETS follow their primal (the tangent reads operands bound
 /// earlier, never the freshly-bound name).
-let rec private tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, string> =
+and private tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, string> =
     match s with
     // A let-bound loop object gets no tangent binding: it is a deferred
     // iteration, not data. Its tangent materializes at the application
@@ -4663,11 +4693,10 @@ let rec private tangentOfStmt (rc: RevCtx) (s: NStmt) : Result<NStmt list, strin
          | Some tl ->
              tangentOfExpr rc rhs |> Result.map (fun tr -> [NAssign (tl, tr); s]))
     | NFor (var, lo, hi, body) ->
-        body |> List.fold (fun acc st ->
-            acc |> Result.bind (fun ss ->
-                tangentOfStmt rc st |> Result.map (fun s2 -> ss @ s2)))
-            (Ok [])
-        |> Result.map (fun body' -> [NFor (var, lo, hi, body')])
+        // the body's own bindings are scoped to it, so the threaded context is
+        // discarded at the closing brace
+        tangentOfStmts rc body
+        |> Result.map (fun (_, body') -> [NFor (var, lo, hi, body')])
 
 // NStmt -> Stmt conversion
 
@@ -4995,29 +5024,23 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
             | Some (TyArray (_, idxTys)) when not idxTys.IsEmpty -> Some (p.Name, idxTys)
             | _ -> None)
         |> Map.ofList
-    // let-bound loop objects, resolved at their application sites
-    let rec collectLoopBindings (acc: Map<string, Expr>) (ss: NStmt list) =
-        ss |> List.fold (fun m st ->
-            match st with
-            | NLet (n, _, ({ Kind = ExprKind.ExprMethodFor _ | ExprKind.ExprObjectFor _ } as value)) ->
-                if Map.containsKey n m then m else Map.add n value m
-            | NFor (_, _, _, body) -> collectLoopBindings m body
-            | _ -> m) acc
+    // Let-bound loop objects are resolved at their APPLICATION sites, so their
+    // environment starts EMPTY and grows as the sweep passes each `let`
+    // (`noteLoopBinding`). It used to be collected up front over the whole
+    // body, first-wins, which answered a re-`let` of the same name with the
+    // FIRST loop -- the second computation's tangent then iterated the first
+    // one's operands.
     let rc = { Fname = fname; Ctx = ctx; Diff = diff; Arrays = arrays; Known = known
-               ArrayIdxTys = arrayIdxTys; LoopBindings = collectLoopBindings Map.empty stmts
+               ArrayIdxTys = arrayIdxTys; LoopBindings = Map.empty
                Dims = Map.empty; SortPlans = collectSortPlans stmts; Inlining = [] }
 
     // tangent-interleaved body + (primal, tangent) return
-    let sweptR =
-        stmts |> List.fold (fun acc s ->
-            acc |> Result.bind (fun ss ->
-                tangentOfStmt rc s |> Result.map (fun s2 -> ss @ s2)))
-            (Ok [])
-    sweptR |> Result.bind (fun swept ->
+    let sweptR = tangentOfStmts rc stmts
+    sweptR |> Result.bind (fun (rcEnd, swept) ->
     finalComps
     |> List.fold (fun acc c ->
         acc |> Result.bind (fun ts ->
-            tangentOfExpr rc c |> Result.map (fun t -> ts @ [t])))
+            tangentOfExpr rcEnd c |> Result.map (fun t -> ts @ [t])))
         (Ok [])
     |> Result.map (fun tangentComps ->
     // Return: components then their tangents, flat -- `(p, t)` for the
