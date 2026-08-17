@@ -2095,6 +2095,12 @@ let private fusePipelinesEnv (ctx: Ctx) (env0: Map<string, Expr>) (arrays0: Set<
             let env2 = names |> List.fold (fun (m: Map<string, Expr>) n -> Map.remove n m) env
             let arr2 = names |> List.fold (fun s n -> Set.remove n s) arrays
             re (ExprLambda (ps, wc, go env2 arr2 b))
+        // NOTE for anyone adding arms below: every remaining BINDER form
+        // (`ExprLet`, `ExprMatch`, `ExprFor`, `ExprRecArray`) falls to the
+        // catch-all and is returned UNCHANGED. That forgoes fusion inside them,
+        // which is only a missed rewrite; descending without first dropping the
+        // form's binders from `env`/`arrays` would resolve a shadowed name to an
+        // outer binding, which is a wrong answer. Shadow first, then descend.
         | ExprKind.ExprBlock (ss, fe) ->
             let env2, arr2, ss' =
                 ss |> List.fold (fun (en, ar, acc) s ->
@@ -2104,7 +2110,19 @@ let private fusePipelinesEnv (ctx: Ctx) (env0: Map<string, Expr>) (arrays0: Set<
                         let en2 = if bindsPipelineValue v2 then Map.add nm v2 en else Map.remove nm en
                         let ar2 = if isArrayish ar (resolve en 0 v2) v2 then Set.add nm ar else Set.remove nm ar
                         (en2, ar2, acc @ [StmtLet { b with Value = v2 }])
-                    | StmtLet b -> (en, ar, acc @ [StmtLet { b with Value = go en ar b.Value }])
+                    // A NON-PatVar pattern still BINDS: `let (inc, dec) = ...`
+                    // shadows a module-level `inc` for the rest of the block.
+                    // Threading the env untouched left the stale binding
+                    // visible, so `inc <$> a` fused the MODULE kernel into a
+                    // pipeline the local one owns -- a wrong answer, silently.
+                    // Nothing here can say what a destructured component is
+                    // bound to, so the names are simply dropped from both maps.
+                    | StmtLet b ->
+                        let bound = patternBoundNames b.Pattern
+                        let v2 = go en ar b.Value
+                        let en2 = bound |> List.fold (fun (m: Map<string, Expr>) n -> Map.remove n m) en
+                        let ar2 = bound |> List.fold (fun s n -> Set.remove n s) ar
+                        (en2, ar2, acc @ [StmtLet { b with Value = v2 }])
                     | StmtExpr ex -> (en, ar, acc @ [StmtExpr (go en ar ex)])
                     | StmtAssign (l, o, r) -> (en, ar, acc @ [StmtAssign (l, o, go en ar r)])
                     | other -> (en, ar, acc @ [other])) (env, arrays, [])
@@ -5097,6 +5115,35 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             | DeclStatic ({ Pattern = { Kind = PatternKind.PatVar nm }; Type = Some t }) -> Map.add nm t acc
             | _ -> acc)
             Map.empty
+    // What each FUNCTION declaration can see: everything declared above it,
+    // plus itself (a named function may self-recurse; mutual recursion is
+    // BL2001). Snapshotted in declaration order, because the three maps above
+    // are whole-module and pipeline fusion resolves stage kernels through them
+    // -- which would let a body fuse a function or a `let` declared BELOW it,
+    // turning a program the checker rejects into one that compiles and runs.
+    let prefixVisible =
+        decls
+        |> List.fold (fun (fns, lvs, ltys, snaps) d ->
+            match d.Value with
+            | DeclFunction fd ->
+                let fns' = Map.add fd.Name fd fns
+                (fns', lvs, ltys, Map.add fd.Name (fns', lvs, ltys) snaps)
+            | DeclLet ({ Pattern = { Kind = PatternKind.PatVar nm } } as b)
+            | DeclStatic ({ Pattern = { Kind = PatternKind.PatVar nm } } as b) ->
+                (fns, Map.add nm b.Value lvs,
+                 (match b.Type with Some t -> Map.add nm t ltys | None -> Map.remove nm ltys),
+                 snaps)
+            | DeclLet b | DeclStatic b ->
+                // a destructure rebinds each name to something fusion cannot
+                // chase: drop them rather than leave a stale value visible
+                let names = patternBoundNames b.Pattern
+                (fns,
+                 names |> List.fold (fun (m: Map<string, Expr>) n -> Map.remove n m) lvs,
+                 names |> List.fold (fun (m: Map<string, TypeExpr>) n -> Map.remove n m) ltys,
+                 snaps)
+            | _ -> (fns, lvs, ltys, snaps))
+            (Map.empty, Map.empty, Map.empty, Map.empty)
+        |> (fun (_, _, _, snaps) -> snaps)
     // Source span per differentiable function, for stamping synthSpan so
     // syn-based derivative builders carry the differentiated decl's location.
     let funcSpans =
@@ -5138,6 +5185,24 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
             let mutable available = funcDecls
             let madeOrder = ResizeArray<string>()
             let madeMap = System.Collections.Generic.Dictionary<string, FunctionDecl * string>()
+            /// The context a body may resolve through: the prefix snapshot at
+            /// its own declaration, widened with the SYNTHESIZED declarations
+            /// (which are spliced beside their root, so they are always in
+            /// scope for each other). A synthesized source inherits its root's
+            /// snapshot -- it was built from a body that already passed here.
+            let ctxFor (fname: string) =
+                let rec snapshot n =
+                    match Map.tryFind n prefixVisible with
+                    | Some s -> s
+                    | None ->
+                        match madeMap.TryGetValue n with
+                        | true, (_, src) -> snapshot src
+                        | _ -> (funcDecls, moduleLoopVals, moduleLetTys)
+                let (fns, lvs, ltys) = snapshot fname
+                let withSynth =
+                    available |> Map.fold (fun acc n fd ->
+                        if Map.containsKey n funcDecls then acc else Map.add n fd acc) fns
+                { ctx with Decls = withSynth; ModuleLoopVals = lvs; ModuleLetTys = ltys }
             let synthResult =
                 requestsOrdered
                 |> Seq.distinct
@@ -5155,7 +5220,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                             // ROOT source decl's span (composition chains
                             // inherit it) before building the derivative.
                             Blade.Ast.synthSpan <- (Map.tryFind fname funcSpans |> Option.defaultValue Blade.Ast.synthSpan)
-                            let ctx2 = { ctx with Decls = available }
+                            let ctx2 = ctxFor fname
                             // A synthesized source is trusted: it binds
                             // reserved names by construction, and the
                             // shadowing hazard the reserved gate guards
@@ -5202,7 +5267,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         // it, and the derivative already succeeded.
                         let d =
                             if List.isEmpty mine then d
-                            else { d with Value = DeclFunction { fd with Body = fst (fuseFunctionBody ctx fd) } }
+                            else { d with Value = DeclFunction { fd with Body = fst (fuseFunctionBody (ctxFor fd.Name) fd) } }
                         d :: mine
                     | _ -> [d]))))
 
@@ -5228,10 +5293,6 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
 /// will not touch is one the existing IRComposeApply path still handles.
 let fuseProgram (program: Program) : Program =
     let fuseModule (m: ModuleDecl) : ModuleDecl =
-        let funcDecls =
-            m.Decls |> List.choose (fun d ->
-                match d.Value with DeclFunction fd -> Some (fd.Name, fd) | _ -> None)
-            |> Map.ofList
         let typeAliases =
             m.Decls |> List.collect (fun d ->
                 match d.Value with
@@ -5239,24 +5300,45 @@ let fuseProgram (program: Program) : Program =
                 | DeclType (TyDeclMutualGroup (members, _)) -> members
                 | _ -> [])
             |> Map.ofList
-        let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = Set.empty
-                    ModuleLoopVals = Map.empty; ModuleLetTys = Map.empty; Fresh = ref 0 }
-        // Module bindings accumulate in DECLARATION ORDER: a body may only
-        // resolve through names bound before it, which is the language's own
-        // visibility rule. Resolving a later binding into an earlier body
-        // would turn programs the checker rejects into programs it accepts.
+        // Module bindings -- values AND function declarations -- accumulate in
+        // DECLARATION ORDER: a body may only resolve through names bound before
+        // it (plus its own, since a named function may self-recurse), which is
+        // the language's own visibility rule. `funcDecls` used to be a
+        // whole-module map, so a pipeline stage could resolve to a function
+        // declared LATER: `(object_for(inc) >>@ object_for(dbl)) <@> A` fused
+        // and RAN with both kernels declared below it, where the checker's rule
+        // says BL2001. Fusion must not launder a forward reference into a
+        // program the checker never sees.
         let mutable env : Map<string, Expr> = Map.empty
         let mutable arrays : Set<string> = Set.empty
+        let mutable funcDecls : Map<string, FunctionDecl> = Map.empty
+        // ONE counter cell for the whole module, so the per-decl contexts below
+        // keep minting distinct names (see Ctx.Fresh).
+        let freshCell = ref 0
+        let ctxNow () =
+            { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = Set.empty
+              ModuleLoopVals = Map.empty; ModuleLetTys = Map.empty; Fresh = freshCell }
         let noteBinding (pat: Pattern) (v: Expr) =
             match pat.Kind with
             | PatternKind.PatVar nm ->
                 env <- (if bindsPipelineValue v then Map.add nm v env else Map.remove nm env)
                 arrays <- (if isArrayish arrays v v then Set.add nm arrays else Set.remove nm arrays)
-            | _ -> ()
+            // A destructuring module binding rebinds each of its names. Nothing
+            // here can say what a component holds, so they are dropped from
+            // both maps rather than left pointing at an earlier binding of the
+            // same name (the block fold's non-PatVar arm does the same).
+            | _ ->
+                for nm in patternBoundNames pat do
+                    env <- Map.remove nm env
+                    arrays <- Set.remove nm arrays
         let decls =
             m.Decls |> List.map (fun d ->
                 match d.Value with
                 | DeclFunction fd ->
+                    // Visible to its own body: everything declared above, plus
+                    // itself (self-recursion is legal; mutual recursion is not).
+                    funcDecls <- Map.add fd.Name fd funcDecls
+                    let ctx = ctxNow ()
                     let ps = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
                     let paramArrays =
                         fd.Params
@@ -5273,11 +5355,11 @@ let fuseProgram (program: Program) : Program =
                             fd.Body
                     { d with Value = DeclFunction { fd with Body = body } }
                 | DeclLet b ->
-                    let v, _ = fusePipelinesEnv ctx env arrays b.Value
+                    let v, _ = fusePipelinesEnv (ctxNow ()) env arrays b.Value
                     noteBinding b.Pattern v
                     { d with Value = DeclLet { b with Value = v } }
                 | DeclStatic b ->
-                    let v, _ = fusePipelinesEnv ctx env arrays b.Value
+                    let v, _ = fusePipelinesEnv (ctxNow ()) env arrays b.Value
                     noteBinding b.Pattern v
                     { d with Value = DeclStatic { b with Value = v } }
                 | _ -> d)
