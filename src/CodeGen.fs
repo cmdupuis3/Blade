@@ -14825,14 +14825,17 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // become a no-op) and MINUS IRGroupKeys/IRGroupBy (a `|> compute` on a
     // grouping is not a spelling the surface produces, and genComputeBinding
     // has no arm to fall back on if this guess were wrong).
+    //
+    // WRITTEN AS THAT SUBTRACTION, not as the 18 constructors it works out to.
+    // The hand-enumerated version said the same thing in the comment and then
+    // re-derived it by hand below, so the two could drift the moment a new
+    // statement-shaped node was added: `isStatementShaped` would gain it and
+    // this list would not, and the miss is silent (the node falls to
+    // genComputeBinding's scalar fall-through and dies on the unsupported-node
+    // sentinel -- exactly the BL7001 this arm was added to stop). Both
+    // subtrahends are predicates in IR.fs beside `isStatementShaped` itself.
     | IRCompute eager when
-        (match eager with
-         | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _
-         | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _
-         | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
-         | IRGroupBucket _ | IRGroupSizes _ | IRArrayLit _
-         | IRArrayNegate _ | IRArrayConjugate _ -> true
-         | _ -> false) ->
+        isStatementShaped eager && not (isDeferringForm eager) && not (isGroupTableForm eager) ->
         genBinding ctx { binding with Value = eager } builder
     | IRCompute inner ->
         genComputeBinding ctx binding builder inner

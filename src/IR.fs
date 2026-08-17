@@ -6534,10 +6534,34 @@ let isStatementShaped (e: IRExpr) : bool =
 /// borrowing wrapper into a deterministic-dealloc frame that already plans to
 /// free the lender. `IRCompute` routes to the materializing emitter instead,
 /// which builds a real pool -- and, since this change, its own extents table.
-let forceDeferringForm (e: IRExpr) : IRExpr =
+///
+/// `isDeferringForm` is the MEMBERSHIP test and `forceDeferringForm` the
+/// transform. They are split because not every consumer wants the transform:
+/// genBinding's `|> compute` peel has to SUBTRACT this family from
+/// `isStatementShaped` (forcing them there would route them back to the emitter
+/// that defers, making the compute a no-op), and subtracting a set is only
+/// honest if it names the same set.
+let isDeferringForm (e: IRExpr) : bool =
     match e with
-    | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> IRCompute e
-    | _ -> e
+    | IRChoice _ | IRFallback _ | IRGuard _ | IRSequence _ -> true
+    | _ -> false
+
+let forceDeferringForm (e: IRExpr) : IRExpr =
+    if isDeferringForm e then IRCompute e else e
+
+/// The CSR-TABLE grouping members of `isStatementShaped`: `group_keys` and the
+/// `group_by` that reads it. Named for the same reason as `isDeferringForm` --
+/// the one consumer that must subtract them (genBinding's `|> compute` peel,
+/// where a grouping is not a spelling the surface produces and genComputeBinding
+/// has no arm to fall back on) should say which set it is subtracting rather
+/// than re-listing constructors.
+///
+/// The two ACCESSORS -- IRGroupBucket / IRGroupSizes -- are deliberately NOT
+/// here. They materialize an ordinary array and peel like any other eager form.
+let isGroupTableForm (e: IRExpr) : bool =
+    match e with
+    | IRGroupKeys _ | IRGroupBy _ -> true
+    | _ -> false
 
 /// `isStatementShaped` through an explicit `|> compute`. The user's own force
 /// is the SAME routing problem, not a different one: `sequence(a, b) |> compute`
