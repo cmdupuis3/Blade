@@ -1,0 +1,35 @@
+// TEST: JVP Route A -- Two Apply Sites, One Kernel, One Arity
+// The same pack kernel applied twice at arity 3 in ONE body: the unroller
+// answers the second site from its shape memo, and each site must still mint
+// its own parameter run -- shared parameter NAMES across two lambdas would be
+// legal but would silently move the synthesized numbering.
+//
+// a = [1, 2, 3], b = [2, 3, 4]; m(i,j,k) = a_i a_j a_k, q = the same over b.
+//   primal  = m(0,1,2) + q(0,1,2) + m(1,1,2) = 6 + 24 + 12 = 42
+// Seeds da = e0, db = e1:
+//   dm(0,1,2) = 1*2*3                     = 6
+//   dq(0,1,2) = b0*1*b2 = 2*1*4           = 8
+//   dm(1,1,2) = 0 (no a0 factor)          = 0
+//   tangent = 14
+import ad as ad
+
+type I = Idx<3>
+
+function packprod(a: Poly<T^0>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 1 -> { let head :: tail = a
+             head }
+    | _ -> { let head :: tail = a
+             head * packprod(tail) }
+}
+
+function f(a: Array<Float like I>, b: Array<Float like I>) -> Float = {
+    let m = object_for(packprod) <@> (a, a, a) |> compute
+    let q = object_for(packprod) <@> (b, b, b) |> compute
+    m(0, 1, 2) + q(0, 1, 2) + m(1, 1, 2)
+}
+
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [2.0, 3.0, 4.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
+// WARN: BL4003
+// EXPECT: v = 42
+// EXPECT: t = 14
