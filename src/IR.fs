@@ -6360,13 +6360,72 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
               | t -> t)
          | [] -> IRTScalar ETFloat64)
 
+    // -- Rank-changing assembly combinators (formalism 2.6) ---------------
+    // `stack(A1..An)` adds a fresh LEADING axis of extent n over the operands'
+    // (identical -- TypeCheck enforces it) shape; `join(A1..An, d)` keeps the
+    // shape and SUMS the extents on axis d. Both used to sit in the untyped
+    // list below, with each consumer that needed an element type reaching PAST
+    // the node to its first operand instead (CodeGen's `inferElemTypeStrict`
+    // has a two-line arm doing exactly that, and says so).
+    //
+    // That was survivable while every consumer reached past. It stopped being
+    // survivable once `isStatementShapedArraysArg` -- the ONE predicate behind
+    // the function-body, RETURN and loop-operand hoisting routes -- gated on
+    // the node being ARRAY-TYPED. `stack(x, y) * 2.0` failed that test, so the
+    // stack was left inline in the broadcast's operand slot and the emitted
+    // nest read an `arr0` nothing had declared (module scope and function body
+    // alike). Reaching past the node cannot fix that: the hoist needs a type
+    // for the NAME it mints, which is the operand type plus a rank change.
+    //
+    // This mirrors `TypeCheck.inferStack` / `inferJoin` arithmetic-for-
+    // arithmetic. It is not a second check: by the time IR exists those two
+    // have already REFUSED non-array operands, rank disagreement and off-axis
+    // extent clashes, so every shape reaching here is validated. The
+    // synthesized axis carries Id 0 -- an IR-level axis has no source-level
+    // identity to preserve, and its consumers read Extent / IxKind / Symmetry,
+    // never the id. An operand `typeOf` cannot reconstruct leaves the node
+    // untyped, exactly as before.
+    | IRStack (first :: _ as es) ->
+        (match typeOf first with
+         | ArrayElem a ->
+             let leadIdx =
+                 { Id = 0; Rank = 1; Extent = IRLit (IRLitInt (int64 es.Length))
+                   Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                   Kind = SDimension; Dependencies = [] }
+             mkArrayArrow (leadIdx :: a.IndexTypes) a.ElemType None
+         | _ -> IRTUnit)
+    | IRJoin ((first :: _ as es), dim) ->
+        (match typeOf first with
+         | ArrayElem a when dim >= 0 && dim < a.IndexTypes.Length ->
+             let dimExtents =
+                 es |> List.map (fun e ->
+                     match typeOf e with
+                     | ArrayElem at when dim < at.IndexTypes.Length -> Some at.IndexTypes.[dim].Extent
+                     | _ -> None)
+             // The literal sum when every operand's axis extent is static (the
+             // common case, and what pins depend on); the runtime addition
+             // chain otherwise. Same two-branch rule as `inferJoin`.
+             let joinedExtent =
+                 match dimExtents |> List.map (function Some (IRLit (IRLitInt n)) -> Some n | _ -> None) with
+                 | statics when statics |> List.forall Option.isSome ->
+                     IRLit (IRLitInt (statics |> List.sumBy Option.get))
+                 | _ ->
+                     match dimExtents |> List.choose id with
+                     | [] -> a.IndexTypes.[dim].Extent
+                     | xs -> xs |> List.reduce (fun l r -> IRBinOp (IRElementwise, IRAdd, l, r))
+             let joined = { a.IndexTypes.[dim] with Extent = joinedExtent; Tag = None }
+             mkArrayArrow
+                 (a.IndexTypes |> List.mapi (fun d ix -> if d = dim then joined else ix))
+                 a.ElemType None
+         | _ -> IRTUnit)
+
     // -- Deliberately untyped (loop objects, combinator/emission-internal
     //    markers -- not runtime values with a simple type). Enumerated with
     //    no wildcard so a NEW variant demands a typing decision here.
     | IRMethodFor _ | IRObjectFor _ | IRReynolds _ | IRArrayProduct _
     | IRComposeObj _ | IRCompose _
     | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _ | IRDiag _
-    | IRZip _ | IRAlign _ | IRStack _ | IRJoin _
+    | IRZip _ | IRAlign _ | IRStack [] | IRJoin ([], _)
     | IRTupleCons _ | IRTupleDecons _ | IRPolyIndex _ | IRPolyTail _ | IRReplicate _
     | IRVirtualReverse _ | IRBlocked _ | IRZero ->
         IRTUnit
@@ -6775,10 +6834,22 @@ let liftChildIncludingLoopApp (builder: IRBuilder) (child: IRExpr) : (IRId * IRT
 /// The predicate set is deliberately the SAME one the `IRMethodFor` /
 /// `IRApplyCombinator` / `IRComposeApply` arms apply to their `Arrays` slots
 /// (`isArrayFieldAccess`, `isNestedLoopComputeArg`, `isInlineArrayLitArg`,
-/// `isArrayValuedSelect`, `isNestedLoopFormArg`) -- the operand-naming rule is
-/// shared, so the hoisting rule has to be -- PLUS `isInlineForm`, which the
-/// loop forms exempt only because codegen auto-materializes mask/intersect/
-/// union/unique in an `Arrays` slot and this emitter does not.
+/// `isArrayValuedSelect`, `isNestedLoopFormArg`, `isStatementShapedArraysArg`)
+/// -- the operand-naming rule is shared, so the hoisting rule has to be -- PLUS
+/// `isInlineForm`, which the loop forms exempt only because codegen
+/// auto-materializes mask/intersect/union/unique in an `Arrays` slot and this
+/// emitter does not.
+///
+/// `isStatementShapedArraysArg` is the fourth consumer of the one predicate the
+/// three sibling arms already share, and it is here because "same predicate
+/// set" was a claim this lane did not actually satisfy when it was added: a
+/// hand-copied list omitted it, so `stack(x, y) * 2.0` in a function body still
+/// reached `genObjectForApplication` as a bare IRStack and the nest read an
+/// `arr0` nothing declared. Everything statement-shaped that is not already
+/// covered above enters through that one name -- IRStack and IRJoin, and the
+/// DEFERRING family (`<|:>` / sequence / guard / choice), which hoists in its
+/// FORCED spelling for the reason `forceDeferringForm` gives: bound bare, its
+/// emitter records a deferral and declares no name at all.
 let liftLoopAppOperand (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
     let (peeled, inner) = peelLetChain child
     let needsName =
@@ -6787,12 +6858,15 @@ let liftLoopAppOperand (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * I
         | e ->
             isInlineForm e || isArrayFieldAccess e || isNestedLoopComputeArg e
             || isInlineArrayLitArg e || isArrayValuedSelect e || isNestedLoopFormArg e
+            || isStatementShapedArraysArg e
     if needsName then
         let id = builder.FreshId()
         // IRArrayLit carries its array type in the node rather than through
         // `typeOf` (mirroring liftChildIncludingArrayLit).
         let ty = match inner with IRArrayLit (_, arrTy) -> mkArrayLike arrTy | _ -> typeOf inner
-        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+        // Identity for everything but the deferring family, exactly as in the
+        // three sibling arms.
+        (peeled @ [(id, ty, forceDeferringForm inner)], IRVar (id, ty))
     else
         (peeled, inner)
 

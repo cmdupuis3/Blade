@@ -1,0 +1,43 @@
+// TEST: Fnbody Stack Join Broadcast
+// ----------------------------------------------------------------------------
+// stack / join CONSUMED by an elementwise broadcast rather than let-bound.
+//
+// `stack(x, y) * 2.0` lowers to a synthesized loop application whose array
+// operand is the bare assembly node. `genObjectForApplication` spells each
+// operand by looking it up as a named binding and falling back to the
+// placeholder `arr<i>`, so an un-named operand left the nest reading an
+// identifier nothing declared -- `error: 'arr0' was not declared in this
+// scope`, at module scope and in a function body alike.
+//
+// The hoist that names it keys off `isStatementShapedArraysArg`, the one
+// predicate behind every operand-hoisting route, and that predicate requires
+// the node to be ARRAY-TYPED. stack and join carried no IR-level type at all
+// (their consumers reached past the node to an operand for an element type),
+// so they failed a test that exists to exclude `gk` and eigh's tuple. Typing
+// them is what lets the shared predicate see them.
+//
+// Both directions of shape change are covered: stack ADDS an axis (the result
+// is rank 2 over a rank-1 operand) and join SUMS one (2 + 2 -> 4).
+// ----------------------------------------------------------------------------
+type I2 = Idx<2>
+type I4 = Idx<4>
+
+function scale_stack(x: Array<Float64 like I2>, y: Array<Float64 like I2>) -> Array<Float64 like I2, I2> = {
+    stack(x, y) * 2.0
+}
+
+function scale_join(x: Array<Float64 like I2>, y: Array<Float64 like I2>) -> Array<Float64 like I4> = {
+    join(x, y, 0) * 2.0
+}
+
+let a: Array<Float64 like I2> = [1.0, 2.0]
+let b: Array<Float64 like I2> = [3.0, 4.0]
+let sm = scale_stack(a, b)
+let jm = scale_join(a, b)
+// The same two shapes at MODULE scope, which failed identically.
+let sm_top = stack(a, b) * 2.0
+let jm_top = join(a, b, 0) * 2.0
+// EXPECT: sm = [2, 4, 6, 8]
+// EXPECT: jm = [2, 4, 6, 8]
+// EXPECT: sm_top = [2, 4, 6, 8]
+// EXPECT: jm_top = [2, 4, 6, 8]
