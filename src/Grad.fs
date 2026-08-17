@@ -214,13 +214,18 @@ type private Ctx = {
     /// literal would misread an annotated `Array<Idx<N> like R>` table as
     /// dynamic -- the one direction that silently NaNs an empty mean.
     ModuleLetTys: Map<string, TypeExpr>
-    /// Fresh-suffix counter (shared across one expand run).
-    mutable Fresh: int
+    /// Fresh-suffix counter, shared across one expand run. A `ref` CELL, not a
+    /// `mutable` field: the synthesis loop derives per-request contexts with
+    /// `{ ctx with Decls = available }`, and a record copy would duplicate a
+    /// mutable field by VALUE -- restarting the numbering each round, so two
+    /// synthesis rounds over one module could mint the same `__ck1`/`__gt2`.
+    /// The cell is shared by every copy, which is what "shared" has to mean.
+    Fresh: int ref
 }
 
 let private fresh (ctx: Ctx) (prefix: string) : string =
-    ctx.Fresh <- ctx.Fresh + 1
-    sprintf "%s%d" prefix ctx.Fresh
+    ctx.Fresh.Value <- ctx.Fresh.Value + 1
+    sprintf "%s%d" prefix ctx.Fresh.Value
 
 /// Which transform is currently synthesizing ("grad" | "jvp") -- prefixes
 /// every internal error and selects the diagnostic code at the `expand`
@@ -252,6 +257,202 @@ let private resolveArrayTy (ctx: Ctx) (t: TypeExpr) : TypeExpr =
     match resolveTy ctx t with
     | TyArray (elem, idxs) -> TyArray (resolveTy ctx elem, idxs |> List.map (resolveTy ctx))
     | other -> other
+
+/// Does any of `names` occur anywhere in `e`? EXHAUSTIVE over the grammar,
+/// on purpose: `mentionsAnyOf` answers TRUE for every node it has no arm for,
+/// which would make the residual check below refuse any body that so much as
+/// contains a `group_keys` call. Shadowing is ignored -- the names asked
+/// about are the peel's own bindings, so a false positive costs a refusal
+/// while a missed use would leave a name dangling, which typecheck says
+/// loudly. Anything genuinely leaf-shaped answers false, listed by name so a
+/// new grammar node shows up as an incomplete-match warning instead of
+/// silently defaulting either way.
+let rec private mentionsDeep (names: Set<string>) (e: Expr) : bool =
+    let m = mentionsDeep names
+    let any = List.exists m
+    let opt o = match o with Some x -> m x | None -> false
+    match e.Kind with
+    | ExprKind.ExprVar n -> Set.contains n names
+    | ExprKind.ExprBinOp (_, _, l, r) -> m l || m r
+    | ExprKind.ExprUnaryOp (_, i) -> m i
+    | ExprKind.ExprApp (f, args) -> m f || any args
+    | ExprKind.ExprTupleIndex (t, i) -> m t || m i
+    | ExprKind.ExprField (t, _) -> m t
+    | ExprKind.ExprLambda (ps, _, b) -> (ps |> List.exists (fun p -> opt p.Default)) || m b
+    | ExprKind.ExprLet (bnd, b) -> m bnd.Value || m b
+    | ExprKind.ExprMatch (s, cases) ->
+        m s || (cases |> List.exists (fun c -> opt c.Guard || m c.Body))
+    | ExprKind.ExprIf (c, t, f) -> m c || m t || m f
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprStack es
+    | ExprKind.ExprSequence es | ExprKind.ExprZip es | ExprKind.ExprMethodFor es
+    | ExprKind.ExprGroupKeys es -> any es
+    | ExprKind.ExprAlign (es, _) | ExprKind.ExprJoin (es, _) -> any es
+    | ExprKind.ExprBlock (ss, fe) -> (ss |> List.exists (stmtMentionsDeep names)) || opt fe
+    | ExprKind.ExprObjectFor k -> m k
+    | ExprKind.ExprDotDot (l, h) -> m l || m h
+    | ExprKind.ExprBlocked (_, b) -> m b
+    | ExprKind.ExprHalo (_, o) -> m o
+    | ExprKind.ExprPure i | ExprKind.ExprCompute i | ExprKind.ExprRead i
+    | ExprKind.ExprRank i | ExprKind.ExprUnique i | ExprKind.ExprGroupBucket i
+    | ExprKind.ExprExtents i | ExprKind.ExprStatic i | ExprKind.ExprTyped (i, _)
+    | ExprKind.ExprTranspose (i, _, _) | ExprKind.ExprDecompact (i, _)
+    | ExprKind.ExprPartialApp (_, i, _) | ExprKind.ExprReynolds (i, _) -> m i
+    | ExprKind.ExprGuard (l, r) | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
+    | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r)
+    | ExprKind.ExprIntersect (l, r) | ExprKind.ExprUnion (l, r)
+    | ExprKind.ExprContains (l, r) | ExprKind.ExprGroupBy (l, r)
+    | ExprKind.ExprSort (l, r) | ExprKind.ExprGram (l, r)
+    | ExprKind.ExprAssign (l, r) -> m l || m r
+    | ExprKind.ExprReduce (a, k, i, ax) -> m a || m k || opt i || opt ax
+    | ExprKind.ExprStruct (_, fields, spread) ->
+        (fields |> List.exists (fun (_, fe) -> m fe)) || opt spread
+    | ExprKind.ExprFor (src, _, k) ->
+        (match src with
+         | ForArrays (es, inc) -> any es || opt inc
+         | ForKernel k2 -> m k2)
+        || opt k
+    | ExprKind.ExprRecArray d ->
+        m d.SliceExpr || (match d.SeedArm with Some (_, se) -> m se | None -> false)
+    | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprQualified _
+    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprArity _
+    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _ -> false
+
+and private stmtMentionsDeep (names: Set<string>) (s: Stmt) : bool =
+    match s with
+    | StmtSpanned (inner, _) -> stmtMentionsDeep names inner
+    | StmtLet b -> mentionsDeep names b.Value
+    | StmtExpr ex -> mentionsDeep names ex
+    | StmtAssign (l, _, r) -> mentionsDeep names l || mentionsDeep names r
+    | StmtForIn (_, r, body) ->
+        mentionsDeep names r || (body |> List.exists (stmtMentionsDeep names))
+
+/// Capture-avoiding substitution for fusion ONLY: `name := repl` over a
+/// kernel body.
+///
+/// Unlike `substVar` (whose catch-all silently returns the node unchanged)
+/// this one's catch-all is `None` -- DECLINE. A form it does not know about
+/// might contain a live occurrence of `name`, and quietly leaving that
+/// occurrence behind is how a fusion turns into a wrong answer (or, more
+/// often, a baffling BL2001 far from here). Forms that BIND names
+/// (`ExprLambda` that does not shadow, `let`, blocks, matches, `for`,
+/// recursive arrays) also decline: `repl` is a whole kernel body carrying
+/// free captures, and proving those survive a binder is not worth it for
+/// shapes no kernel actually uses.
+let rec private substKern (name: string) (repl: Expr) (e: Expr) : Expr option =
+    let s = substKern name repl
+    let re k = Some (inheritSpan e k)
+    let s1 mk a = s a |> Option.bind (fun a' -> re (mk a'))
+    let s2 mk a b =
+        match s a, s b with
+        | Some a', Some b' -> re (mk a' b')
+        | _ -> None
+    let sList (xs: Expr list) =
+        xs |> List.fold (fun acc x ->
+            acc |> Option.bind (fun ys -> s x |> Option.map (fun y -> ys @ [y]))) (Some [])
+    let sOpt (x: Expr option) =
+        match x with
+        | None -> Some None
+        | Some a -> s a |> Option.map Some
+    match e.Kind with
+    | ExprKind.ExprVar n when n = name -> Some repl
+    // leaves: nothing to rewrite, nothing to miss
+    | ExprKind.ExprVar _ | ExprKind.ExprLit _ | ExprKind.ExprWildcard
+    | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
+    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _
+    | ExprKind.ExprArity _ -> Some e
+    | ExprKind.ExprBinOp (m, op, l, r) -> s2 (fun a b -> ExprBinOp (m, op, a, b)) l r
+    | ExprKind.ExprUnaryOp (op, i) -> s1 (fun a -> ExprUnaryOp (op, a)) i
+    | ExprKind.ExprApp (f, args) ->
+        match s f, sList args with
+        | Some f', Some args' -> re (ExprApp (f', args'))
+        | _ -> None
+    | ExprKind.ExprTupleIndex (t, i) -> s2 (fun a b -> ExprTupleIndex (a, b)) t i
+    | ExprKind.ExprField (x, f) -> s1 (fun a -> ExprField (a, f)) x
+    | ExprKind.ExprIf (c, t, f) ->
+        match s c, s t, s f with
+        | Some c', Some t', Some f' -> re (ExprIf (c', t', f'))
+        | _ -> None
+    | ExprKind.ExprTuple es -> sList es |> Option.bind (fun es' -> re (ExprTuple es'))
+    | ExprKind.ExprArrayLit es -> sList es |> Option.bind (fun es' -> re (ExprArrayLit es'))
+    | ExprKind.ExprMethodFor ops -> sList ops |> Option.bind (fun o -> re (ExprMethodFor o))
+    | ExprKind.ExprObjectFor k -> s1 (fun a -> ExprObjectFor a) k
+    | ExprKind.ExprDotDot (l, h) -> s2 (fun a b -> ExprDotDot (a, b)) l h
+    | ExprKind.ExprBlocked (t, x) -> s1 (fun a -> ExprBlocked (t, a)) x
+    | ExprKind.ExprHalo (t, offs) -> s1 (fun a -> ExprHalo (t, a)) offs
+    | ExprKind.ExprZip es -> sList es |> Option.bind (fun es' -> re (ExprZip es'))
+    | ExprKind.ExprAlign (es, spec) -> sList es |> Option.bind (fun es' -> re (ExprAlign (es', spec)))
+    | ExprKind.ExprStack es -> sList es |> Option.bind (fun es' -> re (ExprStack es'))
+    | ExprKind.ExprJoin (es, d) -> sList es |> Option.bind (fun es' -> re (ExprJoin (es', d)))
+    | ExprKind.ExprSequence es -> sList es |> Option.bind (fun es' -> re (ExprSequence es'))
+    | ExprKind.ExprGroupKeys es -> sList es |> Option.bind (fun es' -> re (ExprGroupKeys es'))
+    | ExprKind.ExprPure i -> s1 (fun a -> ExprPure a) i
+    | ExprKind.ExprCompute i -> s1 (fun a -> ExprCompute a) i
+    | ExprKind.ExprRead i -> s1 (fun a -> ExprRead a) i
+    | ExprKind.ExprGuard (c, b) -> s2 (fun a b2 -> ExprGuard (a, b2)) c b
+    | ExprKind.ExprReplicate (c, b) -> s2 (fun a b2 -> ExprReplicate (a, b2)) c b
+    | ExprKind.ExprReynolds (k, anti) -> s1 (fun a -> ExprReynolds (a, anti)) k
+    | ExprKind.ExprTyped (i, t) -> s1 (fun a -> ExprTyped (a, t)) i
+    | ExprKind.ExprRank i -> s1 (fun a -> ExprRank a) i
+    | ExprKind.ExprMask (a, p) -> s2 (fun x y -> ExprMask (x, y)) a p
+    | ExprKind.ExprCompound (d, m) -> s2 (fun x y -> ExprCompound (x, y)) d m
+    | ExprKind.ExprSparse (vs, ks) -> s2 (fun x y -> ExprSparse (x, y)) vs ks
+    | ExprKind.ExprIntersect (a, b) -> s2 (fun x y -> ExprIntersect (x, y)) a b
+    | ExprKind.ExprUnion (a, b) -> s2 (fun x y -> ExprUnion (x, y)) a b
+    | ExprKind.ExprUnique a -> s1 (fun x -> ExprUnique x) a
+    | ExprKind.ExprContains (a, x) -> s2 (fun p q -> ExprContains (p, q)) a x
+    | ExprKind.ExprGroupBy (vs, g) -> s2 (fun x y -> ExprGroupBy (x, y)) vs g
+    | ExprKind.ExprGroupBucket g -> s1 (fun x -> ExprGroupBucket x) g
+    | ExprKind.ExprSort (a, k) -> s2 (fun x y -> ExprSort (x, y)) a k
+    | ExprKind.ExprReduce (a, k, init, axes) ->
+        match s a, s k, sOpt init, sOpt axes with
+        | Some a', Some k', Some i', Some x' -> re (ExprReduce (a', k', i', x'))
+        | _ -> None
+    | ExprKind.ExprTranspose (a, d1, d2) -> s1 (fun x -> ExprTranspose (x, d1, d2)) a
+    | ExprKind.ExprDecompact (a, d) -> s1 (fun x -> ExprDecompact (x, d)) a
+    | ExprKind.ExprGram (l, r) -> s2 (fun x y -> ExprGram (x, y)) l r
+    | ExprKind.ExprExtents a -> s1 (fun x -> ExprExtents x) a
+    | ExprKind.ExprPartialApp (op, x, isLeft) -> s1 (fun a -> ExprPartialApp (op, a, isLeft)) x
+    | ExprKind.ExprAssign (l, r) -> s2 (fun x y -> ExprAssign (x, y)) l r
+    | ExprKind.ExprStatic i -> s1 (fun a -> ExprStatic a) i
+    | ExprKind.ExprStruct (n, fields, spread) ->
+        let fs =
+            fields |> List.fold (fun acc (fn, fv) ->
+                acc |> Option.bind (fun ys -> s fv |> Option.map (fun y -> ys @ [(fn, y)]))) (Some [])
+        match fs, sOpt spread with
+        | Some fs', Some sp' -> re (ExprStruct (n, fs', sp'))
+        | _ -> None
+    // a lambda that SHADOWS the name is already correct as written
+    | ExprKind.ExprLambda (ps, _, _) when ps |> List.exists (fun p -> p.Name = name) -> Some e
+    // everything else -- binders, blocks, matches, loop forms, and anything
+    // added to the grammar after this was written -- declines.
+    | _ -> None
+
+/// Substitute `pname := repl` into a KERNEL-SHAPED body -- either a kernel
+/// parameter meeting its indexed read (the map rule) or a callee parameter
+/// meeting its argument (the kernel-body call rule) -- refusing rather than
+/// half-substituting.
+///
+/// `substKern` is the substitution: its catch-all DECLINES, so it never
+/// leaves a live occurrence behind and never crosses a binder it cannot
+/// prove safe, which is exactly the alpha-safety both callers need. A
+/// decline is only interesting when the name actually occurs, though, and
+/// `mentionsDeep` (exhaustive over the grammar, shadowing ignored) decides
+/// that: a body that never mentions the parameter passes through untouched,
+/// so a kernel whose body merely CONTAINS an unrelated inner lambda is not
+/// refused for it.
+///
+/// The predecessor here was `substVar`, whose catch-all silently returns the
+/// node unchanged -- which meant a parameter used inside a `reduce`, an
+/// `extents`, or any other form it lacked an arm for was left dangling in
+/// the emitted tangent lambda, surfacing as an unbound-name type error far
+/// from the cause. Refusing by name is the whole improvement.
+let private substParam (fname: string) (pname: string) (repl: Expr) (body: Expr) : Result<Expr, string> =
+    if not (mentionsDeep (Set.singleton pname) body) then Ok body
+    else
+        match substKern pname repl body with
+        | Some b -> Ok b
+        | None ->
+            err fname (sprintf "cannot substitute '%s' into the kernel body: a binder or an unsupported form stands between the parameter and its use, so the substitution cannot be proved capture-free" pname)
 
 // Body -> NStmt conversion
 
@@ -454,21 +655,51 @@ let private (|IndexIota|_|) (e: Expr) =
             when p.Name = b -> Some ()
     | _ -> None
 
-/// `sort(<iota>, lambda(<p>: I) -> <A>(<p>))`: the shape both synthesized
-/// permutation sorts have. Recognizes an ALREADY-EXPANDED body on a
+/// `sort(<iota>, lambda(<p>: I) -> <key>[x := <A>(<p>)])`: the shape both
+/// synthesized permutation sorts have. Recognizes an ALREADY-EXPANDED body on a
 /// composition round (`ad.jvp(ad.grad(f))` re-runs the pre-pass over a body
-/// this pass itself wrote) so the plumbing is reused instead of re-emitted.
+/// this pass itself wrote) so the plumbing is reused instead of re-emitted, and
+/// it is also how `collectSortPlans` recovers which array a permutation belongs
+/// to after inlining has renamed every local.
+///
+/// The key body is the USER's, composed over the gathered element, so it is NOT
+/// in general the bare application `A(p)` -- a descending key reads
+/// `0.0 - A(p)`. What identifies the plumbing is that `p` occurs ONLY as the
+/// subscript of array reads, and that every such read names the SAME array:
+/// that array is the sorted source.
 ///
 /// The `iotas` gate is load-bearing: without it a PRIMAL sort under a
 /// one-call key (`sort(A, lambda(x: Float) -> abs(x))`) has the same shape
 /// and would be misread as plumbing, losing its plan and its derivative.
 /// Only a sort whose operand is a materialized index array is plumbing.
 let private (|SortPermForm|_|) (iotas: Set<string>) (e: Expr) =
+    /// The single array `p` is read through, or None if `p` is read any other
+    /// way (bare, as a function head, through two different arrays, or not at
+    /// all). Structural, and its catch-all answers "cannot tell" -- a form this
+    /// misses is simply not recognized as plumbing.
+    let keyedArray (p: string) (body: Expr) : string option =
+        let hits = System.Collections.Generic.HashSet<string>()
+        let mutable bad = false
+        let rec go (x: Expr) =
+            match x.Kind with
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, [{ Kind = ExprKind.ExprVar b }]) when b = p ->
+                if a = p then bad <- true else hits.Add a |> ignore
+            | ExprKind.ExprVar n -> if n = p then bad <- true
+            | ExprKind.ExprLit _ -> ()
+            | ExprKind.ExprTyped (i, _) | ExprKind.ExprUnaryOp (_, i)
+            | ExprKind.ExprPure i | ExprKind.ExprCompute i -> go i
+            | ExprKind.ExprBinOp (_, _, l, r) -> go l; go r
+            | ExprKind.ExprApp (f, args) -> go f; List.iter go args
+            | ExprKind.ExprIf (c, t, f) -> go c; go t; go f
+            | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es -> List.iter go es
+            | _ -> bad <- true
+        go body
+        if bad || hits.Count <> 1 then None else Some (Seq.head hits)
     match e.Kind with
     | ExprKind.ExprSort ({ Kind = ExprKind.ExprVar srcIdx },
-                         { Kind = ExprKind.ExprLambda ([p], _,
-                             { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar keyed }, [{ Kind = ExprKind.ExprVar b }]) }) })
-            when p.Name = b && Set.contains srcIdx iotas -> Some (keyed, p.Type)
+                         { Kind = ExprKind.ExprLambda ([p], _, kbody) })
+            when Set.contains srcIdx iotas ->
+        keyedArray p.Name kbody |> Option.map (fun keyed -> (keyed, p.Type))
     | _ -> None
 
 /// Does `e` mention any name in `names`? Unhandled forms answer TRUE. This
@@ -554,14 +785,24 @@ let private expandSort (fname: string) (ctx: Ctx)
              err fname (sprintf "differentiating `sort` needs the sorted array's index type to be a NAMED alias (v1): '%s' is declared over an anonymous index type, whose occurrences do not share an identity, so the synthesized permutation would not unify with it. Add `type I = Idx<n>` and declare the array as `Array<Float like I>`" src)
          | Some ity ->
         // The key must be a lambda of one parameter reading only THAT
-        // element. A key closing over a second differentiable array would
-        // make the permutation depend on it, and the permutation-as-data
-        // rule drops that dependence -- so refuse rather than answer wrong.
+        // element. A key closing over ANY other binding in the differentiated
+        // scope would make the permutation depend on it, and the
+        // permutation-as-data rule drops that dependence -- so refuse rather
+        // than answer wrong.
+        //
+        // `preBound` is every parameter (all ranks, arrays AND scalars) plus
+        // every local the surface body binds. The predecessor set here was
+        // "rank-1 arrays with a declared index type, plus the operand", which
+        // let a key close over a rank-2 array or a plain Float parameter and
+        // compile to a silently constant permutation. Over-refusal is the safe
+        // direction and costs a hoist; under-refusal is a wrong derivative.
+        // MODULE-level constants stay legal (they are not in `preBound`, and
+        // they carry no derivative), which is the case worth keeping.
         match key.Kind with
         | ExprKind.ExprLambda ([kp], _, kbody) ->
-            let closedOver = Set.remove kp.Name (Set.union (Map.keys idxTys |> Set.ofSeq) (Set.singleton src))
-            if mentionsAnyOf closedOver kbody then
-                err fname (sprintf "differentiating `sort` requires a key that reads ONLY the sorted element: the key of '%s' closes over another array in scope, so the permutation would depend on data whose contribution the derivative drops (v1). Precompute the key into the sorted array, or sort outside the differentiated function" name)
+            let closedOver = Set.remove kp.Name preBound
+            if mentionsDeep closedOver kbody then
+                err fname (sprintf "differentiating `sort` requires a key that reads ONLY the sorted element: the key of '%s' closes over another binding in scope, so the permutation would depend on data whose contribution the derivative drops (v1). Precompute the key into the sorted array, or sort outside the differentiated function" name)
             else
             let iotaN = sortIotaName name
             let permN = sortPermName name
@@ -580,6 +821,29 @@ let private expandSort (fname: string) (ctx: Ctx)
                 err fname (sprintf "binding '%s' collides with a name the sort expansion synthesizes for '%s'; rename it" (List.head collided) name)
             else
             let pv = "__spk"
+            // The permutation is an ARGSORT of the ORIGINAL INDICES under the
+            // USER'S key: `sort(iota, lambda(i: I) -> key[x := A(i)])`. The key
+            // body has to be COMPOSED here, not dropped -- an argsort of the
+            // raw values answers a different question the moment the key is
+            // anything but the identity (a descending key `0.0 - x` would come
+            // back ascending), and every leg downstream reads this permutation
+            // as if it were the primal's own.
+            //
+            // `substKern` is the substitution because its catch-all DECLINES:
+            // it never leaves a live occurrence of the key parameter behind and
+            // never crosses a binder it cannot prove safe. A decline is a named
+            // refusal, not a half-substituted key.
+            match substKern kp.Name (syn (ExprApp (v src, [v pv]))) kbody with
+            | None ->
+                err fname (sprintf "differentiating `sort` cannot rebuild the key of '%s' over the permutation: a binder or an unsupported form stands between the key parameter '%s' and its use, so the composed key cannot be proved capture-free (v1). Simplify the key, or precompute it into the sorted array" name kp.Name)
+            | Some permKeyBody ->
+            // A key that never reads its element sorts by a constant. The
+            // permutation would then carry no reference to the sorted array,
+            // and `collectSortPlans` -- which recovers the plumbing by SHAPE,
+            // because inlining renames locals -- would have nothing to key on.
+            if not (mentionsDeep (Set.singleton pv) permKeyBody) then
+                err fname (sprintf "differentiating `sort` requires a key that reads the sorted element: the key of '%s' is constant, so the sort is an identity the derivative cannot trace (v1); drop the sort instead" name)
+            else
             let iotaLet =
                 if alreadyPerm then []
                 else [ StmtLet { Mutability = BindLet; Pattern = synPat (PatVar iotaN); Type = None
@@ -588,8 +852,7 @@ let private expandSort (fname: string) (ctx: Ctx)
                 if alreadyPerm then []
                 else [ StmtLet { Mutability = BindLet; Pattern = synPat (PatVar permN); Type = None
                                  Value = syn (ExprSort (v iotaN,
-                                                        syn (ExprLambda ([lamP pv ity], None,
-                                                                         syn (ExprApp (v src, [v pv])))))) } ]
+                                                        syn (ExprLambda ([lamP pv ity], None, permKeyBody)))) } ]
             let invLet =
                 if not wantInv || alreadyInv then []
                 else [ StmtLet { Mutability = BindLet; Pattern = synPat (PatVar invN); Type = None
@@ -655,11 +918,8 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (inK
         keys |> List.fold (fun acc k -> acc |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel k)) (Ok ())
     | { Kind = ExprKind.ExprGroupBucket g } -> walkExpr fname ctx onVar inKernel g
     | { Kind = ExprKind.ExprExtents a } -> walkExpr fname ctx onVar inKernel a
-    // ... and their `|> compute` materializations (the emitter needs the
-    // binding materialized inside a function body). Narrow on purpose: in
-    // grad mode `compute` stays refused everywhere else.
-    | { Kind = ExprKind.ExprCompute ({ Kind = ExprKind.ExprGroupBucket _ | ExprKind.ExprExtents _ | ExprKind.ExprGroupKeys _ } as inner) } ->
-        walkExpr fname ctx onVar inKernel inner
+    // (Their `|> compute` materializations need no arm of their own: `compute`
+    // IS a LinearForm, so the arm above already walked through it.)
     // Bare loop objects are LEGAL let initializers in jvp mode (the binding
     // is resolved at its application site); operands are visited for taint.
     | { Kind = ExprKind.ExprMethodFor arrs } when errMode.Value = "jvp" ->
@@ -703,8 +963,11 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (inK
     // are ordinary BinOps and would otherwise slip through this walk when both
     // operands are plain names, dying much later in the adjoint with a generic
     // "unsupported expression form" that never says the word combinator.
-    | { Kind = ExprKind.ExprBinOp (_, (OpApply | OpBind | OpParallel | OpFusion | OpArrayProd | OpFunctor | OpChoice | OpFallback | OpComposeObj | OpComposeMeth | OpCompose | OpCons), _, _) } ->
-        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); loop-object combinator operators (`<@>`, `>>=`, `<&>`, `<&!>`, `<*>`, `<$>`, `<|>`, `<|:>`, `>>@`, `@>>`, `>>`, `::`) are not differentiable"
+    // `<|:>` (OpFallback) is deliberately ABSENT: LinearForm admits it above
+    // (storage branching is linear in both legs), so listing it here would be
+    // both unreachable and a lie in the message.
+    | { Kind = ExprKind.ExprBinOp (_, (OpApply | OpBind | OpParallel | OpFusion | OpArrayProd | OpFunctor | OpChoice | OpComposeObj | OpComposeMeth | OpCompose | OpCons), _, _) } ->
+        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); loop-object combinator operators (`<@>`, `>>=`, `<&>`, `<&!>`, `<*>`, `<$>`, `<|>`, `>>@`, `@>>`, `>>`, `::`) are not differentiable"
     | { Kind = ExprKind.ExprBinOp (_, _, l, r) } ->
         walkExpr fname ctx onVar inKernel l |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel r)
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) } ->
@@ -1571,107 +1834,6 @@ let private asKernelLambda (ctx: Ctx) (k: Expr)
             None)
     | _ -> Error KernUnsupported
 
-/// Capture-avoiding substitution for fusion ONLY: `name := repl` over a
-/// kernel body.
-///
-/// Unlike `substVar` (whose catch-all silently returns the node unchanged)
-/// this one's catch-all is `None` -- DECLINE. A form it does not know about
-/// might contain a live occurrence of `name`, and quietly leaving that
-/// occurrence behind is how a fusion turns into a wrong answer (or, more
-/// often, a baffling BL2001 far from here). Forms that BIND names
-/// (`ExprLambda` that does not shadow, `let`, blocks, matches, `for`,
-/// recursive arrays) also decline: `repl` is a whole kernel body carrying
-/// free captures, and proving those survive a binder is not worth it for
-/// shapes no kernel actually uses.
-let rec private substKern (name: string) (repl: Expr) (e: Expr) : Expr option =
-    let s = substKern name repl
-    let re k = Some (inheritSpan e k)
-    let s1 mk a = s a |> Option.bind (fun a' -> re (mk a'))
-    let s2 mk a b =
-        match s a, s b with
-        | Some a', Some b' -> re (mk a' b')
-        | _ -> None
-    let sList (xs: Expr list) =
-        xs |> List.fold (fun acc x ->
-            acc |> Option.bind (fun ys -> s x |> Option.map (fun y -> ys @ [y]))) (Some [])
-    let sOpt (x: Expr option) =
-        match x with
-        | None -> Some None
-        | Some a -> s a |> Option.map Some
-    match e.Kind with
-    | ExprKind.ExprVar n when n = name -> Some repl
-    // leaves: nothing to rewrite, nothing to miss
-    | ExprKind.ExprVar _ | ExprKind.ExprLit _ | ExprKind.ExprWildcard
-    | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
-    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _
-    | ExprKind.ExprArity _ -> Some e
-    | ExprKind.ExprBinOp (m, op, l, r) -> s2 (fun a b -> ExprBinOp (m, op, a, b)) l r
-    | ExprKind.ExprUnaryOp (op, i) -> s1 (fun a -> ExprUnaryOp (op, a)) i
-    | ExprKind.ExprApp (f, args) ->
-        match s f, sList args with
-        | Some f', Some args' -> re (ExprApp (f', args'))
-        | _ -> None
-    | ExprKind.ExprTupleIndex (t, i) -> s2 (fun a b -> ExprTupleIndex (a, b)) t i
-    | ExprKind.ExprField (x, f) -> s1 (fun a -> ExprField (a, f)) x
-    | ExprKind.ExprIf (c, t, f) ->
-        match s c, s t, s f with
-        | Some c', Some t', Some f' -> re (ExprIf (c', t', f'))
-        | _ -> None
-    | ExprKind.ExprTuple es -> sList es |> Option.bind (fun es' -> re (ExprTuple es'))
-    | ExprKind.ExprArrayLit es -> sList es |> Option.bind (fun es' -> re (ExprArrayLit es'))
-    | ExprKind.ExprMethodFor ops -> sList ops |> Option.bind (fun o -> re (ExprMethodFor o))
-    | ExprKind.ExprObjectFor k -> s1 (fun a -> ExprObjectFor a) k
-    | ExprKind.ExprDotDot (l, h) -> s2 (fun a b -> ExprDotDot (a, b)) l h
-    | ExprKind.ExprBlocked (t, x) -> s1 (fun a -> ExprBlocked (t, a)) x
-    | ExprKind.ExprHalo (t, offs) -> s1 (fun a -> ExprHalo (t, a)) offs
-    | ExprKind.ExprZip es -> sList es |> Option.bind (fun es' -> re (ExprZip es'))
-    | ExprKind.ExprAlign (es, spec) -> sList es |> Option.bind (fun es' -> re (ExprAlign (es', spec)))
-    | ExprKind.ExprStack es -> sList es |> Option.bind (fun es' -> re (ExprStack es'))
-    | ExprKind.ExprJoin (es, d) -> sList es |> Option.bind (fun es' -> re (ExprJoin (es', d)))
-    | ExprKind.ExprSequence es -> sList es |> Option.bind (fun es' -> re (ExprSequence es'))
-    | ExprKind.ExprGroupKeys es -> sList es |> Option.bind (fun es' -> re (ExprGroupKeys es'))
-    | ExprKind.ExprPure i -> s1 (fun a -> ExprPure a) i
-    | ExprKind.ExprCompute i -> s1 (fun a -> ExprCompute a) i
-    | ExprKind.ExprRead i -> s1 (fun a -> ExprRead a) i
-    | ExprKind.ExprGuard (c, b) -> s2 (fun a b2 -> ExprGuard (a, b2)) c b
-    | ExprKind.ExprReplicate (c, b) -> s2 (fun a b2 -> ExprReplicate (a, b2)) c b
-    | ExprKind.ExprReynolds (k, anti) -> s1 (fun a -> ExprReynolds (a, anti)) k
-    | ExprKind.ExprTyped (i, t) -> s1 (fun a -> ExprTyped (a, t)) i
-    | ExprKind.ExprRank i -> s1 (fun a -> ExprRank a) i
-    | ExprKind.ExprMask (a, p) -> s2 (fun x y -> ExprMask (x, y)) a p
-    | ExprKind.ExprCompound (d, m) -> s2 (fun x y -> ExprCompound (x, y)) d m
-    | ExprKind.ExprSparse (vs, ks) -> s2 (fun x y -> ExprSparse (x, y)) vs ks
-    | ExprKind.ExprIntersect (a, b) -> s2 (fun x y -> ExprIntersect (x, y)) a b
-    | ExprKind.ExprUnion (a, b) -> s2 (fun x y -> ExprUnion (x, y)) a b
-    | ExprKind.ExprUnique a -> s1 (fun x -> ExprUnique x) a
-    | ExprKind.ExprContains (a, x) -> s2 (fun p q -> ExprContains (p, q)) a x
-    | ExprKind.ExprGroupBy (vs, g) -> s2 (fun x y -> ExprGroupBy (x, y)) vs g
-    | ExprKind.ExprGroupBucket g -> s1 (fun x -> ExprGroupBucket x) g
-    | ExprKind.ExprSort (a, k) -> s2 (fun x y -> ExprSort (x, y)) a k
-    | ExprKind.ExprReduce (a, k, init, axes) ->
-        match s a, s k, sOpt init, sOpt axes with
-        | Some a', Some k', Some i', Some x' -> re (ExprReduce (a', k', i', x'))
-        | _ -> None
-    | ExprKind.ExprTranspose (a, d1, d2) -> s1 (fun x -> ExprTranspose (x, d1, d2)) a
-    | ExprKind.ExprDecompact (a, d) -> s1 (fun x -> ExprDecompact (x, d)) a
-    | ExprKind.ExprGram (l, r) -> s2 (fun x y -> ExprGram (x, y)) l r
-    | ExprKind.ExprExtents a -> s1 (fun x -> ExprExtents x) a
-    | ExprKind.ExprPartialApp (op, x, isLeft) -> s1 (fun a -> ExprPartialApp (op, a, isLeft)) x
-    | ExprKind.ExprAssign (l, r) -> s2 (fun x y -> ExprAssign (x, y)) l r
-    | ExprKind.ExprStatic i -> s1 (fun a -> ExprStatic a) i
-    | ExprKind.ExprStruct (n, fields, spread) ->
-        let fs =
-            fields |> List.fold (fun acc (fn, fv) ->
-                acc |> Option.bind (fun ys -> s fv |> Option.map (fun y -> ys @ [(fn, y)]))) (Some [])
-        match fs, sOpt spread with
-        | Some fs', Some sp' -> re (ExprStruct (n, fs', sp'))
-        | _ -> None
-    // a lambda that SHADOWS the name is already correct as written
-    | ExprKind.ExprLambda (ps, _, _) when ps |> List.exists (fun p -> p.Name = name) -> Some e
-    // everything else -- binders, blocks, matches, loop forms, and anything
-    // added to the grammar after this was written -- declines.
-    | _ -> None
-
 /// Rename every PARAMETER reference a where-clause carries. Fusion
 /// alpha-renames stage 1's params, so every clause that names them must
 /// follow: `comm`/`anticomm` groups, `omp(x: n)` variable lists, and the
@@ -2124,101 +2286,6 @@ let rec private rewriteGroupConsumption (mName: string) (repl: Expr)
     | ExprKind.ExprArrayLit es -> re (ExprArrayLit (es |> List.map rc))
     | ExprKind.ExprReduce (src, sec, initOpt, ax) -> re (ExprReduce (rc src, sec, initOpt, ax))
     | _ -> e
-
-/// Does any of `names` occur anywhere in `e`? EXHAUSTIVE over the grammar,
-/// on purpose: `mentionsAnyOf` answers TRUE for every node it has no arm for,
-/// which would make the residual check below refuse any body that so much as
-/// contains a `group_keys` call. Shadowing is ignored -- the names asked
-/// about are the peel's own bindings, so a false positive costs a refusal
-/// while a missed use would leave a name dangling, which typecheck says
-/// loudly. Anything genuinely leaf-shaped answers false, listed by name so a
-/// new grammar node shows up as an incomplete-match warning instead of
-/// silently defaulting either way.
-let rec private mentionsDeep (names: Set<string>) (e: Expr) : bool =
-    let m = mentionsDeep names
-    let any = List.exists m
-    let opt o = match o with Some x -> m x | None -> false
-    match e.Kind with
-    | ExprKind.ExprVar n -> Set.contains n names
-    | ExprKind.ExprBinOp (_, _, l, r) -> m l || m r
-    | ExprKind.ExprUnaryOp (_, i) -> m i
-    | ExprKind.ExprApp (f, args) -> m f || any args
-    | ExprKind.ExprTupleIndex (t, i) -> m t || m i
-    | ExprKind.ExprField (t, _) -> m t
-    | ExprKind.ExprLambda (ps, _, b) -> (ps |> List.exists (fun p -> opt p.Default)) || m b
-    | ExprKind.ExprLet (bnd, b) -> m bnd.Value || m b
-    | ExprKind.ExprMatch (s, cases) ->
-        m s || (cases |> List.exists (fun c -> opt c.Guard || m c.Body))
-    | ExprKind.ExprIf (c, t, f) -> m c || m t || m f
-    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprStack es
-    | ExprKind.ExprSequence es | ExprKind.ExprZip es | ExprKind.ExprMethodFor es
-    | ExprKind.ExprGroupKeys es -> any es
-    | ExprKind.ExprAlign (es, _) | ExprKind.ExprJoin (es, _) -> any es
-    | ExprKind.ExprBlock (ss, fe) -> (ss |> List.exists (stmtMentionsDeep names)) || opt fe
-    | ExprKind.ExprObjectFor k -> m k
-    | ExprKind.ExprDotDot (l, h) -> m l || m h
-    | ExprKind.ExprBlocked (_, b) -> m b
-    | ExprKind.ExprHalo (_, o) -> m o
-    | ExprKind.ExprPure i | ExprKind.ExprCompute i | ExprKind.ExprRead i
-    | ExprKind.ExprRank i | ExprKind.ExprUnique i | ExprKind.ExprGroupBucket i
-    | ExprKind.ExprExtents i | ExprKind.ExprStatic i | ExprKind.ExprTyped (i, _)
-    | ExprKind.ExprTranspose (i, _, _) | ExprKind.ExprDecompact (i, _)
-    | ExprKind.ExprPartialApp (_, i, _) | ExprKind.ExprReynolds (i, _) -> m i
-    | ExprKind.ExprGuard (l, r) | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
-    | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r)
-    | ExprKind.ExprIntersect (l, r) | ExprKind.ExprUnion (l, r)
-    | ExprKind.ExprContains (l, r) | ExprKind.ExprGroupBy (l, r)
-    | ExprKind.ExprSort (l, r) | ExprKind.ExprGram (l, r)
-    | ExprKind.ExprAssign (l, r) -> m l || m r
-    | ExprKind.ExprReduce (a, k, i, ax) -> m a || m k || opt i || opt ax
-    | ExprKind.ExprStruct (_, fields, spread) ->
-        (fields |> List.exists (fun (_, fe) -> m fe)) || opt spread
-    | ExprKind.ExprFor (src, _, k) ->
-        (match src with
-         | ForArrays (es, inc) -> any es || opt inc
-         | ForKernel k2 -> m k2)
-        || opt k
-    | ExprKind.ExprRecArray d ->
-        m d.SliceExpr || (match d.SeedArm with Some (_, se) -> m se | None -> false)
-    | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprQualified _
-    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprArity _
-    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _ -> false
-
-and private stmtMentionsDeep (names: Set<string>) (s: Stmt) : bool =
-    match s with
-    | StmtSpanned (inner, _) -> stmtMentionsDeep names inner
-    | StmtLet b -> mentionsDeep names b.Value
-    | StmtExpr ex -> mentionsDeep names ex
-    | StmtAssign (l, _, r) -> mentionsDeep names l || mentionsDeep names r
-    | StmtForIn (_, r, body) ->
-        mentionsDeep names r || (body |> List.exists (stmtMentionsDeep names))
-
-/// Substitute `pname := repl` into a KERNEL-SHAPED body -- either a kernel
-/// parameter meeting its indexed read (the map rule) or a callee parameter
-/// meeting its argument (the kernel-body call rule) -- refusing rather than
-/// half-substituting.
-///
-/// `substKern` is the substitution: its catch-all DECLINES, so it never
-/// leaves a live occurrence behind and never crosses a binder it cannot
-/// prove safe, which is exactly the alpha-safety both callers need. A
-/// decline is only interesting when the name actually occurs, though, and
-/// `mentionsDeep` (exhaustive over the grammar, shadowing ignored) decides
-/// that: a body that never mentions the parameter passes through untouched,
-/// so a kernel whose body merely CONTAINS an unrelated inner lambda is not
-/// refused for it.
-///
-/// The predecessor here was `substVar`, whose catch-all silently returns the
-/// node unchanged -- which meant a parameter used inside a `reduce`, an
-/// `extents`, or any other form it lacked an arm for was left dangling in
-/// the emitted tangent lambda, surfacing as an unbound-name type error far
-/// from the cause. Refusing by name is the whole improvement.
-let private substParam (fname: string) (pname: string) (repl: Expr) (body: Expr) : Result<Expr, string> =
-    if not (mentionsDeep (Set.singleton pname) body) then Ok body
-    else
-        match substKern pname repl body with
-        | Some b -> Ok b
-        | None ->
-            err fname (sprintf "cannot substitute '%s' into the kernel body: a binder or an unsupported form stands between the parameter and its use, so the substitution cannot be proved capture-free" pname)
 
 // ---------------------------------------------------------------------------
 // Route A: unrolling an arity-polymorphic pack kernel at the AD apply site
@@ -5047,7 +5114,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         if requestsOrdered.Count = 0 then Ok decls'
         else
             let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = moduleVals
-                        ModuleLoopVals = moduleLoopVals; ModuleLetTys = moduleLetTys; Fresh = 0 }
+                        ModuleLoopVals = moduleLoopVals; ModuleLetTys = moduleLetTys; Fresh = ref 0 }
             // Synthesize in DISCOVERY order against a GROWING decl map:
             // inner requests precede the outer requests that consume them,
             // so by the time `ad.jvp(ad.grad(f))` synthesizes the outer
@@ -5157,7 +5224,7 @@ let fuseProgram (program: Program) : Program =
                 | _ -> [])
             |> Map.ofList
         let ctx = { Decls = funcDecls; TypeAliases = typeAliases; ModuleVals = Set.empty
-                    ModuleLoopVals = Map.empty; ModuleLetTys = Map.empty; Fresh = 0 }
+                    ModuleLoopVals = Map.empty; ModuleLetTys = Map.empty; Fresh = ref 0 }
         // Module bindings accumulate in DECLARATION ORDER: a body may only
         // resolve through names bound before it, which is the language's own
         // visibility rule. Resolving a later binding into an earlier body

@@ -1,0 +1,32 @@
+// TEST: C7 Sort Reverse Under A Descending Key
+// The reverse twin of 086. The inverse permutation is a second sort of the
+// same index array keyed on the permutation's values, so it inherits whatever
+// the permutation got right -- which means an argsort that ignored the user's
+// key produced a plausible, wrong, fully self-consistent gradient.
+//
+// a = [3.0, 1.0, 4.0, 1.5, 2.0], key = -x, sorted [4, 3, 2, 1.5, 1].
+// a(0)=3 -> slot 1 (w2), a(1)=1 -> slot 4 (w5), a(2)=4 -> slot 0 (w1),
+// a(3)=1.5 -> slot 3 (w4), a(4)=2 -> slot 2 (w3).
+// da = [2, 5, 1, 4, 3]   (the ascending-perm bug gave [4, 1, 5, 2, 3])
+import ad as ad
+
+type I = Idx<5>
+
+function f(a: Array<Float like I>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> 0.0 - x)
+    s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
+}
+
+let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
+let gv = ad.grad(f)([3.0, 1.0, 4.0, 1.5, 2.0], da)
+// EXPECT: gv = 27
+// EXPECT: da = [2, 5, 1, 4, 3]
+
+// The differential gate: the reverse gradient contracted with a seed must
+// equal the forward tangent along it, exactly.
+let (jv, jt) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
+let dirderiv = da(0) * 0.1 + da(1) * (-0.2) + da(2) * 0.3 + da(3) * 0.05 + da(4) * (-0.15)
+let resid = jt - dirderiv
+// EXPECT: jv = 27
+// EXPECT: jt = -0.75
+// EXPECT: resid = 0

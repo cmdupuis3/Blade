@@ -1,0 +1,20 @@
+// TEST: C7 Sort Key May Not Close Over A Differentiable SCALAR (rejects)
+// 038 pins the array case. The closure check used to look only at rank-1
+// arrays carrying a declared index type, so a key closing over a plain Float
+// parameter slipped through and compiled to a permutation the derivative
+// treats as constant -- here `c = -1` makes the key descending, and the
+// tangent came back 0 where the truth is 2. The check now names EVERY
+// parameter and local in scope.
+// ERROR: BL5501
+// ERROR-CONTAINS: key that reads ONLY the sorted element
+import ad as ad
+
+type I = Idx<3>
+
+function g(a: Array<Float like I>, c: Float) -> Float = {
+    let s = sort(a, lambda(x: Float) -> x * c)
+    s(0) * 2.0
+}
+
+let (v, t) = ad.jvp(g)([3.0, 1.0, 2.0], -1.0, [1.0, 0.0, 0.0], 0.0)
+v
