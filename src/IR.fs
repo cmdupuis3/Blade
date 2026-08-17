@@ -6841,6 +6841,38 @@ let liftChildIncludingLoopApp (builder: IRBuilder) (child: IRExpr) : (IRId * IRT
         let (b, e) = liftChild builder inner
         (peeled @ b, e)
 
+/// `liftChildIncludingLoopApp`, plus the still-DEFERRED combinator forms.
+///
+/// Used only for `prodsum`'s operand slots, and for the reason that makes them
+/// different from every other consuming position: the fused IIFE subscripts each
+/// operand BY NAME (`__ps += a[__pt] * e[__pt]`), so an operand has to be a
+/// binding, never an expression. A bare `sin <@> a` sitting there is genuinely
+/// deferred -- it has no materialized value and no name -- and `exprToCpp`
+/// answers with the UNEVALUATED_COMPUTATION_USED_AS_VALUE sentinel, which is a
+/// diagnostic STRING spliced straight into the subscript position. That is the
+/// one thing the by-name rule may never do: force it or fuse it, never splice.
+///
+/// Hoisting is the force. Minting `let __vN = <combinator>` puts the operand on
+/// exactly the road a hand-written intermediate `let` takes, and the existing
+/// deferred-forcing machinery finishes the job from there -- module level via
+/// `ctx.DeferredComputations` + `collectDeferredPositionalReads` (whose IRProdSum
+/// arm already notes every operand), function-body level via `forcedDeferredIds`,
+/// which is seeded from the same collector. The RHS is carried over UNCHANGED
+/// rather than wrapped in `IRCompute`: a wrap would only be recognised for the
+/// IRApplyCombinator half (`isInlineForm`), leaving `IRComposeApply` -- a
+/// `>>@`-composed pipeline applied with `<@>` -- to splice the sentinel exactly
+/// as before, which it did even when the user wrote `|> compute` themselves.
+let liftDeferredOperand (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    match inner with
+    | IRApplyCombinator _ | IRComposeApply _
+    | IRCompute (IRApplyCombinator _) | IRCompute (IRComposeApply _) ->
+        let id = builder.FreshId()
+        let ty = typeOf inner
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    | _ ->
+        let (b, e) = liftChildIncludingLoopApp builder inner
+        (peeled @ b, e)
 /// Lift an ARGUMENT of a synthesized elementwise loop application
 /// (`IRApp(IRObjectFor ..., args)`, what an array/scalar broadcast `x - s`
 /// lowers to). Its emitter -- `genObjectForApplication` -- spells each operand
@@ -7007,11 +7039,14 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         IRReduceCompute (liftExpr builder comp, liftExpr builder kernel, liftExpr builder seed)
     | IRProdSum args ->
         // Every operand slot can hold an inline form; lift each so codegen
-        // reads .extents off named bindings.
+        // reads .extents off named bindings. `liftDeferredOperand`, not
+        // `liftChildIncludingLoopApp`: the fused IIFE reads EVERY operand by
+        // name, so a still-deferred combinator has to be hoisted too (see its
+        // doc -- the alternative is the sentinel spliced into the subscript).
         let (allBinds, finals) =
             args |> List.fold (fun (bs, fs) a ->
                 let a' = liftExpr builder a
-                let (b, aFinal) = liftChildIncludingLoopApp builder a'
+                let (b, aFinal) = liftDeferredOperand builder a'
                 (bs @ b, fs @ [aFinal])) ([], [])
         wrapLets allBinds (IRProdSum finals)
     | IRExtent (arr, dim) ->

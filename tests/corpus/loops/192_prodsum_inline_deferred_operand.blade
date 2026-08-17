@@ -1,0 +1,56 @@
+// TEST: Prodsum Inline Deferred Operand
+// ============================================================================
+// loops/117 closed the by-name-read hole for a prodsum operand that is a
+// deferred LET (`let e = exp <@> a` ... `prodsum(a, e)`). The operand written
+// INLINE (`prodsum(a, exp <@> a)`) had no let to force, and nothing minted one:
+// the fused IIFE renders every operand by name, so the combinator reached
+// `exprToCpp` in a subscript position and the whole program was REFUSED,
+//     error[BL7004]: unevaluated computation used as value - use |> compute
+// telling the user to write a `|> compute` that does not help -- see the
+// composed case below, where writing it changed nothing.
+//
+// The rule is 117's, and a by-name read has two honest answers: force the
+// producer or fuse it. Refusing is neither, when the let-bound spelling of the
+// identical expression compiles. The lift pass now hoists such an operand to
+// its own let, which is precisely what writing that intermediate binding by
+// hand already did, and the existing forcing machinery finishes it at both
+// seams (module level via `collectDeferredPositionalReads`, function bodies
+// via `forcedDeferredIds`).
+//
+// `>>@`-composed pipelines are pinned alongside the plain `<@>` apply because
+// they were WORSE: an IRComposeApply operand was refused even with an explicit
+// `|> compute` on it, so NO source-level spelling of the inline form worked.
+// (`prodsum(a, (p <@> a) |> compute)` compiles on its own today; it is the
+// bare `prodsum(a, p <@> a)` that this fix reaches.)
+//
+// Each inline spelling is pinned against the let-bound spelling of the SAME
+// expression, so the two roads must agree as well as be correct. The exp values
+// are 117's number (sum x*e^x over [1, 2, 3]); the composed stages are affine
+// on purpose, so `twice(x) = 2x + 1` and the pin is the exact integer
+// 1*3 + 2*5 + 3*7 = 34 rather than a 15-digit transcendental.
+// ============================================================================
+type X = Idx<3>
+
+let a: Array<Float64 like X> = [1.0, 2.0, 3.0]
+
+// Module level: inline apply, and the let-bound twin 117 already covers.
+let at_module = prodsum(a, exp <@> a)
+let e_named = exp <@> a
+let at_module_named = prodsum(a, e_named)
+
+// Function body: the second forcing seam.
+function g(v: Array<Float like X>) -> Float = prodsum(v, exp <@> v)
+let in_function = g(a)
+
+// A composed pipeline applied inline -- IRComposeApply, not IRApplyCombinator.
+let twice = object_for(lambda(x) -> x * 2.0) >>@ object_for(lambda(x) -> x + 1.0)
+let composed = prodsum(a, twice <@> a)
+let t_named = (twice <@> a) |> compute
+let composed_named = prodsum(a, t_named)
+
+// EXPECT: at_module = 77.7530047958834
+// EXPECT: at_module_named = 77.7530047958834
+// EXPECT: in_function = 77.7530047958834
+// EXPECT: t_named = [3, 5, 7]
+// EXPECT: composed = 34
+// EXPECT: composed_named = 34

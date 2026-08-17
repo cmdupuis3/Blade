@@ -1,0 +1,42 @@
+// TEST: Row View Pair Elementwise
+// ============================================================================
+// A COMPANION pin to 133, not a restatement of it. 133 established that the
+// residual of dimensional currying over a loop-built grid survives every
+// consuming position it lists -- direct call argument, let-then-call, and map
+// operand -- each of which reads ONE row view. 181 adds the kernel-body row
+// view as a broadcast operand, again one row.
+//
+// TWO row views in an elementwise binop take a different emitter: the
+// flat-elementwise fast path, which collapses the nest to one loop over the
+// backing pools and hoists `pool_base(<name>.data)` per operand. That hoist
+// spells BOTH members the raw `promote<T, 1>::type` row pointer lacks, so it
+// is the strictest consumer of the wrapper 133's fix installs -- and the one
+// that fails loudest when a row is bound bare:
+//
+//     error: request for member 'data' in '__v36',
+//            which is of non-class type 'double*'
+//
+// Both binding sites are covered, because they are separately emitted: the
+// MODULE-level let (`pair0`), and the FUNCTION-BODY let a kernel body unrolls
+// to (`paired`, whose row indices are computed rather than literal -- the
+// spelling a literal index cannot reach).
+//
+// Values: g(r, c) = 10r + c, so g(0) + g(1) = [10, 12, 14] and row j of
+// `paired` is g(2j) + g(2j+1) = [40j + 10, 40j + 12, 40j + 14].
+//
+// Extents are deliberately UNTAGGED (`Idx<6>` inline, not a named alias): a
+// literal row subscript against a tagged slot is a BL4003 suggestion, and this
+// test is about the peel, not about tag flow.
+// ============================================================================
+let g = (method_for(range<Idx<6>>) <@> lambda(r) ->
+          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r * 10.0 + 1.0 * c)) |> compute
+
+// Module-level binding site, literal indices.
+let pair0 = (g(0) + g(1)) |> compute
+
+// Function-body binding site, COMPUTED indices.
+let paired = (method_for(range<Idx<3>>) <@> lambda(j) -> (g(2 * j) + g(2 * j + 1))) |> compute
+
+// EXPECT: g = [[0, 1, 2], [10, 11, 12], [20, 21, 22], [30, 31, 32], [40, 41, 42], [50, 51, 52]]
+// EXPECT: pair0 = [10, 12, 14]
+// EXPECT: paired = [[10, 12, 14], [50, 52, 54], [90, 92, 94]]
