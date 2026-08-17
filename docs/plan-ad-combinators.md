@@ -1177,16 +1177,25 @@ index cells, and a fiber is not a cell.
 kernel-body path to build. No new refusal was added for it; the existing
 combinator-operator message is the wall.
 
-**Known wall, NOT an AD gap.** A tangent whose primal factors contain a
-same-module call *over a fiber* — `mean((x - mean(x)) * (y - mean(y)))`, i.e.
-`mean` nested inside array-arithmetic rather than wrapping the whole body —
-produces a correct AST that the EMITTER cannot render: an inline row view in an
-elementwise-map operand position emits an undeclared `arr0`. It reproduces with
-no `ad` in the program at all (`method_for(range<R>) <@> lambda(i) -> reduce((a(i)
-- mean(a(i))) * (a(i) - mean(a(i))), (+))`), so it belongs to the loop-form
-"blessed position" gap, not here. The workaround is the shape corpus test 071
-pins: fold the helper's internals into one expression-bodied helper over the
-fibers.
+**The former wall, and it was never an AD gap (fixed 2026-08-16).** A tangent
+whose primal factors contain a same-module call *over a fiber* —
+`mean((x - mean(x)) * (y - mean(y)))`, i.e. `mean` nested inside
+array-arithmetic rather than wrapping the whole body — produced a correct AST
+that the EMITTER could not render: an inline row view in an elementwise-map
+operand position emitted an undeclared `arr0`. It reproduced with no `ad` in the
+program at all (`method_for(range<R>) <@> lambda(i) -> reduce((a(i) - mean(a(i)))
+* (a(i) - mean(a(i))), (+))`, now `tests/corpus/loops/176`), so it belonged to
+the loop-form "blessed position" gap and was fixed there.
+
+The cause was one slot away from where the family had been patched before. An
+array/scalar broadcast lowers to `IRApp(IRObjectFor ..., [row])` — a synthesized
+loop APPLICATION, not one of the three `Arrays` lists — and its emitter names
+operands by the same `IRVar`-lookup-else-`arr<i>` rule with no auto-materialize
+arm at all. `liftLoopAppOperand` gives those argument slots the loop-form
+hoisting rule. Corpus test 085 is the nested-helper covariance kernel, pinned to
+071's digits: factoring `mean` out of `covariance` must not move one. The 071
+shape — fold the helper's internals into a single expression-bodied helper over
+the fibers — is no longer a workaround, just the other spelling.
 
 ### 2.19b Shipped (2026-08-16): Route A, the surface unroller
 
