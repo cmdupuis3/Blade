@@ -1,0 +1,66 @@
+// TEST: A Rec-Array Prefix Read Under An If Is Still A Prefix Read
+// `expandRecArray` asks `hasPrefix` whether a slice reads the recursion's own
+// prefix. That predicate ran on a hand-rolled walker over "the arithmetic +
+// array-read fragment" whose catch-all answered FALSE -- and the fragment had
+// no `ExprIf` arm. A slice whose ONLY prefix read sat inside a branch was
+// therefore classified prefix-FREE. In the plain case that produced a
+// wrong-shaped refusal ("cannot differentiate through 'prefix'"); with a prefix
+// pattern variable that SHADOWS an array in scope it was worse -- the emitted
+// slice read that other array, and the program ran with a silently wrong value.
+// The predicate is now the exhaustive walker.
+//
+// f: s(0) = c; s(n) = if n > 2 then s(n-1)*0.5 else c.
+// At c = 2: s = [2, 2, 2, 1], sum = 7; ds = [1, 1, 1, 0.5], sum = 3.5.
+import ad as ad
+
+type S = Idx<4>
+
+function f(c: Float) -> Float = {
+    let rec s: Array<Float like S> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: c
+        | prefix :: n -> prefix :: (if n > 2 then prefix(n - 1) * 0.5 else c)
+    reduce(s, (+))
+}
+
+let (fv, ft) = ad.jvp(f)(2.0, 1.0)
+// EXPECT: fv = 7
+// EXPECT: ft = 3.5
+
+// The same recurrence with the prefix pattern variable named `w`, which is
+// also an array PARAMETER. `w` inside the slice is the recursion's prefix --
+// the pattern binds it -- so the answer must be f's, not a read of the
+// parameter. Misclassified, this printed 21 (0.5 * w(2) = 15 in the last slot).
+function g(w: Array<Float like S>, c: Float) -> Float = {
+    let rec s: Array<Float like S> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: c
+        | w :: n -> w :: (if n > 2 then w(n - 1) * 0.5 else c)
+    reduce(s, (+))
+}
+
+let direct = g([10.0, 20.0, 30.0, 40.0], 2.0)
+let (gv, gt) = ad.jvp(g)([10.0, 20.0, 30.0, 40.0], 2.0, [0.0, 0.0, 0.0, 0.0], 1.0)
+// EXPECT: direct = 7
+// EXPECT: gv = 7
+// EXPECT: gt = 3.5
+
+// Control: the prefix read is OUTSIDE the branch (the fragment walker saw it
+// through the BinOp), so this always worked. Pinned so the widened predicate
+// is shown not to have changed it.
+// h: s(0) = c; s(n) = s(n-1)*0.5 + (if n > 2 then c else 0).
+// At c = 2: s = [2, 1, 0.5, 2.25], sum = 5.75; ds sums to 2.875.
+function h(c: Float) -> Float = {
+    let rec s: Array<Float like S> =
+        match s with
+        | zero -> zero
+        | zero :: n -> zero :: c
+        | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + (if n > 2 then c else 0.0)
+    reduce(s, (+))
+}
+
+let (hv, ht) = ad.jvp(h)(2.0, 1.0)
+// EXPECT: hv = 5.75
+// EXPECT: ht = 2.875

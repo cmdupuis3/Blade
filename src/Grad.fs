@@ -1511,17 +1511,19 @@ let private arrayLiteralExtents (t: TypeExpr) : (bool * int list) option =
         else None
     | _ -> None
 
-/// Does `e` reference the variable `name` anywhere (over the arithmetic +
-/// array-read fragment recursive-array slices live in)?
-let rec private mentionsVar (name: string) (e: Expr) : bool =
-    match e.Kind with
-    | ExprKind.ExprVar n -> n = name
-    | ExprKind.ExprLit _ -> false
-    | ExprKind.ExprTyped (inner, _) | ExprKind.ExprUnaryOp (_, inner) -> mentionsVar name inner
-    | ExprKind.ExprBinOp (_, _, l, r) | ExprKind.ExprDotDot (l, r) -> mentionsVar name l || mentionsVar name r
-    | ExprKind.ExprApp (f, args) -> mentionsVar name f || List.exists (mentionsVar name) args
-    | ExprKind.ExprArrayLit elems -> List.exists (mentionsVar name) elems
-    | _ -> false
+/// Does `e` reference the variable `name` anywhere?
+///
+/// `mentionsDeep`, specialized. It used to be its own walker over "the
+/// arithmetic + array-read fragment recursive-array slices live in", with a
+/// catch-all answering FALSE -- and the fragment was missing `ExprIf` and
+/// `ExprTuple`. That made `expandRecArray`'s `hasPrefix` blind to a prefix read
+/// under a branch: the slice was classified prefix-FREE, which produced a
+/// wrong-shaped refusal in the ordinary case and, when the prefix pattern
+/// variable shadowed an array in scope, emitted reads of that OTHER array --
+/// a silently wrong value. A missed reference here is never safe, so the
+/// answer comes from the exhaustive walker instead of a fragment.
+let private mentionsVar (name: string) (e: Expr) : bool =
+    mentionsDeep (Set.singleton name) e
 
 /// Substitute free references to `name` with the expression `repl` over the
 /// same fragment (used to bind a recurrence's step ordinal / prefix name).
