@@ -1,0 +1,42 @@
+// TEST: Bare Expr Sequence Matches Binding
+// ----------------------------------------------------------------------------
+// A bare top-level expression naming a `|> compute`d sequence printed
+// UNINITIALIZED MEMORY in every row after the first, while the SAME value
+// printed through its own `let` was correct.
+//
+// The bare-expression desugar was not the culprit. `s` on its own line becomes
+// `let __exprN = s` (Parser.fs), an ordinary assignable let -- and the explicitly
+// spelled `let s_alias = s` below was equally wrong. What differed was the
+// SOURCE. A sequence assembled its result by POINTER ALIASING (`out[k] = <name>_k`),
+// so the rows lived in the children's separate pools and the array was not the
+// single contiguous pool `pool_base` documents. The assignable-let deep copy
+// reads its source as `pool_base(src.data)` plus a total leaf COUNT, so it ran
+// off the end of child 0's pool and filled the trailing rows with whatever
+// followed in memory. `stack` has always copied into a dense pool, which is the
+// whole reason the two spellings disagreed on the same data; the sequence
+// emitter now copies the same way.
+//
+// So `t` below is a CONTROL, not a duplicate: it is the spelling that was
+// already right, and it pins the two against each other. The `__expr*` pins are
+// the regression itself. A relapse prints uninitialized memory, which is
+// nondeterministic rather than merely wrong, so it can only show up as a hard
+// mismatch here -- never as a plausible number.
+// ----------------------------------------------------------------------------
+let x = [1.0, 2.0]
+let y = [3.0, 4.0]
+
+let s = sequence(x, y) |> compute
+let t = stack(x, y)
+
+// The named-binding reads: correct before this fix and after it.
+let s_alias = s
+// EXPECT: s = [1.0, 2.0, 3.0, 4.0]
+// EXPECT: t = [1.0, 2.0, 3.0, 4.0]
+// EXPECT: s_alias = [1.0, 2.0, 3.0, 4.0]
+
+// The bare-expression reads, which is where the garbage surfaced. Each must
+// equal the binding it names, element for element.
+s
+t
+// EXPECT: __expr1 = [1.0, 2.0, 3.0, 4.0]
+// EXPECT: __expr2 = [1.0, 2.0, 3.0, 4.0]

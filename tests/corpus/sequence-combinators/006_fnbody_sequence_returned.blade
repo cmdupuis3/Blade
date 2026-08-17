@@ -12,12 +12,16 @@
 //     IRSequence arm was missed then because no IRSequence could be returned.
 //     It now uses the same `emitExtentsTable` helper.
 //
-//  2. STORAGE. Unlike every other form in the statement-shaped family, a
-//     sequence's result ALIASES its inputs instead of copying them -- the
-//     emitter assembles `<name>[i] = <name>_i`, which is why isFreshPoolForm
-//     refuses to call a sequence a fresh-pool barrier. Sparing only the
-//     returned name from the scope's frees would delete the children out from
-//     under the value that just escaped, so the per-child pools are spared too.
+//  2. STORAGE. A sequence's result USED TO alias its inputs instead of copying
+//     them -- the emitter assembled `<name>[i] = <name>_i` -- so sparing only
+//     the returned name from the scope's frees would have deleted the children
+//     out from under the value that just escaped, and the per-child pools were
+//     spared too. That aliasing was itself a bug (the result was not one
+//     contiguous pool, so every consumer reading it through `pool_base` walked
+//     off the end of child 0; see 007), and the emitter now copies into a dense
+//     pool of its own like `stack` does. The sparing still stands, because the
+//     outer pool is still not registered for freeing -- what this test pins is
+//     that the escaped value survives its frame whichever way that is resolved.
 //
 // A wrong answer to either shows up as garbage rows or a crash, never as an
 // arithmetic slip, so the pins below are load-bearing as shape assertions.

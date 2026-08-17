@@ -1754,18 +1754,21 @@ let buildGroupBy (idxTys: IRIndexType list) (gk: GroupKeysValue) (vals: BladeArr
       Data = SRagged (rows, lens, gk.Offsets) }
 
 // PRINT: byte-parity array binding printer (mirrors CodeGen genPrintStatements,
-// CodeGen.fs:9889): genPrintArrayFlat (ranks 1-4, else a rank-N placeholder)
-// or genPrintArraySymAware (symmetric ranks 2-8). Sym-aware, ragged, and
-// non-scalar-element paths raise ArrayOpUnsupported (gate SKIPs). Called by
-// Print.printBindings in place of its PrintUnsupported raise, appending to
-// the same StringBuilder (no timing line -- printBindings emits that once).
+// CodeGen.fs:9889): genPrintArrayFlat (rank 2 nested, every other rank flat)
+// or genPrintArraySymAware (symmetric; placeholder past rank 8). Sym-aware,
+// ragged, and non-scalar-element paths raise ArrayOpUnsupported (gate SKIPs).
+// Called by Print.printBindings in place of its PrintUnsupported raise,
+// appending to the same StringBuilder (no timing line -- printBindings emits
+// that once).
 //
 // Flat format (genPrintArrayFlat, verified against the compiled binary):
-//   rank 1-3 :  name = [c0, c1, c2, ...]\n     (row-major, ", " between cells)
-//   rank 4   :  name (E0xE1xE2xE3):\n
-//               ..name[i][j] = [ ... ]\n        (one line per (i,j); 2-space lead)
-//   rank 5+  :  name = <rank-N array>\n
+//   rank 2   :  name = [[a, b], [c, d]]\n      (nested, round-trips as source)
+//   other    :  name = [c0, c1, c2, ...]\n     (row-major, ", " between cells,
+//                                              EVERY rank >= 1 except 2)
 //   rank 0   :  name = <rank-0>\n
+// (The rank-4 grid and rank-5+ `<rank-N array>` dense formats are retired:
+// rank-3 already printed flat, and neither of those two emitted a line the
+// EXPECT harness could parse as a value.)
 // Each cell renders as `cout << name[...]` would for the element's C++ static
 // type (formatFloat15 for Float64, etc).
 
@@ -1860,10 +1863,11 @@ let private emitNested2 (sb: StringBuilder) (name: string) (arr: BladeArray) (et
         i <- i + 1L
     sb.Append("]").Append('\n') |> ignore
 
-/// Ranks 1 and 3: `name = [c0, c1, ...]` row-major, ", "-separated, `]`, newline.
-/// (Rank 2 goes through emitNested2 -- see its twin's note on why only that
-/// rank nests.)
-let private emitFlat123 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType) : unit =
+/// Every rank except 2: `name = [c0, c1, ...]` row-major, ", "-separated, `]`,
+/// newline. Rank 2 goes through emitNested2 -- see its twin's note on why only
+/// that rank nests. The twin of CodeGen.genPrintArrayFlat, byte-identical for
+/// any rank (the coord walk is rank-generic).
+let private emitFlat (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType) : unit =
     if arr.Extents.Length = 2 then
         emitNested2 sb name arr et arr.Extents.[0] (fun _ -> arr.Extents.[1])
     else
@@ -1874,34 +1878,6 @@ let private emitFlat123 (sb: StringBuilder) (name: string) (arr: BladeArray) (et
         first <- false
         sb.Append(formatCell et (readCell arr coords)) |> ignore)
     sb.Append("]").Append('\n') |> ignore
-
-/// Rank 4: a header line then one `  name[i][j] = [ ... ]` line per outer pair.
-let private emitRank4 (sb: StringBuilder) (name: string) (arr: BladeArray) (et: ElemType) : unit =
-    let e = arr.Extents
-    sb.Append(name).Append(" (")
-      .Append(string e.[0]).Append('x').Append(string e.[1]).Append('x')
-      .Append(string e.[2]).Append('x').Append(string e.[3]).Append("):").Append('\n')
-    |> ignore
-    let mutable i = 0L
-    while i < e.[0] do
-        let mutable j = 0L
-        while j < e.[1] do
-            sb.Append("  ").Append(name).Append('[').Append(string i).Append("][")
-              .Append(string j).Append("] = [")
-            |> ignore
-            let mutable first = true
-            let mutable k = 0L
-            while k < e.[2] do
-                let mutable l = 0L
-                while l < e.[3] do
-                    if not first then sb.Append(", ") |> ignore
-                    first <- false
-                    sb.Append(formatCell et (readCell arr [ i; j; k; l ])) |> ignore
-                    l <- l + 1L
-                k <- k + 1L
-            sb.Append("]").Append('\n') |> ignore
-            j <- j + 1L
-        i <- i + 1L
 
 /// Symmetric-aware print: mirrors CodeGen.genPrintArraySymAware (CodeGen.fs:9791)
 /// exactly. Iterates the compact (triangular/strict-triangular) index space in
@@ -2020,16 +1996,15 @@ let printArrayBinding (b: IRBinding) (arr: BladeArray) (sb: StringBuilder) : uni
                         if k > 0 then sb.Append(", ") |> ignore
                         sb.Append(formatCell et (readCell arr [ int64 k ])) |> ignore
                     sb.Append("]").Append('\n') |> ignore
-                elif hasSymmetry arrType.IndexTypes && rank >= 2 && rank <= 8 then
+                // Every symmetric rank routes to emitSymAware, whose internal
+                // guard prints the `<rank-N array>` placeholder past rank 8;
+                // emitFlat dense-walks EVERY rank and would misread compact
+                // storage. Same routing as CodeGen genPrintStatements.
+                elif hasSymmetry arrType.IndexTypes && rank >= 2 then
                     emitSymAware sb b.Name arr et
                 elif rank < 1 then
                     sb.Append(b.Name).Append(" = <rank-0>").Append('\n') |> ignore
-                elif rank <= 3 then
-                    emitFlat123 sb b.Name arr et
-                elif rank = 4 then
-                    emitRank4 sb b.Name arr et
                 else
-                    sb.Append(b.Name).Append(" = <rank-").Append(string rank).Append(" array>").Append('\n')
-                    |> ignore
+                    emitFlat sb b.Name arr et
         | _ -> raise (ArrayOpUnsupported (sprintf "print: array '%s' of non-scalar element type" b.Name))
     | _ -> raise (ArrayOpUnsupported (sprintf "print: binding '%s' is not an array type" b.Name))

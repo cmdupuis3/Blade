@@ -1,0 +1,28 @@
+// TEST: Bare Expr Replicate Matches Binding
+// ----------------------------------------------------------------------------
+// The replicate half of sequence-combinators/007. `replicate(n, c)` lowers to
+// the same IRSequence node as `sequence(...)` (Lowering.fs builds it as n copies
+// of one child), so it inherited the same defect: the result was assembled by
+// aliasing the children's pools rather than owning one, and any consumer that
+// read it as a contiguous pool -- the assignable-let deep copy behind both
+// `let r_alias = r` and the `__exprN` bare-expression desugar -- ran past the
+// end of the first child's storage into uninitialized memory.
+//
+// Pinned separately from the sequence test because the two reach the shared
+// emitter by different lowering paths, and a fold that special-cases replicate
+// (Lowering's constant-fill fold rewrites `replicate(N, pure(lit))` to an array
+// literal, which does NOT go through this emitter) could regress one while the
+// other stays green. The child here is a deferred combinator, not a literal, so
+// this test stays on the IRSequence path.
+// ----------------------------------------------------------------------------
+let A = [1.0, 2.0]
+let L = method_for(A)
+let c = L <@> lambda(v) -> v + 10.0
+
+let r = replicate(2, c) |> compute
+let r_alias = r
+// EXPECT: r = [11.0, 12.0, 11.0, 12.0]
+// EXPECT: r_alias = [11.0, 12.0, 11.0, 12.0]
+
+r
+// EXPECT: __expr1 = [11.0, 12.0, 11.0, 12.0]

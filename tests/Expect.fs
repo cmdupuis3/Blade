@@ -699,7 +699,8 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     // the flattening tryParse1DBoolArray does. It exists for the
                     // same reason both of those do: whether a rank-2 printer
                     // emits row brackets is a codegen detail the pin author does
-                    // not choose (rank 2 nests, ranks 1 and 3 do not). Every
+                    // not choose (rank 2 nests, every other rank prints one
+                    // flat row-major run). Every
                     // element and the total count are still compared; only the
                     // row split goes unchecked — a pin that wants it checked is
                     // written nested, which routes to the 2D matcher.

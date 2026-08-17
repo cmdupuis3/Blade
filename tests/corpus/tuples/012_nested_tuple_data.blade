@@ -49,7 +49,7 @@ let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
 let D: Array<Float64 like Idx<2>> = [7.0, 8.0]
 let g = object_for(lambda(p: Tuple<2>, q: Tuple<2>) -> p[0] * p[1] + q[0] * q[1])
           <@> ((A, B), (C, D)) |> compute
-// EXPECT: g[0][0] = [38, 43, 45, 51]
-// EXPECT: g[0][1] = [39, 44, 46, 52]
-// EXPECT: g[1][0] = [41, 46, 48, 54]
-// EXPECT: g[1][1] = [43, 48, 50, 56]
+// g is rank 4 and prints as ONE flat row-major run (the auto-printer's single
+// rank regime; the per-block `g[i][j] = [...]` grid lines this pin group used
+// to ride are retired). Blocks in order: g[0][0], g[0][1], g[1][0], g[1][1].
+// EXPECT: g = [38, 43, 45, 51, 39, 44, 46, 52, 41, 46, 48, 54, 43, 48, 50, 56]

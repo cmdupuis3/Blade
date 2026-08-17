@@ -24,13 +24,13 @@ let D = decompact(W, 0)
 let fibre = D(1, 1, 0)
 let total = reduce(fibre, lambda(a, b) -> a + b)
 // S(i,j) = A[i]*A[j] = [[1,2],[2,4]]; W(i,j,k,l) = S(i,j) + S(k,l).
-// D[1][1] is S(1,1) + [1,2,2,4] = 4 + [1,2,2,4] = [5,6,6,8], so the k = 0 fibre
-// D(1,1,0) is [5, 6] and its sum is 11.
+// The (1,1) plane of D is S(1,1) + [1,2,2,4] = 4 + [1,2,2,4] = [5,6,6,8], so
+// the k = 0 fibre D(1,1,0) is [5, 6] and its sum is 11. D is rank 4 and
+// prints as ONE flat row-major run (the auto-printer's single rank regime;
+// the per-plane `D[i][j] = [...]` grid lines these pins used to ride are
+// retired), so the D pin is the four planes in (0,0) (0,1) (1,0) (1,1) order.
 // EXPECT: S = [1, 2, 4]
 // EXPECT: W = [2, 3, 5, 4, 6, 8]
-// EXPECT: D[0][0] = [2, 3, 3, 5]
-// EXPECT: D[0][1] = [3, 4, 4, 6]
-// EXPECT: D[1][0] = [3, 4, 4, 6]
-// EXPECT: D[1][1] = [5, 6, 6, 8]
+// EXPECT: D = [2, 3, 3, 5, 3, 4, 4, 6, 3, 4, 4, 6, 5, 6, 6, 8]
 // EXPECT: fibre = [5, 6]
 // EXPECT: total = 11

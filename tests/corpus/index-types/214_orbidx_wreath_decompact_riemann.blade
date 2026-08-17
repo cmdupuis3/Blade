@@ -23,18 +23,15 @@ let B = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
 let h = lambda(p, q) where comm(p, q) -> p * q
 let R = method_for(B, B) <@> h |> compute
 let D = decompact(R, 0)
-// B(i,j) = A[i] - A[j] as a full 3x3 = [[0,-1,-2],[1,0,-1],[2,1,0]], so
-// D[i][j] is B(i,j) times the flattened (k,l) plane [0,-1,-2,1,0,-1,2,1,0].
-// Rows i = j are the zero set (B(i,i) = 0); D[1][0] is D[0][1] negated, which
-// is the '-' level's character made visible one row at a time.
+// B(i,j) = A[i] - A[j] as a full 3x3 = [[0,-1,-2],[1,0,-1],[2,1,0]], so the
+// (i,j) plane of D is B(i,j) times the flattened (k,l) plane
+// [0,-1,-2,1,0,-1,2,1,0]. Planes i = j are the zero set (B(i,i) = 0), and
+// plane (1,0) is plane (0,1) negated -- the '-' level's character made
+// visible one plane at a time. D is rank 4 and prints as ONE flat row-major
+// run (the auto-printer's single rank regime; the per-plane `D[i][j] = [...]`
+// grid lines these pins used to ride are retired), so the D pin is those nine
+// planes in (i,j) order:
+//   (0,0) (0,1) (0,2) (1,0) (1,1) (1,2) (2,0) (2,1) (2,2)
 // EXPECT: B = [-1, -2, -1]
 // EXPECT: R = [1, 2, 1, 4, 2, 1]
-// EXPECT: D[0][0] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
-// EXPECT: D[0][1] = [0, 1, 2, -1, 0, 1, -2, -1, 0]
-// EXPECT: D[0][2] = [0, 2, 4, -2, 0, 2, -4, -2, 0]
-// EXPECT: D[1][0] = [0, -1, -2, 1, 0, -1, 2, 1, 0]
-// EXPECT: D[1][1] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
-// EXPECT: D[1][2] = [0, 1, 2, -1, 0, 1, -2, -1, 0]
-// EXPECT: D[2][0] = [0, -2, -4, 2, 0, -2, 4, 2, 0]
-// EXPECT: D[2][1] = [0, -1, -2, 1, 0, -1, 2, 1, 0]
-// EXPECT: D[2][2] = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+// EXPECT: D = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, -1, 0, 1, -2, -1, 0, 0, 2, 4, -2, 0, 2, -4, -2, 0, 0, -1, -2, 1, 0, -1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, -1, 0, 1, -2, -1, 0, 0, -2, -4, 2, 0, -2, 4, 2, 0, 0, -1, -2, 1, 0, -1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]

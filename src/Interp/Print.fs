@@ -16,9 +16,9 @@
 // ARRAY bindings (M2) dispatch exactly as CodeGen.genPrintStatements' ArrayElem
 // arms do -- this module owns the kind dispatch, Interp/ArrayOps owns the cell/
 // row traversal and the low-level array-line emitters. This wave renders:
-//   * dense flat rank 1-3   -> ArrayOps.emitFlatArray  (genPrintArrayFlat 1..3)
-//   * dense rank 4 grid     -> ArrayOps.emitGrid4Array (genPrintArrayFlat 4)
-//   * rank 0 / rank >= 5    -> ArrayOps.emitRankNPlaceholder (`<rank-N array>`)
+//   * dense arrays          -> ArrayOps.emitFlat (genPrintArrayFlat: rank 2
+//                              nested, every other rank >= 1 one flat run)
+//   * rank 0                -> `<rank-0>` placeholder
 //   * rank-1 struct arrays, all-scalar fields -> per-field print loop
 //       `name = [{f1: V1, f2: V2}, ...]` (mirrors genPrintStatements)
 // and mirrors CodeGen's no-stdout (C++ comment only) arms as zero output:
@@ -323,10 +323,11 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
             elif Blade.CodeGen.isRaggedArrayType arrType then
                 ()   // ragged sub-view: CodeGen comment only.
             else
-                // DENSE flat / grid / placeholder OR symmetric-aware (rank 2-8):
-                // delegate the array-LINE emission to ArrayOps.printArrayBinding
-                // (byte-verified against the compiled binary; owns the flat/grid/
-                // placeholder + genPrintArraySymAware formats, and its own
+                // DENSE (rank 2 nested, every other rank flat) OR
+                // symmetric-aware: delegate the array-LINE emission to
+                // ArrayOps.printArrayBinding (byte-verified against the
+                // compiled binary; owns the flat/nested +
+                // genPrintArraySymAware formats, and its own
                 // ragged/non-scalar backstop -> ArrayOpUnsupported).
                 // The materialized value must be a VArray (else defer: the
                 // interpreter has not produced a printable image yet).

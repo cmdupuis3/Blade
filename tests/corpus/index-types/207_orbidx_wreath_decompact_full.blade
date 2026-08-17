@@ -30,16 +30,12 @@ let S = method_for(A, A) <@> g |> compute
 let h = lambda(p, q) where comm(p, q) -> p + q
 let W = method_for(S, S) <@> h |> compute
 let D = decompact(W, 0)
-// S(i,j) = A[i]*A[j] as a full 3x3 = [[1,2,3],[2,4,6],[3,6,9]], so
-// D[i][j] is the flattened (k,l) plane S(i,j) + [1,2,3,2,4,6,3,6,9].
+// S(i,j) = A[i]*A[j] as a full 3x3 = [[1,2,3],[2,4,6],[3,6,9]], so the
+// (i,j) plane of D is the flattened S(i,j) + [1,2,3,2,4,6,3,6,9]. D is rank 4
+// and prints as ONE flat row-major run (the auto-printer's single rank
+// regime; the per-plane `D[i][j] = [...]` grid lines these pins used to ride
+// are retired), so the D pin is those nine planes in (i,j) order:
+//   (0,0) (0,1) (0,2) (1,0) (1,1) (1,2) (2,0) (2,1) (2,2)
 // EXPECT: S = [1, 2, 3, 4, 6, 9]
 // EXPECT: W = [2, 3, 4, 5, 7, 10, 4, 5, 6, 8, 11, 6, 7, 9, 12, 8, 10, 13, 12, 15, 18]
-// EXPECT: D[0][0] = [2, 3, 4, 3, 5, 7, 4, 7, 10]
-// EXPECT: D[0][1] = [3, 4, 5, 4, 6, 8, 5, 8, 11]
-// EXPECT: D[0][2] = [4, 5, 6, 5, 7, 9, 6, 9, 12]
-// EXPECT: D[1][0] = [3, 4, 5, 4, 6, 8, 5, 8, 11]
-// EXPECT: D[1][1] = [5, 6, 7, 6, 8, 10, 7, 10, 13]
-// EXPECT: D[1][2] = [7, 8, 9, 8, 10, 12, 9, 12, 15]
-// EXPECT: D[2][0] = [4, 5, 6, 5, 7, 9, 6, 9, 12]
-// EXPECT: D[2][1] = [7, 8, 9, 8, 10, 12, 9, 12, 15]
-// EXPECT: D[2][2] = [10, 11, 12, 11, 13, 15, 12, 15, 18]
+// EXPECT: D = [2, 3, 4, 3, 5, 7, 4, 7, 10, 3, 4, 5, 4, 6, 8, 5, 8, 11, 4, 5, 6, 5, 7, 9, 6, 9, 12, 3, 4, 5, 4, 6, 8, 5, 8, 11, 5, 6, 7, 6, 8, 10, 7, 10, 13, 7, 8, 9, 8, 10, 12, 9, 12, 15, 4, 5, 6, 5, 7, 9, 6, 9, 12, 7, 8, 9, 8, 10, 12, 9, 12, 15, 10, 11, 12, 11, 13, 15, 12, 15, 18]

@@ -8710,8 +8710,11 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
 /// Deliberately non-barrier, against a naive reading of "fresh-pool producer":
 ///   * IRChoice / IRFallback / IRGuard / IRComposeMeth -- their results BORROW an
 ///     operand's `.extents` pointer, so an escaping result must pin its operands.
-///   * IRSequence / IRReplicate -- the emitter assembles `out[k] = A_k`, i.e. the
-///     outer array can share child storage.
+///   * IRSequence / IRReplicate -- the emitter DOES now give the result its own
+///     dense pool (a per-child copy nest, like stack), so these could become
+///     barriers; they are held out because the emitter still does not register
+///     that pool for freeing, and a barrier here would stop propagation to
+///     children the frees do reach. Flip both together, never just this one.
 ///   * IRParallel / IRFusion / IRFunctorMap / IRZip -- deferred forms whose
 ///     forcing shape depends on whether the leaf is a computation or a concrete
 ///     array; not worth proving.
@@ -15837,16 +15840,24 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // to prevent one child's output from contaminating another's array resolution.
         let n = elems.Length
         let childNames = elems |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+        // The type each child BINDING is emitted with. Shared with the copy nest
+        // below, which needs the type of the array that actually exists under
+        // `<name>_i` to bake its loop bounds -- deriving it a second time from
+        // `elems` would let the nest and the emission disagree.
+        let childTypeOf (elem: IRExpr) =
+            let wrappedElem =
+                if functorWrappers.IsEmpty then elem
+                else functorWrappers |> List.fold (fun acc w -> IRFunctorMap(w, acc)) elem
+            let ty =
+                match wrappedElem with
+                | IRApplyCombinator info -> info.OutputType
+                | IRComposeApply info -> info.OutputType
+                | _ -> inferExprType wrappedElem
+            (wrappedElem, ty)
+        let childTypes = elems |> List.map (childTypeOf >> snd)
         let (allCode, mergedVarNames) =
             (elems, childNames) ||> List.map2 (fun elem childName ->
-                let wrappedElem =
-                    if functorWrappers.IsEmpty then elem
-                    else functorWrappers |> List.fold (fun acc w -> IRFunctorMap(w, acc)) elem
-                let childType =
-                    match wrappedElem with
-                    | IRApplyCombinator info -> info.OutputType
-                    | IRComposeApply info -> info.OutputType
-                    | _ -> inferExprType wrappedElem
+                let (wrappedElem, childType) = childTypeOf elem
                 let childBinding = { Id = builder.FreshId(); Name = childName; Type = childType; Value = IRCompute wrappedElem; IsConst = true; IsMutable = false }
                 genBinding ctx childBinding builder)
             |> List.fold (fun (accCode, accNames) (code, newCtx) ->
@@ -15876,27 +15887,87 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // where the sole extent is the child count) and `new size_t[R]`
         // otherwise -- both outlive the frame.
         //
-        // The heap table is deliberately NOT registered for freeing, matching
-        // the pool on the line below, which this emitter has never registered
-        // either: an IRSequence's cells ALIAS its children's storage
-        // (`<name>[i] = <name>_i`, see the assign lines and isFreshPoolForm's
-        // note), so a free here would race the children's own frees.
+        // Neither the heap table nor the pool below is registered for freeing.
+        // The original reason was that the cells ALIASED the children's storage,
+        // so a free here would race the children's own frees -- and, for a
+        // sequence RETURNED from a frame, the escape analysis had to spare the
+        // children's pools too or it would delete the rows out from under the
+        // value that just escaped (corpus sequence-combinators/006). The copy
+        // nest below retires that argument: the pool is exclusively this
+        // binding's and the children are dead the moment they are copied.
+        //
+        // Left unregistered anyway, because that is a LEAK and this commit is a
+        // correctness fix -- registering is what frees too early, and 006 is the
+        // test that would crash rather than merely grow. The follow-up is to
+        // report `MatPool (name, childElemType, outerRank, "nullptr", None,
+        // ownedExtents)` (what materializeStackForm reports) AND to stop sparing
+        // the children, which must land together: sparing them while freeing the
+        // outer pool leaks strictly more than today.
         let extentsName = name + "_extents"
         let extentsDims =
             (sprintf "%d" n, true)
             :: [for d in 0 .. childRank - 1 -> (sprintf "%s.extents[%d]" (List.head childNames) d, false)]
         let (extentsDeclLines, _ownedExtents) = emitExtentsTable ind extentsName outerRank extentsDims
-        // Allocate pointer array (for array children) or value array (for scalar children),
-        // wrapped in Array<T,N>. The `new` allocation produces the underlying data; the
-        // wrapper ties it together with the freshly emitted name_extents.
+        // ARRAY children: one dense pool of this binding's OWN plus a per-child
+        // copy nest -- the same fresh-pool discipline materializeStackForm uses,
+        // and for the same two reasons it was moved onto it.
+        //
+        // The pointer-aliasing assembly this replaces (`out[k] = <name>_k`, one
+        // `new T*[n]` skeleton whose cells point into the CHILDREN's pools) is
+        // not one contiguous pool, so it violated the invariant `pool_base`
+        // documents and every consumer that reads an array through it walked off
+        // the end of child 0's pool into uninitialized memory. The reachable
+        // case was the assignable-let deep copy (`let b = <a sequence>`, which
+        // includes the `__exprN` desugar of a bare top-level expression) and the
+        // negate/conjugate transform; BLAS, CUDA and MPI streaming read the same
+        // way. Copying also makes the combinator a VALUE: `let` bindings are
+        // assignable in Blade, so an aliased sequence would see later writes to
+        // any child.
+        //
+        // It was also the reason `sequence`/`replicate` were rank-1-only -- the
+        // skeleton was emitted with exactly one `*` whatever the child rank, so
+        // a rank-2 child failed to compile as C++ (`new double*[2]` for an
+        // `Array<double,3>`). The nest below carries any child rank.
+        //
+        // SCALAR children keep their value array: `new T[n]` filled by
+        // assignment is already one contiguous pool, which is the invariant.
         let allocDecl =
             if childRank > 0 then
-                sprintf "%sArray<%s, %d> %s = { new %s*[%d], %s_extents };" ind childElemType outerRank name childElemType n name
+                arrayAlloc { Ind = ind; Elem = childElemType; Rank = outerRank; Name = name
+                             Symm = "nullptr"; Strict = None; Extents = extentsName }
             else
                 sprintf "%sArray<%s, 1> %s = { new %s[%d], %s_extents };" ind childElemType name childElemType n name
         let assignLines =
-            childNames |> List.mapi (fun i cn ->
-                sprintf "%s%s[%d] = %s;" ind name i cn)
+            if childRank = 0 then
+                childNames |> List.mapi (fun i cn ->
+                    sprintf "%s%s[%d] = %s;" ind name i cn)
+            else
+                // One nest per child. Loop variables are declared in each `for`
+                // init, so sibling nests at the same level reuse the names.
+                // Each nest reads its OWN child's extents (TypeCheck has proven
+                // the children share a shape at runtime, but not that shape
+                // monomorphization pinned them all to literals), so a child that
+                // knows its own trip count bakes it whatever its siblings got.
+                let loopVar d = sprintf "__sq%s_%d" name d
+                (childNames, childTypes)
+                ||> List.mapi2 (fun k cn cty ->
+                    let boundAt d =
+                        match cty with
+                        | ArrayElem st -> literalOrRuntimeExtentOfArray st cn d
+                        | _ -> sprintf "%s.extents[%d]" cn d
+                    let opens =
+                        [ for d in 0 .. childRank - 1 ->
+                            sprintf "%s%sfor (size_t %s = 0; %s < %s; %s++) {"
+                                ind (String.replicate d "    ") (loopVar d) (loopVar d) (boundAt d) (loopVar d) ]
+                    let sub =
+                        [ for d in 0 .. childRank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                    let body =
+                        [ sprintf "%s%s%s[%d]%s = %s%s;"
+                            ind (String.replicate childRank "    ") name k sub cn sub ]
+                    let closes =
+                        [ for d in childRank - 1 .. -1 .. 0 -> sprintf "%s%s}" ind (String.replicate d "    ") ]
+                    opens @ body @ closes)
+                |> List.concat
         let ctx' = { ctx with VarNames = Map.add binding.Id name mergedVarNames }
         (allCode @ childTypeErrCode @ extentsDeclLines @ [allocDecl] @ assignLines, ctx')
     
@@ -20518,8 +20589,19 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
       "    }"
       sprintf "    cout << \"]\" << endl;" ]
 
-/// Generate code to print an array value (rank 2 nested; other ranks flattened
-/// for easy parsing)
+/// Generate code to print a dense array value. ONE regime for every rank:
+/// rank 2 nests (genPrintNested2, the shape its literal is written in), every
+/// other rank >= 1 prints FLAT -- a single row-major comma-separated run.
+///
+/// Flat past rank 2 is a decision, not a shortcut. The EXPECT harness treats a
+/// flat run and a depth-2 nest as the same value (Expect.fs's flatten duality)
+/// but parses nothing deeper, so a rank-r bracket nest would break every flat
+/// pin while adding shape text the extents already carry; and no bracket
+/// nesting makes a rank-3+ dump readable anyway. This regime replaced two
+/// historical formats that made higher ranks UNPINNABLE: a rank-4 multi-line
+/// `name[i][j] = [...]` grid (whose lines never parse as a `name = value`
+/// pin) and a rank-5+ `<rank-N array>` placeholder that printed no values at
+/// all -- while rank 3 printed flat, the inconsistency this retired.
 let genPrintArrayFlat (name: string) (rank: int) : string list =
     let v = sanitizeCppName name
     let firstVar = sprintf "%s__first" v
@@ -20527,19 +20609,22 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
         [sprintf "    cout << \"%s = <rank-0>\" << endl;" name]
     elif rank = 2 then
         genPrintNested2 name (sprintf "%s.extents[0]" v) (sprintf "%s.extents[1]" v)
-    elif rank <= 3 then
-        // Ranks 1-3: flat comma-separated output
-        let loopVars = [| "i"; "j"; "k" |]
+    else
+        // Loop-var names as genPrintArraySymAware spells them, with the same
+        // numbered overflow past eight (nothing collides: the print block is
+        // its own statement scope).
+        let loopVarNames = [| "i"; "j"; "k"; "l"; "m"; "n_"; "p"; "q" |]
+        let loopVar d = if d < loopVarNames.Length then loopVarNames.[d] else sprintf "d%d" d
         let opens = [
             sprintf "    cout << \"%s = [\";" name
             sprintf "    bool %s = true;" firstVar ]
         let loops =
             [ for d in 0 .. rank - 1 ->
                 sprintf "    %sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
-                    (String.replicate d "    ") loopVars.[d] loopVars.[d] v d loopVars.[d] ]
+                    (String.replicate d "    ") (loopVar d) (loopVar d) v d (loopVar d) ]
         let inner =
             let ind = "    " + String.replicate rank "    "
-            let idx = loopVars.[0..rank-1] |> Array.map (sprintf "[%s]") |> String.concat ""
+            let idx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
             [ sprintf "%sif (!%s) cout << \", \";" ind firstVar
               sprintf "%s%s = false;" ind firstVar
               sprintf "%scout << %s%s;" ind v idx ]
@@ -20548,32 +20633,6 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
                 sprintf "    %s}" (String.replicate d "    ") ]
         let finish = [ sprintf "    cout << \"]\" << endl;" ]
         opens @ loops @ inner @ closes @ finish
-    elif rank = 4 then
-        // Rank 4: 2D grid of 2D blocks
-        // Print as: name[i][j] = [ row0; row1; ... ] for each (i,j)
-        [
-            sprintf "    cout << \"%s (\" << %s.extents[0] << \"x\" << %s.extents[1] << \"x\" << %s.extents[2] << \"x\" << %s.extents[3] << \"):\" << endl;"
-                name v v v v
-            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" v
-            sprintf "        for (size_t j = 0; j < %s.extents[1]; j++) {" v
-            sprintf "            cout << \"  %s[\" << i << \"][\" << j << \"] = [\";" name
-            sprintf "            bool %s = true;" firstVar
-            sprintf "            for (size_t k = 0; k < %s.extents[2]; k++) {" v
-            sprintf "                for (size_t l = 0; l < %s.extents[3]; l++) {" v
-            sprintf "                    if (!%s) cout << \", \";" firstVar
-            sprintf "                    %s = false;" firstVar
-            sprintf "                    cout << %s[i][j][k][l];" v
-            "                }"
-            "            }"
-            sprintf "            cout << \"]\" << endl;"
-            "        }"
-            "    }"
-        ]
-    else
-        // Rank 5+: just print total size and first few elements
-        [
-            sprintf "    cout << \"%s = <rank-%d array>\" << endl;" name rank
-        ]
 
 /// Generate print loop for arrays with per-dimension symmetry awareness.
 /// Expands IRIndexType list into per-dimension loop structure:
@@ -20963,7 +21022,11 @@ let genPrintStatements (modul: IRModule) : string list =
                     // Skip rather than emit broken code. Scalar derivations
                     // from the sub-view still print normally.
                     [sprintf "    // (sub-view of ragged array '%s' not printed; metadata not propagated)" b.Name]
-                elif hasSymmetry && rank >= 2 && rank <= 8 then
+                // Every symmetric rank routes to the sym-aware printer: its
+                // internal guard emits the `<rank-N array>` placeholder past
+                // rank 8, whereas genPrintArrayFlat now dense-walks EVERY rank
+                // and would misread compact storage.
+                elif hasSymmetry && rank >= 2 then
                     genPrintArraySymAware b.Name arrType.IndexTypes
                 else
                     genPrintArrayFlat b.Name rank

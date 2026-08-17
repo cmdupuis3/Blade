@@ -1,0 +1,31 @@
+// TEST: Print Rank Regime
+// ----------------------------------------------------------------------------
+// The auto-printer's ONE rank regime, pinned end to end: rank 2 nests one
+// level of row brackets, every other rank prints a single flat row-major run.
+//
+// Before this regime, rank 4 printed a multi-line `name[i][j] = [...]` grid
+// and rank 5+ printed a `<rank-N array>` placeholder -- neither emitted a
+// `name = [...]` line, so the r4 and r5 pins below were IMPOSSIBLE to state:
+// the harness reported "not found in output" for any value pinned on them.
+// Their pins are therefore the regression tests for the regime itself, while
+// r2 and r3 pin the shapes that were always printable (the EXPECT harness
+// treats a flat pin and a nested actual as the same value, so every pin here
+// is written flat).
+// ----------------------------------------------------------------------------
+let x = [1.0, 2.0]
+let y = [3.0, 4.0]
+
+let r2 = stack(x, y)
+let r3 = stack(r2, r2)
+let r4 = stack(r3, r3)
+let r5 = stack(r4, r4)
+
+// EXPECT: r2 = [1.0, 2.0, 3.0, 4.0]
+// EXPECT: r3 = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+// EXPECT: r4 = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+// EXPECT: r5 = [1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0]
+
+// Scalar reads through the full index chain, proving the deep ranks are real
+// arrays (extents intact), not just printable ones.
+let deep = r5(1, 0, 1, 1, 1)
+// EXPECT: deep = 4
