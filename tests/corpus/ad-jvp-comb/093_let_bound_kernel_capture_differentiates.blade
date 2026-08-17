@@ -1,0 +1,31 @@
+// TEST: A Let-Bound Kernel's Scalar Capture Differentiates
+// The positive half of 092: once the operand is a proper array parameter, the
+// map rule substitutes indexed reads for the kernel parameter and leaves the
+// CAPTURE where it is, so the ordinary expression rule differentiates it.
+// f(p, s) = sum_i p(i) * s, so df = s * sum(dp) + sum(p) * ds.
+// At p = [1, 2, 3], s = 2: sum(p) = 6.
+import ad as ad
+
+type I = Idx<3>
+
+function f(p: Array<Float like I>, s: Float) -> Float = {
+    let L = object_for(lambda(x: Float) -> x * s)
+    let m = L <@> p |> compute
+    reduce(m, (+))
+}
+
+// WARN: BL4003
+// Seed the CAPTURE alone: t = sum(p) * 1 = 6.
+let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], 2.0, [0.0, 0.0, 0.0], 1.0)
+// EXPECT: v = 12
+// EXPECT: t = 6
+
+// Seed the OPERAND alone, one slot: t = s * 1 = 2.
+let (v2, t2) = ad.jvp(f)([1.0, 2.0, 3.0], 2.0, [1.0, 0.0, 0.0], 0.0)
+// EXPECT: v2 = 12
+// EXPECT: t2 = 2
+
+// Both: t = 2 * 3 + 6 * 1 = 12.
+let (v3, t3) = ad.jvp(f)([1.0, 2.0, 3.0], 2.0, [1.0, 1.0, 1.0], 1.0)
+// EXPECT: v3 = 12
+// EXPECT: t3 = 12

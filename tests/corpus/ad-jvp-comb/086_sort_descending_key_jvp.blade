@@ -1,0 +1,43 @@
+// TEST: C7 Sort Differentiates The USER'S Key, Not An Argsort Of Raw Values
+// The permutation the derivative gathers through is synthesized by sorting the
+// row INDICES -- and it has to sort them under the key the user wrote. The
+// expansion used to drop the key entirely and argsort the raw values, which is
+// the same answer only for the identity key: a DESCENDING key came back
+// ascending, and both legs then gathered through the wrong permutation with no
+// diagnostic. This pins the descending case.
+//
+// a = [3.0, 1.0, 4.0, 1.5, 2.0], key = -x  ->  sorted [4, 3, 2, 1.5, 1]
+// perm = [2, 0, 4, 3, 1]  (original index landing at each sorted slot)
+// v = 4*1 + 3*2 + 2*3 + 1.5*4 + 1*5 = 27
+import ad as ad
+
+type I = Idx<5>
+
+function f(a: Array<Float like I>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> 0.0 - x)
+    s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
+}
+
+// Seeding a(2) = 4.0, the LARGEST value: under the descending key it lands at
+// slot 0 and collects weight 1. The argsort-of-values bug reported 5 (the
+// weight of the slot it would have taken ascending).
+let (v, t) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.0, 0.0, 1.0, 0.0, 0.0])
+// EXPECT: v = 27
+// EXPECT: t = 1
+
+// Full seed d = [0.1, -0.2, 0.3, 0.05, -0.15]; ds = d o perm, so
+// t2 = 1*0.3 + 2*0.1 + 3*(-0.15) + 4*0.05 + 5*(-0.2) = -0.75  (bug: 1.35).
+let (v2, t2) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
+// EXPECT: v2 = 27
+// EXPECT: t2 = -0.75
+
+// A key that is not a bare parameter read at all: sorting by the SQUARE puts
+// 1.0 first and 4.0 last, which is the ascending order here, but the composed
+// key still has to reach the permutation for the plan recovery to find it.
+function g(a: Array<Float like I>) -> Float = {
+    let s = sort(a, lambda(x: Float) -> x * x)
+    s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
+}
+let (v3, t3) = ad.jvp(g)([3.0, 1.0, 4.0, 1.5, 2.0], [0.0, 0.0, 1.0, 0.0, 0.0])
+// EXPECT: v3 = 42
+// EXPECT: t3 = 5
