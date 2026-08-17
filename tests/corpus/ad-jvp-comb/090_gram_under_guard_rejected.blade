@@ -1,0 +1,26 @@
+// TEST: C6 Gram Nested Under A Reindexing Wrapper Rejected (rejects)
+// Every arm of the C6 reverse flow reads the cotangent THROUGH the `cotAt`
+// reindexer the enclosing forms compose -- except gram, whose adjoints are
+// whole-array `gram` expressions and so read the cotangent BUFFER by name.
+// Under a wrapper that silently dropped the wrapper: `guard(FALSE, gram(a, b))`
+// came back with the UNGATED adjoint (da = dG.b, db = dG^T.a) where the truth
+// is all zeros, and nothing said so. Refuse until the arm can thread cotAt.
+// 091 pins the two-statement spelling that does work.
+// ERROR: BL5500
+// ERROR-CONTAINS: adjoint of gram nested under transpose/guard/stack/join
+import ad as ad
+
+type I = Idx<2>
+type K = Idx<3>
+
+function floss(p: Float, a: Array<Float like I, K>, b: Array<Float like I, K>) -> Float = {
+    let g = guard(p > 0.0, gram(a, b))
+    g(0, 1) * 2.0 + g(1, 0)
+}
+
+let a0 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let b0 = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+let mut da = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut db = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let gv = ad.grad(floss)(-1.0, a0, b0, da, db)
+gv

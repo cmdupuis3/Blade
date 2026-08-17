@@ -3794,30 +3794,40 @@ let rec private adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt list
 ///                to emit inside function bodies)
 /// Operand positions must be named diff arrays (or nested supported forms);
 /// anything else refuses with a named message.
+///
+/// Every arm but `gram` reads the cotangent THROUGH `cotAt`, the reindexer the
+/// enclosing forms have composed. `gram`'s adjoints are whole-array `gram`
+/// expressions, not per-index reads, so they cannot express an arbitrary
+/// reindexing -- they read the cotangent BUFFER directly. Under a non-identity
+/// `cotAt` that silently ignores the wrapper (a guard's gate, a transpose's
+/// swap), which is why `cotIdent` is threaded explicitly rather than guessed
+/// from the shape of `value`: only the identity reader may reach the gram arm.
 let private adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: string) (value: Expr) : Result<NStmt list, string> option =
     let ctx = rc.Ctx
     let accumInto (aname: string) (mkIdx: Expr list -> Expr list) (dims: int list) (cotAt: Expr list -> Expr) =
         if Set.contains aname rc.Diff then
             accumLoop ctx dims (fun idx -> syn (ExprApp (v (dName aname), mkIdx idx))) cotAt
         else []
-    let rec flow (cotAt: Expr list -> Expr) (dims: int list) (init: Expr) : Result<NStmt list, string> =
+    /// `cotIdent`: `cotAt` is still the plain `__g_<xname>(idx)` reader the
+    /// dispatch below started from -- no enclosing form has wrapped it.
+    let rec flow (cotIdent: bool) (cotAt: Expr list -> Expr) (dims: int list) (init: Expr) : Result<NStmt list, string> =
         match init.Kind with
         | ExprKind.ExprVar a -> Ok (accumInto a id dims cotAt)
         | ExprKind.ExprTyped (inner, _) | ExprKind.ExprCompute inner | ExprKind.ExprPure inner ->
-            flow cotAt dims inner
+            flow cotIdent cotAt dims inner
         | ExprKind.ExprGuard (c, inner) ->
-            flow (fun idx -> syn (ExprIf (c, cotAt idx, fLit 0.0))) dims inner
+            flow false (fun idx -> syn (ExprIf (c, cotAt idx, fLit 0.0))) dims inner
         | ExprKind.ExprTranspose (inner, d1, d2) ->
             let swap (xs: 'a list) =
                 xs |> List.mapi (fun i x -> if i = d1 then xs.[d2] elif i = d2 then xs.[d1] else x)
-            flow (fun idx -> cotAt (swap idx)) (swap dims) inner
+            flow false (fun idx -> cotAt (swap idx)) (swap dims) inner
         | ExprKind.ExprStack es ->
             (match dims with
              | _ :: rest ->
                  es |> List.mapi (fun k e2 -> (k, e2))
                     |> List.fold (fun acc (k, e2) ->
                         acc |> Result.bind (fun ss ->
-                            flow (fun idx -> cotAt (iLit (int64 k) :: idx)) rest e2
+                            flow false (fun idx -> cotAt (iLit (int64 k) :: idx)) rest e2
                             |> Result.map (fun s2 -> ss @ s2)))
                         (Ok [])
              | [] -> err rc.Fname "internal: stack initializer with no dims")
@@ -3828,7 +3838,8 @@ let private adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: str
                      acc |> Result.bind (fun (off, ss) ->
                          match staticDimsOf ctx denv part with
                          | Some (h :: _) ->
-                             flow (fun idx ->
+                             flow false
+                                  (fun idx ->
                                       match idx with
                                       | lead :: tail -> cotAt (add lead (iLit (int64 off)) :: tail)
                                       | [] -> cotAt idx)
@@ -3838,6 +3849,11 @@ let private adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: str
                      (Ok (0, []))
                  |> Result.map snd
              | [] -> err rc.Fname "internal: join initializer with no dims")
+        | ExprKind.ExprGram _ when not cotIdent ->
+            // The arm below reads `__g_<xname>` whole. Reaching it through a
+            // wrapper would drop that wrapper's reindexing on the floor --
+            // guard(FALSE, gram(a, b)) came back with the UNGATED adjoint.
+            err rc.Fname "the adjoint of gram nested under transpose/guard/stack/join is not supported (v1); bind the gram to its own let first (`let g = gram(a, b)` then wrap `g`), which gives it an identity cotangent and differentiates today"
         | ExprKind.ExprGram (ga, gb) ->
             // direct operands only (v1): the adjoints read the PRIMAL
             // operands by name, and the cotangent buffer by name
@@ -3881,19 +3897,19 @@ let private adjointOfInit (rc: RevCtx) (denv: Map<string, int list>) (xname: str
         // array ALIAS: cotangent flows whole-buffer (grad refused this
         // before C6 because no adjoint existed; now one does)
         (match Map.tryFind xname denv with
-         | Some dims -> Some (flow (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
+         | Some dims -> Some (flow true (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
          | None -> None)
     | ExprKind.ExprTranspose _ | ExprKind.ExprStack _ | ExprKind.ExprJoin _
     | ExprKind.ExprGram _ | ExprKind.ExprSort _ ->
         (match Map.tryFind xname denv with
-         | Some dims -> Some (flow (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
+         | Some dims -> Some (flow true (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
          | None -> Some (err rc.Fname "this combinator initializer needs statically-known dims to differentiate (v1)"))
     // pure/compute/guard over an ARRAY use the reindexing flow; the scalar
     // case falls through to adjointOf, which has pass-through arms
     | ExprKind.ExprGuard _ | ExprKind.ExprPure _ | ExprKind.ExprCompute _
             when Set.contains xname rc.Arrays ->
         (match Map.tryFind xname denv with
-         | Some dims -> Some (flow (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
+         | Some dims -> Some (flow true (fun idx -> syn (ExprApp (v (dName xname), idx))) dims value)
          | None -> Some (err rc.Fname "this combinator initializer needs statically-known dims to differentiate (v1)"))
     | _ -> None
 
