@@ -205,11 +205,25 @@ let private gateInputs (info: ApplyInfo) : unit =
 
 // Binary fold resolution (reduce kernels / choice sections lower to callables).
 
-let private resolveBinaryFold (st: InterpState) (kernel: IRExpr) : (Value -> Value -> Value) =
+/// The fold kernel of a `reduce` / `<&!>` leg, as a binary closure.
+///
+/// The SITE ENV is threaded for the same reason `resolveUnaryKernel` threads it:
+/// `callCallable` passes NO captures and `evalCall` chains a callable's frame to
+/// the module-global scope only, so a capture bound in an enclosing FUNCTION
+/// frame is invisible. `function wsum(xs) = { let w = 2.0; reduce(xs, lambda(p,
+/// q) -> p + w * q) }` captures `w` that way -- the compiled lane forwards it
+/// through the kernel's capture list, and without this the interpreter died on
+/// the unbound id (BL8004) while the compiled lane printed the answer. Kernels
+/// that capture nothing bind an empty map and behave exactly as before.
+let private resolveBinaryFold (st: InterpState) (env: Env) (kernel: IRExpr) : (Value -> Value -> Value) =
     match resolveKernel kernel with
     | Some rk when rk.Callable.Params.Length = 2 ->
         let callable = rk.Callable
-        (fun a b -> callCallable st callable [a; b])
+        let caps =
+            callable.Captures
+            |> List.choose (fun c -> envTryFind env c.Id |> Option.map (fun cell -> (c.Id, cell)))
+            |> Map.ofList
+        (fun a b -> Core.evalCall st callable caps [a; b])
     | _ -> raise (InterpUnsupported "reduce/fold kernel does not resolve to a binary callable")
 
 // Array literal -> dense BladeArray (via ArrayOps.arrayLitFromValues). The
@@ -545,12 +559,21 @@ and private forceComposeMeth (st: InterpState) (env: Env) (left: IRExpr) (right:
             match resolveKernel kernelRef with
             | Some rk when rk.Callable.Params.Length = 1 ->
                 let callable = rk.Callable
+                // Captures from the SITE env, exactly as resolveUnaryKernel
+                // binds them: `callCallable` passes none and `evalCall` chains
+                // only to module-global, so an `@>>` right kernel that reads a
+                // binding of the enclosing FUNCTION frame would otherwise throw
+                // on the unbound id while the compiled lane forwards it.
+                let caps =
+                    callable.Captures
+                    |> List.choose (fun c -> envTryFind env c.Id |> Option.map (fun cell -> (c.Id, cell)))
+                    |> Map.ofList
                 let out = A.allocDense a.ElemType a.IndexTypes a.Extents
                 let rank = a.Extents.Length
                 let rec walk (level: int) (acc: int64 list) =
                     if level = rank then
                         let coords = List.rev acc
-                        A.writeCell out coords (callCallable st callable [ A.readCell a coords ])
+                        A.writeCell out coords (Core.evalCall st callable caps [ A.readCell a coords ])
                     else
                         for i in 0L .. a.Extents.[level] - 1L do walk (level + 1) (i :: acc)
                 walk 0 []
@@ -642,8 +665,9 @@ and private forceInputArray (st: InterpState) (env: Env) (arrExpr: IRExpr) : Bla
 
 /// Resolve a sort key / mask predicate / compose-apply stage expr to a unary
 /// Value->Value closure via resolveKernel (peels Reynolds, resolves through the
-/// callables + synthetic table). Invoked with empty captures like
-/// resolveBinaryFold -- module-level kernels reach their captures via st.Global.
+/// callables + synthetic table). Captures are bound from the site env, the same
+/// way `resolveBinaryFold` and `forceComposeMeth` bind theirs; module-level
+/// kernels additionally reach theirs via st.Global.
 and private resolveUnaryKernel (st: InterpState) (env: Env) (kernel: IRExpr) : (Value -> Value) =
     match resolveKernel kernel with
     | Some rk when rk.Callable.Params.Length = 1 ->
@@ -1797,8 +1821,8 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
     // either way, and each leg gets its own nest here as it always has.
     let legFolds =
         match kernel with
-        | IRTuple ks when ks.Length = infos.Length -> ks |> List.map (resolveBinaryFold st)
-        | _ -> infos |> List.map (fun _ -> resolveBinaryFold st kernel)
+        | IRTuple ks when ks.Length = infos.Length -> ks |> List.map (resolveBinaryFold st env)
+        | _ -> infos |> List.map (fun _ -> resolveBinaryFold st env kernel)
     let legSeeds =
         match seed with
         | VTuple ss when ss.Length = infos.Length -> List.ofArray ss
@@ -1919,14 +1943,14 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         match av with
         | VArray a ->
             if a.Extents.Length <> 1 then raise (InterpUnsupported "reduce over rank>1 array (M2.7)")
-            A.reduceArray a (resolveBinaryFold st kernel) initV
+            A.reduceArray a (resolveBinaryFold st env kernel) initV
         | VCompound cv ->
             // reduce over a compound walks its compact present-cell buffer
             // (genReduceBinding compound arm, CodeGen.fs:1934-1938).
-            A.compoundReduce cv (resolveBinaryFold st kernel) initV
+            A.compoundReduce cv (resolveBinaryFold st env kernel) initV
         | VSparse sv ->
             // reduce over a sparse walks its compact buffer in key order.
-            A.sparseReduce sv (resolveBinaryFold st kernel) initV
+            A.sparseReduce sv (resolveBinaryFold st env kernel) initV
         | _ -> raise (InterpUnsupported "reduce over a non-array value")
     | IRReduceCompute (comp, kernel, seedExpr) ->
         let seed = Core.evalExpr st env seedExpr

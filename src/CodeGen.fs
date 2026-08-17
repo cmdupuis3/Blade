@@ -9350,6 +9350,52 @@ let suppressAllocName (n: string) : unit =
     | None -> ()
     | Some frame -> frame.SuppressNames <- Set.add n frame.SuppressNames
 
+/// A cursor into the live frame's registration list, and its companion that
+/// spares EVERYTHING registered after it (`suppressAllocsSince`).
+///
+/// Why the pair exists rather than another `suppressAllocName` call. A RETURN
+/// position lifts its value into a `__retN` and must spare that value's storage
+/// from the scope's frees, but "that value's storage" is not always one pool
+/// named `__retN`: `materializeEighForm` declares TWO under derived names
+/// (`__retN__q` / `__retN__lam`) and binds `__retN` to a make_tuple of the two
+/// wrappers, and `genSequenceBinding` declares one per child (`__retN_0`, ...).
+/// Sparing only the binding name emitted `deallocate(...)` for the real pools
+/// and then returned wrappers pointing at freed memory -- a use-after-free the
+/// caller reads as garbage (eigh reproduces it whenever the BLAS route is live;
+/// the synthesized Jacobi fallback hides it by never taking this arm).
+///
+/// Naming conventions are not a sound basis for the spare decision -- every
+/// multi-pool form invents its own suffixes, and the next one to be added would
+/// reintroduce the bug silently. What IS sound is the registration record
+/// itself: an allocation emitted while the return binding was being rendered
+/// belongs to the returned value. Mark the list, render, spare the delta.
+///
+/// The trade this makes is deliberate and one-directional. A form that
+/// registers a genuine SCRATCH pool inside its own emission would now leak that
+/// pool for the frame's lifetime instead of freeing it. A leak bounded by one
+/// call is strictly preferable to handing the caller a dangling pointer, and
+/// the frame's other allocations (everything registered before the mark) are
+/// unaffected, so nothing that used to be freed on the ordinary let path stops
+/// being freed.
+///
+/// The FRAME is captured with the cursor rather than re-read at the suppress
+/// call: an emitter that pushed a nested scope and left it live would otherwise
+/// stamp the suppression onto the wrong frame.
+let allocRegistrationMark () : (AllocScope * int) option =
+    match currentAllocScope () with
+    | None -> None
+    | Some frame -> Some (frame, List.length frame.Allocs)
+
+let suppressAllocsSince (mark: (AllocScope * int) option) : unit =
+    match mark with
+    | None -> ()
+    | Some (frame, before) ->
+        let now = List.length frame.Allocs
+        // Newest-FIRST list, so the delta is the prefix.
+        if now > before then
+            for a in frame.Allocs |> List.truncate (now - before) do
+                frame.SuppressNames <- Set.add (trackedAllocName a) frame.SuppressNames
+
 let registeredAllocNames () : string list =
     match currentAllocScope () with
     | None -> []
@@ -13854,6 +13900,11 @@ let genComposeApply
             match stageLiteral with
             | Some n -> sprintf "%d" n
             | None -> srcName + ".extents[0]"
+        // A stage is EMITTABLE when it is either a NAMED C++ lambda (the
+        // direct-call arm below) or a callable `genApplyCombinator` can resolve
+        // (the per-stage fallback arm). Anything else has no kernel to call.
+        let stageEmittable (kn: string option) (k: IRExpr) : bool =
+            kn.IsSome || (resolveCallable k).IsSome
         match kernelName1, kernelName2 with
         | Some k1, Some k2 ->
             // Both kernels are named C++ lambdas - direct call loops
@@ -13886,6 +13937,33 @@ let genComposeApply
             if singleArray then
                 registerPoolAlloc AllocDense elemType arrRank "nullptr" (name + "_extents") name None
             (elemTypeErrCode @ s1Code @ [""] @ s2Code, ctx)
+        | _ when not (stageEmittable kernelName1 kernel1 && stageEmittable kernelName2 kernel2) ->
+            // STAGED EMISSION IS TWO-STAGE (v1), and `IRComposeObj` NESTS. A
+            // three-stage `o1 >>@ o2 >>@ o3` therefore arrives with a whole
+            // COMPOSITION sitting in a stage slot: `kernel1` is the inner
+            // `IRComposeObj`, which is neither a named C++ lambda nor a
+            // resolvable callable.
+            //
+            // The shape only gets this far when SURFACE FUSION DECLINED --
+            // fusion normally collapses the chain into one kernel before the
+            // emitter sees it (loops/176), and it declines on, e.g., a stage
+            // whose kernel is a BLOCK-BODIED named function, since a block is
+            // not an expression to inline (loops/179).
+            //
+            // Left alone, the arm below handed `genApplyCombinator` a kernel it
+            // could not resolve and the nest emitted `r__s1[__i0] = ((void)0);`
+            // -- delivered as a raw g++ "void value not ignored as it ought to
+            // be", with no BL code, no Blade line, and nothing naming the actual
+            // limitation. Refuse here instead, on the BL7004 channel, so the
+            // message says which ceiling was hit and what to write instead.
+            let errCode =
+                codegenError ctx ind
+                    "a pipeline stage with a block-bodied kernel cannot fuse, and staged emission supports \
+two stages (v1) -- this `>>@` chain has more than two, so one stage reaches the emitter as a composition \
+rather than a kernel. Split the chain and force the halves \
+(`let s = (o1 >>@ o2) <@> A |> compute` then `object_for(k3) <@> s |> compute`), or give every stage an \
+expression-bodied kernel so the whole pipeline fuses into one loop"
+            (errCode, ctx)
         | _ ->
             // Fallback: inline lambdas - use ApplyInfo per stage.
             // We materialize via direct `genApplyCombinator` calls
@@ -14747,14 +14825,17 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // become a no-op) and MINUS IRGroupKeys/IRGroupBy (a `|> compute` on a
     // grouping is not a spelling the surface produces, and genComputeBinding
     // has no arm to fall back on if this guess were wrong).
+    //
+    // WRITTEN AS THAT SUBTRACTION, not as the 18 constructors it works out to.
+    // The hand-enumerated version said the same thing in the comment and then
+    // re-derived it by hand below, so the two could drift the moment a new
+    // statement-shaped node was added: `isStatementShaped` would gain it and
+    // this list would not, and the miss is silent (the node falls to
+    // genComputeBinding's scalar fall-through and dies on the unsupported-node
+    // sentinel -- exactly the BL7001 this arm was added to stop). Both
+    // subtrahends are predicates in IR.fs beside `isStatementShaped` itself.
     | IRCompute eager when
-        (match eager with
-         | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _
-         | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _
-         | IRGram _ | IRMatmul _ | IREigh _ | IRSolve _
-         | IRGroupBucket _ | IRGroupSizes _ | IRArrayLit _
-         | IRArrayNegate _ | IRArrayConjugate _ -> true
-         | _ -> false) ->
+        isStatementShaped eager && not (isDeferringForm eager) && not (isGroupTableForm eager) ->
         genBinding ctx { binding with Value = eager } builder
     | IRCompute inner ->
         genComputeBinding ctx binding builder inner
@@ -19215,23 +19296,27 @@ or return a scalar and materialize at the call site"
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType r
                 Value = forceDeferringForm r; IsConst = false; IsMutable = true
             }
+            // EVERY allocation this binding registers leaves with the value;
+            // free everything the frame held before it. Sparing the delta
+            // rather than the NAME `__retN` is what covers the multi-pool
+            // members of the family, and covers them without a per-form list:
+            //
+            //   * IREigh declares `__retN__q` / `__retN__lam` and binds
+            //     `__retN` to a make_tuple of those two wrappers. Freeing them
+            //     here returned a tuple of dangling pointers (live only on the
+            //     BLAS route -- the Jacobi fallback never reaches this arm).
+            //   * IRSequence ALIASES its inputs rather than copying them: the
+            //     emitter assembles `<name>[i] = <name>_i`, so the returned
+            //     array's cells ARE the per-child pools (`isFreshPoolForm`
+            //     documents exactly this, which is why it refuses to call a
+            //     sequence a fresh-pool barrier).
+            //
+            // Both used to need their own suffix-reconstructing arm here; the
+            // mark/spare pair in `allocRegistrationMark` states the rule once
+            // and the next multi-pool form inherits it.
+            let allocMark = allocRegistrationMark ()
             let (retCode, _) = genBinding bodyCtx tempBinding builder
-            // The materialized pool leaves with the value; free everything else.
-            suppressAllocName retVarName
-            // IRSequence is the one member of this family whose result ALIASES
-            // its inputs rather than copying them: the emitter assembles
-            // `<name>[i] = <name>_i`, so the returned array's cells ARE the
-            // per-child pools (isFreshPoolForm documents exactly this, which is
-            // why it refuses to call a sequence a fresh-pool barrier). Sparing
-            // only `__retN` would free those children out from under the value
-            // that just escaped -- a use-after-free the caller reads as garbage
-            // rows. The child names are the emitter's own `<name>_<i>`
-            // convention, so they are derivable here without threading anything
-            // back out of genBinding.
-            (match (match r with IRCompute inner -> inner | e -> e) with
-             | IRSequence elems ->
-                 elems |> List.iteri (fun i _ -> suppressAllocName (sprintf "%s_%d" retVarName i))
-             | _ -> ())
+            suppressAllocsSince allocMark
             stmts @ retCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
         | _ ->
             // Return-extent ABI (supersedes the stage-2b guard): a
