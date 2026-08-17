@@ -326,6 +326,74 @@ and private stmtMentionsDeep (names: Set<string>) (s: Stmt) : bool =
     | StmtForIn (_, r, body) ->
         mentionsDeep names r || (body |> List.exists (stmtMentionsDeep names))
 
+/// EVERY variable name occurring anywhere in `e`. `mentionsDeep`'s dual: same
+/// exhaustive coverage, same deliberate blindness to inner binders. Callers
+/// that need the FREE names subtract their own binders; a name an inner lambda
+/// rebinds is still reported, which over-reports and therefore over-taints --
+/// the direction that costs a refusal rather than a silent zero.
+let rec private allVarsDeep (e: Expr) : Set<string> =
+    let any (es: Expr list) = es |> List.fold (fun acc x -> Set.union acc (allVarsDeep x)) Set.empty
+    let opt o = match o with Some x -> allVarsDeep x | None -> Set.empty
+    match e.Kind with
+    | ExprKind.ExprVar n -> Set.singleton n
+    | ExprKind.ExprBinOp (_, _, l, r) -> any [l; r]
+    | ExprKind.ExprUnaryOp (_, i) -> allVarsDeep i
+    | ExprKind.ExprApp (f, args) -> Set.union (allVarsDeep f) (any args)
+    | ExprKind.ExprTupleIndex (t, i) -> any [t; i]
+    | ExprKind.ExprField (t, _) -> allVarsDeep t
+    | ExprKind.ExprLambda (ps, _, b) ->
+        Set.union (ps |> List.fold (fun acc p -> Set.union acc (opt p.Default)) Set.empty) (allVarsDeep b)
+    | ExprKind.ExprLet (bnd, b) -> any [bnd.Value; b]
+    | ExprKind.ExprMatch (s, cases) ->
+        cases |> List.fold (fun acc c -> Set.union acc (Set.union (opt c.Guard) (allVarsDeep c.Body)))
+                           (allVarsDeep s)
+    | ExprKind.ExprIf (c, t, f) -> any [c; t; f]
+    | ExprKind.ExprTuple es | ExprKind.ExprArrayLit es | ExprKind.ExprStack es
+    | ExprKind.ExprSequence es | ExprKind.ExprZip es | ExprKind.ExprMethodFor es
+    | ExprKind.ExprGroupKeys es -> any es
+    | ExprKind.ExprAlign (es, _) | ExprKind.ExprJoin (es, _) -> any es
+    | ExprKind.ExprBlock (ss, fe) ->
+        ss |> List.fold (fun acc s -> Set.union acc (stmtAllVarsDeep s)) (opt fe)
+    | ExprKind.ExprObjectFor k -> allVarsDeep k
+    | ExprKind.ExprDotDot (l, h) -> any [l; h]
+    | ExprKind.ExprBlocked (_, b) -> allVarsDeep b
+    | ExprKind.ExprHalo (_, o) -> allVarsDeep o
+    | ExprKind.ExprPure i | ExprKind.ExprCompute i | ExprKind.ExprRead i
+    | ExprKind.ExprRank i | ExprKind.ExprUnique i | ExprKind.ExprGroupBucket i
+    | ExprKind.ExprExtents i | ExprKind.ExprStatic i | ExprKind.ExprTyped (i, _)
+    | ExprKind.ExprTranspose (i, _, _) | ExprKind.ExprDecompact (i, _)
+    | ExprKind.ExprPartialApp (_, i, _) | ExprKind.ExprReynolds (i, _) -> allVarsDeep i
+    | ExprKind.ExprGuard (l, r) | ExprKind.ExprReplicate (l, r) | ExprKind.ExprMask (l, r)
+    | ExprKind.ExprCompound (l, r) | ExprKind.ExprSparse (l, r)
+    | ExprKind.ExprIntersect (l, r) | ExprKind.ExprUnion (l, r)
+    | ExprKind.ExprContains (l, r) | ExprKind.ExprGroupBy (l, r)
+    | ExprKind.ExprSort (l, r) | ExprKind.ExprGram (l, r)
+    | ExprKind.ExprAssign (l, r) -> any [l; r]
+    | ExprKind.ExprReduce (a, k, i, ax) -> Set.union (any [a; k]) (Set.union (opt i) (opt ax))
+    | ExprKind.ExprStruct (_, fields, spread) ->
+        fields |> List.fold (fun acc (_, fe) -> Set.union acc (allVarsDeep fe)) (opt spread)
+    | ExprKind.ExprFor (src, _, k) ->
+        Set.union
+            (match src with
+             | ForArrays (es, inc) -> Set.union (any es) (opt inc)
+             | ForKernel k2 -> allVarsDeep k2)
+            (opt k)
+    | ExprKind.ExprRecArray d ->
+        Set.union (allVarsDeep d.SliceExpr)
+                  (match d.SeedArm with Some (_, se) -> allVarsDeep se | None -> Set.empty)
+    | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprQualified _
+    | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprArity _
+    | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _ -> Set.empty
+
+and private stmtAllVarsDeep (s: Stmt) : Set<string> =
+    match s with
+    | StmtSpanned (inner, _) -> stmtAllVarsDeep inner
+    | StmtLet b -> allVarsDeep b.Value
+    | StmtExpr ex -> allVarsDeep ex
+    | StmtAssign (l, _, r) -> Set.union (allVarsDeep l) (allVarsDeep r)
+    | StmtForIn (_, r, body) ->
+        body |> List.fold (fun acc s2 -> Set.union acc (stmtAllVarsDeep s2)) (allVarsDeep r)
+
 /// Capture-avoiding substitution for fusion ONLY: `name := repl` over a
 /// kernel body.
 ///
@@ -928,7 +996,29 @@ let rec private walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (inK
                 match a.Kind with
                 | ExprKind.ExprHalo _ | ExprKind.ExprRange _ -> Ok ()
                 | _ -> walkExpr fname ctx onVar inKernel a)) (Ok ())
-    | { Kind = ExprKind.ExprObjectFor _ } when errMode.Value = "jvp" -> Ok ()
+    // A let-bound `object_for(kern)` is a deferred iteration and gets no
+    // tangent of its own -- but its kernel may CAPTURE differentiable data, and
+    // the binding then carries that dependence to every application site (which
+    // resolves the loop object by name and re-taints from it). Walking nothing
+    // here meant a result whose ONLY route to a differentiable parameter ran
+    // through a capture came out with a silent ZERO tangent, or -- worse -- was
+    // refused as "does not depend on any differentiable parameter", which was
+    // simply untrue. Taint ONLY: the kernel body's validation belongs to the
+    // apply site (which walks it properly, with `inKernel` set), and adding a
+    // second validation here would refuse bindings that are never applied.
+    | { Kind = ExprKind.ExprObjectFor kern } when errMode.Value = "jvp" ->
+        let captures (ps: LambdaParam list) (body: Expr) =
+            let bound = ps |> List.map (fun p -> p.Name) |> Set.ofList
+            Set.difference (allVarsDeep body) bound
+        (match kern.Kind with
+         | ExprKind.ExprLambda (ps, _, kbody)
+         | ExprKind.ExprReynolds ({ Kind = ExprKind.ExprLambda (ps, _, kbody) }, _) ->
+             captures ps kbody |> Set.iter onVar
+         // a named-function or intrinsic kernel: the NAME carries whatever
+         // taint it has, exactly as at the apply site
+         | ExprKind.ExprVar n -> onVar n
+         | other -> allVarsDeep (inheritSpan kern other) |> Set.iter onVar)
+        Ok ()
     // C2-C5: the rank-0 map (both spellings). Visit the operand arrays (so
     // taint sees them; virtual halo/range operands have nothing to visit)
     // and the kernel BODY; kernel params are bound by the lambda, and the
