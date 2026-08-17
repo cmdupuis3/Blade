@@ -6758,6 +6758,44 @@ let liftChildIncludingLoopApp (builder: IRBuilder) (child: IRExpr) : (IRId * IRT
         let (b, e) = liftChild builder inner
         (peeled @ b, e)
 
+/// Lift an ARGUMENT of a synthesized elementwise loop application
+/// (`IRApp(IRObjectFor ..., args)`, what an array/scalar broadcast `x - s`
+/// lowers to). Its emitter -- `genObjectForApplication` -- spells each operand
+/// by looking the arg up as an `IRVar` in `ctx.VarNames` and falling back to
+/// the placeholder `arr<i>`, exactly like a loop form's `Arrays` list, and it
+/// has no auto-materialize arm at all. So an arg that is not already a named
+/// binding leaves the nest reading an identifier that was never declared
+/// (`error: 'arr0' was not declared in this scope`).
+///
+/// The failing shape is an INLINE ROW VIEW: `a(i) - mean(a(i))` inside a kernel
+/// body, where the broadcast's array operand is the partial index `a(i)` rather
+/// than a rank-1 parameter. Naming it in a `let` is what writing the
+/// intermediate binding by hand already does.
+///
+/// The predicate set is deliberately the SAME one the `IRMethodFor` /
+/// `IRApplyCombinator` / `IRComposeApply` arms apply to their `Arrays` slots
+/// (`isArrayFieldAccess`, `isNestedLoopComputeArg`, `isInlineArrayLitArg`,
+/// `isArrayValuedSelect`, `isNestedLoopFormArg`) -- the operand-naming rule is
+/// shared, so the hoisting rule has to be -- PLUS `isInlineForm`, which the
+/// loop forms exempt only because codegen auto-materializes mask/intersect/
+/// union/unique in an `Arrays` slot and this emitter does not.
+let liftLoopAppOperand (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * IRExpr) list * IRExpr =
+    let (peeled, inner) = peelLetChain child
+    let needsName =
+        match inner with
+        | IRArrayLit _ -> true
+        | e ->
+            isInlineForm e || isArrayFieldAccess e || isNestedLoopComputeArg e
+            || isInlineArrayLitArg e || isArrayValuedSelect e || isNestedLoopFormArg e
+    if needsName then
+        let id = builder.FreshId()
+        // IRArrayLit carries its array type in the node rather than through
+        // `typeOf` (mirroring liftChildIncludingArrayLit).
+        let ty = match inner with IRArrayLit (_, arrTy) -> mkArrayLike arrTy | _ -> typeOf inner
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    else
+        (peeled, inner)
+
 /// Lift a list of children, accumulating bindings.
 let liftChildren (builder: IRBuilder) (children: IRExpr list) : (IRId * IRType * IRExpr) list * IRExpr list =
     children |> List.fold (fun (binds, acc) child ->
@@ -6990,9 +7028,19 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         // extended helper that lifts both inline forms and IRArrayLit.
         let fn' = liftExpr builder fn
         let args' = args |> List.map (liftExpr builder)
+        // A SYNTHESIZED LOOP APPLICATION (`IRApp(IRObjectFor ...)`, the shape
+        // an array/scalar broadcast lowers to) does not consume its args as
+        // ordinary call arguments: they are the loop's ARRAY OPERANDS, named
+        // positionally by genObjectForApplication. They need the loop-form
+        // Arrays hoisting rule, not the call-argument one -- see
+        // `liftLoopAppOperand`.
+        let liftArg =
+            match fn' with
+            | IRObjectFor _ -> liftLoopAppOperand builder
+            | _ -> liftChildIncludingArrayLit builder
         let (binds, argsFinal) =
             args' |> List.fold (fun (accB, accA) a ->
-                let (b, a') = liftChildIncludingArrayLit builder a
+                let (b, a') = liftArg a
                 (accB @ b, accA @ [a'])) ([], [])
         wrapLets binds (IRApp (fn', argsFinal, retTy))
     | IRJoin (arrs, dim) ->

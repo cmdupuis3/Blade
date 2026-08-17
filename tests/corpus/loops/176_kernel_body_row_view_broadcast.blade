@@ -1,0 +1,94 @@
+// TEST: Kernel-Body Row View As An Elementwise-Map Operand
+// ============================================================================
+// An array/scalar broadcast (`row - s`) lowers to a SYNTHESIZED LOOP
+// APPLICATION -- `IRApp(IRObjectFor ..., [row])` -- whose emitter names its
+// array operand by looking it up as a bound variable and falling back to the
+// placeholder `arr<i>`, exactly like a loop form's `Arrays` list. Only inline
+// forms and array literals were hoisted into that slot, so an operand that is
+// an INLINE ROW VIEW left the nest reading an identifier never declared:
+//
+//     error: 'arr0' was not declared in this scope
+//       __v1073741830[__i0] = __wrap_66___v1073741830(arr0[__i0]);
+//
+// The trigger is the partial application `a(i)` in the operand position --
+// `row - mean(row)` over a NAMED rank-1 kernel parameter always compiled, which
+// is what made this look like an AD bug rather than an emitter one. It is the
+// fifth instance of the blessed-position family (see 166 for the chained map,
+// 034 for the array literal): the argument slots of a loop application get the
+// same hoisting rule the loop forms' `Arrays` slots already had.
+//
+// The hand-split spelling -- bind the row, then map it -- is the workaround
+// that always worked, and it defines what hoisting the operand means. Every
+// EXPECT below is pinned against it.
+// ============================================================================
+type R = Idx<3>
+type C = Idx<4>
+
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+
+let A: Array<Float64 like R, C> = [[1.0, 2.0, 3.0, 4.0],
+                                   [2.0, 4.0, 6.0, 8.0],
+                                   [1.0, 1.0, 1.0, 1.0]]
+
+// Row means 2.5 / 5 / 1; deviations squared sum to 5 / 20 / 0.
+
+// ---------------------------------------------------------------------------
+// The shape that emitted an undeclared `arr0`, inside a FUNCTION BODY: the
+// kernel takes the index, so both operands of the broadcast are inline row
+// views rather than a rank-1 parameter.
+// ---------------------------------------------------------------------------
+function row_ss(a: Array<Float64 like R, C>) -> Float64 = {
+    let s = method_for(range<R>) <@> lambda(i) ->
+                reduce((a(i) - mean(a(i))) * (a(i) - mean(a(i))), (+)) |> compute
+    reduce(s, (+))
+}
+let ss_fn = row_ss(A)
+// EXPECT: ss_fn = 25
+
+// The NAMED-parameter spelling of the same arithmetic, which always compiled.
+// Its agreement is the point: the fix changes how the operand is spelled in
+// C++, not what the loop computes.
+function row_ss_named(a: Array<Float64 like R, C>) -> Float64 = {
+    let s = method_for(a) <@> lambda(row: T^1) ->
+                reduce((row - mean(row)) * (row - mean(row)), (+)) |> compute
+    reduce(s, (+))
+}
+let ss_named = row_ss_named(A)
+// EXPECT: ss_named = 25
+
+// ---------------------------------------------------------------------------
+// Same shape at MODULE level (the other materialization site), and per row so
+// a wrong row view would show up as a wrong cell rather than a lucky total.
+// ---------------------------------------------------------------------------
+let per_row = method_for(range<R>) <@> lambda(i) ->
+                  reduce((A(i) - mean(A(i))) * (A(i) - mean(A(i))), (+)) |> compute
+// EXPECT: per_row = [5, 20, 0]
+
+// SCALAR ON THE LEFT (`s - row`): the broadcast's other orientation, which
+// builds the same one-param kernel over the same unnamed operand. Squaring
+// makes it agree with `per_row` elementwise.
+let per_row_flipped = method_for(range<R>) <@> lambda(i) ->
+                          reduce((mean(A(i)) - A(i)) * (mean(A(i)) - A(i)), (+)) |> compute
+// EXPECT: per_row_flipped = [5, 20, 0]
+
+// A row view under a NON-symmetric broadcast, so an operand mix-up cannot
+// cancel: sum(2 * row - 1) = 2 * sum(row) - 4 per row.
+let per_row_affine = method_for(range<R>) <@> lambda(i) ->
+                         reduce(2.0 * A(i) - 1.0, (+)) |> compute
+// EXPECT: per_row_affine = [16, 36, 4]
+
+// ---------------------------------------------------------------------------
+// The hand-split baseline: bind the row first, then map it. This is what the
+// hoist now does automatically, so the two must agree cell for cell.
+// ---------------------------------------------------------------------------
+let r0 = A(0 : R)
+let r1 = A(1 : R)
+let r2 = A(2 : R)
+let split0 = reduce((r0 - mean(r0)) * (r0 - mean(r0)), (+))
+let split1 = reduce((r1 - mean(r1)) * (r1 - mean(r1)), (+))
+let split2 = reduce((r2 - mean(r2)) * (r2 - mean(r2)), (+))
+let resid = (per_row(0 : R) - split0) + (per_row(1 : R) - split1) + (per_row(2 : R) - split2)
+// EXPECT: split0 = 5
+// EXPECT: split1 = 20
+// EXPECT: split2 = 0
+// EXPECT: resid = 0
