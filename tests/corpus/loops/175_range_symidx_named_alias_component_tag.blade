@@ -1,0 +1,36 @@
+// TEST: Range SymIdx Named Alias Carries The Component Tag
+// Was "Range SymIdx Named Alias Rejects", pinning a hard BL4003 as OBSERVED
+// BEHAVIOR and saying so: naming the SymIdx group turned a warning into a
+// refusal with no semantic difference between the two programs. That is now
+// fixed, so this file pins the fix instead of the symptom.
+//
+// An index record has ONE `Tag` field for the whole group (IRIndexTypeG.Tag,
+// "name (index space matching)"), and `elemTypeForIterationIndex` hands that
+// tag to EVERY component param. The nominative-alias rule used to overwrite it
+// with the alias name, so for `type S2 = SymIdx<2, I3>` both params typed as
+// `Nat<S2>` -- the GROUP's name, a type no component index of S2 can inhabit --
+// and indexing the I3-tagged array they actually range over was BL4003 at ERROR
+// severity. A multi-rank record now keeps its COMPONENT space's tag, which is
+// docs/formalism.md 7.3's stated minimal fix.
+//
+// THE ASSERTION IS SILENCE. There is no `// WARN:` pin here, and warning pins
+// are strict in BOTH directions, so any warning this file emits fails it. That
+// is what proves the params are `Nat<I3>` and nothing weaker: untagged `Int64`
+// params would warn BL4003 twice (that is 174, which still does, because its
+// group is anonymous and has no component tag to inherit), and `Nat<S2>` params
+// would error. Only the component tag passes silently.
+//
+// The values are 172's and 174's, unchanged -- the tag fix moves no data.
+type I3 = Idx<3>
+type S2 = SymIdx<2, I3>
+let v: Array<Float like I3> = [2.0, 3.0, 5.0]
+let sym = method_for(range<S2>) <@> lambda(p0, p1) -> v(p0) * v(p0 + p1) |> compute
+// EXPECT: sym = [[4, 6, 10], [9, 15], [25]]
+
+// The trade the fix makes explicit: a multi-rank alias names the class for
+// readability but mints no distinct nominal identity, exactly as the wreath
+// carve-out beside it already did. So an array annotated with the ALIAS and one
+// annotated with the group written INLINE are the same type, and this
+// assignment is legal rather than a nominal mismatch.
+let inline_spelled: Array<Float like SymIdx<2, I3>> = sym
+// EXPECT: inline_spelled = [[4, 6, 10], [9, 15], [25]]

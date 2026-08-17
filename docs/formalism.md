@@ -797,23 +797,34 @@ the current convention by accident:
   the risk is not cost but that any pre-existing `range<Sym…>` kernel written
   against the offsets flips meaning, hence the pins first.
 
-Two further defects sit at the same seam. The first is the tag analogue of the
-offset one — `elemTypeForIterationIndex` applied per rank component without
-adjusting for rank > 1; the second is independent.
+Two further defects sat at the same seam. Both are now fixed; the mechanism and
+the residual limits are recorded here because the fix trades one property away.
 
-- The component params carry the *group's* tag, not the component space's. An
-  index record has ONE `Tag` field for the whole group (`IRIndexTypeG.Tag`,
-  "name (index space matching)"), so lowering a multi-rank slot keeps whichever
-  name the group was written under and drops the component's. With
-  `type S2 = SymIdx<2, I3>` both params type as `Nat<S2>` — a type no component
-  index of S2 can inhabit — so indexing an `I3`-tagged array is a hard BL4003;
-  spell the same group inline and `Tag` is `None`, the params are untagged
-  `Int64`, and the identical program merely warns. Whether the group happens to
-  be *named* is not a semantic distinction. The minimal fix is for a multi-rank
-  record's `Tag` to name the COMPONENT space (`I3`), which is what "index space
-  matching" means for the values the slot actually produces; both spellings then
-  check with no warning. Pinned as `tests/corpus/loops/174` (warns) and `175`
-  (errors).
+- ~~The component params carry the *group's* tag, not the component space's.~~
+  FIXED. An index record has ONE `Tag` field for the whole group
+  (`IRIndexTypeG.Tag`, "name (index space matching)") and
+  `elemTypeForIterationIndex` hands it to EVERY component param, so overwriting
+  it with the group's name typed both params of `type S2 = SymIdx<2, I3>` as
+  `Nat<S2>` — a type no component index of S2 can inhabit — making a hard
+  BL4003 out of indexing the `I3`-tagged array they range over, while the same
+  group spelled inline had `Tag = None`, untagged `Int64` params, and merely
+  warned. Whether the group happens to be *named* is not a semantic
+  distinction.
+
+  The minimal fix named here is the one taken: a multi-rank record's `Tag` now
+  names the COMPONENT space, which is what "index space matching" means for the
+  values the slot actually produces, and both spellings check with no warning.
+  It is the fourth carve-out from the nominative-alias rule, beside the irreps,
+  bad-spec and wreath ones, each there for the same reason — on those records
+  `Tag` is carrying something the alias name would destroy.
+
+  THE TRADE: like the wreath carve-out, a multi-rank alias now names the class
+  for readability but mints no distinct nominal identity, so
+  `Array<F like S2>` and `Array<F like SymIdx<2, I3>>` are the SAME type
+  (pinned in `175`). Giving a group alias its own identity *and* keeping the
+  component tag needs a second tag field on every index record — a type-system
+  change, not a fix. Pinned as `tests/corpus/loops/174` (anonymous group, still
+  warns: it has no component tag to inherit) and `175` (named group, silent).
 - Naming only the component — `range<SymIdx<2, I3>>` — is the spelling that
   works, and it is the bullet above's "minimal fix" already realized for this
   one form. The base slot resolves to `I3`'s record and inherits its `Tag`, so
@@ -831,10 +842,12 @@ adjusting for rank > 1; the second is independent.
   has no reading, and is now refused at the range seam rather than left to g++
   (`tests/corpus/index-types/240`).
 
-  This does NOT settle the first bullet: `type S2 = SymIdx<2, I3>` names the
-  GROUP, and the group's own name still overwrites the component tag, so 175
-  stays a hard BL4003. Component-naming and group-naming remain different, and
-  only the former is fixed.
+  Component-naming and group-naming were fixed separately and by different
+  means — this bullet by resolving the base slot to `I3`'s record, the bullet
+  above by stopping the alias name from overwriting a multi-rank tag — but they
+  now agree: `range<SymIdx<2, I3>>`, `range<S2>` and the inline anonymous form
+  all iterate the same space, and the two that have a component tag to inherit
+  both check silently.
 
 ### 7.4 For-loop syntax
 

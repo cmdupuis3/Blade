@@ -17197,6 +17197,31 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     // ordinary nominative path below, exactly like
                     // `type S = SymIdx<2, n>`.
                     | _ when idx.IxKind = IxKOrbit -> idx
+                    // A MULTI-RANK compact record (SymIdx/AntisymIdx/
+                    // HermitianIdx, Rank >= 2) keeps the tag of its COMPONENT
+                    // space. The fourth carve-out of the same species as the
+                    // three above: on a multi-rank record `Tag` is not a
+                    // spare name field, it is the identity of the space the
+                    // slot's values inhabit -- one record has one `Tag`
+                    // (IRIndexTypeG.Tag, "name (index space matching)"), and
+                    // `elemTypeForIterationIndex` hands that tag to EVERY
+                    // component param. Overwriting it with the group's name
+                    // typed both params of `type S2 = SymIdx<2, I3>` as
+                    // `Nat<S2>` -- a type no component index of S2 can
+                    // inhabit -- so indexing the I3-tagged array they
+                    // actually range over was a hard BL4003, while the
+                    // identical program spelled inline merely warned.
+                    // Whether the group happens to be NAMED is not a semantic
+                    // distinction; this is docs/formalism.md 7.3's stated
+                    // minimal fix, and with it both spellings check silently.
+                    //
+                    // Like the wreath carve-out above, a multi-rank alias
+                    // therefore names the class for readability but mints no
+                    // distinct nominal identity. That is the honest trade:
+                    // the alternative is a second tag field on every index
+                    // record to carry group identity and component identity
+                    // apart, which is a type-system change, not a fix.
+                    | _ when idx.Rank >= 2 -> idx
                     | _ -> { idx with Tag = Some name; IxKind = ixKindOfTag (Some name) }
                 Ok (TDIIndexType (name, named, chasedBody))
             | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->

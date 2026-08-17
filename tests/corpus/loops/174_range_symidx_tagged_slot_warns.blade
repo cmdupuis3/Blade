@@ -1,26 +1,26 @@
 // TEST: Range SymIdx Tagged Slot Warns
-// The tag side of `range<SymIdx<...>>`, and the WARNING half of the pair whose
-// ERROR half is 175.
+// The tag side of `range<SymIdx<...>>`, and the one spelling of the three that
+// still warns -- deliberately.
 //
 // `range<LatIdx>` flows LatIdx's tag onto the kernel's index param, which is
 // what makes `A(i)` typecheck with no annotation
-// (TypeCheck.elemTypeForIterationIndex). A multi-rank slot gets no such tag:
-// the params come out plain Int64, so every read of the I3-tagged array `v` is
-// an untagged-integer index -- BL4003 as a WARNING, twice (v(p0) and
-// v(p0 + p1)), and the program compiles and runs to 172's values.
+// (TypeCheck.elemTypeForIterationIndex). The group here is anonymous on BOTH
+// counts -- no alias AND a literal extent -- so there is no component tag
+// anywhere to inherit: the params come out plain Int64, every read of the
+// I3-tagged array `v` is an untagged-integer index, and that is BL4003 as a
+// WARNING, twice (v(p0) and v(p0 + p1)). The program compiles and runs to
+// 172's values.
 //
-// Name that same SymIdx group and the identical program HARD-ERRORS instead
-// (175). Nothing semantic separates the two spellings.
-//
-// The group here is deliberately anonymous on BOTH counts -- no alias AND a
-// literal extent, which is why the params are untagged and this file warns.
-// `range<SymIdx<2, I3>>`, naming only the COMPONENT, is a third behaviour
-// again -- and it is now the one that WORKS: the base slot resolves to I3's
-// record and inherits its tag, so both params type as `Nat<I3>`, the same
-// values below are produced, and nothing warns at all. It is pinned as
-// index-types/239. (Until that resolution existed it failed codegen, emitting
-// `S_extents[0] = __range0.extents[0];` for an `__range0` that was never
-// declared -- a defect, not a refusal, so it had no honest pin here.)
+// This file is the CONTROL for the other two spellings, which both name the
+// component space somewhere and are now both silent:
+//   - `range<SymIdx<2, I3>>` names the component inline -- the base slot
+//     resolves to I3's record and inherits its tag (index-types/239).
+//   - `range<S2>` for `type S2 = SymIdx<2, I3>` names the group -- a
+//     multi-rank record now keeps its COMPONENT tag rather than having it
+//     overwritten by the alias name (175, which used to be this file's
+//     hard-ERROR twin and is now its silent one).
+// Writing the extent literally, as here, is what opts out of the tag
+// discipline -- so this warning is the discipline working, not a gap.
 // See docs/formalism.md 7.3.
 type I3 = Idx<3>
 let v: Array<Float like I3> = [2.0, 3.0, 5.0]
