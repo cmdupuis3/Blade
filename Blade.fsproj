@@ -310,6 +310,23 @@
          from CodeGen so a future IR interpreter can reuse the exact plan. Pure
          int/list logic; no IR/Types dependency, so it can precede CodeGen. -->
     <Compile Include="src/ReynoldsCore.fs" />
+    <!-- The C++ emitter, eight layers in dependency order. CodeGenState.fs
+         (AsyncLocal cells, env gates as functions, shape predicates, type
+         rendering) is what the interpreter and Build/Cli reach through the
+         CodeGen.* re-exports. CodeGenExpr.fs and CodeGenBinding.fs each hold
+         ONE atomic rec-chain (expression renderer + materialize* family;
+         per-binding-kind emitters) and cannot be split further without
+         breaking mutual recursion. The middle three carry the loop-nest
+         core, the CUDA/MPI backends, and fusion-tree assembly. CodeGen.fs
+         (function/module/program assembly + public entry points) keeps the
+         module name and must stay last. -->
+    <Compile Include="src/CodeGenState.fs" />
+    <Compile Include="src/CodeGenExprSupport.fs" />
+    <Compile Include="src/CodeGenExpr.fs" />
+    <Compile Include="src/CodeGenLoopNest.fs" />
+    <Compile Include="src/CodeGenCuda.fs" />
+    <Compile Include="src/CodeGenFusion.fs" />
+    <Compile Include="src/CodeGenBinding.fs" />
     <Compile Include="src/CodeGen.fs" />
     <!-- Tree-walking IR interpreter (differential twin of CodeGen; output must
          byte-match compiled binaries). Value = runtime value universe;
