@@ -21,6 +21,10 @@ open Blade.Tests.SumTypes
 open Blade.Tests.Interfaces
 open Blade.Tests.Modules
 open Blade.Tests.Guards
+open Blade.Tests.Combinators
+open Blade.Tests.Tuples
+open Blade.Tests.RecursiveArrays
+open Blade.Tests.StackJoin
 open Blade.Tests.Bracketed
 open Blade.Tests.IndexTypes
 open Blade.Tests.Mutability

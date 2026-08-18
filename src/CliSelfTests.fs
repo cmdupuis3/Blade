@@ -21,6 +21,10 @@ open Blade.Tests.SumTypes
 open Blade.Tests.Interfaces
 open Blade.Tests.Modules
 open Blade.Tests.Guards
+open Blade.Tests.Combinators
+open Blade.Tests.Tuples
+open Blade.Tests.RecursiveArrays
+open Blade.Tests.StackJoin
 open Blade.Tests.Bracketed
 open Blade.Tests.IndexTypes
 open Blade.Tests.Mutability
@@ -2050,18 +2054,6 @@ let internal dispatchTest (rest: string list) : int =
         // walker would say by shadowing the `ml.equiv` pin so it reaches typecheck.
         let failed = (Blade.Tests.RepRejectCensus.runRepRejectCensusTests ()).Failed
         if failed = 0 then 0 else 1
-    | [ "gal-layer" ] | [ "gallayer" ] ->
-        // MEASUREMENT ONLY: what a typecheck-resident walker would conclude
-        // about every galilean certificate in the corpus, accepted and
-        // refused alike. Changes no checking behaviour; not in the full suite.
-        let failed = (Blade.Tests.GalLayerCensus.runGalLayerCensusTests ()).Failed
-        if failed = 0 then 0 else 1
-    | [ "perm-layer" ] | [ "permlayer" ] ->
-        // MEASUREMENT ONLY: the PERM discipline's layer question, plus the
-        // first perm INFERENCE experiment (writes the pin back into the
-        // source, runs the shipped seam checker). Not in the full suite.
-        let failed = (Blade.Tests.PermLayerCensus.runPermLayerCensusTests ()).Failed
-        if failed = 0 then 0 else 1
     | [ "oracles" ] ->
         // Differential-harness oracles checked against hand-computed / analytic values.
         let failed = (Blade.Tests.OracleReview.runOracleTests ()).Failed
@@ -2213,22 +2205,29 @@ let internal dispatchTest (rest: string list) : int =
             | "structs" -> Some ("Structs", structTests)
             | "struct-aborts" | "structaborts" -> Some ("Struct Aborts", structAbortTests)
             | "struct-mutual" | "mutual" -> Some ("Struct Mutual", structMutualTests)
-            | "sumtypes" -> Some ("Sum Types", sumTypeTests)
+            | "sum-types" | "sumtypes" -> Some ("Sum Types", sumTypeTests)
             | "interfaces" -> Some ("Interfaces", interfaceTests)
             | "modules" -> Some ("Modules", moduleTests)
             | "guards" -> Some ("Guards", guardTests)
+            | "guard-combinators" | "guardcombinators" -> Some ("Guard Combinators", guardCombinatorTests)
+            | "zero-combinators" | "zerocombinators" -> Some ("Zero Combinators", zeroCombinatorTests)
+            | "sequence-combinators" | "sequencecombinators" -> Some ("Sequence Combinators", sequenceCombinatorTests)
+            | "replicate" -> Some ("Replicate", replicateTests)
+            | "anon-ranges" | "anonranges" -> Some ("Anonymous Ranges", anonRangeTests)
+            | "recursive-arrays" | "recursivearrays" -> Some ("Recursive Arrays", recursiveArrayTests)
+            | "tuple-views" | "tupleviews" -> Some ("Tuple Views", tupleViewTests)
             | "bracketed" -> Some ("Bracketed", bracketedTests)
             // The `Tuple<N>` surface layer (docs/plan-tuples-vs-arg-packs.md
             // 6b). Mixed category: positives plus "(rejects)" probes, so no
             // asRejectProbes wrapper.
             | "tuples" -> Some ("Tuples", tupleTests)
-            | "indextypes" -> Some ("Index Types", indexTypeTests)
+            | "index-types" | "indextypes" -> Some ("Index Types", indexTypeTests)
             | "static" -> Some ("Static", staticTests)
             | "units" -> Some ("Units", unitTests)
             | "unit-errors" | "uniterrors" -> Some ("Unit Errors", asRejectProbes unitErrorTests)
             | "mutability" -> Some ("Mutability", mutabilityTests)
             | "mutability-errors" | "mutabilityerrors" -> Some ("Mutability Errors", asRejectProbes mutabilityErrorTests)
-            | "funcarrays" | "fa" -> Some ("Func Arrays", funcArrayTests)
+            | "func-arrays" | "funcarrays" | "fa" -> Some ("Func Arrays", funcArrayTests)
             | "ppl" -> Some ("PPL", pplTests)
             | "math" -> Some ("Math", mathTests)
             | "rand" -> Some ("Rand", randTests)
@@ -2242,7 +2241,10 @@ let internal dispatchTest (rest: string list) : int =
             | "ml-ops" | "mlops" -> Some ("ML Ops", mlOpsTests)
             | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
             | "ml-equiv" | "mlequiv" | "equiv" -> Some ("ML Equiv", mlEquivTests)
-            | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests)
+            // The full sql-* union, matching what RunAll's default suite runs
+            // (unique-contains/semijoins/v24d-probes were silently missing
+            // from this shortcut before).
+            | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes)
             | "deferred-concrete" | "deferredconcrete" -> Some ("Deferred Concrete", Blade.Tests.RunAll.deferredConcreteTests)
             | "memfree" -> Some ("Mem Free", Blade.Tests.RunAll.memfreeTests)
             | "memfree-stress" | "memfreestress" -> Some ("Mem Free Stress", Blade.Tests.RunAll.memfreeStressTests)

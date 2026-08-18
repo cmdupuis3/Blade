@@ -396,6 +396,10 @@
          the cycle/duplicate checks. (Also `blade test module-resolve`.) -->
     <Compile Include="tests/Test_ModuleResolve.fs" />
     <Compile Include="tests/Test_Guards.fs" />
+    <Compile Include="tests/Test_Combinators.fs" />
+    <Compile Include="tests/Test_Tuples.fs" />
+    <Compile Include="tests/Test_RecursiveArrays.fs" />
+    <Compile Include="tests/Test_StackJoin.fs" />
     <Compile Include="tests/Test_Bracketed.fs" />
     <Compile Include="tests/Test_IndexTypes.fs" />
     <!-- The OrbIdx bijection layer (src/OrbRank.fs): the traversal stream and
@@ -424,17 +428,6 @@
     <Compile Include="tests/Test_RepDifferential.fs" />
     <Compile Include="tests/Test_RepCheckAgreement.fs" />
     <Compile Include="tests/Test_RepRejectCensus.fs" />
-    <!-- MEASUREMENT SCAFFOLDING for the retired galilean-layer census: the
-         experimental typed GALILEAN judgment and its two censuses. Lives in the
-         test assembly deliberately — nothing in src/ may reference it, and it is
-         not part of the full suite (verb `blade test gal-layer`). -->
-    <Compile Include="tests/Test_GalLayerCensus.fs" />
-    <!-- MEASUREMENT SCAFFOLDING for the retired perm-layer census: the experimental
-         typed PERM judgment, its three censuses and the first-ever perm
-         inference experiment. Test assembly only - nothing in src/ may
-         reference it, and it is not part of the full suite
-         (verb `blade test perm-layer`). -->
-    <Compile Include="tests/Test_PermLayerCensus.fs" />
     <Compile Include="tests/Oracles.fs" />
     <Compile Include="tests/Test_Oracles.fs" />
     <Compile Include="tests/Test_WignerTables.fs" />
@@ -572,7 +565,7 @@
        still skipped. Always runs the Copy task every build, where
        SkipUnchangedFiles compares timestamp and size and copies when either
        differs. Three files; the build cost is not worth reasoning about. The
-       corpus glob above deliberately keeps PreserveNewest, since it is 1744
+       corpus glob above deliberately keeps PreserveNewest, since it is ~1,900
        files and tests/Corpus.fs already prefers ./tests/corpus over the
        deployed copy, so it was never exposed to this. -->
   <ItemGroup>

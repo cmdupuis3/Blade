@@ -82,11 +82,11 @@ Loaded by tests/Corpus.fs; named in the Test_*.fs modules (e.g. Test_Basic.fs
 maps `basicTests` to `basic/`). `multifile/` holds one subdirectory per test,
 one `.blade` per module file (with `// MODULE:`), compiled together.
 
-`mutability-errors/` and `unit-errors/` are preserved assets for a future
-expected-error runner; they are not currently run. `struct-aborts/` IS run
-(via `structAbortTests` in tests/RunAll.fs's `allTests`, also reachable as
-`blade test struct-aborts`) — its tests expect compile success followed by a
-nonzero runtime exit, pinned by `// ABORT:`.
+`mutability-errors/` and `unit-errors/` run as reject-probes (wrapped in
+`asRejectProbes` in tests/RunAll.fs's `allTests`, also reachable as
+`blade test mutability-errors` / `blade test unit-errors`). `struct-aborts/`
+runs unwrapped — its tests expect compile success followed by a nonzero
+runtime exit, pinned by `// ABORT:`.
 
 To add a test: create `<category>/NNN_<slug>.blade` with the next free number.
 No recompilation is needed — the suite reads these files at run time. When run
