@@ -4,6 +4,12 @@ module Blade.Unify
 
 open Blade.Ast
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 
 // Error Types (public -- consumed by Lowering.fs and Main.fs)
@@ -215,7 +221,7 @@ type TypeError =
     | AntisymmContradictsBody of param1: string * param2: string
     | AntisymMapNotOdd of param: string * proved: string
     | HermitianMapNotReal of param: string
-    // The wreath-tie analog of AntisymMapNotOdd (IR.deduceWreathTie
+    // The wreath-tie analog of AntisymMapNotOdd (IRLoopStructure.deduceWreathTie
     // condition 6): a comm/anticomm tie over an input class with a '-'
     // INNER level needs the kernel provably sign-odd in every tied argument;
     // the deduction says `param` is `proved` instead. `levels` renders the class.

@@ -11,6 +11,12 @@ open System.Diagnostics
 open System.Runtime.InteropServices
 open Blade.Ast
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.Lowering
 open Blade.CodeGen
@@ -165,7 +171,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                     // invalid IR (was `| Error _ -> ir0`). The host/device
                     // differential compares two variants; if BOTH were generated
                     // from invalid IR they could still agree and pass.
-                    match IR.validateIR ir0 with
+                    match IRValidate.validateIR ir0 with
                     | Error validationErrors ->
                         Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
                     | Ok ir ->

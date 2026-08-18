@@ -52,7 +52,7 @@ and TypedLambdaInfo = {
     /// comm on a PNeg body from a declared anticomm on a PInv body.
     AntisymGroups: int list list
     /// Per-parameter sign parity of the body (`Types.KernelSignParity`, decl
-    /// order), feeding `IR.deduceWreathTie`'s soundness gate. Populated only
+    /// order), feeding `IRLoopStructure.deduceWreathTie`'s soundness gate. Populated only
     /// when this lambda reaches the seam as a kernel; other construction sites
     /// leave it empty (read as all-unknown). Lowering copies it onto the
     /// lifted `IRCallable` so codegen and the interpreter agree on the tie.

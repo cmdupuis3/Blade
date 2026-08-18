@@ -24,6 +24,12 @@ open System
 open System.IO
 open System.Text.Json
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 
 // Metadata model
@@ -105,7 +111,7 @@ let binom (m: int64) (k: int) : int64 =
 /// (sym) or strict (antisym) combinations at depth 1, and the iterated fold
 /// over the level list for a wreath head. The wreath arm goes through
 /// `Blade.OrbRank.cellCountChecked`, the SAME overflow-checked fold
-/// `IR.bufferGroupCardinality`/`IR.classifyOutputStorage` size the in-memory
+/// `IR.bufferGroupCardinality`/`IRStorage.classifyOutputStorage` size the in-memory
 /// pool with, so the two never independently disagree about a pool length.
 let packedCardinalityChecked (g: PackedGroup) : Result<int64, string> =
     match g.Sym with

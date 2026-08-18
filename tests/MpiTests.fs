@@ -11,6 +11,12 @@ module Blade.Tests.MpiTests
 open System.IO
 open Blade
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Lowering
 open Blade.CodeGen
 open Blade.Build
@@ -50,7 +56,7 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
                     // invalid IR (was `| Error _ -> ir0`). The serial/mpi
                     // differential compares two variants of the SAME source, so
                     // both would be equally wrong and would still agree.
-                    match IR.validateIR ir0 with
+                    match IRValidate.validateIR ir0 with
                     | Error validationErrors ->
                         Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
                     | Ok ir ->

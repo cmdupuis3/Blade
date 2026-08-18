@@ -29,6 +29,12 @@ open System.Text
 open System.Collections.Generic
 open Blade.Types
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Interp.Value
 open Blade.Interp.CppFormat
 
@@ -378,7 +384,7 @@ let hasWreath (idxTys: IRIndexType list) : bool =
     idxTys |> List.exists (fun ix -> ix.Symmetry = SymWreath)
 
 /// Allocate a zeroed wreath pool: `cellCountChecked` cells, flat, in stream
-/// order. The count comes from the same checked fold `IR.classifyOutputStorage`
+/// order. The count comes from the same checked fold `IRStorage.classifyOutputStorage`
 /// sized the compiled pool with, so the two backends cannot allocate
 /// differently (7.2: the failure to guard is a silent wraparound).
 let allocWreath (elemTy: IRType) (idxTys: IRIndexType list)

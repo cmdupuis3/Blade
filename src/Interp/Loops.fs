@@ -4,7 +4,7 @@
 // loop-nest / reduction machinery into runtime Values that byte-match the
 // compiled C++ (the differential gate). Anti-drift invariant: this module
 // consumes the same `LoopNestCodeGen` structure CodeGen renders, built by
-// calling `IR.buildLoopNestCodeGen` directly (never re-derived), so
+// calling `IRStorage.buildLoopNestCodeGen` directly (never re-derived), so
 // iteration order, bound formulas (Extent - SumDeps - Strict), per-level
 // element peeling, and reduction seed/order/empty semantics cannot diverge
 // from the compiled binary.
@@ -32,6 +32,12 @@ module Blade.Interp.Loops
 open System.Collections.Generic
 open Blade.Types
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Interp.Value
 open Blade.Interp.Core
 
@@ -1628,7 +1634,7 @@ and private interpretNest
             paramCells.[elem.ParamVarId].V <- VInt (extent - 1L - i)
             (curArrays, sliced)
         | RealArray when b.FusedRank.IsSome ->
-            // Arc-1 fused JOINT level (IR.fuseJointSLevels; genElementBinding
+            // Arc-1 fused JOINT level (IRLoopStructure.fuseJointSLevels; genElementBinding
             // CodeGen.fs:3087): spans the array's whole d-dim plain-dense S-block.
             // The loop var is a left-justified compound coordinate; component 0
             // shifts it to the ABSOLUTE compound coord p (bound deps + strict

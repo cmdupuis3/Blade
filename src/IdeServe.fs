@@ -120,7 +120,7 @@ let fullTierUpgrade : Blade.Ide.FullTierUpgrade =
                with ex -> Error [ ("BL6002", ex.Message) ]) with
         | Error failures -> Error failures
         | Ok ir ->
-            match Blade.IR.validateIR ir with
+            match Blade.IRValidate.validateIR ir with
             | Error errs -> Error (errs |> List.map (fun e -> ("BL6001", e)))
             | Ok validated -> Ok (concreteValueTypes validated)
 

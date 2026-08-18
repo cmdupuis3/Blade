@@ -23,7 +23,7 @@ type SymmetryClass =
     | SymWreath
 
 /// Per-parameter SIGN parity of a kernel, recorded on the callable for the
-/// wreath-tie soundness gate (`IR.deduceWreathTie`); mirrors
+/// wreath-tie soundness gate (`IRLoopStructure.deduceWreathTie`); mirrors
 /// `Deduce.SignParity` (IRCallable sits below Deduce.fs in compile order).
 /// TypeCheck is the sole producer; empty means "never computed" (all-KspUnknown).
 type KernelSignParity =

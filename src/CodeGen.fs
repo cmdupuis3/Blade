@@ -5,6 +5,12 @@
 module Blade.CodeGen
 
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.EmitCpp
 open Blade.ReynoldsCore
@@ -2402,7 +2408,7 @@ let internal solveSingularMessage =
 /// those sites. The gemv and syrk dispatches each carried their own inline copy
 /// of this match until they were routed through here.
 ///
-/// SOUNDNESS. `IR.shapeMonomorphizeModule` writes a literal into `Extent` only
+/// SOUNDNESS. `IRMono.shapeMonomorphizeModule` writes a literal into `Extent` only
 /// when every occurrence of that symbolic name was pinned to the SAME literal,
 /// and `shapeRewriteType` confines the rewrite to the `Extent` field -- it never
 /// touches a body's `extents(A)` read. So a literal in the record is a statement
@@ -2616,7 +2622,7 @@ let foldReorderLicensed (callable: IRCallable) : bool =
 /// This is the rule the gemv/syrk dispatches apply to their `n`, lifted so the
 /// intrinsic/IIFE emitters can share it instead of each restating
 /// `.extents[0]`. Baking is sound because Phase 4
-/// (`IR.shapeMonomorphizeModule`) writes a literal into `IRIndexTypeG.Extent`
+/// (`IRMono.shapeMonomorphizeModule`) writes a literal into `IRIndexTypeG.Extent`
 /// only when EVERY occurrence of the symbolic name was pinned to the SAME
 /// literal, and `shapeRewriteType` confines the rewrite to `Extent` -- it never
 /// touches a body's `extents(A)` read. Deliberately matches `IRLit (IRLitInt
@@ -5903,7 +5909,7 @@ let genElementBindingPeel (rawRowPeel: bool) (level: LoopIndexBinding) (elem: El
         let code = sprintf "int64_t %s = (%s - 1 - %s);" elem.ParamName extentStr level.IndexName
         (code, elem.ParamName)
     | RealArray when level.FusedRank.IsSome ->
-        // Arc 1 fused JOINT level (see IR.fuseJointSLevels): this single loop
+        // Arc 1 fused JOINT level (see IRLoopStructure.fuseJointSLevels): this single loop
         // level spans the argument's whole plain-dense S-block (d dims), so the
         // grouped triangular iteration ranges over whole argument index tuples --
         // the joint symmetry, the only one an identity group licenses
@@ -6304,7 +6310,7 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
             // fused levels. Without this the depth was inert -- `omp(a: 1)` on a
             // 2-level nest emitted collapse(2), threading a dimension belonging
             // to an argument that granted nothing. IsParallel carries the
-            // licence per level (IR.buildLoopNestCodeGen).
+            // licence per level (IRStorage.buildLoopNestCodeGen).
             let collapseEligible (b: LoopIndexBinding) =
                 isRectangular b && b.IsParallel
             // Collapse depth = length of the leading prefix that is BOTH
@@ -6524,7 +6530,7 @@ let genLoopBoundExpr (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
         sprintf "%s.trailing_stride" binding.ExtentArrayRef
     // Arc 1 fused JOINT level: the axis spans the array's first d dense
     // dims; its bound is the product of those extents. A literal product
-    // was already folded to IRLit by IR.fuseJointSLevels (first arm); this
+    // was already folded to IRLit by IRLoopStructure.fuseJointSLevels (first arm); this
     // renders the runtime form.
     | _ when binding.FusedRank.IsSome ->
         [0 .. binding.FusedRank.Value - 1]
@@ -11788,7 +11794,7 @@ let classifyMpiShape (codeGen: LoopNestCodeGen) : MpiShape =
 //
 //  A wreath application is `k` occurrences of ONE object, comm-tied, over a
 //  common compact class `L`; the output class is `L ++ [(k,s)]`
-//  (IR.deduceWreathTie). It bypasses the generic loop machinery entirely:
+//  (IRLoopStructure.deduceWreathTie). It bypasses the generic loop machinery entirely:
 //    * the nest it needs is SEGMENT-PEELED (bijections section 2, multiple
 //      straight-line sub-nests decomposed by equality-prefix length on
 //      SUB-KEYS) -- `buildLoopLevelStructure` has no such concept and refuses
@@ -16023,7 +16029,7 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
     // A wreath group passes the `Symmetry <> SymNone && Rank >= 2` packed test
     // (correctly -- it IS packed) but must NOT take the Array<T,N> + pool-copy
     // materialization below: a wreath array's in-memory storage is a bare flat
-    // `T*` of orb_cell_count cells (IR.classifyOutputStorage's AllocWreath, the
+    // `T*` of orb_cell_count cells (IRStorage.classifyOutputStorage's AllocWreath, the
     // same shape genWreathApply allocates), not a skeleton-backed Array. It gets
     // its own arm, and a provider that does not store wreath pools
     // (ReadWreathPool = None -- csv, netcdf) still refuses here.
@@ -20257,7 +20263,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // descends into lambda bodies directly, and the CallablesTable
     // resolves named function IDs to their (params, body) so the IRApp
     // arm can walk them with parameter substitution.
-    let callables = IR.buildCallablesTableForModule modul
+    let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
 
     // Deterministic deallocation: the fresh-return fixpoint resolves callees
@@ -20382,7 +20388,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
 /// order. Returns (funcCode, setupCode, computeCode).
 let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string list * string list =
     setCodegenStructFieldsCache modul.Types
-    let callables = IR.buildCallablesTableForModule modul
+    let callables = IRPrint.buildCallablesTableForModule modul
     IR.setCallablesContext callables |> ignore
     // Same install as genModule -- split-timing mode goes through this entry point
     // instead, and a missing install here would silently demote every callee to

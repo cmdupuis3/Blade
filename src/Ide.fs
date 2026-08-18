@@ -56,6 +56,12 @@ open System.Collections.Generic
 open Blade.Ast
 open Blade.Types
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.TypedAst
 
 // JSON emission (hand-rolled: tiny payload, zero dependencies)

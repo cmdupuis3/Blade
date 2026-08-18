@@ -12,6 +12,12 @@ open Blade
 open Blade.Ast
 open Blade.Parser
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.TypeEnv
 open Blade.Lowering

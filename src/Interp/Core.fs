@@ -33,6 +33,12 @@ module Blade.Interp.Core
 open System.Collections.Generic
 open Blade.Types
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Interp.Value
 
 module N = Blade.Interp.Numerics
@@ -136,7 +142,7 @@ and InterpState = {
 let FrameCap = 64
 
 /// Build the interpreter state for a lowered module: the callables table
-/// (reusing IR.buildCallablesTableForModule so let-bound lambda aliases resolve
+/// (reusing IRPrint.buildCallablesTableForModule so let-bound lambda aliases resolve
 /// exactly as they do at codegen) plus zeroed budgets.
 let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
     let table = buildCallablesTableForModule modul

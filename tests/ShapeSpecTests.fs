@@ -25,7 +25,7 @@ open Blade.Tests.TestHarness
 
 /// Pin one environment variable for the duration of a scope, restoring the
 /// prior value on exit. Same use-guard idiom as `LinAlgTests.pinEnv`, and it
-/// works for the same reason: `IR.shapeSpecCap` re-reads the environment at
+/// works for the same reason: `IRMono.shapeSpecCap` re-reads the environment at
 /// every consultation rather than freezing a module value.
 let private pinEnv (name: string) (value: string option) =
     let prior = System.Environment.GetEnvironmentVariable(name)

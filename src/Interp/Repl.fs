@@ -90,7 +90,7 @@ let lowerSessionDiag (fileName: string option) (source: string)
             | Error msg ->
                 reject [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan msg ]
             | Ok ir ->
-            match Blade.IR.validateIR ir with
+            match Blade.IRValidate.validateIR ir with
             | Error errs ->
                 reject (errs |> List.map (fun s ->
                     Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s))

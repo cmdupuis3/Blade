@@ -9,6 +9,12 @@ open System.IO
 open System.Diagnostics
 open System.Runtime.InteropServices
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.Lowering
 open Blade.CodeGen
@@ -1090,7 +1096,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                         // `| Error _ -> ir0` ("validation errors don't block this
                         // probe") generated C++ from invalid IR, so a validator
                         // regression on these programs was invisible here.
-                        match IR.validateIR ir0 with
+                        match IRValidate.validateIR ir0 with
                         | Error validationErrors ->
                             Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
                         | Ok ir ->
@@ -1243,7 +1249,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 | Error e -> Error (sprintf "lower failed: %s" e)
                 | Ok ir0 ->
                     // Hard-fail on validation errors (was `| Error _ -> ir0`).
-                    match IR.validateIR ir0 with
+                    match IRValidate.validateIR ir0 with
                     | Error validationErrors ->
                         Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
                     | Ok ir ->
@@ -1371,7 +1377,7 @@ let private compileProgram (outputDir: string) (name: string) (src: string) : Re
         match lower src with
         | Error e -> Error (sprintf "lower failed: %s" e)
         | Ok ir0 ->
-            match IR.validateIR ir0 with
+            match IRValidate.validateIR ir0 with
             | Error errs -> Error (sprintf "IR validation failed: %s" (String.concat "; " errs))
             | Ok ir ->
                 let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
@@ -1714,7 +1720,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                 match lower src with
                 | Error e -> Error (sprintf "lower failed: %s" e)
                 | Ok ir0 ->
-                    match IR.validateIR ir0 with
+                    match IRValidate.validateIR ir0 with
                     | Error errs -> Error (String.concat "; " errs)
                     | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir nm))
             with ex -> Error (sprintf "codegen raised: %s" ex.Message)

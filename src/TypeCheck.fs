@@ -1,4 +1,4 @@
-﻿// TypeCheck.fs - Type Checking and Inference
+// TypeCheck.fs - Type Checking and Inference
 //
 //   - Unification with substitution (inference variables resolve through constraints)
 //   - Extent preservation (Idx<180> keeps extent=180, not placeholder 0)
@@ -18,6 +18,12 @@ module Blade.TypeCheck
 
 open Blade.Ast
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.TypedAst
 open Blade.Unify
@@ -979,7 +985,7 @@ and symPowerIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
 /// The index record for `OrbIdx<[(r1,s1), ..., (rd,sd)], base>`, the twin of
 /// `symPowerIndexRecord`, shared by index-position and value-position
 /// lowering. Normalized first via `IR.orbitNormalForm` (shared with the
-/// deduction producer `IR.deduceWreathTie`, so written and deduced classes
+/// deduction producer `IRLoopStructure.deduceWreathTie`, so written and deduced classes
 /// never disagree): a rank-1 level is the trivial group S_1, so `(1,-)`
 /// zeroes nothing and `(1,+)` ties nothing, keeping depth logarithmic.
 ///
@@ -2463,7 +2469,7 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
         let freshIdx i =
             // The minted extent name carries the index record's own fresh id.
             // These names are IDENTITY, not just display: shape
-            // monomorphization (IR.shapeMonomorphizeModules) bakes call-site
+            // monomorphization (IRMono.shapeMonomorphizeModules) bakes call-site
             // extents into a spec BY NAME, so two distinct inference vars
             // sharing a display name (`__method_for_inferred_n` minted once
             // for a caller's param and once inside its callee) would be baked
@@ -9866,7 +9872,7 @@ and convertScaleTo (env: TypeEnv) (context: string) (dst: UnitSig) (t: TypedExpr
         | other ->
             Error (Other (sprintf
                     "%s relates %s and %s, which differ by the factor %s, but a %s value cannot carry a unit conversion"
-                    context (ppUnitSig src) (ppUnitSig dst) (ppUnitScale factor) (IR.ppIRType other)))
+                    context (ppUnitSig src) (ppUnitSig dst) (ppUnitScale factor) (IRPrint.ppIRType other)))
     | _ -> Ok t
 
 /// Reject a magnitude difference at a seam that does NOT yet insert a
@@ -12243,7 +12249,7 @@ and buildApplyInfo (env: TypeEnv)
     // `buildLoopLevelStructure`, which REFUSES a wreath input outright -- the
     // depth-3 shape `let P = f(A,A) in g(P,P)` would otherwise die here, before
     // `deduceOutputType` ever ran. Same predicate, same arguments, one rule
-    // (`IR.deduceWreathTie`), so this cannot disagree with what the output type
+    // (`IRLoopStructure.deduceWreathTie`), so this cannot disagree with what the output type
     // ends up being.
     // Per-parameter SIGN parities of the kernel body, for the tie rule's
     // soundness gate (deduceWreathTie condition 6: a '-' inner level requires
@@ -12280,7 +12286,7 @@ and buildApplyInfo (env: TypeEnv)
     // spelled out at deduceWreathTie condition 6).
     let wreathGateErr =
         match wreathVerdict with
-        | IR.WreathKernelNotOdd (argPos, parity, innerLevels) ->
+        | IRLoopStructure.WreathKernelNotOdd (argPos, parity, innerLevels) ->
             let pname =
                 match List.tryItem argPos lambdaInfo.Params with
                 | Some (p: TypedParam) -> p.Name
@@ -12295,7 +12301,7 @@ and buildApplyInfo (env: TypeEnv)
     | Some e -> Error e
     | None ->
     let wreathTie =
-        match wreathVerdict with IR.WreathTied t -> Some t | _ -> None
+        match wreathVerdict with IRLoopStructure.WreathTied t -> Some t | _ -> None
     // A wreath INPUT that did NOT earn a tie has no iteration at all: only
     // the segment-peeled `orb_visit` nest walks a wreath pool, driven by the
     // OUTPUT class, so an application that doesn't produce one (unary map,
@@ -13722,7 +13728,7 @@ and irTypeBadPgIrrepsDetail (t: IRType) : string option =
 /// STILL REFUSED, deliberately, even though DEDUCTION produces storable
 /// wreath classes -- the two are different powers. Deduction reaches a
 /// wreath class only through the one shape that has a traversal nest (a comm
-/// tie over every argument, `IR.deduceWreathTie`), and the value it produces
+/// tie over every argument, `IRLoopStructure.deduceWreathTie`), and the value it produces
 /// is written once and printed. An ANNOTATION names the class in the
 /// abstract: it admits `let R: Array<F64 like OrbIdx<[(2,-),(2,+)],4>> = zero
 /// |> compute`, a producer that does not exist, and makes the binding a

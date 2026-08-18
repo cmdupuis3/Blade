@@ -16,6 +16,12 @@ module Blade.Interp.Run
 open System.Text
 open Blade.Types
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Interp.Value
 
 /// The process-like result of one interpreter run -- the triple the
@@ -521,7 +527,7 @@ let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits
             // (via resolveKernel/resolveCallable in Interp/Loops.fs). AsyncLocal
             // does not flow from makeState's private table, so it must be set
             // here and restored on exit. Harmless for a pure-scalar run.
-            let savedCtx = Blade.IR.setCallablesContext (Blade.IR.buildCallablesTableForModule merged)
+            let savedCtx = Blade.IR.setCallablesContext (Blade.IRPrint.buildCallablesTableForModule merged)
             try
                 let state = Core.makeState merged limits
                 // Wire the M2 loop/array backend (Interp/Loops.fs).

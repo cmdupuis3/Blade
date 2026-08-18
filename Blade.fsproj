@@ -88,7 +88,21 @@
          its eventual consumer (the checked sibling of `binomI64`, IR.fs:2438),
          and nothing it needs compiles later. -->
     <Compile Include="src/OrbRank.fs" />
+    <!-- The IR, seven layers. IR.fs keeps the whole hot surface (core types
+         and constructors, the module/builder model, the analysis context, the
+         canonical ExprShape walkers, typeOf) so downstream `open Blade.IR`
+         call sites are untouched; the peeled passes follow in dependency
+         order. IRLoopStructure feeds IRStorage (buildLoopNestCodeGen uses the
+         loop-level machinery); IRLift precedes IRMono only by convention,
+         neither references the other. IRValidate consumes IRMono (dead
+         polymorph elimination) and IRPrint, so it closes the group. -->
     <Compile Include="src/IR.fs" />
+    <Compile Include="src/IRLoopStructure.fs" />
+    <Compile Include="src/IRStorage.fs" />
+    <Compile Include="src/IRLift.fs" />
+    <Compile Include="src/IRMono.fs" />
+    <Compile Include="src/IRPrint.fs" />
+    <Compile Include="src/IRValidate.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
          keyed by surface module name). Compiles after IR.fs and before the
          provider implementations that register into it. -->

@@ -45,6 +45,7 @@ module ReplTypes =
     open Blade.Ast
     open Blade.Types
     open Blade.IR
+    open Blade.IRPrint
     open Blade.TypedAst
 
     /// What the REPL knows about one top-level name.

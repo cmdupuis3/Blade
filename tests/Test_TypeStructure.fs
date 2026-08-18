@@ -1,6 +1,12 @@
 module Blade.Tests.TypeStructure
 
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.Tests.TestHarness
 open Blade.Lowering
@@ -107,7 +113,7 @@ and formatBladeIndex (ix: IRIndexType) : string =
     // An irreps record's identity is its SPEC, not its extent — defer to the
     // compiler's own printer, which renders `IrrepsIdx<[(l,p,m), ...]>` and
     // wraps it in `SymIdx<k, ...>` when the record is a symmetric power of it.
-    | IrrepsIdxLike _ -> Blade.IR.ppIndexType ix
+    | IrrepsIdxLike _ -> Blade.IRPrint.ppIndexType ix
     | _ ->
     // A wreath record's extent lives inside the IROrbitClass marker, so read it
     // through orbitBaseExtent (the identity on every other record).
@@ -560,7 +566,7 @@ let private test_comm_over_irreps_infers_sym_irreps () =
               (ix.Extent = IRLit (IRLitInt 5L)), sprintf "Extent = %A, want IRLit 5 (= total_dim)" ix.Extent ]
         match checks |> List.tryFind (fst >> not) with
         | Some (_, why) -> (name, false, why)
-        | None -> (name, true, Blade.IR.ppIndexType ix)
+        | None -> (name, true, Blade.IRPrint.ppIndexType ix)
 
 // F10 (b): the ROUND TRIP. Writing the (newly writable) annotation on that same
 // output must produce the SAME index record the inference produced — same rank,
@@ -578,11 +584,11 @@ let private test_sym_irreps_annotation_matches_inference () =
     | Ok inf, Ok ann ->
         let identity (ix: IRIndexType) =
             (ix.Rank, ix.Symmetry, ix.Tag, ix.IxKind, ix.Kind, ix.Extent, ix.Dependencies)
-        if identity inf = identity ann then (name, true, Blade.IR.ppIndexType ann)
+        if identity inf = identity ann then (name, true, Blade.IRPrint.ppIndexType ann)
         else
             (name, false,
              sprintf "inferred %s vs annotated %s (identity fields differ)"
-                 (Blade.IR.ppIndexType inf) (Blade.IR.ppIndexType ann))
+                 (Blade.IRPrint.ppIndexType inf) (Blade.IRPrint.ppIndexType ann))
 
 // ---- Stage 4: multi-axis irreps under joint fusion -------------------------
 // `fuseJointSLevels` now admits IrrepsIdx S-dims beside plain ones, so a

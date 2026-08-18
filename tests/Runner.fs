@@ -7,6 +7,12 @@ open System
 open Blade
 open System.IO
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.Lowering
 open Blade.CodeGen
@@ -224,7 +230,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                         | Ok _ -> []
                 FpIRError (e, diags)
             | Ok ir ->
-                match IR.validateIR ir with
+                match IRValidate.validateIR ir with
                 | Error validationErrors -> FpIRValidationError validationErrors
                 | Ok ir ->
                     if not compileAndRun then FpIROnly ir
@@ -997,7 +1003,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
             failed <- failed + 1
             failedNames <- failedNames @ [testName]
         | Ok ir ->
-            match IR.validateIR ir with
+            match IRValidate.validateIR ir with
             | Error validationErrors ->
                 let joined = String.concat "; " validationErrors
                 Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "IR validation: %s" joined)
@@ -1303,7 +1309,7 @@ let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outpu
                 printfn "    [warn %s] %s" w.Code (w.Message.Replace("\r\n", " ").Replace("\n", " "))
             irFailed <- irFailed + 1
         | Ok ir ->
-            match IR.validateIR ir with
+            match IRValidate.validateIR ir with
             | Error validationErrors ->
                 printfn "  [IR:FAIL] %s (validation)" testName
                 for e in validationErrors do

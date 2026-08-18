@@ -9,6 +9,12 @@ open System.IO
 open System.Diagnostics
 open System.Runtime.InteropServices
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.Lowering
 open Blade.CodeGen
@@ -46,7 +52,7 @@ let private runDiffCase (outputDir: string) (caseName: string) (edgiSrc: string)
             // FpIRValidationError arm. The old `| Error _ -> ir0` fell through
             // to codegen on invalid IR, so a validator regression could only
             // surface as an unrelated downstream symptom -- or not at all.
-            match IR.validateIR ir0 with
+            match IRValidate.validateIR ir0 with
             | Error validationErrors ->
                 printfn "    [diff:%s] IR VALIDATION FAILED: %s" caseName (String.concat "; " validationErrors)
                 false

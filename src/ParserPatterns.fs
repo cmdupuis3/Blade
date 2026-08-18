@@ -179,7 +179,7 @@ let parseConjunctArgList (tokens: Token list) : ParseResult<string list> =
 /// omp(a: 2, b: 1) => [("a",2); ("b",1)]. The parenthesised form is optional --
 /// bare `omp` yields `Omp { Vars = [] }`, read downstream as "auto": every
 /// consumer treats an empty depth list as the outermost-level license
-/// (IR.buildLoopNestCodeGen's `licenseUnresolved` fallback), and the
+/// (IRStorage.buildLoopNestCodeGen's `licenseUnresolved` fallback), and the
 /// fold-kernel gate (docs/plan-cpp-perf-exploitation.md) has no per-argument
 /// depth to name at all -- a reduce walks one axis, so the only question is
 /// whether it may be reordered.

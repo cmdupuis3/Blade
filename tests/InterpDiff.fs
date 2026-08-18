@@ -19,6 +19,12 @@ open System.Text.RegularExpressions
 open System.Threading.Tasks
 open Blade
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Build
 open Blade.CodeGen
 open Blade.Interp

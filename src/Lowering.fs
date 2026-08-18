@@ -7,6 +7,12 @@ module Blade.Lowering
 open System
 open Blade.Ast
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.TypedAst
 
@@ -957,7 +963,7 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
             with AntisymGroups = info.AntisymGroups
                  // The apply seam's per-parameter sign summary rides along
                  // the same way, so codegen and the interpreter can hand
-                 // IR.deduceWreathTie the values typecheck judged from.
+                 // IRLoopStructure.deduceWreathTie the values typecheck judged from.
                  SignParities = info.SignParities }
     // Emit IRVar(callable.Id, funcType): the callable lives in
     // LiftedCallables -> module.Functions, and the IRVar carries just the
@@ -2248,7 +2254,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // Monomorphize arity-polymorphic functions first: Poly<T^N> packs
         // get expanded into N concrete params per call site. After this,
         // every function has a fixed param count matching its call sites.
-        let irModule = IR.monomorphizeModule irModule env.Builder
+        let irModule = IRMono.monomorphizeModule irModule env.Builder
         currentExports <- Map.add moduleName exports currentExports
         irModules <- irModules @ [irModule]
 
@@ -2264,10 +2270,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // not own it, and the call reached validateIR still carrying `IRTInfer`
     // (BL6001). That is what stopped a Blade-source stdlib from exporting a
     // generic function; `stdlib/stats.blade`'s `mean(row: T^1) -> T^0` is the
-    // motivating case. See IR.monomorphizeHMFunctionsModules for why merging is
+    // motivating case. See IRMono.monomorphizeHMFunctionsModules for why merging is
     // sound and how the result is split back; a single-module program is
     // unaffected, down to the ids the builder mints.
-    let irModules = IR.monomorphizeHMFunctionsModules irModules env.Builder
+    let irModules = IRMono.monomorphizeHMFunctionsModules irModules env.Builder
 
     // SHAPE monomorphization: a function over a symbolic extent (`Idx<n>`)
     // gets a specialized copy per distinct call-site extent signature, with
@@ -2285,7 +2291,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // before any of these passes run, so hoisting them out of the loop cannot
     // change what a later module sees, and for a single-module program the
     // builder mints exactly the same ids in exactly the same order as before.
-    let irModules = IR.shapeMonomorphizeModules irModules env.Builder
+    let irModules = IRMono.shapeMonomorphizeModules irModules env.Builder
 
     let irModules =
         irModules |> List.map (fun irModule ->
@@ -2295,11 +2301,11 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // an array op at lowering time (its element type was an unresolved
         // var), so it gets the same elementwise-loop lowering top-level
         // `x + y` does.
-        let irModule = IR.lowerArrayBinOpsModule irModule env.Builder
+        let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
-        let irModule = IR.liftInlineFormsModule irModule env.Builder
+        let irModule = IRLift.liftInlineFormsModule irModule env.Builder
         // S2/S4, SECOND APPLICATION -- and it has to be here, not only at
         // `lowerTypedExpr` time. `lowerArrayBinOpsModule` SYNTHESIZES fresh
         // `IRApplyCombinator` nodes (an array-vs-array binop becomes
@@ -2333,7 +2339,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // drops it. Unreachable from any binding, it can only ever be a BL6001.
     // Must run after EVERY specializing pass -- each can make a function
     // concrete or mint new references -- and before validateIR.
-    IR.eliminateDeadPolymorphs { Modules = irModules }
+    IRValidate.eliminateDeadPolymorphs { Modules = irModules }
 
 // Typecheck warning surfacing (shared by every CLI lane)
 

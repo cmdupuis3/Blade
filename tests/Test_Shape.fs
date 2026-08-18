@@ -7,6 +7,12 @@ module Blade.Tests.Shape
 
 open Blade
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.Tests.TestHarness
 

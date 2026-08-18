@@ -201,7 +201,7 @@ let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<s
             | Some rendered -> Error rendered
             | None ->
             printTypeCheckWarnings useColor (Some sm) false
-            let validated = IR.validateIR ir
+            let validated = IRValidate.validateIR ir
             mark "validateIR"
             match validated with
             | Error errs ->

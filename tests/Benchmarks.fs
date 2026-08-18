@@ -10,6 +10,12 @@ open System.IO
 open System.Diagnostics
 open System.Runtime.InteropServices
 open Blade.IR
+open Blade.IRLoopStructure
+open Blade.IRStorage
+open Blade.IRLift
+open Blade.IRMono
+open Blade.IRPrint
+open Blade.IRValidate
 open Blade.Types
 open Blade.Lowering
 open Blade.CodeGen
@@ -71,7 +77,7 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
         | Ok ir0 ->
         // Hard-fail on validation errors rather than timing invalid IR
         // (was `| Error _ -> ir0`).
-        match IR.validateIR ir0 with
+        match IRValidate.validateIR ir0 with
         | Error validationErrors ->
             Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
         | Ok ir ->
@@ -290,7 +296,7 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
         // symmetry/014 for the pinned rectangular behavior. For a repeated
         // MULTI-DIM array the license is the JOINT simplex over compound
         // index tuples (r! once, docs/formalism.md §12.4), realized by level
-        // fusion (IR.fuseJointSLevels) — never per-dimension.
+        // fusion (IRLoopStructure.fuseJointSLevels) — never per-dimension.
         //
         // These cases use method_for(A, A, ...) — the same array repeated —
         // which is exactly the licensed situation.
