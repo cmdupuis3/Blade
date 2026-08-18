@@ -122,7 +122,7 @@ let private strictPinFailure (strictPins: bool) (useColor: bool)
                              (sm: Blade.Diagnostics.SourceMap option) : string option =
     if not strictPins then None
     else
-        match Blade.TypeCheck.PinSuggestions.get () |> List.distinct with
+        match Blade.TypeCheckIde.PinSuggestions.get () |> List.distinct with
         | [] -> None
         | suggestions ->
             let ds =

@@ -280,6 +280,20 @@
     <Compile Include="src/Unify.fs" />
     <Compile Include="src/TypeEnv.fs" />
     <Compile Include="src/Zonk.fs" />
+    <!-- The type checker, six layers in dependency order. TypeCheckIde.fs
+         (AsyncLocal side-channels) precedes everything that writes them;
+         TypeLower.fs (surface-type lowering) and TypeCheckSupport.fs
+         (capture/pattern/dispatch helpers) feed TypeCheckInfer.fs, the
+         atomic ~13k-line inferExpr..checkDecl rec-chain. TypeCheckValidate.fs
+         holds the post-zonk sweeps. TypeCheck.fs (checkModule/checkProgram/
+         typeCheck) keeps the public module name and must stay last: its
+         driver registers the DeduceRep EngineDischarge hook, which needs
+         both DeduceRep.fs and the ML elaborators already compiled. -->
+    <Compile Include="src/TypeCheckIde.fs" />
+    <Compile Include="src/TypeLower.fs" />
+    <Compile Include="src/TypeCheckSupport.fs" />
+    <Compile Include="src/TypeCheckInfer.fs" />
+    <Compile Include="src/TypeCheckValidate.fs" />
     <Compile Include="src/TypeCheck.fs" />
     <!-- File-based module resolution: dotted import name -> .blade path, plus
          the transitive closure of an entry file's imports in dependency order.

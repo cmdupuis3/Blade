@@ -1212,10 +1212,10 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
     // typeCheck): per-function adjacent-pair parities and pack parities.
     // Last write wins on redefinition, like the TypeEnv tables they mirror.
     let dedPairs =
-        Blade.TypeCheck.IdeDeductions.getPairs ()
+        Blade.TypeCheckIde.IdeDeductions.getPairs ()
         |> List.fold (fun m (n, v) -> Map.add n v m) Map.empty
     let dedPacks =
-        Blade.TypeCheck.IdeDeductions.getPacks ()
+        Blade.TypeCheckIde.IdeDeductions.getPacks ()
         |> List.fold (fun m (n, v) -> Map.add n v m) Map.empty
     // Each value binding names its own abstract vars: schemes don't share
     // ids across bindings, so per-binding namespaces can't collide.
@@ -1508,7 +1508,7 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
 /// span (first wins -- the deduction is per-kernel, not per-site).
 let private collectKernels () : KernelIdeInfo list =
     let seen = HashSet<int * int * int * int>()
-    [ for k in Blade.TypeCheck.IdeDeductions.getKernels () do
+    [ for k in Blade.TypeCheckIde.IdeDeductions.getKernels () do
         let (line, col, endLine, endCol) = clampSpan k.KSpan
         if seen.Add((line, col, endLine, endCol)) then
             yield { KLine = line; KCol = col; KEndLine = endLine; KEndCol = endCol
@@ -1870,7 +1870,7 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             // plain strings in typeCheck's Ok payload, and as structured
             // (message, kernel-span) pairs in PinSuggestions -- emit the
             // structured form, BL4010 at the kernel's real span.
-            let pinSuggestions = Blade.TypeCheck.PinSuggestions.get ()
+            let pinSuggestions = Blade.TypeCheckIde.PinSuggestions.get ()
             // Stage-6a equivariance-certificate suggestions: BL4011 at
             // the DECL span, ghost-rendering `where ml.equiv(G)`.
             let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
@@ -1896,7 +1896,7 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             // The checker's own warnings, coded and spanned. BL4010 is
             // skipped: PinSuggestions above already emitted exactly
             // those (BL4011/BL4014 never ride this channel).
-            for d in Blade.TypeCheck.WarningLog.get () |> List.distinct do
+            for d in Blade.TypeCheckIde.WarningLog.get () |> List.distinct do
                 if d.Code <> "BL4010" then
                     let (line, col, endLine, endCol) = clampSpan d.Span
                     diags.Add { Severity = "warning"; Line = line; Col = col
@@ -1913,7 +1913,7 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             deduced <-
                 try
                     let checkerFacts =
-                        Blade.TypeCheck.DeducedFacts.get ()
+                        Blade.TypeCheckIde.DeducedFacts.get ()
                         |> List.map (fun (f, span) ->
                             let empty = emptyDeduced span
                             match f with
