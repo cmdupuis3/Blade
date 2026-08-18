@@ -64,6 +64,20 @@
     <Compile Include="src/ParserPatterns.fs" />
     <Compile Include="src/ParserGrammar.fs" />
     <Compile Include="src/Parser.fs" />
+    <!-- The ad.grad/ad.jvp AST transform, seven layers in dependency order:
+         GradCommon.fs (substrate: intrinsics tables, Ctx/NStmt, substitution),
+         GradExpand.fs (pre-sweep expansions: sort-as-permutation, renaming,
+         hoisting, rec-arrays, static extents), GradFusion.fs (C7 pipeline
+         fusion + peel classification), GradPackUnroll.fs (Route A pack
+         unrolling + grouped-peel lowering), GradNormalize.fs (inlining +
+         AD-able-subset analysis), GradSweeps.fs (the adjoint and tangent
+         sweeps), Grad.fs (synthesize/expand drivers + the public surface). -->
+    <Compile Include="src/GradCommon.fs" />
+    <Compile Include="src/GradExpand.fs" />
+    <Compile Include="src/GradFusion.fs" />
+    <Compile Include="src/GradPackUnroll.fs" />
+    <Compile Include="src/GradNormalize.fs" />
+    <Compile Include="src/GradSweeps.fs" />
     <Compile Include="src/Grad.fs" />
     <!-- OrbIdx storage/indexing bijections (docs/plan-orbidx-bijections.md
          Phase 2, pure-function layer): the §4 checked cardinality fold, the §5
