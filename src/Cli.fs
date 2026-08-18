@@ -3025,7 +3025,7 @@ let private dispatchInner (args: string[]) : int =
 
     | [| "check"; file |] -> checkFile file strictPins
 
-    // Native-toolchain health report (docs/plan-toolchain-packaging.md).
+    // Native-toolchain health report (docs/plans/plan-toolchain-packaging.md).
     | [| "doctor" |] -> Blade.Doctor.runDoctor false
     | [| "doctor"; "--json" |] -> Blade.Doctor.runDoctor true
 

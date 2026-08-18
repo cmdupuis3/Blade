@@ -8293,7 +8293,7 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
 // This is the inverse of the (perm, offsets) pair, which is otherwise reachable
 // only from inside a ragged peel. It is what lets a per-group aggregation be
 // re-expressed as a dense gather through `bucket` -- the shape reverse-mode AD
-// needs (docs/plan-ad-combinators.md 2.17a).
+// needs (docs/plans/plan-ad-combinators.md 2.17a).
 //
 // The argument MUST be a bare name. A grouping is not a first-class value: the
 // whole runtime structure lives in C++ locals named after the binding

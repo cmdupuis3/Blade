@@ -1,5 +1,5 @@
 // blade.toolchain.json -- the durable, OS-neutral record of where this
-// machine keeps Blade's native toolchain (docs/plan-toolchain-packaging.md).
+// machine keeps Blade's native toolchain (docs/plans/plan-toolchain-packaging.md).
 // Written by `blade setup` (future phase), read here by the configuration
 // gates that historically read only process environment variables
 // (BLAS/LAPACK tiers, NETCDF_DIR, MSMPI_BIN).

@@ -7,13 +7,13 @@ Status: design draft. Date 2026-08-15.
 plan doc), with `src/Grad.fs` carrying **uncommitted F0 work** (176 insertions:
 the collision gate, the type-alias/module-val context fields, and F0.4's
 combinator-operator refusal arm, already landed at `Grad.fs:288-294`). Grad.fs
-line numbers therefore differ from `docs/plan-forward-mode-ad.md`'s, which were
+line numbers therefore differ from `docs/plans/plan-forward-mode-ad.md`'s, which were
 verified against master. Where a cite matters and the file is volatile I name
 the symbol as well as the line. Everything else (`formalism.md`, `Ast.fs`,
 `TypeCheck.fs`, `Interp/Loops.fs`, `ReynoldsCore.fs`, `proofs/BladeJacobian.v`,
 corpus) is at `9cb7a53` and stable.
 
-Prior art: `docs/plan-forward-mode-ad.md` §4 F4 (the one paragraph this document
+Prior art: `docs/plans/plan-forward-mode-ad.md` §4 F4 (the one paragraph this document
 expands); the retired roadmap's C-track quote — *"AD-through-combinators: `<|>`
 and `<|:>` are the exceptions — value-branching vs storage-branching; Tier-1
 emission = mut-buffer + NFor loops, since pipelines aren't re-differentiable

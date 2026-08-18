@@ -28,7 +28,7 @@
          spells toolchain artifacts (exe/obj/shared-lib extensions, the MPI
          link line, libm's name, install-prefix library search). Dependency-
          free; consulted by LinAlgPatterns.fs, Build.fs and the interpreter's
-         libm binding. See docs/plan-toolchain-packaging.md. -->
+         libm binding. See docs/plans/plan-toolchain-packaging.md. -->
     <Compile Include="src/Platforms.fs" />
     <!-- blade.toolchain.json reader: env-first configuration lookup shared
          by every gate that used to read only process env (BLAS/LAPACK tiers,

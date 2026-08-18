@@ -1,5 +1,5 @@
 // `blade doctor` -- the native-toolchain health report
-// (docs/plan-toolchain-packaging.md, Phase "doctor").
+// (docs/plans/plan-toolchain-packaging.md, Phase "doctor").
 //
 // Every probe here COMPILES AND RUNS a real program rather than trusting a
 // PATH lookup, because the single most common setup failure on Windows is

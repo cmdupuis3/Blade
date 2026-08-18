@@ -612,7 +612,7 @@
         "tests/corpus/ad-jvp/014_digamma_rejected_jvp.blade"
       ],
       "docs": [
-        "docs/plan-forward-mode-ad.md"
+        "docs/plans/plan-forward-mode-ad.md"
       ]
     },
     "BL5502": {
@@ -623,7 +623,7 @@
         "tests/corpus/ad-jvp-comb/080_pack_no_base_arm_rejected.blade"
       ],
       "docs": [
-        "docs/plan-ad-combinators.md"
+        "docs/plans/plan-ad-combinators.md"
       ]
     },
     "BL5600": {

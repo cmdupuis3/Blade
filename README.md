@@ -43,7 +43,7 @@ Optional dependencies, all probed by `doctor`:
 * **CUDA** — nvcc (+ MSVC Build Tools on Windows)
 
 Configuration is env vars or a `blade.toolchain.json` beside the binary (env
-wins per key); see [docs/plan-toolchain-packaging.md](docs/plan-toolchain-packaging.md).
+wins per key); see [docs/plans/plan-toolchain-packaging.md](docs/plans/plan-toolchain-packaging.md).
 
 ## Current State
 

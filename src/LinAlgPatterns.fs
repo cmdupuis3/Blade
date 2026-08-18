@@ -25,7 +25,7 @@ open Blade.Types
 // Availability gate
 
 /// How the BLAS/LAPACK toolchain was configured: the four TIERS of
-/// docs/plan-toolchain-packaging.md, resolved through `Toolchain.get`
+/// docs/plans/plan-toolchain-packaging.md, resolved through `Toolchain.get`
 /// (process env first and live, blade.toolchain.json second). First match
 /// wins:
 ///

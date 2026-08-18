@@ -15,4 +15,6 @@ Hub for most documentation, including guides, formalisms, and proof explanations
 | [features/sql.md](features/sql.md) | SQL-like / relational operations | Relational feature module |
 | [features/equivariant-nn.md](features/equivariant-nn.md) | Equivariant ML: irreps, CG tensor products, spherical harmonics, message passing | ML feature module |
 | [features/graphs-trees.md](features/graphs-trees.md) | Tree structures and graph types via trace indices | Graph/tree feature module sketch |
+| [features/ppl.md](features/ppl.md) | Probabilistic programming: moment formers, Dist algebra, mstate streaming, inference | PPL feature module |
 | [blade_literature_survey.md](blade_literature_survey.md) | Broad list of related literature and packages | Related work |
+| [plans/README.md](plans/README.md) | Living design docs with per-doc status (active specs, executed plans, investigation verdicts) | Design history and intent |

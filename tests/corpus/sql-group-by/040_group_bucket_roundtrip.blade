@@ -6,7 +6,7 @@
 //
 // That inverse is what turns a per-group aggregation back into a dense gather,
 // which is the shape reverse-mode AD needs through group_by
-// (docs/plan-ad-combinators.md 2.17a); this test pins the gather itself.
+// (docs/plans/plan-ad-combinators.md 2.17a); this test pins the gather itself.
 
 // ---- The round trip: the grouped array read at (bucket(i), rank(i)) gives
 // back the original value at row i. This is 2.17a's ungroup -- an ordinary

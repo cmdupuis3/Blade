@@ -55,7 +55,7 @@ examples/                  9 numbered worked programs plus lsdft.blade / lswosa.
                            the best source of idiomatic Blade.
 docs/                      formalism.md (canonical semantics), features.md (feature census),
                            quickstart-1/2.md (tutorial), proofs.md (Coq correspondence),
-                           plan-*.md (living design docs).
+                           plans/*.md (living design docs; plans/README.md indexes status).
 proofs/                    the Coq/Rocq formalization itself.
 generated_cpp_tests/       gitignored scratch dir the harness writes .cpp/.exe into.
                            It is CWD-RELATIVE: never run two `blade test` processes from the
@@ -274,7 +274,7 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
   (BL3016), unlicensed symmetry claims: the compiler refuses to compile a plausible-but-wrong
   fast path. When you hit one, fix the declaration, don't cast around it.
 - Benchmark discipline: never measure at power-of-two extents (known ~7x cache artifact);
-  follow the protocol in `docs/plan-cpp-perf-exploitation.md`.
+  interleave A/B runs and report medians, not single passes.
 
 ### Naming and formatting
 

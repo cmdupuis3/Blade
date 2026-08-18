@@ -1121,7 +1121,7 @@ let runLinAlgProbeTests () : BlockResult =
                   FailedNames = (if failNames.IsEmpty then [sprintf "<exit %d>" rproc.ExitCode] else failNames) }
 
 
-/// The four-tier BLAS/LAPACK resolution (docs/plan-toolchain-packaging.md):
+/// The four-tier BLAS/LAPACK resolution (docs/plans/plan-toolchain-packaging.md):
 /// pure in-process unit checks of `resolveBlasTier` / `blasAvailable` /
 /// `lapackAvailable` / `blasFlavor` / `blasBuildFlags`, plus `Toolchain.get`'s
 /// env-over-file precedence. No g++, no BLAS runtime, no filesystem beyond a

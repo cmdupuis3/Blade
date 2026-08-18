@@ -1,5 +1,5 @@
 // `blade setup` -- non-interactive environment bootstrap
-// (docs/plan-toolchain-packaging.md, Phase "setup").
+// (docs/plans/plan-toolchain-packaging.md, Phase "setup").
 //
 // Every mode ends the same way: apply the candidate configuration to THIS
 // process's environment, run the doctor's real compile+run probes against

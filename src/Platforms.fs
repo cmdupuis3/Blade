@@ -1,4 +1,4 @@
-// Platform abstraction (docs/plan-toolchain-packaging.md, Phase 1).
+// Platform abstraction (docs/plans/plan-toolchain-packaging.md, Phase 1).
 //
 // THE one module that knows which operating system this process runs on and
 // how that OS spells toolchain artifacts: executable/object/shared-library
