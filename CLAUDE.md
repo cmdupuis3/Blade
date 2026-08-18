@@ -30,17 +30,25 @@ Blade.fsproj / Blade.sln   root exe project: compiler + test harness in one bina
                            EnableDefaultItems=false — new .fs files MUST be added to
                            Blade.fsproj by hand, in dependency order.
 src/*.fs                   compiler pipeline. Runtime phases: Lexer/Parser → TypeCheck/
-                           Unify/Deduce → Lowering → IR passes → EmitCpp/CodeGen (18.9k
-                           lines). NOTE: Blade.fsproj compile order is NOT phase order
-                           (IR.fs, Deduce.fs, LinAlgPatterns.fs all precede TypeCheck.fs) —
-                           read the fsproj before choosing where to insert a <Compile> entry.
+                           Unify/Deduce → Lowering → IR passes → EmitCpp/CodeGen. The big
+                           phases are FILE GROUPS in dependency order, each with one atomic
+                           rec-chain file that must not be split further: Parser* (grammar
+                           in ParserGrammar.fs), Grad* (AD pipeline), IR* (hot surface stays
+                           in IR.fs), TypeCheck* (the ~13k inferExpr chain in
+                           TypeCheckInfer.fs; Blade.TypeCheck = the driver), CodeGen*
+                           (chains in CodeGenExpr.fs/CodeGenBinding.fs; Blade.CodeGen =
+                           assembly + re-exported surface). NOTE: fsproj compile order is
+                           NOT phase order — read the fsproj (and its group comments)
+                           before choosing where to insert a <Compile> entry.
 src/cpp/                   C++ runtime headers, deployed beside every generated .cpp.
 src/Interp/                IR interpreter (used by `test interp`, `repl`, diff gates).
 src/{ml,ppl,math,rand,display,spectra,sgs}/compiler/
                            domain elaborators compiled INTO Blade.exe.
-src/math, src/ml, src/ppl(MomentAlgebra), src/sgs, src/spectra (top level, not compiler/)
-                           5 SEPARATE oracle .fsproj — reference programs the Test_*Oracle
-                           suites compare against; not part of Blade.exe.
+oracles/{math,ml,ppl,sgs,spectra}/
+                           5 SEPARATE oracle .fsproj (BladeMath, BladeML, MomentAlgebra,
+                           BladeSgs, BladeSpectra) — standalone reference programs whose
+                           dump verbs generate corpus EXPECT pins; not part of Blade.exe.
+                           Run: dotnet run --project oracles/<domain>.
 tests/                     harness compiled into Blade.fsproj (no xunit). Corpus tests live
                            in tests/corpus/<category>/*.blade, one test per file.
 stdlib/                    Blade-source stdlib (units/SI.blade, plot.blade), deployed beside
@@ -51,8 +59,9 @@ stdlib/                    Blade-source stdlib (units/SI.blade, plot.blade), dep
                            An edit can still outrun the BINARY by using a compiler feature it
                            predates; `blade doctor`'s stdlib row names the root that answered
                            and flags a diverging copy.
-examples/                  9 numbered worked programs plus lsdft.blade / lswosa.blade —
-                           the best source of idiomatic Blade.
+examples/                  9 numbered worked programs plus lsdft.blade / lswosa.blade /
+                           lseof.bladenb — the best source of idiomatic Blade; physics/ is
+                           a second, self-contained 47-program corpus with its own README.
 docs/                      formalism.md (canonical semantics), features.md (feature census),
                            quickstart-1/2.md (tutorial), proofs.md (Coq correspondence),
                            plans/*.md (living design docs; plans/README.md indexes status).
@@ -97,11 +106,12 @@ Requirements: .NET 7 SDK; MSYS2 **ucrt64** g++ on PATH for anything that compile
 - Missing toolchain pieces make tests **skip, not fail**, and skips don't affect the exit
   code — always check the `, N skipped` suffix in the totals before trusting a green run.
 - Two different category namespaces:
-  - `blade test <key>` uses alias keys from `Cli.fs` (often unhyphenated):
-    `blade test indextypes`, `blade test basic`, `blade test sql`.
+  - `blade test <key>` uses alias keys from `src/CliSelfTests.fs` (dispatchTest's key
+    map); multiword categories accept both spellings (`index-types` / `indextypes`).
   - `blade test interp <dir>` / `blade test diff-oracle <dir>` take the **literal**
     `tests/corpus/<dir>` name: `blade test interp index-types`.
-  So: `blade test indextypes` but `blade test interp index-types`.
+- Every corpus category has a standalone `blade test <key>`; `blade test sql` runs the
+  same sql-* union the full suite does.
 - To iterate on a single corpus test, `blade run tests/corpus/<cat>/<file>.blade` (fast, but
   pins are only validated by the harness, not by `run`).
 - Full-suite runs from concurrent sessions must use private working directories (the scratch
