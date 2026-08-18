@@ -1155,6 +1155,24 @@ let compileForBackend (caps: Capabilities) (req: BackendReq) (srcFile: string) (
     | SkipCompile why -> Error ("Skipped: " + why)
 
 
+/// Windows: make a launched program resolve netcdf.dll's dependency set from
+/// the NetCDF install itself. A provider program links netcdf dynamically;
+/// the loader finds netcdf.dll via PATH but resolves its own imports (its
+/// bundled zlib1.dll among them) through the same PATH order, where MSYS2
+/// ucrt64 -- ahead of the install because g++ needs it -- ships a shadowing
+/// zlib1.dll, and the exe dies at startup with STATUS_ENTRYPOINT_NOT_FOUND
+/// before main. Prepending <NETCDF_DIR>/bin lets the install's own
+/// dependency set win. Read per call, like the other environment gates.
+let private prependNetcdfBin (psi: ProcessStartInfo) =
+    if Platforms.os = Platforms.Windows then
+        match Toolchain.get "NETCDF_DIR" with
+        | Some dir when dir <> "" ->
+            let bin = Path.Combine(dir, "bin")
+            if Directory.Exists bin then
+                let cur = match psi.Environment.TryGetValue "PATH" with | true, v -> v | _ -> ""
+                psi.Environment.["PATH"] <- bin + ";" + cur
+        | _ -> ()
+
 /// Run a compiled executable
 let runExecutable (exeFile: string) : Result<int * string, string> =
     try
@@ -1165,6 +1183,7 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         psi.UseShellExecute <- false
         psi.CreateNoWindow <- true
         psi.WorkingDirectory <- Path.GetDirectoryName(exeFullPath)
+        prependNetcdfBin psi
         
         use proc = Process.Start(psi)
         // Read both streams asynchronously to avoid deadlocks
@@ -1257,6 +1276,7 @@ let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, strin
             psi.UseShellExecute <- false
             psi.CreateNoWindow <- true
             psi.WorkingDirectory <- Path.GetDirectoryName(exeFullPath)
+            prependNetcdfBin psi
             use proc = Process.Start(psi)
             let stdoutTask = proc.StandardOutput.ReadToEndAsync()
             let stderrTask = proc.StandardError.ReadToEndAsync()

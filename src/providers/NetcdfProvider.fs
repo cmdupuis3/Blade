@@ -75,11 +75,35 @@ module private NcFFI =
     let check (status: int) (msg: string) =
         if status <> 0 then failwithf "NetCDF error (%d): %s" status msg
 
+    // The externs above probe the plain name "netcdf.dll" through the ambient
+    // search path. With MSYS2 ucrt64 ahead of the NetCDF install on PATH
+    // (where it must be for g++), the loader resolves netcdf.dll's own
+    // zlib1.dll import to MSYS2's copy and the load dies with
+    // ERROR_PROC_NOT_FOUND before any extern runs. Loading the library by
+    // ABSOLUTE path resolves its dependencies from its own directory first,
+    // and a module already loaded under the name "netcdf.dll" short-circuits
+    // the externs' plain-name probe. Keyed per NETCDF_DIR value (read per
+    // call, like the other environment gates) so a failed attempt is not
+    // retried but a repointed NETCDF_DIR gets its own attempt.
+    let private preloadAttempts = System.Collections.Concurrent.ConcurrentDictionary<string, bool>()
+    let preloadFromNetcdfDir () =
+        match System.Environment.GetEnvironmentVariable "NETCDF_DIR" with
+        | null | "" -> ()
+        | root ->
+            preloadAttempts.GetOrAdd(root, fun root ->
+                [ System.IO.Path.Combine(root, "bin", "netcdf.dll")
+                  System.IO.Path.Combine(root, "netcdf.dll") ]
+                |> List.exists (fun p ->
+                    System.IO.File.Exists p
+                    && fst (NativeLibrary.TryLoad p)))
+            |> ignore
+
 // Safe Wrappers
 
 module private NcQuery =
 
     let openFile (path: string) (mode: int) =
+        NcFFI.preloadFromNetcdfDir ()
         let mutable id = 0
         NcFFI.nc_open(path, mode, &id) |> fun s -> NcFFI.check s (sprintf "opening '%s'" path)
         id
