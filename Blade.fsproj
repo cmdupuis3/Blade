@@ -53,6 +53,16 @@
          this list, so anything later than here is invisible to one of them. -->
     <Compile Include="src/PerfCounters.fs" />
     <Compile Include="src/Lexer.fs" />
+    <!-- The parser, five layers in dependency order. ParserCore.fs holds the
+         infrastructure plus the parseExprRef/parseBodyRef forward-ref cells;
+         ParserTypes.fs and ParserPatterns.fs reach the expression grammar only
+         through those cells, which is why they may precede ParserGrammar.fs
+         (the atomic expr/stmt rec-chain). Parser.fs (decls + entry points)
+         wires the cells with its trailing `do` bindings, so it must be last. -->
+    <Compile Include="src/ParserCore.fs" />
+    <Compile Include="src/ParserTypes.fs" />
+    <Compile Include="src/ParserPatterns.fs" />
+    <Compile Include="src/ParserGrammar.fs" />
     <Compile Include="src/Parser.fs" />
     <Compile Include="src/Grad.fs" />
     <!-- OrbIdx storage/indexing bijections (docs/plan-orbidx-bijections.md
