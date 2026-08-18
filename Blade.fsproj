@@ -432,6 +432,12 @@
     <Compile Include="tests/HybridTests.fs" />
     <Compile Include="tests/DiffOracle.fs" />
     <Compile Include="tests/RunAll.fs" />
+    <!-- The CLI, three layers in dependency order: CliCommands.fs (compile/run/
+         check/emit + the REPL loop), CliSelfTests.fs (the `blade test` blocks
+         that exercise those commands, so it must follow them), and Cli.fs
+         (dispatchInner/dispatch, which routes to both, so it comes last). -->
+    <Compile Include="src/CliCommands.fs" />
+    <Compile Include="src/CliSelfTests.fs" />
     <Compile Include="src/Cli.fs" />
     <Compile Include="src/Main.fs" />
   </ItemGroup>
