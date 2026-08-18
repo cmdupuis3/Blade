@@ -45,6 +45,15 @@ type TypeError =
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType
+    /// BL2007. A provider's NATIVE library (libnetcdf) failed to load while
+    /// reading store metadata at a `let store = alias.load(path)` site.
+    /// Distinct from a missing/unreadable STORE (those keep checkDecl's
+    /// silent opaque fallback -- Lowering.tryInvokeProvider owns their
+    /// diagnostics): with no library, no store this provider names can ever
+    /// resolve in this process, and the fallback would surface as a baffling
+    /// element-type mismatch (the defaulted Float64 vs the store's real
+    /// element type) at some downstream ascription instead of the cause.
+    | ProviderNativeLoadFailure of provider: string * path: string * detail: string
     // FIELDS = sprintf args; formatTypeError (TypeEnv.fs) renders each verbatim.
     // Index-type violations (BL4003)
     | IndexTagMismatchNamed of expected: string * actual: string

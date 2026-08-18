@@ -110,6 +110,13 @@
       "examples": [],
       "docs": []
     },
+    "BL2007": {
+      "title": "provider native library unavailable",
+      "explanation": "A provider store load (`let store = alias.load(path)`) reads the store's metadata at compile time through the provider's native library (libnetcdf for netcdf), and that library failed to load in the compiler's process. This is an environment condition, not a store problem: until the library loads, no store this provider names can resolve, and every dim/var the store binds is untypeable. The checker refuses at the load site rather than falling back to opaque types, which would die far downstream as a spurious element-type mismatch (the defaulted Float64 against the store's real element type). A missing or unreadable store file is a different condition with its own diagnostic at lowering.",
+      "fix": "Install the provider's runtime library, or point its install-root variable at an existing install -- NETCDF_DIR for netcdf: the compiler then loads <NETCDF_DIR>/bin/netcdf.dll by absolute path (so its bundled dependencies win over same-named DLLs elsewhere on PATH, e.g. MSYS2's zlib1.dll), and generated programs run with that bin directory prepended to PATH. The message's detail is the loader's own error: 'the specified procedure could not be found' means a dependency of the library was shadowed by an incompatible copy; 'the specified module could not be found' means the library itself is not on the search path.",
+      "examples": [],
+      "docs": []
+    },
     "BL3001": {
       "title": "type mismatch",
       "explanation": "Unification failed: a value's type cannot be reconciled with the type its position requires. Covers plain mismatches as well as an argument whose RANK or element type disagrees with the parameter, with the expected and actual types printed.",

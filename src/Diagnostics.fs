@@ -167,6 +167,14 @@ module Codes =
             "BL2004", "module not found"
             "BL2005", "import cycle"
             "BL2006", "duplicate module"
+            // BL2007: a provider's NATIVE library (libnetcdf) failed to load
+            // while reading store metadata at `alias.load(path)`. Not BL2004
+            // (the store file is not the problem) and deliberately not left
+            // to the checker's opaque fallback: without metadata the store's
+            // element types default and die later as a baffling BL3001 far
+            // from the cause. Missing/unreadable STORES keep their lowering
+            // diagnostics; this fires only for the library itself.
+            "BL2007", "provider native library unavailable"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"

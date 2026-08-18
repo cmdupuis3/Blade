@@ -73,6 +73,13 @@ let runNetcdfTests () =
             check (sprintf "%s: no unexpected exception" what) false
                 (sprintf "%s: %s" (ex.GetType().Name) ex.Message)
 
+    // The string-side twin of `unexpected`'s DllNotFoundException arm: the
+    // checker surfaces a typecheck-TIME missing-library condition as BL2007
+    // ("provider ... cannot load its native library") through the ordinary
+    // Error channel, not as an escaping exception -- so lower/typecheck
+    // Error arms need this recognizer to apply the same SKIP policy.
+    let nativeLibUnavailable (e: string) = e.Contains "cannot load its native library"
+
     // ---------------------------------------------------------------
     // Test 1: ncTypeToElemType mapping
     // ---------------------------------------------------------------
@@ -1028,6 +1035,8 @@ let sample = NetCDF.load("tests/fixtures/sample.nc")
                         | _ -> false)
                 check "vars struct has field A" varAExists ""
 
+            | Error e when nativeLibUnavailable e ->
+                printfn "  SKIP Lower succeeds: %s" e
             | Error e ->
                 printfn "  Lower error: %s" e
                 check "Lower succeeds" false e
@@ -1098,12 +1107,15 @@ let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.rea
                  if isSkipError e then printfn "  SKIP load_compound e2e (compile skipped): %s" e
                  else check "load_compound e2e: compiles and links libnetcdf" false e)
         | Error e ->
-            // A lowering error is a FAILURE, not a skip. The fixture-gap excuse
+            // A lowering error is a FAILURE, not a skip -- except the BL2007
+            // missing-LIBRARY condition, which is `unexpected`'s SKIP policy
+            // arriving through the Error channel. The fixture-gap excuse
             // in the old message is not a lowering condition: a missing sample.nc
             // raises FileNotFoundException (handled below), and a sample.nc
             // lacking B/B_mask is a broken fixture the block must report, since
             // every assertion above depends on it.
-            check "load_compound|>read: lowers" false (sprintf "lower error: %s" e)
+            if nativeLibUnavailable e then printfn "  SKIP load_compound|>read: %s" e
+            else check "load_compound|>read: lowers" false (sprintf "lower error: %s" e)
     with ex -> unexpected "load_compound|>read" ex
 
     // ---------------------------------------------------------------
@@ -1151,6 +1163,8 @@ let out = method_for(data) <@> lambda(x) -> x + x |> compute
              | Error e ->
                  if isSkipError e then printfn "  SKIP compound map e2e (compile skipped): %s" e
                  else check "compound map e2e: compiles and links libnetcdf" false e)
+        | Error e when nativeLibUnavailable e ->
+            printfn "  SKIP compound map: %s" e
         | Error e ->
             check "compound map: lowers (method_for over a compound)" false
                 (sprintf "lower error: %s" e)
@@ -1266,6 +1280,8 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
              | Error e ->
                  if isSkipError e then printfn "  SKIP dense read e2e (compile skipped): %s" e
                  else check "dense read e2e: compiles and links libnetcdf" false e)
+        | Error e when nativeLibUnavailable e ->
+            printfn "  SKIP dense read: %s" e
         | Error e ->
             check "dense read: lowers (plain provider var read)" false (sprintf "lower error: %s" e)
     with ex -> unexpected "dense read" ex
@@ -1396,6 +1412,8 @@ let top = ranked(0)
              | Error e ->
                  if isSkipError e then printfn "  SKIP relational pipeline e2e (compile skipped): %s" e
                  else check "relational pipeline e2e: compiles and links libnetcdf" false e)
+        | Error e when nativeLibUnavailable e ->
+            printfn "  SKIP relational pipeline: %s" e
         | Error e ->
             check "relational pipeline: lowers" false (sprintf "lower error: %s" e)
     with ex -> unexpected "relational pipeline" ex
@@ -1433,6 +1451,9 @@ let b = ps
         | Error e -> check "static fold: parses" false e.Message
         | Ok program ->
             match TypeCheck.typeCheck program with
+            | Error errs when errs |> List.exists (TypeEnv.formatCompileError >> nativeLibUnavailable) ->
+                printfn "  SKIP static fold: %s"
+                    (errs |> List.map TypeEnv.formatCompileError |> String.concat "; ")
             | Error errs ->
                 check "static fold: typechecks (fold succeeded)" false
                     (errs |> List.map TypeEnv.formatCompileError |> String.concat "; ")

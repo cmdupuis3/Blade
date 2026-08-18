@@ -542,6 +542,9 @@ let formatTypeError (err: TypeError) : string =
     | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
     | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
     | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
+    | ProviderNativeLoadFailure (provider, path, detail) ->
+        sprintf "provider '%s' cannot load its native library, so the store '%s' cannot be read at compile time: %s. Every type this store binds is unresolvable until the library loads -- install the provider's runtime, or point its install-root variable at it (NETCDF_DIR for netcdf: the compiler and generated programs then use that install's own libraries)."
+                provider path detail
     // Promoted variants (Stage 5): text reproduced verbatim.
     | IndexTagMismatchNamed (expected, actual) -> sprintf "Array index tag mismatch: slot expects '%s' but argument has type '%s'." expected actual
     | IndexTagMismatchAnon expected -> sprintf "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value." expected
@@ -791,6 +794,10 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
         | None ->
             match e.Error with
             | UnboundVariable _ -> "BL2001"
+            // Environment condition, not a type judgment: the provider's
+            // native library is unloadable, so the store's names cannot
+            // resolve -- same band as BL2004's "module not found".
+            | ProviderNativeLoadFailure _ -> "BL2007"
             | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ -> "BL3001"
             | ArityMismatch _ | KernelPackArity _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"

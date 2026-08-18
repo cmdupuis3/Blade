@@ -11380,12 +11380,27 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
             // the typed value SHAPE is left intact so the lowering-side provider
             // detection still fires. Ordinary (opaque) inference is the fallback
             // when the receiver is not a provider alias or the file can't be read.
+            let mutable providerLoadError : TypeError option = None
             let (env, tValue) =
                 match binding.Value.Kind with
                 | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") }, [{ Kind = ExprKind.ExprLit (LitString path) }]) ->
                     match providerAliasName env alias with
                     | None -> (env, tValue)
                     | Some pname ->
+                        // A native-library load failure is NOT a store problem:
+                        // no store this provider names can ever resolve in this
+                        // process, and the opaque fallback would leave every
+                        // `<store>.vars.<v>` at a fresh var whose element type
+                        // defaults (Float64), dying far downstream as a baffling
+                        // type mismatch. Park BL2007 for the load site instead
+                        // (surfaced right below; same idiom as patternError).
+                        // Everything ELSE (missing file, unreadable store) keeps
+                        // the silent fallback: Lowering.tryInvokeProvider owns
+                        // those diagnostics.
+                        let parkNativeFailure (detail: string) =
+                            setCurrentExprSpan binding.Value.Span
+                            providerLoadError <- Some (ProviderNativeLoadFailure (pname, path, detail))
+                            (env, tValue)
                         try
                             // Read the store metadata at compile time (the same read
                             // Lowering.tryInvokeProvider performs) and register the
@@ -11397,8 +11412,13 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             Blade.ProviderRegistry.IdeStores.record name pm
                             let (envM, moduleTy) = registerProviderModule env name pm
                             (envM, { tValue with Type = moduleTy })
-                        with _ -> (env, tValue)
+                        with
+                        | :? System.DllNotFoundException as dex -> parkNativeFailure dex.Message
+                        | :? System.TypeInitializationException as tix when (tix.InnerException :? System.DllNotFoundException) ->
+                            parkNativeFailure tix.InnerException.Message
+                        | _ -> (env, tValue)
                 | _ -> (env, tValue)
+            if providerLoadError.IsSome then Error providerLoadError.Value else
             let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None
             let assign = assignOfBindingMut binding.Mutability
             let (varId, env') = bindLetPatVar env name identity assign tValue

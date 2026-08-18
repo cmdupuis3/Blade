@@ -2219,11 +2219,14 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
              File.Copy("tests/fixtures/sample.nc", Path.Combine(e2eDir, "tests", "fixtures", "sample.nc"), true)
              let ncDiff (label: string) (mkSrc: string -> string) =
                  match compileRun (sprintf "strm_%s_read" label) (mkSrc "read") with
-                 // A missing libnetcdf shows up as a link failure, which is a
-                 // genuine environment condition -- recognize it as a skip;
+                 // A missing libnetcdf shows up as a link failure (g++), or as
+                 // BL2007's "cannot load its native library" when the checker's
+                 // compile-time metadata read cannot load the DLL -- both are
+                 // genuine environment conditions, recognize them as skips;
                  // everything else is a failure. Previously every error printed
                  // SKIP and deleted the differential.
-                 | Error e when e.Contains "-lnetcdf" || e.Contains "netcdf.h" ->
+                 | Error e when e.Contains "-lnetcdf" || e.Contains "netcdf.h"
+                                || e.Contains "cannot load its native library" ->
                      printfn "  SKIP nc stream differential: libnetcdf not available for g++ (%s)" e
                  | Error e -> baselineFailed "nc stream differential (.read baseline)" e
                  | Ok (refOut, _) ->
