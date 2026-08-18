@@ -149,9 +149,9 @@
          dispatches WhereClause.Custom conjuncts through it. -->
     <Compile Include="src/Constraints.fs" />
     <!-- ML compiler layer (Blade.ML.*): spec model, CG tables, static
-         builtins, ops elaboration. Lives under ml/compiler/ beside the
-         BladeML reference project (which is a SEPARATE fsproj and does
-         not compile these); core touchpoints are StaticEval's builtin
+         builtins, ops elaboration. Lives under src/ml/compiler/; the
+         BladeML reference project (a SEPARATE fsproj, now at oracles/ml,
+         which does not compile these); core touchpoints are StaticEval's builtin
          registry and the MLElaborate.expand pipeline stage. -->
     <Compile Include="src/ml/compiler/MLSpec.fs" />
     <!-- The S_n permutation-module counting layer (stage 5a-i): RGS partition
@@ -228,8 +228,8 @@
     <Compile Include="src/ml/compiler/MLElaborate.fs" />
     <!-- PPL compiler layer (Blade.Ppl.*): moment/comoment formers and
          declared independence, elaborated to plain Blade source. Lives
-         under ppl/compiler/ beside the MomentAlgebra reference project
-         (a SEPARATE fsproj); core touchpoint is the PplElaborate.expand
+         under src/ppl/compiler/; the MomentAlgebra reference project is a
+         SEPARATE fsproj at oracles/ppl; core touchpoint is the PplElaborate.expand
          pipeline stage in TypeCheck.typeCheck. -->
     <Compile Include="src/ppl/compiler/PplElaborate.fs" />
     <!-- Linear-algebra dispatch classification (Phase 5 of
@@ -248,8 +248,8 @@
     <Compile Include="src/LinAlgPatterns.fs" />
     <!-- Math compiler layer (Blade.Math.*): tensor decompositions
          (Jacobi SVD/eigh, mode-n unfolding, HOSVD) elaborated to plain
-         Blade source. Lives under math/compiler/ beside the BladeMath
-         reference project (a SEPARATE fsproj); core touchpoint is the
+         Blade source. Lives under src/math/compiler/; the BladeMath
+         reference project is a SEPARATE fsproj at oracles/math; core touchpoint is the
          MathElaborate.expand pipeline stage in TypeCheck.typeCheck. -->
     <Compile Include="src/math/compiler/MathDecls.fs" />
     <Compile Include="src/math/compiler/MathElaborate.fs" />
@@ -261,15 +261,15 @@
     <Compile Include="src/display/compiler/DisplayElaborate.fs" />
     <!-- Spectra compiler layer (Blade.Spectra.*): FFT + arity-polymorphic
          polyspectra elaborated to plain Blade source. Lives under
-         spectra/compiler/ beside the BladeSpectra oracle (a SEPARATE
-         fsproj); core touchpoint is the SpectraElaborate.expand pipeline
+         src/spectra/compiler/; the BladeSpectra oracle is a SEPARATE
+         fsproj at oracles/spectra; core touchpoint is the SpectraElaborate.expand pipeline
          stage in TypeCheck.typeCheck. -->
     <Compile Include="src/spectra/compiler/SpectraDecls.fs" />
     <Compile Include="src/spectra/compiler/SpectraElaborate.fs" />
     <!-- sgs compiler layer (Blade.Sgs.*): subgrid-closure field formers
          (central-difference gradient, box filter, exact subgrid stress)
-         elaborated to plain Blade source. Lives under sgs/compiler/ beside
-         the BladeSgs physics oracle (a SEPARATE fsproj); reuses the
+         elaborated to plain Blade source. Lives under src/sgs/compiler/;
+         the BladeSgs physics oracle is a SEPARATE fsproj at oracles/sgs; reuses the
          Blade.Math.Decls AST helpers and the Blade.ML.CartesianBridge pack
          order (compile order), while its PIPELINE stage runs between ML and
          PPL (TypeCheck.typeCheck) so `where ml.galilean` bodies are judged

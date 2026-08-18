@@ -602,7 +602,7 @@ base case would inject a spurious 1. Pin it.
    Dirac term at the switching set is dropped — the standard subgradient
    convention, which the jvp plan has already committed to for if/match with a
    *pinned* convention (`plan-forward-mode-ad.md:158-161`, the ml oracle's
-   zero-norm convention, `src/ml/Autodiff.fs:103`). Admit, document, pin.
+   zero-norm convention, `oracles/ml/Autodiff.fs:103`). Admit, document, pin.
 3. **REV.** `guard(p, cot)` routed into c's adjoint — the same predicate again.
    Pleasingly symmetric.
 4. **Machinery.** Essentially none; guard is a wrapper, recurse into the body.

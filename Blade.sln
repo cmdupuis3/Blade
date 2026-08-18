@@ -5,17 +5,17 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Blade", "Blade.fsproj", "{E82A3829-3EAF-4223-8FE2-0746666468EE}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{C7186669-F75F-4950-92CE-7A438BA9EA2D}"
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "oracles", "oracles", "{C7186669-F75F-4950-92CE-7A438BA9EA2D}"
 EndProject
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeMath", "src\math\BladeMath.fsproj", "{E10E4CD5-8954-4D53-A469-3C2A53B15249}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeMath", "oracles\math\BladeMath.fsproj", "{E10E4CD5-8954-4D53-A469-3C2A53B15249}"
 EndProject
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeML", "src\ml\BladeML.fsproj", "{72F7AF41-9C67-49EF-A856-3FE2E8265FFA}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeML", "oracles\ml\BladeML.fsproj", "{72F7AF41-9C67-49EF-A856-3FE2E8265FFA}"
 EndProject
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "MomentAlgebra", "src\ppl\MomentAlgebra.fsproj", "{973050E9-7385-4297-8E93-0C4ED20076CA}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "MomentAlgebra", "oracles\ppl\MomentAlgebra.fsproj", "{973050E9-7385-4297-8E93-0C4ED20076CA}"
 EndProject
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeSgs", "src\sgs\BladeSgs.fsproj", "{8447286C-E71F-43D9-83E0-C8226763E69F}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeSgs", "oracles\sgs\BladeSgs.fsproj", "{8447286C-E71F-43D9-83E0-C8226763E69F}"
 EndProject
-Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeSpectra", "src\spectra\BladeSpectra.fsproj", "{3C4F4AF8-A723-4882-8EF1-A0F8C24F1EE7}"
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "BladeSpectra", "oracles\spectra\BladeSpectra.fsproj", "{3C4F4AF8-A723-4882-8EF1-A0F8C24F1EE7}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

@@ -4,7 +4,7 @@ namespace BladeSgs
 /// synthetic divergence-free fields, box filters, and the exact SGS stress
 /// as a central comoment. Prints pins in the copy-pasteable form the corpus
 /// tests bake. Run:
-///   dotnet run --project sgs -- dump-oracle
+///   dotnet run --project oracles/sgs -- dump-oracle
 ///
 /// FROZEN FIELD CONFIG (shared by sgs/004 and sgs/005):
 ///   N = 4 per axis, L = 2pi, h = pi/2, periodic. Four cosine modes, each

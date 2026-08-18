@@ -10,7 +10,7 @@ read as relative to `src/`) from doc comments at `src/Ast.fs:159`,
 `src/providers/ZarrSimplexBlocksPlan.md:188`. For the user-facing surface —
 the 23 formers, import gating, independence licensing — see
 `docs/features/ppl.md`; for the reference-prototype/oracle architecture see
-`src/ppl/README.md`. This file is scoped narrowly to the typed-Dist arc
+`oracles/ppl/README.md`. This file is scoped narrowly to the typed-Dist arc
 itself.
 
 ## 1. Surface syntax — `TyDist`

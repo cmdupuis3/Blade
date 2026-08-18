@@ -1,5 +1,5 @@
 /// Prints oracle values for the fixed corpus fixtures (tests/corpus/math/)
-/// in EXPECT-ready form. Run: dotnet run --project math/BladeMath.fsproj
+/// in EXPECT-ready form. Run: dotnet run --project oracles/math
 module BladeMath.OracleDump
 
 open System.Globalization

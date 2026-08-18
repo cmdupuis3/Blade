@@ -4,7 +4,7 @@ namespace BladeML
 /// copy-pasteable form for authoring (and re-pinning) the Blade e2e example:
 /// dataset literals, initial weights, CG tables for the two TP configs,
 /// step-0 gradients, and the loss trajectory. Run:
-///   dotnet run --project ml -- dump-oracle
+///   dotnet run --project oracles/ml -- dump-oracle
 module OracleDump =
 
     /// Full round-trip precision, invariant culture -- the same spelling

@@ -436,7 +436,7 @@ let freeCumulants (data: float[][]) (rmax: int) : SymTensor.T[] =
 // Prototype 5: closed-form densities, Edgeworth / Cornish-Fisher, conjugates
 // ---------------------------------------------------------------------------
 
-/// Full-precision formatting for the pin sheet (src/ppl/ORACLE_PINS.md).
+/// Full-precision formatting for the pin sheet (oracles/ppl/ORACLE_PINS.md).
 /// 17 significant digits round-trips an IEEE double exactly.
 let g17 (x: float) : string =
     if System.Double.IsNegativeInfinity x then "-inf"

@@ -5,7 +5,7 @@ project boundary:
 
 | Layer | Where | Compiled by | Role |
 |---|---|---|---|
-| **Reference implementation** (this README's main subject) | `ml/*.fs`, `BladeML.fsproj` | `dotnet run --project ml` — its own exe; `Blade.fsproj` does NOT reference it | executable semantics + value oracle |
+| **Reference implementation** (this README's main subject) | `ml/*.fs`, `BladeML.fsproj` | `dotnet run --project oracles/ml` — its own exe; `Blade.fsproj` does NOT reference it | executable semantics + value oracle |
 | **Compiler ML layer** (`Blade.ML.*`) | `ml/compiler/*.fs` | `Blade.fsproj` (the main compiler) | the ops in the language |
 
 `ml/compiler/` contents (in compile order):
@@ -76,10 +76,10 @@ documents the elaboration surface implemented by `ml/compiler/`), on top of
 `docs/formalism.md` v11. (The old `blade_ml_spec_v10.md` is
 superseded and no longer on disk.)
 
-**Run**: `dotnet run --project ml` from the repo root (or `dotnet run` inside
+**Run**: `dotnet run --project oracles/ml` from the repo root (or `dotnet run` inside
 `ml/`). Prints per-section progress and a pass/fail summary; exit code 0 on
 success. Current baseline: **170 passed, 0 failed** (149 forward + 21
-autodiff/training). `dotnet run --project ml -- dump-oracle` prints the
+autodiff/training). `dotnet run --project oracles/ml -- dump-oracle` prints the
 training oracle's dataset, CG tables, and pinned trajectory for authoring the
 Blade e2e example.
 

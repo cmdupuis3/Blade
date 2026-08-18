@@ -1217,7 +1217,7 @@ let solveArray (matrix: BladeArray) (rhs: BladeArray) (outType: IRType) : BladeA
 /// the conventions `MathDecls.eighDecl` / `blade_lapack`'s `emit_values_desc`
 /// / `emit_vectors_desc` document and reproduce.
 ///
-/// A DELIBERATE COPY of `BladeMath.Jacobi.eigh` (src/math/Jacobi.fs), not a
+/// A DELIBERATE COPY of `BladeMath.Jacobi.eigh` (oracles/math/Jacobi.fs), not a
 /// call into it: BladeMath is a separate fsproj the compiler never
 /// references, so it can serve as the value oracle for the generated code.
 /// Kept in step by `blade test diff-oracle math`.

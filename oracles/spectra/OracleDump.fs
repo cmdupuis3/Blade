@@ -1,5 +1,5 @@
 /// EXPECT-pin dumps for tests/corpus/spectra (run:
-/// dotnet run --project spectra/BladeSpectra.fsproj). Values print G17 /
+/// dotnet run --project oracles/spectra). Values print G17 /
 /// InvariantCulture so pins are exact and locale-independent; complex values
 /// print as (re, im) pairs matching Blade's flat array output. Each block is
 /// annotated with its corpus id.

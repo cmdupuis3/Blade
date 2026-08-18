@@ -3,7 +3,7 @@
 | Layer | Where | Compiled by | Role |
 |---|---|---|---|
 | **Compiler layer** (the real thing) | `ppl/compiler/PplElaborate.fs` | `Blade.fsproj` (the main compiler) | the `ppl` module in the language — source-to-source elaboration, pre-typecheck |
-| **Reference prototype** (this README's main subject) | `ppl/*.fs`, `MomentAlgebra.fsproj` | `dotnet run --project src/ppl/MomentAlgebra.fsproj` — its own exe; `Blade.fsproj` does NOT reference it | independent oracle + EXPECT-pin generator for the corpus |
+| **Reference prototype** (this README's main subject) | `ppl/*.fs`, `MomentAlgebra.fsproj` | `dotnet run --project oracles/ppl` — its own exe; `Blade.fsproj` does NOT reference it | independent oracle + EXPECT-pin generator for the corpus |
 
 The user-facing surface (formers, independence licensing, order accounting,
 the `Dist<r,T>` type) is documented in full at `docs/features/ppl.md`. This
@@ -34,7 +34,7 @@ One checker-level piece lives outside the elaborator: `cumulant(d, k)`
 projection on a typed `Dist<r,T>` value (including a Dist-typed function
 *parameter*, which elaboration can never see) is
 `TypeCheck.inferCumulantProj`, gated by the finer-grained `BL3007` order
-guard. See `docs/features/ppl.md` §5 and `src/ppl/NOTES.md` for the full
+guard. See `docs/features/ppl.md` §5 and `oracles/ppl/NOTES.md` for the full
 typed-Dist arc from surface syntax through checker-level nominal typing to
 erasure at `Zonk.fs`.
 
@@ -62,7 +62,7 @@ find them in the file:
 
 ## 2. Reference prototype — why the duplication is deliberate
 
-`src/ppl/*.fs` (`Combinatorics.fs`, `SymTensor.fs`, `MomentCumulant.fs`,
+`oracles/ppl/*.fs` (`Combinatorics.fs`, `SymTensor.fs`, `MomentCumulant.fs`,
 `Dist.fs`, `Density.fs`, `Streaming.fs`, `Oracle.fs`, `TestHarness.fs`,
 `Program.fs`) plus `MomentAlgebra.fsproj` is a **standalone F# executable**, deliberately NOT
 listed in `Blade.fsproj`'s compile items and never referenced by the
@@ -87,7 +87,7 @@ prototype its own from-scratch implementation and a new `dump-*` verb
 ## 3. Running the prototype
 
 ```
-dotnet run --project src/ppl/MomentAlgebra.fsproj
+dotnet run --project oracles/ppl
 ```
 
 With no arguments, this runs the full self-test suite
@@ -103,8 +103,8 @@ Two extra verbs print oracle datasets to stdout instead of running the
 self-tests:
 
 ```
-dotnet run --project src/ppl/MomentAlgebra.fsproj -- dump-cumulants
-dotnet run --project src/ppl/MomentAlgebra.fsproj -- dump-jet
+dotnet run --project oracles/ppl -- dump-cumulants
+dotnet run --project oracles/ppl -- dump-jet
 ```
 
 ## 4. How a corpus pin is produced
@@ -144,7 +144,7 @@ corpus file(s) that cite it.
 
 The P1 (named families, log-densities, approximate bridge) and P5 (conjugate
 posteriors) arcs added a fifth prototype module, `Density.fs`, and a second
-pin sheet, `src/ppl/ORACLE_PINS.md`, following the exact `dump-cumulants`/
+pin sheet, `oracles/ppl/ORACLE_PINS.md`, following the exact `dump-cumulants`/
 `dump-jet` pattern above rather than inventing a new one:
 
 - **`Density.fs`** (520 lines, compiled between `Dist.fs` and `Streaming.fs`

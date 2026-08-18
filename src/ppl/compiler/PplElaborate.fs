@@ -2157,7 +2157,7 @@ let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName
 
 // Conjugate posterior updates (plan section 6, P5): bayes(prior(hyper),
 // <family>_lik(params), A, r) -- the closed-form posterior AS AN ORDINARY
-// FAMILY TOWER. Pure source synthesis mirroring src/ppl/Density.fs
+// FAMILY TOWER. Pure source synthesis mirroring oracles/ppl/Density.fs
 // Conjugate (the oracle's dump-conjugate verb): the sufficient statistic
 // comes off the data by loglik's accumulation idiom (the data's only use),
 // the posterior hyperparameters are once-bound scalar arithmetic, and the
@@ -2465,7 +2465,7 @@ let private rewriteBodyFormers (active: string -> bool) (ctx: Ctx) (fnName: stri
 //                               fill exists.
 //
 // Both expansions are generated from the same formal-series construction the
-// reference oracle uses (src/ppl/Density.fs, module Expansion) -- the
+// reference oracle uses (oracles/ppl/Density.fs, module Expansion) -- the
 // eps-truncation bookkeeping below mirrors it line for line, only over a
 // symbolic coefficient ring (sparse polynomials in z, phi(z), and the
 // standardized cumulants lambda_3..lambda_6) instead of floats, so the

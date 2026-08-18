@@ -427,7 +427,7 @@ layer (`docs/plan-ppl-proper.md` §4): a "model" is an ordinary named function
 summing `logpdf`/`loglik` terms, and each call site rewrites to the same
 closed-form arithmetic the decl-position formers emit, hoisted as statement
 lets into the enclosing block (`rewriteBodyFormers`, PplElaborate.fs:2307,
-Pass 1.5 — see `src/ppl/README.md` §1 for where this sits in the pipeline).
+Pass 1.5 — see `oracles/ppl/README.md` §1 for where this sits in the pipeline).
 `loglik` keeps its accumulation-loop shape at statement level specifically so
 the surrounding function body stays inside `Grad`'s AD-able subset — every
 other former stays decl-RHS only; a misplaced-use pass still rejects them
@@ -516,7 +516,7 @@ dist_sample_approx(d, key, n) a keyed __rand_uniform fill mapped through
 
 (Section comment, PplElaborate.fs:2448-2484.) Both expansions are generated
 by the same formal-series construction the reference oracle uses
-(`src/ppl/Density.fs`, module `Expansion`) — a symbolic coefficient ring over
+(`oracles/ppl/Density.fs`, module `Expansion`) — a symbolic coefficient ring over
 `z`, `phi(z)`, and the standardized cumulants `lambda_3..lambda_6`, collapsed
 to straight-line arithmetic over runtime-read kappas rather than floats.
 `r = 2` carries no correction terms at all — the Edgeworth density of a
@@ -544,8 +544,8 @@ let pdf4 = ppl.dist_pdf_approx(d4, 2.0)         // EXPECT: 0.180731399197857
 
 Oracle pins for the whole bridge (per-family Edgeworth densities and
 Cornish-Fisher quantiles at several orders, plus accuracy tables against the
-exact laws) are catalogued in `src/ppl/ORACLE_PINS.md` under `dump-edgeworth`
-and `dump-cf` — see `src/ppl/README.md` for the oracle workflow.
+exact laws) are catalogued in `oracles/ppl/ORACLE_PINS.md` under `dump-edgeworth`
+and `dump-cf` — see `oracles/ppl/README.md` for the oracle workflow.
 
 Tests: `ppl/090-093` (Edgeworth-exact-on-Gaussian, oracle-pinned Edgeworth/CF
 values), `ppl/094` (empirical towers, and packed-vs-flat kappa-read parity
@@ -705,7 +705,7 @@ dist_condition(d, i, x)
 
 (Section comments, PplElaborate.fs:2161-2180 and :1613-1629.) `bayes` mirrors
 the reference prototype's `Density.fs` `Conjugate` module (oracle verb
-`dump-conjugate`, see `src/ppl/ORACLE_PINS.md`): the sufficient statistic
+`dump-conjugate`, see `oracles/ppl/ORACLE_PINS.md`): the sufficient statistic
 (the sample-axis sum) is read off the data array once via `loglik`'s own
 accumulation idiom, the posterior hyperparameters are once-bound scalar
 arithmetic (Density.fs's formulas verbatim), and the posterior tower is
@@ -887,7 +887,7 @@ not a user-facing error). This is why both backends "come for free": by the
 time either one runs, a Dist is nothing more exotic than a tuple of ordinary
 packed `SymIdx` arrays. The internal architecture of this arc — the typed
 surface type, its checker-level guards, and the erasure boundary — is
-documented in more depth for compiler maintainers at `src/ppl/NOTES.md`.
+documented in more depth for compiler maintainers at `oracles/ppl/NOTES.md`.
 
 ---
 
@@ -949,7 +949,7 @@ comments for each open item.
     constructor needs a decision about how its components are stored
     (`Flat` registry components like every univariate family constructor,
     §2.7, vs. `method_for`-packed `SymIdx` storage like a data-estimated
-    `dist(A, r)`, `src/ppl/NOTES.md` §7) and how `dist_add`
+    `dist(A, r)`, `oracles/ppl/NOTES.md` §7) and how `dist_add`
     combines the two representations for a multivariate tower; unresolved,
     so no `mvgaussian` constructor exists.
   - **Multivariate tower Bayes lift**: `dist_expect`/`dist_reweight`/
@@ -980,8 +980,8 @@ comments for each open item.
   - Corpus numbering continued past 069 through **133**; new `__rand_*` pins
     landed in `tests/corpus/rand/005-017`. Both DONE.
   - **Oracle `dump-*` verbs** — DONE: `dump-logpdf`, `dump-edgeworth`,
-    `dump-cf`, `dump-conjugate` in `src/ppl/Program.fs`, pinned in
-    `src/ppl/ORACLE_PINS.md` (see `src/ppl/README.md` §5 for the workflow).
+    `dump-cf`, `dump-conjugate` in `oracles/ppl/Program.fs`, pinned in
+    `oracles/ppl/ORACLE_PINS.md` (see `oracles/ppl/README.md` §5 for the workflow).
   - **`ppl` in `InterpDiff.currentSlice`** — was already present
     (`tests/InterpDiff.fs`'s `m5Slice`) before this arc started, covering the
     module generally rather than being added specifically "once samplers

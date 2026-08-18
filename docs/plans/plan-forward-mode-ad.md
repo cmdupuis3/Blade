@@ -179,7 +179,7 @@ oracle jvp twins.
 Drop the three vacuous checks; admit arbitrary overwrites and read-then-write;
 non-additive folds via the lockstep lane; arbitrary smooth rank-1 recurrences;
 if/match with a **pinned subgradient convention** (the ml oracle's zero-norm
-convention, `src/ml/Autodiff.fs:103` — admit, don't pretend exactness).
+convention, `oracles/ml/Autodiff.fs:103` — admit, don't pretend exactness).
 Convert `ad/007_overwrite_rejected` into an `ad-jvp` *positive* test with a
 header documenting the boundary shift. FD verification pins thresholded
 booleans (`abs(diff) < tol` → `EXPECT: agree = true`), never FD residuals —
@@ -232,7 +232,7 @@ and the C-track cross product — scope it only after F3 ships.
   positive. In-process, no C++. This is the only guard against silent subset
   drift; a bespoke jvp-vs-grad runtime gate is NOT warranted (both transforms
   emit ordinary Blade — a corpus test is a strictly better artifact).
-- **F# oracle** (`src/ml/Autodiff.fs` + `Tests_Autodiff.fs`, separate
+- **F# oracle** (`oracles/ml/Autodiff.fs` + `Tests_Autodiff.fs`, separate
   BladeML.fsproj — no Blade.fsproj change): `jvpOp` twins for the seven vjps
   in the e2e path + one-liner `jvpGather = gather` / `jvpScatterAdd =
   scatterAdd`; adjointness gate `⟨u, Jv⟩ = ⟨Jᵀu, v⟩` at ~1e-12 **plus**
@@ -274,8 +274,8 @@ and the C-track cross product — scope it only after F3 ships.
 `docs/features/equivariant-nn.md` §11 (drop "forward mode" from Remaining; add
 jvp ABI/subset; state the certificate posture — tangent equivariance is a
 theorem given the primal, mirroring the grad statement at
-`src/ml/README.md:324-325`); `docs/features.md:369` (row hard-codes "reverse
-mode"); `src/ml/README.md` §5 (jvp oracle description); `examples/README.md`
+`oracles/ml/README.md:324-325`); `docs/features.md:369` (row hard-codes "reverse
+mode"); `oracles/ml/README.md` §5 (jvp oracle description); `examples/README.md`
 04/07 (natural teaching surfaces); `docs/proofs.md` (note `tangent_joint_swap`
 is now consumed). House rule: cite deleted design docs as "retired <stem>
 plan" only.
