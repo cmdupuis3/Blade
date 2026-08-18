@@ -86,10 +86,8 @@ let rec ts_days: Array<Float64 like Time> = match ts_days with
 let ts: Array<Float64<time> like Time> = (ts_days <@> lambda(d) -> one_day * d) |> compute
 
 let span_days = reduce(ts_days, lambda(a, b) -> if a > b then a else b)
-
 // %%
 span_days
-
 // %% [markdown]
 // ## Synthetic 2D+time field
 //
@@ -221,7 +219,6 @@ let power_probe = (spec_probe <@> lambda(z) -> real(abs(z) * abs(z))) |> compute
 
 // %%
 plot.line(freqs_cpd, power_probe, "LSDFT spectrum at p = 20": title, "frequency (cycles/day)": xlabel, "power": ylabel)
-
 // %% [markdown]
 // ## Diurnal amplitude and phase maps
 //
