@@ -1,0 +1,25 @@
+// RANK-3 SYMMETRIC, COMPACT: the r! control's numerator arm. C(303, 3) =
+// 4,590,551 canonical cells against the dense arm's 301^3 = 27,270,901 -- a
+// finite-n ratio of 5.941, which is what "6x at rank 3" actually means at a
+// benchmarkable extent (3! is the asymptote, not the target).
+//
+// The kernel is SYMMETRIC IN ITS ARGUMENTS on purpose: it makes the compact
+// and dense arms answer the same number at every probe, so the pair is a
+// correctness check as well as a timing pair. Paired with
+// bench_sym3_dense.blade, which is this file with the `where comm(...)`
+// clause deleted and nothing else changed.
+//
+// 301 is not a power of two (and the packed simplex has no power-of-two
+// pathology anyway -- its row pitch shrinks every row; see
+// plan-simplex-blocked-compute.md, eighth measurement).
+type Sx = Idx<301>
+
+function probe3() -> Float64 = {
+    let v = method_for(range<Sx>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let s = method_for(v, v, v) <@> lambda(x, y, z) where comm(x, y, z) -> x * y * z + x + y + z |> compute
+    // A corner, an interior triple and a body-diagonal cell: enough to prove
+    // the addressing agrees across arms without printing four million numbers.
+    s((0 : Sx), (0 : Sx), (0 : Sx)) + s((7 : Sx), (11 : Sx), (300 : Sx)) + s((150 : Sx), (150 : Sx), (150 : Sx))
+}
+
+let probe = probe3()

@@ -1,0 +1,32 @@
+// RANK-3 DENSE: the r! control's denominator arm. The full hypercube,
+// 301^3 = 27,270,901 cells, against bench_sym3_compact.blade's C(303, 3) =
+// 4,590,551 canonical cells -- a finite-n ratio of 5.941, which is what "6x
+// at rank 3" actually means at a benchmarkable extent (3! is the asymptote,
+// approached only as n grows).
+//
+// THIS FILE IS bench_sym3_compact.blade WITH THE `where comm(x, y, z)` CLAUSE
+// DELETED AND NOTHING ELSE CHANGED. That is the whole experiment: the
+// declaration is the only difference between the arms, so the ratio measures
+// exactly what declaring the symmetry buys. Without the clause the shared
+// operand positions carry no identity-group tie, the output is a dense rank-3
+// array, and the nest is the full hypercube (corpus symmetry/007 pins that
+// rule at rank 2, with its BL4010 pin suggestion).
+//
+// The kernel is SYMMETRIC IN ITS ARGUMENTS on purpose: it makes the compact
+// and dense arms answer the same number at every probe, so the pair is a
+// correctness check as well as a timing pair.
+//
+// 301 is not a power of two (and the packed simplex has no power-of-two
+// pathology anyway -- its row pitch shrinks every row; see
+// plan-simplex-blocked-compute.md, eighth measurement).
+type Sx = Idx<301>
+
+function probe3() -> Float64 = {
+    let v = method_for(range<Sx>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let s = method_for(v, v, v) <@> lambda(x, y, z) -> x * y * z + x + y + z |> compute
+    // A corner, an interior triple and a body-diagonal cell: enough to prove
+    // the addressing agrees across arms without printing four million numbers.
+    s((0 : Sx), (0 : Sx), (0 : Sx)) + s((7 : Sx), (11 : Sx), (300 : Sx)) + s((150 : Sx), (150 : Sx), (150 : Sx))
+}
+
+let probe = probe3()

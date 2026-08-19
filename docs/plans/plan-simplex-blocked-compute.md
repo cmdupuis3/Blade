@@ -516,6 +516,66 @@ which is exactly how `blade test llvm-bench` already pins its arms. The auto
 policy itself is vindicated twice over: it fires on this shape and lands on the
 winning emission at both measured sizes, still with no knob in the program.
 
+## 0a. Rank r, measured 2026-08-19 — the simplex emitter is arbitrary-rank, and r! is 92-95% delivered
+
+The llvm lane refused every compact group of rank ≥ 3. It no longer does, and
+nothing in the new code is per-rank: `SimplexBlocksCore.prefixTerm` gives level
+k's contribution in closed form (the hockey-stick collapse of `rankOfCoords`'s
+inner sum into a difference of two binomials), `emitSimplexSerialR` threads it
+down an r-deep nest hoisting each term to its own level, and `canonRead`
+canonicalizes by sorting network with the antisym sign as the exchange PARITY.
+The two degenerate cases are what make it trustworthy: at r = 2 the formula IS
+`rowBase2`, and at the last level it collapses to `i - lo`, so the innermost run
+stays affine and pool-contiguous at every rank.
+
+**The measurement** (compact vs dense at matched n and matched kernel — the
+dense arm is the same program with the `where comm(...)` clause deleted, which
+is the r! control the corpus already uses; non-power-of-two extents, interleaved
+arms, 27 samples per arm, medians; probe values identical across all four arms):
+
+| shape | lane | compact | dense | ratio | of theory | ns/cell compact |
+|---|---|---|---|---|---|---|
+| r = 3, n = 301 (4 590 551 vs 27 270 901 cells; theory **5.941x**) | cpp | 8.46 ms | 45.59 ms | 5.39x | 91% | 1.84 |
+| | **llvm** | 9.16 ms | 49.92 ms | **5.45x** | **92%** | 2.00 |
+| r = 4, n = 61 (635 376 vs 13 845 841 cells; theory **21.792x**) | cpp | 1.58 ms | 25.29 ms | 16.01x | 73% | 2.49 |
+| | **llvm** | 1.27 ms | 26.38 ms | **20.77x** | **95%** | 2.00 |
+
+Three readings, in order of how much they should change anyone's plans.
+
+1. **r! is essentially delivered.** 92% of the finite-n ceiling at rank 3 and 95%
+   at rank 4. The residual is per-cell, not structural: the triangular nest costs
+   2.00 ns/cell against the dense nest's 1.83-1.91: about 9%, which is the
+   dependent trip counts and the extra loop levels' bookkeeping, and it is the
+   whole gap. Note the ceiling is 5.94 rather than 6 at n = 301 — quoting "6x"
+   at a benchmarkable extent is quoting the asymptote, which is why the corpus
+   benchmark compares against `exactSimplexRatio` instead.
+2. **The llvm lane's compact addressing is RANK-FLAT: 2.00 ns/cell at both r = 3
+   and r = 4.** That is the closed form's O(1)-per-cell claim, measured rather
+   than argued — each level's term is hoisted, so adding a rank adds a hoisted
+   polynomial, not per-cell work.
+3. **The C++ lane's compact addressing is NOT rank-flat — 1.84 → 2.49 ns/cell
+   from r = 3 to r = 4 — so the llvm lane overtakes it at rank 4** (20.77x vs
+   16.01x; 1.27 ms vs 1.58 ms on the compact arm). This is the first shape
+   measured where the llvm lane beats the C++ lane on RUNTIME rather than
+   codegen time, and the mechanism is structural: the C++ lane addresses a
+   compact cell through an allocation-time Iliffe skeleton, which costs r
+   pointer dereferences per cell and therefore grows with rank, while the closed
+   form's cost sits in hoisted terms that do not. The rank-2 measurement that
+   found the two lanes at parity (§0.3 of plan-llvm-backend.md) was reading the
+   flat end of that curve.
+
+**What this does NOT show.** The blocked (brick) schedule is still rank-2 only:
+`SimplexBlocksCore` enumerates rank-r blocks already, but the prism emitter does
+not exist, and rank 3+ refuses the blocked schedule by name rather than silently
+running serial (which would corrupt the deterministic combine order the blocked
+arm exists for). Nothing above is evidence for or against bricks at rank 3 — and
+§3's own table argues the case is *weaker* there (dense-brick fraction 37.5% at
+r=3/T=4 against 75% at r=2/T=4, needing T ≥ r before any dense brick exists at
+all). The serial rank-r nest is what delivers the r! above, and it delivers it
+without blocking.
+
+---
+
 **Eighth measurement 2026-08-18 — packed triangular storage has no power-of-two
 pathology, and the licence's payoff is contiguity-dependent.** Mirror-read
 symmetric folds (`reduce` over `S(i, j) + S(j, i)` per dense cell, canonical

@@ -522,13 +522,14 @@ let private isDenseShape (gs: Grp list) : bool = gs |> List.forall (grpCompact >
 
 let private denseGroups (extents: int64 list) : Grp list = extents |> List.map GDense
 
-/// The one compact group of a shape that is EXACTLY one rank-2 simplex, or
-/// None. Bricking is scoped to this case (plan section 9, P1: "rank-2 first"),
-/// so the predicate lives in one place.
-let private soleSimplex2 (gs: Grp list) : (int64 * bool) option =
+/// The shape that is EXACTLY one compact simplex, at any rank: `(r, n,
+/// strict)`. Whole-array schedules (the flat pool walk, the blocked
+/// decomposition) are defined on this shape and no other, so the predicate
+/// lives in one place.
+let private soleSimplexR (gs: Grp list) : (int * int64 * bool) option =
     match gs with
-    | [ GSym (2, n) ] -> Some (n, false)
-    | [ GAnti (2, n) ] -> Some (n, true)
+    | [ GSym (r, n) ] -> Some (r, n, false)
+    | [ GAnti (r, n) ] -> Some (r, n, true)
     | _ -> None
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1049,20 @@ let private poolElemBytes = function
     | ScBool -> 1L
     | _ -> 8L
 
+/// Does a rank-r simplex of extent n keep the emitted offset arithmetic inside
+/// i64? `emitBinomConst` lays down the FALLING FACTORIAL and divides at the
+/// end, so the intermediate -- at most (n+r)^r -- overflows well before the
+/// binomial itself would. Checked in floating point because the whole point is
+/// to answer without overflowing. Rank 2 admits n up to ~3e9, rank 3 ~2e6,
+/// rank 5 ~6000: comfortably past any extent whose pool would fit in memory,
+/// so this refuses only genuinely absurd shapes -- and it refuses them by
+/// declining the GROUP, which makes it a clean whole-program fallback to the
+/// C++ lane rather than a miscompile.
+let private simplexFitsI64 (r: int) (n: int64) : bool =
+    let mutable acc = 1.0
+    for _ in 1 .. r do acc <- acc * float (n + int64 r)
+    acc < 9.0e18
+
 /// Project ONE index record onto a shape group, or None when this lane has no
 /// storage for it.
 let private groupOfIndexType (ix: IRIndexType) : Grp option =
@@ -1058,9 +1073,12 @@ let private groupOfIndexType (ix: IRIndexType) : Grp option =
         | Some n ->
             match ix.Symmetry, ix.Rank with
             | SymNone, 1 -> Some (GDense n)
-            | SymSymmetric, 2 -> Some (GSym (2, n))
-            | SymAntisymmetric, 2 -> Some (GAnti (2, n))
-            // Rank 3+ compact groups, Hermitian and wreath all land here.
+            // ANY rank: the offset closed form, the serial nest and the
+            // canonicalizing read are all rank-parametric, so rank 3+ needs no
+            // arm of its own -- only the arithmetic-range check above.
+            | SymSymmetric, r when r >= 2 && simplexFitsI64 r n -> Some (GSym (r, n))
+            | SymAntisymmetric, r when r >= 2 && simplexFitsI64 r n -> Some (GAnti (r, n))
+            // Hermitian, wreath, and out-of-range simplices land here.
             | _ -> None
 
 /// Project an IRType onto the static-extent array universe. Everything this
@@ -1154,15 +1172,94 @@ let private emitRowBase2 (c: Ctx) (n: int64) (strict: bool) (i: string) : string
     let m = i64Bin c "mul" i t
     i64Bin c "sdiv" m "2"
 
+/// An operand that is a decimal literal, or None. Constant folding at
+/// emission is not cosmetic here: the rank-r offset arithmetic below is full
+/// of binomials of a CONSTANT (`n` minus a literal lower bound), and folding
+/// them turns a chain of six instructions into one immediate.
+let private tryLitI64 (s: string) : int64 option =
+    match System.Int64.TryParse(s, System.Globalization.NumberStyles.AllowLeadingSign,
+                                System.Globalization.CultureInfo.InvariantCulture) with
+    | true, v -> Some v
+    | _ -> None
+
+/// `C(x, m)` for a RUNTIME x and a compile-time m: the falling factorial
+/// x(x-1)...(x-m+1) over the constant m!. Exact in integers -- a product of m
+/// consecutive integers is always divisible by m! -- so this needs no rounding
+/// care. Folds outright when x is a literal.
+///
+/// The callers only ever evaluate this where `x >= m` holds by construction
+/// (see `emitPrefixTerm`), which is what lets the plain falling factorial
+/// stand in for `SimplexBlocksCore.binom`'s clamped-to-zero branch.
+let private emitBinomConst (c: Ctx) (x: string) (m: int) : string =
+    if m <= 0 then "1"
+    elif m = 1 then x
+    else
+        match tryLitI64 x with
+        | Some v -> string (Blade.SimplexBlocksCore.binom v m)
+        | None ->
+            let mutable acc = x
+            for j in 1 .. m - 1 do
+                acc <- i64Bin c "mul" acc (i64Bin c "sub" x (string j))
+            let mutable f = 1L
+            for j in 2 .. m do f <- f * int64 j
+            i64Bin c "sdiv" acc (string f)
+
+/// `SimplexBlocksCore.prefixTerm` emitted: the rank contributed by advancing
+/// coordinate k of a rank-r group from its canonical lower bound `lo` by the
+/// STORAGE offset `s` (so the absolute coordinate is `lo + s`).
+///
+///     strict:     C(n-lo,   m+1) - C(n-lo-s,   m+1)
+///     symmetric:  C(n-lo+m, m+1) - C(n-lo-s+m, m+1)     (m = r-k-1)
+///
+/// TWO PROPERTIES CARRY THE WHOLE DESIGN. At the last level (k = r-1, m = 0)
+/// the degree is 1 and the term is exactly `s` -- no arithmetic at all, so the
+/// innermost run is affine in its loop counter and therefore contiguous in the
+/// pool at EVERY rank. And every term is invariant under the levels inside it,
+/// so a nest hoists each one to its own level and pays O(1) per cell.
+///
+/// `x >= m+1` holds at both evaluation points for any canonical tuple (the
+/// canonical bound leaves at least `m` coordinates' worth of room above
+/// `i_k`), which is why `emitBinomConst`'s unclamped falling factorial is
+/// sound here.
+let private emitPrefixTerm (c: Ctx) (strict: bool) (n: int64) (r: int) (k: int)
+                           (lo: string) (s: string) : string =
+    let m = r - k - 1
+    if m = 0 then s
+    else
+        let d = if strict then 0L else int64 m
+        let hi =
+            match tryLitI64 lo with
+            | Some l -> string (n + d - l)
+            | None -> i64Bin c "sub" (string (n + d)) lo
+        let lowEnd = i64Bin c "sub" hi s
+        i64Bin c "sub" (emitBinomConst c hi (m + 1)) (emitBinomConst c lowEnd (m + 1))
+
 /// The offset of a cell inside ONE group, from that group's STORAGE
 /// coordinates. A dense axis is its own coordinate (no instruction at all); a
-/// rank-2 compact group is `rowBase(i) + p`.
+/// compact group of rank r sums `emitPrefixTerm` over its levels, threading
+/// the canonical lower bound (`lo_0 = 0`, `lo_k = i_{k-1} + strict`).
+///
+/// At rank 2 this is `rowBase(i) + p` with the row base spelled as
+/// `C(n,2) - C(n-i,2)` instead of `i*(2n-i-1)/2` -- the same value (the
+/// property pins assert it) by the one formula that also serves ranks 3+.
 let private grpOffset (c: Ctx) (g: Grp) (idxs: Val list) : string =
     match g, idxs with
     | GDense _, [ i ] -> i.Reg
-    | (GSym (2, n) | GAnti (2, n)), [ i; p ] ->
-        i64Bin c "add" (emitRowBase2 c n (grpStrict g) i.Reg) p.Reg
-    | _ -> refuse "a compact index group of rank 3 or more (the simplex prisms are not in the llvm lane yet)"
+    | GDense _, _ -> refuse "a dense axis indexed by more than one coordinate"
+    | _ ->
+        let r = grpRank g
+        let n = grpExtent g
+        let strict = grpStrict g
+        if List.length idxs <> r then
+            refuse (sprintf "a rank-%d compact index group addressed by %d coordinates" r (List.length idxs))
+        let sInc = if strict then 1L else 0L
+        let mutable lo = "0"
+        let mutable acc = "0"
+        idxs |> List.iteri (fun k (sk: Val) ->
+            acc <- i64Add c acc (emitPrefixTerm c strict n r k lo sk.Reg)
+            // The next level's canonical floor: i_k + strict = lo + s_k + strict.
+            lo <- i64Add c (i64Add c lo sk.Reg) (string sInc))
+        acc
 
 /// Pool offset from STORAGE coordinates, one per axis. The Horner chain over
 /// groups: `((off0 * cells1 + off1) * cells2 + off2) ...`. For an all-dense
@@ -1289,32 +1386,54 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
             rest <- rest |> List.skip r
             match g, mine with
             | GDense _, [ i ] -> yield i
-            | (GSym (2, _) | GAnti (2, _)), [ i; j ] ->
-                let lt = freshReg c
-                ln c (renderCmp { Dest = lt; Kind = "icmp"; Pred = "sle"; Ty = ScI64; Lhs = i.Reg; Rhs = j.Reg })
-                let lo = freshReg c
-                ln c (sprintf "%s = select i1 %s, i64 %s, i64 %s" lo lt i.Reg j.Reg)
-                let hi = freshReg c
-                ln c (sprintf "%s = select i1 %s, i64 %s, i64 %s" hi lt j.Reg i.Reg)
-                let span = i64Bin c "sub" hi lo
+            | _ when grpCompact g && List.length mine = r ->
+                // CANONICALIZE BY SORTING NETWORK, at any rank. A bubble pass
+                // over r coordinates is r(r-1)/2 compare-exchanges, each a
+                // compare and two selects -- straight-line, no branch, and at
+                // r = 2 it is exactly the single exchange this used to be.
+                //
+                // The ANTISYMMETRIC CHARACTER falls out of the same network:
+                // the permutation's sign is the PARITY of the exchanges it
+                // performed (a transposition is odd), so xor-ing the swap
+                // flags gives the sign for any rank -- the rank-2 "negate when
+                // swapped" rule generalized, with no per-rank table.
+                let arr = Array.ofList (mine |> List.map (fun (v: Val) -> v.Reg))
+                let mutable swapFlags = []
+                for pass in 0 .. r - 2 do
+                    for q in 0 .. r - 2 - pass do
+                        let x = arr.[q]
+                        let y = arr.[q + 1]
+                        let gt = freshReg c
+                        ln c (renderCmp { Dest = gt; Kind = "icmp"; Pred = "sgt"; Ty = ScI64; Lhs = x; Rhs = y })
+                        let lo = freshReg c
+                        ln c (sprintf "%s = select i1 %s, i64 %s, i64 %s" lo gt y x)
+                        let hi = freshReg c
+                        ln c (sprintf "%s = select i1 %s, i64 %s, i64 %s" hi gt x y)
+                        arr.[q] <- lo
+                        arr.[q + 1] <- hi
+                        swapFlags <- gt :: swapFlags
                 if grpStrict g then
-                    let eq = freshReg c
-                    ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = i.Reg; Rhs = j.Reg })
-                    let sw = freshReg c
-                    ln c (renderCmp { Dest = sw; Kind = "icmp"; Pred = "sgt"; Ty = ScI64; Lhs = i.Reg; Rhs = j.Reg })
-                    diags <- eq :: diags
-                    swaps <- sw :: swaps
-                    // `span - 1` is negative exactly on the diagonal, where
-                    // the whole coordinate tuple is REDIRECTED to cell 0
-                    // below -- a negative here is a dead select arm, never a
-                    // computed address.
-                    let dec = i64Bin c "sub" span "1"
-                    yield { Reg = lo; Ty = ScI64 }
-                    yield { Reg = dec; Ty = ScI64 }
-                else
-                    yield { Reg = lo; Ty = ScI64 }
-                    yield { Reg = span; Ty = ScI64 }
-            | _ -> refuse "an absolute read of a compact index group of rank 3 or more" ]
+                    // Sorted, so a repeat is ADJACENT: r-1 equality tests
+                    // decide "not stored" (the strict diagonal, at any rank --
+                    // for r >= 3 that is every tuple with any two equal
+                    // coordinates, not merely i = j).
+                    for q in 0 .. r - 2 do
+                        let eq = freshReg c
+                        ln c (renderCmp { Dest = eq; Kind = "icmp"; Pred = "eq"; Ty = ScI64; Lhs = arr.[q]; Rhs = arr.[q + 1] })
+                        diags <- eq :: diags
+                    swaps <- swapFlags @ swaps
+                // Sorted ABSOLUTE coordinates -> STORAGE coordinates:
+                // s_0 = i_0, s_k = i_k - i_{k-1} - strict. On a strict repeat
+                // some s_k is negative, which is a dead select arm: the whole
+                // tuple is REDIRECTED to cell 0 below before any address is
+                // computed.
+                let sInc = if grpStrict g then 1L else 0L
+                for q in 0 .. r - 1 do
+                    if q = 0 then yield { Reg = arr.[0]; Ty = ScI64 }
+                    else
+                        let d = i64Bin c "sub" arr.[q] arr.[q - 1]
+                        yield { Reg = (if sInc = 0L then d else i64Bin c "sub" d (string sInc)); Ty = ScI64 }
+            | _ -> refuse "an absolute read of an index group this lane cannot canonicalize" ]
     match diags with
     | [] -> readCell c a storage
     | _ ->
@@ -1545,6 +1664,69 @@ let private emitSimplex2 (c: Ctx) (n: int64) (strict: bool) (tile: int64 option)
         // ... and finally the last diagonal block.
         onBlock (fun () -> emitBrick c n strict (string (last * b)) wLast None wLast body)
 
+/// THE ARBITRARY-RANK SERIAL SIMPLEX: every canonical cell of a rank-r compact
+/// group, once, in ascending-lex (= pool) order.
+///
+/// r nested counted loops, level k running its absolute coordinate from its
+/// canonical floor (`0`, then `i_{k-1} + strict`) over the room left above it.
+/// Nothing here is rank-2 shaped, and nothing is special-cased per rank: the
+/// only rank-dependent quantities are the trip-count slack and the degree of
+/// `emitPrefixTerm`'s polynomial, both derived from r.
+///
+/// THE COST ARGUMENT, which is why this is not merely "a triangular nest".
+/// The pool offset is threaded down the nest as a running base: level k adds
+/// its own term, which is invariant under every level inside it, so it is
+/// emitted ONCE per iteration of level k rather than once per cell. The last
+/// level's term degenerates to its own loop counter (`emitPrefixTerm`, m = 0),
+/// so the innermost loop adds one `add` and walks the pool contiguously. Total
+/// addressing cost is O(1) per cell at any rank, with no combinadic
+/// arithmetic, no per-cell canonicality test, and no division except by the
+/// compile-time factorials in the hoisted terms.
+///
+/// The trip count carries the strict slack (`n - lo - (r-1-k)` when strict):
+/// the tuples it drops are exactly those with no room for the coordinates
+/// still to place, so the nest never opens an inner loop it knows is empty.
+let private emitSimplexSerialR (c: Ctx) (r: int) (n: int64) (strict: bool)
+                               (body: Val list -> Val -> unit) : unit =
+    let sInc = if strict then 1L else 0L
+    let rec go (k: int) (lo: string) (baseOff: string) (accS: Val list) =
+        if k = r then body (List.rev accS) { Reg = baseOff; Ty = ScI64 }
+        else
+            let room = n - (if strict then int64 (r - 1 - k) else 0L)
+            let trips =
+                match tryLitI64 lo with
+                | Some l -> string (room - l)
+                | None -> i64Bin c "sub" (string room) lo
+            emitCountedLoopTo c trips (fun t ->
+                // The loop counter IS the storage coordinate: it counts from
+                // the canonical floor, which is what a packed coordinate means.
+                let term = emitPrefixTerm c strict n r k lo t
+                go (k + 1)
+                   (i64Add c (i64Add c lo t) (string sInc))
+                   (i64Add c baseOff term)
+                   ({ Reg = t; Ty = ScI64 } :: accS))
+    go 0 "0" "0" []
+
+/// Enumerate a compact group's canonical cells at ANY rank, handing `body` the
+/// group's STORAGE coordinates (one per level) and the pool offset.
+///
+/// `tile` selects the schedule: `None` is the serial simplex above (one block
+/// covering the domain, so `onBlock` wraps it once); `Some B` is the blocked
+/// decomposition, which is currently defined for rank 2 only -- the rank-r
+/// block enumeration exists in `SimplexBlocksCore` (`blockSequence`,
+/// `isDenseBrick`) but its emitter does not, and a fold that silently ran
+/// serial when it asked to be blocked would corrupt the one thing the blocked
+/// arm is for (a reassociated-but-deterministic combine order). So it refuses
+/// by name instead.
+let private emitSimplexR (c: Ctx) (r: int) (n: int64) (strict: bool) (tile: int64 option)
+                         (onBlock: (unit -> unit) -> unit)
+                         (body: Val list -> Val -> unit) : unit =
+    match tile, r with
+    | None, _ -> onBlock (fun () -> emitSimplexSerialR c r n strict body)
+    | Some b, 2 -> emitSimplex2 c n strict (Some b) onBlock (fun i p off -> body [ i; p ] off)
+    | Some _, _ ->
+        refuse (sprintf "a BLOCKED rank-%d simplex (the blocked schedule is rank-2 only; the serial rank-%d nest is supported)" r r)
+
 /// Enumerate a whole shape's STORAGE coordinates, innermost group last,
 /// handing the body the coordinates and the pool offset. Dense groups are
 /// plain counted loops; a compact group is its serial triangle. Bricking is
@@ -1558,8 +1740,8 @@ let private emitShapeNest (c: Ctx) (groups: Grp list) (body: Val list -> Val -> 
             body idxs { Reg = storageOffset c groups idxs; Ty = ScI64 }
         | GDense n :: tl -> emitCountedLoop c n (fun i -> go ({ Reg = i; Ty = ScI64 } :: acc) tl)
         | g :: tl when grpCompact g ->
-            emitSimplex2 c (grpExtent g) (grpStrict g) None (fun emit -> emit ())
-                (fun i p _ -> go (p :: i :: acc) tl)
+            emitSimplexR c (grpRank g) (grpExtent g) (grpStrict g) None (fun emit -> emit ())
+                (fun coords _ -> go (List.fold (fun a x -> x :: a) acc coords) tl)
         | _ -> refuse "an index group the llvm lane cannot iterate"
     go [] groups
 
@@ -2594,11 +2776,17 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
     | AVirt _ ->
         let total = shapeCells a.Groups
         let ptr = allocPool c a.Elem total
-        (match soleSimplex2 a.Groups with
-         | Some (n, strict) ->
-             emitSimplex2 c n strict (brickTileEdge true a.RowOpBytes n) (fun emit -> emit ())
-                 (fun i p off ->
-                     let v = coerce c a.Elem (readCell c a [ i; p ])
+        (match soleSimplexR a.Groups with
+         | Some (r, n, strict) ->
+             // A MAP's cells are independent, so the brick order is free (no
+             // licence question); the tile edge is the reuse policy's call.
+             // Blocking is defined at rank 2 only, so rank 3+ takes `None` and
+             // runs the serial simplex rather than refusing a shape it can
+             // perfectly well emit.
+             let tile = if r = 2 then brickTileEdge true a.RowOpBytes n else None
+             emitSimplexR c r n strict tile (fun emit -> emit ())
+                 (fun coords off ->
+                     let v = coerce c a.Elem (readCell c a coords)
                      storeCell c a.Elem (gepCell c a.Elem ptr off.Reg) v)
          | None ->
              emitShapeNest c a.Groups (fun idxs off ->
@@ -3197,31 +3385,34 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
         ln c (sprintf "store i1 true, ptr %s" haveFlag)
         ln c (sprintf "br label %%%s" lEnd)
         lbl c lEnd
-    match soleSimplex2 a.Groups with
+    match soleSimplexR a.Groups with
     | None ->
         // A compact group beside other groups: serial over the whole shape.
         emitShapeNest c a.Groups (fun idxs _ -> feed acc haveTotal (readCell c a idxs))
         loadSlot c acc accTy
-    | Some (n, strict) ->
+    | Some (r, n, strict) ->
         // Folds carry no reuse hint: the canonical fold streams the pool once
         // (nothing to re-read), so bricking stays knob+licence-only here --
         // and the row-bin schedule in plan-compact-sym-folds.md section 5.6
         // is the fold's real future, not bricks.
-        match brickTileEdge brickable 0L n with
+        match (if r = 2 then brickTileEdge brickable 0L n else None) with
         | None ->
             // Serial canonical order. When the operand can answer a flat read
             // (a pool, or a cell-congruent producer) that order IS pool order,
-            // so the walk is one counted loop with no coordinate arithmetic.
+            // so the walk is one counted loop with no coordinate arithmetic --
+            // and that shortcut is rank-independent, which is why a rank-3
+            // fold over a materialized pool costs exactly what a rank-2 one
+            // does per cell.
             if hasFlatRead a then
                 emitCountedLoop c total (fun k -> feed acc haveTotal (readFlat c a { Reg = k; Ty = ScI64 }))
             else
-                emitSimplex2 c n strict None (fun emit -> emit ())
-                    (fun i p _ -> feed acc haveTotal (readCell c a [ i; p ]))
+                emitSimplexR c r n strict None (fun emit -> emit ())
+                    (fun coords _ -> feed acc haveTotal (readCell c a coords))
             loadSlot c acc accTy
         | Some b ->
             let part = allocaOf c (llTy accTy)
             let havePart = allocaOf c "i1"
-            emitSimplex2 c n strict (Some b)
+            emitSimplexR c r n strict (Some b)
                 (fun emitBlock ->
                     ln c (sprintf "store i1 false, ptr %s" havePart)
                     emitBlock ()
@@ -3236,7 +3427,7 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
                     feed acc haveTotal (loadSlot c part accTy)
                     ln c (sprintf "br label %%%s" lSkip)
                     lbl c lSkip)
-                (fun i p _ -> feed part havePart (readCell c a [ i; p ]))
+                (fun coords _ -> feed part havePart (readCell c a coords))
             loadSlot c acc accTy
 
 /// `reduce(<deferred computation>, op, init)` -- the FUSED terminal. One nest,

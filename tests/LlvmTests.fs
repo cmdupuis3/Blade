@@ -789,6 +789,32 @@ let runSimplexAgreementTests () : BlockResult =
     check "packedOffset2 = rankOfCoords (the emitter's closed form)" offBad.IsEmpty
         (if offBad.IsEmpty then "every canonical rank-2 cell of every extent" else sprintf "%d failures, first: %s" offBad.Length (List.head (List.rev offBad)))
 
+    // THE RANK-r GENERALIZATION, held to the same standard: the hockey-stick
+    // closed form must name the cell the combinadic rank names, at every rank
+    // the lane can emit -- and it must PARTITION, i.e. the offsets of the
+    // canonical cells are exactly 0 .. poolCells-1 with no gap and no
+    // collision. A closed form that is merely injective would still corrupt a
+    // pool; the surjectivity half is what proves no cell is stranded.
+    let mutable offRBad = []
+    for strict in [ false; true ] do
+        for r in 1 .. 5 do
+            // Small extents on purpose: the cell count is C(n+r-1, r), so this
+            // grid is already ~10^4 tuples at r = 5 and it is exhaustive.
+            for n in [ 1L; 2L; 3L; 4L; 5L; 7L; 8L ] do
+                let cells = SimplexBlocksCore.poolCellsR strict n r
+                let seen = System.Collections.Generic.HashSet<int64>()
+                for k in 0L .. cells - 1L do
+                    let coords = SimplexBlocksCore.unrankToCoords strict n r k
+                    let closed = SimplexBlocksCore.packedOffsetR strict n coords
+                    if closed <> k then
+                        offRBad <- sprintf "strict=%b r=%d n=%d rank=%d -> %d" strict r n k closed :: offRBad
+                    if not (seen.Add closed) then
+                        offRBad <- sprintf "collision strict=%b r=%d n=%d at %d" strict r n k :: offRBad
+                if int64 seen.Count <> cells then
+                    offRBad <- sprintf "coverage strict=%b r=%d n=%d: %d of %d" strict r n seen.Count cells :: offRBad
+    check "packedOffsetR = rankOfCoords, and partitions the pool (ranks 1-5)" offRBad.IsEmpty
+        (if offRBad.IsEmpty then "every canonical cell, ranks 1-5, sym and antisym" else sprintf "%d failures, first: %s" offRBad.Length (List.head (List.rev offRBad)))
+
     // The bricks themselves: they cover the domain exactly once, an
     // off-diagonal brick is a FULL RECTANGLE every one of whose cells is
     // canonical (that is the entire point -- no mask, no guard), and the
@@ -1205,7 +1231,22 @@ let private simplexCorpusCases =
       "symmetry", "Antisymmetric triangular storage (1D strict simplex)"
       "symmetry", "Flat Elementwise Sym Compact"
       "loops", "Range SymIdx Prefix Offsets (r=2)"
-      "loops", "Range SymIdx Named Alias Carries The Component Tag" ]
+      "loops", "Range SymIdx Named Alias Carries The Component Tag"
+      // RANK 3. The blocked arms run serial at rank 3 (the blocked schedule is
+      // rank-2 only), so for these the gate is really "the rank-r nest agrees
+      // with the C++ lane three times over" -- which is exactly what wants
+      // watching while the arithmetic is new. `Range SymIdx Prefix Offsets
+      // (r=3)` is the sharpest of them: it pins the packed COORDINATE the
+      // emitter hands every cell, so a wrong prefix term shows up as a wrong
+      // printed value rather than as a crash. The literals cover the
+      // canonicalizing read (mirrors and the diagonal); the antisym pair
+      // covers the cumulative strict shift that a previous rank-3 build got
+      // wrong (index-types/040's header records that bug).
+      "loops", "Range SymIdx Prefix Offsets (r=3)"
+      "index-types", "Rank-3 Symmetric Literal"
+      "index-types", "Unannotated Triangular Literal Infers Rank-3 Symmetric"
+      "index-types", "AntisymIdx Rank-3 Consumed By Kernel"
+      "symmetry", "Output Type: Three-Way Same" ]
 
 /// The synthesized programs (tests/fixtures/llvm/): a whole packed pool
 /// printed cell by cell at ragged extents, and the large prime-extent case.

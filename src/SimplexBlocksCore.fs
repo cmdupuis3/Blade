@@ -191,6 +191,50 @@ let packedOffset2 (strict: bool) (n: int64) (i: int64) (j: int64) : int64 =
 let poolCells2 (strict: bool) (n: int64) : int64 =
     if strict then binom n 2 else binom (n + 1L) 2
 
+/// THE RANK-r GENERALIZATION OF `rowBase2`, and the reason an arbitrary-rank
+/// simplex can be emitted without per-cell combinadic arithmetic.
+///
+/// `rankOfCoords` accumulates `completions v m` for v in [lo, i), where
+/// m = r-k-1 is the number of coordinates still to place and
+///     completions v m = C(n-v-1, m)      (strict)
+///                     = C(n-v+m-1, m)    (symmetric).
+/// Both sums telescope under the hockey-stick identity
+/// (sum_{u <= U} C(u, m) = C(U+1, m+1)) into a DIFFERENCE OF TWO BINOMIALS:
+///     strict:     C(n-lo,   m+1) - C(n-i,   m+1)
+///     symmetric:  C(n-lo+m, m+1) - C(n-i+m, m+1)
+/// i.e. one polynomial of degree m+1 in each endpoint -- no loop, no
+/// factorial, and (the point of writing it this way) a form the emitter lays
+/// down as a handful of integer instructions HOISTED OUT of the inner loops:
+/// level k's term is invariant under everything inside level k.
+///
+/// Two degenerate cases carry the whole design. At r = 2, k = 0, lo = 0 this
+/// is exactly `rowBase2` -- C(n,2) - C(n-i,2) = i*(2n-i-1)/2 when strict. At
+/// the LAST level (k = r-1, so m = 0) it degenerates to `i - lo`: the
+/// innermost run is AFFINE, which is what makes consecutive final coordinates
+/// consecutive pool cells at every rank, not just at rank 2.
+let prefixTerm (strict: bool) (n: int64) (r: int) (k: int) (lo: int64) (i: int64) : int64 =
+    let m = r - k - 1
+    let d = if strict then 0L else int64 m
+    binom (n - lo + d) (m + 1) - binom (n - i + d) (m + 1)
+
+/// Pool offset of a canonical rank-r cell (ascending; strictly ascending when
+/// `strict`). Equals `rankOfCoords strict n coords` -- the property pins
+/// assert exactly that over a grid -- but is built from `prefixTerm`, so it
+/// mirrors what the emitter computes level by level.
+let packedOffsetR (strict: bool) (n: int64) (coords: int64[]) : int64 =
+    let r = coords.Length
+    let s = if strict then 1L else 0L
+    let mutable acc = 0L
+    let mutable lo = 0L
+    for k in 0 .. r - 1 do
+        acc <- acc + prefixTerm strict n r k lo coords.[k]
+        lo <- coords.[k] + s
+    acc
+
+/// Cells in a whole rank-r pool: C(n+r-1, r) symmetric, C(n, r) antisymmetric.
+let poolCellsR (strict: bool) (n: int64) (r: int) : int64 =
+    if strict then binom n r else binom (n + int64 r - 1L) r
+
 /// One rank-2 block, in the shape an emitter lays down. Rows and columns are
 /// ABSOLUTE coordinates; a dense brick needs no canonicality test anywhere
 /// inside it, and the on-diagonal residue keeps its serial triangle.

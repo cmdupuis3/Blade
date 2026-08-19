@@ -25,15 +25,25 @@ supplies alloc/panic/clock/print with byte-identical output formatting to the C+
 
 Covered: the scalar core; dense static-extent arrays, loop nests, folds and array
 printing; the fact layer (function/parameter attributes and licensed FMF, with
-`BLADE_LLVM_FACTS` killing all three classes or any one of them); packed rank-2
-`SymIdx`/`AntisymIdx` pools with triangular map nests, mirror reads, antisym sign, empty
-diagonal, and the blocked-simplex decomposition behind `BLADE_LLVM_BRICKS`.
+`BLADE_LLVM_FACTS` killing all three classes or any one of them); packed
+`SymIdx`/`AntisymIdx` pools **at any rank** — triangular map nests, mirror reads,
+antisym sign, empty diagonal — plus the blocked-simplex decomposition behind
+`BLADE_LLVM_BRICKS` (rank 2 only; rank 3+ runs the serial simplex).
+
+*Rank ≥ 3 landed 2026-08-19* and is worth its own line, because it was the largest
+remaining refusal after `IRForRange`: `SimplexBlocksCore.prefixTerm` supplies the
+per-level offset in closed form, `emitSimplexSerialR` hoists one term per level down
+an r-deep nest, and `canonRead` canonicalizes by sorting network with the
+antisymmetric sign as the exchange parity. Measured at **92% of r! at rank 3 and 95%
+at rank 4**, with per-cell addressing cost FLAT across rank — where the C++ lane's
+rises, so the llvm lane overtakes it at rank 4. Full table in
+`plan-simplex-blocked-compute.md` §0a.
 
 Refused, by name, at whole-program granularity: runtime extents; providers; CUDA, MPI
 and OpenMP emission; ragged/sparse/compound/orbit index types; Hermitian and wreath;
-rank ≥ 3 compact groups; `IrrepsIdx` literals; element writes into compact storage;
-outer products over compact storage; complex arrays. Compact symmetric *folds* are
-refused earlier still, by the front end (BL3999, five sites in
+the BLOCKED schedule at rank ≥ 3; `IrrepsIdx` literals; element writes into compact
+storage; outer products over compact storage; complex arrays. Compact symmetric
+*folds* are refused earlier still, by the front end (BL3999, five sites in
 `src/TypeCheckInfer.fs`) — that refusal binds both lanes.
 
 **The largest single gap is `IRForRange`**, which has no arm. It is what `let rec`
