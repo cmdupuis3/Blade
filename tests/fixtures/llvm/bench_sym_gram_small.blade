@@ -1,0 +1,31 @@
+// RUNTIME SHAPE 3d-small: the reuse-pressure shape, sized for a thermally
+// constrained host.
+//
+// bench_sym_gram.blade (n = 6006) is the shape the C twins measured at 2.76x,
+// but one run is seconds of uninterrupted AVX over a 150 MB working set, and
+// thirty of those per arm is what repeatedly hard-crashed the reference
+// laptop (docs/plans/plan-simplex-blocked-compute.md, third measurement
+// block). This is the SAME shape at the twins' smaller measured point:
+// n = 3001 keeps bm at 9.2 MB -- past the 8 MiB reuse threshold the emitter
+// keys on, so the derived policy still bricks -- while quartering the output
+// cells, so a run is ~250 ms rather than ~2 s. The twins measured 1.38x
+// (reassociated) here, which is far above run-to-run noise.
+//
+// Extents stay composite non-powers of two: 3001 = 3001 (prime, so the tile
+// edge falls back to 64 ragged), d = 402 = 2*3*67. Values are exact quarters,
+// so every association prints identical bits.
+type Sx = Idx<3001>
+type Kx = Idx<402>
+
+function gram_probe() -> Float64 = {
+    let bm = method_for(range<Sx>, range<Kx>) <@> lambda(i, k) -> 1.0 + 0.5 * ((i * 31 + k) % 7) |> compute
+    let s = method_for(bm, bm) <@> lambda(x: T^1, y: T^1) where comm(x, y) -> reduce(x * y, (+)) |> compute
+    // A corner, a last-column cell and a diagonal cell -- enough to prove the
+    // addressing agrees across arms. These stay INSIDE the function on
+    // purpose: a bare top-level `let` PRINTS, and printing `s` here would
+    // format 4.5 million cells of text per run (hundreds of MB), which is I/O and
+    // memory pressure, not the traversal this shape exists to time.
+    s((0 : Sx), (0 : Sx)) + s((7 : Sx), (3000 : Sx)) + s((1500 : Sx), (1500 : Sx))
+}
+
+let probe = gram_probe()

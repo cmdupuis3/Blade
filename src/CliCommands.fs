@@ -107,6 +107,8 @@ let printUsage () =
     printfn "  blade check myprogram.edgi --strict-pins"
     printfn "  blade test"
     printfn "  blade test --omp --cuda --timing"
+    printfn "  blade test llvm            (BLADE_LLVM lane vs the C++ lane; standalone only)"
+    printfn "  blade test llvm-bench      (codegen-speed and runtime tables for both lanes)"
 
 /// Strict-pins mode. Confirm-and-pin SUGGESTIONS (BL4010) are warnings by
 /// default: the deduction proposes, storage stays DENSE, nothing changes
@@ -163,101 +165,217 @@ let internal usageFailure (reason: string) : int =
     printUsage ()
     1
 
-/// Compile a .edgi file to C++ source string
+/// The front half EVERY back end shares: parse, resolve file imports,
+/// typecheck, lower, validate. Split out of `compileFile` so the C++ emitter
+/// and the BLADE_LLVM lane consume ONE front-end pass -- a lane that refuses
+/// and falls back must not make the program pay for two.
+///
+/// `mark` is the phase-timing sink; the caller owns the stopwatch so the marks
+/// of both halves land on one timeline.
+let private frontEndToIR (filePath: string) (strictPins: bool) (mark: string -> unit)
+        : Result<Blade.IR.IRProgram * Blade.Diagnostics.SourceMap, string> =
+    // Env-gated compiler perf counters (BLADE_PERF_COUNTERS=1); refreshed
+    // here so the gate is live before the front end runs. See
+    // docs/plan-compile-speed.md Stage 5.
+    Blade.PerfCounters.refresh ()
+    let source = File.ReadAllText(filePath)
+    // Errors come back as coded, spanned Diagnostics, rendered rustc-style with source snippets.
+    let useColor = not Console.IsErrorRedirected
+    // `lowerFileDiag` resolves file-based imports (`import units.SI` ->
+    // stdlib/units/SI.blade) first and lowers the whole set. With nothing
+    // to resolve it IS `lowerDiag (Some filePath) source`.
+    let lowered = lowerFileDiag filePath source
+    mark "frontend-total(lowerFileDiag)"
+    match lowered with
+    | Error ds, sm ->
+        // A file with a hard error has still EARNED every warning the checker produced before it failed.
+        printTypeCheckWarnings useColor (Some sm) false
+        Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+    | Ok (ir, _), sm ->
+        // Strict mode fails here, before codegen: the pin suggestions
+        // REPLACE their warning twins (which are therefore not printed).
+        match strictPinFailure strictPins useColor (Some sm) with
+        | Some rendered -> Error rendered
+        | None ->
+        printTypeCheckWarnings useColor (Some sm) false
+        let validated = IRValidate.validateIR ir
+        mark "validateIR"
+        match validated with
+        | Error errs ->
+            let ds =
+                errs |> List.map (fun s ->
+                    Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s)
+            Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+        | Ok ir -> Ok (ir, sm)
+
+/// The C++ back half: IRProgram -> translation unit, plus the two
+/// refusal channels codegen reports through.
+let private cppBackendOfIR (ir: Blade.IR.IRProgram) (testName: string) (sm: Blade.Diagnostics.SourceMap)
+                           (verbose: bool) (timing: bool) (swAll: System.Diagnostics.Stopwatch)
+                           (mark: string -> unit) : Result<string * string list, string> =
+    let useColor = not Console.IsErrorRedirected
+    let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
+    mark "codegen"
+    // A shape that reached codegen with no arm for it. Refuse HERE,
+    // as a coded Blade diagnostic spanned at the declaration --
+    // handing the emitted `BLADE_CODEGEN_ERROR_...` placeholder to
+    // g++ instead reports a Blade back-end gap as an undeclared
+    // C++ identifier. Deliberate codegen refusals are unaffected:
+    // they keep their `#error` guard and their own wording.
+    match CodeGen.takeUnhandledIRNodeDiagnostics () with
+    | (_ :: _) as ds ->
+        Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+    | [] ->
+    // DELIBERATE refusals (BL7004): the same messages the emitted
+    // `#error` directives carry, reported as coded diagnostics
+    // before g++ ever runs. Gated on the generated source actually
+    // carrying a marker -- a rendered-then-discarded refusal
+    // records a message but splices nothing, and must not fail a
+    // program whose translation unit is clean.
+    match CodeGen.takeCodegenRefusalDiagnostics cppCode with
+    | (_ :: _) as ds ->
+        Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
+    | [] ->
+    mark "post-codegen-scans"
+    if timing then
+        eprintfn "[phase] compileFile total: %d ms (cpp %d chars)" swAll.ElapsedMilliseconds cppCode.Length
+    if Blade.PerfCounters.enabled then
+        // The IR walk is measurement-only, hence inside the gate.
+        Blade.PerfCounters.noteIRNodes (IR.countProgramNodes ir)
+        Blade.PerfCounters.report ()
+    if verbose then
+        for w in warnings do
+            eprintfn "[Warning] %s" w
+    else
+        // A `where cuda` kernel that fell back to the host prints
+        // WITHOUT --verbose: device emission is an explicit opt-in
+        // (`--cuda` / the CUDA test phase), so "you asked and did not
+        // get it" is the one codegen warning the user is entitled to
+        // see unprompted. Every other warning keeps its --verbose gate,
+        // and outside cuda emit mode this list is empty.
+        for w in warnings do
+            if w.StartsWith "[cuda] " then eprintfn "warning: %s" w
+    Ok (cppCode, warnings)
+
+/// Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
+/// Returns the whole-run stopwatch, the per-phase `mark`, and the gate itself,
+/// so front end and back half share ONE timeline however they are combined.
+let private phaseTimers () =
+    let timing = phaseTimingEnabled ()
+    let swAll = System.Diagnostics.Stopwatch.StartNew()
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+    let mark name =
+        if timing then
+            eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
+        sw.Restart()
+    (timing, swAll, mark)
+
+/// Compile a .blade file to C++ source. The C++ lane specifically: `blade
+/// test` and every in-process harness reach the back end through here, and
+/// they are not affected by BLADE_LLVM. The routing fork lives in
+/// `compileArtifact` below.
 let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<string * string list, string> =
     if not (File.Exists filePath) then
         Error (sprintf "File not found: %s" filePath)
     else
-        // Env-gated compiler perf counters (BLADE_PERF_COUNTERS=1); refreshed
-        // here so the gate is live before the front end runs. See
-        // docs/plan-compile-speed.md Stage 5.
-        Blade.PerfCounters.refresh ()
-        let source = File.ReadAllText(filePath)
         let testName = Path.GetFileNameWithoutExtension(filePath)
-        // Env-gated phase timing (BLADE_PHASE_TIMING=1); see docs/plan-compile-speed.md.
-        let timing = phaseTimingEnabled ()
-        let swAll = System.Diagnostics.Stopwatch.StartNew()
-        let sw = System.Diagnostics.Stopwatch.StartNew()
-        let mark name =
-            if timing then
-                eprintfn "[phase] %s: %d ms" name sw.ElapsedMilliseconds
-            sw.Restart()
-        // Errors come back as coded, spanned Diagnostics, rendered rustc-style with source snippets.
-        let useColor = not Console.IsErrorRedirected
-        // `lowerFileDiag` resolves file-based imports (`import units.SI` ->
-        // stdlib/units/SI.blade) first and lowers the whole set. With nothing
-        // to resolve it IS `lowerDiag (Some filePath) source`.
-        let lowered = lowerFileDiag filePath source
-        mark "frontend-total(lowerFileDiag)"
-        match lowered with
-        | Error ds, sm ->
-            // A file with a hard error has still EARNED every warning the checker produced before it failed.
-            printTypeCheckWarnings useColor (Some sm) false
-            Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-        | Ok (ir, _), sm ->
-            // Strict mode fails here, before codegen: the pin suggestions
-            // REPLACE their warning twins (which are therefore not printed).
-            match strictPinFailure strictPins useColor (Some sm) with
-            | Some rendered -> Error rendered
-            | None ->
-            printTypeCheckWarnings useColor (Some sm) false
-            let validated = IRValidate.validateIR ir
-            mark "validateIR"
-            match validated with
-            | Error errs ->
-                let ds =
-                    errs |> List.map (fun s ->
-                        Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s)
-                Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-            | Ok ir ->
-                let (cppCode, warnings) = CodeGen.genSelfContainedProgramFromIR ir testName
-                mark "codegen"
-                // A shape that reached codegen with no arm for it. Refuse HERE,
-                // as a coded Blade diagnostic spanned at the declaration --
-                // handing the emitted `BLADE_CODEGEN_ERROR_...` placeholder to
-                // g++ instead reports a Blade back-end gap as an undeclared
-                // C++ identifier. Deliberate codegen refusals are unaffected:
-                // they keep their `#error` guard and their own wording.
-                match CodeGen.takeUnhandledIRNodeDiagnostics () with
-                | (_ :: _) as ds ->
-                    Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-                | [] ->
-                // DELIBERATE refusals (BL7004): the same messages the emitted
-                // `#error` directives carry, reported as coded diagnostics
-                // before g++ ever runs. Gated on the generated source actually
-                // carrying a marker -- a rendered-then-discarded refusal
-                // records a message but splices nothing, and must not fail a
-                // program whose translation unit is clean.
-                match CodeGen.takeCodegenRefusalDiagnostics cppCode with
-                | (_ :: _) as ds ->
-                    Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-                | [] ->
-                mark "post-codegen-scans"
-                if timing then
-                    eprintfn "[phase] compileFile total: %d ms (cpp %d chars)" swAll.ElapsedMilliseconds cppCode.Length
-                if Blade.PerfCounters.enabled then
-                    // The IR walk is measurement-only, hence inside the gate.
-                    Blade.PerfCounters.noteIRNodes (IR.countProgramNodes ir)
-                    Blade.PerfCounters.report ()
-                if verbose then
-                    for w in warnings do
-                        eprintfn "[Warning] %s" w
-                else
-                    // A `where cuda` kernel that fell back to the host prints
-                    // WITHOUT --verbose: device emission is an explicit opt-in
-                    // (`--cuda` / the CUDA test phase), so "you asked and did not
-                    // get it" is the one codegen warning the user is entitled to
-                    // see unprompted. Every other warning keeps its --verbose gate,
-                    // and outside cuda emit mode this list is empty.
-                    for w in warnings do
-                        if w.StartsWith "[cuda] " then eprintfn "warning: %s" w
-                Ok (cppCode, warnings)
+        let (timing, swAll, mark) = phaseTimers ()
+        match frontEndToIR filePath strictPins mark with
+        | Error e -> Error e
+        | Ok (ir, sm) -> cppBackendOfIR ir testName sm verbose timing swAll mark
+
+/// What a back end produced for one program: a C++ translation unit (with its
+/// codegen warnings) or the LLVM lane's textual `.ll`.
+type BackendArtifact =
+    | CppArtifact of source: string * warnings: string list
+    | LlvmArtifact of ll: string
+
+/// Compile a .blade file through whichever back end the environment selects.
+///
+/// BLADE_LLVM UNSET IS TODAY'S BEHAVIOR, BYTE FOR BYTE: the fork below is not
+/// even consulted. With the gate on, the LLVM lane gets first refusal on the
+/// SAME IRProgram the C++ emitter would have consumed -- one front-end pass
+/// either way -- and any refusal prints exactly one notice and hands the
+/// program to the C++ lane unchanged. The lane can therefore only be
+/// all-correct or absent, which is what lets it grow against a byte-pinned
+/// corpus without ever half-compiling anything.
+let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
+    if not (File.Exists filePath) then
+        Error (sprintf "File not found: %s" filePath)
+    else
+        let testName = Path.GetFileNameWithoutExtension(filePath)
+        let (timing, swAll, mark) = phaseTimers ()
+        match frontEndToIR filePath strictPins mark with
+        | Error e -> Error e
+        | Ok (ir, sm) ->
+            let toCpp () =
+                cppBackendOfIR ir testName sm verbose timing swAll mark
+                |> Result.map CppArtifact
+            let fallback (reason: string) =
+                eprintfn "[blade] llvm lane refused: %s; falling back to C++" reason
+                toCpp ()
+            if not (Build.llvmEnabled ()) then toCpp ()
+            else
+                match Build.resolveClang () with
+                | None -> fallback "no clang found (set BLADE_LLVM_CLANG)"
+                | Some _ ->
+                    match EmitLlvm.tryEmitProgramNamed testName ir with
+                    | Error reason -> fallback reason
+                    | Ok ll ->
+                        mark "emit-llvm"
+                        Ok (LlvmArtifact ll)
+
+/// Place a produced executable at the caller's requested path (or leave it
+/// where the toolchain put it), and report it under --verbose. Shared by both
+/// back ends' arms of `compileToExe`.
+let private placeExecutable (outputPath: string option) (verbose: bool) (exePath: string) : string =
+    let finalPath =
+        match outputPath with
+        | Some out ->
+            let outFull = Path.GetFullPath(out)
+            if exePath <> outFull then
+                try File.Copy(exePath, outFull, true) with _ -> ()
+            outFull
+        | None -> exePath
+    if verbose then
+        eprintfn "[Compile] %s" finalPath
+    finalPath
 
 /// Compile a .edgi file to an executable
 let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
-    match compileFile filePath verbose strictPins with
+    match compileArtifact filePath verbose strictPins with
     | Error e -> Error e
-    | Ok (cppCode, warnings) ->
+    | Ok (LlvmArtifact ll) ->
+        // The LLVM lane's whole back half: write the .ll where the .cpp would
+        // have gone, deploy the C shim beside it (the link input), and let
+        // clang do IR -> executable in one step.
+        let baseName = Path.GetFileNameWithoutExtension(filePath)
+        let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
+        let dir = if String.IsNullOrEmpty dir then "." else dir
+        let llFile = Path.Combine(dir, baseName + ".ll")
+        File.WriteAllText(llFile, ll)
+        let shimPath = Path.Combine(dir, EmitLlvm.shimFileName)
+        let shimObjPath = Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.shimFileName + Platforms.objExtension)
+        // Same cleanup rule the C++ lane applies to its deployed headers:
+        // remove only what THIS compile created, so a directory that already
+        // held a shim (a scratch dir building many programs) keeps it.
+        let shimWasAbsent = not (File.Exists shimPath)
+        let shimObjWasAbsent = not (File.Exists shimObjPath)
+        EmitLlvm.deployShim dir
+        if verbose then
+            eprintfn "[Emit] %s" llFile
+        (match Build.compileLlvmProgram llFile dir with
+         | Error e -> Error (sprintf "Compilation failed:\n%s" e)
+         | Ok exePath ->
+             let finalPath = placeExecutable outputPath verbose exePath
+             // verbose keeps the intermediates so the .ll can be inspected or
+             // recompiled by hand.
+             if not verbose then
+                 try File.Delete(llFile) with _ -> ()
+                 if shimWasAbsent then (try File.Delete(shimPath) with _ -> ())
+                 if shimObjWasAbsent then (try File.Delete(shimObjPath) with _ -> ())
+             Ok finalPath)
+    | Ok (CppArtifact (cppCode, warnings)) ->
         let baseName = Path.GetFileNameWithoutExtension(filePath)
         let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
         let dir = if String.IsNullOrEmpty dir then "." else dir
@@ -297,21 +415,12 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         | Error e ->
             Error (sprintf "Compilation failed:\n%s" e)
         | Ok exePath ->
-            let finalPath =
-                match outputPath with
-                | Some out ->
-                    let outFull = Path.GetFullPath(out)
-                    if exePath <> outFull then
-                        try File.Copy(exePath, outFull, true) with _ -> ()
-                    outFull
-                | None -> exePath
+            let finalPath = placeExecutable outputPath verbose exePath
             // verbose keeps the intermediates so the source can be inspected/recompiled.
             if not verbose then
                 try File.Delete(cppFile) with _ -> ()
                 for h in deployedHeaders do
                     try File.Delete(h) with _ -> ()
-            if verbose then
-                eprintfn "[Compile] %s" finalPath
             Ok finalPath
 
 /// Run a .edgi file: compile and execute. `mpiRanks = Some n` switches on the
@@ -654,30 +763,37 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                     printfn "OK"
                     0
 
-/// Emit C++ source to file or stdout
+/// Emit back-end source to file or stdout: C++ normally, textual LLVM IR when
+/// the BLADE_LLVM lane took the program.
 let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : int =
-    match compileFile filePath verbose strictPins with
+    match compileArtifact filePath verbose strictPins with
     | Error e -> reportFailure e
-    | Ok (cppCode, _) ->
+    | Ok artifact ->
+        let text = match artifact with CppArtifact (src, _) -> src | LlvmArtifact ll -> ll
         match outputPath with
         | Some outPath ->
-            // The write and the header deploy are the two ways an emit can fail
-            // for a reason that is not about the program (read-only path, full
-            // disk, a concurrent writer holding the destination). Name the file
-            // rather than letting the top-level boundary report a bare .NET
-            // message with no path in it.
+            // The write and the runtime deploy are the two ways an emit can
+            // fail for a reason that is not about the program (read-only path,
+            // full disk, a concurrent writer holding the destination). Name the
+            // file rather than letting the top-level boundary report a bare
+            // .NET message with no path in it.
             try
-                File.WriteAllText(outPath, cppCode)
-                // Ship the runtime headers next to the emitted .cpp so `g++ file.cpp` compiles as-is (no -I flag needed).
+                File.WriteAllText(outPath, text)
                 let outDir = Path.GetDirectoryName(Path.GetFullPath(outPath))
-                CodeGen.deployRuntimeHeaders (if String.IsNullOrEmpty outDir then "." else outDir)
+                let outDir = if String.IsNullOrEmpty outDir then "." else outDir
+                // Ship the runtime next to the emitted source so the file
+                // compiles as-is with no -I: the C++ headers for a .cpp,
+                // the C shim for a .ll.
+                (match artifact with
+                 | CppArtifact _ -> CodeGen.deployRuntimeHeaders outDir
+                 | LlvmArtifact _ -> EmitLlvm.deployShim outDir)
                 if verbose then
                     eprintfn "[Emit] %s" outPath
                 0
             with ex ->
                 reportFailure (sprintf "Failed to write %s: %s" outPath ex.Message)
         | None ->
-            printf "%s" cppCode
+            printf "%s" text
             0
 
 /// `--strict-pins` regression block. A corpus entry can't express a FLAG's

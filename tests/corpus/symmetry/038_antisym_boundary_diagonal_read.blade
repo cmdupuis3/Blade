@@ -1,0 +1,23 @@
+// TEST: Antisym boundary diagonal read - no load past the pool
+// The diagonal of a strict (antisym) group is NOT stored, so a diagonal read
+// must answer zero WITHOUT loading. The dangerous corner is i = j = n-1: the
+// last row of a strict triangle is EMPTY, so an unguarded canonical read
+// computes rowBase(n-1) + 0 = C(n,2) -- one cell PAST the pool, invisible to
+// value checks because the fetched cell is discarded. n = 16 is the smallest
+// extent where the allocator's 64-byte rounding leaves no slack to absorb it
+// (C(16,2) * 8 = 960 bytes, a multiple of 64). The C++ lane guards with an
+// early return (canon_fold's zero flag); the llvm lane branches around the
+// load (canonRead's canon.read block). Both corners are pinned here, plus one
+// mirror pair so the negate-on-swap transform stays exercised at this extent.
+let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+let L = method_for(A, A)
+let g = lambda(x, y) where anticomm(x, y) -> x - y
+let S = L <@> g |> compute
+let d_last = S(15, 15)
+let d_first = S(0, 0)
+let lower = S(1, 0)
+let upper = S(0, 1)
+// EXPECT: d_last = 0.0
+// EXPECT: d_first = 0.0
+// EXPECT: lower = 1.0
+// EXPECT: upper = -1.0

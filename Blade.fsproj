@@ -328,6 +328,20 @@
     <Compile Include="src/CodeGenFusion.fs" />
     <Compile Include="src/CodeGenBinding.fs" />
     <Compile Include="src/CodeGen.fs" />
+    <!-- The simplex-blocks decomposition as compute math (pure integer
+         arithmetic, no IR): the shared identities the LLVM lane's symmetric
+         nests are laid out from. A deliberate TWIN of the provider-local
+         Blade.ZarrProvider.SimplexBlocks: the two decompositions diverge on
+         purpose (docs/plans/plan-simplex-blocked-compute.md section 6, MPI
+         row) and agree on the identities, which `blade test llvm goldens`
+         pins module against module. -->
+    <Compile Include="src/SimplexBlocksCore.fs" />
+    <!-- The direct LLVM back end (BLADE_LLVM lane): IRProgram -> textual .ll,
+         whole-program refusal, no C++ in between. Placed AFTER the CodeGen
+         group because it reads that layer's shared facts (fpReassocEnabled,
+         foldReorderLicensed, the cpp/ runtime reader for its C shim) and
+         BEFORE the interpreter, which it has nothing to do with. -->
+    <Compile Include="src/EmitLlvm.fs" />
     <!-- Tree-walking IR interpreter (differential twin of CodeGen; output must
          byte-match compiled binaries). Value = runtime value universe;
          CppFormat = iostream-parity printing; Numerics = bit-exact scalar and
@@ -467,6 +481,13 @@
     <Compile Include="tests/Differential.fs" />
     <Compile Include="tests/Benchmarks.fs" />
     <Compile Include="tests/CudaTests.fs" />
+    <!-- The BLADE_LLVM lane's own block (`blade test llvm`): byte-pinned .ll
+         emission plus the llvm-vs-C++ stdout differential over corpus
+         categories. Drives both back ends directly (CliCommands compiles far
+         later, and the ordinary runner is the C++ lane by construction), so it
+         needs only Lowering/CodeGen/EmitLlvm/Build + the corpus loader. Skips
+         cleanly without clang or g++; standalone only, never in the default suite. -->
+    <Compile Include="tests/LlvmTests.fs" />
     <Compile Include="tests/OmpTests.fs" />
     <Compile Include="tests/LinAlgTests.fs" />
     <!-- Structural pins for `blade doctor`: row set/order, JSON shape, and
@@ -513,6 +534,17 @@
        the binary so the suite runs regardless of the working directory. -->
   <ItemGroup>
     <None Include="tests/corpus/**/*.blade">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The BLADE_LLVM emission pins: three tiny .blade programs and the .ll
+         text each one must emit, byte for byte (tests/LlvmTests.fs). Deployed
+         beside the binary for the same reason the corpus is: the block reads
+         them at run time, and a missing fixture must FAIL the pin, not make it
+         vacuously skip. No Link metadata, so the relative path is preserved. -->
+    <None Include="tests/fixtures/llvm/*.blade">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="tests/fixtures/llvm/*.ll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <!-- Native-dependency pins (OpenBLAS tag/url). Copied beside the binary
@@ -648,6 +680,14 @@
          only by programs generated under BLADE_MEMCHECK=1. -->
     <None Include="src/cpp/blade_memcheck.hpp">
       <Link>cpp/blade_memcheck.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- The BLADE_LLVM lane's C runtime shim (print/panic/alloc/clock). Plain
+         C, compiled once per build directory by clang and linked into every
+         .ll the lane produces; EmitLlvm.deployShim copies it beside the .ll
+         exactly as deployRuntimeHeaders copies the C++ headers. -->
+    <None Include="src/cpp/blade_llvm_shim.c">
+      <Link>cpp/blade_llvm_shim.c</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <!-- Round D's cuBLAS swap-table verification, compiled with nvcc and run

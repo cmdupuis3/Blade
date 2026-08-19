@@ -1,0 +1,26 @@
+// RUNTIME SHAPE 3d-baseline: everything bench_sym_gram_small does EXCEPT the
+// symmetric fold.
+//
+// This exists to be SUBTRACTED. The gram fixtures time a whole program --
+// process start, the bm build (3001 x 402 = 1,206,402 cells), the 36 MB
+// output pool's allocation and first touch, and only then the traversal the
+// brick decomposition actually changes. Timing arms against each other is
+// only fair if that common prefix is known rather than assumed, and the
+// 2026-08-18 evening run raised exactly that doubt: ~1.8 GFLOP in ~9 s is
+// ~0.2 GFLOP/s, which is either a slow fold or a fat prefix, and the two
+// stories call for opposite next steps.
+//
+// Same extents, same bm expression, same probe shape as bench_sym_gram_small
+// -- only `s` is missing. bm is probed at three cells so it cannot be
+// eliminated as dead. Any arm's fold time is (that arm's total) minus (this).
+// Knob-independent by construction: no simplex domain appears here, so
+// BLADE_LLVM_BRICKS cannot change this number.
+type Sx = Idx<3001>
+type Kx = Idx<402>
+
+function bm_probe() -> Float64 = {
+    let bm = method_for(range<Sx>, range<Kx>) <@> lambda(i, k) -> 1.0 + 0.5 * ((i * 31 + k) % 7) |> compute
+    bm((0 : Sx), (0 : Kx)) + bm((3000 : Sx), (401 : Kx)) + bm((1500 : Sx), (200 : Kx))
+}
+
+let probe = bm_probe()

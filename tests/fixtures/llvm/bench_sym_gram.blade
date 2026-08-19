@@ -1,0 +1,27 @@
+// RUNTIME SHAPE 3d: reuse pressure -- the shape class where S0 bricks WIN.
+//
+// The sym-map shapes (3a-3c) read a 48 KB operand: L2-resident, nothing for
+// blocking to reuse, and the serial triangle's pool-sequential writes are
+// unbeatable (the 2026-08-18 decomposition: write scatter owns the bricked
+// penalty there). This shape is the other class: s(i,j) = dot(bm(i), bm(j))
+// re-streams an 18.4 MB row-operand matrix (6006 x 402 doubles, larger than
+// the reference machine's 16 MB L3) once per output ROW serially, but once
+// per row-TILE bricked -- measured in C twins at 2.76x (reassoc) / 1.11x
+// (strict) in favor of B = 66 bricks. Extents are composite non-powers of
+// two (6006 = 2*3*7*11*13, 402 = 2*3*67); 66 divides 6006 exactly.
+// Values are exact quarters, so every association prints identical bits.
+type Sx = Idx<6006>
+type Kx = Idx<402>
+
+function gram_probe() -> Float64 = {
+    let bm = method_for(range<Sx>, range<Kx>) <@> lambda(i, k) -> 1.0 + 0.5 * ((i * 31 + k) % 7) |> compute
+    let s = method_for(bm, bm) <@> lambda(x: T^1, y: T^1) where comm(x, y) -> reduce(x * y, (+)) |> compute
+    // A corner, a last-column cell and a diagonal cell -- enough to prove the
+    // addressing agrees across arms. These stay INSIDE the function on
+    // purpose: a bare top-level `let` PRINTS, and printing `s` here would
+    // format 18 million cells of text per run (hundreds of MB), which is I/O and
+    // memory pressure, not the traversal this shape exists to time.
+    s((0 : Sx), (0 : Sx)) + s((7 : Sx), (6005 : Sx)) + s((3003 : Sx), (3003 : Sx))
+}
+
+let probe = gram_probe()

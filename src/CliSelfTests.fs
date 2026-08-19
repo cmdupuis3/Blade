@@ -2160,6 +2160,33 @@ let internal dispatchTest (rest: string list) : int =
         // mpiexec -n 1/2/4). Skips without g++ / -lmsmpi / mpiexec.
         let failed = (Blade.Tests.MpiTests.runMpiTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "llvm" ] ->
+        // The BLADE_LLVM lane: byte-pinned .ll emission (no toolchain needed)
+        // plus the llvm-vs-C++ stdout differential over the scalar/functions/
+        // loops corpora. STANDALONE ONLY -- deliberately absent from
+        // isSuiteFlag and from FullSuiteOptions, so no combination of `blade
+        // test` flags can fold it into the default suite: it spawns two native
+        // compilers per corpus file. Skips cleanly without clang or g++.
+        Blade.Tests.LlvmTests.runLlvmTests ()
+    | [ "llvm-bench" ] | [ "llvmbench" ] ->
+        // The two-lane benchmark: codegen speed (IRProgram -> executable, per
+        // lane) and runtime over four non-power-of-two shapes. Standalone for
+        // the same reason `llvm` is, only more so -- it spawns hundreds of
+        // compiler and executable invocations. Never fails on a slow ratio;
+        // fails only on a refusal, a build error or a value disagreement.
+        Blade.Tests.LlvmTests.runLlvmBench ()
+    | [ "llvm"; cat ] ->
+        // The same differential over ONE corpus directory. Like
+        // `test interp <dir>`, this takes the LITERAL tests/corpus/<dir> name
+        // (`blade test llvm index-types`), not a dispatch alias key.
+        Blade.Tests.LlvmTests.runLlvmCategory cat
+    | [ "--llvm" ] ->
+        // Deliberately NOT a member of isSuiteFlag. Spelling it like one is a
+        // reasonable guess given --omp/--cuda/--mpi, so say why it isn't
+        // instead of letting it fall through to "Unknown test category".
+        eprintfn "test: --llvm is not a full-suite flag -- the llvm lane spawns two native compilers per corpus file, so it is standalone only."
+        eprintfn "      Run 'blade test llvm' (or 'blade test llvm <corpus-dir>' / 'blade test llvm goldens' / 'blade test llvm-bench')."
+        1
     | [ "timing" ] ->
         // Differential timing: (r!)^d speedup of comm-annotation and
         // symmetric-type forms vs dense. Warns (never fails) on a slow ratio.

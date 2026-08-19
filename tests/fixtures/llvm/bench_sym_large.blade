@@ -1,0 +1,18 @@
+// RUNTIME SHAPE 3b: the same symmetric triangular map as bench_sym_map.blade,
+// nine times the work (n = 6007 prime, C(6008, 2) = 18,048,028 canonical
+// cells).
+//
+// It exists because n = 2003 turned out to measure ~3 ms of compute, which is
+// close enough to allocation and first-touch noise that a 10% effect would not
+// be distinguishable from it. The brick decomposition's whole claim is about
+// the traversal of a LARGE simplex, so the bricks verdict is read off this
+// shape and n = 2003 is kept as the brief specified it.
+type Sx = Idx<6007>
+
+function sym_probe() -> Float64 = {
+    let v = method_for(range<Sx>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+    s((0 : Sx), (0 : Sx)) + s((7 : Sx), (6006 : Sx)) + s((3001 : Sx), (3001 : Sx))
+}
+
+let probe = sym_probe()

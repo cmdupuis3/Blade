@@ -9,11 +9,11 @@ re-added after a mass deletion left dangling references).
 | Document | Status | Topic |
 |----------|--------|-------|
 | [plan-ad-combinators.md](plan-ad-combinators.md) | ACTIVE (F4 spec) | Per-combinator forward/reverse AD rules; the companion spec `plan-forward-mode-ad.md` §4 F4 deferred to |
-| [plan-simplex-blocked-compute.md](plan-simplex-blocked-compute.md) | ACTIVE SPEC | Reusing Zarr SimplexBlocks math on the compute side: dense bricks + 2^-d residue |
+| [plan-simplex-blocked-compute.md](plan-simplex-blocked-compute.md) | P0+P1 LANDED (rank 2); P1 GATE FAILED | Reusing Zarr SimplexBlocks math on the compute side: dense bricks + 2^-d residue. Correct and measured; S0 costs ~7% and wins nothing — S1/mirror modes untouched |
 | [plan-toolchain-packaging.md](plan-toolchain-packaging.md) | LANDED (doctor/setup phases open) | deps.json pins, `blade doctor`, `blade setup`, toolchain.json |
 | [plan-forward-mode-ad.md](plan-forward-mode-ad.md) | EXECUTED through F3 | `ad.jvp` forward mode, HVP, second order |
 | [plan-static-array-erasure.md](plan-static-array-erasure.md) | VERDICT: REFUTED | Measured case against static-extent array erasure — do not build |
-| [plan-llvm-backend.md](plan-llvm-backend.md) | VERDICT: EXPLORATORY, narrowed | Fact-emission thesis audit; P0 = clang-lane A/B, ORC JIT the only moat |
+| [plan-llvm-backend.md](plan-llvm-backend.md) | IMPLEMENTED through M5, measured | `BLADE_LLVM` lane: emits, refuses whole-program, `blade test llvm` / `llvm-bench`. Codegen 4.5x faster than g++; runtime at parity — the fact-emission thesis stays refuted, R6 (toolchain) is what pays |
 | [plan-mlir-backend.md](plan-mlir-backend.md) | PROPOSAL: unscheduled | If-we-did-it MLIR architecture sketch (cuda-tile target) |
 
 Conventions: status changes edit the doc's header and this table — never move or

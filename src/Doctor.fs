@@ -153,6 +153,52 @@ let private checkGpp () : CheckResult * bool =
         | Ok (code, _) -> fail (sprintf "compiled but run failed (exit %d)" code)
         | Error e -> fail (sprintf "compiled but run failed: %s" e)
 
+/// The BLADE_LLVM lane's toolchain row.
+///
+/// COMPILES AND RUNS A REAL `.ll`, on the same principle as the g++ row: a
+/// PATH probe cannot tell a clang that answers `--version` from one that
+/// cannot consume textual IR, and "clang exists" is precisely the claim that
+/// would be wrong on a mis-layered MSYS2 install. The probe program is the
+/// smallest thing that exercises the whole path the lane uses -- a module with
+/// no target triple (so `-Wno-override-module` gets exercised too), an
+/// external C declaration, and a `main` whose output is checked.
+let private checkLlvm () : CheckResult =
+    let gate = if Build.llvmEnabled () then "; BLADE_LLVM on" else "; off by default (set BLADE_LLVM=1)"
+    let origin =
+        match Environment.GetEnvironmentVariable "BLADE_LLVM_CLANG" with
+        | null | "" -> originOf "BLADE_LLVM"
+        | _ -> "BLADE_LLVM_CLANG [env]"
+    let row status detail =
+        // Title fits renderText's 14-column pad; "g++ / OpenMP" is the sibling.
+        { Key = "llvm"; Title = "clang / LLVM"; Status = status; Detail = detail; Origin = origin }
+    match Build.resolveClang () with
+    | None ->
+        row StatusMissing "optional -- no clang found on PATH or at C:\\msys64\\clang64\\bin; needed only for BLADE_LLVM"
+    | Some clang ->
+        let version = toolFirstLine clang "--version" |> Option.defaultValue clang
+        let dir = scratchDir ()
+        let ll = Path.Combine(dir, "doctor_llvm.ll")
+        let exe = Path.Combine(dir, "doctor_llvm" + Platforms.exeExtension)
+        File.WriteAllText(ll,
+            "@.m = private unnamed_addr constant [21 x i8] c\"blade-doctor-llvm-ok\\00\"\n\
+             declare i32 @puts(ptr)\n\
+             define i32 @main() {\n\
+             entry:\n\
+             \x20 %r = call i32 @puts(ptr @.m)\n\
+             \x20 ret i32 0\n\
+             }\n")
+        let args = sprintf "-O2 -Wno-override-module -o \"%s\" \"%s\"" exe ll
+        match Build.runProc clang args 120000 with
+        | Error e ->
+            let firstLine = e.Split('\n') |> Array.tryFind (fun l -> l.Trim() <> "") |> Option.defaultValue e
+            row StatusError (sprintf "%s found, but compiling a .ll FAILED: %s" clang (firstLine.Trim()))
+        | Ok () ->
+            match Build.runExecutable exe with
+            | Ok (0, out) when out.Contains "blade-doctor-llvm-ok" ->
+                row StatusOk (sprintf "%s -- compiles and runs textual LLVM IR%s" version gate)
+            | Ok (code, _) -> row StatusWarn (sprintf "%s compiled a .ll but the binary failed (exit %d)" clang code)
+            | Error e -> row StatusWarn (sprintf "%s compiled a .ll but the binary failed: %s" clang e)
+
 let private tierName = function
     | LinAlgPatterns.TierOff -> "off"
     | LinAlgPatterns.TierExplicit -> "explicit (BLADE_BLAS_LINK)"
@@ -393,6 +439,8 @@ let collectChecks () : CheckResult list =
       checkNetcdf gppOk
       checkMpi gppOk
       checkCuda ()
+      // Not gated on gppOk: the LLVM lane has no g++ in it at all.
+      checkLlvm ()
       checkTool "make" "make" "needed for `blade setup --blas=source`"
       checkTool "gfortran" "gfortran" "needed for OpenBLAS's LAPACK half under --blas=source"
       checkTool "git" "git" "needed for `blade setup --blas=source` (clone)"

@@ -23,9 +23,9 @@ export type DoctorStatus = "ok" | "off" | "warn" | "missing" | "error";
 
 /** One row of the report. */
 export interface DoctorCheck {
-  /** Stable machine key. Known values, in emission order: "dotnet", "gpp",
-   *  "blas", "lapack", "netcdf", "mpi", "cuda", "make", "gfortran", "git",
-   *  "coq". Treat as open — rows get added. */
+  /** Stable machine key. Known values, in emission order: "dotnet", "stdlib",
+   *  "gpp", "blas", "lapack", "netcdf", "mpi", "cuda", "llvm", "make",
+   *  "gfortran", "git", "coq". Treat as open — rows get added. */
   key: string;
   /** Human row title ("g++ / OpenMP"). */
   title: string;

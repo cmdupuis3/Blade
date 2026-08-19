@@ -46,7 +46,7 @@ let runDoctorTests () : BlockResult =
     use _d = pinEnv "BLADE_TOOLCHAIN_FILE" (Path.Combine(Path.GetTempPath(), "blade_no_such_toolchain.json"))
 
     let checks = Doctor.collectChecks ()
-    let expectedKeys = ["dotnet"; "stdlib"; "gpp"; "blas"; "lapack"; "netcdf"; "mpi"; "cuda"; "make"; "gfortran"; "git"; "coq"]
+    let expectedKeys = ["dotnet"; "stdlib"; "gpp"; "blas"; "lapack"; "netcdf"; "mpi"; "cuda"; "llvm"; "make"; "gfortran"; "git"; "coq"]
     check "row set and order stable"
         ((checks |> List.map (fun c -> c.Key)) = expectedKeys)
         (sprintf "%d rows" checks.Length)

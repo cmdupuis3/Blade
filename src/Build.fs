@@ -69,6 +69,29 @@ let private fpContractFlag () =
 /// env vars above). Re-evaluated per call so harness env pins take effect.
 let optFlags () = "-O3" + marchFlag () + fpContractFlag ()
 
+// ---------------------------------------------------------------------------
+// The BLADE_LLVM lane's gates (docs/plans/plan-llvm-backend.md section 5).
+//
+// FUNCTIONS, never module-level `let`s, for the reason stated above: a harness
+// (or a sweep script) that pins BLADE_LLVM mid-process must have the pin
+// honored on the next call.
+// ---------------------------------------------------------------------------
+
+/// Whether `blade run` / `compile` / `emit` try the direct LLVM back end first.
+/// UNSET IS THE DEFAULT AND MEANS OFF: with the variable absent every lane in
+/// the compiler behaves byte-for-byte as it did before the back end existed.
+let llvmEnabled () : bool =
+    match System.Environment.GetEnvironmentVariable("BLADE_LLVM") with
+    | "1" | "on" -> true
+    | _ -> false
+
+/// Optimization flags for the clang lane. `-O3` plus the SAME `BLADE_MARCH`
+/// mapping the g++ lane uses, so an A/B between the two back ends compares
+/// like with like. No `-ffp-contract`: LLVM IR contracts only where the
+/// `contract` fast-math flag is present, and EmitLlvm emits none -- the
+/// default emission is already byte-identity-shaped.
+let llvmOptFlags () = "-O3" + marchFlag ()
+
 type HostPlatform = PWindows | PLinux | PMacOS
 
 /// The environment's toolchain capabilities.
@@ -182,6 +205,11 @@ let private hostPlatform () =
 // honored, because those gates were never part of this record.
 let private gppProbe  : Lazy<bool> = lazy (probeTool "g++" "--version")
 let private nvccProbe : Lazy<bool> = lazy (probeTool "nvcc" "--version")
+/// PATH presence of clang, for the BLADE_LLVM lane. Memoized alongside the
+/// other tool probes and exempt from the "gates are functions" rule for the
+/// same reason they are: it consults no environment variable, only whether a
+/// tool answers.
+let private clangPathProbe : Lazy<bool> = lazy (probeTool "clang" "--version")
 let private clProbe   : Lazy<bool> = lazy (hostPlatform () = PWindows && probeTool "cl" "/?")
 let private gpuProbe  : Lazy<bool> = lazy (probeGpu ())
 
@@ -192,6 +220,20 @@ let detectCapabilities () : Capabilities =
 
 /// Capabilities are environment-global; one shared view for every consumer.
 let capabilities = lazy (detectCapabilities ())
+
+/// Resolve the clang that compiles the BLADE_LLVM lane's `.ll`, in the
+/// documented order: the BLADE_LLVM_CLANG override (used VERBATIM, so a bad
+/// value fails loudly instead of being silently replaced), then `clang` on
+/// PATH, then the MSYS2 clang64 root the memcheck lane already depends on.
+/// A function, not a value: the override is an environment variable.
+let resolveClang () : string option =
+    match System.Environment.GetEnvironmentVariable("BLADE_LLVM_CLANG") with
+    | null | "" ->
+        if clangPathProbe.Value then Some "clang"
+        else
+            let msys2 = @"C:\msys64\clang64\bin\clang.exe"
+            if File.Exists msys2 then Some msys2 else None
+    | over -> Some (over.Trim())
 
 /// Whether g++ is actually present and runnable on PATH. Delegates to the
 /// same `probeTool "g++" "--version"` probe that resolveCompile/DiffOracle/
@@ -987,6 +1029,102 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
         match runProc "nvcc" nvccArgs 180000 with
         | Error e -> Error e
         | Ok () -> compileCppWithExtra [dllFull] cppFile outputDir
+
+/// Build the BLADE_LLVM lane's runtime shim into `outputDir`, returning the
+/// object to link. Recompiled only when the `.o` is missing or older than the
+/// `.c` EmitLlvm just deployed, so the per-program cost is one link input, not
+/// a C compile.
+let private buildLlvmShim (clang: string) (outputDir: string) : Result<string, string> =
+    let dir = Path.GetFullPath outputDir
+    let src = Path.Combine(dir, EmitLlvm.shimFileName)
+    let obj = Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.shimFileName + Platforms.objExtension)
+    if not (File.Exists src) then
+        Error (sprintf "llvm shim source missing at %s (EmitLlvm.deployShim should have written it)" src)
+    elif File.Exists obj && File.GetLastWriteTimeUtc obj >= File.GetLastWriteTimeUtc src then
+        Ok obj
+    else
+        let args = sprintf "-c -O2 -o \"%s\" \"%s\"" obj src
+        match runProc clang args 120000 with
+        | Error e -> Error e
+        | Ok () -> Ok obj
+
+/// Identity stamp for one clang binary without spawning it: path, size,
+/// mtime ticks. A replaced or upgraded clang changes the stamp — the same
+/// stamp-not-hash choice `linkedDllStamp` makes for toolchain binaries.
+let private clangStamp (clang: string) : string =
+    try
+        let fi = System.IO.FileInfo(clang)
+        if fi.Exists then sprintf "%s:%d:%d" clang fi.Length fi.LastWriteTimeUtc.Ticks
+        else sprintf "%s:missing" clang
+    with _ -> sprintf "%s:?" clang
+
+/// The LLVM lane's twin of `exeCacheKey` (Stage 4.1). Differences, each
+/// deliberate: the compiler identity is the clang STAMP, not `gppIdentity`;
+/// the runtime input is the shim SOURCE text (the `.o` is a link input whose
+/// content the argument string cannot see); and the version tag is its own,
+/// so the two lanes can never collide on a key.
+let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shimText: string) (exeFullPath: string) (llFullPath: string) : string =
+    let normalizedArgs = args.Replace(exeFullPath, "<EXE>").Replace(llFullPath, "<LL>")
+    let material =
+        String.concat " "
+            [ "blade-llvm-exe-cache-v1"
+              clangStamp clang
+              normalizedArgs
+              shimText
+              llText ]
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
+    |> Array.map (fun b -> b.ToString("x2"))
+    |> String.concat ""
+
+/// Compile and link a `.ll` the LLVM lane emitted into an executable.
+///
+/// ONE clang invocation does the whole back half -- textual IR in, native
+/// executable out (probe P2 in the plan: no `opt`/`llc` orchestration is
+/// needed, and none is wanted, since every fact the lane emits is designed for
+/// the stock -O3 pipeline). `-Wno-override-module` silences the one benign
+/// warning the deliberate absence of a target triple produces.
+///
+/// Cached like the g++ lane (same directory, same BLADE_EXE_CACHE gate, same
+/// eviction) so a rebuild of unchanged source is a file copy on both lanes —
+/// the plan's "no exe cache inverts the 4.5x on warm rebuilds" gap, closed.
+let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, string> =
+    match resolveClang () with
+    | None -> Error "Skipped: BLADE_LLVM is on but no clang was found (set BLADE_LLVM_CLANG)"
+    | Some clang ->
+        let dir = Path.GetFullPath outputDir
+        let llFull = Path.GetFullPath llFile
+        let exeFull = Path.Combine(dir, Path.GetFileNameWithoutExtension llFile + Platforms.exeExtension)
+        match buildLlvmShim clang dir with
+        | Error e -> Error e
+        | Ok shimObj ->
+            let args =
+                sprintf "%s -Wno-override-module -o \"%s\" \"%s\" \"%s\""
+                    (llvmOptFlags ()) exeFull llFull shimObj
+            // Windows-only for the same reason as the g++ arm; a key that
+            // cannot be built (unreadable .ll/shim source) just skips the
+            // cache, never the compile.
+            let cacheSlot =
+                if Platforms.os <> Platforms.Windows then None
+                else
+                    match exeCacheDir () with
+                    | None -> None
+                    | Some cdir ->
+                        try
+                            let llText = File.ReadAllText llFull
+                            let shimText = File.ReadAllText (Path.Combine(dir, EmitLlvm.shimFileName))
+                            Some (cdir, llvmExeCacheKey clang args llText shimText exeFull llFull)
+                        with _ -> None
+            match cacheSlot with
+            | Some (cdir, key) when tryExeCacheHit cdir key exeFull -> Ok exeFull
+            | _ ->
+                match runProc clang args 180000 with
+                | Error e -> Error e
+                | Ok () ->
+                    (match cacheSlot with
+                     | Some (cdir, key) -> storeExeCache cdir key exeFull
+                     | None -> ())
+                    Ok exeFull
 
 /// Compiles a generated source file according to its backend requirement,
 /// resolved against the environment's capabilities. A skip is reported as

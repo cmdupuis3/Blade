@@ -1,0 +1,83 @@
+// CODEGEN-SPEED FIXTURE (dense 1 of 3 -- the LARGE KERNEL of the set): many
+// emitted loop nests rather than one big one. The extents are deliberately
+// small and prime (1009 / 61) because this program is timed for CODEGEN, not
+// for runtime: what it stresses is how much text each back end has to produce
+// per unit of source, and a pipeline of stages plus a multi-accumulator
+// single-pass fold is the densest source-to-emission ratio the corpus idiom set
+// offers.
+//
+// Everything lives inside functions returning scalars, so stdout stays a
+// handful of numbers instead of thousands (the auto-echo pass prints every
+// printable top-level binding).
+type Ix = Idx<1009>
+type Jx = Idx<61>
+
+function stage_a(x: Float64) -> Float64 = { x * 1.5 + 0.25 }
+function stage_b(x: Float64) -> Float64 = { x / (1.0 + abs(x)) }
+function square(x: Float64) -> Float64 = { x * x }
+
+// Two map stages in sequence. `object_for(f) >>@ object_for(g)` would be the
+// idiomatic spelling, but a composed loop object in EXPRESSION position inside
+// a function body is refused by the C++ lane too (BL7004 "compose_obj in
+// expression position"), so it is not a two-lane comparison and has no place in
+// a benchmark: staged maps exercise the same emission on both back ends.
+function pipeline_sum() -> Float64 = {
+    let base = method_for(range<Ix>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let first = method_for(base) <@> stage_a |> compute
+    let out = method_for(first) <@> stage_b |> compute
+    reduce(out, (+))
+}
+
+function multi_accumulator() -> Float64 = {
+    let base = method_for(range<Ix>) <@> lambda(i) -> 0.5 + 0.25 * i |> compute
+    let l = method_for(base)
+    let (s, ss, n) =
+        reduce((l <@> lambda(x) -> x) <&!> (l <@> square) <&!> (l <@> lambda(x) -> 1.0), (+))
+    let mean = s / n
+    ss / n - mean * mean
+}
+
+function elementwise_mix() -> Float64 = {
+    let u = method_for(range<Ix>) <@> lambda(i) -> 1.0 + 1.0 * i |> compute
+    let v = method_for(range<Ix>) <@> lambda(i) -> 2.0 + 0.5 * i |> compute
+    let w = u * v + u - v
+    let z = w * 0.5
+    reduce(z, (+))
+}
+
+function zipped() -> Float64 = {
+    let u = method_for(range<Jx>) <@> lambda(i) -> 1.0 + 1.0 * i |> compute
+    let v = method_for(range<Jx>) <@> lambda(i) -> 3.0 - 0.5 * i |> compute
+    let p = method_for(zip(u, v)) <@> lambda(x, y) -> x * y + x - y |> compute
+    reduce(p, (+))
+}
+
+function outer_product() -> Float64 = {
+    let u = method_for(range<Jx>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let v = method_for(range<Jx>) <@> lambda(i) -> 0.25 + 0.25 * i |> compute
+    let m = method_for(u, v) <@> lambda(x, y) -> x * y |> compute
+    // `reduce(m, (+), axes = 2)` is the direct spelling of this and the llvm
+    // lane REFUSES it: a whole-rank-2 fold lowers through `IRForRange`, which
+    // has no arm there (the refusal reads "IRForRange in value position").
+    // Peeling one axis at a time reaches the same scalar through the partial
+    // fold both lanes emit, and keeps this fixture a two-lane comparison.
+    reduce(reduce(m, (+)), (+))
+}
+
+function rank2_rows() -> Float64 = {
+    let u = method_for(range<Jx>) <@> lambda(i) -> 1.0 + 0.125 * i |> compute
+    // Deliberately NOT commutative in (x, y): the same array in both positions
+    // with a commuting kernel raises BL4010 (pin `where comm` for compact
+    // storage), and a warning in a benchmark fixture is noise. Compact
+    // symmetric storage is bench_sym_map's job.
+    let m = method_for(u, u) <@> lambda(x, y) -> x - 0.5 * y |> compute
+    let rows = reduce(m, (+))
+    reduce(rows, (+))
+}
+
+let p_sum = pipeline_sum()
+let variance = multi_accumulator()
+let mixed = elementwise_mix()
+let zipsum = zipped()
+let outer = outer_product()
+let rows = rank2_rows()

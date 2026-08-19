@@ -1,0 +1,14 @@
+// TEST: Deferred Binding Sole-Read By A Fold Still Prints
+// A deferred MODULE binding whose only reader is a reduce. The fold may not
+// consume it lazily: forcing is what registers a deferred binding for the
+// auto-print list, so consuming would silently delete `c`'s output line.
+// 129 covers the same shape with THREE readers, which is why an llvm-lane
+// sole-read consumption regression slipped past the suite once already.
+type X = Idx<4>
+let A: Array<Float64 like X> = [1.0, 2.0, 3.0, 4.0]
+let c = method_for(A) <@> lambda(x) -> x * 2.0
+type W = Idx<2>
+let ws: Array<Float64 like W> = [1.0, 10.0]
+let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
+// EXPECT: c = [2, 4, 6, 8]
+// EXPECT: out = [20, 200]

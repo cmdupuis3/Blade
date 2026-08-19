@@ -1,0 +1,35 @@
+// CODEGEN-SPEED FIXTURE (scalar 2 of 2): the same scalar core, but spread over
+// outlined functions with branches and self-recursion. Where bench_scalar_chain
+// times one straight-line body, this times per-FUNCTION cost: a define, its
+// attribute group, its parameter attributes and (on the llvm lane) the
+// module-wide termination claim self-recursion withdraws.
+function poly(x: Float64) -> Float64 = {
+    let x2 = x * x
+    let x3 = x2 * x
+    3.0 * x3 - 2.0 * x2 + 0.5 * x - 7.25
+}
+
+function clamp01(x: Float64) -> Float64 = {
+    if x < 0.0 then 0.0
+    else if x > 1.0 then 1.0
+    else x
+}
+
+function fact(n: Int64) -> Int64 = {
+    if n <= 1 then 1 else n * fact(n - 1)
+}
+
+function fib(n: Int64) -> Int64 = {
+    if n < 2 then n else fib(n - 1) + fib(n - 2)
+}
+
+function blend(x: Float64, y: Float64) -> Float64 = {
+    let t = clamp01(x / (x + y + 1.0))
+    t * poly(x) + (1.0 - t) * poly(y)
+}
+
+let p = poly(1.75)
+let q = clamp01(2.5) + clamp01(-1.0) + clamp01(0.5)
+let r = fact(12)
+let s = fib(18)
+let t = blend(1.25, 3.5)

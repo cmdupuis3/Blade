@@ -1,0 +1,5 @@
+// Golden-pin source: an outlined function with a branch, called twice.
+// Pins the call ABI, the entry-block alloca hoist, and the if/else block shape.
+function classify(x: T^0) -> T^0 = { if x > 0.0 then x * 2.0 else 0.0 - x }
+let pos = classify(3.5)
+let neg = classify(0.0 - 2.25)

@@ -1,0 +1,23 @@
+// A whole PACKED POOL, printed cell by cell, at extents that are not powers of
+// two and do not divide the tile edge -- so the last tile is ragged in every
+// arm and the three-way comparison sees the residue, not just the full bricks.
+//
+// Symmetric (inclusive triangle, C(38,2) = 703 cells), antisymmetric (strict,
+// no diagonal, C(23,2) = 253 cells), and an elementwise map over the packed
+// symmetric pool (the flat path, which must NOT be bricked).
+type Ix = Idx<37>
+let v = method_for(range<Ix>) <@> lambda(i) -> 1.0 + 1.0 * i |> compute
+let sym = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+let scaled = sym * 3.0
+
+type Jx = Idx<23>
+let w = method_for(range<Jx>) <@> lambda(i) -> 2.0 + 1.0 * i |> compute
+let anti = method_for(w, w) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+
+// Mirror reads: (j, i) canonicalizes, and the antisymmetric one carries the
+// sign and answers zero on the diagonal it does not store.
+let s_lo = sym((30 : Ix), (5 : Ix))
+let s_hi = sym((5 : Ix), (30 : Ix))
+let a_lo = anti((20 : Jx), (3 : Jx))
+let a_hi = anti((3 : Jx), (20 : Jx))
+let a_diag = anti((7 : Jx), (7 : Jx))

@@ -1,0 +1,21 @@
+// RUNTIME SHAPE 2 (and codegen fixture: dense 3 of 3): a licensed fold over
+// ~1e7 cells. `(+)` is a recognized builtin body, so `foldReorderLicensed`
+// holds and this is the shape `BLADE_FP_REASSOC` is allowed to reassociate --
+// which makes it the one runtime shape where the two lanes' numeric policies
+// can actually diverge.
+//
+// The cell values are INTEGER-VALUED doubles and the running sum stays under
+// 2^53 (5.0e13), so every partial sum is exact and the total is bit-identical
+// under ANY association. That is the standing rule for parallel-reduce tests in
+// this repo, and it is what lets the reassociated arm be compared for value
+// agreement rather than merely for speed.
+//
+// 9999991 is prime; see bench_dense_elementwise.blade on why never 2^k.
+type Ix = Idx<9999991>
+
+function fold_probe() -> Float64 = {
+    let a = method_for(range<Ix>) <@> lambda(i) -> 1.0 + 1.0 * i |> compute
+    reduce(a, (+))
+}
+
+let total = fold_probe()

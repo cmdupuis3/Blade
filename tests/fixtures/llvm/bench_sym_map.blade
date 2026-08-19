@@ -1,0 +1,30 @@
+// RUNTIME SHAPE 3 (and codegen fixture: the symmetric one): a rank-2
+// symmetric map into COMPACT triangular storage at n = 2003 -- C(2004, 2) =
+// 2,007,006 canonical cells. This is the shape `BLADE_LLVM_BRICKS`
+// decomposes, so it is the arm that answers whether the dense-brick covering
+// of the simplex is worth anything.
+//
+// WHY A MAP AND NOT A FOLD. The brief for this benchmark asked for a
+// "symmetric licensed fold". There is no such program to write: reducing over
+// compact storage is REFUSED by the front end at five sites in
+// src/TypeCheckInfer.fs with BL3999 ("folding the canonical cells and folding
+// the logical (mirrored) cells differ ... decompact(A, d) first"), and the
+// refusal is a typecheck refusal, so it stops the C++ lane exactly as it stops
+// the llvm lane -- there is no two-lane comparison behind it. The triangular
+// MAP is the largest piece of compact-storage work either lane will emit, and
+// it is what the brick decomposition acts on.
+//
+// 2003 is prime, so no tile edge divides it and the ragged last tile is
+// unavoidable in the bricked arm (never a power of two -- see
+// bench_dense_elementwise.blade).
+type Sx = Idx<2003>
+
+function sym_probe() -> Float64 = {
+    let v = method_for(range<Sx>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+    // A corner, a last-column cell and a diagonal cell: enough to prove the
+    // addressing agrees across arms without printing two million numbers.
+    s((0 : Sx), (0 : Sx)) + s((7 : Sx), (2002 : Sx)) + s((1001 : Sx), (1001 : Sx))
+}
+
+let probe = sym_probe()

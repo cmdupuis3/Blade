@@ -1544,6 +1544,25 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
     // None = the root is not a deferred computation at all (fall through);
     // Some (Error _) = it IS deferred but malformed for a fused fold.
     let rec collect (t: TypedExpr) : Result<TypedExpr list, TypeError> option =
+        match t.Kind with
+        // An ANONYMOUS force in operand position: `reduce(x * y, (+))`,
+        // `reduce(cos(A), (+))`. The elementwise-operator zip arm and the
+        // intrinsic array lifts wrap their synthesized applies in
+        // `ExprCompute` unconditionally -- right everywhere EXCEPT here,
+        // where the compute node is a subexpression of this very reduce and
+        // the fold is therefore its only possible consumer. There is no
+        // binding to print, capture, or read twice, which is what the
+        // declines below protect; seeing through the wrapper turns the
+        // alloc-fill-refold shape (a fresh temp per evaluation -- per OUTPUT
+        // CELL when the reduce sits in a kernel body, the gram fixture's
+        // ~14.5 GB) into the fused nest. Matching `t.Kind` BEFORE the
+        // binding walk keeps every NAMED computation on today's route: a
+        // `let c = A + B` still resolves as `TExprVar`, still materializes
+        // once, and still auto-prints (loops/095). Terminal-shape errors
+        // under this unwrap decline instead of surfacing -- see
+        // `anonymousUnwrap` at the callsite below.
+        | TExprCompute inner -> collect inner
+        | _ ->
         let r = resolveTypedExpr env t
         match r.Kind with
         | TExprFusion (l, rgt) ->
@@ -1636,11 +1655,18 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                  | _ -> false)
              | _ -> false)
         | _ -> false
+    // Whether `collect` will see through an ANONYMOUS `|> compute` at the
+    // root. Such an operand has today's materializing route as a WORKING
+    // fallback, so a fused-terminal shape error (a lambda fold kernel with no
+    // init, a packed-output leaf) must DECLINE rather than surface: the
+    // program keeps compiling on the route it always had, and only shapes
+    // the terminal actually handles change emission.
+    let anonymousUnwrap = match tArr.Kind with | TExprCompute _ -> true | _ -> false
     if alreadyMaterializedLet () then None else
     match collect tArr with
     | None -> None
     | Some leavesR ->
-        Some (
+        let built = (
             leavesR |> Result.bind (fun leaves ->
             // Each leaf must produce plain (non-compact) cells: folding
             // canonical vs logical cells of symmetric storage differ, the
@@ -1709,6 +1735,9 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                 | _ :: rest -> rest |> List.fold (fun acc _ -> IRTTuple [acc; elem0]) elem0
                 | [] -> elem0
             mkTyped (TExprReduce (rebuilt, tKernel, Some tSeed)) resultType)))))))
+        match built with
+        | Error _ when anonymousUnwrap -> None
+        | _ -> Some built
 
 // ---- REDUCTION JOINS (docs/plan-reduction-joins.md) ------------------------
 //

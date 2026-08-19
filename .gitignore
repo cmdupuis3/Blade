@@ -31,6 +31,10 @@ generated_cpp_tests/
 # Same shape, written by the OpenMP coverage/reduction benchmark harnesses.
 generated_omp_coverage/
 generated_omp_reduce/
+# What a DRIFTED BLADE_LLVM emission pin parks beside its golden so the two can
+# be diffed as files (tests/LlvmTests.fs). Debugging output, never committed;
+# the pin itself, tests/fixtures/llvm/*.ll, is.
+/tests/fixtures/llvm/*.ll.actual
 
 # The pinned diff-oracle build (a full copy of bin/Release output; re-pinned
 # per-machine from a fully-gated build — never committed).
@@ -82,3 +86,4 @@ Thumbs.db
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
+blade_llvm_shim.c

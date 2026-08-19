@@ -1,0 +1,21 @@
+// RUNTIME SHAPE 3c: the divisibility control for the bricks verdict.
+//
+// The 2026-08-18 "bricked 1.07x slower" verdict was read at n = 6007 -- a
+// PRIME extent, chosen under the never-power-of-two rule, which makes the
+// last tile of every brick row ragged (B = 64 leaves a 54-wide 94th tile and
+// no brick row divides evenly). The Zarr simplex-blocks measurements already
+// showed raggedness dominates block overhead, so this shape re-runs the same
+// map at n = 6006 = 2*3*7*11*13 -- composite, still not a power of two --
+// where B = 66 divides the extent exactly (T = 91, every off-diagonal brick a
+// full 66x66 box). Arms pin B = 64 (ragged at this n) and B = 66 (exact)
+// against the serial triangle, isolating raggedness at matched work:
+// C(6007, 2) = 18,039,021 canonical cells, within 0.05% of the prime shape.
+type Sx = Idx<6006>
+
+function sym_probe() -> Float64 = {
+    let v = method_for(range<Sx>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+    s((0 : Sx), (0 : Sx)) + s((7 : Sx), (6005 : Sx)) + s((3001 : Sx), (3001 : Sx))
+}
+
+let probe = sym_probe()

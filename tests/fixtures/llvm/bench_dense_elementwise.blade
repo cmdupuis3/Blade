@@ -1,0 +1,21 @@
+// RUNTIME SHAPE 1 (and codegen fixture: dense 2 of 3): a dense elementwise map
+// over ~1e7 cells.
+//
+// 9999991 is PRIME -- never a power of two (CLAUDE.md's benchmark discipline:
+// a ~7x cache artifact lives at 2^k extents and would drown the effect being
+// measured). At 8 bytes a cell each materialized array is ~80 MB, so this
+// shape is memory-bandwidth-bound by construction and is here to answer "does
+// either back end lose bandwidth", not "does either vectorize better".
+//
+// The work lives inside a function returning a scalar: a top-level array
+// binding would be auto-echoed cell by cell, and printing ten million numbers
+// would be the only thing this program measured.
+type Ix = Idx<9999991>
+
+function elementwise_probe() -> Float64 = {
+    let a = method_for(range<Ix>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let b = a * 1.5
+    b((0 : Ix)) + b((9999990 : Ix)) + b((4999997 : Ix))
+}
+
+let probe = elementwise_probe()

@@ -1,0 +1,12 @@
+// TEST: Nested Function Calling Its Enclosing Function
+// A nested function sees the enclosing name (a function is registered before
+// its body is checked), so f -> h -> f is a legal cycle even though SIBLING
+// mutual recursion is rejected. Only self-calls used to be detected, which
+// let the llvm lane assert `norecurse` -- and `willreturn`/`mustprogress` --
+// about a genuine 2-cycle. Recursion is a CYCLE, not a self-call.
+function f(n: Int64) -> Int64 = {
+    function h(m: Int64) -> Int64 = if m <= 0 then 0 else f(m - 1)
+    h(n)
+}
+let result = f(4)
+// EXPECT: result = 0

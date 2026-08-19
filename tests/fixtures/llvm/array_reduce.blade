@@ -1,0 +1,7 @@
+// Golden-pin source: a dense static-extent array, an elementwise map, and an
+// ordered serial reduce. Pins the pool allocation, the GEP shape of a flat
+// row-major read, and the fold's left-to-right walk (no reassociation).
+type Ix = Idx<4>
+let xs: Array<Float like Ix> = [1.0, 2.0, 3.0, 4.0]
+let doubled = xs * 2.0
+let total = reduce(doubled, (+))

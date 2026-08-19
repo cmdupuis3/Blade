@@ -1,0 +1,18 @@
+// CODEGEN-SPEED FIXTURE (scalar 1 of 2): no arrays at all, so what is being
+// timed is the two emitters' fixed cost plus the two toolchains' fixed cost --
+// the floor of the whole comparison. A long-ish chain of scalar arithmetic and
+// intrinsics keeps it from being degenerate while staying entirely in the
+// scalar core (IRLit / IRBinOp / IRUnaryOp / IRLet).
+let a = 3.25
+let b = 7.5
+let c = a * b + a / b - 2.0
+let d = sqrt(c * c + 1.0)
+let e = exp(d * 0.125) + log(d + 4.0)
+let f = sin(e) * cos(e) + atan2(e, d)
+let g = abs(f) + floor(f) + ceil(f)
+let h = g * g - g / 3.0 + 11.0
+let i1 = 17
+let i2 = 5
+let i3 = i1 * i2 + i1 / i2 - i1 % i2
+let flag = (h > 0.0) && (i3 > 0)
+let out = if flag then h + 1.0 else h - 1.0

@@ -1,0 +1,38 @@
+// The blocked-simplex gate at scale: a coordinate-bearing symmetric map over
+// 997 elements -- C(998, 2) = 497,503 canonical cells, and 997 is PRIME, so no
+// tile edge divides it and the ragged last tile is unavoidable in every arm.
+// (Never a power of two: docs/CLAUDE.md's benchmark discipline, the ~7x cache
+// artifact.)
+//
+// The pool lives inside a function so the program's stdout stays three
+// numbers instead of half a million: what is being compared across the three
+// arms is the ADDRESSING, and a handful of probes spread over the first tile,
+// the diagonal, the interior and the last column tile pin it exactly.
+type Big = Idx<997>
+
+function probe_corner() -> Float64 = {
+    let v = method_for(range<Big>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+    s((0 : Big), (0 : Big)) + s((0 : Big), (996 : Big)) + s((996 : Big), (996 : Big))
+}
+
+function probe_interior() -> Float64 = {
+    let v = method_for(range<Big>) <@> lambda(i) -> 1.0 + 0.5 * i |> compute
+    let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
+    // A diagonal cell, an off-diagonal cell, and its mirror -- the mirror must
+    // canonicalize to the same stored cell.
+    s((500 : Big), (500 : Big)) + s((123 : Big), (777 : Big)) + s((777 : Big), (123 : Big))
+}
+
+function probe_strict() -> Float64 = {
+    let w = method_for(range<Big>) <@> lambda(i) -> 1.0 + 0.25 * i |> compute
+    let a = method_for(w, w) <@> lambda(x, y) where anticomm(x, y) -> x - y |> compute
+    // Strict storage: no diagonal cell exists, so the diagonal read is zero
+    // and the mirror read is the negation.
+    a((17 : Big), (996 : Big)) + a((996 : Big), (17 : Big)) + a((640 : Big), (640 : Big))
+        + a((0 : Big), (1 : Big))
+}
+
+let corner = probe_corner()
+let interior = probe_interior()
+let strict = probe_strict()
