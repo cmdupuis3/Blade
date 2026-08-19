@@ -1662,9 +1662,37 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
     // program keeps compiling on the route it always had, and only shapes
     // the terminal actually handles change emission.
     let anonymousUnwrap = match tArr.Kind with | TExprCompute _ -> true | _ -> false
+    // INPUT CLASSES THE FUSED TERMINAL HAS NO ARM FOR. `genReduceComputeBinding`
+    // bypasses `genApplyCombinator`'s special input paths -- ragged peel,
+    // grouped, compound, dependent-inner -- and refuses them outright
+    // (BL7004, CodeGenBinding.fs). That refusal is fine for a program that
+    // ASKED to fuse, but the anonymous unwrap volunteers programs that never
+    // did: before it, `reduce(<grouped computation>, op)` took the
+    // materializing route and compiled. So the unwrap must decline exactly
+    // where codegen refuses, or it converts working programs into BL7004 --
+    // which is what it did to six grouped-peel AD tests (ad-jvp-comb 046 and
+    // siblings), a regression the fused-fold measurement missed because it
+    // only ran dense categories.
+    //
+    // Mirrors CodeGenBinding's predicate deliberately: same four kinds, so
+    // "what declines here" and "what refuses there" cannot drift apart
+    // silently. A NAMED operand is unaffected either way -- it never reaches
+    // this unwrap, and its BL7004 (if any) is a real diagnostic about a
+    // program that really did ask.
+    let unsupportedFusedInput (leaves: TypedExpr list) : bool =
+        leaves |> List.exists (fun leaf ->
+            match leaf.Kind with
+            | TExprApply info ->
+                info.ArrayTypes |> List.exists (fun at ->
+                    at.IndexTypes |> List.exists (fun ix ->
+                        isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKDepInner
+                        || ix.IxKind = IxKGroupOuter || ix.IxKind = IxKCompound))
+            | _ -> false)
     if alreadyMaterializedLet () then None else
     match collect tArr with
     | None -> None
+    | Some leavesR when anonymousUnwrap
+                        && (match leavesR with Ok ls -> unsupportedFusedInput ls | Error _ -> false) -> None
     | Some leavesR ->
         let built = (
             leavesR |> Result.bind (fun leaves ->
