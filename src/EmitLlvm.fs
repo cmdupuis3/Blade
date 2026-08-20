@@ -3031,17 +3031,39 @@ and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
 /// ever asks for a scalar out of `k2` (corpus loops, "Deferred Binding Forced
 /// On Read"). Marking is enough here: a producer prints by re-running, so the
 /// llvm lane needs the PRINTABILITY fact, not a second pool.
+///
+/// A LOOP BODY IS PRUNED, and that boundary is the C++ lane's `ctx.Indent = 0`
+/// guard in `forceDeferredArrayInput`: a producer materialized inside a loop
+/// body becomes a per-iteration LOCAL there, block-scoped and deliberately
+/// left out of the printable set, so a name this value merely MENTIONS under a
+/// loop is no evidence that the binding ends the program materialized. A
+/// `let rec`'s whole recursion is one such body, which is how a producer forced
+/// per step (`let f = dn |> compute` inside a step block, corpus memfree/007)
+/// used to reach this list through the recursion above -- `traj` names it, so
+/// forcing `traj` printed `dn`, a line the C++ lane does not emit.
+///
+/// Pruning loses nothing, because the reads that DO print from a loop body
+/// never travel this edge: the C++ lane hoists them out of the loop with
+/// `forceDeferredPositionalReads` (at the enclosing indent, hence printable)
+/// and `forceLoopBodyProducers` mirrors that hoist by calling this function
+/// directly on each one.
 and private markForced (c: Ctx) (id: IRId) : unit =
     if c.Forced.Add id then
         match Map.tryFind id c.BindingValues with
         | None -> ()
         | Some v ->
-            iterIRExpr
-                (fun n ->
-                    match n with
+            // `iterIRExpr` with one subtree withheld. Recursion is the shared
+            // `ExprShape` fold, exactly as there, so no variant can be skipped
+            // by accident -- only the loop body named here.
+            let rec walk (e: IRExpr) =
+                match e with
+                | IRForRange (_, lo, hi, _) -> walk lo; walk hi
+                | ExprShape (children, _) ->
+                    children |> List.iter walk
+                    match e with
                     | IRVar (src, _) when src <> id && c.ArrSlots.ContainsKey src -> markForced c src
-                    | _ -> ())
-                v
+                    | _ -> ()
+            walk v
 
 // ---------------------------------------------------------------------------
 // Kernels and loop nests
