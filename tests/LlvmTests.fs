@@ -1189,6 +1189,25 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
                     failedNames <- failedNames @ [ name ]
                     resultLine Fail name detail
     printReasonHistogram (List.rev reasons)
+    // What a sweep is FOR, stated as a number rather than left to be inferred
+    // from a skip count.
+    //
+    // The denominator is the programs the lane could in principle have taken:
+    // skips that are not the lane's doing -- reject/abort probes with nothing
+    // to compare, programs the shared FRONT END refuses, oracle-side declines
+    // -- are excluded rather than counted against it. Including them would
+    // move the coverage figure every time the corpus gained a reject probe,
+    // which says nothing about the back end and would make the one number here
+    // worth reading untrustworthy.
+    let laneRefusals =
+        reasons |> List.filter (fun r -> r.StartsWith "llvm lane refused:") |> List.length
+    let emitted = passed + failed
+    let comparable = emitted + laneRefusals
+    if comparable > 0 then
+        printfn "\n  Lane coverage: %d of %d comparable programs emitted by the llvm lane (%.1f%%)"
+            emitted comparable (100.0 * float emitted / float comparable)
+        printfn "    %d refused by the lane (the histogram above is the worklist); %d skipped for reasons that are not the lane's"
+            laneRefusals (skipped - laneRefusals)
     printFooter block
         [ sprintf "%d passed" passed; sprintf "%d failed" failed; sprintf "%d skipped" skipped ]
     { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }
@@ -1941,12 +1960,29 @@ let runLlvmTests () : int =
 
 /// `blade test llvm <category>` -- the differential over one named corpus
 /// directory (the literal tests/corpus/<dir> name, as `test interp <dir>`
-/// takes). The reserved word `goldens` (alias `pins`) runs the THREE
+/// takes). The reserved word `all` (alias `corpus`) sweeps EVERY single-file
+/// category instead of the seven the lane was grown against, and reports what
+/// fraction of the corpus the lane can actually emit. The reserved word
+/// `goldens` (alias `pins`) runs the THREE
 /// toolchain-free blocks instead -- compare rules, emission pins and the fact
 /// layer -- which finish instantly and are what you want while iterating on
 /// the emitter. `facts` runs the fact block alone.
 let runLlvmCategory (cat: string) : int =
     match cat.ToLower().TrimStart('-') with
+    | "all" | "corpus" ->
+        // The differential over EVERY single-file corpus category, not the
+        // seven `defaultCategories` sweeps. Those seven are the ones the lane
+        // was grown against, so `blade test llvm` measures the lane where it is
+        // known to work; this measures it against the whole corpus, which is
+        // the only way the coverage figure means what it sounds like.
+        //
+        // Expect a much lower one, and expect that to be the POINT: the skip
+        // histogram it prints is the ranked worklist for making the lane a
+        // back end the suite could actually run on. Long -- two native
+        // compilers per file across ~1900 files -- so it stays a verb you ask
+        // for, never part of `blade test`.
+        let r = runLlvmDifferentialTestsFor (Blade.Tests.Corpus.singleFileCategories ())
+        if r.Failed = 0 then 0 else 1
     | "goldens" | "pins" ->
         let r = runLlvmCompareRuleTests ()
         let g = runLlvmGoldenTests ()

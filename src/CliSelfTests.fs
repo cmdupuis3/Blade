@@ -2185,7 +2185,8 @@ let internal dispatchTest (rest: string list) : int =
         // reasonable guess given --omp/--cuda/--mpi, so say why it isn't
         // instead of letting it fall through to "Unknown test category".
         eprintfn "test: --llvm is not a full-suite flag -- the llvm lane spawns two native compilers per corpus file, so it is standalone only."
-        eprintfn "      Run 'blade test llvm' (or 'blade test llvm <corpus-dir>' / 'blade test llvm goldens' / 'blade test llvm-bench')."
+        eprintfn "      Run 'blade test llvm' (or 'blade test llvm all' for every corpus category,"
+        eprintfn "      'blade test llvm <corpus-dir>' / 'blade test llvm goldens' / 'blade test llvm-bench')."
         1
     | [ "timing" ] ->
         // Differential timing: (r!)^d speedup of comm-annotation and

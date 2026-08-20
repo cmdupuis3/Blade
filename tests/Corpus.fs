@@ -85,6 +85,27 @@ let category (dirName: string) : (string * string) list =
         (name, source))
     |> Array.toList
 
+/// Every SINGLE-FILE category on disk, in ordinal name order: the corpus root's
+/// subdirectories that hold at least one .blade DIRECTLY.
+///
+/// That predicate is the whole of the multi-file exclusion, and it is exact
+/// rather than approximate: a multi-file category holds only per-test
+/// subdirectories, never a bare .blade, so it cannot match -- and `category`
+/// treats an existing-but-empty directory as a hard failure, which is what a
+/// coarser filter would walk straight into.
+///
+/// DISCOVERED, not listed. A sweep built from this picks up a new corpus
+/// category the moment one appears; a static list would go quietly stale, and
+/// the failure mode of a stale sweep is the one this repository cares most
+/// about -- coverage that silently stops growing while the summary line stays
+/// green.
+let singleFileCategories () : string list =
+    Directory.GetDirectories corpusRoot.Value
+    |> Array.filter (fun d -> Directory.GetFiles(d, "*.blade").Length > 0)
+    |> Array.map Path.GetFileName
+    |> Array.sortWith (fun a b -> String.CompareOrdinal(a, b))
+    |> Array.toList
+
 /// Load a multi-file test category: tests/corpus/<dirName>/<test>/*.blade,
 /// one subdirectory per test, one .blade per module file (NN_ order prefix,
 /// module file name from the // MODULE: directive).
