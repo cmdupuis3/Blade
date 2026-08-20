@@ -700,6 +700,17 @@ module CppNetcdf =
             | IRTDIndexType (name, _) -> Some name
             | _ -> None)
 
-    /// Generate required C++ includes for NetCDF
+    /// Generate required C++ includes for NetCDF.
+    ///
+    /// netcdf_meta.h comes along for its NC_VERSION_* macros, which are what
+    /// gate the `nc_finalize()` call the main wrapper emits (see
+    /// CodeGen.moduleUsesNetcdf). netcdf.h does NOT pull it in itself, and a
+    /// netcdf too old to have it is also too old to have nc_finalize -- so
+    /// guarding the include keeps that build compiling exactly as it did.
     let genIncludes () : string list =
-        ["#include <netcdf.h>"]
+        [ "#include <netcdf.h>"
+          "#if defined(__has_include)"
+          "#  if __has_include(<netcdf_meta.h>)"
+          "#    include <netcdf_meta.h>"
+          "#  endif"
+          "#endif" ]

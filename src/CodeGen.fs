@@ -2482,7 +2482,49 @@ let genPrintStatements (modul: IRModule) : string list =
 /// prints behind rank 0 -- every rank computes (SPMD), exactly one rank
 /// reports, so output is deterministic and byte-comparable to a serial run.
 /// `mpi` = false emits the historical wrapper byte-identically.
-let genMainWrapper (mpi: bool, mpiThreaded: bool) (testName: string) (bodyIndented: string list) (printCode: string list) : string list =
+/// Does this module read or write through the netcdf provider?
+///
+/// Decided from the IR rather than by sniffing the emitted text, so it is
+/// settled before a line is written. `providerIncludes` answers a related
+/// question further down the file, but the main wrapper is emitted above it.
+let moduleUsesNetcdf (modul: IRModule) : bool =
+    let providerOf (specs: Map<_, _>) f = specs |> Map.toList |> List.map (snd >> f)
+    (providerOf modul.ProviderReads (fun s -> s.Provider)
+     @ providerOf modul.ProviderWrites (fun s -> s.Provider))
+    |> List.exists (fun p -> p = "netcdf")
+
+/// The teardown a netcdf program needs before it may return.
+///
+/// WHY A PROGRAM THAT HAS FINISHED CANNOT SIMPLY RETURN. Some libnetcdf builds
+/// link a large closure -- MSYS2's pulls in libcurl and the AWS C++ SDK, whose
+/// CRT runs an event-loop thread pool. `ExitProcess` (which is where returning
+/// from main, `exit()` and even `_exit()` all end up) terminates every other
+/// thread and THEN runs DLL_PROCESS_DETACH across that closure; a worker killed
+/// while holding a lock a detach handler then wants is a deadlock, and the
+/// process hangs forever having already printed every correct answer. Measured
+/// on a GitHub Windows runner: returning hung, `_exit(0)` hung, `nc_finalize()`
+/// then returning exited cleanly.
+///
+/// So this is not defensive tidying -- it is the difference between a program
+/// that terminates and one that does not, on builds that happen to be linked
+/// that way. Builds with a small closure (an MSVC netCDF pulls only hdf5 and
+/// the CRT) never had the problem and are unaffected: the call is cheap and
+/// ordinary.
+///
+/// Version-gated because nc_finalize arrived in netcdf-c 4.9. Absent the
+/// macros -- an older netcdf, or one shipping no netcdf_meta.h -- nothing is
+/// emitted and that build compiles exactly as it did before.
+let private netcdfFinalizeLines : string list =
+    [ ""
+      "    // Shut the netcdf closure down in order. Returning from main would"
+      "    // reach ExitProcess, which kills this library's worker threads and"
+      "    // then asks their DLLs to detach -- a deadlock on builds that link"
+      "    // curl/AWS, after the program has already printed its results."
+      "#if defined(NC_VERSION_MAJOR) && (NC_VERSION_MAJOR > 4 || (NC_VERSION_MAJOR == 4 && NC_VERSION_MINOR >= 9))"
+      "    nc_finalize();"
+      "#endif" ]
+
+let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: string) (bodyIndented: string list) (printCode: string list) : string list =
     let header =
         if mpi then
             [ "int main(int argc, char** argv) {"
@@ -2518,17 +2560,23 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool) (testName: string) (bodyIndent
               sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
               ""
               "    // Print results for verification" ]
+    let finalizeLines = if netcdf then netcdfFinalizeLines else []
     let footer =
         if mpi then
-            [ "    }"
-              ""
-              "    MPI_Finalize();"
-              "    return 0;"
-              "}" ]
+            // After the rank guard closes, so every rank shuts its own netcdf
+            // down, and before MPI_Finalize, because a parallel-enabled netcdf
+            // is layered on MPI rather than beside it.
+            [ "    }" ]
+            @ finalizeLines
+            @ [ ""
+                "    MPI_Finalize();"
+                "    return 0;"
+                "}" ]
         else
-            [ ""
-              "    return 0;"
-              "}" ]
+            finalizeLines
+            @ [ ""
+                "    return 0;"
+                "}" ]
     // Wrap the whole body in try/catch so C++ exceptions (bad_alloc, etc.)
     // route to blade_rt::panic (BL8005) instead of std::terminate. MPI
     // init/finalize straddle the try; a panic exits without MPI_Finalize,
@@ -2548,7 +2596,7 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool) (testName: string) (bodyIndent
 /// existing "completed in" parser reads the compute time, not the whole body.
 /// The clock variable is reused (start/end reset between phases) exactly as the
 /// archaic Blade prototype did.
-let genMainWrapperSplit (mpi: bool, mpiThreaded: bool) (testName: string) (setupIndented: string list) (computeIndented: string list) (printCode: string list) : string list =
+let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: string) (setupIndented: string list) (computeIndented: string list) (printCode: string list) : string list =
     let header =
         if mpi then
             [ "int main(int argc, char** argv) {"
@@ -2593,17 +2641,23 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool) (testName: string) (setup
               "    " + line
               ""
               "    // Print results for verification" ]
+    let finalizeLines = if netcdf then netcdfFinalizeLines else []
     let footer =
         if mpi then
-            [ "    }"
-              ""
-              "    MPI_Finalize();"
-              "    return 0;"
-              "}" ]
+            // After the rank guard closes, so every rank shuts its own netcdf
+            // down, and before MPI_Finalize, because a parallel-enabled netcdf
+            // is layered on MPI rather than beside it.
+            [ "    }" ]
+            @ finalizeLines
+            @ [ ""
+                "    MPI_Finalize();"
+                "    return 0;"
+                "}" ]
         else
-            [ ""
-              "    return 0;"
-              "}" ]
+            finalizeLines
+            @ [ ""
+                "    return 0;"
+                "}" ]
     // See genMainWrapper: wrap the body in try/catch -> blade_rt::panic (BL8005).
     let tryLine = [ "    try {" ]
     let catchClose =
@@ -2696,7 +2750,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
 
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-    let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented []
+    let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented []
 
     (includes @ [""] @ mpiDecls @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
 
@@ -2833,12 +2887,12 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
             let printCode = genPrintStatements modul
             let setupIndented = setupCode |> List.map (fun s -> "    " + s)
             let computeIndented = computeCode |> List.map (fun s -> "    " + s)
-            (funcDefs, genMainWrapperSplit (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName setupIndented computeIndented printCode)
+            (funcDefs, genMainWrapperSplit (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName setupIndented computeIndented printCode)
         else
             let (funcDefs, bindCode) = genModule modul builder
             let printCode = genPrintStatements modul
             let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-            (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented printCode)
+            (funcDefs, genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented printCode)
     let (funcDefs, mainBody) = mainFunc
     // blade_linalg.hpp include only when a linalg route (gram / matmul) was
     // actually emitted this assembly (collector fills during genModule*;
@@ -2942,7 +2996,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
 
     let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
     let printCode = genPrintStatements modul
-    let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul) testName bodyIndented printCode
+    let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented printCode
 
     // S0: module-level bindings promoted to namespace scope (declaration only).
     let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
