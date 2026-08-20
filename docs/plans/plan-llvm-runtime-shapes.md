@@ -17,7 +17,12 @@ flat rows), memfree let-rec temps. Refused by name: ragged returns,
 multi-operand ragged, group kinds. All ~28 ragged corpus files byte-identical
 to the g++ lane; `blade test llvm index-types` coverage 47.0% (78/166
 comparable) with zero ragged entries left in the refusal histogram.
-Pre-existing (not this change): memfree/007 print drift, tracked separately.
+Gate: 395 passed / 0 failed (master baseline 365/0). The memfree/007 print
+drift this branch surfaced was a separate pre-existing bug, fixed on
+`claude/elastic-fermat-0a330e` and cherry-picked here (4a05376): markForced's
+recursion read MENTIONS where it meant materializations, so a name merely
+used inside a let-rec body joined the printable set -- the C++ lane's
+`ctx.Indent = 0` guard, spelled for this lane by pruning the loop body.
 
 Goal: the LLVM lane (`BLADE_LLVM=1`, `src/EmitLlvm.fs`) emits the ragged/grouped
 family natively and **beats the g++ lane** on those shapes, instead of refusing
