@@ -374,6 +374,14 @@ jobs:
           -Blade .\bin\Release\net7.0\Blade.exe
           -Require gpp,llvm,blas,lapack,netcdf,mpi
 
+      # Runs BEFORE the lane, so a lane that hangs cannot stop it reporting.
+      # Never fails the job -- it answers a question, it does not judge one.
+      - name: Diagnose netcdf process exit
+        if: matrix.lane == 'netcdf'
+        shell: pwsh
+        continue-on-error: true
+        run: .\.github\scripts\Diagnose-Netcdf.ps1
+
       - name: ${{ matrix.title }}
         shell: pwsh
         env:
