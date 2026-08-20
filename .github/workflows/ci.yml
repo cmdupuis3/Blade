@@ -37,6 +37,11 @@
 #   llvm       the BLADE_LLVM lane: the llvm-vs-C++ stdout differential over
 #              the corpus. Standalone only, deliberately: it spawns two native
 #              compilers per file
+#   llvm-suite NIGHTLY-ONLY. The corpus run on the LLVM lane ALONE, judged
+#              against its own EXPECT pins rather than against the C++ lane --
+#              one compiler per file, no g++ in the loop, and it reaches
+#              categories the differential does not sweep. Programs the lane
+#              refuses skip; nothing falls back to C++
 #
 # Never run here: `test cuda` (no usable nvcc host compiler on hosted
 # runners), `test timing` and `test llvm-bench` (benchmarks are not pass/fail
@@ -66,7 +71,7 @@ on:
         description: 'Which test lanes to run'
         type: choice
         default: all
-        options: [all, none, cpp, providers, netcdf, zarr, csv, hybrid, llvm]
+        options: [all, none, cpp, providers, netcdf, zarr, csv, hybrid, llvm, llvm-suite]
       include-interp:
         description: 'Also run the interpreter/codegen differential (slow)'
         type: boolean
@@ -207,10 +212,27 @@ jobs:
               nightlyOnly = $false
             }
             llvm = @{
-              title       = 'LLVM back end'
+              title       = 'LLVM back end (differential vs C++)'
               timeout     = 120
               verbs       = 'test llvm'
               nightlyOnly = $false
+            }
+            # The other half of the LLVM story, and a different question.
+            # `llvm` above asks whether the two lanes AGREE, which needs both
+            # compilers and is bounded by what the C++ oracle also compiles.
+            # This one runs the corpus on the LLVM lane alone and judges it
+            # against the corpus's own EXPECT pins -- no g++ in the loop, one
+            # compiler per file, and it reaches categories the differential
+            # does not sweep. Refusals skip; they are never quietly handed to
+            # the C++ emitter.
+            #
+            # Nightly-only: it is a whole-corpus compile, the same order of
+            # cost as the C++ suite it mirrors.
+            'llvm-suite' = @{
+              title       = 'Corpus on the LLVM back end'
+              timeout     = 120
+              verbs       = 'test --llvm-backend'
+              nightlyOnly = $true
             }
           }
           $all = @($lanes.Keys)
