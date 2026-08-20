@@ -1202,7 +1202,33 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
             Ok (proc.ExitCode, output)
         else
             try proc.Kill() with _ -> ()
-            Error (sprintf "Execution timed out after %ds" (timeoutMs / 1000))
+            // WHAT IT MANAGED TO SAY, before it stopped saying anything.
+            //
+            // A bare "timed out after 120s" is not a diagnosis: it cannot
+            // distinguish a program that hung before it printed a thing from
+            // one that printed every correct value and then hung on the way
+            // out, and those two have nothing in common but the symptom.
+            //
+            // The success path is untouched -- it still reads to end, so the
+            // captured bytes stay byte-identical for the differential gates
+            // that compare them. This is only reachable once the process is
+            // dead, and killing it closes its pipe ends, which is exactly what
+            // lets the readers complete with the partial content. Bounded, so
+            // a wedged reader cannot turn a timeout into a second hang.
+            let grab (t: System.Threading.Tasks.Task<string>) =
+                try (if t.Wait 5000 then t.Result else "") with _ -> ""
+            let describe (label: string) (text: string) =
+                if String.IsNullOrWhiteSpace text then sprintf "no %s" label
+                else
+                    let lines =
+                        text.Replace("\r\n", "\n").Split('\n')
+                        |> Array.filter (fun l -> l.Trim() <> "")
+                    sprintf "%d line(s) of %s, last: %s"
+                        lines.Length label (lines.[lines.Length - 1].Trim())
+            Error (sprintf "Execution timed out after %ds (%s; %s)"
+                       (timeoutMs / 1000)
+                       (describe "stdout" (grab stdoutTask))
+                       (describe "stderr" (grab stderrTask)))
     with ex ->
         Error (sprintf "Execution exception: %s" ex.Message)
 
