@@ -1,10 +1,11 @@
-# Blade CI on GitHub-hosted Windows runners.
+# Blade CI.
 #
-# Windows is the primary development platform for this repository and the one
-# the whole native toolchain story is written against (MSYS2 ucrt64 g++, MSYS2
-# clang64 clang, MS-MPI, the OpenBLAS prebuilt). So CI runs there, on the stock
-# `windows-latest` image plus what .github/actions/setup-blade-toolchain
-# installs -- no container is involved.
+# The test lanes run on GitHub-hosted Windows runners, because Windows is the
+# primary development platform here and the one the whole native toolchain
+# story is written against (MSYS2 ucrt64 g++, MSYS2 clang64 clang, MS-MPI, the
+# OpenBLAS prebuilt). They use the stock `windows-latest` image plus what
+# .github/actions/setup-blade-toolchain installs -- no container is involved.
+# The cheap default gate runs on Linux; the `build` job says why.
 #
 # WHAT RUNS BY DEFAULT IS DELIBERATELY SMALL. Every push and pull request gets
 # the `build` job and nothing else: `dotnet build`, then the byte-pinned LLVM
@@ -19,10 +20,15 @@
 #     `lanes` input can pick one lane instead of all three
 #   * the nightly schedule on master
 #
+# The first two are the BROAD opt-ins and skip the nightly-only lanes; the
+# nightly runs everything, and dispatching a lane BY NAME always runs it.
+#
 # The lanes themselves:
 #
-#   cpp        the default suite, which is the C++ back end end to end, plus
-#              the OpenMP and MPI blocks that are opt-in by flag
+#   cpp        NIGHTLY-ONLY. The default suite, which is the C++ back end end
+#              to end, plus the OpenMP and MPI blocks that are opt-in by flag.
+#              Much the longest lane, so it does not sit in front of a pull
+#              request; `lanes: cpp` still runs it on demand
 #   providers  NetCDF / Zarr / CSV / hybrid, which are reachable ONLY as
 #              standalone verbs -- no combination of `blade test` flags folds
 #              them into the default suite
@@ -77,10 +83,21 @@ jobs:
   # ------------------------------------------------------------------------
   # The default gate. Cheap enough to run on every push: no native toolchain
   # is installed or invoked.
+  #
+  # ON LINUX, deliberately. Nothing this job does is Windows-specific -- the
+  # build is a plain net7.0 compile with no PackageReferences, and the goldens
+  # are four in-process blocks that spawn no compiler and compare .ll text
+  # carrying no target triple, no datalayout and no paths. Linux runners boot
+  # faster, install the .NET 7 SDK faster (the Windows image ships 8/9, so it
+  # is a download either way), and bill at 1x where Windows bills at 2x.
+  #
+  # The Windows lanes do NOT depend on this job, so if the Linux path turns
+  # out to have a wrinkle it cannot take the real coverage down with it -- and
+  # reverting is one line.
   # ------------------------------------------------------------------------
   build:
     name: build + emitter goldens
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -100,22 +117,17 @@ jobs:
       # the simplex-block agreement check. About 60 assertions in ~1.5s, and
       # not one of them spawns a compiler, which is exactly what a
       # run-on-every-push gate should be made of.
+      # Invoked as `dotnet <dll>` rather than through the apphost: a
+      # framework-dependent Blade.dll runs anywhere, where the apphost is
+      # `Blade` here and `Blade.exe` on the lanes. The script does not care --
+      # it just runs `& $Blade @BladeArgs`.
       - name: Byte-pinned emitter goldens
         shell: pwsh
         run: >
-          .\.github\scripts\Invoke-BladeTest.ps1
-          -Blade .\bin\Release\net7.0\Blade.exe
+          ./.github/scripts/Invoke-BladeTest.ps1
+          -Blade dotnet
           -Name 'llvm goldens'
-          -BladeArgs 'test','llvm','goldens'
-
-      # The published layout matters as much as the binary: src/cpp headers and
-      # stdlib/*.blade are deployed beside Blade.exe at build time, and the
-      # runtime reads them from there.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: blade-bin
-          path: bin/Release/net7.0
-          retention-days: 7
+          -BladeArgs 'bin/Release/net7.0/Blade.dll','test','llvm','goldens'
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -148,19 +160,26 @@ jobs:
           # The lane table. One place; the workflow's `test` job is generic.
           $lanes = [ordered]@{
             cpp = @{
-              title   = 'C++ back end'
-              timeout = 120
-              verbs   = 'test --omp --mpi'
+              title       = 'C++ back end'
+              timeout     = 120
+              verbs       = 'test --omp --mpi'
+              # By far the longest lane -- it compiles thousands of corpus
+              # programs with g++. Held back from the label and `lanes: all`
+              # paths so a pull request opting in does not wait on it; the
+              # nightly carries it, and `lanes: cpp` still runs it on demand.
+              nightlyOnly = $true
             }
             providers = @{
-              title   = 'Providers (NetCDF / Zarr / CSV / hybrid)'
-              timeout = 60
-              verbs   = "test netcdf`ntest zarr`ntest csv`ntest hybrid"
+              title       = 'Providers (NetCDF / Zarr / CSV / hybrid)'
+              timeout     = 60
+              verbs       = "test netcdf`ntest zarr`ntest csv`ntest hybrid"
+              nightlyOnly = $false
             }
             llvm = @{
-              title   = 'LLVM back end'
-              timeout = 120
-              verbs   = 'test llvm'
+              title       = 'LLVM back end'
+              timeout     = 120
+              verbs       = 'test llvm'
+              nightlyOnly = $false
             }
           }
           $all = @($lanes.Keys)
@@ -181,6 +200,21 @@ jobs:
             default { @() }
           }
           $selected = @($selected | Where-Object { $lanes.Contains($_) })
+
+          # Nightly-only lanes are dropped from the BROAD opt-ins -- the
+          # `ci:full` label and `lanes: all` -- but never from an explicit
+          # single-lane request, and never from the nightly itself. Say what
+          # was held back: a lane silently missing from a run the user asked
+          # "everything" for is how coverage quietly stops existing.
+          $broad = ($env:EVENT -eq 'pull_request') -or
+                   ($env:EVENT -eq 'workflow_dispatch' -and $env:LANES -eq 'all')
+          if ($broad) {
+            $held = @($selected | Where-Object { $lanes[$_].nightlyOnly })
+            if ($held.Count -gt 0) {
+              Write-Host "held back (nightly-only, run the nightly or dispatch it by name): $($held -join ', ')"
+            }
+            $selected = @($selected | Where-Object { -not $lanes[$_].nightlyOnly })
+          }
 
           $include = @($selected | ForEach-Object {
             [pscustomobject]@{
@@ -220,7 +254,10 @@ jobs:
 
   test:
     name: ${{ matrix.title }}
-    needs: [build, plan]
+    # `plan` only, NOT `build`. The lanes compile their own Windows binary, so
+    # the Linux gate is not on their critical path -- a wrinkle there must not
+    # be able to cancel the nightly's real coverage.
+    needs: [plan]
     if: needs.plan.outputs.any == 'true'
     runs-on: windows-latest
     timeout-minutes: ${{ matrix.timeout }}
@@ -243,10 +280,11 @@ jobs:
         with:
           dotnet-version: '7.0.x'
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: blade-bin
-          path: bin/Release/net7.0
+      # Built here rather than downloaded from `build`: that job produces a
+      # Linux apphost, and these lanes want Blade.exe. Two minutes against a
+      # lane measured in tens of them.
+      - name: Build
+        run: dotnet build Blade.fsproj -c Release
 
       - name: Native toolchain
         uses: ./.github/actions/setup-blade-toolchain
