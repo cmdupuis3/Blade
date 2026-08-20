@@ -72,6 +72,13 @@ module private NcFFI =
     [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
     extern int nc_get_var_longlong(int fileId, int varid, int64[] data)
 
+    // The teardown twin of the calls above. netcdf-c >= 4.9 only; a build
+    // without it raises EntryPointNotFoundException at the call, which the
+    // registration below swallows -- such a build has no thread-spawning
+    // closure to shut down either.
+    [<DllImport("netcdf", CallingConvention = CallingConvention.Cdecl)>]
+    extern int nc_finalize()
+
     let check (status: int) (msg: string) =
         if status <> 0 then failwithf "NetCDF error (%d): %s" status msg
 
@@ -91,12 +98,35 @@ module private NcFFI =
     // the first P/Invoke.
     let ensureNativeLibrary () = Blade.Platforms.ensureNativeResolver ()
 
+    // BLADE.EXE ITSELF NEEDS THE SAME TEARDOWN THE GENERATED PROGRAMS GET.
+    //
+    // The compile-time fold loads libnetcdf into the COMPILER's process, and
+    // on builds whose closure spawns threads (MSYS2's links libcurl and the
+    // AWS C++ SDK), process exit then deadlocks in DLL_PROCESS_DETACH exactly
+    // as it did in the emitted programs -- every test passes, the totals
+    // print, and Blade.exe never returns to its caller. Generated code got
+    // `std::atexit(nc_finalize)`; this is the managed twin: ProcessExit fires
+    // while the CLR is still orderly, before the loader starts detaching.
+    //
+    // Registered on first USE, not at resolver install: the resolver is
+    // shared with libm, and a process that never touched netcdf should not
+    // call into it at exit. EntryPointNotFoundException = a pre-4.9 netcdf,
+    // which has no finalizer and no such closure; anything else at exit is
+    // swallowed too -- a teardown hiccup must not turn a green run red.
+    let private exitFinalizer =
+        lazy (
+            System.AppDomain.CurrentDomain.ProcessExit.Add (fun _ ->
+                try nc_finalize () |> ignore with _ -> ()))
+
+    let registerExitFinalizer () = exitFinalizer.Force ()
+
 // Safe Wrappers
 
 module private NcQuery =
 
     let openFile (path: string) (mode: int) =
         NcFFI.ensureNativeLibrary ()
+        NcFFI.registerExitFinalizer ()
         let mutable id = 0
         NcFFI.nc_open(path, mode, &id) |> fun s -> NcFFI.check s (sprintf "opening '%s'" path)
         id
