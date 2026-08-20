@@ -700,7 +700,16 @@ module CppNetcdf =
             | IRTDIndexType (name, _) -> Some name
             | _ -> None)
 
-    /// Generate required C++ includes for NetCDF.
+    /// Generate required C++ includes for NetCDF, plus the teardown helper.
+    ///
+    /// EVERY LINE RETURNED HERE MUST BE UNIQUE. CodeGen.providerIncludes runs
+    /// `List.distinct` over the concatenation of all providers' lines -- right
+    /// for deduplicating headers, silently destructive for anything else. Two
+    /// nested guards ending in a bare `#endif` cost the inner one, which
+    /// surfaced as "unterminated #else" in every emitted provider program. So
+    /// the `#endif`s carry distinguishing comments (good practice regardless)
+    /// and the helper body is one line rather than one closed by a bare `}`,
+    /// which would collide with any other provider that ever emits one.
     ///
     /// netcdf_meta.h comes along for its NC_VERSION_* macros, which are what
     /// gate the `nc_finalize()` call the main wrapper emits (see
@@ -709,8 +718,31 @@ module CppNetcdf =
     /// guarding the include keeps that build compiling exactly as it did.
     let genIncludes () : string list =
         [ "#include <netcdf.h>"
+          "#include <cstdlib>"
           "#if defined(__has_include)"
           "#  if __has_include(<netcdf_meta.h>)"
           "#    include <netcdf_meta.h>"
           "#  endif"
-          "#endif" ]
+          "#endif  // __has_include"
+          ""
+          "// Shut the netcdf closure down in order, exactly once."
+          "//"
+          "// Some libnetcdf builds link a large closure -- MSYS2's pulls in libcurl"
+          "// and the AWS C++ SDK, whose CRT runs an event-loop thread pool. Every"
+          "// ordinary way out of a C++ program (returning from main, std::exit, even"
+          "// _exit) ends at ExitProcess, which terminates those workers and THEN runs"
+          "// DLL_PROCESS_DETACH across the closure; a thread killed while holding a"
+          "// lock a detach handler then wants deadlocks the process, after it has"
+          "// already printed every correct answer."
+          "//"
+          "// Registered with std::atexit rather than only called at the end of main,"
+          "// because the error paths leave through std::exit(1) -- a failed nc_open,"
+          "// or blade_rt::panic -- and those must terminate too. Idempotent, so the"
+          "// explicit call the MPI path makes for ordering costs nothing."
+          "#if defined(NC_VERSION_MAJOR) && (NC_VERSION_MAJOR > 4 || (NC_VERSION_MAJOR == 4 && NC_VERSION_MINOR >= 9))"
+          "static bool __blade_nc_finalized = false;"
+          "static void __blade_nc_finalize() { if (!__blade_nc_finalized) { __blade_nc_finalized = true; nc_finalize(); } }"
+          "#else"
+          "// netcdf older than 4.9 has no nc_finalize, and no such closure either."
+          "static void __blade_nc_finalize() {}"
+          "#endif  // netcdf >= 4.9" ]

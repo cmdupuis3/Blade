@@ -2516,13 +2516,18 @@ let moduleUsesNetcdf (modul: IRModule) : bool =
 /// emitted and that build compiles exactly as it did before.
 let private netcdfFinalizeLines : string list =
     [ ""
-      "    // Shut the netcdf closure down in order. Returning from main would"
-      "    // reach ExitProcess, which kills this library's worker threads and"
-      "    // then asks their DLLs to detach -- a deadlock on builds that link"
-      "    // curl/AWS, after the program has already printed its results."
-      "#if defined(NC_VERSION_MAJOR) && (NC_VERSION_MAJOR > 4 || (NC_VERSION_MAJOR == 4 && NC_VERSION_MINOR >= 9))"
-      "    nc_finalize();"
-      "#endif" ]
+      "    __blade_nc_finalize();" ]
+
+/// Registered FIRST, before any netcdf call can fail.
+///
+/// The end-of-main call alone was not enough: a failed nc_open and
+/// blade_rt::panic both leave through std::exit(1), which never reaches it --
+/// and on a build whose netcdf closure deadlocks at teardown, that path hangs
+/// exactly as the success path did. std::exit runs atexit handlers before
+/// ExitProcess, so registering covers every way out that is not an outright
+/// crash. The helper is idempotent, so this and the explicit call coexist.
+let private netcdfRegisterLines : string list =
+    [ "    std::atexit(__blade_nc_finalize);" ]
 
 let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: string) (bodyIndented: string list) (printCode: string list) : string list =
     let header =
@@ -2587,7 +2592,7 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
           "      catch (...) { blade_rt::panic(\"BL8005\", \"unknown exception\", nullptr, 0); }"
           "}" ]
     let footerBody = footer |> List.rev |> List.tail |> List.rev  // drop footer's closing "}"
-    header @ tryLine @ bodyIndented @ timing @ printCode @ footerBody @ catchClose
+    header @ (if netcdf then netcdfRegisterLines else []) @ tryLine @ bodyIndented @ timing @ printCode @ footerBody @ catchClose
 
 /// Split-timing variant of genMainWrapper. `setupIndented` is input-data setup
 /// (array literals, etc.); `computeIndented` is the computation. Emits two
@@ -2665,7 +2670,7 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
           "      catch (...) { blade_rt::panic(\"BL8005\", \"unknown exception\", nullptr, 0); }"
           "}" ]
     let footerBody = footer |> List.rev |> List.tail |> List.rev  // drop footer's closing "}"
-    header @ tryLine @ setupIndented @ setupTiming @ computeIndented @ computeTiming @ printCode @ footerBody @ catchClose
+    header @ (if netcdf then netcdfRegisterLines else []) @ tryLine @ setupIndented @ setupTiming @ computeIndented @ computeTiming @ printCode @ footerBody @ catchClose
 
 /// Generate a C++ program (uses external runtime header)
 /// Generate print statements for all bindings in a module.
