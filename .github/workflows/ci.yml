@@ -190,13 +190,32 @@ jobs:
               verbs   = $lanes[$_].verbs
             }
           })
-          # -AsArray, not the pipeline form: ConvertTo-Json collapses a
-          # one-element array to a bare object, and a single-lane dispatch
-          # would then hand `fromJSON` a matrix GitHub cannot expand.
-          $matrix = '{"include":' + (ConvertTo-Json -InputObject $include -Depth 5 -Compress -AsArray) + '}'
+          # Serialize ONE ELEMENT AT A TIME and assemble the array by hand.
+          # ConvertTo-Json's array handling is the trap here: the pipeline form
+          # collapses a one-element array to a bare object, and -InputObject
+          # treats its argument as a single object, so -AsArray wraps an
+          # already-array input a SECOND time and yields include:[[...]] --
+          # which fails as "A sequence was not expected" only once GitHub tries
+          # to expand the matrix, i.e. after the plan job has gone green. A
+          # lone PSCustomObject has no such ambiguity.
+          $matrix = '{"include":[' +
+                    (($include | ForEach-Object { ConvertTo-Json -InputObject $_ -Depth 5 -Compress }) -join ',') +
+                    ']}'
+
+          # Prove the shape here rather than discovering it in `strategy`.
+          $shape = $matrix | ConvertFrom-Json
+          if (@($shape.include).Count -ne $include.Count) {
+            throw "matrix shape is wrong: expected $($include.Count) include entries, JSON has $(@($shape.include).Count) -- $matrix"
+          }
+          foreach ($entry in @($shape.include)) {
+            foreach ($key in 'lane', 'title', 'timeout', 'verbs') {
+              if (-not $entry.PSObject.Properties[$key]) { throw "matrix entry is missing '$key': $matrix" }
+            }
+          }
 
           Write-Host "event=$($env:EVENT) -> lanes: $(if ($selected) { $selected -join ', ' } else { '(none -- build only)' })"
-          "matrix=$matrix"                     | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "matrix=$matrix"
+          "matrix=$matrix" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "any=$(($include.Count -gt 0).ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   test:
