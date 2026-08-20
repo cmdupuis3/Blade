@@ -50,22 +50,18 @@ open Blade.Interp.Value
 /// The externs cannot name the real library directly because a DllImport
 /// string is baked at compile time while the library differs per OS.
 [<Literal>]
-let private LibmLibrary = "blade_libm"
+let private LibmLibrary = Blade.Platforms.libmImportName
 
 // Bind `blade_libm` to whatever this OS calls its C-runtime math library
 // (Blade.Platforms.libmName: ucrtbase.dll / libm.so.6 / libSystem.dylib).
-// Registered once, at this module's static initialization, which is ordered
-// before any function below can run and therefore before the first extern
-// call. Returning IntPtr.Zero for every other name is load-bearing: it means
-// "not mine", handing that import back to the runtime's default resolution --
-// this resolver is per-ASSEMBLY, so it sees every P/Invoke in Blade.dll and
-// must decline the ones it does not own.
-do
-    let resolver =
-        DllImportResolver(fun libraryName _assembly _searchPath ->
-            if libraryName = LibmLibrary then NativeLibrary.Load(Blade.Platforms.libmName)
-            else IntPtr.Zero)
-    NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), resolver)
+//
+// The resolver itself lives in Platforms.fs. It is per-ASSEMBLY and the
+// runtime permits exactly one registration, so libm shares it with the netcdf
+// provider's externs rather than the two racing for the single slot; see
+// `Platforms.ensureNativeResolver`. Forced at this module's static
+// initialization, which is ordered before any function below can run and
+// therefore before the first extern call.
+do Blade.Platforms.ensureNativeResolver ()
 
 // Shims for the platform libm -- the exact library the locally compiled g++
 // binary calls, whichever OS that is. On Windows MinGW ucrt64's libstdc++

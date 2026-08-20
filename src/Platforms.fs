@@ -15,6 +15,7 @@
 module Blade.Platforms
 
 open System.IO
+open System.Reflection
 open System.Runtime.InteropServices
 
 /// The three operating systems Blade's native toolchain path supports.
@@ -118,3 +119,90 @@ let findSharedLib (prefix: string) (stem: string) : string option =
                     try Directory.GetFiles(dir, pat) |> Array.sort |> Array.tryHead
                     with _ -> None)
     searchDirs |> List.tryPick tryDir
+
+// ---------------------------------------------------------------------------
+// The process-wide DllImport resolver
+// ---------------------------------------------------------------------------
+//
+// ONE resolver per ASSEMBLY is all the runtime allows -- a second
+// SetDllImportResolver for the same assembly throws -- and Blade is a single
+// assembly, so every logical import the compiler owns resolves from this one
+// place. It lives here rather than beside either caller because it has to be
+// installable before EITHER of them runs its first extern, and this module is
+// compiled before both.
+//
+// Returning IntPtr.Zero for a name means "not mine": that import falls back to
+// the runtime's ordinary probing, which is what every P/Invoke this resolver
+// does not own must keep getting.
+
+/// Logical import name for the platform's libm. No file is called this on any
+/// OS -- `libmName` above says what the file really is. The externs cannot
+/// name it directly because a DllImport string is baked at compile time while
+/// the library differs per OS.
+[<Literal>]
+let libmImportName = "blade_libm"
+
+/// The stem libnetcdf's externs are declared under. Unlike libm this is a REAL
+/// name, deliberately: it is what the runtime would probe for if this resolver
+/// declined, and it is what a failure message names.
+[<Literal>]
+let netcdfImportName = "netcdf"
+
+let private tryLoadFile (path: string) : nativeint option =
+    if File.Exists path then
+        match NativeLibrary.TryLoad path with
+        | true, handle -> Some handle
+        | _ -> None
+    else None
+
+let private tryLoadName (name: string) : nativeint option =
+    match NativeLibrary.TryLoad name with
+    | true, handle -> Some handle
+    | _ -> None
+
+/// Resolve libnetcdf.
+///
+/// THE FILENAME IS NOT AGREED ACROSS BUILDS: an MSVC-built netCDF ships
+/// netcdf.dll, MSYS2's mingw package ships libnetcdf.dll. `findSharedLib`
+/// already knows both spellings -- it is what assembles the g++ link line --
+/// so routing the in-process load through it too is what stops the two seams
+/// from disagreeing about which file they mean. They did disagree: with only
+/// libnetcdf.dll present, `blade doctor` reported netcdf healthy (it compiles,
+/// links and runs a probe) while every compile-time provider fold failed to
+/// load the same library, because a `DllImport "netcdf"` probe looks for
+/// netcdf.dll and nothing else on Windows.
+///
+/// Loading by ABSOLUTE path is load-bearing too, and predates this: it
+/// resolves libnetcdf's own dependencies from its own directory first. With
+/// MSYS2 ucrt64 ahead of the NetCDF install on PATH (where it must be for
+/// g++), a plain-name load binds netcdf.dll's zlib1.dll import to MSYS2's copy
+/// and dies with ERROR_PROC_NOT_FOUND before any extern runs.
+let private loadNetcdf () : nativeint =
+    let fromPrefix =
+        match System.Environment.GetEnvironmentVariable "NETCDF_DIR" with
+        | null | "" -> None
+        | root -> findSharedLib root "netcdf" |> Option.bind tryLoadFile
+    match fromPrefix with
+    | Some handle -> handle
+    | None ->
+        // No prefix configured, or it held nothing loadable: the ambient search
+        // path, under both spellings rather than only the MSVC one.
+        [ "netcdf"; "libnetcdf" ]
+        |> List.tryPick tryLoadName
+        |> Option.defaultValue 0n
+
+let private nativeResolver =
+    lazy (
+        let resolve =
+            DllImportResolver(fun libraryName _assembly _searchPath ->
+                if libraryName = libmImportName then NativeLibrary.Load libmName
+                elif libraryName = netcdfImportName then loadNetcdf ()
+                else 0n)
+        NativeLibrary.SetDllImportResolver(Assembly.GetExecutingAssembly(), resolve))
+
+/// Install the resolver, once. Idempotent and thread-safe, which it has to be:
+/// the runtime throws on a second registration for the same assembly, so every
+/// caller forces this same Lazy instead of registering its own. Call it before
+/// the first extern in any module owning a name above -- module-initialization
+/// order across an assembly is not something a caller can otherwise rely on.
+let ensureNativeResolver () : unit = nativeResolver.Force()

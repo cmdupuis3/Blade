@@ -75,35 +75,28 @@ module private NcFFI =
     let check (status: int) (msg: string) =
         if status <> 0 then failwithf "NetCDF error (%d): %s" status msg
 
-    // The externs above probe the plain name "netcdf.dll" through the ambient
-    // search path. With MSYS2 ucrt64 ahead of the NetCDF install on PATH
-    // (where it must be for g++), the loader resolves netcdf.dll's own
-    // zlib1.dll import to MSYS2's copy and the load dies with
-    // ERROR_PROC_NOT_FOUND before any extern runs. Loading the library by
-    // ABSOLUTE path resolves its dependencies from its own directory first,
-    // and a module already loaded under the name "netcdf.dll" short-circuits
-    // the externs' plain-name probe. Keyed per NETCDF_DIR value (read per
-    // call, like the other environment gates) so a failed attempt is not
-    // retried but a repointed NETCDF_DIR gets its own attempt.
-    let private preloadAttempts = System.Collections.Concurrent.ConcurrentDictionary<string, bool>()
-    let preloadFromNetcdfDir () =
-        match System.Environment.GetEnvironmentVariable "NETCDF_DIR" with
-        | null | "" -> ()
-        | root ->
-            preloadAttempts.GetOrAdd(root, fun root ->
-                [ System.IO.Path.Combine(root, "bin", "netcdf.dll")
-                  System.IO.Path.Combine(root, "netcdf.dll") ]
-                |> List.exists (fun p ->
-                    System.IO.File.Exists p
-                    && fst (NativeLibrary.TryLoad p)))
-            |> ignore
+    // WHICH FILE the externs above bind to is decided by the process-wide
+    // resolver in Platforms.fs, not by the ambient search path: it takes
+    // NETCDF_DIR through the same `findSharedLib` that assembles the g++ link
+    // line, so the in-process load and the link line can no longer disagree
+    // about the filename. They did disagree -- these externs are declared
+    // under the stem "netcdf", a Windows probe for that looks only for
+    // netcdf.dll, and MSYS2's package ships libnetcdf.dll -- which left
+    // `blade doctor` reporting netcdf healthy while every compile-time
+    // provider fold failed to load it.
+    //
+    // Forced HERE, from the one entry point that reaches an extern first
+    // (every other wrapper below needs a fileId only `openFile` can hand it),
+    // because nothing otherwise guarantees this module is initialized before
+    // the first P/Invoke.
+    let ensureNativeLibrary () = Blade.Platforms.ensureNativeResolver ()
 
 // Safe Wrappers
 
 module private NcQuery =
 
     let openFile (path: string) (mode: int) =
-        NcFFI.preloadFromNetcdfDir ()
+        NcFFI.ensureNativeLibrary ()
         let mutable id = 0
         NcFFI.nc_open(path, mode, &id) |> fun s -> NcFFI.check s (sprintf "opening '%s'" path)
         id
