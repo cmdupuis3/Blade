@@ -24,7 +24,33 @@ open Blade.Tests.Expect
 // Test Runner
 // ============================================================================
 
-/// Result of a full test run (IR + C++ compilation + execution)
+/// Which back end the corpus runner drives a test through.
+///
+/// The corpus is a back-end-independent asset: its `// EXPECT:` pins are
+/// statements about what a Blade program PRINTS, and nothing about them is
+/// C++. Running them on a second back end is therefore a real test of that
+/// back end rather than a re-run of the front end -- the front-end half is
+/// shared and would only be asserting the same thing twice.
+///
+/// RUN-WIDE, not per test: `blade test --llvm-backend` selects it once and
+/// every corpus test in that run goes through it. Behind functions rather than
+/// an exposed mutable, so reads are calls (the rule the environment gates
+/// already follow) and the dispatcher is the only writer.
+type CorpusBackend =
+    | CppBackend
+    | LlvmBackend
+
+let mutable private corpusBackend = CppBackend
+
+/// Select the back end for subsequent corpus runs. Called by `dispatchTest`
+/// before the suite starts; nothing else should write it.
+let setCorpusBackend (backend: CorpusBackend) = corpusBackend <- backend
+
+/// The back end in force. CppBackend unless a caller said otherwise, so every
+/// existing entry point behaves exactly as it did.
+let currentCorpusBackend () = corpusBackend
+
+/// Result of a full test run (IR + back-end artifact + compilation + execution)
 type FullTestResult = {
     TestName: string
     IRResult: Result<IRProgram, string>
@@ -186,6 +212,21 @@ type private FsPipelineOutcome =
     /// file this pipeline just wrote.
     | FpCppGenerated of IRProgram * string * string list * BackendReq * bool * Blade.Diagnostics.Diagnostic list * string
     | FpGenError of IRProgram * string  // ir was valid but codegen threw
+    /// The LLVM lane emitted: ir, the written .ll path. None of the C++ arm's
+    /// companions come with it and that is not an omission -- there is no
+    /// `#error` guard (the lane refuses whole-program instead of emitting a
+    /// poisoned translation unit), no codegen warning channel, and no backend
+    /// requirement to infer, because a program needing CUDA or MPI is one the
+    /// lane declines outright.
+    | FpLlvmGenerated of IRProgram * string
+    /// The selected back end declined this program, with its reason.
+    ///
+    /// NOT a failure. The lane is whole-program-or-nothing by design, so a
+    /// refusal is it working; the house rule that a missing capability skips
+    /// rather than fails is the same rule. What must not happen is falling back
+    /// to C++ the way `blade run` does -- that would silently re-test the C++
+    /// lane and report it as LLVM coverage.
+    | FpBackendRefused of IRProgram * string
 
 /// `wantDiags`: also recover the CODED diagnostics for a refused program.
 /// `lower` returns a formatted string with the BLxxxx code discarded
@@ -234,6 +275,21 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                 | Error validationErrors -> FpIRValidationError validationErrors
                 | Ok ir ->
                     if not compileAndRun then FpIROnly ir
+                    elif currentCorpusBackend () = LlvmBackend then
+                        // ONE front-end pass either way: the lane is handed the
+                        // same validated IRProgram the C++ emitter would have
+                        // consumed, which is exactly the arrangement
+                        // `CliCommands.compileArtifact` makes for `blade run`.
+                        // The difference here is what a refusal means -- there
+                        // it falls back to C++, and a suite that did that would
+                        // report C++ coverage as LLVM coverage.
+                        let safeName = sanitizeFileName testName
+                        match Blade.EmitLlvm.tryEmitProgramNamed testName ir with
+                        | Error reason -> FpBackendRefused (ir, reason)
+                        | Ok llText ->
+                            let llFile = Path.Combine(outputDir, safeName + ".ll")
+                            File.WriteAllText(llFile, llText)
+                            FpLlvmGenerated (ir, llFile)
                     else
                         let safeName = sanitizeFileName testName
                         try
@@ -382,6 +438,60 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
           DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
           WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
           CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
+    | FpBackendRefused (ir, reason) ->
+        // A refusal reads as a SKIP, and needs no new machinery to do it:
+        // `isSkipError` keys on the "Skipped:" prefix and `stageStatuses`
+        // already counts such a stage as skipped. CppGenerated stays false
+        // because no artifact exists -- which is also what makes a
+        // `REJECT-AT: codegen` probe skip here instead of failing for the
+        // absence of a `#error` guard this back end cannot emit.
+        let msg = sprintf "Skipped: llvm lane refused: %s" reason
+        { TestName = testName; IRResult = Ok ir; CppGenerated = false;
+          CppFile = None; CompileResult = Error msg; RunResult = Error msg;
+          ValueCheckResult = Error [msg]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
+          RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
+          EmittedErrorGuard = emittedErrorGuard
+          DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+          WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+          CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
+    | FpLlvmGenerated (ir, llFile) ->
+        // The C shim every .ll links against, beside the artifact. Idempotent,
+        // and `compileLlvmProgram` rebuilds the object only when the source is
+        // newer, so the per-test cost is one link input.
+        Blade.EmitLlvm.deployShim outputDir
+        match compileLlvmProgram llFile outputDir with
+        | Error e ->
+            // Same split the C++ arm makes: a "Skipped:" error is a missing
+            // capability, anything else is a real compile failure.
+            let runErr = if isSkipError e then e else "Compile failed"
+            { TestName = testName; IRResult = Ok ir; CppGenerated = true;
+              CppFile = Some llFile; CompileResult = Error e; RunResult = Error runErr;
+              ValueCheckResult = Error [runErr]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
+              RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
+              EmittedErrorGuard = emittedErrorGuard
+              DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+              WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+              CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
+        | Ok exeFile ->
+            // From here the test is judged exactly as the C++ lane's are: the
+            // `// EXPECT:` pins are statements about what the PROGRAM prints,
+            // and which back end printed it is not their business.
+            let runResult = runExecutable exeFile
+            let valueCheckResult =
+                match runResult with
+                | Ok (0, output) ->
+                    if expectedValues.IsEmpty then Ok ()
+                    else checkExpectedValues expectedValues output
+                | Ok (code, _) -> Error [sprintf "Exit code %d" code]
+                | Error e -> Error [e]
+            { TestName = testName; IRResult = Ok ir; CppGenerated = true;
+              CppFile = Some llFile; CompileResult = Ok exeFile; RunResult = runResult;
+              ValueCheckResult = valueCheckResult; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
+              RejectStage = rejectStage; MalformedExpectLines = malformedExpectLines
+              EmittedErrorGuard = emittedErrorGuard
+              DiagPins = diagPins; DiagContains = diagContains; ProducedDiags = producedDiags
+              WarnPins = warnPins; WarnCodegenPins = warnCodegenPins
+              CapturedWarnings = capturedWarnings; ProducedCodegenWarnings = producedCodegenWarnings }
     | FpCppGenerated (ir, srcFile, _codegenWarnings, backendReq, _, _, generatedSrc) ->
         // Codegen warnings are NOT printed here. They rode into
         // `producedCodegenWarnings` above and are judged against the source's
@@ -641,7 +751,13 @@ let warningPinMisses (warnPins: string list) (codegenPins: string list)
 /// Skips rather than Fails when there is no source). The CHECKER half is
 /// unconditional: the front end always runs, so its warnings are always earned.
 let private resultWarningPinMisses (result: FullTestResult) : string list =
-    if result.CppGenerated then
+    // `// WARN-CODEGEN:` pins assert what the C++ EMITTER printed, so they are
+    // only answerable when that emitter ran. Dropping them on another back end
+    // is not leniency: these pins are strict in BOTH directions, so one that
+    // cannot fire would fail the test for the back end's existence rather than
+    // for anything about the program. `// WARN:` pins stay in force either way
+    // -- those come from the front end, and the front end is shared.
+    if result.CppGenerated && currentCorpusBackend () = CppBackend then
         warningPinMisses result.WarnPins result.WarnCodegenPins
                          result.CapturedWarnings result.ProducedCodegenWarnings
     else
@@ -763,6 +879,14 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
             | Ok _ ->
                 Blade.Tests.TestHarness.Fail,
                 "expected rejection during lowering, but the program lowered"
+        | RejectAtCodegen when currentCorpusBackend () <> CppBackend ->
+            // This probe pins an emitted `#error` guard, which is a C++-emitter
+            // artifact. Another back end refuses whole-program instead -- a
+            // different mechanism, not a weaker one -- so the probe has nothing
+            // to assert here. Skipping says that; letting it run would fail it
+            // for the absence of a guard no one claimed would be emitted.
+            Blade.Tests.TestHarness.Skip,
+            "codegen-stage probe: pins the C++ emitter's #error guard"
         | RejectAtCodegen ->
             match result.IRResult with
             | Error _ ->
@@ -972,7 +1096,26 @@ let runMultiFileTests (name: string) (tests: (string * (string * string) list) l
 /// Run multi-file module tests with full C++ pipeline
 let runMultiFileTestsFull (name: string) (tests: (string * (string * string) list) list) (outputDir: string) =
     printHeader (sprintf "Blade-DSL: %s Tests (Multi-File, Full C++ Pipeline)" name)
-    
+
+    // THIS BLOCK IS C++-ONLY, and says so rather than pretending otherwise.
+    //
+    // It drives codegen inline -- its own generate/compile/run/check sequence
+    // with its own counters -- instead of going through `runFullTest`, so the
+    // corpus back-end selector does not reach it. Under any other back end the
+    // honest report is a skip: running these on the C++ emitter during an LLVM
+    // run would count C++ coverage toward the LLVM lane, which is the one thing
+    // a second back end must never be allowed to do.
+    //
+    // The fix is to give this runner the same fork the single-file one has.
+    // Until then the gap is 14 tests, and it is named here and in the summary
+    // rather than left for someone to infer from a total.
+    if currentCorpusBackend () <> CppBackend then
+        printfn "SKIPPED: this block drives the C++ emitter directly, so it cannot report on another back end."
+        printfn "         %d multi-file test(s) not run.\n" (List.length tests)
+        printFooter name [ "0 passed"; "0 failed"; sprintf "%d skipped" (List.length tests) ]
+        { Block = name; Passed = 0; Failed = 0; Skipped = List.length tests; FailedNames = [] }
+    else
+
     let gppAvailable = checkGppAvailable ()
     if not gppAvailable then
         printfn "WARNING: g++ not available.\n"

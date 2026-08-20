@@ -1863,7 +1863,7 @@ let internal runFullSuite opts =
 /// OPENBLAS_DIR for notebook work would otherwise see ~8 reds that vanish
 /// when run "clean". Tests that exercise the gate itself set and restore
 /// these variables in-process, which this clear does not disturb.
-let internal dispatchTest (rest: string list) : int =
+let rec internal dispatchTest (rest: string list) : int =
     for var in [ "OPENBLAS_DIR"; "BLADE_BLAS" ] do
         if System.Environment.GetEnvironmentVariable var <> null then
             eprintfn "test: clearing ambient %s for this run (suites assume the BLAS gate off; gate suites manage it themselves)" var
@@ -2180,6 +2180,47 @@ let internal dispatchTest (rest: string list) : int =
         // `test interp <dir>`, this takes the LITERAL tests/corpus/<dir> name
         // (`blade test llvm index-types`), not a dispatch alias key.
         Blade.Tests.LlvmTests.runLlvmCategory cat
+    | [ "--llvm-backend" ] | [ "llvm-backend" ] ->
+        // The ordinary suite with the CORPUS driven through the BLADE_LLVM lane
+        // instead of the C++ emitter.
+        //
+        // Distinct from `blade test llvm`, and the distinction is the point.
+        // That is a two-lane DIFFERENTIAL: it needs both compilers, and asks
+        // whether the lanes agree. This runs ONE lane and judges it against the
+        // corpus's own `// EXPECT:` pins -- no g++, one compiler per file, and
+        // an answer about the LLVM lane that does not depend on the C++ lane
+        // being right. Weaker per program (a pin covers only what it names) and
+        // stronger in reach.
+        //
+        // A program the lane refuses SKIPS. It is never handed to the C++
+        // emitter: `blade run`'s fallback is exactly wrong here, because it
+        // would count C++ coverage as the LLVM lane's.
+        match resolveClang () with
+        | None ->
+            eprintfn "test --llvm-backend: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+            eprintfn "      An error, not a skip: without clang EVERY corpus test would skip and the run would look green."
+            1
+        | Some clang ->
+            printfn "Corpus back end: LLVM (clang: %s)" clang
+            printfn "A program the lane refuses is SKIPPED, never handed to the C++ emitter, so the totals below are this lane's own.\n"
+            setCorpusBackend LlvmBackend
+            try runFullSuite defaultFullSuiteOptions
+            finally setCorpusBackend CppBackend
+    | [ "--llvm-backend"; cat ] | [ cat; "--llvm-backend" ] ->
+        // The same back end over ONE category. This is the form you want while
+        // growing the lane -- the whole suite is a long way to find out that a
+        // single category still refuses everything -- and the form CI wants,
+        // since a scoped lane fails fast and names what it covered.
+        match resolveClang () with
+        | None ->
+            eprintfn "test --llvm-backend: no clang found (set BLADE_LLVM_CLANG, or install C:\\msys64\\clang64)."
+            1
+        | Some clang ->
+            printfn "Corpus back end: LLVM (clang: %s), category: %s" clang cat
+            printfn ""
+            setCorpusBackend LlvmBackend
+            try dispatchTest [ cat ]
+            finally setCorpusBackend CppBackend
     | [ "--llvm" ] ->
         // Deliberately NOT a member of isSuiteFlag. Spelling it like one is a
         // reasonable guess given --omp/--cuda/--mpi, so say why it isn't

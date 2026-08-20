@@ -107,6 +107,8 @@ let printUsage () =
     printfn "  blade check myprogram.edgi --strict-pins"
     printfn "  blade test"
     printfn "  blade test --omp --cuda --timing"
+    printfn "  blade test --llvm-backend  (the ordinary suite, corpus driven through the LLVM"
+    printfn "                              lane and judged against its own EXPECT pins; no g++)"
     printfn "  blade test llvm            (BLADE_LLVM lane vs the C++ lane; standalone only)"
     printfn "  blade test llvm all        (the same differential over EVERY corpus category,"
     printfn "                              reporting what fraction of it the lane can emit)"
