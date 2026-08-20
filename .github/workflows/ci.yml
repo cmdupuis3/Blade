@@ -408,3 +408,25 @@ jobs:
           path: ci-logs
           retention-days: 7
           if-no-files-found: ignore
+
+      # The GENERATED SOURCES, when a provider lane goes red.
+      #
+      # A provider failure is nearly always about what the emitter baked into
+      # the program -- extents folded from the store's metadata, above all --
+      # and that is unreadable from a log line saying the program timed out.
+      # The .cpp says it outright.
+      #
+      # Provider lanes only, and only on failure: `blade test netcdf` leaves a
+      # handful of files in this directory, where the cpp lane leaves thousands
+      # and would turn every red run into a several-hundred-megabyte upload.
+      - uses: actions/upload-artifact@v4
+        if: >-
+          failure() && (matrix.lane == 'netcdf' || matrix.lane == 'zarr'
+          || matrix.lane == 'csv' || matrix.lane == 'hybrid')
+        with:
+          name: generated-${{ matrix.lane }}
+          path: |
+            generated_cpp_tests/**/*.cpp
+            generated_cpp_tests/**/*.ll
+          retention-days: 7
+          if-no-files-found: ignore
