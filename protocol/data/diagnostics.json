@@ -542,6 +542,18 @@
         "docs/formalism.md"
       ]
     },
+    "BL4018": {
+      "title": "ragged lens contradicts the literal",
+      "explanation": "A ragged array LITERAL checked against a closed `RaggedIdx<lens>` annotation whose lens the literal does not match -- either because the resolved row lengths differ, or because the lens is not a compile-time value and so cannot be compared at all. A ragged array takes its shape from its literal: codegen bakes the `_lens` and `_offsets` companions from the literal's own nesting, and the lens reference the annotation carries is read by no codegen or interpreter site. A disagreeing lens was therefore accepted and then ignored -- the annotation described one shape and the array had another. Only the two-slot form `Array<T like Idx<n>, RaggedIdx<lens>>` is judged; with further prior axes the lens is a flattened companion over all of them and its entries no longer stand one-to-one against the literal's rows. The DepIdx sibling runs the same comparison against its inner-extent formula.",
+      "fix": "Make the lens and the literal agree -- whichever is wrong -- or drop the annotation entirely and let the nested literal infer the ragged type, which is the spelling to use when the lengths are meant to come from the data. A lens reported as not compile-time must become an array of integer literals (a plain `let` or a `let static` both resolve); allocating a ragged array to lengths only the running program knows is separate, planned work.",
+      "examples": [
+        "tests/corpus/index-types/250_ragged_lens_contradicts_literal_rejects.blade",
+        "tests/corpus/index-types/251_ragged_lens_not_static_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
     "BL5000": {
       "title": "ml elaboration error",
       "explanation": "The `ml` domain elaborator refused a construct: a non-static configuration where a compile-time spec is required, a gated block reached in the wrong order, a bad derivation order, or an op whose arguments do not fit its spec.",

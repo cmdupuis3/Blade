@@ -8734,6 +8734,66 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
 /// length. Only an ANNOTATION reaches here -- an unannotated triangular
 /// literal still infers the ragged type (the same brackets are legal
 /// RaggedIdx data), so the annotation decides the class, never the shape.
+/// An array literal checked against a CLOSED `RaggedIdx<lens>` annotation.
+///
+/// The lens is the one thing in a ragged annotation that construction does
+/// NOT derive for itself. Codegen bakes `<name>_lens` and `<name>_offsets`
+/// straight from the literal's own nesting (genArrayLiteral's ragged branch,
+/// via computeRaggedRowLengths), and `IRRaggedLookup`'s payload -- the lens
+/// reference -- has no consumer in CodeGen*/Interp at all. So a lens that
+/// disagreed with the literal was accepted and then ignored: three separate
+/// spellings of a wrong lens all compiled clean and all ran to the LITERAL's
+/// shape. This is the seam that makes the two agree or say why not.
+///
+/// It is the ragged twin of a check codegen already runs for DepIdx, whose
+/// inner extent FORMULA is evaluated per row and compared against the same
+/// `computeRaggedRowLengths` (CodeGenLoopNest). Ragged does it in the front
+/// end instead, because unlike a formula a lens is a value in SCOPE here.
+///
+/// A lens the compiler cannot hold is refused rather than dropped: honouring
+/// one -- allocating to lengths only the running program knows -- is a
+/// separate, planned change, and until it lands "ignored" is the only other
+/// thing the annotation could mean.
+and checkRaggedLensAgainstLit (env: TypeEnv) (arrTy: IRArrayType) (elems: Expr list) : TypeResult<unit> =
+    // Only the two-slot form `Array<T like Idx<n>, RaggedIdx<lens>>` is
+    // judged. That is the shape whose literal nests exactly twice and the one
+    // the ragged literal emitter builds; with further prior axes the lens is
+    // a FLATTENED companion over all of them, so its entries no longer stand
+    // one-to-one against this literal's rows.
+    match arrTy.IndexTypes with
+    | [_outer; inner] when inner.IxKind = IxKRagged ->
+        (match inner.Extent with
+         | IRRaggedLookup lengths ->
+             // The name the annotation wrote. `resolveRaggedLensSource` has
+             // already declined anything synthesized, so a non-IRParam
+             // payload here is a lens spelled some way this seam does not
+             // read -- it resolves to RlRuntime and is reported as such.
+             let lensName =
+                 match lengths with
+                 | IRParam (n, _, _) -> n
+                 | _ -> "the declared lens"
+             (match resolveRaggedLensSource env lengths with
+              | RlRuntime -> Error (RaggedLensNotStatic lensName)
+              | RlStatic declared ->
+                  let rowLens =
+                      elems |> List.map (fun e ->
+                          match e.Kind with
+                          | ExprKind.ExprArrayLit row -> Some (int64 row.Length)
+                          | _ -> None)
+                  // A row that is not itself a literal (a named array spliced
+                  // in, say) has no length to read here; judge nothing rather
+                  // than compare against a count that is not the one built.
+                  if rowLens |> List.exists Option.isNone then Ok ()
+                  else
+                      let actual = rowLens |> List.map Option.get
+                      if declared = actual then Ok ()
+                      else
+                          let fmt (xs: int64 list) =
+                              "[" + (xs |> List.map string |> String.concat ", ") + "]"
+                          Error (RaggedLensMismatch (lensName, fmt declared, fmt actual)))
+         | _ -> Ok ())
+    | _ -> Ok ()
+
 and checkCompactArrayLit (env: TypeEnv) (arrTy: IRArrayType) (elems: Expr list) (litSpan: Span)
                          : TypeResult<TypedExpr> =
     let ix = arrTy.IndexTypes.Head
@@ -8989,6 +9049,12 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
                 | _ -> None
             Error (ArrayLitLength (elems.Length, expectedN, axisTag))
         else
+            // A closed `RaggedIdx<lens>` inner slot: the outer length check
+            // above reads the OUTER extent, and the per-row recursion below
+            // reaches the ragged record with no static extent to check
+            // against (its Extent is an IRRaggedLookup), so the row lengths
+            // are only judgeable from here, where the rows are still in hand.
+            checkRaggedLensAgainstLit env arrTy elems |> Result.bind (fun () ->
             // Build the element annotation: just the elem type if no inner
             // index types, otherwise an array with the remaining index types.
             // arrTy.ElemType is IRType post-B2.
@@ -8997,7 +9063,7 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
                 else mkArrayLike { arrTy with IndexTypes = innerIdxs }
             elems |> List.map (checkExpr env elemAnnot) |> sequenceResults
             |> Result.map (fun tElems ->
-                mkTyped (TExprArrayLit (tElems, arrTy)) (mkArrayLike arrTy))
+                mkTyped (TExprArrayLit (tElems, arrTy)) (mkArrayLike arrTy)))
 
     // fill_random(mod): internal random-fill array constructor. The result
     // array type/shape comes from the annotation (this bidirectional arm), so

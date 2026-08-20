@@ -222,6 +222,16 @@ type TypeError =
     /// imaginary part: A(i,i) = conj(A(i,i)) forces the diagonal real, and
     /// the stored cell is read unconjugated at (i,i). `where_` locates the cell.
     | HermitianLitDiagComplex of where_: string
+    /// A ragged array LITERAL whose row lengths disagree with the lens its
+    /// closed `RaggedIdx<lens>` annotation names. Nothing derives the shape
+    /// from the lens -- construction bakes `_lens`/`_offsets` from the
+    /// literal's own nesting -- so the annotation and the array it annotates
+    /// would describe different shapes.
+    | RaggedLensMismatch of lensName: string * declared: string * actual: string
+    /// The same seam, one step earlier: the lens a closed `RaggedIdx<lens>`
+    /// names is not a compile-time value, so there is nothing to check the
+    /// literal against and nothing construction could honour.
+    | RaggedLensNotStatic of lensName: string
     | ObjectForKernel of got: string
     | ChainOpNeedsMethodFor of leftDesc: string
     | ChainOpBadKernel of rightDesc: string

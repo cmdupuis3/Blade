@@ -1,0 +1,14 @@
+// TEST: Ragged Lens Static Binding
+// The accepting side of BL4018, in the spelling the corpus does not
+// otherwise cover: a `let static` lens. Two static sources resolve a closed
+// `RaggedIdx<lens>` -- the StaticValues entry a `let static` leaves behind
+// (the branch SparseIdx's key resolution takes), and the checked value of a
+// plain `let` (019's spelling, and the only one a lens conventionally uses,
+// since a plain `let` never reaches StaticValues). Both must agree with the
+// literal; this pins the first.
+let static lens = [3, 2, 1]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let row_sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+let total = reduce(row_sums, (+))
+// EXPECT: row_sums = [6, 9, 6]
+// EXPECT: total = 21

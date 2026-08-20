@@ -476,6 +476,15 @@ profile takes its annotation: `Array<T like Idx<n>, RaggedIdx<lens>>`. Any
 other row profile — equal lengths, or lengths that don't step down by one to a
 final 1 — is untouched and still infers rectangular or inline-ragged.
 
+**A ragged literal's shape is the literal's.** `RaggedIdx<lens>` over a literal
+does not size anything: the row lengths and offsets are built from the nesting
+itself, and the annotation's `lens` is checked against them rather than read.
+So a `lens` that disagrees is refused (BL4018), as is one the compiler cannot
+hold — a lens computed at run time can be neither honoured nor compared, and
+sizing a ragged array from one is not yet a thing the language does. When the
+lengths are meant to come from the data, write the nest with no annotation at
+all and let it infer.
+
 The rule is matched at any rank — `[[[1,2,3],[4,5],[6]], [[7,8],[9]], [[10]]]`
 is `SymIdx<3, 3>` — but it is INCLUSIVE only: the strict profile
 (`n-1, ..., 1, 0`) is `AntisymIdx`'s storage, and antisymmetry is a claim about

@@ -1,0 +1,16 @@
+// TEST: Ragged Lens Not Static (rejects)
+// ERROR: BL4018
+// The other half of BL4018: a lens that is a genuine RUNTIME value. Row
+// lengths are baked from the literal, so a lens the compiler cannot hold is
+// neither honoured nor checkable -- it can only be ignored, which is what
+// used to happen. Refused instead: allocating a ragged array to lengths only
+// the running program knows is separate, planned work.
+//
+// `base + 1` is [1, 2, 3] elementwise, which disagrees with the literal's
+// [3, 2, 1] -- but that is not what is being reported here. The compiler
+// never gets far enough to compare: a plain `let` fed by a computed pipeline
+// carries no compile-time value, so the lens resolves to nothing at all.
+let base: Array<Int64 like Idx<3>> = [0, 1, 2]
+let lens = (method_for(base) <@> lambda(b: Int64) -> b + 1) |> compute
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+// ERROR-CONTAINS: is not a compile-time value

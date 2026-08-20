@@ -670,6 +670,12 @@ same shape -- %s. (A flat list or a rectangular nest names cells the storage doe
 A(i, i) = conj(A(i, i)) forces the diagonal real, and the stored diagonal cell is read unconjugated, \
 so this value is not one the class can hold. Write a real diagonal (the off-diagonal cells carry the \
 complex half)." where_
+    | RaggedLensMismatch (lensName, declared, actual) ->
+        sprintf "Ragged literal: the annotation names `RaggedIdx<%s>`, and %s holds %s, but the literal's rows are %s. A ragged array takes its row lengths from its LITERAL -- the baked lens and offsets are computed from this nesting, and nothing reads `%s` back -- so the annotation would describe a shape the array does not have. Fix whichever one is wrong; if the lengths are meant to come from the data, drop the annotation and let the literal infer the ragged type."
+            lensName lensName declared actual lensName
+    | RaggedLensNotStatic lensName ->
+        sprintf "Ragged literal: the annotation names `RaggedIdx<%s>`, but `%s` is not a compile-time value. A ragged array's row lengths are baked from the LITERAL's own nesting, so a lens known only at run time can neither be honoured nor checked -- it would be accepted and then ignored. Make `%s` a compile-time array of integer literals (so the two can be compared), or drop the annotation and let the literal infer the ragged type. Allocating to lengths only the running program knows is separate, planned work."
+            lensName lensName lensName
     | ObjectForKernel got -> sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" got
     | ChainOpNeedsMethodFor leftDesc -> sprintf "<@> requires method_for or object_for on the left side, but got %s" leftDesc
     | ChainOpBadKernel rightDesc -> sprintf "<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got %s" rightDesc
@@ -853,6 +859,12 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // asks for a reorder the checker has no licence for. Fix is to
             // add `comm(...)` (or use a builtin body), not remove a disproved annotation.
             | FoldOmpNeedsLicense _ -> "BL4016"
+            // Own code, not BL4003's index-type bucket: the index type is
+            // well formed and the USE is servable -- it is the LENS, the one
+            // part of the annotation construction does not derive for itself,
+            // that the literal contradicts. The fix is to reconcile two
+            // spellings of one shape, not to stop using RaggedIdx.
+            | RaggedLensMismatch _ | RaggedLensNotStatic _ -> "BL4018"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"

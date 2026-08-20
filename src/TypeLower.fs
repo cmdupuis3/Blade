@@ -1438,3 +1438,70 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
                 else
                     Error (Other "halo<...>: offsets must be a flat int array [-1,0,1] or an array of per-axis int arrays [[-1,0,1],[0],[-1,0,1]] (no mixing, no empty axes)")
         | _ -> Error (Other "halo<...>: offsets must be a compile-time array of integer literals, e.g. [-1, 0, 1]")
+
+
+// ---------------------------------------------------------------------------
+// Closed-RaggedIdx lens resolution
+// ---------------------------------------------------------------------------
+
+/// The two ways a closed `RaggedIdx<lens>` can name its per-row lengths,
+/// split the way `resolveSparseKeysSource` splits SparseIdx's keys: a lens
+/// whose values the compiler can hold (`RlStatic`), and one that exists only
+/// once the program runs (`RlRuntime`).
+///
+/// Unlike SparseIdx the verdict is NOT stored in the IR. `IRRaggedLookup`'s
+/// payload has no consumer in CodeGen*/Interp -- ragged construction bakes
+/// its `_lens`/`_offsets` companions from the LITERAL's own nesting -- and
+/// putting the resolved values into the index record's `Extent` would change
+/// index-type IDENTITY: two separate lens bindings holding equal values would
+/// start unifying. So the resolution stays on demand, at the one seam that
+/// has something to check a lens against.
+type RaggedLensSource =
+    | RlStatic of int64 list
+    | RlRuntime
+
+/// Resolve the lengths reference of a closed `RaggedIdx<lens>` -- the IRExpr
+/// inside its `IRRaggedLookup` extent. `lowerExtentExpr` leaves that as the
+/// bare NAME (`IRParam (name, ...)`): an array-valued lens folds to no
+/// integer, so both of its constant-folding tiers are skipped.
+///
+/// Two static sources, and the second is the load-bearing one. A `let static`
+/// entry in `StaticValues` is the branch resolveSparseKeysSource's Ok side
+/// takes, but a lens is conventionally a plain `let` (every closed-lens site
+/// in the corpus spells it that way) and a plain `let` never reaches
+/// StaticValues -- so the checked binding's own value is consulted too.
+let resolveRaggedLensSource (env: TypeEnv) (lengths: IRExpr) : RaggedLensSource =
+    let allInts (xs: int64 option list) =
+        if not xs.IsEmpty && List.forall Option.isSome xs
+        then Some (xs |> List.map Option.get) else None
+    let ofStaticValue (sv: StaticEval.StaticValue) =
+        match sv with
+        | StaticEval.SVTuple comps ->
+            comps |> List.map (function StaticEval.SVInt v -> Some v | _ -> None) |> allInts
+        | _ -> None
+    // The checked value of a plain `let`. A negative entry resolves rather
+    // than falling through to RlRuntime: a negative row length is nonsense,
+    // and reporting it as "the lens disagrees with the literal" beats "the
+    // lens is not compile-time", which sends the reader after the wrong fix.
+    let ofTypedValue (te: TypedExpr) =
+        match te.Kind with
+        | TExprArrayLit (rows, _) ->
+            rows
+            |> List.map (fun e ->
+                match e.Kind with
+                | TExprLit (LitInt v) -> Some v
+                | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt v) }) -> Some (-v)
+                | _ -> None)
+            |> allInts
+        | _ -> None
+    match lengths with
+    // A synthesized (`__`-prefixed) or unresolved (`?`) name is not a lens
+    // anyone wrote: the inline and opaque ragged forms both land there.
+    | IRParam (name, _, _) when name <> "?" && not (name.StartsWith "__") ->
+        match Map.tryFind name env.StaticValues |> Option.bind ofStaticValue with
+        | Some vs -> RlStatic vs
+        | None ->
+            match lookupVar name env |> Option.bind (fun vi -> vi.TypedValue) |> Option.bind ofTypedValue with
+            | Some vs -> RlStatic vs
+            | None -> RlRuntime
+    | _ -> RlRuntime

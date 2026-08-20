@@ -282,6 +282,13 @@ module Codes =
             // one that never carried it. Warning, on BL4001's dropped-`omp`
             // precedent -- the program is correct, just not the one asked for.
             "BL4017", "symmetry clause licenses nothing here"
+            // BL4018: a ragged array LITERAL whose row lengths disagree with
+            // the lens its closed `RaggedIdx<lens>` annotation names -- or
+            // whose lens is not a compile-time value at all. Ragged
+            // construction bakes its lens/offsets from the literal's own
+            // nesting and reads the annotation's lens nowhere, so both cases
+            // used to be accepted and then ignored.
+            "BL4018", "ragged lens contradicts the literal"
             // BL5xxx: elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"

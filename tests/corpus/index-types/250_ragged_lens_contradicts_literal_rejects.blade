@@ -1,0 +1,17 @@
+// TEST: Ragged Lens Contradicts Literal (rejects)
+// ERROR: BL4018
+// A closed `RaggedIdx<lens>` names row lengths the literal does not have.
+// Nothing derives the shape from the lens: construction bakes the `_lens`
+// and `_offsets` companions from the literal's OWN nesting, and
+// `IRRaggedLookup`'s payload -- the lens reference -- is read by no codegen
+// or interpreter site at all. So this pair used to compile clean and run to
+// the literal's [3, 2, 1] while the annotation said [1, 2, 3]: the
+// annotation was not wrong, it was inert.
+//
+// The reversed lens is deliberate. It sums to the same 6 leaf values, so
+// the leaf-count check the ragged emitter already ran cannot see it -- only
+// a per-ROW comparison can, which is what BL4018 does.
+let lens: Array<Int64 like Idx<3>> = [1, 2, 3]
+let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let row_sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
+// The refusal names both shapes; 019 is the same program with a lens that agrees.
