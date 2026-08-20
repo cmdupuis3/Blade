@@ -497,12 +497,41 @@ type private Grp =
     | GDense of int64
     | GSym of int * int64
     | GAnti of int * int64
+    /// A RAGGED PAIR: ONE group spanning TWO axes -- the static outer row
+    /// axis and the per-row inner axis -- whose row base is a TABLE LOOKUP
+    /// (offsets[i]) instead of a closed form. The static/dynamic split the
+    /// IR already makes (IxKRaggedInline literals bake their lens; a ragged
+    /// function parameter's lens arrive at run time) lives in the TABLE, so
+    /// addressing and loop shapes are one code path for both lanes.
+    | GRagged of rows: int64 * table: RaggedTable
+    /// RANK 1 with an OPERAND extent: the residual of peeling one row off a
+    /// ragged group. The operand is a literal for a static-lane row peeled at
+    /// a literal index, a register otherwise -- either way `emitCountedLoopTo`
+    /// takes it as-is.
+    | GDynDense of len: string
 
-let private grpRank = function GDense _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r
-let private grpExtent = function GDense n -> n | GSym (_, n) -> n | GAnti (_, n) -> n
+/// Where a ragged group's offsets live. rows+1 entries; offsets[rows] is the
+/// total cell count. The STATIC lane carries the values (folded straight into
+/// addressing at literal indices) plus a `private unnamed_addr constant`
+/// global for loop-variable indices -- `constant` proves no store can touch
+/// it, which lets consecutive rows share one load. The DYNAMIC lane holds a
+/// runtime `ptr` (a ragged parameter's sidecar argument) with IDENTICAL
+/// addressing -- the two lanes differ in one operand token.
+and private RaggedTable =
+    | RtStatic of offsets: int64[] * tableSym: string
+    | RtDynamic of tablePtr: string
+
+let private grpRank = function GDense _ | GDynDense _ -> 1 | GSym (r, _) -> r | GAnti (r, _) -> r | GRagged _ -> 2
+let private grpExtent =
+    function
+    | GDense n -> n | GSym (_, n) -> n | GAnti (_, n) -> n
+    | GRagged _ -> refuse "a ragged index group where a single static extent is required"
+    | GDynDense _ -> refuse "a runtime-extent axis where a static extent is required"
 /// Antisymmetric groups are STRICT (i < j) and store no diagonal.
 let private grpStrict = function GAnti _ -> true | _ -> false
-let private grpCompact = function GDense _ -> false | _ -> true
+let private grpCompact = function GSym _ | GAnti _ -> true | _ -> false
+let private isRaggedGrp = function GRagged _ -> true | _ -> false
+let private hasRagged (gs: Grp list) = gs |> List.exists isRaggedGrp
 
 /// How many AXES a group spans, as extents (a rank-2 group spans two).
 let private grpAxes (g: Grp) : int64 list = List.replicate (grpRank g) (grpExtent g)
@@ -515,6 +544,10 @@ let private grpCells (g: Grp) : int64 =
     | GDense n -> n
     | GSym (r, n) -> Blade.SimplexBlocksCore.binom (n + int64 r - 1L) r
     | GAnti (r, n) -> Blade.SimplexBlocksCore.binom n r
+    // offsets[rows] IS the total cell count -- the static lane's one number.
+    | GRagged (rows, RtStatic (offsets, _)) -> offsets.[int rows]
+    | GRagged (_, RtDynamic _) -> refuse "a dynamic ragged shape where a static cell count is required"
+    | GDynDense _ -> refuse "a runtime-extent axis where a static cell count is required"
 
 let private shapeCells (gs: Grp list) : int64 = gs |> List.fold (fun acc g -> acc * grpCells g) 1L
 
@@ -568,6 +601,9 @@ type private ArrVal =
     /// its extent twice. Length = the array's rank, which is what every
     /// consumer that counts index slots means by rank.
     member this.Extents = axisExtents this.Groups
+    /// The number of index SLOTS, computed without touching extents -- safe
+    /// on ragged shapes, whose extent list has no static answer.
+    member this.Rank = this.Groups |> List.sumBy grpRank
 
 and private ArrSrc =
     | APool of string
@@ -1104,6 +1140,24 @@ let private requireArray (what: string) (t: IRType) : Sc * Grp list =
         refuse (sprintf "%s has type %s -- the llvm lane handles arrays over static Idx<n> axes and rank-2 Sym/Antisym groups only"
                     what (Blade.IRPrint.ppIRType t))
 
+/// The RAGGED-PAIR array type: a static plain outer axis over a ragged-family
+/// (or DepIdx) inner. Deliberately NOT folded into arrayShapeOf: every
+/// existing dense/compact site keeps refusing ragged by name, and only the
+/// sites that grew a ragged story consult this. Answers (element, rows).
+let private raggedArrShape (t: IRType) : (Sc * int64) option =
+    match Blade.IR.stripUnits t with
+    | ArrayElem arr ->
+        (match arr.IndexTypes with
+         | [ outer; inner ]
+             when (outer.IxKind = IxKPlain || outer.IxKind = IxKDepOuter)
+                  && outer.Symmetry = SymNone && outer.Rank = 1
+                  && (isRaggedFamilyKind inner.IxKind || inner.IxKind = IxKDepInner) ->
+             (match scalarTyOf arr.ElemType, Blade.IRPrint.tryEvalIntIR outer.Extent with
+              | Some e, Some n when e <> ScVoid -> Some (e, n)
+              | _ -> None)
+         | _ -> None)
+    | _ -> None
+
 /// `for (i = 0; i < n; i++)`, with the counter in an entry-block slot so
 /// mem2reg turns it back into the induction variable it is. `body` may emit
 /// its own control flow: the increment lands in whatever block is current
@@ -1182,6 +1236,43 @@ let private tryLitI64 (s: string) : int64 option =
     | true, v -> Some v
     | _ -> None
 
+/// Emit a STATIC ragged group's offsets table as a module constant and answer
+/// its symbol. `constant`, never `global`: LLVM then knows no store anywhere
+/// can touch it, so consecutive rows share one load (the previous row's hi IS
+/// this row's lo) and a small outer loop can fold the loads away entirely.
+let private raggedTableGlobal (c: Ctx) (offsets: int64[]) : string =
+    let name = sprintf "@.blade.roff.%d" (nextN c)
+    let body = offsets |> Array.map (sprintf "i64 %d") |> String.concat ", "
+    c.Globals.Add(sprintf "%s = private unnamed_addr constant [%d x i64] [%s], align 64"
+                      name offsets.Length body)
+    name
+
+/// offsets[i] as an operand: folded to a literal when the table and the index
+/// are both compile-time; one gep + load otherwise -- the SAME two lines for
+/// the static global and the dynamic pointer.
+let private raggedOffAt (c: Ctx) (table: RaggedTable) (i: string) : string =
+    match table, tryLitI64 i with
+    | RtStatic (offsets, _), Some k when k >= 0L && k < int64 offsets.Length ->
+        string offsets.[int k]
+    | _ ->
+        let sym = match table with RtStatic (_, s) -> s | RtDynamic p -> p
+        let g = freshReg c
+        ln c (sprintf "%s = getelementptr inbounds i64, ptr %s, i64 %s" g sym i)
+        let v = freshReg c
+        ln c (sprintf "%s = load i64, ptr %s" v g)
+        v
+
+/// The length of row i: offsets[i+1] - offsets[i], folded when it can be.
+let private raggedLenAt (c: Ctx) (table: RaggedTable) (i: string) : string =
+    match table, tryLitI64 i with
+    | RtStatic (offsets, _), Some k when k >= 0L && k + 1L < int64 offsets.Length ->
+        string (offsets.[int k + 1] - offsets.[int k])
+    | _ ->
+        let ip1 = i64Bin c "add" i "1"
+        let hi = raggedOffAt c table ip1
+        let lo = raggedOffAt c table i
+        i64Bin c "sub" hi lo
+
 /// `C(x, m)` for a RUNTIME x and a compile-time m: the falling factorial
 /// x(x-1)...(x-m+1) over the constant m!. Exact in integers -- a product of m
 /// consecutive integers is always divisible by m! -- so this needs no rounding
@@ -1246,6 +1337,12 @@ let private grpOffset (c: Ctx) (g: Grp) (idxs: Val list) : string =
     match g, idxs with
     | GDense _, [ i ] -> i.Reg
     | GDense _, _ -> refuse "a dense axis indexed by more than one coordinate"
+    | GDynDense _, [ i ] -> i.Reg
+    | GDynDense _, _ -> refuse "a runtime-extent axis indexed by more than one coordinate"
+    // A ragged cell is offsets[row] + element: one table operand and one add,
+    // folded outright when the row is a literal against a static table.
+    | GRagged (_, table), [ i; j ] -> i64Add c (raggedOffAt c table i.Reg) j.Reg
+    | GRagged _, _ -> refuse "a ragged group addressed by other than (row, element) coordinates"
     | _ ->
         let r = grpRank g
         let n = grpExtent g
@@ -1310,14 +1407,15 @@ let private storeCell (c: Ctx) (elem: Sc) (ptr: string) (v: Val) : unit =
         ln c (sprintf "store i8 %s, ptr %s" w ptr)
     | _ -> ln c (sprintf "store %s %s, ptr %s" (poolTy elem) v.Reg ptr)
 
-/// A zeroed pool of `n` cells. calloc semantics are load-bearing, not
-/// convenient: a recursive array reads past its built prefix and the language
-/// promises those cells are zero.
-let private allocPool (c: Ctx) (elem: Sc) (n: int64) : string =
+/// A zeroed pool of `n` cells -- `n` an OPERAND, so a runtime-sized ragged
+/// pool and a literal-sized dense one are the same call. calloc semantics are
+/// load-bearing, not convenient: a recursive array reads past its built
+/// prefix and the language promises those cells are zero.
+let private allocPool (c: Ctx) (elem: Sc) (n: string) : string =
     needShim c "blade_alloc_cells"
     let p = freshReg c
     ln c (renderCall { Dest = Some p; RetTy = ScStr; Callee = "@blade_alloc_cells"
-                       Args = [ ScI64, string n; ScI64, string (poolElemBytes elem) ] })
+                       Args = [ ScI64, n; ScI64, string (poolElemBytes elem) ] })
     // Inside a tracking scope (a function body, an IRForRange trip), record
     // the pool so the scope's exit can free it -- through a slot, so a pool
     // allocated on one branch frees without a dominance argument.
@@ -1350,6 +1448,23 @@ let private hasFlatRead (a: ArrVal) : bool =
     match a.Src with
     | APool _ | AVirtFlat _ -> true
     | AVirt _ -> false
+
+/// Total stored cells of a shape, as an OPERAND: a literal for every static
+/// shape (including a static-table ragged pair, whose offsets[rows] folds),
+/// one load for a dynamic-table ragged pair.
+let private shapeCellsOp (c: Ctx) (gs: Grp list) : string =
+    match gs with
+    | [ GRagged (rows, table) ] -> raggedOffAt c table (string rows)
+    | _ -> string (shapeCells gs)
+
+/// The single extent of a rank-1 shape, as an OPERAND: a literal for a dense
+/// axis, the carried length operand for a peeled ragged row. Loops take it
+/// through `emitCountedLoopTo`, which is what makes the two the same shape.
+let private soleExtentOp (a: ArrVal) : string =
+    match a.Groups with
+    | [ GDense n ] -> string n
+    | [ GDynDense len ] -> len
+    | _ -> refuse "a rank-1 operand with no single extent"
 
 /// Read at ABSOLUTE coordinates -- the ones a user writes in `S(2)(1)`. For a
 /// dense shape this IS `readCell` (identical emission, so the dense goldens do
@@ -1497,6 +1612,26 @@ let private splitGroupsAt (k: int) (groups: Grp list) : Grp list * Grp list =
 /// which is the whole reason the skeleton is not emitted. On a producer it is
 /// index-list concatenation, with no materialization anywhere.
 let private rowView (c: Ctx) (a: ArrVal) (idxs: Val list) : ArrVal =
+    // Peeling ONE index off a ragged pair yields the row: a rank-1 view whose
+    // extent is an OPERAND (offsets[i+1] - offsets[i]) rather than a static
+    // number. On a pool that is one GEP, exactly like the dense case; on the
+    // cell-congruent producer it is an ordinal rebase. The generic path below
+    // must never see this shape -- half of a ragged group is not a static
+    // shape, and splitGroupsAt says so.
+    match a.Groups, idxs with
+    | [ GRagged (_, table) ], [ i ] ->
+        let off = raggedOffAt c table i.Reg
+        let len = raggedLenAt c table i.Reg
+        (match a.Src with
+         | APool p -> { a with Groups = [ GDynDense len ]; Src = APool (gepCell c a.Elem p off) }
+         | AVirtFlat f ->
+             { a with Groups = [ GDynDense len ]
+                      Src = AVirt (fun c2 tail ->
+                                match tail with
+                                | [ j ] -> f c2 { Reg = i64Add c2 off j.Reg; Ty = ScI64 }
+                                | _ -> refuse "a ragged row read with more than one coordinate") }
+         | AVirt _ -> refuse "a row view of a coordinate-bearing ragged producer")
+    | _ ->
     let k = List.length idxs
     let (lead, rest) = splitGroupsAt k a.Groups
     match a.Src with
@@ -1824,7 +1959,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | IRIndex (arrExpr, idxExprs, _) ->
              let a = materializeExpr c arrExpr
              let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
-             if List.length idxs <> List.length a.Extents then
+             if List.length idxs <> a.Rank then
                  refuse "an element write through a partial index"
              // A write into COMPACT storage is refused, not canonicalized: a
              // store through (j, i) would silently land on the canonical cell
@@ -1892,25 +2027,39 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
                 emitArr c arrExpr
             | _ -> emitArr c arrExpr
         let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
-        if List.length idxs <> List.length a.Extents then
+        if List.length idxs <> a.Rank then
             refuse (sprintf "a partial index (%d of %d) in value position"
-                        (List.length idxs) (List.length a.Extents))
+                        (List.length idxs) a.Rank)
         // THE ONE PLACE ABSOLUTE COORDINATES ENTER. Everything else in this
         // file works in storage coordinates; a subscript the user wrote is
         // absolute and may name a mirror cell, so it canonicalizes here.
         canonRead c a idxs
 
     | IRExtent (arrExpr, dim) ->
-        // extents() is a CONSTANT in this lane: static extents are the v1
-        // boundary, so there is no runtime extents table to read from.
-        let (_, extents) = arrayShapeOfExpr c arrExpr
-        if dim < 0 || dim >= List.length extents then
-            refuse (sprintf "extents(_, %d) outside the array's rank" dim)
-        { Reg = string extents.[dim]; Ty = ScI64 }
+        // extents() of a STATIC shape is a constant. The one runtime answer is
+        // a peeled ragged row, whose length is the operand its view carries.
+        (match arrayShapeOf (typeOf arrExpr) with
+         | Some (_, groups) ->
+             let extents = axisExtents groups
+             if dim < 0 || dim >= List.length extents then
+                 refuse (sprintf "extents(_, %d) outside the array's rank" dim)
+             { Reg = string extents.[dim]; Ty = ScI64 }
+         | None ->
+             let a = emitArr c arrExpr
+             (match a.Groups, dim with
+              | [ GDynDense len ], 0 -> { Reg = len; Ty = ScI64 }
+              | groups, d ->
+                  let extents = axisExtents groups
+                  if d < 0 || d >= List.length extents then
+                      refuse (sprintf "extents(_, %d) outside the array's rank" d)
+                  { Reg = string extents.[d]; Ty = ScI64 }))
 
     | IRRank arrExpr ->
-        let (_, extents) = arrayShapeOfExpr c arrExpr
-        { Reg = string (List.length extents); Ty = ScI64 }
+        (match arrayShapeOf (typeOf arrExpr) with
+         | Some (_, groups) -> { Reg = string (groups |> List.sumBy grpRank); Ty = ScI64 }
+         | None ->
+             let a = emitArr c arrExpr
+             { Reg = string a.Rank; Ty = ScI64 })
 
     | IRReduce (arrExpr, kernelExpr, initExpr) -> emitReduce c arrExpr kernelExpr initExpr
 
@@ -2117,7 +2266,7 @@ and private emitProdSum (c: Ctx) (args: IRExpr list) : Val =
                 emitArr c a
             | _ -> emitArr c a)
     let head = List.head ops
-    if List.length head.Extents <> 1 then refuse "prodsum over a rank-2+ operand"
+    if head.Rank <> 1 then refuse "prodsum over a rank-2+ operand"
     let ty = if head.Elem = ScBool then ScI64 else head.Elem
     let acc = allocaOf c (llTy ty)
     // The OUTER accumulation is `+`, which is licensed by construction: the
@@ -2129,7 +2278,7 @@ and private emitProdSum (c: Ctx) (args: IRExpr list) : Val =
     let accFlags =
         withFoldFmf c (Blade.CodeGenState.fpReassocEnabled ()) (fun () -> fmfFor c ty)
     ln c (sprintf "store %s %s, ptr %s" (llTy ty) (match ty with ScF64 -> f64Const 0.0 | _ -> "0") acc)
-    emitCountedLoop c head.Extents.[0] (fun t ->
+    emitCountedLoopTo c (soleExtentOp head) (fun t ->
         let iv = { Reg = t; Ty = ScI64 }
         let mutable prod = coerce c ty (readCell c head [ iv ])
         for o in List.tail ops do
@@ -2399,6 +2548,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
                 |> List.map (fun (p, a) ->
                     match arrayShapeOf p.Type with
                     | Some _ -> KArray (emitArr c a)
+                    | None when (raggedArrShape p.Type).IsSome -> KArray (emitArr c a)
                     | None -> KScalar (emitExpr c a))
             applyKernel c callable kargs
         finally c.Inlining.Remove callable.Id |> ignore
@@ -2413,19 +2563,33 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
     // optimization -- a producer has no address for the callee to write to.
     let argVals =
         List.zip callable.Params args
-        |> List.map (fun (p, a) ->
+        |> List.collect (fun (p, a) ->
             match arrayShapeOf p.Type with
             | Some (elem, groups) ->
                 let av = materializeExpr c a
                 if av.Elem <> elem || av.Groups <> groups then
                     refuse (sprintf "argument shape disagrees with parameter '%s' of '%s'" p.Name callable.Name)
                 (match av.Src with
-                 | APool ptr -> (ScStr, ptr)
+                 | APool ptr -> [ (ScStr, ptr) ]
                  | _ -> refuse "an unmaterialized array argument")
             | None ->
-                let sc = requireScalar (sprintf "parameter '%s' of '%s'" p.Name callable.Name) p.Type
-                let v = coerce c sc (emitExpr c a)
-                (sc, v.Reg))
+                match raggedArrShape p.Type with
+                | Some (elem, rows) ->
+                    // A ragged pair crosses as TWO arguments: the pool and its
+                    // offsets table. A static table's global symbol IS a ptr
+                    // operand; a forwarded parameter's table is a register.
+                    let av = materializeExpr c a
+                    (match av.Groups, av.Src with
+                     | [ GRagged (r2, table) ], APool ptr when av.Elem = elem && r2 = rows ->
+                         let tp = match table with RtStatic (_, sym) -> sym | RtDynamic reg -> reg
+                         [ (ScStr, ptr); (ScStr, tp) ]
+                     | _ ->
+                         refuse (sprintf "argument shape disagrees with ragged parameter '%s' of '%s'"
+                                     p.Name callable.Name))
+                | None ->
+                    let sc = requireScalar (sprintf "parameter '%s' of '%s'" p.Name callable.Name) p.Type
+                    let v = coerce c sc (emitExpr c a)
+                    [ (sc, v.Reg) ])
     match arrayShapeOf callable.RetType with
     | Some _ ->
         let dest = freshReg c
@@ -2522,9 +2686,9 @@ and private copyArr (c: Ctx) (a: ArrVal) : ArrVal =
     match a.Src with
     | AVirt _ | AVirtFlat _ -> a
     | APool src ->
-        let total = shapeCells a.Groups
+        let total = shapeCellsOp c a.Groups
         let dst = allocPool c a.Elem total
-        emitCountedLoop c total (fun i ->
+        emitCountedLoopTo c total (fun i ->
             let v = loadCell c a.Elem (gepCell c a.Elem src i)
             storeCell c a.Elem (gepCell c a.Elem dst i) v)
         { a with Src = APool dst }
@@ -2619,7 +2783,7 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
     | IRIndex (arrExpr, idxExprs, _) ->
         let a = emitArr c arrExpr
         let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
-        if List.length idxs >= List.length a.Extents then
+        if List.length idxs >= a.Rank then
             refuse "a full index where an array was expected"
         rowView c a idxs
 
@@ -2725,9 +2889,36 @@ and private staticExtentOf (ix: IRIndexType) (what: string) : int64 =
     | Some n -> n
     | None -> refuse (sprintf "a %s over a runtime extent" what)
 
+/// A RAGGED literal. Row lengths come from the LITERAL'S OWN STRUCTURE,
+/// exactly as the C++ lane's computeRaggedRowLengths reads them -- the closed
+/// annotation's lens binding is decorative in both lanes today. One flat pool
+/// (no row table), one constant offsets global.
+and private emitRaggedLit (c: Ctx) (elems: IRExpr list) (elem: Sc) (rows: int64) : ArrVal =
+    if int64 (List.length elems) <> rows then
+        refuse (sprintf "a ragged literal with %d rows for a declared outer extent of %d"
+                    (List.length elems) rows)
+    let rowElems =
+        elems |> List.map (fun e ->
+            match e with
+            | IRArrayLit (inner, _) -> inner
+            | _ -> refuse "a ragged literal whose rows are not row literals")
+    let offsets = Array.zeroCreate (List.length rowElems + 1)
+    rowElems |> List.iteri (fun i r -> offsets.[i + 1] <- offsets.[i] + int64 (List.length r))
+    let total = offsets.[List.length rowElems]
+    let sym = raggedTableGlobal c offsets
+    let ptr = allocPool c elem (string total)
+    rowElems |> List.concat |> List.iteri (fun i x ->
+        let v = coerce c elem (emitExpr c x)
+        storeCell c elem (gepCell c elem ptr (string i)) v)
+    { Elem = elem; Groups = [ GRagged (rows, RtStatic (offsets, sym)) ]
+      Src = APool ptr; RowOpBytes = 0L }
+
 /// A literal array. The IR nests one `IRArrayLit` per rank level; the pool is
 /// its row-major flattening, which is the declared shape's traversal order.
 and private emitArrayLit (c: Ctx) (elems: IRExpr list) (arrType: IRArrayType) : ArrVal =
+    match raggedArrShape (Blade.IR.mkArrayLike arrType) with
+    | Some (elem, rows) -> emitRaggedLit c elems elem rows
+    | None ->
     let (elem, groups) = requireArray "an array literal" (Blade.IR.mkArrayLike arrType)
     let rec flatten (es: IRExpr list) : IRExpr list =
         es |> List.collect (fun x ->
@@ -2738,7 +2929,7 @@ and private emitArrayLit (c: Ctx) (elems: IRExpr list) (arrType: IRArrayType) : 
     let total = shapeCells groups
     if int64 flat.Length <> total then
         refuse (sprintf "an array literal with %d values for a shape of %d cells" flat.Length total)
-    let ptr = allocPool c elem total
+    let ptr = allocPool c elem (string total)
     flat |> List.iteri (fun i x ->
         let v = coerce c elem (emitExpr c x)
         storeCell c elem (gepCell c elem ptr (string i)) v)
@@ -2760,22 +2951,37 @@ and private materialize (c: Ctx) (a: ArrVal) : ArrVal =
     match a.Src with
     | APool _ -> a
     | AVirtFlat f ->
-        let total = shapeCells a.Groups
+        let total = shapeCellsOp c a.Groups
         let ptr = allocPool c a.Elem total
-        emitCountedLoop c total (fun k ->
+        emitCountedLoopTo c total (fun k ->
             let v = coerce c a.Elem (f c { Reg = k; Ty = ScI64 })
             storeCell c a.Elem (gepCell c a.Elem ptr k) v)
         { a with Src = APool ptr }
+    | AVirt _ when hasRagged a.Groups ->
+        // A coordinate producer over the ragged pair: the nest is the ragged
+        // walk itself -- outer rows, inner bound off the table, pool offset
+        // one add past the row base.
+        (match a.Groups with
+         | [ GRagged (rows, table) ] ->
+             let total = shapeCellsOp c a.Groups
+             let ptr = allocPool c a.Elem total
+             emitCountedLoop c rows (fun g ->
+                 let off = raggedOffAt c table g
+                 emitCountedLoopTo c (raggedLenAt c table g) (fun j ->
+                     let v = coerce c a.Elem (readCell c a [ { Reg = g; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ])
+                     storeCell c a.Elem (gepCell c a.Elem ptr (i64Add c off j)) v))
+             { a with Src = APool ptr }
+         | _ -> refuse "a coordinate producer over a mixed ragged shape")
     | AVirt _ when isDenseShape a.Groups ->
         let total = shapeCells a.Groups
-        let ptr = allocPool c a.Elem total
+        let ptr = allocPool c a.Elem (string total)
         emitNest c a.Extents (fun idxs ->
             let v = coerce c a.Elem (readCell c a idxs)
             storeCell c a.Elem (gepCell c a.Elem ptr (storageOffset c a.Groups idxs)) v)
         { a with Src = APool ptr }
     | AVirt _ ->
         let total = shapeCells a.Groups
-        let ptr = allocPool c a.Elem total
+        let ptr = allocPool c a.Elem (string total)
         (match soleSimplexR a.Groups with
          | Some (r, n, strict) ->
              // A MAP's cells are independent, so the brick order is free (no
@@ -2825,17 +3031,39 @@ and private materializeExpr (c: Ctx) (e: IRExpr) : ArrVal =
 /// ever asks for a scalar out of `k2` (corpus loops, "Deferred Binding Forced
 /// On Read"). Marking is enough here: a producer prints by re-running, so the
 /// llvm lane needs the PRINTABILITY fact, not a second pool.
+///
+/// A LOOP BODY IS PRUNED, and that boundary is the C++ lane's `ctx.Indent = 0`
+/// guard in `forceDeferredArrayInput`: a producer materialized inside a loop
+/// body becomes a per-iteration LOCAL there, block-scoped and deliberately
+/// left out of the printable set, so a name this value merely MENTIONS under a
+/// loop is no evidence that the binding ends the program materialized. A
+/// `let rec`'s whole recursion is one such body, which is how a producer forced
+/// per step (`let f = dn |> compute` inside a step block, corpus memfree/007)
+/// used to reach this list through the recursion above -- `traj` names it, so
+/// forcing `traj` printed `dn`, a line the C++ lane does not emit.
+///
+/// Pruning loses nothing, because the reads that DO print from a loop body
+/// never travel this edge: the C++ lane hoists them out of the loop with
+/// `forceDeferredPositionalReads` (at the enclosing indent, hence printable)
+/// and `forceLoopBodyProducers` mirrors that hoist by calling this function
+/// directly on each one.
 and private markForced (c: Ctx) (id: IRId) : unit =
     if c.Forced.Add id then
         match Map.tryFind id c.BindingValues with
         | None -> ()
         | Some v ->
-            iterIRExpr
-                (fun n ->
-                    match n with
+            // `iterIRExpr` with one subtree withheld. Recursion is the shared
+            // `ExprShape` fold, exactly as there, so no variant can be skipped
+            // by accident -- only the loop body named here.
+            let rec walk (e: IRExpr) =
+                match e with
+                | IRForRange (_, lo, hi, _) -> walk lo; walk hi
+                | ExprShape (children, _) ->
+                    children |> List.iter walk
+                    match e with
                     | IRVar (src, _) when src <> id && c.ArrSlots.ContainsKey src -> markForced c src
-                    | _ -> ())
-                v
+                    | _ -> ()
+            walk v
 
 // ---------------------------------------------------------------------------
 // Kernels and loop nests
@@ -2889,6 +3117,20 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
         match resolveKernel info.Kernel with
         | Some rk -> rk
         | None -> refuse "an apply-combinator whose kernel does not resolve to a callable"
+    // A RAGGED operand or output takes its own peel BEFORE the shared loop
+    // builder runs: buildLoopNestCodeGen has no ragged story (the C++ lane
+    // routes these through tryRaggedPeel for the same reason), and an
+    // exception from a shared layer here would escape tryEmitProgram.
+    let typeHasRaggedRow (t: IRType) =
+        match Blade.IR.stripUnits t with
+        | ArrayElem arr ->
+            arr.IndexTypes |> List.exists (fun ix ->
+                isRaggedRowKind ix.IxKind || ix.IxKind = IxKGroupOuter)
+        | _ -> false
+    if info.Arrays |> List.exists (fun a -> typeHasRaggedRow (typeOf a))
+       || typeHasRaggedRow info.OutputType then
+        applyRaggedPeel c info rk.Callable
+    else
     // A WREATH (OrbIdx depth >= 2) pool is refused BEFORE the shared loop
     // builder runs, not after: `buildLoopNestCodeGen` reaches `buildSymmVec`,
     // which `failwith`s on a wreath class rather than returning. A refusal
@@ -3155,6 +3397,69 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
                     acc <- { Reg = d; Ty = elem }
                 acc) }
 
+/// The RAGGED PEEL: `method_for(r) <@> kernel` over a ragged pair, dispatched
+/// on the OUTPUT type exactly as the C++ lane's tryRaggedPeel dispatches
+/// (CodeGenCuda.fs): an output that KEEPS the ragged inner axis is the
+/// shape-preserving ELEMENTWISE map (the kernel sees one scalar cell, and the
+/// output shares the operand's offsets, so the whole thing is cell-congruent
+/// -- the flat path, zero coordinate arithmetic); an output that DROPS it is
+/// the CONSUMING form (the kernel sees the row view, answers one scalar per
+/// row, and the output is a plain dense vector). Both stay producers;
+/// `|> compute` materializes as usual.
+and private applyRaggedPeel (c: Ctx) (info: ApplyInfo) (cl: IRCallable) : ArrVal =
+    let hasGroupKind (t: IRType) =
+        match Blade.IR.stripUnits t with
+        | ArrayElem arr ->
+            arr.IndexTypes |> List.exists (fun ix ->
+                ix.IxKind = IxKGroupOuter || ix.IxKind = IxKGroupMember)
+        | _ -> false
+    if hasGroupKind info.OutputType
+       || (info.Arrays |> List.exists (fun a -> hasGroupKind (typeOf a))) then
+        refuse "a group_by result in a combinator (grouped shapes are not in the llvm lane yet)"
+    match info.Arrays, cl.Params with
+    | [ arrExpr ], [ _ ] ->
+        // The operand rule is emitReduce's three-way rule: a multi-read name
+        // forces so readers share one pool; a sole-read module binding is
+        // consumed but marked forced so it still prints; anything else is
+        // consumed where it stands.
+        let a =
+            match arrExpr with
+            | IRVar (id, _) when not (c.Facts.ReadOnce.Contains id) -> materializeExpr c arrExpr
+            | IRVar (id, _) when c.BindingValues.ContainsKey id ->
+                markForced c id
+                emitArr c arrExpr
+            | _ -> emitArr c arrExpr
+        let rows =
+            match a.Groups with
+            | [ GRagged (rows, _) ] -> rows
+            | _ -> refuse "a ragged peel whose operand is not a sole ragged pair"
+        let outputRagged =
+            match Blade.IR.stripUnits info.OutputType with
+            | ArrayElem arr -> arr.IndexTypes |> List.exists (fun ix -> isRaggedRowKind ix.IxKind)
+            | _ -> false
+        let elem =
+            match scalarTyOf cl.RetType with
+            | Some s when s <> ScVoid -> s
+            | _ ->
+                match Blade.IR.stripUnits info.OutputType with
+                | ArrayElem arr -> requireScalar "a ragged combinator's element" arr.ElemType
+                | t -> requireScalar "a ragged combinator's result" t
+        if outputRagged then
+            if not (hasFlatRead a) then
+                refuse "an elementwise ragged map over a coordinate-bearing producer"
+            { Elem = elem; Groups = a.Groups; RowOpBytes = 0L
+              Src = AVirtFlat (fun c2 k ->
+                        coerce c2 elem (applyKernel c2 cl [ KScalar (readFlat c2 a k) ])) }
+        else
+            { Elem = elem; Groups = [ GDense rows ]; RowOpBytes = 0L
+              Src = AVirt (fun c2 idxs ->
+                        match idxs with
+                        | [ g ] -> coerce c2 elem (applyKernel c2 cl [ KArray (rowView c2 a [ g ]) ])
+                        | _ -> refuse "a ragged peel read at other than its row coordinate") }
+    | arrays, ps ->
+        refuse (sprintf "a ragged combinator over %d arrays and %d kernel parameters -- mixing ragged operands with other arrays or multi-parameter kernels is not supported"
+                    (List.length arrays) (List.length ps))
+
 /// `object_for(k)` applied directly to arrays -- the shape `A + B`, `A * 2.0`
 /// and `A [+] B` lower to (Lowering.lowerTypedBinOp). InputRanks says which:
 /// `[0; 0]` co-iterates, `[1; 1]` is the outer product, `[0]` is the
@@ -3185,7 +3490,8 @@ and private objectForApply (c: Ctx) (objInfo: ObjectForInfo) (args: IRExpr list)
     // producer it always had, so dense emission does not move.
     let congruentFlat (parts: ArrVal list) =
         parts |> List.forall hasFlatRead
-        && (parts |> List.exists (fun p -> p.Groups |> List.exists grpCompact))
+        && (parts |> List.exists (fun p ->
+                p.Groups |> List.exists (fun g -> grpCompact g || isRaggedGrp g)))
     match objInfo.InputRanks, ops with
     | [ 0; 0 ], [ a; b ] ->
         if a.Groups <> b.Groups then
@@ -3201,9 +3507,9 @@ and private objectForApply (c: Ctx) (objInfo: ObjectForInfo) (args: IRExpr list)
           Src = AVirt (fun c2 idxs ->
                     coerce c2 elem (applyKernel c2 cl [ KScalar (readCell c2 a idxs); KScalar (readCell c2 b idxs) ])) }
     | [ 1; 1 ], [ a; b ] ->
-        let ra = List.length a.Extents
-        if (a.Groups @ b.Groups) |> List.exists grpCompact then
-            refuse "an outer product over compact storage"
+        if (a.Groups @ b.Groups) |> List.exists (fun g -> grpCompact g || isRaggedGrp g) then
+            refuse "an outer product over compact or ragged storage"
+        let ra = a.Rank
         { Elem = elem; Groups = a.Groups @ b.Groups
           RowOpBytes = 0L
           Src = AVirt (fun c2 idxs ->
@@ -3281,9 +3587,13 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         | Some s when s <> ScVoid -> s
         | _ -> a.Elem
     if a.Groups |> List.exists grpCompact then emitCompactFold c a cl accTy initExpr else
-    if List.length a.Extents <> 1 then
+    if a.Rank <> 1 then
         refuse "reduce over a rank-2+ array (partial folds are not in the llvm lane yet)"
-    let n = a.Extents.[0]
+    // The bound is an OPERAND: a literal for a static axis (byte-identical to
+    // the counted loop this always was), the carried length for a peeled
+    // ragged row. An unseeded fold over an empty row is the same UB it is in
+    // the C++ lane; only the statically-provable case refuses.
+    let bound = soleExtentOp a
     let acc = allocaOf c (llTy accTy)
     let start =
         match initExpr with
@@ -3292,12 +3602,20 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
             ln c (sprintf "store %s %s, ptr %s" (llTy accTy) v.Reg acc)
             0L
         | None ->
-            if n < 1L then refuse "reduce over a statically empty array"
+            (match tryLitI64 bound with
+             | Some n when n < 1L -> refuse "reduce over a statically empty array"
+             | _ -> ())
             let v0 = coerce c accTy (readCell c a [ { Reg = "0"; Ty = ScI64 } ])
             ln c (sprintf "store %s %s, ptr %s" (llTy accTy) v0.Reg acc)
             1L
     let licensed = foldFmfDecorable cl
-    emitCountedLoop c (n - start) (fun k ->
+    let trips =
+        if start = 0L then bound
+        else
+            match tryLitI64 bound with
+            | Some n -> string (n - start)
+            | None -> i64Bin c "sub" bound (string start)
+    emitCountedLoopTo c trips (fun k ->
         let i = addI64 c { Reg = k; Ty = ScI64 } { Reg = string start; Ty = ScI64 }
         let cur = loadSlot c acc accTy
         // The cell read is OUTSIDE the licensed scope on purpose: on a deferred
@@ -3550,6 +3868,16 @@ and private emitArrCall (c: Ctx) (e: IRExpr) : ArrVal =
 // Function and program assembly
 // ---------------------------------------------------------------------------
 
+/// How one function parameter crosses the ABI.
+type private ParamKind =
+    | PScalar of Sc
+    | PArray of Sc * Grp list
+    /// The ragged pair: pool pointer plus its offsets-table pointer, two
+    /// arguments -- the "carry the per-row shape across the boundary as a
+    /// separate pointer" ABI, spelled with offsets rather than lens because
+    /// offsets are what addressing consumes and offsets[rows] is the total.
+    | PRagged of Sc * int64
+
 /// `internal` linkage everywhere but `main`: the module is the whole program
 /// (Blade has no separate compilation), so nothing needs to be externally
 /// visible and every definition stays available for inlining and DCE.
@@ -3562,6 +3890,8 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     c.NameArrSlots <- Dictionary()
     if not (List.isEmpty cl.Captures) then
         refuse (sprintf "the function '%s', which captures enclosing bindings" cl.Name)
+    if (raggedArrShape cl.RetType).IsSome then
+        refuse (sprintf "'%s' returns a ragged array (ragged returns are not in the llvm lane yet)" cl.Name)
     // An array parameter arrives as a bare `ptr` with its shape baked from the
     // declared type -- never a descriptor struct (plan section 5). A `mut`
     // parameter needs no separate treatment: the pointer IS the caller's pool,
@@ -3570,11 +3900,14 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
         cl.Params
         |> List.mapi (fun i p ->
             match arrayShapeOf p.Type with
-            | Some (elem, groups) -> (i, p, Choice2Of2 (elem, groups))
+            | Some (elem, groups) -> (i, p, PArray (elem, groups))
             | None ->
-                let sc = requireScalar (sprintf "parameter '%s' of '%s'" p.Name cl.Name) p.Type
-                if sc = ScVoid then refuse (sprintf "a unit parameter on '%s'" cl.Name)
-                (i, p, Choice1Of2 sc))
+                match raggedArrShape p.Type with
+                | Some (elem, rows) -> (i, p, PRagged (elem, rows))
+                | None ->
+                    let sc = requireScalar (sprintf "parameter '%s' of '%s'" p.Name cl.Name) p.Type
+                    if sc = ScVoid then refuse (sprintf "a unit parameter on '%s'" cl.Name)
+                    (i, p, PScalar sc))
     // Parameter facts. `noundef` on everything (no undef/poison channel exists
     // in this emitter); `readonly` on pointers only when a whole-module scan
     // found no element write anywhere -- see `ModuleFacts.ArraysReadOnly`.
@@ -3590,8 +3923,9 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
         ps
         |> List.map (fun (i, _, k) ->
             match k with
-            | Choice1Of2 sc -> sprintf "%s%s %%a%d" (llTy sc) (paramAttr ()) i
-            | Choice2Of2 _ -> sprintf "ptr%s %%a%d" arrayParamAttrs i)
+            | PScalar sc -> sprintf "%s%s %%a%d" (llTy sc) (paramAttr ()) i
+            | PArray _ -> sprintf "ptr%s %%a%d" arrayParamAttrs i
+            | PRagged _ -> sprintf "ptr%s %%a%d, ptr%s %%a%dr" arrayParamAttrs i arrayParamAttrs i)
         |> String.concat ", "
     // NOT `noalias` on an array RETURN either: a body whose result is one of
     // its own parameters returns that pointer unchanged (`materialize` of an
@@ -3604,13 +3938,19 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
              else grpFnTerminating)
     for (i, p, k) in ps do
         match k with
-        | Choice1Of2 sc ->
+        | PScalar sc ->
             let slot = allocaOf c (llTy sc)
             ln c (sprintf "store %s %%a%d, ptr %s" (llTy sc) i slot)
             c.Slots.[p.VarId] <- (slot, sc)
             c.NameSlots.[p.Name] <- (slot, sc)
-        | Choice2Of2 (elem, groups) ->
+        | PArray (elem, groups) ->
             let a = { Elem = elem; Groups = groups; Src = APool (sprintf "%%a%d" i); RowOpBytes = 0L }
+            c.ArrSlots.[p.VarId] <- a
+            c.NameArrSlots.[p.Name] <- a
+        | PRagged (elem, rows) ->
+            let a = { Elem = elem
+                      Groups = [ GRagged (rows, RtDynamic (sprintf "%%a%dr" i)) ]
+                      Src = APool (sprintf "%%a%d" i); RowOpBytes = 0L }
             c.ArrSlots.[p.VarId] <- a
             c.NameArrSlots.[p.Name] <- a
     // A function body is a tracking scope: its temporaries die at `ret`, and
@@ -3766,8 +4106,8 @@ let private emitSeparator (c: Ctx) (flag: string) : unit =
 /// coordinate (the left-justified slot), which is exactly what `arr[i][j]`
 /// indexes on the C++ side; that is what makes a printed triangle the same
 /// bytes in both lanes, which every symmetric corpus EXPECT depends on.
-let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
-    let rank = List.length a.Extents
+let private emitArrayPrintGeneric (c: Ctx) (label: string) (a: ArrVal) : unit =
+    let rank = a.Rank
     /// The literal bound of axis `d` given the loop registers already open.
     /// Only an axis INSIDE a compact group has a dependent bound.
     let axisPlan =
@@ -3808,6 +4148,36 @@ let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
                 emitCountedLoopTo c (boundOf d prior) (fun i -> go (d + 1) (prior @ [ i ]))
         go 0 []
     outStr c "]\n"
+
+/// The print dispatcher. Ragged shapes carry operand bounds the generic
+/// printer's static axis plan cannot express, so they get their own arms --
+/// the SAME bytes the C++ lane's Ragged<T> printer produces: rank 2 nests
+/// with the per-row bound, a peeled row runs flat.
+let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
+    match a.Groups with
+    | [ GRagged (rows, table) ] ->
+        outStr c (label + " = [")
+        emitCountedLoop c rows (fun i ->
+            let t = freshReg c
+            ln c (renderCmp { Dest = t; Kind = "icmp"; Pred = "ne"; Ty = ScI64; Lhs = i; Rhs = "0" })
+            emitIfThen c t (fun () -> outStr c ", ")
+            outStr c "["
+            let flag = allocaOf c "i1"
+            ln c (sprintf "store i1 true, ptr %s" flag)
+            emitCountedLoopTo c (raggedLenAt c table i) (fun j ->
+                emitSeparator c flag
+                outVal c (readCell c a [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
+            outStr c "]")
+        outStr c "]\n"
+    | [ GDynDense len ] ->
+        outStr c (label + " = [")
+        let flag = allocaOf c "i1"
+        ln c (sprintf "store i1 true, ptr %s" flag)
+        emitCountedLoopTo c len (fun j ->
+            emitSeparator c flag
+            outVal c (readCell c a [ { Reg = j; Ty = ScI64 } ]))
+        outStr c "]\n"
+    | _ -> emitArrayPrintGeneric c label a
 
 /// Which bindings never print, mirroring `CodeGen.computeDeferredIds`: an
 /// unforced computation has no materialized array to echo. A binding a
