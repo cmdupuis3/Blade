@@ -200,6 +200,18 @@ runs:
         if (-not (Test-Path $clang)) { throw "no clang for the BLADE_LLVM lane at $clang" }
         Add-Content -Path $env:GITHUB_ENV -Value "NETCDF_DIR=$(Join-Path $root 'ucrt64')" -Encoding utf8
         Add-Content -Path $env:GITHUB_ENV -Value "BLADE_LLVM_CLANG=$clang" -Encoding utf8
+        # tests/fixtures/sample.nc is HDF5-format (\x89HDF), so netCDF-4 file
+        # locking applies to it. The provider tests put TWO readers on that one
+        # file: the compiler opens it in-process for the compile-time fold, and
+        # the program it then builds opens it again at run time. HDF5 acquires
+        # its lock with a WAITING LockFileEx, so contention there is a hang
+        # rather than an error -- and the in-process side has no timeout at all,
+        # where child execution at least gives up after 120s.
+        #
+        # Both readers are read-only, which is the case this switch exists for.
+        # It reaches the child processes too: they inherit the environment of
+        # the compiler that spawns them.
+        Add-Content -Path $env:GITHUB_ENV -Value "HDF5_USE_FILE_LOCKING=FALSE" -Encoding utf8
 
     - name: Toolchain versions
       shell: pwsh
