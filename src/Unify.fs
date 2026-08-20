@@ -290,6 +290,17 @@ type TypeError =
     // Struct construction (BL3008)
     | StructFieldDuplicate of structName: string * field: string
     | StructNoField of structName: string * field: string
+    /// Field ACCESS (`v.w`, `v.w(i)`) naming a field the struct does not
+    /// declare -- BL3018, not BL3008's constructor-side twin above. The two
+    /// are separate codes because they fail at opposite ends: a constructor
+    /// has the full field list in hand and always refused, while an ACCESS
+    /// used to degrade to a fresh type variable, so the program typechecked
+    /// and the mistake surfaced (if at all) as an unrelated codegen refusal
+    /// against an array of unknown extent. `available` is the declared field
+    /// list in declaration order; `steering` is optional extra guidance
+    /// (empty when there is none) -- e.g. a provider `<mod>__vars` access
+    /// whose name is really filed under the sibling `<mod>__dims`.
+    | StructFieldUnknown of structName: string * field: string * available: string list * steering: string
     | StructSpreadBase of structName: string
     | StructSpreadNotStruct of structName: string * got: string
     | StructSpreadRedundant of structName: string

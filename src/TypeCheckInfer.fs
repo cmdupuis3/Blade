@@ -259,7 +259,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- Method call: obj.method(args) -> impl resolution ----
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField (obj, method) }, args) ->
-        inferMethodCall env obj method args
+        inferMethodCall env expr.Span obj method args
     // ---- Scalar math intrinsics: exp(x), sqrt(x), ... ----
     // Surface form is a plain call; the name is rewritten to OpMath only
     // when it is NOT user-bound (a user `function exp(...)` or a local
@@ -1035,18 +1035,23 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     | ExprKind.ExprField (obj, field) ->
         inferExpr env obj |> Result.bind (fun tObj ->
-            let (fieldTy, fieldIdx) =
+            // Re-stamp the WHOLE access's span: inferExpr on the object just
+            // stamped the innermost leaf ('sample' in `sample.vars.xdim`),
+            // which is not where the bad name is.
+            if expr.Span.StartLine > 0 then setCurrentExprSpan expr.Span
+            // A miss on a RESOLVED struct is BL3018, not a fresh type
+            // variable; `structFieldAccess` returns Ok None for every other
+            // named type, which keeps the old fallback where it belongs.
+            let resolved =
                 match tObj.Type with
-                | IRTNamed typeName ->
-                    match lookupTypeDef typeName env with
-                    | Some (TDIStruct (_, _, fields, _)) ->
-                        let idx = fields |> List.tryFindIndex (fun (n, _) -> n = field)
-                        let ty = fields |> List.tryFind (fun (n, _) -> n = field) |> Option.map snd
-                        (ty |> Option.defaultValue (env.Subst.Fresh()),
-                         idx |> Option.defaultValue 0)
-                    | _ -> (env.Subst.Fresh(), 0)
-                | _ -> (env.Subst.Fresh(), 0)
-            Ok (mkTyped (TExprField (tObj, field, fieldIdx)) fieldTy))
+                | IRTNamed typeName -> structFieldAccess env typeName field
+                | _ -> Ok None
+            resolved |> Result.map (fun hit ->
+                let (fieldTy, fieldIdx) =
+                    match hit with
+                    | Some (ty, idx) -> (ty, idx)
+                    | None -> (env.Subst.Fresh(), 0)
+                mkTyped (TExprField (tObj, field, fieldIdx)) fieldTy))
 
     // ---- Lambda ----
     | ExprKind.ExprLambda (parms, whereClause, body) -> inferLambda env parms whereClause body
@@ -3977,7 +3982,7 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
 // name from the argument shape (ProviderReadSpec), not from the type.
 
 
-and inferMethodCall (env: TypeEnv) obj method args : TypeResult<TypedExpr> =
+and inferMethodCall (env: TypeEnv) (callSpan: Span) obj method args : TypeResult<TypedExpr> =
     inferExpr env obj |> Result.bind (fun tObj ->
     args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
         // Check if this is an impl method call
@@ -3991,22 +3996,23 @@ and inferMethodCall (env: TypeEnv) obj method args : TypeResult<TypedExpr> =
                 let tFunc = mkTyped (TExprVar (mangledName, funcVarId, None)) funcType
                 Ok (mkTyped (TExprApp (tFunc, tObj :: tArgs)) retTy)
             | None ->
-                // Not an impl method -- treat as struct field access + application
-                let (fieldTy, fieldIdx) =
-                    match lookupTypeDef typeName env with
-                    | Some (TDIStruct (_, _, fields, _)) ->
-                        let idx = fields |> List.tryFindIndex (fun (n, _) -> n = method)
-                        let ty = fields |> List.tryFind (fun (n, _) -> n = method) |> Option.map snd
-                        (ty |> Option.defaultValue (env.Subst.Fresh()),
-                         idx |> Option.defaultValue 0)
-                    | _ -> (env.Subst.Fresh(), 0)
-                let tField = mkTyped (TExprField (tObj, method, fieldIdx)) fieldTy
-                // Route through dispatchAppOrIndex so array-typed fields
-                // become TExprIndex (with tag-checking) rather than
-                // TExprApp. Without this, `data.region(s)` would lower to
-                // IRApp and emit a C++ function call against the
-                // Array<T,N> wrapper, which has no operator().
-                dispatchAppOrIndex env tField tArgs
+                // Not an impl method -- treat as struct field access +
+                // application. Same BL3018 refusal as the bare-access arm:
+                // the impl lookup above already had its chance, so a name
+                // that is neither a method nor a declared field is a typo.
+                if callSpan.StartLine > 0 then setCurrentExprSpan callSpan
+                structFieldAccess env typeName method |> Result.bind (fun hit ->
+                    let (fieldTy, fieldIdx) =
+                        match hit with
+                        | Some (ty, idx) -> (ty, idx)
+                        | None -> (env.Subst.Fresh(), 0)
+                    let tField = mkTyped (TExprField (tObj, method, fieldIdx)) fieldTy
+                    // Route through dispatchAppOrIndex so array-typed fields
+                    // become TExprIndex (with tag-checking) rather than
+                    // TExprApp. Without this, `data.region(s)` would lower to
+                    // IRApp and emit a C++ function call against the
+                    // Array<T,N> wrapper, which has no operator().
+                    dispatchAppOrIndex env tField tArgs)
         | _ ->
             // Non-named type -- regular field access + application
             let tField = mkTyped (TExprField (tObj, method, 0)) (env.Subst.Fresh())

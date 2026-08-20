@@ -1344,11 +1344,19 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
     // Deterministic fixture values, so the EXPECTs are pinned inline.
     // ---------------------------------------------------------------
     printfn "\n--- relational pipeline: mask/compound/reduce/sort over a provider read (sample.nc) ---"
+    // `sample.DIMS.xdim`, not `.vars`: xdim is a COORDINATE variable, which
+    // ncFileToModule's isCoordinateVar files under the dims struct. This
+    // source read `.vars.xdim` for a long time -- a field that does not exist
+    // on sample__vars -- and the field-access checker answered a miss with a
+    // fresh type variable, so it typechecked into an array of unknown extent.
+    // That is the whole of the "KNOWN GAP" this block used to pin on a
+    // mask/relational extent seam; the seam was never involved. BL3018 now
+    // refuses the wrong accessor by name -- pinned in the block below.
     let relSource = """
 import netcdf as NetCDF
 
 let sample = NetCDF.load("tests/fixtures/sample.nc")
-let xd = sample.vars.xdim |> NetCDF.read
+let xd = sample.dims.xdim |> NetCDF.read
 let high = mask(xd, lambda(x) -> x > 10)
 let sel = compound(xd, high)
 let n_high = extents(sel)
@@ -1361,31 +1369,16 @@ let top = ranked(0)
         | Ok ir ->
             check "relational pipeline: lowers" true ""
             let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "provider_relational_e2e"
-            // KNOWN GAP (pinned): mask over a provider-materialized array hits an
-            // unresolved-extent placeholder (`size_t xd_extent_0 = /* dynamic */;`)
-            // -- the mask-binding extent lookup does not cover ProviderReads
-            // bindings, whose extents live in the runtime Array struct. Tracked in
-            // docs/features/sql-coverage.md (provider->relational seam).
-            // When the seam is fixed the placeholder disappears and the full e2e
-            // below (compile + run + value checks) activates automatically.
-            //
-            // The pin is now an ASSERTION rather than a literal `true`. The old
-            //   if cppCode.Contains "/* dynamic */" then
-            //       check "...KNOWN GAP pinned..." true ""
-            // sat INSIDE its own guard, so it restated the condition it had
-            // already tested and could not fail for any reason -- while
-            // short-circuiting past the compile, the run, and the three value
-            // pins (n_high / total_high / top) below. Asserting the marker's
-            // PRESENCE makes the pin falsifiable in the direction that matters:
-            // the day the provider->relational extent seam is fixed, the
-            // placeholder disappears, THIS check goes red, and whoever fixed it
-            // deletes the branch so the dormant e2e starts running for real.
+            // The same marker, asserted in the OPPOSITE direction from the
+            // pin it replaces. With the accessor corrected the extent folds to
+            // a literal (`size_t xd_extent_0 = 20;`), so a placeholder here is
+            // a regression, not a known gap -- and the e2e below (compile +
+            // run + the n_high/total_high/top value pins) is no longer guarded
+            // off behind it, which is what kept it dormant.
             let gapMarker = "/* dynamic */"
-            let gapStillOpen = cppCode.Contains gapMarker
-            check "relational pipeline: KNOWN GAP still open (mask extent over a provider read is an unresolved-extent placeholder; e2e below is dormant)"
-                gapStillOpen
-                (sprintf "no '%s' placeholder in the generated C++ -- the provider->relational extent seam looks FIXED. Delete this pin and the `if gapStillOpen` guard so the e2e (compile + run + n_high/total_high/top) runs." gapMarker)
-            if gapStillOpen then () else
+            check "relational pipeline: provider read has a resolved extent (no unresolved-extent placeholder)"
+                (not (cppCode.Contains gapMarker))
+                (sprintf "generated C++ still contains '%s' -- a provider-read extent went unresolved" gapMarker)
             let relOutDir = "./generated_cpp_tests"
             if not (Directory.Exists relOutDir) then Directory.CreateDirectory relOutDir |> ignore
             CodeGen.deployRuntimeHeaders relOutDir
@@ -1417,6 +1410,50 @@ let top = ranked(0)
         | Error e ->
             check "relational pipeline: lowers" false (sprintf "lower error: %s" e)
     with ex -> unexpected "relational pipeline" ex
+
+    // ---------------------------------------------------------------
+    // The wrong section accessor is refused BY NAME (BL3018).
+    //
+    // ncFileToModule splits the file's variables in two: isCoordinateVar
+    // routes a rank-1 variable whose single dim is its own name to the
+    // `<mod>__dims` struct, everything else to `<mod>__vars`. So `xdim` is a
+    // field of sample__dims and NOT of sample__vars, and `sample.vars.xdim`
+    // names nothing.
+    //
+    // It used to typecheck: the field-access checker resolved a miss to a
+    // fresh type variable, so the accessor produced an array whose index-type
+    // extent was a symbolic IRExpr, and the mistake surfaced -- if at all --
+    // far downstream in the provider emitter, as a message about runtime
+    // NetCDF extents. Two assertions here, both about the MESSAGE rather than
+    // the mere fact of rejection: it must name the missing field, and it must
+    // name the accessor that works.
+    // ---------------------------------------------------------------
+    printfn "\n--- wrong section accessor: sample.vars.<coordinate> is refused (sample.nc) ---"
+    let wrongAccessorSource = """
+import netcdf as NetCDF
+
+let sample = NetCDF.load("tests/fixtures/sample.nc")
+let xd = sample.vars.xdim |> NetCDF.read
+let s = reduce(xd, (+))
+"""
+    try
+        match lower wrongAccessorSource with
+        | Ok _ ->
+            check "wrong section accessor: sample.vars.xdim is rejected" false
+                "the program typechecked -- a field that does not exist on sample__vars resolved to a fresh type variable"
+        | Error e when nativeLibUnavailable e ->
+            printfn "  SKIP wrong section accessor: %s" e
+        | Error e ->
+            check "wrong section accessor: the diagnostic names the missing field and its struct"
+                (e.Contains "struct sample__vars has no field 'xdim'")
+                (sprintf "got: %s" e)
+            check "wrong section accessor: the diagnostic names the accessor that works"
+                (e.Contains "sample.dims.xdim")
+                (sprintf "got: %s" e)
+            check "wrong section accessor: the diagnostic lists the fields that DO exist"
+                (e.Contains "available fields:" && e.Contains "A")
+                (sprintf "got: %s" e)
+    with ex -> unexpected "wrong section accessor" ex
 
     // ---------------------------------------------------------------
     // Provider-backed statics: the compile-time fold (ProviderStatics)

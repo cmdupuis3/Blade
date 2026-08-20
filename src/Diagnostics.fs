@@ -231,6 +231,15 @@ module Codes =
             // emit C++ naming symbols that were never declared. Refuse it
             // where the source name is still in hand.
             "BL3017", "group_keys result escapes its binding"
+            // BL3018: a field ACCESS naming a field the struct does not
+            // declare. Separate from BL3008 ("struct construction error"),
+            // which is the constructor-side twin: an access had no
+            // declaration check at all and degraded to a fresh type
+            // variable, so `sample.vars.xdim` on a NetCDF coordinate
+            // variable (filed under `.dims`) typechecked and produced an
+            // array of unknown extent that only failed much later, in the
+            // provider emitter, with a message about runtime extents.
+            "BL3018", "unknown struct field"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"

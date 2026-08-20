@@ -196,7 +196,7 @@
     },
     "BL3008": {
       "title": "struct construction error",
-      "explanation": "A struct literal, field access, or spread does not agree with the struct's declaration: a duplicate or unknown field, a missing required field, a field of the wrong type, a bound whose scope reaches a field declared later, or a spread base that is not a struct.",
+      "explanation": "A struct literal or spread does not agree with the struct's declaration: a duplicate or unknown field, a missing required field, a field of the wrong type, a bound whose scope reaches a field declared later, or a spread base that is not a struct. Reading a field that does not exist is BL3018, not this code -- an access is checked against the same declaration but at a different site.",
       "fix": "Compare the literal against the `struct` declaration field by field. Bounds may only reference fields declared before them.",
       "examples": [
         "tests/corpus/diagnostics/011_predicate_unannotated.blade",
@@ -313,6 +313,16 @@
       "docs": [
         "docs/features/sql.md"
       ]
+    },
+    "BL3018": {
+      "title": "unknown struct field",
+      "explanation": "A field ACCESS -- `v.f`, or `v.f(i)` in the applied spelling -- names something the struct does not declare. Both spellings used to answer a miss with a fresh type variable, so the access typechecked and produced a value of unknown type; on a provider binding that meant an array whose index-type extent was a symbolic expression, and the mistake surfaced (if at all) much later as a codegen refusal describing a symptom. The common provider case is spelling the wrong section: a NetCDF or Zarr load files COORDINATE variables under `<binding>.dims` and data variables under `<binding>.vars`, so `sample.vars.xdim` for a coordinate names nothing. A CSV load emits no dims section at all.",
+      "fix": "Check the name against the fields the message lists. For a provider binding the message also names the sibling section when the field lives there, so `sample.vars.xdim` becomes `sample.dims.xdim`; `blade check` on the load alone prints the struct the provider built.",
+      "examples": [
+        "tests/corpus/structs/051_unknown_field_access.blade",
+        "tests/corpus/structs/052_unknown_field_call.blade"
+      ],
+      "docs": []
     },
     "BL3999": {
       "title": "type error",

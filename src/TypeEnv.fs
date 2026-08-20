@@ -704,6 +704,12 @@ complex half)." where_
     | ImplMissingMethods (iface, typeName, methods) -> sprintf "impl %s for %s is missing required methods: %s" iface typeName methods
     | StructFieldDuplicate (structName, field) -> sprintf "struct %s: field '%s' assigned more than once" structName field
     | StructNoField (structName, field) -> sprintf "struct %s has no field '%s'" structName field
+    | StructFieldUnknown (structName, field, available, steering) ->
+        let avail =
+            match available with
+            | [] -> "; it declares no fields"
+            | fs -> sprintf "; available fields: %s" (fs |> String.concat ", ")
+        sprintf "struct %s has no field '%s'%s%s" structName field steering avail
     | StructSpreadBase structName -> sprintf "struct %s: a spread base must be a variable or field path -- bind it with let first" structName
     | StructSpreadNotStruct (structName, got) -> sprintf "struct %s: spread base must be a %s value, got %s" structName structName got
     | StructSpreadRedundant structName -> sprintf "struct %s: every field is provided explicitly -- the '..' spread is redundant" structName
@@ -836,6 +842,10 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | ImplMissingMethods _
             | FallbackNeedsArrays _ | FallbackSymmetricLeft
             | FallbackRightNotDense _ | FallbackRankMismatch _ -> "BL3007"
+            // Field ACCESS gets its own code: BL3008 reads "struct
+            // construction error", and this one is raised nowhere near a
+            // constructor.
+            | StructFieldUnknown _ -> "BL3018"
             | StructFieldDuplicate _ | StructNoField _ | StructMissingField _
             | StructFieldType _ | UnknownStructType _ | StructBoundScope _
             | StaticStructField _

@@ -1,0 +1,13 @@
+// TEST: Struct Unknown Field Access (rejects)
+// ERROR: BL3018
+// ERROR-CONTAINS: available fields: x, y, z
+// Reading a field the struct does not declare is BL3018, not BL3008: the
+// constructor-side check (026) always refused, but an ACCESS used to fall
+// back to a fresh type variable and typecheck clean.
+struct Vector3 {
+    x: Float64,
+    y: Float64,
+    z: Float64
+}
+let v = Vector3 { x = 1.0, y = 2.0, z = 3.0 }
+let sum = v.x + v.w

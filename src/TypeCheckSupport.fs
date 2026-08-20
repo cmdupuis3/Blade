@@ -3087,3 +3087,48 @@ let internal assignTargetError (env: TypeEnv) (tL: TypedExpr) : TypeError option
             | _ -> None
     | _ -> None
 
+/// A provider binding files coordinate variables under `<mod>__dims` and data
+/// variables under `<mod>__vars` (NetcdfProvider.ncFileToModule's
+/// `isCoordinateVar` split; ZarrProvider's `isCoordinateArr` twin). Spelling
+/// the wrong section is the common mistake -- `sample.vars.xdim` for a
+/// coordinate -- so when the missing name IS declared on the sibling section,
+/// name the accessor that works. Derived from the STRUCT NAME alone, so it
+/// needs no provider knowledge here and stays quiet ("") for user structs.
+let internal providerSectionSteering (env: TypeEnv) (structName: string) (field: string) : string =
+    let sibling =
+        if structName.EndsWith "__vars" then Some (structName.Substring(0, structName.Length - 6), "dims")
+        elif structName.EndsWith "__dims" then Some (structName.Substring(0, structName.Length - 6), "vars")
+        else None
+    match sibling with
+    | Some (baseName, other) ->
+        match lookupTypeDef (sprintf "%s__%s" baseName other) env with
+        | Some (TDIStruct (_, _, fields, _)) when fields |> List.exists (fun (n, _) -> n = field) ->
+            sprintf " -- it is declared on %s__%s, so the accessor is `%s.%s.%s`"
+                    baseName other baseName other field
+        | _ -> ""
+    | None -> ""
+
+/// Resolve a field ACCESS (`v.f`, `v.f(i)`) against a named type.
+///
+///   `Ok (Some (ty, idx))` -- the name is a declared field.
+///   `Error (StructFieldUnknown ...)` -- the type IS a struct and the name is
+///       not one of its fields (BL3018).
+///   `Ok None` -- NO VERDICT. Every other named type reaches field syntax too
+///       (aliases, variants, provider index types), and there the historical
+///       fresh-type-variable fallback is still the right answer. Only a
+///       resolved struct has the field list needed to refuse.
+///
+/// Before this existed both call sites defaulted a miss to `Fresh(), 0`, so
+/// `sample.vars.xdim` typechecked into an array of unknown extent and failed
+/// (if at all) in the provider emitter, describing a symptom.
+let internal structFieldAccess (env: TypeEnv) (typeName: string) (field: string)
+                               : Result<(IRType * int) option, TypeError> =
+    match lookupTypeDef typeName env with
+    | Some (TDIStruct (_, _, fields, _)) ->
+        match fields |> List.tryFindIndex (fun (n, _) -> n = field) with
+        | Some idx -> Ok (Some (snd fields.[idx], idx))
+        | None ->
+            Error (StructFieldUnknown (typeName, field,
+                                       fields |> List.map fst,
+                                       providerSectionSteering env typeName field))
+    | _ -> Ok None

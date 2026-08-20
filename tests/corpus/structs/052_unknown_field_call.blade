@@ -1,0 +1,12 @@
+// TEST: Struct Unknown Field Applied (rejects)
+// ERROR: BL3018
+// ERROR-CONTAINS: has no field 'dat'
+// The `obj.name(args)` spelling routes through the impl-method handler, a
+// SECOND field-resolution site with the same fresh-type-variable fallback.
+// Once the impl lookup has missed, a name that is not a declared field is a
+// typo, and indexing an array field is the common shape.
+struct Holder {
+    data: Array<Float64 like Idx<4>>
+}
+let h = Holder { data = [1.0, 2.0, 3.0, 4.0] }
+let v = h.dat(0)

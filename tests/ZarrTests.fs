@@ -1879,6 +1879,28 @@ let w = z.write("%s", W)
     check "window: out-of-range bounds rejected at typecheck"
         ((typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n").Contains "bounds")
         (typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n")
+    // The dims/vars split is Zarr's too (isCoordinateArr), so the same
+    // wrong-section mistake is available here -- and BL3018 answers it with
+    // the sibling accessor, in both directions. The seam is shared with
+    // NetCDF and CSV: one field-access resolution site, not three.
+    let wrongSection = """
+import zarr as z
+let store = z.load("tests/fixtures/zarr_stores/zarr_e2e_v2")
+let bad = store.vars.x
+"""
+    check "wrong section: a coordinate under .vars is refused, naming .dims"
+        ((typeErrOf wrongSection).Contains "struct store__vars has no field 'x'"
+         && (typeErrOf wrongSection).Contains "store.dims.x")
+        (typeErrOf wrongSection)
+    let wrongSectionRev = """
+import zarr as z
+let store = z.load("tests/fixtures/zarr_stores/zarr_e2e_v2")
+let bad = store.dims.A
+"""
+    check "wrong section: a data array under .dims is refused, naming .vars"
+        ((typeErrOf wrongSectionRev).Contains "struct store__dims has no field 'A'"
+         && (typeErrOf wrongSectionRev).Contains "store.vars.A")
+        (typeErrOf wrongSectionRev)
     check "window: dense variables rejected with steering"
         ((typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_e2e_v2\")\nlet W = z.read_window(s.vars.A, 0, 2)\n").Contains "PACKED")
         (typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_e2e_v2\")\nlet W = z.read_window(s.vars.A, 0, 2)\n")

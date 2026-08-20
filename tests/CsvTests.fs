@@ -252,6 +252,34 @@ let bad = obs(1, "tmp")
          check "lower: unknown label rejected with available list"
              (e.Contains "'tmp' is not a value of EnumIdx 't_cols'" && e.Contains "time, temp, pressure") e)
 
+    // Field ACCESS against the provider struct (BL3018), the sibling of the
+    // EnumIdx label check above: that one validates a column SUBSCRIPT, this
+    // one the struct field naming the array. CSV emits a vars section only --
+    // no coordinate arrays exist in a flat table -- so `.dims` is itself the
+    // unknown field, and the census in the message is what tells you so.
+    (let noSuchVar = sprintf """
+import csv as c
+let t = c.load("%s")
+let bad = t.vars.nope
+"""
+                         (fixFile "lw_obs.csv")
+     match lower noSuchVar with
+     | Ok _ -> check "lower: unknown vars field rejected" false "lowered without error"
+     | Error e ->
+         check "lower: unknown vars field rejected, listing the fields that exist"
+             (e.Contains "struct t__vars has no field 'nope'" && e.Contains "available fields: data") e)
+    (let noDimsSection = sprintf """
+import csv as c
+let t = c.load("%s")
+let bad = t.dims.time
+"""
+                             (fixFile "lw_obs.csv")
+     match lower noDimsSection with
+     | Ok _ -> check "lower: .dims on a csv binding rejected" false "lowered without error"
+     | Error e ->
+         check "lower: .dims on a csv binding rejected (csv emits no dims section)"
+             (e.Contains "struct t has no field 'dims'" && e.Contains "available fields: vars") e)
+
     // ---------------------------------------------------------------
     // 7. Static fold (compile-time payload) + fold ceiling
     // ---------------------------------------------------------------
