@@ -87,3 +87,9 @@ Thumbs.db
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
 blade_llvm_shim.c
+
+# GitHub Actions scratch: the tee-d test logs and the workspace-local
+# executable cache the CI workflow points BLADE_EXE_CACHE at.
+/ci-logs/
+/.blade-exe-cache/
+/.deps/

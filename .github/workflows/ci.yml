@@ -1,0 +1,292 @@
+# Blade CI on GitHub-hosted Windows runners.
+#
+# Windows is the primary development platform for this repository and the one
+# the whole native toolchain story is written against (MSYS2 ucrt64 g++, MSYS2
+# clang64 clang, MS-MPI, the OpenBLAS prebuilt). So CI runs there, on the stock
+# `windows-latest` image plus what .github/actions/setup-blade-toolchain
+# installs -- no container is involved.
+#
+# WHAT RUNS BY DEFAULT IS DELIBERATELY SMALL. Every push and pull request gets
+# the `build` job and nothing else: `dotnet build`, then the byte-pinned LLVM
+# emission goldens, which take about a second and need no native toolchain at
+# all. That is the whole of the default cost -- no g++, no MSYS2, no MS-MPI, no
+# OpenBLAS download, no thousands of compiled corpus programs.
+#
+# The heavy lanes are opt-in, and there are three ways in:
+#
+#   * label a pull request `ci:full`
+#   * run the workflow by hand (Actions -> CI -> Run workflow), where the
+#     `lanes` input can pick one lane instead of all three
+#   * the nightly schedule on master
+#
+# The lanes themselves:
+#
+#   cpp        the default suite, which is the C++ back end end to end, plus
+#              the OpenMP and MPI blocks that are opt-in by flag
+#   providers  NetCDF / Zarr / CSV / hybrid, which are reachable ONLY as
+#              standalone verbs -- no combination of `blade test` flags folds
+#              them into the default suite
+#   llvm       the BLADE_LLVM lane: the llvm-vs-C++ stdout differential over
+#              the corpus. Standalone only, deliberately: it spawns two native
+#              compilers per file
+#
+# Never run here: `test cuda` (no usable nvcc host compiler on hosted
+# runners), `test timing` and `test llvm-bench` (benchmarks are not pass/fail
+# signal, and a shared runner is the wrong instrument), `test diff-oracle`
+# (hours, and it needs the separate oracle build). The `interp` differential is
+# available on demand via the workflow_dispatch input.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+    # `labeled` is what makes the `ci:full` opt-in below work on an already
+    # open pull request; the other three are the defaults this would otherwise
+    # get implicitly.
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    # 06:00 UTC daily, on master only (GitHub runs schedules on the default
+    # branch). This is what makes a build-only default safe: a regression the
+    # cheap gate cannot see still surfaces within a day rather than at release.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: 'Which test lanes to run'
+        type: choice
+        default: all
+        options: [all, none, cpp, providers, llvm]
+      include-interp:
+        description: 'Also run the interpreter/codegen differential (slow)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: 1
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+jobs:
+  # ------------------------------------------------------------------------
+  # The default gate. Cheap enough to run on every push: no native toolchain
+  # is installed or invoked.
+  # ------------------------------------------------------------------------
+  build:
+    name: build + emitter goldens
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '7.0.x'
+
+      # Blade.fsproj is the one exe project: compiler, domain elaborators and
+      # the whole test harness in a single binary. The oracles/ projects are
+      # separate and only feed `test diff-oracle`, which CI does not run.
+      - name: Build
+        run: dotnet build Blade.fsproj -c Release
+
+      # `llvm goldens` is the reserved word for the three toolchain-free blocks
+      # -- compare rules, byte-pinned .ll emission, and the fact layer -- plus
+      # the simplex-block agreement check. About 60 assertions in ~1.5s, and
+      # not one of them spawns a compiler, which is exactly what a
+      # run-on-every-push gate should be made of.
+      - name: Byte-pinned emitter goldens
+        shell: pwsh
+        run: >
+          .\.github\scripts\Invoke-BladeTest.ps1
+          -Blade .\bin\Release\net7.0\Blade.exe
+          -Name 'llvm goldens'
+          -BladeArgs 'test','llvm','goldens'
+
+      # The published layout matters as much as the binary: src/cpp headers and
+      # stdlib/*.blade are deployed beside Blade.exe at build time, and the
+      # runtime reads them from there.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blade-bin
+          path: bin/Release/net7.0
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-build
+          path: ci-logs
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------------
+  # Decide which heavy lanes this event asks for, and emit the matrix. Runs on
+  # Linux because it is pure arithmetic over the event payload -- no checkout,
+  # no toolchain, and Linux minutes are cheaper than Windows ones.
+  # ------------------------------------------------------------------------
+  plan:
+    name: plan lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      any: ${{ steps.pick.outputs.any }}
+    steps:
+      - id: pick
+        shell: pwsh
+        env:
+          EVENT: ${{ github.event_name }}
+          LANES: ${{ inputs.lanes }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          # The lane table. One place; the workflow's `test` job is generic.
+          $lanes = [ordered]@{
+            cpp = @{
+              title   = 'C++ back end'
+              timeout = 120
+              verbs   = 'test --omp --mpi'
+            }
+            providers = @{
+              title   = 'Providers (NetCDF / Zarr / CSV / hybrid)'
+              timeout = 60
+              verbs   = "test netcdf`ntest zarr`ntest csv`ntest hybrid"
+            }
+            llvm = @{
+              title   = 'LLVM back end'
+              timeout = 120
+              verbs   = 'test llvm'
+            }
+          }
+          $all = @($lanes.Keys)
+
+          $selected = switch ($env:EVENT) {
+            'schedule'          { $all }
+            'workflow_dispatch' {
+              switch ($env:LANES) {
+                'all'   { $all }
+                'none'  { @() }
+                default { @($env:LANES) }
+              }
+            }
+            'pull_request' {
+              # Opting a single pull request in, without editing the workflow.
+              if ($env:LABELS -and ($env:LABELS | ConvertFrom-Json) -contains 'ci:full') { $all } else { @() }
+            }
+            default { @() }
+          }
+          $selected = @($selected | Where-Object { $lanes.Contains($_) })
+
+          $include = @($selected | ForEach-Object {
+            [pscustomobject]@{
+              lane    = $_
+              title   = $lanes[$_].title
+              timeout = $lanes[$_].timeout
+              verbs   = $lanes[$_].verbs
+            }
+          })
+          # -AsArray, not the pipeline form: ConvertTo-Json collapses a
+          # one-element array to a bare object, and a single-lane dispatch
+          # would then hand `fromJSON` a matrix GitHub cannot expand.
+          $matrix = '{"include":' + (ConvertTo-Json -InputObject $include -Depth 5 -Compress -AsArray) + '}'
+
+          Write-Host "event=$($env:EVENT) -> lanes: $(if ($selected) { $selected -join ', ' } else { '(none -- build only)' })"
+          "matrix=$matrix"                     | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "any=$(($include.Count -gt 0).ToString().ToLower())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  test:
+    name: ${{ matrix.title }}
+    needs: [build, plan]
+    if: needs.plan.outputs.any == 'true'
+    runs-on: windows-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+
+    env:
+      # The content-addressed executable cache Blade keeps between runs. Moving
+      # it into the workspace is what lets actions/cache carry it across CI
+      # runs; the key Blade computes internally already covers compiler
+      # identity, link flags and source text, so a stale entry can only miss,
+      # never lie.
+      BLADE_EXE_CACHE: ${{ github.workspace }}\.blade-exe-cache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '7.0.x'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: blade-bin
+          path: bin/Release/net7.0
+
+      - name: Native toolchain
+        uses: ./.github/actions/setup-blade-toolchain
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\.blade-exe-cache
+          key: blade-exe-${{ matrix.lane }}-${{ github.sha }}
+          restore-keys: |
+            blade-exe-${{ matrix.lane }}-
+
+      # Assert the environment BEFORE running anything, because a missing
+      # dependency makes this harness SKIP rather than fail, and skips do not
+      # affect the exit code -- a half-installed runner is otherwise a green
+      # run that proved nothing. Every lane asserts the WHOLE toolchain, not
+      # just its own slice: the claim being made is that the CI environment is
+      # complete, and a lane-shaped assertion lets a dependency rot unnoticed
+      # until the lane that needs it happens to change.
+      #
+      # `cuda` is the one row never required -- hosted runners have no usable
+      # nvcc host compiler, which is why `test cuda` is not a lane here.
+      - name: Assert the toolchain is complete
+        shell: pwsh
+        run: >
+          .\.github\scripts\Assert-Toolchain.ps1
+          -Blade .\bin\Release\net7.0\Blade.exe
+          -Require gpp,llvm,blas,lapack,netcdf,mpi
+
+      - name: ${{ matrix.title }}
+        shell: pwsh
+        env:
+          VERBS: ${{ matrix.verbs }}
+        run: |
+          $exe = '.\bin\Release\net7.0\Blade.exe'
+          $failed = @()
+          foreach ($verb in ($env:VERBS -split "`r?`n")) {
+            if (-not $verb.Trim()) { continue }
+            $bladeArgs = $verb.Trim() -split '\s+'
+            .\.github\scripts\Invoke-BladeTest.ps1 -Blade $exe -Name "blade $($verb.Trim())" -BladeArgs $bladeArgs
+            if ($LASTEXITCODE -ne 0) { $failed += $verb.Trim() }
+          }
+          if ($failed.Count -gt 0) { throw "red: $($failed -join '; ')" }
+
+      # The interpreter and codegen are differential twins, so this gate is
+      # what catches one drifting from the other -- it is just too slow to
+      # attach to a lane by default.
+      - name: Interpreter differential
+        if: matrix.lane == 'cpp' && inputs.include-interp
+        shell: pwsh
+        run: >
+          .\.github\scripts\Invoke-BladeTest.ps1
+          -Blade .\bin\Release\net7.0\Blade.exe
+          -Name 'interpreter differential'
+          -BladeArgs 'test','--interp'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-${{ matrix.lane }}
+          path: ci-logs
+          retention-days: 7
+          if-no-files-found: ignore

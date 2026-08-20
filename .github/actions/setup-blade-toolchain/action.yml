@@ -1,0 +1,213 @@
+name: Set up the Blade native toolchain
+description: >-
+  Everything `blade doctor` probes on a GitHub-hosted Windows runner: MSYS2
+  ucrt64 g++ (the C++ back end), MSYS2 clang64 clang (the BLADE_LLVM lane), the
+  OpenBLAS prebuilt pinned in deps.json, libnetcdf, and MS-MPI. Assumes
+  actions/checkout has already run -- the OpenBLAS version is read out of the
+  repository's deps.json.
+
+  Everything downloaded is cached: the MSYS2 package tarballs, the OpenBLAS
+  release zip (unpacked), and the MS-MPI installer. A warm run reinstalls
+  rather than refetches.
+
+inputs:
+  msys2-location:
+    description: >-
+      MSYS2 root. The default is the one the runner image already ships, and it
+      is also the root Blade's own fallback probes hardcode
+      (Build.resolveClang -> C:\msys64\clang64\bin\clang.exe). Changing it
+      means those fallbacks stop working, so BLADE_LLVM_CLANG below carries the
+      explicit path regardless.
+    required: false
+    default: 'C:\msys64'
+
+  cache-directory:
+    description: Where the cached native dependencies are unpacked.
+    required: false
+    default: ${{ github.workspace }}\.deps
+
+runs:
+  using: composite
+  steps:
+    # ----------------------------------------------------------------------
+    # MSYS2: g++ for the C++ back end, clang for the LLVM back end, plus the
+    # provider and parallelism libraries Blade links against.
+    #
+    # `release: false` reuses the MSYS2 already installed on the image instead
+    # of downloading a fresh one, which is what keeps the root at C:\msys64.
+    # `msystem: UCRT64` only picks the default environment for the `msys2 {0}`
+    # shell; pacman installs the clang64 packages just the same. `cache: true`
+    # caches the downloaded package tarballs.
+    # ----------------------------------------------------------------------
+    - name: MSYS2 toolchains and libraries
+      uses: msys2/setup-msys2@v2
+      with:
+        release: false
+        msystem: UCRT64
+        update: false
+        cache: true
+        install: >-
+          mingw-w64-ucrt-x86_64-gcc
+          mingw-w64-ucrt-x86_64-netcdf
+          mingw-w64-ucrt-x86_64-msmpi
+          mingw-w64-clang-x86_64-clang
+          mingw-w64-clang-x86_64-lld
+          mingw-w64-clang-x86_64-compiler-rt
+
+    # ----------------------------------------------------------------------
+    # ORDER IS LOAD-BEARING, in both directions.
+    #
+    # Blade shells out to `g++` and `clang` from a .NET process, so they have
+    # to be on the WINDOWS PATH -- the `msys2 {0}` shell this action sets up is
+    # not involved in any of it.
+    #
+    # ucrt64 goes first. Both roots ship DLLs under the same names (zlib1.dll,
+    # libzstd.dll, libwinpthread-1.dll) and every g++-linked test binary
+    # resolves those by PATH order at run time; a foreign zlib1.dll shadowing
+    # the one libnetcdf was built against is a bug this repository has already
+    # been bitten by once.
+    #
+    # clang64 goes last, and only so a binary the LLVM lane links can find its
+    # own runtime DLLs. `clang` itself is never resolved through PATH here --
+    # BLADE_LLVM_CLANG names it outright.
+    # ----------------------------------------------------------------------
+    - name: PATH (ucrt64 first, clang64 last)
+      shell: pwsh
+      run: |
+        $root = '${{ inputs.msys2-location }}'
+        foreach ($dir in @((Join-Path $root 'ucrt64\bin'), (Join-Path $root 'clang64\bin'))) {
+          if (-not (Test-Path $dir)) { throw "expected toolchain directory missing: $dir" }
+          Add-Content -Path $env:GITHUB_PATH -Value $dir -Encoding utf8
+        }
+
+    # ----------------------------------------------------------------------
+    # deps.json is the single source of truth for the OpenBLAS version
+    # ("Versions live HERE, not in scripts or docs"), so read the tag out of it
+    # rather than repeating it -- and key the cache on it, so bumping the pin
+    # invalidates exactly what it should.
+    #
+    # MS-MPI is the one dependency pinned here instead: it has no release feed
+    # to read. Bump both the version and the URL together if Microsoft retires
+    # the link.
+    # ----------------------------------------------------------------------
+    - name: Resolve pinned dependency versions
+      id: pins
+      shell: pwsh
+      run: |
+        $tag = (Get-Content deps.json -Raw | ConvertFrom-Json).dependencies |
+               Where-Object { $_.name -eq 'openblas' } |
+               Select-Object -First 1 -ExpandProperty tag
+        if (-not $tag) { throw 'deps.json has no openblas dependency carrying a tag' }
+        Write-Host "OpenBLAS $tag (from deps.json)"
+        "openblas-tag=$tag" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+        "msmpi-version=10.1.1" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    - name: Cache downloaded native dependencies
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.cache-directory }}
+        key: >-
+          blade-deps-${{ runner.os }}-openblas-${{ steps.pins.outputs.openblas-tag }}-msmpi-${{ steps.pins.outputs.msmpi-version }}
+
+    # ----------------------------------------------------------------------
+    # OpenBLAS. The release zip unpacks to exactly the bin/include/lib prefix
+    # shape Blade's TierOpenBlasDir expects: -I<dir>/include finds cblas.h and
+    # lapacke.h directly, and Platforms.findSharedLib picks
+    # <dir>/bin/libopenblas.dll off the link line.
+    # ----------------------------------------------------------------------
+    - name: OpenBLAS
+      shell: pwsh
+      run: |
+        $tag = '${{ steps.pins.outputs.openblas-tag }}'
+        $prefix = Join-Path '${{ inputs.cache-directory }}' 'openblas'
+        $probe = Join-Path $prefix 'include\cblas.h'
+        if (Test-Path $probe) {
+          Write-Host "OpenBLAS $tag already unpacked at $prefix (cache hit)"
+        } else {
+          $version = $tag.TrimStart('v')
+          $zip = Join-Path $env:RUNNER_TEMP 'openblas.zip'
+          $url = "https://github.com/OpenMathLib/OpenBLAS/releases/download/$tag/OpenBLAS-$version-x64.zip"
+          Write-Host "downloading $url"
+          New-Item -ItemType Directory -Force -Path '${{ inputs.cache-directory }}' | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Expand-Archive -Path $zip -DestinationPath $prefix -Force
+        }
+        foreach ($f in @('include\cblas.h', 'include\lapacke.h', 'bin\libopenblas.dll')) {
+          if (-not (Test-Path (Join-Path $prefix $f))) {
+            throw "the OpenBLAS prefix is not the expected shape: $f missing under $prefix"
+          }
+        }
+        # libopenblas.dll is loaded by PATH at run time, not merely linked.
+        Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $prefix 'bin') -Encoding utf8
+        Add-Content -Path $env:GITHUB_ENV -Value "OPENBLAS_DIR=$prefix" -Encoding utf8
+
+    # ----------------------------------------------------------------------
+    # MS-MPI. The MSYS2 msmpi package supplies only the import library g++
+    # links (`-lmsmpi`); mpiexec and msmpi.dll come from Microsoft's
+    # redistributable. Only the DOWNLOAD is cached -- the install itself
+    # touches System32 and the registry as well as Program Files, so it is not
+    # something a directory cache can restore; it is also only ~20s.
+    #
+    # Blade probes MSMPI_BIN, then machine-scope MSMPI_BIN, then this exact
+    # install path -- the export below is belt and braces, but it removes the
+    # dependency on the installer having refreshed the machine environment of
+    # an already-running job.
+    # ----------------------------------------------------------------------
+    - name: MS-MPI runtime
+      shell: pwsh
+      run: |
+        $bin = 'C:\Program Files\Microsoft MPI\Bin'
+        if (-not (Test-Path (Join-Path $bin 'mpiexec.exe'))) {
+          $setup = Join-Path '${{ inputs.cache-directory }}' 'msmpisetup.exe'
+          if (Test-Path $setup) {
+            Write-Host "using cached MS-MPI ${{ steps.pins.outputs.msmpi-version }} installer"
+          } else {
+            $url = 'https://download.microsoft.com/download/a/5/2/a5207ca5-1203-491a-8fb8-906fd68ae623/msmpisetup.exe'
+            Write-Host "downloading $url"
+            New-Item -ItemType Directory -Force -Path '${{ inputs.cache-directory }}' | Out-Null
+            Invoke-WebRequest -Uri $url -OutFile $setup -UseBasicParsing
+          }
+          Start-Process -FilePath $setup -ArgumentList '-unattend' -Wait -NoNewWindow
+        } else {
+          Write-Host "MS-MPI already present at $bin"
+        }
+        $mpiexec = Join-Path $bin 'mpiexec.exe'
+        if (-not (Test-Path $mpiexec)) { throw "the MS-MPI install produced no mpiexec at $mpiexec" }
+        Add-Content -Path $env:GITHUB_PATH -Value $bin -Encoding utf8
+        Add-Content -Path $env:GITHUB_ENV -Value "MSMPI_BIN=$bin" -Encoding utf8
+
+    # ----------------------------------------------------------------------
+    # The environment Blade reads. What is deliberately NOT set here matters
+    # as much as what is:
+    #
+    #   BLADE_BLAS / BLADE_BLAS_LINK / BLADE_CUBLAS -- `blade test` clears
+    #     ambient OPENBLAS_DIR and BLADE_BLAS itself (the suites are written
+    #     against the gate OFF: corpus EXPECT pins are exact printed values and
+    #     a BLAS route is licensed to differ in the last ULP), but it does NOT
+    #     clear the explicit tier. Exporting BLADE_BLAS_LINK or BLADE_CUBLAS
+    #     here reddens roughly a dozen tests that have nothing wrong with them.
+    #     OPENBLAS_DIR alone is safe, and is what lets `blade doctor` prove the
+    #     BLAS and LAPACK routes really link and run.
+    #
+    #   BLADE_OMP_THREADS / BLADE_FP_REASSOC / BLADE_MARCH -- codegen knobs.
+    #     CI tests the defaults.
+    # ----------------------------------------------------------------------
+    - name: Blade toolchain environment
+      shell: pwsh
+      run: |
+        $root = '${{ inputs.msys2-location }}'
+        $clang = Join-Path $root 'clang64\bin\clang.exe'
+        if (-not (Test-Path $clang)) { throw "no clang for the BLADE_LLVM lane at $clang" }
+        Add-Content -Path $env:GITHUB_ENV -Value "NETCDF_DIR=$(Join-Path $root 'ucrt64')" -Encoding utf8
+        Add-Content -Path $env:GITHUB_ENV -Value "BLADE_LLVM_CLANG=$clang" -Encoding utf8
+
+    - name: Toolchain versions
+      shell: pwsh
+      run: |
+        Write-Host '--- g++ ---';   & g++ --version   | Select-Object -First 1
+        Write-Host '--- clang ---'; & clang --version | Select-Object -First 1
+        Write-Host '--- mpiexec ---'
+        # MS-MPI's mpiexec exits non-zero from a bare help query, so do not let
+        # that decide the step (Build.fs makes the same allowance when probing).
+        & "$env:MSMPI_BIN\mpiexec.exe" 2>&1 | Select-Object -First 1
+        exit 0
