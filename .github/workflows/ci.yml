@@ -29,9 +29,11 @@
 #              to end, plus the OpenMP and MPI blocks that are opt-in by flag.
 #              Much the longest lane, so it does not sit in front of a pull
 #              request; `lanes: cpp` still runs it on demand
-#   providers  NetCDF / Zarr / CSV / hybrid, which are reachable ONLY as
-#              standalone verbs -- no combination of `blade test` flags folds
-#              them into the default suite
+#   netcdf     one lane EACH, because these are reachable only as standalone
+#   zarr       verbs (no combination of `blade test` flags folds them into the
+#   csv        default suite) and because a hang in one must not take the rest
+#   hybrid     down with it -- which is exactly what happened when they shared
+#              a step. `lanes: providers` still selects all four at once
 #   llvm       the BLADE_LLVM lane: the llvm-vs-C++ stdout differential over
 #              the corpus. Standalone only, deliberately: it spawns two native
 #              compilers per file
@@ -64,7 +66,7 @@ on:
         description: 'Which test lanes to run'
         type: choice
         default: all
-        options: [all, none, cpp, providers, llvm]
+        options: [all, none, cpp, providers, netcdf, zarr, csv, hybrid, llvm]
       include-interp:
         description: 'Also run the interpreter/codegen differential (slow)'
         type: boolean
@@ -169,10 +171,39 @@ jobs:
               # nightly carries it, and `lanes: cpp` still runs it on demand.
               nightlyOnly = $true
             }
-            providers = @{
-              title       = 'Providers (NetCDF / Zarr / CSV / hybrid)'
-              timeout     = 60
-              verbs       = "test netcdf`ntest zarr`ntest csv`ntest hybrid"
+            # ONE LANE PER PROVIDER, not one lane running four verbs in
+            # sequence. Each lane is its own job on its own runner, so a verb
+            # that hangs -- and `test netcdf` has hung, on an HDF5 lock with no
+            # timeout behind it -- costs its own lane and nothing else. As one
+            # step they shared a fate: netcdf hung and zarr, csv and hybrid
+            # never ran at all.
+            #
+            # The cost is per-lane fixed overhead (checkout, SDK, build,
+            # toolchain, doctor) paid four times instead of once. It buys
+            # failure isolation and four independent red/green signals, and the
+            # lanes run concurrently so wall-clock does not suffer.
+            netcdf = @{
+              title       = 'Provider: NetCDF'
+              timeout     = 45
+              verbs       = 'test netcdf'
+              nightlyOnly = $false
+            }
+            zarr = @{
+              title       = 'Provider: Zarr'
+              timeout     = 45
+              verbs       = 'test zarr'
+              nightlyOnly = $false
+            }
+            csv = @{
+              title       = 'Provider: CSV'
+              timeout     = 30
+              verbs       = 'test csv'
+              nightlyOnly = $false
+            }
+            hybrid = @{
+              title       = 'Mixed parallelism (MPI + OpenMP)'
+              timeout     = 45
+              verbs       = 'test hybrid'
               nightlyOnly = $false
             }
             llvm = @{
@@ -184,13 +215,21 @@ jobs:
           }
           $all = @($lanes.Keys)
 
+          # Named groups, so splitting a lane does not cost the shorthand that
+          # named it. `lanes: providers` still selects the provider set; it just
+          # gets four jobs now instead of one.
+          $groups = @{ providers = @('netcdf', 'zarr', 'csv', 'hybrid') }
+
           $selected = switch ($env:EVENT) {
             'schedule'          { $all }
             'workflow_dispatch' {
               switch ($env:LANES) {
                 'all'   { $all }
                 'none'  { @() }
-                default { @($env:LANES) }
+                default {
+                  if ($groups.ContainsKey($env:LANES)) { $groups[$env:LANES] }
+                  else { @($env:LANES) }
+                }
               }
             }
             'pull_request' {
