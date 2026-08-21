@@ -1,6 +1,8 @@
 # Blade
 
 [![Project Status: WIP](https://www.repostatus.org/badges/latest/wip.svg)](https://www.repostatus.org/#wip)
+[![nightly](https://img.shields.io/github/actions/workflow/status/cmdupuis3/Blade/ci.yml?event=schedule&label=nightly)](https://github.com/cmdupuis3/Blade/actions/workflows/ci.yml?query=event%3Aschedule)
+[![build](https://img.shields.io/github/actions/workflow/status/cmdupuis3/Blade/ci.yml?branch=master&event=push&label=build)](https://github.com/cmdupuis3/Blade/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush)
 
 Blade is a general purpose array-functional programming language. 
 

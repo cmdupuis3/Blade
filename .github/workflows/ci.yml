@@ -64,6 +64,11 @@ on:
     # 06:00 UTC daily, on master only (GitHub runs schedules on the default
     # branch). This is what makes a build-only default safe: a regression the
     # cheap gate cannot see still surfaces within a day rather than at release.
+    #
+    # The README's `nightly` badge reports THIS trigger's last run. The badge
+    # URL keys on the workflow FILENAME plus `event=schedule`, so renaming this
+    # file or dropping this trigger empties the badge rather than reddening it
+    # -- a way for the badge to stop meaning anything without looking broken.
     - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
