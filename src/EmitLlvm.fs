@@ -1407,10 +1407,20 @@ let private storeCell (c: Ctx) (elem: Sc) (ptr: string) (v: Val) : unit =
         ln c (sprintf "store i8 %s, ptr %s" w ptr)
     | _ -> ln c (sprintf "store %s %s, ptr %s" (poolTy elem) v.Reg ptr)
 
-/// A zeroed pool of `n` cells -- `n` an OPERAND, so a runtime-sized ragged
-/// pool and a literal-sized dense one are the same call. calloc semantics are
-/// load-bearing, not convenient: a recursive array reads past its built
-/// prefix and the language promises those cells are zero.
+/// An UNINITIALIZED pool of `n` cells -- `n` an OPERAND, so a runtime-sized
+/// ragged pool and a literal-sized dense one are the same call.
+///
+/// THE INVARIANT EVERY CALLER DISCHARGES: the pool's every cell is written
+/// before any cell is read. Each call site is a complete fill by
+/// construction -- `materialize`'s four nests each cover their whole shape,
+/// `copyArr` copies cell-for-cell, and the two literal fills store exactly
+/// `total` cells behind a count guard. Zeros the LANGUAGE promises (a
+/// recursive array's unbuilt prefix, `guard`'s else arm) are explicit stores
+/// in the IR both lanes share, so they hold here without allocator help --
+/// the C++ lane's pools are uninitialized `new T[]` for the same reason. The
+/// allocator used to memset anyway, which cost one full write pass per pool
+/// inside the timed region (the llvm lane's "13-20% IR-shape headroom" of
+/// plan-simplex-blocked-compute.md section 0b was almost entirely this).
 let private allocPool (c: Ctx) (elem: Sc) (n: string) : string =
     needShim c "blade_alloc_cells"
     let p = freshReg c

@@ -23,8 +23,13 @@
  *   - bool prints "true"/"false" (boolalpha).
  *   - int64 prints plain decimal, INT64_MIN included.
  *
- * The allocators are calloc-shaped BY CONTRACT, not by convenience: recursive
- * arrays read past the built prefix and rely on those cells being zero.
+ * The allocators return UNINITIALIZED storage, exactly like the C++ lane's
+ * `new T[cardinality]` (linearized_storage.hpp): both lanes emit from the same
+ * IR, and every zero the language promises -- a recursive array's implicit
+ * prefix, a guard's else arm -- is an EXPLICIT store that IR already contains,
+ * so an allocator memset only re-wrote memory the emitted fill was about to
+ * write again (measured at a full write pass per pool, ~13-20% of the whole
+ * program on compact-map fixtures: plan-simplex-blocked-compute.md section 0b).
  */
 
 #include <stdio.h>
@@ -72,7 +77,7 @@ BLADE_NORETURN void blade_panic(const char *msg) {
  * is undefined. */
 #define BLADE_POOL_ALIGN 64
 
-static void *blade_alloc_aligned_zeroed(size_t bytes) {
+static void *blade_alloc_aligned(size_t bytes) {
     void *p = NULL;
     /* A zero-cell pool still gets storage: the emitted code may hold the
      * pointer even when no loop iteration ever dereferences it, and a NULL
@@ -91,10 +96,13 @@ static void *blade_alloc_aligned_zeroed(size_t bytes) {
     if (posix_memalign(&p, (size_t)BLADE_POOL_ALIGN, rounded) != 0) p = NULL;
 #endif
     if (!p) blade_panic("error[BL8006]: out of memory");
-    /* calloc semantics are load-bearing, not convenient -- a recursive array
-     * reads past its built prefix and the language promises zeros there. The
-     * aligned allocators do not zero, so this memset IS the guarantee. */
-    memset(p, 0, rounded);
+    /* NO memset. Zeros the language promises (a recursive array's unbuilt
+     * prefix, guard's else arm) are explicit stores in the emitted IR -- the
+     * same contract the C++ lane's uninitialized `new T[]` pools live by. A
+     * blanket zero here was one full write pass per pool inside the timed
+     * region, and the emitter's fill was about to overwrite every cell of it
+     * (every allocPool caller in src/EmitLlvm.fs fills the whole pool before
+     * any read; see the invariant note on allocPool). */
     return p;
 }
 
@@ -112,19 +120,19 @@ static size_t blade_pool_bytes(long long n, long long elemBytes) {
 }
 
 void *blade_alloc_f64(long long n) {
-    return blade_alloc_aligned_zeroed(blade_pool_bytes(n, (long long)sizeof(double)));
+    return blade_alloc_aligned(blade_pool_bytes(n, (long long)sizeof(double)));
 }
 
 void *blade_alloc_i64(long long n) {
-    return blade_alloc_aligned_zeroed(blade_pool_bytes(n, (long long)sizeof(long long)));
+    return blade_alloc_aligned(blade_pool_bytes(n, (long long)sizeof(long long)));
 }
 
-/* The general dense-array pool: `n` cells of `cellBytes` each, zeroed and
+/* The general dense-array pool: `n` cells of `cellBytes` each, uninitialized,
  * 64-byte aligned. Sized in BYTES because a Bool pool stores one byte per cell
  * (i1 has no settled memory layout to share across the C boundary) while every
  * other element type stores eight. */
 void *blade_alloc_cells(long long n, long long cellBytes) {
-    return blade_alloc_aligned_zeroed(blade_pool_bytes(n, cellBytes));
+    return blade_alloc_aligned(blade_pool_bytes(n, cellBytes));
 }
 
 /* NULL is a NO-OP by contract, not by luck: the emitter's scope-exit frees

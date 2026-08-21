@@ -640,6 +640,43 @@ Four findings, ranked by how much they should change anyone's plans.
    session scratchpad `cpp-juice/`, `twin.cpp` with the full variant matrix in
    its header) before any deeper backend investment.
 
+   **RESOLVED 2026-08-20 — it was never the IR shape; it was the shim
+   allocator's memset.** The emission-diff pass ran both fixtures' `.ll` and
+   the closed twins through the same clang 22.1.8 at `-O3 -march=native` and
+   compared the OPTIMIZED forms: the hot nests come out structurally
+   identical. mem2reg rebuilds the induction variables from the counter
+   allocas, LICM hoists the per-level operand loads (the two `noalias`
+   allocator returns are all the AA it needs), SCEV strength-reduces the
+   hockey-stick polynomials, and both inner loops vectorize to the same
+   VF=4/IF=4 body with the same five vector FP ops. The two remaining textual
+   differences are real but small: the twin's `-ffp-contract=fast` puts
+   `contract` flags on its IR while the lane's order-preserving default emits
+   none (measured ~0 here — `BLADE_FP_CONTRACT=fast` moved the fixture within
+   noise; the kernel has one fusable pair per cell and the loop is
+   load/store-bound), and the backend does NOT retro-contract plain
+   fmul+fadd in `.ll` input, so passing `-ffp-contract=fast` to clang-on-.ll
+   is inert. What actually cost 13-20% sat outside the loops:
+   `blade_alloc_cells` memset every pool (calloc semantics "for recursive
+   arrays"), a full write pass over the 36.7 MB rank-3 / 5.1 MB rank-4 output
+   pool inside the timed region, which the fill nest then overwrote cell for
+   cell. The zeroing was provably redundant: the C++ lane's pools are
+   uninitialized `new T[]`, both lanes emit the same IR, and every zero the
+   language promises (rec-array prefix, `guard` else) is an explicit store in
+   that IR — the llvm differential passing 0-failed against the uninitialized
+   C++ lane is the standing proof no reachable program reads an unwritten
+   cell. With the memset removed (shim-only change; emitted `.ll`
+   byte-identical, goldens untouched), clean interleaved 27-sample medians:
+   r=3 8.46 ms vs twin 8.37 (parity, was 9.88), r=4 **1.02 ms vs twin 1.05**
+   (was 1.29) — the lane now matches or edges the erased-C++-on-clang control
+   at both ranks, and reading 1's "llvm loses to flat C++ by 1.17-1.30x"
+   narrows to the g++-vs-clang twin spread (4-8%). The alloca/load-store
+   emission style is EXONERATED: clang's own front end emits the same shape,
+   and the fact-layer attributes already carry everything -O3 needs to erase
+   it. (§0c below, measured independently the same day, found the same
+   allocator through the other lens: the memset was a SECOND first-touch pass
+   both bench lanes could never see in their own deltas because only the llvm
+   lane paid it.)
+
 ## 0c. The roofline, measured 2026-08-20 — MOST of the benchmark is the allocator, not the code
 
 Prompted by "what else can either lane do here": before proposing techniques,
