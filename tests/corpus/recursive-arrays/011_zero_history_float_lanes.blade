@@ -1,0 +1,41 @@
+// TEST: Recursive Array Implicit Zero History (both lanes)
+// ============================================================================
+// The Float-only twin of 009, and it exists because 009 CANNOT COVER THE LLVM
+// LANE: 009 declares `Array<Int like IStep>`, and an Int32 array literal is a
+// whole-program refusal there, so 009 silently falls back to C++ and the llvm
+// allocator is never exercised by it.
+//
+// What needs covering is a LANGUAGE GUARANTEE (formalism 7.5 / 10.4, and
+// CLAUDE.md's "reads past the built prefix are implicitly zero, so lag schemes
+// need no bounds guards"): a prefix read outside the prefix built so far is the
+// element type's ZERO. That guarantee must hold on an UNINITIALIZED pool. Both
+// lanes now allocate uninitialized -- the C++ lane has always used
+// `new T[cardinality]` (linearized_storage.hpp), and the llvm shim dropped its
+// allocator memset when it was measured at 13-20% of whole-program time
+// (plan-simplex-blocked-compute.md section 0b) -- so the zeros come from
+// EXPLICIT STORES in the shared IR, not from the allocator. This file is the
+// standing proof of that, on the lane 009 cannot reach.
+//
+// `b` is the distinguisher, exactly as in 009: scaling by 1e300 turns any
+// stray denormal or heap-metadata bit pattern into a visible number, while an
+// exact zero stays exactly zero. Before the guard existed these lags returned
+// allocator garbage (009's header records `b` reading -1.3e+69).
+// ============================================================================
+type Draw = Idx<6>
+type D2 = Idx<6>
+
+// a(0) = 1 (seed); a(1) = a(-2) = 0; a(2) = a(-1) = 0; a(3) = a(0) = 1; ...
+let rec a: Array<Float like Draw> =
+    match a with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 3)
+// EXPECT: a = [1, 0, 0, 1, 0, 0]
+
+// The same stream amplified: an exact zero stays zero, garbage does not.
+let rec b: Array<Float like D2> =
+    match b with
+    | zero -> zero
+    | zero :: s -> zero :: 1.0
+    | prefix :: n -> prefix :: prefix(n - 3) * 1.0e300
+// EXPECT: b = [1, 0, 0, 1e+300, 0, 0]
