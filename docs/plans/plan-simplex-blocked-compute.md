@@ -563,6 +563,12 @@ Three readings, in order of how much they should change anyone's plans.
    form's cost sits in hoisted terms that do not. The rank-2 measurement that
    found the two lanes at parity (§0.3 of plan-llvm-backend.md) was reading the
    flat end of that curve.
+   **AMENDED by §0b below: the overtake is emitted-vs-emitted only.** Hand-erased
+   C++ twins with flat addressing win at BOTH ranks, so reading 3's mechanism
+   diagnosis stands (the skeleton write path IS the deficit) but its
+   backend conclusion does not survive giving the C++ lane the same addressing —
+   the win is code-shape, not backend, exactly as the backend-independence
+   theorem predicts.
 
 **What this does NOT show.** The blocked (brick) schedule is still rank-2 only:
 `SimplexBlocksCore` enumerates rank-r blocks already, but the prism emitter does
@@ -573,6 +579,66 @@ arm exists for). Nothing above is evidence for or against bricks at rank 3 — a
 r=3/T=4 against 75% at r=2/T=4, needing T ≥ r before any dense brick exists at
 all). The serial rank-r nest is what delivers the r! above, and it delivers it
 without blocking.
+
+## 0b. The home-turf control, measured 2026-08-20 — erased C++ wins both ranks; the rank-4 "llvm overtake" was an addressing artifact
+
+§0a's reading 3 compared the two lanes' EMITTED programs. The fairness question
+is what each lane can do in its IDEAL setup — so the same fixtures were re-run
+against HAND-ERASED C++ twins (the `plan-static-array-erasure.md` §3b
+methodology): identical storage-coordinate loops, dependent bounds, per-level
+operand hoists, kernel, fill, probes and timing region, with only the
+ADDRESSING changed. Two variants, both writing the flat pool directly with no
+Iliffe skeleton: `cursor` (one running write cursor — the canonical nest IS
+pool order, so `s[cur++]` is exact and addressing costs zero arithmetic;
+single-thread ideal, rows serially dependent) and `closed` (the hockey-stick
+closed form hoisted per level — the llvm lane's addressing spelled in C++;
+rows stay independent). Compiled with the lane's own flags
+(`-O3 -march=native -ffp-contract=fast`, g++ 15.2 and clang++ 22.1.8); probe
+values identical across every arm; two clean interleaved runs, 27 samples per
+arm, medians (a first run was discarded for ambient contamination — spreads
+2-4x the clean runs', another session's compute burst; the clean runs
+reproduce each other and the §0a absolutes).
+
+| arm | r=3 median | ns/cell | r=4 median | ns/cell |
+|---|---|---|---|---|
+| **flat cursor, g++** | **7.67 ms** | **1.67** | **0.98 ms** | **1.54** |
+| flat closed-form, g++ | 7.78 ms | 1.69 | 1.00 ms | 1.57 |
+| flat closed-form, clang++ | 7.92 ms | 1.73 | 1.06 ms | 1.67 |
+| emitted C++ (skeleton), g++ | 8.25 ms | 1.80 | 1.53 ms | 2.41 |
+| emitted C++ (skeleton), clang++ | 8.36 ms | 1.82 | 1.92 ms* | 3.02* |
+| llvm lane | 8.96 ms | 1.95 | 1.20 ms | 1.89 |
+
+(*from the contaminated run only — treat as ≈ g++-emitted, not as a clang
+penalty.)
+
+Four findings, ranked by how much they should change anyone's plans.
+
+1. **C++ on its home turf wins at both ranks.** Flat-pool addressing beats the
+   llvm lane by 1.17x (r=3) and 1.20-1.30x (r=4), and beats the lane's own
+   emitted skeleton code by 1.07x (r=3) and **1.53x (r=4)**. §0a reading 3 is
+   AMENDED: the rank-4 overtake was real against the emitters as they stand,
+   but it is an ADDRESSING artifact, fully recoverable in C++ — the
+   backend-independence theorem (plan-llvm-backend.md §1-2) survives its
+   sharpest test yet.
+2. **The actionable emitter item: canonical compact FILLS should write the flat
+   pool, not the skeleton.** `closed` ≈ `cursor` within noise (1.57 vs 1.54
+   ns/cell at r=4), so the parallelizable form is free — the C++ emitter change
+   should emit closed-form flat writes (keeping rows independent for OMP),
+   replacing `__orow = A[i][j]`-style skeleton writes in exactly the canonical
+   compact-output nests. Reads through the skeleton elsewhere are untouched.
+   This is the same "flat arithmetic == skeleton, so erasure is safe" result
+   plan-static-array-erasure.md measured at rank 3 on the fiber shape — but at
+   rank 4 on the map shape it is no longer parity, it is 1.53x, because the
+   per-loop-entry skeleton dereferences amortize over ever-shorter inner runs
+   (mean inner trip ≈ n/r).
+3. **The toolchain axis is neutral** (clang++ twins within 4-8% of g++ twins,
+   both orderings preserved), so none of the above is a gcc-vs-clang effect.
+4. **The llvm lane has its own 13-20% IR-shape headroom**: clang++ compiling
+   clean C++ of the SAME algorithm (closed twin: 1.06 ms) beats the lane's
+   emitted IR (1.20 ms) — so the deficit is the lane's alloca/load-store IR
+   shape, not the clang backend. Worth an emission-diff pass (probe artifacts:
+   session scratchpad `cpp-juice/`, `twin.cpp` with the full variant matrix in
+   its header) before any deeper backend investment.
 
 ---
 

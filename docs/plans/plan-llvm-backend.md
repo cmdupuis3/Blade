@@ -35,9 +35,14 @@ remaining refusal after `IRForRange`: `SimplexBlocksCore.prefixTerm` supplies th
 per-level offset in closed form, `emitSimplexSerialR` hoists one term per level down
 an r-deep nest, and `canonRead` canonicalizes by sorting network with the
 antisymmetric sign as the exchange parity. Measured at **92% of r! at rank 3 and 95%
-at rank 4**, with per-cell addressing cost FLAT across rank — where the C++ lane's
-rises, so the llvm lane overtakes it at rank 4. Full table in
-`plan-simplex-blocked-compute.md` §0a.
+at rank 4**, with per-cell addressing cost FLAT across rank — where the emitted C++
+lane's rises, so the llvm lane overtakes it at rank 4 *emitted-vs-emitted*. The
+home-turf control (2026-08-20) then amended that reading: hand-erased C++ with
+flat-pool addressing wins at BOTH ranks (and clang-vs-g++ is neutral), so the rank-4
+gap is an ADDRESSING artifact the C++ emitter can recover — the backend-independence
+theorem (§1-2) holds — and the same control found the llvm lane's own emitted IR
+13-20% behind clang on clean C++ of the identical algorithm, an IR-shape headroom
+item for this lane. Full tables in `plan-simplex-blocked-compute.md` §0a-0b.
 
 Refused, by name, at whole-program granularity: runtime extents; providers; CUDA, MPI
 and OpenMP emission; ragged/sparse/compound/orbit index types; Hermitian and wreath;
