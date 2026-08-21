@@ -10,6 +10,7 @@ re-added after a mass deletion left dangling references).
 |----------|--------|-------|
 | [plan-ad-combinators.md](plan-ad-combinators.md) | ACTIVE (F4 spec) | Per-combinator forward/reverse AD rules; the companion spec `plan-forward-mode-ad.md` §4 F4 deferred to |
 | [plan-simplex-blocked-compute.md](plan-simplex-blocked-compute.md) | P0+P1 LANDED (rank 2); P1 GATE FAILED | Reusing Zarr SimplexBlocks math on the compute side: dense bricks + 2^-d residue. Correct and measured; S0 costs ~7% and wins nothing — S1/mirror modes untouched |
+| [plan-rank-r-former.md](plan-rank-r-former.md) | DESIGN: nothing built | BLAS-class rank-r symmetric contraction (`sum_t A(t,i1)...A(t,ir)`) with NO decompaction. The KRS schedule uses the packed pool's affine last axis to reduce rank-r to a ragged rank-2 gemm, claiming 100% of r! in flops where BCSS got storage only; bricks and S1 are NOT needed, and the real bottleneck is a dependent FMA chain. P0 is a census that can kill it |
 | [plan-toolchain-packaging.md](plan-toolchain-packaging.md) | LANDED (doctor/setup phases open) | deps.json pins, `blade doctor`, `blade setup`, toolchain.json |
 | [plan-forward-mode-ad.md](plan-forward-mode-ad.md) | EXECUTED through F3 | `ad.jvp` forward mode, HVP, second order |
 | [plan-static-array-erasure.md](plan-static-array-erasure.md) | VERDICT: REFUTED | Measured case against static-extent array erasure — do not build |
