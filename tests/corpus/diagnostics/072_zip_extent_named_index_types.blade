@@ -1,0 +1,18 @@
+// TEST: Diag Zip Extent Named Index Types (rejects)
+// The same clash written with EXPLICIT, distinct, named index types. This
+// spelling used to pass `blade check` outright.
+//
+// I8 and I2 disagree TWICE -- different names AND different extents -- and the
+// pin is on the EXTENT deliberately. `zipHeadClash` orders its three checks by
+// severity (packing, then extent, then nominal identity), so the operand that
+// would be read past its allocation is named before the operand that is merely
+// spelled differently. Swapping that order would answer a memory-safety
+// question with a naming answer. diagnostics/074 pins the nominal half on its
+// own, over operands whose extents agree.
+// ERROR: BL3016
+// ERROR-CONTAINS: Blade does not broadcast mismatched extents
+type I8 = Idx<8>
+type I2 = Idx<2>
+let P: Array<Float64 like I8> = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+let Q: Array<Float64 like I2> = [10.0, 20.0]
+let bad = P + Q

@@ -1,0 +1,38 @@
+// TEST: Zip Anonymous Index Co-Iterates With Named
+// The PERMISSIVE half of the co-iteration agreement rule (diagnostics/071-074
+// hold the refusals): an UNNAMED index co-iterates with a named one of the
+// same extent, and with another unnamed one.
+//
+// This is the deliberate boundary. Two NAMES that differ refuse (074) --
+// provenance is part of the type. An untagged record is "some axis of this
+// extent", not "an axis distinct from every named one", so it stays
+// compatible with both. The rule is the same name-permissive shape the irreps
+// aliases already state one layer up ("anonymous IrrepsIdx<spec> unifies with
+// either"), and the idiom it protects is everywhere: a bare seed or
+// accumulator literal multiplied against an annotated array.
+type R = Idx<6>
+
+let v: Array<Float64 like R> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
+let seed = [1.0, 0.0, -2.0, 3.0, 0.5, 0.25]
+
+// named x anonymous, and the mirror -- neither order refuses.
+let a = v * seed
+let b = seed * v
+let dot = reduce(a, (+))
+// EXPECT: a = [10, 0, -60, 120, 25, 15]
+// EXPECT: b = [10, 0, -60, 120, 25, 15]
+// EXPECT: dot = 110
+
+// The SAME name on both sides is the other accepting case: nominal agreement
+// is equality, not distinctness.
+let w: Array<Float64 like R> = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
+let c = v + w
+// EXPECT: c = [11, 21, 31, 42, 52, 62]
+
+// Two anonymous operands of equal extent: no names to disagree, and the extent
+// check is what stands between this and the out-of-bounds walk of
+// diagnostics/071.
+let p = [1.0, 2.0, 3.0]
+let q = [10.0, 20.0, 30.0]
+let d = p + q
+// EXPECT: d = [11, 22, 33]

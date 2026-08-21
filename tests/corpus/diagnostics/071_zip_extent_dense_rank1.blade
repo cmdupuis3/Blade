@@ -1,0 +1,18 @@
+// TEST: Diag Zip Extent Dense Rank1 (rejects)
+// The elementwise binop between two rank-1 arrays of DIFFERENT extents.
+// `A + B` is re-synthesized as `method_for(zip(A, B)) <@> lambda(u, w) -> u + w`
+// (inferBinOp), and the co-iteration record used to come from the FIRST
+// operand with NO agreement check at all: `zipSharedRecords`' single-record
+// rule returned `shape0.Head` whenever either operand had <= 1 index record,
+// which two dense rank-1 arrays always do. So this walked P's 8 cells over
+// Q's 2-cell pool, in BOTH lanes, silently:
+//   C++  : bad = [11, 21, nan, 1, 1, 1, 1, 1]
+//   LLVM : bad = [11, 21, 3145957.80750876, 2.75698565208236e+40, ...]
+// The tail is whatever the allocator left behind -- a wrong answer with no
+// symptom, which is the exact failure mode BL3016 exists to refuse at the
+// parameter seam (069/070). This is the co-iteration seam of the same code.
+// ERROR: BL3016
+// ERROR-CONTAINS: operand 2 has extent 2 on the shared axis
+let P = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+let Q = [10.0, 20.0]
+let bad = P + Q

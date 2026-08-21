@@ -1318,12 +1318,106 @@ let isGroupedRaggedShape (recs: IRIndexType list) : bool =
     | [outer; inner] -> outer.IxKind = IxKGroupOuter && inner.IxKind = IxKGroupMember
     | _ -> false
 
+/// PACKING agreement for ONE shared co-iteration axis: same logical rank and
+/// same symmetry. That pair is exactly how cells are addressed -- a compact
+/// axis (`SymIdx<2, 4>`: rank 2, one cell per canonical tuple, laid out as a
+/// simplex) and a plain dense axis (`Idx<4>`: rank 1, one cell per subscript)
+/// enumerate different cell counts with different subscript arithmetic, so no
+/// single walk serves both whatever their extents say. That mix used to reach
+/// codegen and die in g++ on `double[size_t]` -- the invalid-emission class.
+///
+/// Deliberately does NOT compare `IxKind`/`Kind`. Most index kinds vary the
+/// PROVENANCE of a flat dense walk, not the walk, and they co-iterate with a
+/// plain `Idx<n>` today by design: an irreps block index (`IrrepsIdx<..>`,
+/// `PgIrrepsIdx<..>`) is block-structured DENSE, and a `group_by` outer slot
+/// (`Idx<__ngroups>`) is a dense group axis. The equivariant, ml-ops and
+/// grouped-peel corpora all zip those against plain axes; requiring IxKind
+/// equality here cost 11 of them.
+let indexPackingCoIterable (a: IRIndexType) (b: IRIndexType) : bool =
+    a.Rank = b.Rank && a.Symmetry = b.Symmetry
+
+/// NOMINAL agreement for a shared co-iteration axis: two index types that both
+/// carry a user-facing NAME must carry the SAME name. `type LatIdx = Idx<180>`
+/// registers its record with `Tag = Some "LatIdx"` (the plain-index arm of
+/// `registerTypeDecl`), so the provenance really is in the IR and this
+/// really is checkable -- which is what CLAUDE.md's invariant asks for
+/// ("Nat<LatIdx> and Nat<LonIdx> don't unify even at equal extent ... index
+/// provenance is part of the type"), and what the rank->=2 product rule
+/// already enforces through `indexRecordsAgree`'s Tag comparison. Rank 1 was
+/// the hole.
+///
+/// PERMISSIVE on the anonymous side, on purpose and on precedent. An untagged
+/// record is "some axis of this extent", not "an axis distinct from every
+/// named one": `let mut dv = [0.0, 0.0, 0.0]` beside an
+/// `Array<Float64 like R>` is the ordinary way to write a seed vector, and
+/// `dv * seed` must keep working (ad-jvp-comb/043-045 are exactly that). This
+/// is the same name-permissive rule the irreps aliases already state --
+/// "anonymous `IrrepsIdx<spec>` unifies with either" -- one layer down.
+///
+/// Restricted to `IxKPlain` because Tag doubles as the KIND sentinel
+/// (`__group_outer`, `__raggedidx`, the irreps payloads). For anything but a
+/// plain record the tag is not a name and comparing it would mean the
+/// packing/provenance conflation `indexPackingCoIterable` deliberately avoids.
+let indexNamesCoIterable (a: IRIndexType) (b: IRIndexType) : bool =
+    a.IxKind <> IxKPlain || b.IxKind <> IxKPlain
+    || (match a.Tag, b.Tag with
+        | Some x, Some y -> x = y
+        | _ -> true)
+
+/// The shared-axis disagreement in a single-record co-iteration, if any --
+/// every operand's HEAD record against the FIRST operand's, which is the
+/// record the walk will actually use. Reports the first offender (1-based).
+///
+/// Three obligations, in this order, because that is decreasing severity:
+///   1. Packing (`indexPackingCoIterable`) -> BL3999, the band this function's
+///      other structural refusals already use. No walk exists at all.
+///   2. Extent, LITERAL vs LITERAL only -> BL3016 (`ZipExtentMismatch`). The
+///      walk exists and is out of bounds. Checked BEFORE names so that
+///      `I8 + I2` reports the memory-safety fact rather than the naming one.
+///      A symbolic extent reads `.extents[d]` at runtime and keeps the
+///      historical looseness -- the same rule `kernelExtentClash` follows.
+///   3. Nominal identity (`indexNamesCoIterable`) -> BL3999. The walk is
+///      in-bounds; the operands just are not over the same index space.
+///
+/// Only the HEAD is compared. A rank-2 operand zipped with a rank-1 one takes
+/// this arm too (`minRank <= 1`), and there the shared record is the leading
+/// one; the trailing records are the kernel's business, trimmed by its slice
+/// rank in buildApplyInfo.
+let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
+    match arrayTypes with
+    | [] | [_] -> None
+    | first :: rest ->
+        match first.IndexTypes with
+        | [] -> None
+        | h0 :: _ ->
+            rest
+            |> List.mapi (fun i at -> (i + 2, at))
+            |> List.tryPick (fun (pos, at) ->
+                match at.IndexTypes with
+                | [] -> None
+                | h :: _ ->
+                    if not (indexPackingCoIterable h0 h) then
+                        Some (Other (sprintf
+                                "co-iteration operands must share ONE index space on the co-iterated axis, but operand 1 is over %s and operand %d is over %s. These walk different cell counts with different subscript arithmetic (a packed/compact axis stores one cell per canonical tuple; a plain dense axis stores one per subscript), so there is no shared iteration for the kernel to run over. Decompact the packed operand, or write the traversal over each explicitly."
+                                (ppIndexType h0) pos (ppIndexType h)))
+                    else
+                        match tryEvalIntIR h0.Extent, tryEvalIntIR h.Extent with
+                        | Some e0, Some e when e0 <> e -> Some (ZipExtentMismatch (pos, e0, e))
+                        | _ ->
+                            if not (indexNamesCoIterable h0 h) then
+                                Some (Other (sprintf
+                                        "co-iteration operands are over DIFFERENT index types: operand 1 is indexed by '%s' and operand %d by '%s'. A named index type carries provenance, so two of them do not interoperate merely by having the same extent (%s) -- that is what makes a subscript bounds-safe by construction. Index one of them through the other's space, or drop the annotation on one operand if they really are the same axis (an UNNAMED index co-iterates with either)."
+                                        (defaultArg h0.Tag "?") pos (defaultArg h.Tag "?") (ppExtentOf h0.Extent)))
+                            else None)
+
 /// Shared iteration records for a zip co-iteration, from the operands' array
-/// types. Single-record operands (dense rank-1, packed symmetric) use the
-/// first record with no agreement check. Multi-record operands (dense rank
-/// >= 2) span the FULL product of records and require structural agreement
-/// + all-plain-dense records (mixed dense/packed multi-axis rejects), with
-/// the grouped-ragged shape as the one non-dense exception.
+/// types. Single-record operands (dense rank-1, packed symmetric) co-iterate
+/// the FIRST operand's record, and every other operand's head record must
+/// agree with it (`zipHeadClash`) -- shape first, then literal extents.
+/// Multi-record operands (dense rank >= 2) span the FULL product of records
+/// and require structural agreement + all-plain-dense records (mixed
+/// dense/packed multi-axis rejects), with the grouped-ragged shape as the one
+/// non-dense exception.
 let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, TypeError> =
     match arrayTypes with
     | [] -> Ok []
@@ -1331,8 +1425,14 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
         let shape0 = first.IndexTypes
         let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
         if shape0.Length <= 1 || minRank <= 1 then
-            // Single-record rule (first array's first record).
-            Ok (if minRank > 0 then [shape0.Head] else [])
+            // Single-record rule (first array's first record). The head
+            // records must still AGREE: this arm used to take shape0.Head
+            // unchecked, so `[1.0; x8] + [10.0, 20.0]` walked 8 cells over a
+            // 2-cell pool in both lanes, and a SymIdx<2,4> + Idx<4> zip
+            // reached g++ as invalid C++.
+            match zipHeadClash arrayTypes with
+            | Some e when minRank > 0 -> Error e
+            | _ -> Ok (if minRank > 0 then [shape0.Head] else [])
         elif not (rest |> List.forall (fun at -> indexShapesAgree at.IndexTypes shape0)) then
             Error (Other "co-iteration over multi-axis arrays requires all operands to have identical index shapes (same records: tags, extents, symmetry)")
         elif isGroupedRaggedShape shape0 then

@@ -624,6 +624,8 @@ class IS implemented, and the dense result folds like any other array." op level
         sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
     | ExtentArgMismatch (pos, dim, expected, actual) ->
         sprintf "argument %d: extent mismatch on index slot %d -- the parameter declares Idx<%d> but the argument has Idx<%d>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent." pos dim expected actual
+    | ZipExtentMismatch (pos, expected, actual) ->
+        sprintf "elementwise co-iteration: operand %d has extent %d on the shared axis, but operand 1 has extent %d. A zip walks ONE index space, taken from the first operand, so the longer walk reads past the shorter operand's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Bring the operands to a common extent, or index/slice the longer one first." pos actual expected
     | HaloExtentMismatch (declared, dim, targetName, actual) ->
         sprintf "halo extent mismatch: the halo declares an inner extent of %d, but '%s' (read through the window at index slot %d) has extent %d. The window walk is bounded by the DECLARED extent, so an oversized halo reads past '%s''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over." declared targetName dim actual targetName
     | QuantityTerminal (quantity, declName) ->
@@ -818,7 +820,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"
             | QuantityArgMismatch _ -> "BL3010"
-            | ExtentArgMismatch _ | HaloExtentMismatch _ -> "BL3016"
+            | ExtentArgMismatch _ | HaloExtentMismatch _ | ZipExtentMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"

@@ -1,0 +1,21 @@
+// TEST: Diag Zip Compact Dense Mix (rejects)
+// The same seam, structural half: a PACKED axis zipped with a plain dense one.
+// `SymIdx<2, 4>` stores 10 canonical-tuple cells behind simplex addressing;
+// `Idx<4>` stores 4 cells behind a flat subscript. There is no walk that serves
+// both, so the single-record rule's unchecked `shape0.Head` handed codegen a
+// loop whose body subscripted an already-peeled scalar, and the program died in
+// g++ rather than in Blade:
+//   error: invalid types 'double[size_t]' for array subscript
+// That is the invalid-emission class. It is a refusal now, before emission.
+//
+// Rank + symmetry is the whole predicate (`indexRecordsCoIterable`), NOT the
+// index KIND: irreps block indices and `group_by` outer slots are dense walks
+// that legitimately co-iterate with a plain `Idx<n>` (ml-equiv, ml-ops and the
+// grouped-peel AD corpora all do it), and only packing changes the addressing.
+// ERROR: BL3999
+// ERROR-CONTAINS: operand 1 is over SymIdx<2, 4> and operand 2 is over Idx<4>
+type S = SymIdx<2, 4>
+type D = Idx<4>
+let A: Array<Float64 like S> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0], [8.0, 9.0], [10.0]]
+let B: Array<Float64 like D> = [1.0, 2.0, 3.0, 4.0]
+let bad = A + B

@@ -1,0 +1,23 @@
+// TEST: Diag Zip Distinct Index Types Same Extent (rejects)
+// The NOMINAL half of the co-iteration agreement rule, isolated: same extent,
+// different named index types. This is the invariant CLAUDE.md states --
+// "Nat<LatIdx> and Nat<LonIdx> don't unify even at equal extent ... which is
+// what makes A(i) bounds-safe by construction" -- and rank 1 was the hole in
+// it. The rank->=2 product rule (`indexRecordsAgree`) has compared Tag all
+// along, so `Array<.. like LatIdx, LonIdx> + Array<.. like DownIdx, LonIdx>`
+// already refused; only the single-record path took the first operand's
+// record unchecked.
+//
+// The name is genuinely in the IR to compare: `type LatIdx = Idx<8>` registers
+// its record with `Tag = Some "LatIdx"` (registerTypeDecl's plain-index arm).
+//
+// The rule is name-PERMISSIVE on the anonymous side -- an untagged record
+// co-iterates with either -- which index-types/253 pins. Two NAMES is the
+// case that refuses.
+// ERROR: BL3999
+// ERROR-CONTAINS: operand 1 is indexed by 'LatIdx' and operand 2 by 'LonIdx'
+type LatIdx = Idx<4>
+type LonIdx = Idx<4>
+let lat: Array<Float64 like LatIdx> = [1.0, 2.0, 3.0, 4.0]
+let lon: Array<Float64 like LonIdx> = [10.0, 20.0, 30.0, 40.0]
+let bad = lat + lon

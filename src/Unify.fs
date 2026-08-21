@@ -158,6 +158,14 @@ type TypeError =
     /// undersized one silently emits fewer windows -- a wrong answer with no
     /// symptom. `dim` is 1-based over the indexed array's slots.
     | HaloExtentMismatch of declared: int64 * dim: int * targetName: string * actual: int64
+    /// BL3016 (same family, the co-iteration twin): two operands of one
+    /// elementwise zip -- `A + B`, `zip(A, B) <@> k`, `method_for(zip ..)` --
+    /// carry DIFFERENT compile-time-literal extents on the shared axis. The
+    /// shared iteration record comes from the FIRST operand, so the walk runs
+    /// the first operand's extent over every operand's storage: the shorter
+    /// one is read past its allocation, silently, with no broadcast anywhere
+    /// in the language to justify it. `pos` is the offending operand, 1-based.
+    | ZipExtentMismatch of pos: int * expected: int64 * actual: int64
     /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.

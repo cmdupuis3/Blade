@@ -1,5 +1,12 @@
 // TEST: Pack Alias Invariance
-// WARN: BL4004
+// NO BL4004 HERE, deliberately. The implicit-outer steering note ("did you
+// mean elementwise?") only fires when the operands COULD co-iterate, and A
+// (Idx<2>) and B (Idx<3>) cannot -- `zip(A, B)` is now a BL3016 extent clash
+// rather than a silent out-of-bounds walk, so the note would be advice that
+// does not compile. This file pinned the warning back when the co-iterability
+// probe (`zipSharedRecords`) took the first operand's record unchecked and
+// answered "yes" for any two rank-1 arrays. loops/101 keeps the live pin, over
+// same-extent operands, where the note is real.
 // The SUBSTITUTION LAW of the width-schema design
 // (docs/plan-tuples-vs-arg-packs.md 6b): a pack is its flat LEAF sequence, so
 // `K <@> (A, B)`, `let P = (A, B); K <@> P` and `let Q = P; K <@> Q` are ONE
