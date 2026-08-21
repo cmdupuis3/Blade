@@ -640,6 +640,68 @@ Four findings, ranked by how much they should change anyone's plans.
    session scratchpad `cpp-juice/`, `twin.cpp` with the full variant matrix in
    its header) before any deeper backend investment.
 
+## 0c. The roofline, measured 2026-08-20 — MOST of the benchmark is the allocator, not the code
+
+Prompted by "what else can either lane do here": before proposing techniques,
+find the actual wall. Four arms over the same rank-3 domain (n = 301, 4 590 551
+cells, 35.0 MB out), best of 7, buffer pre-touched OUTSIDE the timed region so
+the loop is measured warm — plus a separate allocator probe. All on the same
+5800HS, g++ 15.2, `-O3 -march=native`.
+
+| arm | ms | ns/cell | note |
+|---|---|---|---|
+| map, real pool (warm) | 2.62 | 0.57 | the nest + kernel + streaming stores |
+| map, store masked into 64 KB | 2.45 | 0.53 | same instructions, memory wall removed |
+| pure store stream, plain | 2.74 | 0.60 | 12.5 GB/s effective |
+| pure store stream, **non-temporal** | **0.82** | **0.18** | **41.8 GB/s effective — 3.35x** |
+
+| allocator, 35 MB pool | ms |
+|---|---|
+| `_aligned_malloc` | 0.01 |
+| **first touch (page faults + stores)** | **6.3** |
+| re-touch, pages already mapped | 3.4 |
+| **`free`** | **1.3** |
+
+**The headline: the benchmarked programs are ~55% allocator and OS, not
+computation.** Blade's own `completed in` clock brackets allocate → fill →
+probe → free (see any emitted `main`), so the 7.67 ms twin decomposes roughly
+as 2.6 ms of warm compute + ~2.9 ms of first-touch page faults (6.3 − 3.4) +
+~1.3 ms of `free` + fill/probes. Every lane comparison in §0a/§0b — and the
+rank-2 ones before them — is therefore diluted by a tax both lanes pay
+identically. It does not invalidate those ratios (the arms are matched and the
+tax is common-mode), but it means **code-quality differences are compressed by
+roughly 2x in every number this plan reports**, and it explains why the lanes
+cluster so tightly.
+
+Consequences for what to optimize, in measured order:
+
+1. **The page-fault storm is the single largest line item** (~2.9 ms of 7.7).
+   Levers: large pages (35 MB is 8 960 4 KB pages against 18 2 MB pages;
+   Windows needs `SeLockMemoryPrivilege`, Linux gets it from THP for free), or
+   pool reuse across runs where a program allocates the same shape repeatedly.
+   Neither is a backend question — it is `blade_alloc_cells` and the C++
+   lane's `allocate<>`.
+2. **`free` at 1.3 ms is pure waste for a pool that lives until exit** — the OS
+   reclaims at process teardown regardless. The llvm lane's original arena
+   model (never free) had this right for whole-program pools; the scoped-free
+   work correctly fixed REPEATED scopes, and the top-level case should stay
+   arena. The C++ lane emits `deallocate` unconditionally and pays it.
+3. **Non-temporal stores are 3.35x on the store stream** and are exactly
+   licensed here — a canonical fill writes each cell once and never reads it,
+   which Blade knows from the fresh-pool/deferral analysis and C cannot prove.
+   On the WARM map the win is small (compute at 2.45 ms already overlaps the
+   2.74 ms store stream), so this pays on store-dominated shapes, not this one.
+4. **The warm nest is already near-optimal**: 0.53 ns/cell ≈ 1.75 cycles at
+   3.3 GHz for 4 flops + a load + a store, with the masked-store arm proving
+   the memory system adds only 7%. There is no large vectorization prize left
+   in the inner loop of THIS shape — which retires, for maps, the whole family
+   of iteration-shape tricks (coalescing the ragged runs, uniform-trip
+   rectangularization, unroll-and-jam). Those remain open only where the inner
+   run is genuinely short, i.e. high rank at small n.
+
+Probe sources: `cpp-juice/roofline.cpp` and `cpp-juice/alloc.cpp` in the
+finding session's scratchpad; both are self-describing and re-runnable.
+
 ---
 
 **Eighth measurement 2026-08-18 — packed triangular storage has no power-of-two
