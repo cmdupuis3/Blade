@@ -621,7 +621,12 @@ Four findings, ranked by how much they should change anyone's plans.
    backend-independence theorem (plan-llvm-backend.md §1-2) survives its
    sharpest test yet.
 2. **The actionable emitter item: canonical compact FILLS should write the flat
-   pool, not the skeleton.** `closed` ≈ `cursor` within noise (1.57 vs 1.54
+   pool, not the skeleton.** (IMPLEMENTED and AMENDED by §0c: the emitter
+   change landed and is correct, but the 1.53x below is NOT addressing — a
+   twin that varies the addressing ALONE puts it at ~1.07x at rank 4 and inside
+   the noise at rank 3; the rest is the Iliffe skeleton's allocation and
+   teardown, which these twins never paid and this change's own scope keeps.)
+   `closed` ≈ `cursor` within noise (1.57 vs 1.54
    ns/cell at r=4), so the parallelizable form is free — the C++ emitter change
    should emit closed-form flat writes (keeping rows independent for OMP),
    replacing `__orow = A[i][j]`-style skeleton writes in exactly the canonical
@@ -738,6 +743,126 @@ Consequences for what to optimize, in measured order:
 
 Probe sources: `cpp-juice/roofline.cpp` and `cpp-juice/alloc.cpp` in the
 finding session's scratchpad; both are self-describing and re-runnable.
+
+---
+
+## 0d. §0b finding 2 IMPLEMENTED and RE-MEASURED, 2026-08-20 — the flat write is right, the 1.53x was not addressing
+
+*(Measured independently of §0c and landing on the same culprit from the other
+side: §0c found the allocator dominating the timed region by probing it
+directly; §0d finds the flat-write change neutral and the remaining gap sitting
+in the SKELETON ALLOCATION rather than in the addressing. Same conclusion, two
+routes — which is the strongest form these measurements come in.)*
+
+**Landed.** §0b finding 2's emitter item is in the C++ lane:
+`CodeGenLoopNest.compactFlatWritePlan` replaces the Iliffe row walk
+(`__orow = A[__i0][__i1]`) in canonical compact FILL nests with a flat-pool
+write — `__orow = pool + <closed-form offset>` — spelled from the same
+`SimplexBlocksCore.prefixTerm` the llvm lane's `emitSimplexSerialR` uses, one
+term hoisted per loop level, the innermost level's term left as its own loop
+counter so the store stays `__orow[__i(r-1)] = ...` with `BLADE_IVDEP` intact.
+`SimplexBlocksCore.fs` moved into the fsproj's dependency-free front group so
+both emitters read the one spelling; a third copy is how two lanes drift.
+
+Closed form, not the cursor, exactly as §0b recommended: the rows stay
+independent, so the nest still takes its `#pragma omp parallel for
+schedule(dynamic)` and each thread computes its own offsets from its own outer
+index (verified in emission).
+
+The gate is narrow on purpose — one compact group spanning the whole array, a
+compile-time extent, and loop bounds that ARE the canonical floors the formula
+assumes (checked against `BoundDependencies`/`StrictOffset` per level, so a
+reordered/fused/slabbed nest declines). Symmetric, Hermitian and antisymmetric
+(strict) all qualify; everything else keeps the skeleton walk. **Scope held to
+the WRITE:** the skeleton is still allocated and every read, print, teardown and
+streaming path still goes through it.
+
+**Correct.** Full default suite 5073 passed / 0 failed / 2 skipped;
+`blade test llvm blocks` 15/0 (the three-way C++ / llvm-serial / llvm-bricked
+cell-for-cell agreement — the C++ arm is the changed one, so this gate IS the
+proof that a flat write lands where a skeleton read looks); `symmetry` 38/0,
+`index-types` 252/0, `reynolds` 28/0, `omp-pragma` 69/0, `omp-reduce` 81/0. Every
+emitted probe value is unchanged against the pre-change binary at both ranks.
+
+**And the measurement does not reproduce §0b's magnitude.** The re-bench used a
+twin rebuilt to separate the two things §0b varied together (probe artifacts:
+session scratchpad `cpp-juice/` — `twin.cpp` with the two-axis matrix in its
+header, `bench.py`, `bench_sym4_compact.blade`):
+
+- `TWIN_VARIANT` — how the fill ADDRESSES its row (`skeleton` / `closed` /
+  `cursor`), and
+- `TWIN_NOSKEL` — whether the program builds and tears down an Iliffe skeleton
+  at all.
+
+§0b's twins were `closed`-addressed **and** skeleton-free, and the difference
+was booked entirely to addressing. Holding the storage axis fixed says
+otherwise. Interleaved, 27 process launches per arm, medians, g++ 15.2
+`-O3 -march=native -ffp-contract=fast`, probe values identical across all arms:
+
+| arm (region = allocate + fill + probe + deallocate, what an emitted program times) | r=3, n=301 | r=4, n=61 |
+|---|---|---|
+| emitted-old (skeleton writes) | 7.250 ms | 1.362 ms |
+| **emitted-new (flat closed-form writes)** | **7.290 ms** | **1.431 ms** |
+| twin, skeleton addressing | 7.210 ms | 1.374 ms |
+| twin, closed addressing | 7.186 ms | 1.386 ms |
+| twin, cursor addressing | 7.180 ms | 1.401 ms |
+| twin, closed addressing, **NO SKELETON** (§0b's own twin) | 6.925 ms | **0.872 ms** |
+
+Read the last two rows against each other: **same addressing, 1.59x apart at
+rank 4.** That is §0b's 1.53x, and it is the skeleton's construction plus
+teardown, not the row pointer. Measured directly (`cpp-juice/allocprobe.cpp`),
+the rank-4 shape's skeleton is 41,663 interior pointer rows costing
+`allocate<>` 0.21 ms and `deallocate<>` 0.12 ms — 0.33 ms of the 0.51 ms gap,
+against a fill of ~0.28 ms. The change's scope keeps the skeleton allocated
+because every other consumer reads through it, so **none of that 1.59x was
+ever reachable by this change**, and the whole-program region is unchanged
+within noise at both ranks.
+
+Where the addressing IS visible — the fill alone, allocation and teardown
+hoisted out, caches flushed before each timed fill (21 interleaved launches):
+
+| arm | r=3, n=301 | r=4, n=61 |
+|---|---|---|
+| fill, skeleton | 3.554 ms | 0.308 ms |
+| **fill, closed** | **3.740 ms** | **0.284 ms** |
+| fill, cursor | 3.703 ms | 0.268 ms |
+
+Rank 4: the closed form beats the skeleton by 1.07–1.09x (reproduced across two
+independent runs) and sits ~5% behind the cursor ideal — §0b's *direction* at
+rank 4, an eighth of its *magnitude*. Rank 3 at n = 301 writes a 36 MB pool and
+is store-bandwidth-bound: two runs disagreed on the sign, so there is no rank-3
+addressing effect to report at this extent, and §0b's 1.07x there is inside the
+same noise.
+
+One mechanism worth recording, because it decides when this change pays: **a
+freshly built skeleton is HOT.** With the pool re-filled without a cache flush
+the rank-4 skeleton arm is the *faster* one (0.158 vs 0.170 ms) — a cached
+pointer load beats a two-multiply polynomial. The closed form wins only once the
+skeleton nodes have been evicted, which is what happens when the pool is large
+relative to L3 or when the fill runs some distance from the allocation. So the
+honest verdict is **neutral-to-slightly-positive**, and the reasons to keep it
+are structural rather than a stopwatch: strictly less dependent work per loop
+entry, rows left independent for OMP, and one spelling of the offset math shared
+by both back ends.
+
+**What this changes elsewhere in this document.** §0a reading 3's mechanism
+diagnosis ("the C++ lane addresses a compact cell through an allocation-time
+Iliffe skeleton, which costs r pointer dereferences per cell") is now measured
+to cost ~7% at rank 4, not the 1.53x §0b read — and its "per cell" is per loop
+ENTRY, which is why it never grew the way the rank-flat argument predicted.
+§0b's findings 1, 3 and 4 stand as written; only finding 2's magnitude falls.
+The methodological lesson is the one the eighth measurement already taught in a
+different costume: an erased twin must erase ONE axis, and a timing region must
+contain the same statements on both sides — §0b's twins skipped an allocation
+and a teardown the emitted program pays inside its own `start`..`end`.
+
+**Open, and now better posed than "make the write flat":** the rank-4 region is
+~40% skeleton lifecycle by direct measurement (0.33 ms of 1.39 ms), and 0.51 ms
+of it once the pool's own first-touch cost rides along. That is the real number
+on the table, and reaching it means not building the skeleton for a compact
+array at all — i.e. teaching the READ paths (`canon_*`, printing, deallocation,
+BLAS/CUDA streaming) the same closed form the write now uses, which is
+`plan-static-array-erasure.md`'s programme rather than this one's.
 
 ---
 

@@ -777,6 +777,189 @@ let genForLoopHeader (compoundArrays: Set<string>) (binding: LoopIndexBinding) :
         subtraction
         binding.IndexName
 
+// ---------------------------------------------------------------------------
+// FLAT-POOL WRITES FOR CANONICAL COMPACT FILL NESTS
+// ---------------------------------------------------------------------------
+// docs/plans/plan-simplex-blocked-compute.md section 0b, finding 2, is the
+// measurement this implements. A compact fill nest used to reach its output row
+// through the ALLOCATION-TIME ILIFFE SKELETON (`__orow = A[__i0][__i1]`), which
+// costs one pointer dereference per level per loop ENTRY. Those dereferences
+// amortize over the innermost run, and a simplex's innermost run is short and
+// gets shorter as rank rises (mean trip count ~ n/r), so the skeleton measured
+// 1.07x at rank 3 and 1.53x at rank 4 against hand-erased C++ twins that write
+// the flat pool directly -- same loops, same kernel, only the addressing
+// changed.
+//
+// The replacement is the SAME closed form the llvm lane emits
+// (`EmitLlvm.emitSimplexSerialR` over `SimplexBlocksCore.prefixTerm`, which is
+// property-pinned equal to `rankOfCoords` at ranks 1-5). Level k contributes
+//
+//     strict:     C(n-lo,   m+1) - C(n-lo-s,   m+1)
+//     symmetric:  C(n-lo+m, m+1) - C(n-lo-s+m, m+1)      (m = r-k-1)
+//
+// where `lo` is the level's canonical floor and `s` its STORAGE coordinate --
+// which is exactly the loop counter, because the nest already iterates storage
+// coordinates (`for (__i1 = 0; __i1 < n - __i0; ...)`; genForLoopHeader renders
+// the floor as the bound subtraction). Every term is invariant under the levels
+// inside it, so each hoists to its own level and the nest pays O(1) per cell at
+// any rank. At the LAST level m = 0 and the term degenerates to the loop
+// counter itself -- which is why the innermost run stays affine and
+// pool-contiguous, and why the store is still `__orow[__i(r-1)] = ...` with
+// BLADE_IVDEP intact.
+//
+// CLOSED FORM, NOT A RUNNING CURSOR. The canonical nest visits the pool in
+// order, so a running `*cur++` would be exact and cost no arithmetic at all --
+// and it measured the same (1.54 vs 1.57 ns/cell at rank 4, inside the noise).
+// A cursor makes the rows serially dependent; the closed form leaves them
+// independent, so it is the one that composes with the
+// `#pragma omp parallel for schedule(dynamic)` this nest already puts on its
+// outer level. Free parallelism beats a rounding error.
+//
+// SCOPE: the fill's WRITE POINTER, and nothing else. The skeleton is still
+// allocated, and every other consumer -- lazy canonical reads, printing,
+// deallocation, BLAS/CUDA streaming -- still goes through it.
+
+/// `C(x, m)` over a C++ `size_t` expression, as the unclamped falling factorial
+/// `x(x-1)...(x-m+1) / m!` (folded to a literal when `x` is one).
+///
+/// UNCLAMPED IS SOUND HERE, which is not self-evident: `SimplexBlocksCore.binom`
+/// answers 0 for x < m, and so does this product, because one of its first m
+/// factors is then exactly zero and a zero factor annihilates the unsigned
+/// wraparound in the factors after it. Every evaluation point the plan below
+/// emits has x >= 0 (`compactFlatWritePlan` argues each one), so the emitted
+/// arithmetic and the F# reference agree on every cell the nest visits.
+/// Overflow is out of reach for the same reason it is in the llvm lane: the
+/// pool has to fit in memory, which bounds the falling factorial by m! times
+/// the pool cardinality.
+let private cppFallingBinom (x: string) (m: int) : string =
+    if m <= 0 then "1"
+    else
+        match System.Int64.TryParse x with
+        | true, v -> string (Blade.SimplexBlocksCore.binom v m)
+        | _ ->
+            let factors =
+                [ for j in 0 .. m - 1 -> if j = 0 then x else sprintf "(%s - %d)" x j ]
+                |> String.concat " * "
+            let mutable f = 1L
+            for j in 2 .. m do f <- f * int64 j
+            if f = 1L then factors else sprintf "(%s) / %d" factors f
+
+/// The emitted pieces of a canonical compact fill nest's flat-pool write.
+type CompactFlatWrite = {
+    /// Hoisted once, just outside the nest: the contiguous pool underneath the
+    /// skeleton that `allocate<>` built.
+    PoolDecl: string
+    /// Lines to emit inside loop level k's body, for k = 0 .. r-2, keyed by
+    /// level. The innermost level has no entry: its term IS its loop counter.
+    Hoists: Map<int, string list>
+    /// Replaces the skeleton row walk at the innermost row-hoist site.
+    RowDecl: string
+}
+
+/// Build the closed-form flat-write plan for `codeGen`, or None when the nest is
+/// not a canonical compact fill -- in which case the caller keeps the skeleton
+/// row walk, which is correct for every shape.
+///
+/// The gate is deliberately narrow; each clause is a fact the closed form needs:
+///  1. ONE compact group spanning the WHOLE array (`IndexTypes = [ix]`,
+///     `ix.Rank = r`). A mixed shape (a dense axis beside a compact group)
+///     addresses through a Horner chain over groups that this does not spell,
+///     so it keeps the skeleton. `classifyOutputStorage` is consulted too, so
+///     the plan and the ALLOCATOR cannot disagree about the layout.
+///  2. A COMPILE-TIME extent, equal at every level. A compact group has one
+///     extent by construction; requiring the literal is what lets the outermost
+///     binomial fold to a constant and keeps the hoisted polynomials cheap.
+///  3. The nest IS the canonical simplex the formula describes: level k's bound
+///     subtracts exactly the outer counters 0..k-1 plus `k` for a strict group,
+///     i.e. its canonical floor is `sum(outer counters) + k*strict`. A
+///     reordered, fused or slabbed nest fails this and keeps the skeleton.
+///
+/// Hermitian rides the symmetric arm: it shares the packed upper triangle
+/// (`buildSymmVec` groups it with SymSymmetric) and differs only in the
+/// conjugate-on-swap READ, which this does not touch.
+let compactFlatWritePlan (codeGen: LoopNestCodeGen) (outRowName: string)
+                         : CompactFlatWrite option =
+    match codeGen.OutputType with
+    | ArrayElem at ->
+        let r = List.length codeGen.Bindings
+        // (1) one whole-array compact group, agreeing with the allocator.
+        let strictOpt =
+            match at.IndexTypes, classifyOutputStorage codeGen.OutputType with
+            | [ ix ], AllocSymmetric when ix.Rank = r && r >= 2 ->
+                (match ix.Symmetry with
+                 | SymSymmetric | SymHermitian -> Some false
+                 | _ -> None)
+            | [ ix ], AllocAntisymmetric when ix.Rank = r && r >= 2 ->
+                (match ix.Symmetry with SymAntisymmetric -> Some true | _ -> None)
+            | _ -> None
+        // (2) one compile-time extent, shared by every level.
+        let ns =
+            codeGen.Bindings
+            |> List.map (fun b -> match b.Extent with IRLit (IRLitInt v) -> Some v | _ -> None)
+        let nOpt =
+            match ns with
+            | Some n0 :: _ when n0 > 0L && ns |> List.forall (fun e -> e = Some n0) -> Some n0
+            | _ -> None
+        match strictOpt, nOpt with
+        | Some strict, Some n ->
+            let sInc = if strict then 1 else 0
+            // (3) the bounds ARE the canonical floors the formula assumes.
+            let canonical =
+                codeGen.Bindings
+                |> List.mapi (fun k b ->
+                    b.FusedRank.IsNone
+                    && b.StrictOffset = k * sInc
+                    && Set.ofList b.BoundDependencies = Set.ofList [ 0 .. k - 1 ])
+                |> List.forall id
+            if not canonical then None
+            else
+                let elemCpp = elemTypeToCpp at.ElemType
+                let tag = sanitizeCppName codeGen.OutputName
+                let poolName = sprintf "__opool_%s" tag
+                let hiName k = sprintf "__ohi_%s_%d" tag k
+                let endName k = sprintf "__oend_%s_%d" tag k
+                let offName k = sprintf "__ooff_%s_%d" tag k
+                let names = codeGen.Bindings |> List.map (fun b -> b.IndexName)
+                // Level 0's upper evaluation point is the pool's own cardinality
+                // argument -- `n + (r-1)` symmetric, `n` strict -- and it is a
+                // literal, so `C(., r)` folds and level 0 costs one subtraction
+                // plus one polynomial.
+                let hi0 = n + (if strict then 0L else int64 (r - 1))
+                let hoists =
+                    [ for k in 0 .. r - 2 ->
+                        let m1 = r - k        // = m + 1, the binomial's lower argument
+                        let hiHere = if k = 0 then string hi0 else hiName k
+                        let lines =
+                            [ // `hi_k = n + d_k - lo_k`, and `d` falls by one per
+                              // level exactly as `lo` climbs by one under
+                              // strictness, so `hi_k = lowEnd_{k-1} - 1` in BOTH
+                              // classes: one chain, no per-class arithmetic. It is
+                              // evaluated only inside level k's body, which runs
+                              // only when level k has a trip -- precisely when
+                              // this is positive.
+                              if k > 0 then
+                                  yield sprintf "const size_t %s = %s - 1;" (hiName k) (endName (k - 1))
+                              // `lowEnd_k = n + d_k - i_k >= d_k + 1 >= 1`: an
+                              // absolute coordinate never reaches the extent.
+                              yield sprintf "const size_t %s = %s - %s;"
+                                        (endName k) hiHere (List.item k names)
+                              yield sprintf "const size_t %s = %s(%s) - (%s);"
+                                        (offName k)
+                                        (if k = 0 then "" else offName (k - 1) + " + ")
+                                        (cppFallingBinom hiHere m1)
+                                        (cppFallingBinom (endName k) m1) ]
+                        (k, lines) ]
+                    |> Map.ofList
+                Some { PoolDecl =
+                         sprintf "%s* %s = nested_array_utilities::pool_base(%s.data);"
+                             elemCpp poolName codeGen.OutputName
+                       Hoists = hoists
+                       RowDecl =
+                         sprintf "%s* BLADE_RESTRICT %s = %s + %s;"
+                             elemCpp outRowName poolName (offName (r - 2)) }
+        | _ -> None
+    | _ -> None
+
 /// Generate complete loop nest as C++ code
 /// Tracks peeled names across levels and generates element bindings for all arrays at each level
 
@@ -1406,6 +1589,22 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             let txt = genNestPragma (List.skip pl codeGen.Bindings) ""
             let m = System.Text.RegularExpressions.Regex.Match(txt, @"collapse\((\d+)\)")
             if m.Success then pl + int m.Groups.[1].Value - 1 else pl
+    // CANONICAL COMPACT FILL: write the flat pool through the closed-form
+    // offsets instead of walking the Iliffe skeleton (see compactFlatWritePlan
+    // for the math and the gate; plan-simplex-blocked-compute.md section 0b
+    // finding 2 for the measurement). Declined outright when the nest carries a
+    // MULTI-LEVEL `collapse` -- the per-level hoists are statements BETWEEN loop
+    // headers, which g++ rejects inside a collapsed prefix ("loop not permitted
+    // in intervening code in OpenMP loop body"). No compact nest can reach that
+    // case today (level 1 of a simplex is triangular, so genNestPragma's
+    // collapse prefix stops at 1 and the nest gets `schedule(dynamic)` on level
+    // 0 alone), which is exactly why the guard is cheap to keep honest.
+    let compactFlat =
+        if outRowDecl.IsNone || ompLastLevel > (defaultArg pragmaLevel 0) then None
+        else compactFlatWritePlan codeGen outRowName
+    match compactFlat with
+    | Some plan -> lines <- lines @ [ind depth + plan.PoolDecl]
+    | None -> ()
     for binding in codeGen.Bindings do
         let levelIdx = bidx
         // Generate the loop header (pragma only on the outermost loop).
@@ -1477,11 +1676,16 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 for w in warmupLines do lines <- lines @ [ind depth + w]
             | None -> ()
         // Output row hoist: same scope as the carousel warm-up (just
-        // outside the innermost header, re-taken per outer iteration).
+        // outside the innermost header, re-taken per outer iteration). The
+        // flat-pool plan replaces the skeleton walk with `pool + <closed-form
+        // offset>`; everything downstream (the `__orow[__i(r-1)]` store, the
+        // restrict qualifier, BLADE_IVDEP) is unchanged, because the innermost
+        // level's own term IS its loop counter at every rank.
         if bidx = lastBindingIdx then
-            match outRowDecl with
-            | Some d -> lines <- lines @ [ind depth + d]
-            | None -> ()
+            match compactFlat, outRowDecl with
+            | Some plan, _ -> lines <- lines @ [ind depth + plan.RowDecl]
+            | None, Some d -> lines <- lines @ [ind depth + d]
+            | None, None -> ()
         // `BLADE_IVDEP` must be the LAST thing before the `for`, and only
         // on a header the OpenMP construct does not own (see ompLastLevel).
         // It is the portable spelling -- cpp/blade_portability.hpp expands it
@@ -1508,6 +1712,17 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             else []
         lines <- lines @ suppressedMarker @ ivdepSuppressedMarker @ [ind depth + pragmaPrefix + ivdepPrefix + header]
         depth <- depth + 1
+        // This level's share of the compact output's pool offset, hoisted here
+        // because the term is invariant under every level inside it -- which is
+        // what makes the addressing O(1) per cell instead of O(r). Levels
+        // 0 .. r-2 only; the innermost term is its own loop counter and is spent
+        // by the `__orow[...]` subscript.
+        match compactFlat with
+        | Some plan ->
+            (match Map.tryFind levelIdx plan.Hoists with
+             | Some hs -> lines <- lines @ (hs |> List.map (fun h -> ind depth + h))
+             | None -> ())
+        | None -> ()
         // Thread-coverage marker: record this thread as seen and the team size
         // it observes. Each thread writes ONLY its own slot (race-free). Team
         // size is captured per-slot (not a single guarded write) because

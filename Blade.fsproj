@@ -52,6 +52,19 @@
          instrumented consumers (IR.fs and Unify.fs) sit ~175 entries apart in
          this list, so anything later than here is invisible to one of them. -->
     <Compile Include="src/PerfCounters.fs" />
+    <!-- The simplex-blocks decomposition as compute math (pure integer
+         arithmetic, no IR, no environment): the shared identities BOTH
+         emitters lay their symmetric nests out from, namely the LLVM lane's
+         emitSimplexSerialR and the C++ lane's compact flat-pool write
+         (CodeGenLoopNest.compactFlatWritePlan). Dependency-free, so it sits in
+         the front group: it has to precede the CodeGen group, not just the
+         LLVM one, and being the SINGLE spelling of the offset math is the
+         whole point (a third copy is how two lanes drift). A deliberate TWIN
+         of the provider-local Blade.ZarrProvider.SimplexBlocks: the two
+         decompositions diverge on purpose (see section 6, MPI row, of
+         docs/plans/plan-simplex-blocked-compute.md) and agree on the
+         identities, which `blade test llvm goldens` pins module vs module. -->
+    <Compile Include="src/SimplexBlocksCore.fs" />
     <Compile Include="src/Lexer.fs" />
     <!-- The parser, five layers in dependency order. ParserCore.fs holds the
          infrastructure plus the parseExprRef/parseBodyRef forward-ref cells;
@@ -328,14 +341,6 @@
     <Compile Include="src/CodeGenFusion.fs" />
     <Compile Include="src/CodeGenBinding.fs" />
     <Compile Include="src/CodeGen.fs" />
-    <!-- The simplex-blocks decomposition as compute math (pure integer
-         arithmetic, no IR): the shared identities the LLVM lane's symmetric
-         nests are laid out from. A deliberate TWIN of the provider-local
-         Blade.ZarrProvider.SimplexBlocks: the two decompositions diverge on
-         purpose (docs/plans/plan-simplex-blocked-compute.md section 6, MPI
-         row) and agree on the identities, which `blade test llvm goldens`
-         pins module against module. -->
-    <Compile Include="src/SimplexBlocksCore.fs" />
     <!-- The direct LLVM back end (BLADE_LLVM lane): IRProgram -> textual .ll,
          whole-program refusal, no C++ in between. Placed AFTER the CodeGen
          group because it reads that layer's shared facts (fpReassocEnabled,
