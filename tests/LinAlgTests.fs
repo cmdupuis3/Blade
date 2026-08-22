@@ -514,9 +514,18 @@ let private emissionCases : (string * bool * string * string list * string list)
        [ "for (size_t __gi"; "__gjr < 3 - __gi"; "G[__gi][__gjr] = __gacc;" ],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
       // gram(A, B): the dense scatter over all (i, j).
+      // The `__gj` axis is UNROLL-AND-JAMMED (R = 4), so its induction variable
+      // is hoisted and the loop is a bare `for (; ...)` -- the old
+      // "for (size_t __gj" marker no longer appears even though the loop
+      // plainly does. What this case asserts is "gate off emits the NATIVE
+      // dense loops, not a shim call", so it now pins BOTH emitted bodies: the
+      // jammed tile and the scalar remainder. That is strictly more than
+      // before, since a jam that silently stopped firing would now fail here
+      // rather than pass unnoticed.
       ("gate_off_gram_distinct_emits_dense_loops", false,
        realMat + realMatB + "let G = gram(A, B)\n",
-       [ "for (size_t __gi"; "for (size_t __gj"; "G[__gi][__gj] = __gacc;" ],
+       [ "for (size_t __gi"; "__gj + 4 <="
+         "G[__gi][__gj + 0] = __gacc0;"; "G[__gi][__gj] = __gacc;" ],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
       // matmul: the reordered i-t-j triple loop (unit-stride B, row-accumulator
       // in C). Per OUTPUT CELL the summands are still added in ascending t —

@@ -2520,11 +2520,56 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // `B[j][k]` are both unit-stride in `k`, so gram has nothing
                     // to gain from the i-t-j reorder matmul needs.
                     // BUILD KNOB -- see the same-array arm above.
+                    // UNROLL-AND-JAM over the output axis `__gj`
+                    // (docs/plans/plan-unroll-and-jam.md). The fold over `__gk`
+                    // is a serial dependent chain -- one accumulator, ~0.25
+                    // FMA/cycle, unvectorizable -- while `__gj` sits outside it
+                    // as a perfectly independent axis contributing nothing. R
+                    // output cells at a time gives R independent chains that
+                    // share every `__growi[__gk]` load.
+                    //
+                    // BITWISE, and that is the whole reason this needs no
+                    // licence: each cell keeps its own accumulator and its own
+                    // ascending summation order. Jamming reinterleaves
+                    // INDEPENDENT cells; it never reassociates one cell's sum.
+                    // The licensed fold split -- the thing BLADE_FP_REASSOC
+                    // exists for -- measured 1.00x on this very shape, because
+                    // splitting the fold adds chains without adding reuse.
+                    //
+                    // R = 4, not 8, for a measured reason: at >= 8 accumulators
+                    // gcc starts contracting the jammed body to `vfmadd231pd`
+                    // while still refusing to contract the reference nest, so
+                    // wider tiles stop being bit-identical under Blade's
+                    // shipping `-ffp-contract=fast`. R = 4 is bitwise at BOTH
+                    // contraction settings. Accumulators are separate named
+                    // locals, never an array: the array form spills 46-103
+                    // times and gets 3.7x where named locals spill zero and get
+                    // 12.3x -- the same rule the K-lane form already follows.
+                    //
+                    // The remainder runs the original scalar body. When
+                    // `pExtent < R` that is the ONLY body that runs, so narrow
+                    // outputs emit exactly what they emitted before.
+                    let jamR = 4
+                    let accName k = sprintf "__gacc%d" k
+                    let rowName k = sprintf "__growj%d" k
                     [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
                        else ompThreadsSuppressedBlockMarker ())
                       sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
                       sprintf "    %s" (lRowDecl "__growi" "__gi")
-                      sprintf "    for (size_t __gj = 0; __gj < %s; __gj++) {" pExtent
+                      sprintf "    size_t __gj = 0;"
+                      sprintf "    for (; __gj + %d <= %s; __gj += %d) {" jamR pExtent jamR
+                      yield! [ for k in 0 .. jamR - 1 ->
+                                 sprintf "        %s" (rRowDecl (rowName k) (sprintf "__gj + %d" k)) ]
+                      yield! [ for k in 0 .. jamR - 1 ->
+                                 sprintf "        %s %s = %s();" outElemStr (accName k) outElemStr ]
+                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                      yield! [ for k in 0 .. jamR - 1 ->
+                                 sprintf "            %s += %s;" (accName k) (mulTerm "__growi" (rowName k)) ]
+                      sprintf "        }"
+                      yield! [ for k in 0 .. jamR - 1 ->
+                                 sprintf "        %s[__gi][__gj + %d] = %s;" varName k (accName k) ]
+                      sprintf "    }"
+                      sprintf "    for (; __gj < %s; __gj++) {" pExtent
                       sprintf "        %s" (rRowDecl "__growj" "__gj")
                       sprintf "        %s __gacc = %s();" outElemStr outElemStr
                       sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
