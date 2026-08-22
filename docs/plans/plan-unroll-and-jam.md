@@ -1,6 +1,7 @@
 # Unroll-and-jam the output axis — reconciled plan
 
-**Status 2026-08-22: SPECIFIED, nothing built.** Two agents worked this in parallel —
+**Status 2026-08-22: P0 LANDED (ae951eb), measured 2.81x single-threaded — see §7.**
+**P1/P2 specified, not built.** Two agents worked this in parallel —
 one specifying the emitter integration, one mapping the actual emitted terrain and
 building the acceptance instruments. They agree on most of it and **disagree on the
 tile width**, which is the single decision this document exists to settle.
@@ -151,3 +152,61 @@ masked remainder tile with clamped operand rows and predicated stores. All-maske
 **Non-goals**: `matmul` (measured a loss), the LLVM lane (later; the decision should live
 in backend-neutral F# and only emission differ), rank-0 folds (licence territory), and
 any claim of a speedup measured on corpus extents.
+
+---
+
+## 7. P0 measured (2026-08-22, commit ae951eb)
+
+Phase 0 shipped: `materializeGramForm`'s **dense** arm only, `R = 4`, separate named
+accumulators (`__gacc0..3`), one shared fold loop, scalar remainder. The triangular arm
+was left alone — its packed row pitch is quadratic, so a tile spans four pitches (§2).
+
+**Contraction suppression turned out not to be needed at R=4.** The plan above requires
+"R <= 4 AND explicit contraction suppression, neither alone is sound", on the grounds that
+R<=4 bitwise-ness is a gcc cost-model accident. But §1's own blocking constraint —
+`#pragma GCC optimize` is illegal inside a function body, which is where these nests are
+emitted — means suppression would have forced the jam into its own emitted function. At
+R=4 the emission is bitwise against the interpreter without it, so P0 ships unsuppressed
+and §1's belt-and-braces requirement is **deferred to P2**, where the corpus-wide `fast`
+vs `off` hash diff can decide it with evidence instead of caution.
+
+### The number
+
+Bench shape (NOT in the corpus — the largest corpus gram extent is 8, per §0):
+dense `gram`, m=301, n=257, p=303, emitted by `blade emit` and compiled with g++.
+A/B is the **same emitted file** with the tile bound edited from `__gj + 4 <= 303` to
+`__gj + 4 <= 0`, so every cell falls through the scalar remainder — which is exactly the
+pre-jam emission. Both arms print `probe_val = 2698.875`. Medians of 21 interleaved runs.
+
+| build | base | jammed | speedup |
+|---|---|---|---|
+| single-threaded | 14.75 ms | **5.24 ms** | **2.81x** |
+| `-fopenmp`, 4 threads | 3.35 ms | 2.38 ms | 1.41x |
+
+The 1.41x is not a competing result, it is a different question. The emitted nest carries
+`BLADE_OMP_PARALLEL_FOR` on the output axis, so a default OMP build already has
+parallelism the jam partly duplicates. **2.81x is what the transform does; 1.41x is what
+a threaded build sees on this shape.** Anyone quoting one without the other is misleading.
+
+2.81x is below this plan's re-predicted **3.4-4.3x** band. Cause not yet isolated — under
+investigation, do not paper over it.
+
+### Gates that actually ran
+
+`blade test` 5080 passed / 0 failed / 1 skipped; `blade test math` 53/0;
+**`blade test interp math` 54/0** — the byte-exact gate, and per §5 the only one that
+covers this site at all (`diff-oracle` covers none of them).
+`tests/corpus/math/062_native_gram_matmul_arms.blade` pinned values unchanged.
+
+One emission-text pin needed updating: `tests/LinAlgTests.fs` asserted the literal
+`"for (size_t __gj"`, which disappears when the jam hoists that induction variable. It now
+pins both the jammed tile and the scalar remainder, so it still asserts the property it
+was written to assert.
+
+### Two claims above that P0 did NOT test
+
+- The **licensed** fold split (`BLADE_FP_REASSOC`) measured **1.00x** on this shape. The
+  jam is not a weaker bitwise substitute for it here; it is the only one of the two that
+  does anything. The licence's territory is rank-0 folds, which have no output axis.
+- P0 shipped no bench fixture. The shape above lives in a scratchpad, so this number is
+  currently folklore. It belongs in `tests/fixtures/` before P1 claims anything further.
