@@ -1765,9 +1765,18 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              @ (idxLines |> List.map (fun l -> ind + l))
              @ [ sprintf "%ssize_t %s_trail = %s;" ind name trailExpr
                  sprintf "%s%s* %s_densepool = nested_array_utilities::pool_base(%s.data);" ind elemCpp name denseName
-                 sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail];" ind elemCpp name elemCpp idxName name
+                 // The `+ 1` is REQUIRED BY the branchless scatter and only by
+                 // it: that form stores unconditionally and lets the cursor sit
+                 // at `cardinality` after the last selected cell, so a trailing
+                 // unselected cell writes one past the logical end. One element
+                 // of slack, never read, is the price of deleting a branch that
+                 // mispredicts once per grid cell.
+                 (if trailTerms.IsEmpty then
+                     sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail + 1];" ind elemCpp name elemCpp idxName name
+                  else
+                     sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail];" ind elemCpp name elemCpp idxName name)
                  // scatter present leading cells (row-major prefix-popcount)
-                 compactScatter { Ind = ind; Name = name; IdxName = idxName }
+                 compactScatter { Ind = ind; Name = name; IdxName = idxName; ScalarTrail = trailTerms.IsEmpty }
                  sprintf "%snested_array_utilities::Compound<%s, %d> %s { %s_compact, %s, %s_trail };" ind elemCpp leadRank name name idxName name ]
          // Owns BOTH the compact buffer and the freshly built index. (BL6002
          // restricts compound() to top-level lets today, where the empty
@@ -2036,11 +2045,31 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         @ (if elideGather then
              [ sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) %s[__g] = nullptr;" ind gkName name ]
            else
-             [ sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
-               sprintf "%s    size_t __sz = %s__offsets[__g + 1] - %s__offsets[__g];" ind gkName gkName
-               sprintf "%s    %s[__g] = new %s[__sz];" ind name elemStr
+             // ONE CSR POOL, not one `new[]` per group. The total is already in
+             // hand -- `gk__offsets[gk__ngroups]` is the CSR convention -- so the
+             // per-group allocation was never buying anything, and it cost three
+             // ways at once: G malloc/free pairs, G allocator headers roughly
+             // doubling footprint, and the destruction of spatial locality that
+             // made every later pass walk a header-interleaved heap instead of
+             // one contiguous run. Measured on the segmented-reduction prototype
+             // (src/microkernels/segmented_fold.c): 2.4x / 11.3x / 3.6x on
+             // uniform-large / uniform-small / skewed group distributions, and
+             // 62-94% of that kernel's whole recoverable win. The small-group
+             // case is where it hurts most -- G mallocs for a 4-element group is
+             // ~78 ns of allocator per group against a handful of ns of copy.
+             //
+             // Rows now SLICE the pool, so ownership changes with them: the
+             // table's deallocator becomes `deallocate_ragged_storage(rows, pool)`
+             // (registered below). `deallocate_ragged_rows_owned` would be
+             // undefined behaviour here -- it `delete[]`s each row, and these are
+             // interior pointers.
+             [ sprintf "%s%s* %s__pool = new %s[%s__offsets[%s__ngroups]];" ind elemStr name elemStr gkName gkName
+               sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
+               sprintf "%s    size_t __off = %s__offsets[__g];" ind gkName
+               sprintf "%s    size_t __sz = %s__offsets[__g + 1] - __off;" ind gkName
+               sprintf "%s    %s[__g] = %s__pool + __off;" ind name name
                sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
-               sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[%s__offsets[__g] + __k]" gkName gkName))
+               sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[__off + __k]" gkName))
                sprintf "%s    }" ind
                sprintf "%s}" ind ])
     // Owns the row table AND every per-group row (each a separate new[]).
@@ -2048,8 +2077,18 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // 0, so the row count comes from the gk__ngroups local -- a plain size_t
     // in the same scope, guaranteed live at the scope-exit free point. The
     // gk__offsets/__perm side tables are NOT owned here (see group_keys).
-    registerShapedAlloc name "deallocate_ragged_rows_owned"
-        (sprintf "%s.data, %s__ngroups" name gkName)
+    // Ownership follows the layout chosen above. The GATHERED form slices one
+    // CSR pool, so the table and the pool are freed together and no row is
+    // individually owned -- `deallocate_ragged_storage` is exactly that shape,
+    // and its own comment already named the per-row-owned group_by layout as
+    // the opposite hazard. The ELIDED form allocates no pool and leaves every
+    // row null, so it keeps the per-row deallocator, which no-ops on null.
+    if elideGather then
+        registerShapedAlloc name "deallocate_ragged_rows_owned"
+            (sprintf "%s.data, %s__ngroups" name gkName)
+    else
+        registerShapedAlloc name "deallocate_ragged_storage"
+            (sprintf "%s.data, %s__pool" name name)
     let ctx' = addVarName binding.Id name ctx
     let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
     (forceCode @ code, ctx')

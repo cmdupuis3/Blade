@@ -75,38 +75,44 @@ let runGatherElisionTests () : BlockResult =
         "let sizes = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute\n"
     let sumsPeel =
         "let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute\n"
-    // The copy loop's two halves: the per-group allocation and the element
-    // store. Matched on the emitted spelling with indentation stripped.
-    let perRowAlloc = "g[__g] = new double[__sz];"
+    // The copy loop's two halves: the row-table fill and the element store.
+    // Matched on the emitted spelling with indentation stripped.
+    //
+    // The gathered form allocates ONE CSR pool and points each row into it
+    // (`g[__g] = g__pool + __off`), where it used to `new double[__sz]` per
+    // group. What these cases actually assert is "the gather is live" vs "the
+    // gather is elided", so the marker tracks the row-table fill whatever its
+    // spelling; only the elided arm emits null rows and no pool at all.
+    let poolSlice = "g[__g] = g__pool + __off;"
     let copyStore = "g[__g][__k] ="
     let nullRows = "g[__g] = nullptr;"
     let cases =
         [ // Sole consumer reads only extents -> gather is dead.
           "extents-only peel elides the gather",
           header + sizesPeel,
-          [nullRows], [perRowAlloc; copyStore]
+          [nullRows], [poolSlice; copyStore]
           // A second consumer reads VALUES -> the gather is live. This is the
           // load-bearing direction: eliding here emits a null dereference.
           "a values-reading consumer keeps the gather",
           header + sizesPeel + sumsPeel,
-          [perRowAlloc; copyStore], [nullRows]
+          [poolSlice; copyStore], [nullRows]
           // Values-only consumer: nothing to elide, unchanged behaviour.
           "a values-only peel is untouched",
           header + sumsPeel,
-          [perRowAlloc; copyStore], [nullRows]
+          [poolSlice; copyStore], [nullRows]
           // Nothing consumes it: the gather is dead for the same reason, just
           // more obviously. Auto-print still reports it (reading extents only),
           // so this is not dead-binding elimination -- only the copy goes.
           "an unused group_by elides its gather",
           header + "let n = extents(gk)\n",
-          [nullRows], [perRowAlloc; copyStore]
+          [nullRows], [poolSlice; copyStore]
           // ...but a bare top-level `g` is a REFERENCE (it desugars to a
           // binding initialised from g), so it counts as a use and keeps the
           // gather. Conservative rather than clever: pinned so the distinction
           // is deliberate and cannot drift silently.
           "a bare top-level mention of the grouped array keeps the gather",
           header + "g\n",
-          [perRowAlloc; copyStore], [nullRows]
+          [poolSlice; copyStore], [nullRows]
           // `extents(gk)` needs no grouped array at all -- the direct spelling
           // allocates nothing per group and copies nothing.
           "extents(gk) emits no group_by gather at all",
@@ -114,7 +120,7 @@ let runGatherElisionTests () : BlockResult =
            let gk = group_keys(keys)\n\
            let sizes = extents(gk)\n",
           ["sizes[__g] = (int64_t)(gk__offsets[__g + 1] - gk__offsets[__g]);"],
-          [perRowAlloc; copyStore; "new double*"] ]
+          [poolSlice; copyStore; "new double*"] ]
     for (name, src, mustContain, mustNotContain) in cases do
         match Blade.Tests.Functions.cppOf "gather_elision" src with
         | Error e -> fail name e
