@@ -727,7 +727,12 @@ Consequences for what to optimize, in measured order:
    reclaims at process teardown regardless. The llvm lane's original arena
    model (never free) had this right for whole-program pools; the scoped-free
    work correctly fixed REPEATED scopes, and the top-level case should stay
-   arena. The C++ lane emits `deallocate` unconditionally and pays it.
+   arena. ~~The C++ lane emits `deallocate` unconditionally and pays it.~~
+   **CORRECTED 2026-08-21 (emission survey, `src/microkernels/SURVEY.md` §2.3):
+   the C++ lane does NOT pay `deallocate` on top-level pools** — `registerAlloc`
+   no-ops on an empty scope stack (`CodeGenLoopNest.fs:3686`). The 1.3 ms free
+   cost measured above is real for SCOPED pools, not for whole-program ones, so
+   this consequence applies to repeated scopes only.
 3. **Non-temporal stores are 3.35x on the store stream** and are exactly
    licensed here — a canonical fill writes each cell once and never reads it,
    which Blade knows from the fresh-pool/deferral analysis and C cannot prove.

@@ -230,13 +230,18 @@ schedule refuses today rather than running serial.
 
 ## 7. Lane divergence found in passing
 
-The C++ flat-elementwise gate excludes antisymmetric shapes by name
-(`CodeGenLoopNest.fs:1995`) while the LLVM gate does not
-(`EmitLlvm.fs:3246-3254`). Since the llvm differential (395/0) compares *values*
-against the C++ lane and is green over the symmetry categories, this is a
-schedule divergence rather than a correctness one — the two lanes take different
-paths to the same numbers. Worth reconciling so the lanes' performance
-characteristics do not silently differ; not urgent.
+~~The C++ flat-elementwise gate excludes antisymmetric shapes by name
+(`CodeGenLoopNest.fs:1995`) while the LLVM gate does not.~~
+
+**CORRECTED 2026-08-21** (emission survey, `src/microkernels/SURVEY.md` §2.2).
+That reading was wrong in both halves. `codeGen.IsAntisymmetric` is the
+**Reynolds** flag, not a storage class — `IRStorage.fs:696` states the
+distinction — and the corpus contains emitted `antisym<2,4>` flat nests, so the
+C++ gate does not exclude antisymmetric storage at all. A real divergence does
+exist but runs the **other way**: the *LLVM* gate excludes **dense** shapes
+(`EmitLlvm.fs:3255`). Still a schedule divergence rather than a correctness one
+(the differential compares values and is green), and still worth reconciling so
+the lanes' performance characteristics do not silently differ; not urgent.
 
 Separately, and *not* part of this design: an elementwise binop between rank-1
 arrays of different extents silently reads out of bounds in **both** lanes and

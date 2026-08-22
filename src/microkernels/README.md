@@ -100,6 +100,16 @@ emitter that assumes aligned packed row starts is wrong; these kernels use
 unaligned loads throughout, and that is a consequence of the layout, not
 laziness.
 
+**`packed_syr_syrk.c` ASSUMES A SAMPLE-MAJOR OPERAND LAYOUT** (the contracted
+sample axis is the leading/streamed one). This is the largest unstated
+integration risk in the arm this README recommends building, flagged by the
+2026-08-21 linalg survey: transposing operands to sample-major is precisely the
+unlock for a register-blocked contraction, so if Blade's operands arrive in the
+other orientation the kernel's numbers do not transfer until a transpose (or a
+layout choice) is paid for. `krs_former.c` packs `A` explicitly and INSIDE its
+timed region, so it carries no such hidden premise — the contrast between the
+two is the thing to notice.
+
 ## Building and running
 
 ```
