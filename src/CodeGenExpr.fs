@@ -2565,35 +2565,100 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // The remainder runs the original scalar body. When
                     // `pExtent < R` that is the ONLY body that runs, so narrow
                     // outputs emit exactly what they emitted before.
-                    let jamR = 5
+                    // R IS DERIVED FROM THE OUTPUT EXTENT, not fixed. The
+                    // governing variable is `p mod R`, not the knee: a tile
+                    // that does not divide `p` leaves its remainder cells to
+                    // the un-jammed body at base speed, and at small `p` that
+                    // remainder IS most of the work. Measured at m=4001,
+                    // n=257 (cyc/MAC ratios vs the un-jammed nest):
+                    //
+                    //     p:      6     7     8     9    12    13    16    24    40   303
+                    //     R=5: 2.40  2.00  1.77  1.63  2.52  2.26  3.12  2.55  3.81  3.47
+                    //     best: 3.84  3.96  3.96  3.87  3.91  3.03  3.86  3.84  3.87  3.53
+                    //     at R:    6     7     8     9     6     6     8     8     8     6
+                    //
+                    // A fixed R=5 gets 41-100% of the best available width,
+                    // and its worst cases are exactly the extents this corpus
+                    // has -- the largest gram extent anywhere in tests/ is 8,
+                    // where R=5 gives 1.77x against R=8's 3.96x.
+                    //
+                    // The rule below reproduces the measured best at every
+                    // extent above. `p <= 10` takes R = p: one tile, zero
+                    // remainder, every cell jammed. Above that, the largest
+                    // divisor in [4..10] does the same with a tile that still
+                    // fits the register file. Only when nothing divides `p` is
+                    // there a remainder to trade, and there the crossover of
+                    // the 3/R chain bound against gcc's flat shuffle floor
+                    // (correction 16 in src/microkernels/README.md) puts the
+                    // optimum at 6 -- measured best at both p=13 and p=303.
+                    //
+                    // A RUNTIME extent cannot be derived, so it keeps a fixed
+                    // width. That path is a genuine gamble: no single R is
+                    // good at every `p mod R`, and 5 is merely the knee for
+                    // gcc + double. clang wants 8 and float wants 4 -- see
+                    // correction 16 -- so this constant is a local optimum of
+                    // one compiler and one element type, not a fact.
+                    // COMPLEX DOES NOT JAM. Measured on this emitter text at
+                    // m=301 n=257 p=303, complex<double> peaks at 1.13x (R=3)
+                    // and then REGRESSES -- 0.90x at R=6, 0.86x at R=8 -- so
+                    // the derivation below, which happily returns R=p for
+                    // p<=10, would emit a slowdown for any complex gram with
+                    // p in 6..10. Worse, complex at R=2 is NOT bit-identical
+                    // to the un-jammed nest (the only width where that is
+                    // true), and p=2 is the most common gram extent in this
+                    // corpus. A 1.13x ceiling does not buy those two hazards.
+                    // `jamR = 1` makes the tile bound `__gj + 1 <= p`, which
+                    // would jam every cell at width 1, so the arms below are
+                    // gated on `doJam` instead and complex emits the plain
+                    // nest it emitted before ae951eb.
+                    let doJam = not (isComplexElem outElem)
+                    let jamR =
+                        let runtimeKnee = 5
+                        if not (snd pDim) then runtimeKnee
+                        else
+                            match System.Int32.TryParse(fst pDim) with
+                            | true, pLit when pLit >= 2 ->
+                                if pLit <= 10 then pLit
+                                else
+                                    match [ 10 .. -1 .. 4 ] |> List.tryFind (fun d -> pLit % d = 0) with
+                                    | Some d -> d
+                                    | None -> 6
+                            | _ -> runtimeKnee
                     let accName k = sprintf "__gacc%d" k
                     let rowName k = sprintf "__growj%d" k
-                    [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
-                       else ompThreadsSuppressedBlockMarker ())
-                      sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
-                      sprintf "    %s" (lRowDecl "__growi" "__gi")
-                      sprintf "    size_t __gj = 0;"
-                      sprintf "    for (; __gj + %d <= %s; __gj += %d) {" jamR pExtent jamR
-                      yield! [ for k in 0 .. jamR - 1 ->
-                                 sprintf "        %s" (rRowDecl (rowName k) (sprintf "__gj + %d" k)) ]
-                      yield! [ for k in 0 .. jamR - 1 ->
-                                 sprintf "        %s %s = %s();" outElemStr (accName k) outElemStr ]
-                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                      yield! [ for k in 0 .. jamR - 1 ->
-                                 sprintf "            %s += %s;" (accName k) (mulTerm "__growi" (rowName k)) ]
-                      sprintf "        }"
-                      yield! [ for k in 0 .. jamR - 1 ->
-                                 sprintf "        %s[__gi][__gj + %d] = %s;" varName k (accName k) ]
-                      sprintf "    }"
-                      sprintf "    for (; __gj < %s; __gj++) {" pExtent
-                      sprintf "        %s" (rRowDecl "__growj" "__gj")
-                      sprintf "        %s __gacc = %s();" outElemStr outElemStr
-                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                      sprintf "            __gacc += %s;" (mulTerm "__growi" "__growj")
-                      sprintf "        }"
-                      sprintf "        %s[__gi][__gj] = __gacc;" varName
-                      sprintf "    }"
-                      sprintf "}" ]
+                    // NOTE: every element below is an EXPLICIT `yield`.
+                    // The `if doJam` arm forces it: introducing one
+                    // explicit yield turns OFF F#'s implicit yields for
+                    // the whole list, and the bare `sprintf` lines then
+                    // compile to discarded expressions (FS3221) -- i.e.
+                    // silently missing lines in the emitted C++.
+                    [ yield (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
+                             else ompThreadsSuppressedBlockMarker ())
+                      yield sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
+                      yield sprintf "    %s" (lRowDecl "__growi" "__gi")
+                      yield sprintf "    size_t __gj = 0;"
+                      if doJam then
+                          yield sprintf "    for (; __gj + %d <= %s; __gj += %d) {" jamR pExtent jamR
+                          yield! [ for k in 0 .. jamR - 1 ->
+                                     sprintf "        %s" (rRowDecl (rowName k) (sprintf "__gj + %d" k)) ]
+                          yield! [ for k in 0 .. jamR - 1 ->
+                                     sprintf "        %s %s = %s();" outElemStr (accName k) outElemStr ]
+                          yield sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                          yield! [ for k in 0 .. jamR - 1 ->
+                                     sprintf "            %s += %s;" (accName k) (mulTerm "__growi" (rowName k)) ]
+                          yield sprintf "        }"
+                          yield! [ for k in 0 .. jamR - 1 ->
+                                     sprintf "        %s[__gi][__gj + %d] = %s;" varName k (accName k) ]
+                          yield sprintf "    }"
+                      yield sprintf "    for (; __gj < %s; __gj++) {" pExtent
+                      yield sprintf "        %s" (rRowDecl "__growj" "__gj")
+                      yield sprintf "        %s __gacc = %s();" outElemStr outElemStr
+                      yield sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                      yield sprintf "            __gacc += %s;" (mulTerm "__growi" "__growj")
+                      yield sprintf "        }"
+                      yield sprintf "        %s[__gi][__gj] = __gacc;" varName
+                      yield sprintf "    }"
+                      yield sprintf "}" ]
             Some (extentDecl @ [allocDecl] @ loop,
                   [MatPool (varName, outElemStr, 2, "nullptr", None, ownedExtents)])
      | _ -> None)
