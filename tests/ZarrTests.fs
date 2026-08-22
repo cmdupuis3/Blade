@@ -1346,11 +1346,23 @@ let w = z.write("%s", W)
             | Error e -> check (sprintf "%s: write program lowers" label) false e
             | Ok ir ->
                 // The write must go through the ORBIT arm, not the depth-1
-                // packed one: no pool_base (there is no skeleton to reach into).
+                // packed one: a wreath array IS its flat pool, so nothing may
+                // reach W through a skeleton (`pool_base(W.data)`) and the
+                // packed arm's pool copy (`__pc_pool`, genPackedPoolCopy) must
+                // not appear at all.
+                //
+                // BOTH negatives are SCOPED, and must stay scoped. This used to
+                // scan the whole program for the bare word "pool_base", which was
+                // only ever true by accident: the program also builds the compact
+                // intermediate S, and since 39e0a0c a canonical compact fill
+                // reaches its output row through `pool_base(S.data)` instead of
+                // the Iliffe skeleton. That is an unrelated array and says nothing
+                // about how W is written -- but it turned this into a false red.
                 let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "%s_write" label)
-                check (sprintf "%s: write emits a flat pool copy + the orb_cell_count pin (no pool_base)" label)
+                check (sprintf "%s: write emits a flat pool copy + the orb_cell_count pin (no skeleton route for W)" label)
                     (cppCode.Contains "orb_cell_count" && cppCode.Contains "_flat[__ow_i]"
-                     && not (cppCode.Contains "pool_base")) ""
+                     && not (cppCode.Contains "pool_base(W.data)")
+                     && not (cppCode.Contains "__pc_pool")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
                 let cppFile = Path.Combine(e2eDir, sprintf "%s_write.cpp" label)
                 File.WriteAllText(cppFile, cppCode)
