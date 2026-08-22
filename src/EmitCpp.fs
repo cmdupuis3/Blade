@@ -66,6 +66,10 @@ type CompactScatter = {
     Ind: string
     Name: string     // compact binding name; prefixes every local (_r/_c/_t/...)
     IdxName: string  // compound_index_t instance (supplies the mask vector)
+    /// Is the trailing extent STATICALLY 1 (no trailing dims)? Then the copy
+    /// is one element per grid cell and the BRANCHLESS form is emitted -- see
+    /// the note below for why that is gated on this and not emitted always.
+    ScalarTrail: bool
 }
 
 let compactScatter (s: CompactScatter) : string =
@@ -73,10 +77,40 @@ let compactScatter (s: CompactScatter) : string =
     // Assembled from small pieces rather than one 21-slot format string --
     // miscounting THAT argument list is precisely the bug class this layer
     // exists to kill.
-    s.Ind
-    + sprintf "{ size_t %s_r = 0; " n
-    + sprintf "for (size_t %s_c = 0; %s_c < %s_grid; %s_c++) " n n s.IdxName n
-    + sprintf "if (%s_maskvec[%s_c]) { " s.IdxName n
-    + sprintf "for (size_t %s_t = 0; %s_t < %s_trail; %s_t++) " n n n n
-    + sprintf "%s_compact[%s_r * %s_trail + %s_t] = %s_densepool[%s_c * %s_trail + %s_t]; " n n n n n n n n
-    + sprintf "%s_r++; } }" n
+    if s.ScalarTrail then
+        // BRANCHLESS COMPACTION. `mask()` produces a data-dependent predicate,
+        // so the branchy form below mispredicts once per grid cell: measured at
+        // 3.17 ns/cell against 0.72 branchless at 50% random selectivity, and
+        // the excess closes exactly as 12-16 cycles per mispredict, the Zen 3
+        // penalty (src/microkernels/stream_compaction.c). gcc does NOT
+        // if-convert this loop -- verified in disassembly, byte-identical with
+        // if-conversion disabled -- so the branch is really there.
+        //
+        // The trick: store UNCONDITIONALLY and advance the output cursor by the
+        // predicate. An unselected cell writes to the slot the next selected
+        // cell will overwrite, so the result is identical -- this is pure data
+        // movement, no arithmetic, hence BITWISE exact and licence-free.
+        //
+        // GATED ON A SCALAR TRAIL, deliberately. With `trail` elements dragged
+        // per cell the branchless form copies `grid * trail` instead of
+        // `selected * trail`, which loses outright at low selectivity, and the
+        // branch is amortised over the inner loop anyway. Only `trail == 1`,
+        // known here at emission time, gets it.
+        //
+        // The caller MUST size the destination `cardinality + 1`: after the
+        // last selected cell the cursor sits at `cardinality`, and a trailing
+        // unselected cell writes there. That padding is an ABI requirement of
+        // this form, not an implementation detail.
+        s.Ind
+        + sprintf "{ size_t %s_r = 0; " n
+        + sprintf "for (size_t %s_c = 0; %s_c < %s_grid; %s_c++) { " n n s.IdxName n
+        + sprintf "%s_compact[%s_r] = %s_densepool[%s_c]; " n n n n
+        + sprintf "%s_r += (size_t)(!!%s_maskvec[%s_c]); } }" n s.IdxName n
+    else
+        s.Ind
+        + sprintf "{ size_t %s_r = 0; " n
+        + sprintf "for (size_t %s_c = 0; %s_c < %s_grid; %s_c++) " n n s.IdxName n
+        + sprintf "if (%s_maskvec[%s_c]) { " s.IdxName n
+        + sprintf "for (size_t %s_t = 0; %s_t < %s_trail; %s_t++) " n n n n
+        + sprintf "%s_compact[%s_r * %s_trail + %s_t] = %s_densepool[%s_c * %s_trail + %s_t]; " n n n n n n n n
+        + sprintf "%s_r++; } }" n
