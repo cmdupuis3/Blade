@@ -1,6 +1,7 @@
 # Unroll-and-jam the output axis — reconciled plan
 
-**Status 2026-08-22: P0 LANDED (ae951eb), measured 2.81x single-threaded — see §7.**
+**Status 2026-08-22: P0 LANDED (ae951eb, R bumped to 5 in 272e9be). 3.26x at a 257-long
+fold, 3.48x at 2003, asymptote ~3.7-3.8x — see §7, which also corrects §1, §2 and §6.**
 **P1/P2 specified, not built.** Two agents worked this in parallel —
 one specifying the emitter integration, one mapping the actual emitted terrain and
 building the acceptance instruments. They agree on most of it and **disagree on the
@@ -188,8 +189,37 @@ The 1.41x is not a competing result, it is a different question. The emitted nes
 parallelism the jam partly duplicates. **2.81x is what the transform does; 1.41x is what
 a threaded build sees on this shape.** Anyone quoting one without the other is misleading.
 
-2.81x is below this plan's re-predicted **3.4-4.3x** band. Cause not yet isolated — under
-investigation, do not paper over it.
+### Why 2.81x and not the predicted 3.4-4.3x — RESOLVED
+
+**Both numbers are right; they are the same transform at two fold lengths.** The gap is
+produced by the BASELINE, not by the jam.
+
+Adjacent output cells in the un-jammed nest are independent, so the out-of-order window
+overlaps the tail of one cell's add chain with the head of the next. That recovery is a
+fixed ~100-150 cycles PER OUTPUT CELL — a large fraction of a short fold, negligible on a
+long one. At n=257 it makes the baseline run at **2.43 cyc/MAC, faster than the 3.0
+cyc/MAC its own serial `vaddsd` chain requires**.
+
+| n | 35 | 131 | 259 | 1027 | 2051 |
+|---|---|---|---|---|---|
+| base cyc/MAC | 1.35 | 1.88 | 2.43 | 2.88 | 2.96 |
+| jam R=4 cyc/MAC | 0.77 | 0.76 | 0.82 | 0.81 | 0.80 |
+| speedup | 1.75 | 2.46 | 2.96 | 3.56 | 3.69 |
+
+**The jam's own cost is flat in n. All the curvature is the baseline's.** Proved by
+control rather than argument: a `k_base_serial` variant with identical arithmetic but each
+cell seeded on the previous (so cells cannot overlap) sits at 3.03 cyc/MAC at every n, and
+against that no-overlap baseline R=4 delivers a flat **3.73-4.01x — the predicted band**,
+hitting 3.80x exactly at n=2051.
+
+Ruled out with evidence, not dismissed: **allocation dilution** (setup 0.30 ms, output
+alloc 7 us, first-touch 0.1 ms; nest-only 2.93x vs whole-program 2.80x — worth 0.13x of
+the gap) and **the p=303 remainder** (p swept 151-1219 flat at 2.95-3.09x; the 3-cell
+remainder costs 1.4%). Allocation had been the leading hypothesis; it was wrong.
+
+**Honest headline: 2.83x at a 257-long fold, 3.48x at 2003, asymptote ~3.7-3.8x.** Any
+single figure quoted without its fold length is meaningless for this transform.
+
 
 ### Gates that actually ran
 
@@ -210,3 +240,71 @@ was written to assert.
   does anything. The licence's territory is rank-0 folds, which have no output axis.
 - P0 shipped no bench fixture. The shape above lives in a scratchpad, so this number is
   currently folklore. It belongs in `tests/fixtures/` before P1 claims anything further.
+
+### Three findings that change P1
+
+**1. The dense gram arm is dead code in a default environment.** With `OPENBLAS_DIR` set
+and `BLADE_BLAS` unset — the shipping default, per CLAUDE.md's "presence alone enables the
+BLAS route" — dense `gram` routes to `blade_gram_distinct_d` and the jammed arm never
+runs. There is no size threshold; it is purely environmental. Every bench fixture for this
+work MUST pin `BLADE_BLAS=0`, and P0's practical reach is smaller than its speedup
+suggests: it wins where BLAS is off, not everywhere.
+
+**2. Nothing in the tree could have caught a non-bitwise jam.** Two independent blindnesses
+compose. `tests/InterpDiff.fs` compares byte-identical NORMALIZED STDOUT, but the emitted
+main prints at `std::setprecision(15)` while a double needs 17 significant digits to
+round-trip — so a 1-2 ULP divergence is invisible to `blade test interp`. And the bench
+program `gramdense.blade` is structurally bit-blind: its operands are dyadic, so they never
+round, and an explicit-`fma` control hashes IDENTICAL on it while hashing different on
+random operands. The bitwise property here is sound by construction (each accumulator keeps
+its own ascending order; jamming reinterleaves independent cells, it never reassociates one
+cell's sum) — but it is a construction argument, not a gated one. **P0's commit message
+overstated `interp math` 54/0 as bitwise verification. It verified agreement to 15 digits.**
+Any future width or licence change needs a full-mantissa hash control, not the corpus.
+
+**3. Threaded builds are bandwidth-bound, so ILP is the wrong knob there.** At 8 threads
+the jam is ~1.5x and R is noise, against ~100 GB/s of B-operand traffic. Getting more there
+needs blocking/packing to cut that traffic, not more accumulators. The single-thread and
+multi-thread stories are different problems and should stop being quoted as one number.
+
+### P1 scope, corrected against the emitted corpus
+
+The §2 inventory undercounted. Measured at ae951eb over `generated_cpp_tests/`:
+
+| | §2 claim | actual |
+|---|---|---|
+| prodsum in-nest | 242 / 3982 | **1868 / 5609** |
+| reduce in-nest | 108 | 111 |
+| P1-criterion sites | ~101 programs | 142 sites / 80 programs |
+| **after the decline list** | — | **16 sites / 9 programs** |
+
+The 242 reproduces exactly as "innermost enclosing loop is `__i0`/`__i1`"; the survey missed
+1612 occurrences at `__i2`-`__i5`, which are the extent-1 PPL simplex moment towers. **All
+16 surviving sites are prodsum — zero `IRReduce` sites are jam-eligible anywhere in the
+corpus**, so building the reduce arm would ship an ungated transform. The 80 -> 9 collapse
+is mostly one decline (static bound < R), i.e. the corpus extent is too small for the tile
+to fire — which is the corpus being a gate, not evidence the transform is narrow.
+
+`blade test interp` covers neither `multifile` nor `sgs`, which hold 5 of those 9.
+
+### Two seam corrections
+
+`planJam` cannot go "beside `flatShapeSignature`" — that is at `:2107`, AFTER
+`genLoopNestStreamed` (1374-2045) ends, and F# is order-dependent. Correct home is beside
+`compactFlatWritePlan` (`:880`), with `planHaloCarousel` (`:1246`) as the second precedent.
+The consumption point at `:1971-1988` is right, but incomplete: a jam must also rewrite the
+header (`:1714`) and replicate the peels (`:1774-1783`), not just the cell write.
+
+The proposed predicate site `prodSumBound` is at `:211-214`, not `:206-209`, and is a
+string renderer inside `exprToCppCore` — unreachable as a decision seam. The discriminator
+it names (`isRaggedRowType`) is the right one; the location is not.
+
+**The work P1 actually is:** the fold loop is invisible at the seam.
+`reynoldsResult.Value.CppExpr` is an opaque rendered string — the nest emitter owns headers
+and peels while `exprToCppCore` owns the fold. Since §3 measured unfused textual
+duplication at 0.98-1.00x, P1 is a structured-emission refactor FIRST. The codebase already
+states the problem at its `BLADE_IVDEP` gate (`:1556-1558`): "the nest machinery cannot see
+that loop (it counts nest LEVELS)". The right helper is a sibling of `fpReassocLaneStmts`
+(`CodeGenExprSupport.fs:1194`), which is the literal transpose of the jam — K offsets of
+one operand under licence, vs R operands at one offset bitwise — and already carries the
+separate-named-locals rule and a `combine` callback shared by `+=` and `acc = W(acc, x)`.
