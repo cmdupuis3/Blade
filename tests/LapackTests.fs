@@ -232,8 +232,15 @@ let private emissionCases : (string * bool * string * string list * string list)
          // both cases rather than treated as a dispatch marker.
          "blade_rt::panic(\"BL8007\""
          // The working copy: A is never factorized in place, which is what
-         // makes two solves over one A give the same answer twice.
-         "std::vector<double> x__lu(x__n * x__n);" ],
+         // makes two solves over one A give the same answer twice. Small
+         // systems now take that copy on the STACK -- the malloc/free pair was
+         // a flat ~57 ns at every n, i.e. most of what a small solve costs
+         // (src/microkernels/small_solve.c) -- with the heap path unchanged
+         // above the threshold. Asserting the selection line pins BOTH facts:
+         // that a working copy exists at all, and that the small-n path avoids
+         // the allocation.
+         "double x__lu__stk[64];"
+         "if (x__n <= 8) { x__lu = x__lu__stk; }" ],
        [ lapackInclude; "blade_lapack::"; "__math_solve"; "LAPACKE_" ])
       // A solve program with the gate on names the LAPACK header and NOT the
       // BLAS one -- the converse of `blas_program_carries_no_lapack_dependency`

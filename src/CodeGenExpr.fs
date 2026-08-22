@@ -2930,7 +2930,26 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
                   // The working copy. LU overwrites it, so A itself is never
                   // touched -- `solve(A, b)` twice over the same A is the same
                   // answer twice, which a factor-in-place would quietly break.
-                  sprintf "std::vector<%s> %s(%s * %s);" outElemStr luName nName nName
+                  //
+                  // SMALL SYSTEMS DO NOT TOUCH THE HEAP. The allocation, not the
+                  // arithmetic, is what a small solve costs: measured on the
+                  // prototype (src/microkernels/small_solve.c) the malloc/free
+                  // pair is a FLAT 56-59 ns at every n, which is 73-85% of the
+                  // entire gap between this emission and a fully specialized
+                  // fixed-size kernel -- 13.3x of the 13.3x at n=2, and still
+                  // three quarters of it at n=8. A 8x8 stack buffer captures
+                  // that without any new codegen machinery, without specializing
+                  // on n, and WITHOUT CHANGING THE ARITHMETIC: the same
+                  // operations in the same order on the same storage layout, so
+                  // this is bitwise identical (955/955 in the prototype) and
+                  // needs no licence. Above the threshold the vector path is
+                  // unchanged; `resize` on a default-constructed vector is the
+                  // only allocation, and it never runs for small n.
+                  sprintf "%s %s__stk[64];" outElemStr luName
+                  sprintf "std::vector<%s> %s__heap;" outElemStr luName
+                  sprintf "%s* %s;" outElemStr luName
+                  sprintf "if (%s <= 8) { %s = %s__stk; } else { %s__heap.resize(%s * %s); %s = %s__heap.data(); }"
+                      nName luName luName luName nName nName luName luName
                   sprintf "for (size_t __si = 0; __si < %s; __si++) {" nName
                   sprintf "    for (size_t __sj = 0; __sj < %s; __sj++) { %s = %s[__si][__sj]; }" nName (luCell "__si" "__sj") aName
                   // x starts life as b and is transformed in place: the forward
