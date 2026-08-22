@@ -576,6 +576,41 @@ let private gppIdentity : Lazy<string> =
             with _ -> ""
         sprintf "%s|%s" (defaultArg resolved "g++") version)
 
+/// What `-march=native` ACTUALLY SELECTED on this machine, hashed.
+///
+/// `-march=native` is CPU-dependent codegen behind CPU-INDEPENDENT TEXT. The
+/// flag reads the same everywhere, so two machines with different CPUs hash to
+/// the same key for binaries that are not interchangeable, and a cache shared
+/// between them hands one machine a binary built for the other's instruction
+/// set. That is not hypothetical: a CI cache shared across heterogeneous
+/// runners did exactly this, and every compile-and-run test in the lane
+/// "compiled" -- a cache hit is a file copy -- and then died with
+/// STATUS_ILLEGAL_INSTRUCTION (0xC000001D), including one with no provider or
+/// external library in it at all.
+///
+/// Asking the compiler is the authoritative answer: `-Q --help=target` prints
+/// the target options `native` resolved to, so a CPU difference that changes
+/// codegen changes this string and one that does not, does not. Memoized like
+/// `gppIdentity` (one subprocess per run, on the first compile), and empty on
+/// any failure, which returns the key to exactly what it was before.
+let private nativeTargetIdentity : Lazy<string> =
+    lazy (
+        try
+            let psi = ProcessStartInfo("g++", "-march=native -Q --help=target")
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            use proc = Process.Start(psi)
+            let out = proc.StandardOutput.ReadToEndAsync()
+            proc.StandardError.ReadToEndAsync() |> ignore
+            proc.WaitForExit(10000) |> ignore
+            use sha = System.Security.Cryptography.SHA256.Create()
+            sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes out.Result)
+            |> Array.map (fun b -> b.ToString("x2"))
+            |> String.concat ""
+        with _ -> "")
+
 /// The runtime headers' contribution to the key, computed once per process:
 /// all 13 shipped header texts (~264 KB), name-tagged. They are static files
 /// beside the binary and already memoized by CodeGen, so hashing them costs
@@ -622,6 +657,12 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
             [ "blade-exe-cache-v1"
               gppIdentity.Value
               normalizedArgs
+              // Only when the flag is `native`, and deliberately: an explicit
+              // `-march=x86-64-v3` is portable text `normalizedArgs` already
+              // carries, and `BLADE_MARCH=off` selects nothing CPU-specific.
+              // So the common non-native configurations keep the keys they had
+              // rather than being invalidated for a hazard they do not have.
+              (if (marchFlag ()).Contains "native" then nativeTargetIdentity.Value else "")
               runtimeHeaderDigest.Value
               linkedDllStamp args
               cppText ]
