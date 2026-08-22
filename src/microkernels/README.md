@@ -33,6 +33,86 @@ bound what is left to win).
 | `probe_accumulator_chains.c` | instrument: accumulator count vs working set | — | 1/2/4/8 YMM = 0.204/0.100/0.056/0.042 ns/cell; 12 regresses |
 | `probe_bandwidth_roof.c` | instrument: this machine's single-core roofline | — | read 28.5 GB/s, RMW 15-20 GB/s (single core, NOT the all-core figure) |
 
+## Second batch — from the optimization-site survey (`SURVEY.md`)
+
+| file | what it is | verdict | headline |
+|---|---|---|---|
+| `unroll_and_jam.c` | unroll-and-jam the OUTPUT axis around an in-nest fold | **BUILD — the headline** | **13.95x, BITWISE on arbitrary doubles**, while the licence-requiring fold split gets **1.00x** |
+| `segmented_fold.c` | fused segmented reduction (`group_by` + `reduce`) | **BUILD, but fix the allocator first** | 19-37x total — of which **one CSR pool instead of G mallocs is 62-94%** |
+| `stream_compaction.c` | SIMD `mask`/`compound` (the WHERE idiom) | **BUILD, width-dependent** | branchless scalar captures **95.6%** on doubles; SIMD is required on 32-bit (1.4-2.6x more) |
+| `small_solve.c` | fixed-size LU / Cholesky, heap-free | **BUILD, but the allocation is the win** | 13.3x/3.4x/3.0x/1.86x/1.46x at n=2/3/4/6/8 — **73-85% is just removing malloc** |
+| `small_solve_batched.c` | batched small solves, 4 layouts | **BUILD — gather, do NOT transpose** | 5.5-32x; decomposed as heap 5.1x x SIMD 2.3x x **layout only 1.19x** |
+| `sym3_eigen.c` | symmetric 3x3 eigen, closed form vs Jacobi | **BUILD ONLY the gap-guarded variant** | 4.2x at Jacobi accuracy — the naive closed form returns **duplicate eigenvectors** |
+
+### What the second batch established
+
+**The bitwise transform beats the licensed one, by a lot.** `unroll_and_jam.c` is the
+survey's convergent finding built and measured: unrolling the enclosing OUTPUT axis
+gives 8-14x on a 2-level contraction and is bitwise-identical on arbitrary random
+doubles, while splitting the fold across accumulators — which *requires*
+`BLADE_FP_REASSOC` — measures **1.00x** once `d` pushes operands out of L1. Chains
+alone are worth ~0x; chains *inside* a jam are worth ~3.5x on top of it, because the
+jam is the transform that creates the reuse. The corpus census (116 serial
+statement-form reduces against 6 licensed) is therefore addressable **without touching
+a single `where` clause**.
+
+The two transforms are **complementary, not competing**: rank >= 1 output takes the
+jam (bitwise, default-on); a rank-0 output — a true `reduce` to a scalar — cannot be
+jammed at all, and there the licensed fold split is the only lever and is worth 4-10x.
+
+**Allocation keeps being the dominant term.** Three of the four new kernels decompose
+that way: the segmented fold is 62-94% allocator, the small solve 73-85%, and the
+batched solve's layout change is worth only 1.19x against 5.1x for removing the heap.
+Consistent with `plan-simplex-blocked-compute.md` §0c, which found ~55% of a
+benchmarked program was allocator and first-touch.
+
+### Five more corrections, from building these
+
+10. **FMA CONTRACTION IS A BIT-CHANGING TRANSFORM INDEPENDENT OF REASSOCIATION.** gcc's
+    `AVOID_256FMA_CHAINS` tuning on znver3 *refuses* to contract the single-accumulator
+    fold Blade emits — the asm is byte-identical at `-ffp-contract=off` and `=fast` —
+    but it *does* contract a fold-split form. So a jammed kernel that hand-writes FMA
+    changes the result bits **without reassociating anything**, and would break the
+    byte-exact interp/diff-oracle gates. A bitwise-safe jam must emit `vmulpd`+`vaddpd`
+    and gives up 11-20% of its throughput to do so. (Measured reason the tuning exists:
+    the fused single-accumulator form is *slower* than unfused — a 4-cycle FMA chain
+    against a 3-cycle `vaddsd` chain.)
+11. **The tile shape must be derived from the OUTPUT EXTENTS, not fixed.** A 4x8 tile on
+    a 6-row output covers rows 0-3 and sends 33% of the work to a scalar tail: 2.18x,
+    where a 2x8 tile that divides 6 exactly gets **12.63x on identical data**. And
+    `n < R_j` kills the jam outright (1.01x at n=6). Emit a masked short tile, never a
+    fallback to the reference nest.
+12. **The prefix-sum segmented fold is a trap that would have passed our own test.**
+    `out[g] = S[off[g+1]] - S[off[g]]` vectorizes beautifully and makes every hard case
+    free — and it is bitwise-correct on the small-integer inputs these kernels verify
+    with. It is unusable in production: the differencing cancels against the *global*
+    prefix, so a late short segment loses most of its significant digits. Recorded
+    because it looks excellent on exactly this benchmark.
+13. **Batched small solves: the win is SIMD, not layout — and transposing costs more
+    than it saves.** Converting AoS to interleaved BLK4 costs 3.6-51.6 ns per system
+    while the layout itself is worth only 1.05-1.31x, so gather-into-registers beats
+    transpose-the-batch at *every* size tested. Interleave only if the array is *born*
+    interleaved. Secondary: full SoA is *worse* than BLK4 at n=8 (83.8 vs 48.1 ns) —
+    `n*n` separate streams exhaust the prefetchers.
+14. **The closed-form symmetric 3x3 eigendecomposition is not safe as usually written.**
+    Independent cross products give **orthogonality error 1.00** on degenerate input —
+    two returned eigenvectors are the same vector — with residuals to 3e-2, and
+    degenerate 3x3 tensors are ordinary in physics (isotropic stress, `A = cI`). Two
+    repairs, ~20 lines: orthogonalize structurally, and fall back to Jacobi when the
+    analytic gap is below `1e-6 max|lambda|`. That version is 4.2x faster at Jacobi
+    accuracy with a 0% fallback rate on generic input. The naive one is a fast wrong
+    answer.
+
+Also worth knowing, from the same batch: **branchless pivoting failed twice** — gcc
+emits branches rather than blends for `sw ? a : b` on doubles, and a true bitmask
+select was 2x worse still (two GP<->XMM domain crossings per select). Do not pay for
+pivoting on SPD input; use Cholesky, which needs none and is 1.6x faster at n=3,4.
+**Specialization itself stops paying at n ~ 8-10** — against a *no-heap* runtime-n
+loop it is 3.4x at n=2 but only 1.12x at n=8, so specialize aggressively at n <= 4 and
+merely remove the allocation above that. And **fixing `n` to a compile-time constant is
+bitwise** (955/955 identical), so it is a byte-exact drop-in; switching LU to Cholesky
+is **not** (2.9%) and must be a visible semantic choice.
+
 ## What building them corrected
 
 These prototypes exist because nine claims in the design did not survive contact
