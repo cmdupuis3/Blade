@@ -524,7 +524,7 @@ let private emissionCases : (string * bool * string * string list * string list)
       // rather than pass unnoticed.
       ("gate_off_gram_distinct_emits_dense_loops", false,
        realMat + realMatB + "let G = gram(A, B)\n",
-       [ "for (size_t __gi"; "__gj + 4 <="
+       [ "for (size_t __gi"; "__gj + 5 <="
          "G[__gi][__gj + 0] = __gacc0;"; "G[__gi][__gj] = __gacc;" ],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
       // matmul: the reordered i-t-j triple loop (unit-stride B, row-accumulator

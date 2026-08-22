@@ -2536,20 +2536,36 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // exists for -- measured 1.00x on this very shape, because
                     // splitting the fold adds chains without adding reuse.
                     //
-                    // R = 4, not 8, for a measured reason: at >= 8 accumulators
-                    // gcc starts contracting the jammed body to `vfmadd231pd`
-                    // while still refusing to contract the reference nest, so
-                    // wider tiles stop being bit-identical under Blade's
-                    // shipping `-ffp-contract=fast`. R = 4 is bitwise at BOTH
-                    // contraction settings. Accumulators are separate named
-                    // locals, never an array: the array form spills 46-103
-                    // times and gets 3.7x where named locals spill zero and get
-                    // 12.3x -- the same rule the K-lane form already follows.
+                    // R = 5 is the measured knee, and the reason is NOT "5
+                    // scalar chains". gcc transposes the R x 4 tile and runs
+                    // R-lane `vaddpd` in k-order, so the binding resource is
+                    // shuffle throughput (R=4: 16, R=6: 23, R=8: 32 shuffles
+                    // per iteration). That is why the curve peaks at 5-6 and
+                    // falls back by 8, and why `-fno-tree-vectorize` -- which
+                    // really does give R scalar chains -- is 24% SLOWER.
+                    // Measured on this emitter: R=5 beats R=4 by 17% at a
+                    // 257-long fold and 27% at 2003.
+                    //
+                    // An earlier draft capped this at 4, believing gcc
+                    // contracts to `vfmadd231pd` at R >= 8 and breaks bitwise-
+                    // ness under Blade's shipping `-ffp-contract=fast`. That
+                    // does not reproduce on THIS emission: zero `vfmadd*` in
+                    // the jammed fold body at every R up to 16, and the whole
+                    // 301x303 output hashes bit-identical for R = 2..16 on
+                    // full-mantissa operands at `=fast`. The contraction was a
+                    // sample-major prototype artifact. Widening past 5 is a
+                    // speed question here, not a correctness one.
+                    //
+                    // Accumulators are separate named locals, never an array:
+                    // the array form spills 46-103 times and gets 3.7x where
+                    // named locals spill zero and get 12.3x -- the same rule
+                    // the K-lane form already follows. Verified no spills
+                    // through R=8 (first spill at R=12).
                     //
                     // The remainder runs the original scalar body. When
                     // `pExtent < R` that is the ONLY body that runs, so narrow
                     // outputs emit exactly what they emitted before.
-                    let jamR = 4
+                    let jamR = 5
                     let accName k = sprintf "__gacc%d" k
                     let rowName k = sprintf "__growj%d" k
                     [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
