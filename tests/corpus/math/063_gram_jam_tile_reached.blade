@@ -1,0 +1,32 @@
+// TEST: gram distinct at an output extent the JAMMED tile can actually reach
+// Companion to 062, which pins the native arms' VALUES but cannot execute the
+// one thing this file exists for.
+//
+// materializeGramForm unroll-and-jams the dense arm's output axis R cells at a
+// time (CodeGenExpr.fs, `jamR`), emitting a tile loop plus a scalar remainder.
+// The tile is guarded by `for (; __gj + R <= p; __gj += R)`. Every OTHER gram
+// program in this corpus has p in {2, 3, 4} -- so at R = 5 that guard is
+// STATICALLY FALSE everywhere and the jammed body is unreachable in the whole
+// test suite. 062 itself emits `__gj + 5 <= 4`. A green suite therefore proved
+// only that the un-jammed remainder still works.
+//
+// Here p = 13: the tile runs twice (10 cells) and the remainder takes 3, so
+// both emitted bodies execute and must agree. 13 keeps that property for every
+// R from 2 to 12, so widening the tile again does not silently un-cover this.
+//
+// Values are small integers, exact in binary, because `interp math` demands
+// BYTE-identity against Interp/ArrayOps: each output cell keeps its own
+// ascending summation order under the jam, so the arms can only differ through
+// FP contraction, which coincides with mul+add on exact partial sums. That
+// makes this a shape test, not a rounding test -- the rounding question is
+// `src/microkernels/gram_jam_width.cpp`, which needs operands that can round.
+//
+// NOTE: with OPENBLAS_DIR set and BLADE_BLAS unset, gram routes to the BLAS
+// shim and none of this runs. `blade test` clears both (CliSelfTests.fs), which
+// is why the native arms are reachable here at all.
+type M35 = Array<Float64 like Idx<3>, Idx<5>>
+type M135 = Array<Float64 like Idx<13>, Idx<5>>
+let A: M35 = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]
+let D: M135 = [[1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0], [3.0, 4.0, 5.0, 6.0, 7.0], [4.0, 5.0, 6.0, 7.0, 8.0], [5.0, 6.0, 7.0, 8.0, 9.0], [6.0, 7.0, 8.0, 9.0, 10.0], [7.0, 8.0, 9.0, 10.0, 11.0], [8.0, 9.0, 10.0, 11.0, 12.0], [9.0, 10.0, 11.0, 12.0, 13.0], [10.0, 11.0, 12.0, 13.0, 14.0], [11.0, 12.0, 13.0, 14.0, 15.0], [12.0, 13.0, 14.0, 15.0, 16.0], [13.0, 14.0, 15.0, 16.0, 17.0]]
+let H = gram(A, D)
+// EXPECT: H = [55, 70, 85, 100, 115, 130, 145, 160, 175, 190, 205, 220, 235, 130, 170, 210, 250, 290, 330, 370, 410, 450, 490, 530, 570, 610, 205, 270, 335, 400, 465, 530, 595, 660, 725, 790, 855, 920, 985]
