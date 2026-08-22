@@ -325,7 +325,25 @@ let runGrRenderTests () : BlockResult =
         withEnv [ "BLADE_GR_RENDER", Some (installFake mode)
                   "GRDIR", Some grRoot
                   "GR_DISPLAY", Some "should-be-removed" ] (fun () ->
-            try f () finally GR.shutdown ())
+            // The product's 10 s startup-ping deadline is calibrated against a
+            // NATIVE gr-render.exe (~2.6 s cold, per the GrRender header). This
+            // fake is a .ps1, so `argvFor` spawns powershell.exe -- a full
+            // Windows PowerShell CLR start that happens BEFORE the script's
+            // first line, and so before the ping every mode answers
+            // immediately. On a loaded CI runner that cold start alone blew
+            // past 10 s on the FIRST spawn of the block (nightly 2026-08-22,
+            // llvm-suite lane: four consecutive failures, the first reading
+            // "timed out after 10000 ms" and the next three "<no request
+            // recorded>" because no worker ever came up). Raised here, not in
+            // the product, for the same reason `renderTimeoutMs` is lowered for
+            // the "slow" case below: the deadline under test is the product's,
+            // but the process being deadlined is the fake's.
+            let savedPing = GR.pingTimeoutMs
+            GR.pingTimeoutMs <- 60000
+            try f ()
+            finally
+                GR.pingTimeoutMs <- savedPing
+                GR.shutdown ())
     let workerTests = [
         "the worker answers a render with base64 payload bytes"
         "the request line splices the spec VERBATIM"
