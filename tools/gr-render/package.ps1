@@ -56,10 +56,15 @@ if (-not $OutDir) { $OutDir = Join-Path $here 'dist' }
 # produces will never be found.
 # ---------------------------------------------------------------------------
 
-$isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-$isMacOS = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
-$isLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
-$platform = if ($isWindows) { 'win32' } elseif ($isMacOS) { 'darwin' } elseif ($isLinux) { 'linux' } else { throw "unrecognized platform (not Windows, macOS or Linux)" }
+# NOT $isWindows/$isMacOS/$isLinux: PowerShell variable names are case-insensitive,
+# and pwsh 7 defines $IsWindows/$IsMacOS/$IsLinux as READ-ONLY automatic variables,
+# so assigning them is a hard error under the `shell: pwsh` that CI runs these
+# scripts with. It only ever worked locally because Windows PowerShell 5.1 has no
+# such automatic variables.
+$onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$onMacOS = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
+$onLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
+$platform = if ($onWindows) { 'win32' } elseif ($onMacOS) { 'darwin' } elseif ($onLinux) { 'linux' } else { throw "unrecognized platform (not Windows, macOS or Linux)" }
 
 $archRaw = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 $arch =
@@ -69,7 +74,7 @@ $arch =
         default { $archRaw.ToLowerInvariant() }
     }
 
-$exeExt = if ($isWindows) { '.exe' } else { '' }
+$exeExt = if ($onWindows) { '.exe' } else { '' }
 $stampedName = "gr-render-$platform-$arch$exeExt"
 
 # ---- build via build.ps1 (single source of truth for compiler flags) ------
@@ -103,7 +108,7 @@ if ((Test-Path $dest) -and -not $Force) {
 
 if ($needsCopy) {
     Copy-Item -Path $builtExe -Destination $dest -Force
-    if (-not $isWindows) {
+    if (-not $onWindows) {
         # Copy-Item's permission-preservation across platforms is not
         # something to trust blindly; make the executable bit explicit.
         try { & chmod +x $dest } catch { Write-Warning "chmod +x $dest failed: $_" }

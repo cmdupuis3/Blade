@@ -47,11 +47,16 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 # "which platform" means the same three strings everywhere in the toolchain.
 # ---------------------------------------------------------------------------
 
-$isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-$isMacOS = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
-$isLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
-$platform = if ($isWindows) { 'win32' } elseif ($isMacOS) { 'darwin' } elseif ($isLinux) { 'linux' } else { throw "unrecognized platform (not Windows, macOS or Linux)" }
-$exeExt = if ($isWindows) { '.exe' } else { '' }
+# NOT $isWindows/$isMacOS/$isLinux: PowerShell variable names are case-insensitive,
+# and pwsh 7 defines $IsWindows/$IsMacOS/$IsLinux as READ-ONLY automatic variables,
+# so assigning them is a hard error under the `shell: pwsh` that CI runs these
+# scripts with. It only ever worked locally because Windows PowerShell 5.1 has no
+# such automatic variables.
+$onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$onMacOS = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
+$onLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
+$platform = if ($onWindows) { 'win32' } elseif ($onMacOS) { 'darwin' } elseif ($onLinux) { 'linux' } else { throw "unrecognized platform (not Windows, macOS or Linux)" }
+$exeExt = if ($onWindows) { '.exe' } else { '' }
 
 function Resolve-GrDir {
     param([string]$Explicit)
@@ -150,7 +155,7 @@ Write-Host "gr-render: compiling against $gr ($platform)"
 & $gpp.Source @compileArgs
 if ($LASTEXITCODE -ne 0) { throw "$($gpp.Name) failed with exit code $LASTEXITCODE" }
 if (-not (Test-Path $exe)) { throw "$($gpp.Name) reported success but $exe is missing" }
-if (-not $isWindows) {
+if (-not $onWindows) {
     try { & chmod +x $exe } catch { Write-Warning "chmod +x $exe failed: $_" }
 }
 

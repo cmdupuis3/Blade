@@ -51,9 +51,12 @@ function Check {
 # hygiene checks that only make sense on Windows) rather than failing on an
 # assumption that was never true off Windows in the first place.
 
-$isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-$exeExt = if ($isWindows) { '.exe' } else { '' }
-$grRuntimeLibCandidates = if ($isWindows) { @('bin/libGR.dll') } else { @('lib/libGR.so', 'lib/libGR.dylib', 'bin/libGR.so', 'bin/libGR.dylib') }
+# NOT $isWindows: PowerShell variable names are case-insensitive and pwsh 7 defines
+# $IsWindows as a READ-ONLY automatic variable, so assigning it is a hard error under
+# the `shell: pwsh` that CI runs this script with (see build.ps1 for the full note).
+$onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+$exeExt = if ($onWindows) { '.exe' } else { '' }
+$grRuntimeLibCandidates = if ($onWindows) { @('bin/libGR.dll') } else { @('lib/libGR.so', 'lib/libGR.dylib', 'bin/libGR.so', 'bin/libGR.dylib') }
 
 # ---- environment -----------------------------------------------------------
 
