@@ -80,7 +80,7 @@ module private NcFFI =
     extern int nc_finalize()
 
     let check (status: int) (msg: string) =
-        if status <> 0 then failwithf "NetCDF error (%d): %s" status msg
+        if status <> 0 then failwith $"NetCDF error ({status}): {msg}"
 
     // WHICH FILE the externs above bind to is decided by the process-wide
     // resolver in Platforms.fs, not by the ambient search path: it takes
@@ -128,7 +128,7 @@ module private NcQuery =
         NcFFI.ensureNativeLibrary ()
         NcFFI.registerExitFinalizer ()
         let mutable id = 0
-        NcFFI.nc_open(path, mode, &id) |> fun s -> NcFFI.check s (sprintf "opening '%s'" path)
+        NcFFI.nc_open(path, mode, &id) |> fun s -> NcFFI.check s $"opening '{path}'"
         id
 
     let closeFile (fileId: int) =
@@ -147,7 +147,7 @@ module private NcQuery =
     let getDim (fileId: int) (dimId: int) =
         let buf : byte[] = Array.zeroCreate 256
         let mutable length = 0L
-        NcFFI.nc_inq_dim(fileId, dimId, buf, &length) |> fun s -> NcFFI.check s (sprintf "querying dim %d" dimId)
+        NcFFI.nc_inq_dim(fileId, dimId, buf, &length) |> fun s -> NcFFI.check s $"querying dim {dimId}"
         let nul = System.Array.IndexOf(buf, 0uy)
         let len = if nul >= 0 then nul else buf.Length
         let name = System.Text.Encoding.ASCII.GetString(buf, 0, len)
@@ -165,19 +165,19 @@ module private NcQuery =
 
     let getVar (fileId: int) (varId: int) (dimLookup: Map<int, NcDim>) =
         let nameBuf : byte[] = Array.zeroCreate 256
-        NcFFI.nc_inq_varname(fileId, varId, nameBuf) |> fun s -> NcFFI.check s (sprintf "querying var %d name" varId)
+        NcFFI.nc_inq_varname(fileId, varId, nameBuf) |> fun s -> NcFFI.check s $"querying var {varId} name"
         let nul = System.Array.IndexOf(nameBuf, 0uy)
         let len = if nul >= 0 then nul else nameBuf.Length
         let name = System.Text.Encoding.ASCII.GetString(nameBuf, 0, len)
 
         let mutable xtype = 0
-        NcFFI.nc_inq_vartype(fileId, varId, &xtype) |> fun s -> NcFFI.check s (sprintf "querying var %d type" varId)
+        NcFFI.nc_inq_vartype(fileId, varId, &xtype) |> fun s -> NcFFI.check s $"querying var {varId} type"
 
         let mutable ndims = 0
-        NcFFI.nc_inq_varndims(fileId, varId, &ndims) |> fun s -> NcFFI.check s (sprintf "querying var %d ndims" varId)
+        NcFFI.nc_inq_varndims(fileId, varId, &ndims) |> fun s -> NcFFI.check s $"querying var {varId} ndims"
 
         let dimIds = Array.zeroCreate ndims
-        NcFFI.nc_inq_vardimid(fileId, varId, dimIds) |> fun s -> NcFFI.check s (sprintf "querying var %d dimids" varId)
+        NcFFI.nc_inq_vardimid(fileId, varId, dimIds) |> fun s -> NcFFI.check s $"querying var {varId} dimids"
 
         let dims =
             dimIds
@@ -185,7 +185,7 @@ module private NcQuery =
             |> List.map (fun did ->
                 match Map.tryFind did dimLookup with
                 | Some dim -> dim
-                | None -> failwithf "Dimension ID %d not found" did)
+                | None -> failwith $"Dimension ID {did} not found")
 
         { Name = name; Dims = dims; TypeCode = xtype }
 
@@ -194,8 +194,7 @@ module private NcQuery =
 /// Loads all metadata from a NetCDF file (opens read-only, extracts dims/vars, closes).
 let load (path: string) : NcFile =
     if not (System.IO.File.Exists path) then
-        failwithf "NetCDF file not found: '%s' (resolved against cwd '%s')"
-            path (System.IO.Directory.GetCurrentDirectory())
+        failwith $"NetCDF file not found: '{path}' (resolved against cwd '{(System.IO.Directory.GetCurrentDirectory())}')"
     let fileId = NcQuery.openFile path 0  // NC_NOWRITE = 0
     try
         let dimIds = NcQuery.getDimIds fileId
@@ -234,18 +233,18 @@ let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
                     let v = NcQuery.getVar fileId vid dimLookup
                     if v.Name = varName then Some (vid, v) else None)
             match hit with
-            | None -> Error (sprintf "variable '%s' not found in '%s'" varName path)
+            | None -> Error $"variable '{varName}' not found in '{path}'"
             | Some (vid, v) ->
                 let lens = v.Dims |> List.map (fun d -> int d.Length)
                 let count = lens |> List.fold (*) 1
                 match v.TypeCode with
                 | 5 | 6 ->  // NC_FLOAT, NC_DOUBLE
                     let buf : float[] = Array.zeroCreate (max count 1)
-                    NcFFI.check (NcFFI.nc_get_var_double(fileId, vid, buf)) (sprintf "reading '%s'" varName)
+                    NcFFI.check (NcFFI.nc_get_var_double(fileId, vid, buf)) $"reading '{varName}'"
                     Ok { DimLengths = lens; Payload = NcFloats buf }
                 | _ ->
                     let buf : int64[] = Array.zeroCreate (max count 1)
-                    NcFFI.check (NcFFI.nc_get_var_longlong(fileId, vid, buf)) (sprintf "reading '%s'" varName)
+                    NcFFI.check (NcFFI.nc_get_var_longlong(fileId, vid, buf)) $"reading '{varName}'"
                     Ok { DimLengths = lens; Payload = NcInts buf }
         finally
             NcQuery.closeFile fileId
@@ -268,7 +267,7 @@ let ncTypeToElemType (tc: int) : ElemType =
     | 9  -> ETInt64     // NC_UINT     (unsigned 32   -> Int)
     | 10 -> ETInt64     // NC_INT64
     | 11 -> ETInt64     // NC_UINT64   (unsigned 64   -> Int)
-    | _  -> failwithf "Unsupported NetCDF type code: %d" tc
+    | _  -> failwith $"Unsupported NetCDF type code: {tc}"
 
 /// Builds a named IRIndexType from an NcDim; the name is this index space's nominal identity.
 let ncDimToNamedIndexType (builder: IRBuilder) (dim: NcDim) : string * IRIndexType =
@@ -291,7 +290,7 @@ let ncVarToArrayType (dimMap: Map<string, IRIndexType>) (var: NcVar) : IRArrayTy
         |> List.map (fun dim ->
             match Map.tryFind dim.Name dimMap with
             | Some idx -> idx
-            | None -> failwithf "Dimension '%s' not found in module" dim.Name)
+            | None -> failwith $"Dimension '{dim.Name}' not found in module")
     {
         ElemType = IRTScalar (ncTypeToElemType var.TypeCode)
         IndexTypes = indexTypes
@@ -353,10 +352,10 @@ let ncFileToModule
             let arrType = mkArrayArrow [idx] (IRTScalar ETInt64) (Some (AIDVariable dim.Name))
             (dim.Name, arrType))
 
-    let dimsStruct = IRTDStruct(sprintf "%s__dims" moduleName, dimsFields)
+    let dimsStruct = IRTDStruct($"{moduleName}__dims", dimsFields)
 
     // vars struct: data variables only (exclude coordinate variables)
-    let dimNames = file.Dims |> List.map (fun d -> d.Name) |> Set.ofList
+    let dimNames = file.Dims |> List.map _.Name |> Set.ofList
     let isCoordinateVar (v: NcVar) =
         dimNames.Contains v.Name
         && v.Dims.Length = 1
@@ -369,7 +368,7 @@ let ncFileToModule
             let arrType = ncVarToArrayType dimMap v
             (v.Name, mkArrayLike arrType))
 
-    let varsStruct = IRTDStruct(sprintf "%s__vars" moduleName, varsFields)
+    let varsStruct = IRTDStruct($"{moduleName}__vars", varsFields)
 
     {
         Name = moduleName
@@ -410,9 +409,8 @@ module CppNetcdf =
     /// is spliced into a C++ string literal, so it must avoid double quotes.
     let private ncChecked (cppVarName: string) (context: string) (callExpr: string) : string list =
         [
-            sprintf "%s_ncstat = %s;" cppVarName callExpr
-            sprintf "if (%s_ncstat != NC_NOERR) { std::cerr << \"NetCDF error (%s): \" << nc_strerror(%s_ncstat) << std::endl; std::exit(1); }"
-                cppVarName context cppVarName
+            $"{cppVarName}_ncstat = {callExpr};"
+            $"if ({cppVarName}_ncstat != NC_NOERR) {{ std::cerr << \"NetCDF error ({context}): \" << nc_strerror({cppVarName}_ncstat) << std::endl; std::exit(1); }}"
         ]
 
     /// Generate C++ code to open a NetCDF file and read a variable
@@ -436,11 +434,11 @@ module CppNetcdf =
             arrType.IndexTypes
             |> List.mapi (fun i idx ->
                 match idx.Extent with
-                | IRLit (IRLitInt n) -> sprintf "size_t %s_extent_%d = %d;" cppVarName i n
-                | _ -> sprintf "size_t %s_extent_%d = /* dynamic */;" cppVarName i)
+                | IRLit (IRLitInt n) -> $"size_t {cppVarName}_extent_{i} = {n};"
+                | _ -> $"size_t {cppVarName}_extent_{i} = /* dynamic */;")
 
         let extentNames =
-            arrType.IndexTypes |> List.mapi (fun i _ -> sprintf "%s_extent_%d" cppVarName i)
+            arrType.IndexTypes |> List.mapi (fun i _ -> $"{cppVarName}_extent_{i}")
         let ncGetSuffix =
             match primElem with
             | ETFloat32 -> "float"
@@ -453,51 +451,49 @@ module CppNetcdf =
         // silent failure can't hand the copy loop an uninitialized buffer.
         let flatRead =
             [
-                sprintf "// Read %s from %s" varName filePath
-                sprintf "int %s_ncid, %s_varid, %s_ncstat;" cppVarName cppVarName cppVarName
+                $"// Read {varName} from {filePath}"
+                $"int {cppVarName}_ncid, {cppVarName}_varid, {cppVarName}_ncstat;"
             ]
-            @ ncChecked cppVarName (sprintf "opening '%s' to read %s" filePath varName)
-                (sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid)" filePath cppVarName)
-            @ ncChecked cppVarName (sprintf "locating variable '%s' in '%s'" varName filePath)
-                (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid)" cppVarName varName cppVarName)
+            @ ncChecked cppVarName $"opening '{filePath}' to read {varName}"
+                $"nc_open(\"{filePath}\", NC_NOWRITE, &{cppVarName}_ncid)"
+            @ ncChecked cppVarName $"locating variable '{varName}' in '{filePath}'"
+                $"nc_inq_varid({cppVarName}_ncid, \"{varName}\", &{cppVarName}_varid)"
             @ extentsFromDims
             @ [
-                sprintf "%s* %s_flat = new %s[%s];"
-                    elemCpp cppVarName elemCpp (String.concat " * " extentNames)
+                $"""{elemCpp}* {cppVarName}_flat = new {elemCpp}[{(String.concat " * " extentNames)}];"""
             ]
-            @ ncChecked cppVarName (sprintf "reading variable '%s' from '%s'" varName filePath)
-                (sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_flat)" ncGetSuffix cppVarName cppVarName cppVarName)
+            @ ncChecked cppVarName $"reading variable '{varName}' from '{filePath}'"
+                $"nc_get_var_{ncGetSuffix}({cppVarName}_ncid, {cppVarName}_varid, {cppVarName}_flat)"
             @ [
-                sprintf "nc_close(%s_ncid);" cppVarName
+                $"nc_close({cppVarName}_ncid);"
             ]
         // Materialize the nested-pointer Array indexed as <v>[i][j]...: allocate<>
         // builds the nested structure, the flat buffer is copied in (runtime-
         // bounded loops compile fast, unlike a baked literal) and released.
         // ProviderReads routes a maskless spec here, vs genReadCompoundVar.
-        let idxVars = [ for i in 0 .. rank - 1 -> sprintf "%s_i%d" cppVarName i ]
+        let idxVars = [ for i in 0 .. rank - 1 -> $"{cppVarName}_i{i}" ]
         let openLoops =
             idxVars |> List.mapi (fun d iv ->
                 let ind = String.replicate d "    "
-                sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind iv iv extentNames.[d] iv)
+                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames.[d]}; {iv}++) {{")
         let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
         // Row-major flat index (Horner): (((i0)*ext1 + i1)*ext2 + i2)... matches
         // NetCDF's contiguous storage order.
         let flatIdx =
             let mutable acc = idxVars.[0]
             for i in 1 .. rank - 1 do
-                acc <- sprintf "(%s) * %s + %s" acc extentNames.[i] idxVars.[i]
+                acc <- $"({acc}) * {extentNames.[i]} + {idxVars.[i]}"
             acc
         let bodyInd = String.replicate rank "    "
         let materialize =
             [
-                sprintf "size_t %s_extents[] = { %s };" cppVarName (String.concat ", " extentNames)
-                sprintf "Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                    elemCpp rank cppVarName elemCpp rank cppVarName cppVarName
+                $"""size_t {cppVarName}_extents[] = {{ {(String.concat ", " extentNames)} }};"""
+                $"Array<{elemCpp}, {rank}> {cppVarName} = {{ allocate<typename promote<{elemCpp}, {rank}>::type, nullptr>({cppVarName}_extents), {cppVarName}_extents }};"
             ]
             @ openLoops
-            @ [ sprintf "%s%s%s = %s_flat[%s];" bodyInd cppVarName nestedSub cppVarName flatIdx ]
-            @ [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
-            @ [ sprintf "delete[] %s_flat;" cppVarName ]
+            @ [ $"{bodyInd}{cppVarName}{nestedSub} = {cppVarName}_flat[{flatIdx}];" ]
+            @ [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
+            @ [ $"delete[] {cppVarName}_flat;" ]
         flatRead @ materialize
 
     /// Reads a variable as a COMPOUND (masked) array, triggered only by
@@ -552,10 +548,10 @@ module CppNetcdf =
             varArrType.IndexTypes
             |> List.mapi (fun i idx ->
                 match idx.Extent with
-                | IRLit (IRLitInt n) -> sprintf "size_t %s_extent_%d = %d;" cppVarName i n
-                | _ -> sprintf "size_t %s_extent_%d = /* dynamic */;" cppVarName i)
+                | IRLit (IRLitInt n) -> $"size_t {cppVarName}_extent_{i} = {n};"
+                | _ -> $"size_t {cppVarName}_extent_{i} = /* dynamic */;")
         let extentNames =
-            varArrType.IndexTypes |> List.mapi (fun i _ -> sprintf "%s_extent_%d" cppVarName i)
+            varArrType.IndexTypes |> List.mapi (fun i _ -> $"{cppVarName}_extent_{i}")
         let v = cppVarName
         let leadExtentNames = extentNames |> List.truncate leadRank
         let trailExtentNames = extentNames |> List.skip leadRank
@@ -565,49 +561,49 @@ module CppNetcdf =
         let leadExtentsInit = leadExtentNames |> String.concat ", "
 
         [
-            sprintf "// Read compound %s (masked by %s) from %s" varName maskName filePath
-            sprintf "int %s_ncid, %s_varid, %s_maskid, %s_ncstat;" v v v v
+            $"// Read compound {varName} (masked by {maskName}) from {filePath}"
+            $"int {v}_ncid, {v}_varid, {v}_maskid, {v}_ncstat;"
         ]
-        @ ncChecked v (sprintf "opening '%s' to read %s" filePath varName)
-            (sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid)" filePath v)
+        @ ncChecked v $"opening '{filePath}' to read {varName}"
+            $"nc_open(\"{filePath}\", NC_NOWRITE, &{v}_ncid)"
         @ extentsFromDims
         @ [
             // grid = masked leading cells; trail = regular trailing stride; total = dense size
-            sprintf "size_t %s_grid = %s;" v gridExpr
-            sprintf "size_t %s_trail = %s;" v trailExpr
-            sprintf "size_t %s_total = %s;" v totalExpr
+            $"size_t {v}_grid = {gridExpr};"
+            $"size_t {v}_trail = {trailExpr};"
+            $"size_t {v}_total = {totalExpr};"
             // dense variable (all dims)
-            sprintf "%s* %s_dense = new %s[%s_total];" elemCpp v elemCpp v
+            $"{elemCpp}* {v}_dense = new {elemCpp}[{v}_total];"
         ]
-        @ ncChecked v (sprintf "locating variable '%s' in '%s'" varName filePath)
-            (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid)" v varName v)
-        @ ncChecked v (sprintf "reading variable '%s' from '%s'" varName filePath)
-            (sprintf "nc_get_var_%s(%s_ncid, %s_varid, %s_dense)" (ncGet primElem) v v v)
+        @ ncChecked v $"locating variable '{varName}' in '{filePath}'"
+            $"nc_inq_varid({v}_ncid, \"{varName}\", &{v}_varid)"
+        @ ncChecked v $"reading variable '{varName}' from '{filePath}'"
+            $"nc_get_var_{ncGet primElem}({v}_ncid, {v}_varid, {v}_dense)"
         @ [
             // integer mask over the leading masked dims -- size is grid, not total
-            sprintf "%s* %s_maskraw = new %s[%s_grid];" maskCpp v maskCpp v
+            $"{maskCpp}* {v}_maskraw = new {maskCpp}[{v}_grid];"
         ]
-        @ ncChecked v (sprintf "locating mask '%s' in '%s'" maskName filePath)
-            (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_maskid)" v maskName v)
-        @ ncChecked v (sprintf "reading mask '%s' from '%s'" maskName filePath)
-            (sprintf "nc_get_var_%s(%s_ncid, %s_maskid, %s_maskraw)" (ncGet maskElem) v v v)
+        @ ncChecked v $"locating mask '{maskName}' in '{filePath}'"
+            $"nc_inq_varid({v}_ncid, \"{maskName}\", &{v}_maskid)"
+        @ ncChecked v $"reading mask '{maskName}' from '{filePath}'"
+            $"nc_get_var_{ncGet maskElem}({v}_ncid, {v}_maskid, {v}_maskraw)"
         @ [
-            sprintf "nc_close(%s_ncid);" v
+            $"nc_close({v}_ncid);"
             // int -> std::vector<bool> (nonzero = present): the load_compound conversion
-            sprintf "std::vector<bool> %s_maskvec(%s_grid);" v v
-            sprintf "for (size_t %s_i = 0; %s_i < %s_grid; %s_i++) %s_maskvec[%s_i] = (%s_maskraw[%s_i] != 0);" v v v v v v v v
-            sprintf "delete[] %s_maskraw;" v
+            $"std::vector<bool> {v}_maskvec({v}_grid);"
+            $"for (size_t {v}_i = 0; {v}_i < {v}_grid; {v}_i++) {v}_maskvec[{v}_i] = ({v}_maskraw[{v}_i] != 0);"
+            $"delete[] {v}_maskraw;"
             // compound index over the leading masked dims
-            sprintf "std::array<size_t, %d> %s_extents = { %s };" leadRank v leadExtentsInit
-            sprintf "compound_index_t<%d>* %s_idx = new compound_index_t<%d>(\"%s\", %s_extents, %s_maskvec);" leadRank v leadRank varName v v
+            $"std::array<size_t, {leadRank}> {v}_extents = {{ {leadExtentsInit} }};"
+            $"compound_index_t<{leadRank}>* {v}_idx = new compound_index_t<{leadRank}>(\"{varName}\", {v}_extents, {v}_maskvec);"
             // compact backing: present leading cells x trailing block
-            sprintf "%s* %s_compact = new %s[%s_idx->cardinality * %s_trail];" elemCpp v elemCpp v v
+            $"{elemCpp}* {v}_compact = new {elemCpp}[{v}_idx->cardinality * {v}_trail];"
             // scatter: copy each present cell's trailing block (row-major
             // prefix-popcount order); string-concatenated so the count can't drift.
             ("{ size_t " + v + "_r = 0; for (size_t " + v + "_c = 0; " + v + "_c < " + v + "_grid; " + v + "_c++) if (" + v + "_maskvec[" + v + "_c]) { for (size_t " + v + "_t = 0; " + v + "_t < " + v + "_trail; " + v + "_t++) " + v + "_compact[" + v + "_r * " + v + "_trail + " + v + "_t] = " + v + "_dense[" + v + "_c * " + v + "_trail + " + v + "_t]; " + v + "_r++; } }")
-            sprintf "delete[] %s_dense;" v
+            $"delete[] {v}_dense;"
             // bundle into the non-owning Compound wrapper (trailing_stride = _trail; 1 when all dims are masked)
-            sprintf "nested_array_utilities::Compound<%s, %d> %s { %s_compact, %s_idx, %s_trail };" elemCpp leadRank v v v v
+            $"nested_array_utilities::Compound<{elemCpp}, {leadRank}> {v} {{ {v}_compact, {v}_idx, {v}_trail }};"
         ]
 
     /// Generates C++ to write a variable to a NetCDF file. dimNames provides
@@ -634,30 +630,28 @@ module CppNetcdf =
             |> List.mapi (fun i idx ->
                 let dimName =
                     if i < dimNames.Length then dimNames.[i]
-                    else sprintf "dim%d" i
+                    else $"dim{i}"
                 let extent =
                     match idx.Extent with
-                    | IRLit (IRLitInt n) -> sprintf "%d" n
+                    | IRLit (IRLitInt n) -> string n
                     | _ -> "0 /* unlimited */"
-                ncChecked cppVarName (sprintf "defining dimension '%s' in '%s'" dimName filePath)
-                    (sprintf "nc_def_dim(%s_ncid, \"%s\", %s, &%s_dimids[%d])"
-                        cppVarName dimName extent cppVarName i))
+                ncChecked cppVarName $"defining dimension '{dimName}' in '{filePath}'"
+                    ($"nc_def_dim({cppVarName}_ncid, \"{dimName}\", {extent}, &{cppVarName}_dimids[{i}])"))
             |> List.concat
 
         [
-            sprintf "// Write %s to %s" varName filePath
-            sprintf "int %s_ncid, %s_varid, %s_ncstat;" cppVarName cppVarName cppVarName
-            sprintf "int %s_dimids[%d];" cppVarName rank
+            $"// Write {varName} to {filePath}"
+            $"int {cppVarName}_ncid, {cppVarName}_varid, {cppVarName}_ncstat;"
+            $"int {cppVarName}_dimids[{rank}];"
         ]
-        @ ncChecked cppVarName (sprintf "creating '%s' to write %s" filePath varName)
-            (sprintf "nc_create(\"%s\", NC_CLOBBER | NC_NETCDF4, &%s_ncid)" filePath cppVarName)
+        @ ncChecked cppVarName $"creating '{filePath}' to write {varName}"
+            $"nc_create(\"{filePath}\", NC_CLOBBER | NC_NETCDF4, &{cppVarName}_ncid)"
         @ dimDefs
-        @ ncChecked cppVarName (sprintf "defining variable '%s' in '%s'" varName filePath)
-            (sprintf "nc_def_var(%s_ncid, \"%s\", %s, %d, %s_dimids, &%s_varid)"
-                cppVarName varName ncType rank cppVarName cppVarName)
-        @ ncChecked cppVarName (sprintf "ending define mode for '%s'" filePath)
-            (sprintf "nc_enddef(%s_ncid)" cppVarName)
-        @ ncChecked cppVarName (sprintf "writing variable '%s' to '%s'" varName filePath)
+        @ ncChecked cppVarName $"defining variable '{varName}' in '{filePath}'"
+            ($"nc_def_var({cppVarName}_ncid, \"{varName}\", {ncType}, {rank}, {cppVarName}_dimids, &{cppVarName}_varid)")
+        @ ncChecked cppVarName $"ending define mode for '{filePath}'"
+            $"nc_enddef({cppVarName}_ncid)"
+        @ ncChecked cppVarName $"writing variable '{varName}' to '{filePath}'"
             (sprintf "nc_put_var_%s(%s_ncid, %s_varid, %s_flat)"
                 (match primElem with
                  | ETFloat32 -> "float"
@@ -667,8 +661,8 @@ module CppNetcdf =
                  | _ -> "double")
                 cppVarName cppVarName cppVarName)
         // nc_close flushes buffered writes, so its status matters here (unlike the read paths).
-        @ ncChecked cppVarName (sprintf "closing '%s' after writing %s" filePath varName)
-            (sprintf "nc_close(%s_ncid)" cppVarName)
+        @ ncChecked cppVarName $"closing '{filePath}' after writing {varName}"
+            $"nc_close({cppVarName}_ncid)"
 
     /// STREAMED fiber reads: hoisted prologue -- opens the file once and
     /// declares the start/count vectors for nc_get_vara; the handle stays open for the program's lifetime.
@@ -687,27 +681,27 @@ module CppNetcdf =
             | _         -> "double"
         let rank = arrType.IndexTypes.Length
         if rank < 2 then
-            failwithf "NetCDF stream of '%s': needs at least one site dim plus the trailing fiber axis (rank >= 2)" varName
+            failwith $"NetCDF stream of '{varName}': needs at least one site dim plus the trailing fiber axis (rank >= 2)"
         if arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone || ix.Rank <> 1) then
-            failwithf "NetCDF stream of '%s': dense variables only" varName
+            failwith $"NetCDF stream of '{varName}': dense variables only"
         let extents =
             arrType.IndexTypes |> List.map (fun ix ->
                 match ix.Extent with
                 | IRLit (IRLitInt n) -> n
-                | _ -> failwithf "NetCDF stream of '%s' requires literal extents" varName)
+                | _ -> failwith $"NetCDF stream of '{varName}' requires literal extents")
         let fiberLen = List.last extents
         ignore elemCpp
-        [ sprintf "// Stream %s from %s (fiber reads inlined at the S/T boundary)" varName filePath
-          sprintf "int %s_ncid, %s_varid, %s_ncstat;" v v v ]
-        @ ncChecked v (sprintf "opening '%s' to stream %s" filePath varName)
-            (sprintf "nc_open(\"%s\", NC_NOWRITE, &%s_ncid)" filePath v)
-        @ ncChecked v (sprintf "locating variable '%s' in '%s'" varName filePath)
-            (sprintf "nc_inq_varid(%s_ncid, \"%s\", &%s_varid)" v varName v)
-        @ [ sprintf "size_t %s_fiber_ext[1] = { %d };" v fiberLen
-            sprintf "size_t %s_start[%d]; size_t %s_count[%d];" v rank v rank ]
-        @ [ for d in 0 .. rank - 2 -> sprintf "%s_count[%d] = 1;" v d ]
-        @ [ sprintf "%s_count[%d] = %d;" v (rank - 1) fiberLen
-            sprintf "%s_start[%d] = 0;" v (rank - 1) ]
+        [ $"// Stream {varName} from {filePath} (fiber reads inlined at the S/T boundary)"
+          $"int {v}_ncid, {v}_varid, {v}_ncstat;" ]
+        @ ncChecked v $"opening '{filePath}' to stream {varName}"
+            $"nc_open(\"{filePath}\", NC_NOWRITE, &{v}_ncid)"
+        @ ncChecked v $"locating variable '{varName}' in '{filePath}'"
+            $"nc_inq_varid({v}_ncid, \"{varName}\", &{v}_varid)"
+        @ [ $"size_t {v}_fiber_ext[1] = {{ {fiberLen} }};"
+            $"size_t {v}_start[{rank}]; size_t {v}_count[{rank}];" ]
+        @ [ for d in 0 .. rank - 2 -> $"{v}_count[{d}] = 1;" ]
+        @ [ $"{v}_count[{rank - 1}] = {fiberLen};"
+            $"{v}_start[{rank - 1}] = 0;" ]
 
     /// STREAMED fiber reads: the in-nest read -- sets the site coordinates and pulls one trailing-axis fiber into the destination buffer.
     let genStreamFiber (filePath: string) (varName: string) (cppVarName: string) (destBuf: string) (siteExprs: string list) (arrType: IRArrayType) : string list =
@@ -719,9 +713,9 @@ module CppNetcdf =
             | IRTScalar ETInt32 -> "int"
             | IRTScalar ETInt64 -> "longlong"
             | _ -> "double"
-        [ for d in 0 .. siteExprs.Length - 1 -> sprintf "%s_start[%d] = (size_t)(%s);" v d siteExprs.[d] ]
-        @ ncChecked v (sprintf "streaming a fiber of '%s' from '%s'" varName filePath)
-            (sprintf "nc_get_vara_%s(%s_ncid, %s_varid, %s_start, %s_count, %s)" suffix v v v v destBuf)
+        [ for d in 0 .. siteExprs.Length - 1 -> $"{v}_start[{d}] = (size_t)({siteExprs.[d]});" ]
+        @ ncChecked v $"streaming a fiber of '{varName}' from '{filePath}'"
+            $"nc_get_vara_{suffix}({v}_ncid, {v}_varid, {v}_start, {v}_count, {destBuf})"
 
     /// Extract dimension names from a module's index type definitions
     let dimNamesFromModule (modul: IRModule) : string list =

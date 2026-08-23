@@ -32,7 +32,7 @@ module Tests_SphericalHarmonics =
             let want = specY v.[0] v.[1] v.[2]
             for l in 0 .. 2 do
                 // Spec constants have 8 digits; tolerance reflects that.
-                checkArrayClose (sprintf "Y_%d matches spec table, sample %d" l i) 5e-7 want.[l] got.[l]
+                checkArrayClose $"Y_{l} matches spec table, sample {i}" 5e-7 want.[l] got.[l]
 
         section "spherical harmonics: closed-form identities"
 
@@ -43,7 +43,7 @@ module Tests_SphericalHarmonics =
             let a = SphericalHarmonics.eval l (s * v0.[0]) (s * v0.[1]) (s * v0.[2])
             let b = SphericalHarmonics.eval l v0.[0] v0.[1] v0.[2]
                     |> Array.map (fun t -> t * s ** float l)
-            checkArrayClose (sprintf "homogeneity degree %d" l) 1e-10 b a
+            checkArrayClose $"homogeneity degree {l}" 1e-10 b a
 
         // Unsold / addition theorem: sum_m Y_lm(v)^2 = (2l+1)/(4pi) r^(2l).
         // Pins the normalization exactly, for every degree.
@@ -53,7 +53,7 @@ module Tests_SphericalHarmonics =
             let y = SphericalHarmonics.eval l v.[0] v.[1] v.[2]
             let sumSq = y |> Array.sumBy (fun t -> t * t)
             let expect = float (2 * l + 1) / (4.0 * Math.PI) * r2 ** float l
-            checkClose (sprintf "addition theorem degree %d" l) 1e-10 expect sumSq
+            checkClose $"addition theorem degree {l}" 1e-10 expect sumSq
 
         // Rotation invariance of the per-degree norm (independent of Wigner D).
         for l in 0 .. 4 do
@@ -62,7 +62,7 @@ module Tests_SphericalHarmonics =
             let rv = matVec r v
             let n1 = SphericalHarmonics.eval l v.[0] v.[1] v.[2] |> Array.sumBy (fun t -> t * t)
             let n2 = SphericalHarmonics.eval l rv.[0] rv.[1] rv.[2] |> Array.sumBy (fun t -> t * t)
-            checkClose (sprintf "norm invariance degree %d" l) 1e-10 n1 n2
+            checkClose $"norm invariance degree {l}" 1e-10 n1 n2
 
         // Y_to layout = concatenation of per-degree blocks = IrrepsIdx<sh_spec>.
         let vv = Rotations.randomUnitVector rng

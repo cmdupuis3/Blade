@@ -102,5 +102,5 @@ let runCartesianBridgeTests () : BlockResult =
     check "x2y2 row * sqrt(15/8pi) = 0.5462742152960396 (the y_to x2y2 constant)"
           (close (s2i.[5].[0] * schur) 0.5462742152960396) ""
 
-    printFooter "Cartesian Bridge" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "Cartesian Bridge" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "Cartesian Bridge"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

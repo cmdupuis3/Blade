@@ -78,9 +78,9 @@ let parseRejectStage (source: string) : RejectStage =
         | "lower" -> RejectAtLower
         | "codegen" -> RejectAtCodegen
         | other ->
-            failwithf "// REJECT-AT: '%s' is not a known reject stage (expected 'lower' or 'codegen')" other
+            failwith $"// REJECT-AT: '{other}' is not a known reject stage (expected 'lower' or 'codegen')"
     | many ->
-        failwithf "conflicting // REJECT-AT: directives in one test: %s" (String.concat ", " many)
+        failwith $"""conflicting // REJECT-AT: directives in one test: {(String.concat ", " many)}"""
 
 /// Expected value for a variable
 type ExpectedValue =
@@ -674,8 +674,8 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                             | "false" when floatEquals expectedVal 0.0 tolerance -> None
                             | "true" -> Some (sprintf "%s: expected %.17g, got true (1)" name expectedVal)
                             | "false" -> Some (sprintf "%s: expected %.17g, got false (0)" name expectedVal)
-                            | _ -> Some (sprintf "%s: could not parse '%s' as float" name actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name)
+                            | _ -> Some ($"{name}: could not parse '{actualStr}' as float")
+                    | None -> Some ($"{name}: not found in output")
                     
                 | ExpectedBool (name, expectedVal) ->
                     match actual.TryFind name with
@@ -690,7 +690,7 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                             | _ -> false
                         if matches then None
                         else Some (sprintf "%s: expected %b, got %s" name expectedVal actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name)
+                    | None -> Some ($"{name}: not found in output")
                     
                 | ExpectedArray1D (name, expectedVals) ->
                     // A NESTED actual (`[[1, 2], [3, 4]]`) is compared against
@@ -716,8 +716,8 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                         | Some actualVals when actualVals.Length = expectedVals.Length &&
                                                List.forall2 (fun e a -> floatEquals e a tolerance) expectedVals actualVals -> None
                         | Some actualVals -> Some (sprintf "%s: expected %A, got %A" name expectedVals actualVals)
-                        | None -> Some (sprintf "%s: could not parse '%s' as array" name actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name)
+                        | None -> Some ($"{name}: could not parse '{actualStr}' as array")
+                    | None -> Some ($"{name}: not found in output")
 
                 | ExpectedArray1DBool (name, expectedVals) ->
                     // Bools are exact, so there is no tolerance to apply here:
@@ -730,16 +730,15 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                         match tryParse1DBoolArray actualStr with
                         | Some actualVals ->
                             if actualVals.Length <> expectedVals.Length then
-                                Some (sprintf "%s: expected %d bool elements, got %d ('%s')"
-                                              name expectedVals.Length actualVals.Length actualStr)
+                                Some ($"{name}: expected {expectedVals.Length} bool elements, got {actualVals.Length} ('{actualStr}')")
                             else
                                 List.zip expectedVals actualVals
                                 |> List.mapi (fun i (e, a) -> (i, e, a))
                                 |> List.tryPick (fun (i, e, a) ->
                                     if e = a then None
                                     else Some (sprintf "%s: element %d expected %b, got %b" name i e a))
-                        | None -> Some (sprintf "%s: could not parse '%s' as a bool array" name actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name)
+                        | None -> Some ($"{name}: could not parse '{actualStr}' as a bool array")
+                    | None -> Some ($"{name}: not found in output")
 
                 | ExpectedArray2D (name, expectedRows) ->
                     // Two actual-side shapes are accepted, because the
@@ -765,14 +764,14 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     | Some actualStr ->
                         let compareRows (actualRows: float list list) =
                             if actualRows.Length <> expectedRows.Length then
-                                Some (sprintf "%s: expected %d rows, got %d" name expectedRows.Length actualRows.Length)
+                                Some ($"{name}: expected {expectedRows.Length} rows, got {actualRows.Length}")
                             else
                                 let rowIssue =
                                     List.zip expectedRows actualRows
                                     |> List.mapi (fun i (e, a) -> (i, e, a))
                                     |> List.tryPick (fun (i, e, a) ->
                                         if e.Length <> a.Length then
-                                            Some (sprintf "%s: row %d expected %d elements, got %d" name i e.Length a.Length)
+                                            Some ($"{name}: row {i} expected {e.Length} elements, got {a.Length}")
                                         else
                                             List.zip e a
                                             |> List.mapi (fun j (ev, av) -> (j, ev, av))
@@ -797,8 +796,8 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                         if floatEquals ev av tolerance then None
                                         else Some (sprintf "%s: element %d (row-major) expected %.17g, got %.17g (diff=%.3e)"
                                                            name k ev av (abs (ev - av))))
-                            | None -> Some (sprintf "%s: could not parse '%s' as a 2D array" name actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name)
+                            | None -> Some ($"{name}: could not parse '{actualStr}' as a 2D array")
+                    | None -> Some ($"{name}: not found in output")
 
                 | ExpectedComplex (name, expectedRe, expectedIm) ->
                     match actual.TryFind name with
@@ -814,10 +813,10 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                          floatEquals expectedIm im tolerance -> None
                                 | Some re, Some im ->
                                     Some (sprintf "%s: expected (%g, %g), got (%g, %g)" name expectedRe expectedIm re im)
-                                | _ -> Some (sprintf "%s: could not parse complex components from '%s'" name actualStr)
-                            | _ -> Some (sprintf "%s: malformed complex output '%s'" name actualStr)
+                                | _ -> Some ($"{name}: could not parse complex components from '{actualStr}'")
+                            | _ -> Some ($"{name}: malformed complex output '{actualStr}'")
                         else Some (sprintf "%s: expected complex (%g, %g) but output '%s' isn't in (re,im) form" name expectedRe expectedIm actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name)
+                    | None -> Some ($"{name}: not found in output")
                 
                 | ExpectedArray1DComplex (name, expectedPairs) ->
                     match actual.TryFind name with
@@ -836,7 +835,7 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                 match parseComplexArray t with
                                 | Some actualPairs ->
                                     if actualPairs.Length <> expectedPairs.Length then
-                                        Some (sprintf "%s: expected %d complex elements, got %d" name expectedPairs.Length actualPairs.Length)
+                                        Some ($"{name}: expected {expectedPairs.Length} complex elements, got {actualPairs.Length}")
                                     else
                                         let mismatch =
                                             List.zip expectedPairs actualPairs
@@ -847,9 +846,9 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                         | Some ((eRe, eIm), (aRe, aIm)) ->
                                             Some (sprintf "%s: expected element (%g, %g), got (%g, %g)" name eRe eIm aRe aIm)
                                 | None ->
-                                    Some (sprintf "%s: could not parse complex array from '%s'" name actualStr)
-                        else Some (sprintf "%s: expected complex array but output '%s' isn't in [(re,im),...] form" name actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name)
+                                    Some ($"{name}: could not parse complex array from '{actualStr}'")
+                        else Some ($"{name}: expected complex array but output '{actualStr}' isn't in [(re,im),...] form")
+                    | None -> Some ($"{name}: not found in output")
 
                 | ExpectedString (name, expected) ->
                     // Scalar string output: `cout << name << endl` emits the
@@ -859,8 +858,8 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     match actual.TryFind name with
                     | Some actualStr ->
                         if actualStr.Trim() = expected then None
-                        else Some (sprintf "%s: expected \"%s\", got \"%s\"" name expected (actualStr.Trim()))
-                    | None -> Some (sprintf "%s: not found in output" name)
+                        else Some ($"{name}: expected \"{expected}\", got \"{(actualStr.Trim())}\"")
+                    | None -> Some ($"{name}: not found in output")
 
                 | ExpectedArray1DString (name, expectedVals) ->
                     // Array print emits `[a, b, c]` with comma-separated raw
@@ -878,20 +877,19 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                 if String.IsNullOrWhiteSpace(inner) then []
                                 else
                                     inner.Split([|", "|], StringSplitOptions.None)
-                                    |> Array.map (fun s -> s.Trim())
+                                    |> Array.map (_.Trim())
                                     |> Array.toList
                             if parts.Length <> expectedVals.Length then
-                                Some (sprintf "%s: expected %d string elements, got %d (\"%s\")"
-                                        name expectedVals.Length parts.Length actualStr)
+                                Some ($"{name}: expected {expectedVals.Length} string elements, got {parts.Length} (\"{actualStr}\")")
                             else
                                 let mismatch =
                                     List.zip expectedVals parts
                                     |> List.tryFind (fun (e, a) -> e <> a)
                                 match mismatch with
                                 | None -> None
-                                | Some (e, a) -> Some (sprintf "%s: expected element \"%s\", got \"%s\"" name e a)
-                        else Some (sprintf "%s: expected string array but output '%s' isn't in [a, b, ...] form" name actualStr)
-                    | None -> Some (sprintf "%s: not found in output" name))
+                                | Some (e, a) -> Some ($"{name}: expected element \"{e}\", got \"{a}\"")
+                        else Some ($"{name}: expected string array but output '{actualStr}' isn't in [a, b, ...] form")
+                    | None -> Some ($"{name}: not found in output"))
 
         let allErrors = collapseErrors @ errors
         if allErrors.IsEmpty then Ok ()

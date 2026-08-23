@@ -57,11 +57,11 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
     let check name (groups: BufferDimGroup list) (expected: int64) =
         match card groups with
         | Some n when n = expected ->
-            pass name (sprintf "=> %d" n)
+            pass name ($"=> {n}")
         | Some n ->
-            fail name (sprintf "=> %d (expected %d)" n expected)
+            fail name ($"=> {n} (expected {expected})")
         | None ->
-            fail name (sprintf "=> non-literal (expected %d)" expected)
+            fail name ($"=> non-literal (expected {expected})")
     // Rectangular: 8 x 8 = 64
     check "rect 8x8" [rectS 8; rectS 8] 64L
     // Rectangular 1-D: 12
@@ -87,8 +87,8 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
     else fail "isRectangular(sym)" "should be false"
     // extern "C" boundary-safety gate: fundamental scalars cross, library types don't.
     let checkBnd name ty expected =
-        if isCudaBoundarySafeElem ty = expected then pass (sprintf "boundary(%s)" name) (sprintf "%b" expected)
-        else fail (sprintf "boundary(%s)" name) (sprintf "should be %b" expected)
+        if isCudaBoundarySafeElem ty = expected then pass ($"boundary({name})") (sprintf "%b" expected)
+        else fail ($"boundary({name})") (sprintf "should be %b" expected)
     checkBnd "f64" (IRTScalar ETFloat64) true
     checkBnd "f32" (IRTScalar ETFloat32) true
     checkBnd "i64" (IRTScalar ETInt64) true
@@ -100,7 +100,7 @@ let runBufferTypeTests () : Blade.Tests.TestHarness.BlockResult =
     checkBnd "complex128" (IRTScalar ETComplex128) true
     checkBnd "complex64" (IRTScalar ETComplex64) true
     checkBnd "string" (IRTScalar ETString) false
-    printFooter "Buffer Type" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
+    printFooter "Buffer Type" [$"{passed} passed"; $"{failures} failure(s)"]
     { Block = "Buffer Type"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
 
 /// First `where cuda` hardware test. Differential: generate the SAME rank-1 map
@@ -156,7 +156,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                 // -march cleanly on Windows. Same rule as Build.fs's CUDA paths.
                 // The Linux branch below goes through compileCpp, so it DOES
                 // pick up the shared -O3 -march flags.
-                let args = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\"" exeFull cppFull
+                let args = $"-std=c++17 -O2 -o \"{exeFull}\" \"{cppFull}\""
                 runProc "nvcc" args 120000 |> Result.map (fun () -> exeFull)
             else compileCpp cppFile outputDir
 
@@ -165,7 +165,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
         let genVariant (name: string) (src: string) : Result<string * string option, string> =
             try
                 match lower src with
-                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Error e -> Error ($"lower failed: {e}")
                 | Ok ir0 ->
                     // Hard-fail on validation errors instead of generating from
                     // invalid IR (was `| Error _ -> ir0`). The host/device
@@ -173,7 +173,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                     // from invalid IR they could still agree and pass.
                     match IRValidate.validateIR ir0 with
                     | Error validationErrors ->
-                        Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                        Error ($"""IR validation failed: {(String.concat "; " validationErrors)}""")
                     | Ok ir ->
                     let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
                     let cuOpt = CodeGen.getCudaFileContent ()
@@ -186,7 +186,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                             File.WriteAllText(cuFile, cu)
                             cuFile)
                     Ok (cppFile, cuFileOpt)
-            with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+            with ex -> Error ($"codegen failed: {ex.Message}")
 
         // runExecutable returns (exitCode, output). The three call sites below
         // used `|> Result.map snd`, which DISCARDED the exit code: a process
@@ -198,9 +198,9 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
         // this makes every call site agree.)
         let runExeChecked (what: string) (exe: string) : Result<string, string> =
             match runExecutable exe with
-            | Error e -> Error (sprintf "%s run: %s" what e)
+            | Error e -> Error ($"{what} run: {e}")
             | Ok (0, out) -> Ok out
-            | Ok (code, out) -> Error (sprintf "%s exited %d:\n%s" what code out)
+            | Ok (code, out) -> Error ($"{what} exited {code}:\n{out}")
 
         let resultLines (s: string) =
             (s.Replace("\r\n", "\n").Trim()).Split('\n')
@@ -212,8 +212,8 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
         // both run, outputs must match (cuda-vs-host codegen equivalence).
         // Returns 0 on pass, 1 on failure; prints a labeled line either way.
         let runCudaCase (label: string) (hostSrc: string) (cudaSrc: string) : int =
-            let hostName = sprintf "cuda_%s_host" label
-            let cudaName = sprintf "cuda_%s_dev" label
+            let hostName = $"cuda_{label}_host"
+            let cudaName = $"cuda_{label}_dev"
             // Force-clean stale artifacts for THIS case (the generated dir
             // persists across runs / version unzips).
             for stem in [hostName; cudaName] do
@@ -230,7 +230,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                     if cuOpt.IsSome then Error "host variant unexpectedly emitted a .cu"
                     else
                         match compileHost cppFile with
-                        | Error e -> Error (sprintf "host compile: %s" e)
+                        | Error e -> Error ($"host compile: {e}")
                         | Ok exe -> runExeChecked "host" exe
             let cudaOut =
                 // CUDA variant: emission ON -> kernel + launch emitted into .cu/.cpp.
@@ -255,20 +255,20 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                             Error "the .cu contains a codegen sentinel"
                         else
                         match compileCudaSplit cuFile cppFile outputDir with
-                        | Error e -> Error (sprintf "cuda split-compile: %s" e)
+                        | Error e -> Error ($"cuda split-compile: {e}")
                         | Ok exe -> runExeChecked "cuda" exe
                 CodeGen.setCudaEmitMode false
                 r
             match hostOut, cudaOut with
-            | Error e, _ -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "host oracle: %s" e); 1
-            | _, Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "cuda: %s" e); 1
+            | Error e, _ -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"host oracle: {e}"); 1
+            | _, Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"cuda: {e}"); 1
             | Ok hOut, Ok cOut ->
                 let h, c = resultLines hOut, resultLines cOut
                 // Both variants print a result line; "" = "" would otherwise be
                 // a vacuous agreement (e.g. if both programs became silent).
                 if String.IsNullOrWhiteSpace h || String.IsNullOrWhiteSpace c then
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label
-                        (sprintf "empty output -- nothing to compare (host=%d chars, cuda=%d chars)" h.Length c.Length)
+                        ($"empty output -- nothing to compare (host={h.Length} chars, cuda={c.Length} chars)")
                     1
                 elif h = c then
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "cuda matches host-loop oracle"
@@ -286,7 +286,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
         // allocate). Verifies the program compiles under cl AND its result line
         // contains the expected substring.
         let runHostCompileCase (label: string) (src: string) (expectSubstr: string) : int =
-            let nm = sprintf "cuda_%s_host" label
+            let nm = $"cuda_{label}_host"
             for ext in [".cu"; ".cpp"; ".cu.obj"; ".cpp.obj"; ".cu.o"; ".cpp.o"; ".exe"; ".out"] do
                 let f = Path.Combine(outputDir, nm + ext)
                 try if File.Exists f then File.Delete f with _ -> ()
@@ -295,7 +295,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                 | Error e -> Error e
                 | Ok (cppFile, _) ->
                     match compileHost cppFile with
-                    | Error e -> Error (sprintf "host compile: %s" e)
+                    | Error e -> Error ($"host compile: {e}")
                     | Ok exe -> runExeChecked "host" exe
             match outcome with
             | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label e; 1
@@ -305,7 +305,7 @@ let runCudaTests () : Blade.Tests.TestHarness.BlockResult =
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass label "host compiles under MSVC + correct result"
                     0
                 else
-                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "expected substring %s not in output" expectSubstr)
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"expected substring {expectSubstr} not in output")
                     printfn "    output: %s" r
                     1
 
@@ -851,7 +851,7 @@ let R = stats(t, s, ws) |> compute
                         let kernels = countOf cu "__global__ void __cuda_"
                         let lastBegin = cpp.LastIndexOf "_begin(pool_base"
                         let firstEnd = cpp.IndexOf "_end(pool_base"
-                        if kernels <> 2 then Error (sprintf "expected 2 kernels, .cu has %d" kernels)
+                        if kernels <> 2 then Error ($"expected 2 kernels, .cu has {kernels}")
                         elif not (cu.Contains "cudaGetDeviceCount") then Error "no in-wrapper device query"
                         elif countOf cu "_begin(" < 2 || countOf cu "_end(" < 2 then Error "missing split wrappers"
                         elif lastBegin < 0 || firstEnd < 0 then Error "host begin/end calls not found"
@@ -928,13 +928,13 @@ let R = method_for(Z) <@> lambda(z) where cuda(block: 32) -> exp(z) * conj(z) |>
                         elif not (cu.Contains "thrust::complex<double>") then Error ".cu missing thrust::complex device buffers"
                         else
                             match compileCudaSplit cuFile cppFile outputDir with
-                            | Error e -> Error (sprintf "cuda split-compile: %s" e)
+                            | Error e -> Error ($"cuda split-compile: {e}")
                             | Ok exe ->
                                 match runExecutable exe with
-                                | Error e -> Error (sprintf "run: %s" e)
+                                | Error e -> Error ($"run: {e}")
                                 | Ok (0, out) when out.Contains "R = [" -> Ok ()
                                 | Ok (0, _) -> Error "output missing the R array"
-                                | Ok (code, out) -> Error (sprintf "exit %d:\n%s" code out)
+                                | Ok (code, out) -> Error ($"exit {code}:\n{out}")
                 CodeGen.setCudaEmitMode false
                 match outcome with
                 | Ok () ->
@@ -1042,18 +1042,18 @@ let R = ws <@> lambda(w) where cuda(block: 32) -> {
                         let loops = countOf "for (" cu
                         let accs = countOf "_jacc" cu
                         if loops <> 1 then
-                            Error (sprintf "the join emitted %d loops, not ONE fused traversal" loops)
+                            Error ($"the join emitted {loops} loops, not ONE fused traversal")
                         // 4 declarations + 4 reads on the left of the fold + 4
                         // on the right + 4 tail reads = the accumulators are
                         // used, not merely declared. The exact count is not the
                         // point; ZERO would mean the join never reached the
                         // device emitter at all.
                         elif accs < 4 then
-                            Error (sprintf "the join declared %d accumulator references (expected one per leg)" accs)
+                            Error ($"the join declared {accs} accumulator references (expected one per leg)")
                         elif countOf "cos(" cu <> 1 then
-                            Error (sprintf "the shared `cos` is evaluated %d times per iteration, not once" (countOf "cos(" cu))
+                            Error ($"""the shared `cos` is evaluated {(countOf "cos(" cu)} times per iteration, not once""")
                         elif countOf "sin(" cu <> 1 then
-                            Error (sprintf "the shared `sin` is evaluated %d times per iteration, not once" (countOf "sin(" cu))
+                            Error ($"""the shared `sin` is evaluated {(countOf "sin(" cu)} times per iteration, not once""")
                         elif not (cu.Contains "const double") then
                             Error "the shared deferred operands are not per-thread const locals"
                         else Ok ()
@@ -1117,7 +1117,7 @@ let R = fscale(A) |> compute
                 1
         if rtStructRc = 0 then passed <- passed + 1
         else (failures <- failures + 1; failedNames <- failedNames @ ["runtime_extent_structure"])
-        printFooter "CUDA Kernel" [sprintf "%d passed" passed; sprintf "%d failure(s)" failures]
+        printFooter "CUDA Kernel" [$"{passed} passed"; $"{failures} failure(s)"]
         { Block = "CUDA Kernel"; Passed = passed; Failed = failures; Skipped = 0; FailedNames = failedNames }
 
 
@@ -1173,9 +1173,9 @@ let runCublasSwapTests () : Blade.Tests.TestHarness.BlockResult =
         // at -O2, the rule for every nvcc path in this repo.
         let args =
             if onWindows then
-                sprintf "-std=c++17 -O2 -Xcompiler /Zc:preprocessor -o \"%s\" \"%s\" -lcublas" exePath testSrc
+                $"-std=c++17 -O2 -Xcompiler /Zc:preprocessor -o \"{exePath}\" \"{testSrc}\" -lcublas"
             else
-                sprintf "-std=c++17 -O2 -o \"%s\" \"%s\" -lcublas" exePath testSrc
+                $"-std=c++17 -O2 -o \"{exePath}\" \"{testSrc}\" -lcublas"
         let runIn (exe: string) (a: string) (timeoutMs: int) =
             let psi = ProcessStartInfo(exe, a)
             psi.RedirectStandardOutput <- true
@@ -1233,4 +1233,4 @@ let runCublasSwapTests () : Blade.Tests.TestHarness.BlockResult =
             else
                 printFooter blockName ["FAILED"]
                 { Block = blockName; Passed = pPassed; Failed = max 1 (pTotal - pPassed); Skipped = 0
-                  FailedNames = (if failNames.IsEmpty then [sprintf "<exit %d>" rCode] else failNames) }
+                  FailedNames = (if failNames.IsEmpty then [$"<exit {rCode}>"] else failNames) }

@@ -63,7 +63,7 @@ let rec freeVars (bound: Set<string>) (e: Expr) : Set<string> =
     | ExprKind.ExprLet (b, body) ->
         Set.union (fv b.Value) (freeVars (Set.union bound (Set.ofList (patternVars b.Pattern))) body)
     | ExprKind.ExprLambda (ps, _, body) ->
-        freeVars (Set.union bound (Set.ofList (ps |> List.map (fun p -> p.Name)))) body
+        freeVars (Set.union bound (Set.ofList (ps |> List.map _.Name))) body
     | ExprKind.ExprMatch (s, cases) ->
         // A case pattern binds over its own arm -- the same names `judge`
         // binds via `bindPatternVars`, not the outer scope.
@@ -168,6 +168,6 @@ and freeVarsStmts (bound: Set<string>) (stmts: Stmt list) : Set<string> * Set<st
 /// case each discipline rejects with its own message) more.
 let conjunctsOf (name: string) (fd: FunctionDecl) : (Ident * Ident list) list =
     fd.WhereClause
-    |> Option.map (fun w -> w.Custom)
+    |> Option.map _.Custom
     |> Option.defaultValue []
     |> List.filter (fun (n, _) -> n = name)

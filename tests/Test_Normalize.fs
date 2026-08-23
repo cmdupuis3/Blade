@@ -255,5 +255,5 @@ let runNormalizeTests () : Blade.Tests.TestHarness.BlockResult =
             failed <- failed + 1
             failedNames <- failedNames @ [name]
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
-    Blade.Tests.TestHarness.printFooter "Normalize" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    Blade.Tests.TestHarness.printFooter "Normalize" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Normalize"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

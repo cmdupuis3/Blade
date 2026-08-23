@@ -70,7 +70,7 @@ let staticEnvOf (env: TypeEnv) : StaticEval.StaticEnv =
                 src
                 |> Map.map (fun _ (fd: FunctionDecl) ->
                     { StaticEval.Name = fd.Name
-                      StaticEval.Params = fd.Params |> List.map (fun p -> p.Name)
+                      StaticEval.Params = fd.Params |> List.map (_.Name)
                       StaticEval.Body = fd.Body })
             staticFuncProjCache <- Some (box src, p)
             p
@@ -412,7 +412,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
             // claim they share one variable. Used by ppIRType for
             // diagnostics; doesn't drive per-slot specialization (that's
             // keyed by parameter position in the IR phase).
-            let arityName = sprintf "r%d" (env.Builder.FreshId())
+            let arityName = $"r{env.Builder.FreshId()}"
             match args with
             | [inner] -> IRTPoly (lowerTypeExpr env inner, arityName)
             | _ -> IRTPoly (IRTScalar ETFloat64, arityName)
@@ -717,7 +717,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         // Fresh arity-variable name per Poly occurrence. See the TyNamed "Poly"
         // case above for rationale: packs are independent, so each Poly param
         // gets its own identifier in the type rep.
-        let arityName = sprintf "r%d" (env.Builder.FreshId())
+        let arityName = $"r{env.Builder.FreshId()}"
         IRTPoly (lowerTypeExpr env inner, arityName)
     | TyUnitExpr ue ->
         // A compound unit expression standing ALONE in type position. The
@@ -923,10 +923,10 @@ and resolveSparseKeysSource (env: TypeEnv) (keysExpr: Expr) : Result<SparseKeysS
                     acc |> Result.bind (fun vs ->
                         match c with
                         | StaticEval.SVInt v when v >= 0L -> Ok (vs @ [v])
-                        | StaticEval.SVInt v -> Error (sprintf "SparseIdx: key coordinates must be non-negative; got %d" v)
+                        | StaticEval.SVInt v -> Error $"SparseIdx: key coordinates must be non-negative; got {v}"
                         | other -> Error (sprintf "SparseIdx: key tuple components must be Nat literals; got %A" other))) (Ok [])
             | StaticEval.SVInt v when v >= 0L -> Ok [v]   // rank-1: bare Nat keys
-            | StaticEval.SVInt v -> Error (sprintf "SparseIdx: key coordinates must be non-negative; got %d" v)
+            | StaticEval.SVInt v -> Error $"SparseIdx: key coordinates must be non-negative; got {v}"
             | other -> Error (sprintf "SparseIdx: keys must be a static list of Nat tuples; got element %A" other)
         (match sv with
          | StaticEval.SVTuple elems when not elems.IsEmpty ->
@@ -936,7 +936,7 @@ and resolveSparseKeysSource (env: TypeEnv) (keysExpr: Expr) : Result<SparseKeysS
         |> Result.bind (fun entries ->
             let arity = entries.Head.Length
             if entries |> List.exists (fun e -> e.Length <> arity) then
-                Error (sprintf "SparseIdx: all key tuples must have the same arity; first is %d-ary" arity)
+                Error $"SparseIdx: all key tuples must have the same arity; first is {arity}-ary"
             elif (entries |> List.distinct |> List.length) <> entries.Length then
                 Error "SparseIdx: duplicate key tuple in static key list"
             else Ok (SkStatic entries, arity))
@@ -948,7 +948,7 @@ and resolveSparseKeysSource (env: TypeEnv) (keysExpr: Expr) : Result<SparseKeysS
              (match lookupVar name env with
               | Some vi ->
                   (match vi.Type with
-                   | ArrayElem arr when (arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) = 1 ->
+                   | ArrayElem arr when (arr.IndexTypes |> List.sumBy (_.Rank)) = 1 ->
                        (match arr.ElemType with
                         | IRTTuple ts when ts.Length >= 2 ->
                             let natLike t =
@@ -963,7 +963,7 @@ and resolveSparseKeysSource (env: TypeEnv) (keysExpr: Expr) : Result<SparseKeysS
                         | other ->
                             Error (sprintf "SparseIdx<%s>: keys must be a rank-1 array of Nat tuples (Array<(Nat, ...) like ...>); '%s' has element type %A" name name other))
                    | ArrayElem _ ->
-                       Error (sprintf "SparseIdx<%s>: keys array must be rank 1 (one key tuple per entry)" name)
+                       Error $"SparseIdx<{name}>: keys array must be rank 1 (one key tuple per entry)"
                    | other ->
                        Error (sprintf "SparseIdx<%s>: keys must be an array (Array<(Nat, ...) like ...>); '%s' has type %A" name name other))
               | None -> Ok (SkRuntime (lowerExtentExpr env keysExpr), 1))
@@ -1115,7 +1115,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                                | IRTScalar ETBool -> ()
                                | other ->
                                    failwithf "CompoundIdx<%s>: mask must have bool element type (Array<bool like ...>); '%s' has element type %A" name name other)
-                              arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+                              arr.IndexTypes |> List.sumBy (_.Rank)
                           | other ->
                               failwithf "CompoundIdx<%s>: mask must be an array (Array<bool like ...>); '%s' has type %A" name name other)
                      IRVar (vi.VarId, vi.Type), rank
@@ -1397,9 +1397,7 @@ let private zipHeadClash (arrayTypes: IRArrayType list) : TypeError option =
                 | [] -> None
                 | h :: _ ->
                     if not (indexPackingCoIterable h0 h) then
-                        Some (Other (sprintf
-                                "co-iteration operands must share ONE index space on the co-iterated axis, but operand 1 is over %s and operand %d is over %s. These walk different cell counts with different subscript arithmetic (a packed/compact axis stores one cell per canonical tuple; a plain dense axis stores one per subscript), so there is no shared iteration for the kernel to run over. Decompact the packed operand, or write the traversal over each explicitly."
-                                (ppIndexType h0) pos (ppIndexType h)))
+                        Some (Other ($"co-iteration operands must share ONE index space on the co-iterated axis, but operand 1 is over {(ppIndexType h0)} and operand {pos} is over {(ppIndexType h)}. These walk different cell counts with different subscript arithmetic (a packed/compact axis stores one cell per canonical tuple; a plain dense axis stores one per subscript), so there is no shared iteration for the kernel to run over. Decompact the packed operand, or write the traversal over each explicitly."))
                     else
                         match tryEvalIntIR h0.Extent, tryEvalIntIR h.Extent with
                         | Some e0, Some e when e0 <> e -> Some (ZipExtentMismatch (pos, e0, e))
@@ -1423,7 +1421,7 @@ let zipSharedRecords (arrayTypes: IRArrayType list) : Result<IRIndexType list, T
     | [] -> Ok []
     | first :: rest ->
         let shape0 = first.IndexTypes
-        let minRank = arrayTypes |> List.map (fun at -> at.IndexTypes.Length) |> List.min
+        let minRank = arrayTypes |> List.map (_.IndexTypes.Length) |> List.min
         if shape0.Length <= 1 || minRank <= 1 then
             // Single-record rule (first array's first record). The head
             // records must still AGREE: this arm used to take shape0.Head
@@ -1482,7 +1480,7 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
             Ok { inner with
                     Id = env.Builder.FreshId()
                     Extent = inner.Extent
-                    Tag = Some (sprintf "__halowin|c:|%s" offCsv)
+                    Tag = Some $"__halowin|c:|{offCsv}"
                     IxKind = IxKCompound }
         | _ ->
             // Dense inner. Reach includes the implicit center 0: w(0) is
@@ -1502,10 +1500,10 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
             Ok { inner with
                     Id = env.Builder.FreshId()
                     Extent = shrunkExtent
-                    Tag = Some (sprintf "__halowin|d:%s|%s" innerName offCsv)
+                    Tag = Some $"__halowin|d:{innerName}|{offCsv}"
                     IxKind = IxKPlain }
     match evalStaticValueExpr env offsetsExpr with
-    | Error msg -> Error (Other (sprintf "halo<...>: offsets must be a compile-time int array (%s)" msg))
+    | Error msg -> Error (Other $"halo<...>: offsets must be a compile-time int array ({msg})")
     | Ok sv ->
         let asInt = function StaticEval.SVInt n -> Some (int n) | _ -> None
         match sv with
@@ -1601,7 +1599,7 @@ let resolveRaggedLensSource (env: TypeEnv) (lengths: IRExpr) : RaggedLensSource 
         match Map.tryFind name env.StaticValues |> Option.bind ofStaticValue with
         | Some vs -> RlStatic vs
         | None ->
-            match lookupVar name env |> Option.bind (fun vi -> vi.TypedValue) |> Option.bind ofTypedValue with
+            match lookupVar name env |> Option.bind (_.TypedValue) |> Option.bind ofTypedValue with
             | Some vs -> RlStatic vs
             | None -> RlRuntime
     | _ -> RlRuntime

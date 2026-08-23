@@ -55,7 +55,7 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
         // groups -- never expressions, so it contributes nothing.
         let defaultFree =
             parms
-            |> List.choose (fun p -> p.Default)
+            |> List.choose (_.Default)
             |> List.map (collectFreeVars bound')
             |> List.fold Set.union Set.empty
         Set.union defaultFree (collectFreeVars bound' body)
@@ -826,7 +826,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             List.zip pats tys |> List.map (fun (p, t) -> checkPattern env t p)
             |> sequenceResults |> Result.map (fun tPats ->
                 { Kind = TPatTuple tPats; Type = expected
-                  Bindings = tPats |> List.collect (fun p -> p.Bindings) })
+                  Bindings = tPats |> List.collect (_.Bindings) })
         | _ ->
             let tys = pats |> List.map (fun _ -> env.Subst.Fresh())
             let tupleTy = IRTTuple tys
@@ -834,7 +834,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
                 List.zip pats tys |> List.map (fun (p, t) -> checkPattern env t p)
                 |> sequenceResults |> Result.map (fun tPats ->
                     { Kind = TPatTuple tPats; Type = expected
-                      Bindings = tPats |> List.collect (fun p -> p.Bindings) }))
+                      Bindings = tPats |> List.collect (_.Bindings) }))
 
     | PatternKind.PatCons (headPat, tailPat) ->
         let headTy = env.Subst.Fresh()
@@ -858,7 +858,7 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
                 Ok { Kind = TPatVariant (tag, None, isEnum)
                      Type = IRTNamed parentName; Bindings = [] }
             | Some p, None ->
-                Error (PatternTypeMismatch (sprintf "%s(...)" tag, expected))
+                Error (PatternTypeMismatch ($"{tag}(...)", expected))
             | None, Some _ ->
                 Ok { Kind = TPatVariant (tag, None, isEnum)
                      Type = IRTNamed parentName; Bindings = [] }
@@ -938,8 +938,8 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
             { Id = idxId
               Rank = 1
               Extent =
-                IRParam ((if k = 1 then sprintf "__%s_inferred_n_%d" opName idxId
-                          else sprintf "__%s_inferred_n%d_%d" opName i idxId),
+                IRParam ((if k = 1 then $"__{opName}_inferred_n_{idxId}"
+                          else $"__{opName}_inferred_n{i}_{idxId}"),
                          0, IRTNat None)
               Symmetry = SymNone
               Tag = None; IxKind = IxKPlain
@@ -1111,9 +1111,7 @@ let internal checkArrayIndexTags (env: TypeEnv) (tArr: TypedExpr) (arrTy: IRArra
                     // very site: the ERROR branch two cases up raises
                     // IndexTagMismatchNamed, which is already BL4003.
                     if not synthetic then
-                        emitWarning env "BL4003" tArg.Span (sprintf
-                            "Array indexed with untagged integer where slot expects tag '%s'. Consider an explicit cast like `(expr : %s)` or iterate via `range<%s>` to flow the tag automatically."
-                            tagName tagName tagName)
+                        emitWarning env "BL4003" tArg.Span ($"Array indexed with untagged integer where slot expects tag '{tagName}'. Consider an explicit cast like `(expr : {tagName})` or iterate via `range<{tagName}>` to flow the tag automatically.")
                     None
                 | _ -> None
             | _ -> None)
@@ -1176,10 +1174,10 @@ let internal validateTabulatedIndex (env: TypeEnv) (arrTy: IRArrayType) (tArgs: 
         (match tArgs with
          | [] -> Ok ()  // bare array value; nothing to check
          | args ->
-             let isWild (e: TypedExpr) = match e.Kind with TExprWildcard -> true | _ -> false
+             let isWild (e: TypedExpr) = e.Kind.IsTExprWildcard
              let firstIsTuple =
-                 (match args.Head.Kind with TExprTuple _ -> true | _ -> false)
-                 || (match env.Subst.Resolve args.Head.Type with IRTTuple _ -> true | _ -> false)
+                 args.Head.Kind.IsTExprTuple
+                 || (env.Subst.Resolve args.Head.Type).IsIRTTuple
              if firstIsTuple then Error (CompoundTupleForm k)
              elif args |> List.exists isWild then Error (CompoundTupleForm k)
              elif args.Length < k then Error (CompoundUnderSupplied (k, args.Length))
@@ -1463,8 +1461,7 @@ let regroupArgsByWidth (env: TypeEnv) (paramTys: IRType list) (tArgs: TypedExpr 
 let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType list)
                       : (int * int * int * IRType * IRType) option =
     let isVariadic =
-        paramTys |> List.exists (fun t ->
-            match subst.Resolve t with IRTPoly _ -> true | _ -> false)
+        paramTys |> List.exists (fun t -> (subst.Resolve t).IsIRTPoly)
     if isVariadic || argTys.Length < paramTys.Length then None
     else
         appArgPairs paramTys argTys
@@ -1491,8 +1488,7 @@ let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
 let firstArgTypeClash (subst: Subst) (paramTys: IRType list) (argTys: IRType list)
                       : (int * IRType * IRType) option =
     let isVariadic =
-        paramTys |> List.exists (fun t ->
-            match subst.Resolve t with IRTPoly _ -> true | _ -> false)
+        paramTys |> List.exists (fun t -> (subst.Resolve t).IsIRTPoly)
     if isVariadic || argTys.Length < paramTys.Length then None
     else
         appArgPairs paramTys argTys
@@ -1508,7 +1504,7 @@ let firstArgTypeClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
 /// exponent it carries OUT of the body is the exponent the body applies to that
 /// argument. Nothing but the probe ever sees these -- `funcUnitTransform`
 /// removes them from the residual before recording it.
-let unitProbeBase (i: int) : string = sprintf "__unit_probe_%d" i
+let unitProbeBase (i: int) : string = $"__unit_probe_{i}"
 
 /// A recorded transform, applied: `residual * PROD_i argUnits[i] ^ exponents[i]`.
 /// Shared by the two consumers -- the call site (`unitStampedReturn`) and the
@@ -1619,7 +1615,7 @@ let internal unitStampedReturn (env: TypeEnv) (callee: string option)
         // variable. A concrete return type either carries its own signature or
         // legitimately has none.
         match resolvedRet with
-        | ArrayElem at -> (match env.Subst.Resolve at.ElemType with IRTInfer _ -> true | _ -> false)
+        | ArrayElem at -> (env.Subst.Resolve at.ElemType).IsIRTInfer
         | IRTInfer _ -> true
         | _ -> false
     if not deduced || (elemUnits resolvedRet).IsSome then retTy
@@ -1692,12 +1688,12 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
              let axes = max 1 ix.Rank
              if tArgs.Length <> axes then
                  Error (OrbitSubscriptArity (levels, axes, tArgs.Length))
-             elif tArgs |> List.exists (fun a -> match a.Kind with TExprWildcard -> true | _ -> false) then
+             elif tArgs |> List.exists _.Kind.IsTExprWildcard then
                  // A `_` marks a FREE axis; freeing one axis of a wreath is the
                  // partial read again, in the other spelling. Same verdict, and
                  // the arity message's partial-read sentence is the right one:
                  // a hole is a coordinate not supplied.
-                 Error (OrbitSubscriptArity (levels, axes, axes - (tArgs |> List.filter (fun a -> match a.Kind with TExprWildcard -> true | _ -> false) |> List.length)))
+                 Error (OrbitSubscriptArity (levels, axes, axes - (tArgs |> List.filter _.Kind.IsTExprWildcard |> List.length)))
              else
                  // The nominal tag check runs for uniformity, not because it
                  // can currently fire: `mkWreathIndexRecord` stamps the
@@ -1734,7 +1730,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                (match ix.Symmetry with
                 | SymSymmetric | SymAntisymmetric | SymHermitian -> true
                 | SymNone | SymWreath -> false)) ->
-        if tArgs |> List.exists (fun a -> match a.Kind with TExprWildcard -> true | _ -> false) then
+        if tArgs |> List.exists _.Kind.IsTExprWildcard then
             // A hole frees ONE axis of the group, and a partially-read compact
             // group has no residual class -- the same refusal the wreath arm
             // gives a partial read, and the reason `decompact` exists.
@@ -1785,7 +1781,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         let packed =
                             { (List.head coords) with
                                 Kind = TExprTuple coords
-                                Type = IRTTuple (coords |> List.map (fun c -> c.Type)) }
+                                Type = IRTTuple (coords |> List.map (_.Type)) }
                         packed :: (tArgs |> List.skip k)
                     else tArgs
                 let firstArg = List.head tArgs
@@ -1814,7 +1810,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                     | _ -> e)
                             { firstArg with
                                 Kind = TExprTuple elems'
-                                Type = IRTTuple (elems' |> List.map (fun e -> e.Type)) }
+                                Type = IRTTuple (elems' |> List.map (_.Type)) }
                         | _ -> firstArg
                 let tArgs = firstArg :: List.tail tArgs
                 // Trailing-dim wildcards: `B((...), _)` leaves the trailing
@@ -1825,7 +1821,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 // index frees an INTERIOR dim, which needs a data restructure
                 // and is rejected.
                 let keptRemaining, interiorTrailingHole =
-                    let isWild (e: TypedExpr) = match e.Kind with TExprWildcard -> true | _ -> false
+                    let isWild (e: TypedExpr) = e.Kind.IsTExprWildcard
                     let rec split acc seenWild args =
                         match args with
                         | [] -> (List.rev acc, false)
@@ -1949,7 +1945,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 match env.Subst.Resolve t with
                 | ArrayElem at ->
                     let e = env.Subst.Resolve at.ElemType
-                    (IR.getUnits e, (match e with IRTInfer _ -> false | _ -> true))
+                    (IR.getUnits e, not e.IsIRTInfer)
                 | IRTInfer _ -> (None, false)
                 | resolved -> (IR.getUnits resolved, true)
             let describeArg (au: UnitSig option) =
@@ -1957,15 +1953,15 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 | None -> "bare (it carries no unit signature)"
                 | Some a ->
                     match a.Nominal with
-                    | Some qn -> sprintf "the quantity '%s'" qn
-                    | None -> sprintf "structurally dimensioned (%s)" (ppUnitSig a)
+                    | Some qn -> $"the quantity '{qn}'"
+                    | None -> $"structurally dimensioned ({ppUnitSig a})"
             List.zip (List.truncate n paramTys) (List.truncate n tArgs)
             |> List.mapi (fun i (pTy, arg) -> (i, sigOf pTy, sigOf arg.Type))
             |> List.tryPick (fun (i, (pu, _), (au, aConcrete)) ->
                 match pu, au with
                 | Some pu, Some au when not (unitCompatible pu au) ->
                     atArg i
-                    Some (UnitMismatch (sprintf "argument %d" (i + 1), ppUnitSig pu, ppUnitSig au))
+                    Some (UnitMismatch ($"argument {i + 1}", ppUnitSig pu, ppUnitSig au))
                 // Convertible but at a different MAGNITUDE. Argument passing
                 // is a seam that does not (yet) insert a factor, so name the
                 // difference instead of handing the callee a raw number in
@@ -2024,10 +2020,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 // rejected a correct program. The identical program without
                 // units passed, which is the tell: units must not decide
                 // whether a type is known, only what it measures.
-                let isConcrete t =
-                    match IR.stripUnits (env.Subst.Resolve t) with
-                    | IRTInfer _ -> false
-                    | _ -> true
+                let isConcrete t = not (IR.stripUnits (env.Subst.Resolve t)).IsIRTInfer
                 List.zip (List.truncate n paramTys) (List.truncate n tArgs)
                 |> List.mapi (fun i (pTy, arg) -> (i, pTy, arg))
                 |> List.tryPick (fun (i, pTy, arg) ->
@@ -2036,7 +2029,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         List.zip pcs acs
                         |> List.mapi (fun j (pc, ac) -> (j, pc, ac))
                         |> List.tryPick (fun (j, pc, ac) ->
-                            let where = sprintf "argument %d, component %d" (i + 1) (j + 1)
+                            let where = $"argument {i + 1}, component {j + 1}"
                             let (pr, pe) = shapeOf pc
                             let (ar, ae) = shapeOf ac
                             if not (isConcrete (env.Subst.Resolve pc)) then None
@@ -2057,9 +2050,8 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // param count says nothing about legal call-site arg counts, so
         // arity accounting stands down (monomorphization owns the call).
         let isVariadic =
-            paramTys |> List.exists (fun t ->
-                match env.Subst.Resolve t with IRTPoly _ -> true | _ -> false)
-        let argRankClash = firstArgRankClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type))
+            paramTys |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTPoly)
+        let argRankClash = firstArgRankClash env.Subst paramTys (tArgs |> List.map (_.Type))
         // mutClash (BL4005) - WRITE PERMISSION, the one check here about the
         // caller's binding form rather than its type. A `mut` parameter writes
         // back into the caller's array, so the caller must hold write access
@@ -2103,8 +2095,8 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                  (match lookupVar aname env with
                                   | Some info when info.Assign = MutPassable -> None
                                   | Some info when info.Assign = ReadOnly ->
-                                      Some (i, fname, declPos, sprintf "'%s' is a `let static` or a non-`mut` parameter" aname)
-                                  | Some _ -> Some (i, fname, declPos, sprintf "'%s' is a plain `let`" aname)
+                                      Some (i, fname, declPos, $"'{aname}' is a `let static` or a non-`mut` parameter")
+                                  | Some _ -> Some (i, fname, declPos, $"'{aname}' is a plain `let`")
                                   // Not a tracked binding (an import or a
                                   // builtin): no permission to reason about,
                                   // so leave it to the checks that do.
@@ -2165,7 +2157,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                  Error (BlockSpecArgMismatch (i + 1, ppIndexType pi, ppIndexType ai)))
         | None, Some (i, slot, pi, ai), _, _ ->
             atArg i
-            Error (IndexRankMismatch (sprintf "argument %d, index slot %d" (i + 1) slot,
+            Error (IndexRankMismatch ($"argument {i + 1}, index slot {slot}",
                                       ppIndexType pi, max 1 pi.Rank,
                                       ppIndexType ai, max 1 ai.Rank))
         | None, None, Some unitErr, _ ->
@@ -2178,12 +2170,12 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         | None, None, None, None ->
             // The FIFTH check, last because every one above it names the
             // defect more precisely: element CLASS. See firstArgTypeClash.
-            match firstArgTypeClash env.Subst paramTys (tArgs |> List.map (fun a -> a.Type)) with
+            match firstArgTypeClash env.Subst paramTys (tArgs |> List.map (_.Type)) with
             | Some (i, pTy, aTy) ->
                 atArg i
                 let callee =
                     match tFunc.Kind with
-                    | TExprVar (name, _, _) -> sprintf "'%s'" name
+                    | TExprVar (name, _, _) -> $"'{name}'"
                     | _ -> "this function"
                 Error (ArgTypeMismatch (i + 1, callee,
                                         ppIRType (env.Subst.Resolve pTy),
@@ -2409,8 +2401,7 @@ let checkOmpInternalLoop (env: TypeEnv) (paramNames: string list)
                 // names-no-parameter warning: a `where` conjunct that does not
                 // mean what it was written to mean.
                 emitWarning env "BL4001" sp
-                    (sprintf "omp(%s: ...) on %s licenses the CALLER's iteration over `%s` (the S-dims an argument contributes when this is used as a kernel), not the loop over `%s` built inside this body. That loop is licensed by a clause on its OWN kernel -- write `%s <@> lambda(..) where omp(..) -> ..`. As written the inner loop is emitted SERIAL."
-                             v owner v v v)
+                    ($"omp({v}: ...) on {owner} licenses the CALLER's iteration over `{v}` (the S-dims an argument contributes when this is used as a kernel), not the loop over `{v}` built inside this body. That loop is licensed by a clause on its OWN kernel -- write `{v} <@> lambda(..) where omp(..) -> ..`. As written the inner loop is emitted SERIAL.")
             | None -> ())
 
 /// True if any node in the typed subtree still has an UNRESOLVED type (an
@@ -2830,7 +2821,7 @@ let internal tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (ar
              | true, ps -> Some ps
              | _ -> None)
         // Immediately-applied lambda literal: its params are right here.
-        | ExprKind.ExprLambda (parms, _, _) when parms |> List.exists (fun p -> p.Default.IsSome) ->
+        | ExprKind.ExprLambda (parms, _, _) when parms |> List.exists (_.Default.IsSome) ->
             Some (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
         | _ -> None
     match paramInfos with
@@ -2840,7 +2831,7 @@ let internal tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (ar
         let required = ps |> List.takeWhile (fun (_, _, d) -> Option.isNone d) |> List.length
         let k = args.Length
         let hasWildcard =
-            args |> List.exists (fun a -> match a.Kind with ExprKind.ExprWildcard -> true | _ -> false)
+            args |> List.exists _.Kind.IsExprWildcard
         if hasWildcard || k < required then None
         else
         let trailingSlots = ps |> List.skip required   // all defaulted (trailing rule)
@@ -2971,7 +2962,7 @@ let internal tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (ar
                           Pattern = { Kind = PatVar name; Span = value.Span }
                           Type = None
                           Value = value }
-            let tempName i = sprintf "__dflt%d_%d" uid i
+            let tempName i = $"__dflt{uid}_{i}"
             let tempStmts = refIdx |> List.map (fun (i, _) -> mkLet (tempName i) (List.item i requiredArgs))
             let aliasStmts =
                 refIdx |> List.map (fun (i, n) ->
@@ -3101,10 +3092,9 @@ let internal providerSectionSteering (env: TypeEnv) (structName: string) (field:
         else None
     match sibling with
     | Some (baseName, other) ->
-        match lookupTypeDef (sprintf "%s__%s" baseName other) env with
+        match lookupTypeDef $"{baseName}__{other}" env with
         | Some (TDIStruct (_, _, fields, _)) when fields |> List.exists (fun (n, _) -> n = field) ->
-            sprintf " -- it is declared on %s__%s, so the accessor is `%s.%s.%s`"
-                    baseName other baseName other field
+            $" -- it is declared on {baseName}__{other}, so the accessor is `{baseName}.{other}.{field}`"
         | _ -> ""
     | None -> ""
 

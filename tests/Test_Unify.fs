@@ -56,8 +56,8 @@ let private isErrOf (pred: TypeError -> bool) (result: TypeResult<unit>) : bool 
     | Error e -> pred e
     | Ok _ -> false
 
-let private isTypeMismatch = isErrOf (function TypeMismatch _ -> true | _ -> false)
-let private isIndexRankMismatch = isErrOf (function IndexRankMismatch _ -> true | _ -> false)
+let private isTypeMismatch = isErrOf _.IsTypeMismatch
+let private isIndexRankMismatch = isErrOf _.IsIndexRankMismatch
 
 // ---- Test cases -----------------------------------------------------------
 
@@ -151,7 +151,7 @@ let private test_uniform_flat_vs_nested_still_fails () =
     ("uniform flat-vs-nested still fails with TypeMismatch under ToNested (documents §5.2 gap)",
      pass,
      if pass then "rejected as TypeMismatch; flip this test when B-flat lands"
-     else sprintf "expected TypeMismatch: %s — B-flat may have landed; update docs" (describeResult result))
+     else $"expected TypeMismatch: {(describeResult result)} — B-flat may have landed; update docs")
 
 let private test_three_kind_split_arrow () =
     // [SIdx; SVal; SIdxVirt] (three groups) vs nested form
@@ -336,7 +336,7 @@ let private test_dist_vs_tuple_rejects () =
     let pass = isTypeMismatch r1 && isTypeMismatch r2
     ("Dist vs bare tuple rejected with TypeMismatch in both directions (strict, no coercion)",
      pass,
-     if pass then "correctly rejected" else sprintf "%s / %s" (describeResult r1) (describeResult r2))
+     if pass then "correctly rejected" else $"{(describeResult r1)} / {(describeResult r2)}")
 
 let private test_dist_axis_tag_mismatch_rejects () =
     // Axes are nominative like ArrayElem index types: lat-Dist ≠ lon-Dist
@@ -354,7 +354,7 @@ let private test_dist_axis_tag_mismatch_rejects () =
     let pass = isTypeMismatch rNamed && isOk rSyn
     ("Dist axis tags are nominative (user names gate with TypeMismatch, synthetic tags don't)",
      pass,
-     sprintf "named: %s / synthetic: %s" (describeResult rNamed) (describeResult rSyn))
+     $"named: {(describeResult rNamed)} / synthetic: {(describeResult rSyn)}")
 
 let private symIdxN (id: int) (rank: int) (extent: int) : IRIndexType =
     { idxN extent with Id = id; Rank = rank; Symmetry = SymSymmetric }
@@ -446,5 +446,5 @@ let runUnifyTests () : Blade.Tests.TestHarness.BlockResult =
             failed <- failed + 1
             failedNames <- failedNames @ [name]
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
-    Blade.Tests.TestHarness.printFooter "Unify" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    Blade.Tests.TestHarness.printFooter "Unify" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Unify"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

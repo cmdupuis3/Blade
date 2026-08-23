@@ -202,13 +202,13 @@ let runCsvTests () =
      let builder = IRBuilder()
      let pm = loadAsModule builder "m" p
      check "meta: matrix load synthesizes NO EnumIdx (plain Idx axes)"
-         (pm.Types |> List.forall (function IRTDEnumIdx _ -> false | _ -> true)) ""
+         (pm.Types |> List.forall (fun t -> not t.IsIRTDEnumIdx)) ""
      let varsStructs = pm.Types |> List.choose (function IRTDStruct (n, fields) -> Some (n, fields) | _ -> None)
      check "meta: matrix data is 3 x 2 Int64, untagged axes"
          (match varsStructs with
           | [(_, [("data", ArrayElem arrTy)])] ->
               arrTy.ElemType = IRTScalar ETInt64
-              && arrTy.IndexTypes |> List.map (fun ix -> ix.Extent) = [IRLit (IRLitInt 3L); IRLit (IRLitInt 2L)]
+              && arrTy.IndexTypes |> List.map (_.Extent) = [IRLit (IRLitInt 3L); IRLit (IRLitInt 2L)]
               && arrTy.IndexTypes |> List.forall (fun ix -> ix.Tag = None)
           | _ -> false)
          (sprintf "%A" varsStructs))
@@ -298,7 +298,7 @@ let static V = m.vars.data |> c.read
      | Error e -> check "fold: static csv read lowers (fold did not reject)" false e)
     (let bigName = "lw_big.csv"
      // 65537 single-column rows: one over the fold ceiling.
-     CsvWrite.writeRaw (fixFile bigName) [ for i in 0 .. 65536 -> sprintf "%d.0" i ]
+     CsvWrite.writeRaw (fixFile bigName) [ for i in 0 .. 65536 -> $"{i}.0" ]
      let bigSource = sprintf """
 import csv as c
 let m = c.load("%s")
@@ -383,7 +383,7 @@ let _ = c.write("%s", V)
                         | Ok (code, driftOut) ->
                             check "e2e: runtime row-count drift aborts loudly"
                                 (code <> 0 && driftOut.Contains "CSV error" && driftOut.Contains "more data rows")
-                                (sprintf "exit %d: %s" code (driftOut.Substring(0, min 200 driftOut.Length)))
+                                ($"exit {code}: {(driftOut.Substring(0, min 200 driftOut.Length))}")
                         | Error e -> check "e2e: runtime row-count drift aborts loudly" false e)
                     finally
                        File.WriteAllText(runtimeFix, orig))
@@ -397,11 +397,11 @@ let _ = c.write("%s", V)
                         | Ok (code, missOut) ->
                             check "e2e: missing file at runtime fails loudly (nonzero + CSV error)"
                                 (code <> 0 && missOut.Contains "CSV error")
-                                (sprintf "exit %d: %s" code (missOut.Substring(0, min 200 missOut.Length)))
+                                ($"exit {code}: {(missOut.Substring(0, min 200 missOut.Length))}")
                         | Error e -> check "e2e: missing file fails loudly" false e)
                     finally
                        try Directory.Delete(missingDir, true) with _ -> ())
-               | Ok (code, runOut) -> check "e2e: runs (exit 0)" false (sprintf "exit %d: %s" code runOut)
+               | Ok (code, runOut) -> check "e2e: runs (exit 0)" false ($"exit {code}: {runOut}")
                | Error e -> check "e2e: runs (exit 0)" false e)
           | Error e ->
               if isSkipError e then printfn "  SKIP csv read e2e (compile skipped): %s" e
@@ -472,7 +472,7 @@ let total = reduce(rowsums, (+))
                             (r.ExitCode = Blade.Interp.Run.ExitOk && r.Stdout.Contains "total = 12.5")
                             r.Stdout
                     | Error e -> check "write e2e: Blade re-load lowers" false e)
-               | Ok (code, runOut) -> check "write e2e: runs (exit 0)" false (sprintf "exit %d: %s" code runOut)
+               | Ok (code, runOut) -> check "write e2e: runs (exit 0)" false ($"exit {code}: {runOut}")
                | Error e -> check "write e2e: runs (exit 0)" false e)
           | Error e ->
               if isSkipError e then printfn "  SKIP csv write e2e (compile skipped): %s" e
@@ -554,7 +554,7 @@ let _ = c.write("%s", final)
                             (xs = [| 2.0; 4.0; 6.0; 0.5 |]) (sprintf "%A" xs)
                     | Ok d -> check "kw-name: write of a reserved-word binding round-trips" false (sprintf "%A" d.Payload)
                     | Error e -> check "kw-name: write of a reserved-word binding round-trips" false e)
-               | Ok (code, runOut) -> check "kw-name: runs (exit 0)" false (sprintf "exit %d: %s" code runOut)
+               | Ok (code, runOut) -> check "kw-name: runs (exit 0)" false ($"exit {code}: {runOut}")
                | Error e -> check "kw-name: runs (exit 0)" false e)
           | Error e ->
               if isSkipError e then printfn "  SKIP kw-name e2e (compile skipped): %s" e

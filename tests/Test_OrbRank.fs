@@ -40,7 +40,7 @@ open Blade.OrbRank
 let private bruteCanonical (levels: Level list) (n: int) : int list list =
     let rank = axisRank levels
     let total = pown (int64 n) rank
-    if total > 5_000_000L then failwithf "bruteCanonical: %d tuples is too many" total
+    if total > 5_000_000L then failwith $"bruteCanonical: {total} tuples is too many"
     let seen = HashSet<int list>()
     let d = Array.zeroCreate rank
     for e in 0L .. total - 1L do
@@ -242,7 +242,7 @@ let runOrbRankTests () : BlockResult =
     // ---- §7.2: the int64 wall diagnoses, it does not wrap -------------------
     match cellCountChecked [ (2, OPlus); (2, OPlus); (2, OPlus) ] 1000L with
     | Error e -> check "overflow: depth-3 all-'+' at n = 1000 diagnoses" true e
-    | Ok v -> check "overflow: depth-3 all-'+' at n = 1000 diagnoses" false (sprintf "wrapped to %d" v)
+    | Ok v -> check "overflow: depth-3 all-'+' at n = 1000 diagnoses" false ($"wrapped to {v}")
     check "overflow: depth 2 at n = 1000 still fits (125250375250 cells)"
           (cellCountChecked [ (2, OPlus); (2, OPlus) ] 1000L = Ok 125250375250L) ""
     check "malformed class: a level with r < 1 is an Error, not a wrong count"
@@ -280,27 +280,26 @@ let runOrbRankTests () : BlockResult =
                 nestCells <- nestCells + got.Length
                 if got <> want then
                     nestOk <- false
-                    nestBad <- sprintf "%s n=%d: %d vs %d cells"
-                                       (showLevels [ (2, sInner); (2, sOuter) ]) n got.Length want.Length
+                    nestBad <- $"{(showLevels [ (2, sInner); (2, sOuter) ])} n={n}: {got.Length} vs {want.Length} cells"
     check "traversal: keysFrom = the hand-unrolled segmentedNestDepth2 (4 sign combos, n = 3,4,5)"
-          nestOk (if nestOk then sprintf "%d cells, exact stream match" nestCells else nestBad)
+          nestOk (if nestOk then $"{nestCells} cells, exact stream match" else nestBad)
 
     // ---- the sweep: stream / count / rank / unrank / successor vs brute -----
     check "sweep menu = closure(d<=2, r<=3) + exact(d=3, r=2)"
-          (List.length sweepClasses = 51) (sprintf "%d classes" (List.length sweepClasses))
+          (List.length sweepClasses = 51) ($"{(List.length sweepClasses)} classes")
     let mutable sweptCells = 0
     for lv in sweepClasses do
         for n in [ 3; 4 ] do
-            let nm = sprintf "%s n=%d" (showLevels lv) n
+            let nm = $"{(showLevels lv)} n={n}"
             let stream = visitStream lv n |> List.ofSeq
             let truth = bruteCanonical lv n
             sweptCells <- sweptCells + stream.Length
-            check (sprintf "stream %s = brute canonical set, in order" nm)
+            check ($"stream {nm} = brute canonical set, in order")
                   (stream = truth)
-                  (sprintf "%d cells" stream.Length)
-            check (sprintf "cellCount %s = stream length" nm)
+                  ($"{stream.Length} cells")
+            check ($"cellCount {nm} = stream length")
                   (cellCountChecked lv (int64 n) = Ok(int64 stream.Length))
-                  (sprintf "%d" stream.Length)
+                  (string stream.Length)
             // rank(stream[i]) = i and unrank(i) = stream[i], for every cell.
             let arr = List.toArray stream
             let mutable rankBad = ""
@@ -314,8 +313,8 @@ let runOrbRankTests () : BlockResult =
                     match orbUnrank lv n (int64 i) with
                     | Ok t when t = arr.[i] -> ()
                     | other -> rankOk <- false; rankBad <- sprintf "unrank %d = %A, want %A" i other arr.[i]
-            check (sprintf "rank/unrank %s: rank(stream[i]) = i and unrank inverts it" nm)
-                  rankOk (if rankOk then sprintf "%d cells" arr.Length else rankBad)
+            check ($"rank/unrank {nm}: rank(stream[i]) = i and unrank inverts it")
+                  rankOk (if rankOk then $"{arr.Length} cells" else rankBad)
             // the successor chain from the first cell IS the stream.
             let chain =
                 if arr.Length = 0 then []
@@ -328,8 +327,8 @@ let runOrbRankTests () : BlockResult =
                         cur <- orbSuccessor lv n cur.Value
                         guard <- guard + 1
                     List.ofSeq acc
-            check (sprintf "successor chain %s = the stream, None at the last cell" nm)
-                  (chain = stream) (sprintf "%d steps" (max 0 (chain.Length - 1)))
+            check ($"successor chain {nm} = the stream, None at the last cell")
+                  (chain = stream) ($"{(max 0 (chain.Length - 1))} steps")
 
     // ---- larger extents: stream vs arithmetic, no brute force ---------------
     // Brute force is n^rank; these classes are past its reach, so the pin is
@@ -360,7 +359,7 @@ let runOrbRankTests () : BlockResult =
                     bigBad <- sprintf "%s n=%d: unrank %d = %A, want %A" (showLevels lv) n i
                                       (orbUnrank lv n (int64 i)) t)
     check "larger extents: count = stream length and rank/unrank invert, 6 classes"
-          bigOk (if bigOk then sprintf "%d cells" bigCells else bigBad)
+          bigOk (if bigOk then $"{bigCells} cells" else bigBad)
 
     // ---- Phase 0 anchor: the depth-1 ranks ARE the triangular offsets -------
     // Written out longhand, the way the existing SymIdx/AntisymIdx storage
@@ -440,7 +439,7 @@ let runOrbRankTests () : BlockResult =
                         boxBad <- sprintf "%s n=%d: rank %A = %A" (showLevels lv) n t got
     check "rank domain box {-1..n}^axes: every tuple is a stream cell (rank = index) or refused"
           boxOk
-          (if boxOk then sprintf "%d probes over %d classes (box <= 100k)" boxProbes boxClasses else boxBad)
+          (if boxOk then $"{boxProbes} probes over {boxClasses} classes (box <= 100k)" else boxBad)
     check "orbUnrank refuses a rank outside [0, M)"
           (isError (orbUnrank [ (2, OPlus) ] 4 10L)
            && isError (orbUnrank [ (2, OPlus) ] 4 -1L)

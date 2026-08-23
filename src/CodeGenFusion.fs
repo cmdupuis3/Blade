@@ -72,9 +72,9 @@ let genFusedNestPragma (bindings: LoopIndexBinding list) (staggered: bool) (prag
                 b.BoundDependencies.IsEmpty && b.StrictOffset = 0
             let hasTriangularBelow = rest |> List.exists (fun b -> not (isRectangular b))
             if hasTriangularBelow then
-                sprintf "#pragma omp parallel for schedule(dynamic)\n%s" pragmaIndent
+                $"#pragma omp parallel for schedule(dynamic)\n{pragmaIndent}"
             else
-                sprintf "#pragma omp parallel for\n%s" pragmaIndent
+                $"#pragma omp parallel for\n{pragmaIndent}"
 
 /// Check that a set of fusion leaves can legally merge into ONE loop nest.
 /// Leaves may have DIFFERENT depths (arities): a shallower leaf's loop levels
@@ -87,10 +87,10 @@ let genFusedNestPragma (bindings: LoopIndexBinding list) (staggered: bool) (prag
 /// Returns the primary (deepest) leaf, or a human-readable incompatibility.
 let checkMergeCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen, string> =
     if leafCgs.IsEmpty then Error "no fusion leaves" else
-    if leafCgs |> List.exists (fun cg -> cg.Bindings.IsEmpty) then
+    if leafCgs |> List.exists (_.Bindings.IsEmpty) then
         Error "a leaf has no loop levels (scalar application)"
     else
-    let primary = leafCgs |> List.maxBy (fun cg -> cg.Bindings.Length)
+    let primary = leafCgs |> List.maxBy (_.Bindings.Length)
     let boundEq (a: LoopIndexBinding) (b: LoopIndexBinding) =
         // Same runtime extent: literal-equal, or resolved against the same
         // array dimension (covers a literal vs. runtime rendering of the
@@ -110,8 +110,7 @@ let checkMergeCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGe
             |> List.mapi (fun j b -> (j, b))
             |> List.tryPick (fun (j, b) ->
                 if boundEq primary.Bindings.[j] b then None
-                else Some (sprintf "loop level %d of '%s' does not match '%s' (extent or triangular structure differs)"
-                               j cg.OutputName primary.OutputName)))
+                else Some ($"loop level {j} of '{cg.OutputName}' does not match '{primary.OutputName}' (extent or triangular structure differs)")))
     match incompat with
     | Some reason -> Error reason
     | None -> Ok primary
@@ -131,10 +130,10 @@ let checkMergeCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGe
 /// and refuses there first; this is the codegen-side backstop.
 let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen, string> =
     if leafCgs.IsEmpty then Error "no join legs" else
-    if leafCgs |> List.exists (fun cg -> cg.Bindings.IsEmpty) then
+    if leafCgs |> List.exists (_.Bindings.IsEmpty) then
         Error "a join leg has no loop levels (scalar reduction)"
     else
-    let primary = leafCgs |> List.maxBy (fun cg -> cg.Bindings.Length)
+    let primary = leafCgs |> List.maxBy (_.Bindings.Length)
     let boundOk (a: LoopIndexBinding) (b: LoopIndexBinding) =
         (match a.Extent, b.Extent with
          | IRLit la, IRLit lb -> la = lb
@@ -152,8 +151,7 @@ let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen
                 |> List.mapi (fun j b -> (j, b))
                 |> List.tryPick (fun (j, b) ->
                     if boundOk primary.Bindings.[j] b then None
-                    else Some (sprintf "loop level %d of '%s' does not match '%s' (extent or triangular structure differs)"
-                                   j cg.OutputName primary.OutputName)))
+                    else Some ($"loop level {j} of '{cg.OutputName}' does not match '{primary.OutputName}' (extent or triangular structure differs)")))
     match incompat with
     | Some reason -> Error reason
     | None -> Ok primary
@@ -180,7 +178,7 @@ let checkJoinCompatible (leafCgs: LoopNestCodeGen list) : Result<LoopNestCodeGen
 /// `#pragma omp parallel for` on the cell loop inside each rank's slab.
 let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs: LoopNestCodeGen list) (outerNames: Map<int, string>) (indent: int) (hostParallel: bool) (mpiSlabVar: string option) : string list =
     let ind n = String.replicate n "    "
-    let primary = leafCgs |> List.maxBy (fun cg -> cg.Bindings.Length)
+    let primary = leafCgs |> List.maxBy (_.Bindings.Length)
     let staggered = leafCgs |> List.exists (fun cg -> cg.Bindings.Length <> primary.Bindings.Length)
     let emitOuterOmp = hostParallel && primary.FoldWrapper.IsNone
     // Streamed fiber reads share per-source handles and per-argument
@@ -264,7 +262,7 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                         "fold accumulates into a shared scalar, which is not race-safe"
                     else "the fused nest's joined backend decision is not host-parallel"
                 ompSuppressedMarker
-                    (leafCgs |> List.exists (fun cg -> cg.OmpRequested))
+                    (leafCgs |> List.exists (_.OmpRequested))
                     (pragmaPrefix <> "") reason (ind depth)
             else []
         atOuterLevel <- false
@@ -272,8 +270,7 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
         let header =
             match mpiSlabVar with
             | Some sv when j = 0 ->
-                sprintf "for (size_t %s = __blade_mpi_lo_%s; %s < __blade_mpi_hi_%s; %s++) {"
-                    pBinding.IndexName sv pBinding.IndexName sv pBinding.IndexName
+                $"for (size_t {pBinding.IndexName} = __blade_mpi_lo_{sv}; {pBinding.IndexName} < __blade_mpi_hi_{sv}; {pBinding.IndexName}++) {{"
             | _ -> genForLoopHeader compoundArrays pBinding
         lines <- lines @ suppressedMarker @ [ind depth + pragmaPrefix + header]
         depth <- depth + 1
@@ -326,7 +323,7 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                         let (code, newName) =
                             match Map.tryFind name0 declaredNames with
                             | Some prior when prior <> code0 ->
-                                let renamed = { elem with ParamName = sprintf "%s__l%d" elem.ParamName li }
+                                let renamed = { elem with ParamName = $"{elem.ParamName}__l{li}" }
                                 genElementBindingPeel rawRow binding renamed cur
                             | _ -> (code0, name0)
                         if Map.tryFind newName declaredNames <> Some code then
@@ -351,21 +348,21 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                     |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) nameMap
                 let rr = genKernelExprWithReynolds cg.KernelExpr cg.KernelParams cg.HasReynolds cg.IsAntisymmetric nameMap pfn
                 if cg.HasReynolds && rr.UniqueTerms < rr.TotalPerms then
-                    lines <- lines @ [ind depth + sprintf "// Reynolds: %d/%d perms unique (dedup %dx)" rr.UniqueTerms rr.TotalPerms (rr.TotalPerms / max 1 rr.UniqueTerms)]
+                    lines <- lines @ [ind depth + $"// Reynolds: {rr.UniqueTerms}/{rr.TotalPerms} perms unique (dedup {rr.TotalPerms / max 1 rr.UniqueTerms}x)"]
                 // Cell write for compute; accumulate-through-wrapper for the
                 // fused fold (scalar accumulators, no cell indexing); a
                 // per-iteration CONST for a reduction join's shared leaf,
                 // which every later leaf at this level reads by name.
                 let assign =
                     match cg.ShareDecl with
-                    | Some elemCpp -> sprintf "const %s %s = %s;" elemCpp cg.OutputName rr.CppExpr
+                    | Some elemCpp -> $"const {elemCpp} {cg.OutputName} = {rr.CppExpr};"
                     | None ->
                     match cg.FoldWrapper with
-                    | Some wname -> sprintf "%s = %s(%s, %s);" cg.OutputName wname cg.OutputName rr.CppExpr
+                    | Some wname -> $"{cg.OutputName} = {wname}({cg.OutputName}, {rr.CppExpr});"
                     | None ->
                         let outputIdx =
-                            cg.Bindings |> List.map (fun b -> sprintf "[%s]" b.IndexName) |> String.concat ""
-                        sprintf "%s%s = %s;" cg.OutputName outputIdx rr.CppExpr
+                            cg.Bindings |> List.map (fun b -> $"[{b.IndexName}]") |> String.concat ""
+                        $"{cg.OutputName}{outputIdx} = {rr.CppExpr};"
                 lines <- lines @ [ind depth + assign]
 
     // Close all loops
@@ -387,8 +384,8 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
     // Get array names
     let arrayNames = arrays |> List.mapi (fun i arr ->
         match arr with
-        | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
-        | _ -> sprintf "arr%d" i)
+        | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}")
+        | _ -> $"arr{i}")
     
     // Resolve the kernel via `resolveCallable`. The wrapper closure
     // takes the kernel's regular params (elementwise) and forwards to
@@ -427,7 +424,7 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
         // top level there is no frame and both keep program lifetime. The
         // static form owns nothing on either path.
         let retExtents (rank: int) (dims: (string * bool) list) : string list * string option =
-            emitExtentsTable ind (sprintf "%s_extents" name) rank dims
+            emitExtentsTable ind ($"{name}_extents") rank dims
         // One derivation of each operand extent, feeding BOTH the copy-loop
         // bound and the return-extents table -- the loop and the shape it
         // describes cannot disagree because they are the same expression.
@@ -437,7 +434,7 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
             match List.tryItem pos operandTypes with
             | Some (ArrayElem at) ->
                 (literalOrRuntimeExtentOfArray at nm dim, (literalExtentOfArray at dim).IsSome)
-            | _ -> (sprintf "%s.extents[%d]" nm dim, false)
+            | _ -> ($"{nm}.extents[{dim}]", false)
         match objInfo.InputRanks, arrayNames with
         | [1; 1], [arrA; arrB] ->
             // Outer product: result[i][j] = kernel(A[i], B[j])
@@ -445,13 +442,13 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
             let b0 = extentAt 1 0
             let (aExt, bExt) = (fst a0, fst b0)
             let (extentsDecl, ownedExtents) = retExtents 2 [a0; b0]
-            let allocDecl = sprintf "%sArray<%s, 2> %s = { allocate<promote<%s, 2>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
+            let allocDecl = $$"""{{ind}}Array<{{elemTypeStr}}, 2> {{name}} = { allocate<promote<{{elemTypeStr}}, 2>::type>({{name}}_extents), {{name}}_extents };"""
             let loopCode = [
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind aExt
-                sprintf "%s    for (size_t __i1 = 0; __i1 < %s; __i1++) {" ind bExt
-                sprintf "%s        %s[__i0][__i1] = %s(%s[__i0], %s[__i1]);" ind name wname arrA arrB
-                sprintf "%s    }" ind
-                sprintf "%s}" ind
+                $$"""{{ind}}for (size_t __i0 = 0; __i0 < {{aExt}}; __i0++) {"""
+                $$"""{{ind}}    for (size_t __i1 = 0; __i1 < {{bExt}}; __i1++) {"""
+                $"{ind}        {name}[__i0][__i1] = {wname}({arrA}[__i0], {arrB}[__i1]);"
+                $$"""{{ind}}    }"""
+                $"{ind}}}"
             ]
             // Statement-position materializer (sole caller is genBinding's
             // IRApp(IRObjectFor) arm, directly or via genFuncBody's
@@ -466,11 +463,11 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
             // Elementwise: result[i] = kernel(A[i], B[i])
             let a0 = extentAt 0 0
             let (extentsDecl, ownedExtents) = retExtents 1 [a0]
-            let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
+            let allocDecl = $$"""{{ind}}Array<{{elemTypeStr}}, 1> {{name}} = { allocate<promote<{{elemTypeStr}}, 1>::type>({{name}}_extents), {{name}}_extents };"""
             let loopCode = [
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind (fst a0)
-                sprintf "%s    %s[__i0] = %s(%s[__i0], %s[__i0]);" ind name wname arrA arrB
-                sprintf "%s}" ind
+                $$"""{{ind}}for (size_t __i0 = 0; __i0 < {{(fst a0)}}; __i0++) {"""
+                $"{ind}    {name}[__i0] = {wname}({arrA}[__i0], {arrB}[__i0]);"
+                $"{ind}}}"
             ]
             registerPoolAlloc AllocDense elemTypeStr 1 "nullptr"
                 (name + "_extents") name ownedExtents
@@ -482,11 +479,11 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
             // kernel, so only the array is iterated.
             let a0 = extentAt 0 0
             let (extentsDecl, ownedExtents) = retExtents 1 [a0]
-            let allocDecl = sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemTypeStr name elemTypeStr name name
+            let allocDecl = $$"""{{ind}}Array<{{elemTypeStr}}, 1> {{name}} = { allocate<promote<{{elemTypeStr}}, 1>::type>({{name}}_extents), {{name}}_extents };"""
             let loopCode = [
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind (fst a0)
-                sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name wname arrA
-                sprintf "%s}" ind
+                $$"""{{ind}}for (size_t __i0 = 0; __i0 < {{(fst a0)}}; __i0++) {"""
+                $"{ind}    {name}[__i0] = {wname}({arrA}[__i0]);"
+                $"{ind}}}"
             ]
             registerPoolAlloc AllocDense elemTypeStr 1 "nullptr"
                 (name + "_extents") name ownedExtents
@@ -494,9 +491,9 @@ let genObjectForApplication (ctx: CodeGenContext) (name: string) (objInfo: Objec
 
         | _ ->
             // Unsupported configuration
-            codegenError ctx ind (sprintf "unsupported object_for configuration for '%s'" name)
+            codegenError ctx ind ($"unsupported object_for configuration for '{name}'")
     | _ ->
-        codegenError ctx ind (sprintf "object_for kernel for '%s' does not resolve to a callable" name)
+        codegenError ctx ind ($"object_for kernel for '{name}' does not resolve to a callable")
 
 // Binding Generation
 
@@ -592,7 +589,7 @@ let genComposeApply
             | [] -> None
         let stageBoundOf (srcName: string) =
             match stageLiteral with
-            | Some n -> sprintf "%d" n
+            | Some n -> string n
             | None -> srcName + ".extents[0]"
         // A stage is EMITTABLE when it is either a NAMED C++ lambda (the
         // direct-call arm below) or a callable `genApplyCombinator` can resolve
@@ -602,14 +599,14 @@ let genComposeApply
         match kernelName1, kernelName2 with
         | Some k1, Some k2 ->
             // Both kernels are named C++ lambdas - direct call loops
-            let s1Name = sprintf "%s__s1" name
+            let s1Name = $"{name}__s1"
             let s1Code = [
-                sprintf "%sconst size_t* %s_extents = %s.extents;" ind s1Name arrName
+                $"{ind}const size_t* {s1Name}_extents = {arrName}.extents;"
                 arrayAlloc { Ind = ind; Elem = elemType; Rank = arrRank; Name = s1Name
                              Symm = "nullptr"; Strict = None; Extents = s1Name + "_extents" }
                 forLoop ind "__i0" (stageBoundOf arrName)
-                sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind s1Name k1 arrName
-                sprintf "%s}" ind
+                $"{ind}    {s1Name}[__i0] = {k1}({arrName}[__i0]);"
+                $"{ind}}}"
             ]
             // Deterministic deallocation, site 5e: the `>>@` two-stage pipeline.
             // Both stages allocate dense/nullptr under a borrowed extents pointer
@@ -621,12 +618,12 @@ let genComposeApply
             if singleArray then
                 registerPoolAlloc AllocDense elemType arrRank "nullptr" (s1Name + "_extents") s1Name None
             let s2Code = [
-                sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
+                $"{ind}const size_t* {name}_extents = {s1Name}.extents;"
                 arrayAlloc { Ind = ind; Elem = elemType; Rank = arrRank; Name = name
                              Symm = "nullptr"; Strict = None; Extents = name + "_extents" }
                 forLoop ind "__i0" (stageBoundOf s1Name)
-                sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name k2 s1Name
-                sprintf "%s}" ind
+                $"{ind}    {name}[__i0] = {k2}({s1Name}[__i0]);"
+                $"{ind}}}"
             ]
             if singleArray then
                 registerPoolAlloc AllocDense elemType arrRank "nullptr" (name + "_extents") name None
@@ -664,7 +661,7 @@ expression-bodied kernel so the whole pipeline fuses into one loop"
             // (rather than constructing IRBindings and going through
             // genBinding) to keep this helper independent of the
             // recursive let-binding group below.
-            let s1Name = sprintf "%s__s1" name
+            let s1Name = $"{name}__s1"
             let s1Id = builder.FreshId()
             let s1ElemType : IRType =
                 match resolveCallable kernel1 with
@@ -710,13 +707,13 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
     let arrayNamesOf (info: ApplyInfo) =
         info.Arrays |> List.mapi (fun i arr ->
             match arr with
-            | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
-            | IRRange _ -> sprintf "__range%d" i
-            | IRVirtualReverse _ -> sprintf "__rev%d" i
-            | IRBlocked _ -> sprintf "__blk%d" i
-            | _ -> sprintf "arr%d" i)
-    if infos |> List.exists (fun info -> info.Arrays.IsEmpty) then
-        Error (sprintf "no arrays in method_for for fused '%s'" name)
+            | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}")
+            | IRRange _ -> $"__range{i}"
+            | IRVirtualReverse _ -> $"__rev{i}"
+            | IRBlocked _ -> $"__blk{i}"
+            | _ -> $"arr{i}")
+    if infos |> List.exists (_.Arrays.IsEmpty) then
+        Error ($"no arrays in method_for for fused '{name}'")
     elif infos |> List.exists (fun info ->
              info.Arrays |> List.exists (fun a ->
                  match a with
@@ -728,7 +725,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         // an undeclared `__rangeN_cidx`.
         Error "range<CompoundIdx> is not yet supported in fused (multi-output) loop applications; use a single-kernel method_for"
     else
-        let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+        let leafNames = infos |> List.mapi (fun i _ -> $"{name}_{i}")
         // Each leaf's nest is built against its OWN arrays -- allocation
         // extents and kernel-param element bindings both come from here.
         let leafCgs = infos |> List.mapi (fun i info ->
@@ -748,7 +745,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         // the full output on the host too).
         let declCode = leafCgs |> List.mapi (fun i cg ->
             let lname = leafNames.[i]
-            let symmVecName = sprintf "%s_symm" lname
+            let symmVecName = $"{lname}_symm"
             // Pass nullptr DIRECTLY when there's no symmetry -- a function-local
             // `static constexpr const size_t* X_symm = nullptr` can't be used
             // as a constant template arg under MSVC (C2131; the address of a
@@ -759,7 +756,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 else "nullptr"
             let outputRank = match cg.OutputType with ArrayElem arr -> arrayRank arr | _ -> 0
             let outputElemType = match cg.OutputType with ArrayElem arr -> elemTypeToCpp arr.ElemType | IRTScalar et -> primTypeToCpp et | t -> irTypeToCpp t
-            let extentsName = sprintf "%s_extents" lname
+            let extentsName = $"{lname}_extents"
             // Same structural literal pairing as the single-kernel dense arm:
             // only the IRLit arm is compile-time; an all-literal table takes
             // the static constexpr form and owns nothing (emitExtentsTable
@@ -767,21 +764,20 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
             let extentDims =
                 cg.Bindings |> List.map (fun b ->
                     match b.Extent with
-                    | IRLit (IRLitInt n) -> (sprintf "%d" n, true)
+                    | IRLit (IRLitInt n) -> (string n, true)
                     | _ ->
                         match b.FusedRank with
                         | Some d ->
                             let prod = [0 .. d - 1] |> List.map (sprintf "%s.extents[%d]" b.ExtentArrayRef) |> String.concat " * "
                             (prod, false)
-                        | None -> (sprintf "%s.extents[%d]" b.ExtentArrayRef b.ExtentDimRef, false))
+                        | None -> ($"{b.ExtentArrayRef}.extents[{b.ExtentDimRef}]", false))
             let (extentDecls, ownedExtents) = emitExtentsTable ind extentsName outputRank extentDims
             let allocRhs =
                 match emitAllocRhs (classifyOutputStorage cg.OutputType)
                           outputElemType outputRank symmArg extentsName with
                 | Ok rhs -> rhs
-                | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
-            let allocDecl = sprintf "%sArray<%s, %d> %s = %s;"
-                                ind outputElemType outputRank lname allocRhs
+                | Error msg -> recordCodegenRefusal msg; $"{{ nullptr, {extentsName} }};\n#error \"{msg}\""
+            let allocDecl = $"{ind}Array<{outputElemType}, {outputRank}> {lname} = {allocRhs};"
             (match cg.OutputType with
              | ArrayElem at when isFreeableDenseArrayType at ->
                  leafRegs.Add(fun () ->
@@ -789,7 +785,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                          outputElemType outputRank symmArg extentsName lname ownedExtents)
              | _ -> ())
             extentDecls @ [allocDecl]) |> List.concat
-        let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
+        let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
         let childrenMap = Map.ofList [name, leafNames]
         let wrap body =
             // declCode is genuinely emitted on this path -- see site 2 above.
@@ -806,7 +802,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
         // buffers), so they must NOT prepend the host declCode.
         let wrapDevice body = (body @ [""] @ [tupleLine], name, childrenMap)
         let staggered =
-            let deepest = leafCgs |> List.map (fun cg -> cg.Bindings.Length) |> List.max
+            let deepest = leafCgs |> List.map (_.Bindings.Length) |> List.max
             leafCgs |> List.exists (fun cg -> cg.Bindings.Length <> deepest)
 
         // Loop structure (bounds/triangularity) must agree regardless of
@@ -819,9 +815,9 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
             match backends with
             // ---- All host (serial/omp): merged host nest --------------------
             | _ when backends |> List.forall isHostBackend ->
-                let anyOmp = backends |> List.exists (function BkOmp -> true | _ -> false)
-                let allOmp = backends |> List.forall (function BkOmp -> true | _ -> false)
-                let allSerial = backends |> List.forall (function BkSerial -> true | _ -> false)
+                let anyOmp = backends |> List.exists (_.IsBkOmp)
+                let allOmp = backends |> List.forall (_.IsBkOmp)
+                let allSerial = backends |> List.forall (_.IsBkSerial)
                 let hostParallelR =
                     if isMandatory then
                         // <&!>: every leaf's backend must be identical.
@@ -836,7 +832,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                     registerStreamBufDecls sNew
                     wrap (sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent hostParallel None))
             // ---- All cuda: device co-fusion --------------------------------
-            | _ when backends |> List.forall (function BkCuda _ -> true | _ -> false) ->
+            | _ when backends |> List.forall (_.IsBkCuda) ->
                 let blockSizes = backends |> List.choose (function BkCuda b -> Some b | _ -> None) |> List.distinct
                 if blockSizes.Length > 1 then
                     Error "cuda leaves request different block sizes -- a shared launch needs one block size; unify the cuda(block: N) clauses or force separately"
@@ -856,15 +852,15 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
             // then each leaf's output -- a contiguous outer-row pool slab -- is
             // restored on all ranks by its own Allgatherv. Requires every leaf
             // dense rectangular; triangular/simplicial is not co-decomposed.
-            | _ when backends |> List.forall (function BkMpi -> true | _ -> false) ->
-                let primaryCg = leafCgs |> List.maxBy (fun cg -> cg.Bindings.Length)
+            | _ when backends |> List.forall (_.IsBkMpi) ->
+                let primaryCg = leafCgs |> List.maxBy (_.Bindings.Length)
                 let ineligible =
                     List.zip leafCgs (leafCgs |> List.map classifyMpiShape)
                     |> List.tryPick (fun (cg, shape) ->
                         match shape with
                         | MpiDense -> None
-                        | MpiSimplicial -> Some (sprintf "leaf '%s' is triangular; mpi co-fusion decomposes dense rectangular leaves only (v1)" cg.OutputName)
-                        | MpiIneligible r -> Some (sprintf "leaf '%s': %s" cg.OutputName r))
+                        | MpiSimplicial -> Some ($"leaf '{cg.OutputName}' is triangular; mpi co-fusion decomposes dense rectangular leaves only (v1)")
+                        | MpiIneligible r -> Some ($"leaf '{cg.OutputName}': {r}"))
                 match ineligible with
                 | Some reason -> Error reason
                 | None ->
@@ -872,7 +868,7 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                 // (single) omp-parallel region when the leaves' inner backend
                 // is omp. Leaf bindings' IsParallel carries the kernel's omp
                 // opt-in; the <&!>/<&> agreement rule mirrors the host arm.
-                let leafOmp = leafCgs |> List.map (fun cg -> cg.Bindings |> List.exists (fun b -> b.IsParallel))
+                let leafOmp = leafCgs |> List.map (fun cg -> cg.Bindings |> List.exists (_.IsParallel))
                 let hostParallelR =
                     if isMandatory then
                         if leafOmp |> List.forall id then Ok true
@@ -885,11 +881,11 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                         genLoopBoundExpr (compoundArrayNamesOf primaryCg.Bindings) (List.head primaryCg.Bindings)
                     // Shared row-slab bounds (balanced split; P > n -> empty slabs).
                     let prologue =
-                        [ sprintf "%ssize_t __blade_mpi_n_%s = %s;" ind name outerBound
-                          sprintf "%ssize_t __blade_mpi_q_%s = __blade_mpi_n_%s / (size_t)__blade_mpi_size;" ind name name
+                        [ $"{ind}size_t __blade_mpi_n_{name} = {outerBound};"
+                          $"{ind}size_t __blade_mpi_q_{name} = __blade_mpi_n_{name} / (size_t)__blade_mpi_size;"
                           sprintf "%ssize_t __blade_mpi_r_%s = __blade_mpi_n_%s %% (size_t)__blade_mpi_size;" ind name name
-                          sprintf "%ssize_t __blade_mpi_lo_%s = (size_t)__blade_mpi_rank * __blade_mpi_q_%s + ((size_t)__blade_mpi_rank < __blade_mpi_r_%s ? (size_t)__blade_mpi_rank : __blade_mpi_r_%s);" ind name name name name
-                          sprintf "%ssize_t __blade_mpi_hi_%s = __blade_mpi_lo_%s + __blade_mpi_q_%s + ((size_t)__blade_mpi_rank < __blade_mpi_r_%s ? 1 : 0);" ind name name name name ]
+                          $"{ind}size_t __blade_mpi_lo_{name} = (size_t)__blade_mpi_rank * __blade_mpi_q_{name} + ((size_t)__blade_mpi_rank < __blade_mpi_r_{name} ? (size_t)__blade_mpi_rank : __blade_mpi_r_{name});"
+                          $"{ind}size_t __blade_mpi_hi_{name} = __blade_mpi_lo_{name} + __blade_mpi_q_{name} + ((size_t)__blade_mpi_rank < __blade_mpi_r_{name} ? 1 : 0);" ]
                     let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind leafCgs
                     registerStreamBufDecls sNew
                     let nest = sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent hostParallel (Some name)
@@ -906,30 +902,30 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
                                 | ArrayElem at -> (match at.ElemType with AnyPrimElem et -> mpiDatatypeOf et | _ -> None)
                                 | _ -> None
                                 |> Option.defaultValue "MPI_DOUBLE"
-                            let extentsName = sprintf "%s_extents" lname
+                            let extentsName = $"{lname}_extents"
                             let innerProd =
                                 if outputRank <= 1 then "1"
-                                else [1 .. outputRank - 1] |> List.map (fun i -> sprintf "%s[%d]" extentsName i) |> String.concat " * "
-                            [ sprintf "%s{ // MPI: restore full %s on all ranks" ind lname
-                              sprintf "%s    %s* __blade_mpi_pool = nested_array_utilities::pool_base(%s.data);" ind outElemCpp lname
-                              sprintf "%s    size_t __blade_mpi_inner = %s;" ind innerProd
-                              sprintf "%s    if (__blade_mpi_n_%s * __blade_mpi_inner > 2147483647ULL) { std::cerr << \"error[BL8004]: element count exceeds int32 range (rank \" << __blade_mpi_rank << \")\" << std::endl; MPI_Abort(MPI_COMM_WORLD, 13); }" ind name
-                              sprintf "%s    int* __blade_mpi_counts = new int[__blade_mpi_size];" ind
-                              sprintf "%s    int* __blade_mpi_displs = new int[__blade_mpi_size];" ind
-                              sprintf "%s    for (int __r = 0; __r < __blade_mpi_size; __r++) {" ind
-                              sprintf "%s        size_t __lo = (size_t)__r * __blade_mpi_q_%s + ((size_t)__r < __blade_mpi_r_%s ? (size_t)__r : __blade_mpi_r_%s);" ind name name name
-                              sprintf "%s        size_t __hi = __lo + __blade_mpi_q_%s + ((size_t)__r < __blade_mpi_r_%s ? 1 : 0);" ind name name
-                              sprintf "%s        __blade_mpi_counts[__r] = (int)((__hi - __lo) * __blade_mpi_inner);" ind
-                              sprintf "%s        __blade_mpi_displs[__r] = (int)(__lo * __blade_mpi_inner);" ind
-                              sprintf "%s    }" ind
-                              sprintf "%s    MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, __blade_mpi_pool, __blade_mpi_counts, __blade_mpi_displs, %s, MPI_COMM_WORLD);" ind dtype
-                              sprintf "%s    delete[] __blade_mpi_counts; delete[] __blade_mpi_displs;" ind
-                              sprintf "%s}" ind ]) |> List.concat
+                                else [1 .. outputRank - 1] |> List.map (fun i -> $"{extentsName}[{i}]") |> String.concat " * "
+                            [ $"{ind}{{ // MPI: restore full {lname} on all ranks"
+                              $"{ind}    {outElemCpp}* __blade_mpi_pool = nested_array_utilities::pool_base({lname}.data);"
+                              $"{ind}    size_t __blade_mpi_inner = {innerProd};"
+                              $"{ind}    if (__blade_mpi_n_{name} * __blade_mpi_inner > 2147483647ULL) {{ std::cerr << \"error[BL8004]: element count exceeds int32 range (rank \" << __blade_mpi_rank << \")\" << std::endl; MPI_Abort(MPI_COMM_WORLD, 13); }}"
+                              $"{ind}    int* __blade_mpi_counts = new int[__blade_mpi_size];"
+                              $"{ind}    int* __blade_mpi_displs = new int[__blade_mpi_size];"
+                              $$"""{{ind}}    for (int __r = 0; __r < __blade_mpi_size; __r++) {"""
+                              $"{ind}        size_t __lo = (size_t)__r * __blade_mpi_q_{name} + ((size_t)__r < __blade_mpi_r_{name} ? (size_t)__r : __blade_mpi_r_{name});"
+                              $"{ind}        size_t __hi = __lo + __blade_mpi_q_{name} + ((size_t)__r < __blade_mpi_r_{name} ? 1 : 0);"
+                              $"{ind}        __blade_mpi_counts[__r] = (int)((__hi - __lo) * __blade_mpi_inner);"
+                              $"{ind}        __blade_mpi_displs[__r] = (int)(__lo * __blade_mpi_inner);"
+                              $$"""{{ind}}    }"""
+                              $"{ind}    MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, __blade_mpi_pool, __blade_mpi_counts, __blade_mpi_displs, {dtype}, MPI_COMM_WORLD);"
+                              $"{ind}    delete[] __blade_mpi_counts; delete[] __blade_mpi_displs;"
+                              $"{ind}}}" ]) |> List.concat
                     Ok (wrap (prologue @ [""] @ nest @ [""] @ gathers)))
             // ---- Mixed backends: cannot share one nest ----------------------
             | _ ->
                 let names = backends |> List.map backendName |> List.distinct |> String.concat ", "
-                Error (sprintf "leaves request different execution backends (%s) -- a fused nest has one backend per shared level; force the differing leaves separately with |> compute" names))
+                Error ($"leaves request different execution backends ({names}) -- a fused nest has one backend per shared level; force the differing leaves separately with |> compute"))
 
 /// <&> SOFT JOIN over independent cuda leaves that cannot share one nest:
 /// each leaf keeps its OWN kernel (own block size, arity, inputs) and the
@@ -945,18 +941,18 @@ let tryGenMergedCompute (ctx: CodeGenContext) (name: string) (infos: ApplyInfo l
 let tryGenCudaSoftJoin (ctx: CodeGenContext) (name: string) (infos: ApplyInfo list) (builder: IRBuilder) : (string list * string * Map<string, string list>) option =
     let backends = infos |> List.map classifyLeafBackend
     if infos.Length < 2
-       || not (backends |> List.forall (function BkCuda _ -> true | _ -> false))
-       || infos |> List.exists (fun info -> info.Arrays.IsEmpty) then None
+       || not (backends |> List.forall (_.IsBkCuda))
+       || infos |> List.exists (_.Arrays.IsEmpty) then None
     else
     let arrayNamesOf (info: ApplyInfo) =
         info.Arrays |> List.mapi (fun i arr ->
             match arr with
-            | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
-            | IRRange _ -> sprintf "__range%d" i
-            | IRVirtualReverse _ -> sprintf "__rev%d" i
-            | IRBlocked _ -> sprintf "__blk%d" i
-            | _ -> sprintf "arr%d" i)
-    let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+            | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}")
+            | IRRange _ -> $"__range{i}"
+            | IRVirtualReverse _ -> $"__rev{i}"
+            | IRBlocked _ -> $"__blk{i}"
+            | _ -> $"arr{i}")
+    let leafNames = infos |> List.mapi (fun i _ -> $"{name}_{i}")
     let leafCgs = infos |> List.mapi (fun i info ->
         // S2 routing, same rule as the single-kernel site.
         routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) leafNames.[i] builder))
@@ -977,17 +973,17 @@ let tryGenCudaSoftJoin (ctx: CodeGenContext) (name: string) (infos: ApplyInfo li
     else
     let pieces = pieces |> List.map Option.get
     let header =
-        [ sprintf "    // <&> soft join: %d independent cuda kernels. Begin pass launches" pieces.Length
+        [ $"    // <&> soft join: {pieces.Length} independent cuda kernels. Begin pass launches"
           "    // async round-robin over devices (inside the wrappers); end pass syncs." ]
     let allocs = pieces |> List.collect (fun (alloc, _, _) -> alloc)
     let begins =
         pieces |> List.mapi (fun k (_, args, lname) ->
-            let argStr = args |> List.map (fun n -> sprintf "pool_base(%s.data)" n) |> String.concat ", "
-            sprintf "    __launch_%s_begin(%s, %d);" (sanitizeCppName lname) argStr k)
+            let argStr = args |> List.map (fun n -> $"pool_base({n}.data)") |> String.concat ", "
+            $"    __launch_{(sanitizeCppName lname)}_begin({argStr}, {k});")
     let ends =
         pieces |> List.map (fun (_, _, lname) ->
-            sprintf "    __launch_%s_end(pool_base(%s.data));" (sanitizeCppName lname) lname)
-    let tupleLine = sprintf "    auto %s = std::make_tuple(%s);" name (leafNames |> String.concat ", ")
+            $"    __launch_{(sanitizeCppName lname)}_end(pool_base({lname}.data));")
+    let tupleLine = $"""    auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
     Some (header @ allocs @ begins @ ends @ [""; tupleLine], name, Map.ofList [name, leafNames])
 
 /// Recursively generate code for a parallel composition tree (<&>).
@@ -1046,7 +1042,7 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
         | Some result -> result
         | None ->
         // Multiple leaves -- generate each, assemble flat tuple
-        let leafNames = leaves |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+        let leafNames = leaves |> List.mapi (fun i _ -> $"{name}_{i}")
         let allCode =
             (leaves, leafNames) ||> List.map2 (fun leaf leafName ->
                 match leaf with
@@ -1058,12 +1054,12 @@ let rec genParallelTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (bui
                 | IRVar (id, _) ->
                     let existingName = Map.tryFind id ctx.VarNames |> Option.defaultValue leafName
                     if existingName <> leafName then
-                        [sprintf "%sauto& %s = %s;" ind leafName existingName; ""]
+                        [$"{ind}auto& {leafName} = {existingName};"; ""]
                     else []
                 | _ ->
                     genScalarBinding ctx leafName leaf (inferExprType leaf) @ [""])
             |> List.concat
-        let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
+        let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
         let childMap = Map.ofList [name, leafNames]
         (allCode @ [tupleLine], name, childMap)
 
@@ -1080,7 +1076,7 @@ let rec buildPairTree (expr: IRExpr) (names: string list) : string * string list
     | IRFusion (left, right) | IRParallel (left, right, _) ->
         let (leftStr, names') = buildPairTree left names
         let (rightStr, names'') = buildPairTree right names'
-        (sprintf "std::make_pair(%s, %s)" leftStr rightStr, names'')
+        ($"std::make_pair({leftStr}, {rightStr})", names'')
     | _ ->
         match names with
         | n :: rest -> (n, rest)
@@ -1122,7 +1118,7 @@ let genFusionTree (ctx: CodeGenContext) (name: string) (expr: IRExpr) (builder: 
         match tryGenMergedCompute ctx name infos true builder with
         | Ok result -> result
         | Error reason ->
-            (codegenError ctx ind (sprintf "<&!> cannot fuse these computations into one loop nest: %s (use <&> to allow independent loops)" reason), name, Map.empty)
+            (codegenError ctx ind ($"<&!> cannot fuse these computations into one loop nest: {reason} (use <&> to allow independent loops)"), name, Map.empty)
 
 /// Compute the number of flat leaves for a type (recursing into nested tuples).
 let rec tupleLeafCount (ty: IRType) : int =
@@ -1156,7 +1152,7 @@ let tupleLeafRanges (ty: IRType) : (int * int) list =
 /// spelling, decided here. `sanitizeCppName` is idempotent, so the second
 /// application inside `addVarName` is a no-op.
 let bindingCppName (binding: IRBinding) : string =
-    if binding.Name = "_" then sprintf "__tup_%d" binding.Id else sanitizeCppName binding.Name
+    if binding.Name = "_" then $"__tup_{binding.Id}" else sanitizeCppName binding.Name
 
 /// Generate C++ code for an IR binding: the DISPATCHER.
 /// Each binding shape's emission lives in its own named `genXxxBinding`
@@ -1203,13 +1199,13 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
     let (lead, trailing) =
         match arrTy.IndexTypes with
         | l :: rest when l.Symmetry <> SymNone && l.Rank >= 2 -> (l, rest)
-        | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "packed pool copy of '%s': expected a leading packed group" varName)))
+        | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"packed pool copy of '{varName}': expected a leading packed group")))
     if trailing |> List.exists (fun ix -> ix.Symmetry <> SymNone || ix.Rank <> 1) then
-        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "packed pool copy of '%s': only one leading packed group plus dense trailing dims is supported" varName)))
+        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"packed pool copy of '{varName}': only one leading packed group plus dense trailing dims is supported")))
     let litOf (e: IRExpr) =
         match e with
         | IRLit (IRLitInt n) -> n
-        | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "packed pool copy of '%s' requires literal extents" varName)))
+        | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"packed pool copy of '{varName}' requires literal extents")))
     let n = litOf lead.Extent
     let r = lead.Rank
     let binom (m: int64) (k: int) : int64 =
@@ -1233,11 +1229,11 @@ let genPackedPoolCopy (arrTy: IRArrayType) (arrayCpp: string) (flatBase: string)
     // strict pool is compact.
     let total = card * trail
     if toFlat then
-        [ sprintf "{ auto* __pc_pool = nested_array_utilities::pool_base(%s.data);" arrayCpp
-          sprintf "  for (size_t __pc_i = 0; __pc_i < %d; __pc_i++) { %s_flat[__pc_i] = __pc_pool[__pc_i]; } }" total flatBase ]
+        [ $$"""{ auto* __pc_pool = nested_array_utilities::pool_base({{arrayCpp}}.data);"""
+          $$"""  for (size_t __pc_i = 0; __pc_i < {{total}}; __pc_i++) { {{flatBase}}_flat[__pc_i] = __pc_pool[__pc_i]; } }""" ]
     else
-        [ sprintf "{ auto* __pc_pool = nested_array_utilities::pool_base(%s.data);" arrayCpp
-          sprintf "  for (size_t __pc_i = 0; __pc_i < %d; __pc_i++) { __pc_pool[__pc_i] = %s_flat[__pc_i]; } }" total flatBase ]
+        [ $$"""{ auto* __pc_pool = nested_array_utilities::pool_base({{arrayCpp}}.data);"""
+          $$"""  for (size_t __pc_i = 0; __pc_i < {{total}}; __pc_i++) { __pc_pool[__pc_i] = {{flatBase}}_flat[__pc_i]; } }""" ]
 
 /// Collect the DISTINCT ids of deferred-computation bindings that `root` reads
 /// POSITIONALLY (base of an IRIndex/IRExtent/IRContains) or WHOLE (a
@@ -1340,7 +1336,7 @@ let collectDeferredKernelCaptures (ctx: CodeGenContext) (kernel: IRExpr) : IRId 
     match resolveKernel kernel with
     | Some rk ->
         rk.Callable.Captures
-        |> List.map (fun c -> c.Id)
+        |> List.map (_.Id)
         |> List.filter (fun id -> Map.containsKey id ctx.DeferredComputations)
         |> List.distinct
     | None -> []
@@ -1361,13 +1357,13 @@ let compactOrDenseSource (e: IRExpr) (nameStr: string) : string * (string -> str
         | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
         | _ -> false
     let bound =
-        if isR1Compact then sprintf "%s.idx->cardinality" nameStr
+        if isR1Compact then $"{nameStr}.idx->cardinality"
         else
             match inferExprType e with
             | ArrayElem at -> literalOrRuntimeExtentOfArray at nameStr 0
-            | _ -> sprintf "%s.extents[0]" nameStr
+            | _ -> $"{nameStr}.extents[0]"
     let elemAt (i: string) =
-        if isR1Compact then sprintf "%s.data[%s]" nameStr i else sprintf "%s[%s]" nameStr i
+        if isR1Compact then $"{nameStr}.data[{i}]" else $"{nameStr}[{i}]"
     (bound, elemAt)
 
 /// NEGATIVE KEY = "this row belongs to no group".
@@ -1391,6 +1387,6 @@ let negativeKeyDrop (elemType: IRType) (keyVar: string) (indent: string) : strin
     match IR.stripUnits elemType with
     | IRTScalar (ETInt64 | ETInt32 | ETFloat64 | ETFloat32)
     | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) ->
-        [sprintf "%s    if (%s < 0) continue; // negative key: row belongs to no group" indent keyVar]
+        [$"{indent}    if ({keyVar} < 0) continue; // negative key: row belongs to no group"]
     | _ -> []
 

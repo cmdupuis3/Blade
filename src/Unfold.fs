@@ -167,7 +167,7 @@ let rec substFree (m: Map<string, Expr>) (e: Expr) : Expr =
         match x.Kind with
         | ExprKind.ExprVar n -> Map.tryFind n m
         | ExprKind.ExprLambda (ps, wc, body) ->
-            let m' = without (ps |> List.map (fun p -> p.Name) |> Set.ofList) m
+            let m' = without (ps |> List.map (_.Name) |> Set.ofList) m
             Some (inheritSpan x (ExprLambda (ps, wc, substFree m' body)))
         | ExprKind.ExprLet (b, body) ->
             let m' = without (collectPatternBindings b.Pattern) m
@@ -207,7 +207,7 @@ let rec private freshenBinders (prefix: string) (counter: int ref) (e: Expr) : E
     let fresh (orig: string) =
         let n = counter.Value
         counter.Value <- n + 1
-        sprintf "%s%s_%d" prefix orig n
+        $"{prefix}{orig}_{n}"
     let renamePat (pat: Pattern) : Pattern * Map<string, Expr> =
         let rec go (pat: Pattern) (acc: Map<string, Expr>) =
             match pat.Kind with
@@ -321,7 +321,7 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
                  (match evalExpr ctx.Env maxSteps idxE with
                   | Ok (SVInt i) when int i >= 0 && int i < vs.Length -> vs.[int i]
                   | Ok (SVInt i) ->
-                      raise (UnfoldError (sprintf "static unfolding: staged tuple index %d out of bounds (0..%d)" i (vs.Length - 1)))
+                      raise (UnfoldError $"static unfolding: staged tuple index {i} out of bounds (0..{vs.Length - 1})")
                   | _ ->
                       raise (UnfoldError "static unfolding: an index into a staged tuple must be a compile-time integer"))
              | _ -> UOpaque expr)  // Poly-tuple indexing on a runtime value -- not ours
@@ -330,12 +330,12 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
             // argument (or an intermediate) is staged -- inline the body.
             let fd = ctx.Env.Functions.[fname]
             if args.Length <> fd.Params.Length then
-                raise (UnfoldError (sprintf "static unfolding: '%s' expects %d argument(s), got %d" fname fd.Params.Length args.Length))
+                raise (UnfoldError $"static unfolding: '{fname}' expects {fd.Params.Length} argument(s), got {args.Length}")
             let argVals = args |> List.map recur
             ctx.Inlined.Add fname |> ignore
             let inst = ctx.Counter.Value
             ctx.Counter.Value <- inst + 1
-            let body = freshenBinders (sprintf "__unf_%s_%d_" fname inst) ctx.Counter fd.Body
+            let body = freshenBinders $"__unf_{fname}_{inst}_" ctx.Counter fd.Body
             let substMap = (fd.Params, argVals |> List.map uvalueToExpr) ||> List.zip |> Map.ofList
             ueval ctx staged true (fuel - 1) (substFree substMap body)
         | ExprKind.ExprIf (c, t, el) when inInline ->
@@ -344,7 +344,7 @@ let rec private ueval (ctx: UCtx) (staged: Map<string, UValue>)
              | Ok (SVBool false) -> recur el
              | Ok _ -> raise (UnfoldError "static unfolding: an `if` condition inside a static function must be a compile-time Bool")
              | Error why ->
-                 raise (UnfoldError (sprintf "static unfolding: an `if` condition inside a static function does not evaluate at compile time (%s)" why)))
+                 raise (UnfoldError $"static unfolding: an `if` condition inside a static function does not evaluate at compile time ({why})"))
         | ExprKind.ExprLet (({ Pattern = { Kind = PatternKind.PatVar n } } as b), body) when inInline ->
             // let inside an inlined body: bind (possibly staged), continue
             let v = recur b.Value
@@ -358,7 +358,7 @@ let private unfoldFormer (ctx: UCtx) (staged: Map<string, UValue>) (inner: Expr)
     let single (what: string) (e: Expr) =
         match flattenU (uevalArg e) with
         | [k] -> k
-        | many -> raise (UnfoldError (sprintf "static %s: the kernel elaborated to %d expressions -- exactly one is required (select from a staged tuple with an index: qs[k])" what many.Length))
+        | many -> raise (UnfoldError $"static {what}: the kernel elaborated to {many.Length} expressions -- exactly one is required (select from a staged tuple with an index: qs[k])")
     match inner.Kind with
     | ExprKind.ExprMethodFor args ->
         inheritSpan inner (ExprMethodFor (args |> List.collect (uevalArg >> flattenU)))
@@ -429,7 +429,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
             | _ -> None) e
     let rewriteIn (spanLine: int) (e: Expr) : Expr =
         try rewriteExpr e
-        with UnfoldError msg -> raise (UnfoldError (sprintf "%s (line %d)" msg spanLine))
+        with UnfoldError msg -> raise (UnfoldError $"{msg} (line {spanLine})")
     let rewritten =
         m.Decls |> List.map (fun d ->
             // Spliced ground literals in this decl take its span (ambient).
@@ -459,7 +459,7 @@ let private unfoldModule (m: ModuleDecl) : ModuleDecl =
                     | _ -> Set.empty
                 for KeyValue (n, _) in staged do
                     if Set.contains n vars then
-                        raise (UnfoldError (sprintf "staged static '%s' holds compile-time-only values (lambdas/arrays/loop objects) and is only usable inside a static former (line %d)" n d.Span.StartLine))
+                        raise (UnfoldError $"staged static '{n}' holds compile-time-only values (lambdas/arrays/loop objects) and is only usable inside a static former (line {d.Span.StartLine})")
 
     // Phase 5: delete consumed staged decls, then delete static FUNCTIONS
     // this pass inlined that have no surviving reference (a staged-only body

@@ -52,7 +52,7 @@ module MathUtils =
             for r in col + 1 .. n - 1 do
                 if abs m.[r].[col] > abs m.[piv].[col] then piv <- r
             if abs m.[piv].[col] < 1e-12 then
-                failwithf "solve: (near-)singular matrix at column %d" col
+                failwith $"solve: (near-)singular matrix at column {col}"
             if piv <> col then
                 let t = m.[piv]
                 m.[piv] <- m.[col]
@@ -69,7 +69,7 @@ module MathUtils =
 
     let maxAbsDiff (a: float[]) (b: float[]) : float =
         if a.Length <> b.Length then
-            failwithf "maxAbsDiff: length mismatch %d vs %d" a.Length b.Length
+            failwith $"maxAbsDiff: length mismatch {a.Length} vs {b.Length}"
         let mutable acc = 0.0
         for i in 0 .. a.Length - 1 do
             acc <- max acc (abs (a.[i] - b.[i]))

@@ -876,7 +876,7 @@ the axis count is the named final argument `axes = n`" line col
 
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token: %s" (describeToken kind)) line col
+        error $"Unexpected token: {describeToken kind}" line col
 
     | None ->
         errorEof "Unexpected end of input"
@@ -1172,7 +1172,7 @@ and parseGuardPrimary (tokens: Token list) : ParseResult<Expr> =
         success (mkExpr (mergeSpan (headSpan tokens) expr.Span) (ExprUnaryOp (OpNot, expr))) remaining
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token in guard: %s" (describeToken kind)) line col
+        error $"Unexpected token in guard: {describeToken kind}" line col
     | None ->
         errorEof "Expected guard expression but got end of file"
 
@@ -1218,7 +1218,7 @@ and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
                 success (mkExpr sp (ExprObjectFor (mkExpr sp (ExprSection b)))) remaining
             | None ->
                 let line, col = currentPos afterLParen
-                error (sprintf "Unknown operator in object_for: %s" op) line col
+                error $"Unknown operator in object_for: {op}" line col
         | _ ->
             parseExprImpl afterLParen >>= fun kernel afterKernel ->
             expect TokRParen afterKernel >>= fun _ remaining ->
@@ -1244,7 +1244,7 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
                 success (mkE tokens remaining (ExprSection binOp)) remaining
             | None ->
                 let line, col = currentPos tokens
-                error (sprintf "Unknown operator in section: %s" op) line col
+                error $"Unknown operator in section: {op}" line col
         | _ ->
             parseExprImpl tokens >>= fun first afterFirst ->
             match peek afterFirst with
@@ -1449,7 +1449,7 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
             let afterMatch = advance afterEq
             (match peek afterMatch with
              | Some (TokIdent scrut) when scrut = name -> success () (advance afterMatch)
-             | _ -> errHere afterMatch (sprintf "recursive array '%s': the match scrutinee must be the array being defined (`match %s with`)" name name))
+             | _ -> errHere afterMatch $"recursive array '{name}': the match scrutinee must be the array being defined (`match {name} with`)")
             >>= fun () afterScrut ->
             expect (TokKeyword KwWith) afterScrut >>= fun _ afterWith ->
             // --- arm 1 (required): | zero -> zero
@@ -1457,12 +1457,12 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
             expect TokPipe afterWith >>= fun _ a1 ->
             (match peek a1 with
              | Some (TokKeyword KwZero) -> success () (advance a1)
-             | _ -> errHere a1 (sprintf "recursive array '%s': the first arm must be the base case `| zero -> zero` (extent 0 is the empty array)" name))
+             | _ -> errHere a1 $"recursive array '{name}': the first arm must be the base case `| zero -> zero` (extent 0 is the empty array)")
             >>= fun () a2 ->
             expect (TokOp "->") a2 >>= fun _ a3 ->
             (match peek a3 with
              | Some (TokKeyword KwZero) -> success () (advance a3)
-             | _ -> errHere a3 (sprintf "recursive array '%s': the base arm's body must be `zero`" name))
+             | _ -> errHere a3 $"recursive array '{name}': the base arm's body must be `zero`")
             >>= fun () afterBase ->
             // --- arm 2 (optional seed) / arm 3 (required inductive):
             //     | zero :: n -> zero :: SEED
@@ -1476,7 +1476,7 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
                     | Some (TokIdent p) -> false, p, Ok (advance t1)
                     | _ -> false, "", Error ()
                 match t2res with
-                | Error () -> errHere t1 (sprintf "recursive array '%s': expected `zero :: n` (seed arm) or `prefix :: n` (inductive arm) pattern" name)
+                | Error () -> errHere t1 $"recursive array '{name}': expected `zero :: n` (seed arm) or `prefix :: n` (inductive arm) pattern"
                 | Ok t2 ->
                 expect TokColonColon t2 >>= fun _ t3 ->
                 expectIdent t3 >>= fun stepVar t4 ->
@@ -1490,8 +1490,8 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
                     | _ -> false, Error ()
                 match t6res with
                 | Error () ->
-                    let expected = if isSeed then "zero :: <seed slice>" else sprintf "%s :: <slice expr>" pfxName
-                    errHere t5 (sprintf "recursive array '%s': the arm body must produce exactly one new slice -- `%s`" name expected)
+                    let expected = if isSeed then "zero :: <seed slice>" else $"{pfxName} :: <slice expr>"
+                    errHere t5 $"recursive array '{name}': the arm body must produce exactly one new slice -- `{expected}`"
                 | Ok t6 ->
                 let _ = headOk
                 expect TokColonColon t6 >>= fun _ t7 ->
@@ -1502,7 +1502,7 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
                 // seed arm present; inductive arm must follow
                 parseConsArm afterArm2 >>= fun (isSeed2, pfx2, step2, slice2) afterArm3 ->
                 if isSeed2 then
-                    errHere afterArm2 (sprintf "recursive array '%s': only one seed arm (`zero :: n`) is allowed; expected the inductive arm `prefix :: n -> prefix :: <slice>`" name)
+                    errHere afterArm2 $"recursive array '{name}': only one seed arm (`zero :: n`) is allowed; expected the inductive arm `prefix :: n -> prefix :: <slice>`"
                 else
                     let sp = rangeSpan tokens afterArm3
                     success {
@@ -1527,9 +1527,9 @@ and parseRecArrayBinding (tokens: Token list) : ParseResult<Binding> =
                         PrefixVar = pfx1; StepVar = step1; SliceExpr = slice1 })
                 } afterArm2
         | _ ->
-            errHere afterEq (sprintf "recursive array '%s': the body must be `match %s with | zero -> zero | prefix :: n -> prefix :: <slice>`" name name)
+            errHere afterEq $"recursive array '{name}': the body must be `match {name} with | zero -> zero | prefix :: n -> prefix :: <slice>`"
     | _ ->
-        errHere afterName (sprintf "recursive array '%s' requires an explicit type annotation (`let rec %s: Array<T like Step, ...> = ...`) -- a self-referential definition cannot infer its own type" name name)
+        errHere afterName $"recursive array '{name}' requires an explicit type annotation (`let rec {name}: Array<T like Step, ...> = ...`) -- a self-referential definition cannot infer its own type"
 
 and parseLetStmt (tokens: Token list) : ParseResult<Stmt> =
     match peek tokens with

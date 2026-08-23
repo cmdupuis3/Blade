@@ -15,7 +15,7 @@ records the refusal as binding both lanes).
 
 ## 1. The refusal, reproduced
 
-Probes run against `bin/Release/net7.0/Blade.exe` on `feat/llvm-backend`. Not added to
+Probes run against `bin/Release/net10.0/Blade.exe` on `feat/llvm-backend`. Not added to
 the corpus; reproduced here so the surface is on the record.
 
 | # | program (core line) | result |

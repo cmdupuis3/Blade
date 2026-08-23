@@ -462,7 +462,7 @@ let orbitBaseExtent (ix: IRIndexType) : IRExpr =
 
 /// Render a level list in the surface spelling: `[(2,-), (2,+)]`.
 let ppOrbitLevels (levels: (int * bool) list) : string =
-    "[" + (levels |> List.map (fun (r, plus) -> sprintf "(%d,%s)" r (if plus then "+" else "-"))
+    "[" + (levels |> List.map (fun (r, plus) -> $"""({r},{(if plus then "+" else "-")})""")
                   |> String.concat ", ") + "]"
 
 /// The ONE text for the hard refusal at the storage boundary: every refusal
@@ -679,9 +679,9 @@ let rec validateArrowShape (slots: IRArrowSlot list) (result: IRType) : string l
                 match slot with
                 | SIdxVirt _ -> ()
                 | SIdx _ ->
-                    errs.Add(sprintf "Slot %d is SIdx but appears after first SIdxVirt at %d (stored cannot follow virtual)" i k)
+                    errs.Add $"Slot {i} is SIdx but appears after first SIdxVirt at {k} (stored cannot follow virtual)"
                 | SVal _ ->
-                    errs.Add(sprintf "Slot %d is SVal but appears after first SIdxVirt at %d (virtual arrays cannot contain functions)" i k))
+                    errs.Add $"Slot {i} is SVal but appears after first SIdxVirt at {k} (virtual arrays cannot contain functions)")
         // Constraint 2: result must not be an arrow
         match result with
         | IRTArrow _ ->
@@ -822,7 +822,7 @@ let distComponentType (k: int) (elem: IRType) (axes: IRIndexType list) : IRType 
                     | IRLit (IRLitInt m), IRLit (IRLitInt n) -> IRLit (IRLitInt (m * n))
                     | l, r -> IRBinOp (IRElementwise, IRMul, l, r)) first.Extent
         let symIdx = {
-            Id = (axes |> List.tryHead |> Option.map (fun a -> a.Id) |> Option.defaultValue 0)
+            Id = (axes |> List.tryHead |> Option.map _.Id |> Option.defaultValue 0)
             Rank = k
             Extent = fusedExtent
             Symmetry = SymSymmetric
@@ -888,8 +888,8 @@ let compoundViewType (freshId: IRId) (varArr: IRArrayType) (maskArr: IRArrayType
             maskRank <= List.length varIdxs
             && List.forall2 dimsMatch (varIdxs |> List.truncate maskRank) maskIdxs
         if not isLeadingPrefix then
-            let varIds = varIdxs |> List.map (fun i -> i.Id)
-            let maskIds = maskIdxs |> List.map (fun i -> i.Id)
+            let varIds = varIdxs |> List.map _.Id
+            let maskIds = maskIdxs |> List.map _.Id
             Error (sprintf "compound/load_compound: the mask must cover a leading prefix of the array's dimensions, sharing index-space identity (same named index type, or same provider dimension). Mask and dense leading dimensions do not correspond (mask dim Ids %A vs array dim Ids %A). Name the shared index types (e.g. `type LatIdx = Idx<n>`) so the mask and dense array refer to the same index space; reordered or non-prefix masks are not yet supported" maskIds varIds)
         else
             let compoundIdx =
@@ -1143,8 +1143,8 @@ let (|InvalidElem|_|) (ty: IRType) =
     match ty with
     | IRTLoop _
     | IRTComputation _
-    | IRTGroupKeys _ -> Some ()
-    | _ -> None
+    | IRTGroupKeys _ -> true
+    | _ -> false
 
 
 /// Strip unit annotation from a type, returning the bare type
@@ -1429,7 +1429,7 @@ type IRProgram = {
 let bindingTypeByName (program: IRProgram) (name: string) : IRType option =
     program.Modules
     |> List.tryPick (fun m ->
-        m.Bindings |> List.tryFind (fun b -> b.Name = name) |> Option.map (fun b -> b.Type))
+        m.Bindings |> List.tryFind (fun b -> b.Name = name) |> Option.map _.Type)
 
 
 // IR Construction Helpers
@@ -1515,7 +1515,7 @@ let mkCallable
     let id = match opts.IdOverride with Some i -> i | None -> builder.FreshId()
     {
         Id = id
-        Name = match opts.NameOverride with Some n -> n | None -> sprintf "__lambda_%d" id
+        Name = match opts.NameOverride with Some n -> n | None -> $"__lambda_{id}"
         Params = parms
         RetType = retType
         Body = body
@@ -1646,7 +1646,7 @@ let internal withVisited (fId: IRId) (action: unit -> 'T) : 'T =
 let registerSyntheticCallable (callable: IRCallable) : IRExpr =
     let ctx = currentAnalysisCtx ()
     ctx.SyntheticCallables.[callable.Id] <- callable
-    let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+    let paramTypes = callable.Params |> List.map _.Type
     let funcType = mkFuncArrow paramTypes callable.RetType
     IRVar (callable.Id, funcType)
 
@@ -1752,7 +1752,7 @@ let mapKernelInner (transform: IRCallable -> IRExpr) (expr: IRExpr) : IRExpr =
 
 /// Child-list mismatch in a rebuild -- always a walker bug, never recoverable.
 let private badChildren (ctor: string) : 'a =
-    failwithf "ExprShape.rebuild: child list does not match %s's shape" ctor
+    failwith $"ExprShape.rebuild: child list does not match {ctor}'s shape"
 
 /// Total active pattern: an expression's immediate children, plus a function
 /// rebuilding the same variant around replacement children.
@@ -2324,13 +2324,13 @@ let (|TypeVia|_|) (expr: IRExpr) : IRExpr option =
     | _ -> None
 
 /// Index-space arithmetic markers: always Int64 scalars.
-let (|IntValued|_|) (expr: IRExpr) : unit option =
+let (|IntValued|_|) (expr: IRExpr) : bool =
     match expr with
     | IRArity _ | IRNth | IRRank _ | IRExtent _ | IRRaggedLookup _
     | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
     | IROpaqueExtent | IRRange _ ->
-        Some ()
-    | _ -> None
+        true
+    | _ -> false
 
 // Synthetic sentinel index IDs
 //
@@ -2384,8 +2384,7 @@ let classifyCompoundIndexTuple (k: int) (coords: IRExpr list) : CompoundIndexFor
 /// was edited out of sync with typeOf's coverage tail -- fail loudly rather
 /// than mistype silently.
 let private unreachableTyping (family: string) (expr: IRExpr) : 'a =
-    failwithf "typeOf: family pattern %s no longer covers %s -- coverage arm and family out of sync"
-        family (expr.GetType().Name)
+    failwith $"typeOf: family pattern {family} no longer covers {(expr.GetType().Name)} -- coverage arm and family out of sync"
 
 /// The canonical expression type reconstruction. See the section comment
 /// above for how this relates to exprTypeIfKnown and CodeGen.inferExprType.

@@ -120,20 +120,20 @@ and formatBladeIndex (ix: IRIndexType) : string =
     let n = formatExtent (Blade.IR.orbitBaseExtent ix)
     match ix.Rank, ix.Symmetry with
     | 0, _ -> "_"                                            // rank hole in a pattern
-    | 1, SymNone -> sprintf "Idx<%s>" n
-    | r, SymSymmetric -> sprintf "SymIdx<%d, %s>" r n
-    | r, SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" r n
-    | 2, SymHermitian -> sprintf "HermitianIdx<%s>" n
+    | 1, SymNone -> $"Idx<{n}>"
+    | r, SymSymmetric -> $"SymIdx<{r}, {n}>"
+    | r, SymAntisymmetric -> $"AntisymIdx<{r}, {n}>"
+    | 2, SymHermitian -> $"HermitianIdx<{n}>"
     // The LEVEL LIST is the type here — a rank-only rendering would name a
     // different class — so it is what gets printed. (The SparseIdx addition
     // skipped this function and the compiler's own printers; not repeated.)
     | _, SymWreath ->
-        sprintf "OrbIdx<%s, %s>" (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) n
+        $"OrbIdx<{(Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix))}, {n}>"
     // Defensive fallbacks: shapes the canonical syntax doesn't define (e.g. a
     // non-symmetric group of arity > 1, or a non-rank-2 Hermitian). Surface the
     // anomaly rather than mis-rendering it as a well-formed type.
-    | r, SymNone -> sprintf "Idx<%s, rank=%d?>" n r
-    | r, SymHermitian -> sprintf "HermitianIdx<%s, rank=%d?>" n r
+    | r, SymNone -> $"Idx<{n}, rank={r}?>"
+    | r, SymHermitian -> $"HermitianIdx<{n}, rank={r}?>"
 
 /// Render a full type in Blade surface syntax. Arrays become
 /// `Array<Elem like Ix, Ix, ...>` (or `VirtualArray<...>` for virtual arrays);
@@ -145,10 +145,10 @@ and formatBladeType (ty: IRType) : string =
         let kw = if a.IsVirtual then "VirtualArray" else "Array"
         let elem = formatBladeElem a.ElemType
         let ixs = a.IndexTypes |> List.map formatBladeIndex |> String.concat ", "
-        sprintf "%s<%s like %s>" kw elem ixs
+        $"{kw}<{elem} like {ixs}>"
     | IRTScalar _ | IRTNamed _ -> formatBladeElem ty
-    | IRTTuple ts -> sprintf "(%s)" (ts |> List.map formatBladeType |> String.concat ", ")
-    | IRTComputation t -> sprintf "Computation<%s>" (formatBladeType t)
+    | IRTTuple ts -> $"""({(ts |> List.map formatBladeType |> String.concat ", ")})"""
+    | IRTComputation t -> $"Computation<{(formatBladeType t)}>"
     | IRTUnit -> "Unit"
     // Anything else: fall back to the structural dump so no information is lost
     // (and so an unexpected shape is visible rather than silently mis-rendered).
@@ -160,16 +160,15 @@ and formatBladeType (ty: IRType) : string =
 /// (as a pattern). Returns (passed, detail).
 let private assertBindingType (testName: string) (src: string) (bindingName: string) (expected: IRType) : string * bool * string =
     match lower src with
-    | Error e -> (testName, false, sprintf "lower failed: %s" e)
+    | Error e -> (testName, false, $"lower failed: {e}")
     | Ok prog ->
         match bindingTypeByName prog bindingName with
-        | None -> (testName, false, sprintf "no binding named '%s' in lowered program" bindingName)
+        | None -> (testName, false, $"no binding named '{bindingName}' in lowered program")
         | Some actual ->
             if matchesTypePattern expected actual then
                 (testName, true, formatBladeType actual)
             else (testName, false,
-                  sprintf "type mismatch for '%s': expected %s, got %s"
-                      bindingName (formatBladeType expected) (formatBladeType actual))
+                  $"type mismatch for '{bindingName}': expected {(formatBladeType expected)}, got {(formatBladeType actual)}")
 
 // ---- Test cases ------------------------------------------------------------
 // Each returns (name, passed, detail). The cases assert STRUCTURE — the thing
@@ -303,12 +302,12 @@ let private test_elementwise_over_hermitian_type () =
 /// Lower `src` and return the index records of `bindingName`'s array type.
 let private indexRecordsOf (src: string) (bindingName: string) : Result<IRIndexType list, string> =
     match lower src with
-    | Error e -> Error (sprintf "lower failed: %s" e)
+    | Error e -> Error ($"lower failed: {e}")
     | Ok prog ->
         match bindingTypeByName prog bindingName with
-        | None -> Error (sprintf "no binding named '%s' in lowered program" bindingName)
+        | None -> Error ($"no binding named '{bindingName}' in lowered program")
         | Some (ArrayElem a) -> Ok a.IndexTypes
-        | Some other -> Error (sprintf "binding '%s' is not an array: %s" bindingName (formatBladeType other))
+        | Some other -> Error ($"binding '{bindingName}' is not an array: {(formatBladeType other)}")
 
 /// Assert the per-slot (IxKind, Tag) of `bindingName`'s index records — the
 /// two fields matchesTypePattern cannot see.
@@ -379,13 +378,13 @@ let private test_elementwise_over_enumidx_type () =
         "let h = lambda(e) -> e\n" +
         "let result = method_for(codes) <@> h |> compute\n"
     match lower src with
-    | Error e -> (name, false, sprintf "lower failed: %s" e)
+    | Error e -> (name, false, $"lower failed: {e}")
     | Ok prog ->
         match bindingTypeByName prog "result" with
         | None -> (name, false, "no 'result' binding")
         | Some actual ->
             if not (matchesTypePattern (arrOf anyElem [idx]) actual) then
-                (name, false, sprintf "axis shape: expected Array<_ like Idx<_>>, got %s" (formatBladeType actual))
+                (name, false, $"axis shape: expected Array<_ like Idx<_>>, got {(formatBladeType actual)}")
             else
                 match actual with
                 | ArrayElem a ->
@@ -499,9 +498,9 @@ let private test_negative_control () =
         "let anti = L <@> reynolds(f, Antisymmetric) |> compute\n" +
         "let result = decompact(anti, 0)\n"
     let wrong = arrOf anyElem [idx; idx; idx]
-    let testName = sprintf "negative control: anti3 d=0 is NOT %s" (formatBladeType wrong)
+    let testName = $"negative control: anti3 d=0 is NOT {(formatBladeType wrong)}"
     match lower src with
-    | Error e -> (testName, false, sprintf "lower failed: %s" e)
+    | Error e -> (testName, false, $"lower failed: {e}")
     | Ok prog ->
         match bindingTypeByName prog "result" with
         | None -> (testName, false, "no 'result' binding")
@@ -512,7 +511,7 @@ let private test_negative_control () =
                 (testName, true, formatBladeType actual)
             else
                 (testName, false,
-                 sprintf "relation wrongly matched a dense rank-3 pattern against %s" (formatBladeType actual))
+                 $"relation wrongly matched a dense rank-3 pattern against {(formatBladeType actual)}")
 
 // ---- F10: §2.7's IR-reachability claim, EXECUTED ---------------------------
 // The retired transforms-as-types plan §2.7 asserted — "read, not yet executed" —
@@ -538,15 +537,15 @@ let private irrepsCommPrologue =
 /// Lower `src` and return the SOLE index record of `bindingName`'s array type.
 let private soleIndexOf (src: string) (bindingName: string) : Result<IRIndexType, string> =
     match lower src with
-    | Error e -> Error (sprintf "lower failed: %s" e)
+    | Error e -> Error ($"lower failed: {e}")
     | Ok prog ->
         match bindingTypeByName prog bindingName with
-        | None -> Error (sprintf "no binding named '%s' in lowered program" bindingName)
+        | None -> Error ($"no binding named '{bindingName}' in lowered program")
         | Some (ArrayElem a) ->
             match a.IndexTypes with
             | [ix] -> Ok ix
-            | ixs -> Error (sprintf "expected exactly one index record, got %d" ixs.Length)
-        | Some other -> Error (sprintf "binding '%s' is not an array: %s" bindingName (formatBladeType other))
+            | ixs -> Error ($"expected exactly one index record, got {ixs.Length}")
+        | Some other -> Error ($"binding '{bindingName}' is not an array: {(formatBladeType other)}")
 
 // F10 (a): the INFERENCE side. `comm` over two identical rank-1 IrrepsIdx-typed
 // arrays must deduce a rank-2 SYMMETRIC index that still carries the spec —
@@ -559,7 +558,7 @@ let private test_comm_over_irreps_infers_sym_irreps () =
     | Ok ix ->
         let wantTag = Some (mkIrrepsTag None [(0, 0, 2); (1, 1, 1)])
         let checks =
-            [ (ix.Rank = 2), sprintf "Rank = %d, want 2" ix.Rank
+            [ (ix.Rank = 2), $"Rank = {ix.Rank}, want 2"
               (ix.Symmetry = SymSymmetric), sprintf "Symmetry = %A, want SymSymmetric" ix.Symmetry
               (ix.IxKind = IxKIrreps), sprintf "IxKind = %A, want IxKIrreps" ix.IxKind
               (ix.Tag = wantTag), sprintf "Tag = %A, want %A (spec payload lost)" ix.Tag wantTag
@@ -579,16 +578,15 @@ let private test_sym_irreps_annotation_matches_inference () =
         irrepsCommPrologue
         + "let result: Array<Float like SymIdx<2, IrrepsIdx<spec>>> = L <@> f |> compute\n"
     match soleIndexOf inferred "result", soleIndexOf annotated "result" with
-    | Error e, _ -> (name, false, sprintf "inferred side: %s" e)
-    | _, Error e -> (name, false, sprintf "annotated side: %s" e)
+    | Error e, _ -> (name, false, $"inferred side: {e}")
+    | _, Error e -> (name, false, $"annotated side: {e}")
     | Ok inf, Ok ann ->
         let identity (ix: IRIndexType) =
             (ix.Rank, ix.Symmetry, ix.Tag, ix.IxKind, ix.Kind, ix.Extent, ix.Dependencies)
         if identity inf = identity ann then (name, true, Blade.IRPrint.ppIndexType ann)
         else
             (name, false,
-             sprintf "inferred %s vs annotated %s (identity fields differ)"
-                 (Blade.IRPrint.ppIndexType inf) (Blade.IRPrint.ppIndexType ann))
+             $"inferred {(Blade.IRPrint.ppIndexType inf)} vs annotated {(Blade.IRPrint.ppIndexType ann)} (identity fields differ)")
 
 // ---- Stage 4: multi-axis irreps under joint fusion -------------------------
 // `fuseJointSLevels` now admits IrrepsIdx S-dims beside plain ones, so a
@@ -634,20 +632,20 @@ let private checkFusedLevels (name: string) (recs: IRIndexType list) (wantExtent
     let levels = fuseTwoCopies recs
     let wantExt = IRLit (IRLitInt wantExtent)
     let checks =
-        [ (levels.Length = 2), sprintf "expected 2 fused levels (one per copy), got %d" levels.Length
+        [ (levels.Length = 2), $"expected 2 fused levels (one per copy), got {levels.Length}"
           (levels |> List.forall (fun l -> l.FusedFactors = Some recs)),
-            sprintf "FusedFactors = %A, want the source records verbatim" (levels |> List.map (fun l -> l.FusedFactors))
+            sprintf "FusedFactors = %A, want the source records verbatim" (levels |> List.map (_.FusedFactors))
           (levels |> List.forall (fun l -> l.IndexSpace.Extent = wantExt)),
-            sprintf "Extent = %A, want IRLit %d (the literal product)" (levels |> List.map (fun l -> l.IndexSpace.Extent)) wantExtent
+            sprintf "Extent = %A, want IRLit %d (the literal product)" (levels |> List.map (_.IndexSpace.Extent)) wantExtent
           (levels |> List.forall (fun l -> l.IndexSpace.Tag = None)),
-            sprintf "Tag = %A, want None (the fused axis is anonymous)" (levels |> List.map (fun l -> l.IndexSpace.Tag))
+            sprintf "Tag = %A, want None (the fused axis is anonymous)" (levels |> List.map (_.IndexSpace.Tag))
           (levels |> List.forall (fun l -> l.IndexSpace.SourceRank = recs.Length)),
-            sprintf "SourceRank = %A, want %d" (levels |> List.map (fun l -> l.IndexSpace.SourceRank)) recs.Length
+            sprintf "SourceRank = %A, want %d" (levels |> List.map (_.IndexSpace.SourceRank)) recs.Length
           (levels |> List.forall (fun l -> l.IndexSpace.Symmetry = SymNone)),
-            sprintf "Symmetry = %A, want SymNone (the level is the ITERATION axis)" (levels |> List.map (fun l -> l.IndexSpace.Symmetry)) ]
+            sprintf "Symmetry = %A, want SymNone (the level is the ITERATION axis)" (levels |> List.map (_.IndexSpace.Symmetry)) ]
     match checks |> List.tryFind (fst >> not) with
     | Some (_, why) -> (name, false, why)
-    | None -> (name, true, sprintf "2 levels, SourceRank %d, extent %d" recs.Length wantExtent)
+    | None -> (name, true, $"2 levels, SourceRank {recs.Length}, extent {wantExtent}")
 
 // Stage 4 (a): the fused LEVEL for a mixed plain x irreps S-block. Idx<2> x
 // IrrepsIdx<[(1,1,1)]> (total_dim 3) -> one compound axis of extent 6.
@@ -677,10 +675,10 @@ let private test_symidx_factor_still_does_not_fuse () =
     let symFactor = { sRec 2 3L IxKPlain None with Rank = 2; Symmetry = SymSymmetric }
     let levels = fuseTwoCopies [ sRec 1 2L IxKPlain None; symFactor ]
     // Rank-2 symmetric record spans 2 levels, so each copy has 3 raw levels.
-    if levels |> List.exists (fun l -> l.FusedFactors.IsSome) then
+    if levels |> List.exists (_.FusedFactors.IsSome) then
         (name, false, "a SymIdx-bearing S-block was fused")
     elif levels.Length <> 6 then
-        (name, false, sprintf "expected 6 unfused levels (3 per copy), got %d" levels.Length)
+        (name, false, $"expected 6 unfused levels (3 per copy), got {levels.Length}")
     else (name, true, "6 unfused levels, no FusedFactors")
 
 /// Lower `src` and return the SOLE index record of the fused output binding,
@@ -690,7 +688,7 @@ let private checkFusedOutput (name: string) (src: string) (wantExtent: int64) =
     | Error e -> (name, false, e)
     | Ok ix ->
         let checks =
-            [ (ix.Rank = 2), sprintf "Rank = %d, want 2" ix.Rank
+            [ (ix.Rank = 2), $"Rank = {ix.Rank}, want 2"
               (ix.Symmetry = SymSymmetric), sprintf "Symmetry = %A, want SymSymmetric" ix.Symmetry
               (ix.Extent = IRLit (IRLitInt wantExtent)),
                 sprintf "Extent = %A, want IRLit %d (the literal product)" ix.Extent wantExtent
@@ -790,15 +788,15 @@ let private test_compose_apply_output_type () =
 /// there is no array binding to read it off.
 let private aliasIndexRecord (src: string) (aliasName: string) : Result<IRIndexType, string> =
     match lower src with
-    | Error e -> Error (sprintf "lower failed: %s" e)
+    | Error e -> Error ($"lower failed: {e}")
     | Ok prog ->
         match prog.Modules
-              |> List.collect (fun m -> m.Types)
+              |> List.collect (_.Types)
               |> List.tryPick (function
                                | IRTDIndexType (n, ix) when n = aliasName -> Some ix
                                | _ -> None) with
         | Some ix -> Ok ix
-        | None -> Error (sprintf "no index-type alias named '%s' in lowered program" aliasName)
+        | None -> Error ($"no index-type alias named '{aliasName}' in lowered program")
 
 let private withoutId (ix: IRIndexType) = { ix with Id = 0 }
 
@@ -816,7 +814,7 @@ let private test_orbidx_depth1_plus_is_symidx_record () =
         if withoutId a = withoutId b then (name, true, formatBladeIndex b)
         else (name, false, sprintf "records differ:\n  SymIdx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
     | Ok a, Ok b ->
-        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+        (name, false, $"expected one index record each, got {a.Length} and {b.Length}")
 
 /// Depth-1 '-': the AntisymIdx twin of the above. Independently asserted
 /// because a lowering that ignored the sign would pass the '+' test.
@@ -831,7 +829,7 @@ let private test_orbidx_depth1_minus_is_antisym_record () =
         if withoutId a = withoutId b then (name, true, formatBladeIndex b)
         else (name, false, sprintf "records differ:\n  AntisymIdx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
     | Ok a, Ok b ->
-        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+        (name, false, $"expected one index record each, got {a.Length} and {b.Length}")
 
 /// §7.2's normalization: a rank-1 level is the trivial group at EITHER sign and
 /// is dropped, so `[(2,+), (1,-)]` is `[(2,+)]` — the SymIdx<2,3> record — and
@@ -850,7 +848,7 @@ let private test_orbidx_rank1_level_drops () =
             (name, true, formatBladeIndex b)
         else (name, false, sprintf "records differ:\n  SymIdx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
     | Ok a, Ok b ->
-        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+        (name, false, $"expected one index record each, got {a.Length} and {b.Length}")
 
 /// The empty class: `OrbIdx<[], 3>` is the plain `Idx<3>` record (§3's normal
 /// form), including Tag = None and IxKind = IxKPlain — a wreath marker left on
@@ -867,7 +865,7 @@ let private test_orbidx_empty_is_plain_idx_record () =
             (name, true, formatBladeIndex b)
         else (name, false, sprintf "records differ:\n  Idx: %A\n  OrbIdx: %A" (withoutId a) (withoutId b))
     | Ok a, Ok b ->
-        (name, false, sprintf "expected one index record each, got %d and %d" a.Length b.Length)
+        (name, false, $"expected one index record each, got {a.Length} and {b.Length}")
 
 /// Depth 2 — the only case that is new machinery. Asserts the whole record
 /// shape (Rank = the PRODUCT of the level ranks, Symmetry = SymWreath, the
@@ -893,21 +891,21 @@ let private test_orbidx_depth2_record_and_cardinality () =
                 | other -> Error (sprintf "cardinality did not fold to a literal: %A" other)
             with e -> Error e.Message
         let problems =
-            [ if ix.Rank <> 4 then yield sprintf "Rank = %d, expected 4 (= 2 * 2)" ix.Rank
+            [ if ix.Rank <> 4 then yield $"Rank = {ix.Rank}, expected 4 (= 2 * 2)"
               if ix.Symmetry <> SymWreath then yield sprintf "Symmetry = %A, expected SymWreath" ix.Symmetry
               if ix.IxKind <> IxKOrbit then yield sprintf "IxKind = %A, expected IxKOrbit" ix.IxKind
               if ix.Tag <> Some "__orbidx" then yield sprintf "Tag = %A, expected Some \"__orbidx\"" ix.Tag
               if ixKindOfTag ix.Tag <> ix.IxKind then yield "Tag/IxKind disagree (the IR validator would reject)"
               if levels <> [ (2, false); (2, true) ] then
-                  yield sprintf "levels = %s, expected [(2,-), (2,+)] outermost-last" (ppOrbitLevels levels)
+                  yield $"levels = {(ppOrbitLevels levels)}, expected [(2,-), (2,+)] outermost-last"
               match ix.Extent with
               | IROrbitClass (_, IRLit (IRLitInt 4L)) -> ()
               | other -> yield sprintf "base extent = %A, expected IROrbitClass (_, 4)" other
               match card with
               | Ok 21L -> ()
-              | Ok n -> yield sprintf "cell count = %d, expected 21 (4 -> C(4,2)=6 -> C(7,2)=21)" n
-              | Error e -> yield sprintf "cell count failed: %s" e ]
-        if List.isEmpty problems then (name, true, sprintf "%s, 21 cells" (formatBladeIndex ix))
+              | Ok n -> yield $"cell count = {n}, expected 21 (4 -> C(4,2)=6 -> C(7,2)=21)"
+              | Error e -> yield $"cell count failed: {e}" ]
+        if List.isEmpty problems then (name, true, $"{(formatBladeIndex ix)}, 21 cells")
         else (name, false, String.concat "; " problems)
 
 /// The level list is TYPE IDENTITY, not decoration: `[(2,+),(2,+)]` and
@@ -994,5 +992,5 @@ let runTypeStructureTests () : Blade.Tests.TestHarness.BlockResult =
             failed <- failed + 1
             failedNames <- failedNames @ [name]
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
-    Blade.Tests.TestHarness.printFooter "Type-Structure" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    Blade.Tests.TestHarness.printFooter "Type-Structure" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Type-Structure"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

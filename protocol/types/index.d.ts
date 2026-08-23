@@ -296,7 +296,7 @@ export interface ResolveRepoRootOptions {
 export declare function resolveRepoRoot(options?: ResolveRepoRootOptions): string | undefined;
 
 /** The in-repo build outputs, resolved relative to this package rather than
- *  hardcoded: `<repo>/bin/Release/net7.0/Blade.exe` and its Debug twin.
+ *  hardcoded: `<repo>/bin/Release/net10.0/Blade.exe` and its Debug twin.
  *  Installed as a dependency these cannot exist, and resolution correctly
  *  falls through. */
 export declare const DEFAULT_CANDIDATES: string[];

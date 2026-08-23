@@ -55,7 +55,7 @@ let internal packUnrollBudget = 256
 let internal packUnrollMarker = "[BL5502] "
 
 let internal errPackUnroll (fname: string) (msg: string) : Result<'a, string> =
-    Error (sprintf "%s%s(%s): %s" packUnrollMarker errMode.Value fname msg)
+    Error $"{packUnrollMarker}{errMode.Value}({fname}): {msg}"
 
 /// `Poly<inner>` after alias resolution -- the ELEMENT type each expanded
 /// parameter carries. `Poly<T^1>` yields `T^1`, which is what makes the
@@ -193,7 +193,7 @@ let rec internal unrollPackFn (ctx: Ctx) (fname: string) (budget: int ref)
     match fd.Params with
     | [p] when (polyElemTy ctx p.Type).IsSome ->
         if budget.Value <= 0 then
-            errPackUnroll fname (sprintf "unrolling the arity-polymorphic kernel '%s' exceeded the %d-arm budget: the recursion is not shrinking its pack, so it has no base case at this arity" fd.Name packUnrollBudget)
+            errPackUnroll fname $"unrolling the arity-polymorphic kernel '{fd.Name}' exceeded the {packUnrollBudget}-arm budget: the recursion is not shrinking its pack, so it has no base case at this arity"
         else
             budget.Value <- budget.Value - 1
             unrollPackExpr ctx fname budget (Map.ofList [(p.Name, view)]) fd.Body
@@ -204,7 +204,7 @@ let rec internal unrollPackFn (ctx: Ctx) (fname: string) (budget: int ref)
         // that split off a tuple-per-slot call shape, which `<@>` has no
         // spelling for), and a free parameter has no operand to fill it at
         // all. Refused by name rather than guessed.
-        err fname (sprintf "differentiating an arity-polymorphic kernel supports exactly ONE `Poly<...>` pack parameter and nothing beside it (v1); '%s' declares %d parameter(s), and a `<@>` operand list carries no way to say which operands fill which pack" fd.Name fd.Params.Length)
+        err fname $"differentiating an arity-polymorphic kernel supports exactly ONE `Poly<...>` pack parameter and nothing beside it (v1); '{fd.Name}' declares {fd.Params.Length} parameter(s), and a `<@>` operand list carries no way to say which operands fill which pack"
 
 /// The body walk. Every form that can carry a pack occurrence has an arm;
 /// the catch-all passes a pack-free subtree through untouched and REFUSES
@@ -280,7 +280,7 @@ and internal unrollPackExpr (ctx: Ctx) (fname: string) (budget: int ref)
          | ExprKind.ExprLit (LitInt k) when int k >= 0 && int k < List.length view ->
              Ok (re (ExprVar view.[int k]))
          | ExprKind.ExprLit (LitInt k) ->
-             errPackUnroll fname (sprintf "an arity-polymorphic kernel reads element %d of a pack that has only %d element(s) at this arity" (int k) (List.length view))
+             errPackUnroll fname $"an arity-polymorphic kernel reads element {int k} of a pack that has only {List.length view} element(s) at this arity"
          | _ ->
              err fname "an arity-polymorphic kernel reads its pack at a NON-LITERAL index (`a[k]` under a former over `range<Idx<arity(a)>>`); the differentiated form has one parameter per element, so the subscript has to be a literal. Write the fold as a `head :: tail` recursion")
     | ExprKind.ExprMatch (scrut, cases) ->
@@ -295,7 +295,7 @@ and internal unrollPackExpr (ctx: Ctx) (fname: string) (budget: int ref)
                          | PatternKind.PatVar x -> substParam fname x (re (ExprLit (LitInt m))) b
                          | _ -> Ok b)
                  | None ->
-                     errPackUnroll fname (sprintf "an arity-polymorphic kernel has NO arm for arity %d: `match arity(...)` reached that arity through its own recursion and found no guard-free case. Add a base arm for it (`| %d -> ...`) or a catch-all" (int m) (int m)))
+                     errPackUnroll fname $"an arity-polymorphic kernel has NO arm for arity {int m}: `match arity(...)` reached that arity through its own recursion and found no guard-free case. Add a base arm for it (`| {int m} -> ...`) or a catch-all")
             | _ ->
                 err fname "`match` inside a differentiated kernel is supported only as `match arity(<pack>)`, whose arm is chosen at the apply site's arity")
     | ExprKind.ExprBlock (stmts, final) -> goBlock env stmts final
@@ -309,7 +309,7 @@ and internal unrollPackExpr (ctx: Ctx) (fname: string) (budget: int ref)
               | [{ Kind = ExprKind.ExprVar a }] when Map.containsKey a env ->
                   unrollPackFn ctx fname budget ctx.Decls.[g] env.[a]
               | _ ->
-                  err fname (sprintf "a call to the arity-polymorphic kernel '%s' inside a differentiated kernel body must pass one whole pack (`%s(tail)`); an element or expression argument list has no arity to unroll at" g g))
+                  err fname $"a call to the arity-polymorphic kernel '{g}' inside a differentiated kernel body must pass one whole pack (`{g}(tail)`); an element or expression argument list has no arity to unroll at")
          | _ -> gList args |> Result.map (fun args' -> re (ExprApp (fn, args'))))
     // -- type-carrying forms -------------------------------------------------
     | ExprKind.ExprRange tys -> subTys tys |> Result.map (fun ts -> re (ExprRange ts))
@@ -379,7 +379,7 @@ and internal unrollPackExpr (ctx: Ctx) (fname: string) (budget: int ref)
 /// The canonical slot names a MEMOIZED unroll is built over. `#` is not a
 /// Blade identifier character, so a slot can collide with nothing a user
 /// wrote, and each apply site renames the slots to its own fresh parameters.
-let internal packSlot (i: int) : string = sprintf "__pk#%d" i
+let internal packSlot (i: int) : string = $"__pk#{i}"
 
 /// The unrolled body at one arity, over canonical slots -- memoized per
 /// (kernel, arity), because a body applying the same pack kernel at the same
@@ -507,7 +507,7 @@ let internal groupRegimeOf (ctx: Ctx) (fd: FunctionDecl) (letTys: Map<string, Ty
                         | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt _) }) -> true
                         | _ -> false)
                 | _ -> false
-            match ctx.ModuleLets |> Map.tryFind kn |> Option.map (fun ml -> ml.Value) with
+            match ctx.ModuleLets |> Map.tryFind kn |> Option.map _.Value with
             | Some mv when litInts mv -> GRDynamic
             | _ -> GRUnknown
     | _ -> GRUnknown
@@ -570,7 +570,7 @@ let internal lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr
         | ExprKind.ExprLambda ([rp], _, kbody) -> classifyPeelKernel rp.Name kbody
         | ExprKind.ExprLambda (ps, _, _) when List.length ps <> 1 -> Ok None
         | ExprKind.ExprVar fn when Map.containsKey fn ctx.Decls ->
-            Error (sprintf "the peel kernel '%s' over grouped values must be spelled as a LAMBDA for the auto-lowering to read it -- a named function eta-expands WITHOUT its where-clause, so v1 does not accept one; inline it, e.g. `lambda(r) -> reduce(r, (+)) / extents(r)`" fn)
+            Error $"the peel kernel '{fn}' over grouped values must be spelled as a LAMBDA for the auto-lowering to read it -- a named function eta-expands WITHOUT its where-clause, so v1 does not accept one; inline it, e.g. `lambda(r) -> reduce(r, (+)) / extents(r)`"
         | _ -> Ok None
     match kernRead with
     | Error msg -> refuse msg
@@ -606,7 +606,7 @@ let internal lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr
     let stmts1 = stmts0 |> List.map (mapStmtValue rw)
     let final1 = finalOpt |> Option.map rw
     let notFullyReduced =
-        sprintf "the grouped peel '%s' is not reduced away: a differentiable per-group loss has to collapse the GROUP axis completely -- `reduce(%s, (+))` or `reduce(%s * <group-space weights>, (+))` -- because that axis has no compile-time extent for anything downstream to allocate over (v1)" mName mName mName
+        $"the grouped peel '{mName}' is not reduced away: a differentiable per-group loss has to collapse the GROUP axis completely -- `reduce({mName}, (+))` or `reduce({mName} * <group-space weights>, (+))` -- because that axis has no compile-time extent for anything downstream to allocate over (v1)"
     if found.Count <> 1 then refuse notFullyReduced else
     // Every other mention of the peel or of the grouped value it came from
     // would be left dangling by dropping their lets, so it refuses instead.
@@ -627,15 +627,15 @@ let internal lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr
     let policy =
         match regime, pk with
         | GRUnknown, _ ->
-            Error (sprintf "cannot tell whether the key space behind '%s' admits EMPTY groups, and the per-group fold of an empty group is only defined by an explicit init; annotate the key array -- `Array<Int64 like R>` for dynamic discovery (which never manufactures an empty group), `Array<Idx<N> like R>` / an `EnumIdx` element for a positional key space" gkName)
+            Error $"cannot tell whether the key space behind '{gkName}' admits EMPTY groups, and the per-group fold of an empty group is only defined by an explicit init; annotate the key array -- `Array<Int64 like R>` for dynamic discovery (which never manufactures an empty group), `Array<Idx<N> like R>` / an `EnumIdx` element for a positional key space"
         | _, PKMean _ when nonzeroInit ->
             Error "a nonzero init in a per-group MEAN contributes `init * sum_g w_g / n_g`, which is a GROUP-space quantity and not recoverable from the source loop; v1 auto-lowers per-group means with an init of 0.0 (or none) only"
         | GRDynamic, PKSum _ when nonzeroInit ->
             Error "a nonzero init in a per-group sum contributes `init * <group count>`, and the group count of a dynamically-discovered key space is not known until run time; use `Idx<N>` / `EnumIdx` keys (whose group count is static) or an init of 0.0"
         | GRStatic _, PKSum None ->
-            Error (sprintf "the key space behind '%s' is positional, so it can have EMPTY groups -- and the fold of an empty group is undefined without an init (BL8003). Add one to define it: `reduce(r, (+), 0.0)`. Plain `Int64` keys need no init, because dynamic discovery never manufactures an empty group" gkName)
+            Error $"the key space behind '{gkName}' is positional, so it can have EMPTY groups -- and the fold of an empty group is undefined without an init (BL8003). Add one to define it: `reduce(r, (+), 0.0)`. Plain `Int64` keys need no init, because dynamic discovery never manufactures an empty group"
         | GRStatic _, PKMean _ ->
-            Error (sprintf "the key space behind '%s' is positional, so it can have EMPTY groups -- and the mean of an empty group is 0/0, which no init defines. Key the grouping by plain `Int64` (dynamic discovery never manufactures an empty group), or reformulate as a per-group sum with an explicit init" gkName)
+            Error $"the key space behind '{gkName}' is positional, so it can have EMPTY groups -- and the mean of an empty group is 0/0, which no init defines. Key the grouping by plain `Int64` (dynamic discovery never manufactures an empty group), or reformulate as a per-group sum with an explicit init"
         | _ -> Ok ()
     match policy with
     | Error msg -> refuse msg

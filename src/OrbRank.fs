@@ -82,7 +82,7 @@ type Level = int * OrbSign
 let signStr (s: OrbSign) = match s with OPlus -> "+" | OMinus -> "-"
 
 let showLevels (ls: Level list) =
-    "[" + (ls |> List.map (fun (r, s) -> sprintf "(%d%s)" r (signStr s)) |> String.concat ",") + "]"
+    "[" + (ls |> List.map (fun (r, s) -> $"({r}{signStr s})") |> String.concat ",") + "]"
 
 /// Number of raw axes the class acts on: the product of the level ranks
 /// (1 for the empty class, whose tuples are single coordinates).
@@ -108,7 +108,7 @@ let validateLevels (levels: Level list) : Result<unit, string> =
         match lvls with
         | [] -> Ok()
         | (r, s) :: rest ->
-            if r < 1 then Error(sprintf "level %d (r=%d,%s): rank must be >= 1" i r (signStr s))
+            if r < 1 then Error $"level {i} (r={r},{signStr s}): rank must be >= 1"
             else go (i + 1) rest
     go 1 levels
 
@@ -116,14 +116,14 @@ let validateLevels (levels: Level list) : Result<unit, string> =
 // All operands are non-negative. Ported from proofs/OrbitEnum.fsx.
 
 let addChecked (a: int64) (b: int64) : Result<int64, string> =
-    if b > 0L && a > Int64.MaxValue - b then Error(sprintf "int64 overflow: %d + %d" a b) else Ok(a + b)
+    if b > 0L && a > Int64.MaxValue - b then Error $"int64 overflow: {a} + {b}" else Ok(a + b)
 
 let subChecked (a: int64) (b: int64) : Result<int64, string> =
-    if b > a then Error(sprintf "int64 underflow: %d - %d" a b) else Ok(a - b)
+    if b > a then Error $"int64 underflow: {a} - {b}" else Ok(a - b)
 
 let mulChecked (a: int64) (b: int64) : Result<int64, string> =
     if a = 0L || b = 0L then Ok 0L
-    elif a > Int64.MaxValue / b then Error(sprintf "int64 overflow: %d * %d" a b)
+    elif a > Int64.MaxValue / b then Error $"int64 overflow: {a} * {b}"
     else Ok(a * b)
 
 let rec gcd64 (a: int64) (b: int64) = if b = 0L then a else gcd64 b (a % b)
@@ -132,8 +132,8 @@ let rec gcd64 (a: int64) (b: int64) = if b = 0L then a else gcd64 b (a % b)
 /// C(m-r+i, i) <= C(m,r), so the multiply-then-divide loop cannot wrap *even
 /// transiently*: an overflow here means the true binomial exceeds int64.
 let binomChecked (m: int64) (r: int) : Result<int64, string> =
-    if r < 0 then Error(sprintf "C(%d,%d): negative rank" m r)
-    elif m < 0L then Error(sprintf "C(%d,%d): negative extent" m r)
+    if r < 0 then Error $"C({m},{r}): negative rank"
+    elif m < 0L then Error $"C({m},{r}): negative extent"
     elif int64 r > m then Ok 0L
     else
         let mutable acc = Ok 1L
@@ -163,14 +163,14 @@ let cellCountChecked (levels: Level list) (n: int64) : Result<int64, string> =
     match validateLevels levels with
     | Error e -> Error e
     | Ok() ->
-    if n < 0L then Error(sprintf "negative extent %d" n) else
+    if n < 0L then Error $"negative extent {n}" else
     let rec go i lvls (m: int64) =
         match lvls with
         | [] -> Ok m
         | (r, s) :: rest ->
             let top = if s = OPlus then addChecked m (int64 r - 1L) else Ok m
             match top |> Result.bind (fun t -> binomChecked t r) with
-            | Error e -> Error(sprintf "level %d (r=%d,%s): %s" i r (signStr s) e)
+            | Error e -> Error $"level {i} (r={r},{signStr s}): {e}"
             | Ok m' -> go (i + 1) rest m'
     go 1 levels n
 
@@ -198,12 +198,12 @@ let rec canonOrb (levels: Level list) (tup: int list) : (int list * int) option 
     | [] ->
         match tup with
         | [ x ] -> Some([ x ], 1)
-        | _ -> failwithf "canonOrb: base case needs a 1-element tuple, got %d" (List.length tup)
+        | _ -> failwith $"canonOrb: base case needs a 1-element tuple, got {List.length tup}"
     | _ ->
         let inner, (r, s) = peelOuter levels
-        if r < 1 then failwithf "canonOrb: level rank %d must be >= 1" r
+        if r < 1 then failwith $"canonOrb: level rank {r} must be >= 1"
         let total = List.length tup
-        if total % r <> 0 then failwithf "canonOrb: tuple length %d not divisible by r=%d" total r
+        if total % r <> 0 then failwith $"canonOrb: tuple length {total} not divisible by r={r}"
         let subs = tup |> List.chunkBySize (total / r) |> List.map (canonOrb inner)
         if List.exists Option.isNone subs then None else
         let parts = subs |> List.map Option.get
@@ -246,11 +246,11 @@ let rec keysFrom (levels: Level list) (n: int) (lo: int list option) (strict: bo
             | None -> 0
             | Some [ p ] -> if strict then p + 1 else p
             | Some other ->
-                failwithf "OrbRank.keysFrom: base class needs a 1-element bound, got %d" (List.length other)
+                failwith $"OrbRank.keysFrom: base class needs a 1-element bound, got {List.length other}"
         seq { for x in max 0 start .. n - 1 -> [ x ] }
     | _ ->
         let inner, (r, s) = peelOuter levels
-        if r < 1 then failwithf "OrbRank.keysFrom: level rank %d must be >= 1" r
+        if r < 1 then failwith $"OrbRank.keysFrom: level rank {r} must be >= 1"
         let strictLevel = (s = OMinus)
         // The free tail: `m` further sub-keys, each above the previous one per
         // the level sign, in ascending lex order.
@@ -267,7 +267,7 @@ let rec keysFrom (levels: Level list) (n: int) (lo: int list option) (strict: bo
         | Some flat ->
             let total = List.length flat
             if total % r <> 0 then
-                failwithf "OrbRank.keysFrom: bound length %d not divisible by r=%d" total r
+                failwith $"OrbRank.keysFrom: bound length {total} not divisible by r={r}"
             let ls = flat |> List.chunkBySize (total / r) |> List.toArray
             seq {
                 // Segment E: the equality region, at its stream position.
@@ -302,7 +302,7 @@ let visitStreamChecked (levels: Level list) (n: int) : Result<seq<int list>, str
     match validateLevels levels with
     | Error e -> Error e
     | Ok() ->
-        if n < 0 then Error(sprintf "negative extent %d" n)
+        if n < 0 then Error $"negative extent {n}"
         else Ok(keysFrom levels n None false)
 
 // The arithmetic rank/unrank pair
@@ -322,8 +322,8 @@ let lexRankStrict (ground: int64) (cs: int64 list) : Result<int64, string> =
         (match acc with
          | Error _ -> ()
          | Ok a ->
-            if c <= prev then acc <- Error(sprintf "lexRankStrict: %d does not exceed %d" c prev)
-            elif c >= ground then acc <- Error(sprintf "lexRankStrict: %d outside [0,%d)" c ground)
+            if c <= prev then acc <- Error $"lexRankStrict: {c} does not exceed {prev}"
+            elif c >= ground then acc <- Error $"lexRankStrict: {c} outside [0,{ground})"
             else
                 acc <-
                     binomChecked (ground - prev - 1L) (r - j + 1)
@@ -348,12 +348,12 @@ let lexRankStrict (ground: int64) (cs: int64 list) : Result<int64, string> =
 /// this level's cell count, so the arithmetic overflows only when the class
 /// itself leaves int64.
 let lexUnrankStrict (ground: int64) (r: int) (rank: int64) : Result<int64 list, string> =
-    if r < 0 then Error(sprintf "lexUnrankStrict: negative rank width %d" r) else
+    if r < 0 then Error $"lexUnrankStrict: negative rank width {r}" else
     match binomChecked ground r with
     | Error e -> Error e
     | Ok total ->
         if rank < 0L || rank >= total then
-            Error(sprintf "rank %d outside [0,%d)" rank total)
+            Error $"rank {rank} outside [0,{total})"
         else
             let res = ResizeArray<int64>()
             let mutable rem = rank
@@ -405,13 +405,13 @@ let rec private orbRankGo (levels: Level list) (n: int) (t: int list) : Result<i
     | [] ->
         match t with
         | [ x ] when x >= 0 && x < n -> Ok(int64 x)
-        | [ x ] -> Error(sprintf "orbRank: coordinate %d outside [0,%d)" x n)
-        | _ -> Error(sprintf "orbRank: base class needs a 1-element tuple, got %d" (List.length t))
+        | [ x ] -> Error $"orbRank: coordinate {x} outside [0,{n})"
+        | _ -> Error $"orbRank: base class needs a 1-element tuple, got {List.length t}"
     | _ ->
         let inner, (r, s) = peelOuter levels
         let total = List.length t
         if total = 0 || total % r <> 0 then
-            Error(sprintf "orbRank: tuple length %d not divisible by r=%d" total r)
+            Error $"orbRank: tuple length {total} not divisible by r={r}"
         else
             // The sub-keys rank first; the level then ranks the key sequence.
             t
@@ -423,8 +423,7 @@ let rec private orbRankGo (levels: Level list) (n: int) (t: int list) : Result<i
                     a |> List.pairwise
                       |> List.forall (fun (x, y) -> if s = OMinus then x < y else x <= y)
                 if not ordered then
-                    Error(sprintf "orbRank: tuple is not canonical at the outer level (%d%s): sub-key ranks %s"
-                                  r (signStr s) (a |> List.map string |> String.concat ","))
+                    Error($"""orbRank: tuple is not canonical at the outer level ({r}{(signStr s)}): sub-key ranks {(a |> List.map string |> String.concat ",")}""")
                 else
                     cellCountChecked inner (int64 n)
                     |> Result.bind (fun m ->
@@ -447,7 +446,7 @@ let orbRank (levels: Level list) (n: int) (t: int list) : Result<int64, string> 
 let rec private orbUnrankGo (levels: Level list) (n: int) (rank: int64) : Result<int list, string> =
     match levels with
     | [] ->
-        if rank < 0L || rank >= int64 n then Error(sprintf "orbUnrank: rank %d outside [0,%d)" rank n)
+        if rank < 0L || rank >= int64 n then Error $"orbUnrank: rank {rank} outside [0,{n})"
         else Ok [ int rank ]
     | _ ->
         let inner, (r, s) = peelOuter levels
@@ -578,17 +577,15 @@ let private storageGate (who: string) (levels: Level list) (n: int) (poolLen: in
     | Error e -> Error e
     | Ok m ->
         if int64 poolLen <> m then
-            Error(sprintf "%s: pool has %d cells, %s at n=%d needs %d"
-                          who poolLen (showLevels levels) n m)
+            Error($"{who}: pool has {poolLen} cells, {(showLevels levels)} at n={n} needs {m}")
         else
             let axes = axisRank levels
             let len = List.length t
             if len <> axes then
-                Error(sprintf "%s: tuple %s has length %d, %s acts on %d axes"
-                              who (showTuple t) len (showLevels levels) axes)
+                Error($"{who}: tuple {(showTuple t)} has length {len}, {(showLevels levels)} acts on {axes} axes")
             else
                 match t |> List.tryFind (fun d -> d < 0 || d >= n) with
-                | Some d -> Error(sprintf "%s: coordinate %d outside [0,%d)" who d n)
+                | Some d -> Error $"{who}: coordinate {d} outside [0,{n})"
                 | None -> Ok m
 
 /// Where a storage read lands, WITHOUT touching a pool: everything about
@@ -632,7 +629,7 @@ let orbReadPlan (who: string) (levels: Level list) (n: int) (poolLen: int) (t: i
                 if r < 0L || r >= int64 poolLen then
                     // Unreachable while rank < cellCount = poolLen; kept so a
                     // future rank bug is a diagnosis, not an IndexOutOfRange.
-                    Error(sprintf "%s: rank %d outside the pool [0,%d)" who r poolLen)
+                    Error $"{who}: rank {r} outside the pool [0,{poolLen})"
                 else Ok(OrbPoolCell(int r, chi))
 
 /// The storage read: the value of the dense tensor at ANY raw tuple `t`, served out
@@ -650,7 +647,7 @@ let orbRead (levels: Level list) (n: int) (pool: int64[]) (t: int list) : Result
         elif v = Int64.MinValue then
             // The one value whose negation leaves int64. The overflow rule applies to
             // the read too: wraparound must diagnose.
-            Error(sprintf "int64 overflow: -(%d)" v)
+            Error $"int64 overflow: -({v})"
         else Ok(-v)
 
 /// The storage read inverted, and ONLY at a canonical cell: `t` must be a canonOrb
@@ -674,8 +671,7 @@ let orbWriteCanonical (levels: Level list) (n: int) (pool: int64[]) (t: int list
     | Ok _ ->
         match canonOrb levels t with
         | None ->
-            Error(sprintf "orbWriteCanonical: tuple %s is in the zero set of %s -- it has no pool cell"
-                          (showTuple t) (showLevels levels))
+            Error($"orbWriteCanonical: tuple {(showTuple t)} is in the zero set of {(showLevels levels)} -- it has no pool cell")
         | Some (c, chi) when c <> t ->
             Error(sprintf "orbWriteCanonical: tuple %s is not canonical for %s (canonical form %s, character %+d)"
                           (showTuple t) (showLevels levels) (showTuple c) chi)
@@ -689,7 +685,7 @@ let orbWriteCanonical (levels: Level list) (n: int) (pool: int64[]) (t: int list
             | Error e -> Error e
             | Ok r ->
                 if r < 0L || r >= int64 pool.Length then
-                    Error(sprintf "orbWriteCanonical: rank %d outside the pool [0,%d)" r pool.Length)
+                    Error $"orbWriteCanonical: rank {r} outside the pool [0,{pool.Length})"
                 else
                     pool.[int r] <- v
                     Ok()

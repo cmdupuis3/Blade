@@ -17,14 +17,14 @@ module Blade.EmitCpp
 /// `for (size_t VAR = 0; VAR < BOUND; VAR++) {` -- the canonical counting
 /// loop. VAR is stated once rather than repeated at each use.
 let forLoop (ind: string) (var: string) (bound: string) : string =
-    sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind var var bound var
+    $$"""{{ind}}for (size_t {{var}} = 0; {{var}} < {{bound}}; {{var}}++) {"""
 
 /// `for (int64_t VAR = START; VAR < BOUND; VAR++) {` -- the for-in loop.
 /// int64_t, not size_t (unlike forLoop's internal counters): VAR is the
 /// user's Int64 for-in variable, and an unsigned binding wraps negative
 /// intermediates in body arithmetic (e.g. 0.5 * (k - 1) at k=0).
 let forLoopFrom (ind: string) (var: string) (start: string) (bound: string) : string =
-    sprintf "%sfor (int64_t %s = %s; %s < %s; %s++) {" ind var start var bound var
+    $$"""{{ind}}for (int64_t {{var}} = {{start}}; {{var}} < {{bound}}; {{var}}++) {"""
 
 // ----------------------------------------------------------------------------
 // Array allocation
@@ -51,8 +51,7 @@ let arrayAlloc (a: ArrayAlloc) : string =
         sprintf "%sArray<%s, %d> %s = { allocate_strict<typename promote<%s, %d>::type, %s, %s>(%s), %s };"
             a.Ind a.Elem a.Rank a.Name a.Elem a.Rank a.Symm strictArg a.Extents a.Extents
     | None ->
-        sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, %s>(%s), %s };"
-            a.Ind a.Elem a.Rank a.Name a.Elem a.Rank a.Symm a.Extents a.Extents
+        $"{a.Ind}Array<{a.Elem}, {a.Rank}> {a.Name} = {{ allocate<typename promote<{a.Elem}, {a.Rank}>::type, {a.Symm}>({a.Extents}), {a.Extents} }};"
 
 // ----------------------------------------------------------------------------
 // Compact-pool scatter
@@ -102,15 +101,15 @@ let compactScatter (s: CompactScatter) : string =
         // unselected cell writes there. That padding is an ABI requirement of
         // this form, not an implementation detail.
         s.Ind
-        + sprintf "{ size_t %s_r = 0; " n
-        + sprintf "for (size_t %s_c = 0; %s_c < %s_grid; %s_c++) { " n n s.IdxName n
-        + sprintf "%s_compact[%s_r] = %s_densepool[%s_c]; " n n n n
-        + sprintf "%s_r += (size_t)(!!%s_maskvec[%s_c]); } }" n s.IdxName n
+        + $$"""{ size_t {{n}}_r = 0; """
+        + $$"""for (size_t {{n}}_c = 0; {{n}}_c < {{s.IdxName}}_grid; {{n}}_c++) { """
+        + $"{n}_compact[{n}_r] = {n}_densepool[{n}_c]; "
+        + $$"""{{n}}_r += (size_t)(!!{{s.IdxName}}_maskvec[{{n}}_c]); } }"""
     else
         s.Ind
-        + sprintf "{ size_t %s_r = 0; " n
-        + sprintf "for (size_t %s_c = 0; %s_c < %s_grid; %s_c++) " n n s.IdxName n
-        + sprintf "if (%s_maskvec[%s_c]) { " s.IdxName n
-        + sprintf "for (size_t %s_t = 0; %s_t < %s_trail; %s_t++) " n n n n
-        + sprintf "%s_compact[%s_r * %s_trail + %s_t] = %s_densepool[%s_c * %s_trail + %s_t]; " n n n n n n n n
-        + sprintf "%s_r++; } }" n
+        + $$"""{ size_t {{n}}_r = 0; """
+        + $"for (size_t {n}_c = 0; {n}_c < {s.IdxName}_grid; {n}_c++) "
+        + $$"""if ({{s.IdxName}}_maskvec[{{n}}_c]) { """
+        + $"for (size_t {n}_t = 0; {n}_t < {n}_trail; {n}_t++) "
+        + $"{n}_compact[{n}_r * {n}_trail + {n}_t] = {n}_densepool[{n}_c * {n}_trail + {n}_t]; "
+        + $$"""{{n}}_r++; } }"""

@@ -10,7 +10,7 @@ module BladeMath.Jacobi
 let svd (sweeps: int) (a: float[,]) : float[,] * float[] * float[,] =
     let m = Array2D.length1 a
     let n = Array2D.length2 a
-    if m < n then failwithf "svd oracle: m < n (%dx%d)" m n
+    if m < n then failwith $"svd oracle: m < n ({m}x{n})"
     let w = Array2D.init m n (fun i j -> a.[i, j])
     let vv = Array2D.init n n (fun i j -> if i = j then 1.0 else 0.0)
     for _sweep in 1 .. sweeps do

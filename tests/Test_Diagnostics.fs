@@ -63,7 +63,7 @@ let runDiagnosticsCoreTests () : BlockResult =
     check "registry codes are well-formed BLxxxx"
         (codes |> List.forall (fun c ->
             c.Length = 6 && c.StartsWith "BL" && c.Substring 2 |> Seq.forall System.Char.IsDigit))
-        (sprintf "%d codes" codes.Length)
+        ($"{codes.Length} codes")
     check "registry titles are non-empty"
         (Codes.registryEntries |> List.forall (fun (_, t) -> t <> ""))
         ""
@@ -74,11 +74,11 @@ let runDiagnosticsCoreTests () : BlockResult =
         |> List.map fst
     check "registry codes are unique (no code claimed twice)"
         (List.isEmpty dupCodes)
-        (if List.isEmpty dupCodes then sprintf "%d codes" codes.Length
-         else sprintf "duplicated: %s" (String.concat ", " dupCodes))
+        (if List.isEmpty dupCodes then $"{codes.Length} codes"
+         else $"""duplicated: {(String.concat ", " dupCodes)}""")
     check "every registry entry survives into the lookup Map"
         (codes.Length = Map.count Codes.registry)
-        (sprintf "%d entries, %d map keys" codes.Length (Map.count Codes.registry))
+        ($"{codes.Length} entries, {(Map.count Codes.registry)} map keys")
 
     // -- banding ------------------------------------------------------------
     // The band digit IS the phase: BL0xxx lex, BL1xxx parse, ... BL9xxx
@@ -118,7 +118,7 @@ let runDiagnosticsCoreTests () : BlockResult =
             | None -> true)
     check "registry codes are banded (phaseOfCode agrees with the band digit for every code)"
         (List.isEmpty bandMisfits)
-        (if List.isEmpty bandMisfits then sprintf "%d codes across 10 bands" codes.Length
+        (if List.isEmpty bandMisfits then $"{codes.Length} codes across 10 bands"
          else bandMisfits
               |> List.map (fun c -> sprintf "%s -> %A" c (Codes.phaseOfCode c))
               |> String.concat ", ")
@@ -130,7 +130,7 @@ let runDiagnosticsCoreTests () : BlockResult =
         (let firstBreak =
             codes |> List.pairwise |> List.tryFind (fun (a, b) -> a >= b)
          match firstBreak with
-         | Some (a, b) -> sprintf "out of order at %s -> %s" a b
+         | Some (a, b) -> $"out of order at {a} -> {b}"
          | None -> "ascending")
     check "elaborator codes registered"
         ([ "ml"; "ppl"; "math"; "rand"; "spectra"; "grad" ]
@@ -148,15 +148,15 @@ let runDiagnosticsCoreTests () : BlockResult =
         |> withContext [ "in function 'f'" ]
     check "renderShort: line:col prefix, message, indented context"
         (Render.renderShort d1 = "3:5: Unbound variable: zz\n  in function 'f'")
-        (sprintf "got: %s" (Render.renderShort d1))
+        ($"got: {(Render.renderShort d1)}")
     let d2 = mkError "BL9001" PhInternal noSpan "boom"
     check "renderShort: noSpan drops the location entirely"
         (Render.renderShort d2 = "boom")
-        (sprintf "got: %s" (Render.renderShort d2))
+        ($"got: {(Render.renderShort d2)}")
     let d3 = mkError "BL2001" PhResolve (span (Some "a.blade") 2 1 2 3) "msg"
     check "renderShort: file-qualified location"
         (Render.renderShort d3 = "a.blade:2:1: msg")
-        (sprintf "got: %s" (Render.renderShort d3))
+        ($"got: {(Render.renderShort d3)}")
 
     // -- render: header, arrow line, snippet, underline -------------------
     let sm = SourceMap.ofSources [ "a.blade", "let a = 1\nlet b = zz + 1\nlet c = 2" ]
@@ -165,16 +165,16 @@ let runDiagnosticsCoreTests () : BlockResult =
     let lines = rendered.Split '\n'
     check "render: header line is error[CODE]: message"
         (lines.[0] = "error[BL2001]: Unbound variable: zz")
-        (sprintf "got: %s" lines.[0])
+        ($"got: {lines.[0]}")
     check "render: arrow line carries file:line:col"
         (lines.[1].Trim() = "--> a.blade:2:9")
-        (sprintf "got: %s" lines.[1])
+        ($"got: {lines.[1]}")
     check "render: snippet shows the offending source line"
         (rendered.Contains "2 | let b = zz + 1")
-        (sprintf "got:\n%s" rendered)
+        ($"got:\n{rendered}")
     check "render: underline covers the span (2 carets at col 9)"
         (lines |> Array.exists (fun l -> l.EndsWith "        ^^"))
-        (sprintf "got:\n%s" rendered)
+        ($"got:\n{rendered}")
 
     // -- render: File=None span resolves against a single-file map --------
     let d5 = mkError "BL2001" PhResolve (span None 2 9 2 11) "Unbound variable: zz"
@@ -193,7 +193,7 @@ let runDiagnosticsCoreTests () : BlockResult =
         ""
     check "render: noSpan renders header only"
         (Render.render false None d2 = "error[BL9001]: boom")
-        (sprintf "got: %s" (Render.render false None d2))
+        ($"got: {(Render.render false None d2)}")
     let d6 = d4 |> withNote "did you mean 'z'?"
     check "render: notes appear as '= note:' lines"
         ((Render.render false (Some sm) d6).Contains "= note: did you mean 'z'?")
@@ -213,7 +213,7 @@ let runDiagnosticsCoreTests () : BlockResult =
     let rendered8 = Render.render false (Some sm) d8
     check "render: multi-line span underlines to end of first line (exactly 6 carets at col 9)"
         (rendered8.Split '\n' |> Array.exists (fun l -> l.EndsWith "        ^^^^^^"))
-        (sprintf "got:\n%s" rendered8)
+        ($"got:\n{rendered8}")
 
     // -- severities --------------------------------------------------------
     let dw = { d4 with Severity = SevWarning }
@@ -254,8 +254,7 @@ let runDiagnosticsCoreTests () : BlockResult =
     match cppRoots |> List.tryFind Directory.Exists with
     | None ->
         check "runtime C++ sources located for the panic-containment scan" false
-            (sprintf "no cpp directory found; looked in %s"
-                (cppRoots |> List.map Path.GetFullPath |> String.concat " ; "))
+            ($"""no cpp directory found; looked in {(cppRoots |> List.map Path.GetFullPath |> String.concat " ; ")}""")
     | Some root ->
         let sources =
             Directory.GetFiles root
@@ -278,9 +277,8 @@ let runDiagnosticsCoreTests () : BlockResult =
         let unscanned = mustScan |> List.filter (fun f -> not (scanned.Contains f))
         check "panic-containment scan covers every runtime header an emitted body can reach"
             (List.isEmpty unscanned)
-            (if List.isEmpty unscanned then sprintf "%d files under %s" sources.Length root
-             else sprintf "not found under %s: %s (the scan below would pass vacuously)"
-                    root (String.concat ", " unscanned))
+            (if List.isEmpty unscanned then $"{sources.Length} files under {root}"
+             else $"""not found under {root}: {(String.concat ", " unscanned)} (the scan below would pass vacuously)""")
         let offenders =
             sources
             |> List.filter (fun p -> Path.GetFileName p <> "blade_runtime.hpp")
@@ -291,14 +289,14 @@ let runDiagnosticsCoreTests () : BlockResult =
                     |> Array.filter (fun (_, line) -> line.Contains "blade_rt::panic")
                     |> Array.map (fun (i, _) -> string (i + 1))
                 if hits.Length = 0 then None
-                else Some (sprintf "%s:%s" (Path.GetFileName p) (String.concat "," hits)))
+                else Some ($"""{(Path.GetFileName p)}:{(String.concat "," hits)}"""))
         check "blade_rt::panic is reached only from generated code (no runtime header but blade_runtime.hpp)"
             (List.isEmpty offenders)
             (if List.isEmpty offenders then
-                sprintf "%d file(s) scanned under %s" sources.Length root
+                $"{sources.Length} file(s) scanned under {root}"
              else
                 sprintf "panic now reachable from %s. This BREAKS SHADOW-FRAME ELISION: codegen omits BLADE_FRAME from emitted bodies it proves cannot reach a panic, and that proof only looks at the calls the body makes — inline/template runtime code is invisible to it. Those kernels would now panic with no frame pushed, so every BL-panic trace through one drops a link in its Blade call stack (values unchanged, diagnostics silently degraded). Fix: keep the panic in blade_runtime.hpp behind a call the generated body makes textually, or teach codegen to stop eliding the frame."
                     (String.concat "; " offenders))
 
-    printFooter "Diagnostics Core" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
+    printFooter "Diagnostics Core" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Diagnostics Core"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

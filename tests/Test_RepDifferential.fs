@@ -228,27 +228,25 @@ let diffFile (dirs: Directives) (seam: Proposal list) (typed: Proposal list) : V
     let mutable failures : string list = []
     let add f = failures <- failures @ [ f ]
     for m in dirs.Malformed do
-        add (sprintf "MALFORMED DIRECTIVE: %s" m)
+        add ($"MALFORMED DIRECTIVE: {m}")
     match dirs.Exempt with
     | Some r when not (List.contains r exemptReasons) ->
-        add (sprintf "UNKNOWN TYPED-EXEMPT reason '%s' (known: %s)" r (String.concat ", " exemptReasons))
+        add ($"""UNKNOWN TYPED-EXEMPT reason '{r}' (known: {(String.concat ", " exemptReasons)})""")
     | _ -> ()
     if dirs.Exempt.IsNone then
         for m in missed do
-            add (sprintf "RECALL MISS: seam proposes '%s' under %s, typed does not" m.Owner m.Group)
+            add ($"RECALL MISS: seam proposes '{m.Owner}' under {m.Group}, typed does not")
     for u in unpinned do
-        add (sprintf "FALSE POSITIVE: typed proposes '%s' under %s with no seam match and no TYPED-SUGGEST pin"
-                 u.Owner u.Group)
+        add ($"FALSE POSITIVE: typed proposes '{u.Owner}' under {u.Group} with no seam match and no TYPED-SUGGEST pin")
     for (_, (o, g)) in pinPool do
-        add (sprintf "PIN NOT PRODUCED: TYPED-SUGGEST %s|%s" o g)
+        add ($"PIN NOT PRODUCED: TYPED-SUGGEST {o}|{g}")
 
     let notes =
         [ for (s, t) in pairs do
             if t.Signature <> "" && t.Signature <> s.Signature then
-                yield sprintf "SIG DRIFT '%s': seam [%s] vs typed [%s]" s.Owner s.Signature t.Signature
+                yield $"SIG DRIFT '{s.Owner}': seam [{s.Signature}] vs typed [{t.Signature}]"
             if t.Deps <> s.Deps then
-                yield sprintf "DEPS DRIFT '%s': seam [%s] vs typed [%s]" s.Owner
-                          (String.concat ", " s.Deps) (String.concat ", " t.Deps)
+                yield $"""DEPS DRIFT '{s.Owner}': seam [{(String.concat ", " s.Deps)}] vs typed [{(String.concat ", " t.Deps)}]"""
           if dirs.Exempt.IsSome && missed.IsEmpty then
             yield "STALE TYPED-EXEMPT: nothing to exempt (the typed walker now matches every seam proposal here)" ]
 
@@ -350,7 +348,7 @@ let runRepDifferentialTests () : BlockResult =
                              + "-> IrrepsIdx<[(0, 0, 1), (1, 1, 2)]>"
         check "seam parse: deduction shape" ok
             (if ok then "owner, group, and the bracket-bearing signature survive"
-             else sprintf "owner='%s' group='%s' sig='%s'" p.Owner p.Group p.Signature)
+             else $"owner='{p.Owner}' group='{p.Group}' sig='{p.Signature}'")
     | other -> check "seam parse: deduction shape" false (sprintf "classified as %A" other)
 
     // 2. The dependency-closure tail, and the point-group vocabulary.
@@ -364,7 +362,7 @@ let runRepDifferentialTests () : BlockResult =
                  && p.Signature.EndsWith "PgIrrepsIdx<C4, [(\"E\", 1)]>"
         check "seam parse: closure tail and point group" ok
             (if ok then "deps split, signature not truncated by the tail"
-             else sprintf "group='%s' deps=[%s] sig='%s'" p.Group (String.concat ", " p.Deps) p.Signature)
+             else $"""group='{p.Group}' deps=[{(String.concat ", " p.Deps)}] sig='{p.Signature}'""")
     | other -> check "seam parse: closure tail and point group" false (sprintf "classified as %A" other)
 
     // 3. The upgrade lint is EXCLUDED by shape, not by accident.
@@ -372,14 +370,13 @@ let runRepDifferentialTests () : BlockResult =
         "function 'layer_weak' is pinned ml.equiv(SO3) but judges under O3: "
         + "the stronger certificate is available"
     check "seam parse: upgrade lint excluded"
-        (match parseSeamMessage msgLint with SeamUpgradeLint -> true | _ -> false)
+        (parseSeamMessage msgLint).IsSeamUpgradeLint
         "the E4 lint proposes an edit, not a pin, so it is not a deduction"
 
     // 4. Negative control: a message that starts like a proposal and is not one
     //    (the galilean phrasing) must not be silently read as a deduction.
     check "seam parse: unrecognized shape is reported, not dropped"
-        (match parseSeamMessage "function 'shear' judges boost-invariant with velocity parameter(s) u" with
-         | SeamUnparseable _ -> true | _ -> false)
+        (parseSeamMessage "function 'shear' judges boost-invariant with velocity parameter(s) u").IsSeamUnparseable
         "an unparseable string classifies as such, and the summary asserts none occur"
 
     // 5. Directive parsing.
@@ -499,15 +496,14 @@ let runRepDifferentialTests () : BlockResult =
     let vLive = diffFile noDirs selfProposals selfTyped
     let renderTyped (ps: Proposal list) =
         if ps.IsEmpty then "none"
-        else ps |> List.map (fun p -> sprintf "%s|%s" p.Owner p.Group) |> String.concat ", "
+        else ps |> List.map (fun p -> $"{p.Owner}|{p.Group}") |> String.concat ", "
     check "end-to-end: both walkers agree on a live program"
         (seamOk && vLive.Failures.IsEmpty && vLive.Matched = 1)
         (if seamOk && vLive.Failures.IsEmpty && vLive.Matched = 1 then
             sprintf "seam and typed both propose 'layer_loose' under O3%s"
                 (if vLive.Notes.IsEmpty then "" else " (" + String.concat " ; " vLive.Notes + ")")
          else
-            sprintf "typed proposed: %s ; %s" (renderTyped selfTyped)
-                (String.concat " ; " vLive.Failures))
+            $"""typed proposed: {(renderTyped selfTyped)} ; {(String.concat " ; " vLive.Failures)}""")
     Blade.DeduceRep.TypedCertProposals.reset ()
 
     // ------------------------------------------------------------------
@@ -536,7 +532,7 @@ let runRepDifferentialTests () : BlockResult =
         let _ = Lowering.lowerDiag None source
         let parses = readSeam ()
         let seam = parses |> List.choose (function SeamProposal p -> Some p | _ -> None)
-        let lint = parses |> List.filter (function SeamUpgradeLint -> true | _ -> false) |> List.length
+        let lint = parses |> List.filter (_.IsSeamUpgradeLint) |> List.length
         let unparsed = parses |> List.choose (function SeamUnparseable m -> Some m | _ -> None)
         let typed = readTyped ()
         let v = diffFile dirs seam typed
@@ -548,11 +544,11 @@ let runRepDifferentialTests () : BlockResult =
         totLint <- totLint + lint
         unparsedAll <- unparsedAll @ unparsed
         let summary =
-            [ yield sprintf "seam %d / typed %d, %d matched" v.Seam v.Typed v.Matched
-              if v.Exempted > 0 then yield sprintf "%d exempt (engine)" v.Exempted
-              if v.Wins > 0 then yield sprintf "%d typed-only win(s)" v.Wins
-              if lint > 0 then yield sprintf "%d upgrade lint(s) excluded" lint
-              for u in unparsed -> sprintf "UNCLASSIFIED SEAM MESSAGE: %s" u
+            [ yield $"seam {v.Seam} / typed {v.Typed}, {v.Matched} matched"
+              if v.Exempted > 0 then yield $"{v.Exempted} exempt (engine)"
+              if v.Wins > 0 then yield $"{v.Wins} typed-only win(s)"
+              if lint > 0 then yield $"{lint} upgrade lint(s) excluded"
+              for u in unparsed -> $"UNCLASSIFIED SEAM MESSAGE: {u}"
               yield! v.Notes ]
             |> String.concat " ; "
         let detail =
@@ -566,20 +562,20 @@ let runRepDifferentialTests () : BlockResult =
     // assertion is vacuously satisfied, and the block goes green while checking
     // nothing at all.
     check "gate is not vacuous: the seam channel produced deduction-shaped proposals"
-        (totSeam > 0) (sprintf "%d seam proposal(s) across the category" totSeam)
+        (totSeam > 0) ($"{totSeam} seam proposal(s) across the category")
     check "every seam message classified as a deduction or as the upgrade lint"
         unparsedAll.IsEmpty
-        (if unparsedAll.IsEmpty then sprintf "%d deduction(s), %d lint(s)" totSeam totLint
+        (if unparsedAll.IsEmpty then $"{totSeam} deduction(s), {totLint} lint(s)"
          else unparsedAll |> String.concat " ; ")
 
     printFooter "Rep Deduction Differential"
-        [ sprintf "%d passed" passed
-          sprintf "%d failure(s)" failed
-          sprintf "seam %d" totSeam
-          sprintf "typed %d" totTyped
-          sprintf "%d matched" totMatched
-          sprintf "%d exempt" totExempt
-          sprintf "%d win(s)" totWins ]
+        [ $"{passed} passed"
+          $"{failed} failure(s)"
+          $"seam {totSeam}"
+          $"typed {totTyped}"
+          $"{totMatched} matched"
+          $"{totExempt} exempt"
+          $"{totWins} win(s)" ]
     { Block = "Rep Deduction Differential"
       Passed = passed
       Failed = failed

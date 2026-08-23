@@ -36,18 +36,18 @@ let private pinEnv (name: string) (value: string option) =
 let private cppOfSource (testName: string) (src: string) : Result<string, string> =
     try
         match lower src with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
-    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+    with ex -> Error ($"codegen raised: {ex.Message}")
 
 /// The multi-module twin. `lowerMultiSource` is the only door to a program with
 /// more than one `IRModule`, which is the whole point of the cross-module case.
 let private cppOfModules (testName: string) (sources: (string * string) list) : Result<string, string> =
     try
         match lowerMultiSource sources with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
-    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+    with ex -> Error ($"codegen raised: {ex.Message}")
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -57,7 +57,7 @@ let private cppOfModules (testName: string) (sources: (string * string) list) : 
 /// loop-producing node) and returns a scalar, so nothing downstream depends on
 /// the return shape.
 let private sumFn (name: string) =
-    sprintf "function %s(v: Array<Float64 like Idx<n>>) -> Float64 = reduce(v, (+))\n" name
+    $"function {name}(v: Array<Float64 like Idx<n>>) -> Float64 = reduce(v, (+))\n"
 
 let private vec5 = "let w5: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
 let private vec3 = "let w3: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
@@ -168,8 +168,8 @@ let private runEmissionCase
             true
         else
             let parts =
-                (if missing.IsEmpty then [] else [sprintf "missing: %s" (String.concat " | " missing)])
-                @ (if present.IsEmpty then [] else [sprintf "unexpected: %s" (String.concat " | " present)])
+                (if missing.IsEmpty then [] else [$"""missing: {(String.concat " | " missing)}"""])
+                @ (if present.IsEmpty then [] else [$"""unexpected: {(String.concat " | " present)}"""])
             resultLine Fail name (String.concat "; " parts)
             false
 
@@ -284,7 +284,7 @@ let private runScopedCase
         let problems =
             checks |> List.collect (fun (signature, mustContain, mustNotContain) ->
                 match bodyOf cpp signature with
-                | None -> [ sprintf "no definition of `%s`" signature ]
+                | None -> [ $"no definition of `{signature}`" ]
                 | Some body ->
                     (mustContain |> List.filter (body.Contains >> not)
                                  |> List.map (sprintf "`%s` missing %s" signature))
@@ -300,7 +300,7 @@ let private runAbsenceCase
     | Ok cpp ->
         match forbidden |> List.filter cpp.Contains with
         | [] -> resultLine Pass name ""; true
-        | present -> resultLine Fail name (sprintf "unexpected: %s" (String.concat " | " present)); false
+        | present -> resultLine Fail name ($"""unexpected: {(String.concat " | " present)}"""); false
 
 // ---------------------------------------------------------------------------
 // Cap plumbing
@@ -313,13 +313,13 @@ let private capProbeSource =
     sumFn "vsum"
     + ([1 .. 5]
        |> List.map (fun k ->
-            let elems = [1 .. k] |> List.map (fun i -> sprintf "%d.0" i) |> String.concat ", "
-            sprintf "let v%d: Array<Float64 like Idx<%d>> = [%s]\nlet s%d = vsum(v%d)\n" k k elems k k)
+            let elems = [1 .. k] |> List.map (fun i -> $"{i}.0") |> String.concat ", "
+            $"let v{k}: Array<Float64 like Idx<{k}>> = [{elems}]\nlet s{k} = vsum(v{k})\n")
        |> String.concat "")
 
 /// How many `vsum_shape_n<k>` DEFINITIONS the emitted program holds.
 let private specCountOf (cpp: string) =
-    [1 .. 5] |> List.filter (fun k -> cpp.Contains (sprintf "double vsum_shape_n%d(Array" k)) |> List.length
+    [1 .. 5] |> List.filter (fun k -> cpp.Contains ($"double vsum_shape_n{k}(Array")) |> List.length
 
 let private runCapCase (name: string) (envValue: string option) (expected: int) =
     use _cap = pinEnv "BLADE_SHAPE_SPEC_CAP" envValue
@@ -328,10 +328,10 @@ let private runCapCase (name: string) (envValue: string option) (expected: int) 
     | Ok cpp ->
         let got = specCountOf cpp
         if got = expected then
-            resultLine Pass name (sprintf "%d spec(s)" got)
+            resultLine Pass name ($"{got} spec(s)")
             true
         else
-            resultLine Fail name (sprintf "expected %d spec(s), got %d" expected got)
+            resultLine Fail name ($"expected {expected} spec(s), got {got}")
             false
 
 /// The same five shapes, but against a function whose body applies a lifted
@@ -342,10 +342,10 @@ let private lambdaCapProbeSource =
     rowdotFn
     + ([1 .. 5]
        |> List.map (fun k ->
-            let elems = [1 .. k] |> List.map (fun i -> sprintf "%d.0" i) |> String.concat ", "
-            sprintf "let w%d: Array<Float64 like Idx<%d>> = [%s]\n" k k elems
-            + sprintf "let m%d: Array<Float64 like Idx<2>, Idx<%d>> = [[%s], [%s]]\n" k k elems elems
-            + sprintf "let r%d = rowdot(m%d, w%d)\n" k k k)
+            let elems = [1 .. k] |> List.map (fun i -> $"{i}.0") |> String.concat ", "
+            $"let w{k}: Array<Float64 like Idx<{k}>> = [{elems}]\n"
+            + $"let m{k}: Array<Float64 like Idx<2>, Idx<{k}>> = [[{elems}], [{elems}]]\n"
+            + $"let r{k} = rowdot(m{k}, w{k})\n")
        |> String.concat "")
 
 /// How many co-specialized KERNEL definitions the emitted program holds. The
@@ -365,10 +365,10 @@ let private runLambdaCapCase (name: string) (envValue: string option) (expected:
     | Ok cpp ->
         let got = lambdaCloneCountOf cpp
         if got = expected then
-            resultLine Pass name (sprintf "%d kernel clone(s)" got)
+            resultLine Pass name ($"{got} kernel clone(s)")
             true
         else
-            resultLine Fail name (sprintf "expected %d kernel clone(s), got %d" expected got)
+            resultLine Fail name ($"expected {expected} kernel clone(s), got {got}")
             false
 
 let runShapeSpecTests () =
@@ -395,6 +395,6 @@ let runShapeSpecTests () =
     let results = emission @ scoped @ caps
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed
-    printFooter "Shape Specialization" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "Shape Specialization" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Shape Specialization"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = if failed = 0 then [] else ["see above"] }

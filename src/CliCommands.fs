@@ -280,7 +280,7 @@ let private phaseTimers () =
 /// `compileArtifact` below.
 let compileFile (filePath: string) (verbose: bool) (strictPins: bool) : Result<string * string list, string> =
     if not (File.Exists filePath) then
-        Error (sprintf "File not found: %s" filePath)
+        Error $"File not found: {filePath}"
     else
         let testName = Path.GetFileNameWithoutExtension(filePath)
         let (timing, swAll, mark) = phaseTimers ()
@@ -305,7 +305,7 @@ type BackendArtifact =
 /// corpus without ever half-compiling anything.
 let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Result<BackendArtifact, string> =
     if not (File.Exists filePath) then
-        Error (sprintf "File not found: %s" filePath)
+        Error $"File not found: {filePath}"
     else
         let testName = Path.GetFileNameWithoutExtension(filePath)
         let (timing, swAll, mark) = phaseTimers ()
@@ -369,7 +369,7 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         if verbose then
             eprintfn "[Emit] %s" llFile
         (match Build.compileLlvmProgram llFile dir with
-         | Error e -> Error (sprintf "Compilation failed:\n%s" e)
+         | Error e -> Error $"Compilation failed:\n{e}"
          | Ok exePath ->
              let finalPath = placeExecutable outputPath verbose exePath
              // verbose keeps the intermediates so the .ll can be inspected or
@@ -417,7 +417,7 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
                // over spares the backend sniffs a read-back of what we wrote.
                | None -> compileForBackendSource (Some cppCode) capabilities.Value backendReq cppFile dir) with
         | Error e ->
-            Error (sprintf "Compilation failed:\n%s" e)
+            Error $"Compilation failed:\n{e}"
         | Ok exePath ->
             let finalPath = placeExecutable outputPath verbose exePath
             // verbose keeps the intermediates so the source can be inspected/recompiled.
@@ -498,7 +498,7 @@ let private runExeIn (cwd: string) (exeFile: string) : Result<int * string * str
             (try proc.Kill() with _ -> ())
             Error "Execution timed out after 60s"
     with ex ->
-        Error (sprintf "Execution exception: %s" ex.Message)
+        Error $"Execution exception: {ex.Message}"
 
 /// The engine `blade repl` drives, shared with `ide serve`'s notebook lane:
 /// the accumulating snippet list, rebind-in-place splicing, interp-first
@@ -517,7 +517,7 @@ let internal compiledReplLane (srcPath: string) (cwd: string) : Result<int * str
     | Error e -> Error e
     | Ok exePath ->
         match runExeIn cwd exePath with
-        | Error e -> Error (sprintf "Runtime error: %s" e)
+        | Error e -> Error $"Runtime error: {e}"
         | Ok triple -> Ok triple
 
 let replLoop () : int =
@@ -714,7 +714,7 @@ let replLoop () : int =
 
 let checkFile (filePath: string) (strictPins: bool) : int =
     if not (File.Exists filePath) then
-        reportFailure (sprintf "File not found: %s" filePath)
+        reportFailure $"File not found: {filePath}"
     else
         let source = File.ReadAllText(filePath)
         let useColor = not Console.IsErrorRedirected
@@ -795,7 +795,7 @@ let emitFile (filePath: string) (outputPath: string option) (verbose: bool) (str
                     eprintfn "[Emit] %s" outPath
                 0
             with ex ->
-                reportFailure (sprintf "Failed to write %s: %s" outPath ex.Message)
+                reportFailure $"Failed to write {outPath}: {ex.Message}"
         | None ->
             printf "%s" text
             0

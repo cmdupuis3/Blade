@@ -92,7 +92,7 @@ and parseUnitAtom (tokens: Token list) : ParseResult<UnitExpr> =
 /// type argument in the language starts with a numeric literal followed by
 /// `*` or `/`, so nothing else can mean this.
 let isUnitExprArg (tokens: Token list) : bool =
-    match tokens |> List.truncate 4 |> List.map (fun t -> t.Kind) with
+    match tokens |> List.truncate 4 |> List.map (_.Kind) with
     | TokInt 1L :: _ -> true
     | TokInt _ :: TokOp "*" :: _ -> true
     | TokInt _ :: TokOp "/" :: _ -> true
@@ -256,7 +256,7 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
              // which 6b rules out explicitly.
              if n < 2L then
                  let (line, col) = currentPos afterLt
-                 errorC "BL1004" (sprintf "Tuple<%d> is not a tuple width: `Tuple<N>` requires an integer literal N >= 2 (there is no 1-tuple -- `(e)` is grouping -- and no 0-tuple annotation)" n) line col
+                 errorC "BL1004" $"Tuple<{n}> is not a tuple width: `Tuple<N>` requires an integer literal N >= 2 (there is no 1-tuple -- `(e)` is grouping -- and no 0-tuple annotation)" line col
              else
                  expectGt (advance afterLt) >>= fun _ remaining ->
                  success (TyTupleWidth (int n)) remaining
@@ -354,7 +354,7 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
 
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token in type: %s" (describeToken kind)) line col
+        error $"Unexpected token in type: {describeToken kind}" line col
     
     | None ->
         errorEof "Expected type but got end of file"
@@ -407,11 +407,11 @@ and buildTypeApp (name: string) (args: TypeArg list) (line: int) (col: int) (rem
             named |> List.map fst |> List.countBy id
             |> List.tryPick (fun (n, c) -> if c > 1 then Some n else None)
         if not orderOk then
-            error (sprintf "In `%s<...>`: a positional type argument may not follow a named bound. Write the unit or tag first: `%s<Unit, min=..., max=...>`" name name) line col
+            error $"In `{name}<...>`: a positional type argument may not follow a named bound. Write the unit or tag first: `{name}<Unit, min=..., max=...>`" line col
         elif badName.IsSome then
-            error (sprintf "Unknown named type argument '%s=' in `%s<...>`: only `min=` and `max=` exist" badName.Value name) line col
+            error $"Unknown named type argument '{badName.Value}=' in `{name}<...>`: only `min=` and `max=` exist" line col
         elif dup.IsSome then
-            error (sprintf "In `%s<...>`: `%s=` given more than once" name dup.Value) line col
+            error $"In `{name}<...>`: `{dup.Value}=` given more than once" line col
         else
             let pick k = named |> List.tryPick (fun (n, v) -> if n = k then Some v else None)
             success (TyBounded (TyNamed (name, positionals), pick "min", pick "max")) remaining
@@ -465,7 +465,7 @@ and parseOrbLevel (tokens: Token list) : ParseResult<int * bool> =
         let afterRank = advance afterLP
         if r < 1L then
             let line, col = currentPos afterLP
-            error (sprintf "OrbIdx level (%d, ...): a level rank must be >= 1 (S_0 is not a symmetric group; a rank-1 level is the trivial group and is normalized away)" r) line col
+            error $"OrbIdx level ({r}, ...): a level rank must be >= 1 (S_0 is not a symmetric group; a rank-1 level is the trivial group and is normalized away)" line col
         elif r > 4096L then
             // A per-level sanity cap, not the real bound: the real bound is the
             // class's raw axis count (product of level ranks), checked at
@@ -473,7 +473,7 @@ and parseOrbLevel (tokens: Token list) : ParseResult<int * bool> =
             // overflow bites long before either (7.2). This only catches a
             // typo like `(4000000000,+)` before it reaches an int multiply.
             let line, col = currentPos afterLP
-            error (sprintf "OrbIdx level (%d, ...): a level rank above 4096 is almost certainly a typo. The binding constraint on an OrbIdx class is int64 overflow in its cell count, which is reached at far smaller ranks (docs/plan-orbit-index-types.md section 7.2)." r) line col
+            error $"OrbIdx level ({r}, ...): a level rank above 4096 is almost certainly a typo. The binding constraint on an OrbIdx class is int64 overflow in its cell count, which is reached at far smaller ranks (docs/plan-orbit-index-types.md section 7.2)." line col
         else
         expect TokComma afterRank >>= fun _ afterComma ->
         match peek afterComma with
@@ -694,7 +694,7 @@ and parseIndexType (tokens: Token list) : ParseResult<TypeExpr> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, PgIrrepsIdx, or a named index type alias) but got %s" (describeToken kind)) line col
+        error $"Expected index type (Idx, SymIdx, AntisymIdx, HermitianIdx, EnumIdx, DepIdx, RaggedIdx, IrrepsIdx, PgIrrepsIdx, or a named index type alias) but got {describeToken kind}" line col
     
     | None ->
         errorEof "Expected index type but got end of file"

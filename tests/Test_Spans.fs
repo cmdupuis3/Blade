@@ -113,7 +113,7 @@ let runSpanTests () : BlockResult =
             | _ -> ""
         | Error _ -> ""
     check "formatCompileError includes line:col"
-        (formatted.Contains "3:") (sprintf "got: %s" formatted)
+        (formatted.Contains "3:") ($"got: {formatted}")
 
     // -- `let static` assertion: fold or fail loudly ----------------------
     // A static whose RHS needs a runtime value is a compile error at the
@@ -320,11 +320,11 @@ let runSpanTests () : BlockResult =
     let expMsg = parseErrMsg "function f(x y) -> Int64 = 1\n"
     check "expected-token message is humanized (identifier 'y', not TokIdent)"
         (expMsg.Contains "Expected ')'" && expMsg.Contains "identifier 'y'" && not (expMsg.Contains "Tok"))
-        (sprintf "got: %s" expMsg)
+        ($"got: {expMsg}")
     let unexpMsg = parseErrMsg "let x = )\n"
     check "unexpected-token message carries no raw DU constructor name"
         (unexpMsg.Contains "')'" && not (unexpMsg.Contains "Tok"))
-        (sprintf "got: %s" unexpMsg)
+        ($"got: {unexpMsg}")
 
     // (e) ParseError.Code is classified: BL1001 expected-token, BL1002 EOF,
     //     BL1999 generic.
@@ -332,13 +332,13 @@ let runSpanTests () : BlockResult =
         match Parser.parseProgram src with Error e -> e.Code | Ok _ -> "OK"
     check "parse error code: BL1001 (expected token)"
         (parseErrCode "function f(x y) -> Int64 = 1\n" = "BL1001")
-        (sprintf "got %s" (parseErrCode "function f(x y) -> Int64 = 1\n"))
+        ($"""got {(parseErrCode "function f(x y) -> Int64 = 1\n")}""")
     check "parse error code: BL1002 (unexpected EOF)"
         (parseErrCode "function f(x" = "BL1002")
-        (sprintf "got %s" (parseErrCode "function f(x"))
+        ($"""got {(parseErrCode "function f(x")}""")
     check "parse error code: BL1999 (generic)"
         (parseErrCode "let x = )\n" = "BL1999")
-        (sprintf "got %s" (parseErrCode "let x = )\n"))
+        ($"""got {(parseErrCode "let x = )\n")}""")
 
-    printFooter "Error Locations" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
+    printFooter "Error Locations" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Error Locations"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

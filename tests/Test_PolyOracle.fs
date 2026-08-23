@@ -156,8 +156,7 @@ let private copyFeature (u: MLS.PolyCopyUse) (off: int) : PolyV[] =
     let tbl = SPT.symPowerTable u.Degree u.CopyL
     let occ = tbl.Occurrences |> List.item u.Occ
     if occ.L <> u.OccL || occ.Copy <> u.OccCopy then
-        failwithf "PolyOracle: occurrence-order drift (label says L=%d copy=%d, table says L=%d copy=%d)"
-            u.OccL u.OccCopy occ.L occ.Copy
+        failwith $"PolyOracle: occurrence-order drift (label says L={u.OccL} copy={u.OccCopy}, table says L={occ.L} copy={occ.Copy})"
     Array.init (2 * occ.L + 1) (fun c ->
         let mutable m : PolyV = Map.empty
         tbl.Cells |> Array.iteri (fun ci cell ->
@@ -181,7 +180,7 @@ let private labelPoly (cis: CopyInfo[]) (lb: MLS.PolyLabel) : PolyV[] =
             acc <- couple accL u.OccL mid acc (copyFeature u cis.[u.Copy].Off)
             accL <- mid
         if accL <> lb.L then
-            failwithf "PolyOracle: chain ended at L=%d but the label says L=%d" accL lb.L
+            failwith $"PolyOracle: chain ended at L={accL} but the label says L={lb.L}"
         let sc = sqrt (float lb.Multinomial)
         acc |> Array.map (Map.map (fun _ v -> v * sc))
 
@@ -367,7 +366,7 @@ let private buildRef (s: MLS.Spec) (k: int) : RefCase =
                 if mult = 0 then
                     if num |> Array.exists (Array.exists (fun (v: bigint) -> not v.IsZero)) then
                         zeroOk <- false
-                        zeroDetail <- sprintf "L=%d P=%d numerator nonzero" L par
+                        zeroDetail <- $"L={L} P={par} numerator nonzero"
                 else
                     let mutable tr = BigInteger.Zero
                     for i in 0 .. m - 1 do tr <- tr + num.[i].[i]
@@ -495,7 +494,7 @@ let runPolyOracleTests () : BlockResult =
           "D [(2,e,1)]",         anchorD, 3 ]
 
     for (nm, s, k) in anchors do
-        let tag = sprintf "%s k=%d" nm k
+        let tag = $"{nm} k={k}"
         let cis = copyInfos s
         let rf = buildRef s k
         let cells = rf.Cells
@@ -517,7 +516,7 @@ let runPolyOracleTests () : BlockResult =
                 let mutable acc = 0.0
                 for i in 0 .. nC - 1 do acc <- acc + flat.[a].[i] * flat.[b].[i]
                 gramDev <- max gramDev (abs (acc - (if a = b then 1.0 else 0.0)))
-        check (sprintf "%s: label basis orthonormal, %d labels / %d vectors (1e-12)" tag labels.Length flat.Length)
+        check ($"{tag}: label basis orthonormal, {labels.Length} labels / {flat.Length} vectors (1e-12)")
               (flat.Length = nC && gramDev < 1e-12)
               (sprintf "dim %d, max Gram dev %.3g" nC gramDev)
 
@@ -545,13 +544,13 @@ let runPolyOracleTests () : BlockResult =
                 let mutable acc = 0.0
                 for KeyValue (_, p) in conv do acc <- acc + p.[i].[j]
                 compDev <- max compDev (abs (acc - (if i = j then 1.0 else 0.0)))
-        check (sprintf "%s: Σ_(L,P) P_conv = I (1e-12)" tag) (compDev < 1e-12)
+        check ($"{tag}: Σ_(L,P) P_conv = I (1e-12)") (compDev < 1e-12)
               (sprintf "max dev %.3g" compDev)
 
         // ---- the exact side's own checks, BEFORE any float ---------------
-        check (sprintf "%s: exact tr(P_ref) = (2L+1)·mult, all (L,P)" tag) rf.TraceOk rf.TraceDetail
-        check (sprintf "%s: P_ref ≡ 0 at every (L,P) absent from sym_spec (exact)" tag) rf.ZeroOk rf.ZeroDetail
-        check (sprintf "%s: frame transform G unitary, P_ref real (1e-12)" tag)
+        check ($"{tag}: exact tr(P_ref) = (2L+1)·mult, all (L,P)") rf.TraceOk rf.TraceDetail
+        check ($"{tag}: P_ref ≡ 0 at every (L,P) absent from sym_spec (exact)") rf.ZeroOk rf.ZeroDetail
+        check ($"{tag}: frame transform G unitary, P_ref real (1e-12)")
               (rf.UnitaryDev < 1e-12 && rf.MaxImag < 1e-12)
               (sprintf "‖GG†−I‖ %.3g, max |Im P_ref| %.3g" rf.UnitaryDev rf.MaxImag)
 
@@ -570,8 +569,8 @@ let runPolyOracleTests () : BlockResult =
                         w <- max w (abs (a.[i].[j] - b.[i].[j]))
                 if w > worst then
                     worst <- w
-                    worstAt <- sprintf " (worst at L=%d P=%d)" (fst key) (snd key)
-        check (sprintf "%s: ‖P_ref − P_conv‖_max < 1e-10 over %d (L,P) sectors" tag keysRef.Length)
+                    worstAt <- $" (worst at L={(fst key)} P={(snd key)})"
+        check ($"{tag}: ‖P_ref − P_conv‖_max < 1e-10 over {keysRef.Length} (L,P) sectors")
               (keysRef = keysConv && worst < 1e-10)
               (if keysRef <> keysConv then sprintf "sector sets differ: %A vs %A" keysRef keysConv
                else sprintf "max %.3g%s" worst worstAt)
@@ -627,10 +626,10 @@ let runPolyOracleTests () : BlockResult =
                 let (_, _, bo) = paths.[c.Path]
                 if q.Count <> 1 || not (q.ContainsKey ((bo, 0))) then
                     buildOk <- false
-                    buildDetail <- sprintf "packed slot %d hit %d (block, mo) targets" c.WBase q.Count
+                    buildDetail <- $"packed slot {c.WBase} hit {q.Count} (block, mo) targets"
                 let arr = if q.ContainsKey ((bo, 0)) then q.[(bo, 0)] else [| |]
                 (c, oA.[bo].L, arr |> Array.map (toFrame 2 cells cidx)))
-        check (sprintf "M-pin %s: each packed slot (mo=0) writes exactly one output copy" nm)
+        check ($"M-pin {nm}: each packed slot (mo=0) writes exactly one output copy")
               buildOk buildDetail
 
         // ---- label side ---------------------------------------------------
@@ -654,7 +653,7 @@ let runPolyOracleTests () : BlockResult =
             && (labKeys |> Array.distinct).Length = labKeys.Length
             && (List.sort (List.ofArray cellKeys)) = (List.sort (List.ofArray labKeys))
         let labPos = labKeys |> Array.mapi (fun i k -> (k, i)) |> Map.ofArray
-        check (sprintf "M-pin %s: label ↔ kept-cell alignment table is a bijection (%d pairs)" nm s2cells.Length)
+        check ($"M-pin {nm}: label ↔ kept-cell alignment table is a bijection ({s2cells.Length} pairs)")
               alignOk
               (if alignOk then
                  sprintf "%d distinct-copy + %d repeated-copy sectors"
@@ -694,7 +693,7 @@ let runPolyOracleTests () : BlockResult =
                     let aligned = (labPos.[labKey lb] = rj) && (lci = rci)
                     if aligned then worstAligned <- max worstAligned (abs (v - ratioOf.[rc.WBase]))
                     else worstCross <- max worstCross (abs v)
-            check (sprintf "M-pin %s: M is a label-aligned scaled permutation (%dx%d, 1e-12)" nm nC nC)
+            check ($"M-pin {nm}: M is a label-aligned scaled permutation ({nC}x{nC}, 1e-12)")
                   (sq && worstAligned < 1e-12 && worstCross < 1e-12)
                   (sprintf "aligned blocks ratio·I to %.3g, cross-pairs to %.3g" worstAligned worstCross)
 
@@ -713,10 +712,10 @@ let runPolyOracleTests () : BlockResult =
                 |> Array.map (fun r -> sprintf "%+.4f" r)
                 |> Array.countBy id
                 |> Array.sortBy fst
-                |> Array.map (fun (v, c) -> sprintf "%s x%d" v c)
+                |> Array.map (fun (v, c) -> $"{v} x{c}")
                 |> String.concat ", "
-            check (sprintf "M-pin %s: |ratio| = √2 (distinct-copy) / 1 (repeated-copy), derived (1e-12)" nm)
-                  ratioOk (if ratioOk then sprintf "observed multiset: %s" multiset else bad)
+            check ($"M-pin {nm}: |ratio| = √2 (distinct-copy) / 1 (repeated-copy), derived (1e-12)")
+                  ratioOk (if ratioOk then $"observed multiset: {multiset}" else bad)
 
-    printFooter "Poly Oracle" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "Poly Oracle" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "Poly Oracle"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

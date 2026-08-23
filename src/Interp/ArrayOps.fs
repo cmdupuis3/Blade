@@ -394,8 +394,7 @@ let allocWreath (elemTy: IRType) (idxTys: IRIndexType list)
         | Ok c -> c
         | Error detail ->
             raise (ArrayOpUnsupported
-                     (sprintf "OrbIdx%s at extent %d: cell count -- %s"
-                              (Blade.IR.ppOrbitLevels levels) n detail))
+                     ($"OrbIdx{(Blade.IR.ppOrbitLevels levels)} at extent {n}: cell count -- {detail}"))
     let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
     { ElemType = elemTy
       IndexTypes = idxTys
@@ -444,9 +443,7 @@ let wreathReadAny (arr: BladeArray) (levels: (int * bool) list) (n: int64)
                                     (int n) (storeLen arr.Data) tuple with
     | Error detail ->
         raise (InterpPanic ("BL8003",
-                            sprintf "OrbIdx%s read at (%s): %s"
-                                    (Blade.IR.ppOrbitLevels levels)
-                                    (tuple |> List.map string |> String.concat ",") detail,
+                            $"""OrbIdx{(Blade.IR.ppOrbitLevels levels)} read at ({(tuple |> List.map string |> String.concat ",")}): {detail}""",
                             None, 0))
     | Ok Blade.OrbRank.OrbZeroCell -> zeroOfElemTy arr.ElemType
     | Ok (Blade.OrbRank.OrbPoolCell (i, chi)) ->
@@ -503,8 +500,7 @@ let readCompact (arr: BladeArray) (logicalCoords: int64 list) : Value =
         (match logicalCoords |> List.tryFind (fun c -> c < 0L || c >= n) with
          | Some bad ->
              raise (InterpPanic ("BL8003",
-                                 sprintf "OrbIdx%s read: coordinate %d outside [0,%d)"
-                                         (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) bad n,
+                                 $"OrbIdx{(Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix))} read: coordinate {bad} outside [0,{n})",
                                  None, 0))
          | None ->
              wreathReadAny arr (Blade.IR.orbitLevelsOf ix) n
@@ -1387,7 +1383,7 @@ let buildCompound (arrType: IRArrayType) (dense: BladeArray) (mask: BladeArray) 
     let leadRank =
         arrType.IndexTypes
         |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
-        |> Option.map (fun ix -> ix.Rank)
+        |> Option.map _.Rank
         |> Option.defaultValue (max 1 mask.Extents.Length)
     let leadExtents = mask.Extents
     let maskBits = flatLeaves mask |> Array.map toBoolv
@@ -1503,7 +1499,7 @@ let buildSparse (arrType: IRArrayType) (values: BladeArray) (keys: int64[][])
     let leadRank =
         arrType.IndexTypes
         |> List.tryFind (fun ix -> ix.IxKind = IxKSparse)
-        |> Option.map (fun ix -> ix.Rank)
+        |> Option.map _.Rank
         |> Option.defaultValue (if keys.Length > 0 then keys.[0].Length else 1)
     if values.Extents.Length < 1 || values.Extents.[0] <> card then
         raise (InterpPanic ("BL8001", "sparse(values, keys): values length does not match key count", None, 0))
@@ -2012,5 +2008,5 @@ let printArrayBinding (b: IRBinding) (arr: BladeArray) (sb: StringBuilder) : uni
                     sb.Append(b.Name).Append(" = <rank-0>").Append('\n') |> ignore
                 else
                     emitFlat sb b.Name arr et
-        | _ -> raise (ArrayOpUnsupported (sprintf "print: array '%s' of non-scalar element type" b.Name))
-    | _ -> raise (ArrayOpUnsupported (sprintf "print: binding '%s' is not an array type" b.Name))
+        | _ -> raise (ArrayOpUnsupported $"print: array '{b.Name}' of non-scalar element type")
+    | _ -> raise (ArrayOpUnsupported $"print: binding '{b.Name}' is not an array type")

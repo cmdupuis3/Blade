@@ -30,10 +30,10 @@ let internal cppStrEscape (s: string) : string =
 let internal panicSpanArgs (span: Blade.Ast.Span) : string =
     let fileArg =
         match span.File with
-        | Some f when f <> "" -> sprintf "\"%s\"" (cppStrEscape f)
+        | Some f when f <> "" -> $"\"{(cppStrEscape f)}\""
         | _ -> "nullptr"
     let lineArg = if span.StartLine > 0 then string span.StartLine else "0"
-    sprintf "%s, %s" fileArg lineArg
+    $"{fileArg}, {lineArg}"
 
 // Code Generation Context
 
@@ -233,8 +233,7 @@ let tryHoistModuleBindingDecl (name: string) (lines: string list) : (string * st
     let re =
         hoistDeclRegexCache.GetOrAdd(name, fun n ->
             let pattern =
-                sprintf "^(?<ind>\\s*)(?<ty>[A-Za-z_][A-Za-z0-9_:<>,\\* ]*?)\\s+%s\\s*=\\s*(?<rhs>.*;)\\s*$"
-                        (System.Text.RegularExpressions.Regex.Escape n)
+                $"^(?<ind>\\s*)(?<ty>[A-Za-z_][A-Za-z0-9_:<>,\\* ]*?)\\s+{(System.Text.RegularExpressions.Regex.Escape n)}\\s*=\\s*(?<rhs>.*;)\\s*$"
             System.Text.RegularExpressions.Regex(pattern))
     let reserved = hoistDeclReserved
     let matches =
@@ -249,10 +248,10 @@ let tryHoistModuleBindingDecl (name: string) (lines: string list) : (string * st
     match matches with
     | [ (idx, m) ] ->
         let ty = m.Groups.["ty"].Value.Trim()
-        let decl = sprintf "%s %s;" ty name
+        let decl = $"{ty} {name};"
         let rewritten =
             lines |> List.mapi (fun i l ->
-                if i = idx then sprintf "%s%s = %s" (m.Groups.["ind"].Value) name (m.Groups.["rhs"].Value)
+                if i = idx then $"""{(m.Groups.["ind"].Value)}{name} = {(m.Groups.["rhs"].Value)}"""
                 else l)
         Some (decl, rewritten)
     | _ -> None
@@ -263,7 +262,7 @@ let tryHoistModuleBindingDecl (name: string) (lines: string list) : (string * st
 let hoistSymmDecl (name: string) (symmVec: int list) : string =
     let cell = symmDeclsCell ()
     let values = symmVec |> List.map string |> String.concat ", "
-    let decl = sprintf "static constexpr const size_t %s[%d] = {%s};" name symmVec.Length values
+    let decl = $"static constexpr const size_t {name}[{symmVec.Length}] = {{{values}}};"
     cell.AppendDistinct decl
     name
 
@@ -294,20 +293,17 @@ let internal emitAllocRhs
     | AllocAntisymmetric ->
         // Matches allocate_antisym byte-for-byte (verified at ranks 2-4).
         let allOnes = List.replicate rank 1
-        let maskName = hoistSymmDecl (sprintf "%s_anti" extentsName) allOnes
-        Ok (sprintf "{ allocate<typename promote<%s, %d>::type, %s, false>(%s), %s }"
-                elemType rank maskName extentsName extentsName)
+        let maskName = hoistSymmDecl ($"{extentsName}_anti") allOnes
+        Ok ($"{{ allocate<typename promote<{elemType}, {rank}>::type, {maskName}, false>({extentsName}), {extentsName} }}")
     | AllocDense | AllocSymmetric ->
-        Ok (sprintf "{ allocate<typename promote<%s, %d>::type, %s>(%s), %s }"
-                elemType rank symmArg extentsName extentsName)
+        Ok ($"{{ allocate<typename promote<{elemType}, {rank}>::type, {symmArg}>({extentsName}), {extentsName} }}")
     | AllocPerGroupStrict strictVec ->
         // symmArg MUST be the compact-grouped SYMM mask (antisym grouped like
         // symmetric), built by the caller's buildSymmVecWithStrict so SYMM and
         // STRICT align position-for-position. Sign is lazy-on-read (canon_*),
         // never baked into storage.
-        let strictName = hoistSymmDecl (sprintf "%s_strict" extentsName) strictVec
-        Ok (sprintf "{ allocate_strict<typename promote<%s, %d>::type, %s, %s>(%s), %s }"
-                elemType rank symmArg strictName extentsName extentsName)
+        let strictName = hoistSymmDecl ($"{extentsName}_strict") strictVec
+        Ok ($"{{ allocate_strict<typename promote<{elemType}, {rank}>::type, {symmArg}, {strictName}>({extentsName}), {extentsName} }}")
     | AllocWreath (levels, _, _) ->
         // Reaching here means some OTHER site (a copy, negate, materializer) tried
         // to put a wreath class into an Array wrapper; genWreathApply is the real
@@ -317,7 +313,7 @@ Array<T,N>: allocate<> builds ONE shrinking simplex and a wreath's rows shrink p
 deduced wreath OUTPUT of a comm-tied apply has an emitter (a flat orb_cell_count pool)."
                       (ppOrbitLevels levels))
     | AllocUnsupported reason ->
-        Error (sprintf "Blade codegen: unsupported antisymmetric output storage -- %s" reason)
+        Error ($"Blade codegen: unsupported antisymmetric output storage -- {reason}")
 
 /// The `orb_level<...>` template-argument list for an OrbIdx class, in the
 /// header's public (doc) order: OUTERMOST LAST, exactly as `IROrbitClass`
@@ -330,7 +326,7 @@ deduced wreath OUTPUT of a comm-tied apply has an emitter (a flat orb_cell_count
 let orbLevelArgs (levels: (int * bool) list) : string =
     levels
     |> List.map (fun (r, isPlus) ->
-        sprintf "orbit_wreath_utilities::orb_level<%d,%s>" r (if isPlus then "true" else "false"))
+        $"""orbit_wreath_utilities::orb_level<{r},{(if isPlus then "true" else "false")}>""")
     |> String.concat ", "
 
 // Materializer allocation descriptors (deterministic deallocation, site 7)
@@ -645,7 +641,7 @@ let ompThreadsSuppressedReason () : string =
 /// swallow the rest of the statement. Same argument as the `dispatchMarkerTag`
 /// block comments at those sites.
 let ompThreadsSuppressedBlockMarker () : string =
-    sprintf "/* [omp] thread pragma suppressed: %s */" (ompThreadsSuppressedReason ())
+    $"/* [omp] thread pragma suppressed: {(ompThreadsSuppressedReason ())} */"
 
 /// The census phrase for "this kernel asked for `omp` and got serial code",
 /// shared by BOTH comment forms so they cannot drift. `ompSuppressedMarker`
@@ -658,7 +654,7 @@ let ompThreadsSuppressedBlockMarker () : string =
 /// order-dependent and the earliest consumer -- `renderReduceExpr`, an
 /// expression-position emitter -- sits above that function.
 let ompSuppressedPhrase (reason: string) : string =
-    sprintf "[omp] requested but emitted serial: %s" reason
+    $"[omp] requested but emitted serial: {reason}"
 
 /// The census marker as a BLOCK comment, for emitters whose output is a
 /// SINGLE-LINE IIFE (`[&]() { ... }()`) at an expression position, where a `//`
@@ -669,7 +665,7 @@ let ompSuppressedPhrase (reason: string) : string =
 /// Returns "" when the kernel never asked for `omp`, so a caller can prepend it
 /// unconditionally.
 let ompSuppressedBlockMarker (requested: bool) (reason: string) : string =
-    if requested then sprintf "/* %s */ " (ompSuppressedPhrase reason) else ""
+    if requested then $"/* {(ompSuppressedPhrase reason)} */ " else ""
 
 /// Collector: did THIS program assembly emit a `blade_linalg::` dispatch call?
 /// Set by the gram / matmul emitters during genModule; the program assemblers
@@ -859,7 +855,7 @@ let mpiDatatypeOf (et: ElemType) : string option =
 /// computes includes and printCode BEFORE genModule runs. Lifted lambdas land
 /// in module.Functions, so both kernel forms (lambda / top-level fn) are seen.
 let moduleUsesMpi (modul: IRModule) : bool =
-    modul.Functions |> List.exists (fun f -> f.IsMpiParallel)
+    modul.Functions |> List.exists (_.IsMpiParallel)
 
 /// Whether any kernel is the MPI-outer/OpenMP-inner hybrid (`where mpi,
 /// omp(...)`). Drives the thread-aware MPI init: hybrid ranks host an OMP
@@ -966,7 +962,7 @@ let setCurrentCodegenDecl (name: string) : unit = (currentDeclCell ()).Value <- 
 /// told once.
 let recordUnhandledIRNode (position: string) (nodeName: string) : unit =
     let cell = unhandledNodesCell ()
-    let entry = (sprintf "%s in %s" nodeName position, (currentDeclCell ()).Value)
+    let entry = ($"{nodeName} in {position}", (currentDeclCell ()).Value)
     if not (List.contains entry cell.Value) then
         cell.Value <- cell.Value @ [entry]
 
@@ -978,9 +974,9 @@ let takeUnhandledIRNodeDiagnostics () : Blade.Diagnostics.Diagnostic list =
     let entries = cell.Value
     cell.Value <- []
     entries |> List.map (fun (what, declName) ->
-        let where = if declName = "" then "" else sprintf " (while emitting '%s')" declName
+        let where = if declName = "" then "" else $" (while emitting '{declName}')"
         Blade.Diagnostics.Codes.backendLimit (IR.declSpanOf declName)
-            (sprintf "code generation has no rule for %s%s" what where)
+            ($"code generation has no rule for {what}{where}")
         |> Blade.Diagnostics.withNote
             "this is a gap in the C++ back end, not an error in your program -- \
              the construct typechecked and lowered. Please report it; meanwhile, \
@@ -1038,9 +1034,9 @@ let takeCodegenRefusalDiagnostics (cppCode: string) : Blade.Diagnostics.Diagnost
        || not (cppCode.Contains "#error" || cppCode.Contains "BLADE_CODEGEN_ERROR_") then []
     else
         entries |> List.map (fun (msg, declName) ->
-            let where = if declName = "" then "" else sprintf " (while emitting '%s')" declName
+            let where = if declName = "" then "" else $" (while emitting '{declName}')"
             Blade.Diagnostics.Codes.backendRefusal (IR.declSpanOf declName)
-                (sprintf "%s%s" msg where))
+                ($"{msg}{where}"))
 
 /// Record an expression-level warning and return a C++ expression that causes a compile error.
 /// The identifier is the in-place marker; the companion `#error` directive is
@@ -1059,7 +1055,7 @@ let exprError (msg: string) : string =
     // otherwise be reported twice under two codes.
     if not (msg.StartsWith "unsupported IR node") then
         recordCodegenRefusal msg
-    sprintf "BLADE_CODEGEN_ERROR_%s" (msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())
+    $"""BLADE_CODEGEN_ERROR_{(msg.Replace(" ", "_").Replace("'", "").Replace("(", "").Replace(")", "").Replace(",", "").Replace(":", "").Replace("\"", "").ToUpper())}"""
 
 // Substitution map for contains-aware mask rendering.
 //
@@ -1194,7 +1190,7 @@ let primTypeToCpp = function
 
 /// Get rank (total dimensions) from array type
 let arrayRank (arr: IRArrayType) =
-    arr.IndexTypes |> List.sumBy (fun i -> i.Rank)
+    arr.IndexTypes |> List.sumBy (_.Rank)
 
 // ---------------------------------------------------------------------------
 // Array-SHAPE predicates: which C++ wrapper an array type is spelled as.
@@ -1311,12 +1307,12 @@ let rec elemTypeToCpp (ty: IRType) : string =
     | InferElem id ->
         let cell = exprWarningsCell ()
         cell.Value <- cell.Value @
-            [sprintf "elemTypeToCpp: unresolved type variable T?%d in element position" id]
-        sprintf "BLADE_UNRESOLVED_ELEM_TYPE_%d" id
+            [$"elemTypeToCpp: unresolved type variable T?{id} in element position"]
+        $"BLADE_UNRESOLVED_ELEM_TYPE_{id}"
     | PolyElem (_, var) ->
         let cell = exprWarningsCell ()
         cell.Value <- cell.Value @
-            [sprintf "elemTypeToCpp: PolyElem<%s> in element position is not yet implemented" var]
+            [$"elemTypeToCpp: PolyElem<{var}> in element position is not yet implemented"]
         "BLADE_NOT_IMPLEMENTED_POLY_ELEM"
     | InvalidElem ->
         let cell = exprWarningsCell ()
@@ -1342,7 +1338,7 @@ and irTypeToCpp = function
         // breaks. arrowSlotTypeForFuncSig delegates non-array elements
         // back to irTypeToCpp, so scalar/nested-tuple elements render as
         // before.
-        sprintf "std::tuple<%s>" (ts |> List.map arrowSlotTypeForFuncSig |> String.concat ", ")
+        $"""std::tuple<{(ts |> List.map arrowSlotTypeForFuncSig |> String.concat ", ")}>"""
     | IRTUnit -> "void"
     | IRTLoop lt ->
         match lt.Kind with
@@ -1388,8 +1384,8 @@ and irTypeToCpp = function
     | IRTNamed name -> name  // Named types (structs, etc.) use their name directly
     | IRTInfer n ->
         let cell = exprWarningsCell ()
-        cell.Value <- cell.Value @ [sprintf "unresolved type variable _%d reached codegen" n]
-        sprintf "BLADE_UNRESOLVED_TYPE_%d" n
+        cell.Value <- cell.Value @ [$"unresolved type variable _{n} reached codegen"]
+        $"BLADE_UNRESOLVED_TYPE_{n}"
     | IRTUnitAnnotated (inner, _) -> irTypeToCpp inner  // Units erase at codegen
     | IRTGroupKeys _ -> "void*"  // GroupKeys is an opaque runtime structure
     | IRTArrow (slots, result, identity) ->
@@ -1402,16 +1398,16 @@ and irTypeToCpp = function
         //     Ragged<T> via operator[] returns (`let row = arr(i)` needs this, not
         //     the wrapper, which is reserved for allocation sites and signatures).
         //   - mixed slot kinds: not yet expressible by language surface; sentinel.
-        let isAllSVal = slots |> List.forall (function SVal _ -> true | _ -> false)
-        let isAllStored = slots |> List.forall (function SIdx _ -> true | _ -> false)
-        let isAllVirtual = slots |> List.forall (function SIdxVirt _ -> true | _ -> false)
+        let isAllSVal = slots |> List.forall (_.IsSVal)
+        let isAllStored = slots |> List.forall (_.IsSIdx)
+        let isAllVirtual = slots |> List.forall (_.IsSIdxVirt)
         if isAllSVal then
             let paramTypes =
                 slots |> List.map (function
                     | SVal t -> arrowSlotTypeForFuncSig t
                     | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.iceCodegen "unreachable -- guarded by isAllSVal")))
             let paramList = String.concat ", " paramTypes
-            sprintf "std::function<%s(%s)>" (arrowSlotTypeForFuncSig result) paramList
+            $"std::function<{(arrowSlotTypeForFuncSig result)}({paramList})>"
         elif (isAllStored || isAllVirtual) && not slots.IsEmpty then
             // Reconstruct an IRArrayType view for rendering
             let indexTypes =
@@ -1424,7 +1420,7 @@ and irTypeToCpp = function
                 IsVirtual = isAllVirtual
                 Identity = identity
             }
-            sprintf "promote<%s, %d>::type" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+            $"promote<{(elemTypeToCpp arr.ElemType)}, {arrayRank arr}>::type"
         else
             let cell = exprWarningsCell ()
             cell.Value <- cell.Value @ ["IRTArrow with mixed slot kinds reached codegen (no language construct produces these yet)"]
@@ -1458,9 +1454,9 @@ and cppArrayTypeStr (arr: IRArrayType) : string =
         let rank =
             arr.IndexTypes
             |> List.tryFind (fun idx -> idx.IxKind = IxKCompound)
-            |> Option.map (fun idx -> idx.Rank)
+            |> Option.map (_.Rank)
             |> Option.defaultValue (arrayRank arr)
-        sprintf "Compound<%s, %d>" (elemTypeToCpp arr.ElemType) rank
+        $"Compound<{(elemTypeToCpp arr.ElemType)}, {rank}>"
     elif isSparseArrayType arr then
         // Sparse<T, RANK>: an explicit key enumeration. RANK is the key tuple
         // arity, carried on the sparse index type's Rank -- same read-off
@@ -1468,22 +1464,22 @@ and cppArrayTypeStr (arr: IRArrayType) : string =
         let rank =
             arr.IndexTypes
             |> List.tryFind (fun idx -> idx.IxKind = IxKSparse)
-            |> Option.map (fun idx -> idx.Rank)
+            |> Option.map (_.Rank)
             |> Option.defaultValue (arrayRank arr)
-        sprintf "Sparse<%s, %d>" (elemTypeToCpp arr.ElemType) rank
+        $"Sparse<{(elemTypeToCpp arr.ElemType)}, {rank}>"
     elif declaresAsRaggedRow arr then
         // Rank-1 peeled row: carries its length inline as `.len`. Shared with
         // the peel's row bindings via `declaresAsRaggedRow` (see its doc for
         // the IxKGroupMember gap).
-        sprintf "RaggedRow<%s>" (elemTypeToCpp arr.ElemType)
+        $"RaggedRow<{(elemTypeToCpp arr.ElemType)}>"
     elif isRaggedArrayType arr || isDepIdxArrayType arr then
         // Rank >= 2 ragged/dep-idx container. A grouped array
         // ([__group_outer; __group_member]) deliberately does NOT land here:
         // group_by materializes a row-pointer skeleton (`Array<T*, 1>`), not
         // a Ragged<T>, and that representation is unchanged.
-        sprintf "Ragged<%s>" (elemTypeToCpp arr.ElemType)
+        $"Ragged<{(elemTypeToCpp arr.ElemType)}>"
     else
-        sprintf "Array<%s, %d>" (elemTypeToCpp arr.ElemType) (arrayRank arr)
+        $"Array<{(elemTypeToCpp arr.ElemType)}, {arrayRank arr}>"
 
 /// Render a type for use inside a std::function<...> signature. Array types
 /// render as the WRAPPER form to match function declarations at the call

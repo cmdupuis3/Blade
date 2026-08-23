@@ -419,7 +419,7 @@ let private foldProviderRead (env: StaticEnv) (inner: Expr) : Result<StaticValue
 /// so a runaway is refused rather than half-evaluated.
 let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr) : Result<StaticValue, string> =
     if depth > fuel.MaxDepth then
-        Error (sprintf "Static evaluation: nesting depth limit exceeded (%d levels -- possible infinite recursion)" fuel.MaxDepth)
+        Error $"Static evaluation: nesting depth limit exceeded ({fuel.MaxDepth} levels -- possible infinite recursion)"
     elif fuel.Left <= 0 then
         Error "Static evaluation: step limit exceeded (possible infinite recursion)"
     else
@@ -436,7 +436,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
         | Some v -> Ok v
         | None ->
             // Could be a static function used as a value (shouldn't happen normally)
-            Error (sprintf "Static evaluation: undefined variable '%s'" name)
+            Error $"Static evaluation: undefined variable '{name}'"
 
     | ExprKind.ExprBinOp (_, op, l, r) ->
         // Both operands are visited at depth + 1 and BOTH draw from the same
@@ -467,8 +467,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
             env.CalledFunctions.Value <- Set.add fname env.CalledFunctions.Value
             evalArgs env fuel depth args |> Result.bind (fun argVals ->
                 if argVals.Length <> funcDef.Params.Length then
-                    Error (sprintf "Static function '%s' expects %d args, got %d"
-                               fname funcDef.Params.Length argVals.Length)
+                    Error ($"Static function '{fname}' expects {funcDef.Params.Length} args, got {argVals.Length}")
                 else
                     let bodyEnv =
                         (funcDef.Params, argVals) ||> List.zip
@@ -496,7 +495,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
 
     | ExprKind.ExprApp (func, args) ->
         // Non-variable function position -- try evaluating
-        Error (sprintf "Static evaluation: unsupported function form in call")
+        Error "Static evaluation: unsupported function form in call"
 
     | ExprKind.ExprIf (cond, thenBr, elseBr) ->
         evalCore env fuel (depth + 1) cond |> Result.bind (fun cv ->
@@ -526,8 +525,8 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
     // Module-qualified static access (`M.k`): imported statics are seeded
     // into Values under their qualified name by checkModule's pre-pass --
     // consult that before treating the field access as a structural read.
-    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar objName }, field) when Map.containsKey (sprintf "%s.%s" objName field) env.Values ->
-        Ok env.Values.[sprintf "%s.%s" objName field]
+    | ExprKind.ExprField ({ Kind = ExprKind.ExprVar objName }, field) when Map.containsKey $"{objName}.{field}" env.Values ->
+        Ok env.Values.[$"{objName}.{field}"]
 
     | ExprKind.ExprField (obj, field) ->
         evalCore env fuel (depth + 1) obj |> Result.bind (fun ov ->
@@ -535,8 +534,8 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
             | SVStruct (sname, sfields) ->
                 match sfields |> List.tryFind (fun (fn, _) -> fn = field) with
                 | Some (_, v) -> Ok v
-                | None -> Error (sprintf "Static evaluation: struct %s has no field '%s'" sname field)
-            | _ -> Error (sprintf "Static evaluation: field access '%s' not supported on static values" field))
+                | None -> Error $"Static evaluation: struct {sname} has no field '{field}'"
+            | _ -> Error $"Static evaluation: field access '{field}' not supported on static values")
 
     | ExprKind.ExprStruct (name, fields, spread) ->
         // Evaluate all field values, stored as an SVStruct (name + named
@@ -556,7 +555,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
                 | None -> Ok provided
                 | Some baseExpr ->
                     match Map.tryFind name env.Structs with
-                    | None -> Error (sprintf "Static evaluation: cannot fold '..' spread for struct %s (unknown field layout)" name)
+                    | None -> Error $"Static evaluation: cannot fold '..' spread for struct {name} (unknown field layout)"
                     | Some info ->
                         evalCore env fuel (depth + 1) baseExpr |> Result.bind (fun bv ->
                             match bv with
@@ -571,7 +570,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
                                     List.zip info.Fields bvals
                                     |> List.filter (fun (fn, _) -> not (List.contains fn providedNames))
                                 Ok (provided @ inherited)
-                            | _ -> Error (sprintf "Static evaluation: '..' spread base for struct %s did not fold to a %d-field struct" name info.Fields.Length)))
+                            | _ -> Error $"Static evaluation: '..' spread base for struct {name} did not fold to a {info.Fields.Length}-field struct"))
         fieldValsR
         |> Result.bind (fun fieldVals ->
             // Field order follows DECLARATION order when known (the spread
@@ -599,10 +598,10 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
                             match evalCore bodyEnv fuel (depth + 1) c with
                             | Ok (SVBool true) -> checkAll (i + 1) rest
                             | Ok (SVBool false) ->
-                                if total = 1 then Error (sprintf "Constraint violation in %s (static)" name)
-                                else Error (sprintf "Constraint violation in %s (static, conjunct %d)" name i)
-                            | Ok _ -> Error (sprintf "constraint of %s is not a boolean at compile time" name)
-                            | Error why -> Error (sprintf "constraint of %s cannot fold: %s" name why)
+                                if total = 1 then Error $"Constraint violation in {name} (static)"
+                                else Error $"Constraint violation in {name} (static, conjunct {i})"
+                            | Ok _ -> Error $"constraint of {name} is not a boolean at compile time"
+                            | Error why -> Error $"constraint of {name} cannot fold: {why}"
                 checkAll 1 info.Conjuncts
             | _ -> Ok result)
 
@@ -612,7 +611,7 @@ let rec private evalCore (env: StaticEnv) (fuel: Fuel) (depth: int) (expr: Expr)
         foldProviderRead env inner
 
     | _ ->
-        Error (sprintf "Static evaluation: unsupported expression form")
+        Error "Static evaluation: unsupported expression form"
 
 /// `depth` here (and in evalMatch/evalBlock/evalBuiltin below) is the depth of
 /// the PARENT node; the arguments themselves are its children, hence + 1.
@@ -772,7 +771,7 @@ and private evalBuiltin env fuel depth (name: string) (args: Expr list) : Result
         | "min", [SVFloat a; SVFloat b] -> Ok (SVFloat (min a b))
         | "max", [SVFloat a; SVFloat b] -> Ok (SVFloat (max a b))
         | "length", [SVTuple xs] -> Ok (SVInt (int64 xs.Length))
-        | "prodsum", (SVTuple _ :: _) when argVals |> List.forall (function SVTuple _ -> true | _ -> false) ->
+        | "prodsum", (SVTuple _ :: _) when argVals |> List.forall _.IsSVTuple ->
             // Static mirror of the runtime prodsum intrinsic: sum_t prod_l
             // x_l(t), over equal-length static arrays (fold as SVTuple).
             let tuples = argVals |> List.map (function SVTuple xs -> xs | _ -> [])
@@ -793,7 +792,7 @@ and private evalBuiltin env fuel depth (name: string) (args: Expr list) : Result
             // names cannot be overridden.
             match externalBuiltins.TryGetValue name with
             | true, f -> f argVals
-            | _ -> Error (sprintf "Static evaluation: unknown function '%s' or wrong arguments" name))
+            | _ -> Error $"Static evaluation: unknown function '{name}' or wrong arguments")
 
 /// Evaluate binary operations with type promotion
 and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticValue, string> =
@@ -904,7 +903,7 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
         | DeclFunction fd when fd.IsStatic ->
             staticFuncs <- Map.add fd.Name {
                 Name = fd.Name
-                Params = fd.Params |> List.map (fun p -> p.Name)
+                Params = fd.Params |> List.map (_.Name)
                 Body = fd.Body
             } staticFuncs
         | DeclType (TyDeclStruct (sname, _, sfields, sconstraints, sIsStatic)) ->
@@ -912,7 +911,7 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
             // fold-time conjunct list mirrors the checker's via the shared
             // Ast.structConjuncts helper.
             structInfos <- Map.add sname {
-                Fields = sfields |> List.map (fun f -> f.Name)
+                Fields = sfields |> List.map (_.Name)
                 Conjuncts = structConjuncts sfields sconstraints
                 FieldDecls = sfields
                 Declared = sconstraints
@@ -931,7 +930,7 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
         | _ -> ()
 
     let pending = List.rev pendingRev
-    let staticNames = pending |> List.collect (fun pd -> pd.Names) |> Set.ofList
+    let staticNames = pending |> List.collect (_.Names) |> Set.ofList
 
     // Provider-backed roots: `import netcdf as nc` provider-module aliases
     // plus the bindings that load through them (`let sample =
@@ -1001,8 +1000,7 @@ let resolveStatics (decls: Located<Decl> list) : Result<StaticEnv * StaticFailur
 
     match topoSort deps with
     | Error cycle ->
-        Error (sprintf "Static evaluation: circular dependency among: %s"
-                   (cycle |> String.concat ", "))
+        Error ($"""Static evaluation: circular dependency among: {(cycle |> String.concat ", ")}""")
     | Ok evalOrder ->
         // Phase 3: Evaluate each declaration once, in dependency order.
         // Duplicate names across decls: Map.ofList keeps the last decl,
@@ -1038,8 +1036,8 @@ let rec ppStaticValue (v: StaticValue) : string =
     | SVInt n -> string n
     | SVFloat f -> sprintf "%g" f
     | SVBool b -> if b then "true" else "false"
-    | SVString s -> sprintf "\"%s\"" s
+    | SVString s -> $"\"{s}\""
     | SVUnit -> "()"
-    | SVTuple vs -> sprintf "(%s)" (vs |> List.map ppStaticValue |> String.concat ", ")
+    | SVTuple vs -> $"""({(vs |> List.map ppStaticValue |> String.concat ", ")})"""
     | SVStruct (n, fs) ->
-        sprintf "%s { %s }" n (fs |> List.map (fun (fn, v) -> sprintf "%s = %s" fn (ppStaticValue v)) |> String.concat ", ")
+        $"""{n} {{ {(fs |> List.map (fun (fn, v) -> $"{fn} = {ppStaticValue v}") |> String.concat ", ")} }}"""

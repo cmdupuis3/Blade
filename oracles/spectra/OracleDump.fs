@@ -12,7 +12,7 @@ open BladeSpectra.Polyspec
 let private fmt (x: float) = x.ToString("G17", CultureInfo.InvariantCulture)
 let private fmtArr (xs: float seq) =
     "[" + (xs |> Seq.map fmt |> String.concat ", ") + "]"
-let private fmtC (z: Cplx) = sprintf "(%s, %s)" (fmt z.Re) (fmt z.Im)
+let private fmtC (z: Cplx) = $"({fmt z.Re}, {fmt z.Im})"
 let private fmtCArr (zs: Cplx seq) =
     "[" + (zs |> Seq.map fmtC |> String.concat ", ") + "]"
 

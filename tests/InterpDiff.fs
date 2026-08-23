@@ -399,10 +399,10 @@ let runInterpDiffTests (categories: string list) : BlockResult =
             resultLine Skip name detail
         let skipUnsupported name feature =
             unsupported <- unsupported + 1
-            resultLine Skip name (sprintf "SKIP-UNSUPPORTED: %s" feature)
+            resultLine Skip name ($"SKIP-UNSUPPORTED: {feature}")
 
         for cat in categories do
-            printSubHeader (sprintf "category: %s" cat)
+            printSubHeader ($"category: {cat}")
             // Every test in a reject-only category is a compile-reject probe,
             // even without the "(rejects)" name marker (see rejectOnlyCategories).
             let catRejectOnly = rejectOnlyCategories.Contains cat
@@ -431,7 +431,7 @@ let runInterpDiffTests (categories: string list) : BlockResult =
 
                 elif isAbortProbe result then
                     match result.IRResult with
-                    | Error e -> fail name (sprintf "abort probe failed front-end: %s" e)
+                    | Error e -> fail name ($"abort probe failed front-end: {e}")
                     | Ok program ->
                         match runInterpTimedRec program name with
                         | Error e -> fail name e
@@ -488,12 +488,11 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                             // reason) if the refusal is correct, or fix whatever
                             // regressed. Neither is something this gate can infer.
                             fail name
-                                (sprintf "compiled front-end rejected an UNMARKED test -- mark it '(rejects)' or fix it: %s"
-                                         (firstLine e))
-                        | Ok _ -> fail name (sprintf "compiled side failed: %s" e)
+                                ($"compiled front-end rejected an UNMARKED test -- mark it '(rejects)' or fix it: {(firstLine e)}")
+                        | Ok _ -> fail name ($"compiled side failed: {e}")
                     | Ok (compiledExit, compiledOut) ->
                         match result.IRResult with
-                        | Error e -> fail name (sprintf "front-end rejected (unexpected): %s" e)
+                        | Error e -> fail name ($"front-end rejected (unexpected): {e}")
                         | Ok program ->
                             match runInterpTimedRec program name with
                             | Error e -> fail name e
@@ -501,12 +500,11 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                                 if interp.ExitCode = Run.ExitUnsupported then
                                     skipUnsupported name (unsupportedFeature interp)
                                 elif interp.ExitCode = Run.ExitInterpBug then
-                                    fail name (sprintf "interp bug: %s" (firstLine interp.Stderr))
+                                    fail name ($"interp bug: {(firstLine interp.Stderr)}")
                                 elif compiledExit <> 0 then
-                                    fail name (sprintf "compiled binary exited %d (non-abort test)" compiledExit)
+                                    fail name ($"compiled binary exited {compiledExit} (non-abort test)")
                                 elif interp.ExitCode <> 0 then
-                                    fail name (sprintf "interp exited %d, compiled exited 0: %s"
-                                                   interp.ExitCode (firstLine interp.Stderr))
+                                    fail name ($"interp exited {interp.ExitCode}, compiled exited 0: {(firstLine interp.Stderr)}")
                                 else
                                     let mine = normalize interp.Stdout
                                     let theirs = normalize compiledOut
@@ -520,7 +518,7 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                                         // Second gate: EXPECT values vs interp output.
                                         match checkExpectedValues (parseExpectedValues source) interp.Stdout with
                                         | Ok () -> pass name "values identical"
-                                        | Error msgs -> fail name (sprintf "interp value-check: %s" (String.concat "; " msgs))
+                                        | Error msgs -> fail name ($"""interp value-check: {(String.concat "; " msgs)}""")
 
         // ------------------------------------------------------------------
         // Provider-read wiring verification (M6). There are NO netcdf/zarr CORPUS
@@ -564,26 +562,26 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                     Data = Blade.ZarrProvider.ZarrWrite.WI64 [| 10L; 20L; 30L |]; OmitChunks = []; Blade = None } ]
             Blade.ZarrProvider.ZarrWrite.writeStoreV2 storePath vars
             let src =
-                sprintf "import zarr as z\nlet sample = z.load(\"%s\")\nlet A = sample.vars.A |> z.read\nlet F = sample.vars.F |> z.read\nlet N = sample.vars.N |> z.read\n" storePath
+                $"import zarr as z\nlet sample = z.load(\"{storePath}\")\nlet A = sample.vars.A |> z.read\nlet F = sample.vars.F |> z.read\nlet N = sample.vars.N |> z.read\n"
             match Blade.Lowering.lower src with
-            | Error e -> fail provName (sprintf "lower failed: %s" e)
+            | Error e -> fail provName ($"lower failed: {e}")
             | Ok ir ->
                 let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "interp_prov_verify"
                 let cppFile = Path.Combine(provDir, "interp_prov_verify.cpp")
                 File.WriteAllText(cppFile, cpp)
                 match compileCpp cppFile provDir with
-                | Error e when isSkipError e -> skip provName (sprintf "compile skipped: %s" e)
-                | Error e -> fail provName (sprintf "compile failed: %s" e)
+                | Error e when isSkipError e -> skip provName ($"compile skipped: {e}")
+                | Error e -> fail provName ($"compile failed: {e}")
                 | Ok exe ->
                     match runExecutable exe with
-                    | Error e -> fail provName (sprintf "compiled run failed: %s" e)
+                    | Error e -> fail provName ($"compiled run failed: {e}")
                     | Ok (code, compiledOut) when code <> 0 ->
-                        fail provName (sprintf "compiled binary exited %d: %s" code (firstLine compiledOut))
+                        fail provName ($"compiled binary exited {code}: {(firstLine compiledOut)}")
                     | Ok (_, compiledOut) ->
                         match runInterpTimed ir "interp_prov_verify" with
                         | Error e -> fail provName e
                         | Ok interp when interp.ExitCode <> 0 ->
-                            fail provName (sprintf "interp exited %d (compiled 0): %s" interp.ExitCode (firstLine interp.Stderr))
+                            fail provName ($"interp exited {interp.ExitCode} (compiled 0): {(firstLine interp.Stderr)}")
                         | Ok interp ->
                             let mine = normalize interp.Stdout
                             let theirs = normalize compiledOut
@@ -593,7 +591,7 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                                 fail provName "stdout diverges from compiled binary"
                                 printfn "    interp:   %s" (mine.Split('\n') |> Array.truncate 4 |> String.concat " | ")
                                 printfn "    compiled: %s" (theirs.Split('\n') |> Array.truncate 4 |> String.concat " | ")
-         with ex -> fail provName (sprintf "exception: %s" ex.Message))
+         with ex -> fail provName ($"exception: {ex.Message}"))
 
         if unsupported > 0 then
             printfn ""
@@ -619,10 +617,10 @@ let runInterpDiffTests (categories: string list) : BlockResult =
             |> List.iter (fun (n, t, heapMb, gen2) ->
                 printfn "    %7.2fs  heap %6.0f MB  gen2 %3d  %s" t heapMb gen2 n)
         printFooter blockName
-            [ sprintf "%d passed" passed
-              sprintf "%d failed" failed
-              sprintf "%d skip-unsupported" unsupported
-              sprintf "%d skipped" skipped ]
+            [ $"{passed} passed"
+              $"{failed} failed"
+              $"{unsupported} skip-unsupported"
+              $"{skipped} skipped" ]
         // SKIP-UNSUPPORTED folds into the roll-up's Skipped bucket (it is not a
         // failure) but is surfaced distinctly in the footer/summary lines above.
         { Block = blockName

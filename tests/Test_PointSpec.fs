@@ -102,7 +102,7 @@ let private raises (f: unit -> unit) : bool * string =
 
 let private showSpec (s: PgSpec) : string =
     if List.isEmpty s then "[]"
-    else s |> List.map (fun (n, m) -> sprintf "%s x %d" n m) |> String.concat ", "
+    else s |> List.map (fun (n, m) -> $"{n} x {m}") |> String.concat ", "
 
 let runPointSpecTests () : BlockResult =
     printHeader "PG Spec (point-group labels, the FS-weighted count)"
@@ -124,7 +124,7 @@ let runPointSpecTests () : BlockResult =
     let fetched = raises (fun () -> pointGroup "C4" |> ignore; pointGroup "D4" |> ignore)
     check "registry: fetching C4 and D4 runs certifyPointGroup without a single assert firing"
           (not (fst fetched))
-          (if fst fetched then snd fetched else sprintf "registry = {%s}" (String.concat ", " pointGroupNames))
+          (if fst fetched then snd fetched else $"""registry = {{{(String.concat ", " pointGroupNames)}}}""")
 
     let c4 = pointGroup "C4"
     let d4 = pointGroup "D4"
@@ -133,16 +133,16 @@ let runPointSpecTests () : BlockResult =
 
     check "C4: generator closure over the common word set has |G| = 4 elements"
           (c4i.Closure = 4 && c4.Order = 4)
-          (sprintf "words: %s" (String.concat " " c4i.Words))
+          ($"""words: {(String.concat " " c4i.Words)}""")
     check "D4: generator closure over the common word set has |G| = 8 elements"
           (d4i.Closure = 8 && d4.Order = 8)
-          (sprintf "words: %s" (String.concat " " d4i.Words))
+          ($"""words: {(String.concat " " d4i.Words)}""")
 
     // The FS indicators, printed rather than merely asserted. nu = 2 - e:
     // 1 at real type, 0 at complex type (see MLPointSpec.fsIndicator for why
     // the quaternionic row would read -2 and not the textbook -1).
     let showNu (xs: (string * int) list) =
-        xs |> List.map (fun (n, v) -> sprintf "%s=%d" n v) |> String.concat " "
+        xs |> List.map (fun (n, v) -> $"{n}={v}") |> String.concat " "
     check "C4 FS indicators sum_g chi(g^2)/|G|: A=1 B=1 E=0 — E is of COMPLEX type, e = 2"
           (c4i.FsIndicators = [ ("A", 1); ("B", 1); ("E", 0) ]
            && endDim (pgIrrep c4 "E").Fs = 2)
@@ -180,7 +180,7 @@ let runPointSpecTests () : BlockResult =
 
     check "R-Burnside trap: sum_i d_i^2/e_i = |G| — C4: 1+1+4/2 = 4, D4: 1+1+1+1+4 = 8"
           (c4i.Burnside = 4 && d4i.Burnside = 8 && burnsideSum c4 = c4.Order && burnsideSum d4 = d4.Order)
-          (sprintf "C4 %d = %d, D4 %d = %d" c4i.Burnside c4.Order d4i.Burnside d4.Order)
+          ($"C4 {c4i.Burnside} = {c4.Order}, D4 {d4i.Burnside} = {d4.Order}")
     check "endDim: R -> 1, C -> 2, H -> 4"
           (endDim FsReal = 1 && endDim FsComplex = 2 && endDim FsQuat = 4) ""
 
@@ -216,12 +216,11 @@ let runPointSpecTests () : BlockResult =
     let d4Hom = pgHomDim d4 d4Spec d4Spec
     check "THE CONTRAST: [trivial x1, E x2] -> itself is 9 at C4 and 5 at D4 — the FS correction is the only difference"
           (c4Hom = 9 && d4Hom = 5)
-          (sprintf "C4 %s -> %d (1 + 2*2*2), D4 %s -> %d (1 + 2*2*1)"
-               (showSpec c4Spec) c4Hom (showSpec d4Spec) d4Hom)
+          ($"C4 {(showSpec c4Spec)} -> {c4Hom} (1 + 2*2*2), D4 {(showSpec d4Spec)} -> {d4Hom} (1 + 2*2*1)")
     check "the contrast is NOT a dimension effect: both modules are 5-dimensional over R"
           (pgTotalDim c4 c4Spec = 5 && pgTotalDim d4 d4Spec = 5
            && (pgIrrep c4 "E").DimR = (pgIrrep d4 "E").DimR)
-          (sprintf "dim_R V = %d at both" (pgTotalDim c4 c4Spec))
+          ($"dim_R V = {(pgTotalDim c4 c4Spec)} at both")
     // And the same shape at the E label alone, where the ratio is starkest.
     check "[E x1] -> [E x1] is 2 at C4 and 1 at D4 — End_G(E) is C there and R here"
           (pgHomDim c4 [ ("E", 1) ] [ ("E", 1) ] = 2 && pgHomDim d4 [ ("E", 1) ] [ ("E", 1) ] = 1) ""
@@ -243,15 +242,15 @@ let runPointSpecTests () : BlockResult =
             if gb <> mb then
                 blockMismatch <- sprintf "%A -> %A: generic %d pairs vs MLSpec %d" si so gb mb :: blockMismatch
             pairs <- pairs + 1
-    check (sprintf "TWIN: genericHomDim @ O(3) (EndDim = 1) = MLSpec.homDim on all %d ordered spec pairs" pairs)
+    check ($"TWIN: genericHomDim @ O(3) (EndDim = 1) = MLSpec.homDim on all {pairs} ordered spec pairs")
           (List.isEmpty homMismatch)
           (if List.isEmpty homMismatch then
-             sprintf "%d specs, %d pairs, zero divergence — MLSpec byte-untouched" (List.length sweep) pairs
-           else sprintf "%d mismatches, e.g. %s" homMismatch.Length (List.head homMismatch))
-    check (sprintf "TWIN: genericHomBlocks @ O(3) pair count = MLSpec.homBlocks pair count on all %d pairs" pairs)
+             $"{(List.length sweep)} specs, {pairs} pairs, zero divergence — MLSpec byte-untouched"
+           else $"{homMismatch.Length} mismatches, e.g. {(List.head homMismatch)}")
+    check ($"TWIN: genericHomBlocks @ O(3) pair count = MLSpec.homBlocks pair count on all {pairs} pairs")
           (List.isEmpty blockMismatch)
           (if List.isEmpty blockMismatch then "zero divergence"
-           else sprintf "%d mismatches, e.g. %s" blockMismatch.Length (List.head blockMismatch))
+           else $"{blockMismatch.Length} mismatches, e.g. {(List.head blockMismatch)}")
     let totalOk = sweep |> List.forall (fun s -> genericTotalDim o3Algebra (o3Spec s) = MS.totalDim s)
     check "TWIN: genericTotalDim @ O(3) = MLSpec.totalDim on the 15 sweep specs" totalOk ""
     // The identity that ties the two together at e = 1 AND at e = 2: summing
@@ -270,7 +269,7 @@ let runPointSpecTests () : BlockResult =
     let quatCount = genericHomDim quatAlgebra [ ("Q", 2) ] [ ("Q", 3) ]
     check "FsQuat COUNTS uniformly: a synthetic H-type label weights a cell by e = 4 (2*3*4 = 24)"
           (quatCount = 24 && endDim quatLabel.Fs = 4)
-          (sprintf "genericHomDim [Q x2] -> [Q x3] = %d" quatCount)
+          ($"genericHomDim [Q x2] -> [Q x3] = {quatCount}")
     let (quatRaised, quatMsg) = raises (fun () -> endBasis quatLabel |> ignore)
     check "FsQuat REFUSES to emit: endBasis on an H-type label is a loud internal error"
           (quatRaised && quatMsg.Contains "RESERVED")
@@ -331,13 +330,13 @@ let runPointSpecTests () : BlockResult =
           (List.length dupBlocks = 5
            && dupBlocks |> List.map (fun (bi, bo, _, _) -> (bi, bo))
               = [ (0, 0); (2, 0); (1, 1); (0, 2); (2, 2) ])
-          (sprintf "%d pairs over spec [%s]" (List.length dupBlocks) (showSpec dupSpec))
+          ($"{(List.length dupBlocks)} pairs over spec [{(showSpec dupSpec)}]")
     let pairSum =
         dupBlocks |> List.sumBy (fun (_, _, (label, mOut), (_, mIn)) ->
             mOut * mIn * endDim (pgIrrep c4 label).Fs)
     check "sum over pgHomBlocks pairs of mOut*mIn*e = pgHomDim (the emission/count bridge)"
           (pairSum = pgHomDim c4 dupSpec dupSpec)
-          (sprintf "%d = %d" pairSum (pgHomDim c4 dupSpec dupSpec))
+          ($"{pairSum} = {(pgHomDim c4 dupSpec dupSpec)}")
     // Duplicate entries AGGREGATE in the count (MLSpec.aggregateByIrrep's rule).
     check "duplicate spec entries aggregate: [E x1, E x2] counts as [E x3]"
           (pgHomDim c4 [ ("E", 1); ("E", 2) ] [ ("E", 3) ] = pgHomDim c4 [ ("E", 3) ] [ ("E", 3) ]
@@ -364,5 +363,5 @@ let runPointSpecTests () : BlockResult =
     let (negMult, _) = raises (fun () -> pgTotalDim c4 [ ("A", -1) ] |> ignore)
     check "negative multiplicity is refused" negMult ""
 
-    printFooter "PG Spec" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "PG Spec" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "PG Spec"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

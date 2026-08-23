@@ -416,7 +416,7 @@ module Codes =
 
     let ice (message: string) : Diagnostic =
         mkError "BL9001" PhInternal noSpan
-            (sprintf "internal compiler error: %s" message)
+            $"internal compiler error: {message}"
         |> withNote "this is a bug in the Blade compiler, not in your program -- please report it"
 
     let iceCodegen (message: string) : Diagnostic =
@@ -458,8 +458,8 @@ module Render =
         let line = span.StartLine
         let col = max 1 span.StartCol
         match span.File with
-        | Some f -> sprintf "%s:%d:%d" f line col
-        | None -> sprintf "%d:%d" line col
+        | Some f -> $"{f}:{line}:{col}"
+        | None -> $"{line}:{col}"
 
     /// Legacy one-line form, mirroring TypeEnv.formatCompileError's shape:
     ///   "file:line:col: message" + indented context lines (outermost first).
@@ -471,9 +471,9 @@ module Render =
             |> List.map (sprintf "  %s")
             |> String.concat "\n"
         if loc = "" && context = "" then d.Message
-        elif context = "" then sprintf "%s: %s" loc d.Message
-        elif loc = "" then sprintf "%s\n%s" d.Message context
-        else sprintf "%s: %s\n%s" loc d.Message context
+        elif context = "" then $"{loc}: {d.Message}"
+        elif loc = "" then $"{d.Message}\n{context}"
+        else $"{loc}: {d.Message}\n{context}"
 
     /// Snippet block for one located span: gutter, source line, underline.
     /// Renders the span's first line only; a multi-line span underlines to
@@ -503,8 +503,8 @@ module Render =
                 let startCol = min startCol (text.Length + 1)
                 let underlineLen = max 1 (min underlineLen (text.Length - startCol + 2))
                 let gut = gutterColor useColor
-                [ sprintf "%s %s" (gut (pad + " |")) ""
-                  sprintf "%s %s" (gut (sprintf "%d |" lineNo)) text
+                [ $"""{(gut (pad + " |"))} {""}"""
+                  $"""{(gut $"{lineNo} |")} {text}"""
                   sprintf "%s %s%s"
                       (gut (pad + " |"))
                       (String.replicate (startCol - 1) " ")
@@ -522,31 +522,31 @@ module Render =
         let header =
             sprintf "%s%s %s"
                 (sevColor useColor d.Severity (sevLabel d.Severity))
-                (sevColor useColor d.Severity (sprintf "[%s]:" d.Code))
+                (sevColor useColor d.Severity $"[{d.Code}]:")
                 (bold useColor d.Message)
         let locLines =
             if hasLocation d.Span then
-                sprintf "  %s %s" (gutterColor useColor "-->") (location d.Span)
+                $"""  {(gutterColor useColor "-->")} {(location d.Span)}"""
                 :: snippet useColor d.Severity sm d.Span
             else []
         let noteLines =
             d.Notes
             |> List.collect (fun (nspan, text) ->
-                let noteLine = sprintf "  %s %s" (gutterColor useColor "=") (sprintf "note: %s" text)
+                let noteLine = $"""  {(gutterColor useColor "=")} {$"note: {text}"}"""
                 match nspan with
                 | Some s when hasLocation s ->
-                    noteLine :: (sprintf "    %s %s" (gutterColor useColor "-->") (location s)) :: []
+                    noteLine :: ($"""    {(gutterColor useColor "-->")} {(location s)}""") :: []
                 | _ -> [ noteLine ])
         // Synthesized last, so a phase's own notes still read first: this one
         // is about the FILE, not the finding.
         let provenanceLines =
             match buildOutputNote d.Span with
-            | Some text -> [ sprintf "  %s %s" (gutterColor useColor "=") (sprintf "note: %s" text) ]
+            | Some text -> [ $"""  {(gutterColor useColor "=")} {$"note: {text}"}""" ]
             | None -> []
         let contextLines =
             d.Context
             |> List.rev
-            |> List.map (fun c -> sprintf "  %s %s" (gutterColor useColor "=") c)
+            |> List.map (fun c -> $"""  {(gutterColor useColor "=")} {c}""")
         String.concat "\n" (header :: (locLines @ noteLines @ provenanceLines @ contextLines))
 
     let renderAll (useColor: bool) (sm: SourceMap option) (ds: Diagnostic list) : string =

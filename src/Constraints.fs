@@ -54,4 +54,4 @@ let registeredConstraintNames () : string list =
 /// provenance) and handlers (which insert license facts over these tokens
 /// in EnterBody) agree on the format without coupling to each other.
 let paramProvenanceToken (funcName: string) (paramName: string) : string =
-    sprintf "%s.%s" funcName paramName
+    $"{funcName}.{paramName}"

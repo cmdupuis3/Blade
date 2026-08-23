@@ -337,7 +337,7 @@ let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
     | IRBind _ | IRZip _ | IRSequence _ -> true
     | IRVar (id, _) ->
         match envTryFind env id with
-        | Some cell -> (match cell.V with VDeferred _ -> true | _ -> false)
+        | Some cell -> cell.V.IsVDeferred
         | None -> false
     | _ -> false
 
@@ -376,11 +376,11 @@ let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
     | IRTuple elems -> elems |> List.forall (isDeferredOperand env)
     | IRTupleProj (IRVar (pid, _), _, _) ->
         match envTryFind env pid with
-        | Some cell -> (match cell.V with VDeferred _ -> true | _ -> false)
+        | Some cell -> cell.V.IsVDeferred
         | None -> false
     | IRVar (srcId, _) ->
         match envTryFind env srcId with
-        | Some cell -> (match cell.V with VDeferred _ -> true | _ -> false)
+        | Some cell -> cell.V.IsVDeferred
         | None -> false
     | _ -> false
 
@@ -464,7 +464,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         | None ->
             match st.Callables.TryGetValue id with
             | true, callable -> makeClosure env callable
-            | _ -> raise (InterpPanic ("BL8004", sprintf "unbound variable (id %d)" id, None, 0))
+            | _ -> raise (InterpPanic ("BL8004", $"unbound variable (id {id})", None, 0))
 
     | IRParam (name, _, ty) ->
         // Bare IRParam in value position: a nullary variant constructor. (Real
@@ -472,7 +472,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // this expression form.)
         match variantResultName ty with
         | Some tn when isCtorName name -> VVariant (tn, hash name, None)
-        | _ -> raise (InterpUnsupported (sprintf "IRParam '%s' (qualified or partially-applied reference)" name))
+        | _ -> raise (InterpUnsupported $"IRParam '{name}' (qualified or partially-applied reference)")
 
     | IRComplex (re, im) ->
         let r = toF64 (evalExpr st env re)
@@ -567,7 +567,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         | VStruct (_, fields) ->
             match fields |> Array.tryFind (fun (n, _) -> n = field) with
             | Some (_, v) -> v
-            | None -> raise (InterpPanic ("BL8003", sprintf "no field '%s' on struct" field, None, 0))
+            | None -> raise (InterpPanic ("BL8003", $"no field '{field}' on struct", None, 0))
         | _ -> raise (InterpUnsupported "IRFieldAccess on non-struct value")
 
     // Inline object_for application (`A [op] B` outer product, etc.) is an
@@ -759,7 +759,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
                           sb.Append(elemStr store (i * nc + j)) |> ignore
                       sb.Append ']' |> ignore
                   sb.Append ']' |> ignore
-              | r, _ -> raise (InterpUnsupported (sprintf "display.json_array: unsupported rank %d" r)))
+              | r, _ -> raise (InterpUnsupported $"display.json_array: unsupported rank {r}"))
              VString (sb.ToString())
          | _ -> raise (InterpUnsupported "display.json_array: operand did not evaluate to an array"))
 
@@ -949,7 +949,7 @@ and applyValue (st: InterpState) (fv: Value) (argVals: Value list) : Value =
 and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, ValueRef>) (args: Value list) : Value =
     st.Depth <- st.Depth + 1
     if st.Depth > st.Limits.MaxDepth then
-        raise (InterpPanic ("BL8002", sprintf "interpreter call depth budget exceeded (%d)" st.Limits.MaxDepth, None, 0))
+        raise (InterpPanic ("BL8002", $"interpreter call depth budget exceeded ({st.Limits.MaxDepth})", None, 0))
     // Shadow-stack frame at body entry, named by the Blade function -- the SAME
     // string CodeGen pushes via BLADE_FRAME (CodeGen.fs:9342/9392). Pushed AFTER
     // the depth guard (an over-budget call never ran a C++ body, so it pushed no
@@ -968,8 +968,7 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
     let ps = callable.Params
     if List.length ps <> List.length args then
         raise (InterpPanic ("BL8002",
-                            sprintf "arity mismatch calling '%s' (expected %d, got %d)"
-                                callable.Name (List.length ps) (List.length args),
+                            $"arity mismatch calling '{callable.Name}' (expected {(List.length ps)}, got {(List.length args)})",
                             None, 0))
     List.iter2 (fun (p: IRParam) (a: Value) -> envBind frame p.VarId a |> ignore) ps args
     let result = evalExpr st frame callable.Body
@@ -1044,7 +1043,7 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
         | VStruct (_, fields) ->
             match fields |> Array.tryFindIndex (fun (n, _) -> n = field) with
             | Some i -> let (n, _) = fields.[i] in fields.[i] <- (n, v)
-            | None -> raise (InterpPanic ("BL8003", sprintf "no field '%s' on struct" field, None, 0))
+            | None -> raise (InterpPanic ("BL8003", $"no field '{field}' on struct", None, 0))
         | _ -> raise (InterpUnsupported "assignment to non-struct field target")
     | LVIndex (arrExpr, indices) ->
         // Array element assignment: force the target array to concrete form, then
@@ -1132,8 +1131,7 @@ let private checkArrayLitRowExtents (varName: string) (elements: IRExpr list) (a
                      match dOpt with
                      | Some n when j < row.Extents.Length && row.Extents.[j] <> n ->
                          raise (InterpPanic ("BL8006",
-                                 sprintf "array literal row %s of '%s' has extent %d in dim %d, but the declared type expects %d"
-                                     (formatPath path) varName row.Extents.[j] j n,
+                                 $"array literal row {(formatPath path)} of '{varName}' has extent {row.Extents.[j]} in dim {j}, but the declared type expects {n}",
                                  None, 0))
                      | _ -> ())
              | _ -> ())
@@ -1177,7 +1175,7 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
         // too, not a silently mis-shaped array (func-arrays T12 abort probe).
         (match b.Value, value with
          | IRArrayLit (elements, arrType), VArray arr ->
-             let cppName = if b.Name = "_" then sprintf "__tup_%d" b.Id else b.Name
+             let cppName = if b.Name = "_" then $"__tup_{b.Id}" else b.Name
              checkArrayLitRowExtents cppName elements arrType arr
          | _ -> ())
         // Copy semantics for assignable top-level array bindings whose

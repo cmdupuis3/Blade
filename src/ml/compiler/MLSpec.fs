@@ -50,7 +50,7 @@ let tpSpec (s1: Spec) (s2: Spec) : Spec =
             { L = l; Parity = parityMul e1.Parity e2.Parity; Mult = e1.Mult * e2.Mult } ]
     |> List.groupBy (fun e -> (e.L, e.Parity))
     |> List.sortBy fst
-    |> List.map (fun ((l, p), es) -> { L = l; Parity = p; Mult = es |> List.sumBy (fun e -> e.Mult) })
+    |> List.map (fun ((l, p), es) -> { L = l; Parity = p; Mult = es |> List.sumBy _.Mult })
 
 /// Total multiplicity per (l, parity). Duplicate spec entries AGGREGATE
 /// here -- Linear.findBlock's first-match rule makes later duplicates
@@ -402,11 +402,9 @@ let private peelSector (what: string) (p: int) (off: int) (hist: int[]) : SpecEn
     let check (stage: string) =
         for i in 0 .. histWidth off - 1 do
             if h.[i] < 0 then
-                failwithf "internal: %s weight histogram went negative (parity %d, weight %d, %s)"
-                    what p (i - off) stage
+                failwith $"internal: {what} weight histogram went negative (parity {p}, weight {(i - off)}, {stage})"
             if h.[i] <> h.[histWidth off - 1 - i] then
-                failwithf "internal: %s weight histogram is not w <-> -w symmetric (parity %d, weight %d, %s)"
-                    what p (i - off) stage
+                failwith $"internal: {what} weight histogram is not w <-> -w symmetric (parity {p}, weight {(i - off)}, {stage})"
     check "before the peel"
     let out = ResizeArray<SpecEntry> ()
     for l in off .. -1 .. 0 do
@@ -415,7 +413,7 @@ let private peelSector (what: string) (p: int) (off: int) (hist: int[]) : SpecEn
             out.Add { L = l; Parity = p; Mult = c }
             for w in -l .. l do
                 h.[off + w] <- h.[off + w] - c
-            check (sprintf "after peeling l=%d" l)
+            check $"after peeling l={l}"
     if h |> Array.exists (fun x -> x <> 0) then
         failwithf "internal: %s weight histogram did not peel to zero (parity %d, residue %A)" what p h
     List.ofSeq out
@@ -425,7 +423,7 @@ let private peelSector (what: string) (p: int) (off: int) (hist: int[]) : SpecEn
 /// Coq-proved cardinalities every call: total_dim(Sym^k)=C(n+k-1,k),
 /// total_dim(Lambda^k)=C(n,k), n=total_dim s.
 let powerSpec (kind: PowerKind) (s: Spec) (k: int) : Spec =
-    if k < 0 then failwithf "internal: %s with negative k (%d)" (powerName kind) k
+    if k < 0 then failwith $"internal: {powerName kind} with negative k ({k})"
     let n = totalDim s
     let lMax = s |> List.fold (fun a e -> max a e.L) 0
     let off = lMax * k
@@ -434,7 +432,7 @@ let powerSpec (kind: PowerKind) (s: Spec) (k: int) : Spec =
         [ for p in 0 .. 1 do yield! peelSector (powerName kind) p off hist.[p] ]
         |> List.groupBy (fun e -> (e.L, e.Parity))
         |> List.sortBy fst
-        |> List.map (fun ((l, p), es) -> { L = l; Parity = p; Mult = es |> List.sumBy (fun e -> e.Mult) })
+        |> List.map (fun ((l, p), es) -> { L = l; Parity = p; Mult = es |> List.sumBy _.Mult })
     let expected = match kind with PowSym -> binomial (n + k - 1) k | PowAlt -> binomial n k
     if int64 (totalDim res) <> expected then
         failwithf "internal: %s(spec, %d) decomposed to total_dim %d but the basis cardinality is %d (spec %A)"
@@ -520,15 +518,14 @@ let polyCopies (s: Spec) : PolyCopy list =
 /// j l` emits `Occurrences` in (pinned against it in tests, since MLSpec
 /// stays dependency-free). COUNTS come from `powerSpec PowSym [(l,p,1)] j`.
 let symOccurrences (l: int) (p: int) (j: int) : (int * int) list =
-    if j < 1 then failwithf "internal: symOccurrences with degree %d (must be >= 1)" j
+    if j < 1 then failwith $"internal: symOccurrences with degree {j} (must be >= 1)"
     let entries = powerSpec PowSym [ { L = l; Parity = p; Mult = 1 } ] j
     let want = (j * p) % 2
     for e in entries do
         if e.Parity <> want then
-            failwithf "internal: Sym^%d(V_%d parity %d) produced an occurrence of parity %d (the copy-power parity rule says %d)"
-                j l p e.Parity want
+            failwith $"internal: Sym^{j}(V_{l} parity {p}) produced an occurrence of parity {e.Parity} (the copy-power parity rule says {want})"
     entries
-    |> List.sortByDescending (fun e -> e.L)
+    |> List.sortByDescending _.L
     |> List.collect (fun e -> [ for c in 0 .. e.Mult - 1 -> (e.L, c) ])
 
 /// One used copy of a sector: which copy, at what degree, and which occurrence
@@ -571,7 +568,7 @@ type PolyLabel = {
 /// k`'s multiplicity; (2) sum_(L,P) count*(2L+1) = C(total_dim s+k-1,k) --
 /// redundant given (1), but catches grouping bugs for free.
 let polyLabels (s: Spec) (k: int) : PolyLabel list =
-    if k < 0 then failwithf "internal: polyLabels with negative k (%d)" k
+    if k < 0 then failwith $"internal: polyLabels with negative k ({k})"
     let copies = polyCopies s |> List.toArray
     let n = copies.Length
     // occ.[c].[j] -- the occurrence list of copy c at degree j (index 0 unused).
@@ -609,7 +606,7 @@ let polyLabels (s: Spec) (k: int) : PolyLabel list =
                 // k = 0: the empty sector is the trivial label (Sym^0 = R).
                 | [] -> yield (sector, us, [], 0, 0, multinomial)
                 | head :: tl ->
-                    for ch in chains head.OccL (tl |> List.map (fun u -> u.OccL)) do
+                    for ch in chains head.OccL (tl |> List.map _.OccL) do
                         let finalL = match List.tryLast ch with Some x -> x | None -> head.OccL
                         yield (sector, us, ch, finalL, parity, multinomial) ]
         |> List.mapi (fun i (sector, us, ch, l, p, mn) ->
@@ -653,8 +650,7 @@ let linearBlocks (specIn: Spec) (specOut: Spec) : Result<(int * SpecEntry * Spec
             match specIn |> List.tryFindIndex (fun ei -> ei.L = eo.L && ei.Parity = eo.Parity) with
             | Some bi -> Ok (rows @ [ (bi, eo, specIn.[bi]) ])
             | None ->
-                Error (sprintf "linear: output irrep (l=%d, parity=%d) not present in the input spec (all_irreps_present fails)"
-                           eo.L eo.Parity)))
+                Error ($"linear: output irrep (l={eo.L}, parity={eo.Parity}) not present in the input spec (all_irreps_present fails)")))
         (Ok [])
 
 let linearWeightDim (specIn: Spec) (specOut: Spec) : Result<int, string> =

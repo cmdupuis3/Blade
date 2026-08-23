@@ -122,7 +122,7 @@ let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId
     | TExprVar (n, vid, _) ->
         (match Map.tryFind vid env with
          | Some v -> Ok v
-         | None -> outside (sprintf "'%s' is not a parameter or a local binding of this body" n) e.Span)
+         | None -> outside $"'{n}' is not a parameter or a local binding of this body" e.Span)
 
     | TExprBinOp (Elementwise, op, l, r) ->
         go l |> Result.bind (fun vl -> go r |> Result.bind (fun vr -> PX.binOp ctx e.Span op vl vr))
@@ -136,7 +136,7 @@ let rec private extractVal (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId
             | PX.VScalar p -> Ok (PX.VScalar (PX.Poly.neg p))
             | PX.VVec ps -> Ok (PX.VVec (ps |> Array.map PX.Poly.neg))
             | PX.VInvArr _ -> outside "an invariant array has no polynomial form -- read its cells at static indices" e.Span
-            | PX.VOpaque n -> outside (sprintf "the shape of invariant '%s' is not decidable from its type" n) e.Span)
+            | PX.VOpaque n -> outside $"the shape of invariant '{n}' is not decidable from its type" e.Span)
     // `OpMath` lands here: post-typecheck it is a UNARY OP rather than the
     // named call MLEquiv sees, so a transcendental must be refused explicitly
     // or it would ride through the `OpNeg` arm's shape.
@@ -206,15 +206,15 @@ and private extractIndex (ctx: Ctx) (resolve: IRType -> IRType) (env: Map<IRId, 
             | PX.VVec ps ->
                 (match staticOffset idxE with
                  | Some i when i >= 0 && i < ps.Length -> Ok (PX.VScalar ps.[i])
-                 | Some i -> outside (sprintf "index %d is outside a %d-component value" i ps.Length) e.Span
+                 | Some i -> outside $"index {i} is outside a {ps.Length}-component value" e.Span
                  | None -> outside "indexing a representation-typed value needs a static offset" e.Span)
             | PX.VInvArr name ->
                 (match staticOffset idxE with
                  | Some i -> PX.charge ctx (PX.Poly.ofMono (PX.Mono.invAtom { Name = name; Index = Some i })) |> Result.map PX.VScalar
-                 | None -> outside (sprintf "indexing the invariant '%s' needs a static offset" name) e.Span)
+                 | None -> outside $"indexing the invariant '{name}' needs a static offset" e.Span)
             | PX.VScalar _ -> outside "a scalar cannot be indexed" e.Span
             | PX.VOpaque name ->
-                outside (sprintf "the shape of invariant '%s' is not decidable from its type" name) e.Span)
+                outside $"the shape of invariant '{name}' is not decidable from its type" e.Span)
     | _ -> outside "only single-offset reads are admitted in the polynomial fragment" e.Span
 
 /// THE POST-ELABORATION ARM. Whole-array arithmetic that the seam meets as
@@ -437,7 +437,7 @@ let extractTyped (resolve: IRType -> IRType) (parms: RepParam list) (sg: RepSigT
             | PX.VScalar p, None -> Ok ({ PX.Components = [| p |] } : PX.PolyForm)
             | PX.VVec ps, Some n when ps.Length = n -> Ok ({ PX.Components = ps } : PX.PolyForm)
             | PX.VVec ps, Some n ->
-                outside (sprintf "the body assembles %d components but the return has %d" ps.Length n) body.Span
+                outside $"the body assembles {ps.Length} components but the return has {n}" body.Span
             | PX.VVec _, None -> outside "the body is an array but the return is a scalar" body.Span
             | PX.VScalar _, Some _ -> outside "the body is a scalar but the return is a representation-typed array" body.Span
             | (PX.VInvArr _ | PX.VOpaque _), _ -> outside "the body is an invariant with no polynomial form" body.Span)

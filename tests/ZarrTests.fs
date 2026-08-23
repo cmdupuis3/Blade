@@ -58,7 +58,7 @@ let runZarrTests () =
     let baselineFailed (what: string) (e: string) =
         if not zCaps.HasGpp then printfn "  SKIP %s: g++ not found (%s)" what e
         elif isSkipError e then printfn "  SKIP %s: %s" what e
-        else check (sprintf "%s: baseline builds and runs" what) false e
+        else check ($"{what}: baseline builds and runs") false e
 
     // Fixture stores live under tests/fixtures/zarr_stores/ (not the repo root).
     // The SAME relative string resolves at the compiler cwd (compile-time
@@ -214,7 +214,7 @@ let runZarrTests () =
         varsFields |> List.tryPick (fun (n, t) ->
             if n <> "A" then None else
             match t with
-            | ArrayElem at -> Some (at.IndexTypes |> List.map (fun ix -> ix.Id))
+            | ArrayElem at -> Some (at.IndexTypes |> List.map (_.Id))
             | _ -> None)
      let xId = indexDefs |> List.tryPick (fun (n, it) -> if n = "x" then Some it.Id else None)
      check "mock module: A's first index IS the shared x index type (same Id)"
@@ -356,32 +356,32 @@ let runZarrTests () =
              for c in 0 .. 3 ->
                if r >= 2 && c >= 2 then 99L else int64 (100 + r * 4 + c) |]
     for (version, writer) in [ (2, ZarrWrite.writeStoreV2); (3, ZarrWrite.writeStoreV3) ] do
-        let root = Path.Combine(scratch, sprintf "store_v%d" version)
+        let root = Path.Combine(scratch, $"store_v{version}")
         writer root (mkVars ())
         (try
             let store = load root
-            check (sprintf "v%d: load discovers 3 arrays" version)
-                (store.Version = version && (store.Arrays |> List.map (fun a -> a.Name) |> List.sort) = ["A"; "B"; "x"])
-                (sprintf "version %d arrays %A" store.Version (store.Arrays |> List.map (fun a -> a.Name)))
+            check ($"v{version}: load discovers 3 arrays")
+                (store.Version = version && (store.Arrays |> List.map (_.Name) |> List.sort) = ["A"; "B"; "x"])
+                (sprintf "version %d arrays %A" store.Version (store.Arrays |> List.map (_.Name)))
             (match tryFindArray store "A" with
              | Some m ->
-                 check (sprintf "v%d: A meta roundtrip (shape/chunks/dims/fill)" version)
+                 check ($"v{version}: A meta roundtrip (shape/chunks/dims/fill)")
                      (m.Shape = [5L; 7L] && m.Chunks = [2L; 3L] && m.DimNames = Some ["x"; "y"] && m.FillValue = FillFloat -1.0)
                      (sprintf "%A" m)
-             | None -> check (sprintf "v%d: A found" version) false "")
+             | None -> check ($"v{version}: A found") false "")
             (match readVarData root "A" with
              | Ok { DimLengths = [5; 7]; Payload = ZFloats got } ->
-                 check (sprintf "v%d: A values roundtrip through multi-chunk assembly (edge chunks)" version)
+                 check ($"v{version}: A values roundtrip through multi-chunk assembly (edge chunks)")
                      (got = aData) (sprintf "first few: %A vs %A" (Array.truncate 5 got) (Array.truncate 5 aData))
-             | Ok d -> check (sprintf "v%d: A values roundtrip" version) false (sprintf "unexpected payload %A" d.DimLengths)
-             | Error e -> check (sprintf "v%d: A values roundtrip" version) false e)
+             | Ok d -> check ($"v{version}: A values roundtrip") false (sprintf "unexpected payload %A" d.DimLengths)
+             | Error e -> check ($"v{version}: A values roundtrip") false e)
             (match readVarData root "B" with
              | Ok { Payload = ZInts got } ->
-                 check (sprintf "v%d: B omitted chunk reads as fill (99), int32 widened to int64" version)
+                 check ($"v{version}: B omitted chunk reads as fill (99), int32 widened to int64")
                      (got = expectB ()) (sprintf "got %A" got)
-             | Ok _ -> check (sprintf "v%d: B fill/widening" version) false "not ints"
-             | Error e -> check (sprintf "v%d: B fill/widening" version) false e)
-         with ex -> check (sprintf "v%d: store loads" version) false ex.Message)
+             | Ok _ -> check ($"v{version}: B fill/widening") false "not ints"
+             | Error e -> check ($"v{version}: B fill/widening") false e)
+         with ex -> check ($"v{version}: store loads") false ex.Message)
     // Missing chunk + null fill = loud error, not silent zeros.
     (let root = Path.Combine(scratch, "store_nullfill")
      ZarrWrite.writeStoreV2 root [
@@ -562,7 +562,7 @@ let S = sp.fft(A)
     let e2eDir = "./generated_cpp_tests"
     if not (Directory.Exists e2eDir) then Directory.CreateDirectory e2eDir |> ignore
     for (version, writer) in [ (2, ZarrWrite.writeStoreV2); (3, ZarrWrite.writeStoreV3) ] do
-        let storeName = fixStore (sprintf "zarr_e2e_v%d" version)
+        let storeName = fixStore ($"zarr_e2e_v{version}")
         let storeInDir = Path.Combine(e2eDir, storeName)
         let e2eVars : ZarrWrite.WriteVar list = [
             { Name = "A"; DimNames = Some ["x"; "y"]; Shape = [5L; 7L]; Chunks = [2L; 3L]
@@ -586,21 +586,21 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
         try
             match lower readSource with
             | Ok ir ->
-                check (sprintf "e2e v%d: ProviderReads spec (provider=zarr, maskless)" version)
+                check ($"e2e v{version}: ProviderReads spec (provider=zarr, maskless)")
                     (ir.Modules.[0].ProviderReads |> Map.exists (fun _ s -> s.Provider = "zarr" && s.VarName = "A" && s.MaskName = None))
                     ""
-                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_read_e2e_v%d" version)
-                check (sprintf "e2e v%d: emits fstream reads, no netcdf dependency" version)
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_read_e2e_v{version}")
+                check ($"e2e v{version}: emits fstream reads, no netcdf dependency")
                     (cppCode.Contains "std::ifstream" && not (cppCode.Contains "netcdf.h")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
-                let cppFile = Path.Combine(e2eDir, sprintf "zarr_read_e2e_v%d.cpp" version)
+                let cppFile = Path.Combine(e2eDir, $"zarr_read_e2e_v{version}.cpp")
                 File.WriteAllText(cppFile, cppCode)
                 (match compileCpp cppFile e2eDir with
                  | Ok exePath ->
-                     check (sprintf "e2e v%d: compiles (pure std C++ — no link flags)" version) true ""
+                     check ($"e2e v{version}: compiles (pure std C++ — no link flags)") true ""
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
-                          check (sprintf "e2e v%d: runs (exit 0)" version) true ""
+                          check ($"e2e v{version}: runs (exit 0)") true ""
                           // Ground truth via the F# read path (fill -1 in the
                           // omitted chunk region), kernel doubles it.
                           (match readVarData storeInDir "A" with
@@ -609,16 +609,16 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                                // Shape-tolerant flatten (TestHarness): `out`
                                // is rank 2 and prints NESTED since 7ac4d3a.
                                (match tryParsePrintedFloats "out" runOut with
-                                | None -> check (sprintf "e2e v%d: values match ground truth" version) false "no parseable out = [...] line"
+                                | None -> check ($"e2e v{version}: values match ground truth") false "no parseable out = [...] line"
                                 | Some parsed ->
                                     let ok =
                                         parsed.Length = expected.Length
                                         && Array.forall2 (fun a b -> abs (a - b) <= 1e-9 * max 1.0 (abs b)) parsed expected
-                                    check (sprintf "e2e v%d: values match ground truth (2*A incl. fill region)" version)
+                                    check ($"e2e v{version}: values match ground truth (2*A incl. fill region)")
                                         ok
-                                        (sprintf "%d vs %d values" parsed.Length expected.Length))
-                           | Ok _ -> check (sprintf "e2e v%d: values match ground truth" version) false "truth not floats"
-                           | Error e -> check (sprintf "e2e v%d: values match ground truth" version) false e)
+                                        ($"{parsed.Length} vs {expected.Length} values"))
+                           | Ok _ -> check ($"e2e v{version}: values match ground truth") false "truth not floats"
+                           | Error e -> check ($"e2e v{version}: values match ground truth") false e)
                           // Missing store at runtime fails loudly (metadata check).
                           if version = 2 then
                               let missingDir = Path.Combine(Path.GetTempPath(), "blade_zarr_missing_" + Guid.NewGuid().ToString("N"))
@@ -630,17 +630,17 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                                    | Ok (code, missOut) ->
                                        check "e2e: missing store at runtime fails loudly (nonzero + Zarr error)"
                                            (code <> 0 && missOut.Contains "Zarr error")
-                                           (sprintf "exit %d: %s" code (missOut.Substring(0, min 200 missOut.Length)))
+                                           ($"exit {code}: {(missOut.Substring(0, min 200 missOut.Length))}")
                                    | Error e -> check "e2e: missing store fails loudly" false e)
                                finally
                                   try Directory.Delete(missingDir, true) with _ -> ())
-                      | Ok (code, runOut) -> check (sprintf "e2e v%d: runs (exit 0)" version) false (sprintf "exit %d: %s" code runOut)
-                      | Error e -> check (sprintf "e2e v%d: runs (exit 0)" version) false e)
+                      | Ok (code, runOut) -> check ($"e2e v{version}: runs (exit 0)") false ($"exit {code}: {runOut}")
+                      | Error e -> check ($"e2e v{version}: runs (exit 0)") false e)
                  | Error e ->
                      if isSkipError e then printfn "  SKIP zarr read e2e v%d (compile skipped): %s" version e
-                     else check (sprintf "e2e v%d: compiles" version) false e)
-            | Error e -> check (sprintf "e2e v%d: lowers" version) false e
-        with ex -> check (sprintf "e2e v%d" version) false ex.Message
+                     else check ($"e2e v{version}: compiles") false e)
+            | Error e -> check ($"e2e v{version}: lowers") false e
+        with ex -> check ($"e2e v{version}") false ex.Message
 
     // ---------------------------------------------------------------
     // 11. Write -> read roundtrip e2e (the Blade-side writer)
@@ -671,7 +671,7 @@ let w = z.write("%s", A)
         | Ok ir ->
             check "write e2e: ProviderWrites spec recorded (provider=zarr)"
                 (ir.Modules.[0].ProviderWrites |> Map.exists (fun _ s -> s.Provider = "zarr" && s.VarName = "A" && s.FilePath = outStore))
-                (sprintf "%d write specs" (Map.count ir.Modules.[0].ProviderWrites))
+                ($"{(Map.count ir.Modules.[0].ProviderWrites)} write specs")
             let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_write_e2e"
             check "write e2e: emits flatten + filesystem writer"
                 (cppCode.Contains "create_directories" && cppCode.Contains ".zarray") ""
@@ -699,7 +699,7 @@ let w = z.write("%s", A)
                                 | None -> false)
                                ""
                        | Error _ -> ())
-                  | Ok (code, runOut) -> check "write e2e: runs (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Ok (code, runOut) -> check "write e2e: runs (exit 0)" false ($"exit {code}: {runOut}")
                   | Error e -> check "write e2e: runs (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP zarr write e2e (compile skipped): %s" e
@@ -839,8 +839,8 @@ let data = z.load_compound(sample.vars.A, sample.vars.M) |> z.read
         let n = 4
         let pool = triOracle strict n
         let card = int64 pool.Length
-        let inStore = fixStore (sprintf "zarr_tri_%s" kind)
-        let outStore = fixStore (sprintf "zarr_tri_%s_out" kind)
+        let inStore = fixStore ($"zarr_tri_{kind}")
+        let outStore = fixStore ($"zarr_tri_{kind}_out")
         let layout : BladeLayout = { Group = { Sym = sym; Rank = 2; Extent = int64 n; Levels = [] }; DenseDims = []; Blocks = None }
         let triVars : ZarrWrite.WriteVar list = [
             { Name = "C"; DimNames = None; Shape = [card]; Chunks = [card]
@@ -863,11 +863,11 @@ let w = z.write("%s", C)
         try
             match lower triSource with
             | Ok ir ->
-                check (sprintf "packed %s: read spec is packed (provider=zarr)" kind)
+                check ($"packed {kind}: read spec is packed (provider=zarr)")
                     (ir.Modules.[0].ProviderReads |> Map.exists (fun _ s ->
                         s.Provider = "zarr" && s.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry = sym && ix.Rank = 2)))
                     ""
-                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_tri_%s_e2e" kind)
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_tri_{kind}_e2e")
                 // BOTH classes materialize by a linear pool_base copy under a
                 // hoisted SYMM: allocate<>'s DFS pool order IS ascending-lex
                 // for strict (antisym) storage exactly as for inclusive (sym)
@@ -875,21 +875,21 @@ let w = z.write("%s", C)
                 // dead diagonal). The antisym arm used to unrank each cell and
                 // index the skeleton with `ix[k] - ix[k-1]`, which shifted the
                 // whole pool by one; per-cell unranking here is now a defect.
-                check (sprintf "packed %s: codegen materializes the packed pool by linear copy" kind)
+                check ($"packed {kind}: codegen materializes the packed pool by linear copy")
                     (cppCode.Contains "pool_base"
                      && cppCode.Contains (if strict then "_anti" else "_symm")
                      && not (cppCode.Contains "antisymmetric::unlinearize")) ""
-                check (sprintf "packed %s: linearized_storage header included" kind)
+                check ($"packed {kind}: linearized_storage header included")
                     (cppCode.Contains "linearized_storage.hpp") ""
                 CodeGen.deployRuntimeHeaders e2eDir
-                let cppFile = Path.Combine(e2eDir, sprintf "zarr_tri_%s_e2e.cpp" kind)
+                let cppFile = Path.Combine(e2eDir, $"zarr_tri_{kind}_e2e.cpp")
                 File.WriteAllText(cppFile, cppCode)
                 (match compileCpp cppFile e2eDir with
                  | Ok exePath ->
-                     check (sprintf "packed %s: compiles" kind) true ""
+                     check ($"packed {kind}: compiles") true ""
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
-                          check (sprintf "packed %s: runs (exit 0)" kind) true ""
+                          check ($"packed {kind}: runs (exit 0)") true ""
                           // The doubled kernel output must be the doubled pool
                           // IN ORDER, cell for cell. A set comparison (or one
                           // that whitelists spurious 0.0) cannot see a pool
@@ -926,32 +926,32 @@ let w = z.write("%s", C)
                                // regression in exactly the storage path the
                                // off-by-one lived in.
                                let expected = pool |> Array.map (fun x -> x + x)
-                               check (sprintf "packed %s: kernel values = 2x oracle pool (exact, in pool order)" kind)
+                               check ($"packed {kind}: kernel values = 2x oracle pool (exact, in pool order)")
                                    (got = expected)
                                    (sprintf "got %A expected %A" got expected)
-                           | None -> check (sprintf "packed %s: kernel values" kind) false "no parseable out = [...] line")
+                           | None -> check ($"packed {kind}: kernel values") false "no parseable out = [...] line")
                           // Write roundtrip: exact pool order + blade metadata.
                           let outFull = Path.Combine(e2eDir, outStore)
                           (match readVarData outFull "C" with
                            | Ok { Payload = ZFloats got } ->
-                               check (sprintf "packed %s: written pool is EXACTLY the input pool (canonical order preserved)" kind)
+                               check ($"packed {kind}: written pool is EXACTLY the input pool (canonical order preserved)")
                                    (got = pool) (sprintf "got %A" (Array.truncate 6 got))
-                           | Ok _ -> check (sprintf "packed %s: written pool exact" kind) false "not floats"
-                           | Error e -> check (sprintf "packed %s: written pool exact" kind) false e)
+                           | Ok _ -> check ($"packed {kind}: written pool exact") false "not floats"
+                           | Error e -> check ($"packed {kind}: written pool exact") false e)
                           (try
                               let wstore = load outFull
-                              check (sprintf "packed %s: written store carries the blade attribute" kind)
+                              check ($"packed {kind}: written store carries the blade attribute")
                                   (match tryFindArray wstore "C" with
                                    | Some m -> m.Blade = Some layout
                                    | None -> false) ""
-                           with ex -> check (sprintf "packed %s: written store loads" kind) false ex.Message)
-                      | Ok (code, runOut) -> check (sprintf "packed %s: runs (exit 0)" kind) false (sprintf "exit %d: %s" code runOut)
-                      | Error e -> check (sprintf "packed %s: runs (exit 0)" kind) false e)
+                           with ex -> check ($"packed {kind}: written store loads") false ex.Message)
+                      | Ok (code, runOut) -> check ($"packed {kind}: runs (exit 0)") false ($"exit {code}: {runOut}")
+                      | Error e -> check ($"packed {kind}: runs (exit 0)") false e)
                  | Error e ->
                      if isSkipError e then printfn "  SKIP packed %s e2e (compile skipped): %s" kind e
-                     else check (sprintf "packed %s: compiles" kind) false e)
-            | Error e -> check (sprintf "packed %s: lowers" kind) false e
-        with ex -> check (sprintf "packed %s e2e" kind) false ex.Message
+                     else check ($"packed {kind}: compiles") false e)
+            | Error e -> check ($"packed {kind}: lowers") false e
+        with ex -> check ($"packed {kind} e2e") false ex.Message
 
     // ---------------------------------------------------------------
     // 17b. KERNEL-PRODUCED packed pool -> write (write side, unmasked)
@@ -1005,7 +1005,7 @@ let w = z.write("%s", C)
                      let vs = p |> List.map (fun q -> avals.[c.[q]])
                      (if strict then sign p else 1.0) * scalarF vs) |]
         let ps = [ 0 .. rank - 1 ] |> List.map (sprintf "p%d") |> String.concat ", "
-        let outStore = fixStore (sprintf "zarr_kw_%s_out" label)
+        let outStore = fixStore ($"zarr_kw_{label}_out")
         (try Directory.Delete(Path.Combine(e2eDir, outStore), true) with _ -> ())
         let src =
             sprintf """
@@ -1023,11 +1023,11 @@ let w = z.write("%s", C)
         try
             match lower src with
             | Ok ir ->
-                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_kw_%s_e2e" label)
-                check (sprintf "kernel-write %s: pool flatten is a linear pool_base copy" label)
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_kw_{label}_e2e")
+                check ($"kernel-write {label}: pool flatten is a linear pool_base copy")
                     (cppCode.Contains "pool_base" && not (cppCode.Contains "antisymmetric::unlinearize")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
-                let cppFile = Path.Combine(e2eDir, sprintf "zarr_kw_%s_e2e.cpp" label)
+                let cppFile = Path.Combine(e2eDir, $"zarr_kw_{label}_e2e.cpp")
                 File.WriteAllText(cppFile, cppCode)
                 (match compileCpp cppFile e2eDir with
                  | Ok exePath ->
@@ -1037,11 +1037,11 @@ let w = z.write("%s", C)
                           // for cell — no rotation, no trailing fill.
                           (match readVarData (Path.Combine(e2eDir, outStore)) "C" with
                            | Ok { DimLengths = dl; Payload = ZFloats got } ->
-                               check (sprintf "kernel-write %s: written pool = independent oracle (exact, in order)" label)
+                               check ($"kernel-write {label}: written pool = independent oracle (exact, in order)")
                                    (dl = [oracle.Length] && got = oracle)
                                    (sprintf "shape %A got %A expected %A" dl got oracle)
-                           | Ok _ -> check (sprintf "kernel-write %s: written pool" label) false "not floats"
-                           | Error e -> check (sprintf "kernel-write %s: written pool" label) false e)
+                           | Ok _ -> check ($"kernel-write {label}: written pool") false "not floats"
+                           | Error e -> check ($"kernel-write {label}: written pool") false e)
                           // ... and the in-process print must agree with it, so
                           // a shift cannot hide by moving between the two.
                           // Shape-tolerant flatten (TestHarness): C is a
@@ -1049,16 +1049,16 @@ let w = z.write("%s", C)
                           // flattened walk is the canonical pool order.
                           (match tryParsePrintedFloats "C" runOut with
                            | Some got ->
-                               check (sprintf "kernel-write %s: printed pool = written pool = oracle" label)
+                               check ($"kernel-write {label}: printed pool = written pool = oracle")
                                    (got = oracle) (sprintf "got %A expected %A" got oracle)
-                           | None -> check (sprintf "kernel-write %s: printed pool" label) false "no parseable C = [...] line")
-                      | Ok (code, runOut) -> check (sprintf "kernel-write %s: runs (exit 0)" label) false (sprintf "exit %d: %s" code runOut)
-                      | Error e -> check (sprintf "kernel-write %s: runs (exit 0)" label) false e)
+                           | None -> check ($"kernel-write {label}: printed pool") false "no parseable C = [...] line")
+                      | Ok (code, runOut) -> check ($"kernel-write {label}: runs (exit 0)") false ($"exit {code}: {runOut}")
+                      | Error e -> check ($"kernel-write {label}: runs (exit 0)") false e)
                  | Error e ->
                      if isSkipError e then printfn "  SKIP kernel-write %s e2e (compile skipped): %s" label e
-                     else check (sprintf "kernel-write %s: compiles" label) false e)
-            | Error e -> check (sprintf "kernel-write %s: lowers" label) false e
-        with ex -> check (sprintf "kernel-write %s e2e" label) false ex.Message
+                     else check ($"kernel-write {label}: compiles") false e)
+            | Error e -> check ($"kernel-write {label}: lowers") false e
+        with ex -> check ($"kernel-write {label} e2e") false ex.Message
 
     // ---------------------------------------------------------------
     // 18. Mixed sym x dense packed read -> write roundtrip
@@ -1110,7 +1110,7 @@ let w = z.write("%s", D)
                                (dl = [int card; trail] && got = pool) (sprintf "shape %A" dl)
                        | Ok _ -> check "packed mixed: roundtrip" false "not floats"
                        | Error e -> check "packed mixed: roundtrip" false e)
-                  | Ok (code, out) -> check "packed mixed: runs (exit 0)" false (sprintf "exit %d: %s" code out)
+                  | Ok (code, out) -> check "packed mixed: runs (exit 0)" false ($"exit {code}: {out}")
                   | Error e -> check "packed mixed: runs (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP packed mixed e2e (compile skipped): %s" e
@@ -1220,7 +1220,7 @@ let w = z.write("%s", D)
           | _ -> false)
          (sprintf "%A" wType)
      check "orbit typing: the pool dim does NOT join the module's shareable dimensions"
-         (m.Types |> List.forall (function IRTDIndexType _ -> false | _ -> true)) ""
+         (m.Types |> List.forall (fun t -> not t.IsIRTDIndexType)) ""
      // F#-writer round trip: the attribute we emit is the attribute we parse.
      let orbFix = fixStore "zarr_orb_attr"
      (try Directory.Delete(orbFix, true) with _ -> ())
@@ -1265,7 +1265,7 @@ let w = z.write("%s", D)
     /// Compiled stdout for a source, or a skip/failure reason.
     let compiledStdout (label: string) (src: string) : Result<string, string> =
         match lower src with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir ->
             let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir label
             CodeGen.deployRuntimeHeaders e2eDir
@@ -1276,23 +1276,23 @@ let w = z.write("%s", D)
             | Ok exePath ->
                 match runExecutable exePath with
                 | Ok (0, out) -> Ok out
-                | Ok (code, out) -> Error (sprintf "exit %d: %s" code out)
+                | Ok (code, out) -> Error ($"exit {code}: {out}")
                 | Error e -> Error e
     /// Normalized stdout comparison, mirroring InterpDiff.normalize (timing
     /// lines out, CRLF -> LF, trimmed).
     let normOut (s: string) =
         s.Replace("\r\n", "\n").Split('\n')
         |> Array.filter (fun l -> not (l.Contains "completed in") && not (l.Contains "input allocation took"))
-        |> Array.map (fun l -> l.TrimEnd())
+        |> Array.map (_.TrimEnd())
         |> String.concat "\n" |> fun t -> t.Trim()
     /// The interpreter walk of the same program (the second backend).
     let interpStdout (label: string) (src: string) : Result<string, string> =
         match lower src with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir ->
             let r = Blade.Interp.Run.runProgram ir label Blade.Interp.Value.defaultLimits
             if r.ExitCode = 0 then Ok r.Stdout
-            else Error (sprintf "interp exit %d: %s" r.ExitCode (r.Stderr.Trim()))
+            else Error ($"interp exit {r.ExitCode}: {(r.Stderr.Trim())}")
     let orbCases =
         [ // (label, extent, inner reynolds keyword or "", inner kernel, outer
           //  kernel, LEVELS, hand-derived pool, probe (name, subscript, value))
@@ -1324,11 +1324,11 @@ let w = z.write("%s", D)
         // attribute must carry, outermost-last in both.
         let levelsJson =
             "[" + (levels |> List.map (fun (r, plus) -> sprintf "[%d, \"%s\"]" r (if plus then "+" else "-")) |> String.concat ", ") + "]"
-        let outStore = fixStore (sprintf "zarr_%s_out" label)
+        let outStore = fixStore ($"zarr_{label}_out")
         (try Directory.Delete(outStore, true) with _ -> ())
         (try Directory.Delete(Path.Combine(e2eDir, outStore), true) with _ -> ())
         let avals = [ for i in 1 .. n -> sprintf "%.1f" (float i) ] |> String.concat ", "
-        let innerKernel = if innerSym = "" then "g" else sprintf "reynolds(g, %s)" innerSym
+        let innerKernel = if innerSym = "" then "g" else $"reynolds(g, {innerSym})"
         let writeSrc =
             sprintf """
 import zarr as z
@@ -1343,7 +1343,7 @@ let w = z.write("%s", W)
                     avals innerBody innerKernel outerBody outStore
         try
             match lower writeSrc with
-            | Error e -> check (sprintf "%s: write program lowers" label) false e
+            | Error e -> check ($"{label}: write program lowers") false e
             | Ok ir ->
                 // The write must go through the ORBIT arm, not the depth-1
                 // packed one: a wreath array IS its flat pool, so nothing may
@@ -1358,35 +1358,35 @@ let w = z.write("%s", W)
                 // reaches its output row through `pool_base(S.data)` instead of
                 // the Iliffe skeleton. That is an unrelated array and says nothing
                 // about how W is written -- but it turned this into a false red.
-                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "%s_write" label)
-                check (sprintf "%s: write emits a flat pool copy + the orb_cell_count pin (no skeleton route for W)" label)
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"{label}_write")
+                check ($"{label}: write emits a flat pool copy + the orb_cell_count pin (no skeleton route for W)")
                     (cppCode.Contains "orb_cell_count" && cppCode.Contains "_flat[__ow_i]"
                      && not (cppCode.Contains "pool_base(W.data)")
                      && not (cppCode.Contains "__pc_pool")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
-                let cppFile = Path.Combine(e2eDir, sprintf "%s_write.cpp" label)
+                let cppFile = Path.Combine(e2eDir, $"{label}_write.cpp")
                 File.WriteAllText(cppFile, cppCode)
                 (match compileCpp cppFile e2eDir with
                  | Error e ->
                      if isSkipError e then printfn "  SKIP %s e2e (compile skipped): %s" label e
-                     else check (sprintf "%s: write compiles" label) false e
+                     else check ($"{label}: write compiles") false e
                  | Ok exePath ->
                  match runExecutable exePath with
                  | Ok (code, out) when code <> 0 ->
-                     check (sprintf "%s: write runs (exit 0)" label) false (sprintf "exit %d: %s" code out)
-                 | Error e -> check (sprintf "%s: write runs (exit 0)" label) false e
+                     check ($"{label}: write runs (exit 0)") false ($"exit {code}: {out}")
+                 | Error e -> check ($"{label}: write runs (exit 0)") false e
                  | Ok (_, writeOut) ->
-                     check (sprintf "%s: write runs (exit 0)" label) true ""
+                     check ($"{label}: write runs (exit 0)") true ""
                      let written = Path.Combine(e2eDir, outStore)
                      // (a) The pool on disk equals the hand-derived cells, in
                      // order — the independent-oracle comparison, not a roundtrip.
                      (match readVarData written "W" with
                       | Ok { DimLengths = dl; Payload = ZFloats got } ->
-                          check (sprintf "%s: written pool = hand-derived cells (exact, in canonical order)" label)
+                          check ($"{label}: written pool = hand-derived cells (exact, in canonical order)")
                               (dl = [pool.Length] && got = pool)
                               (sprintf "shape %A got %A expected %A" dl got pool)
-                      | Ok _ -> check (sprintf "%s: written pool" label) false "not floats"
-                      | Error e -> check (sprintf "%s: written pool" label) false e)
+                      | Ok _ -> check ($"{label}: written pool") false "not floats"
+                      | Error e -> check ($"{label}: written pool") false e)
                      // ... and the in-process print agrees, so a shift cannot
                      // hide by moving between the two.
                      // Shape-tolerant flatten (TestHarness). A wreath pool
@@ -1396,17 +1396,17 @@ let w = z.write("%s", W)
                      // packed ones.
                      (match tryParsePrintedFloats "W" writeOut with
                       | Some got ->
-                          check (sprintf "%s: printed pool = written pool" label) (got = pool) (sprintf "got %A" got)
-                      | None -> check (sprintf "%s: printed pool" label) false "no parseable W = [...] line")
+                          check ($"{label}: printed pool = written pool") (got = pool) (sprintf "got %A" got)
+                      | None -> check ($"{label}: printed pool") false "no parseable W = [...] line")
                      // (b) The attribute: spec_version 2, orbit head, exact
                      // level list and extent.
                      let attrText = File.ReadAllText (Path.Combine(written, "W", ".zattrs"))
-                     check (sprintf "%s: written attribute is spec_version 2 + kind orbit + the exact levels" label)
+                     check ($"{label}: written attribute is spec_version 2 + kind orbit + the exact levels")
                          (attrText.Contains "\"spec_version\": 2"
                           && attrText.Contains "\"kind\": \"orbit\""
-                          && attrText.Contains (sprintf "\"extent\": %d" n)
-                          && attrText.Contains (sprintf "\"levels\": %s" levelsJson))
-                         (sprintf "attr %s (wanted levels %s)" attrText levelsJson)
+                          && attrText.Contains ($"\"extent\": {n}")
+                          && attrText.Contains ($"\"levels\": {levelsJson}"))
+                         ($"attr {attrText} (wanted levels {levelsJson})")
                      // (c) Reload: the store types back as the same class, and
                      // the RELOADED array serves mirrored / zero-set reads.
                      (try Directory.Delete(outStore, true) with _ -> ())
@@ -1421,7 +1421,7 @@ let w = z.write("%s", W)
                      // two-copy scheme every other e2e block uses.
                      copyDir written outStore
                      let probeLines =
-                         probes |> List.map (fun (nm, expr, _) -> sprintf "let %s = %s" nm expr) |> String.concat "\n"
+                         probes |> List.map (fun (nm, expr, _) -> $"let {nm} = {expr}") |> String.concat "\n"
                      let readSrc =
                          sprintf """
 import zarr as z
@@ -1431,12 +1431,12 @@ let W = s.vars.W |> z.read
 %s
 """
                                  outStore probeLines
-                     match compiledStdout (sprintf "%s_read" label) readSrc with
+                     match compiledStdout ($"{label}_read") readSrc with
                      | Error e ->
                          if isSkipError e then printfn "  SKIP %s read e2e: %s" label e
-                         else check (sprintf "%s: read compiles and runs" label) false e
+                         else check ($"{label}: read compiles and runs") false e
                      | Ok readOut ->
-                         check (sprintf "%s: read compiles and runs" label) true ""
+                         check ($"{label}: read compiles and runs") true ""
                          let scalarOf (nm: string) : float option =
                              readOut.Split('\n')
                              |> Array.tryPick (fun l ->
@@ -1453,32 +1453,32 @@ let W = s.vars.W |> z.read
                                  match scalarOf nm with
                                  | Some got when abs (got - v) < 1e-9 -> None
                                  | other -> Some (nm, v, other))
-                         check (sprintf "%s: RELOADED array serves every mirrored / zero-set read" label)
+                         check ($"{label}: RELOADED array serves every mirrored / zero-set read")
                              (List.isEmpty missing)
                              (sprintf "wrong/missing %A in:\n%s" missing readOut)
                          // Shape-tolerant flatten (TestHarness) -- see the
                          // write-side W parse above for why.
                          let reloadedPool = tryParsePrintedFloats "W" readOut
-                         check (sprintf "%s: RELOADED array prints the pool in canonical order (%d cells)" label pool.Length)
+                         check ($"{label}: RELOADED array prints the pool in canonical order ({pool.Length} cells)")
                              (reloadedPool = Some pool)
                              (sprintf "got %A expected %A" reloadedPool pool)
                          // (d) BOTH BACKENDS. The interpreter walks the same
                          // store from the compiler cwd copy; its stdout must be
                          // byte-identical to the compiled binary's.
-                         (match interpStdout (sprintf "%s_read" label) readSrc with
-                          | Error e -> check (sprintf "%s: interpreter reads the orbit store" label) false e
+                         (match interpStdout ($"{label}_read") readSrc with
+                          | Error e -> check ($"{label}: interpreter reads the orbit store") false e
                           | Ok interpOut ->
-                              check (sprintf "%s: interp stdout == compiled stdout (both backends agree)" label)
+                              check ($"{label}: interp stdout == compiled stdout (both backends agree)")
                                   (normOut interpOut = normOut readOut)
-                                  (sprintf "interp:\n%s\ncompiled:\n%s" (normOut interpOut) (normOut readOut))))
-            with ex -> check (sprintf "%s e2e" label) false ex.Message
+                                  ($"interp:\n{(normOut interpOut)}\ncompiled:\n{(normOut readOut)}")))
+            with ex -> check ($"{label} e2e") false ex.Message
 
     // A DEPTH-1 class spelled `OrbIdx<[(2,+)], n>` must write as "sym", not
     // "orbit": it normalizes to the SymIdx record at lowering, so the orbit
     // head never sees it, and the store keeps ONE spelling per class.
     printfn "\n--- blade orbit head: depth-1 OrbIdx writes as sym/antisym ---"
     for (kw, kindStr, cells) in [ ("+", "sym", 6); ("-", "antisym", 3) ] do
-        let outStore = fixStore (sprintf "zarr_orb_d1_%s_out" kindStr)
+        let outStore = fixStore ($"zarr_orb_d1_{kindStr}_out")
         (try Directory.Delete(Path.Combine(e2eDir, outStore), true) with _ -> ())
         let symKw = if kw = "+" then "Symmetric" else "Antisymmetric"
         let src =
@@ -1493,26 +1493,26 @@ let w = z.write("%s", C)
                     kw symKw outStore
         try
             match lower src with
-            | Error e -> check (sprintf "orbit depth-1 %s: lowers" kindStr) false e
+            | Error e -> check ($"orbit depth-1 {kindStr}: lowers") false e
             | Ok ir ->
-                let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_orb_d1_%s" kindStr)
+                let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_orb_d1_{kindStr}")
                 // Pinned on the EMITTED attribute, no run required: the writer
                 // bakes the JSON as a literal.
-                check (sprintf "orbit depth-1 %s: emitted attribute says kind '%s', spec_version 1, NOT orbit" kindStr kindStr)
-                    (cpp.Contains (sprintf "kind\\\": \\\"%s" kindStr)
+                check ($"orbit depth-1 {kindStr}: emitted attribute says kind '{kindStr}', spec_version 1, NOT orbit")
+                    (cpp.Contains ($"kind\\\": \\\"{kindStr}")
                      && cpp.Contains "spec_version\\\": 1"
                      && not (cpp.Contains "\\\"orbit\\\"")) ""
                 CodeGen.deployRuntimeHeaders e2eDir
-                let cppFile = Path.Combine(e2eDir, sprintf "zarr_orb_d1_%s.cpp" kindStr)
+                let cppFile = Path.Combine(e2eDir, $"zarr_orb_d1_{kindStr}.cpp")
                 File.WriteAllText(cppFile, cpp)
                 (match compileCpp cppFile e2eDir with
                  | Error e ->
                      if isSkipError e then printfn "  SKIP orbit depth-1 %s e2e: %s" kindStr e
-                     else check (sprintf "orbit depth-1 %s: compiles" kindStr) false e
+                     else check ($"orbit depth-1 {kindStr}: compiles") false e
                  | Ok exePath ->
                      match runExecutable exePath with
                      | Ok (0, _) ->
-                         check (sprintf "orbit depth-1 %s: written store is a depth-1 packed head (reload pins it)" kindStr)
+                         check ($"orbit depth-1 {kindStr}: written store is a depth-1 packed head (reload pins it)")
                              (match load (Path.Combine(e2eDir, outStore)) |> fun s -> tryFindArray s "C" with
                               | Some m ->
                                   (match m.Blade with
@@ -1522,9 +1522,9 @@ let w = z.write("%s", C)
                                        && l.Group.Rank = 2 && m.Shape = [int64 cells]
                                    | None -> false)
                               | None -> false) ""
-                     | Ok (code, out) -> check (sprintf "orbit depth-1 %s: runs" kindStr) false (sprintf "exit %d: %s" code out)
-                     | Error e -> check (sprintf "orbit depth-1 %s: runs" kindStr) false e)
-        with ex -> check (sprintf "orbit depth-1 %s" kindStr) false ex.Message
+                     | Ok (code, out) -> check ($"orbit depth-1 {kindStr}: runs") false ($"exit {code}: {out}")
+                     | Error e -> check ($"orbit depth-1 {kindStr}: runs") false e)
+        with ex -> check ($"orbit depth-1 {kindStr}") false ex.Message
 
     // ---------------------------------------------------------------
     // 18d. Corrupted orbit stores + the providers that still refuse
@@ -1595,10 +1595,10 @@ let w = %s.write("generated_cpp_tests/orb_refuse_out", W)
                 match lower src with
                 | Error e -> e
                 | Ok ir ->
-                    let (_, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "orb_refuse_%s" alias)
+                    let (_, _) = CodeGen.genSelfContainedProgramFromIR ir ($"orb_refuse_{alias}")
                     "emitted (no refusal)"
             with ex -> ex.Message
-        check (sprintf "orbit refusal: provider '%s' still refuses a wreath write" alias)
+        check ($"orbit refusal: provider '{alias}' still refuses a wreath write")
             (outcome.Contains "stores no OrbIdx pools") outcome
 
     // ---------------------------------------------------------------
@@ -1619,11 +1619,11 @@ let w = %s.write("generated_cpp_tests/orb_refuse_out", W)
         |> Seq.sumBy (fun b ->
             SimplexBlocks.blockCellCount strict n B (SimplexBlocks.unrankToCoords false T r b))
      check "block cells sum to cardinality: sym n=5 B=2 r=2 (ragged tile)"
-         (sumCells false 5L 2L 2 = 15L) (sprintf "%d" (sumCells false 5L 2L 2))
+         (sumCells false 5L 2L 2 = 15L) (string (sumCells false 5L 2L 2))
      check "block cells sum to cardinality: antisym n=5 B=2 r=2"
-         (sumCells true 5L 2L 2 = 10L) (sprintf "%d" (sumCells true 5L 2L 2))
+         (sumCells true 5L 2L 2 = 10L) (string (sumCells true 5L 2L 2))
      check "block cells sum to cardinality: antisym n=4 B=1 r=2 (diagonal blocks EMPTY)"
-         (sumCells true 4L 1L 2 = 6L) (sprintf "%d" (sumCells true 4L 1L 2)))
+         (sumCells true 4L 1L 2 = 6L) (string (sumCells true 4L 1L 2)))
     check "antisym B=1: every repeated-tile block is empty (the diagonal specialness)"
         (seq { 0L .. SimplexBlocks.blockCount 2 4L - 1L }
          |> Seq.forall (fun b ->
@@ -1685,19 +1685,19 @@ let w = %s.write("generated_cpp_tests/orb_refuse_out", W)
               Blade = Some layout } ]
         let store = load root
         match tryFindArray store "C" with
-        | None -> check (sprintf "%s: array found" name) false ""
+        | None -> check ($"{name}: array found") false ""
         | Some m ->
-            check (sprintf "%s: physical shape is [blockCount, tile^r]" name)
+            check ($"{name}: physical shape is [blockCount, tile^r]")
                 (match m.Blade with
                  | Some l -> l.Blocks.IsSome && m.Shape.Length = 2
                  | None -> false)
                 (sprintf "%A" m.Shape)
             (match readPackedPool m with
              | Ok { DimLengths = [len]; Payload = ZFloats got } ->
-                 check (sprintf "%s: pool roundtrips exactly through block rows" name)
-                     (len = pool.Length && got = pool) (sprintf "len %d" len)
-             | Ok d -> check (sprintf "%s: pool roundtrips" name) false (sprintf "%A" d.DimLengths)
-             | Error e -> check (sprintf "%s: pool roundtrips" name) false e)
+                 check ($"{name}: pool roundtrips exactly through block rows")
+                     (len = pool.Length && got = pool) ($"len {len}")
+             | Ok d -> check ($"{name}: pool roundtrips") false (sprintf "%A" d.DimLengths)
+             | Error e -> check ($"{name}: pool roundtrips") false e)
     sbRoundtrip "sb_sym_ragged_v2" (SymSymmetric, false) 5L 2L OrderLex ZarrWrite.writeStoreV2
     sbRoundtrip "sb_antisym_ragged_v2" (SymAntisymmetric, true) 5L 2L OrderLex ZarrWrite.writeStoreV2
     sbRoundtrip "sb_antisym_B1_v2" (SymAntisymmetric, true) 4L 1L OrderLex ZarrWrite.writeStoreV2
@@ -1766,8 +1766,8 @@ let w = %s.write("generated_cpp_tests/orb_refuse_out", W)
     let sbE2E (name: string) (sym, strict) (n: int64) (tile: int64) order =
         let layout = sbLayout sym strict 2 n tile order
         let pool = sbPool strict n
-        let inStore = fixStore (sprintf "zarr_sb_%s" name)
-        let outStore = fixStore (sprintf "zarr_sb_%s_out" name)
+        let inStore = fixStore ($"zarr_sb_{name}")
+        let outStore = fixStore ($"zarr_sb_{name}_out")
         let vars : ZarrWrite.WriteVar list = [
             { Name = "C"; DimNames = None; Shape = [int64 pool.Length]; Chunks = [int64 pool.Length]
               FillValue = FillFloat -9.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
@@ -1788,30 +1788,30 @@ let w = z.write("%s", C)
         try
             match lower src with
             | Ok ir ->
-                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_sb_%s_e2e" name)
-                check (sprintf "sb e2e %s: emits per-block reassembly" name)
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_sb_{name}_e2e")
+                check ($"sb e2e {name}: emits per-block reassembly")
                     (cppCode.Contains "simplex-blocks" && cppCode.Contains "symmetric::unlinearize") ""
                 CodeGen.deployRuntimeHeaders e2eDir
-                let cppFile = Path.Combine(e2eDir, sprintf "zarr_sb_%s_e2e.cpp" name)
+                let cppFile = Path.Combine(e2eDir, $"zarr_sb_{name}_e2e.cpp")
                 File.WriteAllText(cppFile, cppCode)
                 (match compileCpp cppFile e2eDir with
                  | Ok exePath ->
                      (match runExecutable exePath with
                       | Ok (0, _) ->
-                          check (sprintf "sb e2e %s: runs (exit 0)" name) true ""
+                          check ($"sb e2e {name}: runs (exit 0)") true ""
                           (match readVarData (Path.Combine(e2eDir, outStore)) "C" with
                            | Ok { Payload = ZFloats got } ->
-                               check (sprintf "sb e2e %s: pool through C++ blocks read == oracle pool" name)
+                               check ($"sb e2e {name}: pool through C++ blocks read == oracle pool")
                                    (got = pool) (sprintf "got %A" (Array.truncate 6 got))
-                           | Ok _ -> check (sprintf "sb e2e %s: pool matches" name) false "not floats"
-                           | Error e -> check (sprintf "sb e2e %s: pool matches" name) false e)
-                      | Ok (code, out) -> check (sprintf "sb e2e %s: runs (exit 0)" name) false (sprintf "exit %d: %s" code out)
-                      | Error e -> check (sprintf "sb e2e %s: runs (exit 0)" name) false e)
+                           | Ok _ -> check ($"sb e2e {name}: pool matches") false "not floats"
+                           | Error e -> check ($"sb e2e {name}: pool matches") false e)
+                      | Ok (code, out) -> check ($"sb e2e {name}: runs (exit 0)") false ($"exit {code}: {out}")
+                      | Error e -> check ($"sb e2e {name}: runs (exit 0)") false e)
                  | Error e ->
                      if isSkipError e then printfn "  SKIP sb e2e %s (compile skipped): %s" name e
-                     else check (sprintf "sb e2e %s: compiles" name) false e)
-            | Error e -> check (sprintf "sb e2e %s: lowers" name) false e
-        with ex -> check (sprintf "sb e2e %s" name) false ex.Message
+                     else check ($"sb e2e {name}: compiles") false e)
+            | Error e -> check ($"sb e2e {name}: lowers") false e
+        with ex -> check ($"sb e2e {name}") false ex.Message
     sbE2E "sym" (SymSymmetric, false) 5L 2L OrderLex
     sbE2E "antisym" (SymAntisymmetric, true) 5L 2L OrderLex
     sbE2E "path" (SymSymmetric, false) 8L 2L OrderPath
@@ -1828,8 +1828,8 @@ let w = z.write("%s", C)
      for (label, blocks) in [ ("blocks", Some { Tile = 2L; Grid = 3L; Order = OrderLex }); ("flat", None) ] do
         let layout : BladeLayout = { Group = { Sym = SymSymmetric; Rank = 2; Extent = n; Levels = [] }; DenseDims = []; Blocks = blocks }
         let pool = sbPool false n
-        let inStore = fixStore (sprintf "zarr_win_%s" label)
-        let outStore = fixStore (sprintf "zarr_win_%s_out" label)
+        let inStore = fixStore ($"zarr_win_{label}")
+        let outStore = fixStore ($"zarr_win_{label}_out")
         let vars : ZarrWrite.WriteVar list = [
             { Name = "C"; DimNames = None; Shape = [int64 pool.Length]; Chunks = [int64 pool.Length]
               FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 pool; OmitChunks = []
@@ -1850,44 +1850,44 @@ let w = z.write("%s", W)
         try
             match lower src with
             | Ok ir ->
-                check (sprintf "window %s: spec carries Window=(2,6) and the WINDOW type (extent 4)" label)
+                check ($"window {label}: spec carries Window=(2,6) and the WINDOW type (extent 4)")
                     (ir.Modules.[0].ProviderReads |> Map.exists (fun _ s ->
                         s.Window = Some (2L, 6L)
                         && (match s.VarType.IndexTypes with
                             | lead :: _ -> (match lead.Extent with IRLit (IRLitInt 4L) -> lead.Symmetry = SymSymmetric | _ -> false)
                             | [] -> false)))
                     ""
-                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir (sprintf "zarr_win_%s_e2e" label)
-                check (sprintf "window %s: emits the extraction pass" label)
+                let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir ($"zarr_win_{label}_e2e")
+                check ($"window {label}: emits the extraction pass")
                     (cppCode.Contains "window [2, 6) extraction") ""
                 CodeGen.deployRuntimeHeaders e2eDir
-                let cppFile = Path.Combine(e2eDir, sprintf "zarr_win_%s_e2e.cpp" label)
+                let cppFile = Path.Combine(e2eDir, $"zarr_win_{label}_e2e.cpp")
                 File.WriteAllText(cppFile, cppCode)
                 (match compileCpp cppFile e2eDir with
                  | Ok exePath ->
                      (match runExecutable exePath with
                       | Ok (0, _) ->
-                          check (sprintf "window %s: runs (exit 0)" label) true ""
+                          check ($"window {label}: runs (exit 0)") true ""
                           (match readVarData (Path.Combine(e2eDir, outStore)) "W" with
                            | Ok { Payload = ZFloats got } ->
-                               check (sprintf "window %s: window pool == oracle sub-simplex (translated SymIdx<2,4>)" label)
+                               check ($"window {label}: window pool == oracle sub-simplex (translated SymIdx<2,4>)")
                                    (got = winPool) (sprintf "got %A" got)
-                           | Ok _ -> check (sprintf "window %s: window pool" label) false "not floats"
-                           | Error e -> check (sprintf "window %s: window pool" label) false e)
+                           | Ok _ -> check ($"window {label}: window pool") false "not floats"
+                           | Error e -> check ($"window {label}: window pool") false e)
                           (try
                               let ws = load (Path.Combine(e2eDir, outStore))
-                              check (sprintf "window %s: written window store types as SymIdx<2,4>" label)
+                              check ($"window {label}: written window store types as SymIdx<2,4>")
                                   (match tryFindArray ws "W" with
                                    | Some m -> (match m.Blade with Some l -> l.Group.Extent = 4L | None -> false)
                                    | None -> false) ""
-                           with ex -> check (sprintf "window %s: out store loads" label) false ex.Message)
-                      | Ok (code, out) -> check (sprintf "window %s: runs (exit 0)" label) false (sprintf "exit %d: %s" code out)
-                      | Error e -> check (sprintf "window %s: runs (exit 0)" label) false e)
+                           with ex -> check ($"window {label}: out store loads") false ex.Message)
+                      | Ok (code, out) -> check ($"window {label}: runs (exit 0)") false ($"exit {code}: {out}")
+                      | Error e -> check ($"window {label}: runs (exit 0)") false e)
                  | Error e ->
                      if isSkipError e then printfn "  SKIP window %s e2e (compile skipped): %s" label e
-                     else check (sprintf "window %s: compiles" label) false e)
-            | Error e -> check (sprintf "window %s: lowers" label) false e
-        with ex -> check (sprintf "window %s e2e" label) false ex.Message)
+                     else check ($"window {label}: compiles") false e)
+            | Error e -> check ($"window {label}: lowers") false e
+        with ex -> check ($"window {label} e2e") false ex.Message)
     check "window: out-of-range bounds rejected at typecheck"
         ((typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n").Contains "bounds")
         (typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n")
@@ -1972,7 +1972,7 @@ let w = z.write("%s", C)
             // assertion below while the block still reported green.
             let serialOut : Result<string, string> =
                 match lower src with
-                | Error e -> Error (sprintf "lower: %s" e)
+                | Error e -> Error ($"lower: {e}")
                 | Ok ir ->
                     let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_mpi_ref"
                     CodeGen.deployRuntimeHeaders e2eDir
@@ -1980,12 +1980,12 @@ let w = z.write("%s", C)
                     File.WriteAllText(f, cpp)
                     (match compileCpp f e2eDir with
                      | Error e when isSkipError e -> Error e
-                     | Error e -> Error (sprintf "compile: %s" e)
+                     | Error e -> Error ($"compile: {e}")
                      | Ok exe ->
                          (try Directory.Delete(outFull, true) with _ -> ())
                          (match runExecutable exe with
                           | Ok (0, out) -> Ok out
-                          | Ok (code, out) -> Error (sprintf "exit %d: %s" code (out.Substring(0, min 300 out.Length)))
+                          | Ok (code, out) -> Error ($"exit {code}: {(out.Substring(0, min 300 out.Length))}")
                           | Error e -> Error e))
             match serialOut with
             | Error e -> baselineFailed "zarr mpi differential" e
@@ -2018,12 +2018,12 @@ let w = z.write("%s", C)
                                   let normalize (s: string) =
                                       s.Split('\n')
                                       |> Array.filter (fun l -> not (l.Contains "completed in"))
-                                      |> Array.map (fun l -> l.TrimEnd())
+                                      |> Array.map (_.TrimEnd())
                                       |> String.concat "\n"
                                       |> fun x -> x.Trim()
                                   // An empty serial reference would make this
                                   // "" = "", a pass with no evidence.
-                                  check (sprintf "zarr mpi -n %d: stdout identical to serial" ranks)
+                                  check ($"zarr mpi -n {ranks}: stdout identical to serial")
                                       (not (String.IsNullOrWhiteSpace (normalize refOut))
                                        && normalize out = normalize refOut)
                                       (sprintf "mpi: %s | serial: %s"
@@ -2031,11 +2031,11 @@ let w = z.write("%s", C)
                                           (let r = normalize refOut in if r = "" then "<EMPTY -- nothing to compare>" else r.Substring(0, min 120 r.Length)))
                                   (match readVarData outFull "C" with
                                    | Ok { Payload = ZFloats got } ->
-                                       check (sprintf "zarr mpi -n %d: gathered pool == oracle (write from rank 0)" ranks)
+                                       check ($"zarr mpi -n {ranks}: gathered pool == oracle (write from rank 0)")
                                            (got = mpiPool) ""
-                                   | _ -> check (sprintf "zarr mpi -n %d: gathered pool == oracle" ranks) false "read-back failed")
-                              | Ok (code, out) -> check (sprintf "zarr mpi -n %d: runs (exit 0)" ranks) false (sprintf "exit %d: %s" code (out.Substring(0, min 200 out.Length)))
-                              | Error e -> check (sprintf "zarr mpi -n %d: runs (exit 0)" ranks) false e)
+                                   | _ -> check ($"zarr mpi -n {ranks}: gathered pool == oracle") false "read-back failed")
+                              | Ok (code, out) -> check ($"zarr mpi -n {ranks}: runs (exit 0)") false ($"exit {code}: {(out.Substring(0, min 200 out.Length))}")
+                              | Error e -> check ($"zarr mpi -n {ranks}: runs (exit 0)") false e)
                      | Error e ->
                          if isSkipError e then printfn "  SKIP zarr mpi e2e (compile skipped): %s" e
                          else check "zarr mpi: compiles" false e)
@@ -2081,7 +2081,7 @@ let w = z.write("%s", C)
              not (l.Contains "completed in")
              && not (l.TrimStart().StartsWith "A = [")
              && not (l.TrimStart().StartsWith "B = ["))
-         |> Array.map (fun l -> l.TrimEnd())
+         |> Array.map (_.TrimEnd())
          |> String.concat "\n"
          |> fun x -> x.Trim()
      /// Compare the two builds' COMPUTE output, and refuse to call an empty
@@ -2105,14 +2105,14 @@ let w = z.write("%s", C)
                  let t = l.TrimStart()
                  t.StartsWith "A = [" || t.StartsWith "B = [")
          if a = "" || b = "" then
-             (false, sprintf "nothing left to compare after normalization (stream=%d chars, read=%d chars); the comparison would be vacuous" a.Length b.Length)
+             (false, $"nothing left to compare after normalization (stream={a.Length} chars, read={b.Length} chars); the comparison would be vacuous")
          elif not refPrintedSource then
              (false, ".read baseline never printed the materialized source array (A/B = [...]) -- it did not materialize, so this is not a read-vs-stream differential")
-         elif a <> b then (false, sprintf "stream: %s / read: %s" a b)
+         elif a <> b then (false, $"stream: {a} / read: {b}")
          else (true, "")
      let compileRun (testName: string) (src: string) : Result<string * string, string> =
          match lower src with
-         | Error e -> Error (sprintf "lower: %s" e)
+         | Error e -> Error ($"lower: {e}")
          | Ok ir ->
              let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir testName
              CodeGen.deployRuntimeHeaders e2eDir
@@ -2122,23 +2122,23 @@ let w = z.write("%s", C)
              // Preserve the skip marker so baselineFailed can tell a toolchain
              // skip from a genuine compile failure.
              | Error e when isSkipError e -> Error e
-             | Error e -> Error (sprintf "compile: %s" e)
+             | Error e -> Error ($"compile: {e}")
              | Ok exe ->
                  match runExecutable exe with
                  | Ok (0, out) -> Ok (out, cpp)
-                 | Ok (code, out) -> Error (sprintf "exit %d: %s" code (out.Substring(0, min 300 out.Length)))
+                 | Ok (code, out) -> Error ($"exit {code}: {(out.Substring(0, min 300 out.Length))}")
                  | Error e -> Error e
      let differential (label: string) (mkSrc: string -> string) =
-         match compileRun (sprintf "strm_%s_read" label) (mkSrc "read") with
+         match compileRun ($"strm_{label}_read") (mkSrc "read") with
          | Error e ->
-             baselineFailed (sprintf "stream differential %s (.read baseline)" label) e
+             baselineFailed ($"stream differential {label} (.read baseline)") e
          | Ok (refOut, _) ->
-             (match compileRun (sprintf "strm_%s_stream" label) (mkSrc "stream") with
-              | Error e -> check (sprintf "stream %s: streamed build runs" label) false e
+             (match compileRun ($"strm_{label}_stream") (mkSrc "stream") with
+              | Error e -> check ($"stream {label}: streamed build runs") false e
               | Ok (out, cpp) ->
                   let (ok, why) = sameCompute out refOut
-                  check (sprintf "stream %s: stdout identical to .read" label) ok why
-                  check (sprintf "stream %s: fiber buffers + stream prologue emitted" label)
+                  check ($"stream {label}: stdout identical to .read") ok why
+                  check ($"stream {label}: fiber buffers + stream prologue emitted")
                       (cpp.Contains "_fb_p" && cpp.Contains "// Stream ") "")
 
      // (b) cov-like: comm pair over 1D sites, SymIdx<2,4> output.
@@ -2210,7 +2210,7 @@ let (mu, m2) = (method_for(A) <@> lambda(x: Array<Float64 like TimeIdx>) -> prod
                    |> Array.filter (fun l -> l.Contains "= { A_fb_p0, A_fiber_ext }")
                    |> Array.length
                check "stream fused <&!>: shared s1 fiber bound ONCE (cross-leaf dedup)"
-                   (wrapperBinds = 1) (sprintf "%d wrapper binds of A_fb_p0" wrapperBinds)))
+                   (wrapperBinds = 1) ($"{wrapperBinds} wrapper binds of A_fb_p0")))
      let fusedSoft = fun verb -> sprintf """
 import zarr as z
 
@@ -2252,7 +2252,7 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
              Directory.CreateDirectory(Path.Combine(e2eDir, "tests", "fixtures")) |> ignore
              File.Copy("tests/fixtures/sample.nc", Path.Combine(e2eDir, "tests", "fixtures", "sample.nc"), true)
              let ncDiff (label: string) (mkSrc: string -> string) =
-                 match compileRun (sprintf "strm_%s_read" label) (mkSrc "read") with
+                 match compileRun ($"strm_{label}_read") (mkSrc "read") with
                  // A missing libnetcdf shows up as a link failure (g++), or as
                  // BL2007's "cannot load its native library" when the checker's
                  // compile-time metadata read cannot load the DLL -- both are
@@ -2264,12 +2264,12 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                      printfn "  SKIP nc stream differential: libnetcdf not available for g++ (%s)" e
                  | Error e -> baselineFailed "nc stream differential (.read baseline)" e
                  | Ok (refOut, _) ->
-                     (match compileRun (sprintf "strm_%s_stream" label) (mkSrc "stream") with
-                      | Error e -> check (sprintf "stream %s: streamed build runs" label) false e
+                     (match compileRun ($"strm_{label}_stream") (mkSrc "stream") with
+                      | Error e -> check ($"stream {label}: streamed build runs") false e
                       | Ok (out, cpp) ->
                           let (ok, why) = sameCompute out refOut
-                          check (sprintf "stream %s: stdout identical to .read" label) ok why
-                          check (sprintf "stream %s: nc_get_vara fiber reads inlined" label)
+                          check ($"stream {label}: stdout identical to .read") ok why
+                          check ($"stream {label}: nc_get_vara fiber reads inlined")
                               (cpp.Contains "nc_get_vara") "")
              ncDiff "nc_cov" (fun verb -> sprintf """
 import netcdf as nc
@@ -2293,5 +2293,5 @@ let m2 = method_for(A, A) <@> lambda(x: Array<Float32 like xdim>, y: Array<Float
     // ---------------------------------------------------------------
     // Summary
     // ---------------------------------------------------------------
-    printFooter "Zarr Provider" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "Zarr Provider" [$"{passed} passed"; $"{failed} failed"]
     if failed > 0 then 1 else 0

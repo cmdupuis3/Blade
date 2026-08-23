@@ -147,7 +147,7 @@ type CellPredicate = (string * int64) list -> Result<bool, string>
 /// unactionable: the user cannot tell WHICH assignment blew the fuel.
 let renderCell (cell: (string * int64) list) : string =
     cell
-    |> List.map (fun (n, v) -> sprintf "%s = %d" n v)
+    |> List.map (fun (n, v) -> $"{n} = {v}")
     |> String.concat ", "
     |> sprintf "(%s)"
 
@@ -307,34 +307,29 @@ let private certify
         (heads: int64 list list)
         : unit =
     let render (e: int64 list) =
-        List.zip (fields |> List.map (fun f -> f.Field)) e |> renderCell
+        List.zip (fields |> List.map (_.Field)) e |> renderCell
     if List.length flat <> List.length heads then
-        failwithf "internal: the two enumerations of %s disagree on CARDINALITY -- the flat box filter found %d solutions, the arrow heads-filtered enumeration found %d (see the certificate block in StructIdxSpec.fs)"
-            label (List.length flat) (List.length heads)
+        failwith $"internal: the two enumerations of {label} disagree on CARDINALITY -- the flat box filter found {(List.length flat)} solutions, the arrow heads-filtered enumeration found {(List.length heads)} (see the certificate block in StructIdxSpec.fs)"
     // ORDER agreement, position by position. This is the half that catches an
     // offset bug: a wrong shift permutes values without changing the set.
     List.iteri2 (fun i (a: int64 list) (b: int64 list) ->
         if a <> b then
-            failwithf "internal: the two enumerations of %s disagree at POSITION %d -- the flat box filter has %s, the arrow heads-filtered enumeration has %s. Set agreement without order agreement is the offset-bug signature (retired constrained-index-types plan section 7 C1, the 5a-i third-route discipline)"
-                label i (render a) (render b)) flat heads
+            failwith $"internal: the two enumerations of {label} disagree at POSITION {i} -- the flat box filter has {(render a)}, the arrow heads-filtered enumeration has {(render b)}. Set agreement without order agreement is the offset-bug signature (retired constrained-index-types plan section 7 C1, the 5a-i third-route discipline)") flat heads
     // Every solution must actually lie in the box, and the list must be
     // strictly lex ascending -- the two properties the storage offset depends
     // on, checked against the box rather than against the other route.
     let arr = List.toArray fields
     flat |> List.iteri (fun i e ->
         if List.length e <> arr.Length then
-            failwithf "internal: solution %d of %s has %d coordinates but the box has %d fields"
-                i label (List.length e) arr.Length
+            failwith $"internal: solution {i} of {label} has {(List.length e)} coordinates but the box has {arr.Length} fields"
         List.iteri (fun j v ->
             if v < arr.[j].Lo || v > arr.[j].Hi then
-                failwithf "internal: solution %d of %s is outside the box -- field '%s' = %d is not in the inclusive range %d .. %d"
-                    i label arr.[j].Field v arr.[j].Lo arr.[j].Hi) e)
+                failwith $"internal: solution {i} of {label} is outside the box -- field '{arr.[j].Field}' = {v} is not in the inclusive range {arr.[j].Lo} .. {arr.[j].Hi}") e)
     let rec ascending (xs: int64 list list) =
         match xs with
         | a :: (b :: _ as rest) ->
             if compare a b >= 0 then
-                failwithf "internal: the enumeration of %s is not strictly lex ascending -- %s is not before %s"
-                    label (render a) (render b)
+                failwith $"internal: the enumeration of {label} is not strictly lex ascending -- {(render a)} is not before {(render b)}"
             ascending rest
         | _ -> ()
     ascending flat
@@ -357,10 +352,9 @@ let enumerateBox (label: string) (fields: BoxField list) (pred: CellPredicate) :
     if vol > int64 maxBoxCells then
         let dims =
             fields
-            |> List.map (fun f -> sprintf "%s: %d .. %d (%d)" f.Field f.Lo f.Hi (fieldExtent f))
+            |> List.map (fun f -> $"{f.Field}: {f.Lo} .. {f.Hi} ({fieldExtent f})")
             |> String.concat ", "
-        Error (sprintf "%s: the index box has %d cells, over the %d-cell cap -- enumeration visits every cell of the box before the constraints cut it down, so the CAP IS ON THE BOX, not on the solution count. Box: %s. Narrow the field bounds"
-                   label vol maxBoxCells dims)
+        Error ($"{label}: the index box has {vol} cells, over the {maxBoxCells}-cell cap -- enumeration visits every cell of the box before the constraints cut it down, so the CAP IS ON THE BOX, not on the solution count. Box: {dims}. Narrow the field bounds")
     else
         let memo = memoize pred
         routeFlat fields memo
@@ -373,7 +367,7 @@ let enumerateBox (label: string) (fields: BoxField list) (pred: CellPredicate) :
         |> Result.map (fun r ->
             // card = |entries|, restated at the boundary.
             if r.Card <> List.length r.Entries then
-                failwithf "internal: %s reported card %d but produced %d entries" label r.Card (List.length r.Entries)
+                failwith $"internal: {label} reported card {r.Card} but produced {List.length r.Entries} entries"
             r)
 
 // The fence seam -- struct declaration -> box + cell predicate. The FENCE
@@ -409,10 +403,9 @@ let cellPredicateOf (env: StaticEnv) (spec: StructBoxSpec) : CellPredicate =
             // per cell of the box.
             let tail =
                 if why.Contains "did not fold" then
-                    sprintf ". Every conjunct is folded once per box cell under a budget of %d steps and %d nesting levels, so a conjunct that recurses without a static bound fails at the FIRST cell it is reached at"
-                        cellBudget.Steps cellBudget.Depth
+                    $". Every conjunct is folded once per box cell under a budget of {cellBudget.Steps} steps and {cellBudget.Depth} nesting levels, so a conjunct that recurses without a static bound fails at the FIRST cell it is reached at"
                 else ""
-            Error (sprintf "%s at %s%s" why (renderCell cell) tail)
+            Error $"{why} at {renderCell cell}{tail}"
 
 // The re-entrancy guard
 
@@ -460,7 +453,7 @@ let structEntries (env: StaticEnv) (name: string) : Result<BoxEntries, string> =
 
 /// The cardinality alone.
 let structCard (env: StaticEnv) (name: string) : Result<int, string> =
-    structEntries env name |> Result.map (fun r -> r.Card)
+    structEntries env name |> Result.map (_.Card)
 
 // `idx_card(R)`, the sizing surface. A CORE static builtin: it must fold in
 // a module that never writes `import ml`, so it goes into StaticEval's own
@@ -479,8 +472,7 @@ let private idxCard (env: StaticEnv) (_fuel: int) (args: Expr list) : Result<Sta
         // "you passed a value" case diagnosable rather than confusing.
         match Map.tryFind name env.Values with
         | Some v when not (Map.containsKey name env.Structs) ->
-            Error (sprintf "idx_card(%s): '%s' is a static VALUE (%s), not a struct declaration. idx_card counts the solutions of a constrained struct used as an index type; pass the struct's bare name"
-                       name name (ppStaticValue v))
+            Error ($"idx_card({name}): '{name}' is a static VALUE ({(ppStaticValue v)}), not a struct declaration. idx_card counts the solutions of a constrained struct used as an index type; pass the struct's bare name")
         | _ ->
             structCard env name |> Result.map (fun c -> SVInt (int64 c))
     | [ other ] ->
@@ -491,7 +483,7 @@ let private idxCard (env: StaticEnv) (_fuel: int) (args: Expr list) : Result<Sta
                     | ExprKind.ExprField _ -> " (a field access was given)"
                     | _ -> ""))
     | _ ->
-        Error (sprintf "idx_card expects exactly one argument, the bare name of a declared struct (got %d)" (List.length args))
+        Error $"idx_card expects exactly one argument, the bare name of a declared struct (got {List.length args})"
 
 /// Idempotent registration of the counting layer's static builtins. Called
 /// once from TypeCheck.typeCheck, ahead of every resolveStatics pass -- the

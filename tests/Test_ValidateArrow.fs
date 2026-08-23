@@ -73,7 +73,7 @@ let private expectValue (expected: 'a) (action: unit -> 'a) : bool * string =
         if actual = expected then (true, sprintf "= %A" actual)
         else (false, sprintf "expected %A, got %A" expected actual)
     with ex ->
-        (false, sprintf "raised: %s" ex.Message)
+        (false, $"raised: {ex.Message}")
 
 /// Run a thunk that should raise. Returns (true, "") on raise,
 /// (false, "did not raise") if it didn't.
@@ -114,7 +114,7 @@ let private test_invalid_virtual_array_arrow_elem () =
     ("invalid virtual array (arrow elem) raises with descriptive message",
      pass,
      if pass then "raised with expected message"
-     elif raised then sprintf "raised but message unclear: %s" msg
+     elif raised then $"raised but message unclear: {msg}"
      else "did not raise — gate is not firing")
 
 let private test_valid_stored_array_constructs () =
@@ -168,7 +168,7 @@ let private test_validate_arrow_shape_directly () =
     let pass = (errs = expected)
     ("validateArrowShape: virtual-with-arrow-result reports exactly the constraint-2 message",
      pass,
-     if pass then sprintf "got %d error(s)" errs.Length else sprintf "expected %A, got %A" expected errs)
+     if pass then $"got {errs.Length} error(s)" else sprintf "expected %A, got %A" expected errs)
 
 // ---- Constraint 1: no stored/value slot after the first SIdxVirt ----------
 // Constraint 1 had ZERO tests: every case above and below exercises constraint
@@ -185,7 +185,7 @@ let private test_validate_arrow_shape_stored_after_virtual () =
     let pass = (errs = expected)
     ("validateArrowShape: SIdx after SIdxVirt reports the constraint-1 stored-after-virtual message",
      pass,
-     if pass then sprintf "got %d error(s)" errs.Length else sprintf "expected %A, got %A" expected errs)
+     if pass then $"got {errs.Length} error(s)" else sprintf "expected %A, got %A" expected errs)
 
 let private test_validate_arrow_shape_value_after_virtual () =
     // [SIdxVirt; SVal] is constraint 1's other arm, with its own wording.
@@ -195,7 +195,7 @@ let private test_validate_arrow_shape_value_after_virtual () =
     let pass = (errs = expected)
     ("validateArrowShape: SVal after SIdxVirt reports the constraint-1 value-after-virtual message",
      pass,
-     if pass then sprintf "got %d error(s)" errs.Length else sprintf "expected %A, got %A" expected errs)
+     if pass then $"got {errs.Length} error(s)" else sprintf "expected %A, got %A" expected errs)
 
 let private test_validate_arrow_shape_accepts_wellformed () =
     // The control: an all-virtual arrow with a scalar result violates neither
@@ -237,5 +237,5 @@ let runValidateArrowTests () : Blade.Tests.TestHarness.BlockResult =
             failed <- failed + 1
             failedNames <- failedNames @ [name]
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name detail
-    Blade.Tests.TestHarness.printFooter "Validate Arrow" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    Blade.Tests.TestHarness.printFooter "Validate Arrow" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Validate Arrow"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

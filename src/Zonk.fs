@@ -24,7 +24,7 @@ let mkDeducedRankArray (freshId: unit -> IRId) (elemTy: IRType) (label: string) 
         List.init k (fun i ->
             { Id = freshId ()
               Rank = 1
-              Extent = IRParam (sprintf "__%s_deduced_n%d" label i, 0, IRTNat None)
+              Extent = IRParam ($"__{label}_deduced_n{i}", 0, IRTNat None)
               Symmetry = SymNone
               Tag = None; IxKind = IxKPlain
               Kind = SDimension
@@ -97,7 +97,7 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
                 // close idempotent and globally consistent (every later
                 // Resolve of `n` sees this same array) and introduces no new
                 // inference var, so "no IRTInfer survives zonking" still holds.
-                let arr = mkDeducedRankArray mkId elem (sprintf "zonk%d" n) k
+                let arr = mkDeducedRankArray mkId elem $"zonk{n}" k
                 subst.Bind(n, arr)
                 // Zonk-closed ranks also join the deduced-facts channel so
                 // `ide check --json`'s deduced[] shows them too.

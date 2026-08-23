@@ -70,11 +70,11 @@ let runShapeTests () : BlockResult =
 
     // 1. rebuildWith e (childrenOf e) reproduces e exactly.
     for (name, e) in battery do
-        check (sprintf "round-trip: %s" name) (rebuildWith e (childrenOf e) = e) ""
+        check ($"round-trip: {name}") (rebuildWith e (childrenOf e) = e) ""
 
     // 2. mapIRExpr id is the identity.
     for (name, e) in battery do
-        check (sprintf "mapIRExpr id: %s" name) (mapIRExpr id e = e) ""
+        check ($"mapIRExpr id: {name}") (mapIRExpr id e = e) ""
 
     // 3. mapIRExpr rewrites reach EVERY child position, including the ones
     //    the old per-walker matches skipped (BndPad, IRRange offset).
@@ -136,5 +136,5 @@ let runShapeTests () : BlockResult =
     check "exprTypeIfKnown: no reconstruction"
         (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, vY)) = None) ""
 
-    printFooter "ExprShape" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
+    printFooter "ExprShape" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "ExprShape"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

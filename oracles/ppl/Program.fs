@@ -20,7 +20,7 @@ let testCombinatorics () =
     section "combinatorics"
     let bells = [| 1; 2; 5; 15; 52; 203 |]
     for n in 1 .. 6 do
-        check (sprintf "Bell(%d) = %d" n bells.[n - 1]) (Combinatorics.bell n = bells.[n - 1])
+        check $"Bell({n}) = {bells.[n - 1]}" (Combinatorics.bell n = bells.[n - 1])
     check "C(8,3) = 56" (Combinatorics.binomial 8 3 = 56)
     check "C(6,4) = 15" (Combinatorics.binomial 6 4 = 15)
     checkClose "6!" 1e-9 720.0 (Combinatorics.factorial 6)
@@ -33,12 +33,12 @@ let testSymTensor () =
     // rankOf over the canonical enumeration is a bijection onto 0..N-1
     for (d, r) in [ (3, 4); (4, 3); (2, 6) ] do
         let ranks = SymTensor.enumerate d r |> Array.map SymTensor.rankOf |> Array.sort
-        check (sprintf "rank bijection d=%d r=%d" d r)
+        check $"rank bijection d={d} r={r}"
               (ranks = [| 0 .. SymTensor.storageSize d r - 1 |])
     // sum of joint-r! multiplicities over canonical entries recovers the dense count
     for (d, r) in [ (3, 4); (2, 5) ] do
         let total = SymTensor.enumerate d r |> Array.sumBy SymTensor.multiplicity
-        checkClose (sprintf "sum multiplicities d=%d r=%d = d^r" d r) 1e-9 (float d ** float r) total
+        checkClose $"sum multiplicities d={d} r={r} = d^r" 1e-9 (float d ** float r) total
     // symmetric access: any permutation hits the same entry
     let t = SymTensor.create 3 3
     SymTensor.set t [| 2; 0; 1 |] 7.5
@@ -55,7 +55,7 @@ let testMomentCumulant () =
              t |]
     let back = MomentCumulant.cumulantsFromMoments (MomentCumulant.momentsFromCumulants kappa)
     for k in 1 .. 5 do
-        checkArrayClose (sprintf "round trip rank %d" k) 1e-9 kappa.[k - 1].Data back.[k - 1].Data
+        checkArrayClose $"round trip rank {k}" 1e-9 kappa.[k - 1].Data back.[k - 1].Data
     // Isserlis: zero-mean Gaussian pair, rho = 0.5 -- only pairings survive
     let g = Dist.create 2 4
     SymTensor.set g.Kappa.[1] [| 0; 0 |] 1.0
@@ -236,7 +236,7 @@ let testJetPushforwardVec () =
     let transformed = [| Array.map2 (+) b.[0] b.[1]; Array.map2 (*) b.[0] b.[1] |]
     let direct = computeCumulants transformed 3
     for k in 1 .. 3 do
-        checkArrayClose (sprintf "vec empirical identity rank %d" k) 1e-9 direct.[k - 1].Data vec.Kappa.[k - 1].Data
+        checkArrayClose $"vec empirical identity rank {k}" 1e-9 direct.[k - 1].Data vec.Kappa.[k - 1].Data
     // 5) Guards: the strict order budget, and a mis-shaped derivative slot.
     let distB4 : Dist.T = { Dim = 2; Order = 4; Kappa = computeCumulants b 4 }
     checkThrows "vec order guard (q*s = 6 > 4 strict)"
@@ -248,14 +248,14 @@ let testJetPushforwardVec () =
 // ---------------------------------------------------------------------------
 
 let private compareAcc (name: string) (relTol: float) (absTol: float) (reference: Streaming.Acc) (acc: Streaming.Acc) =
-    checkClose (sprintf "%s: N" name) 1e-9 reference.N acc.N
-    checkArrayClose (sprintf "%s: mean" name) 1e-10 reference.Mean acc.Mean
+    checkClose $"{name}: N" 1e-9 reference.N acc.N
+    checkArrayClose $"{name}: mean" 1e-10 reference.Mean acc.Mean
     for p in 2 .. reference.Order do
         let refT = reference.M.[p - 2]
         let accT = acc.M.[p - 2]
         let labels = SymTensor.labelTable reference.Dim p
         for e in 0 .. refT.Data.Length - 1 do
-            checkCloseRel (sprintf "%s: M%d(%s)" name p (fmtLabels labels.[e])) relTol absTol
+            checkCloseRel $"{name}: M{p}({fmtLabels labels.[e]})" relTol absTol
                           refT.Data.[e] accT.Data.[e]
 
 let testStreaming () =
@@ -361,7 +361,7 @@ let testFullCircle () =
             let ev = exact.Kappa.[k - 1].Data.[e]
             let av = est.Kappa.[k - 1].Data.[e]
             worst <- max worst (abs (ev - av))
-            checkCloseRel (sprintf "kappa%d(%s)" k (fmtLabels labels.[e])) relTol absTol ev av
+            checkCloseRel $"kappa{k}({fmtLabels labels.[e]})" relTol absTol ev av
         printfn "  rank %d: max |exact - estimated| = %.4g" k worst
     // a taste of the comparison table
     printfn "  sample entries (exact vs streamed):"
@@ -532,7 +532,7 @@ let testDensity () =
     checkClose "lgamma(5) = log 24" 1e-13 3.1780538303479458 (Density.lgamma 5.0)
     checkClose "lgamma(6) = log 120" 1e-13 4.787491742782046 (Density.lgamma 6.0)
     for n in 0 .. 15 do
-        checkCloseRel (sprintf "lgamma(%d) = log %d!" (n + 1) n) 1e-13 1e-13
+        checkCloseRel $"lgamma({n + 1}) = log {n}!" 1e-13 1e-13
                       (log (Combinatorics.factorial n)) (Density.logFactorial n)
     // reflection: lgamma(x) + lgamma(1-x) = log(pi / sin(pi x))
     for x in [ 0.1; 0.3; 0.45 ] do
@@ -582,7 +582,7 @@ let testDensity () =
                        - log (Combinatorics.factorial (a - 1)) - log (Combinatorics.factorial (b - 1)))
                       (Density.betaLogpdf (float a) (float b) x)
     for k in 0 .. 8 do
-        checkCloseRel (sprintf "Poisson(4.5) vs factorial form at %d" k) 1e-13 1e-13
+        checkCloseRel $"Poisson(4.5) vs factorial form at {k}" 1e-13 1e-13
                       (float k * log 4.5 - 4.5 - log (Combinatorics.factorial k))
                       (Density.poissonLogpmf 4.5 (float k))
 

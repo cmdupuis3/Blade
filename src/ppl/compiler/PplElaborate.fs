@@ -139,18 +139,18 @@ let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
     (needed: int list list) (n: float) : Located<Decl> list * PoolInfo =
     let mkDecl name value =
         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-    let rowName i = sprintf "__ppl_row_%s_%d" uniq i
+    let rowName i = $"__ppl_row_{uniq}_{i}"
     let rowDecls = rows |> List.mapi (fun i e -> mkDecl (rowName i) e)
-    let lName = sprintf "__ppl_poolL_%s" uniq
+    let lName = $"__ppl_poolL_{uniq}"
     let lValue =
         match rows with
         | [_] -> methodForE [v (rowName 0)]
         | _ -> methodForE [syn (ExprZip [ for i in 0 .. rows.Length - 1 -> v (rowName i) ])]
     let sets = needed |> List.map List.sort |> List.distinct |> List.sortBy (fun s -> (s.Length, s))
     let tag (s: int list) = s |> List.map string |> String.concat "_"
-    let pName s = sprintf "__ppl_P_%s_%s" uniq (tag s)
-    let kName s = sprintf "__ppl_poolk_%s_%s" uniq (tag s)
-    let xName i = sprintf "__x%d" i
+    let pName s = $"__ppl_P_{uniq}_{tag s}"
+    let kName s = $"__ppl_poolk_{uniq}_{tag s}"
+    let xName i = $"__x{i}"
     let ps = [ for i in 0 .. rows.Length - 1 -> { Name = xName i; Type = None; Default = None; NameSpan = noSpan } ]
     let kDecls =
         sets |> List.map (fun s ->
@@ -345,7 +345,7 @@ let rec private splitInvariant (e: Expr) : (string * string) list * Expr option 
 
 /// Deterministic alias binding name for a struct-field array path m.f -- formers iterate named bindings (method_for over a raw
 /// field access doesn't reach codegen's binding-keyed loop machinery), so field paths normalize to `let __ppl_arr_m_f = m.f`.
-let private aliasOf (m: string) (f: string) = sprintf "__ppl_arr_%s_%s" m f
+let private aliasOf (m: string) (f: string) = $"__ppl_arr_{m}_{f}"
 
 // Former elaboration
 type private Ctx = {
@@ -382,14 +382,14 @@ let private indepKey (a: string) (b: string) = if a <= b then (a, b) else (b, a)
 let private arrayShape (ctx: Ctx) (what: string) (name: string) : Result<TypeExpr * TypeExpr list * TypeExpr * int, string> =
     match Map.tryFind name ctx.Arrays with
     | None ->
-        Error (sprintf "%s: '%s' must be a module-level let with an Array<Elem like ..., SampleIdx> annotation (the formers read the declared shape)" what name)
+        Error $"{what}: '{name}' must be a module-level let with an Array<Elem like ..., SampleIdx> annotation (the formers read the declared shape)"
     | Some (_, idxs) when idxs.Length < 2 ->
-        Error (sprintf "%s: '%s' needs at least one variable axis plus the sample axis (Array<Elem like VarIdx, SampleIdx>); a lone sample axis has no comoment structure" what name)
+        Error $"{what}: '{name}' needs at least one variable axis plus the sample axis (Array<Elem like VarIdx, SampleIdx>); a lone sample axis has no comoment structure"
     | Some (elem, idxs) ->
         let fiber = List.last idxs
         let leading = idxs |> List.take (idxs.Length - 1)
         match resolveExtent ctx.Aliases ctx.Statics fiber with
-        | None -> Error (sprintf "%s: '%s' sample axis extent must be statically known (Idx<n> directly or through aliases)" what name)
+        | None -> Error $"{what}: '{name}' sample axis extent must be statically known (Idx<n> directly or through aliases)"
         | Some n -> Ok (elem, leading, fiber, n)
 
 /// moments(A, k): raw order-k comoment former.
@@ -400,7 +400,7 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
         let k =
             match evalExpr ctx.Statics maxSteps kExpr with
             | Ok (SVInt n) when n >= 1L -> Ok (int n)
-            | Ok (SVInt n) -> Error (sprintf "moments: order must be >= 1, got %d" n)
+            | Ok (SVInt n) -> Error $"moments: order must be >= 1, got {n}"
             | _ -> Error "moments: the order must be a compile-time integer (a literal, `let static`, or static-function call)"
         k |> Result.bind (fun k ->
         arrayShape ctx "moments" aName |> Result.map (fun (elem, leading, fiber, n) ->
@@ -413,12 +413,12 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
                 pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
             | _ ->
                 // Multiaxis / unresolvable leading extent: per-cell pipeline.
-                let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
+                let paramNames = [ for i in 1 .. k -> $"__x{i}" ]
                 let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); Default = None; NameSpan = noSpan })
                 let whereC = if k >= 2 then commWhere paramNames else None
                 let body = divE (prodsumE (paramNames |> List.map v)) (fLit (float n))
-                let lName = sprintf "__ppl_L_%s" outName
-                let kName = sprintf "__ppl_k_%s" outName
+                let lName = $"__ppl_L_{outName}"
+                let kName = $"__ppl_k_{outName}"
                 let mk value = { Pattern = pvar ""; Type = None; Value = value; Mutability = BindLet }
                 [ { Value = DeclLet { mk (methodForE (List.replicate k (v aName))) with Pattern = pvar lName }; Span = span }
                   { Value = DeclLet { mk (lambdaE ps whereC body) with Pattern = pvar kName }; Span = span }
@@ -436,8 +436,8 @@ let private centralPairBody (n: float) =
 /// comoments(A, 2) same-array | comoments(X, Y) cross-block.
 let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
-    let lName = sprintf "__ppl_L_%s" outName
-    let kName = sprintf "__ppl_k_%s" outName
+    let lName = $"__ppl_L_{outName}"
+    let kName = $"__ppl_k_{outName}"
     let mkDecl pat value = { Value = DeclLet { Pattern = pvar pat; Type = None; Value = value; Mutability = BindLet }; Span = span }
     match args with
     // Same-array central comoment of static order (only 2 for now)
@@ -472,7 +472,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
         arrayShape ctx "comoments" xName |> Result.bind (fun (elemX, leadX, fibX, nX) ->
         arrayShape ctx "comoments" yName |> Result.bind (fun (elemY, leadY, fibY, nY) ->
             if nX <> nY then
-                Error (sprintf "comoments: '%s' and '%s' sample axes disagree (%d vs %d)" xName yName nX nY)
+                Error $"comoments: '{xName}' and '{yName}' sample axes disagree ({nX} vs {nY})"
             elif Set.contains (indepKey xName yName) ctx.Indep then
                 // Declared independent: the central cross block is structurally zero -- emit the literal (needs both leading
                 // extents statically, single leading axis each).
@@ -482,7 +482,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                     | Some dx, Some dy ->
                         let zeros = arrLitE (List.replicate dx (arrLitE (List.replicate dy (fLit 0.0))))
                         Ok [ { Value = DeclLet { binding with Value = zeros }; Span = span } ]
-                    | _ -> Error (sprintf "comoments: independent zero block needs static variable-axis extents for '%s' and '%s'" xName yName)
+                    | _ -> Error $"comoments: independent zero block needs static variable-axis extents for '{xName}' and '{yName}'"
                 | _ -> Error "comoments: independent zero blocks support one variable axis per array so far (multi-axis blocks deferred)"
             else
                 match leadX, leadY with
@@ -524,7 +524,7 @@ let private cumulantKernelBody (r: int) (n: float) : Expr =
     let blockName (s: int list) = "__m" + (s |> List.map (fun i -> string (i + 1)) |> String.concat "")
     let lets =
         nonemptySubsets r |> List.map (fun s ->
-            sLet (blockName s) (divE (prodsumE (s |> List.map (fun i -> v (sprintf "__x%d" (i + 1))))) (fLit n)))
+            sLet (blockName s) (divE (prodsumE (s |> List.map (fun i -> v $"__x{i + 1}"))) (fLit n)))
     let terms =
         setPartitions r |> List.map (fun p ->
             let b = p.Length
@@ -536,9 +536,9 @@ let private cumulantKernelBody (r: int) (n: float) : Expr =
 /// (comm for k >= 2); out = L <@> kernel |> compute.
 let private formerPipeline (span: Span) (outName: string) (outBinding: Binding option)
     (aName: string) (elem: TypeExpr) (fiber: TypeExpr) (k: int) (body: Expr) : Located<Decl> list =
-    let lName = sprintf "__ppl_L_%s" outName
-    let kName = sprintf "__ppl_k_%s" outName
-    let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
+    let lName = $"__ppl_L_{outName}"
+    let kName = $"__ppl_k_{outName}"
+    let paramNames = [ for i in 1 .. k -> $"__x{i}" ]
     let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); Default = None; NameSpan = noSpan })
     let whereC = if k >= 2 then commWhere paramNames else None
     let outValue = computeE (applyE (v lName) (v kName))
@@ -558,7 +558,7 @@ let private elabCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
         let r =
             match evalExpr ctx.Statics maxSteps rExpr with
             | Ok (SVInt n) when n >= 1L && n <= 6L -> Ok (int n)
-            | Ok (SVInt n) -> Error (sprintf "cumulants: order must be in 1..6 (got %d) -- Bell-number kernel growth beyond that needs the shared-subexpression pass" n)
+            | Ok (SVInt n) -> Error $"cumulants: order must be in 1..6 (got {n}) -- Bell-number kernel growth beyond that needs the shared-subexpression pass"
             | _ -> Error "cumulants: the order must be a compile-time integer (a literal, `let static`, or static-function call)"
         r |> Result.bind (fun r ->
         arrayShape ctx "cumulants" aName |> Result.map (fun (elem, leading, fiber, n) ->
@@ -599,7 +599,7 @@ type private DistInfo = {
     Flat: bool
 }
 
-let private distComponentName (dName: string) (k: int) = sprintf "__dist_%s_k%d" dName k
+let private distComponentName (dName: string) (k: int) = $"__dist_{dName}_k{k}"
 
 /// The binding that makes a dist a VALUE: `let d = __dist_pack(k1, ..., kr)`. The checker types the intrinsic as
 /// Dist<r, tau like axes> (nominal), so `d` is first-class: it crosses function boundaries and cumulant(d, k) projects anywhere.
@@ -622,11 +622,11 @@ let private elabDist (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
             // The tower, fused: per order a loop object and a cumulant kernel, then ONE compute over the <&>-chain, destructured
             // into the per-order components -- a single deferred computation owns the whole tower.
             let comps = [ for k in 1 .. r -> distComponentName dName k ]
-            let lName k = sprintf "__ppl_L_%s_k%d" dName k
-            let kName k = sprintf "__ppl_k_%s_k%d" dName k
+            let lName k = $"__ppl_L_{dName}_k{k}"
+            let kName k = $"__ppl_k_{dName}_k{k}"
             let stageDecls =
                 [ for k in 1 .. r do
-                    let paramNames = [ for i in 1 .. k -> sprintf "__x%d" i ]
+                    let paramNames = [ for i in 1 .. k -> $"__x{i}" ]
                     let ps = paramNames |> List.map (fun p -> { Name = p; Type = Some (TyArray (elem, [fiber])); Default = None; NameSpan = noSpan })
                     let whereC = if k >= 2 then commWhere paramNames else None
                     yield { Value = DeclLet { Pattern = pvar (lName k); Type = None; Value = methodForE (List.replicate k (v aName)); Mutability = BindLet }; Span = span }
@@ -661,7 +661,7 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
                       if not (Set.contains (indepKey s1 s2) ctx.Indep) then yield (s1, s2) ]
             match missing with
             | (s1, s2) :: _ ->
-                Error (sprintf "dist %s: cumulants combine only for independent distributions -- declare independence of %s and %s (loose `let _ = ppl.independent(...)` or a struct `where ppl.indep(...)`)" opName s1 s2)
+                Error $"dist {opName}: cumulants combine only for independent distributions -- declare independence of {s1} and {s2} (loose `let _ = ppl.independent(...)` or a struct `where ppl.indep(...)`)"
             | [] ->
                 let decls =
                     [ for k in 1 .. d1.Order ->
@@ -680,11 +680,11 @@ let private elabDistCombine (opName: string) (weight: int -> float) (ctx: Ctx) (
                              Flat = d1.Flat || d2.Flat }
                 Ok (decls, info)
         | Some d1, Some d2 ->
-            Error (sprintf "dist %s: orders disagree (%d vs %d) -- carry the same stochastic order on both sides" opName d1.Order d2.Order)
+            Error $"dist {opName}: orders disagree ({d1.Order} vs {d2.Order}) -- carry the same stochastic order on both sides"
         | _ ->
-            Error (sprintf "dist %s expects two previously declared dist(...) bindings" opName)
+            Error $"dist {opName} expects two previously declared dist(...) bindings"
     | _ ->
-        Error (sprintf "dist %s expects two dist operands" opName)
+        Error $"dist {opName} expects two dist operands"
 
 let private elabDistScale (ctx: Ctx) (span: Span) (dName: string)
     (dists: Map<string, DistInfo>) (args: Expr list)
@@ -721,14 +721,14 @@ let private elabComomentsMerge (ctx: Ctx) (span: Span) (outName: string) (bindin
         let staticN what e =
             match evalExpr ctx.Statics maxSteps e with
             | Ok (SVInt n) when n >= 1L -> Ok (float n)
-            | _ -> Error (sprintf "comoments_merge: %s must be a compile-time chunk size >= 1" what)
+            | _ -> Error $"comoments_merge: {what} must be a compile-time chunk size >= 1"
         staticN "nA" nAExpr |> Result.bind (fun nA ->
         staticN "nB" nBExpr |> Result.map (fun nB ->
             let n = nA + nB
-            let deltaN = sprintf "__ppl_delta_%s" outName
-            let ddLN = sprintf "__ppl_ddL_%s" outName
-            let ddKN = sprintf "__ppl_ddk_%s" outName
-            let ddN = sprintf "__ppl_dd_%s" outName
+            let deltaN = $"__ppl_delta_{outName}"
+            let ddLN = $"__ppl_ddL_{outName}"
+            let ddKN = $"__ppl_ddk_{outName}"
+            let ddN = $"__ppl_dd_{outName}"
             let mkDecl pat value = { Value = DeclLet { Pattern = pvar pat; Type = None; Value = value; Mutability = BindLet }; Span = span }
             // delta = mB - mA (lockstep over the mean vectors)
             let deltaDecl = mkDecl deltaN (zipMap2 (v mA) (v mB) (subE (v "__w") (v "__u")))
@@ -791,7 +791,7 @@ type private MStateInfo = {
     Packed: bool
 }
 
-let private mstateComponent (sName: string) (what: string) = sprintf "__mst_%s_%s" sName what
+let private mstateComponent (sName: string) (what: string) = $"__mst_{sName}_{what}"
 
 /// Read M_S for |S| >= 2 from a state, representation-aware.
 let private mReadExpr (info: MStateInfo) (labels: int list) : Expr =
@@ -819,7 +819,7 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
                     // ArrayLits (Packed = false), same representation merge outputs carry.
                     let (pd, pool) = acquirePool ctx span aName d (float n) r
                     let meanN = mstateComponent sName "mean"
-                    let mN p = mstateComponent sName (sprintf "m%d" p)
+                    let mN p = mstateComponent sName $"m{p}"
                     let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                     let meanDecl = mkDecl meanN (arrLitE [ for i in 0 .. d - 1 -> poolMoment pool [i] ])
                     let mDecls =
@@ -855,7 +855,7 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
             let cB = a.N / n
             let deltaN = mstateComponent outName "delta"
             let meanN = mstateComponent outName "mean"
-            let mN p = mstateComponent outName (sprintf "m%d" p)
+            let mN p = mstateComponent outName $"m{p}"
             let dRead lbl = appE (v deltaN) [iLit lbl]
             let mSide (info: MStateInfo) (labels: int list) =
                 if labels.IsEmpty then fLit info.N else mReadExpr info labels
@@ -881,7 +881,7 @@ let private elabMStateMerge (ctx: Ctx) (span: Span) (outName: string)
             let info = { Order = a.Order; Dim = a.Dim; N = n; Mean = meanN; Ms = [ for p in 2 .. a.Order -> mN p ]; Packed = false }
             Ok ([deltaDecl; meanDecl] @ mDecls, info)
         | Some a, Some b ->
-            Error (sprintf "mstate_merge: shapes disagree (order %d vs %d, dim %d vs %d)" a.Order b.Order a.Dim b.Dim)
+            Error $"mstate_merge: shapes disagree (order {a.Order} vs {b.Order}, dim {a.Dim} vs {b.Dim})"
         | _ ->
             Error "mstate_merge expects two previously declared mstate(...) bindings"
     | _ ->
@@ -903,7 +903,7 @@ let private elabMStateCumulants (ctx: Ctx) (span: Span) (binding: Binding)
                     if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                     else Error "mstate_cumulants: destructure into plain names"
                 | _ ->
-                    Error (sprintf "mstate_cumulants: destructure the result -- `let (k1, ..., k%d) = mstate_cumulants(%s)`" s.Order sn)
+                    Error $"mstate_cumulants: destructure the result -- `let (k1, ..., k{s.Order}) = mstate_cumulants({sn})`"
             compNames |> Result.map (fun names ->
                 let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                 let muE (labels: int list) = divE (mReadExpr s labels) (fLit s.N)
@@ -995,13 +995,13 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
         let staticOrd what e =
             match evalExpr ctx.Statics maxSteps e with
             | Ok (SVInt x) when x >= 1L && x <= 5L -> Ok (int x)
-            | _ -> Error (sprintf "mixed_cumulants: %s must be a compile-time integer in 1..5" what)
+            | _ -> Error $"mixed_cumulants: {what} must be a compile-time integer in 1..5"
         staticOrd "p" pExpr |> Result.bind (fun p ->
         staticOrd "q" qExpr |> Result.bind (fun q ->
         arrayShape ctx "mixed_cumulants" xName |> Result.bind (fun (elemX, leadX, fibX, nX) ->
         arrayShape ctx "mixed_cumulants" yName |> Result.bind (fun (_elemY, leadY, fibY, nY) ->
             if nX <> nY then
-                Error (sprintf "mixed_cumulants: '%s' and '%s' sample axes disagree (%d vs %d)" xName yName nX nY)
+                Error $"mixed_cumulants: '{xName}' and '{yName}' sample axes disagree ({nX} vs {nY})"
             elif Set.contains (indepKey xName yName) ctx.Indep then
                 // Structural sparsity at all orders: cumulants factor over independent subalgebras, so any block touching both is 0.
                 match leadX, leadY with
@@ -1037,10 +1037,10 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     let cells = [ for labArr in cellLabels -> cumulantCellExpr pool labArr r ]
                     Ok (pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ])
                 | _ ->
-                    let lName = sprintf "__ppl_L_%s" outName
-                    let kName = sprintf "__ppl_k_%s" outName
-                    let xParams = [ for i in 1 .. p -> sprintf "__x%d" i ]
-                    let yParams = [ for i in p + 1 .. r -> sprintf "__x%d" i ]
+                    let lName = $"__ppl_L_{outName}"
+                    let kName = $"__ppl_k_{outName}"
+                    let xParams = [ for i in 1 .. p -> $"__x{i}" ]
+                    let yParams = [ for i in p + 1 .. r -> $"__x{i}" ]
                     let ps =
                         (xParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibX])); Default = None; NameSpan = noSpan }))
                         @ (yParams |> List.map (fun nm -> { Name = nm; Type = Some (TyArray (elemX, [fibY])); Default = None; NameSpan = noSpan }))
@@ -1077,7 +1077,7 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
                             let names = pats |> List.map (fun p -> match p.Kind with PatternKind.PatVar nm -> Some nm | _ -> None)
                             if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                             else Error "dist_affine: destructure into plain names"
-                        | _ -> Error (sprintf "dist_affine: destructure the result -- `let (p1, ..., p%d) = dist_affine(%s, %s)`" info.Order wName dn)
+                        | _ -> Error $"dist_affine: destructure the result -- `let (p1, ..., p{info.Order}) = dist_affine({wName}, {dn})`"
                     compNames |> Result.map (fun names ->
                         let wRead i j = appE (v wName) [iLit i; iLit j]
                         // All index tuples over [0, n)^k (order matters for the W factors; kappa reads canonicalize the j-tuple).
@@ -1097,7 +1097,7 @@ let private elabDistAffine (ctx: Ctx) (span: Span) (binding: Binding)
                                     terms |> List.reduce addE ]
                             { Value = DeclLet { Pattern = pvar nm; Type = None; Value = arrLitE cells; Mutability = BindLet }; Span = span }))
                 | Some _, Some nCols ->
-                    Error (sprintf "dist_affine: W's column count (%d) must match the dist's dimension (%d)" nCols n)
+                    Error $"dist_affine: W's column count ({nCols}) must match the dist's dimension ({n})"
                 | _ -> Error "dist_affine: W's extents must be statically known"
             | _ -> Error "dist_affine: W must be an annotated module-level mxn array (Array<Elem like Idx<m>, Idx<n>>)")
     | _ ->
@@ -1137,14 +1137,14 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
             let qRes =
                 match evalExpr ctx.Statics maxSteps qExpr with
                 | Ok (SVInt x) when x >= 1L && x <= 6L -> Ok (int x)
-                | _ -> Error (sprintf "%s: the output order q must be a compile-time integer in 1..6" former)
+                | _ -> Error $"{former}: the output order q must be a compile-time integer in 1..6"
             qRes |> Result.bind (fun q ->
             let s = dArgs.Length
             let tMax = q * s
             if not closed && tMax > info.Order then
-                Error (sprintf "%s: computing %d output cumulants through a degree-%d jet needs input order %d but the dist carries %d -- insufficient stochastic order. Carry more or accept the truncation explicitly with %s_closed(...)" former q s tMax info.Order former)
+                Error $"{former}: computing {q} output cumulants through a degree-{s} jet needs input order {tMax} but the dist carries {info.Order} -- insufficient stochastic order. Carry more or accept the truncation explicitly with {former}_closed(...)"
             elif closed && tMax > 8 then
-                Error (sprintf "%s: q*s = %d exceeds the generation bound (8) -- lower the output order or the jet degree" former tMax)
+                Error $"{former}: q*s = {tMax} exceeds the generation bound (8) -- lower the output order or the jet degree"
             else
                 let cellsOf k = canonicalTuples dim k |> List.length
                 let g0Read (a: int) : Expr =
@@ -1162,17 +1162,17 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                             | ExprKind.ExprLit (LitFloat 0.0) -> None
                             | _ -> Some cell)
                     | ExprKind.ExprArrayLit cells ->
-                        Error (sprintf "%s: vector D%d needs %d cells (coordinate-major: m = %d outer x %d canonical cells over dim %d), got %d" former k want m (cellsOf k) dim cells.Length)
+                        Error $"{former}: vector D{k} needs {want} cells (coordinate-major: m = {m} outer x {cellsOf k} canonical cells over dim {dim}), got {cells.Length}"
                     | ExprKind.ExprVar w ->
                         (match Map.tryFind w ctx.Arrays with
                          | Some (_, [ix]) when resolveExtent ctx.Aliases ctx.Statics ix = Some want ->
                              Ok (fun a labels -> Some (appE (v w) [iLit (a * cellsOf k + lexOffsetOf dim k labels)]))
                          | Some _ ->
-                             Error (sprintf "%s: vector D%d ('%s') must be a rank-1 array of %d coordinate-major cells" former k w want)
+                             Error $"{former}: vector D{k} ('{w}') must be a rank-1 array of {want} coordinate-major cells"
                          | None ->
-                             Error (sprintf "%s: vector D%d ('%s') must be an annotated module-level array or an inline array literal" former k w))
+                             Error $"{former}: vector D{k} ('{w}') must be an annotated module-level array or an inline array literal")
                     | _ ->
-                        Error (sprintf "%s: with a vector g0 (m = %d), D%d must be a named array or an array literal of %d coordinate-major cells" former m k (m * cellsOf k))
+                        Error $"{former}: with a vector g0 (m = {m}), D{k} must be a named array or an array literal of {m * cellsOf k} coordinate-major cells"
                 let dReadsRes =
                     dArgs
                     |> List.mapi (fun i a -> dReadOf (i + 1) a)
@@ -1182,9 +1182,9 @@ let private elabDistJetVec (closed: bool) (former: string) (ctx: Ctx) (span: Spa
                     let dRead (k: int) (a: int) (labels: int list) = dReadFns.[k - 1] a labels
                     let mkDecl name value =
                         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-                    let kappaName kk ci = sprintf "__ppl_jetk_%s_o%d_c%d" dName kk ci
-                    let cmName t ci = sprintf "__ppl_jetcm_%s_t%d_c%d" dName t ci
-                    let myName k ci = sprintf "__ppl_jetmy_%s_o%d_c%d" dName k ci
+                    let kappaName kk ci = $"__ppl_jetk_{dName}_o{kk}_c{ci}"
+                    let cmName t ci = $"__ppl_jetcm_{dName}_t{t}_c{ci}"
+                    let myName k ci = $"__ppl_jetmy_{dName}_o{k}_c{ci}"
                     let partsOf t =
                         setPartitions t
                         |> List.filter (fun pt ->
@@ -1283,7 +1283,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
     match args with
     | { Kind = ExprKind.ExprVar dn } :: qExpr :: g0Expr :: dArgs when not dArgs.IsEmpty ->
         match Map.tryFind dn dists with
-        | None -> Error (sprintf "%s expects %s(d, q, g0, D1, ..., Ds) with a previously declared dist binding d" former former)
+        | None -> Error $"{former} expects {former}(d, q, g0, D1, ..., Ds) with a previously declared dist binding d"
         | Some info ->
             distDim ctx info |> Result.bind (fun dim ->
             // Vector mode is keyed off g0's shape: an m-cell (m >= 2) array literal or named rank-1 array of static extent m
@@ -1303,14 +1303,14 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
             let qRes =
                 match evalExpr ctx.Statics maxSteps qExpr with
                 | Ok (SVInt x) when x >= 1L && x <= 6L -> Ok (int x)
-                | _ -> Error (sprintf "%s: the output order q must be a compile-time integer in 1..6" former)
+                | _ -> Error $"{former}: the output order q must be a compile-time integer in 1..6"
             qRes |> Result.bind (fun q ->
             let s = dArgs.Length
             let tMax = q * s
             if not closed && tMax > info.Order then
-                Error (sprintf "%s: computing %d output cumulants through a degree-%d jet needs input order %d but '%s' carries %d -- insufficient stochastic order. Carry more (dist(A, %d)) or accept the truncation explicitly with %s_closed(...)" former q s tMax dn info.Order (min tMax 6) former)
+                Error $"{former}: computing {q} output cumulants through a degree-{s} jet needs input order {tMax} but '{dn}' carries {info.Order} -- insufficient stochastic order. Carry more (dist(A, {min tMax 6})) or accept the truncation explicitly with {former}_closed(...)"
             elif closed && tMax > 8 then
-                Error (sprintf "%s: q*s = %d exceeds the generation bound (8) -- lower the output order or the jet degree" former tMax)
+                Error $"{former}: q*s = {tMax} exceeds the generation bound (8) -- lower the output order or the jet degree"
             else
                 // Per-degree derivative read at a label tuple: inline literals/scalar exprs splice (zero cells prune terms);
                 // named arrays read at the flat canonical offset.
@@ -1330,17 +1330,17 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                 | ExprKind.ExprLit (LitFloat 0.0) -> None
                                 | _ -> Some cell)
                         | ExprKind.ExprArrayLit cells ->
-                            Error (sprintf "%s: D%d needs %d cells in canonical lex order over dim %d, got %d" former k (cellsOf k) dim cells.Length)
+                            Error $"{former}: D{k} needs {cellsOf k} cells in canonical lex order over dim {dim}, got {cells.Length}"
                         | ExprKind.ExprVar w ->
                             (match Map.tryFind w ctx.Arrays with
                              | Some (_, [ix]) when resolveExtent ctx.Aliases ctx.Statics ix = Some (cellsOf k) ->
                                  Ok (fun labels -> Some (appE (v w) [iLit (lexOffsetOf dim k labels)]))
                              | Some _ ->
-                                 Error (sprintf "%s: D%d ('%s') must be a rank-1 array of %d cells (canonical lex order over dim %d)" former k w (cellsOf k) dim)
+                                 Error $"{former}: D{k} ('{w}') must be a rank-1 array of {cellsOf k} cells (canonical lex order over dim {dim})"
                              | None ->
-                                 Error (sprintf "%s: D%d ('%s') must be an annotated module-level array or an inline array literal" former k w))
+                                 Error $"{former}: D{k} ('{w}') must be an annotated module-level array or an inline array literal")
                         | _ ->
-                            Error (sprintf "%s: with a %d-dimensional dist, D%d must be a named array or an array literal (scalar-expr jets need a univariate dist)" former dim k)
+                            Error $"{former}: with a {dim}-dimensional dist, D{k} must be a named array or an array literal (scalar-expr jets need a univariate dist)"
                 let dReadsRes =
                     dArgs
                     |> List.mapi (fun i a -> dReadOf (i + 1) a)
@@ -1350,9 +1350,9 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                     let dRead (k: int) (labels: int list) = dReadFns.[k - 1] labels
                     let mkDecl name value =
                         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-                    let kappaName kk ci = sprintf "__ppl_jetk_%s_o%d_c%d" dName kk ci
-                    let cmName t ci = sprintf "__ppl_jetcm_%s_t%d_c%d" dName t ci
-                    let myName m = sprintf "__ppl_jetmy_%s_m%d" dName m
+                    let kappaName kk ci = $"__ppl_jetk_{dName}_o{kk}_c{ci}"
+                    let cmName t ci = $"__ppl_jetcm_{dName}_t{t}_c{ci}"
+                    let myName m = $"__ppl_jetmy_{dName}_m{m}"
                     let partsOf t =
                         setPartitions t
                         |> List.filter (fun pt ->
@@ -1443,7 +1443,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
                                     Flat = true }
                     (kappaDecls @ cmDecls @ myDecls @ compDecls, outInfo))))
     | _ ->
-        Error (sprintf "%s expects %s(d, q, g0, D1, ..., Ds): a dist binding, a static output order, g(mu), and the derivative tensors at the mean" former former)
+        Error $"{former} expects {former}(d, q, g0, D1, ..., Ds): a dist binding, a static output order, g(mu), and the derivative tensors at the mean"
 
 // Tower Bayes: three low-level conditioning primitives, univariate.
 // Straight-line scalar generation over the dist's component reads,
@@ -1475,7 +1475,7 @@ let private elabDistJet (closed: bool) (former: string) (ctx: Ctx) (span: Span) 
 /// the moments(d,k) reconstruction at dim 1). Exact for j <= carried order. Returns decls and a reader (m_0 = literal 1).
 let private rawMomentDecls (span: Span) (tag: string) (info: DistInfo) (top: int)
     : Located<Decl> list * (int -> Expr) =
-    let mName j = sprintf "__ppl_tb_%s_m%d" tag j
+    let mName j = $"__ppl_tb_{tag}_m{j}"
     let decls =
         [ for j in 1 .. top ->
             let parts =
@@ -1509,7 +1509,7 @@ let private mobiusComponentDecls (span: Span) (dName: string) (r: int) (mRead: i
 let private univariateOnly (former: string) (ctx: Ctx) (info: DistInfo) : Result<unit, string> =
     distDim ctx info |> Result.bind (fun dim ->
         if dim = 1 then Ok ()
-        else Error (sprintf "%s: univariate dists only so far -- marginalize or push forward (dist_map/dist_affine) first, then condition" former))
+        else Error $"{former}: univariate dists only so far -- marginalize or push forward (dist_map/dist_affine) first, then condition")
 
 let private elabDistExpect (ctx: Ctx) (span: Span) (binding: Binding)
     (dists: Map<string, DistInfo>) (args: Expr list)
@@ -1544,16 +1544,16 @@ let private elabDistReweight (ctx: Ctx) (span: Span) (dName: string)
             let q = coeffs.Length - 1
             let rOut = info.Order - q
             if rOut < 1 then
-                Error (sprintf "dist_reweight: a degree-%d weight consumes %d orders of the tower and '%s' carries only %d -- insufficient stochastic order. Carry more (dist(A, %d)) or lower the weight degree." q q dn info.Order (min (q + 1) 6))
+                Error $"dist_reweight: a degree-{q} weight consumes {q} orders of the tower and '{dn}' carries only {info.Order} -- insufficient stochastic order. Carry more (dist(A, {(min (q + 1) 6)})) or lower the weight degree."
             else
                 let mDecls, mRead = rawMomentDecls span ("rw_" + dName) info info.Order
-                let zName = sprintf "__ppl_tb_rw_%s_Z" dName
+                let zName = $"__ppl_tb_rw_{dName}_Z"
                 let zVal =
                     coeffs
                     |> List.mapi (fun c cf -> if c = 0 then cf else mulE cf (mRead c))
                     |> List.reduce addE
                 let zDecl = { Value = DeclLet { Pattern = pvar zName; Type = None; Value = zVal; Mutability = BindLet }; Span = span }
-                let wName j = sprintf "__ppl_tb_rw_%s_w%d" dName j
+                let wName j = $"__ppl_tb_rw_{dName}_w{j}"
                 let wDecls =
                     [ for j in 1 .. rOut ->
                         let num =
@@ -1584,13 +1584,13 @@ let private elabDistMix (ctx: Ctx) (span: Span) (dName: string)
             univariateOnly "dist_mix" ctx d1 |> Result.bind (fun () ->
             univariateOnly "dist_mix" ctx d2 |> Result.bind (fun () ->
             let rOut = min d1.Order d2.Order
-            let w1Name = sprintf "__ppl_tb_mx_%s_w1" dName
-            let w2Name = sprintf "__ppl_tb_mx_%s_w2" dName
-            let wsName = sprintf "__ppl_tb_mx_%s_ws" dName
+            let w1Name = $"__ppl_tb_mx_{dName}_w1"
+            let w2Name = $"__ppl_tb_mx_{dName}_w2"
+            let wsName = $"__ppl_tb_mx_{dName}_ws"
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let m1Decls, m1Read = rawMomentDecls span ("mxa_" + dName) d1 rOut
             let m2Decls, m2Read = rawMomentDecls span ("mxb_" + dName) d2 rOut
-            let mixName j = sprintf "__ppl_tb_mx_%s_m%d" dName j
+            let mixName j = $"__ppl_tb_mx_{dName}_m{j}"
             let mixDecls =
                 [ for j in 1 .. rOut ->
                     bind (mixName j)
@@ -1637,11 +1637,11 @@ let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
         | Some info ->
             distDim ctx info |> Result.bind (fun dim ->
             if dim = 1 then
-                Error (sprintf "dist_condition: '%s' is univariate -- conditioning fixes one coordinate of a JOINT tower and returns the rest, and a 1-dimensional tower has no rest. Construct a joint dist(A, 2) over a multi-variable array first; for updating a univariate prior on data, use ppl.bayes." dn)
+                Error $"dist_condition: '{dn}' is univariate -- conditioning fixes one coordinate of a JOINT tower and returns the rest, and a 1-dimensional tower has no rest. Construct a joint dist(A, 2) over a multi-variable array first; for updating a univariate prior on data, use ppl.bayes."
             elif info.Order = 1 then
-                Error (sprintf "dist_condition: '%s' carries only the mean (order 1) -- conditioning is the Schur complement on the kappa_2 block, so construct with dist(A, 2)." dn)
+                Error $"dist_condition: '{dn}' carries only the mean (order 1) -- conditioning is the Schur complement on the kappa_2 block, so construct with dist(A, 2)."
             elif info.Order > 2 then
-                Error (sprintf "dist_condition: '%s' carries order %d, and conditioning is exact ONLY at order 2 (the Gaussian truncation, whose conditionals stay order-2 with the Schur-complement blocks); an order-%d conditional is not a function of the carried tower, and the module refuses rather than truncates. Construct with dist(A, 2)." dn info.Order info.Order)
+                Error $"dist_condition: '{dn}' carries order {info.Order}, and conditioning is exact ONLY at order 2 (the Gaussian truncation, whose conditionals stay order-2 with the Schur-complement blocks); an order-{info.Order} conditional is not a function of the carried tower, and the module refuses rather than truncates. Construct with dist(A, 2)."
             else
             match evalExpr ctx.Statics maxSteps iE with
             | Ok (SVInt ii) when ii >= 0L && ii < int64 dim ->
@@ -1650,9 +1650,9 @@ let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
                 let k1 j = distKappaRead info [j]
                 let k2 a b = distKappaRead info [min a b; max a b]
                 let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-                let xN = sprintf "__ppl_cond_%s_x" dName
-                let sN = sprintf "__ppl_cond_%s_s" dName
-                let devN = sprintf "__ppl_cond_%s_dev" dName
+                let xN = $"__ppl_cond_{dName}_x"
+                let sN = $"__ppl_cond_{dName}_s"
+                let devN = $"__ppl_cond_{dName}_dev"
                 let meanCells =
                     [ for j in rest ->
                         addE (k1 j) (mulE (divE (k2 j i) (v sN)) (v devN)) ]
@@ -1673,7 +1673,7 @@ let private elabDistCondition (ctx: Ctx) (span: Span) (dName: string)
                       bind comps.[0] (arrLitE meanCells)
                       bind comps.[1] (arrLitE covCells) ], outInfo)
             | Ok (SVInt ii) ->
-                Error (sprintf "dist_condition: coordinate %d is out of range for the %d-dimensional dist '%s' (coordinates are 0..%d)" ii dim dn (dim - 1))
+                Error $"dist_condition: coordinate {ii} is out of range for the {dim}-dimensional dist '{dn}' (coordinates are 0..{dim - 1})"
             | _ ->
                 Error "dist_condition: the coordinate must be a compile-time integer (a literal, `let static`, or static-function call)")
     | _ ->
@@ -1706,16 +1706,16 @@ let private elabDistAtoms (ctx: Ctx) (span: Span) (dName: string) (args: Expr li
             | _ -> Error "dist_atoms: the order must be a compile-time integer in 1..6"
         rRes |> Result.map (fun r ->
             let k = rest.Length / 2
-            let xName i = sprintf "__ppl_tb_at_%s_x%d" dName i
-            let wName i = sprintf "__ppl_tb_at_%s_w%d" dName i
+            let xName i = $"__ppl_tb_at_{dName}_x{i}"
+            let wName i = $"__ppl_tb_at_{dName}_w{i}"
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let bindDecls =
                 [ for i in 0 .. k - 1 do
                     yield bind (xName i) rest.[2 * i]
                     yield bind (wName i) rest.[2 * i + 1] ]
-            let wsName = sprintf "__ppl_tb_at_%s_ws" dName
+            let wsName = $"__ppl_tb_at_{dName}_ws"
             let wsDecl = bind wsName ([ for i in 0 .. k - 1 -> v (wName i) ] |> List.reduce addE)
-            let mName j = sprintf "__ppl_tb_at_%s_m%d" dName j
+            let mName j = $"__ppl_tb_at_{dName}_m{j}"
             let mDecls =
                 [ for j in 1 .. r ->
                     let terms =
@@ -1744,13 +1744,13 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
             univariateOnly "dist_negativity" ctx info |> Result.bind (fun () ->
             let sPts = xs.Length
             if sPts - 1 > info.Order then
-                Error (sprintf "dist_negativity: reading %d cells needs the degree-%d Lagrange indicators but '%s' carries order %d -- insufficient stochastic order. Carry more, or claim fewer support points." sPts (sPts - 1) dn info.Order)
+                Error $"dist_negativity: reading {sPts} cells needs the degree-{sPts - 1} Lagrange indicators but '{dn}' carries order {info.Order} -- insufficient stochastic order. Carry more, or claim fewer support points."
             else
-                let xName i = sprintf "__ppl_tb_ng_%s_x%d" outName i
+                let xName i = $"__ppl_tb_ng_{outName}_x{i}"
                 let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
                 let xDecls = [ for i in 0 .. sPts - 1 -> bind (xName i) xs.[i] ]
                 let mDecls, mRead = rawMomentDecls span ("ng_" + outName) info (sPts - 1)
-                let cellName j = sprintf "__ppl_tb_ng_%s_c%d" outName j
+                let cellName j = $"__ppl_tb_ng_{outName}_c{j}"
                 let cellDecls =
                     [ for j in 0 .. sPts - 1 ->
                         let others = [ for kk in 0 .. sPts - 1 do if kk <> j then yield v (xName kk) ]
@@ -1822,7 +1822,7 @@ let private familyParams : Map<string, string list> =
 let private familyNames : Set<string> = familyParams |> Map.toList |> List.map fst |> Set.ofList
 
 let private familySig (fam: string) : string =
-    sprintf "%s(%s)" fam (String.concat ", " familyParams.[fam])
+    $"""{fam}({(String.concat ", " familyParams.[fam])})"""
 
 /// x * x * ... * x, k >= 1 copies: repeated multiplication keeps arbitrary
 /// scalar parameter exprs inside plain arithmetic (the dist_scale convention).
@@ -1845,7 +1845,7 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
         | Ok (SVInt x) when x >= 1L && x <= 6L ->
             let r = int x
             let bind n vl = { Value = DeclLet { Pattern = pvar n; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-            let pName i = sprintf "__ppl_fam_%s_p%d" dName i
+            let pName i = $"__ppl_fam_{dName}_p{i}"
             let pDecls = args |> List.take arity |> List.mapi (fun i e -> bind (pName i) e)
             let p i = v (pName i)
             let direct (kappa: int -> Expr) =
@@ -1878,7 +1878,7 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
                         | _ -> fLit 0.0)
                 | "lognormal" ->
                     // raw moments m_j = exp(j*mu + j^2*s2/2), then Moebius inversion.
-                    let mName j = sprintf "__ppl_fam_%s_m%d" dName j
+                    let mName j = $"__ppl_fam_{dName}_m{j}"
                     let mDecls =
                         [ for j in 1 .. r ->
                             bind (mName j)
@@ -1896,7 +1896,7 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
                     // Plain arithmetic all the way down: no lgamma is needed for
                     // the TOWER (only the log-density touches it), so the
                     // constructor rides the same moment route as lognormal.
-                    let mName j = sprintf "__ppl_fam_%s_m%d" dName j
+                    let mName j = $"__ppl_fam_{dName}_m{j}"
                     let mDecls =
                         [ for j in 1 .. r ->
                             let prev = if j = 1 then fLit 1.0 else v (mName (j - 1))
@@ -1913,9 +1913,9 @@ let private elabFamilyDist (ctx: Ctx) (span: Span) (fam: string) (dName: string)
                          Flat = true }
             Ok (pDecls @ compDecls, info)
         | Ok (SVInt x) ->
-            Error (sprintf "%s: the order must be in 1..6 (got %d) -- Bell-number kernel growth beyond that needs the shared-subexpression pass" fam x)
+            Error $"{fam}: the order must be in 1..6 (got {x}) -- Bell-number kernel growth beyond that needs the shared-subexpression pass"
         | _ ->
-            Error (sprintf "%s: the order must be a compile-time integer (a literal, `let static`, or static-function call)" fam)
+            Error $"{fam}: the order must be a compile-time integer (a literal, `let static`, or static-function call)"
 
 // Log-densities. The lgamma-free closed forms (gaussian/exponential/uniform/
 // lognormal) shipped first; gamma/poisson/beta/bernoulli landed once lgamma
@@ -1954,11 +1954,11 @@ let private familyArg (former: string) (active: string -> bool) (e: Expr) : Resu
     match e.Kind with
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ps) when Set.contains f familyNames && active f -> Ok (f, ps)
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Set.contains f familyNames ->
-        Error (sprintf "%s: '%s' is shadowed by a user definition in this module, so the argument is not a family constructor here" former f)
+        Error $"{former}: '{f}' is shadowed by a user definition in this module, so the argument is not a family constructor here"
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) ->
-        Error (sprintf "%s: unknown family '%s' -- available: gaussian(mu, s2), exponential(rate), gamma(shape, rate), poisson(lam), uniform(a, b), lognormal(mu, s2), bernoulli(p), beta(a, b)" former f)
+        Error $"{former}: unknown family '{f}' -- available: gaussian(mu, s2), exponential(rate), gamma(shape, rate), poisson(lam), uniform(a, b), lognormal(mu, s2), bernoulli(p), beta(a, b)"
     | _ ->
-        Error (sprintf "%s: the first argument must be a family constructor application written syntactically, e.g. %s(gaussian(mu, s2), ...)" former former)
+        Error $"{former}: the first argument must be a family constructor application written syntactically, e.g. {former}(gaussian(mu, s2), ...)"
 
 /// Family + parameter validation shared by logpdf/loglik/sample: arity and
 /// the stray-order-argument steer. `position` names the symbolic slot in the
@@ -1967,9 +1967,9 @@ let private checkSymbolicFamily (ctx: Ctx) (former: string) (position: string) (
     let arity = familyParams.[fam].Length
     if ps.Length = arity then Ok ()
     elif ps.Length = arity + 1 && (match evalExpr ctx.Statics maxSteps (List.last ps) with Ok (SVInt _) -> true | _ -> false) then
-        Error (sprintf "%s: %s takes no order argument in %s -- the family is symbolic here (%s); the order-r tower is the value-position constructor `let d = %s(..., r)`" former fam position (familySig fam) fam)
+        Error $"{former}: {fam} takes no order argument in {position} -- the family is symbolic here ({familySig fam}); the order-r tower is the value-position constructor `let d = {fam}(..., r)`"
     else
-        Error (sprintf "%s: %s expects %d parameter(s) (%s), got %d" former fam arity (String.concat ", " familyParams.[fam]) ps.Length)
+        Error ($"""{former}: {fam} expects {arity} parameter(s) ({(String.concat ", " familyParams.[fam])}), got {ps.Length}""")
 
 let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Expr list) : Result<unit, string> =
     checkSymbolicFamily ctx former "log-density position" fam ps
@@ -1980,8 +1980,8 @@ let private checkDensityFamily (ctx: Ctx) (former: string) (fam: string) (ps: Ex
 /// (rewriteBodyFormers, plan section 4's density-form model bodies) wraps
 /// them as statement lets in a block, so the same closed forms serve both.
 let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr) : (string * Expr) list * Expr =
-    let pName i = sprintf "__ppl_lp_%s_p%d" tok i
-    let xName = sprintf "__ppl_lp_%s_x" tok
+    let pName i = $"__ppl_lp_{tok}_p{i}"
+    let xName = $"__ppl_lp_{tok}_x"
     let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
     let p i = v (pName i)
     let x = v xName
@@ -1989,7 +1989,7 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
         match fam with
         | "gaussian" ->
             // -log(2 pi s2)/2 - (x - mu)^2 / (2 s2)
-            let dN = sprintf "__ppl_lp_%s_d" tok
+            let dN = $"__ppl_lp_{tok}_d"
             ([ (dN, subE x (p 0)) ],
              subE (mulE (fLit (-0.5)) (log2piE (p 1)))
                   (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
@@ -2001,8 +2001,8 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
             ([], subE (fLit 0.0) (appE (v "log") [subE (p 1) (p 0)]))
         | "lognormal" ->
             // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2)
-            let lxN = sprintf "__ppl_lp_%s_lx" tok
-            let dN = sprintf "__ppl_lp_%s_d" tok
+            let lxN = $"__ppl_lp_{tok}_lx"
+            let dN = $"__ppl_lp_{tok}_d"
             ([ (lxN, appE (v "log") [x]); (dN, subE (v lxN) (p 0)) ],
              subE (subE (mulE (fLit (-0.5)) (log2piE (p 1))) (v lxN))
                   (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
@@ -2056,25 +2056,25 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
     : Result<(string * Expr) list * Expr, string> =
         match Map.tryFind aName ctx.Arrays with
         | None ->
-            Error (sprintf "loglik: '%s' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape" aName)
+            Error $"loglik: '{aName}' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
         | Some (_, idxs) when idxs.Length <> 1 ->
-            Error (sprintf "loglik: '%s' carries %d declared axes -- a univariate family sums a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward (dist_map/dist_affine) first" aName idxs.Length)
+            Error $"loglik: '{aName}' carries {idxs.Length} declared axes -- a univariate family sums a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward (dist_map/dist_affine) first"
         | Some (_, idxs) ->
             let fiber = idxs.Head
             match resolveExtent ctx.Aliases ctx.Statics fiber with
-            | None -> Error (sprintf "loglik: '%s' sample axis extent must be statically known (Idx<n> directly or through aliases)" aName)
+            | None -> Error $"loglik: '{aName}' sample axis extent must be statically known (Idx<n> directly or through aliases)"
             | Some n ->
                 let nF = float n
-                let pName i = sprintf "__ppl_ll_%s_p%d" tok i
+                let pName i = $"__ppl_ll_{tok}_p{i}"
                 let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
                 let p i = v (pName i)
-                let accN i = sprintf "__ppl_ll_%s_acc%d" tok i
-                let iN = sprintf "__ppl_ll_%s_i" tok
+                let accN i = $"__ppl_ll_{tok}_acc{i}"
+                let iN = $"__ppl_ll_{tok}_i"
                 // The loop var is a plain Int64 read against a tagged sample
                 // axis; route the read through a synthesized `__` alias so
                 // BL4003's synthesized-buffer gate applies (the read is
                 // compiler-generated -- the user has no cast to write).
-                let srcN = sprintf "__ppl_ll_%s_src" tok
+                let srcN = $"__ppl_ll_{tok}_src"
                 let aRead = appE (v srcN) [v iN]
                 let sMut nm vl = StmtLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindMut }
                 let accAdd i term = StmtExpr (syn (ExprAssign (v (accN i), addE (v (accN i)) term)))
@@ -2087,7 +2087,7 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
                     match fam with
                     | "gaussian" ->
                         // -n/2 log(2 pi s2) - sum (x_i - mu)^2 / (2 s2)
-                        let dN = sprintf "__ppl_ll_%s_d" tok
+                        let dN = $"__ppl_ll_{tok}_d"
                         loop 1
                              [ sLet dN (subE aRead (p 0)); accAdd 0 (mulE (v dN) (v dN)) ]
                              (subE (mulE (fLit (-nF / 2.0)) (log2piE (p 1)))
@@ -2101,8 +2101,8 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
                         mulE (fLit (-nF)) (appE (v "log") [subE (p 1) (p 0)])
                     | "lognormal" ->
                         // -n/2 log(2 pi s2) - sum log x_i - sum (log x_i - mu)^2 / (2 s2)
-                        let lxN = sprintf "__ppl_ll_%s_lx" tok
-                        let dN = sprintf "__ppl_ll_%s_d" tok
+                        let lxN = $"__ppl_ll_{tok}_lx"
+                        let dN = $"__ppl_ll_{tok}_d"
                         loop 2
                              [ sLet lxN (appE (v "log") [aRead])
                                accAdd 0 (v lxN)
@@ -2193,9 +2193,9 @@ let private likArg (active: string -> bool) (e: Expr) : Result<string * Expr lis
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ps) when Set.contains f likNames && active f ->
         let arity = likParams.[f].Length
         if ps.Length = arity then Ok (f, ps)
-        else Error (sprintf "bayes: %s expects %d parameter(s) (%s), got %d" f arity (String.concat ", " likParams.[f]) ps.Length)
+        else Error ($"""bayes: {f} expects {arity} parameter(s) ({(String.concat ", " likParams.[f])}), got {ps.Length}""")
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _) when Set.contains f likNames ->
-        Error (sprintf "bayes: '%s' is shadowed by a user definition in this module, so the argument is not a likelihood former here" f)
+        Error $"bayes: '{f}' is shadowed by a user definition in this module, so the argument is not a likelihood former here"
     | _ ->
         Error "bayes: the second argument must be a likelihood former written syntactically -- gaussian_lik(s2), bernoulli_lik(), or poisson_lik()"
 
@@ -2204,12 +2204,12 @@ let private likArg (active: string -> bool) (e: Expr) : Result<string * Expr lis
 let private bayesSampleVector (ctx: Ctx) (aName: string) : Result<int, string> =
     match Map.tryFind aName ctx.Arrays with
     | None ->
-        Error (sprintf "bayes: '%s' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape" aName)
+        Error $"bayes: '{aName}' must be a module-level let with an Array<Float like SampleIdx> annotation (or a computed method_for shape) -- the former reads the declared shape"
     | Some (_, idxs) when idxs.Length <> 1 ->
-        Error (sprintf "bayes: '%s' carries %d declared axes -- a conjugate update consumes a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward first" aName idxs.Length)
+        Error $"bayes: '{aName}' carries {idxs.Length} declared axes -- a conjugate update consumes a rank-1 sample vector (Array<Float like SampleIdx>); slice or push forward first"
     | Some (_, idxs) ->
         match resolveExtent ctx.Aliases ctx.Statics idxs.Head with
-        | None -> Error (sprintf "bayes: '%s' sample axis extent must be statically known (Idx<n> directly or through aliases)" aName)
+        | None -> Error $"bayes: '{aName}' sample axis extent must be statically known (Idx<n> directly or through aliases)"
         | Some n -> Ok n
 
 let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: string) (args: Expr list)
@@ -2222,21 +2222,21 @@ let private elabBayes (active: string -> bool) (ctx: Ctx) (span: Span) (dName: s
         (match priorFam, likFam with
          | "gaussian", "gaussian_lik" | "beta", "bernoulli_lik" | "gamma", "poisson_lik" -> Ok ()
          | _ ->
-             Error (sprintf "bayes: no conjugate update for a %s prior with a %s likelihood -- supported pairs: %s. (Normal-InverseGamma, unknown mean AND variance, is deferred: its posterior is a 4-hyperparameter object whose mu-margin is Student-t, not a family tower.)" priorFam likFam bayesPairsText))
+             Error $"bayes: no conjugate update for a {priorFam} prior with a {likFam} likelihood -- supported pairs: {bayesPairsText}. (Normal-InverseGamma, unknown mean AND variance, is deferred: its posterior is a 4-hyperparameter object whose mu-margin is Student-t, not a family tower.)")
         |> Result.bind (fun () ->
         (match evalExpr ctx.Statics maxSteps rExpr with
          | Ok (SVInt x) when x >= 1L && x <= 6L -> Ok (int x)
-         | Ok (SVInt x) -> Error (sprintf "bayes: the posterior order must be in 1..6 (got %d) -- Bell-number kernel growth beyond that needs the shared-subexpression pass" x)
+         | Ok (SVInt x) -> Error $"bayes: the posterior order must be in 1..6 (got {x}) -- Bell-number kernel growth beyond that needs the shared-subexpression pass"
          | _ -> Error "bayes: the posterior order must be a compile-time integer (a literal, `let static`, or static-function call)")
         |> Result.bind (fun r ->
         bayesSampleVector ctx aName |> Result.bind (fun n ->
             let nF = float n
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-            let nm s = sprintf "__ppl_by_%s_%s" dName s
+            let nm s = $"__ppl_by_{dName}_{s}"
             // Prior/likelihood parameters bound once (arbitrary pure scalar
             // exprs; the Normal-Normal update reads v0 and s2 twice).
-            let prN i = nm (sprintf "pr%d" i)
-            let lkN i = nm (sprintf "lk%d" i)
+            let prN i = nm $"pr{i}"
+            let lkN i = nm $"lk{i}"
             let paramDecls =
                 (priorPs |> List.mapi (fun i e -> bind (prN i) e))
                 @ (likPs |> List.mapi (fun i e -> bind (lkN i) e))
@@ -2344,7 +2344,7 @@ let private rewriteBodyFormers (active: string -> bool) (ctx: Ctx) (fnName: stri
                 | [] -> []
         match e.Kind with
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "logpdf" }, args) when active "logpdf" ->
-            let tok = sprintf "%s_%d" fnName site
+            let tok = $"{fnName}_{site}"
             site <- site + 1
             (match args with
              | [famE; xExpr] ->
@@ -2355,7 +2355,7 @@ let private rewriteBodyFormers (active: string -> bool) (ctx: Ctx) (fnName: stri
                  |> function Ok parts -> parts | Error m -> fail m e
              | _ -> fail "logpdf expects logpdf(family(params), x): a symbolic family argument and the evaluation point" e)
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "loglik" }, args) when active "loglik" ->
-            let tok = sprintf "%s_%d" fnName site
+            let tok = $"{fnName}_{site}"
             site <- site + 1
             (match args with
              | [famE; { Kind = ExprKind.ExprVar aName }] ->
@@ -2720,19 +2720,19 @@ let private approxSetupDecls (former: string) (ctx: Ctx) (span: Span) (tag: stri
     (dists: Map<string, DistInfo>) (dn: string)
     : Result<Located<Decl> list * int * Expr * Expr * (int -> Expr), string> =
     match Map.tryFind dn dists with
-    | None -> Error (sprintf "%s expects %s(d, ...) with a previously declared dist binding d" former former)
+    | None -> Error $"{former} expects {former}(d, ...) with a previously declared dist binding d"
     | Some info ->
         univariateOnly former ctx info |> Result.bind (fun () ->
         if info.Order < 2 then
-            Error (sprintf "%s: the expansion is anchored on kappa_2 and '%s' carries only order %d -- insufficient stochastic order. Construct with order >= 2 (dist(A, 2..6) or a family constructor)." former dn info.Order)
+            Error $"{former}: the expansion is anchored on kappa_2 and '{dn}' carries only order {info.Order} -- insufficient stochastic order. Construct with order >= 2 (dist(A, 2..6) or a family constructor)."
         elif info.Order > 6 then
-            Error (sprintf "%s: the Edgeworth/Cornish-Fisher series are generated up to order 6 and '%s' carries %d -- rebuild or project the tower at order <= 6" former dn info.Order)
+            Error $"{former}: the Edgeworth/Cornish-Fisher series are generated up to order 6 and '{dn}' carries {info.Order} -- rebuild or project the tower at order <= 6"
         else
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let r = info.Order
-            let muN = sprintf "__ppl_ax_%s_mu" tag
-            let sdN = sprintf "__ppl_ax_%s_sd" tag
-            let lamN k = sprintf "__ppl_ax_%s_l%d" tag k
+            let muN = $"__ppl_ax_{tag}_mu"
+            let sdN = $"__ppl_ax_{tag}_sd"
+            let lamN k = $"__ppl_ax_{tag}_l{k}"
             let decls =
                 [ bind muN (distKappaRead info [0])
                   bind sdN (sqrtE (distKappaRead info [0; 0])) ]
@@ -2747,7 +2747,7 @@ let private cfCorrectionDecls (span: Span) (tag: string) (lam: int -> Expr) (r: 
     let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
     let grouped = axCornishFisherU r
     let maxDeg = grouped |> Map.toList |> List.map fst |> List.max
-    let cName i = sprintf "__ppl_cf_%s_c%d" tag i
+    let cName i = $"__ppl_cf_{tag}_c{i}"
     let decls =
         [ for i in 0 .. maxDeg do
             match Map.tryFind i grouped with
@@ -2772,10 +2772,10 @@ let private elabDistPdfApprox (ctx: Ctx) (span: Span) (outName: string) (binding
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
             let maxJ = 3 * (r - 2)
             let cs = axEdgeworthCoeffs r
-            let xN = sprintf "__ppl_ea_%s_x" outName
-            let zN = sprintf "__ppl_ea_%s_z" outName
-            let fN = sprintf "__ppl_ea_%s_f" outName
-            let heName j = sprintf "__ppl_ea_%s_he%d" outName j
+            let xN = $"__ppl_ea_{outName}_x"
+            let zN = $"__ppl_ea_{outName}_z"
+            let fN = $"__ppl_ea_{outName}_f"
+            let heName j = $"__ppl_ea_{outName}_he{j}"
             let z = v zN
             let heDecls =
                 [ for j in 0 .. maxJ ->
@@ -2811,7 +2811,7 @@ let private elabDistQuantileApprox (ctx: Ctx) (span: Span) (outName: string) (bi
         approxSetupDecls "dist_quantile_approx" ctx span ("cf_" + outName) dists dn
         |> Result.map (fun (setup, r, mu, sd, lam) ->
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-            let nm suffix = sprintf "__ppl_cf_%s_%s" outName suffix
+            let nm suffix = $"__ppl_cf_{outName}_{suffix}"
             let pN, qN, r0N, r1N, ceN, vtN, zN = nm "p", nm "q", nm "r0", nm "r1", nm "ce", nm "vt", nm "z"
             let z = v zN
             let ppndDecls =
@@ -2837,8 +2837,8 @@ let private elabDistQuantileApprox (ctx: Ctx) (span: Span) (outName: string) (bi
 let private staticSampleCount (ctx: Ctx) (former: string) (nExpr: Expr) : Result<int, string> =
     match evalExpr ctx.Statics maxSteps nExpr with
     | Ok (SVInt x) when x >= 1L -> Ok (int x)
-    | Ok (SVInt x) -> Error (sprintf "%s: the sample count must be >= 1 (got %d)" former x)
-    | _ -> Error (sprintf "%s: the sample count must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; only the key and distribution parameters may be runtime values" former)
+    | Ok (SVInt x) -> Error $"{former}: the sample count must be >= 1 (got {x})"
+    | _ -> Error $"{former}: the sample count must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; only the key and distribution parameters may be runtime values"
 
 /// dist_sample_approx(d, key, n): a keyed uniform fill mapped through PPND16
 /// and then the Cornish-Fisher transform -- two elementwise passes, both
@@ -2852,8 +2852,8 @@ let private elabDistSampleApprox (ctx: Ctx) (span: Span) (sName: string) (bindin
         approxSetupDecls "dist_sample_approx" ctx span ("sa_" + sName) dists dn
         |> Result.map (fun (setup, r, mu, sd, lam) ->
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-            let uN = sprintf "__ppl_sa_%s_u" sName
-            let zN = sprintf "__ppl_sa_%s_z" sName
+            let uN = $"__ppl_sa_{sName}_u"
+            let zN = $"__ppl_sa_{sName}_z"
             let cDecls, body =
                 if r = 2 then [], addE mu (mulE sd (v "__u"))
                 else
@@ -2897,9 +2897,9 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
             | "bernoulli"   -> direct "__rand_bernoulli"
             | "beta"        -> direct "__rand_beta"
             | "gaussian" | "lognormal" ->
-                let muN = sprintf "__ppl_sm_%s_mu" sName
-                let sdN = sprintf "__ppl_sm_%s_sd" sName
-                let fN = sprintf "__ppl_sm_%s_fill" sName
+                let muN = $"__ppl_sm_{sName}_mu"
+                let sdN = $"__ppl_sm_{sName}_sd"
+                let fN = $"__ppl_sm_{sName}_fill"
                 let affine = addE (v muN) (mulE (v sdN) (v "__u"))
                 let body = if fam = "gaussian" then affine else expE affine
                 [ bind muN ps.[0]
@@ -2907,9 +2907,9 @@ let private elabPplSample (active: string -> bool) (ctx: Ctx) (span: Span) (sNam
                   bind fN (appE (v "__rand_normal") [keyE; iLit m])
                   { Value = DeclLet { binding with Value = map1 (v fN) body }; Span = span } ]
             | "uniform" ->
-                let aN = sprintf "__ppl_sm_%s_a" sName
-                let wN = sprintf "__ppl_sm_%s_w" sName
-                let fN = sprintf "__ppl_sm_%s_fill" sName
+                let aN = $"__ppl_sm_{sName}_a"
+                let wN = $"__ppl_sm_{sName}_w"
+                let fN = $"__ppl_sm_{sName}_fill"
                 [ bind aN ps.[0]
                   bind wN (subE ps.[1] (v aN))
                   bind fN (appE (v "__rand_uniform") [keyE; iLit m])
@@ -3026,30 +3026,30 @@ let private samplerLogpost (former: string) (example: string) (funcs: Map<string
     : Result<string, string> =
     (match lpE.Kind with
      | ExprKind.ExprVar f -> Ok f
-     | _ -> Error (sprintf "%s: the first argument must be the NAME of a top-level same-module function (the log-posterior, Float -> Float), e.g. %s" former example))
+     | _ -> Error $"{former}: the first argument must be the NAME of a top-level same-module function (the log-posterior, Float -> Float), e.g. {example}")
     |> Result.bind (fun f ->
     match Map.tryFind f funcs with
     | None ->
-        Error (sprintf "%s: unknown log-posterior '%s' -- it must be a top-level function in this module (Float -> Float); assemble it from ppl.logpdf/ppl.loglik terms" former f)
+        Error $"{former}: unknown log-posterior '{f}' -- it must be a top-level function in this module (Float -> Float); assemble it from ppl.logpdf/ppl.loglik terms"
     | Some fd ->
         let isFloatTy = function
             | TyFloat64 | TyFloat32 -> true
             | TyNamed (("Float" | "Float64" | "Float32" | "Double"), []) -> true
             | _ -> false
         if fd.Params.Length <> 1 then
-            Error (sprintf "%s: '%s' takes %d parameter(s) -- this wave samples a SCALAR latent, so the log-posterior must be Float -> Float; fold extra structure into module-level data arrays" former f fd.Params.Length)
+            Error $"{former}: '{f}' takes {fd.Params.Length} parameter(s) -- this wave samples a SCALAR latent, so the log-posterior must be Float -> Float; fold extra structure into module-level data arrays"
         elif not (fd.Params.Head.Type |> Option.forall isFloatTy) then
-            Error (sprintf "%s: '%s' must take a scalar Float latent (its parameter is annotated otherwise)" former f)
+            Error $"{former}: '{f}' must take a scalar Float latent (its parameter is annotated otherwise)"
         elif not (fd.ReturnType |> Option.forall isFloatTy) then
-            Error (sprintf "%s: '%s' must return a Float log-density (its return type is annotated otherwise)" former f)
+            Error $"{former}: '{f}' must return a Float log-density (its return type is annotated otherwise)"
         else Ok f)
 
 /// Static chain length for mh/hmc: n >= 2, element 0 is the seed state.
 let private samplerChainLen (ctx: Ctx) (former: string) (runtimeOnes: string) (nE: Expr) : Result<int, string> =
     match evalExpr ctx.Statics maxSteps nE with
     | Ok (SVInt x) when x >= 2L -> Ok (int x)
-    | Ok (SVInt x) -> Error (sprintf "%s: the chain length must be >= 2 (got %d) -- element 0 is the initial state" former x)
-    | _ -> Error (sprintf "%s: the chain length must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; %s may be runtime values" former runtimeOnes)
+    | Ok (SVInt x) -> Error $"{former}: the chain length must be >= 2 (got {x}) -- element 0 is the initial state"
+    | _ -> Error $"{former}: the chain length must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; {runtimeOnes} may be runtime values"
 
 /// mh(logpost, x0, n, scale, key) -- see the section comment for the emitted
 /// shape. Returns the decls and the static chain length for the registry.
@@ -3063,7 +3063,7 @@ let private elabMh (ctx: Ctx) (span: Span) (chainName: string) (binding: Binding
             samplerChainLen ctx "mh" "x0, scale, and the key" nE
             |> Result.map (fun n ->
                 let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-                let nm s = sprintf "__ppl_mh_%s_%s" chainName s
+                let nm s = $"__ppl_mh_{chainName}_{s}"
                 let x0N, scN, keyN = nm "x0", nm "scale", nm "key"
                 let epsN, uN, stepN, recN = nm "eps", nm "u", nm "step", nm "c"
                 let prevN, tN, propN, dN = "__prev", "__t", "__prop", "__lpd"
@@ -3110,7 +3110,7 @@ let private elabHmc (ctx: Ctx) (span: Span) (chainName: string) (binding: Bindin
         |> Result.bind (fun n ->
         (match evalExpr ctx.Statics maxSteps lE with
          | Ok (SVInt x) when x >= 1L -> Ok (int x)
-         | Ok (SVInt x) -> Error (sprintf "hmc: the leapfrog step count L must be >= 1 (got %d)" x)
+         | Ok (SVInt x) -> Error $"hmc: the leapfrog step count L must be >= 1 (got {x})"
          | _ -> Error "hmc: the leapfrog step count L must be a compile-time integer (a literal, `let static`, or static-function call) -- the sweep is a static loop; x0, eps, and the key may be runtime values")
         |> Result.bind (fun lSteps ->
         match adAlias with
@@ -3118,7 +3118,7 @@ let private elabHmc (ctx: Ctx) (span: Span) (chainName: string) (binding: Bindin
             Error "hmc: the leapfrog gradient rides ad.grad, so the module needs `import ad as ad` -- add the import; the Grad pass expands the emitted ad.grad(logpost) sites after ppl elaboration"
         | Some ad ->
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-            let nm s = sprintf "__ppl_hmc_%s_%s" chainName s
+            let nm s = $"__ppl_hmc_{chainName}_{s}"
             let x0N, epsN, eps2N, keyN = nm "x0", nm "eps", nm "eps2", nm "key"
             let pFillN, uN, stepN, recN = nm "p", nm "u", nm "step", nm "c"
             let prevN, tN = "__prev", "__t"
@@ -3189,18 +3189,18 @@ let private chainSource (ctx: Ctx) (chains: Map<string, int>) (former: string) (
              | Some (_, [ix]) ->
                  (match resolveExtent ctx.Aliases ctx.Statics ix with
                   | Some n -> Ok (nmv, n)
-                  | None -> Error (sprintf "%s: '%s' must have a statically known extent (Idx<n> directly or through aliases)" former nmv))
+                  | None -> Error $"{former}: '{nmv}' must have a statically known extent (Idx<n> directly or through aliases)")
              | Some (_, idxs) ->
-                 Error (sprintf "%s: '%s' carries %d declared axes -- chain diagnostics run on rank-1 chains" former nmv idxs.Length)
+                 Error $"{former}: '{nmv}' carries {idxs.Length} declared axes -- chain diagnostics run on rank-1 chains"
              | None ->
-                 Error (sprintf "%s: '%s' must be a ppl.mh or ppl.hmc chain declared earlier in this module, or a module-level rank-1 array with an Array<Float like Idx<n>> annotation" former nmv))
-    | _ -> Error (sprintf "%s: the chain argument must be a named module-level binding" former)
+                 Error $"{former}: '{nmv}' must be a ppl.mh or ppl.hmc chain declared earlier in this module, or a module-level rank-1 array with an Array<Float like Idx<n>> annotation")
+    | _ -> Error $"{former}: the chain argument must be a named module-level binding"
 
 let private staticNat (ctx: Ctx) (former: string) (what: string) (e: Expr) : Result<int, string> =
     match evalExpr ctx.Statics maxSteps e with
     | Ok (SVInt x) when x >= 0L -> Ok (int x)
-    | Ok (SVInt x) -> Error (sprintf "%s: %s must be >= 0 (got %d)" former what x)
-    | _ -> Error (sprintf "%s: %s must be a compile-time integer (a literal, `let static`, or static-function call)" former what)
+    | Ok (SVInt x) -> Error $"{former}: {what} must be >= 0 (got {x})"
+    | _ -> Error $"{former}: {what} must be a compile-time integer (a literal, `let static`, or static-function call)"
 
 /// chain_mean(c, burn) / chain_var(c, burn): post-burn moments as the
 /// elabLogLik module-block accumulation idiom, reads through a `__` alias.
@@ -3213,11 +3213,11 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
         chainSource ctx chains former chainE |> Result.bind (fun (src, len) ->
         staticNat ctx former "the burn-in count" burnE |> Result.bind (fun burn ->
         if burn >= len then
-            Error (sprintf "%s: burn = %d discards the whole length-%d chain -- burn must be < the chain length" former burn len)
+            Error $"{former}: burn = {burn} discards the whole length-{len} chain -- burn must be < the chain length"
         else
             let m = float (len - burn)
             let bind nm vl = { Value = DeclLet { Pattern = pvar nm; Type = None; Value = vl; Mutability = BindLet }; Span = span }
-            let nmOf s = sprintf "__ppl_%s_%s_%s" (if isVar then "cv" else "cm") outName s
+            let nmOf s = $"""__ppl_{(if isVar then "cv" else "cm")}_{outName}_{s}"""
             let srcN, iN, aN, bN = nmOf "src", nmOf "i", nmOf "acc", nmOf "acc2"
             let read = appE (v srcN) [v iN]
             let value =
@@ -3239,12 +3239,12 @@ let private elabChainMoment (isVar: bool) (ctx: Ctx) (span: Span) (outName: stri
             Ok [ bind srcN (v src)
                  { Value = DeclLet { binding with Value = value }; Span = span } ]))
     | _ ->
-        Error (sprintf "%s expects %s(chain, burn): a chain binding and a static burn-in count" former former)
+        Error $"{former} expects {former}(chain, burn): a chain binding and a static burn-in count"
 
 /// Shared prologue statements: mean and centered-sum-of-squares of a length-n
 /// source read through `srcE` -- `let mut mu; for; let m; let mut v; for`.
 let private meanVarStmts (tok: string) (srcRead: Expr -> Expr) (n: int) : Stmt list * string * string =
-    let muN, mN, vN, tN, dN = sprintf "__mu_%s" tok, sprintf "__m_%s" tok, sprintf "__v_%s" tok, sprintf "__t_%s" tok, sprintf "__d_%s" tok
+    let muN, mN, vN, tN, dN = $"__mu_{tok}", $"__m_{tok}", $"__v_{tok}", $"__t_{tok}", $"__d_{tok}"
     let stmts =
         [ sMutStmt muN (fLit 0.0)
           forIn tN (iLit 0) (iLit n) [ assignStmt (v muN) (addE (v muN) (srcRead (v tN))) ]
@@ -3265,9 +3265,9 @@ let private elabAutocorr (ctx: Ctx) (span: Span) (outName: string) (binding: Bin
         chainSource ctx chains "autocorr" chainE |> Result.bind (fun (src, len) ->
         staticNat ctx "autocorr" "maxlag" maxlagE |> Result.bind (fun maxlag ->
         if maxlag < 1 || maxlag >= len then
-            Error (sprintf "autocorr: maxlag must be in 1..%d for a length-%d chain (got %d)" (len - 1) len maxlag)
+            Error $"autocorr: maxlag must be in 1..{len - 1} for a length-{len} chain (got {maxlag})"
         else
-            let fnN = sprintf "__ppl_ac_%s_fn" outName
+            let fnN = $"__ppl_ac_{outName}_fn"
             let srcP = "__src"
             let read (i: Expr) = appE (v srcP) [i]
             let (pre, mN, vN) = meanVarStmts "0" read len
@@ -3299,10 +3299,10 @@ let private elabEss (ctx: Ctx) (span: Span) (outName: string) (binding: Binding)
     match args with
     | [chainE] ->
         chainSource ctx chains "ess" chainE |> Result.bind (fun (src, len) ->
-        if len < 4 then Error (sprintf "ess: a length-%d chain is too short -- ess needs at least 4 elements" len)
+        if len < 4 then Error $"ess: a length-{len} chain is too short -- ess needs at least 4 elements"
         else
             let pairs = min ((len - 2) / 2) 128
-            let fnN = sprintf "__ppl_ess_%s_fn" outName
+            let fnN = $"__ppl_ess_{outName}_fn"
             let srcP = "__src"
             let read (i: Expr) = appE (v srcP) [i]
             let (pre, mN, vN) = meanVarStmts "0" read len
@@ -3342,20 +3342,20 @@ let private elabRhat (ctx: Ctx) (span: Span) (outName: string) (binding: Binding
     | [c1E; c2E] ->
         chainSource ctx chains "rhat" c1E |> Result.bind (fun (s1, n1) ->
         chainSource ctx chains "rhat" c2E |> Result.bind (fun (s2, n2) ->
-        if n1 <> n2 then Error (sprintf "rhat: the two chains must have the same static length (got %d and %d)" n1 n2)
-        elif n1 < 4 || n1 % 2 <> 0 then Error (sprintf "rhat: the chain length must be even and >= 4 (got %d) -- each chain splits into two halves" n1)
+        if n1 <> n2 then Error $"rhat: the two chains must have the same static length (got {n1} and {n2})"
+        elif n1 < 4 || n1 % 2 <> 0 then Error $"rhat: the chain length must be even and >= 4 (got {n1}) -- each chain splits into two halves"
         else
             let len = n1
             let m = len / 2
             let mF = float m
-            let fnN = sprintf "__ppl_rhat_%s_fn" outName
+            let fnN = $"__ppl_rhat_{outName}_fn"
             let aP, bP = "__ca", "__cb"
             // segment j: (source param, start offset)
             let segs = [ (aP, 0); (aP, m); (bP, 0); (bP, m) ]
-            let muN j = sprintf "__mu%d" j
-            let mN j = sprintf "__m%d" j
-            let vvN j = sprintf "__vv%d" j
-            let sN j = sprintf "__s%d" j
+            let muN j = $"__mu{j}"
+            let mN j = $"__m{j}"
+            let vvN j = $"__vv{j}"
+            let sN j = $"__s{j}"
             let tN, dN = "__t", "__d"
             let segStmts =
                 segs |> List.mapi (fun j (srcP, lo) ->
@@ -3492,12 +3492,12 @@ let private normalizeMapBody (former: string) (funcs: Map<string, FunctionDecl>)
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, args) when Map.containsKey f funcs ->
             let fd = funcs.[f]
             if args.Length <> fd.Params.Length then
-                Error (sprintf "%s: helper '%s' is called with %d argument(s) but takes %d" former f args.Length fd.Params.Length)
+                Error $"{former}: helper '{f}' is called with {args.Length} argument(s) but takes {fd.Params.Length}"
             elif n <= 0 then
-                Error (sprintf "%s: the map's helper-call chain is too deep -- is a helper function recursive?" former)
+                Error $"{former}: the map's helper-call chain is too deep -- is a helper function recursive?"
             else
                 goList (n - 1) [] args |> Result.bind (fun (n2, args') ->
-                    let bindMap = List.zip (fd.Params |> List.map (fun p -> p.Name)) args' |> Map.ofList
+                    let bindMap = List.zip (fd.Params |> List.map _.Name) args' |> Map.ofList
                     go n2 (substVars bindMap (unwrap fd.Body)))
         | ExprKind.ExprBinOp (m, op, a, b) ->
             go n a |> Result.bind (fun (n2, a') ->
@@ -3531,28 +3531,26 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, prefixArgs) when Map.containsKey f funcs ->
             let fd = funcs.[f]
             if prefixArgs.Length >= fd.Params.Length then
-                Error (sprintf "%s: partial application of '%s' supplies %d of its %d parameter(s) -- leave at least one free to map over"
-                        former f prefixArgs.Length fd.Params.Length)
+                Error ($"{former}: partial application of '{f}' supplies {prefixArgs.Length} of its {fd.Params.Length} parameter(s) -- leave at least one free to map over")
             else
                 // Capture avoidance in two steps: rename residual params to reserved coordinate names FIRST, so no variable inside
                 // the bound-arg expressions can collide with a coordinate after.
                 let k = prefixArgs.Length
                 let bound = fd.Params |> List.truncate k
                 let residual = fd.Params |> List.skip k
-                let freshNames = residual |> List.mapi (fun i _ -> sprintf "__ppl_pa_%s_%d" dName i)
+                let freshNames = residual |> List.mapi (fun i _ -> $"__ppl_pa_{dName}_{i}")
                 let renameMap =
-                    List.zip (residual |> List.map (fun p -> p.Name)) (freshNames |> List.map v)
+                    List.zip (residual |> List.map _.Name) (freshNames |> List.map v)
                     |> Map.ofList
                 let bindMap =
-                    List.zip (bound |> List.map (fun p -> p.Name)) prefixArgs
+                    List.zip (bound |> List.map _.Name) prefixArgs
                     |> Map.ofList
                 let body = fd.Body |> substVars renameMap |> substVars bindMap
                 let ps = freshNames |> List.map (fun n -> { Name = n; Type = None; Default = None; NameSpan = noSpan } : LambdaParam)
                 Ok (Some (ps, body))
         | _ -> Ok None
     let parseErr =
-        sprintf "%s expects %s(d, q, f) or %s(d, q, s, f) where f is lambda(x...) -> expr, a same-module top-level function name, or a prefix partial application of one"
-            former former former
+        $"{former} expects {former}(d, q, f) or {former}(d, q, s, f) where f is lambda(x...) -> expr, a same-module top-level function name, or a prefix partial application of one"
     let parsed =
         match args with
         | [{ Kind = ExprKind.ExprVar dn }; qExpr; fArg] ->
@@ -3570,11 +3568,11 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         | _ -> Error parseErr
     parsed |> Result.bind (fun (dn, qExpr, sOpt, ps, body) ->
     match Map.tryFind dn dists with
-    | None -> Error (sprintf "%s: '%s' must be a previously declared dist binding" former dn)
+    | None -> Error $"{former}: '{dn}' must be a previously declared dist binding"
     | Some info ->
         distDim ctx info |> Result.bind (fun dim ->
         if ps.Length <> dim then
-            Error (sprintf "%s: the lambda takes %d coordinate(s) but '%s' is %d-dimensional" former ps.Length dn dim)
+            Error $"{former}: the lambda takes {ps.Length} coordinate(s) but '{dn}' is {dim}-dimensional"
         else
         let sRes =
             match sOpt with
@@ -3582,7 +3580,7 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
             | Some e ->
                 match evalExpr ctx.Statics maxSteps e with
                 | Ok (SVInt x) when x >= 1L && x <= 8L -> Ok (Some (int x))
-                | _ -> Error (sprintf "%s: the truncation degree s must be a compile-time integer in 1..8" former)
+                | _ -> Error $"{former}: the truncation degree s must be a compile-time integer in 1..8"
         sRes |> Result.bind (fun sOpt ->
         let paramNames = ps |> List.map (fun (p: LambdaParam) -> p.Name)
         // Vector mode: a tuple-valued body lambda(x, y) -> (e1, ..., em)
@@ -3613,7 +3611,7 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
                 | Some s -> if k >= s then Ok (List.rev (lv :: acc)) else grow fbody (lv :: acc) (k + 1)
                 | None ->
                     if allZero lv then Ok (List.rev acc)   // the polynomial terminated at degree k-1
-                    elif k >= 8 then Error (sprintf "%s: the map is not polynomial (its derivatives never vanish) -- own the truncation with an explicit degree: %s(d, q, s, lambda(x...) -> expr)" former former)
+                    elif k >= 8 then Error $"{former}: the map is not polynomial (its derivatives never vanish) -- own the truncation with an explicit degree: {former}(d, q, s, lambda(x...) -> expr)"
                     else grow fbody (lv :: acc) (k + 1))
         let towersRes =
             comps |> List.fold (fun acc cb ->
@@ -3622,10 +3620,10 @@ let private elabDistMap (closed: bool) (ctx: Ctx) (span: Span) (dName: string)
         let sPer = towers |> List.map List.length
         let s = List.max sPer
         if s = 0 then
-            Error (sprintf "%s: the map is constant in the coordinates -- there is no jet to push" former)
+            Error $"{former}: the map is constant in the coordinates -- there is no jet to push"
         else
         // the mean components, bound once; coordinates substitute to them
-        let muName i = sprintf "__ppl_jetmu_%s_%d" dName i
+        let muName i = $"__ppl_jetmu_{dName}_{i}"
         let muDecls =
             [ for i in 0 .. dim - 1 ->
                 { Value = DeclLet { Pattern = pvar (muName i); Type = None
@@ -3696,7 +3694,7 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                             let names = pats |> List.map (fun p -> match p.Kind with PatternKind.PatVar nm -> Some nm | _ -> None)
                             if names |> List.forall Option.isSome then Ok (names |> List.map Option.get)
                             else Error "free_cumulants: destructure into plain names"
-                        | _ -> Error (sprintf "free_cumulants: destructure the result -- `let (f1, ..., f%d) = free_cumulants(%s, %d)`" r aName r)
+                        | _ -> Error $"free_cumulants: destructure the result -- `let (f1, ..., f{r}) = free_cumulants({aName}, {r})`"
                     compNames |> Result.map (fun fkNames ->
                         // Raw moments mu_S = P_S / N from the shared pool sweep.
                         let (pd, pool) = acquirePool ctx span aName d (float n) r
@@ -3789,13 +3787,13 @@ module Independence =
         Validate = fun funcName paramNames args ->
             match args with
             | [a; b] when a = b ->
-                Error (sprintf "function '%s': indep(%s, %s) -- a value is not independent of itself" funcName a b)
+                Error $"function '{funcName}': indep({a}, {b}) -- a value is not independent of itself"
             | [a; b] ->
                 let missing = [a; b] |> List.filter (fun n -> not (List.contains n paramNames))
                 if missing.IsEmpty then Ok ()
-                else Error (sprintf "function '%s': where indep(%s, %s) must name function parameters (unknown: %s)" funcName a b (String.concat ", " missing))
+                else Error ($"""function '{funcName}': where indep({a}, {b}) must name function parameters (unknown: {(String.concat ", " missing)})""")
             | _ ->
-                Error (sprintf "function '%s': indep expects exactly two parameter names -- indep(a, b)" funcName)
+                Error $"function '{funcName}': indep expects exactly two parameter names -- indep(a, b)"
         EnterBody = fun funcName args ->
             match args with
             | [a; b] -> pushLicense (Blade.Constraints.paramProvenanceToken funcName a)
@@ -3812,7 +3810,7 @@ module Independence =
                 let pa = provOf a
                 let pb = provOf b
                 if Set.isEmpty pa || Set.isEmpty pb then
-                    Error (sprintf "call to '%s': cannot establish provenance for the dist argument bound to '%s' -- pass a dist binding (or an expression built from dists) so independence of its sources can be verified" funcName (if Set.isEmpty pa then a else b))
+                    Error $"call to '{funcName}': cannot establish provenance for the dist argument bound to '{if Set.isEmpty pa then a else b}' -- pass a dist binding (or an expression built from dists) so independence of its sources can be verified"
                 else
                     let missing =
                         [ for s1 in pa do
@@ -3821,9 +3819,9 @@ module Independence =
                     match missing with
                     | [] -> Ok ()
                     | (s1, s2) :: _ when s1 = s2 ->
-                        Error (sprintf "call to '%s' requires indep(%s, %s): both arguments carry source '%s' -- a value is not independent of itself; pass dists built from disjoint sources" funcName a b s1)
+                        Error $"call to '{funcName}' requires indep({a}, {b}): both arguments carry source '{s1}' -- a value is not independent of itself; pass dists built from disjoint sources"
                     | (s1, s2) :: _ ->
-                        Error (sprintf "call to '%s' requires indep(%s, %s): sources '%s' and '%s' are not declared independent -- add `let _ = ppl.independent(%s, %s)` (or a struct/function `where ppl.indep(...)` license)" funcName a b s1 s2 s1 s2)
+                        Error $"call to '{funcName}' requires indep({a}, {b}): sources '{s1}' and '{s2}' are not declared independent -- add `let _ = ppl.independent({s1}, {s2})` (or a struct/function `where ppl.indep(...)` license)"
             | _ -> Error "indep expects exactly two arguments"
     }
 
@@ -3883,9 +3881,9 @@ module DistSynth =
     /// (`__v<id>`), so a `let __dsc = c` capture would dangle in the
     /// generated C++.
     let scaleExpr (uniq: int) (c: Expr) (d: Expr) (order: int) : Expr =
-        let dN = sprintf "__dsd_%d" uniq
-        let kN k = sprintf "__dsk_%d_%d" uniq k
-        let sN k = sprintf "__dss_%d_%d" uniq k
+        let dN = $"__dsd_{uniq}"
+        let kN k = $"__dsk_{uniq}_{k}"
+        let sN k = $"__dss_{uniq}_{k}"
         let stmts =
             [ sLet dN d ]
             @ [ for k in 1 .. order ->
@@ -3905,11 +3903,11 @@ module DistSynth =
     ///     let __dks<k> = zipMap2(__dka<k>, __dkb<k>, __u + w_k*__w)
     ///     __dist_pack(__dks1, ..., __dksr) }
     let combineExpr (uniq: int) (weight: int -> float) (l: Expr) (r: Expr) (order: int) : Expr =
-        let lN = sprintf "__dcl_%d" uniq
-        let rN = sprintf "__dcr_%d" uniq
-        let aN k = sprintf "__dka_%d_%d" uniq k
-        let bN k = sprintf "__dkb_%d_%d" uniq k
-        let sN k = sprintf "__dks_%d_%d" uniq k
+        let lN = $"__dcl_{uniq}"
+        let rN = $"__dcr_{uniq}"
+        let aN k = $"__dka_{uniq}_{k}"
+        let bN k = $"__dkb_{uniq}_{k}"
+        let sN k = $"__dks_{uniq}_{k}"
         let stmts =
             [ sLet lN l; sLet rN r ]
             @ [ for k in 1 .. order do
@@ -4090,7 +4088,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
             | DeclImport (["ad"], ImportQualified aliasOpt) -> Some (defaultArg aliasOpt "ad")
             | _ -> None)
     match resolveStatics decls with
-    | Error e -> Error (sprintf "PPL elaboration: static resolution failed: %s" e)
+    | Error e -> Error $"PPL elaboration: static resolution failed: {e}"
     // Fold failures are the type-checker's to report (assertion semantics).
     | Ok (statics, _) ->
         // Pass 0.5: strip indep(...) conjuncts out of struct where-invariants (static licenses, not runtime propositions);
@@ -4174,7 +4172,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                 | [{ Kind = ExprKind.ExprVar x }; { Kind = ExprKind.ExprVar y }] when x <> y ->
                     indep <- Set.add (indepKey x y) indep
                 | [{ Kind = ExprKind.ExprVar x }; { Kind = ExprKind.ExprVar y }] when x = y ->
-                    if err.IsNone then err <- Some (sprintf "independent(%s, %s): an array is not independent of itself" x y)
+                    if err.IsNone then err <- Some $"independent({x}, {y}): an array is not independent of itself"
                 | _ ->
                     if err.IsNone then err <- Some "independent expects two array names (or struct fields): `let _ = ppl.independent(X, Y)`"
             | _ -> rest <- rest @ [d]
@@ -4227,7 +4225,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                     when active "dist" ->
                     chainLenScan
                     |> Map.tryFind cn
-                    |> Option.map (fun n -> (sprintf "__ppl_dist_%s_chain" dName, (tyFloat64, [TyIdx (iLit 1); TyIdx (iLit n)])))
+                    |> Option.map (fun n -> ($"__ppl_dist_{dName}_chain", (tyFloat64, [TyIdx (iLit 1); TyIdx (iLit n)])))
                 | _ -> None)
         let arrays =
             collectArrays rest
@@ -4311,7 +4309,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                         (match args with
                          | [{ Kind = ExprKind.ExprVar cn }; rExpr] when Map.containsKey cn chainLens ->
                              let n = chainLens.[cn]
-                             let wrapN = sprintf "__ppl_dist_%s_chain" dName
+                             let wrapN = $"__ppl_dist_{dName}_chain"
                              let wrapVal =
                                  computeE (applyE
                                      (methodForE [syn (ExprRange [TyIdx (iLit 1); TyIdx (iLit n)])])
@@ -4429,7 +4427,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                          | Ok (SVInt k) when k >= 1L && int k <= info.Order ->
                              Ok (ds @ [ { d with Value = DeclLet { b with Value = mkExpr d.Span (ExprVar info.Components.[int k - 1]) } } ], dists, mstates)
                          | Ok (SVInt k) ->
-                             Error (sprintf "cumulant: order %d exceeds the dist's carried order %d -- insufficient stochastic order. Construct with a higher order or project a carried component." k info.Order)
+                             Error $"cumulant: order {k} exceeds the dist's carried order {info.Order} -- insufficient stochastic order. Construct with a higher order or project a carried component."
                          | _ ->
                              Error "cumulant: the order must be a compile-time integer (a literal, `let static`, or static-function call)")
                     // Streaming state formers: mstate/mstate_merge bind compile-time state objects; mstate_cumulants freezes

@@ -18,15 +18,15 @@ let rec ppIRType = function
     | IRTScalar ETUnit -> "Void"
     | IRTScalar ETString -> "String"
     | IRTTuple ts ->
-        sprintf "(%s)" (ts |> List.map ppIRType |> String.concat ", ")
+        $"""({(ts |> List.map ppIRType |> String.concat ", ")})"""
     | IRTLoop lt ->
         match lt.Kind with
-        | LKMethod -> sprintf "MethodLoop<%d>" (lt.Arity |> Option.defaultValue 0)
-        | LKObject -> sprintf "ObjectLoop<%d>" (lt.Arity |> Option.defaultValue 0)
-    | IRTComputation t -> sprintf "Computation<%s>" (ppIRType t)
+        | LKMethod -> $"MethodLoop<{lt.Arity |> Option.defaultValue 0}>"
+        | LKObject -> $"ObjectLoop<{lt.Arity |> Option.defaultValue 0}>"
+    | IRTComputation t -> $"Computation<{ppIRType t}>"
     | IRTUnit -> "Void"
-    | IRTPoly (base', var) -> sprintf "Poly<%s, %s>" (ppIRType base') var
-    | IRTNat (Some n) -> sprintf "Nat<%d>" n
+    | IRTPoly (base', var) -> $"Poly<{ppIRType base'}, {var}>"
+    | IRTNat (Some n) -> $"Nat<{n}>"
     | IRTNat None -> "Nat<?>"
     | IRTIdxTagged (inner, idxRef) ->
         // Conventional form: when the inner is the typical int64 backing,
@@ -39,27 +39,27 @@ let rec ppIRType = function
             | IRefAnon (id, extent) ->
                 let extentStr =
                     match extent with
-                    | IRLit (IRLitInt n) -> sprintf "%d" n
+                    | IRLit (IRLitInt n) -> string n
                     | IRParam (name, _, _) -> name
-                    | IRVar (vid, _) -> sprintf "v%d" vid
+                    | IRVar (vid, _) -> $"v{vid}"
                     | _ -> "?"
-                sprintf "Idx<%s>#%d" extentStr id
+                $"Idx<{extentStr}>#{id}"
             | IRefAny -> "_"
         match inner with
-        | IRTScalar ETInt64 | IRTScalar ETInt32 -> sprintf "Nat<%s>" tagStr
-        | other -> sprintf "(%s)<%s>" (ppIRType other) tagStr
+        | IRTScalar ETInt64 | IRTScalar ETInt32 -> $"Nat<{tagStr}>"
+        | other -> $"({ppIRType other})<{tagStr}>"
     | IRTDist (order, elem, axes) ->
         let axesStr = axes |> List.map ppIndexType |> String.concat ", "
-        sprintf "Dist<%d, %s like %s>" order (ppIRType elem) axesStr
+        $"Dist<{order}, {ppIRType elem} like {axesStr}>"
     | IRTNamed name -> name  // Named types print as themselves
-    | IRTInfer id -> sprintf "T?%d" id
+    | IRTInfer id -> $"T?{id}"
     // Type-argument rendering (ppUnitSigType, not ppUnitSig): a quantity
     // renders as its nominal name (`Float64<speed>`), a structural signature
     // as its dims, and a dims-cancelled structural signature (`speed/speed`,
     // `m/m`) as `<Unitless>` — display provenance only, distinct from a bare
     // type that never had units.
-    | IRTUnitAnnotated (inner, units) -> sprintf "%s<%s>" (ppIRType inner) (ppUnitSigType units)
-    | IRTGroupKeys (outerIdx, sourceIdx, _) -> sprintf "GroupKeys<%s, %s>" (ppIndexType outerIdx) (ppIndexType sourceIdx)
+    | IRTUnitAnnotated (inner, units) -> $"{ppIRType inner}<{ppUnitSigType units}>"
+    | IRTGroupKeys (outerIdx, sourceIdx, _) -> $"GroupKeys<{ppIndexType outerIdx}, {ppIndexType sourceIdx}>"
     | IRTArrow (slots, result, identity) ->
         // Renders the unified arrow form. For array-shaped arrows (all-SIdx
         // or all-SIdxVirt with non-empty slots), use the user-friendly
@@ -74,26 +74,26 @@ let rec ppIRType = function
                     | SIdx i | SIdxVirt i -> ppIndexType i
                     | _ -> failwith "unreachable")
                 |> String.concat ", "
-            sprintf "Array<%s like %s>" (ppIRType result) indices
+            $"Array<{ppIRType result} like {indices}>"
         else
             let slotStr =
                 slots |> List.map (function
-                    | SIdx idx -> sprintf "Idx<%s>" (ppIndexType idx)
-                    | SIdxVirt idx -> sprintf "VirtIdx<%s>" (ppIndexType idx)
+                    | SIdx idx -> $"Idx<{ppIndexType idx}>"
+                    | SIdxVirt idx -> $"VirtIdx<{ppIndexType idx}>"
                     | SVal ty -> ppIRType ty)
                 |> String.concat ", "
             let idStr =
                 match identity with
                 | Some _ -> " [id]"
                 | None -> ""
-            sprintf "Arrow<%s -> %s>%s" slotStr (ppIRType result) idStr
+            $"Arrow<{slotStr} -> {ppIRType result}>{idStr}"
 
 and ppIndexType (idx: IRIndexType) =
     // Inline extent printing since ppIRExpr is defined later
     let extentStr =
         match idx.Extent with
-        | IRLit (IRLitInt n) -> sprintf "%d" n
-        | IRVar (id, _) -> sprintf "v%d" id
+        | IRLit (IRLitInt n) -> string n
+        | IRVar (id, _) -> $"v{id}"
         | IRParam (name, _, _) -> name
         | _ -> "?"
     match idx with
@@ -101,13 +101,13 @@ and ppIndexType (idx: IRIndexType) =
     | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | _ ->
         match idx.Symmetry with
-        | SymNone -> sprintf "Idx<%s>" extentStr
-        | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
-        | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
-        | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
+        | SymNone -> $"Idx<{extentStr}>"
+        | SymSymmetric -> $"SymIdx<{idx.Rank}, {extentStr}>"
+        | SymAntisymmetric -> $"AntisymIdx<{idx.Rank}, {extentStr}>"
+        | SymHermitian -> $"HermitianIdx<{extentStr}>"
         // Round-trippable surface spelling: the level list IS the type, so a
         // diagnostic that showed only the rank would name a different class.
-        | SymWreath -> sprintf "OrbIdx<%s, %s>" (ppOrbitLevels (orbitLevelsOf idx)) (ppExtentOf (orbitBaseExtent idx))
+        | SymWreath -> $"OrbIdx<{ppOrbitLevels (orbitLevelsOf idx)}, {ppExtentOf (orbitBaseExtent idx)}>"
 
 /// The extent-slot rendering shared by both index printers: the small set of
 /// extent shapes a diagnostic can name, "?" for everything else. Factored out
@@ -115,8 +115,8 @@ and ppIndexType (idx: IRIndexType) =
 /// IROrbitClass marker) and both printers have to reach it the same way.
 and ppExtentOf (e: IRExpr) =
     match e with
-    | IRLit (IRLitInt n) -> sprintf "%d" n
-    | IRVar (id, _) -> sprintf "v%d" id
+    | IRLit (IRLitInt n) -> string n
+    | IRVar (id, _) -> $"v{id}"
     | IRParam (name, _, _) -> name
     | _ -> "?"
 
@@ -129,14 +129,14 @@ and ppExtentOf (e: IRExpr) =
 /// member the base belongs to.
 and ppIrrepsPower (idx: IRIndexType) (renderedBase: string) =
     match idx.Symmetry with
-    | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank renderedBase
-    | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank renderedBase
-    | SymHermitian -> sprintf "HermitianIdx<%s>" renderedBase
+    | SymSymmetric -> $"SymIdx<{idx.Rank}, {renderedBase}>"
+    | SymAntisymmetric -> $"AntisymIdx<{idx.Rank}, {renderedBase}>"
+    | SymHermitian -> $"HermitianIdx<{renderedBase}>"
     // No surface spelling takes a block-spec base under a wreath class (the
     // OrbIdx grammar's second argument is a SymIdxBase, so `OrbIdx<[...],
     // IrrepsIdx<s>>` parses, but nothing lowers a block-spec base into a
     // SymWreath record today). Render both halves rather than drop one.
-    | SymWreath -> sprintf "OrbIdx<%s, %s>" (ppOrbitLevels (orbitLevelsOf idx)) renderedBase
+    | SymWreath -> $"OrbIdx<{ppOrbitLevels (orbitLevelsOf idx)}, {renderedBase}>"
     | SymNone -> renderedBase
 
 /// Build a map from IRIndexType.Id -> type name from a module's IRTDIndexType defs
@@ -155,7 +155,7 @@ let rec ppIRTypeIn (names: Map<IRId, string>) = function
         // `like`, not a comma: this printer feeds the REPL's type echo and the
         // IDE tooltips, where the string is read AS SOURCE. `Array<T, I>` is
         // not the array spelling in any position -- it does not parse.
-        sprintf "Array<%s like %s>" (ppIRTypeIn names arr.ElemType) indices
+        $"Array<{ppIRTypeIn names arr.ElemType} like {indices}>"
     | other -> ppIRType other
 
 and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
@@ -174,17 +174,17 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
         match idx.Symmetry with
         // A plain alias keeps the documented `Idx<Lat>` form: that type's one
         // slot IS the extent, and the alias stands for exactly that extent.
-        | SymNone -> sprintf "Idx<%s>" extentStr
+        | SymNone -> $"Idx<{extentStr}>"
         // An alias of a COMPACT class names the WHOLE class, whose argument
         // slots are (rank, extent) -- slots a name does not fill. Routing it
         // through the extent slot produced `SymIdx<2, MySym>`, which reads as
         // "extent = MySym" and does not parse. The bare name IS the surface
         // spelling of this type (`Array<Int32 like MySym>`), so print that.
         | _ when nominal.IsSome -> nominal.Value
-        | SymSymmetric -> sprintf "SymIdx<%d, %s>" idx.Rank extentStr
-        | SymAntisymmetric -> sprintf "AntisymIdx<%d, %s>" idx.Rank extentStr
-        | SymHermitian -> sprintf "HermitianIdx<%s>" extentStr
-        | SymWreath -> sprintf "OrbIdx<%s, %s>" (ppOrbitLevels (orbitLevelsOf idx)) extentStr
+        | SymSymmetric -> $"SymIdx<{idx.Rank}, {extentStr}>"
+        | SymAntisymmetric -> $"AntisymIdx<{idx.Rank}, {extentStr}>"
+        | SymHermitian -> $"HermitianIdx<{extentStr}>"
+        | SymWreath -> $"OrbIdx<{ppOrbitLevels (orbitLevelsOf idx)}, {extentStr}>"
 
 let ppSymcomState = function
     | SCNeither -> "Neither"
@@ -214,7 +214,7 @@ let ppBinOpWithMode mode op =
     let opStr = ppBinOp op
     match mode with
     | IRElementwise -> opStr
-    | IROuter -> sprintf "[%s]" opStr
+    | IROuter -> $"[{opStr}]"
 
 let ppUnaryOp = function
     | IRNeg -> "-"
@@ -230,36 +230,36 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     let pp = ppIRExprWithNames names 0
     let ind = String.replicate indent "  "
     match expr with
-    | IRLit (IRLitInt n) -> sprintf "%d" n
+    | IRLit (IRLitInt n) -> string n
     | IRLit (IRLitFloat f) -> sprintf "%f" f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
-    | IRLit (IRLitString s) -> sprintf "\"%s\"" s
+    | IRLit (IRLitString s) -> $"\"{s}\""
     | IRLit IRLitUnit -> "()"
     | IRVar (id, _) -> 
         match Map.tryFind id names with
         | Some name -> name
-        | None -> sprintf "v%d" id
+        | None -> $"v{id}"
     | IRParam (name, _, _) -> name
     | IRBinOp (mode, op, a, b) ->
-        sprintf "(%s %s %s)" (pp a) (ppBinOpWithMode mode op) (pp b)
+        $"({pp a} {ppBinOpWithMode mode op} {pp b})"
     | IRUnaryOp (op, a) ->
-        sprintf "(%s%s)" (ppUnaryOp op) (pp a)
+        $"({ppUnaryOp op}{pp a})"
     | IRTuple es ->
-        sprintf "(%s)" (es |> List.map pp |> String.concat ", ")
+        $"""({(es |> List.map pp |> String.concat ", ")})"""
     | IRComplex (re, im) ->
-        sprintf "complex(%s, %s)" (pp re) (pp im)
+        $"complex({pp re}, {pp im})"
     | IRTupleProj (e, i, _) ->
-        sprintf "%s.%d" (pp e) i
+        $"{pp e}.{i}"
     | IRIf (c, t, e) ->
-        sprintf "if %s then %s else %s" (pp c) (pp t) (pp e)
+        $"if {pp c} then {pp t} else {pp e}"
     | IRLet (id, v, b) ->
         // Add the let-bound name to mapping for body
-        let names' = Map.add id (sprintf "v%d" id) names
-        sprintf "let v%d = %s in\n%s%s" id (pp v) ind (ppIRExprWithNames names' indent b)
+        let names' = Map.add id $"v{id}" names
+        $"let v{id} = {pp v} in\n{ind}{ppIRExprWithNames names' indent b}"
     | IRMethodFor info ->
         let arrs = info.Arrays |> List.map pp |> String.concat ", "
         let sdims = info.SDimsPerArray |> List.map string |> String.concat "," 
-        sprintf "method_for(%s) [sdims=[%s], total=%d]" arrs sdims info.TotalSDims
+        $"method_for({arrs}) [sdims=[{sdims}], total={info.TotalSDims}]"
     | IRObjectFor info ->
         let iranks = info.InputRanks |> List.map string |> String.concat ","
         sprintf "object_for(%s) [comm=%A, iranks=[%s], orank=%d]" 
@@ -267,81 +267,80 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRApplyCombinator info ->
         let states = info.SymcomStates |> List.map ppSymcomState |> String.concat ", "
         let triLevels = info.TriangularLevels |> List.map string |> String.concat ","
-        let reynoldsStr = if info.HasReynolds then sprintf ", reynolds=%d perms" info.ReynoldsSpeedup else ""
+        let reynoldsStr = if info.HasReynolds then $", reynolds={info.ReynoldsSpeedup} perms" else ""
         let outputStr = 
             match info.OutputType with
             | IRTUnit -> ""
-            | t -> sprintf ", out=%s" (ppIRType t)
-        sprintf "(%s <@> %s) [states=%s, tri=[%s], speedup=%dx%s%s]" 
-            (pp info.Loop) (pp info.Kernel) states triLevels info.SpeedupFactor reynoldsStr outputStr
+            | t -> $", out={ppIRType t}"
+        $"({(pp info.Loop)} <@> {(pp info.Kernel)}) [states={states}, tri=[{triLevels}], speedup={info.SpeedupFactor}x{reynoldsStr}{outputStr}]"
     | IRComposeApply info ->
         let arrs = info.InputArrays |> List.map pp |> String.concat ", "
         let outputStr = 
             match info.OutputType with
             | IRTUnit -> ""
-            | t -> sprintf ", out=%s" (ppIRType t)
-        sprintf "(%s <@> [%s]) [compose-apply%s]" (pp info.Composition) arrs outputStr
+            | t -> $", out={ppIRType t}"
+        $"({pp info.Composition} <@> [{arrs}]) [compose-apply{outputStr}]"
     | IRCompute c ->
-        sprintf "(%s |> compute)" (pp c)
+        $"({pp c} |> compute)"
     | IRReynolds (k, isAntisym) ->
         let symStr = if isAntisym then ", Antisymmetric" else ""
-        sprintf "reynolds(%s%s)" (pp k) symStr
+        $"reynolds({pp k}{symStr})"
     | IRPure e ->
-        sprintf "pure(%s)" (pp e)
+        $"pure({pp e})"
     | IRParallel (a, b, depth) ->
         sprintf "(%s <&> %s) [fusion=%A]" (pp a) (pp b) depth
     | IRFusion (a, b) ->
-        sprintf "(%s <&!> %s)" (pp a) (pp b)
+        $"({pp a} <&!> {pp b})"
     | IRBind (c, k) ->
-        sprintf "(%s >>= %s)" (pp c) (pp k)
+        $"({pp c} >>= {pp k})"
     | IRFunctorMap (f, c) ->
-        sprintf "(%s <$> %s)" (pp f) (pp c)
+        $"({pp f} <$> {pp c})"
     | IRIndex (arr, idxs, _) ->
-        sprintf "%s(%s)" (pp arr) (idxs |> List.map pp |> String.concat ", ")
+        $"""{(pp arr)}({(idxs |> List.map pp |> String.concat ", ")})"""
     | IRCurry (arr, idx, rank) ->
-        sprintf "%s(%s) [->rank %d]" (pp arr) (pp idx) rank
+        $"{pp arr}({pp idx}) [->rank {rank}]"
     | IRApp (f, args, _) ->
-        sprintf "%s(%s)" (pp f) (args |> List.map pp |> String.concat ", ")
+        $"""{(pp f)}({(args |> List.map pp |> String.concat ", ")})"""
     | IRZip arrs ->
-        sprintf "zip(%s)" (arrs |> List.map pp |> String.concat ", ")
+        $"""zip({(arrs |> List.map pp |> String.concat ", ")})"""
     | IRStack arrs ->
-        sprintf "stack(%s)" (arrs |> List.map pp |> String.concat ", ")
-    | IRArity (None, name) -> sprintf "arity(%s)" name
-    | IRArity (Some n, name) -> sprintf "arity(%s=%d)" name n
+        $"""stack({(arrs |> List.map pp |> String.concat ", ")})"""
+    | IRArity (None, name) -> $"arity({name})"
+    | IRArity (Some n, name) -> $"arity({name}={n})"
     | IRNth -> "nth"
     | IRZero -> "zero"
-    | IRRank arr -> sprintf "rank(%s)" (pp arr)
-    | IRPolyIndex (pack, idx) -> sprintf "%s[%s]" (pp pack) (pp idx)
-    | IRPolyTail (pack, drop) -> sprintf "%s[%d..]" (pp pack) drop
+    | IRRank arr -> $"rank({pp arr})"
+    | IRPolyIndex (pack, idx) -> $"{pp pack}[{pp idx}]"
+    | IRPolyTail (pack, drop) -> $"{pp pack}[{drop}..]"
     | IRChoice (a, b) ->
-        sprintf "(%s <|> %s)" (pp a) (pp b)
+        $"({pp a} <|> {pp b})"
     | IRFallback (a, b) ->
-        sprintf "(%s <|:> %s)" (pp a) (pp b)
+        $"({pp a} <|:> {pp b})"
     | IRCompose (f, g) ->
-        sprintf "(%s >> %s)" (pp f) (pp g)
+        $"({pp f} >> {pp g})"
     | IRComposeObj (f, g) ->
-        sprintf "(%s >>@ %s)" (pp f) (pp g)
+        $"({pp f} >>@ {pp g})"
     | IRComposeMeth (f, g) ->
-        sprintf "(%s @>> %s)" (pp f) (pp g)
+        $"({pp f} @>> {pp g})"
     | IRConstraintCheck (c, msg, _) ->
-        sprintf "check(%s, \"%s\")" (pp c) msg
+        $"check({pp c}, \"{msg}\")"
     | IRAssign (target, v) ->
         let targetStr =
             match target with
             | LVVar id ->
                 match Map.tryFind id names with
                 | Some name -> name
-                | None -> sprintf "v%d" id
+                | None -> $"v{id}"
             | LVIndex (arr, idxs) ->
                 let arrStr = pp arr
                 let idxStr = idxs |> List.map pp |> String.concat ", "
-                sprintf "%s[%s]" arrStr idxStr
-            | LVField (obj, f) -> sprintf "%s.%s" (pp obj) f
+                $"{arrStr}[{idxStr}]"
+            | LVField (obj, f) -> $"{pp obj}.{f}"
             | LVOther e -> pp e
-        sprintf "%s <- %s" targetStr (pp v)
+        $"{targetStr} <- {pp v}"
     | IRForRange (vid, lo, hi, body) ->
-        let varName = Map.tryFind vid names |> Option.defaultValue (sprintf "v%d" vid)
-        sprintf "for %s in %s..%s { %s }" varName (pp lo) (pp hi) (pp body)
+        let varName = Map.tryFind vid names |> Option.defaultValue $"v{vid}"
+        $"for {varName} in {pp lo}..{pp hi} {{ {pp body} }}"
     | _ -> "<expr>"
 
 /// Default pretty printer (no name context)

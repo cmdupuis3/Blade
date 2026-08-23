@@ -5,7 +5,15 @@
        src/. Imported ahead of each .fsproj body, so any project can still
        override an individual property. -->
   <PropertyGroup>
-    <TargetFramework>net7.0</TargetFramework>
+    <!-- .NET 10 / F# 10. LangVersion is deliberately left at the SDK default
+         (F# 10 for the 10.0.x SDK line global.json pins) rather than spelled
+         out, so a future SDK bump is one edit, in global.json. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- A compiler's output must not depend on the host locale: integer and
+         float formatting, casing and comparisons all run invariant. It is also
+         what makes `$"{n}"` and `sprintf "%d" n` agree
+         byte-for-byte (String.Format honours CurrentCulture; printf does not). -->
+    <InvariantGlobalization>true</InvariantGlobalization>
 
     <!-- Blade.fsproj sits at the REPO root, so the SDK's default item globs
          would sweep docs/, proofs/, examples/, legacy/ and the test fixtures

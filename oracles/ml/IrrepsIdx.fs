@@ -26,19 +26,19 @@ module IrrepsIdx =
     /// Storage bijection, forward: (block, mult, m) -> offset.
     let offsetOf (spec: SpecEntry[]) (b: int, mu: int, m: int) : int =
         if b < 0 || b >= spec.Length then
-            invalidArg "b" (sprintf "block %d out of range [0, %d)" b spec.Length)
+            invalidArg "b" $"block {b} out of range [0, {spec.Length})"
         let e = spec.[b]
         let d = Irreps.dim e.Ir
         if mu < 0 || mu >= e.Mult then
-            invalidArg "mu" (sprintf "multiplicity %d out of range [0, %d)" mu e.Mult)
+            invalidArg "mu" $"multiplicity {mu} out of range [0, {e.Mult})"
         if m < 0 || m >= d then
-            invalidArg "m" (sprintf "m-component %d out of range [0, %d)" m d)
+            invalidArg "m" $"m-component {m} out of range [0, {d})"
         (blockStarts spec).[b] + mu * d + m
 
     /// Storage bijection, backward: offset -> (block, mult, m).
     let ofOffset (spec: SpecEntry[]) (off: int) : int * int * int =
         if off < 0 || off >= extent spec then
-            invalidArg "off" (sprintf "offset %d out of range [0, %d)" off (extent spec))
+            invalidArg "off" $"offset {off} out of range [0, {extent spec})"
         let starts = blockStarts spec
         let mutable b = 0
         while off >= starts.[b + 1] do

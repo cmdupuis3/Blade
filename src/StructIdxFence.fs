@@ -76,8 +76,8 @@ let rec typeExprLabel (ty: TypeExpr) : string =
     | TyArray _ -> "an array type"
     | TyAbstractArray _ -> "an abstract array type"
     | TyFunc _ -> "a function type"
-    | TyTuple ts -> sprintf "a %d-tuple type" (List.length ts)
-    | TyVar (v, _) -> sprintf "type variable %s" v
+    | TyTuple ts -> $"a {List.length ts}-tuple type"
+    | TyVar (v, _) -> $"type variable {v}"
     | _ -> "a non-enumerable type"
 
 /// Is this field type an Int? Unit/tag arguments are transparent -- a
@@ -111,14 +111,13 @@ let private seqResult (rs: Result<'a, string> list) : Result<'a list, string> =
 let private foldBound (env: StaticEnv) (sname: string) (fname: string) (side: string) (e: Expr) : Result<int64, string> =
     match evalExpr env maxSteps e with
     | Ok (SVInt n) -> Ok n
-    | Ok v -> Error (sprintf "struct %s, field '%s': %s bound is not static -- it folded to %s, not an integer" sname fname side (ppStaticValue v))
-    | Error why -> Error (sprintf "struct %s, field '%s': %s bound is not static -- %s" sname fname side why)
+    | Ok v -> Error $"struct {sname}, field '{fname}': {side} bound is not static -- it folded to {ppStaticValue v}, not an integer"
+    | Error why -> Error $"struct {sname}, field '{fname}': {side} bound is not static -- {why}"
 
 /// One field's normalized inclusive box.
 let private fieldBox (env: StaticEnv) (sname: string) (f: FieldDecl) : Result<FieldBox, string> =
     if not (isIntFieldType f.Type) then
-        Error (sprintf "struct %s, field '%s': non-enumerable field type %s -- an index-eligible struct needs every field Int with static bounds"
-                   sname f.Name (typeExprLabel f.Type))
+        Error ($"struct {sname}, field '{f.Name}': non-enumerable field type {(typeExprLabel f.Type)} -- an index-eligible struct needs every field Int with static bounds")
     else
         // `Ast.fieldBoxBounds` hands back a HALF-OPEN pair whichever
         // spelling was written (`max=b` becomes `b + 1`); subtracting one
@@ -129,8 +128,7 @@ let private fieldBox (env: StaticEnv) (sname: string) (f: FieldDecl) : Result<Fi
             foldBound env sname f.Name "max" hiExclE |> Result.map (fun hiExcl ->
                 { Field = f.Name; Lo = lo; Hi = hiExcl - 1L }))
         | _ ->
-            Error (sprintf "struct %s, field '%s': unbounded field -- an index-eligible struct needs a static min and max"
-                       sname f.Name)
+            Error ($"struct {sname}, field '{f.Name}': unbounded field -- an index-eligible struct needs a static min and max")
 
 /// STRONG FENCE, over an explicit declaration. `isStatic` is the DECLARED
 /// `static struct` marker: index-eligibility is an OPT-IN, not a property
@@ -143,9 +141,9 @@ let structStaticFenceOf
         (declared: Expr list)
         : Result<StructBoxSpec, string> =
     if not isStatic then
-        Error (sprintf "struct %s is not declared static -- write `static struct %s` to make it index-eligible" name name)
+        Error $"struct {name} is not declared static -- write `static struct {name}` to make it index-eligible"
     elif List.isEmpty fields then
-        Error (sprintf "struct %s has no fields -- an index-eligible struct needs at least one" name)
+        Error $"struct {name} has no fields -- an index-eligible struct needs at least one"
     else
         fields
         |> List.map (fieldBox env name)
@@ -156,7 +154,7 @@ let structStaticFenceOf
 /// registry (declaration order is irrelevant).
 let structStaticFence (env: StaticEnv) (name: string) : Result<StructBoxSpec, string> =
     match Map.tryFind name env.Structs with
-    | None -> Error (sprintf "'%s' is not a declared struct" name)
+    | None -> Error $"'{name}' is not a declared struct"
     | Some info -> structStaticFenceOf env name info.IsStatic info.FieldDecls info.Declared
 
 // The enumeration reading
@@ -181,11 +179,10 @@ let evalConjunctsAtCell
     // A cell must bind every field: a partial cell would silently read a
     // same-named static from the ambient environment instead of failing.
     let cellNames = cell |> List.map fst
-    let fieldNames = spec.Fields |> List.map (fun b -> b.Field)
+    let fieldNames = spec.Fields |> List.map (_.Field)
     if List.length cellNames <> List.length fieldNames
        || not (fieldNames |> List.forall (fun f -> List.contains f cellNames)) then
-        Error (sprintf "struct %s: cell binds {%s} but the box has fields {%s}"
-                   spec.Name (String.concat ", " cellNames) (String.concat ", " fieldNames))
+        Error ($"""struct {spec.Name}: cell binds {{{(String.concat ", " cellNames)}}} but the box has fields {{{(String.concat ", " fieldNames)}}}""")
     else
         let cellEnv =
             { env with Values = cell |> List.fold (fun m (n, v) -> Map.add n (SVInt v) m) env.Values }
@@ -199,6 +196,6 @@ let evalConjunctsAtCell
                     match evalExprWith cellEnv cellBudget c with
                     | Ok (SVBool true) -> go (i + 1) rest
                     | Ok (SVBool false) -> Ok false
-                    | Ok _ -> Error (sprintf "conjunct %d of %s is not a boolean at compile time" i spec.Name)
-                    | Error why -> Error (sprintf "conjunct %d of %s did not fold: %s" i spec.Name why)
+                    | Ok _ -> Error $"conjunct {i} of {spec.Name} is not a boolean at compile time"
+                    | Error why -> Error $"conjunct {i} of {spec.Name} did not fold: {why}"
         go 1 spec.Conjuncts

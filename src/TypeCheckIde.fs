@@ -75,11 +75,9 @@ let tupleDestructureArityError (env: TypeEnv) (pats: Pattern list) (valueTy: IRT
         else
             let flatNote =
                 if flat.Length <> ts.Length
-                then sprintf " (%d leaves when flattened)" flat.Length
+                then $" ({flat.Length} leaves when flattened)"
                 else ""
-            Some (Other (sprintf
-                    "this `let` binds %d names, but the value is a %d-tuple%s. A tuple pattern needs one name per component -- or one per flattened leaf -- so write %d, or project the components you want with `t[i]`."
-                    pats.Length ts.Length flatNote ts.Length))
+            Some (Other ($"this `let` binds {pats.Length} names, but the value is a {ts.Length}-tuple{flatNote}. A tuple pattern needs one name per component -- or one per flattened leaf -- so write {ts.Length}, or project the components you want with `t[i]`."))
     | _ -> None
 
 /// Fourth family member -- see `TypeEnv.WarningLog` for the storage and why it

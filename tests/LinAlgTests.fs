@@ -82,9 +82,9 @@ let private cppOfGates (blasOn: bool) (cublasOn: bool) (testName: string) (src: 
     use _cublas = pinCublas cublasOn
     try
         match lower src with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
-    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+    with ex -> Error ($"codegen raised: {ex.Message}")
 
 /// The host-only emit: BLAS as asked, cuBLAS explicitly OFF.
 let private cppOf (blasOn: bool) (testName: string) (src: string) : Result<string, string> =
@@ -595,9 +595,9 @@ let runLinAlgEmissionTests () : BlockResult =
             let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
             let present = mustNotContain |> List.filter cpp.Contains
             if not missing.IsEmpty then
-                fail name (sprintf "generated C++ lacks: %s" (String.concat " | " missing))
+                fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then
-                fail name (sprintf "generated C++ unexpectedly contains: %s" (String.concat " | " present))
+                fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
             else
                 passed <- passed + 1
                 resultLine Pass name (if blasOn then "routing as expected (gate on)"
@@ -654,7 +654,7 @@ let runLinAlgEmissionTests () : BlockResult =
         | Error e when e.Contains expectedFragment ->
             passed <- passed + 1
             resultLine Pass name "rejected at typecheck (gate on)"
-        | Error e -> fail name (sprintf "rejected, but not for the pinned reason: %s" e)
+        | Error e -> fail name ($"rejected, but not for the pinned reason: {e}")
 
     // ---- the availability gate itself ----
     // Pinned because it is now shared with Build.fs's flag injection: a change
@@ -979,9 +979,9 @@ let runLinAlgEmissionTests () : BlockResult =
             let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
             let present = mustNotContain |> List.filter cpp.Contains
             if not missing.IsEmpty then
-                fail name (sprintf "generated C++ lacks: %s" (String.concat " | " missing))
+                fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then
-                fail name (sprintf "generated C++ unexpectedly contains: %s" (String.concat " | " present))
+                fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
             else
                 passed <- passed + 1
                 resultLine Pass name (sprintf "cublas=%b blas=%b" cublasOn blasOn)
@@ -1021,7 +1021,7 @@ let runLinAlgEmissionTests () : BlockResult =
             System.Environment.SetEnvironmentVariable("BLADE_CUBLAS", priorC)
             System.Environment.SetEnvironmentVariable("OPENBLAS_DIR", priorO)
 
-    printFooter "LinAlg Dispatch" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "LinAlg Dispatch" [$"{passed} passed"; $"{failed} failed"]
     { Block = "LinAlg Dispatch"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 
@@ -1065,7 +1065,7 @@ let runLinAlgProbeTests () : BlockResult =
         // to the shipped header the codegen path deploys — a stale copy would
         // defeat the point of running this at all. No -DBLADE_HAS_BLAS and no
         // -I/-l: the views header needs none.
-        let args = sprintf "-std=c++17 %s -o \"%s\" \"%s\"" (optFlags ()) exePath testSrc
+        let args = $"-std=c++17 {(optFlags ())} -o \"{exePath}\" \"{testSrc}\""
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
@@ -1133,7 +1133,7 @@ let runLinAlgProbeTests () : BlockResult =
             else
                 printFooter blockName ["FAILED"]
                 { Block = blockName; Passed = pPassed; Failed = max 1 pFailed; Skipped = 0
-                  FailedNames = (if failNames.IsEmpty then [sprintf "<exit %d>" rproc.ExitCode] else failNames) }
+                  FailedNames = (if failNames.IsEmpty then [$"<exit {rproc.ExitCode}>"] else failNames) }
 
 
 /// The four-tier BLAS/LAPACK resolution (docs/plans/plan-toolchain-packaging.md):
@@ -1244,13 +1244,13 @@ let runBlasTierTests () : BlockResult =
     // ---- include-dir lists (PathSeparator-delimited) ----
     do
         use _t = pinEnv "BLADE_BLAS_LINK" "-lmkl_rt"
-        use _u = pinEnv "BLADE_BLAS_INCLUDE" (sprintf "/inc/one%c/inc/two" Path.PathSeparator)
+        use _u = pinEnv "BLADE_BLAS_INCLUDE" ($"/inc/one{Path.PathSeparator}/inc/two")
         let (compileHalf, _) = LinAlgPatterns.blasBuildFlags true false
         check "BLADE_BLAS_INCLUDE list -> one -I per dir"
             (compileHalf.Contains " -I\"/inc/one\"" && compileHalf.Contains " -I\"/inc/two\"")
             "path-separator split"
     // ---- OPENBLAS_DIR expansion against a real prefix ----
-    let tmpPrefix = Path.Combine(Path.GetTempPath(), sprintf "blade_tier_prefix_%d" (System.Diagnostics.Process.GetCurrentProcess().Id))
+    let tmpPrefix = Path.Combine(Path.GetTempPath(), $"blade_tier_prefix_{(System.Diagnostics.Process.GetCurrentProcess().Id)}")
     do
         try
             // Empty prefix: no library file anywhere -> the -L/-l fallback.
@@ -1271,13 +1271,13 @@ let runBlasTierTests () : BlockResult =
             File.WriteAllText(libPath, "")
             let (_, linkHalf2) = LinAlgPatterns.blasBuildFlags true false
             check "OpenBlasDir expansion, lib present -> direct path link"
-                (linkHalf2 = sprintf " \"%s\"" libPath)
+                (linkHalf2 = $" \"{libPath}\"")
                 "Platforms.findSharedLib hit"
         finally
             try Directory.Delete(tmpPrefix, true) with _ -> ()
     // ---- toolchain file: env-over-file precedence ----
-    let tmpFile suffix content =
-        let p = Path.Combine(Path.GetTempPath(), sprintf "blade_tier_%s_%d.json" suffix (System.Diagnostics.Process.GetCurrentProcess().Id))
+    let tmpFile suffix (content: string) =
+        let p = Path.Combine(Path.GetTempPath(), $"blade_tier_{suffix}_{(System.Diagnostics.Process.GetCurrentProcess().Id)}.json")
         File.WriteAllText(p, content)
         p
     do
@@ -1314,5 +1314,5 @@ let runBlasTierTests () : BlockResult =
             try File.Delete fileB with _ -> ()
             try File.Delete fileC with _ -> ()
 
-    printFooter "BLAS Tier Resolution" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "BLAS Tier Resolution" [$"{passed} passed"; $"{failed} failed"]
     { Block = "BLAS Tier Resolution"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

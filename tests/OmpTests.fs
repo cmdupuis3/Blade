@@ -75,9 +75,9 @@ let private pinOmpThreadsUnset () = pinEnv "BLADE_OMP_THREADS" null
 let private cppOf (testName: string) (src: string) : Result<string, string> =
     try
         match fst (lowerCaptured src) with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
-    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+    with ex -> Error ($"codegen raised: {ex.Message}")
 
 /// A kernel body and the two arrays it folds over, spelled once. Each case
 /// below varies ONLY how the kernel is written and where the clause sits.
@@ -127,7 +127,7 @@ let private ompDepthCases : (string * string * string) list =
     // (name, source, exact expected pragma line)
     let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
     let apply = "let m = object_for(k) <@> (A, B) |> compute\n"
-    let kern clause = sprintf "function k(a: Float64, b: Float64) where %s = a * b\n" clause
+    let kern clause = $"function k(a: Float64, b: Float64) where {clause} = a * b\n"
     [ // One dimension licensed of a 2-level collapsible nest: collapse would
       // thread b's level too, so it must NOT be used.
       ("depth_1_of_2_no_collapse", kern "omp(a: 1)" + arrays + apply,
@@ -372,10 +372,10 @@ let private emissionShapeCases : (string * string * string list * string list) l
     let rowsDecl = "let R = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0], [11.0, 12.0, 13.0, 14.0, 15.0]]\n"
     let prodsumSrc =
         rowsDecl +
-        sprintf "let Cv = method_for(R, R) <@> lambda(a: %s, b: %s) -> prodsum(a, b) |> compute\n" fiber fiber
+        $"let Cv = method_for(R, R) <@> lambda(a: {fiber}, b: {fiber}) -> prodsum(a, b) |> compute\n"
     let loopFreeSrc =
         rowsDecl +
-        sprintf "let D = method_for(R, R) <@> lambda(a: %s, b: %s) -> a(0) * b(0) |> compute\n" fiber fiber
+        $"let D = method_for(R, R) <@> lambda(a: {fiber}, b: {fiber}) -> a(0) * b(0) |> compute\n"
     // Rank-3 triangular comm nest with an omp licence: the `schedule(dynamic)`
     // outer level. Extent 13 -- prime, and not 3, so a bound that lost a
     // dependency subtraction is visible.
@@ -471,7 +471,7 @@ let private ompPlacementCases : (string * string * string) list =
     // (name, source, index variable the pragma must immediately precede)
     let arrays = "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
     let apply = "let m = object_for(k) <@> (A, B) |> compute\n"
-    let kern clause = sprintf "function k(a: Float64, b: Float64) where %s = a * b\n" clause
+    let kern clause = $"function k(a: Float64, b: Float64) where {clause} = a * b\n"
     [ ("outer_licence_pragma_on_i0", kern "omp(a: 1)" + arrays + apply, "__i0")
       ("inner_licence_pragma_on_i1", kern "omp(b: 1)" + arrays + apply, "__i1") ]
 
@@ -521,24 +521,24 @@ let private peelPragmaCases : (string * string * string option) list =
     let row = "Array<Float64 like RaggedIdx<_>>"
     [ // ---- grouped, single operand: the reported case ---------------------
       ("peel_grouped_reduce_licensed",
-       grouped (sprintf "let s = method_for(grouped) <@> lambda(g: %s) where omp(g: 1) -> reduce(g, (+)) |> compute\n" row),
+       grouped ($"let s = method_for(grouped) <@> lambda(g: {row}) where omp(g: 1) -> reduce(g, (+)) |> compute\n"),
        dynamicPragma)
       ("peel_grouped_reduce_unlicensed",
-       grouped (sprintf "let s = method_for(grouped) <@> lambda(g: %s) -> reduce(g, (+)) |> compute\n" row),
+       grouped ($"let s = method_for(grouped) <@> lambda(g: {row}) -> reduce(g, (+)) |> compute\n"),
        None)
       // ---- grouped co-iteration (tryGroupedZipPeel) ------------------------
       ("peel_grouped_zip_licensed",
-       groupedZip (sprintf "let d = method_for(zip(ga, gb)) <@> lambda(ra: %s, rb: %s) where omp(ra: 1) -> prodsum(ra, rb) |> compute\n" row row),
+       groupedZip ($"let d = method_for(zip(ga, gb)) <@> lambda(ra: {row}, rb: {row}) where omp(ra: 1) -> prodsum(ra, rb) |> compute\n"),
        dynamicPragma)
       ("peel_grouped_zip_unlicensed",
-       groupedZip (sprintf "let d = method_for(zip(ga, gb)) <@> lambda(ra: %s, rb: %s) -> prodsum(ra, rb) |> compute\n" row row),
+       groupedZip ($"let d = method_for(zip(ga, gb)) <@> lambda(ra: {row}, rb: {row}) -> prodsum(ra, rb) |> compute\n"),
        None)
       // ---- ragged LITERAL, row-consuming ----------------------------------
       ("peel_ragged_literal_licensed",
-       raggedLit (sprintf "let s = method_for(r) <@> lambda(g: %s) where omp(g: 1) -> reduce(g, (+)) |> compute\n" row),
+       raggedLit ($"let s = method_for(r) <@> lambda(g: {row}) where omp(g: 1) -> reduce(g, (+)) |> compute\n"),
        dynamicPragma)
       ("peel_ragged_literal_unlicensed",
-       raggedLit (sprintf "let s = method_for(r) <@> lambda(g: %s) -> reduce(g, (+)) |> compute\n" row),
+       raggedLit ($"let s = method_for(r) <@> lambda(g: {row}) -> reduce(g, (+)) |> compute\n"),
        None)
       // ---- ragged ELEMENTWISE map (the two-loop arm) ----------------------
       // The pragma must land on `__g`; the `__k` header below it stays bare.
@@ -710,7 +710,7 @@ let private ompThreadsEquivalenceCases : (string * string * string) list =
         "let temps = [20.0, 25.0, 30.0, 22.0, 27.0]\n" +
         "let gk = group_keys(region)\n" +
         "let grouped = group_by(temps, gk)\n" +
-        sprintf "let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) %s-> reduce(g, (+)) |> compute\n" clause
+        $"let s = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) {clause}-> reduce(g, (+)) |> compute\n"
     [ ("knob_equals_unlicensed_map",
        "function cov(a: Float64, b: Float64) where omp(a: 1) = a * b\n" + arrays +
        "let m = object_for(cov) <@> (A, B) |> compute\n",
@@ -776,16 +776,16 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             // form would match the collapse form as a prefix.
             let pragmaLines =
                 cpp.Split('\n')
-                |> Array.map (fun l -> l.Trim())
+                |> Array.map (_.Trim())
                 |> Array.filter (fun l -> l.StartsWith "#pragma omp")
                 |> Array.toList
             match pragmaLines with
             | [actual] when actual = expectedPragma ->
                 passed <- passed + 1
                 resultLine Pass name actual
-            | [actual] -> fail name (sprintf "expected `%s`, got `%s`" expectedPragma actual)
-            | [] -> fail name (sprintf "expected `%s`, got no pragma" expectedPragma)
-            | many -> fail name (sprintf "expected one pragma, got %d: %s" many.Length (String.concat " | " many))
+            | [actual] -> fail name ($"expected `{expectedPragma}`, got `{actual}`")
+            | [] -> fail name ($"expected `{expectedPragma}`, got no pragma")
+            | many -> fail name ($"""expected one pragma, got {many.Length}: {(String.concat " | " many)}""")
     // ---- placement: WHICH loop the pragma governs ----
     for (name, src, expectedIdx) in ompPlacementCases do
         match cppOf name src with
@@ -794,7 +794,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             // The emitter writes the pragma and the loop header it governs as
             // consecutive lines, so the next non-blank line after the pragma is
             // that header.
-            let lines = cpp.Split('\n') |> Array.map (fun l -> l.Trim())
+            let lines = cpp.Split('\n') |> Array.map (_.Trim())
             let governed =
                 lines
                 |> Array.tryFindIndex (fun l -> l.StartsWith "#pragma omp")
@@ -810,8 +810,8 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             match governed with
             | Some idx when idx = expectedIdx ->
                 passed <- passed + 1
-                resultLine Pass name (sprintf "pragma governs %s" idx)
-            | Some idx -> fail name (sprintf "pragma governs %s, expected %s" idx expectedIdx)
+                resultLine Pass name ($"pragma governs {idx}")
+            | Some idx -> fail name ($"pragma governs {idx}, expected {expectedIdx}")
             | None -> fail name "no pragma found"
     // ---- the RAGGED / GROUPED PEEL row loop ----
     // Count, exact string, AND placement in one assertion, because for this site
@@ -827,7 +827,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         match cppOf name src with
         | Error e -> fail name e
         | Ok cpp ->
-            let lines = cpp.Split('\n') |> Array.map (fun l -> l.Trim())
+            let lines = cpp.Split('\n') |> Array.map (_.Trim())
             let pragmaLines = lines |> Array.filter (fun l -> l.StartsWith "#pragma omp") |> Array.toList
             let governedIsRowLoop () =
                 lines
@@ -846,7 +846,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                     passed <- passed + 1
                     resultLine Pass name "serial, and silent (no clause)"
             | None, many ->
-                fail name (sprintf "expected no pragma, got %d: %s" many.Length (String.concat " | " many))
+                fail name ($"""expected no pragma, got {many.Length}: {(String.concat " | " many)}""")
             | Some expected, [actual] when actual = expected ->
                 if not (governedIsRowLoop ()) then
                     fail name "pragma emitted but does not immediately precede the peel's `__g` row loop"
@@ -854,11 +854,11 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                     fail name "pragma emitted AND a requested-but-serial marker -- the two are contradictory"
                 else
                     passed <- passed + 1
-                    resultLine Pass name (sprintf "%s on __g" actual)
-            | Some expected, [actual] -> fail name (sprintf "expected `%s`, got `%s`" expected actual)
-            | Some expected, [] -> fail name (sprintf "expected `%s`, got no pragma" expected)
+                    resultLine Pass name ($"{actual} on __g")
+            | Some expected, [actual] -> fail name ($"expected `{expected}`, got `{actual}`")
+            | Some expected, [] -> fail name ($"expected `{expected}`, got no pragma")
             | Some expected, many ->
-                fail name (sprintf "expected one `%s`, got %d: %s" expected many.Length (String.concat " | " many))
+                fail name ($"""expected one `{expected}`, got {many.Length}: {(String.concat " | " many)}""")
     // ---- the peel's licence DECLINE is audible ----
     (let (name, src) = peelDeclineMarkerCase
      match cppOf name src with
@@ -881,15 +881,13 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         | Error e -> fail name e
         | Ok cpp ->
             let flat =
-                cpp.Split('\n') |> Array.map (fun l -> l.TrimStart()) |> String.concat "\n"
+                cpp.Split('\n') |> Array.map (_.TrimStart()) |> String.concat "\n"
             let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
             let present = mustNotContain |> List.filter flat.Contains
             if not missing.IsEmpty then
-                fail name (sprintf "generated C++ lacks: %s"
-                               (String.concat " | " (missing |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+                fail name ($"""generated C++ lacks: {(String.concat " | " (missing |> List.map (_.Replace("\n", " \\n "))))}""")
             elif not present.IsEmpty then
-                fail name (sprintf "generated C++ still contains: %s"
-                               (String.concat " | " (present |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+                fail name ($"""generated C++ still contains: {(String.concat " | " (present |> List.map (_.Replace("\n", " \\n "))))}""")
             else
                 passed <- passed + 1
                 resultLine Pass name "emission shape as expected"
@@ -909,9 +907,9 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
                 || (cpp.Split('\n')
                     |> Array.exists (fun l -> l.Trim().StartsWith "#include <omp.h>"))
             if not missing.IsEmpty then
-                fail name (sprintf "generated C++ lacks: %s" (String.concat " | " missing))
+                fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then
-                fail name (sprintf "generated C++ unexpectedly contains: %s" (String.concat " | " present))
+                fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
             elif not headerOk then
                 fail name "calls the omp_* runtime API but <omp.h> is not included"
             else
@@ -928,7 +926,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             if List.contains "BL4016" codes then
                 passed <- passed + 1
                 resultLine Pass name "BL4016"
-            else fail name (sprintf "expected BL4016, got: %s" (String.concat ", " codes))
+            else fail name ($"""expected BL4016, got: {(String.concat ", " codes)}""")
     // ---- BLADE_OMP_THREADS=1: what each formerly-threaded site emits ----
     // The pin is scoped to these arms and restored immediately, so nothing
     // above (or in any later block) can see it. Same discipline as the
@@ -941,14 +939,13 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         | Error e -> fail name e
         | Ok cpp ->
             let flat =
-                cpp.Split('\n') |> Array.map (fun l -> l.TrimStart()) |> String.concat "\n"
+                cpp.Split('\n') |> Array.map (_.TrimStart()) |> String.concat "\n"
             let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
             let present = mustNotContain |> List.filter flat.Contains
             if not missing.IsEmpty then
-                fail name (sprintf "knob-on C++ lacks: %s"
-                               (String.concat " | " (missing |> List.map (fun s -> s.Replace("\n", " \\n ")))))
+                fail name ($"""knob-on C++ lacks: {(String.concat " | " (missing |> List.map (_.Replace("\n", " \\n "))))}""")
             elif not present.IsEmpty then
-                fail name (sprintf "knob-on C++ still contains: %s" (String.concat " | " present))
+                fail name ($"""knob-on C++ still contains: {(String.concat " | " present)}""")
             else
                 passed <- passed + 1
                 resultLine Pass name "serial emission as expected"
@@ -977,8 +974,8 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             use _knob = pinEnv "BLADE_OMP_THREADS" "1"
             cppOf name licensedSrc
         match licensed, cppOf name unlicensedSrc with
-        | Error e, _ -> fail name (sprintf "knob-on emit: %s" e)
-        | _, Error e -> fail name (sprintf "unlicensed emit: %s" e)
+        | Error e, _ -> fail name ($"knob-on emit: {e}")
+        | _, Error e -> fail name ($"unlicensed emit: {e}")
         | Ok onCpp, Ok unlicCpp ->
             // The census markers are the ONE intended difference: the licensed
             // program has a dropped clause to report and the unlicensed one has
@@ -992,7 +989,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             else
                 passed <- passed + 1
                 resultLine Pass name "byte-identical to the unlicensed program (modulo the census marker)"
-    printFooter "OpenMP Pragma" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "OpenMP Pragma" [$"{passed} passed"; $"{failed} failed"]
     { Block = "OpenMP Pragma"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 /// Run OpenMP thread-coverage tests. Generates representative loop-nest
@@ -1090,7 +1087,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 try
                     let safeName = sanitizeFileName name
                     match lower src with
-                    | Error e -> Error (sprintf "lower failed: %s" e)
+                    | Error e -> Error ($"lower failed: {e}")
                     | Ok ir0 ->
                         // A validation error is a hard failure. The old
                         // `| Error _ -> ir0` ("validation errors don't block this
@@ -1098,16 +1095,16 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                         // regression on these programs was invisible here.
                         match IRValidate.validateIR ir0 with
                         | Error validationErrors ->
-                            Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                            Error ($"""IR validation failed: {(String.concat "; " validationErrors)}""")
                         | Ok ir ->
                             let (cppCode, _warnings) = CodeGen.genSelfContainedProgramFromIR ir name
                             let srcFile = Path.Combine(outputDir, safeName + ".cpp")
                             File.WriteAllText(srcFile, cppCode)
                             Ok srcFile
-                with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+                with ex -> Error ($"codegen failed: {ex.Message}")
             setOmpTestMode false
             match outcome with
-            | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name (sprintf "generation: %s" e); errors <- errors + 1; failedNames <- failedNames @ [name]
+            | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name ($"generation: {e}"); errors <- errors + 1; failedNames <- failedNames @ [name]
             | Ok srcFile ->
                 let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
                 // Use ABSOLUTE paths for g++. srcFile is relative to the process
@@ -1116,7 +1113,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 // doubled path). Absolute paths make the working dir irrelevant.
                 let srcAbs = Path.GetFullPath(srcFile)
                 let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
+                let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
                 cpsi.RedirectStandardError <- true
                 cpsi.UseShellExecute <- false
                 use cproc = Process.Start(cpsi)
@@ -1130,7 +1127,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                     errors <- errors + 1
                     failedNames <- failedNames @ [name]
                 elif cproc.ExitCode <> 0 then
-                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name (sprintf "compile: %s" cerr.Result)
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name ($"compile: {cerr.Result}")
                     errors <- errors + 1
                     failedNames <- failedNames @ [name]
                 else
@@ -1146,7 +1143,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                     let rerr = rproc.StandardError.ReadToEndAsync()
                     let rExited = rproc.WaitForExit(30000)
                     if not rExited then (try rproc.Kill(true) with _ -> ())
-                    let lines = rout.Result.Split('\n') |> Array.filter (fun l -> l.Contains("[omp-coverage]"))
+                    let lines = rout.Result.Split('\n') |> Array.filter (_.Contains("[omp-coverage]"))
                     if not rExited then
                         Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name "run timed out (30s)"
                         errors <- errors + 1
@@ -1188,23 +1185,22 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                         let maxth = defaultArg maxthO 0
                         if not missing.IsEmpty then
                             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name
-                                (sprintf "unparseable coverage line (missing %s): %s"
-                                    (String.concat ", " missing) (line.Trim()))
+                                ($"""unparseable coverage line (missing {(String.concat ", " missing)}): {(line.Trim())}""")
                             errors <- errors + 1
                             failedNames <- failedNames @ [name]
                         elif maxth <= 1 then
-                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name (sprintf "single-core: maxth=%d, cannot test parallelism" maxth)
+                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name ($"single-core: maxth={maxth}, cannot test parallelism")
                             passed <- passed + 1
                         elif teamsz <= 1 then
-                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name (sprintf "parallel loop ran serially (teamsz=%d, maxth=%d) -- pragma not honored" teamsz maxth)
+                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail name ($"parallel loop ran serially (teamsz={teamsz}, maxth={maxth}) -- pragma not honored")
                             errors <- errors + 1
                             failedNames <- failedNames @ [name]
                         elif distinct <= 1 then
-                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name (sprintf "WARNING: parallel team formed (teamsz=%d) but scheduler used 1 thread (distinct=%d)" teamsz distinct)
+                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name ($"WARNING: parallel team formed (teamsz={teamsz}) but scheduler used 1 thread (distinct={distinct})")
                             warnings <- warnings + 1
                             passed <- passed + 1
                         else
-                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name (sprintf "teamsz=%d, distinct=%d, maxth=%d" teamsz distinct maxth)
+                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass name ($"teamsz={teamsz}, distinct={distinct}, maxth={maxth}")
                             passed <- passed + 1
 
         // -------------------------------------------------------------------
@@ -1233,37 +1229,37 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
         let aLit = aVals |> List.map (sprintf "%g") |> String.concat ","
         let expectedLit = expectedSym |> List.map (sprintf "%g") |> String.concat ", "
         let valSrc =
-            sprintf "let A = [%s]\n" aLit +
+            $"let A = [{aLit}]\n" +
             "let L = method_for(A, A)\n" +
             // omp clause so this genuinely runs parallel under OMP_NUM_THREADS=4
             // — otherwise (post-flip) it would be serial and the env var inert,
             // defeating the race-detection purpose of the repeated runs.
             "let k = lambda(x, y) where comm(x, y), omp(x: 1) -> x * y\n" +
             "let result = L <@> k |> compute\n" +
-            sprintf "// EXPECT: result = [%s]\n" expectedLit
+            $"// EXPECT: result = [{expectedLit}]\n"
         printSubHeader "Value correctness under forced threading (N=12 symmetric)"
         setOmpTestMode false  // value test: no instrumentation, just real codegen
         let valOutcome =
             try
                 match lower valSrc with
-                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Error e -> Error ($"lower failed: {e}")
                 | Ok ir0 ->
                     // Hard-fail on validation errors (was `| Error _ -> ir0`).
                     match IRValidate.validateIR ir0 with
                     | Error validationErrors ->
-                        Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                        Error ($"""IR validation failed: {(String.concat "; " validationErrors)}""")
                     | Ok ir ->
                         let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir "omp_value_check"
                         let sf = Path.Combine(outputDir, "omp_value_check.cpp")
                         File.WriteAllText(sf, cppCode)
                         Ok (Path.GetFullPath sf)
-            with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+            with ex -> Error ($"codegen failed: {ex.Message}")
         match valOutcome with
-        | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" (sprintf "generation: %s" e); errors <- errors + 1; failedNames <- failedNames @ ["omp_value_check"]
+        | Error e -> Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" ($"generation: {e}"); errors <- errors + 1; failedNames <- failedNames @ ["omp_value_check"]
         | Ok srcAbs ->
             let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
             let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
+            let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
             cpsi.RedirectStandardError <- true
             cpsi.UseShellExecute <- false
             use cproc = Process.Start(cpsi)
@@ -1275,7 +1271,7 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                 errors <- errors + 1
                 failedNames <- failedNames @ ["omp_value_check"]
             elif cproc.ExitCode <> 0 then
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" (sprintf "compile: %s" cerr.Result)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" ($"compile: {cerr.Result}")
                 errors <- errors + 1
                 failedNames <- failedNames @ ["omp_value_check"]
             else
@@ -1323,14 +1319,14 @@ let runOmpCoverageTests () : Blade.Tests.TestHarness.BlockResult =
                                 allRunsOk <- false
                                 printfn "    run %d: VALUE MISMATCH (possible race): %s" run (String.concat "; " errs)
                 if allRunsOk then
-                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass "omp_value_check" (sprintf "correct values across 5 runs under OMP_NUM_THREADS=%s" forcedThreads)
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass "omp_value_check" ($"correct values across 5 runs under OMP_NUM_THREADS={forcedThreads}")
                     passed <- passed + 1
                 else
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail "omp_value_check" "values incorrect under threading -- likely a data race in parallelization"
                     errors <- errors + 1
                     failedNames <- failedNames @ ["omp_value_check"]
 
-        printFooter "OpenMP Coverage" [sprintf "%d passed" passed; sprintf "%d error(s)" errors; sprintf "%d warning(s)" warnings]
+        printFooter "OpenMP Coverage" [$"{passed} passed"; $"{errors} error(s)"; $"{warnings} warning(s)"]
         { Block = "OpenMP Coverage"; Passed = passed; Failed = errors; Skipped = 0; FailedNames = failedNames }
 
 // ============================================================================
@@ -1375,17 +1371,17 @@ let private compileProgram (outputDir: string) (name: string) (src: string) : Re
     try
         setOmpTestMode false
         match lower src with
-        | Error e -> Error (sprintf "lower failed: %s" e)
+        | Error e -> Error ($"lower failed: {e}")
         | Ok ir0 ->
             match IRValidate.validateIR ir0 with
-            | Error errs -> Error (sprintf "IR validation failed: %s" (String.concat "; " errs))
+            | Error errs -> Error ($"""IR validation failed: {(String.concat "; " errs)}""")
             | Ok ir ->
                 let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
                 let srcAbs = Path.GetFullPath(Path.Combine(outputDir, sanitizeFileName name + ".cpp"))
                 File.WriteAllText(srcAbs, cppCode)
                 let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
                 let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
+                let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
                 cpsi.RedirectStandardError <- true
                 cpsi.UseShellExecute <- false
                 use cproc = Process.Start(cpsi)
@@ -1393,9 +1389,9 @@ let private compileProgram (outputDir: string) (name: string) (src: string) : Re
                 if not (cproc.WaitForExit(120000)) then
                     (try cproc.Kill(true) with _ -> ())
                     Error "compile timed out (120s)"
-                elif cproc.ExitCode <> 0 then Error (sprintf "compile: %s" (cerr.Result.Trim()))
+                elif cproc.ExitCode <> 0 then Error ($"compile: {(cerr.Result.Trim())}")
                 else Ok exeAbs
-    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+    with ex -> Error ($"codegen raised: {ex.Message}")
 
 /// Run a compiled program with OMP_NUM_THREADS forced, returning stdout.
 let private runProgram (exeAbs: string) (threads: string) : Result<string, string> =
@@ -1412,7 +1408,7 @@ let private runProgram (exeAbs: string) (threads: string) : Result<string, strin
         (try rproc.Kill(true) with _ -> ())
         Error "run timed out (60s)"
     elif rproc.ExitCode <> 0 then
-        Error (sprintf "exit %d: %s" rproc.ExitCode (rerr.Result.Trim()))
+        Error ($"exit {rproc.ExitCode}: {(rerr.Result.Trim())}")
     else Ok rout.Result
 
 /// Every `name = value` scalar line of a program's stdout, as floats. The
@@ -1466,13 +1462,13 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         // four genuinely different chunks.
         let n = 240
         let vals = [ for i in 1 .. n -> 1.0 / float i + float (i % 7) * 0.3 ]
-        let aLit = vals |> List.map (fun v -> v.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
-        let arrDecl = sprintf "let A = [%s]\n" aLit
+        let aLit = vals |> List.map (_.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
+        let arrDecl = $"let A = [{aLit}]\n"
         // A second array for the deferred-computation (2-level nest) case; kept
         // short so the fused nest stays a quick compile.
         let bVals = [ for i in 1 .. 9 -> 0.5 + 1.0 / float (i + 2) ]
-        let bLit = bVals |> List.map (fun v -> v.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
-        let bDecl = sprintf "let B = [%s]\n" bLit
+        let bLit = bVals |> List.map (_.ToString("R", System.Globalization.CultureInfo.InvariantCulture)) |> String.concat ", "
+        let bDecl = $"let B = [{bLit}]\n"
         let commFn = "function myAdd(a: Float64, b: Float64) where comm(a, b), omp = (a + b) * 1.0\n"
         let serialFn = "function myAdd(a: Float64, b: Float64) where comm(a, b) = (a + b) * 1.0\n"
         // Compound (masked) operand: reduce walks the flat `.data` buffer of
@@ -1512,12 +1508,12 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         for (name, ompSrc, serialSrc, isPathB) in cases do
             match compileProgram outputDir (name + "_omp") ompSrc,
                   compileProgram outputDir (name + "_serial") serialSrc with
-            | Error e, _ -> fail name (sprintf "omp build: %s" e)
-            | _, Error e -> fail name (sprintf "serial build: %s" e)
+            | Error e, _ -> fail name ($"omp build: {e}")
+            | _, Error e -> fail name ($"serial build: {e}")
             | Ok ompExe, Ok serialExe ->
                 match runProgram ompExe forcedThreads, runProgram serialExe "1" with
-                | Error e, _ -> fail name (sprintf "omp run: %s" e)
-                | _, Error e -> fail name (sprintf "serial run: %s" e)
+                | Error e, _ -> fail name ($"omp run: {e}")
+                | _, Error e -> fail name ($"serial run: {e}")
                 | Ok ompOut, Ok serialOut ->
                     let ompVals = scalarBindings ompOut
                     let serVals = scalarBindings serialOut
@@ -1535,7 +1531,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                             // Path B determinism: a second run at the same team
                             // size must reproduce the first byte for byte.
                             match runProgram ompExe forcedThreads with
-                            | Error e -> fail name (sprintf "second omp run: %s" e)
+                            | Error e -> fail name ($"second omp run: {e}")
                             | Ok again ->
                                 let strip (s: string) =
                                     s.Split('\n')
@@ -1598,16 +1594,16 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         for (label, n, integerData) in laneCases do
             let name = "lane_boundary_" + label
             let lit = laneLit n (fun i -> if integerData then float (i % 9 + 1) else awkward i)
-            let decl = sprintf "let A = [%s]\n" lit
+            let decl = $"let A = [{lit}]\n"
             let body = "let s = reduce(A, laneAdd)\n"
             match compileProgram outputDir (name + "_omp") (laneKernelOmp + decl + body),
                   compileProgram outputDir (name + "_serial") (laneKernelSer + decl + body) with
-            | Error e, _ -> fail name (sprintf "omp build: %s" e)
-            | _, Error e -> fail name (sprintf "serial build: %s" e)
+            | Error e, _ -> fail name ($"omp build: {e}")
+            | _, Error e -> fail name ($"serial build: {e}")
             | Ok ompExe, Ok serialExe ->
                 match runProgram ompExe forcedThreads, runProgram serialExe "1" with
-                | Error e, _ -> fail name (sprintf "omp run: %s" e)
-                | _, Error e -> fail name (sprintf "serial run: %s" e)
+                | Error e, _ -> fail name ($"omp run: {e}")
+                | _, Error e -> fail name ($"serial run: {e}")
                 | Ok ompOut, Ok serialOut ->
                     match Map.tryFind "s" (scalarBindings ompOut), Map.tryFind "s" (scalarBindings serialOut) with
                     | Some pv, Some sv ->
@@ -1620,14 +1616,14 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                             // constant, so a fixed team size must still reproduce the
                             // run bit for bit.
                             match runProgram ompExe forcedThreads with
-                            | Error e -> fail name (sprintf "second omp run: %s" e)
+                            | Error e -> fail name ($"second omp run: {e}")
                             | Ok again ->
                                 let strip (s: string) =
                                     s.Split('\n')
                                     |> Array.filter (fun l -> not (l.Contains "completed in"))
                                     |> String.concat "\n"
                                 if strip again <> strip ompOut then
-                                    fail name (sprintf "n=%d: run-to-run output differs at fixed OMP_NUM_THREADS=4" n)
+                                    fail name ($"n={n}: run-to-run output differs at fixed OMP_NUM_THREADS=4")
                                 else
                                     pass name (sprintf "n=%d %s: |diff| = %g; identical across 2 runs"
                                                    n (if integerData then "exact" else "vs serial") diff)
@@ -1718,30 +1714,30 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         let emitOnly (nm: string) (src: string) : Result<string, string> =
             try
                 match lower src with
-                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Error e -> Error ($"lower failed: {e}")
                 | Ok ir0 ->
                     match IRValidate.validateIR ir0 with
                     | Error errs -> Error (String.concat "; " errs)
                     | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir nm))
-            with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+            with ex -> Error ($"codegen raised: {ex.Message}")
         let stripTiming (s: string) =
             s.Split('\n') |> Array.filter (fun l -> not (l.Contains "completed in")) |> String.concat "\n"
 
         // (label, n, integerData, sourceOf n)
         let fprSrcReduce (lit: string) =
-            sprintf "let A = [%s]\nlet s = reduce(A, lambda(a, b) -> a + b)\n" lit
+            $"let A = [{lit}]\nlet s = reduce(A, lambda(a, b) -> a + b)\n"
         let fprSrcProdsum (lit: string) (lit2: string) =
-            sprintf "let A = [%s]\nlet B = [%s]\nlet s = prodsum(A, B)\n" lit lit2
+            $"let A = [{lit}]\nlet B = [{lit2}]\nlet s = prodsum(A, B)\n"
         // THREE operand streams: the comoment3 fiber kernel's shape, and the
         // one the arity-aware lane count (`laneCountForStreams`) puts at K = 5.
         let fprSrcProdsum3 (l1: string) (l2: string) (l3: string) =
-            sprintf "let A = [%s]\nlet B = [%s]\nlet C = [%s]\nlet s = prodsum(A, B, C)\n" l1 l2 l3
+            $"let A = [{l1}]\nlet B = [{l2}]\nlet C = [{l3}]\nlet s = prodsum(A, B, C)\n"
         // reduce over an UNFORCED zip -- the dot shape. This lowers through
         // `genReduceComputeBinding` (reduce over a deferred computation), a
         // different emitter from the two above: its element is not a subscript
         // but the nest's whole per-iteration body evaluated at the lane index.
         let fprSrcDot (lit: string) (lit2: string) =
-            sprintf "let x = [%s]\nlet y = [%s]\n" lit lit2
+            $"let x = [{lit}]\nlet y = [{lit2}]\n"
               + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
               + "let s = reduce(P, (+))\n"
         // A `comm`-DECLARED kernel whose body is NOT a bare builtin op. This is
@@ -1753,16 +1749,16 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         let fprCommKernel =
             "function myK(a: Float64, b: Float64) where comm(a, b) = a + b + 0.0\n"
         let fprSrcCommReduce (lit: string) =
-            fprCommKernel + sprintf "let A = [%s]\nlet s = reduce(A, myK)\n" lit
+            fprCommKernel + $"let A = [{lit}]\nlet s = reduce(A, myK)\n"
         // comm kernel over a deferred computation: the reduce-over-computation
         // site's lane fallback. The 3-arg form is required there (a fused fold
         // cannot seed from its first element).
         let fprSrcCommDot (lit: string) (lit2: string) =
-            fprCommKernel + sprintf "let x = [%s]\nlet y = [%s]\n" lit lit2
+            fprCommKernel + $"let x = [{lit}]\nlet y = [{lit2}]\n"
               + "let P = method_for(zip(x, y)) <@> lambda(a: Float64, b: Float64) -> a * b\n"
               + "let s = reduce(P, myK, 0.0)\n"
         let fprSrcCommDot3 (l1: string) (l2: string) (l3: string) =
-            fprCommKernel + sprintf "let x = [%s]\nlet y = [%s]\nlet z = [%s]\n" l1 l2 l3
+            fprCommKernel + $"let x = [{l1}]\nlet y = [{l2}]\nlet z = [{l3}]\n"
               + "let P = method_for(zip(x, y, z)) <@> lambda(a: Float64, b: Float64, c: Float64) -> a * b * c\n"
               + "let s = reduce(P, myK, 0.0)\n"
         let fprNs = [1; 3; 7; 8; 9; 15; 17]
@@ -1772,13 +1768,13 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         let fprNs3 = [1; 3; 4; 5; 6; 9; 11; 17]
         let fprCases : (string * string) list =
             [ for n in fprNs do
-                yield (sprintf "reduce_n%d" n, fprSrcReduce (laneLit n awkward))
-                yield (sprintf "prodsum_n%d" n,
+                yield ($"reduce_n{n}", fprSrcReduce (laneLit n awkward))
+                yield ($"prodsum_n{n}",
                        fprSrcProdsum (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
-                yield (sprintf "dot_n%d" n,
+                yield ($"dot_n{n}",
                        fprSrcDot (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
               for n in fprNs3 do
-                yield (sprintf "prodsum3_n%d" n,
+                yield ($"prodsum3_n{n}",
                        fprSrcProdsum3 (laneLit n awkward)
                                       (laneLit n (fun i -> awkward (i + 3)))
                                       (laneLit n (fun i -> awkward (i + 7))))
@@ -1799,8 +1795,8 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               // lane emitter -- still live for every `comm`-declared kernel --
               // would have no value coverage at all here.
               for n in fprNs do
-                yield (sprintf "comm_reduce_n%d" n, fprSrcCommReduce (laneLit n awkward))
-                yield (sprintf "comm_dot_n%d" n,
+                yield ($"comm_reduce_n{n}", fprSrcCommReduce (laneLit n awkward))
+                yield ($"comm_dot_n{n}",
                        fprSrcCommDot (laneLit n awkward) (laneLit n (fun i -> awkward (i + 3))))
               yield ("comm_reduce_n15_integer_exact",
                      fprSrcCommReduce (laneLit 15 (fun i -> float (i % 9 + 1))))
@@ -1812,12 +1808,12 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             let exact = label.EndsWith "integer_exact"
             match withReassoc true (fun () -> withBlasOff (fun () -> compileProgram outputDir (name + "_on") src)),
                   withReassoc false (fun () -> withBlasOff (fun () -> compileProgram outputDir (name + "_off") src)) with
-            | Error e, _ -> fail name (sprintf "reassoc-on build: %s" e)
-            | _, Error e -> fail name (sprintf "reassoc-off build: %s" e)
+            | Error e, _ -> fail name ($"reassoc-on build: {e}")
+            | _, Error e -> fail name ($"reassoc-off build: {e}")
             | Ok onExe, Ok offExe ->
                 match runProgram onExe "1", runProgram offExe "1" with
-                | Error e, _ -> fail name (sprintf "reassoc-on run: %s" e)
-                | _, Error e -> fail name (sprintf "reassoc-off run: %s" e)
+                | Error e, _ -> fail name ($"reassoc-on run: {e}")
+                | _, Error e -> fail name ($"reassoc-off run: {e}")
                 | Ok onOut, Ok offOut ->
                     match Map.tryFind "s" (scalarBindings onOut), Map.tryFind "s" (scalarBindings offOut) with
                     | Some ov, Some fv ->
@@ -1835,8 +1831,8 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                             // DIFFERENTLY BUILT binaries, which the contract at
                             // `fpReassocEnabled` no longer claims agree.
                             match runProgram onExe "4", runProgram onExe "1" with
-                            | Error e, _ -> fail name (sprintf "reassoc-on run at 4 threads: %s" e)
-                            | _, Error e -> fail name (sprintf "reassoc-on second run: %s" e)
+                            | Error e, _ -> fail name ($"reassoc-on run at 4 threads: {e}")
+                            | _, Error e -> fail name ($"reassoc-on second run: {e}")
                             | Ok at4, Ok again ->
                                 if stripTiming at4 <> stripTiming onOut then
                                     fail name "output differs between OMP_NUM_THREADS=1 and 4 (a reassociated form took something from a team)"
@@ -1886,14 +1882,14 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
               // so this is the serial arm either way.
               ("unlicensed_kernel_stays_serial",
                "function myK(a: Float64, b: Float64) = (a + b) * 1.0000001\n"
-                 + sprintf "let A = [%s]\n" (laneLit 17 awkward)
+                 + $"let A = [{(laneLit 17 awkward)}]\n"
                  + "let s = reduce(A, myK)\n", "unchanged") ]
         for (label, src, expectForm) in fprEmitCases do
             let name = "fp_reassoc_emission_" + label
             match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)),
                   withReassoc false (fun () -> withBlasOff (fun () -> emitOnly name src)) with
-            | Error e, _ -> fail name (sprintf "emit (knob on): %s" e)
-            | _, Error e -> fail name (sprintf "emit (knob off): %s" e)
+            | Error e, _ -> fail name ($"emit (knob on): {e}")
+            | _, Error e -> fail name ($"emit (knob off): {e}")
             | Ok onCpp, Ok offCpp ->
                 let hasLanes (s: string) = s.Contains "__rlane" || s.Contains "__pl0"
                 // The macro, not a raw `#pragma`: cpp/blade_portability.hpp owns
@@ -1918,7 +1914,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                     | "lanes" -> pass name "K-lane form, only with the knob on"
                     | "simd" -> pass name "omp simd reduction form, only with the knob on"
                     | "unchanged" -> pass name "byte-identical with the knob on (unlicensed, stays serial)"
-                    | other -> fail name (sprintf "test bug: unknown expected form %s" other)
+                    | other -> fail name ($"test bug: unknown expected form {other}")
 
         // ---- The lane COUNT is a function of the operand-stream count -------
         // `laneCountForStreams` divides a fixed register/ILP budget among the
@@ -1958,13 +1954,12 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
         for (label, src, prefix, expected) in fprLaneCountCases do
             let name = "fp_reassoc_lane_count_" + label
             match withReassoc true (fun () -> withBlasOff (fun () -> emitOnly name src)) with
-            | Error e -> fail name (sprintf "emit (knob on): %s" e)
+            | Error e -> fail name ($"emit (knob on): {e}")
             | Ok cpp ->
                 let got = distinctLanes prefix cpp
                 if got <> expected then
-                    fail name (sprintf "expected %d lanes (%s0..%s%d), emitted %d"
-                                   expected prefix prefix (expected - 1) got)
-                else pass name (sprintf "%d lanes" got)
+                    fail name ($"expected {expected} lanes ({prefix}0..{prefix}{(expected - 1)}), emitted {got}")
+                else pass name ($"{got} lanes")
 
         // ---- Phase 1 regression: ivdep must not land inside collapse(2) ----
         // Text-only assertions cannot see this; only g++ can.
@@ -1975,10 +1970,10 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             "let M = object_for(k) <@> (P, Q) |> compute\n"
         let collapseName = "collapse2_dense_map_compiles"
         match compileProgram outputDir collapseName collapseSrc with
-        | Error e -> fail collapseName (sprintf "%s" e)
+        | Error e -> fail collapseName e
         | Ok exeAbs ->
             match runProgram exeAbs forcedThreads with
-            | Error e -> fail collapseName (sprintf "run: %s" e)
+            | Error e -> fail collapseName ($"run: {e}")
             | Ok out ->
                 // 5x4 outer product through the kernel. A rank-2 array prints
                 // NESTED — `M = [[a, b, ...], [...], ...]` — so the old flat
@@ -2037,7 +2032,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             finally System.Environment.SetEnvironmentVariable("BLADE_OMP_THREADS", prior)
         let knobN = 33
         let knobLit = laneLit knobN awkward
-        let knobDecl = sprintf "let A = [%s]\n" knobLit
+        let knobDecl = $"let A = [{knobLit}]\n"
         let knobCases : (string * string) list =
             // (label, source) -- one per suppression shape the knob has.
             [ ("path_a_builtin_sum",
@@ -2051,15 +2046,15 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
             let name = "omp_threads_knob_" + label
             match withOmpThreads "1" (fun () -> compileProgram outputDir (name + "_serial") src),
                   withOmpThreads null (fun () -> compileProgram outputDir (name + "_threaded") src) with
-            | Error e, _ -> fail name (sprintf "knob-on build: %s" e)
-            | _, Error e -> fail name (sprintf "knob-off build: %s" e)
+            | Error e, _ -> fail name ($"knob-on build: {e}")
+            | _, Error e -> fail name ($"knob-off build: {e}")
             | Ok serialExe, Ok threadedExe ->
                 // The knob-on binary is run at OMP_NUM_THREADS=4 ON PURPOSE:
                 // it has no parallel construct left, so the runtime setting
                 // must be inert. If it is not, a team survived somewhere.
                 match runProgram serialExe forcedThreads, runProgram threadedExe forcedThreads with
-                | Error e, _ -> fail name (sprintf "knob-on run: %s" e)
-                | _, Error e -> fail name (sprintf "knob-off run: %s" e)
+                | Error e, _ -> fail name ($"knob-on run: {e}")
+                | _, Error e -> fail name ($"knob-off run: {e}")
                 | Ok serialOut, Ok threadedOut ->
                     match Map.tryFind "s" (scalarBindings serialOut),
                           Map.tryFind "s" (scalarBindings threadedOut) with
@@ -2070,7 +2065,7 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                             fail name (sprintf "knob-on %.17g vs knob-off %.17g (|diff| = %g)" sv tv diff)
                         else
                             match runProgram serialExe "1" with
-                            | Error e -> fail name (sprintf "knob-on run at 1 thread: %s" e)
+                            | Error e -> fail name ($"knob-on run at 1 thread: {e}")
                             | Ok at1 ->
                                 if stripTiming at1 <> stripTiming serialOut then
                                     fail name "knob-on output depends on OMP_NUM_THREADS (a thread construct survived suppression)"
@@ -2078,5 +2073,5 @@ let runOmpReduceTests () : Blade.Tests.TestHarness.BlockResult =
                                     pass name (sprintf "|diff| = %g; knob-on output independent of OMP_NUM_THREADS" diff)
                     | _ -> fail name "no scalar binding 's' in program output (comparison would be vacuous)"
 
-        printFooter "OpenMP Reduce" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+        printFooter "OpenMP Reduce" [$"{passed} passed"; $"{failed} failed"]
         { Block = "OpenMP Reduce"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

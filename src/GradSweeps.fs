@@ -93,14 +93,14 @@ let internal kernelCallBody (rc: RevCtx) (f: string) (args: Expr list)
     // it is rejected by the language (BL2001) and, since this pass runs BEFORE
     // typecheck, by the depth cap below.
     if mentionsDeep (Set.singleton f) fd.Body then
-        err rc.Fname (sprintf "cannot differentiate the call to '%s' inside a kernel body: '%s' is recursive (its own body names '%s'), and a kernel body is substituted rather than taped, so the substitution would not terminate. Restructure the helper without recursion, or move the recursion out of the kernel" f f f)
+        err rc.Fname $"cannot differentiate the call to '{f}' inside a kernel body: '{f}' is recursive (its own body names '{f}'), and a kernel body is substituted rather than taped, so the substitution would not terminate. Restructure the helper without recursion, or move the recursion out of the kernel"
     elif List.length rc.Inlining >= maxInlineDepth then
-        err rc.Fname (sprintf "kernel-body call substitution exceeded depth %d (recursive functions are not differentiable)" maxInlineDepth)
+        err rc.Fname $"kernel-body call substitution exceeded depth {maxInlineDepth} (recursive functions are not differentiable)"
     else
         checkInlinable rc.Fname fd args.Length |> Result.bind (fun () ->
         match fd.Body.Kind with
         | ExprKind.ExprBlock _ ->
-            err rc.Fname (sprintf "cannot differentiate the call to '%s' inside a kernel body: only EXPRESSION-bodied same-module functions can be substituted into a kernel (v1), and '%s' has a block body. Rewrite it as a single expression, or call it outside the kernel" f f)
+            err rc.Fname $"cannot differentiate the call to '{f}' inside a kernel body: only EXPRESSION-bodied same-module functions can be substituted into a kernel (v1), and '{f}' has a block body. Rewrite it as a single expression, or call it outside the kernel"
         | _ ->
             List.zip fd.Params args
             |> List.fold (fun acc (p, a) ->
@@ -166,7 +166,7 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
              // An intrinsic with no derivative rule. REFUSING is the point:
              // falling through to `Ok []` here would hand back a gradient that
              // silently drops this term (`digamma` would differentiate to zero).
-             Error (sprintf "'%s' has no derivative rule, so it cannot appear in a differentiated function (its derivative is not expressible in the AD-able subset). Compute it outside the function passed to ad.grad, or pass the value in as a parameter" name)
+             Error $"'{name}' has no derivative rule, so it cannot appear in a differentiated function (its derivative is not expressible in the AD-able subset). Compute it outside the function passed to ad.grad, or pass the value in as a parameter"
          | Some d ->
              let pre, c = bindCot rc cot
              adjointOf rc u (mul c d) |> Result.map (fun ss -> pre @ ss))
@@ -197,7 +197,7 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
         // wrong-answer class as the digamma refusal above).
         if Set.contains name rc.Known then Ok []
         else
-            Error (sprintf "cannot differentiate through '%s': it is not a same-module function, a math intrinsic with a derivative rule, or an array in scope, so its contribution would silently vanish from the gradient. Compute it outside the function passed to ad.grad, or pass the value in as a parameter" name)
+            Error $"cannot differentiate through '{name}': it is not a same-module function, a math intrinsic with a derivative rule, or an array in scope, so its contribution would silently vanish from the gradient. Compute it outside the function passed to ad.grad, or pass the value in as a parameter"
     | ExprKind.ExprUnaryOp (OpNeg, inner) -> adjointOf rc inner (neg cot)
     // C6: scalar pure/compute are materialization barriers -- the adjoint
     // passes straight through; a scalar guard gates its cotangent by the
@@ -553,7 +553,7 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
          | None ->
              // Through `err` (unlike the adjoint's raw Error) so the message
              // carries the jvp prefix the diagnostic boundary keys on.
-             err rc.Fname (sprintf "'%s' has no derivative rule, so it cannot appear in a differentiated function (its derivative is not expressible in the AD-able subset). Compute it outside the function passed to ad.%s, or pass the value in as a parameter" name errMode.Value)
+             err rc.Fname $"'{name}' has no derivative rule, so it cannot appear in a differentiated function (its derivative is not expressible in the AD-able subset). Compute it outside the function passed to ad.{errMode.Value}, or pass the value in as a parameter"
          | Some d -> tangentOfExpr rc u |> Result.map (fun tu -> mulZ d tu))
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [a; b]) } when isBinaryMathIntrinsic name
                                        && not (Map.containsKey name rc.Ctx.Decls) ->
@@ -573,10 +573,10 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         // here is the silent-wrong-gradient failure mode. Refuse instead --
         // this fires on internal inconsistency, so it names the cause.
         if Set.contains name rc.Diff && not (Set.contains name rc.Arrays) then
-            err rc.Fname (sprintf "internal: '%s' carries differentiable data but is not tracked as an array, so its element read has no tangent rule -- this is a gap in the transform's array tracking, please report it" name)
+            err rc.Fname $"internal: '{name}' carries differentiable data but is not tracked as an array, so its element read has no tangent rule -- this is a gap in the transform's array tracking, please report it"
         elif Set.contains name rc.Known then Ok (fLit 0.0)   // non-diff data read
         else
-            err rc.Fname (sprintf "cannot differentiate through '%s': it is not a same-module function, a math intrinsic with a derivative rule, or an array in scope, so its contribution would silently vanish from the gradient. Compute it outside the function passed to ad.%s, or pass the value in as a parameter" name errMode.Value)
+            err rc.Fname $"cannot differentiate through '{name}': it is not a same-module function, a math intrinsic with a derivative rule, or an array in scope, so its contribution would silently vanish from the gradient. Compute it outside the function passed to ad.{errMode.Value}, or pass the value in as a parameter"
     | { Kind = ExprKind.ExprUnaryOp (OpNeg, inner) } ->
         tangentOfExpr rc inner |> Result.map (fun t -> if isZeroLit t then t else neg t)
     | { Kind = ExprKind.ExprUnaryOp (OpNot, _) } -> Ok (fLit 0.0)
@@ -737,7 +737,7 @@ and internal tangentOfMapCore (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Ex
             err rc.Fname kernUnsupportedMsg
     normKern |> Result.bind (fun (ps, wc, body, reynoldsSign) ->
     if ps.Length <> arrays.Length || arrays.IsEmpty then
-        err rc.Fname (sprintf "kernel arity %d does not match %d loop operand(s) in differentiated code" ps.Length arrays.Length)
+        err rc.Fname $"kernel arity {ps.Length} does not match {arrays.Length} loop operand(s) in differentiated code"
     else
     // -- C8: kernel parameter RANK -------------------------------------------
     // A kernel parameter annotated `T^k` (or `Array<T like I, ...>`) is bound
@@ -810,7 +810,7 @@ and internal tangentOfMapCore (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Ex
                     match wc with
                     | Some w ->
                         w.Commutativity |> List.exists (fun group ->
-                            Set.ofList group = Set.ofList (ps |> List.map (fun p -> p.Name)))
+                            Set.ofList group = Set.ofList (ps |> List.map _.Name))
                     | None -> false
                 // `rank1` already excludes every multi-axis operand, so a
                 // rank-carrying parameter cannot reach here anyway; the gate
@@ -863,14 +863,14 @@ and internal tangentOfMapCore (rc: RevCtx) (e: Expr) (bm: BinOpMode) (arrays: Ex
             match c with
             | Choice1Of2 (nm, idxTys) ->
                 if k >= idxTys.Length then
-                    err rc.Fname (sprintf "kernel parameter '%s' is declared rank %d but its operand '%s' has %d axis(es), so the map has no axis left to iterate; a kernel parameter's rank must be strictly less than its operand's" p.Name k nm idxTys.Length)
+                    err rc.Fname $"kernel parameter '{p.Name}' is declared rank {k} but its operand '{nm}' has {idxTys.Length} axis(es), so the map has no axis left to iterate; a kernel parameter's rank must be strictly less than its operand's"
                 else
                     let loopTys = idxTys |> List.truncate (idxTys.Length - k)
                     let ixs = loopTys |> List.map (fun _ -> fresh rc.Ctx "__ci")
                     Ok (Choice1Of2 (p, nm, loopTys, ixs))
             | Choice2Of2 a ->
                 if k > 0 then
-                    err rc.Fname (sprintf "kernel parameter '%s' is declared rank %d, but its loop operand is a `halo`/`range` traversal, which hands the kernel a window or an index rather than an array fiber; rank-carrying kernel parameters are differentiable over NAMED array operands only (v1)" p.Name k)
+                    err rc.Fname $"kernel parameter '{p.Name}' is declared rank {k}, but its loop operand is a `halo`/`range` traversal, which hands the kernel a window or an index rather than an array fiber; rank-carrying kernel parameters are differentiable over NAMED array operands only (v1)"
                 else Ok (Choice2Of2 (p, a)))
     slotsR |> Result.bind (fun slots ->
     let readOf slot =
@@ -1126,11 +1126,11 @@ let internal prepareForSweeps (ctx: Ctx) (fd: FunctionDecl)
     // chain -- binds reserved names by construction and skips the gate.
     let reservedName (n: string) =
         n = "__primal" || n.StartsWith "__g_" || n.StartsWith "__t_"
-    let allNames = (fd.Params |> List.map (fun p -> p.Name)) @ boundNames stmts
+    let allNames = (fd.Params |> List.map _.Name) @ boundNames stmts
     onNames allNames
     match (if skipReservedGate then None else allNames |> List.tryFind reservedName) with
     | Some n ->
-        err fname (sprintf "binding or parameter '%s' collides with a reserved AD name (`__g_*`, `__t_*`, and `__primal` are synthesized by the transform and would shadow it); rename it" n)
+        err fname $"binding or parameter '{n}' collides with a reserved AD name (`__g_*`, `__t_*`, and `__primal` are synthesized by the transform and would shadow it); rename it"
     | None ->
     // validate every expression in the fragment
     let sweepFinal = sweepFinalOf finalE
@@ -1156,7 +1156,7 @@ let internal prepareForSweeps (ctx: Ctx) (fd: FunctionDecl)
       SweepFinal = sweepFinal
       Known =
         Set.unionMany [
-            fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+            fd.Params |> List.map _.Name |> Set.ofList
             boundNames stmts |> Set.ofList
             ctx.ModuleVals ]
       ArrayIdxTys =

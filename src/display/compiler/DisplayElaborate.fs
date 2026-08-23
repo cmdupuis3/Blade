@@ -31,14 +31,14 @@ let private boolLit (b: bool) : Expr = syn (ExprLit (LitBool b))
 let private literalString (what: string) (e: Expr) : Result<string, string> =
     match e.Kind with
     | ExprKind.ExprLit (LitString s) -> Ok s
-    | _ -> Error (sprintf "%s must be a string literal" what)
+    | _ -> Error $"{what} must be a string literal"
 
 /// Elaborate one `display.<op>(...)` call.
 let private elabOp (op: string) (args: Expr list) : Result<Expr, string> =
     let build (mimeE: Expr) (dataE: Expr) (metaE: Expr option) =
         literalString "display.emit: the mime type" mimeE |> Result.bind (fun mime ->
         if not (Blade.Display.Frame.isMimeType mime) then
-            Error (sprintf "display.emit: '%s' is not a mime type (expected type/subtype, e.g. \"application/vnd.plotly.v1+json\")" mime)
+            Error ($"display.emit: '{mime}' is not a mime type (expected type/subtype, e.g. \"application/vnd.plotly.v1+json\")")
         else
             let metaText =
                 match metaE with
@@ -47,7 +47,7 @@ let private elabOp (op: string) (args: Expr list) : Result<Expr, string> =
             metaText |> Result.bind (fun metaJson ->
                 match Blade.Display.Frame.metaTailOf metaJson with
                 | None ->
-                    Error (sprintf "display.emit: meta must be a JSON object literal like \"{\\\"title\\\": \\\"my plot\\\"}\" (got %s)" metaJson)
+                    Error ($"display.emit: meta must be a JSON object literal like \"{{\\\"title\\\": \\\"my plot\\\"}}\" (got {metaJson})")
                 | Some metaTail ->
                     Ok (syn (ExprApp (v "__display_emit",
                                       [ strLit (Blade.Display.Frame.headFor mime)
@@ -93,7 +93,7 @@ let private elabOp (op: string) (args: Expr list) : Result<Expr, string> =
         Ok (syn (ExprApp (v "__display_unit_label", [e])))
     | "unit_label", _ ->
         Error "display.unit_label: expected display.unit_label(x)"
-    | _ -> Error (sprintf "display: unknown op '%s' (available: emit, json_array, json_num, json_string, unit_label)" op)
+    | _ -> Error $"display: unknown op '{op}' (available: emit, json_array, json_num, json_string, unit_label)"
 
 // Rewrite walker (same shape as RandElaborate.rewriteExpr; the catch-all wildcard is deliberately absent so an
 // unhandled constructor is an FS0025 build warning rather than a qualified call surviving unrewritten).

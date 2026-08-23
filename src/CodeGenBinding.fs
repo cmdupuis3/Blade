@@ -83,7 +83,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // That IIFE subscripts every operand BY NAME, so a still-deferred
         // producer must be materialized first (this arm bypasses
         // genScalarExprBinding, which is where the pre-pass normally runs).
-        let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) binding.Value
+        let (forceCode, ctx) = forceDeferredPositionalReads ctx builder ($"{name}__def") binding.Value
         let code = genScalarBinding ctx name binding.Value binding.Type
         let ctx' = addVarName binding.Id name ctx
         (forceCode @ code, ctx')
@@ -96,32 +96,32 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // Defer: computation not materialized until |> compute or combinator forces it
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred computation>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred computation>"], ctx')
 
     | IRComposeApply _ ->
         // Defer: compose-apply is also a lazy computation; materialized
         // when |> compute reaches it (or a combinator forces it).
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred compose-apply>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred compose-apply>"], ctx')
     
     | IRParallel _ | IRFusion _ ->
         // Defer: computation combinator not materialized until |> compute
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred computation combinator>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred computation combinator>"], ctx')
     
     | IRFunctorMap _ ->
         // Defer: functor map not materialized until |> compute
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred functor map>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred functor map>"], ctx')
     
     | IRZip _ ->
         // Defer: zip is a lazy array combinator, absorbed by method_for or materialized by |> compute
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred zip>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred zip>"], ctx')
     
     | IRChoice (left, right) ->
         genChoiceBinding ctx binding builder left right
@@ -164,7 +164,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // method_for creates a loop object - no runtime code needed
         // Just track the variable name for later use
         let ctx' = addVarName binding.Id name ctx
-        ([sprintf "%s// %s = method_for(...) [loop object]" ind name], ctx')
+        ([$"{ind}// {name} = method_for(...) [loop object]"], ctx')
     
     | IRObjectFor _ ->
         // object_for creates a loop object - no runtime code needed.
@@ -174,7 +174,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // emits the object binding name as an undeclared C++ callable.
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with ObjectLoopBindings = Map.add binding.Id binding.Value ctx'.ObjectLoopBindings }
-        ([sprintf "%s// %s = object_for(...) [loop object]" ind name], ctx')
+        ([$"{ind}// {name} = object_for(...) [loop object]"], ctx')
     
     | IRApp (IRObjectFor objInfo, args, _) ->
         // Inline application of object_for - need to expand to loop nest
@@ -217,7 +217,7 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRCompose _ ->
         // Function composition: uses generic lambdas (auto... args)
         let valueStr = exprToCppCtx ctx binding.Value
-        let code = [sprintf "%sauto %s = %s;" ind name valueStr]
+        let code = [$"{ind}auto {name} = {valueStr};"]
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
 
@@ -225,28 +225,28 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         // Defer: ObjectLoop composition, materialized when applied via <@>
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred compose_obj>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred compose_obj>"], ctx')
 
     | IRComposeMeth _ ->
         // Defer: computation composition, materialized when |> compute
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred compose_meth>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred compose_meth>"], ctx')
     
     | IRLet _ ->
         genLetChainBinding ctx binding builder 
     | IRAssign _ ->
         // Assignment expression: generate as statement
-        let code = [sprintf "%s%s;" ind (exprToCppCtx ctx binding.Value)]
+        let code = [$"{ind}{(exprToCppCtx ctx binding.Value)};"]
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
 
     | IRConstraintCheck (cond, message, span) ->
         // Runtime constraint guard -- the loud-failure idiom (cerr + abort).
         let code =
-            [ sprintf "%sif (!(%s)) {" ind (exprToCppCtx ctx cond)
-              sprintf "%s    blade_rt::panic(\"BL8001\", \"%s\", %s);" ind message (panicSpanArgs span)
-              sprintf "%s}" ind ]
+            [ $$"""{{ind}}if (!({{(exprToCppCtx ctx cond)}})) {"""
+              $"{ind}    blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)});"
+              $"{ind}}}" ]
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
 
@@ -257,8 +257,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let nodeType = other.GetType().Name
         // Same classification as exprToCpp's catch-all: no arm for this shape
         // in binding position is a back-end gap, reported as a Blade error.
-        recordUnhandledIRNode (sprintf "binding position (binding '%s')" name) nodeType
-        (codegenError ctx ind (sprintf "unsupported expression for binding '%s' (IR node: %s)" name nodeType), ctx')
+        recordUnhandledIRNode ($"binding position (binding '{name}')") nodeType
+        (codegenError ctx ind ($"unsupported expression for binding '{name}' (IR node: {nodeType})"), ctx')
 
 // Module Generation
 
@@ -274,7 +274,7 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     // below; this pre-pass covers reads nested in binops / ifs / calls / match.
     // After forcing, those bases are no longer in DeferredComputations, so the
     // IRIndex arm's guard falls through to the plain by-name render.
-    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) binding.Value
+    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder ($"{name}__def") binding.Value
     let prepend (code, ctx') = (forceCode @ code, ctx')
     // Check if it's a tuple of deferred computations
     prepend <|
@@ -287,7 +287,7 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
         // All elements are computations -- defer the whole tuple
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred computation tuple>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred computation tuple>"], ctx')
     | IRFieldAccess _ when (match binding.Type with ArrayElem _ -> true | _ -> false) ->
         // Struct field of array type: the field itself is already an
         // Array<T,N> / Ragged<T> wrapper (per genStructDef field
@@ -308,7 +308,7 @@ and genScalarExprBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
         // (`A.data[i]`), so the producer must be materialized in scope first --
         // the same contract the rearrangement combinators enforce via the
         // shared forceDeferredArrayInput helper.
-        let (forceCode, ctx, arrExpr') = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
+        let (forceCode, ctx, arrExpr') = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
         let code = genScalarBinding ctx name (IRIndex (arrExpr', indices, identity)) binding.Type
         let ctx' = addVarName binding.Id name ctx
         (forceCode @ code, ctx')
@@ -390,60 +390,60 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 // Each key pass opens the same way: read the cell into __k,
                 // then (numeric keys) skip the row when the key is negative.
                 let openPass =
-                    [ sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
-                      sprintf "%s    %s __k = %s;" ind elemStr (keysAt "__ki") ] @ dropNeg
+                    [ $$"""{{ind}}for (size_t __ki = 0; __ki < {{keysBound}}; __ki++) {"""
+                      $"""{ind}    {elemStr} __k = {(keysAt "__ki")};""" ] @ dropNeg
                 let code = List.concat [
                     keysElemErrCode
-                    [ sprintf "%s// group_keys: dynamic ngroups (hash discovery, %s keys)" ind elemStr
-                      sprintf "%sstd::unordered_map<%s, size_t> %s__lookup;" ind elemStr name
-                      sprintf "%ssize_t %s__ngroups = 0;" ind name ]
+                    [ $"{ind}// group_keys: dynamic ngroups (hash discovery, {elemStr} keys)"
+                      $"{ind}std::unordered_map<{elemStr}, size_t> {name}__lookup;"
+                      $"{ind}size_t {name}__ngroups = 0;" ]
                     openPass
-                    [ sprintf "%s    if (%s__lookup.find(__k) == %s__lookup.end()) %s__lookup[__k] = %s__ngroups++;" ind name name name name
-                      sprintf "%s}" ind
-                      sprintf "%ssize_t* %s__counts = new size_t[%s__ngroups]();" ind name name ]
+                    [ $"{ind}    if ({name}__lookup.find(__k) == {name}__lookup.end()) {name}__lookup[__k] = {name}__ngroups++;"
+                      $"{ind}}}"
+                      $"{ind}size_t* {name}__counts = new size_t[{name}__ngroups]();" ]
                     openPass
-                    [ sprintf "%s    %s__counts[%s__lookup[__k]]++;" ind name name
-                      sprintf "%s}" ind
-                      sprintf "%ssize_t* %s__offsets = new size_t[%s__ngroups + 1];" ind name name
-                      sprintf "%s%s__offsets[0] = 0;" ind name
-                      sprintf "%sfor (size_t __gi = 0; __gi < %s__ngroups; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind name name name name
-                      sprintf "%ssize_t* %s__fill = new size_t[%s__ngroups]();" ind name name
-                      sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name keysBound ]
+                    [ $"{ind}    {name}__counts[{name}__lookup[__k]]++;"
+                      $"{ind}}}"
+                      $"{ind}size_t* {name}__offsets = new size_t[{name}__ngroups + 1];"
+                      $"{ind}{name}__offsets[0] = 0;"
+                      $"{ind}for (size_t __gi = 0; __gi < {name}__ngroups; __gi++) {name}__offsets[__gi + 1] = {name}__offsets[__gi] + {name}__counts[__gi];"
+                      $"{ind}size_t* {name}__fill = new size_t[{name}__ngroups]();"
+                      $"{ind}size_t* {name}__perm = new size_t[{keysBound}];" ]
                     openPass
-                    [ sprintf "%s    size_t __g = %s__lookup[__k];" ind name
-                      sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
-                      sprintf "%s}" ind
-                      sprintf "%ssize_t %s__nsrc = %s; // source rows (>= offsets[ngroups]; negative keys drop)" ind name keysBound
-                      sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
-                      sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name ]
+                    [ $"{ind}    size_t __g = {name}__lookup[__k];"
+                      $"{ind}    {name}__perm[{name}__offsets[__g] + {name}__fill[__g]++] = __ki;"
+                      $"{ind}}}"
+                      $"{ind}size_t {name}__nsrc = {keysBound}; // source rows (>= offsets[ngroups]; negative keys drop)"
+                      $"{ind}size_t {name}_extents[1] = {{{name}__ngroups}};"
+                      $"{ind}void* {name} = nullptr; // gk: state in {name}__ngroups, {name}__offsets, {name}__perm" ]
                 ]
                 let ctx' = addVarName binding.Id name ctx
                 (code, ctx')
             | Some ngroups, None ->
                 // Case 1: positional bucketing. keys[i] in [0, ngroups).
                 let openPass =
-                    [ sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
-                      sprintf "%s    %s __k = %s;" ind elemStr (keysAt "__ki") ] @ dropNeg
+                    [ $$"""{{ind}}for (size_t __ki = 0; __ki < {{keysBound}}; __ki++) {"""
+                      $"""{ind}    {elemStr} __k = {(keysAt "__ki")};""" ] @ dropNeg
                 let code = List.concat [
                     keysElemErrCode
-                    [ sprintf "%s// group_keys: %d groups, positional buckets (Idx<N> keys)" ind ngroups
-                      sprintf "%ssize_t %s__ngroups = %d;" ind name ngroups
-                      sprintf "%ssize_t %s__counts[%d] = {0};" ind name ngroups ]
+                    [ $"{ind}// group_keys: {ngroups} groups, positional buckets (Idx<N> keys)"
+                      $"{ind}size_t {name}__ngroups = {ngroups};"
+                      $$"""{{ind}}size_t {{name}}__counts[{{ngroups}}] = {0};""" ]
                     openPass
-                    [ sprintf "%s    %s__counts[__k]++;" ind name
-                      sprintf "%s}" ind
-                      sprintf "%ssize_t %s__offsets[%d];" ind name (ngroups + 1)
-                      sprintf "%s%s__offsets[0] = 0;" ind name
-                      sprintf "%sfor (size_t __gi = 0; __gi < %d; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind ngroups name name name
-                      sprintf "%ssize_t %s__fill[%d] = {0};" ind name ngroups
-                      sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name keysBound ]
+                    [ $"{ind}    {name}__counts[__k]++;"
+                      $"{ind}}}"
+                      $"{ind}size_t {name}__offsets[{ngroups + 1}];"
+                      $"{ind}{name}__offsets[0] = 0;"
+                      $"{ind}for (size_t __gi = 0; __gi < {ngroups}; __gi++) {name}__offsets[__gi + 1] = {name}__offsets[__gi] + {name}__counts[__gi];"
+                      $$"""{{ind}}size_t {{name}}__fill[{{ngroups}}] = {0};"""
+                      $"{ind}size_t* {name}__perm = new size_t[{keysBound}];" ]
                     openPass
-                    [ sprintf "%s    size_t __g = (size_t)__k;" ind
-                      sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
-                      sprintf "%s}" ind
-                      sprintf "%ssize_t %s__nsrc = %s; // source rows (>= offsets[ngroups]; negative keys drop)" ind name keysBound
-                      sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
-                      sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name ]
+                    [ $"{ind}    size_t __g = (size_t)__k;"
+                      $"{ind}    {name}__perm[{name}__offsets[__g] + {name}__fill[__g]++] = __ki;"
+                      $"{ind}}}"
+                      $"{ind}size_t {name}__nsrc = {keysBound}; // source rows (>= offsets[ngroups]; negative keys drop)"
+                      $"{ind}size_t {name}_extents[1] = {{{name}__ngroups}};"
+                      $"{ind}void* {name} = nullptr; // gk: state in {name}__ngroups, {name}__offsets, {name}__perm" ]
                 ]
                 let ctx' = addVarName binding.Id name ctx
                 (code, ctx')
@@ -467,43 +467,43 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 let bucketEntries =
                     let renderVal v =
                         match v with
-                        | EVInt n -> sprintf "%dLL" n
+                        | EVInt n -> $"{n}LL"
                         | EVString s -> escapeStringLit s
                     values
                     |> List.mapi (fun i v ->
-                        sprintf "{%s, (size_t)%d}" (renderVal v) i)
+                        $"{{{(renderVal v)}, (size_t){i}}}")
                     |> String.concat ", "
                 let bucketMapDecl =
-                    sprintf "static const std::unordered_map<%s, size_t> %s__bucket_map = {%s};" elemStr name bucketEntries
+                    $"static const std::unordered_map<{elemStr}, size_t> {name}__bucket_map = {{{bucketEntries}}};"
                 let bucketLambdaDecl =
-                    sprintf "auto %s__bucket = [](const %s& __v) -> size_t { auto it = %s__bucket_map.find(__v); return it != %s__bucket_map.end() ? it->second : (size_t)0; };" name elemStr name name
+                    $$"""auto {{name}}__bucket = [](const {{elemStr}}& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); return it != {{name}}__bucket_map.end() ? it->second : (size_t)0; };"""
                 let code = keysElemErrCode @ [
-                    sprintf "%s// group_keys: %d groups, EnumIdx reverse lookup (unordered_map dispatch)" ind ngroups
-                    sprintf "%ssize_t %s__ngroups = %d;" ind name ngroups
-                    sprintf "%s%s" ind bucketMapDecl
-                    sprintf "%s%s" ind bucketLambdaDecl
-                    sprintf "%ssize_t %s__counts[%d] = {0};" ind name ngroups
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
-                    sprintf "%s    %s__counts[%s__bucket(%s)]++;" ind name name (keysAt "__ki")
-                    sprintf "%s}" ind
-                    sprintf "%ssize_t %s__offsets[%d];" ind name (ngroups + 1)
-                    sprintf "%s%s__offsets[0] = 0;" ind name
-                    sprintf "%sfor (size_t __gi = 0; __gi < %d; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind ngroups name name name
-                    sprintf "%ssize_t %s__fill[%d] = {0};" ind name ngroups
-                    sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name keysBound
-                    sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind keysBound
-                    sprintf "%s    size_t __g = %s__bucket(%s);" ind name (keysAt "__ki")
-                    sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
-                    sprintf "%s}" ind
-                    sprintf "%ssize_t %s__nsrc = %s; // source rows (EnumIdx keys never drop, so == offsets[ngroups])" ind name keysBound
-                    sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
-                    sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm" ind name name name name
+                    $"{ind}// group_keys: {ngroups} groups, EnumIdx reverse lookup (unordered_map dispatch)"
+                    $"{ind}size_t {name}__ngroups = {ngroups};"
+                    $"{ind}{bucketMapDecl}"
+                    $"{ind}{bucketLambdaDecl}"
+                    $$"""{{ind}}size_t {{name}}__counts[{{ngroups}}] = {0};"""
+                    $$"""{{ind}}for (size_t __ki = 0; __ki < {{keysBound}}; __ki++) {"""
+                    $"""{ind}    {name}__counts[{name}__bucket({(keysAt "__ki")})]++;"""
+                    $"{ind}}}"
+                    $"{ind}size_t {name}__offsets[{ngroups + 1}];"
+                    $"{ind}{name}__offsets[0] = 0;"
+                    $"{ind}for (size_t __gi = 0; __gi < {ngroups}; __gi++) {name}__offsets[__gi + 1] = {name}__offsets[__gi] + {name}__counts[__gi];"
+                    $$"""{{ind}}size_t {{name}}__fill[{{ngroups}}] = {0};"""
+                    $"{ind}size_t* {name}__perm = new size_t[{keysBound}];"
+                    $$"""{{ind}}for (size_t __ki = 0; __ki < {{keysBound}}; __ki++) {"""
+                    $"""{ind}    size_t __g = {name}__bucket({(keysAt "__ki")});"""
+                    $"{ind}    {name}__perm[{name}__offsets[__g] + {name}__fill[__g]++] = __ki;"
+                    $"{ind}}}"
+                    $"{ind}size_t {name}__nsrc = {keysBound}; // source rows (EnumIdx keys never drop, so == offsets[ngroups])"
+                    $"{ind}size_t {name}_extents[1] = {{{name}__ngroups}};"
+                    $"{ind}void* {name} = nullptr; // gk: state in {name}__ngroups, {name}__offsets, {name}__perm"
                 ]
                 let ctx' = addVarName binding.Id name ctx
                 (code, ctx')
         | _ ->
             let ctx' = addVarName binding.Id name ctx
-            (codegenError ctx ind (sprintf "group_keys binding '%s' has wrong inferred type (expected IRTGroupKeys)" name), ctx')
+            (codegenError ctx ind ($"group_keys binding '{name}' has wrong inferred type (expected IRTGroupKeys)"), ctx')
     | multipleKeys ->
         // Compound (multi-key) dispatch: tuple-keyed unordered_map. Each
         // (k1, k2, ...) tuple discovered becomes its own bucket in
@@ -550,37 +550,37 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 List.map2 (fun k (_, at) ->
                     let (kElem, _) = inferElemTypeStrict ctx ind k "group_keys (compound key)"
                     if List.isEmpty (negativeKeyDrop kElem "__x" ind) then None
-                    else Some (sprintf "%s < 0" (at "__ki"))) multipleKeys keyAccess
+                    else Some ($"""{(at "__ki")} < 0""")) multipleKeys keyAccess
                 |> List.choose id
             if List.isEmpty tests then []
-            else [sprintf "%s    if (%s) continue; // negative key component: row belongs to no group" ind (String.concat " || " tests)]
+            else [$"""{ind}    if ({(String.concat " || " tests)}) continue; // negative key component: row belongs to no group"""]
         let openPass =
-            [ sprintf "%sfor (size_t __ki = 0; __ki < %s; __ki++) {" ind outerExtent ] @ dropNegTuple
+            [ $$"""{{ind}}for (size_t __ki = 0; __ki < {{outerExtent}}; __ki++) {""" ] @ dropNegTuple
         let code = List.concat [
             keyErrCode
-            [ sprintf "%s// group_keys: compound dispatch (%d-key tuple), dynamic ngroups via hash discovery" ind multipleKeys.Length
-              sprintf "%sstd::unordered_map<%s, size_t, tuple_hasher> %s__lookup;" ind tupleTypeStr name
-              sprintf "%ssize_t %s__ngroups = 0;" ind name ]
+            [ $"{ind}// group_keys: compound dispatch ({multipleKeys.Length}-key tuple), dynamic ngroups via hash discovery"
+              $"{ind}std::unordered_map<{tupleTypeStr}, size_t, tuple_hasher> {name}__lookup;"
+              $"{ind}size_t {name}__ngroups = 0;" ]
             openPass
-            [ sprintf "%s    auto __k = %s;" ind (makeTupleAt "__ki")
-              sprintf "%s    if (%s__lookup.find(__k) == %s__lookup.end()) %s__lookup[__k] = %s__ngroups++;" ind name name name name
-              sprintf "%s}" ind
-              sprintf "%ssize_t* %s__counts = new size_t[%s__ngroups]();" ind name name ]
+            [ $"""{ind}    auto __k = {(makeTupleAt "__ki")};"""
+              $"{ind}    if ({name}__lookup.find(__k) == {name}__lookup.end()) {name}__lookup[__k] = {name}__ngroups++;"
+              $"{ind}}}"
+              $"{ind}size_t* {name}__counts = new size_t[{name}__ngroups]();" ]
             openPass
-            [ sprintf "%s    %s__counts[%s__lookup[%s]]++;" ind name name (makeTupleAt "__ki")
-              sprintf "%s}" ind
-              sprintf "%ssize_t* %s__offsets = new size_t[%s__ngroups + 1];" ind name name
-              sprintf "%s%s__offsets[0] = 0;" ind name
-              sprintf "%sfor (size_t __gi = 0; __gi < %s__ngroups; __gi++) %s__offsets[__gi + 1] = %s__offsets[__gi] + %s__counts[__gi];" ind name name name name
-              sprintf "%ssize_t* %s__fill = new size_t[%s__ngroups]();" ind name name
-              sprintf "%ssize_t* %s__perm = new size_t[%s];" ind name outerExtent ]
+            [ $"""{ind}    {name}__counts[{name}__lookup[{(makeTupleAt "__ki")}]]++;"""
+              $"{ind}}}"
+              $"{ind}size_t* {name}__offsets = new size_t[{name}__ngroups + 1];"
+              $"{ind}{name}__offsets[0] = 0;"
+              $"{ind}for (size_t __gi = 0; __gi < {name}__ngroups; __gi++) {name}__offsets[__gi + 1] = {name}__offsets[__gi] + {name}__counts[__gi];"
+              $"{ind}size_t* {name}__fill = new size_t[{name}__ngroups]();"
+              $"{ind}size_t* {name}__perm = new size_t[{outerExtent}];" ]
             openPass
-            [ sprintf "%s    size_t __g = %s__lookup[%s];" ind name (makeTupleAt "__ki")
-              sprintf "%s    %s__perm[%s__offsets[__g] + %s__fill[__g]++] = __ki;" ind name name name
-              sprintf "%s}" ind
-              sprintf "%ssize_t %s__nsrc = %s; // source rows (>= offsets[ngroups]; negative components drop)" ind name outerExtent
-              sprintf "%ssize_t %s_extents[1] = {%s__ngroups};" ind name name
-              sprintf "%svoid* %s = nullptr; // gk: state in %s__ngroups, %s__offsets, %s__perm (compound)" ind name name name name ]
+            [ $"""{ind}    size_t __g = {name}__lookup[{(makeTupleAt "__ki")}];"""
+              $"{ind}    {name}__perm[{name}__offsets[__g] + {name}__fill[__g]++] = __ki;"
+              $"{ind}}}"
+              $"{ind}size_t {name}__nsrc = {outerExtent}; // source rows (>= offsets[ngroups]; negative components drop)"
+              $"{ind}size_t {name}_extents[1] = {{{name}__ngroups}};"
+              $"{ind}void* {name} = nullptr; // gk: state in {name}__ngroups, {name}__offsets, {name}__perm (compound)" ]
         ]
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
@@ -747,7 +747,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             |> List.fold (fun (accCode, accCtx: CodeGenContext) arr ->
                 match arr with
                 | IRVar (id, _) when Map.containsKey id accCtx.DeferredComputations ->
-                    let (fcode, fctx, _) = forceDeferredArrayInput accCtx builder (sprintf "%s__in%d" name id) arr
+                    let (fcode, fctx, _) = forceDeferredArrayInput accCtx builder ($"{name}__in{id}") arr
                     (accCode @ fcode, fctx)
                 | _ -> (accCode, accCtx)) ([], ctx)
         // Same rule one slot over: a deferred binding the KERNEL closes over
@@ -757,7 +757,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // binding that is both an input and a capture is materialized once.
         let (capForceCode, ctx) =
             collectDeferredKernelCaptures ctx info'.Kernel
-            |> forceDeferredBindingIds ctx builder (sprintf "%s__cap" name)
+            |> forceDeferredBindingIds ctx builder ($"{name}__cap")
         let code = genApplyCombinator ctx name info' builder
         let ctx' = addVarName binding.Id name ctx
         (forceCode @ capForceCode @ code, ctx')
@@ -780,7 +780,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let ctx'' = addVarName binding.Id name ctx'
             (code, ctx'')
         else
-            let s1Name = sprintf "%s__wrap_s1" name
+            let s1Name = $"{name}__wrap_s1"
             let s1Id = builder.FreshId()
             let s1Type = info.OutputType
             let (code1, ctx1) = genComposeApply ctx s1Name info s1Type builder
@@ -799,7 +799,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     | IRComposeMeth (left, right) ->
         // @>> : sequential composition -- compute left, feed result to right's kernel
         // Stage 1: materialize left computation
-        let s1Name = sprintf "%s__s1" name
+        let s1Name = $"{name}__s1"
         let s1Id = builder.FreshId()
         
         // Resolve left through deferred
@@ -856,13 +856,13 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let s2Bound =
                 match s1Type with
                 | ArrayElem at -> literalOrRuntimeExtentOfArray at s1Name 0
-                | _ -> sprintf "%s.extents[0]" s1Name
+                | _ -> $"{s1Name}.extents[0]"
             let s2Code = [
-                sprintf "%sconst size_t* %s_extents = %s.extents;" ind name s1Name
-                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" ind elemType arrRank name elemType arrRank name name
-                sprintf "%sfor (size_t __i0 = 0; __i0 < %s; __i0++) {" ind s2Bound
-                sprintf "%s    %s[__i0] = %s(%s[__i0]);" ind name kName s1Name
-                sprintf "%s}" ind
+                $"{ind}const size_t* {name}_extents = {s1Name}.extents;"
+                $$"""{{ind}}Array<{{elemType}}, {{arrRank}}> {{name}} = { allocate<typename promote<{{elemType}}, {{arrRank}}>::type, nullptr>({{name}}_extents), {{name}}_extents };"""
+                $$"""{{ind}}for (size_t __i0 = 0; __i0 < {{s2Bound}}; __i0++) {"""
+                $"{ind}    {name}[__i0] = {kName}({s1Name}[__i0]);"
+                $"{ind}}}"
             ]
             let ctx2 = addVarName binding.Id name ctx1
             (code1 @ [""] @ elemTypeErrCode @ s2Code, ctx2)
@@ -876,7 +876,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     | IRBind (comp, cont) ->
         // Monadic bind: c >>= k
         // Stage 1: materialize comp
-        let s1Name = sprintf "%s__s1" name
+        let s1Name = $"{name}__s1"
         let s1Id = builder.FreshId()
         
         // Resolve comp through deferred
@@ -915,7 +915,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             let contName = match cont with IRVar (id, _) -> Map.tryFind id ctx.VarNames | _ -> None
             match contName with
             | Some kName ->
-                let code = [sprintf "%sauto %s = %s(%s);" ind name kName s1Name]
+                let code = [$"{ind}auto {name} = {kName}({s1Name});"]
                 let ctx' = addVarName binding.Id name ctx1
                 (code1 @ [""] @ code, ctx')
             | None ->
@@ -946,8 +946,8 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             else functorWrappers |> List.fold (fun acc w -> IRFunctorMap(w, acc)) side
         let left' = wrapSide left
         let right' = wrapSide right
-        let nameL = sprintf "%s__lhs" name
-        let nameR = sprintf "%s__rhs" name
+        let nameL = $"{name}__lhs"
+        let nameR = $"{name}__rhs"
         let idL = builder.FreshId()
         let idR = builder.FreshId()
         let bindingL = { Id = idL; Name = nameL; Type = binding.Type; Value = IRCompute left'; IsConst = true; IsMutable = false }
@@ -972,7 +972,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         
         if rank = 0 then
             // Scalar choice
-            let code = [sprintf "%s%s %s = (%s != 0) ? %s : %s;" ind elemType name nameL nameL nameR]
+            let code = [$"{ind}{elemType} {name} = ({nameL} != 0) ? {nameL} : {nameR};"]
             let ctx' = addVarName binding.Id name ctxR
             (codeL @ [""] @ codeR @ [""] @ elemTypeErrCode @ code, ctx')
         else
@@ -986,9 +986,8 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             // hoisted symm name, which isn't threaded here -- out of scope and
             // not currently produced). This avoids referencing a nonexistent
             // function-local `nameL_symm` after the symm-hoist refactor.
-            let extentsAlias = sprintf "%sconst size_t* %s_extents = %s.extents;" ind name nameL
-            let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                                ind elemType rank name elemType rank name name
+            let extentsAlias = $"{ind}const size_t* {name}_extents = {nameL}.extents;"
+            let allocDecl = $"{ind}Array<{elemType}, {rank}> {name} = {{ allocate<typename promote<{elemType}, {rank}>::type, nullptr>({name}_extents), {name}_extents }};"
             // Deterministic deallocation, site 5b: `<|>` array result. rank > 0
             // here (the scalar arm returned above). The extents alias borrows
             // `<name>__lhs.extents`, so nothing is owned; the operands registered
@@ -1010,18 +1009,18 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 let bound =
                     match binding.Type with
                     | ArrayElem at -> literalOrRuntimeExtentOfArray at name i
-                    | _ -> sprintf "%s.extents[%d]" name i
-                loopLines <- loopLines @ [sprintf "%sfor (size_t __i%d = 0; __i%d < %s; __i%d++) {" (indD depth) i i bound i]
+                    | _ -> $"{name}.extents[{i}]"
+                loopLines <- loopLines @ [$$"""{{(indD depth)}}for (size_t __i{{i}} = 0; __i{{i}} < {{bound}}; __i{{i}}++) {"""]
                 depth <- depth + 1
             
-            let idxStr = [for i in 0 .. rank - 1 -> sprintf "[__i%d]" i] |> String.concat ""
-            let lhsElem = sprintf "%s%s" nameL idxStr
-            let rhsElem = sprintf "%s%s" nameR idxStr
-            loopLines <- loopLines @ [sprintf "%s%s%s = (%s != 0) ? %s : %s;" (indD depth) name idxStr lhsElem lhsElem rhsElem]
+            let idxStr = [for i in 0 .. rank - 1 -> $"[__i{i}]"] |> String.concat ""
+            let lhsElem = $"{nameL}{idxStr}"
+            let rhsElem = $"{nameR}{idxStr}"
+            loopLines <- loopLines @ [$"{(indD depth)}{name}{idxStr} = ({lhsElem} != 0) ? {lhsElem} : {rhsElem};"]
             
             for _ in 0 .. rank - 1 do
                 depth <- depth - 1
-                loopLines <- loopLines @ [sprintf "%s}" (indD depth)]
+                loopLines <- loopLines @ [$"{(indD depth)}}}"]
             
             let ctx' = addVarName binding.Id name ctxR
             (codeL @ [""] @ codeR @ [""] @ elemTypeErrCode @ [extentsAlias; allocDecl; ""] @ loopLines, ctx')
@@ -1105,12 +1104,12 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             // historical `(cond ? A : 0.0)` emission was a type error over arrays).
             match binding.Type with
             | ArrayElem arr ->
-                let bodyName = sprintf "%s__gbody" name
+                let bodyName = $"{name}__gbody"
                 let bodyId = builder.FreshId()
                 let bodyBinding = { Id = bodyId; Name = bodyName; Type = binding.Type; Value = IRCompute body; IsConst = true; IsMutable = false }
                 let (codeB, ctxB) = genBinding ctx bodyBinding builder
                 // Materialize the scalar predicate once into its own temp.
-                let condName = sprintf "%s__gcond" name
+                let condName = $"{name}__gcond"
                 let condId = builder.FreshId()
                 let condBinding = { Id = condId; Name = condName; Type = inferExprType cond; Value = cond; IsConst = true; IsMutable = false }
                 let (codeC, ctxC) = genBinding ctxB condBinding builder
@@ -1122,8 +1121,8 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                     | IRTScalar (ETInt64 | ETInt32) -> "0L"
                     | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> "0L"
                     | _ -> "0.0"
-                let extentsAlias = sprintf "%sconst size_t* %s_extents = %s.extents;" ind name bodyName
-                let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };" ind elemType rank name elemType rank name name
+                let extentsAlias = $"{ind}const size_t* {name}_extents = {bodyName}.extents;"
+                let allocDecl = $$"""{{ind}}Array<{{elemType}}, {{rank}}> {{name}} = { allocate<typename promote<{{elemType}}, {{rank}}>::type, nullptr>({{name}}_extents), {{name}}_extents };"""
                 // Deterministic deallocation, site 5c: `guard` over a CONCRETE
                 // array. Extents borrowed from `<name>__gbody`, which registered
                 // above via genBinding, so reverse order frees this result first.
@@ -1136,13 +1135,13 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                     // `arr` is the guarded array's type; the result borrows its
                     // shape wholesale (aliased extents, same rank).
                     let bound = literalOrRuntimeExtentOfArray arr name i
-                    loopLines <- loopLines @ [sprintf "%sfor (size_t __i%d = 0; __i%d < %s; __i%d++) {" (indD depth) i i bound i]
+                    loopLines <- loopLines @ [$$"""{{(indD depth)}}for (size_t __i{{i}} = 0; __i{{i}} < {{bound}}; __i{{i}}++) {"""]
                     depth <- depth + 1
-                let idxStr = [for i in 0 .. rank - 1 -> sprintf "[__i%d]" i] |> String.concat ""
-                loopLines <- loopLines @ [sprintf "%s%s%s = (%s) ? %s%s : %s;" (indD depth) name idxStr condName bodyName idxStr zeroStr]
+                let idxStr = [for i in 0 .. rank - 1 -> $"[__i{i}]"] |> String.concat ""
+                loopLines <- loopLines @ [$"{(indD depth)}{name}{idxStr} = ({condName}) ? {bodyName}{idxStr} : {zeroStr};"]
                 for _ in 0 .. rank - 1 do
                     depth <- depth - 1
-                    loopLines <- loopLines @ [sprintf "%s}" (indD depth)]
+                    loopLines <- loopLines @ [$"{(indD depth)}}}"]
                 let ctx' = addVarName binding.Id name ctxC
                 (codeB @ codeC @ [""] @ [extentsAlias; allocDecl; ""] @ loopLines, ctx')
             | _ ->
@@ -1157,7 +1156,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // IMPORTANT: each child generates against the original ctx, not accumulated,
         // to prevent one child's output from contaminating another's array resolution.
         let n = elems.Length
-        let childNames = elems |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+        let childNames = elems |> List.mapi (fun i _ -> $"{name}_{i}")
         // The type each child BINDING is emitted with. Shared with the copy nest
         // below, which needs the type of the array that actually exists under
         // `<name>_i` to bake its loop bounds -- deriving it a second time from
@@ -1223,8 +1222,8 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         // outer pool leaks strictly more than today.
         let extentsName = name + "_extents"
         let extentsDims =
-            (sprintf "%d" n, true)
-            :: [for d in 0 .. childRank - 1 -> (sprintf "%s.extents[%d]" (List.head childNames) d, false)]
+            (string n, true)
+            :: [for d in 0 .. childRank - 1 -> ($"{(List.head childNames)}.extents[{d}]", false)]
         let (extentsDeclLines, _ownedExtents) = emitExtentsTable ind extentsName outerRank extentsDims
         // ARRAY children: one dense pool of this binding's OWN plus a per-child
         // copy nest -- the same fresh-pool discipline materializeStackForm uses,
@@ -1254,11 +1253,11 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 arrayAlloc { Ind = ind; Elem = childElemType; Rank = outerRank; Name = name
                              Symm = "nullptr"; Strict = None; Extents = extentsName }
             else
-                sprintf "%sArray<%s, 1> %s = { new %s[%d], %s_extents };" ind childElemType name childElemType n name
+                $$"""{{ind}}Array<{{childElemType}}, 1> {{name}} = { new {{childElemType}}[{{n}}], {{name}}_extents };"""
         let assignLines =
             if childRank = 0 then
                 childNames |> List.mapi (fun i cn ->
-                    sprintf "%s%s[%d] = %s;" ind name i cn)
+                    $"{ind}{name}[{i}] = {cn};")
             else
                 // One nest per child. Loop variables are declared in each `for`
                 // init, so sibling nests at the same level reuse the names.
@@ -1266,24 +1265,22 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 // the children share a shape at runtime, but not that shape
                 // monomorphization pinned them all to literals), so a child that
                 // knows its own trip count bakes it whatever its siblings got.
-                let loopVar d = sprintf "__sq%s_%d" name d
+                let loopVar d = $"__sq{name}_{d}"
                 (childNames, childTypes)
                 ||> List.mapi2 (fun k cn cty ->
                     let boundAt d =
                         match cty with
                         | ArrayElem st -> literalOrRuntimeExtentOfArray st cn d
-                        | _ -> sprintf "%s.extents[%d]" cn d
+                        | _ -> $"{cn}.extents[{d}]"
                     let opens =
                         [ for d in 0 .. childRank - 1 ->
-                            sprintf "%s%sfor (size_t %s = 0; %s < %s; %s++) {"
-                                ind (String.replicate d "    ") (loopVar d) (loopVar d) (boundAt d) (loopVar d) ]
+                            $"""{ind}{(String.replicate d "    ")}for (size_t {(loopVar d)} = 0; {(loopVar d)} < {(boundAt d)}; {(loopVar d)}++) {{""" ]
                     let sub =
-                        [ for d in 0 .. childRank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                        [ for d in 0 .. childRank - 1 -> $"[{(loopVar d)}]" ] |> String.concat ""
                     let body =
-                        [ sprintf "%s%s%s[%d]%s = %s%s;"
-                            ind (String.replicate childRank "    ") name k sub cn sub ]
+                        [ $"""{ind}{(String.replicate childRank "    ")}{name}[{k}]{sub} = {cn}{sub};""" ]
                     let closes =
-                        [ for d in childRank - 1 .. -1 .. 0 -> sprintf "%s%s}" ind (String.replicate d "    ") ]
+                        [ for d in childRank - 1 .. -1 .. 0 -> $"""{ind}{(String.replicate d "    ")}}}""" ]
                     opens @ body @ closes)
                 |> List.concat
         let ctx' = { ctx with VarNames = Map.add binding.Id name mergedVarNames }
@@ -1322,7 +1319,7 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
     let pspec =
         match Blade.ProviderRegistry.tryFind spec.Provider with
         | Some p -> p
-        | None -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider '%s' is not registered -- was ProviderStatics.install () run?" spec.Provider)))
+        | None -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}' is not registered -- was ProviderStatics.install () run?")))
     if spec.Streamed then
         // Streamed read: emit only the provider's hoisted stream prologue
         // (open handles, fiber extents vector). Consuming nests inline the
@@ -1331,7 +1328,7 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         // and the eligible-shape checks in the nest fail loudly first.
         match pspec.GenStreamOpen with
         | None ->
-            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider '%s' does not support streamed reads (variable '%s' -- bind with .read)" spec.Provider spec.VarName)))
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}' does not support streamed reads (variable '{spec.VarName}' -- bind with .read)")))
         | Some gen ->
             let code = gen spec.FilePath spec.VarName name spec.VarType
             let ctx' = addVarName binding.Id name ctx
@@ -1348,7 +1345,7 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
     match spec.VarType.IndexTypes |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
     | Some ix when pspec.ReadWreathPool.IsNone ->
         failwith (orbitStorageUnsupported
-                      (sprintf "provider read of '%s' (provider '%s' stores no OrbIdx pools)" spec.VarName spec.Provider)
+                      ($"provider read of '{spec.VarName}' (provider '{spec.Provider}' stores no OrbIdx pools)")
                       (orbitLevelsOf ix))
     | Some ix ->
         // The store's pool IS the storage, so the whole read is: assemble the
@@ -1358,13 +1355,13 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         // No copy, no unlinearize, no reorder: spec_version 2 defines exactly
         // one on-disk order and it is the one the pool is in.
         if spec.Window.IsSome then
-            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "z.read_window over an OrbIdx (iterated-wreath) pool ('%s') is not supported: a wreath class has no translated sub-class to window into" spec.VarName)))
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"z.read_window over an OrbIdx (iterated-wreath) pool ('{spec.VarName}') is not supported: a wreath class has no translated sub-class to window into")))
         match classifyOutputStorage binding.Type, pspec.GenReadPacked with
         | AllocWreath (levels, n, cells), Some gen ->
             let elemCpp =
                 match binding.Type with
                 | ArrayElem at -> elemTypeToCpp at.ElemType
-                | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.iceCodegen (sprintf "wreath provider read '%s': binding is not array-typed" spec.VarName)))
+                | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.iceCodegen ($"wreath provider read '{spec.VarName}': binding is not array-typed")))
             let opts : Blade.ProviderRegistry.PackedReadOpts = { Distribute = false; Window = None }
             let assemble = gen spec.FilePath spec.VarName name spec.VarType opts
             // Same runtime pin genWreathApply emits: the C++ section 4 fold and the
@@ -1373,17 +1370,15 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
             // implementations, and a disagreement is a wrong-sized pool that
             // nothing on the value side could notice.
             let pin =
-                [ sprintf "if (orbit_wreath_utilities::orb_cell_count<%s>(%d) != %dLL) { blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the store's declared cardinality\", nullptr, 0); }"
-                          (orbLevelArgs levels) n cells ]
+                [ $"if (orbit_wreath_utilities::orb_cell_count<{(orbLevelArgs levels)}>({n}) != {cells}LL) {{ blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the store's declared cardinality\", nullptr, 0); }}" ]
             registerAlloc (RawAlloc (name, None))
             let adopt =
-                [ sprintf "// OrbIdx%s over extent %d: %d pool cells adopted from the store (ascending-lex canonical order)"
-                          (ppOrbitLevels levels) n cells
-                  sprintf "%s* %s = %s_flat;" elemCpp name name ]
+                [ $"// OrbIdx{(ppOrbitLevels levels)} over extent {n}: {cells} pool cells adopted from the store (ascending-lex canonical order)"
+                  $"{elemCpp}* {name} = {name}_flat;" ]
             ((assemble @ pin @ adopt) |> List.map (fun s -> ind + s), addVarName binding.Id name ctx)
         | AllocWreath _, None ->
             failwith (orbitStorageUnsupported
-                          (sprintf "provider read of '%s' (provider '%s' emits no packed reader)" spec.VarName spec.Provider)
+                          ($"provider read of '{spec.VarName}' (provider '{spec.Provider}' emits no packed reader)")
                           (orbitLevelsOf ix))
         | spec_, _ ->
             failwith (orbitStorageUnsupported
@@ -1400,10 +1395,10 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         // holds exactly the canonical cells in ascending-lex order (the same
         // pinned order the store uses), so no per-cell unlinearize is needed.
         if spec.MaskName.IsSome then
-            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider '%s': load_compound over a packed variable ('%s') is not supported" spec.Provider spec.VarName)))
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}': load_compound over a packed variable ('{spec.VarName}') is not supported")))
         match pspec.GenReadPacked with
         | None ->
-            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider '%s' does not support packed (symmetric/antisymmetric) variables (variable '%s')" spec.Provider spec.VarName)))
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}' does not support packed (symmetric/antisymmetric) variables (variable '{spec.VarName}')")))
         | Some gen ->
             (match binding.Type with
              | ArrayElem arrTy ->
@@ -1420,30 +1415,30 @@ and genProviderReadBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                  let extentTerms =
                      componentExtents |> List.map (fun e ->
                          match e with
-                         | IRLit (IRLitInt n) -> sprintf "%d" n
-                         | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "packed provider read of '%s' requires literal extents" spec.VarName))))
-                 let extentsName = sprintf "%s_extents" name
-                 let extentsArr = sprintf "size_t %s[] = { %s };" extentsName (String.concat ", " extentTerms)
+                         | IRLit (IRLitInt n) -> string n
+                         | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"packed provider read of '{spec.VarName}' requires literal extents"))))
+                 let extentsName = $"{name}_extents"
+                 let extentsArr = $$"""size_t {{extentsName}}[] = { {{(String.concat ", " extentTerms)}} };"""
                  let symmVec = buildSymmVec binding.Type
                  let symmArg =
-                     if hasRealSymmetry symmVec then hoistSymmDecl (sprintf "%s_symm" name) symmVec
+                     if hasRealSymmetry symmVec then hoistSymmDecl ($"{name}_symm") symmVec
                      else "nullptr"
                  let allocLine =
                      match emitAllocRhs (classifyOutputStorage binding.Type) elemCpp rank symmArg extentsName with
-                     | Ok rhs -> sprintf "Array<%s, %d> %s = %s;" elemCpp rank name rhs
-                     | Error msg -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "packed provider read '%s': %s" spec.VarName msg)))
+                     | Ok rhs -> $"Array<{elemCpp}, {rank}> {name} = {rhs};"
+                     | Error msg -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"packed provider read '{spec.VarName}': {msg}")))
                  let copy = genPackedPoolCopy arrTy name name spec.VarName false
-                 ((assemble @ [extentsArr; allocLine] @ copy @ [sprintf "delete[] %s_flat;" name])
+                 ((assemble @ [extentsArr; allocLine] @ copy @ [$"delete[] {name}_flat;"])
                   |> List.map (fun s -> ind + s),
                   addVarName binding.Id name ctx)
-             | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.iceCodegen (sprintf "packed provider read '%s': binding is not array-typed" spec.VarName))))
+             | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.iceCodegen ($"packed provider read '{spec.VarName}': binding is not array-typed"))))
     else
     let readCode =
         (match spec.MaskName, spec.MaskType with
          | Some maskName, Some maskType ->
              (match pspec.GenReadCompoundVar with
               | Some gen -> gen spec.FilePath spec.VarName maskName name spec.VarType maskType
-              | None -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider '%s' does not support load_compound (variable '%s')" spec.Provider spec.VarName))))
+              | None -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}' does not support load_compound (variable '{spec.VarName}')"))))
          | _ ->
              pspec.GenReadVar spec.FilePath spec.VarName name spec.VarType)
     (readCode |> List.map (fun s -> ind + s), addVarName binding.Id name ctx)
@@ -1459,12 +1454,12 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     let pspec =
         match Blade.ProviderRegistry.tryFind spec.Provider with
         | Some p -> p
-        | None -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider '%s' is not registered -- was ProviderStatics.install () run?" spec.Provider)))
+        | None -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}' is not registered -- was ProviderStatics.install () run?")))
     let srcCpp =
         match Map.tryFind spec.SourceId ctx.VarNames with
         | Some n -> n
         | None -> sanitizeCppName spec.VarName
-    let baseName = sprintf "%s_wr%d" srcCpp (int binding.Id)
+    let baseName = $"{srcCpp}_wr{int binding.Id}"
     let arrTy = spec.SourceType
     let elemCpp = elemTypeToCpp arrTy.ElemType
     // The wreath arm runs BEFORE the component-extent fold below: a wreath
@@ -1474,7 +1469,7 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     match arrTy.IndexTypes |> List.tryFind (fun ix -> ix.Symmetry = SymWreath) with
     | Some ix when pspec.ReadWreathPool.IsNone ->
         failwith (orbitStorageUnsupported
-                      (sprintf "provider write of '%s' (provider '%s' stores no OrbIdx pools)" spec.VarName spec.Provider)
+                      ($"provider write of '{spec.VarName}' (provider '{spec.Provider}' stores no OrbIdx pools)")
                       (orbitLevelsOf ix))
     | Some ix ->
         // The source array IS the flat pool in ascending-lex canonical order,
@@ -1486,15 +1481,14 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         (match classifyOutputStorage (mkArrayLike arrTy) with
          | AllocWreath (levels, n, cells) ->
              let pin =
-                 sprintf "if (orbit_wreath_utilities::orb_cell_count<%s>(%d) != %dLL) { blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the compiler's iterated-binomial fold\", nullptr, 0); }"
-                         (orbLevelArgs levels) n cells
+                 $"if (orbit_wreath_utilities::orb_cell_count<{(orbLevelArgs levels)}>({n}) != {cells}LL) {{ blade_rt::panic(\"BL8004\", \"OrbIdx pool size disagreement: orb_cell_count vs the compiler's iterated-binomial fold\", nullptr, 0); }}"
              let flatten =
-                 [ sprintf "// Write %s (OrbIdx%s pool, %d cells) to %s" spec.VarName (ppOrbitLevels levels) cells spec.FilePath
+                 [ $"// Write {spec.VarName} (OrbIdx{(ppOrbitLevels levels)} pool, {cells} cells) to {spec.FilePath}"
                    pin
-                   sprintf "%s* %s_flat = new %s[%d];" elemCpp baseName elemCpp cells
-                   sprintf "for (size_t __ow_i = 0; __ow_i < %d; __ow_i++) { %s_flat[__ow_i] = %s[__ow_i]; }" cells baseName srcCpp ]
+                   $"{elemCpp}* {baseName}_flat = new {elemCpp}[{cells}];"
+                   $$"""for (size_t __ow_i = 0; __ow_i < {{cells}}; __ow_i++) { {{baseName}}_flat[__ow_i] = {{srcCpp}}[__ow_i]; }""" ]
              let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
-             let cleanup = [ sprintf "delete[] %s_flat;" baseName ]
+             let cleanup = [ $"delete[] {baseName}_flat;" ]
              (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
          | other ->
              failwith (orbitStorageUnsupported
@@ -1506,8 +1500,8 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
     let extentTerms =
         componentExtents |> List.map (fun e ->
             match e with
-            | IRLit (IRLitInt n) -> sprintf "%d" n
-            | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider write of '%s' requires literal extents" spec.VarName))))
+            | IRLit (IRLitInt n) -> string n
+            | _ -> raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider write of '{spec.VarName}' requires literal extents"))))
     let isPacked =
         arrTy.IndexTypes |> List.exists (fun idx -> idx.Symmetry <> SymNone && idx.Rank >= 2)
     if isPacked then
@@ -1517,26 +1511,26 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         // GenReadPacked presence is the provider's packed-layout capability
         // flag (read and write go together: both are pool-order I/O).
         if pspec.GenReadPacked.IsNone then
-            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "provider '%s' does not support packed (symmetric/antisymmetric) writes (variable '%s')" spec.Provider spec.VarName)))
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"provider '{spec.Provider}' does not support packed (symmetric/antisymmetric) writes (variable '{spec.VarName}')")))
         let poolCount =
             deviceBufferCardinality (deviceBufferTypeOfArray arrTy) |> exprToCpp ctx.VarNames
         let flatten =
-            [ sprintf "// Write %s (packed pool) to %s" spec.VarName spec.FilePath
-              sprintf "%s* %s_flat = new %s[%s];" elemCpp baseName elemCpp poolCount ]
+            [ $"// Write {spec.VarName} (packed pool) to {spec.FilePath}"
+              $"{elemCpp}* {baseName}_flat = new {elemCpp}[{poolCount}];" ]
             @ genPackedPoolCopy arrTy srcCpp baseName spec.VarName true
         let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
-        let cleanup = [ sprintf "delete[] %s_flat;" baseName ]
+        let cleanup = [ $"delete[] {baseName}_flat;" ]
         (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
     else
-    let extentNames = extentTerms |> List.mapi (fun i _ -> sprintf "%s_ext%d" baseName i)
+    let extentNames = extentTerms |> List.mapi (fun i _ -> $"{baseName}_ext{i}")
     let extentDecls =
         List.zip extentNames extentTerms
-        |> List.map (fun (n, t) -> sprintf "size_t %s = %s;" n t)
-    let idxVars = [ for i in 0 .. rank - 1 -> sprintf "%s_i%d" baseName i ]
+        |> List.map (fun (n, t) -> $"size_t {n} = {t};")
+    let idxVars = [ for i in 0 .. rank - 1 -> $"{baseName}_i{i}" ]
     let openLoops =
         idxVars |> List.mapi (fun d iv ->
             let indl = String.replicate d "    "
-            sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" indl iv iv extentNames.[d] iv)
+            $$"""{{indl}}for (size_t {{iv}} = 0; {{iv}} < {{extentNames.[d]}}; {{iv}}++) {""")
     let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
     let flatIdx =
         match idxVars with
@@ -1544,18 +1538,18 @@ and genProviderWriteBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         | first :: _ ->
             let mutable acc = first
             for i in 1 .. rank - 1 do
-                acc <- sprintf "(%s) * %s + %s" acc extentNames.[i] idxVars.[i]
+                acc <- $"({acc}) * {extentNames.[i]} + {idxVars.[i]}"
             acc
     let bodyInd = String.replicate rank "    "
     let flatten =
-        [ sprintf "// Write %s to %s" spec.VarName spec.FilePath ]
+        [ $"// Write {spec.VarName} to {spec.FilePath}" ]
         @ extentDecls
-        @ [ sprintf "%s* %s_flat = new %s[%s];" elemCpp baseName elemCpp (String.concat " * " extentNames) ]
+        @ [ $"""{elemCpp}* {baseName}_flat = new {elemCpp}[{(String.concat " * " extentNames)}];""" ]
         @ openLoops
-        @ [ sprintf "%s%s_flat[%s] = %s%s;" bodyInd baseName flatIdx srcCpp nestedSub ]
-        @ [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
+        @ [ $"{bodyInd}{baseName}_flat[{flatIdx}] = {srcCpp}{nestedSub};" ]
+        @ [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
     let writeCode = pspec.GenWriteVar spec.FilePath spec.VarName baseName arrTy spec.DimNames
-    let cleanup = [ sprintf "delete[] %s_flat;" baseName ]
+    let cleanup = [ $"delete[] {baseName}_flat;" ]
     (guardProviderWrite ind (flatten @ writeCode @ cleanup), ctx)
 
 
@@ -1590,33 +1584,30 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         let rank = extents.Length
         let nonLiteral = extents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
         if nonLiteral then
-            ([refusalErrorLine ind (sprintf "rand binding '%s' requires literal extents" name)], addVarName binding.Id name ctx)
+            ([refusalErrorLine ind ($"rand binding '{name}' requires literal extents")], addVarName binding.Id name ctx)
         else
             let extentTerms = extents |> List.map (fun e -> match e with IRLit (IRLitInt n) -> string n | _ -> "0")
-            let extentsName = sprintf "%s_extents" name
-            let extentsArr = sprintf "%ssize_t %s[] = { %s };" ind extentsName (String.concat ", " extentTerms)
+            let extentsName = $"{name}_extents"
+            let extentsArr = $$"""{{ind}}size_t {{extentsName}}[] = { {{(String.concat ", " extentTerms)}} };"""
             let card = extents |> List.fold (fun acc e -> match e with IRLit (IRLitInt n) -> acc * n | _ -> acc) 1L
             let allocLine =
-                sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s), %s };"
-                    ind elemCpp rank name elemCpp rank extentsName extentsName
+                $"{ind}Array<{elemCpp}, {rank}> {name} = {{ allocate<typename promote<{elemCpp}, {rank}>::type, nullptr>({extentsName}), {extentsName} }};"
             // Array parameter first (surface order puts weights before any
             // scalar par), then the scalar pars.
             let weightsArgs =
                 match weightsExpr with
                 | None -> ""
                 | Some (wExpr, k) ->
-                    sprintf ", nested_array_utilities::pool_base(%s.data), (size_t)%dLL"
-                        (exprToCpp ctx.VarNames wExpr) k
+                    $", nested_array_utilities::pool_base({(exprToCpp ctx.VarNames wExpr)}.data), (size_t){k}LL"
             let parArgs =
                 parExprs
-                |> List.map (fun p -> sprintf ", (double)(%s)" (exprToCpp ctx.VarNames p))
+                |> List.map (fun p -> $", (double)({(exprToCpp ctx.VarNames p)})")
                 |> String.concat ""
             let fillLine =
-                sprintf "%sblade_rand::%s(nested_array_utilities::pool_base(%s.data), (size_t)%dLL, (int64_t)(%s)%s%s);"
-                    ind kind name card (exprToCpp ctx.VarNames keyExpr) weightsArgs parArgs
+                $"{ind}blade_rand::{kind}(nested_array_utilities::pool_base({name}.data), (size_t){card}LL, (int64_t)({(exprToCpp ctx.VarNames keyExpr)}){weightsArgs}{parArgs});"
             ([extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
     | _ ->
-        ([refusalErrorLine ind (sprintf "rand binding '%s' is not an array type" name)], addVarName binding.Id name ctx)
+        ([refusalErrorLine ind ($"rand binding '{name}' is not an array type")], addVarName binding.Id name ctx)
 
 and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -1643,25 +1634,24 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
              // Dense-rectangular path: unchanged (byte-compatible with the
              // pre-arc-3 emission -- the runtime fill_random walks the shape).
              let rank = arrayRank arrTy
-             let extentNames = arrTy.IndexTypes |> List.mapi (fun i _ -> sprintf "%s_extent_%d" name i)
+             let extentNames = arrTy.IndexTypes |> List.mapi (fun i _ -> $"{name}_extent_{i}")
              let extentDecls =
                  arrTy.IndexTypes |> List.mapi (fun i idx ->
                      match idx.Extent with
-                     | IRLit (IRLitInt n) -> sprintf "%ssize_t %s_extent_%d = %d;" ind name i n
-                     | _ -> refusalErrorLine ind (sprintf "fill_random binding '%s' has a non-literal extent at dim %d" name i))
-             let extentsArr = sprintf "%ssize_t %s_extents[] = { %s };" ind name (String.concat ", " extentNames)
+                     | IRLit (IRLitInt n) -> $"{ind}size_t {name}_extent_{i} = {n};"
+                     | _ -> refusalErrorLine ind ($"fill_random binding '{name}' has a non-literal extent at dim {i}"))
+             let extentsArr = $$"""{{ind}}size_t {{name}}_extents[] = { {{(String.concat ", " extentNames)}} };"""
              let allocLine =
-                 sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                     ind elemCpp rank name elemCpp rank name name
+                 $"{ind}Array<{elemCpp}, {rank}> {name} = {{ allocate<typename promote<{elemCpp}, {rank}>::type, nullptr>({name}_extents), {name}_extents }};"
              let fillLine =
-                 sprintf "%sfill_random(%s.data, %s_extents, (int)(%s));" ind name name (exprToCpp ctx.VarNames modExpr)
+                 $"{ind}fill_random({name}.data, {name}_extents, (int)({(exprToCpp ctx.VarNames modExpr)}));"
              (extentDecls @ [extentsArr; allocLine; fillLine], addVarName binding.Id name ctx)
          elif hasHermitian then
              // Hermitian stores the full n^2 cells but they are CONSTRAINT-
              // COUPLED (A(i,j) = conj(A(j,i))): independent pool draws would
              // violate the invariant, so hermitian fill needs a canonical-
              // half fill + mirrored conjugation -- not yet emitted.
-             ([refusalErrorLine ind (sprintf "fill_random binding '%s': HermitianIdx is not supported (stored cells are constraint-coupled)" name)],
+             ([refusalErrorLine ind ($"fill_random binding '{name}': HermitianIdx is not supported (stored cells are constraint-coupled)")],
               addVarName binding.Id name ctx)
          else
              // GENERALIZED fill (arc 3, formalism 3.5): one draw per STORED
@@ -1677,32 +1667,32 @@ and genRandomInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
              let nonLiteral =
                  componentExtents |> List.exists (fun e -> match e with IRLit (IRLitInt _) -> false | _ -> true)
              if nonLiteral then
-                 ([refusalErrorLine ind (sprintf "fill_random binding '%s' requires literal extents" name)],
+                 ([refusalErrorLine ind ($"fill_random binding '{name}' requires literal extents")],
                   addVarName binding.Id name ctx)
              else
                  let extentTerms =
                      componentExtents |> List.map (fun e ->
-                         match e with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "0")
-                 let extentsName = sprintf "%s_extents" name
-                 let extentsArr = sprintf "%ssize_t %s[] = { %s };" ind extentsName (String.concat ", " extentTerms)
+                         match e with IRLit (IRLitInt n) -> string n | _ -> "0")
+                 let extentsName = $"{name}_extents"
+                 let extentsArr = $$"""{{ind}}size_t {{extentsName}}[] = { {{(String.concat ", " extentTerms)}} };"""
                  let symmVec = buildSymmVec binding.Type
                  let symmArg =
-                     if hasRealSymmetry symmVec then hoistSymmDecl (sprintf "%s_symm" name) symmVec
+                     if hasRealSymmetry symmVec then hoistSymmDecl ($"{name}_symm") symmVec
                      else "nullptr"
                  let allocLines =
                      match emitAllocRhs (classifyOutputStorage binding.Type) elemCpp rank symmArg extentsName with
-                     | Ok rhs -> [sprintf "%sArray<%s, %d> %s = %s;" ind elemCpp rank name rhs]
-                     | Error msg -> [refusalErrorLine ind (sprintf "fill_random '%s': %s" name msg)]
+                     | Ok rhs -> [$"{ind}Array<{elemCpp}, {rank}> {name} = {rhs};"]
+                     | Error msg -> [refusalErrorLine ind ($"fill_random '{name}': {msg}")]
                  let poolCount =
                      deviceBufferCardinality (deviceBufferTypeOfArray arrTy)
                      |> exprToCpp ctx.VarNames
                  let fillLines =
-                     [ sprintf "%s{ auto* __fr_pool = nested_array_utilities::pool_base(%s.data);" ind name
+                     [ $"{ind}{{ auto* __fr_pool = nested_array_utilities::pool_base({name}.data);"
                        sprintf "%s  for (size_t __fr_i = 0; __fr_i < %s; __fr_i++) { __fr_pool[__fr_i] = static_cast<%s>(rand() %% (int)(%s)); } }"
                            ind poolCount elemCpp (exprToCpp ctx.VarNames modExpr) ]
                  (extentsArr :: allocLines @ fillLines, addVarName binding.Id name ctx)
      | _ ->
-         ([refusalErrorLine ind (sprintf "fill_random binding '%s' is not an array type" name)], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind ($"fill_random binding '{name}' is not an array type")], addVarName binding.Id name ctx))
 
 
 and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) : string list * CodeGenContext =
@@ -1734,7 +1724,7 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
     let (maskPre, maskName) =
         match maskExpr with
         | IRMask _ ->
-            let tmpName = sprintf "%s__masksrc" name
+            let tmpName = $"{name}__masksrc"
             (match materializeInlineForm emptySubst ctx.VarNames tmpName (lazy "bool") maskExpr with
              // Deliberately NOT registered: this temp feeds the COMPOUND index
              // construction below, and compound storage / ownership is owned by
@@ -1748,23 +1738,23 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          let leadRank =
              arrTy.IndexTypes
              |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
-             |> Option.map (fun ix -> ix.Rank)
+             |> Option.map (_.Rank)
              |> Option.defaultValue 1
          let elemCpp = elemTypeToCpp arrTy.ElemType
          // The compound array type carries leadRank (compound) + trailing
          // slots; the number of trailing dims = arrTy.IndexTypes.Length - 1.
          let trailingDimCount = arrTy.IndexTypes.Length - 1
-         let idxName = sprintf "%s_idx" name
+         let idxName = $"{name}_idx"
          let (idxLines, _) = genCompoundIndexFromMask maskName leadRank idxName
          // trail = product of dense.extents[leadRank .. leadRank+trailingDimCount-1]
          let trailTerms =
-             [ for d in 0 .. trailingDimCount - 1 -> sprintf "%s.extents[%d]" denseName (leadRank + d) ]
+             [ for d in 0 .. trailingDimCount - 1 -> $"{denseName}.extents[{leadRank + d}]" ]
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
          let lines =
              maskPre
              @ (idxLines |> List.map (fun l -> ind + l))
-             @ [ sprintf "%ssize_t %s_trail = %s;" ind name trailExpr
-                 sprintf "%s%s* %s_densepool = nested_array_utilities::pool_base(%s.data);" ind elemCpp name denseName
+             @ [ $"{ind}size_t {name}_trail = {trailExpr};"
+                 $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);"
                  // The `+ 1` is REQUIRED BY the branchless scatter and only by
                  // it: that form stores unconditionally and lets the cursor sit
                  // at `cardinality` after the last selected cell, so a trailing
@@ -1772,12 +1762,12 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                  // of slack, never read, is the price of deleting a branch that
                  // mispredicts once per grid cell.
                  (if trailTerms.IsEmpty then
-                     sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail + 1];" ind elemCpp name elemCpp idxName name
+                     $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail + 1];"
                   else
-                     sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail];" ind elemCpp name elemCpp idxName name)
+                     $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail];")
                  // scatter present leading cells (row-major prefix-popcount)
                  compactScatter { Ind = ind; Name = name; IdxName = idxName; ScalarTrail = trailTerms.IsEmpty }
-                 sprintf "%snested_array_utilities::Compound<%s, %d> %s { %s_compact, %s, %s_trail };" ind elemCpp leadRank name name idxName name ]
+                 $$"""{{ind}}nested_array_utilities::Compound<{{elemCpp}}, {{leadRank}}> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
          // Owns BOTH the compact buffer and the freshly built index. (BL6002
          // restricts compound() to top-level lets today, where the empty
          // scope stack makes this a no-op -- registered anyway so a future
@@ -1786,7 +1776,7 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
          registerShapedAlloc name "deallocate_compound" name
          (lines, addVarName binding.Id name ctx)
      | _ ->
-         ([refusalErrorLine ind (sprintf "compound() binding '%s' is not a CompoundIdx array type" name)], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind ($"compound() binding '{name}' is not a CompoundIdx array type")], addVarName binding.Id name ctx))
 
 and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
     let ind = indentStr ctx
@@ -1814,29 +1804,29 @@ and genSparseInitBinding (ctx: CodeGenContext) (binding: IRBinding) : string lis
          // Trailing dim count = slots after the sparse head (the key axis
          // consumed values dim 0, so these are values dims 1..).
          let trailingDimCount = arrTy.IndexTypes.Length - 1
-         let idxName = sprintf "%s_idx" name
+         let idxName = $"{name}_idx"
          let idxLines =
              match sparseIx.Extent with
              | IRSparseKeys (SkStatic _ as src) -> genSparseIndexFromKeys src None leadRank idxName
              | IRSparseKeys (SkRuntime (IRVar (kid, _)) as src) ->
                  genSparseIndexFromKeys src (Map.tryFind kid ctx.VarNames) leadRank idxName
-             | _ -> [ refusalErrorLine "" (sprintf "sparse() binding '%s': keys source is not a SparseIdx extent" name) ]
+             | _ -> [ refusalErrorLine "" ($"sparse() binding '{name}': keys source is not a SparseIdx extent") ]
          let trailTerms =
-             [ for d in 1 .. trailingDimCount -> sprintf "%s.extents[%d]" valuesName d ]
+             [ for d in 1 .. trailingDimCount -> $"{valuesName}.extents[{d}]" ]
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
          let lines =
              (idxLines |> List.map (fun l -> ind + l))
-             @ [ sprintf "%sif (%s.extents[0] != %s->cardinality) { blade_rt::panic(\"BL8001\", \"sparse(values, keys): values length does not match key count\", nullptr, 0); }" ind valuesName idxName
-                 sprintf "%ssize_t %s_trail = %s;" ind name trailExpr
-                 sprintf "%s%s* %s_valpool = nested_array_utilities::pool_base(%s.data);" ind elemCpp name valuesName
-                 sprintf "%s%s* %s_compact = new %s[%s->cardinality * %s_trail];" ind elemCpp name elemCpp idxName name
-                 sprintf "%sfor (size_t __r = 0; __r < %s->cardinality * %s_trail; __r++) %s_compact[__r] = %s_valpool[__r];" ind idxName name name name
-                 sprintf "%snested_array_utilities::Sparse<%s, %d> %s { %s_compact, %s, %s_trail };" ind elemCpp leadRank name name idxName name ]
+             @ [ $"{ind}if ({valuesName}.extents[0] != {idxName}->cardinality) {{ blade_rt::panic(\"BL8001\", \"sparse(values, keys): values length does not match key count\", nullptr, 0); }}"
+                 $"{ind}size_t {name}_trail = {trailExpr};"
+                 $"{ind}{elemCpp}* {name}_valpool = nested_array_utilities::pool_base({valuesName}.data);"
+                 $"{ind}{elemCpp}* {name}_compact = new {elemCpp}[{idxName}->cardinality * {name}_trail];"
+                 $"{ind}for (size_t __r = 0; __r < {idxName}->cardinality * {name}_trail; __r++) {name}_compact[__r] = {name}_valpool[__r];"
+                 $$"""{{ind}}nested_array_utilities::Sparse<{{elemCpp}}, {{leadRank}}> {{name}} { {{name}}_compact, {{idxName}}, {{name}}_trail };""" ]
          // Owns BOTH the compact buffer and the freshly built index.
          registerShapedAlloc name "deallocate_sparse" name
          (lines, addVarName binding.Id name ctx)
      | _ ->
-         ([refusalErrorLine ind (sprintf "sparse() binding '%s' is not a SparseIdx array type" name)], addVarName binding.Id name ctx))
+         ([refusalErrorLine ind ($"sparse() binding '{name}' is not a SparseIdx array type")], addVarName binding.Id name ctx))
 
 
 /// Rearrangement combinators (group_by, sort, mask, transpose, decompact,
@@ -1902,7 +1892,7 @@ and forceDeferredBindingIds (ctx: CodeGenContext) (builder: IRBuilder) (tmpBase:
             match Map.tryFind id accCtx.DeferredComputations with
             | Some defExpr -> inferExprType defExpr
             | None -> IRTUnit
-        let (code, ctx', _) = forceDeferredArrayInput accCtx builder (sprintf "%s_%d" tmpBase id) (IRVar (id, ty))
+        let (code, ctx', _) = forceDeferredArrayInput accCtx builder ($"{tmpBase}_{id}") (IRVar (id, ty))
         (accCode @ code, ctx')
     ) ([], ctx)
 
@@ -1919,7 +1909,7 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     //
     // Validation accepts any predicate that resolves to a
     // single-parameter callable through resolveCallable.
-    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "mask"
     let elemStr = elemTypeToCpp elemET
     let predErrCode =
@@ -1930,7 +1920,7 @@ and genMaskBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRMask (arrExpr, predExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []  // Unreachable: helper supports IRMask
-    let code = forceCode @ elemErrCode @ predErrCode @ [sprintf "%s// mask: count + compact" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ predErrCode @ [$"{ind}// mask: count + compact"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -1940,15 +1930,15 @@ and genIntersectBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let ind = indentStr ctx
     let name = bindingCppName binding
     // intersect(A, B): elements present in both arrays.
-    let (forceCodeA, ctx, aExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__a" name) aExpr
-    let (forceCodeB, ctx, bExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__b" name) bExpr
+    let (forceCodeA, ctx, aExpr) = forceDeferredArrayInput ctx builder ($"{name}__a") aExpr
+    let (forceCodeB, ctx, bExpr) = forceDeferredArrayInput ctx builder ($"{name}__b") bExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "intersect"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRIntersect (aExpr, bExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// intersect: build set from B, scan A" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCodeA @ forceCodeB @ elemErrCode @ [$"{ind}// intersect: build set from B, scan A"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -1958,15 +1948,15 @@ and genUnionBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
     let ind = indentStr ctx
     let name = bindingCppName binding
     // union(A, B): all elements from A, plus elements from B not in A.
-    let (forceCodeA, ctx, aExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__a" name) aExpr
-    let (forceCodeB, ctx, bExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__b" name) bExpr
+    let (forceCodeA, ctx, aExpr) = forceDeferredArrayInput ctx builder ($"{name}__a") aExpr
+    let (forceCodeB, ctx, bExpr) = forceDeferredArrayInput ctx builder ($"{name}__b") bExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind aExpr "union"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRUnion (aExpr, bExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCodeA @ forceCodeB @ elemErrCode @ [sprintf "%s// union: all of A, plus elements from B not in A" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCodeA @ forceCodeB @ elemErrCode @ [$"{ind}// union: all of A, plus elements from B not in A"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -1979,14 +1969,14 @@ and genUniqueBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // first counts unique elements via std::unordered_set, then fills
     // the output array on a second pass (clearing the set in between
     // so first-occurrence membership testing repeats identically).
-    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "unique"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRUnique arrExpr) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCode @ elemErrCode @ [sprintf "%s// unique: dedup via unordered_set, first-occurrence order" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [$"{ind}// unique: dedup via unordered_set, first-occurrence order"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -2012,7 +2002,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     //
     // group_by's copy loop indexes vals by name, so it needs a MATERIALIZED
     // input; the shared helper forces a still-deferred or inline vals first.
-    let (forceCode, ctx, vals) = forceDeferredArrayInput ctx builder (sprintf "%s__vals" name) vals
+    let (forceCode, ctx, vals) = forceDeferredArrayInput ctx builder ($"{name}__vals") vals
     let valsName = exprToCppCtx ctx vals
     let gkName = exprToCppCtx ctx gk
     let (elemType, elemErrCode) = inferElemTypeStrict ctx ind vals "group_by"
@@ -2027,7 +2017,7 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // return-extent ABI the peel emitters follow; see emitExtentsTable.
     let extentsDecl =
         fst (emitExtentsTable ind (name + "_extents") 2
-                 [(sprintf "%s__ngroups" gkName, false); ("0 /* inner extent is ragged */", false)])
+                 [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
     // GATHER ELISION: every consumer of this binding reads only row LENGTHS
     // (computeExtentsOnlyGroupBys), which come from the gk offsets. The row
     // TABLE is still emitted -- the peel indexes it, and print reads its extents
@@ -2038,12 +2028,12 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     let code =
         elemErrCode
         @ [ if elideGather
-            then sprintf "%s// group_by: rows NOT gathered -- every consumer reads only extents(row)" ind
-            else sprintf "%s// group_by: per-group nested allocation, group-contiguous via gk__perm" ind ]
+            then $"{ind}// group_by: rows NOT gathered -- every consumer reads only extents(row)"
+            else $"{ind}// group_by: per-group nested allocation, group-contiguous via gk__perm" ]
         @ extentsDecl
-        @ [ sprintf "%sArray<%s*, 1> %s = { new %s*[%s__ngroups], %s_extents };" ind elemStr name elemStr gkName name ]
+        @ [ $$"""{{ind}}Array<{{elemStr}}*, 1> {{name}} = { new {{elemStr}}*[{{gkName}}__ngroups], {{name}}_extents };""" ]
         @ (if elideGather then
-             [ sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) %s[__g] = nullptr;" ind gkName name ]
+             [ $"{ind}for (size_t __g = 0; __g < {gkName}__ngroups; __g++) {name}[__g] = nullptr;" ]
            else
              // ONE CSR POOL, not one `new[]` per group. The total is already in
              // hand -- `gk__offsets[gk__ngroups]` is the CSR convention -- so the
@@ -2063,15 +2053,15 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
              // (registered below). `deallocate_ragged_rows_owned` would be
              // undefined behaviour here -- it `delete[]`s each row, and these are
              // interior pointers.
-             [ sprintf "%s%s* %s__pool = new %s[%s__offsets[%s__ngroups]];" ind elemStr name elemStr gkName gkName
-               sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
-               sprintf "%s    size_t __off = %s__offsets[__g];" ind gkName
-               sprintf "%s    size_t __sz = %s__offsets[__g + 1] - __off;" ind gkName
-               sprintf "%s    %s[__g] = %s__pool + __off;" ind name name
-               sprintf "%s    for (size_t __k = 0; __k < __sz; __k++) {" ind
-               sprintf "%s        %s[__g][__k] = %s;" ind name (valsAt (sprintf "%s__perm[__off + __k]" gkName))
-               sprintf "%s    }" ind
-               sprintf "%s}" ind ])
+             [ $"{ind}{elemStr}* {name}__pool = new {elemStr}[{gkName}__offsets[{gkName}__ngroups]];"
+               $$"""{{ind}}for (size_t __g = 0; __g < {{gkName}}__ngroups; __g++) {"""
+               $"{ind}    size_t __off = {gkName}__offsets[__g];"
+               $"{ind}    size_t __sz = {gkName}__offsets[__g + 1] - __off;"
+               $"{ind}    {name}[__g] = {name}__pool + __off;"
+               $$"""{{ind}}    for (size_t __k = 0; __k < __sz; __k++) {"""
+               $"""{ind}        {name}[__g][__k] = {(valsAt (sprintf "%s__perm[__off + __k]" gkName))};"""
+               $$"""{{ind}}    }"""
+               $"{ind}}}" ])
     // Owns the row table AND every per-group row (each a separate new[]).
     // The wrapper is Array<T*,1> whose .extents[1] is the ragged placeholder
     // 0, so the row count comes from the gk__ngroups local -- a plain size_t
@@ -2085,10 +2075,10 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // row null, so it keeps the per-row deallocator, which no-ops on null.
     if elideGather then
         registerShapedAlloc name "deallocate_ragged_rows_owned"
-            (sprintf "%s.data, %s__ngroups" name gkName)
+            ($"{name}.data, {gkName}__ngroups")
     else
         registerShapedAlloc name "deallocate_ragged_storage"
-            (sprintf "%s.data, %s__pool" name name)
+            ($"{name}.data, {name}__pool")
     let ctx' = addVarName binding.Id name ctx
     let ctx' = { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays }
     (forceCode @ code, ctx')
@@ -2116,17 +2106,17 @@ and genGroupBucketBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: I
     // else), which is what makes the `<gk>__` suffixed reads below resolvable.
     let elemStr = "int64_t"
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable ind (name + "_extents") 1 [(sprintf "%s__nsrc" gkName, false)]
+        emitExtentsTable ind (name + "_extents") 1 [($"{gkName}__nsrc", false)]
     let code =
-        [ sprintf "%s// group_bucket: invert gk's perm/offsets into row -> bucket (-1 = dropped row)" ind ]
+        [ $"{ind}// group_bucket: invert gk's perm/offsets into row -> bucket (-1 = dropped row)" ]
         @ extentsDecl
-        @ [ sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemStr name elemStr name name
-            sprintf "%sfor (size_t __i = 0; __i < %s__nsrc; __i++) %s[__i] = -1;" ind gkName name
-            sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
-            sprintf "%s    for (size_t __p = %s__offsets[__g]; __p < %s__offsets[__g + 1]; __p++) {" ind gkName gkName
-            sprintf "%s        %s[%s__perm[__p]] = (%s)__g;" ind name gkName elemStr
-            sprintf "%s    }" ind
-            sprintf "%s}" ind ]
+        @ [ $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { allocate<promote<{{elemStr}}, 1>::type>({{name}}_extents), {{name}}_extents };"""
+            $"{ind}for (size_t __i = 0; __i < {gkName}__nsrc; __i++) {name}[__i] = -1;"
+            $$"""{{ind}}for (size_t __g = 0; __g < {{gkName}}__ngroups; __g++) {"""
+            $$"""{{ind}}    for (size_t __p = {{gkName}}__offsets[__g]; __p < {{gkName}}__offsets[__g + 1]; __p++) {"""
+            $"{ind}        {name}[{gkName}__perm[__p]] = ({elemStr})__g;"
+            $$"""{{ind}}    }"""
+            $"{ind}}}" ]
     registerPoolAlloc AllocDense elemStr 1 "nullptr" (name + "_extents") name ownedExtents
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
@@ -2149,14 +2139,14 @@ and genGroupSizesBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IR
     // are counted nowhere -- consistent with group_bucket reading -1 for them.
     let elemStr = "int64_t"
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable ind (name + "_extents") 1 [(sprintf "%s__ngroups" gkName, false)]
+        emitExtentsTable ind (name + "_extents") 1 [($"{gkName}__ngroups", false)]
     let code =
-        [ sprintf "%s// extents(gk): per-group sizes from the CSR offsets (no gather)" ind ]
+        [ $"{ind}// extents(gk): per-group sizes from the CSR offsets (no gather)" ]
         @ extentsDecl
-        @ [ sprintf "%sArray<%s, 1> %s = { allocate<promote<%s, 1>::type>(%s_extents), %s_extents };" ind elemStr name elemStr name name
-            sprintf "%sfor (size_t __g = 0; __g < %s__ngroups; __g++) {" ind gkName
-            sprintf "%s    %s[__g] = (%s)(%s__offsets[__g + 1] - %s__offsets[__g]);" ind name elemStr gkName gkName
-            sprintf "%s}" ind ]
+        @ [ $$"""{{ind}}Array<{{elemStr}}, 1> {{name}} = { allocate<promote<{{elemStr}}, 1>::type>({{name}}_extents), {{name}}_extents };"""
+            $$"""{{ind}}for (size_t __g = 0; __g < {{gkName}}__ngroups; __g++) {"""
+            $"{ind}    {name}[__g] = ({elemStr})({gkName}__offsets[__g + 1] - {gkName}__offsets[__g]);"
+            $"{ind}}}" ]
     registerPoolAlloc AllocDense elemStr 1 "nullptr" (name + "_extents") name ownedExtents
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
@@ -2178,7 +2168,7 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // enabling sort-skip, merge-style joins, and other optimizations; not yet
     // implemented. Materialization caching would sit downstream of that
     // analysis, not as a substitute for it.
-    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "sort"
     let elemStr = elemTypeToCpp elemET
     // Validate single-param key callable. Helper falls back to a 0L key
@@ -2192,7 +2182,7 @@ and genSortBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRSort (arrExpr, keyExpr)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCode @ elemErrCode @ keyErrCode @ [sprintf "%s// sort: stable_sort on permutation, eager materialization" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ keyErrCode @ [$"{ind}// sort: stable_sort on permutation, eager materialization"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -2206,14 +2196,14 @@ and genTransposeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     // materialization (same phase-1 strategy as sort); the result is an
     // independent array with no aliasing back to the source. TypeCheck has
     // already verified both axes are arity-1 SymNone and in range.
-    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "transpose"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRTranspose (arrExpr, d1, d2)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCode @ elemErrCode @ [sprintf "%s// transpose: hard (swapped-extent alloc + axis-swapped copy)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [$"{ind}// transpose: hard (swapped-extent alloc + axis-swapped copy)"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -2229,7 +2219,7 @@ and genStackJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     let (forceCode, ctx, arrs) =
         arrs |> List.mapi (fun i a -> (i, a))
         |> List.fold (fun (accCode, accCtx, accArrs) (i, a) ->
-            let (code, ctx', a') = forceDeferredArrayInput accCtx builder (sprintf "%s__src%d" name i) a
+            let (code, ctx', a') = forceDeferredArrayInput accCtx builder ($"{name}__src{i}") a
             (accCode @ code, ctx', accArrs @ [a'])) ([], ctx, [])
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind (List.head arrs) opName
     let elemStr = elemTypeToCpp elemET
@@ -2240,8 +2230,8 @@ and genStackJoinBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
         | None -> []
     let note =
         match joinDim with
-        | Some d -> sprintf "%s// join: dense alloc (summed extent on dim %d) + per-source offset copy" ind d
-        | None -> sprintf "%s// stack: fresh leading axis (dense alloc + per-source copy)" ind
+        | Some d -> $"{ind}// join: dense alloc (summed extent on dim {d}) + per-source offset copy"
+        | None -> $"{ind}// stack: fresh leading axis (dense alloc + per-source copy)"
     let code = forceCode @ elemErrCode @ [note] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
@@ -2257,14 +2247,14 @@ and genDecompactBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     // class transform (Sym copy / Antisym sign + zero diagonal / Hermitian
     // conj). TypeCheck has verified dim d targets a compact slot and that
     // the Antisym middle-peel case is excluded.
-    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
     let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr "decompact"
     let elemStr = elemTypeToCpp elemET
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) (IRDecompact (arrExpr, d)) with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCode @ elemErrCode @ [sprintf "%s// decompact: hard (dense alloc + symmetry-expanding scatter)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [$"{ind}// decompact: hard (dense alloc + symmetry-expanding scatter)"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -2275,17 +2265,17 @@ and genArrayNegateConjugateBinding (ctx: CodeGenContext) (binding: IRBinding) (b
     let name = bindingCppName binding
     // Whole-array eager negate/conjugate (the cheap intra-group transposes).
     // Type-preserving: same-shape alloc + flat contiguous-pool transform.
-    let isConj = (match binding.Value with IRArrayConjugate _ -> true | _ -> false)
+    let isConj = (binding.Value.IsIRArrayConjugate)
     let label = if isConj then "conjugate" else "negate"
-    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder (sprintf "%s__arr" name) arrExpr
-    let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr (sprintf "array_%s" label)
+    let (forceCode, ctx, arrExpr) = forceDeferredArrayInput ctx builder ($"{name}__arr") arrExpr
+    let (elemET, elemErrCode) = inferElemTypeStrict ctx ind arrExpr ($"array_{label}")
     let elemStr = elemTypeToCpp elemET
     let form = if isConj then IRArrayConjugate arrExpr else IRArrayNegate arrExpr
     let matStmts =
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) form with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = forceCode @ elemErrCode @ [sprintf "%s// array_%s: whole-array eager transform (same-shape alloc + pool loop)" ind label] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = forceCode @ elemErrCode @ [$"{ind}// array_{label}: whole-array eager transform (same-shape alloc + pool loop)"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -2305,7 +2295,7 @@ and genGramBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = [sprintf "%s// gram: A * B^H (Gram product)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = [$"{ind}// gram: A * B^H (Gram product)"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -2324,7 +2314,7 @@ and genMatmulBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         match materializeInlineForm emptySubst ctx.VarNames name (lazy elemStr) binding.Value with
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
-    let code = [sprintf "%s// matmul: A * B (dense matrix product)" ind] @ (matStmts |> List.map (fun s -> ind + s))
+    let code = [$"{ind}// matmul: A * B (dense matrix product)"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -2343,7 +2333,7 @@ and genEighBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code =
-        [sprintf "%s// eigh: symmetric/Hermitian eigendecomposition -> (Q, LAM)" ind]
+        [$"{ind}// eigh: symmetric/Hermitian eigendecomposition -> (Q, LAM)"]
         @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
@@ -2365,7 +2355,7 @@ and genSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code =
-        [sprintf "%s// solve: A.x = b by partial-pivoted LU -> x" ind]
+        [$"{ind}// solve: A.x = b by partial-pivoted LU -> x"]
         @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
@@ -2412,18 +2402,18 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         | ArrayElem at -> isCompoundArrayType at || isSparseArrayType at
         | _ -> false
     let boundExpr =
-        if isRaggedRowOperand then sprintf "%s.len" arrName
-        elif isCompoundOperand then sprintf "(%s.idx->cardinality * %s.trailing_stride)" arrName arrName
+        if isRaggedRowOperand then $"{arrName}.len"
+        elif isCompoundOperand then $"({arrName}.idx->cardinality * {arrName}.trailing_stride)"
         // Dense operand: the shared literal-or-runtime rule, exactly as the
         // expression-form reduce already does. The two forms emit the same
         // fold over the same array and must agree on its trip count.
         else
             match inferExprType arrExpr with
             | ArrayElem at -> literalOrRuntimeExtentOfArray at arrName 0
-            | _ -> sprintf "%s.extents[0]" arrName
+            | _ -> $"{arrName}.extents[0]"
     let elemAt (i: string) =
-        if isCompoundOperand then sprintf "%s.data[%s]" arrName i
-        else sprintf "%s[%s]" arrName i
+        if isCompoundOperand then $"{arrName}.data[{i}]"
+        else $"{arrName}[{i}]"
 
     // Decide whether to emit a runtime extent check based on whether
     // the array's innermost-dim extent is statically known.
@@ -2440,8 +2430,8 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         // needs an emptiness guard, static or dynamic.
         if isStaticallyNonEmpty || initExpr.IsSome then []
         else [
-            sprintf "%s// reduce: dynamic extent -- runtime non-emptiness guard" ind
-            sprintf "%sif (%s == 0) { blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); }" ind boundExpr
+            $"{ind}// reduce: dynamic extent -- runtime non-emptiness guard"
+            $"{ind}if ({boundExpr} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); }}"
         ]
 
     // Comm-licensed parallel fold. `where ... omp` on the fold kernel is the
@@ -2477,7 +2467,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // upper bound, and the compound operand's is a two-field product through a
     // pointer -- computed once here for both parallel paths. (The serial path
     // keeps using `boundExpr` inline, byte-identical to before.)
-    let rnName = sprintf "__rn_%s" name
+    let rnName = $"__rn_{name}"
     // BUILD KNOB, applied ONE LEVEL ABOVE the two paths because they need
     // DIFFERENT suppressions and the difference is not arbitrary:
     //
@@ -2505,7 +2495,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     // simd form it keeps) and for a kernel that never asked for omp.
     let pathBSuppressedNote =
         if parallelFold.IsSome && not ompThreadsOn
-        then [ sprintf "%s// [omp] requested but emitted serial: %s" ind (ompThreadsSuppressedReason ()) ]
+        then [ $"{ind}// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}" ]
         else []
     let code =
         match resolveCallable kernelExpr with
@@ -2536,10 +2526,10 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // "serial emission contains no `omp_get_`" be checkable by
                 // grepping the output.
                 elemErrCode @ guardLines @ [
-                    sprintf "%s// reduce: comm-licensed reduction (builtin '%s'), flat sweep" ind (binOpToCpp op)
-                    sprintf "%s// [omp] requested but emitted serial: %s" ind (ompThreadsSuppressedReason ())
-                    sprintf "%sconst size_t %s = %s;" ind rnName boundExpr
-                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
+                    $"{ind}// reduce: comm-licensed reduction (builtin '{(binOpToCpp op)}'), flat sweep"
+                    $"{ind}// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}"
+                    $"{ind}const size_t {rnName} = {boundExpr};"
+                    $"{ind}{elemStr} {name} = {seedStr};"
                 ]
                 @ (fpReassocSimdStmts redOp name "__ri" loopStart rnName [] elemAt
                    |> List.map (fun s -> ind + s))
@@ -2549,13 +2539,13 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // is emitted directly (and the wrapper would be dead code).
                 (ompApiUsedCell ()).Value <- true
                 elemErrCode @ guardLines @ [
-                    sprintf "%s// reduce: comm-licensed OpenMP reduction (builtin '%s'), flat sweep" ind (binOpToCpp op)
-                    sprintf "%sconst size_t %s = %s;" ind rnName boundExpr
-                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
-                    sprintf "%s#pragma omp parallel for simd reduction(%s:%s)" ind redOp name
-                    sprintf "%sfor (size_t __ri = %s; __ri < %s; __ri++) {" ind loopStart rnName
-                    sprintf "%s    %s = %s %s %s;" ind name name (binOpToCpp op) (elemAt "__ri")
-                    sprintf "%s}" ind
+                    $"{ind}// reduce: comm-licensed OpenMP reduction (builtin '{(binOpToCpp op)}'), flat sweep"
+                    $"{ind}const size_t {rnName} = {boundExpr};"
+                    $"{ind}{elemStr} {name} = {seedStr};"
+                    $"{ind}#pragma omp parallel for simd reduction({redOp}:{name})"
+                    $$"""{{ind}}for (size_t __ri = {{loopStart}}; __ri < {{rnName}}; __ri++) {"""
+                    $"""{ind}    {name} = {name} {(binOpToCpp op)} {(elemAt "__ri")};"""
+                    $"{ind}}}"
                 ]
             | None, Some _ ->
                 // Path B. Chunk bounds and combine order are fixed functions of
@@ -2565,7 +2555,7 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // result is the seed alone (which is exactly the serial answer
                 // for an empty range, init form included).
                 (ompApiUsedCell ()).Value <- true
-                let partName = sprintf "__rpart_%s" name
+                let partName = $"__rpart_{name}"
                 // K independent LANE accumulators inside each chunk. Lane l owns
                 // __rlo+l, __rlo+l+K, __rlo+l+2K, ... and seeds from its own
                 // first element (no identity needed); lanes fold into lane 0 in
@@ -2578,41 +2568,41 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // to remove. Below K elements the chunk falls back to a plain
                 // serial fold, byte-identical to the lane form for len < K.
                 let kLanes = foldLaneCount
-                let laneName (l: int) = sprintf "__rlane%d" l
+                let laneName (l: int) = $"__rlane{l}"
                 let laneBody =
-                    [ sprintf "%s            if (__rhi - __rlo < (size_t)%d) {" ind kLanes
-                      sprintf "%s                %s __racc = %s;" ind elemStr (elemAt "__rlo")
-                      sprintf "%s                for (size_t __ri = __rlo + 1; __ri < __rhi; __ri++) {" ind
-                      sprintf "%s                    __racc = %s(__racc, %s);" ind wname (elemAt "__ri")
-                      sprintf "%s                }" ind
-                      sprintf "%s                %s[__rt] = __racc;" ind partName
-                      sprintf "%s            } else {" ind ]
+                    [ $$"""{{ind}}            if (__rhi - __rlo < (size_t){{kLanes}}) {"""
+                      $"""{ind}                {elemStr} __racc = {(elemAt "__rlo")};"""
+                      $$"""{{ind}}                for (size_t __ri = __rlo + 1; __ri < __rhi; __ri++) {"""
+                      $"""{ind}                    __racc = {wname}(__racc, {(elemAt "__ri")});"""
+                      $$"""{{ind}}                }"""
+                      $"{ind}                {partName}[__rt] = __racc;"
+                      $$"""{{ind}}            } else {""" ]
                     @ [ for l in 0 .. kLanes - 1 ->
-                          sprintf "%s                %s %s = %s;" ind elemStr (laneName l) (elemAt (sprintf "__rlo + %d" l)) ]
-                    @ [ sprintf "%s                size_t __ri = __rlo + %d;" ind kLanes
-                        sprintf "%s                for (; __ri + %d <= __rhi; __ri += %d) {" ind kLanes kLanes ]
+                          $"""{ind}                {elemStr} {(laneName l)} = {(elemAt (sprintf "__rlo + %d" l))};""" ]
+                    @ [ $"{ind}                size_t __ri = __rlo + {kLanes};"
+                        $$"""{{ind}}                for (; __ri + {{kLanes}} <= __rhi; __ri += {{kLanes}}) {""" ]
                     @ [ for l in 0 .. kLanes - 1 ->
-                          sprintf "%s                    %s = %s(%s, %s);" ind (laneName l) wname (laneName l) (elemAt (sprintf "__ri + %d" l)) ]
-                    @ [ sprintf "%s                }" ind ]
+                          $"""{ind}                    {(laneName l)} = {wname}({(laneName l)}, {(elemAt (sprintf "__ri + %d" l))});""" ]
+                    @ [ $$"""{{ind}}                }""" ]
                     // Tail: at most K-1 elements remain, and they belong to
                     // lanes 0..K-2 in order (lane K-1 can never receive one).
                     @ [ for l in 0 .. kLanes - 2 ->
-                          sprintf "%s                if (__ri < __rhi) { %s = %s(%s, %s); __ri++; }" ind (laneName l) wname (laneName l) (elemAt "__ri") ]
+                          $$"""{{ind}}                if (__ri < __rhi) { {{(laneName l)}} = {{wname}}({{(laneName l)}}, {{(elemAt "__ri")}}); __ri++; }""" ]
                     @ [ for l in 1 .. kLanes - 1 ->
-                          sprintf "%s                %s = %s(%s, %s);" ind (laneName 0) wname (laneName 0) (laneName l) ]
-                    @ [ sprintf "%s                %s[__rt] = %s;" ind partName (laneName 0)
-                        sprintf "%s            }" ind ]
+                          $"{ind}                {(laneName 0)} = {wname}({(laneName 0)}, {(laneName l)});" ]
+                    @ [ $"{ind}                {partName}[__rt] = {(laneName 0)};"
+                        $$"""{{ind}}            }""" ]
                 elemErrCode @ guardLines @ wrapperLines @ [
-                    sprintf "%s// reduce: comm-licensed parallel fold, contiguous chunked partials (%d-lane)" ind kLanes
-                    sprintf "%sconst size_t %s = %s;" ind rnName boundExpr
-                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
-                    sprintf "%s{" ind
-                    sprintf "%s    const size_t __rlo0 = %s;" ind loopStart
-                    sprintf "%s    const size_t __rcnt = (%s > __rlo0) ? (%s - __rlo0) : (size_t)0;" ind rnName rnName
-                    sprintf "%s    if (__rcnt > 0) {" ind
-                    sprintf "%s        int __rT = omp_get_max_threads();" ind
-                    sprintf "%s        if ((size_t)__rT > __rcnt) __rT = (int)__rcnt;" ind
-                    sprintf "%s        if (__rT < 1) __rT = 1;" ind
+                    $"{ind}// reduce: comm-licensed parallel fold, contiguous chunked partials ({kLanes}-lane)"
+                    $"{ind}const size_t {rnName} = {boundExpr};"
+                    $"{ind}{elemStr} {name} = {seedStr};"
+                    $"{ind}{{"
+                    $"{ind}    const size_t __rlo0 = {loopStart};"
+                    $"{ind}    const size_t __rcnt = ({rnName} > __rlo0) ? ({rnName} - __rlo0) : (size_t)0;"
+                    $$"""{{ind}}    if (__rcnt > 0) {"""
+                    $"{ind}        int __rT = omp_get_max_threads();"
+                    $"{ind}        if ((size_t)__rT > __rcnt) __rT = (int)__rcnt;"
+                    $"{ind}        if (__rT < 1) __rT = 1;"
                     // num_threads(n) is a REQUEST, not a guarantee: dynamic
                     // adjustment, or landing inside an enclosing parallel region
                     // with nesting off, can hand back a SMALLER team. Splitting
@@ -2621,21 +2611,21 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     // the team size the region actually got, and the combine
                     // reads it back through a slot only thread 0 writes (the
                     // region's implicit barrier publishes it).
-                    sprintf "%s        int __rTact = __rT;" ind
-                    sprintf "%s        %s* %s = new %s[__rT];" ind elemStr partName elemStr
-                    sprintf "%s        #pragma omp parallel num_threads(__rT)" ind
-                    sprintf "%s        {" ind
-                    sprintf "%s            const int __rnt = omp_get_num_threads();" ind
-                    sprintf "%s            const int __rt = omp_get_thread_num();" ind
-                    sprintf "%s            if (__rt == 0) __rTact = __rnt;" ind
-                    sprintf "%s            const size_t __rlo = __rlo0 + (__rcnt * (size_t)__rt) / (size_t)__rnt;" ind
-                    sprintf "%s            const size_t __rhi = __rlo0 + (__rcnt * ((size_t)__rt + 1)) / (size_t)__rnt;" ind
+                    $"{ind}        int __rTact = __rT;"
+                    $"{ind}        {elemStr}* {partName} = new {elemStr}[__rT];"
+                    $"{ind}        #pragma omp parallel num_threads(__rT)"
+                    $$"""{{ind}}        {"""
+                    $"{ind}            const int __rnt = omp_get_num_threads();"
+                    $"{ind}            const int __rt = omp_get_thread_num();"
+                    $"{ind}            if (__rt == 0) __rTact = __rnt;"
+                    $"{ind}            const size_t __rlo = __rlo0 + (__rcnt * (size_t)__rt) / (size_t)__rnt;"
+                    $"{ind}            const size_t __rhi = __rlo0 + (__rcnt * ((size_t)__rt + 1)) / (size_t)__rnt;"
                 ] @ laneBody @ [
-                    sprintf "%s        }" ind
-                    sprintf "%s        for (int __rt = 0; __rt < __rTact; __rt++) %s = %s(%s, %s[__rt]);" ind name wname name partName
-                    sprintf "%s        delete[] %s;" ind partName
-                    sprintf "%s    }" ind
-                    sprintf "%s}" ind
+                    $$"""{{ind}}        }"""
+                    $"{ind}        for (int __rt = 0; __rt < __rTact; __rt++) {name} = {wname}({name}, {partName}[__rt]);"
+                    $"{ind}        delete[] {partName};"
+                    $$"""{{ind}}    }"""
+                    $"{ind}}}"
                 ]
             | None, None when fpReassocEnabled () && foldReorderLicensed callable ->
                 // BLADE_FP_REASSOC. The user did not write `omp`, so there are
@@ -2682,33 +2672,33 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 let kLanes = foldLaneCount
                 let (laneStmts, resultLane) =
                     fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "__rlo" "__rhi" elemAt
-                        (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
+                        (fun acc rhs -> $"{acc} = {wname}({acc}, {rhs});")
                 elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
-                    sprintf "%s// reduce: accumulator loop, eager (%d-lane, BLADE_FP_REASSOC)" ind kLanes
-                    sprintf "%s%s %s = %s;" ind elemStr name seedStr
-                    sprintf "%s{" ind
-                    sprintf "%s    const size_t __rlo = %s;" ind loopStart
-                    sprintf "%s    const size_t __rhi = %s;" ind boundExpr
-                    sprintf "%s    const size_t __rcnt = (__rhi > __rlo) ? (__rhi - __rlo) : (size_t)0;" ind
-                    sprintf "%s    if (__rcnt < (size_t)%d) {" ind kLanes
+                    $"{ind}// reduce: accumulator loop, eager ({kLanes}-lane, BLADE_FP_REASSOC)"
+                    $"{ind}{elemStr} {name} = {seedStr};"
+                    $"{ind}{{"
+                    $"{ind}    const size_t __rlo = {loopStart};"
+                    $"{ind}    const size_t __rhi = {boundExpr};"
+                    $"{ind}    const size_t __rcnt = (__rhi > __rlo) ? (__rhi - __rlo) : (size_t)0;"
+                    $$"""{{ind}}    if (__rcnt < (size_t){{kLanes}}) {"""
                     // Below K elements there is nothing to interleave, so this
                     // is the serial chain verbatim -- same order, same bits.
-                    sprintf "%s        for (size_t __ri = __rlo; __ri < __rhi; __ri++) {" ind
-                    sprintf "%s            %s = %s(%s, %s);" ind name wname name (elemAt "__ri")
-                    sprintf "%s        }" ind
-                    sprintf "%s    } else {" ind
+                    $$"""{{ind}}        for (size_t __ri = __rlo; __ri < __rhi; __ri++) {"""
+                    $"""{ind}            {name} = {wname}({name}, {(elemAt "__ri")});"""
+                    $$"""{{ind}}        }"""
+                    $$"""{{ind}}    } else {"""
                 ] @ (laneStmts |> List.map (fun s -> ind + "        " + s)) @ [
-                    sprintf "%s        %s = %s(%s, %s);" ind name wname name resultLane
-                    sprintf "%s    }" ind
-                    sprintf "%s}" ind
+                    $"{ind}        {name} = {wname}({name}, {resultLane});"
+                    $$"""{{ind}}    }"""
+                    $"{ind}}}"
                 ]
             | None, None ->
             elemErrCode @ guardLines @ wrapperLines @ pathBSuppressedNote @ [
-                sprintf "%s// reduce: accumulator loop, eager" ind
-                sprintf "%s%s %s = %s;" ind elemStr name seedStr
-                sprintf "%sfor (size_t __ri = %s; __ri < %s; __ri++) {" ind loopStart boundExpr
-                sprintf "%s    %s = %s(%s, %s);" ind name wname name (elemAt "__ri")
-                sprintf "%s}" ind
+                $"{ind}// reduce: accumulator loop, eager"
+                $"{ind}{elemStr} {name} = {seedStr};"
+                $$"""{{ind}}for (size_t __ri = {{loopStart}}; __ri < {{boundExpr}}; __ri++) {"""
+                $"""{ind}    {name} = {wname}({name}, {(elemAt "__ri")});"""
+                $"{ind}}}"
             ]
         | _ ->
             let errLines = codegenError ctx ind "reduce: kernel must resolve to a binary callable (typechecker or IR bug if not)"
@@ -2734,7 +2724,7 @@ and genReduceComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder:
         match e with
         | IRLet (id, value, body) ->
             let tempBinding = {
-                Id = id; Name = sprintf "__v%d" id; Type = inferExprType value
+                Id = id; Name = $"__v{id}"; Type = inferExprType value
                 Value = value; IsConst = false; IsMutable = true
             }
             let (code, nextCtx) = genBinding accCtx tempBinding builder
@@ -2803,11 +2793,11 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                 let arrayNamesOf (info: ApplyInfo) =
                     info.Arrays |> List.mapi (fun i arr ->
                         match arr with
-                        | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
-                        | IRRange _ -> sprintf "__range%d" i
-                        | IRVirtualReverse _ -> sprintf "__rev%d" i
-                        | IRBlocked _ -> sprintf "__blk%d" i
-                        | _ -> sprintf "arr%d" i)
+                        | IRVar (id, _) -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}")
+                        | IRRange _ -> $"__range{i}"
+                        | IRVirtualReverse _ -> $"__rev{i}"
+                        | IRBlocked _ -> $"__blk{i}"
+                        | _ -> $"arr{i}")
                 let foldCg (info: ApplyInfo) (accName: string) =
                     // S2 routing, same rule as the single-kernel site.
                     let cg = routeKernelBodyThroughCall info (buildLoopNestCodeGen info (arrayNamesOf info) accName builder)
@@ -2976,11 +2966,10 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 match elem.Virtual with
                                 | RealArray when elem.ArrayRank = 1
                                                  && not (Map.containsKey elem.ArrayName srcAliases) ->
-                                    let alias = sprintf "__rsrc%d" (Map.count srcAliases)
+                                    let alias = $"__rsrc{Map.count srcAliases}"
                                     srcAliases <- Map.add elem.ArrayName alias srcAliases
                                     aliasDecls <- aliasDecls
-                                        @ [ sprintf "const %s* BLADE_RESTRICT %s = %s.data;"
-                                                (irTypeToCpp elem.ArrayElemType) alias elem.ArrayName ]
+                                        @ [ $"const {(irTypeToCpp elem.ArrayElemType)}* BLADE_RESTRICT {alias} = {elem.ArrayName}.data;" ]
                                 | _ -> ()
                             let mutable currentNames : Map<int, string> = Map.empty
                             let mutable paramFinalNames : Map<IRId, string> = Map.empty
@@ -3022,8 +3011,8 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             // arithmetic, not memory streams, and are not counted.
                             let streams =
                                 lvl.Elements
-                                |> List.filter (fun e -> match e.Virtual with RealArray -> true | _ -> false)
-                                |> List.map (fun e -> e.ArrayName)
+                                |> List.filter (_.Virtual.IsRealArray)
+                                |> List.map (_.ArrayName)
                                 |> List.distinct
                                 |> List.length
                             let boundStr = genLoopBoundExpr (compoundArrayNamesOf cg.Bindings) lvl
@@ -3063,15 +3052,14 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                 // say about vector-register partials, whose
                                 // width the compiler picks.
                                 Some (
-                                    [ sprintf "%s// reduce over computation: accumulator loop (omp simd reduction, BLADE_FP_REASSOC, %d operand stream%s)"
-                                          ind streams (if streams = 1 then "" else "s")
-                                      sprintf "%s{" ind
-                                      sprintf "%s    const size_t __rhi = %s;" ind boundStr ]
+                                    [ $"""{ind}// reduce over computation: accumulator loop (omp simd reduction, BLADE_FP_REASSOC, {streams} operand stream{(if streams = 1 then "" else "s")})"""
+                                      $"{ind}{{"
+                                      $"{ind}    const size_t __rhi = {boundStr};" ]
                                     @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
                                     @ (fpReassocSimdStmts opStr name lvl.IndexName "0" "__rhi"
                                            peels (fun _ -> bodyExpr)
                                        |> List.map (fun s -> ind + "    " + s))
-                                    @ [ sprintf "%s}" ind ])
+                                    @ [ $"{ind}}}" ])
                             | None ->
                             // K-LANE FORM: the fallback for a licence the simd
                             // arm cannot spell (a `comm`-declared kernel, whose
@@ -3086,40 +3074,37 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                             // the same body twice is a hazard the single render
                             // removes.
                             let kLanes = laneCountForStreams streams
-                            let bodyAt (i: string) = sprintf "__rbody(%s)" i
+                            let bodyAt (i: string) = $"__rbody({i})"
                             let (laneStmts, resultLane) =
                                 fpReassocLaneStmts kLanes elemStr "__rlane" "__ri" "0" "__rhi" bodyAt
-                                    (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
+                                    (fun acc rhs -> $"{acc} = {wname}({acc}, {rhs});")
                             Some (
-                                [ sprintf "%s// reduce over computation: accumulator loop (%d-lane, BLADE_FP_REASSOC, %d operand stream%s)"
-                                      ind kLanes streams (if streams = 1 then "" else "s")
-                                  sprintf "%s{" ind
-                                  sprintf "%s    const size_t __rhi = %s;" ind boundStr ]
+                                [ $"""{ind}// reduce over computation: accumulator loop ({kLanes}-lane, BLADE_FP_REASSOC, {streams} operand stream{(if streams = 1 then "" else "s")})"""
+                                  $"{ind}{{"
+                                  $"{ind}    const size_t __rhi = {boundStr};" ]
                                 @ (aliasDecls |> List.map (fun s -> ind + "    " + s))
-                                @ [ sprintf "%s    auto __rbody = [&](size_t %s) -> %s { %s return %s; };"
-                                        ind lvl.IndexName elemStr
-                                        (peels |> String.concat " ") bodyExpr
-                                    sprintf "%s    if (__rhi < (size_t)%d) {" ind kLanes
+                                @ [ $"""{ind}    auto __rbody = [&](size_t {lvl.IndexName}) -> {elemStr} {{ {(peels |> String.concat " ")} return {bodyExpr}; }};"""
+                                    $$"""{{ind}}    if (__rhi < (size_t){{kLanes}}) {"""
                                     // Below K elements there is nothing to
                                     // interleave: the serial chain verbatim -- the
                                     // same bodies, folded in the same ascending
                                     // order into the same seeded accumulator, hence
                                     // the same double the nest below produces.
-                                    sprintf "%s        for (size_t __ri = 0; __ri < __rhi; __ri++) {" ind
-                                    sprintf "%s            %s = %s(%s, __rbody(__ri));" ind name wname name
-                                    sprintf "%s        }" ind
-                                    sprintf "%s    } else {" ind ]
+                                    $$"""{{ind}}        for (size_t __ri = 0; __ri < __rhi; __ri++) {"""
+                                    $"{ind}            {name} = {wname}({name}, __rbody(__ri));"
+                                    $$"""{{ind}}        }"""
+                                    $$"""{{ind}}    } else {""" ]
                                 @ (laneStmts |> List.map (fun s -> ind + "        " + s))
-                                @ [ sprintf "%s        %s = %s(%s, %s);" ind name wname name resultLane
-                                    sprintf "%s    }" ind
-                                    sprintf "%s}" ind ])
+                                @ [ $"{ind}        {name} = {wname}({name}, {resultLane});"
+                                    $$"""{{ind}}    }"""
+                                    $"{ind}}}" ])
                         | _ -> None
                     // The fold nest as emitted today, and the lane form when the
                     // knob and the gate above both admit it. Shared by both
                     // non-dispatch arms so they cannot drift.
                     let foldNestLines () =
                         wrapperLines
-                        @ [sprintf "%s%s %s = %s;" ind elemStr name seedStr]
+                        @ [$"{ind}{elemStr} {name} = {seedStr};"]
                         @ (match laneLines () with
                            | Some ls -> ls
                            | None -> genLoopNest cg ctx.VarNames ctx.Indent)
@@ -3141,9 +3126,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                     genLoopBoundExpr (compoundArrayNamesOf cg.Bindings)
                                                      (List.head cg.Bindings)
                                 // BLOCK comment -- see materializeGramForm's note.
-                                [ sprintf "%s/* linalg dispatch: dot(%s, %s) = reduce(%s * %s, (+)) */ %s %s = %s(%s, %s.data, %s.data, %s);"
-                                      ind xName yName xName yName
-                                      elemStr name entry nExtent xName yName seedStr ]
+                                [ $"{ind}/* linalg dispatch: dot({xName}, {yName}) = reduce({xName} * {yName}, (+)) */ {elemStr} {name} = {entry}({nExtent}, {xName}.data, {yName}.data, {seedStr});" ]
                             | _ -> foldNestLines ()
                         | None -> foldNestLines ()
                     (code, ctx')
@@ -3153,7 +3136,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     // OWN arrays (genFusedLoopNest staggers mixed-arity
                     // trees), so incompatible loop structures are a loud
                     // diagnostic, never silently-shared loops.
-                    let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+                    let leafNames = infos |> List.mapi (fun i _ -> $"{name}_{i}")
                     let leafCgs = infos |> List.mapi (fun i info -> foldCg info leafNames.[i])
                     // A fused fold writes shared scalar accumulators, which race
                     // under any parallel/device backend (omp reduction clauses
@@ -3164,16 +3147,16 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                         | BkCuda _ -> Some "cuda" | BkMpi -> Some "mpi" | _ -> None)
                     match checkMergeCompatible leafCgs, deviceLeaf with
                     | _, Some bk ->
-                        (codegenError ctx ind (sprintf "reduce over a fused computation with a %s leaf: device/parallel reductions over a fused tree are not supported yet -- force the leaf with |> compute and reduce the array" bk), ctx')
+                        (codegenError ctx ind ($"reduce over a fused computation with a {bk} leaf: device/parallel reductions over a fused tree are not supported yet -- force the leaf with |> compute and reduce the array"), ctx')
                     | Error reason, _ ->
-                        (codegenError ctx ind (sprintf "reduce over a fused computation: cannot fuse the leaves into one loop nest: %s" reason), ctx')
+                        (codegenError ctx ind ($"reduce over a fused computation: cannot fuse the leaves into one loop nest: {reason}"), ctx')
                     | Ok _, None ->
                         let declCode =
-                            leafNames |> List.map (fun ln -> sprintf "%s%s %s = %s;" ind elemStr ln seedStr)
+                            leafNames |> List.map (fun ln -> $"{ind}{elemStr} {ln} = {seedStr};")
                         let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind leafCgs
                         registerStreamBufDecls sNew
                         let loopCode = sp @ genFusedLoopNestStreamed sm leafCgs ctx.VarNames ctx.Indent false None
-                        let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
+                        let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
                         // Destructure sub-bindings resolve through TupleChildren
                         // straight to the accumulator names (the fusion-tree
                         // convention) -- never through std::get on the nested type.
@@ -3246,7 +3229,7 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             | BkCuda _ -> Some "cuda" | BkMpi -> Some "mpi" | _ -> None)
     match deviceLeaf with
     | Some bk ->
-        (codegenError ctx ind (sprintf "reduction join with a %s leg: device/parallel reductions over a joined traversal are not supported yet -- force the leg with |> compute and reduce the array" bk), ctx')
+        (codegenError ctx ind ($"reduction join with a {bk} leg: device/parallel reductions over a joined traversal are not supported yet -- force the leg with |> compute and reduce the array"), ctx')
     | None ->
     let callables = kernelExprs |> List.map resolveCallable
     if callables |> List.exists (fun c -> match c with Some cb -> cb.Params.Length <> 2 | None -> true) then
@@ -3273,17 +3256,17 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
         sharedIds |> List.tryPick (fun (id, di) ->
             let who = Map.tryFind id ctx.VarNames |> Option.defaultValue "<anon>"
             if di.Arrays.IsEmpty then
-                Some (sprintf "shared deferred operand '%s' has no array source to take its traversal from" who)
+                Some ($"shared deferred operand '{who}' has no array source to take its traversal from")
             // A deferred map OVER a deferred map: the share leaf would name an
             // operand that has no C++ definition either. One level only.
             elif di.Arrays |> List.exists (fun a -> (deferredOperand a).IsSome) then
-                Some (sprintf "shared deferred operand '%s' reads another deferred computation; only one level of sharing is supported" who)
+                Some ($"shared deferred operand '{who}' reads another deferred computation; only one level of sharing is supported")
             else None)
     match badShare with
     | Some reason ->
-        (codegenError ctx ind (sprintf "reduction join: %s -- force it with |> compute and join over the array" reason), ctx')
+        (codegenError ctx ind ($"reduction join: {reason} -- force it with |> compute and join over the array"), ctx')
     | None ->
-    let sharedName (id: IRId) = Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "__jshr%d" id)
+    let sharedName (id: IRId) = Map.tryFind id ctx.VarNames |> Option.defaultValue ($"__jshr{id}")
     let arrayNamesOf (info: ApplyInfo) =
         info.Arrays |> List.mapi (fun i arr ->
             match arr with
@@ -3293,13 +3276,13 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                  // has already been repointed at it below.
                  | Some (_, di) ->
                     (match di.Arrays.Head with
-                     | IRVar (srcId, _) -> Map.tryFind srcId ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i)
-                     | _ -> sprintf "arr%d" i)
-                 | None -> Map.tryFind id ctx.VarNames |> Option.defaultValue (sprintf "arr%d" i))
-            | IRRange _ -> sprintf "__range%d" i
-            | IRVirtualReverse _ -> sprintf "__rev%d" i
-            | IRBlocked _ -> sprintf "__blk%d" i
-            | _ -> sprintf "arr%d" i)
+                     | IRVar (srcId, _) -> Map.tryFind srcId ctx.VarNames |> Option.defaultValue ($"arr{i}")
+                     | _ -> $"arr{i}")
+                 | None -> Map.tryFind id ctx.VarNames |> Option.defaultValue ($"arr{i}"))
+            | IRRange _ -> $"__range{i}"
+            | IRVirtualReverse _ -> $"__rev{i}"
+            | IRBlocked _ -> $"__blk{i}"
+            | _ -> $"arr{i}")
     /// Repoint every deferred operand slot at the deferred map's own leading
     /// source array, so the level's bound and peel name exist in C++ (and
     /// dedup with the share leaf's identical peel). Which slots were repointed
@@ -3341,7 +3324,7 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // operator get two identical lambdas, which costs a line of text and keeps
     // the wrapper name a pure function of the leg index.
     let wrappers =
-        callables |> List.mapi (fun i cb -> genCallableWrapper ctx.VarNames (sprintf "%s_j%d" name i) cb)
+        callables |> List.mapi (fun i cb -> genCallableWrapper ctx.VarNames ($"{name}_j{i}") cb)
     let wnames = wrappers |> List.map snd
     let sharedElemTy (id: IRId) =
         match sharedIds |> List.tryFind (fun (sid, _) -> sid = id) with
@@ -3350,7 +3333,7 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
              | ArrayElem at -> at.ElemType
              | t -> t)
         | None -> IRTScalar ETFloat64
-    let leafNames = infos |> List.mapi (fun i _ -> sprintf "%s_%d" name i)
+    let leafNames = infos |> List.mapi (fun i _ -> $"{name}_{i}")
     let leafCgs =
         List.mapi (fun i (info: ApplyInfo) ->
             let (info', moved) = repoint info
@@ -3362,9 +3345,9 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 moved |> List.fold (fun body (pos, sid) ->
                     let paramIds =
                         cg0.Bindings
-                        |> List.collect (fun b -> b.Elements)
+                        |> List.collect (_.Elements)
                         |> List.filter (fun el -> el.ArrayPosition = pos)
-                        |> List.map (fun el -> el.ParamVarId)
+                        |> List.map (_.ParamVarId)
                     paramIds |> List.fold (fun acc pid ->
                         substVar pid (IRVar (sid, sharedElemTy sid)) acc) body) cg0.KernelExpr
             { cg0 with KernelExpr = kernelExpr
@@ -3373,7 +3356,7 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
             infos
     match checkJoinCompatible (shareCgs @ leafCgs) with
     | Error reason ->
-        (codegenError ctx ind (sprintf "reduction join: cannot fold the legs in one traversal: %s" reason), ctx')
+        (codegenError ctx ind ($"reduction join: cannot fold the legs in one traversal: {reason}"), ctx')
     | Ok _ ->
         let wrapperLines = wrappers |> List.collect fst |> List.map (fun s -> ind + s)
         let elemStrs =
@@ -3383,12 +3366,12 @@ and genReduceJoinCore (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 | t -> irTypeToCpp t)
         let declCode =
             List.mapi (fun i ln ->
-                sprintf "%s%s %s = %s;" ind elemStrs.[i] ln (exprToCppCtx ctx seedExprs.[i])) leafNames
+                $"{ind}{elemStrs.[i]} {ln} = {(exprToCppCtx ctx seedExprs.[i])};") leafNames
         let allCgs = shareCgs @ leafCgs
         let (sm, sp, sNew) = streamedNestSetup ctx.StreamedArrays ind allCgs
         registerStreamBufDecls sNew
         let loopCode = sp @ genFusedLoopNestStreamed sm allCgs ctx.VarNames ctx.Indent false None
-        let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (leafNames |> String.concat ", ")
+        let tupleLine = $"""{ind}auto {name} = std::make_tuple({(leafNames |> String.concat ", ")});"""
         let shareNote =
             if sharedIds.IsEmpty then []
             else [ sprintf "%s// reduction join: %d leg(s), sharing %s per iteration" ind leafNames.Length
@@ -3409,12 +3392,12 @@ and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
         // Parent is a deferred tuple -- project out the element and defer it
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id elems.[projIdx] ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred computation (tuple proj)>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred computation (tuple proj)>"], ctx')
     | Some (IRParallel _ | IRFusion _) ->
         // Parent is a deferred combinator -- defer the projection too
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred computation (proj of combinator)>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred computation (proj of combinator)>"], ctx')
     | _ ->
         // Tuple projection -- resolve through TupleChildren map
         let parentName =
@@ -3431,11 +3414,11 @@ and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
             // Flat projection: projIdx is a flat leaf index
             if projIdx < flatChildren.Length then
                 let sourceName = flatChildren.[projIdx]
-                let code = [sprintf "%sauto& %s = %s;" ind name sourceName]
+                let code = [$"{ind}auto& {name} = {sourceName};"]
                 let extentsAlias =
                     match IR.stripUnits binding.Type with
                     | ArrayElem _ ->
-                        [sprintf "%sconst size_t* %s_extents = %s.extents;" ind name sourceName]
+                        [$"{ind}const size_t* {name}_extents = {sourceName}.extents;"]
                     | _ -> []
                 let ctx' = addVarName binding.Id name ctx
                 let ctx' =
@@ -3457,7 +3440,7 @@ and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
             if leafCount > 1 && flatChildren.Length > 0 && flatStart + leafCount <= flatChildren.Length then
                 // Sub-tuple: synthesize from flat children range
                 let subChildren = flatChildren.[flatStart .. flatStart + leafCount - 1]
-                let tupleLine = sprintf "%sauto %s = std::make_tuple(%s);" ind name (subChildren |> String.concat ", ")
+                let tupleLine = $"""{ind}auto {name} = std::make_tuple({(subChildren |> String.concat ", ")});"""
                 let ctx' = addVarName binding.Id name ctx
                 let ctx' = { ctx' with TupleChildren = Map.add name subChildren ctx'.TupleChildren }
                 ([tupleLine], ctx')
@@ -3465,11 +3448,11 @@ and genTupleProjBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
             elif flatStart < flatChildren.Length then
                 // Single leaf at computed position
                 let sourceName = flatChildren.[flatStart]
-                let code = [sprintf "%sauto& %s = %s;" ind name sourceName]
+                let code = [$"{ind}auto& {name} = {sourceName};"]
                 let extentsAlias =
                     match IR.stripUnits binding.Type with
                     | ArrayElem _ ->
-                        [sprintf "%sconst size_t* %s_extents = %s.extents;" ind name sourceName]
+                        [$"{ind}const size_t* {name}_extents = {sourceName}.extents;"]
                     | _ -> []
                 let ctx' = addVarName binding.Id name ctx
                 let ctx' =
@@ -3495,13 +3478,13 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // while later assignments/reads use them by name).
     match Map.tryFind srcId ctx.DeferredComputations with
     | Some _ when binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets ->
-        let (fcode, fctx, _) = forceDeferredArrayInput ctx builder (sprintf "%s__src" name) (IRVar (srcId, binding.Type))
+        let (fcode, fctx, _) = forceDeferredArrayInput ctx builder ($"{name}__src") (IRVar (srcId, binding.Type))
         let (code, ctx') = genVarAliasBinding fctx binding builder srcId
         (fcode @ code, ctx')
     | Some deferred ->
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id deferred ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred computation (alias)>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred computation (alias)>"], ctx')
     | None ->
         // Let-binding whose value is a reference to a lifted callable.
         // `let f = lambda(...)` lowers to `binding.Value = IRVar(callable.Id,
@@ -3525,16 +3508,16 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             // below, since forcing can rename nothing but must be in scope.
             let (capForceCode, ctx) =
                 collectDeferredKernelCaptures ctx binding.Value
-                |> forceDeferredBindingIds ctx builder (sprintf "%s__cap" name)
+                |> forceDeferredBindingIds ctx builder ($"{name}__cap")
             let safeName = sanitizeCppName callable.Name
             let paramSig =
                 callable.Params
                 |> List.map (fun p ->
                     match p.Type with
-                    | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
-                    | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+                    | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
+                    | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
                 |> String.concat ", "
-            let regularArgs = callable.Params |> List.map (fun p -> p.Name)
+            let regularArgs = callable.Params |> List.map (_.Name)
             let captureArgs = captureForwardArgs ctx.VarNames callable.Captures
             let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
             // Wrapper type: `std::function<Ret(P1, P2, ...)>`. Explicit
@@ -3557,8 +3540,8 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                 | ArrayElem arr -> cppArrayTypeStr arr
                 | t -> irTypeToCpp t
             let funcTypeStr =
-                sprintf "std::function<%s(%s)>" retTypeStr (String.concat ", " paramTypes)
-            let code = [sprintf "%s%s %s = [&](%s) { return %s(%s); };" ind funcTypeStr name paramSig safeName allArgs]
+                $"""std::function<{retTypeStr}({(String.concat ", " paramTypes)})>"""
+            let code = [$$"""{{ind}}{{funcTypeStr}} {{name}} = [&]({{paramSig}}) { return {{safeName}}({{allArgs}}); };"""]
             let ctx' = addVarName binding.Id name ctx
             (capForceCode @ code, ctx')
         | None ->
@@ -3601,7 +3584,7 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                 // Use auto& when source has flat TupleChildren to avoid type mismatch
                 let code =
                     if hasTupleChildren then
-                        [sprintf "%sauto& %s = %s;" ind name srcName]
+                        [$"{ind}auto& {name} = {srcName};"]
                     else
                         genScalarBinding ctx name binding.Value binding.Type
                 let ctx' = addVarName binding.Id name ctx
@@ -3621,7 +3604,7 @@ and genChoiceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     if isCompExpr left || isCompExpr right then
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred choice>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred choice>"], ctx')
     else
         // Scalar choice: generate directly
         let code = genScalarBinding ctx name binding.Value binding.Type
@@ -3639,7 +3622,7 @@ and genFallbackBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     let name = bindingCppName binding
     let ctx' = addVarName binding.Id name ctx
     let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-    ([sprintf "%s// %s = <deferred fallback>" ind name], ctx')
+    ([$"{ind}// {name} = <deferred fallback>"], ctx')
 
 /// Materialize `A <|:> B` (allocated-fallback, formalism 2.6): read A where
 /// A's STORAGE holds the cell, else B. Two storage regimes, one judgment:
@@ -3666,7 +3649,7 @@ and genFallbackMaterialize (ctx: CodeGenContext) (binding: IRBinding) (builder: 
             ([], ctxIn, Map.find id ctxIn.VarNames, ty)
         | _ ->
             let subTy = match e with IRVar (_, ty) -> ty | _ -> binding.Type
-            let subName = sprintf "%s__%s" name tag
+            let subName = $"{name}__{tag}"
             let subBinding = { Id = builder.FreshId(); Name = subName; Type = subTy
                                Value = IRCompute e; IsConst = true; IsMutable = false }
             let (code, ctx') = genBinding ctxIn subBinding builder
@@ -3704,29 +3687,27 @@ and genFallbackMaterialize (ctx: CodeGenContext) (binding: IRBinding) (builder: 
         // whole-token match on the rendered return text and can only ever see
         // `<name>`, never `<name>_extents`.
         let extentsName = name + "_extents"
-        let dims = [ for d in 0 .. rank - 1 -> (sprintf "%s.extents[%d]" extentsSrc d, false) ]
+        let dims = [ for d in 0 .. rank - 1 -> ($"{extentsSrc}.extents[{d}]", false) ]
         let (extentsDecl, ownedExtents) = emitExtentsTable ind extentsName rank dims
-        let allocDecl = sprintf "%sArray<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                            ind elemType rank name elemType rank name name
+        let allocDecl = $"{ind}Array<{elemType}, {rank}> {name} = {{ allocate<typename promote<{elemType}, {rank}>::type, nullptr>({name}_extents), {name}_extents }};"
         // Deterministic deallocation, site 5d: `<|:>` result. Always a
         // fully-allocated dense array, and now the owner of its own extents
         // table rather than a borrower of an operand's.
         if isFreeableDenseArrayType resArr then
             registerPoolAlloc AllocDense elemType rank "nullptr" extentsName name ownedExtents
         let indD d = String.replicate d "    "
-        let idxVar i = sprintf "__fb%d" i
-        let subscript n = [for i in 0 .. n - 1 -> sprintf "[%s]" (idxVar i)] |> String.concat ""
+        let idxVar i = $"__fb{i}"
+        let subscript n = [for i in 0 .. n - 1 -> $"[{(idxVar i)}]"] |> String.concat ""
         let bodyLines =
             match leftCompound with
             | None ->
                 // Dense-left: one nullptr-robust recursive copy.
-                [sprintf "%snested_array_utilities::fallback_copy<%s, %d>(%s.data, %s.data, %s.data, %s_extents);"
-                    ind elemType rank name nameL nameR name]
+                [$"{ind}nested_array_utilities::fallback_copy<{elemType}, {rank}>({name}.data, {nameL}.data, {nameR}.data, {name}_extents);"]
             | Some aL ->
                 let leadRank =
                     aL.IndexTypes
                     |> List.tryFind (fun ix -> ix.IxKind = IxKCompound)
-                    |> Option.map (fun ix -> ix.Rank)
+                    |> Option.map (_.Rank)
                     |> Option.defaultValue 1
                 let trailingCount = rank - leadRank
                 // Runtime shape guard: the mask's underlying extents must
@@ -3734,16 +3715,15 @@ and genFallbackMaterialize (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                 // and element types are checkable -- the mask is runtime data).
                 let guards =
                     [ for d in 0 .. leadRank - 1 ->
-                        sprintf "%sif (%s.idx->extents[%d] != %s_extents[%d]) { blade_rt::panic(\"BL8001\", \"<|:>: compound left operand's underlying extents disagree with the dense right operand's shape\", nullptr, 0); }"
-                            ind nameL d name d ]
+                        $"{ind}if ({nameL}.idx->extents[{d}] != {name}_extents[{d}]) {{ blade_rt::panic(\"BL8001\", \"<|:>: compound left operand's underlying extents disagree with the dense right operand's shape\", nullptr, 0); }}" ]
                 let mutable lines = guards
                 let mutable depth = ctx.Indent
                 for i in 0 .. leadRank - 1 do
-                    lines <- lines @ [sprintf "%sfor (size_t %s = 0; %s < %s_extents[%d]; %s++) {" (indD depth) (idxVar i) (idxVar i) name i (idxVar i)]
+                    lines <- lines @ [$$"""{{(indD depth)}}for (size_t {{(idxVar i)}} = 0; {{(idxVar i)}} < {{name}}_extents[{{i}}]; {{(idxVar i)}}++) {"""]
                     depth <- depth + 1
                 let leadTuple =
                     [for i in 0 .. leadRank - 1 -> idxVar i] |> String.concat ", "
-                lines <- lines @ [sprintf "%sstd::array<size_t, %d> __fb_t{{ %s }};" (indD depth) leadRank leadTuple]
+                lines <- lines @ [$"{(indD depth)}std::array<size_t, {leadRank}> __fb_t{{{{ {leadTuple} }}}};"]
                 // Row-major flatten of the trailing coordinate inside a
                 // present cell's contiguous block.
                 let trailOffsetExpr =
@@ -3752,32 +3732,32 @@ and genFallbackMaterialize (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                         [leadRank .. rank - 1]
                         |> List.fold (fun acc j ->
                             if acc = "" then idxVar j
-                            else sprintf "(%s * %s_extents[%d] + %s)" acc name j (idxVar j)) ""
+                            else $"({acc} * {name}_extents[{j}] + {(idxVar j)})") ""
                 let readCompact =
-                    if trailingCount = 0 then sprintf "%s.data[%s.idx->linearize(__fb_t)]" nameL nameL
-                    else sprintf "%s.data[%s.idx->linearize(__fb_t) * %s.trailing_stride + %s]" nameL nameL nameL trailOffsetExpr
+                    if trailingCount = 0 then $"{nameL}.data[{nameL}.idx->linearize(__fb_t)]"
+                    else $"{nameL}.data[{nameL}.idx->linearize(__fb_t) * {nameL}.trailing_stride + {trailOffsetExpr}]"
                 let emitTrailingAssign (baseDepth: int) (rhs: string) : string list =
                     let mutable ls = []
                     let mutable d = baseDepth
                     for j in leadRank .. rank - 1 do
-                        ls <- ls @ [sprintf "%sfor (size_t %s = 0; %s < %s_extents[%d]; %s++) {" (indD d) (idxVar j) (idxVar j) name j (idxVar j)]
+                        ls <- ls @ [$$"""{{(indD d)}}for (size_t {{(idxVar j)}} = 0; {{(idxVar j)}} < {{name}}_extents[{{j}}]; {{(idxVar j)}}++) {"""]
                         d <- d + 1
-                    ls <- ls @ [sprintf "%s%s%s = %s;" (indD d) name (subscript rank) rhs]
+                    ls <- ls @ [$"{(indD d)}{name}{(subscript rank)} = {rhs};"]
                     for _ in leadRank .. rank - 1 do
                         d <- d - 1
-                        ls <- ls @ [sprintf "%s}" (indD d)]
+                        ls <- ls @ [$"{(indD d)}}}"]
                     ls
-                lines <- lines @ [sprintf "%sif (%s.idx->present(__fb_t)) {" (indD depth) nameL]
+                lines <- lines @ [$$"""{{(indD depth)}}if ({{nameL}}.idx->present(__fb_t)) {"""]
                 lines <- lines @ emitTrailingAssign (depth + 1) readCompact
-                lines <- lines @ [sprintf "%s} else {" (indD depth)]
-                lines <- lines @ emitTrailingAssign (depth + 1) (sprintf "%s%s" nameR (subscript rank))
-                lines <- lines @ [sprintf "%s}" (indD depth)]
+                lines <- lines @ [$"{(indD depth)}}} else {{"]
+                lines <- lines @ emitTrailingAssign (depth + 1) ($"{nameR}{(subscript rank)}")
+                lines <- lines @ [$"{(indD depth)}}}"]
                 for _ in 0 .. leadRank - 1 do
                     depth <- depth - 1
-                    lines <- lines @ [sprintf "%s}" (indD depth)]
+                    lines <- lines @ [$"{(indD depth)}}}"]
                 lines
         let ctx' = addVarName binding.Id name ctxR
-        (codeL @ codeR @ [""; sprintf "%s// <|:> allocated-fallback: %s where allocated, else %s" ind nameL nameR] @ extentsDecl @ [allocDecl] @ bodyLines, ctx')
+        (codeL @ codeR @ [""; $"{ind}// <|:> allocated-fallback: {nameL} where allocated, else {nameR}"] @ extentsDecl @ [allocDecl] @ bodyLines, ctx')
     | t ->
         let code = codegenError ctx ind (sprintf "<|:>: binding type is not an array (got %A) -- likely a typechecker or IR bug" t)
         (codeL @ codeR @ code, addVarName binding.Id name ctxR)
@@ -3796,7 +3776,7 @@ and genGuardBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
     if leafIsComputation body then
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred guard>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred guard>"], ctx')
     else
         // Scalar guard: generate directly
         let code = genScalarBinding ctx name binding.Value binding.Type
@@ -3813,7 +3793,7 @@ and genSequenceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     if elems |> List.exists isCompExpr then
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred sequence>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred sequence>"], ctx')
     else
         // All scalars: generate as tuple
         let code = genScalarBinding ctx name binding.Value binding.Type
@@ -3829,11 +3809,11 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // header, so the materialization is not re-run each iteration. When this
     // for-range is nested inside a block, genLetChainBinding already forced it
     // (dropped from DeferredComputations) and the collector finds nothing.
-    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) body
+    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder ($"{name}__def") body
     // Imperative for-range loop
     let loStr = exprToCppCtx ctx lo
     let hiStr = exprToCppCtx ctx hi
-    let varName = sprintf "__k%d" vid
+    let varName = $"__k{vid}"
     let innerCtx = addVarName vid varName ctx
     // Unroll the body IRLet chain into statements
     let (bodyLets, _bodyFinal) = unrollLetChain body
@@ -3859,7 +3839,7 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                     // See setAllocOwner: this let owns every allocation emitted
                     // while it renders, sub-temporaries included.
                     setAllocOwner (Some id)
-                    let tempName = sprintf "__v%d" id
+                    let tempName = $"__v{id}"
                     let tempBinding = {
                         Id = id; Name = tempName; Type = inferExprType value
                         Value = value; IsConst = true; IsMutable = false
@@ -3875,7 +3855,7 @@ and genForRangeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
         @ [forLoopFrom ind varName loStr hiStr]
         @ bodyCode
         @ frees
-        @ [sprintf "%s}" ind]
+        @ [$"{ind}}}"]
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 
@@ -3893,7 +3873,7 @@ and genBindChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
     if isCompDeferred then
         let ctx' = addVarName binding.Id name ctx
         let ctx' = { ctx' with DeferredComputations = Map.add binding.Id binding.Value ctx'.DeferredComputations }
-        ([sprintf "%s// %s = <deferred bind>" ind name], ctx')
+        ([$"{ind}// {name} = <deferred bind>"], ctx')
     else
         // Scalar bind: cont(comp)
         let code = genScalarBinding ctx name binding.Value binding.Type
@@ -3909,12 +3889,12 @@ and genLetChainBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
     // still-deferred computed array) at the block's OUTER indent, before any
     // block statement is emitted -- materializing inside the block/loop body
     // would re-run the producer per iteration or dangle its loop var.
-    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder (sprintf "%s__def" name) binding.Value
+    let (forceCode, ctx) = forceDeferredPositionalReads ctx builder ($"{name}__def") binding.Value
     // Block expression: unroll the IRLet chain into sequential bindings
     let (lets, finalExpr) = unrollLetChain binding.Value
     let (allCode, foldCtx) =
         lets |> List.fold (fun (accCode, accCtx) (id, value) ->
-            let tempName = sprintf "__v%d" id
+            let tempName = $"__v{id}"
             let tempBinding = {
                 Id = id; Name = tempName; Type = inferExprType value
                 Value = value; IsConst = true; IsMutable = false

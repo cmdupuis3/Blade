@@ -56,13 +56,13 @@ let private marchFlag () =
     match System.Environment.GetEnvironmentVariable("BLADE_MARCH") with
     | null | "" -> " -march=native"
     | v when v.Trim().ToLowerInvariant() = "off" -> ""
-    | v -> sprintf " -march=%s" (v.Trim())
+    | v -> $" -march={v.Trim()}"
 
 /// The `-ffp-contract=` fragment (leading space included).
 let private fpContractFlag () =
     match System.Environment.GetEnvironmentVariable("BLADE_FP_CONTRACT") with
     | null | "" -> " -ffp-contract=fast"
-    | v -> sprintf " -ffp-contract=%s" (v.Trim())
+    | v -> $" -ffp-contract={v.Trim()}"
 
 /// Host-compiler optimization flags shared by every g++ invocation.
 /// Currently `-O3 -march=native -ffp-contract=fast` by default (see the two
@@ -284,15 +284,15 @@ let runProc (exe: string) (args: string) (timeoutMs: int) : Result<unit, string>
         let errT = proc.StandardError.ReadToEndAsync()
         if not (proc.WaitForExit(timeoutMs)) then
             (try proc.Kill() with _ -> ())
-            Error (sprintf "%s timed out" exe)
+            Error $"{exe} timed out"
         else
             let combined =
                 [ if not (String.IsNullOrWhiteSpace outT.Result) then yield outT.Result
                   if not (String.IsNullOrWhiteSpace errT.Result) then yield errT.Result ]
                 |> String.concat "\n"
             if proc.ExitCode = 0 then Ok ()
-            else Error (sprintf "%s failed (exit %d):\n%s\nCommand: %s %s" exe proc.ExitCode combined exe args)
-    with ex -> Error (sprintf "%s exception: %s" exe ex.Message)
+            else Error $"{exe} failed (exit {proc.ExitCode}):\n{combined}\nCommand: {exe} {args}"
+    with ex -> Error $"{exe} exception: {ex.Message}"
 
 /// The include line a cuBLAS-dispatching program carries, analogous to the
 /// `blade_linalg.hpp` / `blade_lapack.hpp` sniffs below: codegen writes it
@@ -343,7 +343,7 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
         // A failed write is reported, not swallowed: nvcc would otherwise
         // compile whatever stale `.cu` happened to be there.
         match (try File.WriteAllText(cuFile, cuText); None with ex -> Some ex.Message) with
-        | Some why -> Error (sprintf "could not write the cuBLAS device translation unit %s: %s" cuFile why)
+        | Some why -> Error $"could not write the cuBLAS device translation unit {cuFile}: {why}"
         | None ->
         // /Zc:preprocessor: CCCL headers refuse MSVC's traditional
         // preprocessor (same rule as compileCudaSplit / compileCudaMpiHybrid).
@@ -351,8 +351,7 @@ let buildCublasDevice (cppFullPath: string) : Result<string, string> =
             if onWindows then "-shared -Xcompiler /Zc:preprocessor"
             else "-shared -Xcompiler -fPIC"
         let args =
-            sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\" -lcublas"
-                sharedFlags libFile cuFile
+            $"-std=c++17 -O2 {sharedFlags} -o \"{libFile}\" \"{cuFile}\" -lcublas"
         match runProc "nvcc" args 300000 with
         | Error e -> Error e
         | Ok () -> Ok libFile
@@ -440,8 +439,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
                 // a memcheck build is a measurement run, not the enforcement
                 // gate the release compile already provides.
                 let args =
-                    sprintf "-std=c++17 -O0 -g -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"%s\" \"%s\""
-                        exeFullPath cppFullPath
+                    $"-std=c++17 -O0 -g -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"{exeFullPath}\" \"{cppFullPath}\""
                 match runProc cxx args 300000 with
                 | Error e -> Error e
                 | Ok () ->
@@ -463,8 +461,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
                 let objPath = Path.ChangeExtension(cppFullPath, ".obj")
                 let fdPath = Path.ChangeExtension(cppFullPath, "_obj.pdb")
                 let args =
-                    sprintf "/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /Fo\"%s\" /Fd\"%s\" /Fe\"%s\" \"%s\""
-                        objPath fdPath exeFullPath cppFullPath
+                    $"/nologo /fsanitize=address /Zi /Od /MT /std:c++17 /EHsc /openmp:llvm /Fo\"{objPath}\" /Fd\"{fdPath}\" /Fe\"{exeFullPath}\" \"{cppFullPath}\""
                 match runProc "cl" args 300000 with
                 | Error e -> Error e
                 | Ok () ->
@@ -481,13 +478,12 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
             // the /Od /Zi profile. LeakSanitizer (where the platform has it)
             // comes for free on top of the BLADE-MEMCHECK report line.
             let args =
-                sprintf "-std=c++17 -O0 -g -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"%s\" \"%s\""
-                    exeFullPath cppFullPath
+                $"-std=c++17 -O0 -g -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"{exeFullPath}\" \"{cppFullPath}\""
             match runProc "g++" args 300000 with
             | Error e -> Error e
             | Ok () -> Ok exeFullPath
     with ex ->
-        Error (sprintf "Memcheck compilation exception: %s\n%s" ex.Message ex.StackTrace)
+        Error $"Memcheck compilation exception: {ex.Message}\n{ex.StackTrace}"
 
 // ---------------------------------------------------------------------------
 // Content-addressed executable cache (docs/plan-compile-speed.md Stage 4.1)
@@ -574,7 +570,7 @@ let private gppIdentity : Lazy<string> =
                 | Some l -> l.Trim()
                 | None -> ""
             with _ -> ""
-        sprintf "%s|%s" (defaultArg resolved "g++") version)
+        $"""{(defaultArg resolved "g++")}|{version}""")
 
 /// What `-march=native` ACTUALLY SELECTED on this machine, hashed.
 ///
@@ -607,7 +603,7 @@ let private nativeTargetIdentity : Lazy<string> =
             proc.WaitForExit(10000) |> ignore
             use sha = System.Security.Cryptography.SHA256.Create()
             sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes out.Result)
-            |> Array.map (fun b -> b.ToString("x2"))
+            |> Array.map _.ToString("x2")
             |> String.concat ""
         with _ -> "")
 
@@ -628,7 +624,7 @@ let private runtimeHeaderDigest : Lazy<string> =
             for name in CodeGen.runtimeHeaderNames do
                 sb.Append(name).Append(' ').Append(CodeGen.runtimeHeaderText name).Append(' ') |> ignore
             sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(sb.ToString()))
-            |> Array.map (fun b -> b.ToString("x2"))
+            |> Array.map _.ToString("x2")
             |> String.concat ""
         with _ -> "")
 
@@ -637,12 +633,12 @@ let private runtimeHeaderDigest : Lazy<string> =
 /// not: a reinstalled OpenBLAS at the same path must invalidate.
 let private linkedDllStamp (args: string) : string =
     args.Split('"')
-    |> Array.filter (fun tok -> tok.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+    |> Array.filter _.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
     |> Array.map (fun p ->
         try
             let fi = FileInfo(p)
-            if fi.Exists then sprintf "%s:%d:%d" p fi.Length fi.LastWriteTimeUtc.Ticks else sprintf "%s:missing" p
-        with _ -> sprintf "%s:?" p)
+            if fi.Exists then $"{p}:{fi.Length}:{fi.LastWriteTimeUtc.Ticks}" else $"{p}:missing"
+        with _ -> $"{p}:?")
     |> String.concat ";"
 
 /// The cache key for one g++ invocation. `exeFullPath`/`cppFullPath` are
@@ -668,7 +664,7 @@ let private exeCacheKey (args: string) (cppText: string) (exeFullPath: string) (
               cppText ]
     use sha = System.Security.Cryptography.SHA256.Create()
     sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
-    |> Array.map (fun b -> b.ToString("x2"))
+    |> Array.map _.ToString("x2")
     |> String.concat ""
 
 // Eviction caps. Entries are whole executables (~150 KB-2 MB each), so both a
@@ -684,11 +680,11 @@ let private exeCacheMaxBytes = 6L * 1024L * 1024L * 1024L
 let private evictExeCache (dir: string) : unit =
     try
         let entries = DirectoryInfo(dir).GetFiles("*.exe")
-        let total = entries |> Array.sumBy (fun f -> f.Length)
+        let total = entries |> Array.sumBy _.Length
         if entries.Length > exeCacheMaxEntries || total > exeCacheMaxBytes then
             let targetCount = (exeCacheMaxEntries * 3) / 4
             let targetBytes = (exeCacheMaxBytes / 4L) * 3L
-            let oldestFirst = entries |> Array.sortBy (fun f -> f.LastWriteTimeUtc)
+            let oldestFirst = entries |> Array.sortBy _.LastWriteTimeUtc
             let mutable count = entries.Length
             let mutable bytes = total
             for f in oldestFirst do
@@ -737,7 +733,7 @@ let private storeExeCache (dir: string) (key: string) (exeFullPath: string) : un
         let entry = Path.Combine(dir, key + ".exe")
         if not (File.Exists entry) then
             Directory.CreateDirectory dir |> ignore
-            let tmp = Path.Combine(dir, sprintf "%s.%s.tmp" key (Guid.NewGuid().ToString("N")))
+            let tmp = Path.Combine(dir, $"""{key}.{(Guid.NewGuid().ToString("N"))}.tmp""")
             File.Copy(exeFullPath, tmp, true)
             (try File.Move(tmp, entry)
              with _ -> (try File.Delete tmp with _ -> ()))
@@ -812,7 +808,7 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                      let incFlag = sprintf " -I\"%s\"" (Path.Combine(dir, "include"))
                      let linkFlag =
                          match Platforms.findSharedLib dir "netcdf" with
-                         | Some lib -> sprintf " \"%s\"" lib
+                         | Some lib -> $" \"{lib}\""
                          | None -> sprintf " -L\"%s\" -lnetcdf" (Path.Combine(dir, "lib"))
                      incFlag + linkFlag)
 
@@ -860,11 +856,11 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
                 buildCublasDevice cppFullPath |> Result.map (fun lib -> [lib])
             else Ok []
         match deviceBuild with
-        | Error e -> Error (sprintf "cuBLAS device build failed:\n%s" e)
+        | Error e -> Error $"cuBLAS device build failed:\n{e}"
         | Ok deviceInputs ->
 
-        let extraFlags = (extraLinkInputs @ deviceInputs) |> List.map (fun p -> sprintf " \"%s\"" (Path.GetFullPath p)) |> String.concat ""
-        let args = sprintf "-std=c++17 %s %s %s%s -o \"%s\" \"%s\"%s%s%s%s" (optFlags ()) ompFlag safetyFlags blasCompileFlags exeFullPath cppFullPath extraFlags netcdfFlags mpiFlags blasLinkFlags
+        let extraFlags = (extraLinkInputs @ deviceInputs) |> List.map (fun p -> $" \"{Path.GetFullPath p}\"") |> String.concat ""
+        let args = $"-std=c++17 {optFlags ()} {ompFlag} {safetyFlags}{blasCompileFlags} -o \"{exeFullPath}\" \"{cppFullPath}\"{extraFlags}{netcdfFlags}{mpiFlags}{blasLinkFlags}"
         
         // The executable cache (Stage 4.1, above). v1 scope, deliberately
         // narrow -- every excluded lane is one whose inputs are not fully
@@ -922,11 +918,11 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
             Ok exeFullPath
         else
             if String.IsNullOrWhiteSpace allOutput then
-                Error (sprintf "Compilation failed (exit %d) with no output. Command: g++ %s" proc.ExitCode args)
+                Error $"Compilation failed (exit {proc.ExitCode}) with no output. Command: g++ {args}"
             else
-                Error (sprintf "Compilation failed (exit %d):\n%s\nCommand: g++ %s" proc.ExitCode allOutput args)
+                Error $"Compilation failed (exit {proc.ExitCode}):\n{allOutput}\nCommand: g++ {args}"
     with ex ->
-        Error (sprintf "Compilation exception: %s\n%s" ex.Message ex.StackTrace)
+        Error $"Compilation exception: {ex.Message}\n{ex.StackTrace}"
 
 /// `compileCppWithExtraSource` for a caller that does not hold the generated
 /// source in memory (it is read back off disk, once).
@@ -964,7 +960,7 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
                 "-Xcompiler /Zc:preprocessor"
             else "-Xcompiler -Werror=float-conversion,-Werror=narrowing"
 
-        let args = sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\"" hostWarn exeFullPath cuFullPath
+        let args = $"-std=c++17 -O2 {hostWarn} -o \"{exeFullPath}\" \"{cuFullPath}\""
 
         let psi = ProcessStartInfo("nvcc", args)
         psi.RedirectStandardOutput <- true
@@ -992,11 +988,11 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
             Ok exeFullPath
         else
             if String.IsNullOrWhiteSpace allOutput then
-                Error (sprintf "CUDA compilation failed (exit %d) with no output. Command: nvcc %s" proc.ExitCode args)
+                Error $"CUDA compilation failed (exit {proc.ExitCode}) with no output. Command: nvcc {args}"
             else
-                Error (sprintf "CUDA compilation failed (exit %d):\n%s" proc.ExitCode allOutput)
+                Error $"CUDA compilation failed (exit {proc.ExitCode}):\n{allOutput}"
     with ex ->
-        Error (sprintf "CUDA compilation exception: %s\n%s" ex.Message ex.StackTrace)
+        Error $"CUDA compilation exception: {ex.Message}\n{ex.StackTrace}"
 
 /// Compiles a CUDA program split across two files: nvcc compiles the .cu
 /// (device kernels) to an object, g++ compiles the .cpp (host program -- no
@@ -1019,9 +1015,9 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
         // on PATH. No OpenMP here: the rank-1 cuda host half has no
         // parallel loop. /Zc:preprocessor (CCCL refuses MSVC's traditional
         // preprocessor) applies to the .cu compile only.
-        let nvccCu  = sprintf "-std=c++17 -O2 -Xcompiler /Zc:preprocessor -c -o \"%s\" \"%s\"" cuObj cuFull
-        let nvccCpp = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cppObj cppFull
-        let nvccLink = sprintf "-std=c++17 -O2 -o \"%s\" \"%s\" \"%s\"" exeFull cuObj cppObj
+        let nvccCu  = $"-std=c++17 -O2 -Xcompiler /Zc:preprocessor -c -o \"{cuObj}\" \"{cuFull}\""
+        let nvccCpp = $"-std=c++17 -O2 -c -o \"{cppObj}\" \"{cppFull}\""
+        let nvccLink = $"-std=c++17 -O2 -o \"{exeFull}\" \"{cuObj}\" \"{cppObj}\""
         match runProc "nvcc" nvccCu 120000 with
         | Error e -> Error e
         | Ok () ->
@@ -1034,9 +1030,9 @@ let compileCudaSplit (cuFile: string) (cppFile: string) (outputDir: string) : Re
     else
         // Linux: nvcc compiles the .cu (host code via g++), g++ compiles the
         // .cpp; both share the g++ ABI, so the split + link is safe.
-        let nvccCu = sprintf "-std=c++17 -O2 -c -o \"%s\" \"%s\"" cuObj cuFull
-        let gppCpp = sprintf "-std=c++17 -O2 -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"%s\" \"%s\"" cppObj cppFull
-        let nvccLink = sprintf "-std=c++17 -O2 -Xcompiler -fopenmp -o \"%s\" \"%s\" \"%s\"" exeFull cuObj cppObj
+        let nvccCu = $"-std=c++17 -O2 -c -o \"{cuObj}\" \"{cuFull}\""
+        let gppCpp = $"-std=c++17 -O2 -fopenmp -Werror=float-conversion -Werror=narrowing -c -o \"{cppObj}\" \"{cppFull}\""
+        let nvccLink = $"-std=c++17 -O2 -Xcompiler -fopenmp -o \"{exeFull}\" \"{cuObj}\" \"{cppObj}\""
         match runProc "nvcc" nvccCu 120000 with
         | Error e -> Error e
         | Ok () ->
@@ -1066,7 +1062,7 @@ let compileCudaMpiHybrid (cuFile: string) (cppFile: string) (outputDir: string) 
         let sharedFlags =
             if caps.Platform = PWindows then "-shared -Xcompiler /Zc:preprocessor"
             else "-shared -Xcompiler -fPIC"
-        let nvccArgs = sprintf "-std=c++17 -O2 %s -o \"%s\" \"%s\"" sharedFlags dllFull cuFull
+        let nvccArgs = $"-std=c++17 -O2 {sharedFlags} -o \"{dllFull}\" \"{cuFull}\""
         match runProc "nvcc" nvccArgs 180000 with
         | Error e -> Error e
         | Ok () -> compileCppWithExtra [dllFull] cppFile outputDir
@@ -1080,11 +1076,11 @@ let private buildLlvmShim (clang: string) (outputDir: string) : Result<string, s
     let src = Path.Combine(dir, EmitLlvm.shimFileName)
     let obj = Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.shimFileName + Platforms.objExtension)
     if not (File.Exists src) then
-        Error (sprintf "llvm shim source missing at %s (EmitLlvm.deployShim should have written it)" src)
+        Error $"llvm shim source missing at {src} (EmitLlvm.deployShim should have written it)"
     elif File.Exists obj && File.GetLastWriteTimeUtc obj >= File.GetLastWriteTimeUtc src then
         Ok obj
     else
-        let args = sprintf "-c -O2 -o \"%s\" \"%s\"" obj src
+        let args = $"-c -O2 -o \"{obj}\" \"{src}\""
         match runProc clang args 120000 with
         | Error e -> Error e
         | Ok () -> Ok obj
@@ -1095,9 +1091,9 @@ let private buildLlvmShim (clang: string) (outputDir: string) : Result<string, s
 let private clangStamp (clang: string) : string =
     try
         let fi = System.IO.FileInfo(clang)
-        if fi.Exists then sprintf "%s:%d:%d" clang fi.Length fi.LastWriteTimeUtc.Ticks
-        else sprintf "%s:missing" clang
-    with _ -> sprintf "%s:?" clang
+        if fi.Exists then $"{clang}:{fi.Length}:{fi.LastWriteTimeUtc.Ticks}"
+        else $"{clang}:missing"
+    with _ -> $"{clang}:?"
 
 /// The LLVM lane's twin of `exeCacheKey` (Stage 4.1). Differences, each
 /// deliberate: the compiler identity is the clang STAMP, not `gppIdentity`;
@@ -1115,7 +1111,7 @@ let private llvmExeCacheKey (clang: string) (args: string) (llText: string) (shi
               llText ]
     use sha = System.Security.Cryptography.SHA256.Create()
     sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes material)
-    |> Array.map (fun b -> b.ToString("x2"))
+    |> Array.map _.ToString("x2")
     |> String.concat ""
 
 /// Compile and link a `.ll` the LLVM lane emitted into an executable.
@@ -1140,8 +1136,7 @@ let compileLlvmProgram (llFile: string) (outputDir: string) : Result<string, str
         | Error e -> Error e
         | Ok shimObj ->
             let args =
-                sprintf "%s -Wno-override-module -o \"%s\" \"%s\" \"%s\""
-                    (llvmOptFlags ()) exeFull llFull shimObj
+                $"{(llvmOptFlags ())} -Wno-override-module -o \"{exeFull}\" \"{llFull}\" \"{shimObj}\""
             // Windows-only for the same reason as the g++ arm; a key that
             // cannot be built (unreadable .ll/shim source) just skips the
             // cache, never the compile.
@@ -1259,19 +1254,18 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
             let grab (t: System.Threading.Tasks.Task<string>) =
                 try (if t.Wait 5000 then t.Result else "") with _ -> ""
             let describe (label: string) (text: string) =
-                if String.IsNullOrWhiteSpace text then sprintf "no %s" label
+                if String.IsNullOrWhiteSpace text then $"no {label}"
                 else
                     let lines =
                         text.Replace("\r\n", "\n").Split('\n')
                         |> Array.filter (fun l -> l.Trim() <> "")
-                    sprintf "%d line(s) of %s, last: %s"
-                        lines.Length label (lines.[lines.Length - 1].Trim())
+                    $"{lines.Length} line(s) of {label}, last: {(lines.[lines.Length - 1].Trim())}"
             Error (sprintf "Execution timed out after %ds (%s; %s)"
                        (timeoutMs / 1000)
                        (describe "stdout" (grab stdoutTask))
                        (describe "stderr" (grab stderrTask)))
     with ex ->
-        Error (sprintf "Execution exception: %s" ex.Message)
+        Error $"Execution exception: {ex.Message}"
 
 // MPI launch support (mpiexec resolution + wrapped execution)
 
@@ -1316,7 +1310,7 @@ let hasMpiLink : Lazy<bool> =
             File.WriteAllText(src,
                 "#include <mpi.h>\nint main(int argc, char** argv){ MPI_Init(&argc,&argv); MPI_Finalize(); return 0; }\n")
             let exe = Path.Combine(dir, "mpi_probe" + Platforms.exeExtension)
-            let psi = ProcessStartInfo("g++", sprintf "-std=c++17 \"%s\" %s -o \"%s\"" src Platforms.mpiLinkFlag exe)
+            let psi = ProcessStartInfo("g++", $"-std=c++17 \"{src}\" {Platforms.mpiLinkFlag} -o \"{exe}\"")
             psi.RedirectStandardOutput <- true
             psi.RedirectStandardError <- true
             psi.UseShellExecute <- false
@@ -1333,11 +1327,11 @@ let hasMpiLink : Lazy<bool> =
 /// rank's exit code. 60s timeout (multi-process startup is slower than a bare exe).
 let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
     match mpiexecPath.Value with
-    | None -> Error (sprintf "mpiexec not found (%s)" Platforms.mpiRuntimeHint)
+    | None -> Error $"mpiexec not found ({Platforms.mpiRuntimeHint})"
     | Some mpiexec ->
         try
             let exeFullPath = Path.GetFullPath(exeFile)
-            let psi = ProcessStartInfo(mpiexec, sprintf "-n %d \"%s\"" ranks exeFullPath)
+            let psi = ProcessStartInfo(mpiexec, $"-n {ranks} \"{exeFullPath}\"")
             psi.RedirectStandardOutput <- true
             psi.RedirectStandardError <- true
             psi.UseShellExecute <- false
@@ -1356,7 +1350,7 @@ let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, strin
                 try proc.Kill() with _ -> ()
                 Error "Execution timed out after 60s (mpiexec)"
         with ex ->
-            Error (sprintf "Execution exception: %s" ex.Message)
+            Error $"Execution exception: {ex.Message}"
 
 /// Sanitize a test name for use as a filename (cross-platform).
 let sanitizeFileName (name: string) : string =

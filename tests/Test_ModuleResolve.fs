@@ -36,7 +36,7 @@ open Blade.Tests.TestHarness
 type private Scratch() =
     let root =
         Path.Combine(Path.GetTempPath(),
-                     sprintf "blade_modres_%s" (Guid.NewGuid().ToString("N").Substring(0, 12)))
+                     $"""blade_modres_{(Guid.NewGuid().ToString("N").Substring(0, 12))}""")
     do Directory.CreateDirectory root |> ignore
     member _.Root = root
     /// Write `rel` (a relative path, '/'-separated) with `text`, creating
@@ -127,7 +127,7 @@ let runModuleResolveTests () : BlockResult =
         siOnDisk.IsSome
         (match siOnDisk with
          | Some p -> p
-         | None -> sprintf "roots: %s" (String.concat " ; " roots))
+         | None -> $"""roots: {(String.concat " ; " roots)}""")
 
     // -- SOURCE beats the deployed copy, in a checkout ---------------------
     // Blade.fsproj copies stdlib/ next to the binary and the probe is
@@ -147,7 +147,7 @@ let runModuleResolveTests () : BlockResult =
     if roots |> List.exists isSourceRoot then
         check "stdlib_source_root_precedes_the_deployed_copy"
             (roots |> List.head |> isSourceRoot)
-            (sprintf "roots: %s" (String.concat " ; " roots))
+            ($"""roots: {(String.concat " ; " roots)}""")
 
     // -- nothing to resolve: the single-file path, unchanged ---------------
     let plainPath = scratch.Write "plain.blade" "let x = 1.0\nlet y = x + 2.0\n"
@@ -155,7 +155,7 @@ let runModuleResolveTests () : BlockResult =
     let plainRes = Blade.ModuleResolve.resolveEntry plainPath plainSrc
     check "no_imports_resolves_to_exactly_the_entry_file"
         (plainRes.Errors.IsEmpty && plainRes.Files.Length = 1)
-        (sprintf "%d file(s), %d error(s)" plainRes.Files.Length plainRes.Errors.Length)
+        ($"{plainRes.Files.Length} file(s), {plainRes.Errors.Length} error(s)")
 
     // The byte-identity claim, stated as C++ text: whatever `lowerDiag` would
     // have produced for a file with no imports, `lowerFileDiag` produces.
@@ -173,10 +173,10 @@ let runModuleResolveTests () : BlockResult =
 
     // -- builtin pseudo-modules are never looked for on disk ---------------
     for builtin in [ "math"; "ml"; "ppl"; "rand"; "sgs"; "spectra"; "ad"; "netcdf"; "zarr"; "csv" ] do
-        let p = scratch.Write (sprintf "builtin_%s.blade" builtin)
-                    (sprintf "import %s as bb\nlet x = 1.0\n" builtin)
+        let p = scratch.Write ($"builtin_{builtin}.blade")
+                    ($"import {builtin} as bb\nlet x = 1.0\n")
         let r = Blade.ModuleResolve.resolveEntry p (File.ReadAllText p)
-        check (sprintf "builtin_module_%s_is_not_searched_for" builtin)
+        check ($"builtin_module_{builtin}_is_not_searched_for")
             (r.Errors.IsEmpty && r.Files.Length = 1)
             (if r.Errors.IsEmpty then "" else textOf r.Errors)
 
@@ -189,7 +189,7 @@ let runModuleResolveTests () : BlockResult =
          && (List.last siRes.Files).Path = Path.GetFullPath siPath
          && siRes.Files.Head.Declared = "units.SI")
         (if siRes.Errors.IsEmpty then
-            siRes.Files |> List.map (fun f -> sprintf "%s(%s)" (Path.GetFileName f.Path) f.Declared)
+            siRes.Files |> List.map (fun f -> $"{(Path.GetFileName f.Path)}({f.Declared})")
                         |> String.concat " -> "
          else textOf siRes.Errors)
 
@@ -197,7 +197,7 @@ let runModuleResolveTests () : BlockResult =
     check "units_SI_program_lowers"
         (match siLowered with Ok _ -> true | Error _ -> false)
         (match siLowered with
-         | Ok (ir, _) -> sprintf "%d module(s)" ir.Modules.Length
+         | Ok (ir, _) -> $"{ir.Modules.Length} module(s)"
          | Error ds -> textOf ds)
 
     // The REJECT probe. If the import brought in nothing, `Float<meter>` and
@@ -260,7 +260,7 @@ let runModuleResolveTests () : BlockResult =
     scratch.Write "chain/A.blade" "module chain.A\nimport chain.B\nlet a_val = B.b_val + 1.0\n" |> ignore
     let chainPath = scratch.Write "chain_main.blade" "import chain.A\nlet top = A.a_val + 1.0\n"
     let chainRes = Blade.ModuleResolve.resolveEntry chainPath (File.ReadAllText chainPath)
-    let chainOrder = chainRes.Files |> List.map (fun f -> f.Declared)
+    let chainOrder = chainRes.Files |> List.map (_.Declared)
     check "transitive_imports_come_back_in_dependency_order"
         (chainRes.Errors.IsEmpty
          && chainOrder = [ "chain.C"; "chain.B"; "chain.A"; "Main" ])
@@ -361,24 +361,23 @@ let runModuleResolveTests () : BlockResult =
             File.WriteAllText(cppFile, cpp)
             match compileForBackendSource (Some cpp) capabilities.Value (inferBackendReq cpp) cppFile outDir with
             | Error e when isSkipError e -> skip "units_SI_program_computes_the_right_values" e
-            | Error e -> check "units_SI_program_computes_the_right_values" false (sprintf "compile: %s" e)
+            | Error e -> check "units_SI_program_computes_the_right_values" false ($"compile: {e}")
             | Ok exe ->
                 match runExecutable exe with
-                | Error e -> check "units_SI_program_computes_the_right_values" false (sprintf "run: %s" e)
+                | Error e -> check "units_SI_program_computes_the_right_values" false ($"run: {e}")
                 | Ok (_, output) ->
                     let want = [ "force = 6"; "total = 10" ]
                     let missing = want |> List.filter (fun w -> not (output.Contains w))
                     check "units_SI_program_computes_the_right_values"
                         missing.IsEmpty
                         (if missing.IsEmpty then String.concat ", " want
-                         else sprintf "missing %s in: %s" (String.concat " | " missing)
-                                  (output.Replace("\r\n", " ").Replace("\n", " ")))
+                         else $"""missing {(String.concat " | " missing)} in: {(output.Replace("\r\n", " ").Replace("\n", " "))}""")
 
     let passed = results |> Seq.filter (fun (_, o) -> o = Pass) |> Seq.length
     let failed = results |> Seq.filter (fun (_, o) -> o = Fail) |> Seq.length
     let skipped = results |> Seq.filter (fun (_, o) -> o = Skip) |> Seq.length
     printFooter "Module Resolution"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed
-          sprintf "%d skipped" skipped ]
+        [ $"{passed} passed"; $"{failed} failed"
+          $"{skipped} skipped" ]
     { Block = "Module Resolution"; Passed = passed; Failed = failed; Skipped = skipped
       FailedNames = results |> Seq.filter (fun (_, o) -> o = Fail) |> Seq.map fst |> List.ofSeq }

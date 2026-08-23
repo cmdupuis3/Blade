@@ -113,32 +113,32 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
         if extents |> List.forall Option.isSome then
             Ok (label, extents |> List.map Option.get)
         else
-            Error (sprintf "%s: every axis extent of %s must be statically known (Idx<n> directly or through aliases)" what label)
-    let noShape name = Error (sprintf "%s: '%s' has no declared array shape -- %s" what name shapeSources)
+            Error $"{what}: every axis extent of {label} must be statically known (Idx<n> directly or through aliases)"
+    let noShape name = Error $"{what}: '{name}' has no declared array shape -- {shapeSources}"
     match e.Kind with
     // A name: the innermost binder wins; a local binder with no array annotation shadows an outer one.
     | ExprKind.ExprVar name ->
         match Map.tryFind name scope with
-        | Some (Some shape) -> finish (sprintf "'%s'" name) shape
+        | Some (Some shape) -> finish $"'{name}'" shape
         | Some None -> noShape name
         | None ->
             match Map.tryFind name ctx.Arrays with
-            | Some shape -> finish (sprintf "'%s'" name) shape
+            | Some shape -> finish $"'{name}'" shape
             | None -> noShape name
     // An ascription: the universal escape hatch for a shape this pass cannot otherwise see.
     | ExprKind.ExprTyped (_, ty) ->
         match resolveTop ctx.Aliases 8 ty with
         | TyArray (elem, idxs) -> finish "the ascribed expression" (elem, idxs)
-        | _ -> Error (sprintf "%s: the ascription must name an array type (Array<Float64 like Idx<...>, ...>)" what)
+        | _ -> Error $"{what}: the ascription must name an array type (Array<Float64 like Idx<...>, ...>)"
     // A call whose function has an annotated array return type. GUARD: in Blade arrays ARE functions, so `A(i)` and `f(x)`
     // are the same node -- exclude known array names so an index read stays on the error path.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _)
             when not (Map.containsKey f scope) && not (Map.containsKey f ctx.Arrays) ->
         match Map.tryFind f ctx.Funcs with
-        | Some shape -> finish (sprintf "the result of '%s'" f) shape
-        | None -> Error (sprintf "%s: '%s' has no annotated array return type -- %s" what f shapeSources)
+        | Some shape -> finish $"the result of '{f}'" shape
+        | None -> Error $"{what}: '{f}' has no annotated array return type -- {shapeSources}"
     | _ ->
-        Error (sprintf "%s: the field argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` -- %s" what shapeSources)
+        Error $"{what}: the field argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` -- {shapeSources}"
 
 let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int, string> =
     match e.Kind with
@@ -146,9 +146,9 @@ let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some (SVInt n) -> Ok (int n)
-        | Some _ -> Error (sprintf "%s: expected a static int" what)
-        | None -> Error (sprintf "%s: '%s' is not a `let static` binding (sgs op configs must be static)" what name)
-    | _ -> Error (sprintf "%s: config argument must be a `let static` binding name or literal" what)
+        | Some _ -> Error $"{what}: expected a static int"
+        | None -> Error $"{what}: '{name}' is not a `let static` binding (sgs op configs must be static)"
+    | _ -> Error $"{what}: config argument must be a `let static` binding name or literal"
 
 // Elaboration state
 type private ElabState = {
@@ -165,7 +165,7 @@ let private ensure (st: ElabState) (key: string) (make: string -> FunctionDecl) 
     | Some n -> n
     | None ->
         st.Counter <- st.Counter + 1
-        let n = sprintf "__sgs_%d" st.Counter
+        let n = $"__sgs_{st.Counter}"
         let decl = make n
         st.Made <- Map.add key n st.Made
         st.Decls <- st.Decls @ [ decl ]
@@ -207,13 +207,13 @@ let private fieldShape (ctx: Ctx) (scope: Scope) (what: string) (uE: Expr) : Res
     arrayShape ctx scope what uE |> Result.bind (fun (_, dims) ->
         match dims with
         | [ 3; a; b; c ] when a = b && b = c -> Ok a
-        | [ 3; _; _; _ ] -> Error (sprintf "%s: the field must be cubic (Idx<3> then three equal spatial extents)" what)
-        | _ -> Error (sprintf "%s: the field must be Array<Float64 like Idx<3>, Idx<n>, Idx<n>, Idx<n>> (component-first, space-last)" what))
+        | [ 3; _; _; _ ] -> Error $"{what}: the field must be cubic (Idx<3> then three equal spatial extents)"
+        | _ -> Error $"{what}: the field must be Array<Float64 like Idx<3>, Idx<n>, Idx<n>, Idx<n>> (component-first, space-last)")
 
 let private tileArg (ctx: Ctx) (what: string) (n: int) (wE: Expr) : Result<int, string> =
     staticInt ctx.Statics (what + " W") wE |> Result.bind (fun w ->
-        if w < 1 then Error (sprintf "%s: W must be >= 1" what)
-        elif n % w <> 0 then Error (sprintf "%s: the tile width W = %d must divide the spatial extent n = %d" what w n)
+        if w < 1 then Error $"{what}: W must be >= 1"
+        elif n % w <> 0 then Error $"{what}: the tile width W = {w} must divide the spatial extent n = {n}"
         else Ok w)
 
 let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args: Expr list) : Result<Expr, string> =
@@ -242,7 +242,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
             let nm = ensure st (fingerprint "stress" (box (n, w))) (fun nm -> galileanStamp [ "u" ] (stressDecl nm n w))
             syn (ExprApp (syn (ExprVar nm), [ uE ]))))
     | "stress", _ -> Error "stress: expected stress(U, W)"
-    | _ -> Error (sprintf "sgs: unknown op '%s' (available: %s)" op opList)
+    | _ -> Error $"sgs: unknown op '{op}' (available: {opList})"
 
 // Rewrite walker (same shape as MathElaborate.rewriteExpr)
 let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (scope: Scope) (e: Expr)
@@ -432,7 +432,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
     else
         let declsNoImport = decls |> List.filter (not << isSgsImport)
         match resolveStatics declsNoImport with
-        | Error e -> Error (sprintf "sgs elaboration: static resolution failed: %s" e)
+        | Error e -> Error $"sgs elaboration: static resolution failed: {e}"
         | Ok (statics, _) ->
             let tyAliases = collectAliases declsNoImport
             let ctx = { Arrays = collectArrays tyAliases declsNoImport

@@ -289,7 +289,7 @@ let parseFieldDecl (tokens: Token list) : ParseResult<FieldDecl> =
         match peek remaining with
         | Some (TokKeyword KwIn) when typeBound.IsSome ->
             let line, col = currentPos remaining
-            error (sprintf "Field '%s' has two bound specifications: `min=`/`max=` on its type and `in lo .. hi`. Use one." name) line col
+            error $"Field '{name}' has two bound specifications: `min=`/`max=` on its type and `in lo .. hi`. Use one." line col
         | Some (TokKeyword KwIn) ->
             let afterIn = advance remaining
             let loR =
@@ -560,12 +560,12 @@ let parseDecl (tokens: Token list) : ParseResult<Decl> =
         // drift on it.
         let line, col = currentPos tokens
         let classic () =
-            error (sprintf "Expected declaration but got %s" (describeToken kind)) line col
+            error $"Expected declaration but got {describeToken kind}" line col
         match parseExprImpl tokens with
         | Ok (expr, remaining) ->
             let st = PS.Cur
             st.TopExprCounter <- st.TopExprCounter + 1
-            let name = sprintf "__expr%d" st.TopExprCounter
+            let name = $"__expr{st.TopExprCounter}"
             success (DeclLet { Mutability = BindLet
                                Pattern = mkPat (headSpan tokens) (PatVar name)
                                Type = None
@@ -709,7 +709,7 @@ let parseMultiSource (sources: (string * string) list) : Result<Program, ParseEr
                 go (modul' :: acc) rest
             | Error e ->
                 PS.Cur.File <- None
-                Error { e with Message = sprintf "[%s] %s" fileName e.Message }
+                Error { e with Message = $"[{fileName}] {e.Message}" }
     go [] sources
 
 // (The forward-reference wire-up lives at the TOP of this file -- see

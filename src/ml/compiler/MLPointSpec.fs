@@ -99,7 +99,7 @@ let matIsSquare (n: int) (m: int[][]) : bool =
 let matMul (a: int[][]) (b: int[][]) : int[][] =
     let n = a.Length
     if b.Length <> n then
-        failwithf "internal: MLPointSpec.matMul on mismatched sizes (%d vs %d)" n b.Length
+        failwith $"internal: MLPointSpec.matMul on mismatched sizes ({n} vs {b.Length})"
     Array.init n (fun i ->
         Array.init n (fun j ->
             let mutable acc = 0
@@ -204,7 +204,7 @@ let private d4 : PointGroup = {
 let private rawRegistry : PointGroup list = [ c4; d4 ]
 
 /// The registered group names, in registry order.
-let pointGroupNames : string list = rawRegistry |> List.map (fun g -> g.Name)
+let pointGroupNames : string list = rawRegistry |> List.map _.Name
 
 /// A hard cap on the BFS, so a malformed table (say a generator of infinite
 /// order) fails loudly instead of hanging. No shipped group is near it.
@@ -238,8 +238,7 @@ let groupElements (grp: PointGroup) : PgElement list =
             let k = tupleKey nxt
             if seen.Add k then
                 if out.Count >= closureCap then
-                    failwithf "internal: the generator closure of point group %s exceeded %d elements (declared order %d) -- a generator matrix is not of finite order"
-                        grp.Name closureCap grp.Order
+                    failwith $"internal: the generator closure of point group {grp.Name} exceeded {closureCap} elements (declared order {grp.Order}) -- a generator matrix is not of finite order"
                 let el = { Word = cur.Word @ [ gi ]; Mats = nxt }
                 out.Add el
                 queue.Enqueue el
@@ -271,8 +270,7 @@ let fsIndicator (grp: PointGroup) (els: PgElement list) (irrepIndex: int) : int 
             let m = List.item irrepIndex el.Mats
             matTrace (matMul m m))
     if total % grp.Order <> 0 then
-        failwithf "internal: the FS indicator of %s::%s is %d/%d, not an integer -- the element enumeration is wrong"
-            grp.Name (List.item irrepIndex grp.Irreps).Name total grp.Order
+        failwith $"internal: the FS indicator of {grp.Name}::{(List.item irrepIndex grp.Irreps).Name} is {total}/{grp.Order}, not an integer -- the element enumeration is wrong"
     total / grp.Order
 
 /// sum_i d_i^2/e_i -- the R-Burnside sum, which must equal |G|.
@@ -281,8 +279,7 @@ let burnsideSum (grp: PointGroup) : int =
     |> List.sumBy (fun ir ->
         let e = endDim ir.Fs
         if (ir.DimR * ir.DimR) % e <> 0 then
-            failwithf "internal: label %s::%s has d = %d and e = %d, but e does not divide d^2 -- no Wedderburn block has that shape"
-                grp.Name ir.Name ir.DimR e
+            failwith $"internal: label {grp.Name}::{ir.Name} has d = {ir.DimR} and e = {e}, but e does not divide d^2 -- no Wedderburn block has that shape"
         (ir.DimR * ir.DimR) / e)
 
 /// What `certifyPointGroup` computed on the way to passing. Returned rather
@@ -307,46 +304,42 @@ type PgIntegrity = {
 let certifyPointGroup (grp: PointGroup) : PgIntegrity =
     // (1) SHAPE
     if grp.Order < 1 then
-        failwithf "internal: point group %s declares order %d" grp.Name grp.Order
+        failwith $"internal: point group {grp.Name} declares order {grp.Order}"
     if List.isEmpty grp.Irreps then
-        failwithf "internal: point group %s has no labels" grp.Name
-    let names = grp.Irreps |> List.map (fun ir -> ir.Name)
+        failwith $"internal: point group {grp.Name} has no labels"
+    let names = grp.Irreps |> List.map _.Name
     if List.length (List.distinct names) <> List.length names then
         failwithf "internal: point group %s has duplicate label names %A" grp.Name names
     grp.Irreps
     |> List.iter (fun ir ->
         if ir.DimR < 1 then
-            failwithf "internal: label %s::%s has dimension %d" grp.Name ir.Name ir.DimR
+            failwith $"internal: label {grp.Name}::{ir.Name} has dimension {ir.DimR}"
         ir.Gens
         |> List.iteri (fun gi m ->
             if not (matIsSquare ir.DimR m) then
-                failwithf "internal: generator %s of %s::%s is not %d x %d"
-                    (List.item gi grp.GenNames) grp.Name ir.Name ir.DimR ir.DimR)
+                failwith $"internal: generator {(List.item gi grp.GenNames)} of {grp.Name}::{ir.Name} is not {ir.DimR} x {ir.DimR}")
         match ir.J with
         | Some j when not (matIsSquare ir.DimR j) ->
-            failwithf "internal: J of %s::%s is not %d x %d" grp.Name ir.Name ir.DimR ir.DimR
+            failwith $"internal: J of {grp.Name}::{ir.Name} is not {ir.DimR} x {ir.DimR}"
         | _ -> ())
 
     // (2) CLOSURE -- count and multiplicative closure over the common word set.
     let els = groupElements grp
     let closure = List.length els
     if closure <> grp.Order then
-        failwithf "internal: the generator closure of point group %s has %d elements but the table declares order %d -- the generator matrices do not generate the declared group"
-            grp.Name closure grp.Order
+        failwith $"internal: the generator closure of point group {grp.Name} has {closure} elements but the table declares order {grp.Order} -- the generator matrices do not generate the declared group"
     let keys = HashSet<string>(els |> List.map (fun el -> tupleKey el.Mats))
     for a in els do
         for b in els do
             let prod = List.map2 matMul a.Mats b.Mats
             if not (keys.Contains(tupleKey prod)) then
-                failwithf "internal: the enumerated elements of %s are not closed under multiplication (%s * %s escapes)"
-                    grp.Name (wordName grp a.Word) (wordName grp b.Word)
+                failwith $"internal: the enumerated elements of {grp.Name} are not closed under multiplication ({(wordName grp a.Word)} * {(wordName grp b.Word)} escapes)"
 
     // (3) ORTHOGONALITY -- what makes the oracle's rho(g)^T = rho(g)^-1 legitimate.
     for el in els do
         List.iter2 (fun (m: int[][]) (ir: PgIrrep) ->
             if not (matEq (matMul (matTranspose m) m) (matId ir.DimR)) then
-                failwithf "internal: the matrix of %s::%s at element %s is not orthogonal -- the group-average form rho_W(g) M rho_V(g)^T is not the Reynolds operator for this table"
-                    grp.Name ir.Name (wordName grp el.Word)) el.Mats grp.Irreps
+                failwith $"internal: the matrix of {grp.Name}::{ir.Name} at element {(wordName grp el.Word)} is not orthogonal -- the group-average form rho_W(g) M rho_V(g)^T is not the Reynolds operator for this table") el.Mats grp.Irreps
 
     // (4) THE FS INDICATOR -- nu = 2 - e, exactly (see `fsIndicator`).
     let indicators =
@@ -355,8 +348,7 @@ let certifyPointGroup (grp: PointGroup) : PgIntegrity =
             let nu = fsIndicator grp els i
             let want = 2 - endDim ir.Fs
             if nu <> want then
-                failwithf "internal: label %s::%s declares Fs = %s (e = %d), so the FS indicator sum_g chi(g^2)/|G| must be %d, but the element enumeration gives %d"
-                    grp.Name ir.Name (fsName ir.Fs) (endDim ir.Fs) want nu
+                failwith $"internal: label {grp.Name}::{ir.Name} declares Fs = {(fsName ir.Fs)} (e = {(endDim ir.Fs)}), so the FS indicator sum_g chi(g^2)/|G| must be {want}, but the element enumeration gives {nu}"
             (ir.Name, nu))
 
     // (5) THE J IDENTITIES, and the declared-Fs/declared-J agreement.
@@ -365,30 +357,25 @@ let certifyPointGroup (grp: PointGroup) : PgIntegrity =
         |> List.choose (fun ir ->
             match ir.Fs, ir.J with
             | FsComplex, None ->
-                failwithf "internal: label %s::%s is of complex type (e = 2) but carries no baked J -- the emitted End-basis [Id, J] has nothing to emit"
-                    grp.Name ir.Name
+                failwith $"internal: label {grp.Name}::{ir.Name} is of complex type (e = 2) but carries no baked J -- the emitted End-basis [Id, J] has nothing to emit"
             | FsReal, Some _ ->
-                failwithf "internal: label %s::%s is of real type (e = 1) but carries a baked J -- End is one-dimensional, so a J would be a scalar with J^2 = -Id"
-                    grp.Name ir.Name
+                failwith $"internal: label {grp.Name}::{ir.Name} is of real type (e = 1) but carries a baked J -- End is one-dimensional, so a J would be a scalar with J^2 = -Id"
             | FsQuat, _ ->
-                failwithf "internal: label %s::%s declares FsQuat -- the value is RESERVED for double groups (retired transforms-as-types plan section 3.6); no single point group has a quaternionic label"
-                    grp.Name ir.Name
+                failwith $"internal: label {grp.Name}::{ir.Name} declares FsQuat -- the value is RESERVED for double groups (retired transforms-as-types plan section 3.6); no single point group has a quaternionic label"
             | _, None -> None
             | _, Some j ->
                 if not (matEq (matMul j j) (matNeg (matId ir.DimR))) then
-                    failwithf "internal: J^2 <> -Id for %s::%s" grp.Name ir.Name
+                    failwith $"internal: J^2 <> -Id for {grp.Name}::{ir.Name}"
                 ir.Gens
                 |> List.iteri (fun gi g ->
                     if not (matEq (matMul j g) (matMul g j)) then
-                        failwithf "internal: J does not commute with generator %s of %s::%s -- J is not an endomorphism of the label"
-                            (List.item gi grp.GenNames) grp.Name ir.Name)
+                        failwith $"internal: J does not commute with generator {(List.item gi grp.GenNames)} of {grp.Name}::{ir.Name} -- J is not an endomorphism of the label")
                 Some ir.Name)
 
     // (6) THE R-BURNSIDE TRAP.
     let bs = burnsideSum grp
     if bs <> grp.Order then
-        failwithf "internal: the R-Burnside sum of %s is sum_i d_i^2/e_i = %d, but |G| = %d -- the label list is incomplete, or a dimension or an FS type is wrong"
-            grp.Name bs grp.Order
+        failwith $"internal: the R-Burnside sum of {grp.Name} is sum_i d_i^2/e_i = {bs}, but |G| = {grp.Order} -- the label list is incomplete, or a dimension or an FS type is wrong"
 
     { Group = grp.Name
       Order = grp.Order
@@ -409,8 +396,7 @@ let pointGroup (name: string) : PointGroup =
     | _ ->
         match rawRegistry |> List.tryFind (fun g -> g.Name = name) with
         | None ->
-            failwithf "internal: unknown point group '%s' -- the registry is {%s}"
-                name (String.concat ", " pointGroupNames)
+            failwith $"""internal: unknown point group '{name}' -- the registry is {{{(String.concat ", " pointGroupNames)}}}"""
         | Some g ->
             certifyPointGroup g |> ignore
             certified.[name] <- g
@@ -424,7 +410,7 @@ let pgIrrep (grp: PointGroup) (label: string) : PgIrrep =
     | Some ir -> ir
     | None ->
         failwithf "internal: point group %s has no label '%s' -- its labels are {%s}"
-            grp.Name label (grp.Irreps |> List.map (fun ir -> ir.Name) |> String.concat ", ")
+            grp.Name label (grp.Irreps |> List.map _.Name |> String.concat ", ")
 
 /// The index of a label in the group's table order -- the index into a
 /// `PgElement.Mats` tuple.
@@ -433,7 +419,7 @@ let pgIrrepIndex (grp: PointGroup) (label: string) : int =
     | Some i -> i
     | None ->
         failwithf "internal: point group %s has no label '%s' -- its labels are {%s}"
-            grp.Name label (grp.Irreps |> List.map (fun ir -> ir.Name) |> String.concat ", ")
+            grp.Name label (grp.Irreps |> List.map _.Name |> String.concat ", ")
 
 /// The EMITTED End-basis of a cell: [Id] at real type, [Id, J] at complex
 /// type. Its length is `endDim ir.Fs` by construction -- the bridge between
@@ -448,10 +434,9 @@ let endBasis (ir: PgIrrep) : int[][] list =
         match ir.J with
         | Some j -> [ matId ir.DimR; j ]
         | None ->
-            failwithf "internal: label %s is of complex type but has no baked J" ir.Name
+            failwith $"internal: label {ir.Name} is of complex type but has no baked J"
     | FsQuat ->
-        failwithf "internal: label %s is of quaternionic type -- FsQuat is a RESERVED counting value (retired transforms-as-types plan section 3.6: counts are uniform in e, emission is not). The [1, i, j, k] End-basis of a double-group label has no baked table here and no emitter asking for one"
-            ir.Name
+        failwith $"internal: label {ir.Name} is of quaternionic type -- FsQuat is a RESERVED counting value (retired transforms-as-types plan section 3.6: counts are uniform in e, emission is not). The [1, i, j, k] End-basis of a double-group label has no baked table here and no emitter asking for one"
 
 // THE GENERIC e-WEIGHTED COUNTING CORE. Parameterized over the LABEL type
 // alone: a block algebra says how big a label is and how big its
@@ -532,7 +517,7 @@ let private checkSpec (grp: PointGroup) (spec: PgSpec) : unit =
     spec |> List.iter (fun (label, m) ->
         pgIrrep grp label |> ignore
         if m < 0 then
-            failwithf "internal: spec entry %s::%s has negative multiplicity %d" grp.Name label m)
+            failwith $"internal: spec entry {grp.Name}::{label} has negative multiplicity {m}")
 
 /// dim_R of the module a pg spec describes.
 let pgTotalDim (grp: PointGroup) (spec: PgSpec) : int =
@@ -661,8 +646,7 @@ let pgEmbedding (name: string) : PgEmbedding =
     match embeddings |> List.tryFind (fun e -> e.Group = name) with
     | Some e -> e
     | None ->
-        failwithf "internal: point group '%s' has no declared O(3) embedding -- every registered group needs one before its restriction is defined (the registry is {%s})"
-            name (String.concat ", " pointGroupNames)
+        failwith $"""internal: point group '{name}' has no declared O(3) embedding -- every registered group needs one before its restriction is defined (the registry is {{{(String.concat ", " pointGroupNames)}}})"""
 
 /// det of a 3x3 integer matrix.
 let private det3 (m: int[][]) : int =
@@ -691,11 +675,9 @@ let embeddedElements (grp: PointGroup) : (PgElement * int[][]) list =
         emb.GenMats
         |> List.iteri (fun gi m ->
             if not (matIsSquare 3 m) then
-                failwithf "internal: the O(3) embedding of generator %s of %s is not 3 x 3"
-                    (List.item gi grp.GenNames) grp.Name
+                failwith $"internal: the O(3) embedding of generator {(List.item gi grp.GenNames)} of {grp.Name} is not 3 x 3"
             if not (matEq (matMul (matTranspose m) m) (matId 3)) then
-                failwithf "internal: the O(3) embedding of generator %s of %s is not orthogonal -- it is not an element of O(3)"
-                    (List.item gi grp.GenNames) grp.Name)
+                failwith $"internal: the O(3) embedding of generator {(List.item gi grp.GenNames)} of {grp.Name} is not orthogonal -- it is not an element of O(3)")
         let els = groupElements grp
         let geoOf (w: int list) =
             w |> List.fold (fun acc gi -> matMul acc (List.item gi emb.GenMats)) (matId 3)
@@ -709,16 +691,13 @@ let embeddedElements (grp: PointGroup) : (PgElement * int[][]) list =
                 match byAbs.TryGetValue prodKey with
                 | true, gp ->
                     if not (matEq gp (matMul ga gb)) then
-                        failwithf "internal: the O(3) embedding of %s is not a homomorphism -- the geometric matrix of %s * %s is not the product of their geometric matrices"
-                            grp.Name (wordName grp a.Word) (wordName grp b.Word)
+                        failwith $"internal: the O(3) embedding of {grp.Name} is not a homomorphism -- the geometric matrix of {(wordName grp a.Word)} * {(wordName grp b.Word)} is not the product of their geometric matrices"
                 | _ ->
-                    failwithf "internal: the enumerated elements of %s are not closed under multiplication at the embedding step (%s * %s)"
-                        grp.Name (wordName grp a.Word) (wordName grp b.Word)
+                    failwith $"internal: the enumerated elements of {grp.Name} are not closed under multiplication at the embedding step ({(wordName grp a.Word)} * {(wordName grp b.Word)})"
         // (3) FAITHFULNESS
         let images = pairs |> List.map (fun (_, g) -> tupleKey [ g ]) |> List.distinct
         if List.length images <> grp.Order then
-            failwithf "internal: the O(3) embedding of %s has image of size %d but |G| = %d -- it embeds a QUOTIENT, and restricting along it would decompose the wrong group"
-                grp.Name (List.length images) grp.Order
+            failwith $"internal: the O(3) embedding of {grp.Name} has image of size {(List.length images)} but |G| = {grp.Order} -- it embeds a QUOTIENT, and restricting along it would decompose the wrong group"
         geoCache.[grp.Name] <- pairs
         pairs
 
@@ -727,7 +706,7 @@ let embeddedElements (grp: PointGroup) : (PgElement * int[][]) list =
 /// chi_(l+1) = (t-1)*chi_l - chi_(l-1) with chi_0 = 1, chi_1 = t. Exact in
 /// t; no angle is ever named, so there is no float or half-angle to get wrong.
 let private chiRot (l: int) (t: int) : int =
-    if l < 0 then failwithf "internal: MLPointSpec.chiRot negative l (%d)" l
+    if l < 0 then failwith $"internal: MLPointSpec.chiRot negative l ({l})"
     if l = 0 then 1
     else
         let mutable prev = 1
@@ -744,12 +723,12 @@ let private chiRot (l: int) (t: int) : int =
 /// the whole of the parity handling, and DEAD CODE on the shipped roster.
 let o3Character (l: int) (parity: int) (g: int[][]) : int =
     if not (matIsSquare 3 g) then
-        failwithf "internal: MLPointSpec.o3Character expects a 3 x 3 matrix"
+        failwith "internal: MLPointSpec.o3Character expects a 3 x 3 matrix"
     if parity <> 0 && parity <> 1 then
-        failwithf "internal: MLPointSpec.o3Character parity must be 0 (even) or 1 (odd), got %d" parity
+        failwith $"internal: MLPointSpec.o3Character parity must be 0 (even) or 1 (odd), got {parity}"
     let d = det3 g
     if d <> 1 && d <> -1 then
-        failwithf "internal: MLPointSpec.o3Character was handed a matrix of determinant %d -- not an element of O(3)" d
+        failwith $"internal: MLPointSpec.o3Character was handed a matrix of determinant {d} -- not an element of O(3)"
     let chi = chiRot l (matTrace (if d = 1 then g else matNeg g))
     if d = 1 || parity = 0 then chi else -chi
 
@@ -768,9 +747,9 @@ let private restrictCache = Dictionary<string * int * int, PgSpec>()
 /// `pgElementMatrix` on the result must equal chi_(l,p) there, routed
 /// through the emitted LAYOUT so what the pipeline consumes is checked.
 let restrictIrrep (grp: PointGroup) (l: int) (parity: int) : PgSpec =
-    if l < 0 then failwithf "internal: MLPointSpec.restrictIrrep negative l (%d)" l
+    if l < 0 then failwith $"internal: MLPointSpec.restrictIrrep negative l ({l})"
     if parity <> 0 && parity <> 1 then
-        failwithf "internal: MLPointSpec.restrictIrrep parity must be 0 or 1, got %d" parity
+        failwith $"internal: MLPointSpec.restrictIrrep parity must be 0 or 1, got {parity}"
     match restrictCache.TryGetValue ((grp.Name, l, parity)) with
     | true, v -> v
     | _ ->
@@ -784,27 +763,22 @@ let restrictIrrep (grp: PointGroup) (l: int) (parity: int) : PgSpec =
                     |> List.sumBy (fun (el, g) ->
                         o3Character l parity g * matTrace (List.item i el.Mats))
                 if total % grp.Order <> 0 then
-                    failwithf "internal: the character inner product of D^(l=%d, parity=%d) restricted to %s against label %s is %d/%d, not an integer"
-                        l parity grp.Name ir.Name total grp.Order
+                    failwith $"internal: the character inner product of D^(l={l}, parity={parity}) restricted to {grp.Name} against label {ir.Name} is {total}/{grp.Order}, not an integer"
                 let ip = total / grp.Order
                 if ip % e <> 0 then
-                    failwithf "internal: <chi of (l=%d, parity=%d) restricted to %s, chi_%s> = %d is not divisible by e = %d -- over R the multiplicity is the inner product DIVIDED by dim End, so a non-divisible value means the table's FS type is wrong"
-                        l parity grp.Name ir.Name ip e
+                    failwith $"internal: <chi of (l={l}, parity={parity}) restricted to {grp.Name}, chi_{ir.Name}> = {ip} is not divisible by e = {e} -- over R the multiplicity is the inner product DIVIDED by dim End, so a non-divisible value means the table's FS type is wrong"
                 if ip < 0 then
-                    failwithf "internal: D^(l=%d, parity=%d) restricted to %s gives label %s NEGATIVE multiplicity %d"
-                        l parity grp.Name ir.Name (ip / e)
+                    failwith $"internal: D^(l={l}, parity={parity}) restricted to {grp.Name} gives label {ir.Name} NEGATIVE multiplicity {(ip / e)}"
                 (ir.Name, ip / e))
             |> List.filter (fun (_, m) -> m > 0)
         let dimSum = spec |> List.sumBy (fun (nm, m) -> m * (pgIrrep grp nm).DimR)
         if dimSum <> 2 * l + 1 then
-            failwithf "internal: D^(l=%d, parity=%d) restricted to %s decomposed to %d dimensions but the irrep has %d -- a dropped Frobenius-Schur correction reads exactly like this"
-                l parity grp.Name dimSum (2 * l + 1)
+            failwith $"internal: D^(l={l}, parity={parity}) restricted to {grp.Name} decomposed to {dimSum} dimensions but the irrep has {(2 * l + 1)} -- a dropped Frobenius-Schur correction reads exactly like this"
         for (el, g) in pairs do
             let want = o3Character l parity g
             let got = matTrace (pgElementMatrix grp spec el)
             if got <> want then
-                failwithf "internal: the restriction of D^(l=%d, parity=%d) to %s reconstructs character %d at element %s, but the O(3) character there is %d -- the branching table and the element action disagree"
-                    l parity grp.Name got (wordName grp el.Word) want
+                failwith $"internal: the restriction of D^(l={l}, parity={parity}) to {grp.Name} reconstructs character {got} at element {(wordName grp el.Word)}, but the O(3) character there is {want} -- the branching table and the element action disagree"
         restrictCache.[(grp.Name, l, parity)] <- spec
         spec
 
@@ -820,7 +794,7 @@ let restrictSpec (grp: PointGroup) (entries: (int * int * int) list) : PgSpec =
         (Map.empty, entries)
         ||> List.fold (fun m (l, parity, mult) ->
             if mult < 1 then
-                failwithf "internal: MLPointSpec.restrictSpec was handed a block of multiplicity %d" mult
+                failwith $"internal: MLPointSpec.restrictSpec was handed a block of multiplicity {mult}"
             restrictIrrep grp l parity
             |> List.fold (fun m2 (nm, k) ->
                 m2 |> Map.change nm (fun cur -> Some (defaultArg cur 0 + k * mult))) m)
@@ -833,5 +807,5 @@ let restrictSpec (grp: PointGroup) (entries: (int * int * int) list) : PgSpec =
     let want = entries |> List.sumBy (fun (l, _, mult) -> mult * (2 * l + 1))
     let got = pgTotalDim grp out
     if got <> want then
-        failwithf "internal: restricting a spec of dim %d to %s produced a module of dim %d" want grp.Name got
+        failwith $"internal: restricting a spec of dim {want} to {grp.Name} produced a module of dim {got}"
     out

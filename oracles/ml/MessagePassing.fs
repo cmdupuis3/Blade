@@ -15,7 +15,7 @@ module MessagePassing =
         for e in 0 .. sources.Length - 1 do
             let src = sources.[e]
             if src < 0 || src >= nRows then
-                invalidArg "sources" (sprintf "source index %d out of range [0, %d)" src nRows)
+                invalidArg "sources" $"source index {src} out of range [0, {nRows})"
             System.Array.Copy(features, src * featDim, out, e * featDim, featDim)
         out
 
@@ -27,7 +27,7 @@ module MessagePassing =
         for e in 0 .. targets.Length - 1 do
             let tgt = targets.[e]
             if tgt < 0 || tgt >= nTargets then
-                invalidArg "targets" (sprintf "target index %d out of range [0, %d)" tgt nTargets)
+                invalidArg "targets" $"target index {tgt} out of range [0, {nTargets})"
             for c in 0 .. featDim - 1 do
                 out.[tgt * featDim + c] <- out.[tgt * featDim + c] + values.[e * featDim + c]
         out

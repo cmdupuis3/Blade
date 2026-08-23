@@ -324,7 +324,7 @@ let joinDeferrableIdsMany (exprs: IRExpr list) : Set<IRId> =
         match allRefs.TryGetValue kv.Key with
         | true, total -> total = kv.Value
         | _ -> false)
-    |> Seq.map (fun kv -> kv.Key)
+    |> Seq.map _.Key
     |> Set.ofSeq
 
 let joinDeferrableIds (expr: IRExpr) : Set<IRId> = joinDeferrableIdsMany [expr]
@@ -860,7 +860,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprRank e ->
         // Resolve rank statically from the typed expression's type
         let rank = match e.Type with
-                   | ArrayElem at -> at.IndexTypes |> List.sumBy (fun idx -> idx.Rank)
+                   | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank
                    | _ -> 0
         IRLit (IRLitInt (int64 rank))
     
@@ -939,7 +939,7 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     // parallelism flows TypedLambdaInfo.Parallel -> here via the shared
     // extractor (same logic a function's where-clause uses).
     let (lamParallelism, lamIsOmp, lamIsCuda, lamBlock, lamIsMpi) =
-        extractParallelism info.Parallel (info.Params |> List.map (fun p -> p.Name))
+        extractParallelism info.Parallel (info.Params |> List.map _.Name)
     // A named, recursive lambda (`let const name = lambda ...` whose body
     // refers to itself) carries a self-binding: give the lifted callable the
     // real name and the id the body's self-reference resolves to, so the
@@ -973,7 +973,7 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
     // implementation detail of the lifted function's signature.
     env.LiftedCallables.Add(callable)
     let funcType =
-        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+        let paramTypes = callable.Params |> List.map _.Type
         mkFuncArrow paramTypes callable.RetType
     IRVar (callable.Id, funcType)
 
@@ -1165,7 +1165,7 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
     let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256 false
     env.LiftedCallables.Add(callable)
     let funcType =
-        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+        let paramTypes = callable.Params |> List.map _.Type
         mkFuncArrow paramTypes callable.RetType
     IRVar (callable.Id, funcType)
 
@@ -1223,7 +1223,7 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
     let callable = mkLambdaCallable env.Builder parms body retType captures false [] [] false false 256 false
     env.LiftedCallables.Add(callable)
     let funcType =
-        let paramTypes = callable.Params |> List.map (fun p -> p.Type)
+        let paramTypes = callable.Params |> List.map _.Type
         mkFuncArrow paramTypes callable.RetType
     IRVar (callable.Id, funcType)
 
@@ -1284,7 +1284,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         // Kernel slot references the lifted callable via IRVar;
         // genObjectForApplication uses resolveCallable + wrapper to consume it.
         let kernelFuncType =
-            let paramTypes = lambdaInfo.Params |> List.map (fun p -> p.Type)
+            let paramTypes = lambdaInfo.Params |> List.map _.Type
             mkFuncArrow paramTypes lambdaInfo.RetType
         let inputRanks = match mode with Outer -> [1; 1] | Elementwise -> [0; 0]
         let objInfo : ObjectForInfo = {
@@ -1341,7 +1341,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             let sVar = env.Builder.FreshId()
             let cap : CaptureInfo = {
                 Id = sVar
-                Name = sprintf "__bc_s%d" sVar
+                Name = $"__bc_s{sVar}"
                 Type = scalarTy
                 IsMutable = false
             }
@@ -1430,7 +1430,7 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
     // (index, level) detail + flag, cuda -> flag + block size, mpi -> flag.
     let declParallel = match decl.WhereClause with Some wc -> wc.Parallel | None -> []
     let (parallelism, isOmpParallel, isCudaKernel, cudaBlockSize, isMpiParallel) =
-        extractParallelism declParallel (decl.Params |> List.map (fun p -> p.Name))
+        extractParallelism declParallel (decl.Params |> List.map _.Name)
 
     // Bind parameters in environment for body lowering
     let mutable paramEnv = { env with PolyParamNames = polyParamNames }
@@ -1516,7 +1516,7 @@ let lowerTypedDecl (env: TypedLowerEnv) (decl: TypedDecl) : (Choice<IRFuncDef, I
         // id-ordered emission places them correctly.
         let checkBindings =
             binding.PostChecks |> List.mapi (fun i (checkId, tCheck) ->
-                { Id = checkId; Name = sprintf "__mg_check%d" i; Type = IRTUnit
+                { Id = checkId; Name = $"__mg_check{i}"; Type = IRTUnit
                   Value = lowerTypedExpr env'' tCheck; IsConst = true; IsMutable = false })
         ([Choice2Of3 irBinding] @ (subIRBindings |> List.map Choice2Of3) @ (checkBindings |> List.map Choice2Of3), env'')
     
@@ -1832,7 +1832,7 @@ let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: T
                               |> List.tryPick (function
                                   | IRTDIndexType (n, it) when it.Id = idx.Id -> Some n
                                   | _ -> None)
-                              |> Option.defaultValue (sprintf "dim%d" i))
+                              |> Option.defaultValue $"dim{i}")
                   Some { Provider = pname
                          FilePath = path
                          VarName = srcName
@@ -1885,18 +1885,18 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
                 | Some exports ->
                     currentEnv <- { currentEnv with ImportedModules = Map.add alias fullName currentEnv.ImportedModules }
                     for kv in exports.Variables do
-                        let qualName = sprintf "%s.%s" alias kv.Key
+                        let qualName = $"{alias}.{kv.Key}"
                         currentEnv <- bindTypedVar qualName kv.Value.Id currentEnv
                     for kv in exports.Functions do
-                        currentEnv <- { currentEnv with Functions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.Functions }
+                        currentEnv <- { currentEnv with Functions = Map.add $"{alias}.{kv.Key}" kv.Value currentEnv.Functions }
                     for kv in exports.StructDefs do
                         currentEnv <- { currentEnv with StructDefs = Map.add kv.Key kv.Value currentEnv.StructDefs }
                     for kv in exports.UnitDefs do
                         currentEnv <- { currentEnv with UnitDefs = Map.add kv.Key kv.Value currentEnv.UnitDefs }
                     for kv in exports.StaticValues do
-                        currentEnv <- { currentEnv with StaticValues = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticValues }
+                        currentEnv <- { currentEnv with StaticValues = Map.add $"{alias}.{kv.Key}" kv.Value currentEnv.StaticValues }
                     for kv in exports.StaticFunctions do
-                        currentEnv <- { currentEnv with StaticFunctions = Map.add (sprintf "%s.%s" alias kv.Key) kv.Value currentEnv.StaticFunctions }
+                        currentEnv <- { currentEnv with StaticFunctions = Map.add $"{alias}.{kv.Key}" kv.Value currentEnv.StaticFunctions }
                 | None ->
                     // Check if this is a provider-module import (e.g. `import netcdf as nc`)
                     match qname with
@@ -2400,7 +2400,7 @@ let lower (source: string) : Result<IRProgram, string> =
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
-    | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
+    | Error e -> Error $"Parse error at {e.Line}:{e.Col}: {e.Message}"
 
 /// Everything `lowerDiag` does AFTER the parse. Shared by the single-file,
 /// multi-file and already-parsed entry points so they cannot drift.
@@ -2562,7 +2562,7 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
     let r = Blade.ModuleResolve.resolveEntry entryPath source
     match r.Errors with
     | (d: Blade.Diagnostics.Diagnostic) :: _ ->
-        Error (sprintf "%s: %s" d.Code d.Message), []
+        Error $"{d.Code}: {d.Message}", []
     | [] ->
     match Blade.ModuleResolve.parseResolvedFiles r.Files with
     | Ok program ->
@@ -2580,7 +2580,7 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs), warnings
     | Error d ->
-        Error (sprintf "Parse error: %s" d.Message), []
+        Error $"Parse error: {d.Message}", []
 
 /// Lower multiple source files into a single IR program with cross-module imports
 let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, string> =
@@ -2595,7 +2595,7 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
-    | Error e -> Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message)
+    | Error e -> Error $"Parse error at {e.Line}:{e.Col}: {e.Message}"
 
 /// The multi-source twin of `lowerCaptured`, on exactly the same terms: same
 /// pipeline as `lowerMultiSource`, warnings returned rather than printed,
@@ -2617,4 +2617,4 @@ let lowerMultiSourceCaptured (sources: (string * string) list)
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs), warnings
     | Error e ->
-        Error (sprintf "Parse error at %d:%d: %s" e.Line e.Col e.Message), []
+        Error $"Parse error at {e.Line}:{e.Col}: {e.Message}", []

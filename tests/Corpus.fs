@@ -29,8 +29,7 @@ let private corpusRoot : Lazy<string> =
         match candidates |> List.tryFind Directory.Exists with
         | Some d -> d
         | None ->
-            failwithf "Test corpus not found. Looked in: %s"
-                (candidates |> List.map Path.GetFullPath |> String.concat " ; ")
+            failwith $"""Test corpus not found. Looked in: {(candidates |> List.map Path.GetFullPath |> String.concat " ; ")}"""
 
 /// Split a .blade file into its directive lines and source body.
 /// Returns (testName, moduleName option, source).
@@ -38,13 +37,13 @@ let private parseBladeFile (path: string) : string * string option * string =
     let text = File.ReadAllText(path)
     let nl = text.IndexOf('\n')
     if nl < 0 || not (text.StartsWith("// TEST: ")) then
-        failwithf "corpus file %s: first line must be '// TEST: <name>'" path
+        failwith $"corpus file {path}: first line must be '// TEST: <name>'"
     let name = text.Substring(9, nl - 9).TrimEnd('\r')
     // The name is load-bearing, not decoration: "(rejects)" / "(aborts)"
     // suffixes decide which classification arm the runner takes, so a blank name
     // would silently demote a probe to an ordinary test.
     if String.IsNullOrWhiteSpace name then
-        failwithf "corpus file %s: '// TEST:' has an empty name (the name carries the (rejects)/(aborts) probe markers)" path
+        failwith $"corpus file {path}: '// TEST:' has an empty name (the name carries the (rejects)/(aborts) probe markers)"
     let rest = text.Substring(nl + 1)
     if rest.StartsWith("// MODULE: ") then
         let nl2 = rest.IndexOf('\n')
@@ -68,7 +67,7 @@ let private parseBladeFile (path: string) : string * string option * string =
 /// category directory itself, which legitimately holds only subdirectories.
 let private bladeFiles (dir: string) : string[] =
     if not (Directory.Exists dir) then
-        failwithf "corpus category directory missing: %s" (Path.GetFullPath dir)
+        failwith $"corpus category directory missing: {(Path.GetFullPath dir)}"
     let files = Directory.GetFiles(dir, "*.blade")
     if Array.isEmpty files then
         failwithf "corpus category directory has no .blade files: %s (an empty category would report '0 passed, 0 failed' and assert nothing)"
@@ -112,7 +111,7 @@ let singleFileCategories () : string list =
 let multiFileCategory (dirName: string) : (string * (string * string) list) list =
     let catDir = Path.Combine(corpusRoot.Value, dirName)
     if not (Directory.Exists catDir) then
-        failwithf "corpus category directory missing: %s" (Path.GetFullPath catDir)
+        failwith $"corpus category directory missing: {(Path.GetFullPath catDir)}"
     let dirs = Directory.GetDirectories(catDir)
     // Same rule as bladeFiles: a multi-file category with no test subdirectories
     // yields zero tests and a vacuous green "0 passed, 0 failed".
@@ -128,9 +127,9 @@ let multiFileCategory (dirName: string) : (string * (string * string) list) list
                 let (name, modOpt, source) = parseBladeFile f
                 match modOpt with
                 | Some m -> (name, (m, source))
-                | None -> failwithf "corpus file %s: multi-file test lacks '// MODULE: <name>'" f)
+                | None -> failwith $"corpus file {f}: multi-file test lacks '// MODULE: <name>'")
         if Array.isEmpty parts then
-            failwithf "corpus test directory %s has no .blade files" testDir
+            failwith $"corpus test directory {testDir} has no .blade files"
         let (testName, _) = parts.[0]
         (testName, parts |> Array.map snd |> Array.toList))
     |> Array.toList

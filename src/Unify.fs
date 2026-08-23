@@ -778,7 +778,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     (match ty with
                      | ArrayElem arr ->
                          if arr.IndexTypes.Length < k then
-                             Some (RankBoundViolation (k, sprintf "a rank-%d array" arr.IndexTypes.Length))
+                             Some (RankBoundViolation (k, $"a rank-{arr.IndexTypes.Length} array"))
                          else None
                      | IRTInfer id2 ->
                          subst.AddRankLowerBound(id2, k)
@@ -816,7 +816,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     // bind, so no loss) refused the scalar correctly.
                     (match subst.GetArityConstraint(id2) with
                      | Some k2 when k2 <> k ->
-                        Error (Other (sprintf "a `^%d` type variable cannot unify with a `^%d` one: the caret pins an EXACT rank, so the two annotations describe different shapes" k k2))
+                        Error (Other $"a `^{k}` type variable cannot unify with a `^{k2}` one: the caret pins an EXACT rank, so the two annotations describe different shapes")
                      | _ ->
                         subst.CopyArityConstraint(id, id2)
                         subst.Bind(id, ty); Ok ())
@@ -825,8 +825,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     // ("got IRTScalar ETInt64") leaked F# constructor names
                     // into user-facing output, and the fold-kernel seam above
                     // now routes ordinary programs here.
-                    Error (Other (sprintf "a `^%d` type variable is a rank-%d array, but this position supplies %s -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."
-                                          k k (ppIRType ty)))
+                    Error (Other ($"a `^{k}` type variable is a rank-{k} array, but this position supplies {(ppIRType ty)} -- the caret is a rank CLAIM, not a shorthand, so drop it (`T`) where the value is an element rather than an array. In fold-kernel position (`reduce(A, f)`) the parameters ARE the element type: a `T^1` kernel fits an array of rank-1 elements, not a rank-1 array of scalars."))
             | _ ->
                 match subst.GetLiteralDefault(id) with
                 | Some litE ->
@@ -897,7 +896,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             // Y" reads as a puzzle when the two slots hold the same cell
             // count and differ only in index-component span.
             | Some (slot, (i1, i2)) when indexRankDiffers i1 i2 ->
-                Error (IndexRankMismatch (sprintf "index slot %d" slot,
+                Error (IndexRankMismatch ($"index slot {slot}",
                                           ppIndexType i1, max 1 i1.Rank,
                                           ppIndexType i2, max 1 i2.Rank))
             | Some _ -> Error (TypeMismatch (t1, t2))
@@ -969,7 +968,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                 |> List.tryFind (fun (_, (i1, i2)) -> indexPairIncompatible i1 i2)
             match axisMismatch with
             | Some (axis, (i1, i2)) when indexRankDiffers i1 i2 ->
-                Error (IndexRankMismatch (sprintf "Dist axis %d" axis,
+                Error (IndexRankMismatch ($"Dist axis {axis}",
                                           ppIndexType i1, max 1 i1.Rank,
                                           ppIndexType i2, max 1 i2.Rank))
             | Some _ -> Error (TypeMismatch (t1, t2))

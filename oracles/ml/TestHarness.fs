@@ -25,7 +25,7 @@ module TestHarness =
 
     let checkArrayClose (name: string) (tol: float) (expected: float[]) (actual: float[]) =
         if expected.Length <> actual.Length then
-            check (sprintf "%s (length %d vs %d)" name expected.Length actual.Length) false
+            check $"{name} (length {expected.Length} vs {actual.Length})" false
         else
             let d = MathUtils.maxAbsDiff expected actual
             check (sprintf "%s (max abs diff %.3g, tol %g)" name d tol) (d <= tol)
@@ -36,7 +36,7 @@ module TestHarness =
                 f ()
                 false
             with _ -> true
-        check (sprintf "%s (expected exception)" name) threw
+        check $"{name} (expected exception)" threw
 
     let summary () : int =
         printfn ""

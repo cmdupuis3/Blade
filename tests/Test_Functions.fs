@@ -41,9 +41,9 @@ let private countOccurrences (hay: string) (needle: string) : int =
 let cppOf (name: string) (src: string) : Result<string, string> =
     try
         match fst (Blade.Lowering.lowerCaptured src) with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir -> Ok (fst (Blade.CodeGen.genSelfContainedProgramFromIR ir name))
-    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+    with ex -> Error ($"codegen raised: {ex.Message}")
 
 let runFactoryFlattenTests () : BlockResult =
     printHeader "Factory Flat Emission"
@@ -77,7 +77,7 @@ let runFactoryFlattenTests () : BlockResult =
         // application would add call sites (or std::function wrappers).
         check "exactly one plot(...) call in the emitted C++"
             (countOccurrences cf "plot(" = 3)
-            (sprintf "%d occurrences (prototype + definition + 1 call = 3)" (countOccurrences cf "plot("))
+            ($"""{(countOccurrences cf "plot(")} occurrences (prototype + definition + 1 call = 3)""")
         check "no std::function residue (no materialized partial application)"
             (not (cc.Contains "std::function"))
             ""
@@ -87,7 +87,7 @@ let runFactoryFlattenTests () : BlockResult =
     | a, b, c ->
         let describe = function Ok _ -> "ok" | Error e -> e
         fail "factory emission sources lower + generate"
-            (sprintf "flat: %s; chained: %s; swapped: %s" (describe a) (describe b) (describe c))
+            ($"flat: {(describe a)}; chained: {(describe b)}; swapped: {(describe c)}")
     { Block = "Factory Flat Emission"
       Passed = passed
       Failed = failed

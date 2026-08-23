@@ -37,7 +37,7 @@ let private checks = ResizeArray<string * (unit -> bool * string)>()
 let private add name fn = checks.Add((name, fn))
 
 let private eq (expected: string) (actual: string) =
-    (expected = actual), (if expected = actual then "" else sprintf "expected %s, got %s" expected actual)
+    (expected = actual), (if expected = actual then "" else $"expected {expected}, got {actual}")
 
 // ---- 1. The frame format ----------------------------------------------------
 
@@ -151,7 +151,7 @@ add "REPL channel: the frame is a whole line at column 0 of stdout" (fun () ->
             let l = lines.[i]
             let json = l.Substring F.Sentinel.Length
             (json.StartsWith "{" && json.EndsWith "}" && not (json.Contains "\n")),
-            sprintf "line %d = %s" i json)
+            $"line {i} = {json}")
 
 add "REPL channel: the frame precedes the binding prints" (fun () ->
     // The compiled binary emits inside main()'s body, ahead of the timing line
@@ -164,7 +164,7 @@ add "REPL channel: the frame precedes the binding prints" (fun () ->
         let frameAt = lines |> Array.tryFindIndex (fun l -> l.StartsWith F.Sentinel)
         let bindAt = lines |> Array.tryFindIndex (fun l -> l.StartsWith "ok = ")
         match frameAt, bindAt with
-        | Some f, Some b -> (f < b), sprintf "frame at %d, binding at %d" f b
+        | Some f, Some b -> (f < b), $"frame at {f}, binding at {b}"
         | _ -> false, sprintf "missing line(s) in %A" lines)
 
 add "REPL channel: ids count emissions and repeat across runs" (fun () ->
@@ -185,7 +185,7 @@ add "REPL channel: ids count emissions and repeat across runs" (fun () ->
                     l.Substring(i + 6, l.IndexOf("\"", i + 6) - i - 6))
                 |> String.concat ",")
     match idsOf (), idsOf () with
-    | Ok a, Ok b -> (a = "blade-1,blade-2" && a = b), sprintf "run1=%s run2=%s" a b
+    | Ok a, Ok b -> (a = "blade-1,blade-2" && a = b), $"run1={a} run2={b}"
     | Error e, _ | _, Error e -> false, e)
 
 add "REPL channel: a program that never emits produces no sentinel" (fun () ->
@@ -279,7 +279,7 @@ let private plotFrame (source: string) : Result<System.Text.Json.JsonDocument, s
             |> Array.filter (fun l -> l.StartsWith F.Sentinel)
         match frames with
         | [| l |] -> Ok (System.Text.Json.JsonDocument.Parse (l.Substring F.Sentinel.Length))
-        | _ -> Error (sprintf "expected exactly 1 frame, got %d" frames.Length)
+        | _ -> Error ($"expected exactly 1 frame, got {frames.Length}")
 
 let private contourSource =
     "import plot\n\
@@ -305,7 +305,7 @@ add "plot.contourf: the trace is a fill contour carrying the z grid" (fun () ->
         ((trace.GetProperty "type").GetString() = "contour"
          && (trace.GetProperty("contours").GetProperty "coloring").GetString() = "fill"
          && z.GetArrayLength() = 2
-         && row1.EnumerateArray() |> Seq.map (fun e -> e.GetDouble()) |> List.ofSeq = [3.0; 4.0; 5.5]),
+         && row1.EnumerateArray() |> Seq.map (_.GetDouble()) |> List.ofSeq = [3.0; 4.0; 5.5]),
         trace.ToString())
 
 add "plot.contourf: tagged slots steer ncontours and the layout title" (fun () ->
@@ -399,10 +399,10 @@ add "plot: json_num of a non-finite scalar slot is null too" (fun () ->
         let trace = (doc.RootElement.GetProperty("data").GetProperty "data").EnumerateArray() |> Seq.head
         let row (i: int) =
             (trace.GetProperty "z").EnumerateArray() |> Seq.item i
-            |> fun r -> r.EnumerateArray() |> Seq.map (fun e -> e.ValueKind.ToString()) |> String.concat ","
+            |> fun r -> r.EnumerateArray() |> Seq.map (_.ValueKind.ToString()) |> String.concat ","
         ((trace.GetProperty "ncontours").GetInt32() = 5
          && row 0 = "Number,Null" && row 1 = "Null,Number"),
-        sprintf "row0=%s row1=%s" (row 0) (row 1))
+        $"row0={(row 0)} row1={(row 1)}")
 
 // ---- 5. Grid decimation: the `maxdim` slot ----------------------------------
 //
@@ -440,9 +440,7 @@ let private shapeOf (doc: System.Text.Json.JsonDocument) =
     let rowLens =
         z.EnumerateArray() |> Seq.map (fun r -> string (r.GetArrayLength()))
         |> Seq.distinct |> String.concat "/"
-    sprintf "%d,%d,%d,%s"
-        ((t.GetProperty "x").GetArrayLength()) ((t.GetProperty "y").GetArrayLength())
-        (z.GetArrayLength()) rowLens
+    $"""{((t.GetProperty "x").GetArrayLength())},{((t.GetProperty "y").GetArrayLength())},{(z.GetArrayLength())},{rowLens}"""
 
 let private numbersOf (e: System.Text.Json.JsonElement) =
     e.EnumerateArray() |> Seq.map (fun v -> string (v.GetDouble())) |> String.concat ","
@@ -470,7 +468,7 @@ add "plot.contourf: decimated samples are strided ORIGINALS, not interpolants" (
         // first cell is 1*40 + 0 = 40.
         let z10 = ((t.GetProperty "z").EnumerateArray() |> Seq.item 1).EnumerateArray() |> Seq.head
         eq "0,2,5,7,10,12,15,17,20,22,25,27,30,32,35,37|0,1,3,4,6,7,9,10,12,13,15,16,18,19,21,22|40"
-           (sprintf "%s|%s|%s" xs ys (string (z10.GetDouble()))))
+           ($"{xs}|{ys}|{(string (z10.GetDouble()))}"))
 
 add "plot.contourf: a grid inside the cap is serialized BYTE-FOR-BYTE unchanged" (fun () ->
     // The whole no-op path in one assertion: with both axes under the
@@ -495,11 +493,11 @@ add "plot: the maxdim budget snaps DOWN to a supported power of two" (fun () ->
     // budget and is used as-is. Anything under the smallest rung floors at
     // 16 rather than degenerating.
     let shapeAt (cap: string) =
-        match plotFrame (gridPrelude + sprintf "let ok = plot.contourf(gx, gy, gz, %s: maxdim)\n" cap) with
+        match plotFrame (gridPrelude + $"let ok = plot.contourf(gx, gy, gz, {cap}: maxdim)\n") with
         | Error e -> "ERR:" + e
         | Ok doc -> shapeOf doc
     eq "16,16,16,16|32,32,32,32|16,16,16,16"
-       (sprintf "%s|%s|%s" (shapeAt "20") (shapeAt "32") (shapeAt "2")))
+       ($"""{(shapeAt "20")}|{(shapeAt "32")}|{(shapeAt "2")}"""))
 
 add "plot: a grid with BOTH axes at or under maxdim is left alone" (fun () ->
     // The trigger is `>`, not `>=`: a cap of 40 leaves the 40-wide axis
@@ -531,10 +529,9 @@ add "plot: the maxdim slot routes by NOMINAL, flat and chained" (fun () ->
         | Error e -> "ERR:" + e
         | Ok doc ->
             let t = traceOf doc
-            sprintf "%s|%s|%d" (shapeOf doc) ((t.GetProperty "colorscale").GetString())
-                    ((t.GetProperty "ncontours").GetInt32())
+            $"""{(shapeOf doc)}|{((t.GetProperty "colorscale").GetString())}|{((t.GetProperty "ncontours").GetInt32())}"""
     eq "16,16,16,16|Plasma|7|16,16,16,16|Plasma|7"
-       (sprintf "%s|%s" (readBack flat) (readBack chained)))
+       ($"{(readBack flat)}|{(readBack chained)}"))
 
 add "plot: contour and heatmap carry the same maxdim slot" (fun () ->
     // All three GRID factories decimate; line/scatter have no grid to
@@ -591,7 +588,7 @@ let private metaBytesOf (source: string) : string =
 
 /// `plot.line` with the given extra slot text (`""` for none).
 let private lineSlots (slots: string) =
-    sprintf "import plot\nlet ok = plot.line([0.0, 1.0], [0.0, 1.0]%s)\n" slots
+    $"import plot\nlet ok = plot.line([0.0, 1.0], [0.0, 1.0]{slots})\n"
 
 add "plot: the default meta carries id + backend and NOTHING else" (fun () ->
     // Byte-identical to what plot.blade emitted before the slot existed. Any
@@ -632,16 +629,16 @@ add "plot: all five factories carry the backend slot, flat and chained" (fun () 
     // the older slots.
     let g = "[0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]]"
     let calls =
-        [ sprintf "plot.contourf(%s, 1: backend, 5: levels)" g
-          sprintf "plot.contour(%s)(1: backend)(3: levels)" g
-          sprintf "plot.heatmap(%s, 1: backend, 2: cmap)" g
+        [ $"plot.contourf({g}, 1: backend, 5: levels)"
+          $"plot.contour({g})(1: backend)(3: levels)"
+          $"plot.heatmap({g}, 1: backend, 2: cmap)"
           "plot.line([0.0, 1.0], [0.0, 1.0], 1: backend, \"t\": title)"
           "plot.scatter([0.0, 1.0], [0.0, 1.0])(1: backend)" ]
     let got =
         calls |> List.mapi (fun i c ->
-            let m = metaBytesOf (sprintf "import plot\nlet ok = %s\n" c)
+            let m = metaBytesOf ($"import plot\nlet ok = {c}\n")
             if m = "\"meta\":{\"id\":\"blade-1\",\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}"
-            then "gr" else sprintf "[%d %s]" i m)
+            then "gr" else $"[{i} {m}]")
     eq "gr,gr,gr,gr,gr" (String.concat "," got))
 
 // ---- Runner -----------------------------------------------------------------
@@ -657,7 +654,7 @@ let runDisplayTests () : BlockResult =
     let mutable failedNames = []
     for (name, fn) in checks do
         let (ok, detail) =
-            try fn () with ex -> false, sprintf "exception: %s" ex.Message
+            try fn () with ex -> false, $"exception: {ex.Message}"
         if ok then
             passed <- passed + 1
             resultLine Pass name ""
@@ -665,5 +662,5 @@ let runDisplayTests () : BlockResult =
             failed <- failed + 1
             failedNames <- failedNames @ [name]
             resultLine Fail name detail
-    printFooter "Display" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "Display" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Display"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

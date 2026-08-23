@@ -144,7 +144,7 @@ let jsonNumber (rendered: string) (x: float) : string =
 /// `"data":`. Built at ELABORATION time (the mime is a literal, see
 /// DisplayElaborate) so neither runtime lane has to know the encoding rule.
 let headFor (mime: string) : string =
-    sprintf "{\"v\":%d,\"mime\":\"%s\",\"encoding\":\"%s\",\"data\":" Version mime (encodingFor mime)
+    $"{{\"v\":{Version},\"mime\":\"{mime}\",\"encoding\":\"{encodingFor mime}\",\"data\":"
 
 /// A user `meta` object literal reduced to the tail that follows the generated
 /// `"id"` entry: `{"title":"x"}` -> `,"title":"x"`, `{}` -> `""`. The braces

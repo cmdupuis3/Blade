@@ -456,7 +456,7 @@ module DeducedFacts =
     /// owner `"<zonk>"`, param renders as the variable itself, index -1.
     /// Safe because `deduced[]` consumers key on `kind`, not owner/name.
     let recordZonkClosedRank (varId: IRId) (rank: int) =
-        add (DeducedRank ("<zonk>", sprintf "?%d" varId, -1, rank)) noSpan
+        add (DeducedRank ("<zonk>", $"?{varId}", -1, rank)) noSpan
 
 /// Append a non-fatal diagnostic to BOTH warning channels: the plain
 /// string list (`typeCheck`'s Ok payload, kept exact for Repl.fs and the
@@ -526,38 +526,35 @@ let unitAnnoContext = "<type annotation>"
 /// Format a TypeError as a human-readable string
 let formatTypeError (err: TypeError) : string =
     match err with
-    | UnboundVariable name -> sprintf "Unbound variable: %s" name
-    | TypeMismatch (exp, act) -> sprintf "Type mismatch: expected %s, got %s" (ppIRType exp) (ppIRType act)
-    | ArityMismatch (exp, act) -> sprintf "Arity mismatch: expected %d args, got %d" exp act
+    | UnboundVariable name -> $"Unbound variable: {name}"
+    | TypeMismatch (exp, act) -> $"Type mismatch: expected {ppIRType exp}, got {ppIRType act}"
+    | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"
     | KernelPackArity msg -> msg
     | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
         let describe rank ty =
-            if rank = 0 then sprintf "a scalar (%s)" ty
-            else sprintf "a rank-%d array (%s)" rank ty
-        sprintf "argument %d: rank mismatch: the parameter expects %s but the argument is %s. A call site neither broadcasts nor reduces rank -- pass a value of the declared rank, or change the parameter's declared type."
-                pos (describe expRank expTy) (describe actRank actTy)
+            if rank = 0 then $"a scalar ({ty})"
+            else $"a rank-{rank} array ({ty})"
+        $"argument {pos}: rank mismatch: the parameter expects {(describe expRank expTy)} but the argument is {(describe actRank actTy)}. A call site neither broadcasts nor reduces rank -- pass a value of the declared rank, or change the parameter's declared type."
     | ArgTypeMismatch (pos, func, expTy, actTy) ->
-        sprintf "argument %d of %s: type mismatch: the parameter is declared %s but the argument is %s. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type."
-                pos func expTy actTy
-    | InvalidArrayCapture name -> sprintf "Lambda cannot capture array '%s'" name
+        $"argument {pos} of {func}: type mismatch: the parameter is declared {expTy} but the argument is {actTy}. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type."
+    | InvalidArrayCapture name -> $"Lambda cannot capture array '{name}'"
     | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
     | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
     | ProviderNativeLoadFailure (provider, path, detail) ->
-        sprintf "provider '%s' cannot load its native library, so the store '%s' cannot be read at compile time: %s. Every type this store binds is unresolvable until the library loads -- install the provider's runtime, or point its install-root variable at it (NETCDF_DIR for netcdf: the compiler and generated programs then use that install's own libraries)."
-                provider path detail
+        $"provider '{provider}' cannot load its native library, so the store '{path}' cannot be read at compile time: {detail}. Every type this store binds is unresolvable until the library loads -- install the provider's runtime, or point its install-root variable at it (NETCDF_DIR for netcdf: the compiler and generated programs then use that install's own libraries)."
     // Promoted variants (Stage 5): text reproduced verbatim.
-    | IndexTagMismatchNamed (expected, actual) -> sprintf "Array index tag mismatch: slot expects '%s' but argument has type '%s'." expected actual
-    | IndexTagMismatchAnon expected -> sprintf "Array index tag mismatch: slot expects named tag '%s' but argument is an anonymous index value." expected
-    | CrossNominalIndexArith (left, right) -> sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '%s' and '%s'." left right
-    | CrossAnonIndexArith (left, right) -> sprintf "Cross-nominal index-type arithmetic: cannot combine values of distinct anonymous index domains (#%d vs #%d)." left right
-    | CompoundTupleForm rank -> sprintf "Compound arrays take FLAT positional subscripts like SymIdx: write B(c0, ..., c%d), not the tuple form B((c0, ..., c%d)) -- and wildcards (`_`) are not accepted on a compound axis. Partial/wildcard reads (pinning some coordinates, gathering the matches) are a SparseIdx feature: build the valid tuples as a SparseIdx<keys> and index S((c0, _, ...)) there (formalism 3.5)." (rank - 1) (rank - 1)
-    | CompoundUnderSupplied (rank, got) -> sprintf "Compound index under-supplied: this array's compound axis has rank %d (mask is %d-dimensional), so it needs %d flat subscripts B(c0, ..., c%d); got %d. Partial reads are a SparseIdx feature (formalism 3.5)." rank rank rank (rank - 1) got
-    | CompoundOverSupplied (rank, got) -> sprintf "Compound index over-supplied: this array's compound axis has rank %d (mask is %d-dimensional) and consumes %d flat subscripts (plus one per trailing dim); got %d total." rank rank rank got
-    | SparseBareWildcard rank -> sprintf "A bare wildcard `_` cannot index a sparse axis: it pins no coordinate (the result would just be the array itself). Index with a full %d-tuple, pinning at least one coordinate." rank
-    | SparseWildcardArity (rank, tupleLen) -> sprintf "Wildcard sparse indexing must use a FULL-arity tuple: this sparse axis has rank %d, so write all %d coordinates with `_` marking each free axis (got a %d-tuple). Short tuples (without wildcards) pin a leading prefix instead: S((c0, ..., cj))." rank rank tupleLen
-    | SparseAllFree rank -> sprintf "Sparse index with all %d coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate." rank
-    | SparseOverSupplied (rank, got) -> sprintf "Sparse index over-supplied: this array's sparse axis has rank %d (keys are %d-tuples), so it takes at most a %d-tuple like S((c0, ..., c%d)); got a %d-tuple." rank rank rank (rank - 1) got
-    | SparseNeedsTuple rank -> sprintf "Sparse index must be a single tuple: write S((c0, ..., cj)) with inner parentheses, not the flat form S(c0, ..., cj). A SparseIdx<keys> axis of rank %d is indexed as one joint tuple, full or partial (formalism 3.5)." rank
+    | IndexTagMismatchNamed (expected, actual) -> $"Array index tag mismatch: slot expects '{expected}' but argument has type '{actual}'."
+    | IndexTagMismatchAnon expected -> $"Array index tag mismatch: slot expects named tag '{expected}' but argument is an anonymous index value."
+    | CrossNominalIndexArith (left, right) -> $"Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '{left}' and '{right}'."
+    | CrossAnonIndexArith (left, right) -> $"Cross-nominal index-type arithmetic: cannot combine values of distinct anonymous index domains (#{left} vs #{right})."
+    | CompoundTupleForm rank -> $"Compound arrays take FLAT positional subscripts like SymIdx: write B(c0, ..., c{rank - 1}), not the tuple form B((c0, ..., c{rank - 1})) -- and wildcards (`_`) are not accepted on a compound axis. Partial/wildcard reads (pinning some coordinates, gathering the matches) are a SparseIdx feature: build the valid tuples as a SparseIdx<keys> and index S((c0, _, ...)) there (formalism 3.5)."
+    | CompoundUnderSupplied (rank, got) -> $"Compound index under-supplied: this array's compound axis has rank {rank} (mask is {rank}-dimensional), so it needs {rank} flat subscripts B(c0, ..., c{rank - 1}); got {got}. Partial reads are a SparseIdx feature (formalism 3.5)."
+    | CompoundOverSupplied (rank, got) -> $"Compound index over-supplied: this array's compound axis has rank {rank} (mask is {rank}-dimensional) and consumes {rank} flat subscripts (plus one per trailing dim); got {got} total."
+    | SparseBareWildcard rank -> $"A bare wildcard `_` cannot index a sparse axis: it pins no coordinate (the result would just be the array itself). Index with a full {rank}-tuple, pinning at least one coordinate."
+    | SparseWildcardArity (rank, tupleLen) -> $"Wildcard sparse indexing must use a FULL-arity tuple: this sparse axis has rank {rank}, so write all {rank} coordinates with `_` marking each free axis (got a {tupleLen}-tuple). Short tuples (without wildcards) pin a leading prefix instead: S((c0, ..., cj))."
+    | SparseAllFree rank -> $"Sparse index with all {rank} coordinates free (`_`) pins nothing -- the result is the array itself. Drop the index, or pin at least one coordinate."
+    | SparseOverSupplied (rank, got) -> $"Sparse index over-supplied: this array's sparse axis has rank {rank} (keys are {rank}-tuples), so it takes at most a {rank}-tuple like S((c0, ..., c{rank - 1})); got a {got}-tuple."
+    | SparseNeedsTuple rank -> $"Sparse index must be a single tuple: write S((c0, ..., cj)) with inner parentheses, not the flat form S(c0, ..., cj). A SparseIdx<keys> axis of rank {rank} is indexed as one joint tuple, full or partial (formalism 3.5)."
     // OrbIdx storage-refusal text, front-end half. Not routed through
     // IR.orbitStorageUnsupported: a TypeError carries strings, not IR
     // structures, so this renderer can't recover depth as a number -- the
@@ -602,66 +599,66 @@ over it answers for an array of that many elements instead of the n^rank tensor 
 each cell would need its orbit multiplicity (a Burnside count), with a '-' level's character \
 cancelling terms outright. decompact(W, 0) first for the logical fold: full decompaction of a wreath \
 class IS implemented, and the dense result folds like any other array." op levels
-    | RaggedIdxNeedsPrior func -> sprintf "function '%s': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>." func
-    | TagWildcardNotParam where_ -> sprintf "%s: the tag wildcard `_` is legal in PARAMETER position only. A parameter may decline to constrain its argument's index tag or unit, but this position has to PRODUCE one -- a wildcard here would erase the tag rather than relax it. Write the concrete index type (e.g. Nat<LatIdx>) or the bare base type." where_
+    | RaggedIdxNeedsPrior func -> $"function '{func}': RaggedIdx requires at least one prior index in the array's index list -- the ragged extent is a per-row function of the OUTER iteration position (formalism 4.4). Add an outer index, e.g. Array<T like Idx<n>, RaggedIdx<lens>>."
+    | TagWildcardNotParam where_ -> $"{where_}: the tag wildcard `_` is legal in PARAMETER position only. A parameter may decline to constrain its argument's index tag or unit, but this position has to PRODUCE one -- a wildcard here would erase the tag rather than relax it. Write the concrete index type (e.g. Nat<LatIdx>) or the bare base type."
     | IndexRankMismatch (where_, left, leftRank, right, rightRank) ->
-        let components n = if n = 1 then "1 index component" else sprintf "%d index components" n
-        sprintf "%s: %s spans %s but %s spans %s. A rank-k compact group (SymIdx<k, n> / AntisymIdx<k, n>) is ONE index slot covering k dimensions -- indexed A(i0, ..., i(k-1)), not A(j) -- so it is a different type from a flat axis holding the same cells (SymIdx<2, 3> packs 6 cells, exactly Idx<6>). An equal cell count does NOT make the two interchangeable. Convert with decompact (compact group -> dense axes); an annotation cannot reinterpret one form as the other." where_ left (components leftRank) right (components rightRank)
-    | DecompactDimRange (dim, totalDims) -> sprintf "decompact: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dim totalDims (totalDims - 1)
-    | DecompactPlainAxis dim -> sprintf "decompact: dimension %d is a plain (rank-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)." dim
-    | DecompactLastSlotOnly (slots, slot) -> sprintf "decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has %d index slots with the compact group at slot %d." slots slot
-    | TransposeAxisRange (axis, totalDims) -> sprintf "transpose: axis %d is out of range for a rank-%d array (valid axes 0..%d)" axis totalDims (totalDims - 1)
-    | TransposeAxesEqual (axisA, axisB) -> sprintf "transpose: the two axes must differ (got [%d, %d]); swapping an axis with itself is the identity" axisA axisB
-    | TransposeWithinGroup rank -> sprintf "transpose: swapping two dimensions within a single rectangular index group (rank %d) is not yet supported." rank
-    | StackNeedsArrays (pos, got) -> sprintf "stack: argument %d has type %s, not an array. stack(A1, ..., An) adds a fresh LEADING axis over n arrays of the SAME shape; to build a rank-1 array from scalars write the array literal [a, b, c] instead." pos got
-    | StackShapeMismatch (pos, detail) -> sprintf "stack: argument %d does not match argument 1 (%s). stack(A1, ..., An) requires every operand to have the same rank, extents, and element type -- the fresh leading axis selects among them." pos detail
-    | JoinNeedsArrays (pos, got) -> sprintf "join: argument %d has type %s, not an array. join(A, B, d) concatenates arrays along dimension d." pos got
-    | JoinDimRange (dim, totalDims) -> sprintf "join: dimension %d is out of range for a rank-%d array (valid dims 0..%d)" dim totalDims (totalDims - 1)
-    | JoinShapeMismatch (pos, detail) -> sprintf "join: argument %d does not match argument 1 (%s). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d." pos detail
-    | StackJoinCompactSlot (op, slot) -> sprintf "%s: index slot %d is a compact, ragged, or compound group. %s materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first." op slot op
-    | UnitMismatch (context, left, right) -> sprintf "Unit mismatch in %s: %s vs %s" context left right
+        let components n = if n = 1 then "1 index component" else $"{n} index components"
+        $"{where_}: {left} spans {components leftRank} but {right} spans {components rightRank}. A rank-k compact group (SymIdx<k, n> / AntisymIdx<k, n>) is ONE index slot covering k dimensions -- indexed A(i0, ..., i(k-1)), not A(j) -- so it is a different type from a flat axis holding the same cells (SymIdx<2, 3> packs 6 cells, exactly Idx<6>). An equal cell count does NOT make the two interchangeable. Convert with decompact (compact group -> dense axes); an annotation cannot reinterpret one form as the other."
+    | DecompactDimRange (dim, totalDims) -> $"decompact: dimension {dim} is out of range for a rank-{totalDims} array (valid dims 0..{totalDims - 1})"
+    | DecompactPlainAxis dim -> $"decompact: dimension {dim} is a plain (rank-1, non-symmetric) axis; there is nothing to decompact. decompact pulls a component out of a compact group (SymIdx/AntisymIdx/HermitianIdx)."
+    | DecompactLastSlotOnly (slots, slot) -> $"decompact: only a compact group in the LAST index slot, optionally preceded by plain free Idx dimensions, is supported by codegen (the chained to-the-right peel shape). The array here has {slots} index slots with the compact group at slot {slot}."
+    | TransposeAxisRange (axis, totalDims) -> $"transpose: axis {axis} is out of range for a rank-{totalDims} array (valid axes 0..{totalDims - 1})"
+    | TransposeAxesEqual (axisA, axisB) -> $"transpose: the two axes must differ (got [{axisA}, {axisB}]); swapping an axis with itself is the identity"
+    | TransposeWithinGroup rank -> $"transpose: swapping two dimensions within a single rectangular index group (rank {rank}) is not yet supported."
+    | StackNeedsArrays (pos, got) -> $"stack: argument {pos} has type {got}, not an array. stack(A1, ..., An) adds a fresh LEADING axis over n arrays of the SAME shape; to build a rank-1 array from scalars write the array literal [a, b, c] instead."
+    | StackShapeMismatch (pos, detail) -> $"stack: argument {pos} does not match argument 1 ({detail}). stack(A1, ..., An) requires every operand to have the same rank, extents, and element type -- the fresh leading axis selects among them."
+    | JoinNeedsArrays (pos, got) -> $"join: argument {pos} has type {got}, not an array. join(A, B, d) concatenates arrays along dimension d."
+    | JoinDimRange (dim, totalDims) -> $"join: dimension {dim} is out of range for a rank-{totalDims} array (valid dims 0..{totalDims - 1})"
+    | JoinShapeMismatch (pos, detail) -> $"join: argument {pos} does not match argument 1 ({detail}). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d."
+    | StackJoinCompactSlot (op, slot) -> $"{op}: index slot {slot} is a compact, ragged, or compound group. {op} materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first."
+    | UnitMismatch (context, left, right) -> $"Unit mismatch in {context}: {left} vs {right}"
     | QuantityArgMismatch (pos, quantity, got) ->
-        sprintf "argument %d: the parameter's declared type carries the quantity '%s', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is %s. Ascribe it at the call site (e.g. `x : %s`); matching dimensions alone do not imply the quantity." pos quantity got quantity
+        $"argument {pos}: the parameter's declared type carries the quantity '{quantity}', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is {got}. Ascribe it at the call site (e.g. `x : {quantity}`); matching dimensions alone do not imply the quantity."
     | ExtentArgMismatch (pos, dim, expected, actual) ->
-        sprintf "argument %d: extent mismatch on index slot %d -- the parameter declares Idx<%d> but the argument has Idx<%d>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent." pos dim expected actual
+        $"argument {pos}: extent mismatch on index slot {dim} -- the parameter declares Idx<{expected}> but the argument has Idx<{actual}>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent."
     | ZipExtentMismatch (pos, expected, actual) ->
-        sprintf "elementwise co-iteration: operand %d has extent %d on the shared axis, but operand 1 has extent %d. A zip walks ONE index space, taken from the first operand, so the longer walk reads past the shorter operand's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Bring the operands to a common extent, or index/slice the longer one first." pos actual expected
+        $"elementwise co-iteration: operand {pos} has extent {actual} on the shared axis, but operand 1 has extent {expected}. A zip walks ONE index space, taken from the first operand, so the longer walk reads past the shorter operand's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Bring the operands to a common extent, or index/slice the longer one first."
     | HaloExtentMismatch (declared, dim, targetName, actual) ->
-        sprintf "halo extent mismatch: the halo declares an inner extent of %d, but '%s' (read through the window at index slot %d) has extent %d. The window walk is bounded by the DECLARED extent, so an oversized halo reads past '%s''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over." declared targetName dim actual targetName
+        $"halo extent mismatch: the halo declares an inner extent of {declared}, but '{targetName}' (read through the window at index slot {dim}) has extent {actual}. The window walk is bounded by the DECLARED extent, so an oversized halo reads past '{targetName}''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over."
     | QuantityTerminal (quantity, declName) ->
-        sprintf "unit '%s': the quantity '%s' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = %s * m`) nor re-derived from (`Unit q: %s`). Compose from the structural units the quantity was declared over instead." declName quantity quantity quantity
+        $"unit '{declName}': the quantity '{quantity}' cannot be used inside a unit expression. Quantities are TERMINAL -- the nominal layer is exactly one level deep -- so a quantity name can neither be composed (`Unit x = {quantity} * m`) nor re-derived from (`Unit q: {quantity}`). Compose from the structural units the quantity was declared over instead."
     | UnknownUnitName (name, declName, candidates) ->
         let where =
             if declName = unitAnnoContext then "unit annotation"
-            else sprintf "unit '%s'" declName
+            else $"unit '{declName}'"
         sprintf "%s: '%s' is not a declared unit or a known scale constant. A unit expression composes names already in scope -- only a numeric LITERAL may appear without being declared -- so declare '%s' first (`Unit %s`), import the module that exports it, or fix the spelling.%s" where name name name
-            (if List.isEmpty candidates then "" else sprintf " Did you mean: %s?" (String.concat ", " candidates))
+            (if List.isEmpty candidates then "" else $""" Did you mean: {(String.concat ", " candidates)}?""")
     | DefaultParamOrder (func, requiredParam, defaultedParam) ->
-        sprintf "%s: parameter '%s' has no default but follows the defaulted parameter '%s'. Defaults are TRAILING: once a parameter has a default, every later parameter needs one too (otherwise an omitted-argument call is ambiguous). Reorder the parameters or give '%s' a default." func requiredParam defaultedParam requiredParam
+        $"{func}: parameter '{requiredParam}' has no default but follows the defaulted parameter '{defaultedParam}'. Defaults are TRAILING: once a parameter has a default, every later parameter needs one too (otherwise an omitted-argument call is ambiguous). Reorder the parameters or give '{requiredParam}' a default."
     | DefaultParamScope (func, param, referenced) ->
-        sprintf "%s: the default for parameter '%s' references '%s', which is itself a defaulted parameter. A default may reference the REQUIRED parameters only -- defaults evaluate left-to-right at call entry with just the required arguments bound, so another default's value is not available." func param referenced
+        $"{func}: the default for parameter '{param}' references '{referenced}', which is itself a defaulted parameter. A default may reference the REQUIRED parameters only -- defaults evaluate left-to-right at call entry with just the required arguments bound, so another default's value is not available."
     | FactoryDupQuantityDecl (func, quantity, param1, param2) ->
-        sprintf "%s: defaulted parameters '%s' and '%s' both carry the quantity '%s'. By-nominal argument routing (`f(x, 3 : %s)`) needs each quantity to name exactly ONE defaulted slot -- give the second slot a distinct quantity, or make it a plain (non-quantity) parameter." func param1 param2 quantity quantity
+        $"{func}: defaulted parameters '{param1}' and '{param2}' both carry the quantity '{quantity}'. By-nominal argument routing (`f(x, 3 : {quantity})`) needs each quantity to name exactly ONE defaulted slot -- give the second slot a distinct quantity, or make it a plain (non-quantity) parameter."
     | FactoryDupFill (callee, quantity, slot) ->
-        sprintf "call to '%s': the quantity slot '%s' (quantity '%s') is supplied twice -- a second argument tagged '%s' (or a positional argument already claiming that slot) conflicts with an earlier one. Each slot takes at most one argument." callee slot quantity quantity
+        $"call to '{callee}': the quantity slot '{slot}' (quantity '{quantity}') is supplied twice -- a second argument tagged '{quantity}' (or a positional argument already claiming that slot) conflicts with an earlier one. Each slot takes at most one argument."
     | FactoryUnknownTag (callee, quantity, candidates) ->
-        sprintf "call to '%s': an argument is tagged with the quantity '%s', but '%s' has no defaulted slot of that quantity. Its quantity slots are: %s." callee quantity callee (if List.isEmpty candidates then "none" else String.concat ", " candidates)
+        $"""call to '{callee}': an argument is tagged with the quantity '{quantity}', but '{callee}' has no defaulted slot of that quantity. Its quantity slots are: {(if List.isEmpty candidates then "none" else String.concat ", " candidates)}."""
     | FactoryAmbiguousMix (callee, pos) ->
-        sprintf "call to '%s': argument %d has no quantity tag but appears AFTER a quantity-tagged argument, so its slot would be a guess. Positional (untagged) arguments must come first, in declared order; tag the stragglers (`v : quantity`) or reorder the call." callee pos
-    | IntrinsicBindArrayFailed op -> sprintf "%s(): failed to bind array type after unification" op
-    | IntrinsicNeedsArray op -> sprintf "%s() requires an array as argument" op
-    | IntrinsicNotComplex name -> sprintf "%s is not defined for complex operands." name
-    | IntrinsicNeedsNumeric name -> sprintf "%s expects a numeric operand." name
-    | AbsNeedsNumericScalar got -> sprintf "abs expects a numeric scalar operand, got %s" got
-    | IntrinsicComplexScalarOnly name -> sprintf "%s applies to complex scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(z) -> %s(z) |> compute)." name name
-    | IntrinsicNeedsComplex (name, got) -> sprintf "%s expects a complex operand, got %s" name got
-    | ReduceEmptyArray extent -> sprintf "reduce() rejects statically empty arrays (extent = %d). Empty input has no defined reduction without an identity; supply one with the 3-arg form `reduce(arr, op, init)`." extent
-    | ProdsumExtentMismatch (a, b) -> sprintf "prodsum() operands must share one extent: got %d and %d" a b
-    | GramNeedsRank2 (leftRank, rightRank) -> sprintf "gram(A, B): both operands must be rank-2 (matrix) arrays; got rank-%d and rank-%d. gram contracts the trailing axis: A (m x n), B (p x n) -> m x p." leftRank rightRank
-    | GramCompactOperand side -> sprintf "gram(A, B): operands must be rank-2 with two PLAIN index axes; %s compact rank-2 group storage (SymIdx / AntisymIdx / HermitianIdx, e.g. a gram result), whose single packed axis cannot supply the outer and contracted dimensions separately. Expand to a dense matrix first: decompact(X, 0)." side
+        $"call to '{callee}': argument {pos} has no quantity tag but appears AFTER a quantity-tagged argument, so its slot would be a guess. Positional (untagged) arguments must come first, in declared order; tag the stragglers (`v : quantity`) or reorder the call."
+    | IntrinsicBindArrayFailed op -> $"{op}(): failed to bind array type after unification"
+    | IntrinsicNeedsArray op -> $"{op}() requires an array as argument"
+    | IntrinsicNotComplex name -> $"{name} is not defined for complex operands."
+    | IntrinsicNeedsNumeric name -> $"{name} expects a numeric operand."
+    | AbsNeedsNumericScalar got -> $"abs expects a numeric scalar operand, got {got}"
+    | IntrinsicComplexScalarOnly name -> $"{name} applies to complex scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(z) -> {name}(z) |> compute)."
+    | IntrinsicNeedsComplex (name, got) -> $"{name} expects a complex operand, got {got}"
+    | ReduceEmptyArray extent -> $"reduce() rejects statically empty arrays (extent = {extent}). Empty input has no defined reduction without an identity; supply one with the 3-arg form `reduce(arr, op, init)`."
+    | ProdsumExtentMismatch (a, b) -> $"prodsum() operands must share one extent: got {a} and {b}"
+    | GramNeedsRank2 (leftRank, rightRank) -> $"gram(A, B): both operands must be rank-2 (matrix) arrays; got rank-{leftRank} and rank-{rightRank}. gram contracts the trailing axis: A (m x n), B (p x n) -> m x p."
+    | GramCompactOperand side -> $"gram(A, B): operands must be rank-2 with two PLAIN index axes; {side} compact rank-2 group storage (SymIdx / AntisymIdx / HermitianIdx, e.g. a gram result), whose single packed axis cannot supply the outer and contracted dimensions separately. Expand to a dense matrix first: decompact(X, 0)."
     | ArrayLitLength (got, expected, axisTag) ->
-        let axis = match axisTag with Some t -> sprintf " for axis '%s'" t | None -> ""
-        sprintf "Array literal%s has %d elements, but the annotation's extent is %d" axis got expected
+        let axis = match axisTag with Some t -> $" for axis '{t}'" | None -> ""
+        $"Array literal{axis} has {got} elements, but the annotation's extent is {expected}"
     | CompactLitShape (idx, shape, where_, detail) ->
         sprintf "Array literal over the compact group %s: %s %s. A compact group is ONE axis storing \
 one cell per canonical tuple, laid out as a left-justified simplex, so its literal is written in that \
@@ -673,112 +670,110 @@ A(i, i) = conj(A(i, i)) forces the diagonal real, and the stored diagonal cell i
 so this value is not one the class can hold. Write a real diagonal (the off-diagonal cells carry the \
 complex half)." where_
     | RaggedLensMismatch (lensName, declared, actual) ->
-        sprintf "Ragged literal: the annotation names `RaggedIdx<%s>`, and %s holds %s, but the literal's rows are %s. A ragged array takes its row lengths from its LITERAL -- the baked lens and offsets are computed from this nesting, and nothing reads `%s` back -- so the annotation would describe a shape the array does not have. Fix whichever one is wrong; if the lengths are meant to come from the data, drop the annotation and let the literal infer the ragged type."
-            lensName lensName declared actual lensName
+        $"Ragged literal: the annotation names `RaggedIdx<{lensName}>`, and {lensName} holds {declared}, but the literal's rows are {actual}. A ragged array takes its row lengths from its LITERAL -- the baked lens and offsets are computed from this nesting, and nothing reads `{lensName}` back -- so the annotation would describe a shape the array does not have. Fix whichever one is wrong; if the lengths are meant to come from the data, drop the annotation and let the literal infer the ragged type."
     | RaggedLensNotStatic lensName ->
-        sprintf "Ragged literal: the annotation names `RaggedIdx<%s>`, but `%s` is not a compile-time value. A ragged array's row lengths are baked from the LITERAL's own nesting, so a lens known only at run time can neither be honoured nor checked -- it would be accepted and then ignored. Make `%s` a compile-time array of integer literals (so the two can be compared), or drop the annotation and let the literal infer the ragged type. Allocating to lengths only the running program knows is separate, planned work."
-            lensName lensName lensName
+        $"Ragged literal: the annotation names `RaggedIdx<{lensName}>`, but `{lensName}` is not a compile-time value. A ragged array's row lengths are baked from the LITERAL's own nesting, so a lens known only at run time can neither be honoured nor checked -- it would be accepted and then ignored. Make `{lensName}` a compile-time array of integer literals (so the two can be compared), or drop the annotation and let the literal infer the ragged type. Allocating to lengths only the running program knows is separate, planned work."
     | ObjectForKernel got -> sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" got
-    | ChainOpNeedsMethodFor leftDesc -> sprintf "<@> requires method_for or object_for on the left side, but got %s" leftDesc
-    | ChainOpBadKernel rightDesc -> sprintf "<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got %s" rightDesc
-    | ChainOpUndecidable (leftDesc, rightDesc) -> sprintf "cannot infer the roles of the <@> operands: the left side is %s and the right side is %s, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays)." leftDesc rightDesc
-    | CommContradictsBody (p1, p2) -> sprintf "`where comm(%s, %s)` contradicts the kernel body, which is provably ANTIcommutative under that swap (f(%s, %s) = -f(%s, %s)): triangular storage would silently corrupt half the output. Remove the comm clause, or wrap the kernel in reynolds(...) if a signed iteration license over the permutation sum is what you intend." p1 p2 p2 p1 p1 p2
-    | AntisymmContradictsBody (p1, p2) -> sprintf "`where anticomm(%s, %s)` contradicts the kernel body, which is provably COMMUTATIVE under that swap (f(%s, %s) = f(%s, %s)): strict-triangular anticommutative storage would drop the diagonal and negate half the output. Remove the anticomm clause (use `where comm(%s, %s)` for the symmetric triangle), or wrap the kernel in reynolds(..., Antisymmetric) if a signed antisymmetrization is what you intend." p1 p2 p2 p1 p1 p2 p1 p2
-    | AntisymMapNotOdd (param, proved) -> sprintf "mapping this kernel over an ANTISYMMETRIC (AntisymIdx) array would keep the input's strict-triangular storage, and that is only correct for a SIGN-ODD kernel (f(-x) = -f(x)); the deduction says this one is %s in '%s'. An even or unknown-parity map of an antisymmetric array is SYMMETRIC -- it has a diagonal, and the strict iteration the input forces cannot produce one -- so the compact result would negate every mirrored read. Map over a dense copy instead (`decompact(A, 0)` materializes the full tensor, and the kernel over THAT is symmetric with the right diagonal), or use a sign-odd kernel." proved param
-    | WreathTieKernelNotOdd (param, proved, levels) -> sprintf "the declared clause ties every argument over a compact class with a '-' inner level (%s), and that tie is only sound for a kernel SIGN-ODD in each argument separately (h(-p, q) = -h(p, q)): a '-' level claims that mirroring ONE argument's sub-block negates the value, so an even or unknown-parity kernel would store a class whose mirrored reads and decompaction answer with signs the values do not satisfy. The deduction says this kernel is %s in '%s'. Use a per-argument sign-odd kernel (e.g. p * q; note p + q is NOT odd in each argument), or map over dense copies instead: decompact(_, 0) materializes the full tensor, and the kernel over THAT carries no wreath claim." levels proved param
-    | HermitianMapNotReal param -> sprintf "mapping this kernel over a HERMITIAN (HermitianIdx) array would keep the input's Hermitian storage, whose mirrored reads recover H(j,i) as conj(H(i,j)); that is only correct when the kernel commutes with conjugation (f(conj z) = conj(f z)), which is not deducible for '%s'. A kernel built from the parameter, real constants, + - * /, and neg/conj/real qualifies; a complex constant, imag(z), arg(z), `^` and the math intrinsics (exp/log/sqrt/...) do not. Map over a dense copy instead: `decompact(A, 0)` materializes the full conjugate-mirrored matrix, and the kernel over THAT carries no storage claim." param
-    | FoldOmpNeedsLicense kernelDesc -> sprintf "parallel reduction needs comm(...) or a builtin op: %s carries `omp` but nothing licenses the reorder. A parallel fold splits the axis into per-thread chunks and combines the partials, so the kernel must be COMMUTATIVE and ASSOCIATIVE -- write `where comm(a, b), omp` to declare it (the same word `<@>` uses for symmetric storage, cross-checked against the body's parity), or use a builtin fold body (a + b, a * b, a && b, a || b), which carries both properties outright. Drop `omp` to keep the serial fold." kernelDesc
-    | PlaceholderNeedsAllBound (got, total) -> sprintf "the `_` placeholder needs every other parameter bound: this call supplies %d of %d args. Combine with prefix partial application in two steps, or use a lambda." got total
+    | ChainOpNeedsMethodFor leftDesc -> $"<@> requires method_for or object_for on the left side, but got {leftDesc}"
+    | ChainOpBadKernel rightDesc -> $"<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got {rightDesc}"
+    | ChainOpUndecidable (leftDesc, rightDesc) -> $"cannot infer the roles of the <@> operands: the left side is {leftDesc} and the right side is {rightDesc}, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays)."
+    | CommContradictsBody (p1, p2) -> $"`where comm({p1}, {p2})` contradicts the kernel body, which is provably ANTIcommutative under that swap (f({p2}, {p1}) = -f({p1}, {p2})): triangular storage would silently corrupt half the output. Remove the comm clause, or wrap the kernel in reynolds(...) if a signed iteration license over the permutation sum is what you intend."
+    | AntisymmContradictsBody (p1, p2) -> $"`where anticomm({p1}, {p2})` contradicts the kernel body, which is provably COMMUTATIVE under that swap (f({p2}, {p1}) = f({p1}, {p2})): strict-triangular anticommutative storage would drop the diagonal and negate half the output. Remove the anticomm clause (use `where comm({p1}, {p2})` for the symmetric triangle), or wrap the kernel in reynolds(..., Antisymmetric) if a signed antisymmetrization is what you intend."
+    | AntisymMapNotOdd (param, proved) -> $"mapping this kernel over an ANTISYMMETRIC (AntisymIdx) array would keep the input's strict-triangular storage, and that is only correct for a SIGN-ODD kernel (f(-x) = -f(x)); the deduction says this one is {proved} in '{param}'. An even or unknown-parity map of an antisymmetric array is SYMMETRIC -- it has a diagonal, and the strict iteration the input forces cannot produce one -- so the compact result would negate every mirrored read. Map over a dense copy instead (`decompact(A, 0)` materializes the full tensor, and the kernel over THAT is symmetric with the right diagonal), or use a sign-odd kernel."
+    | WreathTieKernelNotOdd (param, proved, levels) -> $"the declared clause ties every argument over a compact class with a '-' inner level ({levels}), and that tie is only sound for a kernel SIGN-ODD in each argument separately (h(-p, q) = -h(p, q)): a '-' level claims that mirroring ONE argument's sub-block negates the value, so an even or unknown-parity kernel would store a class whose mirrored reads and decompaction answer with signs the values do not satisfy. The deduction says this kernel is {proved} in '{param}'. Use a per-argument sign-odd kernel (e.g. p * q; note p + q is NOT odd in each argument), or map over dense copies instead: decompact(_, 0) materializes the full tensor, and the kernel over THAT carries no wreath claim."
+    | HermitianMapNotReal param -> $"mapping this kernel over a HERMITIAN (HermitianIdx) array would keep the input's Hermitian storage, whose mirrored reads recover H(j,i) as conj(H(i,j)); that is only correct when the kernel commutes with conjugation (f(conj z) = conj(f z)), which is not deducible for '{param}'. A kernel built from the parameter, real constants, + - * /, and neg/conj/real qualifies; a complex constant, imag(z), arg(z), `^` and the math intrinsics (exp/log/sqrt/...) do not. Map over a dense copy instead: `decompact(A, 0)` materializes the full conjugate-mirrored matrix, and the kernel over THAT carries no storage claim."
+    | FoldOmpNeedsLicense kernelDesc -> $"parallel reduction needs comm(...) or a builtin op: {kernelDesc} carries `omp` but nothing licenses the reorder. A parallel fold splits the axis into per-thread chunks and combines the partials, so the kernel must be COMMUTATIVE and ASSOCIATIVE -- write `where comm(a, b), omp` to declare it (the same word `<@>` uses for symmetric storage, cross-checked against the body's parity), or use a builtin fold body (a + b, a * b, a && b, a || b), which carries both properties outright. Drop `omp` to keep the serial fold."
+    | PlaceholderNeedsAllBound (got, total) -> $"the `_` placeholder needs every other parameter bound: this call supplies {got} of {total} args. Combine with prefix partial application in two steps, or use a lambda."
     | GroupKeysRank1 -> "group_keys: all key arrays must be rank-1 and share the same outer index (same length). Compound grouping requires each i-th element of every key array to refer to the same record."
-    | GroupKeysEscapes (what, pos) -> sprintf "%s cannot be used %s: a `group_keys` result is NAME-KEYED, not a value. It compiles to three locals named after the binding (`<name>__ngroups`, `<name>__offsets`, `<name>__perm`) and the binding itself carries only an opaque sentinel, so `group_by` can find the grouping only under the exact name the keys were bound to. Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` directly to each `group_by` -- a group_keys result cannot be aliased to a second name, put in a tuple or struct, passed as a function argument, or returned. (Grouping two arrays the same way is what one shared `gk` is FOR: `group_by(a, gk)` and `group_by(b, gk)` co-iterate; two separate `group_keys` calls do not.)" what pos
-    | GroupingNeedsName (intrinsic, got) -> sprintf "%s(gk) requires the BARE NAME of a `group_keys(...)` binding; got %s. A grouping is not a value -- its state lives in locals named after the binding (`<gk>__ngroups`, `<gk>__offsets`, `<gk>__perm`), so it cannot be aliased, passed, returned, or built inline. Bind it once (`let gk = group_keys(...)`) and write `%s(gk)`." intrinsic got intrinsic
-    | GroupBucketNotGrouping got -> sprintf "group_bucket expects a `group_keys(...)` binding; '%s' is not one. Bind the keys first: `let gk = group_keys(k)`, then `group_bucket(gk)`." got
-    | FallbackNeedsArrays (leftDesc, rightDesc) -> sprintf "<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got %s and %s. For value-level choice (first nonzero wins) over scalars or computations, use <|>." leftDesc rightDesc
+    | GroupKeysEscapes (what, pos) -> $"{what} cannot be used {pos}: a `group_keys` result is NAME-KEYED, not a value. It compiles to three locals named after the binding (`<name>__ngroups`, `<name>__offsets`, `<name>__perm`) and the binding itself carries only an opaque sentinel, so `group_by` can find the grouping only under the exact name the keys were bound to. Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` directly to each `group_by` -- a group_keys result cannot be aliased to a second name, put in a tuple or struct, passed as a function argument, or returned. (Grouping two arrays the same way is what one shared `gk` is FOR: `group_by(a, gk)` and `group_by(b, gk)` co-iterate; two separate `group_keys` calls do not.)"
+    | GroupingNeedsName (intrinsic, got) -> $"{intrinsic}(gk) requires the BARE NAME of a `group_keys(...)` binding; got {got}. A grouping is not a value -- its state lives in locals named after the binding (`<gk>__ngroups`, `<gk>__offsets`, `<gk>__perm`), so it cannot be aliased, passed, returned, or built inline. Bind it once (`let gk = group_keys(...)`) and write `{intrinsic}(gk)`."
+    | GroupBucketNotGrouping got -> $"group_bucket expects a `group_keys(...)` binding; '{got}' is not one. Bind the keys first: `let gk = group_keys(k)`, then `group_bucket(gk)`."
+    | FallbackNeedsArrays (leftDesc, rightDesc) -> $"<|:> (allocated-fallback) reads the LEFT array where its storage holds a cell and the right array elsewhere, so both operands must be arrays; got {leftDesc} and {rightDesc}. For value-level choice (first nonzero wins) over scalars or computations, use <|>."
     | FallbackSymmetricLeft -> "<|:> over a symmetric/antisymmetric/Hermitian left operand is not yet supported: symmetric A requires symmetric allocation (formalism 2.6), which the compiler cannot yet verify. decompact(A, d) to dense first."
-    | FallbackRightNotDense what -> sprintf "<|:> right operand must be a plain dense array (it supplies the value for every cell the left side lacks); got %s." what
-    | FallbackRankMismatch (leftRank, rightRank) -> sprintf "<|:> operands must cover the same index space: the left side spans %d dimension(s) but the right side has rank %d." leftRank rightRank
-    | CumulantOrderPositive order -> sprintf "cumulant: order must be >= 1, got %d" order
-    | CumulantNeedsDist got -> sprintf "cumulant expects cumulant(d, k) where d is a Dist value (a dist(...) binding or Dist-typed parameter); got %s" got
-    | DistOpUndefined (left, right) -> sprintf "this operator is not defined on Dist values (left: %s, right: %s): dists support scalar * (multilinearity), + and - of independent dists, and component projection via cumulant(d, k)" left right
-    | EnumIdxMixedKinds name -> sprintf "EnumIdx '%s' has mixed value kinds: integer and string literals in the same EnumIdx<[...]> aren't allowed. The runtime backing must be one or the other (int64_t or std::string)." name
+    | FallbackRightNotDense what -> $"<|:> right operand must be a plain dense array (it supplies the value for every cell the left side lacks); got {what}."
+    | FallbackRankMismatch (leftRank, rightRank) -> $"<|:> operands must cover the same index space: the left side spans {leftRank} dimension(s) but the right side has rank {rightRank}."
+    | CumulantOrderPositive order -> $"cumulant: order must be >= 1, got {order}"
+    | CumulantNeedsDist got -> $"cumulant expects cumulant(d, k) where d is a Dist value (a dist(...) binding or Dist-typed parameter); got {got}"
+    | DistOpUndefined (left, right) -> $"this operator is not defined on Dist values (left: {left}, right: {right}): dists support scalar * (multilinearity), + and - of independent dists, and component projection via cumulant(d, k)"
+    | EnumIdxMixedKinds name -> $"EnumIdx '{name}' has mixed value kinds: integer and string literals in the same EnumIdx<[...]> aren't allowed. The runtime backing must be one or the other (int64_t or std::string)."
     | EnumIdxUnknownLabel (enumName, label, available) ->
-        sprintf "'%s' is not a value of EnumIdx '%s'. Available: %s." label enumName (available |> String.concat ", ")
-    | ImplMissingMethods (iface, typeName, methods) -> sprintf "impl %s for %s is missing required methods: %s" iface typeName methods
-    | StructFieldDuplicate (structName, field) -> sprintf "struct %s: field '%s' assigned more than once" structName field
-    | StructNoField (structName, field) -> sprintf "struct %s has no field '%s'" structName field
+        $"""'{label}' is not a value of EnumIdx '{enumName}'. Available: {(available |> String.concat ", ")}."""
+    | ImplMissingMethods (iface, typeName, methods) -> $"impl {iface} for {typeName} is missing required methods: {methods}"
+    | StructFieldDuplicate (structName, field) -> $"struct {structName}: field '{field}' assigned more than once"
+    | StructNoField (structName, field) -> $"struct {structName} has no field '{field}'"
     | StructFieldUnknown (structName, field, available, steering) ->
         let avail =
             match available with
             | [] -> "; it declares no fields"
-            | fs -> sprintf "; available fields: %s" (fs |> String.concat ", ")
-        sprintf "struct %s has no field '%s'%s%s" structName field steering avail
-    | StructSpreadBase structName -> sprintf "struct %s: a spread base must be a variable or field path -- bind it with let first" structName
-    | StructSpreadNotStruct (structName, got) -> sprintf "struct %s: spread base must be a %s value, got %s" structName structName got
-    | StructSpreadRedundant structName -> sprintf "struct %s: every field is provided explicitly -- the '..' spread is redundant" structName
-    | StructMissingField (structName, field) -> sprintf "struct %s: missing field '%s' in constructor" structName field
-    | StructFieldType (structName, field, expected, actual) -> sprintf "struct %s, field '%s': expected %s, got %s" structName field expected actual
-    | UnknownStructType name -> sprintf "unknown struct type '%s' in constructor" name
-    | StructWhereNotBool (structName, got) -> sprintf "struct %s: where-constraint must be a boolean expression, got %s" structName got
-    | StructWhereError (structName, inner) -> sprintf "struct %s where-constraint: %s" structName inner
-    | WherePredicateUnannotated (owner, func) -> sprintf "static function '%s' is called from a where-clause of '%s': annotate all its parameter types and its return type" func owner
-    | UnknownWhereConstraint (func, name, vocab) -> sprintf "function '%s': unknown where-clause constraint '%s' (registered constraints: %s)" func name vocab
-    | DistOrderCompileTime func -> sprintf "function '%s': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>" func
-    | ImmutableStaticAssign name -> sprintf "Cannot assign to '%s': static bindings are immutable" name
-    | MutAssignRefused (target, reason) -> sprintf "Cannot assign to '%s': %s" target reason
+            | fs -> $"""; available fields: {(fs |> String.concat ", ")}"""
+        $"struct {structName} has no field '{field}'{steering}{avail}"
+    | StructSpreadBase structName -> $"struct {structName}: a spread base must be a variable or field path -- bind it with let first"
+    | StructSpreadNotStruct (structName, got) -> $"struct {structName}: spread base must be a {structName} value, got {got}"
+    | StructSpreadRedundant structName -> $"struct {structName}: every field is provided explicitly -- the '..' spread is redundant"
+    | StructMissingField (structName, field) -> $"struct {structName}: missing field '{field}' in constructor"
+    | StructFieldType (structName, field, expected, actual) -> $"struct {structName}, field '{field}': expected {expected}, got {actual}"
+    | UnknownStructType name -> $"unknown struct type '{name}' in constructor"
+    | StructWhereNotBool (structName, got) -> $"struct {structName}: where-constraint must be a boolean expression, got {got}"
+    | StructWhereError (structName, inner) -> $"struct {structName} where-constraint: {inner}"
+    | WherePredicateUnannotated (owner, func) -> $"static function '{func}' is called from a where-clause of '{owner}': annotate all its parameter types and its return type"
+    | UnknownWhereConstraint (func, name, vocab) -> $"function '{func}': unknown where-clause constraint '{name}' (registered constraints: {vocab})"
+    | DistOrderCompileTime func -> $"function '{func}': Dist order must be a compile-time integer >= 1 (a literal, `let static`, or static-function call): Dist<order, Elem like I1, ..., Ik>"
+    | ImmutableStaticAssign name -> $"Cannot assign to '{name}': static bindings are immutable"
+    | MutAssignRefused (target, reason) -> $"Cannot assign to '{target}': {reason}"
     | MutArgNotPassable (func, argIndex, got) ->
-        sprintf "function '%s': argument %d is passed to a `mut` parameter, which writes back into the caller's array, but %s. Only a `let mut` binding (or another `mut` parameter being forwarded) may be passed there -- declare it `let mut`, or drop `mut` from the parameter if the callee does not write to it." func argIndex got
-    | MutParamNotArray (func, param) -> sprintf "function '%s': parameter '%s' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead." func param
-    | MutualBindJointly (typeName, describe, lowerNames) -> sprintf "type '%s' belongs to mutual group (%s); bind the group jointly: let (%s): (%s) = ..." typeName describe lowerNames describe
-    | MutualDirectElementsOnly describe -> sprintf "mutual member types (group %s) may appear only as direct elements of a joint tuple annotation" describe
+        $"function '{func}': argument {argIndex} is passed to a `mut` parameter, which writes back into the caller's array, but {got}. Only a `let mut` binding (or another `mut` parameter being forwarded) may be passed there -- declare it `let mut`, or drop `mut` from the parameter if the callee does not write to it."
+    | MutParamNotArray (func, param) -> $"function '{func}': parameter '{param}' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead."
+    | MutualBindJointly (typeName, describe, lowerNames) -> $"type '{typeName}' belongs to mutual group ({describe}); bind the group jointly: let ({lowerNames}): ({describe}) = ..."
+    | MutualDirectElementsOnly describe -> $"mutual member types (group {describe}) may appear only as direct elements of a joint tuple annotation"
     | MutualMixedGroups -> "annotation mixes members of different mutual groups"
-    | MutualDuplicateMember describe -> sprintf "duplicate mutual member in annotation (group %s)" describe
-    | MutualIncompleteAnnotation describe -> sprintf "mutual group (%s) is incomplete in this annotation; all group members must appear together" describe
-    | MutualJointAnnotationOnly describe -> sprintf "mutual member types (group %s) may appear only in a joint let annotation or a function's declared return type" describe
-    | MutualParamMemberType (func, param, memberName) -> sprintf "function '%s': parameter '%s' uses mutual member type '%s'; mutual member types may appear only in a joint let annotation or a function's declared return type" func param memberName
-    | MutualBindTuple names -> sprintf "a mutual group (%s) must be bound jointly with a tuple of variables: let (x, y): (%s) = ..." names names
-    | MutualReturnTupleElements describe -> sprintf "mutual group (%s): declared return type must list every member as a direct tuple element" describe
-    | StructFieldMutualType (structName, field, memberName) -> sprintf "struct %s, field '%s': mutual member type '%s' may not be used as a field type" structName field memberName
-    | MutualMemberDupGroup memberName -> sprintf "mutual-group member '%s' is already part of another group" memberName
-    | MutualMemberNotStruct (memberName, name) -> sprintf "mutual-group member '%s': '%s' is not a declared struct" memberName name
-    | MutualMemberBadAlias (memberName, got) -> sprintf "mutual-group member '%s' must alias a struct or scalar type, got %s" memberName got
-    | MutualUnknownField (memberName, field, structName) -> sprintf "mutual constraint references unknown field '%s.%s' (struct %s)" memberName field structName
-    | MutualScalarBare (memberName, field) -> sprintf "'%s' aliases a scalar; reference it bare, not '%s.%s'" memberName memberName field
-    | MutualStructNeedsField memberName -> sprintf "'%s' aliases a struct; reference one of its fields as '%s.<field>'" memberName memberName
-    | MutualUnknownIdent name -> sprintf "identifier '%s' in a mutual-group constraint must be a group member, a member field path, or a static" name
+    | MutualDuplicateMember describe -> $"duplicate mutual member in annotation (group {describe})"
+    | MutualIncompleteAnnotation describe -> $"mutual group ({describe}) is incomplete in this annotation; all group members must appear together"
+    | MutualJointAnnotationOnly describe -> $"mutual member types (group {describe}) may appear only in a joint let annotation or a function's declared return type"
+    | MutualParamMemberType (func, param, memberName) -> $"function '{func}': parameter '{param}' uses mutual member type '{memberName}'; mutual member types may appear only in a joint let annotation or a function's declared return type"
+    | MutualBindTuple names -> $"a mutual group ({names}) must be bound jointly with a tuple of variables: let (x, y): ({names}) = ..."
+    | MutualReturnTupleElements describe -> $"mutual group ({describe}): declared return type must list every member as a direct tuple element"
+    | StructFieldMutualType (structName, field, memberName) -> $"struct {structName}, field '{field}': mutual member type '{memberName}' may not be used as a field type"
+    | MutualMemberDupGroup memberName -> $"mutual-group member '{memberName}' is already part of another group"
+    | MutualMemberNotStruct (memberName, name) -> $"mutual-group member '{memberName}': '{name}' is not a declared struct"
+    | MutualMemberBadAlias (memberName, got) -> $"mutual-group member '{memberName}' must alias a struct or scalar type, got {got}"
+    | MutualUnknownField (memberName, field, structName) -> $"mutual constraint references unknown field '{memberName}.{field}' (struct {structName})"
+    | MutualScalarBare (memberName, field) -> $"'{memberName}' aliases a scalar; reference it bare, not '{memberName}.{field}'"
+    | MutualStructNeedsField memberName -> $"'{memberName}' aliases a struct; reference one of its fields as '{memberName}.<field>'"
+    | MutualUnknownIdent name -> $"identifier '{name}' in a mutual-group constraint must be a group member, a member field path, or a static"
     | MutualUnsupportedExpr -> "unsupported expression form in a mutual-group constraint"
-    | MutualConstraintNotBool (groupId, got) -> sprintf "mutual-group constraint (group %s) must be a boolean expression, got %s" groupId got
-    | MutualConstraintError (groupId, inner) -> sprintf "mutual-group constraint (group %s): %s" groupId inner
-    | ProviderStreamNeedsVar alias -> sprintf "%s.stream expects a provider array variable" alias
-    | ProviderReadWindowBounds (alias, lo, hi, n) -> sprintf "%s.read_window bounds [%d, %d) must satisfy 0 <= lo < hi <= %d (the packed extent)" alias lo hi n
-    | ProviderReadWindowLiteralExtent alias -> sprintf "%s.read_window needs a literal packed extent" alias
-    | ProviderReadWindowPacked alias -> sprintf "%s.read_window applies to PACKED variables (leading SymIdx/AntisymIdx); use %s.read for dense variables" alias alias
-    | ProviderReadWindowNeedsVar alias -> sprintf "%s.read_window expects a provider array variable as its first argument" alias
-    | ProviderReadWindowArgs alias -> sprintf "%s.read_window expects (variable, lo, hi) with integer-literal bounds" alias
-    | ProviderWriteNeedsArray alias -> sprintf "%s.write expects an array as its second argument (the variable to store)" alias
-    | ProviderWriteNamedBinding alias -> sprintf "%s.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; %s.write(\"path\", A))" alias alias
-    | ProviderWriteArgs alias -> sprintf "%s.write expects (\"path\", array): a string-literal store path and the array to write" alias
-    | ProviderWriteModuleScope alias -> sprintf "%s.write is a MODULE-LEVEL declaration form: it is only allowed as the whole right-hand side of a top-level `let` (let _ = %s.write(\"path\", A)). A write nested inside a block, a function or lambda body, a loop, or a branch is not lowered -- hoist it to module scope, or return the array from the block and write it there." alias alias
-    | IrrepsIdxArgMismatch (pos, expected, actual) -> sprintf "argument %d: IrrepsIdx mismatch: the parameter expects %s but the argument carries %s. IrrepsIdx identity is the spec (plus nominative alias name) -- equal total_dim does not make two irreps spaces interchangeable." pos expected actual
-    | BlockSpecArgMismatch (pos, expected, actual) -> sprintf "argument %d: block-spec index mismatch: the parameter expects %s but the argument carries %s. A block-structured index's identity is its GROUP FAMILY plus its spec (plus nominative alias name) -- equal total_dim does not make two block spaces interchangeable, and an O(3) irreps space is never a point-group one." pos expected actual
-    | IrrepsIdxSpec detail -> sprintf "IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." detail
-    | IrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': IrrepsIdx: %s. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>." func detail
-    | PgIrrepsIdxSpec detail -> sprintf "PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." detail
-    | PgIrrepsIdxSpecFn (func, detail) -> sprintf "function '%s': PgIrrepsIdx: %s. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>." func detail
-    | ComplexArity got -> sprintf "complex expects exactly two float components -- complex(re, im) -- got %d argument(s)" got
-    | CumulantOrderExceeds (order, carried) -> sprintf "cumulant: order %d exceeds the dist's carried order %d -- insufficient stochastic order. Construct with a higher order (dist(A, %d)) or project a carried component." order carried order
-    | DistOrderDisagree (op, leftOrder, rightOrder) -> sprintf "dist %s: orders disagree (%d vs %d) -- carry the same stochastic order on both sides" op leftOrder rightOrder
-    | DistNotIndependent (op, source1, source2, steering) -> sprintf "dist %s: cumulants combine only for independent distributions -- sources '%s' and '%s' are not declared independent; %s" op source1 source2 steering
-    | PplConstraintNeedsImport (func, bare) -> sprintf "function '%s': constraint '%s' belongs to the ppl module -- add `import ppl as <alias>` and write `where <alias>.%s(...)`" func bare bare
-    | StructBoundScope (structName, field, bad) -> sprintf "struct %s, field '%s': bound references '%s' -- bounds may reference only earlier fields and statics" structName field bad
-    | StaticStructField (structName, field, why) -> sprintf "static struct %s, field '%s': %s -- every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)" structName field why
-    | BoundsInverted (where_, lo, hi) -> sprintf "%s: bounds cross -- min=%s is greater than max=%s (bounds are inclusive on both ends, so this type has no values)" where_ lo hi
-    | BoundsOnAggregate (where_, noun, subject) -> sprintf "%s: bounds apply to primitive types, not aggregates -- the bound is applied to %s. A bound is a runtime comparison against %s itself (formalism 2.4: bounded PRIMITIVES carry runtime-checked bounds), and an aggregate has no such comparison. Write the bound on the ELEMENT type instead -- `Array<Float64<min=.., max=..> like I, J>` is checked cell by cell." where_ noun subject
+    | MutualConstraintNotBool (groupId, got) -> $"mutual-group constraint (group {groupId}) must be a boolean expression, got {got}"
+    | MutualConstraintError (groupId, inner) -> $"mutual-group constraint (group {groupId}): {inner}"
+    | ProviderStreamNeedsVar alias -> $"{alias}.stream expects a provider array variable"
+    | ProviderReadWindowBounds (alias, lo, hi, n) -> $"{alias}.read_window bounds [{lo}, {hi}) must satisfy 0 <= lo < hi <= {n} (the packed extent)"
+    | ProviderReadWindowLiteralExtent alias -> $"{alias}.read_window needs a literal packed extent"
+    | ProviderReadWindowPacked alias -> $"{alias}.read_window applies to PACKED variables (leading SymIdx/AntisymIdx); use {alias}.read for dense variables"
+    | ProviderReadWindowNeedsVar alias -> $"{alias}.read_window expects a provider array variable as its first argument"
+    | ProviderReadWindowArgs alias -> $"{alias}.read_window expects (variable, lo, hi) with integer-literal bounds"
+    | ProviderWriteNeedsArray alias -> $"{alias}.write expects an array as its second argument (the variable to store)"
+    | ProviderWriteNamedBinding alias -> $"{alias}.write stores a NAMED array binding (its name becomes the store variable's name): bind the value first (let A = ...; {alias}.write(\"path\", A))"
+    | ProviderWriteArgs alias -> $"{alias}.write expects (\"path\", array): a string-literal store path and the array to write"
+    | ProviderWriteModuleScope alias -> $"{alias}.write is a MODULE-LEVEL declaration form: it is only allowed as the whole right-hand side of a top-level `let` (let _ = {alias}.write(\"path\", A)). A write nested inside a block, a function or lambda body, a loop, or a branch is not lowered -- hoist it to module scope, or return the array from the block and write it there."
+    | IrrepsIdxArgMismatch (pos, expected, actual) -> $"argument {pos}: IrrepsIdx mismatch: the parameter expects {expected} but the argument carries {actual}. IrrepsIdx identity is the spec (plus nominative alias name) -- equal total_dim does not make two irreps spaces interchangeable."
+    | BlockSpecArgMismatch (pos, expected, actual) -> $"argument {pos}: block-spec index mismatch: the parameter expects {expected} but the argument carries {actual}. A block-structured index's identity is its GROUP FAMILY plus its spec (plus nominative alias name) -- equal total_dim does not make two block spaces interchangeable, and an O(3) irreps space is never a point-group one."
+    | IrrepsIdxSpec detail -> $"IrrepsIdx: {detail}. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>."
+    | IrrepsIdxSpecFn (func, detail) -> $"function '{func}': IrrepsIdx: {detail}. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>."
+    | PgIrrepsIdxSpec detail -> $"PgIrrepsIdx: {detail}. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>."
+    | PgIrrepsIdxSpecFn (func, detail) -> $"function '{func}': PgIrrepsIdx: {detail}. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>."
+    | ComplexArity got -> $"complex expects exactly two float components -- complex(re, im) -- got {got} argument(s)"
+    | CumulantOrderExceeds (order, carried) -> $"cumulant: order {order} exceeds the dist's carried order {carried} -- insufficient stochastic order. Construct with a higher order (dist(A, {order})) or project a carried component."
+    | DistOrderDisagree (op, leftOrder, rightOrder) -> $"dist {op}: orders disagree ({leftOrder} vs {rightOrder}) -- carry the same stochastic order on both sides"
+    | DistNotIndependent (op, source1, source2, steering) -> $"dist {op}: cumulants combine only for independent distributions -- sources '{source1}' and '{source2}' are not declared independent; {steering}"
+    | PplConstraintNeedsImport (func, bare) -> $"function '{func}': constraint '{bare}' belongs to the ppl module -- add `import ppl as <alias>` and write `where <alias>.{bare}(...)`"
+    | StructBoundScope (structName, field, bad) -> $"struct {structName}, field '{field}': bound references '{bad}' -- bounds may reference only earlier fields and statics"
+    | StaticStructField (structName, field, why) -> $"static struct {structName}, field '{field}': {why} -- every field of a `static struct` must have a statically evaluable type (Int, Float, Bool, String, Char, a tuple of those, or another static struct)"
+    | BoundsInverted (where_, lo, hi) -> $"{where_}: bounds cross -- min={lo} is greater than max={hi} (bounds are inclusive on both ends, so this type has no values)"
+    | BoundsOnAggregate (where_, noun, subject) -> $"{where_}: bounds apply to primitive types, not aggregates -- the bound is applied to {noun}. A bound is a runtime comparison against {subject} itself (formalism 2.4: bounded PRIMITIVES carry runtime-checked bounds), and an aggregate has no such comparison. Write the bound on the ELEMENT type instead -- `Array<Float64<min=.., max=..> like I, J>` is checked cell by cell."
     // Wording must match Unify.fs's rank-bound block: `got` carries the
     // whole "a scalar" / "a rank-N array" tail, so the sentence stays exact.
-    | RankBoundViolation (needed, got) -> sprintf "this value flows into a position that requires a rank-%d (or higher) array, but it resolved to %s" needed got
-    | ProviderImportByModule (suggestion, providers) -> sprintf "provider modules are imported by module name -- write `import %s as <alias>` (the Providers.* spelling was removed; registered providers: %s)" suggestion providers
-    | ProviderNoSelectiveImport pname -> sprintf "provider module '%s' does not support selective import -- use `import %s as <alias>` and call <alias>.load/read/write" pname pname
-    | IndexTypeArithForbidden name -> sprintf "Arithmetic on index type '%s' is not permitted. Index types are nominal labels -- for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented." name
+    | RankBoundViolation (needed, got) -> $"this value flows into a position that requires a rank-{needed} (or higher) array, but it resolved to {got}"
+    | ProviderImportByModule (suggestion, providers) -> $"provider modules are imported by module name -- write `import {suggestion} as <alias>` (the Providers.* spelling was removed; registered providers: {providers})"
+    | ProviderNoSelectiveImport pname -> $"provider module '{pname}' does not support selective import -- use `import {pname} as <alias>` and call <alias>.load/read/write"
+    | IndexTypeArithForbidden name -> $"Arithmetic on index type '{name}' is not permitted. Index types are nominal labels -- for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented."
     | Other msg -> msg
 
 /// Format a CompileError with location and context
@@ -786,8 +781,8 @@ let formatCompileError (err: CompileError) : string =
     let loc =
         if err.Span.StartLine > 0 then
             match err.Span.File with
-            | Some f -> sprintf "%s:%d:%d" f err.Span.StartLine err.Span.StartCol
-            | None -> sprintf "%d:%d" err.Span.StartLine err.Span.StartCol
+            | Some f -> $"{f}:{err.Span.StartLine}:{err.Span.StartCol}"
+            | None -> $"{err.Span.StartLine}:{err.Span.StartCol}"
         else ""
     let msg = formatTypeError err.Error
     let context =
@@ -796,8 +791,8 @@ let formatCompileError (err: CompileError) : string =
         |> List.map (sprintf "  %s")
         |> String.concat "\n"
     if loc = "" && context = "" then msg
-    elif context = "" then sprintf "%s: %s" loc msg
-    else sprintf "%s: %s\n%s" loc msg context
+    elif context = "" then $"{loc}: {msg}"
+    else $"{loc}: {msg}\n{context}"
 
 /// CompileError -> unified Diagnostic. The code comes from the raiser when
 /// present (CompileError.Code), else from the TypeError variant.
@@ -1038,7 +1033,7 @@ let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEn
                     match idx.Extent with
                     | IRLit (IRLitInt v) -> mkExpr noSpan (ExprKind.ExprLit (LitInt v))
                     | _ -> mkExpr noSpan (ExprKind.ExprLit (LitInt 0L))
-                let qualified = sprintf "%s.index.%s" name n
+                let qualified = $"{name}.index.{n}"
                 registerTypeDef qualified (TDIIndexType (qualified, idx, TyIdx extentExpr)) e
             | _ -> e) env
     // Module-struct fields point at the dims/vars struct decls the provider
@@ -1048,7 +1043,7 @@ let registerProviderModule (env: TypeEnv) (name: string) (pm: IRModule) : TypeEn
     let structNames = pm.Types |> List.choose (function IRTDStruct (n, _) -> Some n | _ -> None)
     let fieldFor (label: string) =
         structNames
-        |> List.tryFind (fun n -> n = label || n = sprintf "%s__%s" name label)
+        |> List.tryFind (fun n -> n = label || n = $"{name}__{label}")
         |> Option.map (fun n -> (label, IRTNamed n))
     let moduleFields = [fieldFor "dims"; fieldFor "vars"] |> List.choose id
     let moduleStruct = TDIStruct (name, [], moduleFields, [])
@@ -1079,8 +1074,8 @@ type UnitResolveErr =
 /// reject (the defensive lowering fallback; annotation resolution).
 let ppUnitResolveErr (e: UnitResolveErr) : string =
     match e with
-    | UResolveUnknown name -> sprintf "Unknown unit '%s'" name
-    | UResolveTerminal q -> sprintf "Quantity '%s' cannot appear in a unit expression (quantities are terminal)" q
+    | UResolveUnknown name -> $"Unknown unit '{name}'"
+    | UResolveTerminal q -> $"Quantity '{q}' cannot appear in a unit expression (quantities are terminal)"
 
 /// Resolve a UnitExpr AST node to a canonical UnitSig. Quantity names
 /// (Nominal = Some) are REJECTED in every position — a quantity is an

@@ -86,13 +86,13 @@ let parseArgs (argv: string list) : Result<SetupOptions, string> =
              | "prebuilt" -> go { acc with Blas = BlasPrebuilt } tl
              | "system" -> go { acc with Blas = BlasSystem } tl
              | "none" -> go { acc with Blas = BlasNoneMode } tl
-             | other -> Error (sprintf "--blas expects source|prebuilt|system|none, got '%s'" other))
+             | other -> Error $"--blas expects source|prebuilt|system|none, got '{other}'")
         | "--tools" :: v :: tl -> go { acc with Tools = Some v } tl
         | "--force" :: tl -> go { acc with Force = true } tl
         | "--jobs" :: v :: tl ->
             (match Int32.TryParse v with
              | true, n when n > 0 -> go { acc with Jobs = Some n } tl
-             | _ -> Error (sprintf "--jobs expects a positive integer, got '%s'" v))
+             | _ -> Error $"--jobs expects a positive integer, got '{v}'")
         | "--blas-dir" :: v :: tl -> go { acc with BlasDir = Some v } tl
         | "--blas-include" :: v :: tl -> go { acc with BlasInclude = Some v } tl
         | "--blas-link" :: v :: tl -> go { acc with BlasLink = Some v } tl
@@ -101,10 +101,10 @@ let parseArgs (argv: string list) : Result<SetupOptions, string> =
         | "--flavor" :: v :: tl ->
             (match v.ToLowerInvariant() with
              | "openblas" | "mkl" | "generic" -> go { acc with Flavor = Some (v.ToLowerInvariant()) } tl
-             | other -> Error (sprintf "--flavor expects openblas|mkl|generic, got '%s'" other))
+             | other -> Error $"--flavor expects openblas|mkl|generic, got '{other}'")
         | [("--blas" | "--tools" | "--jobs" | "--blas-dir" | "--blas-include" | "--blas-link" | "--lapack-link" | "--lapack-include" | "--flavor") as flag] ->
-            Error (sprintf "'%s' requires a value" flag)
-        | other :: _ -> Error (sprintf "unexpected argument '%s'" other)
+            Error $"'{flag}' requires a value"
+        | other :: _ -> Error $"unexpected argument '{other}'"
     go defaults normalized
 
 // ---- per-OS install-command data (control flow stays OS-free) ----
@@ -130,7 +130,7 @@ let packageHint (dep: string) : string =
               "netcdf",   "brew install netcdf"
               "mpi",      "brew install open-mpi" ]
     table |> List.tryFind (fun (k, _) -> k = dep) |> Option.map snd
-    |> Option.defaultValue (sprintf "(no %s install hint for this OS)" dep)
+    |> Option.defaultValue $"(no {dep} install hint for this OS)"
 
 /// Default source-build root: ~/.blade/tools (OS-independent spelling).
 let private toolsRoot (opts: SetupOptions) : string =
@@ -145,7 +145,7 @@ let private toolsRoot (opts: SetupOptions) : string =
 let private openblasPin () : Result<string * string, string> =
     let path = Path.Combine(AppContext.BaseDirectory, "deps.json")
     try
-        if not (File.Exists path) then Error (sprintf "deps.json not found beside the binary (%s)" path)
+        if not (File.Exists path) then Error $"deps.json not found beside the binary ({path})"
         else
             use doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText path)
             let deps = doc.RootElement.GetProperty("dependencies")
@@ -155,7 +155,7 @@ let private openblasPin () : Result<string * string, string> =
             match entry with
             | Some e -> Ok (e.GetProperty("url").GetString(), e.GetProperty("tag").GetString())
             | None -> Error "deps.json has no 'openblas' entry"
-    with ex -> Error (sprintf "deps.json unreadable: %s" ex.Message)
+    with ex -> Error $"deps.json unreadable: {ex.Message}"
 
 // ---- toolchain.json writing ----
 
@@ -188,7 +188,7 @@ let private writeMapTo (path: string) (m: Map<string, string>) : unit =
     let body =
         m
         |> Map.toList
-        |> List.map (fun (k, v) -> sprintf "  \"%s\": \"%s\"" (jsonEscape k) (jsonEscape v))
+        |> List.map (fun (k, v) -> $"  \"{jsonEscape k}\": \"{jsonEscape v}\"")
         |> String.concat ",\n"
     File.WriteAllText(path, "{\n" + body + "\n}\n")
 
@@ -210,12 +210,12 @@ let private runLive (dir: string option) (exe: string) (args: string) : Result<u
         let psi = ProcessStartInfo(exe, args)
         psi.UseShellExecute <- false
         match dir with Some d -> psi.WorkingDirectory <- d | None -> ()
-        printfn "  > %s %s%s" exe args (match dir with Some d -> sprintf "   (in %s)" d | None -> "")
+        printfn "  > %s %s%s" exe args (match dir with Some d -> $"   (in {d})" | None -> "")
         use proc = Process.Start(psi)
         proc.WaitForExit()
         if proc.ExitCode = 0 then Ok ()
-        else Error (sprintf "%s exited with %d" exe proc.ExitCode)
-    with ex -> Error (sprintf "%s failed to start: %s" exe ex.Message)
+        else Error $"{exe} exited with {proc.ExitCode}"
+    with ex -> Error $"{exe} failed to start: {ex.Message}"
 
 // ---- verification (doctor is the arbiter) ----
 
@@ -242,7 +242,7 @@ let private verifyAndPersist (updates: (string * string option) list) (persistKe
     let priorFileVar = Environment.GetEnvironmentVariable "BLADE_TOOLCHAIN_FILE"
     let realPath = Toolchain.activePath ()
     let candidatePath =
-        Path.Combine(Path.GetTempPath(), sprintf "blade_setup_candidate_%d.json" (Process.GetCurrentProcess().Id))
+        Path.Combine(Path.GetTempPath(), $"blade_setup_candidate_{Process.GetCurrentProcess().Id}.json")
     writeMapTo candidatePath (applyUpdates (readToolchainFile realPath) updates)
     for (k, v) in updates do
         Environment.SetEnvironmentVariable(k, (match v with Some s -> s | None -> null))
@@ -372,15 +372,15 @@ let private setupSource (opts: SetupOptions) : int =
                 printfn "source already cloned at %s" srcDir
                 Ok ()
             else
-                runLive None "git" (sprintf "clone --depth 1 --branch %s %s \"%s\"" tag url srcDir)
+                runLive None "git" $"clone --depth 1 --branch {tag} {url} \"{srcDir}\""
         let result =
             cloneStep
             |> Result.bind (fun () ->
                 let jobs = opts.Jobs |> Option.defaultValue Environment.ProcessorCount
                 let fortranFlag = if hasFortran then "" else " NOFORTRAN=1"
-                runLive (Some srcDir) "make" (sprintf "-j%d%s" jobs fortranFlag))
+                runLive (Some srcDir) "make" $"-j{jobs}{fortranFlag}")
             |> Result.bind (fun () ->
-                runLive (Some srcDir) "make" (sprintf "install PREFIX=\"%s\"" prefix))
+                runLive (Some srcDir) "make" $"install PREFIX=\"{prefix}\"")
         match result with
         | Error e ->
             eprintfn "Error: OpenBLAS source build failed: %s" e

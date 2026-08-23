@@ -84,7 +84,7 @@ let peelRowPragma = CodeGenLoopNest.peelRowPragma
 let private nestedTupleReturn (retTy: IRType) (flatName: string) (children: Map<string, string list>) : string =
     let isNested =
         match retTy with
-        | IRTTuple ts -> ts |> List.exists (function IRTTuple _ -> true | _ -> false)
+        | IRTTuple ts -> ts |> List.exists (_.IsIRTTuple)
         | _ -> false
     match (if isNested then Map.tryFind flatName children else None) with
     | Some leaves when leaves.Length = (IR.flattenTupleLeaves retTy).Length ->
@@ -98,7 +98,7 @@ let private nestedTupleReturn (retTy: IRType) (flatName: string) (children: Map<
                     ts |> List.fold (fun (acc, rem) t ->
                         let (s, rem') = build t rem
                         (acc @ [s], rem')) ([], remaining)
-                (sprintf "std::make_tuple(%s)" (parts |> String.concat ", "), rest)
+                ($"""std::make_tuple({(parts |> String.concat ", ")})""", rest)
             | _ ->
                 match remaining with
                 | l :: rest -> (l, rest)
@@ -212,7 +212,7 @@ let private genFuncBodyScoped
         // Every allocation emitted while THIS let renders is owned by it (see
         // setAllocOwner); the fold overwrites the stamp each iteration.
         setAllocOwner (Some id)
-        let varName = sprintf "__v%d" id
+        let varName = $"__v{id}"
         // Collapse stacked IRCompute wrappers before dispatching. `compute` is
         // idempotent at inference, but IR construction can stack the user's
         // `|> compute` on a node that already carries its own wrap (measured:
@@ -245,22 +245,22 @@ let private genFuncBodyScoped
         | IRAssign (target, v) ->
             let targetStr =
                 match target with
-                | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue (sprintf "__v%d" tid)
+                | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue ($"__v{tid}")
                 | _ -> exprToCpp currentNames target
             currentNames <- Map.add id varName currentNames
             // Copy-in-place (see exprToCppCore's IRAssign arm): sole-owner mut keeps
             // ONE pool; the RHS temp stays iteration-owned and its scope frees it.
             match copyInPlaceAssign target v with
             | Some (_, rid, n) ->
-                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue (sprintf "__v%d" rid)
-                [sprintf "%sstd::copy_n(pool_base(%s.data), %d, pool_base(%s.data));" indent rhsStr n targetStr]
+                let rhsStr = Map.tryFind rid currentNames |> Option.defaultValue ($"__v{rid}")
+                [$"{indent}std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data));"]
             | None ->
-                [sprintf "%s%s = %s;" indent targetStr (exprToCpp currentNames v)]
+                [$"{indent}{targetStr} = {(exprToCpp currentNames v)};"]
         | IRConstraintCheck (cond, message, span) ->
             currentNames <- Map.add id varName currentNames
-            [ sprintf "%sif (!(%s)) {" indent (exprToCpp currentNames cond)
-              sprintf "%s    blade_rt::panic(\"BL8001\", \"%s\", %s);" indent message (panicSpanArgs span)
-              sprintf "%s}" indent ]
+            [ $$"""{{indent}}if (!({{(exprToCpp currentNames cond)}})) {"""
+              $"{indent}    blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)});"
+              $"{indent}}}" ]
         | IRLit IRLitUnit ->
             // Skip unit literals (side effects already emitted)
             currentNames <- Map.add id varName currentNames
@@ -287,7 +287,7 @@ let private genFuncBodyScoped
             // exemption only fires when every reference is a join operand.
             currentNames <- Map.add id varName currentNames
             currentDeferred <- Map.add id value currentDeferred
-            [sprintf "%s// %s = <deferred computation (reduction-join operand)>" indent varName]
+            [$"{indent}// {varName} = <deferred computation (reduction-join operand)>"]
         | IRApplyCombinator _ | IRComposeApply _ ->
             // WAS: "unevaluated computations -- deferred until |> compute forces
             // them", registering the name and emitting NOTHING. That premise is
@@ -598,7 +598,7 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                 // Defensive: shouldn't fire for the patterns we matched.
                 let valStr = exprToCpp currentNames value
                 currentNames <- Map.add id varName currentNames
-                [sprintf "%sauto %s = %s;" indent varName valStr]
+                [$"{indent}auto {varName} = {valStr};"]
         | v when isStatementShapedValue v ->
             // UNIFIED statement-shaped routing. Every arm above this point
             // names ONE form and does the same three things: build a temp
@@ -666,11 +666,11 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
                      "nullptr" (varName + "_extents") varName None
              | _ -> ())
             currentNames <- Map.add id varName currentNames
-            [sprintf "%sauto %s = %s;" indent varName valStr]
+            [$"{indent}auto {varName} = {valStr};"]
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
-            [sprintf "%sauto %s = %s;" indent varName valStr])
+            [$"{indent}auto {varName} = {valStr};"])
     // Return-arm emissions carry NO owner: a __retN temporary must not be matched
     // against some let's escape status by accident. It is exempted by NAME below.
     setAllocOwner None
@@ -698,12 +698,12 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
         // as it handles the computed spelling.
         match retExpr with
         | IRCompute (IRApplyCombinator info) | IRApplyCombinator info ->
-            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let retVarName = $"__ret{builder.FreshId()}"
             let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let combCode = genApplyCombinator bodyCtx retVarName info builder
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
-            stmts @ combCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+            stmts @ combCode @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
         | (IRIf _ | IRMatch _) when branchingReturnMaterializes retExpr ->
             // A BRANCHING return whose arms each materialize an array
             // (`if flag then xs <@> k1 else xs <@> k2`). S4's return force
@@ -734,7 +734,7 @@ or return a scalar and materialize at the call site"
             // genComputeBinding peels the IRCompute and routes to
             // genComposeApply -- the same statement form module level uses.
             // exprToCpp has no expression rendering for it.
-            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let retVarName = $"__ret{builder.FreshId()}"
             let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
@@ -742,7 +742,7 @@ or return a scalar and materialize at the call site"
             }
             let (compCode, _) = genBinding bodyCtx tempBinding builder
             suppressAllocName retVarName
-            stmts @ compCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+            stmts @ compCode @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
         | IRReduceCompute _ ->
             // Same reason as the IRCompute(IRApplyCombinator) arm above, for the
             // fused-reduce terminal: `reduce(A <@> k, (+))` in RETURN position of
@@ -750,7 +750,7 @@ or return a scalar and materialize at the call site"
             // through genBinding and return the name; exprToCpp's IRReduceCompute
             // arm is a sentinel. Reached by every kernel body whose tail is a
             // reduce over a body-local computation (plan section 1, M-A).
-            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let retVarName = $"__ret{builder.FreshId()}"
             let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
             let tempBinding = {
                 Id = builder.FreshId(); Name = retVarName; Type = inferExprType retExpr
@@ -764,7 +764,7 @@ or return a scalar and materialize at the call site"
             let retName = nestedTupleReturn (inferExprType retExpr) retVarName ctxAfter.TupleChildren
             // A reduce yields a SCALAR: nothing to spare from the frees, and the
             // value is already in a local, so the frees may close before return.
-            stmts @ redCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retName]
+            stmts @ redCode @ popAllocScopeFrees indent @ [$"{indent}return {retName};"]
         | r when isStatementShapedValue r ->
             // UNIFIED statement-shaped RETURN. This one arm replaces the four
             // that used to sit here -- IRTranspose, IRGroupBucket/IRGroupSizes,
@@ -797,7 +797,7 @@ or return a scalar and materialize at the call site"
             // builders and what this change extends to genFallbackMaterialize
             // and the IRSequence arm -- the last two that were still handing
             // back a shape their frame owned.
-            let retVarName = sprintf "__ret%d" (builder.FreshId())
+            let retVarName = $"__ret{builder.FreshId()}"
             let bodyCtx = { ctx with VarNames = currentNames; Indent = ctx.Indent + 1
                                      GroupedArrays = currentGrouped
                                      DeferredComputations = currentDeferred
@@ -827,7 +827,7 @@ or return a scalar and materialize at the call site"
             let allocMark = allocRegistrationMark ()
             let (retCode, _) = genBinding bodyCtx tempBinding builder
             suppressAllocsSince allocMark
-            stmts @ retCode @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retVarName]
+            stmts @ retCode @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
         | _ ->
             // Return-extent ABI (supersedes the stage-2b guard): a
             // loop-materialized array CAN now be returned. The former guard
@@ -887,13 +887,13 @@ or return a scalar and materialize at the call site"
                                 | _ -> false) ->
                 let frees = popAllocScopeFrees indent
                 if List.isEmpty frees then
-                    stmts @ [sprintf "%sreturn %s;" indent retStr]
+                    stmts @ [$"{indent}return {retStr};"]
                 else
-                    let rv = sprintf "__retv%d" (builder.FreshId())
+                    let rv = $"__retv{builder.FreshId()}"
                     stmts
-                    @ [sprintf "%sauto %s = %s;" indent rv retStr]
+                    @ [$"{indent}auto {rv} = {retStr};"]
                     @ frees
-                    @ [sprintf "%sreturn %s;" indent rv]
+                    @ [$"{indent}return {rv};"]
             // An INTERIOR VIEW of a scope-local array, materialized. `return
             // traj(9999)` hands back a wrapper into the trajectory's pool, and
             // nothing can free that pool afterwards -- not this scope (the view
@@ -905,7 +905,7 @@ or return a scalar and materialize at the call site"
             // seed and computeFreshReturnFacts promotes the callee to
             // FreshPool, both off this same predicate.
             | ArrayElem sat when (returnedInteriorView lets retExpr).IsSome ->
-                let retVarName = sprintf "__ret%d" (builder.FreshId())
+                let retVarName = $"__ret{builder.FreshId()}"
                 let viewName = retVarName + "_vw"
                 let extentsName = retVarName + "_extents"
                 let rank = arrayRank sat
@@ -919,41 +919,39 @@ or return a scalar and materialize at the call site"
                 let dims =
                     [ for d in 0 .. rank - 1 ->
                         match literalExtentOfArray sat d with
-                        | Some n -> (sprintf "%d" n, true)
-                        | None -> (sprintf "%s.extents[%d]" viewName d, false) ]
+                        | Some n -> (string n, true)
+                        | None -> ($"{viewName}.extents[{d}]", false) ]
                 let (extentsDecl, _leavesWithValue) = emitExtentsTable indent extentsName rank dims
                 let allocRhs =
                     match emitAllocRhs AllocDense elemStr rank "nullptr" extentsName with
                     | Ok rhs -> rhs
-                    | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
+                    | Error msg -> recordCodegenRefusal msg; $"{{ nullptr, {extentsName} }};\n#error \"{msg}\""
                 // The slice is a CONTIGUOUS sub-block of a dense pool
                 // (returnedInteriorView proved the leading-prefix, all-scalar,
                 // unsymmetric shape), so `pool_base` on the sub-skeleton lands
                 // on its first cell and one flat copy_n moves the whole slice.
                 let matCode =
-                    [ sprintf "%sArray<%s, %d> %s = %s;" indent elemStr rank viewName retStr ]
+                    [ $"{indent}Array<{elemStr}, {rank}> {viewName} = {retStr};" ]
                     @ extentsDecl
-                    @ [ sprintf "%sArray<%s, %d> %s = %s;" indent elemStr rank retVarName allocRhs
-                        sprintf "%ssize_t %s_n = count_leaves<typename promote<%s, %d>::type, nullptr>(%s);"
-                            indent retVarName elemStr rank extentsName
-                        sprintf "%sstd::copy_n(pool_base(%s.data), %s_n, pool_base(%s.data));"
-                            indent viewName retVarName retVarName ]
+                    @ [ $"{indent}Array<{elemStr}, {rank}> {retVarName} = {allocRhs};"
+                        $"{indent}size_t {retVarName}_n = count_leaves<typename promote<{elemStr}, {rank}>::type, nullptr>({extentsName});"
+                        $"{indent}std::copy_n(pool_base({viewName}.data), {retVarName}_n, pool_base({retVarName}.data));" ]
                 stmts @ matCode @ popAllocScopeFrees indent
-                @ [sprintf "%sreturn %s;" indent retVarName]
+                @ [$"{indent}return {retVarName};"]
             | ArrayElem _ | IRTTuple _ ->
                 for n in registeredAllocNames () do
                     if containsIdentToken retStr n then suppressAllocName n
-                stmts @ popAllocScopeFrees indent @ [sprintf "%sreturn %s;" indent retStr]
+                stmts @ popAllocScopeFrees indent @ [$"{indent}return {retStr};"]
             | _ ->
                 let frees = popAllocScopeFrees indent
                 if List.isEmpty frees then
-                    stmts @ [sprintf "%sreturn %s;" indent retStr]
+                    stmts @ [$"{indent}return {retStr};"]
                 else
-                    let rv = sprintf "__retv%d" (builder.FreshId())
+                    let rv = $"__retv{builder.FreshId()}"
                     stmts
-                    @ [sprintf "%sauto %s = %s;" indent rv retStr]
+                    @ [$"{indent}auto {rv} = {retStr};"]
                     @ frees
-                    @ [sprintf "%sreturn %s;" indent rv]
+                    @ [$"{indent}return {rv};"]
 
 /// Emit a function body's statements. Wraps genFuncBodyScoped in the
 /// deterministic-deallocation FUNCTION scope: every allocation the body emits
@@ -1226,8 +1224,8 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     // for separate body-level aliases -- the wrapper IS the binding.
     let paramStr (name: string) (ty: IRType) : string =
         match ty with
-        | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) name
-        | _ -> sprintf "%s %s" (irTypeToCpp ty) name
+        | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {name}"
+        | _ -> $"{(irTypeToCpp ty)} {name}"
     let captureParamStr (cap: CaptureInfo) : string =
         // Captures are appended after the regular params, pass-by-reference so
         // mutation propagates and lifetimes tie to the wrapper's `[&]` capture
@@ -1248,10 +1246,10 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         // they're immutable bindings in Blade.
         match cap.Type with
         | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
-            sprintf "Array<%s*, 1>& %s" (elemTypeToCpp arr.ElemType) cap.Name
-        | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
-        | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
-        | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name
+            $"Array<{(elemTypeToCpp arr.ElemType)}*, 1>& {cap.Name}"
+        | ArrayElem arr -> $"{(cppArrayTypeStr arr)}& {cap.Name}"
+        | FuncElem _ -> $"const {(irTypeToCpp cap.Type)}& {cap.Name}"
+        | _ -> $"{(irTypeToCpp cap.Type)}& {cap.Name}"
     let regularParams = funcDef.Params |> List.map (fun p -> paramStr p.Name p.Type)
     let captureParams = (funcDef.Captures |> List.map captureParamStr) @ gkSidecarParams funcDef.Captures
     let paramList = (regularParams @ captureParams) |> String.concat ", "
@@ -1295,11 +1293,11 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     // Emitted as a MARKER, not the statement: whether this body can reach a
     // panic depends on what its callees do. resolveShadowFrames settles it.
     let code =
-        [sprintf "%s%s %s(%s) {" ind retType safeName paramList]
+        [$$"""{{ind}}{{retType}} {{safeName}}({{paramList}}) {"""]
         @ shadowFrameOpen funcDef bodyInd
         @ bodyStmts
         @ shadowFrameClose bodyInd
-        @ [sprintf "%s}" ind]
+        @ [$"{ind}}}"]
 
     let ctx' = addVarName funcDef.Id funcDef.Name ctx
     (code, ctx')
@@ -1313,8 +1311,8 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
         funcDef.Params
         |> List.map (fun p ->
             match p.Type with
-            | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
-            | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+            | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
+            | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
         |> String.concat ", "
 
     let retType =
@@ -1338,7 +1336,7 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
             | ArrayElem arr -> cppArrayTypeStr arr
             | _ -> irTypeToCpp p.Type)
         |> String.concat ", "
-    let funcType = sprintf "std::function<%s(%s)>" retType paramTypeList
+    let funcType = $"std::function<{retType}({paramTypeList})>"
     // Statement-form body via genFuncBody -- the same renderer proper C++
     // functions use -- so for-in loops, local array literals, and element
     // assignment work in captured functions too. A bare `return <exprToCpp
@@ -1362,11 +1360,11 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
     // and marker-form so resolveShadowFrames can drop it if no panic is
     // reachable from this body.
     let code =
-        [sprintf "%s%s %s = [&](%s) -> %s {" ind funcType safeName paramList retType]
+        [$$"""{{ind}}{{funcType}} {{safeName}} = [&]({{paramList}}) -> {{retType}} {"""]
         @ shadowFrameOpen funcDef bodyInd
         @ bodyStmts
         @ shadowFrameClose bodyInd
-        @ [sprintf "%s};" ind]
+        @ [$"{ind}}};"]
     let ctx' = addVarName funcDef.Id funcDef.Name ctx
     (code, ctx')
 
@@ -1383,8 +1381,8 @@ let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
                 funcDef.Params
                 |> List.map (fun p ->
                     match p.Type with
-                    | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
-                    | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+                    | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
+                    | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
             let captureList =
                 funcDef.Captures
                 |> List.map (fun cap ->
@@ -1392,10 +1390,10 @@ let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
                     // Grouped capture: the row-pointer table form, matching
                     // genFuncDef's captureParamStr token for token.
                     | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
-                        sprintf "Array<%s*, 1>& %s" (elemTypeToCpp arr.ElemType) cap.Name
-                    | ArrayElem arr -> sprintf "%s& %s" (cppArrayTypeStr arr) cap.Name
-                    | FuncElem _ -> sprintf "const %s& %s" (irTypeToCpp cap.Type) cap.Name
-                    | _ -> sprintf "%s& %s" (irTypeToCpp cap.Type) cap.Name)
+                        $"Array<{(elemTypeToCpp arr.ElemType)}*, 1>& {cap.Name}"
+                    | ArrayElem arr -> $"{(cppArrayTypeStr arr)}& {cap.Name}"
+                    | FuncElem _ -> $"const {(irTypeToCpp cap.Type)}& {cap.Name}"
+                    | _ -> $"{(irTypeToCpp cap.Type)}& {cap.Name}")
             let allParams = (paramList @ captureList @ gkSidecarParams funcDef.Captures) |> String.concat ", "
             let retType =
                 match funcDef.RetType with
@@ -1403,7 +1401,7 @@ let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
                 | ArrayElem arr -> cppArrayTypeStr arr
                 | t -> irTypeToCpp t
             let safeName = sanitizeCppName funcDef.Name
-            sprintf "%s %s(%s);" retType safeName allParams)
+            $"{retType} {safeName}({allParams});")
     if decls.IsEmpty then [] else decls @ [""]
 
 /// Classify a binding as a "computation" (forced combinator / compute) vs
@@ -1450,10 +1448,10 @@ let private isComputeBinding (b: IRBinding) : bool =
 /// there, a callee's main-locality must not leak outward into a lifted body;
 /// here, a caller inherits its callee's UNMET obligations.
 let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : Set<IRId> =
-    let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
+    let funcIds = modul.Functions |> List.map (_.Id) |> Set.ofList
     let capturesById =
         modul.Functions
-        |> List.map (fun f -> (f.Id, f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList))
+        |> List.map (fun f -> (f.Id, f.Captures |> List.map (_.Id) |> Set.ofList))
         |> Map.ofList
     // The callables a body NAMES, as opposed to receives: intersecting with
     // funcIds drops params (a param's VarId is never a function id) and
@@ -1461,7 +1459,7 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
     let uncapturedFuncRefs =
         modul.Functions
         |> List.map (fun f ->
-            let captureIds = f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
+            let captureIds = f.Captures |> List.map (_.Id) |> Set.ofList
             (f.Id, Set.difference (Set.intersect (collectVarRefsIR f.Body) funcIds) captureIds))
         |> Map.ofList
     let inheritedCaptures (funcDef: IRFuncDef) =
@@ -1469,8 +1467,8 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
         |> Set.fold (fun acc g ->
             Set.union acc (Map.tryFind g capturesById |> Option.defaultValue Set.empty)) Set.empty
     let capturesModuleBinding (funcDef: IRFuncDef) =
-        let paramIds = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
-        let captureIds = funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList
+        let paramIds = funcDef.Params |> List.map (_.VarId) |> Set.ofList
+        let captureIds = funcDef.Captures |> List.map (_.Id) |> Set.ofList
         let bound = Set.unionMany [paramIds; captureIds; funcIds]
         let spelled = Set.difference (collectVarRefsIR funcDef.Body) bound
         // Subtract `bound` AFTER the fold, never inside it: a self-recursive
@@ -1490,8 +1488,8 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
         |> List.map (fun f ->
             let localBound =
                 Set.union
-                    (f.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
-                    (f.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList)
+                    (f.Params |> List.map (_.VarId) |> Set.ofList)
+                    (f.Captures |> List.map (_.Id) |> Set.ofList)
             (f.Id, Set.difference (Set.intersect (inheritedCaptures f) funcIds) localBound))
         |> Map.ofList
     let refEdges (id: IRId) = Set.union uncapturedFuncRefs.[id] inheritedFuncRefs.[id]
@@ -1519,17 +1517,17 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
     // module binding alone would have made it main-local.
     let allParamIds =
         modul.Functions
-        |> List.collect (fun f -> f.Params |> List.map (fun p -> p.VarId))
+        |> List.collect (fun f -> f.Params |> List.map (_.VarId))
         |> Set.ofList
     // Tested on captures AND spelled body references, because main-local
     // emission drops the capture params entirely (that is the point of `[&]`),
     // so a clone can reach an enclosing param either way. Own params are
     // subtracted -- they are bound here.
     let usesEnclosingParam (funcDef: IRFuncDef) =
-        let ownParams = funcDef.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let ownParams = funcDef.Params |> List.map (_.VarId) |> Set.ofList
         let referenced =
             Set.union
-                (funcDef.Captures |> List.map (fun cap -> cap.Id) |> Set.ofList)
+                (funcDef.Captures |> List.map (_.Id) |> Set.ofList)
                 (collectVarRefsIR funcDef.Body)
         Set.difference (Set.intersect referenced allParamIds) ownParams |> Set.isEmpty |> not
     // Excluded from main-locality ENTIRELY -- not just from `direct`. The
@@ -1537,7 +1535,7 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
     // kernel calls one (`wosa_lsdft`, which captures `two_pi` directly), so
     // filtering only the seed left it re-added one round later.
     let cannotBeMainLocalSeed =
-        modul.Functions |> List.filter usesEnclosingParam |> List.map (fun f -> f.Id) |> Set.ofList
+        modul.Functions |> List.filter usesEnclosingParam |> List.map (_.Id) |> Set.ofList
     // Propagated DOWNWARD along the reference edges: a namespace-scope C++
     // function cannot call a `std::function` local of main(), so everything
     // reachable from something that cannot be main-local must also stay at
@@ -1561,7 +1559,7 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
     let direct =
         modul.Functions
         |> List.filter capturesModuleBinding
-        |> List.map (fun f -> f.Id)
+        |> List.map (_.Id)
         |> Set.ofList
         |> fun s -> Set.difference s cannotBeMainLocal
     let rec close (acc: Set<IRId>) =
@@ -1595,7 +1593,7 @@ let private computeMainLocalFuncIds (modul: IRModule) (ctx0: CodeGenContext) : S
 /// kernels whose call sites all sit in `main()` is left exactly where it was.
 let private computeModuleCaptureHoistIds
         (modul: IRModule) (mainLocalFuncIds: Set<IRId>) : Set<IRId> =
-    let moduleBindingIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
+    let moduleBindingIds = modul.Bindings |> List.map (_.Id) |> Set.ofList
     if Set.isEmpty moduleBindingIds then Set.empty
     else
     let byId = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
@@ -1604,8 +1602,8 @@ let private computeModuleCaptureHoistIds
     |> List.collect (fun f ->
         let nameable =
             Set.union
-                (f.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
-                (f.Captures |> List.map (fun c -> c.Id) |> Set.ofList)
+                (f.Params |> List.map (_.VarId) |> Set.ofList)
+                (f.Captures |> List.map (_.Id) |> Set.ofList)
         collectVarRefsIR f.Body
         |> Set.toList
         |> List.collect (fun rid ->
@@ -1614,7 +1612,7 @@ let private computeModuleCaptureHoistIds
                 match Map.tryFind rid byId with
                 | Some c ->
                     c.Captures
-                    |> List.map (fun cap -> cap.Id)
+                    |> List.map (_.Id)
                     |> List.filter (fun cid ->
                         Set.contains cid moduleBindingIds && not (Set.contains cid nameable))
                 | None -> []))
@@ -1934,8 +1932,8 @@ let genStructDef (name: string) (fields: (string * IRType) list) : string list =
             match fty with
             | ArrayElem arr -> cppArrayTypeStr arr
             | _ -> irTypeToCpp fty
-        sprintf "    %s %s;" cppTy fname)
-    [sprintf "struct %s {" name]
+        $"    {cppTy} {fname};")
+    [$$"""struct {{name}} {"""]
     @ fieldLines
     @ ["};"
        ""]
@@ -1953,41 +1951,40 @@ let genTypeDefs (modul: IRModule) : string list =
                 let variantStructs = variants |> List.collect (fun (vname, data) ->
                     match data with
                     | Some ty -> 
-                        [sprintf "struct %s_T { %s value; };" vname (irTypeToCpp ty)]
+                        [$$"""struct {{vname}}_T { {{(irTypeToCpp ty)}} value; };"""]
                     | None -> 
-                        [sprintf "struct %s_T {};" vname]
+                        [$$"""struct {{vname}}_T {};"""]
                 )
                 let variantTypes = variants |> List.map (fun (v, _) -> v + "_T") |> String.concat ", "
-                let variantAlias = sprintf "using %s = std::variant<%s>;" name variantTypes
+                let variantAlias = $"using {name} = std::variant<{variantTypes}>;"
                 let ctorFuncs = variants |> List.collect (fun (vname, data) ->
                     match data with
                     | Some ty ->
-                        [sprintf "inline %s %s(%s v) { return %s_T{v}; }" name vname (irTypeToCpp ty) vname]
+                        [$$"""inline {{name}} {{vname}}({{(irTypeToCpp ty)}} v) { return {{vname}}_T{v}; }"""]
                     | None ->
-                        [sprintf "const %s %s = %s_T{};" name vname vname]
+                        [$$"""const {{name}} {{vname}} = {{vname}}_T{};"""]
                 )
                 variantStructs @ [variantAlias] @ ctorFuncs @ [""]
             else
                 // Simple enum - use plain enum for unscoped names
-                [sprintf "enum %s { %s };" name 
-                    (variants |> List.map fst |> String.concat ", ")
+                [$"""enum {name} {{ {(variants |> List.map fst |> String.concat ", ")} }};"""
                  ""]
         | IRTDAlias (name, ty) ->
-            [sprintf "using %s = %s;" name (irTypeToCpp ty); ""]
+            [$"using {name} = {(irTypeToCpp ty)};"; ""]
         | IRTDIndexType (name, _) ->
             // Emit a typedef for the index type so foreign-key element types
             // (IRTIdxTagged (_, IRefNamed name)) can render as the alias
             // rather than bare int64_t. The alias is transparent --
             // int64_t-compatible -- but makes generated C++ self-documenting
             // and leaves a hook for future strong typing.
-            [sprintf "using %s = int64_t;" name; ""]
+            [$"using {name} = int64_t;"; ""]
         | IRTDEnumIdx (name, _, values) ->
             // EnumIdx alias: render as the underlying runtime type. All-int
             // values -> int64_t; all-string values -> std::string. The chosen
             // C++ type must match what the Case 2 reverse-lookup dispatch
             // and any keys array stored under this type expect.
             let underlying = EnumValue.underlyingElemType values
-            [sprintf "using %s = %s;" name (primTypeToCpp underlying); ""]
+            [$"using {name} = {(primTypeToCpp underlying)};"; ""]
     )
 
 // Every printer below takes the binding's SOURCE name and splits it in two:
@@ -1999,7 +1996,7 @@ let genTypeDefs (modul: IRModule) : string list =
 
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =
-    [sprintf "    cout << \"%s = \" << %s << endl;" name (sanitizeCppName name)]
+    [$"    cout << \"{name} = \" << {(sanitizeCppName name)} << endl;"]
 
 /// Rank-2 print in the NESTED form -- `name = [[a, b], [c, d]]` -- which is the
 /// shape a rank-2 literal is written in, so the printed line round-trips as
@@ -2013,20 +2010,20 @@ let genPrintScalar (name: string) : string list =
 /// (Interp/ArrayOps.emitNested2) must stay byte-identical to this.
 let private genPrintNested2 (name: string) (outerBound: string) (innerBound: string) : string list =
     let v = sanitizeCppName name
-    let firstVar = sprintf "%s__first" v
-    [ sprintf "    cout << \"%s = [\";" name
-      sprintf "    for (size_t i = 0; i < %s; i++) {" outerBound
+    let firstVar = $"{v}__first"
+    [ $"    cout << \"{name} = [\";"
+      $$"""    for (size_t i = 0; i < {{outerBound}}; i++) {"""
       "        if (i) cout << \", \";"
       "        cout << \"[\";"
-      sprintf "        bool %s = true;" firstVar
-      sprintf "        for (size_t j = 0; j < %s; j++) {" innerBound
-      sprintf "            if (!%s) cout << \", \";" firstVar
-      sprintf "            %s = false;" firstVar
-      sprintf "            cout << %s[i][j];" v
+      $"        bool {firstVar} = true;"
+      $$"""        for (size_t j = 0; j < {{innerBound}}; j++) {"""
+      $"            if (!{firstVar}) cout << \", \";"
+      $"            {firstVar} = false;"
+      $"            cout << {v}[i][j];"
       "        }"
       "        cout << \"]\";"
       "    }"
-      sprintf "    cout << \"]\" << endl;" ]
+      "    cout << \"]\" << endl;" ]
 
 /// Generate code to print a dense array value. ONE regime for every rank:
 /// rank 2 nests (genPrintNested2, the shape its literal is written in), every
@@ -2043,34 +2040,33 @@ let private genPrintNested2 (name: string) (outerBound: string) (innerBound: str
 /// all -- while rank 3 printed flat, the inconsistency this retired.
 let genPrintArrayFlat (name: string) (rank: int) : string list =
     let v = sanitizeCppName name
-    let firstVar = sprintf "%s__first" v
+    let firstVar = $"{v}__first"
     if rank < 1 then
-        [sprintf "    cout << \"%s = <rank-0>\" << endl;" name]
+        [$"    cout << \"{name} = <rank-0>\" << endl;"]
     elif rank = 2 then
-        genPrintNested2 name (sprintf "%s.extents[0]" v) (sprintf "%s.extents[1]" v)
+        genPrintNested2 name ($"{v}.extents[0]") ($"{v}.extents[1]")
     else
         // Loop-var names as genPrintArraySymAware spells them, with the same
         // numbered overflow past eight (nothing collides: the print block is
         // its own statement scope).
         let loopVarNames = [| "i"; "j"; "k"; "l"; "m"; "n_"; "p"; "q" |]
-        let loopVar d = if d < loopVarNames.Length then loopVarNames.[d] else sprintf "d%d" d
+        let loopVar d = if d < loopVarNames.Length then loopVarNames.[d] else $"d{d}"
         let opens = [
-            sprintf "    cout << \"%s = [\";" name
-            sprintf "    bool %s = true;" firstVar ]
+            $"    cout << \"{name} = [\";"
+            $"    bool {firstVar} = true;" ]
         let loops =
             [ for d in 0 .. rank - 1 ->
-                sprintf "    %sfor (size_t %s = 0; %s < %s.extents[%d]; %s++) {"
-                    (String.replicate d "    ") (loopVar d) (loopVar d) v d (loopVar d) ]
+                $"""    {(String.replicate d "    ")}for (size_t {(loopVar d)} = 0; {(loopVar d)} < {v}.extents[{d}]; {(loopVar d)}++) {{""" ]
         let inner =
             let ind = "    " + String.replicate rank "    "
-            let idx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
-            [ sprintf "%sif (!%s) cout << \", \";" ind firstVar
-              sprintf "%s%s = false;" ind firstVar
-              sprintf "%scout << %s%s;" ind v idx ]
+            let idx = [ for d in 0 .. rank - 1 -> $"[{(loopVar d)}]" ] |> String.concat ""
+            [ $"{ind}if (!{firstVar}) cout << \", \";"
+              $"{ind}{firstVar} = false;"
+              $"{ind}cout << {v}{idx};" ]
         let closes =
             [ for d in rank - 1 .. -1 .. 0 ->
-                sprintf "    %s}" (String.replicate d "    ") ]
-        let finish = [ sprintf "    cout << \"]\" << endl;" ]
+                $"""    {(String.replicate d "    ")}}}""" ]
+        let finish = [ "    cout << \"]\" << endl;" ]
         opens @ loops @ inner @ closes @ finish
 
 /// Generate print loop for arrays with per-dimension symmetry awareness.
@@ -2104,7 +2100,7 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
             let strictConst = if idx.Symmetry = SymAntisymmetric then 1 else 0
             let groupDims =
                 [0 .. idxRank - 1] |> List.map (fun a ->
-                    let loopVar = if dimIdx + a < loopVarNames.Length then loopVarNames.[dimIdx + a] else sprintf "d%d" (dimIdx + a)
+                    let loopVar = if dimIdx + a < loopVarNames.Length then loopVarNames.[dimIdx + a] else $"d{dimIdx + a}"
                     let offsets =
                         if isSym && a > 0 then
                             [0 .. a - 1] |> List.map (fun prev -> loopVarNames.[dimIdx + prev])
@@ -2122,10 +2118,10 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
     let boundAt (loopVar: string, dimIdx: int, offsets: string list, strict: int) =
         ignore loopVar
         match offsets @ (if strict > 0 then [string strict] else []) with
-        | [] -> sprintf "%s.extents[%d]" v dimIdx
-        | subParts -> sprintf "%s.extents[%d] - %s" v dimIdx (String.concat " - " subParts)
+        | [] -> $"{v}.extents[{dimIdx}]"
+        | subParts -> $"""{v}.extents[{dimIdx}] - {(String.concat " - " subParts)}"""
     if rank < 1 || rank > 8 then
-        [sprintf "    cout << \"%s = <rank-%d array>\" << endl;" name rank]
+        [$"    cout << \"{name} = <rank-{rank} array>\" << endl;"]
     elif rank = 2 then
         // A rank-2 compact group nests exactly as its literal does: the inner
         // bound carries the row shrink (`extents[1] - i`, or `- i - 1` when the
@@ -2133,10 +2129,10 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
         // offsets above name.
         genPrintNested2 name (boundAt (List.item 0 dims)) (boundAt (List.item 1 dims))
     else
-        let firstVar = sprintf "%s__first" v
+        let firstVar = $"{v}__first"
         let opens = [
-            sprintf "    cout << \"%s = [\";" name
-            sprintf "    bool %s = true;" firstVar ]
+            $"    cout << \"{name} = [\";"
+            $"    bool {firstVar} = true;" ]
         let loops =
             dims |> List.map (fun ((loopVar, _, _, _) as dim) ->
                 let indent = "    " + String.replicate (dims |> List.findIndex (fun (v,_,_,_) -> v = loopVar)) "    "
@@ -2145,15 +2141,15 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
                 // extent - priorVars, an antisymmetric one also - a (strict).
                 forLoop indent loopVar (boundAt dim))
         let innerIndent = "    " + String.replicate rank "    "
-        let idx = dims |> List.map (fun (v,_,_,_) -> sprintf "[%s]" v) |> String.concat ""
+        let idx = dims |> List.map (fun (v,_,_,_) -> $"[{v}]") |> String.concat ""
         let inner = [
-            sprintf "%sif (!%s) cout << \", \";" innerIndent firstVar
-            sprintf "%s%s = false;" innerIndent firstVar
-            sprintf "%scout << %s%s;" innerIndent v idx ]
+            $"{innerIndent}if (!{firstVar}) cout << \", \";"
+            $"{innerIndent}{firstVar} = false;"
+            $"{innerIndent}cout << {v}{idx};" ]
         let closes =
             [for d in rank - 1 .. -1 .. 0 ->
-                sprintf "    %s}" (String.replicate d "    ")]
-        let finish = [sprintf "    cout << \"]\" << endl;"]
+                $"""    {(String.replicate d "    ")}}}"""]
+        let finish = ["    cout << \"]\" << endl;"]
         opens @ loops @ inner @ closes @ finish
 
 /// Print an OrbIdx (iterated-wreath) pool: its cells in STORAGE order (=
@@ -2173,14 +2169,13 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
 let genPrintArrayWreath (name: string) (levels: (int * bool) list) (extent: int64) : string list =
     let levelArgs = orbLevelArgs levels
     let v = sanitizeCppName name
-    let firstVar = sprintf "%s__first" v
-    [ sprintf "    cout << \"%s = [\";" name
-      sprintf "    bool %s = true;" firstVar
-      sprintf "    for (int64_t __ok = 0; __ok < orbit_wreath_utilities::orb_cell_count<%s>(%d); __ok++) {"
-              levelArgs extent
-      sprintf "        if (!%s) cout << \", \";" firstVar
-      sprintf "        %s = false;" firstVar
-      sprintf "        cout << %s[__ok];" v
+    let firstVar = $"{v}__first"
+    [ $"    cout << \"{name} = [\";"
+      $"    bool {firstVar} = true;"
+      $"    for (int64_t __ok = 0; __ok < orbit_wreath_utilities::orb_cell_count<{levelArgs}>({extent}); __ok++) {{"
+      $"        if (!{firstVar}) cout << \", \";"
+      $"        {firstVar} = false;"
+      $"        cout << {v}[__ok];"
       "    }"
       "    cout << \"]\" << endl;" ]
 
@@ -2286,20 +2281,20 @@ let genPrintStatements (modul: IRModule) : string list =
                      (match orbitBaseExtent ix with
                       | IRLit (IRLitInt n) -> genPrintArrayWreath b.Name (orbitLevelsOf ix) n
                       | _ ->
-                          [sprintf "    // (OrbIdx array '%s' not auto-printed: a wreath pool needs a compile-time extent to size its cell count)" b.Name])
+                          [$"    // (OrbIdx array '{b.Name}' not auto-printed: a wreath pool needs a compile-time extent to size its cell count)"])
                  | _ ->
-                     [sprintf "    // (OrbIdx array '%s' not auto-printed: a wreath group combined with other index groups has no pool layout)" b.Name])
+                     [$"    // (OrbIdx array '{b.Name}' not auto-printed: a wreath group combined with other index groups has no pool layout)"])
             | ArrayElem arrType when isCompoundArrayType arrType ->
                 // Compound (load_compound) values wrap a compact buffer plus a
                 // compound_index_t pointer; there is no operator<< for
                 // Compound<T,RANK>. Skip auto-print with a diagnostic so the
                 // generated program still compiles -- scalar value-checks via
                 // element access (e.g. data(lead, t)) remain available.
-                [sprintf "    // (compound array '%s' not auto-printed; Compound<T,RANK> has no operator<<)" b.Name]
+                [$"    // (compound array '{b.Name}' not auto-printed; Compound<T,RANK> has no operator<<)"]
             | ArrayElem arrType when isSparseArrayType arrType ->
                 // Same rationale as the compound arm: Sparse<T,RANK> has no
                 // operator<<; value-checks read cells via full-key access.
-                [sprintf "    // (sparse array '%s' not auto-printed; Sparse<T,RANK> has no operator<<)" b.Name]
+                [$"    // (sparse array '{b.Name}' not auto-printed; Sparse<T,RANK> has no operator<<)"]
             | ArrayElem arrType ->
                 // Arrays of named (struct) types -- cout's operator<<
                 // isn't defined for user types. For rank-1 arrays of structs,
@@ -2318,7 +2313,7 @@ let genPrintStatements (modul: IRModule) : string list =
                     // Skip with a diagnostic comment so the surrounding
                     // value-check on scalar results derived from calls
                     // (e.g. `let r = funcs(1)(5.0)`) still runs.
-                    [sprintf "    // (array '%s' of function values not auto-printed; std::function isn't streamable)" b.Name]
+                    [$"    // (array '{b.Name}' of function values not auto-printed; std::function isn't streamable)"]
                 | IRTNamed structName ->
                     let rank = arrayRank arrType
                     let structFields =
@@ -2329,33 +2324,33 @@ let genPrintStatements (modul: IRModule) : string list =
                     match structFields, rank with
                     | Some fields, 1 when not (List.isEmpty fields) ->
                         let bv = sanitizeCppName b.Name
-                        let firstVar = sprintf "%s__first" bv
+                        let firstVar = $"{bv}__first"
                         let fieldPrints =
                             fields |> List.mapi (fun i (fname, _) ->
                                 let prefix = if i = 0 then "" else ", "
-                                sprintf "        cout << \"%s%s: \" << %s[i].%s;" prefix fname bv fname)
+                                $"        cout << \"{prefix}{fname}: \" << {bv}[i].{fname};")
                         [
-                            sprintf "    cout << \"%s = [\";" b.Name
-                            sprintf "    bool %s = true;" firstVar
-                            sprintf "    for (size_t i = 0; i < %s.extents[0]; i++) {" bv
-                            sprintf "        if (!%s) cout << \", \";" firstVar
-                            sprintf "        %s = false;" firstVar
-                            sprintf "        cout << \"{\";"
+                            $"    cout << \"{b.Name} = [\";"
+                            $"    bool {firstVar} = true;"
+                            $$"""    for (size_t i = 0; i < {{bv}}.extents[0]; i++) {"""
+                            $"        if (!{firstVar}) cout << \", \";"
+                            $"        {firstVar} = false;"
+                            "        cout << \"{\";"
                         ]
                         @ fieldPrints
                         @ [
-                            sprintf "        cout << \"}\";"
+                            "        cout << \"}\";"
                             "    }"
-                            sprintf "    cout << \"]\" << endl;"
+                            "    cout << \"]\" << endl;"
                         ]
                     | _ ->
                         // Struct not found in module Types, or rank > 1, or
                         // no fields -- emit diagnostic comment and skip.
-                        [sprintf "    // (array '%s' of struct '%s' not auto-printed; access individual fields via %s[i].field)" b.Name structName b.Name]
+                        [$"    // (array '{b.Name}' of struct '{structName}' not auto-printed; access individual fields via {b.Name}[i].field)"]
                 | IRTTuple _ ->
                     // std::tuple has no operator<<; value-checks read
                     // components via destructuring instead.
-                    [sprintf "    // (array '%s' of tuple values not auto-printed; std::tuple has no operator<<)" b.Name]
+                    [$"    // (array '{b.Name}' of tuple values not auto-printed; std::tuple has no operator<<)"]
                 | _ ->
                 let rank = arrayRank arrType
                 // Distinguish three cases for ragged-tagged bindings, based on
@@ -2386,7 +2381,7 @@ let genPrintStatements (modul: IRModule) : string list =
                              let k =
                                  at.IndexTypes
                                  |> List.tryFind (fun ix -> ix.IxKind = IxKCompound || ix.IxKind = IxKSparse)
-                                 |> Option.map (fun ix -> ix.Rank)
+                                 |> Option.map (_.Rank)
                                  |> Option.defaultValue coords.Length
                              (match classifyCompoundIndexTuple k coords with
                               | CompoundFull -> true  // dense-typed result of a full read = trailing row
@@ -2410,19 +2405,19 @@ let genPrintStatements (modul: IRModule) : string list =
                 // `.len`, so it is printable directly.
                 let isRaggedRowBinding =
                     isRaggedRowType arrType &&
-                    (match b.Value with IRIndex _ -> true | _ -> false)
+                    (b.Value.IsIRIndex)
                 if isCompoundRowSubview then
-                    [sprintf "    // (trailing-row view '%s' not auto-printed; the raw T* row carries no extents -- derive scalars via %s(t))" b.Name b.Name]
+                    [$"    // (trailing-row view '{b.Name}' not auto-printed; the raw T* row carries no extents -- derive scalars via {b.Name}(t))"]
                 elif isRaggedRowBinding then
                     let bv = sanitizeCppName b.Name
-                    let firstVar = sprintf "%s__first" bv
+                    let firstVar = $"{bv}__first"
                     [
-                        sprintf "    cout << \"%s = [\";" b.Name
-                        sprintf "    bool %s = true;" firstVar
-                        sprintf "    for (size_t __rk = 0; __rk < %s.len; __rk++) {" bv
-                        sprintf "        if (!%s) cout << \", \";" firstVar
-                        sprintf "        %s = false;" firstVar
-                        sprintf "        cout << %s[__rk];" bv
+                        $"    cout << \"{b.Name} = [\";"
+                        $"    bool {firstVar} = true;"
+                        $$"""    for (size_t __rk = 0; __rk < {{bv}}.len; __rk++) {"""
+                        $"        if (!{firstVar}) cout << \", \";"
+                        $"        {firstVar} = false;"
+                        $"        cout << {bv}[__rk];"
                         "    }"
                         "    cout << \"]\" << endl;"
                     ]
@@ -2433,20 +2428,20 @@ let genPrintStatements (modul: IRModule) : string list =
                     // via .lens; print as the flat value sequence the
                     // validation framework expects.
                     let bv = sanitizeCppName b.Name
-                    let firstVar = sprintf "%s__first" bv
+                    let firstVar = $"{bv}__first"
                     // Nested, like every other rank-2 print (genPrintNested2):
                     // a ragged array's rows are the one thing its flat pool
                     // cannot show, and `lens[i]` is exactly the row boundary.
                     [
-                        sprintf "    cout << \"%s = [\";" b.Name
-                        sprintf "    for (size_t __ri = 0; __ri < %s.extents[0]; __ri++) {" bv
+                        $"    cout << \"{b.Name} = [\";"
+                        $$"""    for (size_t __ri = 0; __ri < {{bv}}.extents[0]; __ri++) {"""
                         "        if (__ri) cout << \", \";"
                         "        cout << \"[\";"
-                        sprintf "        bool %s = true;" firstVar
-                        sprintf "        for (size_t __rj = 0; __rj < %s.lens[__ri]; __rj++) {" bv
-                        sprintf "            if (!%s) cout << \", \";" firstVar
-                        sprintf "            %s = false;" firstVar
-                        sprintf "            cout << %s[__ri][__rj];" bv
+                        $"        bool {firstVar} = true;"
+                        $$"""        for (size_t __rj = 0; __rj < {{bv}}.lens[__ri]; __rj++) {"""
+                        $"            if (!{firstVar}) cout << \", \";"
+                        $"            {firstVar} = false;"
+                        $"            cout << {bv}[__ri][__rj];"
                         "        }"
                         "        cout << \"]\";"
                         "    }"
@@ -2460,7 +2455,7 @@ let genPrintStatements (modul: IRModule) : string list =
                     // Sub-view binding: no metadata to drive a print loop.
                     // Skip rather than emit broken code. Scalar derivations
                     // from the sub-view still print normally.
-                    [sprintf "    // (sub-view of ragged array '%s' not printed; metadata not propagated)" b.Name]
+                    [$"    // (sub-view of ragged array '{b.Name}' not printed; metadata not propagated)"]
                 // Every symmetric rank routes to the sym-aware printer: its
                 // internal guard emits the `<rank-N array>` placeholder past
                 // rank 8, whereas genPrintArrayFlat now dense-walks EVERY rank
@@ -2489,8 +2484,8 @@ let genPrintStatements (modul: IRModule) : string list =
 /// question further down the file, but the main wrapper is emitted above it.
 let moduleUsesNetcdf (modul: IRModule) : bool =
     let providerOf (specs: Map<_, _>) f = specs |> Map.toList |> List.map (snd >> f)
-    (providerOf modul.ProviderReads (fun s -> s.Provider)
-     @ providerOf modul.ProviderWrites (fun s -> s.Provider))
+    (providerOf modul.ProviderReads (_.Provider)
+     @ providerOf modul.ProviderWrites (_.Provider))
     |> List.exists (fun p -> p = "netcdf")
 
 /// The teardown a netcdf program needs before it may return.
@@ -2554,7 +2549,7 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
             [ ""
               "    auto end = TIME;"
               "    double elapsed = 1e-9 * TIME_DIFF;"
-              sprintf "    if (__blade_mpi_rank == 0) { cout << \"%s completed in \" << elapsed << \"s\" << endl; }" testName
+              $"    if (__blade_mpi_rank == 0) {{ cout << \"{testName} completed in \" << elapsed << \"s\" << endl; }}"
               ""
               "    // Print results for verification (rank 0 only)"
               "    if (__blade_mpi_rank == 0) {" ]
@@ -2562,7 +2557,7 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
             [ ""
               "    auto end = TIME;"
               "    double elapsed = 1e-9 * TIME_DIFF;"
-              sprintf "    cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
+              $"    cout << \"{testName} completed in \" << elapsed << \"s\" << endl;"
               ""
               "    // Print results for verification" ]
     let finalizeLines = if netcdf then netcdfFinalizeLines else []
@@ -2622,20 +2617,20 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
               "    auto start = TIME;"
               "" ]
     let setupTiming =
-        let line = sprintf "cout << \"%s input allocation took \" << setup_elapsed << \"s\" << endl;" testName
+        let line = $"cout << \"{testName} input allocation took \" << setup_elapsed << \"s\" << endl;"
         [ ""
           "    auto end = TIME;"
           "    double setup_elapsed = 1e-9 * TIME_DIFF;"
-          (if mpi then sprintf "    if (__blade_mpi_rank == 0) { %s }" line else "    " + line)
+          (if mpi then $$"""    if (__blade_mpi_rank == 0) { {{line}} }""" else "    " + line)
           ""
           "    start = TIME;" ]
     let computeTiming =
-        let line = sprintf "cout << \"%s completed in \" << elapsed << \"s\" << endl;" testName
+        let line = $"cout << \"{testName} completed in \" << elapsed << \"s\" << endl;"
         if mpi then
             [ ""
               "    end = TIME;"
               "    double elapsed = 1e-9 * TIME_DIFF;"
-              sprintf "    if (__blade_mpi_rank == 0) { %s }" line
+              $$"""    if (__blade_mpi_rank == 0) { {{line}} }"""
               ""
               "    // Print results for verification (rank 0 only)"
               "    if (__blade_mpi_rank == 0) {" ]
@@ -2789,9 +2784,9 @@ let genProgramFromIR (program: IRProgram) (testName: string) : string =
     | modules ->
         let merged = {
             Name = "merged"
-            Types = modules |> List.collect (fun m -> m.Types)
-            Functions = modules |> List.collect (fun m -> m.Functions)
-            Bindings = modules |> List.collect (fun m -> m.Bindings)
+            Types = modules |> List.collect (_.Types)
+            Functions = modules |> List.collect (_.Functions)
+            Bindings = modules |> List.collect (_.Bindings)
             StaticFunctionUsage = Map.empty
             ProviderReads = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderReads) Map.empty
             ProviderWrites = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderWrites) Map.empty
@@ -2815,8 +2810,8 @@ let providerIncludes (modul: IRModule) : string list =
     let readSpecs = modul.ProviderReads |> Map.toList |> List.map snd
     let writeSpecs = modul.ProviderWrites |> Map.toList |> List.map snd
     let providers =
-        (readSpecs |> List.map (fun s -> s.Provider))
-        @ (writeSpecs |> List.map (fun s -> s.Provider))
+        (readSpecs |> List.map (_.Provider))
+        @ (writeSpecs |> List.map (_.Provider))
         |> List.distinct |> List.sort
     let fromProviders =
         providers |> List.collect (fun p ->
@@ -3034,9 +3029,9 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
             // Functions and bindings from earlier modules come first
             let merged = {
                 Name = "merged"
-                Types = modules |> List.collect (fun m -> m.Types)
-                Functions = modules |> List.collect (fun m -> m.Functions)
-                Bindings = modules |> List.collect (fun m -> m.Bindings)
+                Types = modules |> List.collect (_.Types)
+                Functions = modules |> List.collect (_.Functions)
+                Bindings = modules |> List.collect (_.Bindings)
                 StaticFunctionUsage = modules |> List.fold (fun acc m -> 
                     Map.fold (fun a k v -> Map.add k v a) acc m.StaticFunctionUsage) Map.empty
                 ProviderReads = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderReads) Map.empty

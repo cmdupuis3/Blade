@@ -84,7 +84,7 @@ let blasFlavor () : BlasFlavor =
 /// (a test's use-guard, a hand-run) silently ineffective. Every consultation
 /// re-reads.
 let resolveBlasTier () : BlasTier =
-    let gate = Toolchain.get "BLADE_BLAS" |> Option.map (fun v -> v.Trim().ToLowerInvariant())
+    let gate = Toolchain.get "BLADE_BLAS" |> Option.map _.Trim().ToLowerInvariant()
     match gate with
     | Some "0" | Some "off" -> TierOff
     | _ ->
@@ -157,7 +157,7 @@ let blasBuildFlags (wantsBlas: bool) (wantsLapack: bool) : string * string =
         | None -> []
         | Some s ->
             s.Split(System.IO.Path.PathSeparator)
-            |> Array.map (fun p -> p.Trim())
+            |> Array.map _.Trim()
             |> Array.filter (fun p -> p <> "")
             |> Array.toList
     match resolveBlasTier () with
@@ -180,7 +180,7 @@ let blasBuildFlags (wantsBlas: bool) (wantsLapack: bool) : string * string =
         let incFlag = sprintf " -I\"%s\"" (System.IO.Path.Combine(dir, "include"))
         let linkFlags =
             match Platforms.findSharedLib dir "openblas" with
-            | Some lib -> sprintf " \"%s\"" lib
+            | Some lib -> $" \"{lib}\""
             | None -> sprintf " -L\"%s\" -lopenblas" (System.IO.Path.Combine(dir, "lib"))
         (defines + incFlag, linkFlags)
     | TierSystem -> (defines, " -lopenblas")
@@ -636,18 +636,18 @@ let shimEntryPoint (backend: LinAlgBackend) (call: LinAlgCall) : string option =
         match backend with
         | HostBlas ->
             match call.Route with
-            | RouteGramSame -> Some (sprintf "blade_linalg::blade_gram_same_%s" p)
-            | RouteGramDistinct -> Some (sprintf "blade_linalg::blade_gram_distinct_%s" p)
-            | RouteMatmul -> Some (sprintf "blade_linalg::blade_matmul_%s" p)
-            | RouteDot -> Some (sprintf "blade_linalg::blade_dot_%s" p)
-            | RouteGemv -> Some (sprintf "blade_linalg::blade_gemv_%s" p)
+            | RouteGramSame -> Some $"blade_linalg::blade_gram_same_{p}"
+            | RouteGramDistinct -> Some $"blade_linalg::blade_gram_distinct_{p}"
+            | RouteMatmul -> Some $"blade_linalg::blade_matmul_{p}"
+            | RouteDot -> Some $"blade_linalg::blade_dot_{p}"
+            | RouteGemv -> Some $"blade_linalg::blade_gemv_{p}"
             // Different namespace AND different header: `blade_lapack.hpp`
             // carries its own `#ifndef BLADE_HAS_LAPACK #error`, so a program
             // that names these advertises a LAPACK dependency distinct from a
             // BLAS one.
-            | RouteEighPacked -> Some (sprintf "blade_lapack::blade_eigh_packed_%s" p)
-            | RouteEighDense -> Some (sprintf "blade_lapack::blade_eigh_dense_%s" p)
-            | RouteSolve -> Some (sprintf "blade_lapack::blade_solve_%s" p)
+            | RouteEighPacked -> Some $"blade_lapack::blade_eigh_packed_{p}"
+            | RouteEighDense -> Some $"blade_lapack::blade_eigh_dense_{p}"
+            | RouteSolve -> Some $"blade_lapack::blade_solve_{p}"
         // The device entry-point table is named PER ROUTE, not per cuBLAS
         // routine, with argument lists identical to the host adapters' (same
         // order, same skeleton + pool capacity pairs), so a backend cannot
@@ -663,9 +663,9 @@ let shimEntryPoint (backend: LinAlgBackend) (call: LinAlgCall) : string option =
         // `blade_cuda_` prefix is the namespace.
         | CudaBlas ->
             match call.Route with
-            | RouteGramSame -> Some (sprintf "blade_cuda_gram_same_%s" p)
-            | RouteGramDistinct -> Some (sprintf "blade_cuda_gram_distinct_%s" p)
-            | RouteMatmul -> Some (sprintf "blade_cuda_matmul_%s" p)
+            | RouteGramSame -> Some $"blade_cuda_gram_same_{p}"
+            | RouteGramDistinct -> Some $"blade_cuda_gram_distinct_{p}"
+            | RouteMatmul -> Some $"blade_cuda_matmul_{p}"
             // Unreachable: `routingOf CudaBlas` answers Native for Dot / Gemv /
             // Eigh, so the ViaShim arm above already declined. Spelled out so
             // that flipping one of those policy rows produces a compile error

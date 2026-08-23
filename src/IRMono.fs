@@ -217,13 +217,12 @@ let rec canonTypeKey (ty: IRType) : string =
                 | IRLit (IRLitInt n) -> string n, ""
                 | IROrbitClass (levels, n) ->
                     (match n with IRLit (IRLitInt v) -> string v | _ -> "d"),
-                    (levels |> List.map (fun (r, p) -> sprintf "%d%s" r (if p then "p" else "m"))
+                    (levels |> List.map (fun (r, p) -> $"""{r}{(if p then "p" else "m")}""")
                             |> String.concat "")
                 | _ -> "d", ""
-            sprintf "r%ds%s%se%s" idx.Rank (symTag idx.Symmetry) levelTag ext
-        sprintf "arr_%s__%s" (canonTypeKey arr.ElemType)
-            (arr.IndexTypes |> List.map idxKey |> String.concat "_")
-    | IRTInfer id -> sprintf "v%d" id
+            $"r{idx.Rank}s{symTag idx.Symmetry}{levelTag}e{ext}"
+        $"""arr_{(canonTypeKey arr.ElemType)}__{(arr.IndexTypes |> List.map idxKey |> String.concat "_")}"""
+    | IRTInfer id -> $"v{id}"
     | _ -> "T"
 
 /// Generate a specialized copy of a function for a given set of type-var
@@ -253,7 +252,7 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
     // clone it -- fresh ids for its own params, captures' Ids/types remapped
     // via `varIdRemap`/`bindings`, body's IRVar refs via the combined map.
     // The original lambda stays in module.Functions unchanged.
-    let origParamIds = func.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+    let origParamIds = func.Params |> List.map _.VarId |> Set.ofList
     let lambdaClones = System.Collections.Generic.Dictionary<IRId, IRCallable>()
     // Ids applied directly in a body (heads of IRApp). These go through the
     // module-level call-site rewrite + memoized spec path, so we must NOT
@@ -328,7 +327,7 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
                      let clone =
                          { lam with
                              Id = cloneId
-                             Name = sprintf "%s_HM_%d" lam.Name cloneId
+                             Name = $"{lam.Name}_HM_{cloneId}"
                              Params = newParams'
                              Captures = newCaps
                              Body = newBody
@@ -347,7 +346,7 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         match e with
         | IRVar (id, _) when lambdaClones.ContainsKey id ->
             let clone = lambdaClones.[id]
-            let funcTy = mkFuncArrow (clone.Params |> List.map (fun p -> p.Type)) clone.RetType
+            let funcTy = mkFuncArrow (clone.Params |> List.map _.Type) clone.RetType
             IRVar (clone.Id, funcTy)
         | _ -> e
     let bodyRewritten =
@@ -364,12 +363,12 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
         bindings
         |> Map.toList
         |> List.sortBy fst
-        |> List.map (fun (id, ty) -> sprintf "_%d_%s" id (canonTypeKey ty))
+        |> List.map (fun (id, ty) -> $"_{id}_{canonTypeKey ty}")
         |> String.concat ""
     let spec =
         { func with
             Id = builder.FreshId()
-            Name = sprintf "%s_HM%s" func.Name suffix
+            Name = $"{func.Name}_HM{suffix}"
             Params = newParams
             RetType = newRetType
             Body = bodyRewritten }
@@ -400,7 +399,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
     if hmFuncs.IsEmpty then modul
     else
     let hmFuncMap = hmFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
-    let hmFuncIdSet = hmFuncs |> List.map (fun f -> f.Id) |> Set.ofList
+    let hmFuncIdSet = hmFuncs |> List.map _.Id |> Set.ofList
 
     // 2. Iterate to fixpoint: each round inspects the original module's
     //    expressions AND earlier-round spec bodies (an HM call's arg types
@@ -529,7 +528,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
             let key = (funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
             match Map.tryFind key specMap with
             | Some spec ->
-                IRApp (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map (fun p -> p.Type)) spec.RetType),
+                IRApp (IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map _.Type) spec.RetType),
                        args, spec.RetType)
             | None -> e
         | _ -> e
@@ -769,8 +768,8 @@ let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder)
 
     let merged =
         { modules.Head with
-            Functions = modules |> List.collect (fun m -> m.Functions)
-            Bindings = modules |> List.collect (fun m -> m.Bindings)
+            Functions = modules |> List.collect _.Functions
+            Bindings = modules |> List.collect _.Bindings
             DerivedFuncOrigins =
                 modules |> List.fold (fun acc m ->
                     m.DerivedFuncOrigins |> Map.fold (fun a k v -> Map.add k v a) acc) Map.empty }
@@ -836,7 +835,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // the same array -- correct commutative collapse).
     let identityOf e =
         match e with
-        | IRVar (id, _) -> AIDVariable (sprintf "__coi%d" id)
+        | IRVar (id, _) -> AIDVariable $"__coi{id}"
         | _ -> AIDVariable "__coi"
     // Operand type, seeing through a `|> compute` wrapper so a *nested* array
     // binop -- whose inner rewrite already produced `IRCompute(IRApplyCombinator)`
@@ -900,7 +899,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             else IRBinOp (IRElementwise, op, xVar, sVar)
         let parms : IRParam list =
             [ { Name = "__bx"; Type = IRTScalar arrElem; Index = 0; VarId = xId } ]
-        let cap : CaptureInfo = { Id = sId; Name = sprintf "__v%d" sId; Type = sTy; IsMutable = false }
+        let cap : CaptureInfo = { Id = sId; Name = $"__v{sId}"; Type = sTy; IsMutable = false }
         let lam = mkLambdaCallable builder parms kbody kernelRet [cap] false [] [] false false 256 false
         newLambdas.Add lam
         let kernelFuncType = IRTArrow ([SVal (IRTScalar arrElem)], kernelRet, None)
@@ -1136,7 +1135,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                     | _ -> IRTScalar ETFloat64
                 let newParams =
                     List.init slotArity (fun i ->
-                        { Name = sprintf "%s_%d" polyParam.Name i
+                        { Name = $"{polyParam.Name}_{i}"
                           Type = baseType
                           Index = 0  // recomputed below
                           VarId = builder.FreshId() } : IRParam)
@@ -1459,7 +1458,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         let arityTag = arities |> List.map string |> String.concat "_"
 
         { Id = builder.FreshId()
-          Name = sprintf "%s_arity_%s" func.Name arityTag
+          Name = $"{func.Name}_arity_{arityTag}"
           Params = expandedParams
           RetType = newRetType
           Body = newBody
@@ -1514,10 +1513,10 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
 let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // 1. Identify poly functions
     let polyFuncs =
-        modul.Functions |> List.filter (fun f -> f.IsArityPoly)
+        modul.Functions |> List.filter _.IsArityPoly
     if polyFuncs.IsEmpty then modul  // Nothing to do
     else
-    let polyFuncIds = polyFuncs |> List.map (fun f -> f.Id) |> Set.ofList
+    let polyFuncIds = polyFuncs |> List.map _.Id |> Set.ofList
     let polyFuncMap = polyFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
 
     // 2. Collect call sites from the original module. Seed ONLY from concrete
@@ -1603,8 +1602,8 @@ let monomorphizeModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // so no live function is ever removed.
     let allFuncs = newFunctions @ specFuncs
     let referencedIds =
-        (allFuncs |> List.map (fun f -> f.Body))
-        @ (newBindings |> List.map (fun b -> b.Value))
+        (allFuncs |> List.map _.Body)
+        @ (newBindings |> List.map _.Value)
         |> List.map collectVarRefsIR
         |> Set.unionMany
     let capturesPolyPack (f: IRFuncDef) =
@@ -1866,7 +1865,7 @@ let internal shapeObservations (paramTy: IRType) (argTy: IRType) : (string * int
 /// extents, so this typechecks today).
 let internal shapeSignatureAt (func: IRFuncDef) (args: IRExpr list) : (string * int64) list =
     if args.Length <> func.Params.Length then [] else
-    let paramTys = func.Params |> List.map (fun p -> p.Type)
+    let paramTys = func.Params |> List.map _.Type
     let occ = shapeSymbolicOccurrences paramTys
     if Map.isEmpty occ then [] else
     let obs =
@@ -1958,7 +1957,7 @@ let internal shapeSpecNamesAreOwn
 /// it can reach`. Spans the whole program: a cycle may run through two modules
 /// just as easily as one.
 let internal shapeCallReach (funcs: IRFuncDef list) : Map<IRId, Set<IRId>> =
-    let ids = funcs |> List.map (fun f -> f.Id) |> Set.ofList
+    let ids = funcs |> List.map _.Id |> Set.ofList
     let direct =
         funcs
         |> List.map (fun f -> (f.Id, Set.intersect ids (collectVarRefsIR f.Body)))
@@ -2095,12 +2094,12 @@ type internal ShapeLambdaClone = {
 let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRModule list =
     let debug = shapeSpecDebug ()
     let cap = shapeSpecCap ()
-    let allFuncs = modules |> List.collect (fun m -> m.Functions)
+    let allFuncs = modules |> List.collect _.Functions
     let funcById = allFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     let bindingIds =
-        modules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Id)) |> Set.ofList
+        modules |> List.collect (fun m -> m.Bindings |> List.map _.Id) |> Set.ofList
     let ownNamesOf (f: IRFuncDef) =
-        shapeSymbolicOccurrences (f.Params |> List.map (fun p -> p.Type))
+        shapeSymbolicOccurrences (f.Params |> List.map _.Type)
         |> Map.toSeq |> Seq.map fst |> Set.ofSeq
 
     // RECURSION. The blanket decline is replaced by the narrow sound case: a
@@ -2146,7 +2145,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                                 match Map.tryFind calleeId funcById with
                                 | Some callee ->
                                     shapeCallForwardsExtents callerNames
-                                        (callee.Params |> List.map (fun p -> p.Type)) args
+                                        (callee.Params |> List.map _.Type) args
                                 | None -> false))
             admittedCycles.[id] <- ok
             ok
@@ -2156,7 +2155,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
         |> List.filter (fun f ->
             not f.IsArityPoly
             && (not (Set.contains f.Id recursiveIds) || cycleAdmits f.Id)
-            && not (Map.isEmpty (shapeSymbolicOccurrences (f.Params |> List.map (fun p -> p.Type))))
+            && not (Map.isEmpty (shapeSymbolicOccurrences (f.Params |> List.map _.Type)))
             && shapeSpecWorthwhile f)
     let recursiveDeclines =
         recursiveIds |> Set.filter (fun id -> not (cycleAdmits id))
@@ -2179,7 +2178,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     // the reference structure plus the one thing the name does tell us, and it
     // is exactly what makes inheriting the parent's PROVENANCE (ff3ad88's gate)
     // sound. See `liftedKernelIds` and `lambdaOwnsNames` below.
-    let allFuncIds = allFuncs |> List.map (fun f -> f.Id) |> Set.ofList
+    let allFuncIds = allFuncs |> List.map _.Id |> Set.ofList
     /// Callable ids appearing as the HEAD of an application anywhere in the
     /// program. An applied callee is specialized through the per-signature spec
     /// path above -- its own call sites pin its own names, which is both more
@@ -2236,7 +2235,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
             && not (Set.contains f.Id programAppliedIds)
             && (match Map.tryFind f.Id refCensus with Some 1 -> true | _ -> false)
             && shapeSpecWorthwhile f)
-        |> List.map (fun f -> f.Id)
+        |> List.map _.Id
         |> Set.ofList
     /// The per-signature half of the provenance question, and the inherited
     /// form of `shapeSpecNamesAreOwn`.
@@ -2367,10 +2366,10 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                                   LCloneId = builder.FreshId()
                                   LCloneName =
                                     sprintf "%s_shape%s" lam.Name
-                                            (sign |> List.map (fun (n, v) -> sprintf "_%s%d" n v)
+                                            (sign |> List.map (fun (n, v) -> $"_{n}{v}")
                                                   |> String.concat "") }
                             planLambdas
-                                (Set.union ownedIds (lam.Params |> List.map (fun p -> p.VarId) |> Set.ofList))
+                                (Set.union ownedIds (lam.Params |> List.map _.VarId |> Set.ofList))
                                 subst sign newBody
 
     // Fixpoint: each round rewrites every body (originals, bindings, and the
@@ -2385,8 +2384,8 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
         changed <- false
         rounds <- rounds + 1
         let bodies =
-            (allFuncs |> List.map (fun f -> f.Body))
-            @ (modules |> List.collect (fun m -> m.Bindings |> List.map (fun b -> b.Value)))
+            (allFuncs |> List.map _.Body)
+            @ (modules |> List.collect (fun m -> m.Bindings |> List.map _.Value))
             @ (specMap |> Map.toList |> List.map (snd >> specBody))
             // A clone's body is a call-site source in its own right: its calls
             // now carry literal argument extents, which can specialize a
@@ -2420,12 +2419,12 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                     capDeclines <- Set.add (fid, sign) capDeclines
                 else
                     let specId = builder.FreshId()
-                    let suffix = sign |> List.map (fun (n, v) -> sprintf "_%s%d" n v) |> String.concat ""
+                    let suffix = sign |> List.map (fun (n, v) -> $"_{n}{v}") |> String.concat ""
                     specMap <- Map.add (fid, sign)
                                        { Orig = orig
                                          Subst = Map.ofList sign
                                          SpecId = specId
-                                         SpecName = sprintf "%s_shape%s" orig.Name suffix }
+                                         SpecName = $"{orig.Name}_shape{suffix}" }
                                        specMap
                     changed <- true
         // Co-specialize the kernels every planned spec applies. Done inside the
@@ -2436,7 +2435,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
         specMap
         |> Map.toList
         |> List.iter (fun ((_, sign), s) ->
-            planLambdas (s.Orig.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+            planLambdas (s.Orig.Params |> List.map _.VarId |> Set.ofList)
                         s.Subst sign (specBody s))
         if lamMap.Count > lamBefore then changed <- true
 
@@ -2463,7 +2462,7 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                     else
                         let perFunc =
                             mySpecs |> List.map (fun ((fid, _), s) -> (fid, s.Orig.Name))
-                            |> List.groupBy id |> List.map (fun ((_, n), g) -> sprintf "%s x%d" n g.Length)
+                            |> List.groupBy id |> List.map (fun ((_, n), g) -> $"{n} x{g.Length}")
                         // Lambda clones are charged to the module owning the
                         // LAMBDA, which is where they are placed -- the same
                         // rule the spec counts follow.
@@ -2527,9 +2526,9 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
     // already referenced the lambda, so wherever `f` is in scope the lambda is
     // too, and the clone sits immediately after the lambda.
     let specsByOrigin =
-        specMap |> Map.toList |> List.map snd |> List.groupBy (fun s -> s.Orig.Id) |> Map.ofList
+        specMap |> Map.toList |> List.map snd |> List.groupBy _.Orig.Id |> Map.ofList
     let lamsByOrigin =
-        lamMap.Values |> List.ofSeq |> List.groupBy (fun c -> c.LOrig.Id) |> Map.ofList
+        lamMap.Values |> List.ofSeq |> List.groupBy _.LOrig.Id |> Map.ofList
     let rewritten =
         modules |> List.map (fun modul ->
             let newFunctions =

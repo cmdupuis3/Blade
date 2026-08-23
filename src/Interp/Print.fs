@@ -187,7 +187,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
             let text = formatScalar b.Name et v
             sb.Append(b.Name).Append(" = ").Append(text).Append('\n') |> ignore
         | None ->
-            raise (PrintUnsupported (sprintf "binding '%s': no evaluated value" b.Name))
+            raise (PrintUnsupported $"binding '{b.Name}': no evaluated value")
 
     // Peel |> compute wrappers to reach the underlying materialization node
     // (mirrors genPrintStatements' unwrapMaterialization).
@@ -209,7 +209,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
             (match Blade.IR.typeOf a with
              | ArrayElem at when Blade.CodeGen.isCompoundArrayType at || Blade.CodeGen.isSparseArrayType at ->
                  let k = at.IndexTypes |> List.tryFind (fun ix -> ix.IxKind = IxKCompound || ix.IxKind = IxKSparse)
-                         |> Option.map (fun ix -> ix.Rank) |> Option.defaultValue coords.Length
+                         |> Option.map _.Rank |> Option.defaultValue coords.Length
                  (match Blade.IR.classifyCompoundIndexTuple k coords with
                   | Blade.IR.CompoundFull -> true | Blade.IR.CompoundPartial _ -> false)
              | _ -> false)
@@ -254,8 +254,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                         | Some et when isPrintableScalarEt et -> (fname, et)
                         | _ ->
                             raise (PrintUnsupported
-                                    (sprintf "rank-1 struct array '%s' print: field '%s' is not a printable scalar (M2.6)"
-                                             b.Name fname)))
+                                    ($"rank-1 struct array '{b.Name}' print: field '{fname}' is not a printable scalar (M2.6)")))
                 match lookup b.Id with
                 | Some (VArray ba) ->
                     sb.Append(b.Name).Append(" = [") |> ignore
@@ -267,7 +266,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                             | VStruct (_, fs) -> fs
                             | _ ->
                                 raise (PrintUnsupported
-                                        (sprintf "rank-1 struct array '%s' print: row %d is not a struct value" b.Name i))
+                                        $"rank-1 struct array '{b.Name}' print: row {i} is not a struct value")
                         sb.Append("{") |> ignore
                         fieldEts |> List.iteri (fun j (fname, et) ->
                             if j > 0 then sb.Append(", ") |> ignore
@@ -276,14 +275,14 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                                 | Some v -> v
                                 | None ->
                                     raise (PrintUnsupported
-                                            (sprintf "rank-1 struct array '%s' print: row missing field '%s'" b.Name fname))
+                                            $"rank-1 struct array '{b.Name}' print: row missing field '{fname}'")
                             sb.Append(fname).Append(": ").Append(formatScalar b.Name et fv) |> ignore)
                         sb.Append("}") |> ignore
                     sb.Append("]").Append('\n') |> ignore
                 | Some _ ->
-                    raise (PrintUnsupported (sprintf "rank-1 struct array '%s': value is not a VArray" b.Name))
+                    raise (PrintUnsupported $"rank-1 struct array '{b.Name}': value is not a VArray")
                 | None ->
-                    raise (PrintUnsupported (sprintf "rank-1 struct array '%s': no evaluated value" b.Name))
+                    raise (PrintUnsupported $"rank-1 struct array '{b.Name}': no evaluated value")
             | _ -> ()
         | IRTTuple _ ->
             // Arrays of TUPLE elements are comment-only in CodeGen
@@ -299,13 +298,13 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
             // is comment-only (no stdout).
             let isRaggedLiteralBinding =
                 (Blade.CodeGen.isRaggedArrayType arrType || Blade.CodeGen.isDepIdxArrayType arrType)
-                && (match b.Value with IRArrayLit _ -> true | _ -> false)
+                && b.Value.IsIRArrayLit
             let isRaggedPeelOutput =
                 Blade.CodeGen.isRaggedArrayType arrType
                 && (match unwrapMaterialization b.Value with IRApplyCombinator _ -> true | _ -> false)
             let isRaggedRowBinding =
                 Blade.CodeGen.isRaggedRowType arrType
-                && (match b.Value with IRIndex _ -> true | _ -> false)
+                && b.Value.IsIRIndex
             if isRaggedPeelOutput || isRaggedRowBinding || isRaggedLiteralBinding then
                 // Ragged literals, rank-1 ragged ROWS, and apply-produced ragged
                 // PEEL OUTPUTS all render as the flat backing-pool value sequence,
@@ -319,7 +318,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                 // whole program SKIP-classifies before Print runs.
                 match lookup b.Id with
                 | Some (VArray ba) -> ArrayOps.printArrayBinding b ba sb
-                | _ -> raise (PrintUnsupported (sprintf "ragged/dep-idx array '%s' print: no materialized value yet (M2.7 ragged apply gated upstream)" b.Name))
+                | _ -> raise (PrintUnsupported $"ragged/dep-idx array '{b.Name}' print: no materialized value yet (M2.7 ragged apply gated upstream)")
             elif Blade.CodeGen.isRaggedArrayType arrType then
                 ()   // ragged sub-view: CodeGen comment only.
             else
@@ -335,9 +334,9 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                 | Some (VArray ba) ->
                     ArrayOps.printArrayBinding b ba sb
                 | Some _ ->
-                    raise (PrintUnsupported (sprintf "array binding '%s': value is not a VArray" b.Name))
+                    raise (PrintUnsupported $"array binding '{b.Name}': value is not a VArray")
                 | None ->
-                    raise (PrintUnsupported (sprintf "array binding '%s': no evaluated value" b.Name))
+                    raise (PrintUnsupported $"array binding '{b.Name}': no evaluated value")
 
     for b in irModule.Bindings do
         // isPrintable: a faithful mirror of CodeGen.genPrintStatements'

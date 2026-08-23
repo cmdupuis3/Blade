@@ -159,11 +159,10 @@ module Dist =
         if s < 1 then failwith "jetPushforward: the jet needs at least D_1"
         derivs |> Array.iteri (fun i dk ->
             if dk.Dim <> d || dk.Rank <> i + 1 then
-                failwithf "jetPushforward: D_%d must be a rank-%d symmetric tensor over dim %d" (i + 1) (i + 1) d)
+                failwith $"jetPushforward: D_{i + 1} must be a rank-{i + 1} symmetric tensor over dim {d}")
         let tMax = q * s
         if not closed && tMax > dist.Order then
-            failwithf "jetPushforward: needs input moments up to order %d but Dist carries order %d (closure required)"
-                tMax dist.Order
+            failwith $"jetPushforward: needs input moments up to order {tMax} but Dist carries order {dist.Order} (closure required)"
         let cm = centralMoments dist tMax
         // raw moments of Y' = Y - g0: multinomial over jet-degree compositions
         let rawY =
@@ -223,18 +222,16 @@ module Dist =
         let d = dist.Dim
         let m = g0.Length
         if derivs.Length <> m then
-            failwithf "jetPushforwardVec: %d coordinate jets supplied for %d output coordinates" derivs.Length m
+            failwith $"jetPushforwardVec: {derivs.Length} coordinate jets supplied for {m} output coordinates"
         let s = derivs |> Array.map Array.length |> Array.max
         if s < 1 then failwith "jetPushforwardVec: at least one coordinate needs a D_1"
         derivs |> Array.iteri (fun a jet ->
             jet |> Array.iteri (fun i dk ->
                 if dk.Dim <> d || dk.Rank <> i + 1 then
-                    failwithf "jetPushforwardVec: coordinate %d's D_%d must be a rank-%d symmetric tensor over dim %d"
-                        a (i + 1) (i + 1) d))
+                    failwith $"jetPushforwardVec: coordinate {a}'s D_{(i + 1)} must be a rank-{(i + 1)} symmetric tensor over dim {d}"))
         let tMax = q * s
         if not closed && tMax > dist.Order then
-            failwithf "jetPushforwardVec: needs input moments up to order %d but Dist carries order %d (closure required)"
-                tMax dist.Order
+            failwith $"jetPushforwardVec: needs input moments up to order {tMax} but Dist carries order {dist.Order} (closure required)"
         let cm = centralMoments dist tMax
         let muY =
             [| for k in 1 .. q ->
@@ -282,8 +279,7 @@ module Dist =
     let polyMoments (dist: T) (terms: (float * int[]) list) (q: int) : T =
         let maxDeg = terms |> List.map (fun (_, a) -> Array.sum a) |> List.max
         if q * maxDeg > dist.Order then
-            failwithf "polyMoments: needs input moments up to order %d but Dist carries order %d (closure required)"
-                (q * maxDeg) dist.Order
+            failwith $"polyMoments: needs input moments up to order {(q * maxDeg)} but Dist carries order {dist.Order} (closure required)"
         let mu = moments dist
         let termArr = List.toArray terms
         let t = termArr.Length

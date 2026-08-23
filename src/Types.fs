@@ -190,8 +190,8 @@ let irrepsTagPrefix = "__irreps:"
 /// Serialize an irreps spec (+ optional alias name) into its canonical Tag.
 let mkIrrepsTag (aliasName: string option) (spec: (int * int * int) list) : string =
     let payload =
-        spec |> List.map (fun (l, p, m) -> sprintf "%d,%d,%d" l p m) |> String.concat "|"
-    sprintf "%s%s:%s" irrepsTagPrefix (defaultArg aliasName "") payload
+        spec |> List.map (fun (l, p, m) -> $"{l},{p},{m}") |> String.concat "|"
+    $"""{irrepsTagPrefix}{(defaultArg aliasName "")}:{payload}"""
 
 /// Parse an irreps Tag back into (alias name option, (l, parity, mult) list).
 /// Total: any string not produced by mkIrrepsTag yields None.
@@ -232,8 +232,8 @@ let pgIrrepsTagPrefix = "__pgirreps:"
 /// (LABEL, mult) entries) into its canonical Tag.
 let mkPgIrrepsTag (group: string) (aliasName: string option) (spec: (string * int) list) : string =
     let payload =
-        spec |> List.map (fun (label, m) -> sprintf "%s,%d" label m) |> String.concat "|"
-    sprintf "%s%s:%s:%s" pgIrrepsTagPrefix group (defaultArg aliasName "") payload
+        spec |> List.map (fun (label, m) -> $"{label},{m}") |> String.concat "|"
+    $"""{pgIrrepsTagPrefix}{group}:{(defaultArg aliasName "")}:{payload}"""
 
 /// Parse a pg-irreps Tag back into (group, alias name option, (LABEL, mult) list).
 /// Total: any string not produced by mkPgIrrepsTag yields None.
@@ -465,7 +465,7 @@ let scaleSqrt (s: UnitScale) : UnitScale option =
 /// The rational numerator is elided when it is 1 and a constant carries the
 /// numerator instead, so `2 * pi` does not print as `2 * pi` with a stray 1.
 let ppUnitScale (s: UnitScale) : string =
-    let ppConst (n, e) = if abs e = 1 then n else sprintf "%s^%d" n (abs e)
+    let ppConst (n, e) = if abs e = 1 then n else $"{n}^{abs e}"
     let numConsts = s.Consts |> Map.toList |> List.filter (fun (_, e) -> e > 0) |> List.map ppConst
     let denConsts = s.Consts |> Map.toList |> List.filter (fun (_, e) -> e < 0) |> List.map ppConst
     let numParts =
@@ -473,7 +473,7 @@ let ppUnitScale (s: UnitScale) : string =
     let denParts = (if s.Den.IsOne then [] else [string s.Den]) @ denConsts
     let numStr = if List.isEmpty numParts then "1" else String.concat " * " numParts
     if List.isEmpty denParts then numStr
-    else sprintf "%s / %s" numStr (String.concat " * " denParts)
+    else $"""{numStr} / {(String.concat " * " denParts)}"""
 
 /// Irrational constants usable as unit scale factors, by double value.
 /// `System.Math.PI` is the correctly-rounded double for pi, bit-identical to
@@ -636,21 +636,21 @@ let ppUnitSig (u: UnitSig) : string =
             let ppTerm (name, exp) =
                 if exp = 1 then name
                 elif exp = -1 then name
-                else sprintf "%s^%d" name exp
+                else $"{name}^{exp}"
             let posStr = pos |> List.map ppTerm |> String.concat " * "
             let negStr = neg |> List.map (fun (n, e) -> ppTerm (n, -e)) |> String.concat " * "
             match pos, neg with
             | [], [] -> None
             | _, [] -> Some posStr
-            | [], _ -> Some (sprintf "1 / (%s)" negStr)
-            | _, _ -> Some (sprintf "%s / %s" posStr (if neg.Length > 1 then sprintf "(%s)" negStr else negStr))
+            | [], _ -> Some $"1 / ({negStr})"
+            | _, _ -> Some ($"""{posStr} / {(if neg.Length > 1 then sprintf "(%s)" negStr else negStr)}""")
         // A magnitude is part of the identity, so it prints: without it a
         // `day` vs `second` mismatch would render "second vs second".
         match dimsStr, scaleIsOne u.Scale with
         | None, true -> "dimensionless"
         | None, false -> ppUnitScale u.Scale
         | Some d, true -> d
-        | Some d, false -> sprintf "%s * %s" (ppUnitScale u.Scale) d
+        | Some d, false -> $"{ppUnitScale u.Scale} * {d}"
 
 /// Pretty-print a unit signature in TYPE-ARGUMENT position (`Float64<...>`).
 /// A quantity renders as its nominal name; a structural signature as its dims;
@@ -835,11 +835,11 @@ let (|IrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
         | Some (IrrepsTag (nameOpt, triples)) ->
             let payload =
                 triples
-                |> List.map (fun (l, p, m) -> sprintf "(%d, %d, %d)" l p m)
+                |> List.map (fun (l, p, m) -> $"({l}, {p}, {m})")
                 |> String.concat ", "
-            let core = sprintf "IrrepsIdx<[%s]>" payload
+            let core = $"IrrepsIdx<[{payload}]>"
             Some (match nameOpt with
-                  | Some n -> sprintf "%s (= %s)" n core
+                  | Some n -> $"{n} (= {core})"
                   | None -> core)
         | _ ->
             // Kind says irreps but the tag is missing/unparseable -- a state
@@ -857,10 +857,10 @@ let (|PgIrrepsIdxLike|_|) (ix: IRIndexTypeG<'Ext>) : string option =
         | Some (PgIrrepsTag (group, nameOpt, entries)) ->
             let payload =
                 entries
-                |> List.map (fun (label, m) -> sprintf "(\"%s\", %d)" label m)
+                |> List.map (fun (label, m) -> $"(\"{label}\", {m})")
                 |> String.concat ", "
-            let core = sprintf "PgIrrepsIdx<%s, [%s]>" group payload
+            let core = $"PgIrrepsIdx<{group}, [{payload}]>"
             Some (match nameOpt with
-                  | Some n -> sprintf "%s (= %s)" n core
+                  | Some n -> $"{n} (= {core})"
                   | None -> core)
         | _ -> Some "PgIrrepsIdx<?>"

@@ -138,7 +138,7 @@ let private compareRuns (maxDiffs: int) (cppOut: string) (llvmOut: string) : Res
         let ta = if i < a.Length then a.[i] else "<end>"
         let tb = if i < b.Length then b.[i] else "<end>"
         if ta = "<end>" || tb = "<end>" || not (tokenEq ta tb) then
-            diffs.Add(sprintf "#%d cpp=%s llvm=%s" i ta tb)
+            diffs.Add($"#{i} cpp={ta} llvm={tb}")
         i <- i + 1
     if diffs.Count = 0 then Ok () else Error (List.ofSeq diffs)
 
@@ -166,7 +166,7 @@ let runLlvmCompareRuleTests () : BlockResult =
             resultLine Pass name "agrees"
         | Error diffs, false ->
             passed <- passed + 1
-            resultLine Pass name (sprintf "differs at %s" (List.head diffs))
+            resultLine Pass name ($"differs at {(List.head diffs)}")
         | Ok (), false ->
             failed <- failed + 1
             failedNames <- failedNames @ [ name ]
@@ -174,7 +174,7 @@ let runLlvmCompareRuleTests () : BlockResult =
         | Error diffs, true ->
             failed <- failed + 1
             failedNames <- failedNames @ [ name ]
-            resultLine Fail name (sprintf "the comparator rejected matching output: %s" (String.concat " | " diffs))
+            resultLine Fail name ($"""the comparator rejected matching output: {(String.concat " | " diffs)}""")
     // The trap this block exists for: an output capture that silently returns
     // nothing must NOT read as agreement with a program that printed values.
     check "empty vs printed" "" "x = 1" false
@@ -208,7 +208,7 @@ let runLlvmCompareRuleTests () : BlockResult =
     check "bool differs" "x = true" "x = false" false
     check "string differs" "s = hello" "s = world" false
     printFooter "LLVM Compare Rules"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; "0 skipped" ]
+        [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Compare Rules"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
 
@@ -275,7 +275,7 @@ let private runExeCapture (exeFile: string) : Result<int * string * string, stri
         else
             (try proc.Kill() with _ -> ())
             Error "execution timed out after 60s"
-    with ex -> Error (sprintf "execution exception: %s" ex.Message)
+    with ex -> Error ($"execution exception: {ex.Message}")
 
 // ---------------------------------------------------------------------------
 // Block 1: emission golden pins
@@ -293,8 +293,7 @@ let private goldenRoot : Lazy<string> =
         match candidates |> List.tryFind Directory.Exists with
         | Some d -> d
         | None ->
-            failwithf "llvm golden fixtures not found. Looked in: %s"
-                (candidates |> List.map Path.GetFullPath |> String.concat " ; ")
+            failwith $"""llvm golden fixtures not found. Looked in: {(candidates |> List.map Path.GetFullPath |> String.concat " ; ")}"""
 
 /// The pinned programs, in report order. Scalars, an outlined function with a
 /// branch, and a dense array with a fold -- one representative of each emission
@@ -357,14 +356,14 @@ let runLlvmGoldenTests () : BlockResult =
         let pinPath = Path.Combine(root, name + ".ll")
         try
             if not (File.Exists srcPath) then
-                fail name (sprintf "missing pinned program %s" srcPath)
+                fail name ($"missing pinned program {srcPath}")
             else
                 let source = File.ReadAllText srcPath
                 match Lowering.lower source with
-                | Error e -> fail name (sprintf "lowering refused the pinned program: %s" e)
+                | Error e -> fail name ($"lowering refused the pinned program: {e}")
                 | Ok ir ->
                     match IRValidate.validateIR ir with
-                    | Error errs -> fail name (sprintf "IR validation refused: %s" (String.concat "; " errs))
+                    | Error errs -> fail name ($"""IR validation refused: {(String.concat "; " errs)}""")
                     | Ok ir ->
                         // The program NAME reaches the emitted text (it labels
                         // the timing line), so it must be the fixture stem here
@@ -379,18 +378,18 @@ let runLlvmGoldenTests () : BlockResult =
                             // A pinned program is chosen to be inside the
                             // lane's coverage. Refusing one is a regression,
                             // not a skip.
-                            fail name (sprintf "the llvm lane refused a PINNED program: %s" reason)
+                            fail name ($"the llvm lane refused a PINNED program: {reason}")
                         | Ok ll when updating ->
                             File.WriteAllText(pinPath, ll)
-                            pass name (sprintf "pin rewritten (%d lines)" (normalizeLl ll |> fun s -> s.Split('\n').Length))
+                            pass name ($"pin rewritten ({(normalizeLl ll |> fun s -> s.Split('\n').Length)} lines)")
                         | Ok ll ->
                             if not (File.Exists pinPath) then
-                                fail name (sprintf "no pin at %s -- run with BLADE_LLVM_GOLDEN_UPDATE=1 to create it" pinPath)
+                                fail name ($"no pin at {pinPath} -- run with BLADE_LLVM_GOLDEN_UPDATE=1 to create it")
                             else
                                 let expected = normalizeLl (File.ReadAllText pinPath)
                                 let actual = normalizeLl ll
                                 if expected = actual then
-                                    pass name (sprintf "%d lines pinned" (actual.Split('\n').Length))
+                                    pass name ($"{(actual.Split('\n').Length)} lines pinned")
                                 else
                                     // Park the actual beside the pin so the
                                     // reader can diff two files instead of
@@ -414,9 +413,9 @@ let runLlvmGoldenTests () : BlockResult =
                                     fail name
                                         (sprintf "emission drifted at line %d: pinned %s | emitted %s (wrote %s; BLADE_LLVM_GOLDEN_UPDATE=1 re-pins)"
                                             (firstDiff + 1) e a actualPath)
-        with ex -> fail name (sprintf "exception: %s" ex.Message)
+        with ex -> fail name ($"exception: {ex.Message}")
     printFooter "LLVM Emission Pins"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; "0 skipped" ]
+        [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Emission Pins"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
 
@@ -535,11 +534,11 @@ let runLlvmFactTests () : BlockResult =
             let missing = want |> List.filter (fun s -> not (ll.Contains s))
             let present = deny |> List.filter ll.Contains
             if not missing.IsEmpty then
-                fail name (sprintf "missing from the emitted .ll: %s" (String.concat " | " missing))
+                fail name ($"""missing from the emitted .ll: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then
-                fail name (sprintf "present in the emitted .ll but must not be: %s" (String.concat " | " present))
+                fail name ($"""present in the emitted .ll but must not be: {(String.concat " | " present)}""")
             else
-                pass name (sprintf "%d asserted, %d denied" want.Length deny.Length)
+                pass name ($"{want.Length} asserted, {deny.Length} denied")
 
     printSubHeader "the kill switch"
     // The switch's own rules, asserted directly rather than through emission:
@@ -552,7 +551,7 @@ let runLlvmFactTests () : BlockResult =
                 |> List.filter (fun (cls, want) -> EmitLlvm.factEnabled cls <> want)
                 |> List.map fst
             if wrong.IsEmpty then pass name "as declared"
-            else fail name (sprintf "wrong answer for: %s" (String.concat ", " wrong)))
+            else fail name ($"""wrong answer for: {(String.concat ", " wrong)}"""))
     switchCase "unset licenses every class" None
         [ "fnattrs", true; "paramattrs", true; "fmf", true ]
     switchCase "a bare off kills every class" (Some "off")
@@ -631,10 +630,10 @@ let runLlvmFactTests () : BlockResult =
              [ "attributes #"; "noundef"; "noalias"; "readonly"; "reassoc"; "contract"; " #0" ]
              |> List.filter off.Contains
          if bad.IsEmpty then pass name "no fact text survives"
-         else fail name (sprintf "fact text survived the kill switch: %s" (String.concat " | " bad)))
+         else fail name ($"""fact text survived the kill switch: {(String.concat " | " bad)}"""))
 
     printFooter "LLVM Fact Layer"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; "0 skipped" ]
+        [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "LLVM Fact Layer"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
 
@@ -688,10 +687,10 @@ let runSimplexAgreementTests () : BlockResult =
                     let t = SimplexBlocksCore.tileCount n b
                     cases <- cases + 1
                     if SimplexBlocksCore.blockCount r t <> ZarrProvider.SimplexBlocks.blockCount r t then
-                        mismatches <- sprintf "blockCount r=%d T=%d" r t :: mismatches
+                        mismatches <- $"blockCount r={r} T={t}" :: mismatches
                     for tile in 0L .. t - 1L do
                         if SimplexBlocksCore.tileWidth n b tile <> ZarrProvider.SimplexBlocks.tileWidth n b tile then
-                            mismatches <- sprintf "tileWidth n=%d B=%d t=%d" n b tile :: mismatches
+                            mismatches <- $"tileWidth n={n} B={b} t={tile}" :: mismatches
                     for tiles in SimplexBlocksCore.blockSequence r t do
                         let mine = SimplexBlocksCore.blockCellCount strict n b tiles
                         let theirs = ZarrProvider.SimplexBlocks.blockCellCount strict n b tiles
@@ -703,10 +702,10 @@ let runSimplexAgreementTests () : BlockResult =
                         let theirCells = ZarrProvider.SimplexBlocks.enumBlockCells strict n b tiles |> Seq.toList
                         if myCells <> theirCells then
                             mismatches <- sprintf "enumBlockCells strict=%b n=%d B=%d tiles=%A" strict n b tiles :: mismatches
-    check (sprintf "%s == provider over %d (n, B, r, symmetry) cases" core cases)
+    check ($"{core} == provider over {cases} (n, B, r, symmetry) cases")
         mismatches.IsEmpty
         (if mismatches.IsEmpty then "blockCount, tileWidth, blockCellCount, enumBlockCells all agree"
-         else sprintf "%d disagreements, first: %s" mismatches.Length (List.head (List.rev mismatches)))
+         else $"{mismatches.Length} disagreements, first: {(List.head (List.rev mismatches))}")
 
     // rank/unrank is the other half of the shared surface: it is what names a
     // pool cell, so a divergence here would mean the two modules disagree
@@ -728,7 +727,7 @@ let runSimplexAgreementTests () : BlockResult =
                         rankBad <- sprintf "provider rank round-trip strict=%b n=%d r=%d k=%d" strict n r k :: rankBad
     check "rankOfCoords / unrankToCoords agree and round-trip" rankBad.IsEmpty
         (if rankBad.IsEmpty then "every cell of every grid, both directions"
-         else sprintf "%d failures, first: %s" rankBad.Length (List.head (List.rev rankBad)))
+         else $"{rankBad.Length} failures, first: {(List.head (List.rev rankBad))}")
 
     printSubHeader "the decomposition decomposes"
     // Sum of block cell counts = pool cardinality. This is the identity the
@@ -749,7 +748,7 @@ let runSimplexAgreementTests () : BlockResult =
                     if summed <> pool then
                         sumBad <- sprintf "strict=%b r=%d n=%d B=%d: %d blocks-cells vs %d pool" strict r n b summed pool :: sumBad
     check "sum of blockCellCount = C(n+r-1, r) / C(n, r)" sumBad.IsEmpty
-        (if sumBad.IsEmpty then "every grid point, both symmetries" else sprintf "%d failures, first: %s" sumBad.Length (List.head (List.rev sumBad)))
+        (if sumBad.IsEmpty then "every grid point, both symmetries" else $"{sumBad.Length} failures, first: {(List.head (List.rev sumBad))}")
 
     // The blocks PARTITION the canonical set, and their cells arrive in an
     // order whose ranks are a permutation of [0, N) -- no cell twice, none
@@ -771,7 +770,7 @@ let runSimplexAgreementTests () : BlockResult =
                     if List.sort ranksSeen <> [ 0L .. pool - 1L ] then
                         partBad <- sprintf "strict=%b r=%d n=%d B=%d" strict r n b :: partBad
     check "blocks partition the canonical cell set exactly once" partBad.IsEmpty
-        (if partBad.IsEmpty then "ranks are a permutation of [0, pool)" else sprintf "%d failures, first: %s" partBad.Length (List.head (List.rev partBad)))
+        (if partBad.IsEmpty then "ranks are a permutation of [0, pool)" else $"{partBad.Length} failures, first: {(List.head (List.rev partBad))}")
 
     printSubHeader "the rank-2 compute additions"
     // packedOffset2 is the closed form the emitter lays down; it must name the
@@ -787,7 +786,7 @@ let runSimplexAgreementTests () : BlockResult =
             if SimplexBlocksCore.poolCells2 strict n <> (if strict then SimplexBlocksCore.binom n 2 else SimplexBlocksCore.binom (n + 1L) 2) then
                 offBad <- sprintf "poolCells2 strict=%b n=%d" strict n :: offBad
     check "packedOffset2 = rankOfCoords (the emitter's closed form)" offBad.IsEmpty
-        (if offBad.IsEmpty then "every canonical rank-2 cell of every extent" else sprintf "%d failures, first: %s" offBad.Length (List.head (List.rev offBad)))
+        (if offBad.IsEmpty then "every canonical rank-2 cell of every extent" else $"{offBad.Length} failures, first: {(List.head (List.rev offBad))}")
 
     // THE RANK-r GENERALIZATION, held to the same standard: the hockey-stick
     // closed form must name the cell the combinadic rank names, at every rank
@@ -813,7 +812,7 @@ let runSimplexAgreementTests () : BlockResult =
                 if int64 seen.Count <> cells then
                     offRBad <- sprintf "coverage strict=%b r=%d n=%d: %d of %d" strict r n seen.Count cells :: offRBad
     check "packedOffsetR = rankOfCoords, and partitions the pool (ranks 1-5)" offRBad.IsEmpty
-        (if offRBad.IsEmpty then "every canonical cell, ranks 1-5, sym and antisym" else sprintf "%d failures, first: %s" offRBad.Length (List.head (List.rev offRBad)))
+        (if offRBad.IsEmpty then "every canonical cell, ranks 1-5, sym and antisym" else $"{offRBad.Length} failures, first: {(List.head (List.rev offRBad))}")
 
     // The bricks themselves: they cover the domain exactly once, an
     // off-diagonal brick is a FULL RECTANGLE every one of whose cells is
@@ -845,11 +844,11 @@ let runSimplexAgreementTests () : BlockResult =
                         if not (SimplexBlocksCore.isDenseBrick [| t1; t2 |]) then
                             brickBad <- sprintf "isDenseBrick disagrees strict=%b n=%d B=%d tiles=(%d,%d)" strict n b t1 t2 :: brickBad
                         if br.RowHi > br.ColLo then
-                            brickBad <- sprintf "off-diagonal brick is not strictly ordered n=%d B=%d tiles=(%d,%d)" n b t1 t2 :: brickBad
+                            brickBad <- $"off-diagonal brick is not strictly ordered n={n} B={b} tiles=({t1},{t2})" :: brickBad
                     elif SimplexBlocksCore.isDenseBrick [| t1; t2 |] then
-                        brickBad <- sprintf "diagonal brick claims distinct tiles n=%d B=%d tiles=(%d,%d)" n b t1 t2 :: brickBad
+                        brickBad <- $"diagonal brick claims distinct tiles n={n} B={b} tiles=({t1},{t2})" :: brickBad
                 // Ascending-lex block order, filtered to the non-empty blocks.
-                let order = bricks |> List.map (fun br -> br.Tiles)
+                let order = bricks |> List.map (_.Tiles)
                 let expectedOrder =
                     SimplexBlocksCore.blockSequence 2 (SimplexBlocksCore.tileCount n b)
                     |> Seq.filter (fun ts -> SimplexBlocksCore.blockCellCount strict n b ts > 0L)
@@ -858,7 +857,7 @@ let runSimplexAgreementTests () : BlockResult =
                 if order <> expectedOrder then
                     brickBad <- sprintf "block order strict=%b n=%d B=%d" strict n b :: brickBad
     check "bricks2 covers once, densely, in ascending-lex block order" brickBad.IsEmpty
-        (if brickBad.IsEmpty then "coverage, density, ordering" else sprintf "%d failures, first: %s" brickBad.Length (List.head (List.rev brickBad)))
+        (if brickBad.IsEmpty then "coverage, density, ordering" else $"{brickBad.Length} failures, first: {(List.head (List.rev brickBad))}")
 
     // The profitability table in plan section 3 -- the numbers the B/depth
     // policy is argued from. Pinned so a change to the formula has to face
@@ -870,8 +869,8 @@ let runSimplexAgreementTests () : BlockResult =
         fracCases
         |> List.filter (fun (r, t, want) -> abs (SimplexBlocksCore.denseBrickFraction r t - want) > 0.001)
     check "denseBrickFraction reproduces the plan's table" fracBad.IsEmpty
-        (if fracBad.IsEmpty then sprintf "%d rows" fracCases.Length
-         else sprintf "%d rows disagree" fracBad.Length)
+        (if fracBad.IsEmpty then $"{fracCases.Length} rows"
+         else $"{fracBad.Length} rows disagree")
 
     // The derived policy after the 2026-08-18 measurement: never block by
     // default. S0 bricks lost or tied at every benchmarked extent, so the
@@ -906,7 +905,7 @@ let runSimplexAgreementTests () : BlockResult =
                     foldBad <- sprintf "strict=%b n=%d B=%d: %d vs %d" strict n b serial bricked :: foldBad
     check "per-brick partials in block order = the serial pool-order fold" foldBad.IsEmpty
         (if foldBad.IsEmpty then "exact arithmetic, every grid point, both symmetries"
-         else sprintf "%d failures, first: %s" foldBad.Length (List.head (List.rev foldBad)))
+         else $"{foldBad.Length} failures, first: {(List.head (List.rev foldBad))}")
 
     printSubHeader "the licence gate and the measurement knob"
     // THE GATE, asserted by name in both directions. A fold whose kernel is
@@ -1005,13 +1004,13 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
      | Ok bare, Ok mapped ->
          let d = countOf "sdiv i64" (instructionsOnly mapped) - countOf "sdiv i64" (instructionsOnly bare)
          check "an elementwise map over a packed pool costs no coordinate math" (d = 1)
-             (sprintf "row-base divisions added by `s * 3.0`: %d (1 = its printer's, 0 = the map's)" d)
+             ($"row-base divisions added by `s * 3.0`: {d} (1 = its printer's, 0 = the map's)")
      | a, b ->
          let err = [ a; b ] |> List.tryPick (function Error e -> Some e | _ -> None)
          check "elementwise-over-compact emits" false (defaultArg err "unknown"))
 
     printFooter "Simplex Blocks Agreement"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; "0 skipped" ]
+        [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = "Simplex Blocks Agreement"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }
 
@@ -1107,19 +1106,19 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
             | Ok cppExe ->
             match runExeCapture cppExe with
             | Error e -> SkippedCase ("the C++ oracle does not run: " + e)
-            | Ok (code, _, _) when code <> 0 -> SkippedCase (sprintf "the C++ oracle exits %d" code)
+            | Ok (code, _, _) when code <> 0 -> SkippedCase ($"the C++ oracle exits {code}")
             | Ok (_, cppOut, _) ->
             // ---- llvm lane --------------------------------------------------
             let llFile = Path.Combine(dir, llStem + ".ll")
             File.WriteAllText(llFile, ll)
             match Build.compileLlvmProgram llFile dir with
             | Error e when e.StartsWith "Skipped:" -> SkippedCase e
-            | Error e -> FailedCase (sprintf "llvm compile failed (%s): %s" llFile (e.Replace("\n", " ") |> fun s -> if s.Length > 400 then s.Substring(0, 400) + "..." else s))
+            | Error e -> FailedCase ($"""llvm compile failed ({llFile}): {(e.Replace("\n", " ") |> fun s -> if s.Length > 400 then s.Substring(0, 400) + "..." else s)}""")
             | Ok llExe ->
             match runExeCapture llExe with
-            | Error e -> FailedCase (sprintf "llvm run failed (%s): %s" llFile e)
+            | Error e -> FailedCase ($"llvm run failed ({llFile}): {e}")
             | Ok (code, out, err) when code <> 0 ->
-                FailedCase (sprintf "llvm exe exits %d (%s): %s" code llFile (err.Trim()))
+                FailedCase ($"llvm exe exits {code} ({llFile}): {(err.Trim())}")
             | Ok (_, llvmOut, _) ->
                 match compareRuns 3 cppOut llvmOut with
                 | Ok () ->
@@ -1129,9 +1128,8 @@ let private runCase (dir: string) (name: string) (source: string) : CaseOutcome 
                     Matched (if stripTiming cppOut = "" then "agreed, but neither lane printed a value" else "")
                 | Error diffs ->
                     FailedCase
-                        (sprintf "stdout differs -- %s (kept %s and %s)"
-                            (String.concat " | " diffs) cppFile llFile)
-    with ex -> FailedCase (sprintf "harness exception: %s" ex.Message)
+                        ($"""stdout differs -- {(String.concat " | " diffs)} (kept {cppFile} and {llFile})""")
+    with ex -> FailedCase ($"harness exception: {ex.Message}")
 
 /// The differential sweep over a category list.
 let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
@@ -1169,12 +1167,12 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
             with ex -> Error ex.Message
         match tests with
         | Error msg ->
-            printSubHeader (sprintf "%s -- UNAVAILABLE" cat)
+            printSubHeader ($"{cat} -- UNAVAILABLE")
             printfn "  %s" msg
             failed <- failed + 1
-            failedNames <- failedNames @ [ sprintf "category %s" cat ]
+            failedNames <- failedNames @ [ $"category {cat}" ]
         | Ok tests ->
-            printSubHeader (sprintf "%s (%d files)" cat tests.Length)
+            printSubHeader ($"{cat} ({tests.Length} files)")
             for (name, source) in tests do
                 match runCase dir name source with
                 | Matched note ->
@@ -1209,7 +1207,7 @@ let runLlvmDifferentialTestsFor (categories: string list) : BlockResult =
         printfn "    %d refused by the lane (the histogram above is the worklist); %d skipped for reasons that are not the lane's"
             laneRefusals (skipped - laneRefusals)
     printFooter block
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; sprintf "%d skipped" skipped ]
+        [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }
 
 /// The default sweep (`blade test llvm`).
@@ -1305,12 +1303,12 @@ let runLlvmSimplexGate () : BlockResult =
             let found =
                 try Blade.Tests.Corpus.category cat |> List.tryFind (fun (n, _) -> n = testName)
                 with _ -> None
-            yield (sprintf "%s/%s" cat testName, found)
+            yield ($"{cat}/{testName}", found)
           for fx in simplexFixtures do
             let path = Path.Combine(goldenRoot.Value, fx + ".blade")
             let found =
                 if File.Exists path then Some (fx, File.ReadAllText path) else None
-            yield (sprintf "fixture/%s" fx, found) ]
+            yield ($"fixture/{fx}", found) ]
     for (label, found) in sources do
         match found with
         | None -> fail label "source not found (a corpus test was renamed, or a fixture is missing)"
@@ -1338,7 +1336,7 @@ let runLlvmSimplexGate () : BlockResult =
                             | Ok exe ->
                                 match runExeCapture exe with
                                 | Error e -> Error ("C++ oracle does not run: " + e)
-                                | Ok (code, _, _) when code <> 0 -> Error (sprintf "C++ oracle exits %d" code)
+                                | Ok (code, _, _) when code <> 0 -> Error ($"C++ oracle exits {code}")
                                 | Ok (_, out, _) -> Ok out
                 match cppOut with
                 | Error reason ->
@@ -1349,7 +1347,7 @@ let runLlvmSimplexGate () : BlockResult =
                     let arms =
                         brickArms
                         |> List.map (fun (armName, knob) ->
-                            let llStem = sprintf "simplex_ll_%s_%s" (Build.sanitizeFileName armName) stem
+                            let llStem = $"simplex_ll_{(Build.sanitizeFileName armName)}_{stem}"
                             clearArtifacts dir [ llStem ]
                             let emitted =
                                 withEnv (defaultEmissionEnv @ [ "BLADE_LLVM_BRICKS", Some knob ]) (fun () ->
@@ -1368,19 +1366,19 @@ let runLlvmSimplexGate () : BlockResult =
                                 let f = Path.Combine(dir, llStem + ".ll")
                                 File.WriteAllText(f, ll)
                                 match Build.compileLlvmProgram f dir with
-                                | Error e -> (armName, Error (sprintf "compile failed: %s" (e.Replace("\n", " "))), ll)
+                                | Error e -> (armName, Error ($"""compile failed: {(e.Replace("\n", " "))}"""), ll)
                                 | Ok exe ->
                                     match runExeCapture exe with
                                     | Error e -> (armName, Error ("run failed: " + e), ll)
                                     | Ok (code, _, err) when code <> 0 ->
-                                        (armName, Error (sprintf "exits %d: %s" code (err.Trim())), ll)
+                                        (armName, Error ($"exits {code}: {(err.Trim())}"), ll)
                                     | Ok (_, out, _) -> (armName, Ok out, ll))
                     let refused = arms |> List.tryPick (fun (a, r, _) -> match r with Error e -> Some (a, e) | _ -> None)
                     match refused with
                     | Some (armName, e) when e.StartsWith "llvm lane refused" || e.StartsWith "front end" ->
                         skipped <- skipped + 1
-                        resultLine Skip label (sprintf "%s: %s" armName e)
-                    | Some (armName, e) -> fail label (sprintf "%s: %s" armName e)
+                        resultLine Skip label ($"{armName}: {e}")
+                    | Some (armName, e) -> fail label ($"{armName}: {e}")
                     | None ->
                         let diffs =
                             arms
@@ -1389,10 +1387,10 @@ let runLlvmSimplexGate () : BlockResult =
                                 | Ok out ->
                                     (match compareRuns 3 cppText out with
                                      | Ok () -> None
-                                     | Error ds -> Some (sprintf "%s: %s" armName (String.concat " | " ds)))
+                                     | Error ds -> Some ($"""{armName}: {(String.concat " | " ds)}"""))
                                 | Error _ -> None)
                         if not diffs.IsEmpty then
-                            fail label (sprintf "stdout differs from the C++ lane -- %s" (String.concat " ;; " diffs))
+                            fail label ($"""stdout differs from the C++ lane -- {(String.concat " ;; " diffs)}""")
                         else
                             // The knob must be LIVE: a bricked emission that
                             // is textually the serial one proves nothing.
@@ -1406,10 +1404,10 @@ let runLlvmSimplexGate () : BlockResult =
                                 else None
                             match liveness with
                             | Some why -> fail label why
-                            | None -> pass label (sprintf "3 arms agree (%d chars of output)" (stripTiming cppText).Length)
-            with ex -> fail label (sprintf "harness exception: %s" ex.Message)
+                            | None -> pass label ($"3 arms agree ({(stripTiming cppText).Length} chars of output)")
+            with ex -> fail label ($"harness exception: {ex.Message}")
     printFooter block
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; sprintf "%d skipped" skipped ]
+        [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
     { Block = block; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }
 
 // ---------------------------------------------------------------------------
@@ -1483,8 +1481,8 @@ let private rotate (n: int) (xs: 'a list) : 'a list =
 let private benchSource (name: string) : Result<string, string> =
     let path = Path.Combine(goldenRoot.Value, name + ".blade")
     if File.Exists path then
-        try Ok (File.ReadAllText path) with ex -> Error (sprintf "unreadable: %s" ex.Message)
-    else Error (sprintf "fixture missing: %s" path)
+        try Ok (File.ReadAllText path) with ex -> Error ($"unreadable: {ex.Message}")
+    else Error ($"fixture missing: {path}")
 
 /// Parse the `<name> completed in <t>s` line the two lanes both print. None
 /// when the line is absent, which the caller treats as a failed measurement
@@ -1642,7 +1640,7 @@ let runLlvmBenchCodegen () : BlockResult =
                 let cppBytes = (Seq.head cppSamples).Bytes
                 let llBytes = (Seq.head llSamples).Bytes
                 let ratio = if cppMs > 0.0 then llMs / cppMs else nan
-                rows.Add(sprintf "%s (%s)" prog kind, cppMs, llMs, cppBytes, llBytes, ratio)
+                rows.Add($"{prog} ({kind})", cppMs, llMs, cppBytes, llBytes, ratio)
                 passed <- passed + 1
                 // The medians drive the table; the extremes go on the per-test
                 // line, where a reader deciding whether to believe a 4x ratio
@@ -1698,7 +1696,7 @@ let runLlvmBenchCodegen () : BlockResult =
                     | Error _ -> nan)
             printfn "  llvm shim: the build that also has to compile blade_llvm_shim.c costs"
             printfn "    %.0f ms (once per output directory; every later link reuses the .o)." coldMs
-    printFooter block [ sprintf "%d passed" passed; sprintf "%d failed" failed; "0 skipped" ]
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 // --- runtime ---------------------------------------------------------------
@@ -1780,7 +1778,7 @@ let private rtShapes =
 
 /// Build one arm's executable, or say why not.
 let private buildRtArm (dir: string) (shape: RtShape) (arm: RtArm) (source: string) : Result<string, string> =
-    let stem = Build.sanitizeFileName (sprintf "rtb_%s_%s" arm.Label shape.Fixture)
+    let stem = Build.sanitizeFileName ($"rtb_{arm.Label}_{shape.Fixture}")
     clearArtifacts dir [ stem ]
     withEnv (defaultEmissionEnv @ arm.Pins @ [ "BLADE_EXE_CACHE", Some "0" ]) (fun () ->
         match Lowering.lower source with
@@ -1845,8 +1843,8 @@ let runLlvmBenchRuntime () : BlockResult =
             match buildErr with
             | Some (label, e) ->
                 failed <- failed + 1
-                failedNames <- failedNames @ [ sprintf "%s/%s" shape.Fixture label ]
-                resultLine Fail shape.Fixture (sprintf "arm %s did not build: %s" label e)
+                failedNames <- failedNames @ [ $"{shape.Fixture}/{label}" ]
+                resultLine Fail shape.Fixture ($"arm {label} did not build: {e}")
             | None ->
                 let exes = built |> List.map (fun (a, r) -> a, (match r with Ok e -> e | Error _ -> ""))
                 // ---- values before timing --------------------------------
@@ -1855,13 +1853,13 @@ let runLlvmBenchRuntime () : BlockResult =
                     firstRuns |> List.tryPick (fun (a, r) ->
                         match r with
                         | Error e -> Some (a.Label, e)
-                        | Ok (code, _, err) when code <> 0 -> Some (a.Label, sprintf "exits %d: %s" code (err.Trim()))
+                        | Ok (code, _, err) when code <> 0 -> Some (a.Label, $"exits {code}: {(err.Trim())}")
                         | _ -> None)
                 match runErr with
                 | Some (label, e) ->
                     failed <- failed + 1
-                    failedNames <- failedNames @ [ sprintf "%s/%s" shape.Fixture label ]
-                    resultLine Fail shape.Fixture (sprintf "arm %s did not run: %s" label e)
+                    failedNames <- failedNames @ [ $"{shape.Fixture}/{label}" ]
+                    resultLine Fail shape.Fixture ($"arm {label} did not run: {e}")
                 | None ->
                     let outs = firstRuns |> List.map (fun (a, r) -> a.Label, (match r with Ok (_, o, _) -> o | Error _ -> ""))
                     let oracle = snd outs.Head
@@ -1871,12 +1869,12 @@ let runLlvmBenchRuntime () : BlockResult =
                         |> List.choose (fun (label, o) ->
                             match compareRuns 3 oracle o with
                             | Ok () -> None
-                            | Error ds -> Some (sprintf "%s: %s" label (String.concat " | " ds)))
+                            | Error ds -> Some ($"""{label}: {(String.concat " | " ds)}"""))
                     if not mismatches.IsEmpty then
                         failed <- failed + 1
                         failedNames <- failedNames @ [ shape.Fixture ]
                         resultLine Fail shape.Fixture
-                            (sprintf "arms disagree BEFORE timing -- %s" (String.concat " ;; " mismatches))
+                            ($"""arms disagree BEFORE timing -- {(String.concat " ;; " mismatches)}""")
                     else
                     // ---- the rotated timing loop -----------------------
                     let inner = Dictionary<string, ResizeArray<float>>()
@@ -1897,7 +1895,7 @@ let runLlvmBenchRuntime () : BlockResult =
                                     inner.[label].Add(secs * 1000.0)
                                     outer.[label].Add(sw.Elapsed.TotalMilliseconds)
                                 | None -> measureErr <- Some (label, "no `completed in` line in the output")
-                        | Ok (code, _, err) -> measureErr <- Some (label, sprintf "exits %d: %s" code (err.Trim()))
+                        | Ok (code, _, err) -> measureErr <- Some (label, $"exits {code}: {(err.Trim())}")
                         | Error e -> measureErr <- Some (label, e)
                     for round in 0 .. rtRounds - 1 do
                         for (a, exe) in exes do
@@ -1908,8 +1906,8 @@ let runLlvmBenchRuntime () : BlockResult =
                     match measureErr with
                     | Some (label, e) ->
                         failed <- failed + 1
-                        failedNames <- failedNames @ [ sprintf "%s/%s" shape.Fixture label ]
-                        resultLine Fail shape.Fixture (sprintf "arm %s failed mid-measurement: %s" label e)
+                        failedNames <- failedNames @ [ $"{shape.Fixture}/{label}" ]
+                        resultLine Fail shape.Fixture ($"arm {label} failed mid-measurement: {e}")
                     | None ->
                         let baseline = median (List.ofSeq inner.[(fst exes.Head).Label])
                         printfn ""
@@ -1927,8 +1925,8 @@ let runLlvmBenchRuntime () : BlockResult =
                         printfn ""
                         passed <- passed + 1
                         resultLine Pass shape.Fixture
-                            (sprintf "%d arms agree; %d samples each" exes.Length (rtRounds * rtReps))
-    printFooter block [ sprintf "%d passed" passed; sprintf "%d failed" failed; "0 skipped" ]
+                            ($"{exes.Length} arms agree; {(rtRounds * rtReps)} samples each")
+    printFooter block [ $"{passed} passed"; $"{failed} failed"; "0 skipped" ]
     { Block = block; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 /// `blade test llvm-bench` -- the two benchmark halves and a roll-up. Like
@@ -1937,7 +1935,7 @@ let runLlvmBenchRuntime () : BlockResult =
 let runLlvmBench () : int =
     let blocks = [ runLlvmBenchCodegen (); runLlvmBenchRuntime () ]
     printGrandTotal blocks
-    if blocks |> List.sumBy (fun b -> b.Failed) = 0 then 0 else 1
+    if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
 // ---------------------------------------------------------------------------
 // Entry points for `blade test llvm [category]`
@@ -1956,7 +1954,7 @@ let runLlvmTests () : int =
           runLlvmSimplexGate ()
           runLlvmDifferentialTests () ]
     printGrandTotal blocks
-    if blocks |> List.sumBy (fun b -> b.Failed) = 0 then 0 else 1
+    if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
 /// `blade test llvm <category>` -- the differential over one named corpus
 /// directory (the literal tests/corpus/<dir> name, as `test interp <dir>`

@@ -288,7 +288,7 @@ let private buildRef (n: int) (m: int) : RefCase =
         for j in 0 .. d - 1 do
             if acc.[j] <> int64 order * int64 c.[i].[j] then
                 if idem then
-                    idemDetail <- sprintf "(C·C)[%d][%d] = %d but N!·C = %d" i j acc.[j] (int64 order * int64 c.[i].[j])
+                    idemDetail <- $"(C·C)[{i}][{j}] = {acc.[j]} but N!·C = {(int64 order * int64 c.[i].[j])}"
                 idem <- false
 
     let p = Array.init d (fun i -> Array.init d (fun j -> Rat.make (bigint c.[i].[j]) (bigint order)))
@@ -388,7 +388,7 @@ let private compareExact (a: Rat[][]) (b: Rat[][]) : int * string =
         for j in 0 .. d - 1 do
             if a.[i].[j] <> b.[i].[j] then
                 if diffs = 0 then
-                    first <- sprintf "first at [%d][%d]: %s vs %s" i j (Rat.show a.[i].[j]) (Rat.show b.[i].[j])
+                    first <- $"first at [{i}][{j}]: {(Rat.show a.[i].[j])} vs {(Rat.show b.[i].[j])}"
                 diffs <- diffs + 1
     (diffs, first)
 
@@ -418,7 +418,7 @@ let runPermOracleTests () : BlockResult =
     let negAnchors = set [ (2, 2); (2, 3); (3, 3); (3, 4) ]
 
     for (n, m) in anchors do
-        let tag = sprintf "N=%d m=%d" n m
+        let tag = $"N={n} m={m}"
         let d = pown n m
         let parts = PS.permPartitions m n |> List.toArray
         let nPart = parts.Length
@@ -429,15 +429,14 @@ let runPermOracleTests () : BlockResult =
         // 1. THE REFERENCE PROJECTOR — exact, and about tuples only
         // ====================================================================
         let rf = buildRef n m
-        check (sprintf "%s: tr(P_ref) = #partitions of [%d] with <= %d blocks (exact)" tag m n)
+        check ($"{tag}: tr(P_ref) = #partitions of [{m}] with <= {n} blocks (exact)")
               (rf.Trace = Rat.ofBigInt (bigint want) && int64 nPart = want)
-              (sprintf "tr = %s, partitionCount = %d, permPartitions emitted %d, |S_%d| = %d, dim = %d"
-                   (Rat.show rf.Trace) want nPart n rf.Order d)
-        check (sprintf "%s: P_ref idempotent and symmetric over Q (exact)" tag)
+              ($"tr = {(Rat.show rf.Trace)}, partitionCount = {want}, permPartitions emitted {nPart}, |S_{n}| = {rf.Order}, dim = {d}")
+        check ($"{tag}: P_ref idempotent and symmetric over Q (exact)")
               (rf.Idempotent && rf.Symmetric)
               (if not rf.Idempotent then rf.IdemDetail
                elif not rf.Symmetric then "C is not symmetric"
-               else sprintf "P^2 = P via C*C = %d*C, and C = C^T, over %d^2 entries" rf.Order d)
+               else $"P^2 = P via C*C = {rf.Order}*C, and C = C^T, over {d}^2 entries")
 
         // ====================================================================
         // 2. THE BASIS — two independent constructions of the same 0/1 columns
@@ -462,13 +461,12 @@ let runPermOracleTests () : BlockResult =
         let sizesOk =
             Array.forall2 (fun (g: int[]) (sup: int[]) ->
                 bigint sup.Length = BigInteger.Pow(bigint n, PS.blockCount g)) parts colVia
-        check (sprintf "%s: equality pattern IS an RGS; coarsens-built B = definitional B (%d columns)" tag nPart)
+        check ($"{tag}: equality pattern IS an RGS; coarsens-built B = definitional B ({nPart} columns)")
               (idOk && colsAgree && sizesOk)
               (if not idOk then "patternRgs(RGS gamma) <> gamma for some emitted partition"
                elif not colsAgree then "the coarsens orientation disagrees with the definition"
                elif not sizesOk then "|supp B_gamma| <> N^b(gamma)"
-               else sprintf "|supp B_gamma| = N^b(gamma) for all %d, total support %d"
-                        nPart (colVia |> Array.sumBy Array.length))
+               else $"|supp B_gamma| = N^b(gamma) for all {nPart}, total support {(colVia |> Array.sumBy Array.length)}")
 
         // ====================================================================
         // 3. THE GRAM CLOSED FORM — against an INDEPENDENT union-find join
@@ -476,7 +474,7 @@ let runPermOracleTests () : BlockResult =
         let bc = basisProjector d colVia
         match bc with
         | None ->
-            check (sprintf "%s: Gram (B^T B) is invertible over Q" tag) false
+            check ($"{tag}: Gram (B^T B) is invertible over Q") false
                   "Gaussian elimination found a zero pivot - the emitted basis is dependent"
         | Some bs ->
             let mutable gramOk = true
@@ -489,7 +487,7 @@ let runPermOracleTests () : BlockResult =
                         if gramOk then
                             gramBad <- sprintf "[%d][%d] = %O but N^b(join) = %O (join %A)" a b bs.Gram.[a].[b] predicted j
                         gramOk <- false
-            check (sprintf "%s: (B^T B)[g,p] = N^b(g v p) exactly, %d^2 entries" tag nPart)
+            check ($"{tag}: (B^T B)[g,p] = N^b(g v p) exactly, {nPart}^2 entries")
                   gramOk
                   (if gramOk then
                      sprintf "spot: [0][0] = %O (all-one-block), [%d][%d] = %O (finest), [0][%d] = %O"
@@ -501,17 +499,16 @@ let runPermOracleTests () : BlockResult =
             // 4. THE PIN: P_basis = P_ref ENTRYWISE OVER Q
             // ================================================================
             let (diffs, firstDiff) = compareExact bs.P rf.P
-            check (sprintf "%s: B(B^T B)^-1 B^T = P_ref ENTRYWISE over Q, %d^2 entries, zero tolerance" tag d)
+            check ($"{tag}: B(B^T B)^-1 B^T = P_ref ENTRYWISE over Q, {d}^2 entries, zero tolerance")
                   (diffs = 0 && bs.Trace = rf.Trace)
-                  (if diffs = 0 then sprintf "identical; tr = %s on both sides" (Rat.show bs.Trace)
-                   else sprintf "%d of %d entries differ, %s (tr %s vs %s)"
-                            diffs (d * d) firstDiff (Rat.show bs.Trace) (Rat.show rf.Trace))
+                  (if diffs = 0 then $"identical; tr = {(Rat.show bs.Trace)} on both sides"
+                   else $"{diffs} of {(d * d)} entries differ, {firstDiff} (tr {(Rat.show bs.Trace)} vs {(Rat.show rf.Trace)})")
 
             // ================================================================
             // 5. THE TRUNCATION ANCHORS
             // ================================================================
             if want < bell then
-                check (sprintf "%s: TRUNCATED basis certified (%d < Bell(%d) = %d)" tag nPart m bell)
+                check ($"{tag}: TRUNCATED basis certified ({nPart} < Bell({m}) = {bell})")
                       (diffs = 0 && int64 nPart = want && int64 nPart < bell)
                       (sprintf "the <= %d-block filter drops %d of Bell(%d) = %d partitions, and the remaining %d still span the whole invariant space exactly"
                            n (bell - int64 nPart) m bell nPart)
@@ -524,22 +521,21 @@ let runPermOracleTests () : BlockResult =
                 let dropped = Array.sub colVia 0 (nPart - 1)
                 match basisProjector d dropped with
                 | None ->
-                    check (sprintf "%s: NC(a) dropped column -> trace deficit 1 and P_basis <> P_ref" tag)
+                    check ($"{tag}: NC(a) dropped column -> trace deficit 1 and P_basis <> P_ref")
                           false "the truncated Gram was singular - control inconclusive"
                 | Some nb ->
                     let (nd, nfirst) = compareExact nb.P rf.P
                     let trOk = nb.Trace = Rat.ofInt (nPart - 1)
                     check (sprintf "%s: NC(a) dropping partition %A -> tr falls to %d and P_basis <> P_ref" tag parts.[nPart - 1] (nPart - 1))
                           (trOk && nd > 0)
-                          (sprintf "tr = %s (want %d), %d of %d entries differ, %s"
-                               (Rat.show nb.Trace) (nPart - 1) nd (d * d) nfirst)
+                          ($"tr = {(Rat.show nb.Trace)} (want {(nPart - 1)}), {nd} of {(d * d)} entries differ, {nfirst}")
                 // (b) add a spurious NON-coarsening column: the indicator of the
                 //     all-zeros tuple. Its Gram diagonal is 1, and no legitimate
                 //     column has diagonal 1 (those are N^b with 1 <= b, N >= 2).
                 let spurious = Array.append colVia [| [| 0 |] |]
                 match basisProjector d spurious with
                 | None ->
-                    check (sprintf "%s: NC(b) spurious column -> Gram loses the closed form and P_basis <> P_ref" tag)
+                    check ($"{tag}: NC(b) spurious column -> Gram loses the closed form and P_basis <> P_ref")
                           false "the extended Gram was singular - control inconclusive"
                 | Some nb ->
                     let (nd, nfirst) = compareExact nb.P rf.P
@@ -548,7 +544,7 @@ let runPermOracleTests () : BlockResult =
                         [ 1 .. min n m ] |> List.map (fun b -> BigInteger.Pow(bigint n, b))
                     let closedFormBroken = diag = BigInteger.One && not (List.contains diag legit)
                     let trOk = nb.Trace = Rat.ofInt (nPart + 1)
-                    check (sprintf "%s: NC(b) spurious e_(0..0) column -> Gram diagonal 1 is no N^b, tr rises to %d, P_basis <> P_ref" tag (nPart + 1))
+                    check ($"{tag}: NC(b) spurious e_(0..0) column -> Gram diagonal 1 is no N^b, tr rises to {(nPart + 1)}, P_basis <> P_ref")
                           (closedFormBroken && trOk && nd > 0)
                           (sprintf "Gram[%d][%d] = %O, legitimate diagonals %s; tr = %s (want %d); %d of %d entries differ, %s"
                                nPart nPart diag
@@ -557,5 +553,5 @@ let runPermOracleTests () : BlockResult =
 
     sw.Stop()
     printFooter "Perm Oracle"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; sprintf "%d ms" sw.ElapsedMilliseconds ]
+        [ $"{passed} passed"; $"{failed} failed"; $"{sw.ElapsedMilliseconds} ms" ]
     { Block = "Perm Oracle"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

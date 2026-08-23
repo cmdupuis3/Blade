@@ -73,13 +73,13 @@ open Blade.Tests.Oracles
 let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc: string) (runs: int) (onlyBinding: string option) : Result<float, string> =
     try
         match lower edgiSrc with
-        | Error e -> Error (sprintf "lower failed: %s" e)
+        | Error e -> Error ($"lower failed: {e}")
         | Ok ir0 ->
         // Hard-fail on validation errors rather than timing invalid IR
         // (was `| Error _ -> ir0`).
         match IRValidate.validateIR ir0 with
         | Error validationErrors ->
-            Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+            Error ($"""IR validation failed: {(String.concat "; " validationErrors)}""")
         | Ok ir ->
             let safeName = "timing_" + caseName.Replace(" ", "_").Replace("=", "")
             // Split-timing codegen: the emitted program reports input-allocation
@@ -99,7 +99,7 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
             let srcAbs = Path.GetFullPath srcPath
             let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
             let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-            let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
+            let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
             cpsi.RedirectStandardError <- true
             cpsi.UseShellExecute <- false
             cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)
@@ -113,7 +113,7 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
                 (try cproc.Kill() with _ -> ())
                 Error "compile timed out (>300s)"
             elif cproc.ExitCode <> 0 then
-                Error (sprintf "compile failed: %s" cerr.Result)
+                Error ($"compile failed: {cerr.Result}")
             else
                 // Parse "<...> completed in <t>s" from one run's stdout.
                 let runOnce () : Result<float, string> =
@@ -136,15 +136,15 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
                         rproc.WaitForExit(5000) |> ignore
                     let m = System.Text.RegularExpressions.Regex.Match(rout.Result, @"completed in\s+([0-9.eE+-]+)s")
                     if not rExited then Error "run timed out (>180s)"
-                    elif rproc.ExitCode <> 0 then Error (sprintf "run exited %d" rproc.ExitCode)
+                    elif rproc.ExitCode <> 0 then Error ($"run exited {rproc.ExitCode}")
                     elif m.Success then
                         (match System.Double.TryParse(m.Groups.[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
                          | true, v -> Ok v
-                         | _ -> Error (sprintf "could not parse elapsed '%s'" m.Groups.[1].Value))
+                         | _ -> Error ($"could not parse elapsed '{m.Groups.[1].Value}'"))
                     else Error "no 'completed in' line in output"
                 // Warmup (discarded), then `runs` timed runs; take the median.
                 match runOnce () with
-                | Error e -> Error (sprintf "warmup run failed: %s" e)
+                | Error e -> Error ($"warmup run failed: {e}")
                 | Ok _ ->
                     let mutable samples = []
                     let mutable err = None
@@ -161,7 +161,7 @@ let private timeEdgiProgramOnly (outputDir: string) (caseName: string) (edgiSrc:
                         let sorted = samples |> List.sort
                         let median = sorted.[sorted.Length / 2]
                         Ok median
-    with ex -> Error (sprintf "exception: %s" ex.Message)
+    with ex -> Error ($"exception: {ex.Message}")
 
 /// Default split-timing: clock starts at the first compute binding (whole
 /// computation timed, setup excluded). Thin wrapper over the binding-targeted
@@ -211,11 +211,11 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             let tDense = timeEdgiProgram outputDir (label + "_dense") denseSrc runs
             match tSym, tDense with
             | Error e, _ ->
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "symmetric variant: %s" e)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"symmetric variant: {e}")
                 failed <- failed + 1
                 failedNames <- failedNames @ [label]
             | _, Error e ->
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "dense variant: %s" e)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"dense variant: {e}")
                 failed <- failed + 1
                 failedNames <- failedNames @ [label]
             | Ok ts, Ok td ->
@@ -318,12 +318,12 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             let m = 1000003   // prime modulus, keeps values bounded
             let sb = System.Text.StringBuilder()
             sb.Append("{\n") |> ignore
-            sb.Append(sprintf "    let acc0 = %s\n" (List.head vars)) |> ignore
+            sb.Append($"    let acc0 = {(List.head vars)}\n") |> ignore
             for s in 0 .. stages - 1 do
                 let v = vars.[(s + 1) % r]
                 let c = 2 * s + 1
                 sb.Append(sprintf "    let acc%d = (acc%d * %s + %d) %% %d\n" (s+1) s v c m) |> ignore
-            sb.Append(sprintf "    acc%d\n" stages) |> ignore
+            sb.Append($"    acc{stages}\n") |> ignore
             sb.Append("}") |> ignore
             sb.ToString()
 
@@ -333,11 +333,11 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             let m = 1000003
             let sb = System.Text.StringBuilder()
             sb.Append("{\n") |> ignore
-            sb.Append(sprintf "    let acc0 = %s\n" var) |> ignore
+            sb.Append($"    let acc0 = {var}\n") |> ignore
             for s in 0 .. stages - 1 do
                 let c = 2 * s + 1
                 sb.Append(sprintf "    let acc%d = (acc%d * %s + %d) %% %d\n" (s+1) s var c m) |> ignore
-            sb.Append(sprintf "    acc%d\n" stages) |> ignore
+            sb.Append($"    acc{stages}\n") |> ignore
             sb.Append("}") |> ignore
             sb.ToString()
 
@@ -352,17 +352,17 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             // comm variant: kernel carries comm over all args, and the repeated
             // array A gives shared index-type identity -> triangular iteration.
             let symSrc =
-                sprintf "let A = [%s]\n" aLit +
-                sprintf "let L = method_for(%s)\n" args +
-                sprintf "let k = lambda(%s) where comm(%s) -> %s\n" varList varList body +
+                $"let A = [{aLit}]\n" +
+                $"let L = method_for({args})\n" +
+                $"let k = lambda({varList}) where comm({varList}) -> {body}\n" +
                 "let result = L <@> k |> compute\n"
             // dense variant: identical kernel, NO comm -> full hypercube iteration.
             let denseSrc =
-                sprintf "let A = [%s]\n" aLit +
-                sprintf "let L = method_for(%s)\n" args +
-                sprintf "let k = lambda(%s) -> %s\n" varList body +
+                $"let A = [{aLit}]\n" +
+                $"let L = method_for({args})\n" +
+                $"let k = lambda({varList}) -> {body}\n" +
                 "let result = L <@> k |> compute\n"
-            runRatioCase (sprintf "comm r=%d n=%d" r n) r 1 n (exactSimplexRatio r [n]) symSrc denseSrc
+            runRatioCase ($"comm r={r} n={n}") r 1 n (exactSimplexRatio r [n]) symSrc denseSrc
         // n chosen so the dense n^r array stays under the 2GB cap (int64):
         // r=2 -> 15000^2 = 1.8GB, r=3 -> 620^3 = 1.9GB, r=4 -> 124^4 = 1.9GB.
         // stages=5 Horner steps target ~1-5s dense compute (tune if needed).
@@ -409,7 +409,7 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
                 let muls = [ for _s in 1 .. stages -> " * x" ] |> String.concat ""
                 sprintf "lambda(acc, x) -> (acc + x%s) %% 1000003" muls
             let typeDecl =
-                sprintf "type LatIdx = Idx<%d>\ntype LonIdx = Idx<%d>\ntype TimeIdx = Idx<%d>\n" lDim mDim tDim
+                $"type LatIdx = Idx<{lDim}>\ntype LonIdx = Idx<{mDim}>\ntype TimeIdx = Idx<{tDim}>\n"
             let arrDecl = "let A: Array<Int64 like LatIdx, LonIdx, TimeIdx> = fill_random(1000)\n"
             // r fiber params (a, b, c, ...) all in one comm group; each reduced
             // and summed. method_for(A, A, ..) repeats A r times. Correct product
@@ -418,23 +418,23 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             // (L*M)^r grid.
             let vars = [ for k in 0 .. rArgs - 1 -> string (char (int 'a' + k)) ]
             let paramList =
-                vars |> List.map (fun v -> sprintf "%s: Array<Int64 like TimeIdx>" v) |> String.concat ", "
+                vars |> List.map (fun v -> $"{v}: Array<Int64 like TimeIdx>") |> String.concat ", "
             let varCsv = String.concat ", " vars
-            let reduceSum = vars |> List.map (fun v -> sprintf "reduce(%s, %s)" v binop) |> String.concat " + "
+            let reduceSum = vars |> List.map (fun v -> $"reduce({v}, {binop})") |> String.concat " + "
             let args = List.replicate rArgs "A" |> String.concat ", "
             let kernelComm =
-                sprintf "let k = lambda(%s) where comm(%s) -> %s\n" paramList varCsv reduceSum
+                $"let k = lambda({paramList}) where comm({varCsv}) -> {reduceSum}\n"
             let kernelNoComm =
-                sprintf "let k = lambda(%s) -> %s\n" paramList reduceSum
-            let symSrc = typeDecl + arrDecl + sprintf "let L = method_for(%s)\n" args + kernelComm + "let result = L <@> k |> compute\n"
-            let denseSrc = typeDecl + arrDecl + sprintf "let L = method_for(%s)\n" args + kernelNoComm + "let result = L <@> k |> compute\n"
+                $"let k = lambda({paramList}) -> {reduceSum}\n"
+            let symSrc = typeDecl + arrDecl + $"let L = method_for({args})\n" + kernelComm + "let result = L <@> k |> compute\n"
+            let denseSrc = typeDecl + arrDecl + $"let L = method_for({args})\n" + kernelNoComm + "let result = L <@> k |> compute\n"
             // Exact finite-n product-symmetry target: each of the two outer
             // axes (Lat, Lon) is a rank-r symmetric group, so the achievable
             // limit is the per-axis product ext^r / C(ext+r-1, r). Approaches
             // (r!)^d only as the extents → ∞, which is unreachable at r≥3 since
             // dense scales as (LM)^r.
             let expectedRatio = exactSimplexRatio rArgs [lDim; mDim]
-            runRatioCase (sprintf "prodsym-fiber r=%d d=2 L=%d M=%d T=%d" rArgs lDim mDim tDim) rArgs 2 (lDim * mDim) expectedRatio symSrc denseSrc
+            runRatioCase ($"prodsym-fiber r={rArgs} d=2 L={lDim} M={mDim} T={tDim}") rArgs 2 (lDim * mDim) expectedRatio symSrc denseSrc
         // T kept SMALL (small result allocation). The runtime lever is `stages`
         // (inline Horner length): it raises per-cell FLOPs WITHOUT growing the
         // result allocation. (The array data is built by fill_random, so it no
@@ -499,11 +499,11 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             let hBody = heavyBodyUnary "e" stages
             // symmetric arm: build sym via comm, heavy elementwise map over compact sym.
             let symSrc =
-                sprintf "let A = [%s]\n" aLit +
-                sprintf "let L = method_for(%s)\n" args +
-                sprintf "let g = lambda(%s) where comm(%s) -> %s\n" varList varList prodSum +
+                $"let A = [{aLit}]\n" +
+                $"let L = method_for({args})\n" +
+                $"let g = lambda({varList}) where comm({varList}) -> {prodSum}\n" +
                 "let sym = L <@> g |> compute\n" +
-                sprintf "let h = lambda(e) -> %s\n" hBody +
+                $"let h = lambda(e) -> {hBody}\n" +
                 "let result = method_for(sym) <@> h |> compute\n"
             // dense arm: build a genuinely dense n^r array via a NO-COMM
             // producer (full hypercube iteration — the same dense construction
@@ -515,13 +515,13 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             // a clean baseline directly comparable to the symmetric arm (same h
             // per element, n^r vs C(n+r-1,r) elements -> ratio tracks r!).
             let denseSrc =
-                sprintf "let A = [%s]\n" aLit +
-                sprintf "let L = method_for(%s)\n" args +
-                sprintf "let g = lambda(%s) -> %s\n" varList prodSum +
+                $"let A = [{aLit}]\n" +
+                $"let L = method_for({args})\n" +
+                $"let g = lambda({varList}) -> {prodSum}\n" +
                 "let dense = L <@> g |> compute\n" +
-                sprintf "let h = lambda(e) -> %s\n" hBody +
+                $"let h = lambda(e) -> {hBody}\n" +
                 "let result = method_for(dense) <@> h |> compute\n"
-            runRatioCase (sprintf "symtype r=%d n=%d" r n) r 1 n (exactSimplexRatio r [n]) symSrc denseSrc
+            runRatioCase ($"symtype r={r} n={n}") r 1 n (exactSimplexRatio r [n]) symSrc denseSrc
         // dense n^r ~0.45-0.5 GB, same n as Family 1.
         // Family 2 (elementwise-over-symmetric) timing. The feature it needs —
         // an elementwise rank-0 kernel over an already-symmetric array, staying
@@ -561,11 +561,11 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             let prodSum = vars |> String.concat " + "
             let hBody = heavyBodyUnary "e" stages
             let producer =
-                sprintf "let A = [%s]\n" aLit +
-                sprintf "let L = method_for(%s)\n" args +
-                sprintf "let g = lambda(%s) where comm(%s) -> %s\n" varList varList prodSum +
+                $"let A = [{aLit}]\n" +
+                $"let L = method_for({args})\n" +
+                $"let g = lambda({varList}) where comm({varList}) -> {prodSum}\n" +
                 "let sym = L <@> g |> compute\n" +
-                sprintf "let h = lambda(e) -> %s\n" hBody
+                $"let h = lambda(e) -> {hBody}\n"
             // Compact arm: heavy map directly over the compact symmetric array.
             let compactSrc = producer + "let result = method_for(sym) <@> h |> compute\n"
             // Decompact arm: widen to dense, then heavy map over the dense array.
@@ -581,9 +581,9 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             let decompactChain =
                 let mutable lines = [ "let dc0 = decompact(sym, 0)\n" ]
                 for k in 1 .. r - 2 do
-                    lines <- lines @ [ sprintf "let dc%d = decompact(dc%d, %d)\n" k (k-1) k ]
-                let lastName = sprintf "dc%d" (r - 2)
-                String.concat "" lines + sprintf "let dense = %s\n" lastName
+                    lines <- lines @ [ $"let dc{k} = decompact(dc{(k-1)}, {k})\n" ]
+                let lastName = $"dc{(r - 2)}"
+                String.concat "" lines + $"let dense = {lastName}\n"
             let decompactSrc =
                 producer +
                 decompactChain +
@@ -596,13 +596,13 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             // rectangular n^r, but only the map matters for the decompact-vs-
             // dense comparison since both run the identical map afterward.)
             let denseSrc =
-                sprintf "let A = [%s]\n" aLit +
-                sprintf "let L = method_for(%s)\n" args +
-                sprintf "let g2 = lambda(%s) -> %s\n" varList prodSum +
+                $"let A = [{aLit}]\n" +
+                $"let L = method_for({args})\n" +
+                $"let g2 = lambda({varList}) -> {prodSum}\n" +
                 "let dense = L <@> g2 |> compute\n" +
-                sprintf "let h = lambda(e) -> %s\n" hBody +
+                $"let h = lambda(e) -> {hBody}\n" +
                 "let result = method_for(dense) <@> h |> compute\n"
-            let label = sprintf "decompact-probe r=%d n=%d" r n
+            let label = $"decompact-probe r={r} n={n}"
             // Time ONLY the final map (binding "result"): the producer and the
             // decompact chain are attributed to setup, so what we compare is
             // purely the heavy map over each arm's array. The decompact and
@@ -615,15 +615,15 @@ let runDifferentialTimingTests () : Blade.Tests.TestHarness.BlockResult =
             let tF = timeEdgiProgramOnly outputDir (label + "_dense") denseSrc runs (Some "result")
             match tC, tD, tF with
             | Error e, _, _ ->
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "compact arm: %s" e)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"compact arm: {e}")
                 failed <- failed + 1
                 failedNames <- failedNames @ [label]
             | _, Error e, _ ->
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "decompact arm: %s" e)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"decompact arm: {e}")
                 failed <- failed + 1
                 failedNames <- failedNames @ [label]
             | _, _, Error e ->
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label (sprintf "dense arm: %s" e)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail label ($"dense arm: {e}")
                 failed <- failed + 1
                 failedNames <- failedNames @ [label]
             | Ok tc, Ok td, Ok tf ->

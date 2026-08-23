@@ -73,7 +73,7 @@ let runCliSmokeTests () : TH.BlockResult =
                  | Ok (0, output) when output.Contains "x = 7" ->
                      record runTest TH.Pass ""
                  | Ok (code, output) ->
-                     record runTest TH.Fail (sprintf "exit %d, output: %s" code (output.Trim())))
+                     record runTest TH.Fail $"exit {code}, output: {output.Trim()}")
                 // Non-verbose compiles must clean up: only source + executable remain.
                 let leftovers =
                     Directory.GetFiles(tmpDir)
@@ -90,8 +90,8 @@ let runCliSmokeTests () : TH.BlockResult =
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -141,7 +141,7 @@ let private runStrictPinTests () : TH.BlockResult =
             record "check: default surfaces the suggestion as a warning (exit 0)" TH.Pass ""
         else
             record "check: default surfaces the suggestion as a warning (exit 0)" TH.Fail
-                   (sprintf "exit %d, output: %s" code (out.Trim()))
+                   $"exit {code}, output: {out.Trim()}"
 
         // Strict: the same suggestion becomes an error and fails the build.
         let (code, out) = quietly (fun () -> checkFile unpinnedPath true)
@@ -149,7 +149,7 @@ let private runStrictPinTests () : TH.BlockResult =
             record "check --strict-pins: unpinned deduction is a BL4010 error (exit 1)" TH.Pass ""
         else
             record "check --strict-pins: unpinned deduction is a BL4010 error (exit 1)" TH.Fail
-                   (sprintf "exit %d, output: %s" code (out.Trim()))
+                   $"exit {code}, output: {out.Trim()}"
 
         // The suggestion is ACTIONABLE: applying the proposed pin clears it.
         let (code, out) = quietly (fun () -> checkFile pinnedPath true)
@@ -157,7 +157,7 @@ let private runStrictPinTests () : TH.BlockResult =
             record "check --strict-pins: the pinned twin passes" TH.Pass ""
         else
             record "check --strict-pins: the pinned twin passes" TH.Fail
-                   (sprintf "exit %d, output: %s" code (out.Trim()))
+                   $"exit {code}, output: {out.Trim()}"
 
         // The compile/emit/run lane (all three funnel through compileFile).
         let ((result: Result<string * string list, string>), _) =
@@ -167,7 +167,7 @@ let private runStrictPinTests () : TH.BlockResult =
             record "compile lane --strict-pins: fails before codegen" TH.Pass ""
         | Error e ->
             record "compile lane --strict-pins: fails before codegen" TH.Fail
-                   (sprintf "wrong error: %s" (e.Replace("\n", " | ")))
+                   ($"""wrong error: {(e.Replace("\n", " | "))}""")
         | Ok _ ->
             record "compile lane --strict-pins: fails before codegen" TH.Fail "compiled instead of failing"
 
@@ -183,8 +183,8 @@ let private runStrictPinTests () : TH.BlockResult =
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -245,14 +245,14 @@ let private runSurfacingTests () : TH.BlockResult =
             record name TH.Pass ""
         else
             record name TH.Fail
-                   (sprintf "exit %d, json: %s" code (out.Trim()))
+                   $"exit {code}, json: {out.Trim()}"
 
         // 2. ...and so do the deduced facts (channel (f)) on that arm.
         let name = "ide check --json: deduced[] is populated on the error arm"
         if out.Contains "\"deduced\":[" && out.Contains "\"kind\":\"comm\"" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "json: %s" (out.Trim()))
+            record name TH.Fail $"json: {out.Trim()}"
 
         // 3. Control: the pinned twin is clean and claims nothing.
         let (code, out, _) = quietly2 (fun () -> Blade.Ide.ideCheck pinnedPath)
@@ -260,7 +260,7 @@ let private runSurfacingTests () : TH.BlockResult =
         if code = 0 && not (out.Contains "BL4010") then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "exit %d, json: %s" code (out.Trim()))
+            record name TH.Fail $"exit {code}, json: {out.Trim()}"
 
         // 4. `check`: warnings render as diagnostics on STDERR, keeping
         // stdout ("OK") pipeable.
@@ -271,7 +271,7 @@ let private runSurfacingTests () : TH.BlockResult =
             record name TH.Pass ""
         else
             record name TH.Fail
-                   (sprintf "exit %d, stdout: %s, stderr: %s" code (out.Trim()) (err.Trim()))
+                   $"exit {code}, stdout: {out.Trim()}, stderr: {err.Trim()}"
 
         // 5. `check` on the erroring file still prints the warning (S1).
         let (code, _, err) = quietly2 (fun () -> checkFile errPath false)
@@ -279,7 +279,7 @@ let private runSurfacingTests () : TH.BlockResult =
         if code = 1 && err.Contains "warning[BL4010]" && err.Contains "error[BL2001]" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "exit %d, stderr: %s" code (err.Trim()))
+            record name TH.Fail $"exit {code}, stderr: {err.Trim()}"
 
         // 6. The compile lane agrees (compile/emit/run all funnel here).
         let ((result: Result<string * string list, string>), _, err) =
@@ -287,7 +287,7 @@ let private runSurfacingTests () : TH.BlockResult =
         let name = "compile lane: warnings print on the error arm too"
         match result with
         | Error _ when err.Contains "warning[BL4010]" -> record name TH.Pass ""
-        | Error _ -> record name TH.Fail (sprintf "no warning on stderr: %s" (err.Trim()))
+        | Error _ -> record name TH.Fail $"no warning on stderr: {err.Trim()}"
         | Ok _ -> record name TH.Fail "compiled instead of failing"
 
         // 7-9. The CERTIFICATE channels (BL4011's galilean twin BL4014, and
@@ -310,7 +310,7 @@ let private runSurfacingTests () : TH.BlockResult =
         if rendered.Contains "warning[BL4014]" && rendered.Contains "boost-invariant" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "rendered: %s" (rendered.Trim()))
+            record name TH.Fail $"rendered: {rendered.Trim()}"
 
         // 8. GalCertSuggestions reaches the shared warning-diagnostic assembly
         // and survives `skipPins`: a certificate owns no storage decision, so
@@ -326,14 +326,12 @@ let private runSurfacingTests () : TH.BlockResult =
         if hasBL4014 drained then record name TH.Pass ""
         else
             record name TH.Fail
-                   (sprintf "codes drained: %s"
-                            (drained |> List.map (fun d -> d.Code) |> String.concat ","))
+                   ($"""codes drained: {(drained |> List.map _.Code |> String.concat ",")}""")
         let name = "typeCheckWarningDiagnostics: BL4014 survives --strict-pins"
         if hasBL4014 drainedStrict then record name TH.Pass ""
         else
             record name TH.Fail
-                   (sprintf "codes drained: %s"
-                            (drainedStrict |> List.map (fun d -> d.Code) |> String.concat ","))
+                   ($"""codes drained: {(drainedStrict |> List.map _.Code |> String.concat ",")}""")
 
         // 9. CertFacts reaches `deduced[]` as STRUCTURED data through the real
         // mapping and renderer. Both disciplines share a renderer arm, so a
@@ -353,15 +351,15 @@ let private runSurfacingTests () : TH.BlockResult =
            && deducedJson.Contains "\"kind\":\"galilean\"" && deducedJson.Contains "\"name\":\"u,v\"" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "deduced json: %s" (deducedJson.Trim()))
+            record name TH.Fail $"deduced json: {deducedJson.Trim()}"
     finally
         try Directory.Delete(tmpDir, true) with _ -> ()
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -383,9 +381,8 @@ let private runIdeServeTests () : TH.BlockResult =
         results.Add((name, outcome))
     let esc = Blade.Ide.jsonEscape
     let checkReq (id: int) (tier: string) (file: string) (source: string) =
-        sprintf "{\"id\":%d,\"cmd\":\"check\",\"tier\":\"%s\",\"file\":\"%s\",\"source\":\"%s\"}"
-                id tier (esc file) (esc source)
-    let pingReq (id: int) = sprintf "{\"id\":%d,\"cmd\":\"ping\"}" id
+        $"{{\"id\":{id},\"cmd\":\"check\",\"tier\":\"{tier}\",\"file\":\"{(esc file)}\",\"source\":\"{(esc source)}\"}}"
+    let pingReq (id: int) = $"{{\"id\":{id},\"cmd\":\"ping\"}}"
     let shutdownReq = "{\"cmd\":\"shutdown\"}"
     /// Feed a whole conversation and split the transcript on the framing
     /// newline. The trailing "" is the proof that the LAST response was
@@ -426,7 +423,7 @@ let private runIdeServeTests () : TH.BlockResult =
         let name = "ping answers with ok/serve/version and echoes the id"
         match responses with
         | [r] when code = 0 && r.Contains "\"id\":7" && r.Contains "\"ok\":true"
-                   && r.Contains "\"serve\":1" && r.Contains (sprintf "\"version\":\"%s\"" compilerVersion) ->
+                   && r.Contains "\"serve\":1" && r.Contains $"\"version\":\"{compilerVersion}\"" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -449,7 +446,7 @@ let private runIdeServeTests () : TH.BlockResult =
         if raw.EndsWith "\n" && raw.Split('\n').Length = 2 && fastBody.Contains "\\n" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "%d newline-separated parts" (raw.Split('\n').Length))
+            record name TH.Fail $"{raw.Split('\n').Length} newline-separated parts"
 
         // 4. Full tier: monomorphization upgrades both HM values, and only
         // where it actually knows more than the typed AST did.
@@ -461,7 +458,7 @@ let private runIdeServeTests () : TH.BlockResult =
            && fullBody.Contains "\"concreteType\":\"Float64\"" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "exit %d, response: %s" code fullBody)
+            record name TH.Fail $"exit {code}, response: {fullBody}"
 
         // 5. `type` is never rewritten in place: the client wants both, and
         // decides which to show.
@@ -469,7 +466,7 @@ let private runIdeServeTests () : TH.BlockResult =
         if fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"T\",\"concreteType\":\"Int64\"" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "response: %s" fullBody)
+            record name TH.Fail $"response: {fullBody}"
 
         // 6. A file that TYPECHECKS but will not lower. The fast half of the
         // payload must survive intact (the editor keeps its hovers), the tier
@@ -561,7 +558,7 @@ let private runIdeServeTests () : TH.BlockResult =
         if srcCode = cliCode && swOut.ToString().TrimEnd('\r', '\n') = json then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "exit %d vs %d" srcCode cliCode)
+            record name TH.Fail $"exit {srcCode} vs {cliCode}"
 
         // 12. ...including the missing-file arm, which lives only in the
         // printing wrapper now.
@@ -580,7 +577,7 @@ let private runIdeServeTests () : TH.BlockResult =
         if code = 1 && out.Contains "File not found" && out.Contains "\"bindings\":[]" then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "exit %d, json: %s" code (out.Trim()))
+            record name TH.Fail $"exit {code}, json: {out.Trim()}"
     finally
         Directory.SetCurrentDirectory entryDir
         try Directory.Delete(tmpDir, true) with _ -> ()
@@ -588,8 +585,8 @@ let private runIdeServeTests () : TH.BlockResult =
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -644,12 +641,12 @@ let private runSurfaceTests () : TH.BlockResult =
         let ver = (try root.GetProperty("version").GetInt32() with _ -> -1)
         let cv = (try root.GetProperty("compilerVersion").GetString() with _ -> "")
         if ver = 1 && cv = compilerVersion then record name TH.Pass ""
-        else record name TH.Fail (sprintf "version %d, compilerVersion '%s'" ver cv)
+        else record name TH.Fail $"version {ver}, compilerVersion '{cv}'"
 
     // Accessors over the parsed document; every later case reads through these,
     // so a missing field degrades to an empty list and a readable failure
     // rather than an exception that takes the whole block down.
-    let rootOpt = parsed |> Option.map (fun d -> d.RootElement)
+    let rootOpt = parsed |> Option.map _.RootElement
     let strArrayIn (owner: System.Text.Json.JsonElement option) (field: string) : string list =
         match owner with
         | Some el ->
@@ -698,18 +695,18 @@ let private runSurfaceTests () : TH.BlockResult =
         [ if keywords |> List.tryHead <> Some ["let"; "KwLet"] then
             yield sprintf "keywords[0] = %A" (List.tryHead keywords)
           if keywords.Length <> Blade.Lexer.keywordEntries.Length then
-            yield sprintf "%d keywords, %d entries" keywords.Length Blade.Lexer.keywordEntries.Length
+            yield $"{keywords.Length} keywords, {Blade.Lexer.keywordEntries.Length} entries"
           if not (List.contains "<@>" operators) then yield "operators lacks <@>"
           if operators.Length <> Blade.Lexer.operatorEntries.Length then
-            yield sprintf "%d operators, %d entries" operators.Length Blade.Lexer.operatorEntries.Length
+            yield $"{operators.Length} operators, {Blade.Lexer.operatorEntries.Length} entries"
           if mathIntrinsic "binary" <> ["atan2"; "log_base"] then
             yield sprintf "binary intrinsics = %A" (mathIntrinsic "binary")
           if mathIntrinsic "unary" |> List.isEmpty then yield "unary intrinsics empty"
           if mathIntrinsic "complex" |> List.isEmpty then yield "complex intrinsics empty"
-          if scalarTypes.Length <> 16 then yield sprintf "%d scalar types" scalarTypes.Length
+          if scalarTypes.Length <> 16 then yield $"{scalarTypes.Length} scalar types"
           if scalarTypes <> Blade.TypeCheck.builtinScalarNames then yield "scalarTypes != builtinScalarNames"
           for b in coreBuiltins do
-            if not (Set.contains b builtins) then yield sprintf "builtins lacks %s" b
+            if not (Set.contains b builtins) then yield $"builtins lacks {b}"
           if not (List.contains "hermitian" builtinCalls) then yield "builtinCalls lacks hermitian"
           if not (List.contains "display.emit" builtinCalls) then yield "builtinCalls lacks display.emit" ]
     if List.isEmpty failures then record name TH.Pass ""
@@ -725,7 +722,7 @@ let private runSurfaceTests () : TH.BlockResult =
     let codesMatch = (diagnostics |> List.map (List.truncate 2)) = expected
     let phasesOk = diagnostics |> List.forall (fun e -> List.length e = 3 && e.[2] <> "")
     if codesMatch && phasesOk then
-        record name TH.Pass (sprintf "%d codes" diagnostics.Length)
+        record name TH.Pass $"{diagnostics.Length} codes"
     else
         record name TH.Fail
             (sprintf "%d emitted vs %d registered, phases ok: %b"
@@ -754,7 +751,7 @@ let private runSurfaceTests () : TH.BlockResult =
     let name = "the committed protocol/surface.json matches this compiler's render"
     match artifact "protocol/surface.json" with
     | Error tried ->
-        record name TH.Fail (sprintf "snapshot not found; looked in %s" tried)
+        record name TH.Fail $"snapshot not found; looked in {tried}"
     | Ok path ->
         let onDisk = File.ReadAllText(path).TrimEnd('\r', '\n')
         if onDisk = surfaceJson then record name TH.Pass ""
@@ -767,8 +764,7 @@ let private runSurfaceTests () : TH.BlockResult =
                 |> Option.defaultValue (min onDisk.Length surfaceJson.Length)
             let ctx (s: string) = s.Substring(max 0 (at - 30), min 80 (s.Length - max 0 (at - 30)))
             record name TH.Fail
-                (sprintf "diverges at %d (regenerate with `blade ide surface`)\n      file: %s\n      live: %s"
-                         at (ctx onDisk) (ctx surfaceJson))
+                ($"diverges at {at} (regenerate with `blade ide surface`)\n      file: {(ctx onDisk)}\n      live: {(ctx surfaceJson)}")
 
     // 6. The hand-authored knowledge base: the half of the package no generator
     // can produce, keyed by the SAME registry the surface carries so a new code
@@ -778,10 +774,10 @@ let private runSurfaceTests () : TH.BlockResult =
     let name = "protocol/data/diagnostics.json covers every registry code, with live examples"
     match artifact "protocol/data/diagnostics.json" with
     | Error tried ->
-        record name TH.Fail (sprintf "knowledge base not found; looked in %s" tried)
+        record name TH.Fail $"knowledge base not found; looked in {tried}"
     | Ok path ->
         match (try Some (System.Text.Json.JsonDocument.Parse(File.ReadAllText path)) with _ -> None) with
-        | None -> record name TH.Fail (sprintf "%s is not JSON" path)
+        | None -> record name TH.Fail $"{path} is not JSON"
         | Some kb ->
             let entries =
                 match kb.RootElement.TryGetProperty "codes" with
@@ -803,22 +799,22 @@ let private runSurfaceTests () : TH.BlockResult =
             let problems =
                 [ for (code, title) in Blade.Diagnostics.Codes.registryEntries do
                     match byCode.TryGetValue code with
-                    | false, _ -> yield sprintf "%s absent" code
+                    | false, _ -> yield $"{code} absent"
                     | true, e ->
                         if strOf e "title" <> title then
-                            yield sprintf "%s title '%s' <> registry '%s'" code (strOf e "title") title
-                        if strOf e "explanation" = "" then yield sprintf "%s has no explanation" code
-                        if strOf e "fix" = "" then yield sprintf "%s has no fix" code
+                            yield $"""{code} title '{(strOf e "title")}' <> registry '{title}'"""
+                        if strOf e "explanation" = "" then yield $"{code} has no explanation"
+                        if strOf e "fix" = "" then yield $"{code} has no fix"
                         for ex in listOf e "examples" do
                             match artifact ex with
-                            | Error _ -> yield sprintf "%s example missing: %s" code ex
+                            | Error _ -> yield $"{code} example missing: {ex}"
                             | Ok p ->
                                 if not ((File.ReadAllText p).Contains code) then
-                                    yield sprintf "%s example never mentions it: %s" code ex
+                                    yield $"{code} example never mentions it: {ex}"
                   for (code, _) in entries do
                     if not (Blade.Diagnostics.Codes.isRegistered code) then
-                        yield sprintf "'%s' is not a registered code" code ]
-            if List.isEmpty problems then record name TH.Pass (sprintf "%d codes" entries.Length)
+                        yield $"'{code}' is not a registered code" ]
+            if List.isEmpty problems then record name TH.Pass $"{entries.Length} codes"
             else record name TH.Fail (problems |> List.truncate 6 |> String.concat "; ")
 
     // ...and its docs[] half, which points into docs/ -- repo-only, so this leg
@@ -829,15 +825,15 @@ let private runSurfaceTests () : TH.BlockResult =
     else
         let missing = kbDocPaths |> Seq.distinct |> Seq.filter (File.Exists >> not) |> List.ofSeq
         if List.isEmpty missing then
-            record name TH.Pass (sprintf "%d paths" (kbDocPaths |> Seq.distinct |> Seq.length))
+            record name TH.Pass $"{kbDocPaths |> Seq.distinct |> Seq.length} paths"
         else record name TH.Fail (String.concat "; " missing)
 
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -864,13 +860,11 @@ let private runIdeEvalTests () : TH.BlockResult =
         results.Add((name, outcome))
     let esc = Blade.Ide.jsonEscape
     let evalReq (id: int) (session: string) (source: string) =
-        sprintf "{\"id\":%d,\"cmd\":\"eval\",\"session\":\"%s\",\"source\":\"%s\"}"
-                id (esc session) (esc source)
+        $"{{\"id\":{id},\"cmd\":\"eval\",\"session\":\"{(esc session)}\",\"source\":\"{(esc source)}\"}}"
     let resetReq (id: int) (session: string) =
-        sprintf "{\"id\":%d,\"cmd\":\"resetSession\",\"session\":\"%s\"}" id (esc session)
+        $"{{\"id\":{id},\"cmd\":\"resetSession\",\"session\":\"{esc session}\"}}"
     let checkReq (id: int) (file: string) (source: string) =
-        sprintf "{\"id\":%d,\"cmd\":\"check\",\"tier\":\"fast\",\"file\":\"%s\",\"source\":\"%s\"}"
-                id (esc file) (esc source)
+        $"{{\"id\":{id},\"cmd\":\"check\",\"tier\":\"fast\",\"file\":\"{(esc file)}\",\"source\":\"{(esc source)}\"}}"
     let shutdownReq = "{\"cmd\":\"shutdown\"}"
     /// One conversation, one serveLoop, one sessions dictionary -- so every
     /// scenario below has to send its whole story in a single call.
@@ -1041,7 +1035,7 @@ let private runIdeEvalTests () : TH.BlockResult =
         if code = 0 && responses.Length = 1 && raw.EndsWith "\n" && raw.Split('\n').Length = 2 then
             record name TH.Pass ""
         else
-            record name TH.Fail (sprintf "%d newline-separated parts" (raw.Split('\n').Length))
+            record name TH.Fail $"{raw.Split('\n').Length} newline-separated parts"
 
         // 11. A function declaration is silent like any declaration; a bare
         // reference to it still carries the signature the REPL would have
@@ -1368,8 +1362,8 @@ let private runIdeEvalTests () : TH.BlockResult =
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -1396,12 +1390,10 @@ let private runIdeCellsTests () : TH.BlockResult =
         results.Add((name, outcome))
     let esc = Blade.Ide.jsonEscape
     let cellsReq (id: int) (tier: string) (file: string) (cells: string list) =
-        let arr = cells |> List.map (fun c -> sprintf "\"%s\"" (esc c)) |> String.concat ","
-        sprintf "{\"id\":%d,\"cmd\":\"checkCells\",\"tier\":\"%s\",\"file\":\"%s\",\"cells\":[%s]}"
-                id tier (esc file) arr
+        let arr = cells |> List.map (fun c -> $"\"{esc c}\"") |> String.concat ","
+        $"{{\"id\":{id},\"cmd\":\"checkCells\",\"tier\":\"{tier}\",\"file\":\"{(esc file)}\",\"cells\":[{arr}]}}"
     let evalReq (id: int) (session: string) (source: string) =
-        sprintf "{\"id\":%d,\"cmd\":\"eval\",\"session\":\"%s\",\"source\":\"%s\"}"
-                id (esc session) (esc source)
+        $"{{\"id\":{id},\"cmd\":\"eval\",\"session\":\"{(esc session)}\",\"source\":\"{(esc source)}\"}}"
     let shutdownReq = "{\"cmd\":\"shutdown\"}"
     let drive (requests: string list) : int * string list * string =
         let input = new StringReader(String.concat "\n" requests + "\n")
@@ -1498,7 +1490,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         // later text moves up rather than the earlier one surviving.
         let name = "the assembled source typechecks: the in-between use is not unbound"
         if diagCount body = 0 then record name TH.Pass ""
-        else record name TH.Fail (sprintf "%d diagnostics: %s" (diagCount body) body)
+        else record name TH.Fail $"{diagCount body} diagnostics: {body}"
 
         // 5. A bare-expression cell cannot stand at top level in the file
         // grammar, so it carries a synthetic binding -- and the client needs
@@ -1547,7 +1539,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         let (code, responses, _) =
             drive [ "{\"cmd\":\"checkCells\",\"file\":\"a\",\"cells\":[]}"
                     "{\"id\":41,\"cmd\":\"checkCells\",\"cells\":[]}"
-                    sprintf "{\"id\":42,\"cmd\":\"checkCells\",\"file\":\"%s\"}" (esc nbPath)
+                    $"{{\"id\":42,\"cmd\":\"checkCells\",\"file\":\"{esc nbPath}\"}}"
                     shutdownReq ]
         let name = "checkCells rejects a missing id, file, or cells array"
         match responses with
@@ -1587,8 +1579,7 @@ let private runIdeCellsTests () : TH.BlockResult =
         let rebindBody = match responses with [r] -> r | _ -> ""
         let name = "a rebound Unit declaration supersedes the earlier one"
         if code = 0 && diagCount rebindBody = 0 then record name TH.Pass ""
-        else record name TH.Fail (sprintf "exit %d, %d diagnostics: %s"
-                                          code (diagCount rebindBody) rebindBody)
+        else record name TH.Fail ($"exit {code}, {(diagCount rebindBody)} diagnostics: {rebindBody}")
 
         // 10b. A cell that MIXES declarations with bare expressions. The eval
         // lane splits such a cell into statements; the check lane keeps it in
@@ -1647,8 +1638,8 @@ let private runIdeCellsTests () : TH.BlockResult =
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -1684,9 +1675,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
             let defText =
                 if def.ValueKind = System.Text.Json.JsonValueKind.Null then "null" else spanText def
             let uses = r.GetProperty("uses").EnumerateArray() |> Seq.map spanText |> List.ofSeq
-            yield sprintf "%s %s %s [%s]"
-                    (r.GetProperty("name").GetString()) (r.GetProperty("kind").GetString())
-                    defText (String.concat " " uses) ]
+            yield $"""{(r.GetProperty("name").GetString())} {(r.GetProperty("kind").GetString())} {defText} [{(String.concat " " uses)}]""" ]
     let expect name (source: string) (expected: string list) =
         let actual = refsOf source
         if actual = expected then record name TH.Pass ""
@@ -1759,7 +1748,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
         let nameLen = parts.[0].Length
         let spans =
             line.Substring(line.IndexOf(parts.[2]))
-            |> fun s -> s.Replace("[", " ").Replace("]", " ").Split([|' '|], StringSplitOptions.RemoveEmptyEntries)
+            |> _.Replace("[", " ").Replace("]", " ").Split([|' '|], StringSplitOptions.RemoveEmptyEntries)
         spans
         |> Array.forall (fun sp ->
             match sp.Split([|':'; '-'|]) with
@@ -1835,8 +1824,8 @@ let private runIdeReferencesTests () : TH.BlockResult =
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [sprintf "%d skipped" skipped] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
     { TH.BlockResult.Block = blockName
       Passed = passed
@@ -2323,6 +2312,6 @@ let rec internal dispatchTest (rest: string list) : int =
             let r = runTestCategoryFull name tests "./generated_cpp_tests"
             if r.Failed = 0 then 0 else 1
         | None -> eprintfn "Unknown test category: %s" cat; 1
-    | _ -> usageFailure (sprintf "unrecognized test invocation: test %s" (String.concat " " rest))
+    | _ -> usageFailure ($"""unrecognized test invocation: test {(String.concat " " rest)}""")
 
 /// Top-level command dispatch.

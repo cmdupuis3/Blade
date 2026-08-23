@@ -142,8 +142,8 @@ module TrainingOracle =
     let lossAndGrads (graphs: Graph[]) (w1: float[]) (w2: float[]) (w3: float[]) (wr: float[]) (br: float)
         : float * Grads =
         let traces = graphs |> Array.map (fun g -> forwardGraph g w1 w2 w3 wr br)
-        let preds = traces |> Array.map (fun t -> t.Pred)
-        let targets = graphs |> Array.map (fun g -> g.Target)
+        let preds = traces |> Array.map _.Pred
+        let targets = graphs |> Array.map _.Target
         let loss = Autodiff.mse preds targets
         let dPred = Autodiff.vjpMse preds targets 1.0
 

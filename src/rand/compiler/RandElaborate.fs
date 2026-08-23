@@ -40,9 +40,9 @@ let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some (SVInt n) -> Ok (int n)
-        | Some _ -> Error (sprintf "%s: '%s' is not a static int" what name)
-        | None -> Error (sprintf "%s: '%s' is not a `let static` binding (rand shapes must be static)" what name)
-    | _ -> Error (sprintf "%s: shape must be a static int or list of static ints" what)
+        | Some _ -> Error $"{what}: '{name}' is not a static int"
+        | None -> Error $"{what}: '{name}' is not a `let static` binding (rand shapes must be static)"
+    | _ -> Error $"{what}: shape must be a static int or list of static ints"
 
 /// Resolve a shape argument to its list of positive extents.
 let private resolveShape (statics: StaticEnv) (what: string) (shapeE: Expr) : Result<int list, string> =
@@ -55,7 +55,7 @@ let private resolveShape (statics: StaticEnv) (what: string) (shapeE: Expr) : Re
         acc |> Result.bind (fun xs ->
             staticInt statics what d |> Result.bind (fun n ->
                 if n > 0 then Ok (xs @ [n])
-                else Error (sprintf "%s: shape extents must be positive (got %d)" what n))))
+                else Error $"{what}: shape extents must be positive (got {n})")))
         (Ok [])
 
 /// The `rand` surface: (op, internal builtin, count of non-shape parameter arguments).
@@ -113,8 +113,7 @@ let private paramNames (op: string) : string list =
 let private elabOp (statics: StaticEnv) (op: string) (args: Expr list) : Result<Expr, string> =
     match ops |> List.tryFind (fun (o, _, _) -> o = op) with
     | None ->
-        Error (sprintf "rand: unknown op '%s' (available: %s)" op
-                   (ops |> List.map (fun (o, _, _) -> o) |> String.concat ", "))
+        Error ($"""rand: unknown op '{op}' (available: {(ops |> List.map (fun (o, _, _) -> o) |> String.concat ", ")})""")
     | Some (_, fn, nPars) ->
         // key + nPars distribution params + exactly one shape argument.
         if List.length args <> nPars + 2 then
@@ -124,7 +123,7 @@ let private elabOp (statics: StaticEnv) (op: string) (args: Expr list) : Result<
             let keyE = List.head args
             let parEs = args |> List.skip 1 |> List.take nPars
             let shapeE = List.last args
-            resolveShape statics (sprintf "rand.%s" op) shapeE
+            resolveShape statics $"rand.{op}" shapeE
             |> Result.map (fun dims ->
                 let dimEs = dims |> List.map (fun n -> syn (ExprLit (LitInt (int64 n))))
                 syn (ExprApp (v fn, (keyE :: parEs) @ dimEs)))
@@ -297,7 +296,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
     else
         let declsNoImport = decls |> List.filter (not << isRandImport)
         match resolveStatics declsNoImport with
-        | Error e -> Error (sprintf "rand elaboration: static resolution failed: %s" e)
+        | Error e -> Error $"rand elaboration: static resolution failed: {e}"
         | Ok (statics, _) ->
             declsNoImport |> List.fold (fun acc d ->
                 acc |> Result.bind (fun out ->

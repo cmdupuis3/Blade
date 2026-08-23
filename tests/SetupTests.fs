@@ -49,14 +49,14 @@ let runSetupTests () : BlockResult =
          | Ok o -> o.BlasLink = Some "-lmkl_rt" && o.BlasInclude = Some "/opt/mkl/include" && o.Flavor = Some "mkl"
          | Error _ -> false) "flavor lowercased"
     check "--blas=weird rejected"
-        (match Setup.parseArgs ["--blas=weird"] with Error _ -> true | Ok _ -> false) "mode validation"
+        (Setup.parseArgs ["--blas=weird"]).IsError "mode validation"
     check "--jobs x rejected"
-        (match Setup.parseArgs ["--jobs"; "x"] with Error _ -> true | Ok _ -> false) "int validation"
+        (Setup.parseArgs ["--jobs"; "x"]).IsError "int validation"
     check "trailing valueless flag rejected"
-        (match Setup.parseArgs ["--blas-link"] with Error _ -> true | Ok _ -> false) "missing value"
+        (Setup.parseArgs ["--blas-link"]).IsError "missing value"
 
     // ---- writeToolchain roundtrip through the live reader ----
-    let tmp = Path.Combine(Path.GetTempPath(), sprintf "blade_setup_rt_%d.json" (System.Diagnostics.Process.GetCurrentProcess().Id))
+    let tmp = Path.Combine(Path.GetTempPath(), $"blade_setup_rt_{(System.Diagnostics.Process.GetCurrentProcess().Id)}.json")
     do
         use _t = pinEnv "BLADE_TOOLCHAIN_FILE" tmp
         try
@@ -85,5 +85,5 @@ let runSetupTests () : BlockResult =
          |> List.forall (fun d -> (Setup.packageHint d).Length > 0))
         "per-OS table rows"
 
-    printFooter "Setup" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "Setup" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Setup"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

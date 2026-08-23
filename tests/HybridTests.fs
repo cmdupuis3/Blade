@@ -42,12 +42,12 @@ let runHybridTests () =
     let normalize (s: string) =
         s.Split('\n')
         |> Array.filter (fun l -> not (l.Contains "completed in"))
-        |> Array.map (fun l -> l.TrimEnd())
+        |> Array.map (_.TrimEnd())
         |> String.concat "\n"
         |> fun x -> x.Trim()
     let codegenOf (testName: string) (src: string) : Result<string, string> =
         match lower src with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
     let compileRunSerial (testName: string) (src: string) : Result<string, string> =
         match codegenOf testName src with
@@ -61,11 +61,11 @@ let runHybridTests () =
             // toolchain skip from a genuine compile failure with isSkipError.
             // Wrapping it in "compile: ..." destroyed that distinction.
             | Error e when isSkipError e -> Error e
-            | Error e -> Error (sprintf "compile: %s" e)
+            | Error e -> Error ($"compile: {e}")
             | Ok exe ->
                 match runExecutable exe with
                 | Ok (0, out) -> Ok out
-                | Ok (code, out) -> Error (sprintf "exit %d: %s" code (out.Substring(0, min 200 out.Length)))
+                | Ok (code, out) -> Error ($"exit {code}: {(out.Substring(0, min 200 out.Length))}")
                 | Error e -> Error e
 
     // ---------------------------------------------------------------
@@ -77,7 +77,7 @@ let runHybridTests () =
         | Error e -> e.Message
         | Ok _ -> ""
     let kernelWith (clause: string) =
-        sprintf "let f = lambda(x, y) where comm(x, y), %s -> x * y\n" clause
+        $"let f = lambda(x, y) where comm(x, y), {clause} -> x * y\n"
     check "mpi, omp accepted" (parseErrOf (kernelWith "mpi, omp(x: 1)") = "") (parseErrOf (kernelWith "mpi, omp(x: 1)"))
     check "mpi, cuda accepted" (parseErrOf (kernelWith "mpi, cuda(block: 64)") = "") (parseErrOf (kernelWith "mpi, cuda(block: 64)"))
     check "omp, mpi rejected with steering"
@@ -116,7 +116,7 @@ let R = method_for(A) <@> lambda(x) where %s -> x * 2.0 + 1.0 |> compute
            codegenOf "hyb_degrade" (denseSrc "omp(x: 1)") with
      | Ok a, Ok b ->
          check "gates off: `mpi, omp` emits byte-identical C++ to `omp`" (a = b)
-             (sprintf "lengths %d vs %d" a.Length b.Length)
+             ($"lengths {a.Length} vs {b.Length}")
      | Error e, _ | _, Error e -> check "gates off degradation" false e)
 
     // ---------------------------------------------------------------
@@ -183,7 +183,7 @@ let (u, v) = (method_for(A) <@> lambda(x) where %s -> x * 2.0 + 1.0) <&!> (metho
         printfn "  SKIP hybrid differentials: mpiexec not found"
     else
         let hybridDifferential (label: string) (src: string) (expectMarkers: (string * string) list) =
-            match compileRunSerial (sprintf "hyb_%s_ref" label) src with
+            match compileRunSerial ($"hyb_{label}_ref") src with
             // A missing toolchain is a SKIP; a lowering error, a compile failure,
             // or a nonzero exit of the ORACLE side is a FAILURE. Previously every
             // oracle error printed SKIP, which silently DELETED the differential:
@@ -194,29 +194,29 @@ let (u, v) = (method_for(A) <@> lambda(x) where %s -> x * 2.0 + 1.0) <&!> (metho
             | Error e when isSkipError e ->
                 printfn "  SKIP hybrid %s: serial reference unavailable (%s)" label e
             | Error e ->
-                check (sprintf "hybrid %s: serial reference builds and runs" label) false e
+                check ($"hybrid {label}: serial reference builds and runs") false e
             | Ok refOut when String.IsNullOrWhiteSpace (normalize refOut) ->
                 // An empty oracle makes every `normalize out = normalize refOut`
                 // comparison below a vacuous "" = "".
-                check (sprintf "hybrid %s: serial reference produced output" label) false
+                check ($"hybrid {label}: serial reference produced output") false
                     "serial reference printed nothing -- nothing to differentiate against"
             | Ok refOut ->
                 try
                     try
                         CodeGen.setMpiEmitMode true
-                        match codegenOf (sprintf "hyb_%s_mpi" label) src with
-                        | Error e -> check (sprintf "hybrid %s: lowers under gate" label) false e
+                        match codegenOf ($"hyb_{label}_mpi") src with
+                        | Error e -> check ($"hybrid {label}: lowers under gate") false e
                         | Ok cpp ->
                             for (what, marker) in expectMarkers do
-                                check (sprintf "hybrid %s: %s" label what) (cpp.Contains marker)
-                                    (sprintf "marker '%s' missing" marker)
+                                check ($"hybrid {label}: {what}") (cpp.Contains marker)
+                                    ($"marker '{marker}' missing")
                             CodeGen.deployRuntimeHeaders outDir
-                            let f = Path.Combine(outDir, sprintf "hyb_%s_mpi.cpp" label)
+                            let f = Path.Combine(outDir, $"hyb_{label}_mpi.cpp")
                             File.WriteAllText(f, cpp)
                             (match compileCpp f outDir with
                              | Error e ->
                                  if isSkipError e then printfn "  SKIP hybrid %s (compile skipped): %s" label e
-                                 else check (sprintf "hybrid %s: compiles" label) false e
+                                 else check ($"hybrid {label}: compiles") false e
                              | Ok exe ->
                                  for ranks in [1; 3] do
                                      for threads in ["1"; "4"] do
@@ -225,18 +225,18 @@ let (u, v) = (method_for(A) <@> lambda(x) where %s -> x * 2.0 + 1.0) <&!> (metho
                                          (try
                                              match runExecutableMpi ranks exe with
                                              | Ok (0, out) ->
-                                                 check (sprintf "hybrid %s: -n %d × OMP %s == serial" label ranks threads)
+                                                 check ($"hybrid {label}: -n {ranks} × OMP {threads} == serial")
                                                      (normalize out = normalize refOut)
-                                                     (sprintf "hybrid: %s" ((normalize out).Substring(0, min 160 (normalize out).Length)))
+                                                     ($"hybrid: {((normalize out).Substring(0, min 160 (normalize out).Length))}")
                                              | Ok (code, out) ->
-                                                 check (sprintf "hybrid %s: -n %d × OMP %s runs" label ranks threads) false
-                                                     (sprintf "exit %d: %s" code (out.Substring(0, min 160 out.Length)))
-                                             | Error e -> check (sprintf "hybrid %s: -n %d × OMP %s runs" label ranks threads) false e
+                                                 check ($"hybrid {label}: -n {ranks} × OMP {threads} runs") false
+                                                     ($"exit {code}: {(out.Substring(0, min 160 out.Length))}")
+                                             | Error e -> check ($"hybrid {label}: -n {ranks} × OMP {threads} runs") false e
                                           finally
                                              Environment.SetEnvironmentVariable("OMP_NUM_THREADS", prior)))
                     finally
                         CodeGen.setMpiEmitMode false
-                with ex -> check (sprintf "hybrid %s" label) false ex.Message
+                with ex -> check ($"hybrid {label}") false ex.Message
         hybridDifferential "dense" (denseSrc "mpi, omp(x: 1)")
             [ ("thread-aware MPI init", "MPI_THREAD_FUNNELED")
               ("omp pragma present", "#pragma omp")
@@ -358,17 +358,17 @@ let m2 = method_for(A, A) <@> lambda(x, y) where comm(x, y), %s -> x * y |> comp
                                   for ranks in [1; 3] do
                                       (match runExecutableMpi ranks exe with
                                        | Ok (0, out) ->
-                                           check (sprintf "mpi+cuda: -n %d == serial" ranks)
+                                           check ($"mpi+cuda: -n {ranks} == serial")
                                                (normalize out = normalize refOut)
-                                               (sprintf "hybrid: %s" ((normalize out).Substring(0, min 160 (normalize out).Length)))
+                                               ($"hybrid: {((normalize out).Substring(0, min 160 (normalize out).Length))}")
                                        | Ok (code, out) ->
-                                           check (sprintf "mpi+cuda: -n %d runs" ranks) false
-                                               (sprintf "exit %d: %s" code (out.Substring(0, min 200 out.Length)))
-                                       | Error e -> check (sprintf "mpi+cuda: -n %d runs" ranks) false e))
+                                           check ($"mpi+cuda: -n {ranks} runs") false
+                                               ($"exit {code}: {(out.Substring(0, min 200 out.Length))}")
+                                       | Error e -> check ($"mpi+cuda: -n {ranks} runs") false e))
                  finally
                      CodeGen.setMpiEmitMode false
                      CodeGen.setCudaEmitMode false
              with ex -> check "mpi+cuda hybrid" false ex.Message)
 
-    printFooter "Mixed Parallelism (hybrid)" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "Mixed Parallelism (hybrid)" [$"{passed} passed"; $"{failed} failed"]
     if failed > 0 then 1 else 0

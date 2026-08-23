@@ -48,7 +48,7 @@ let runAllocLayoutTests () : Blade.Tests.TestHarness.BlockResult =
         let exePath = Path.ChangeExtension(testSrc, exeExt)
         // Compile in cppDir so #include "nested_array_utilities.hpp" resolves to
         // the shipped headers, exactly as g++ resolves them for generated tests.
-        let args = sprintf "-std=c++17 %s -o \"%s\" \"%s\"" (optFlags ()) exePath testSrc
+        let args = $"-std=c++17 {(optFlags ())} -o \"{exePath}\" \"{testSrc}\""
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
@@ -124,4 +124,4 @@ let runAllocLayoutTests () : Blade.Tests.TestHarness.BlockResult =
                 // A nonzero exit must cost at least one Failed even when the
                 // summary claims p = n (e.g. the binary aborted after printing).
                 { Block = blockName; Passed = pPassed; Failed = max 1 pFailed; Skipped = 0
-                  FailedNames = (if failNames.IsEmpty then [sprintf "<exit %d>" rproc.ExitCode] else failNames) }
+                  FailedNames = (if failNames.IsEmpty then [$"<exit {rproc.ExitCode}>"] else failNames) }

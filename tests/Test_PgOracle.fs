@@ -220,7 +220,7 @@ let private buildRef (grp: PointGroup) (sIn: PgSpec) (sOut: PgSpec) : RefCase =
             for k in 0 .. dd - 1 do acc <- acc + int64 a.[i].[k] * int64 a.[k].[j]
             if acc <> int64 order * int64 a.[i].[j] then
                 if idem then
-                    idemDetail <- sprintf "(A*A)[%d][%d] = %d but |G|*A = %d" i j acc (int64 order * int64 a.[i].[j])
+                    idemDetail <- $"(A*A)[{i}][{j}] = {acc} but |G|*A = {(int64 order * int64 a.[i].[j])}"
                 idem <- false
 
     let p = Array.init dd (fun i -> Array.init dd (fun j -> Rat.make (bigint a.[i].[j]) (bigint order)))
@@ -395,13 +395,13 @@ let private compareExact (a: Rat[][]) (b: Rat[][]) : int * string =
         for j in 0 .. d - 1 do
             if a.[i].[j] <> b.[i].[j] then
                 if diffs = 0 then
-                    first <- sprintf "first at [%d][%d]: %s vs %s" i j (Rat.show a.[i].[j]) (Rat.show b.[i].[j])
+                    first <- $"first at [{i}][{j}]: {(Rat.show a.[i].[j])} vs {(Rat.show b.[i].[j])}"
                 diffs <- diffs + 1
     (diffs, first)
 
 let private showSpec (s: PgSpec) : string =
     if List.isEmpty s then "[]"
-    else s |> List.map (fun (n, m) -> sprintf "%s*%d" n m) |> String.concat "+"
+    else s |> List.map (fun (n, m) -> $"{n}*{m}") |> String.concat "+"
 
 /// The naive Σ mᵢ·nᵢ formula: the generic core with the FS weight forced to 1.
 /// Negative control (ii) is entirely about the gap between this and pgHomDim.
@@ -449,7 +449,7 @@ let runPgOracleTests () : BlockResult =
 
     for anc in anchors do
         let grp = anc.Grp
-        let tag = sprintf "%s %s -> %s" anc.Tag (showSpec anc.SIn) (showSpec anc.SOut)
+        let tag = $"{anc.Tag} {(showSpec anc.SIn)} -> {(showSpec anc.SOut)}"
         let dv = pgTotalDim grp anc.SIn
         let dw = pgTotalDim grp anc.SOut
         let dd = dw * dv
@@ -459,39 +459,38 @@ let runPgOracleTests () : BlockResult =
         // 1. THE REFERENCE PROJECTOR — exact, and about group elements only
         // ====================================================================
         let rf = buildRef grp anc.SIn anc.SOut
-        check (sprintf "%s: tr(P_ref) = pgHomDim = %d, an INTEGER (the FS formula's numerical shadow)" tag want)
+        check ($"{tag}: tr(P_ref) = pgHomDim = {want}, an INTEGER (the FS formula's numerical shadow)")
               (rf.Trace = Rat.ofInt want && rf.Trace.Den.IsOne)
-              (sprintf "tr = %s, dim V = %d, dim W = %d, dim Hom = %d, |G| = %d"
-                   (Rat.show rf.Trace) dv dw dd rf.Order)
-        check (sprintf "%s: P_ref idempotent and symmetric over Q (exact)" tag)
+              ($"tr = {(Rat.show rf.Trace)}, dim V = {dv}, dim W = {dw}, dim Hom = {dd}, |G| = {rf.Order}")
+        check ($"{tag}: P_ref idempotent and symmetric over Q (exact)")
               (rf.Idempotent && rf.Symmetric)
               (if not rf.Idempotent then rf.IdemDetail
                elif not rf.Symmetric then "A is not symmetric"
-               else sprintf "P^2 = P via A*A = %d*A, and A = A^T, over %d^2 entries" rf.Order dd)
+               else $"P^2 = P via A*A = {rf.Order}*A, and A = A^T, over {dd}^2 entries")
 
         // ====================================================================
         // 2. THE EMITTED BASIS — every column is an exact intertwiner
         // ====================================================================
         let cols = honestColumns grp anc.SIn anc.SOut |> List.toArray
-        check (sprintf "%s: the emitted basis has exactly pgHomDim = %d columns (sum over cells of e)" tag want)
+        check ($"{tag}: the emitted basis has exactly pgHomDim = {want} columns (sum over cells of e)")
               (cols.Length = want)
               (sprintf "%d columns over %d homBlocks pair(s); cells carry e = %s"
                    cols.Length (List.length (pgHomBlocks grp anc.SIn anc.SOut))
                    (pgHomBlocks grp anc.SIn anc.SOut
-                    |> List.map (fun (_, _, (l, _), _) -> sprintf "%s:%d" l (endDim (pgIrrep grp l).Fs))
+                    |> List.map (fun (_, _, (l, _), _) -> $"{l}:{(endDim (pgIrrep grp l).Fs)}")
                     |> String.concat " "))
         let breakers = cols |> Array.choose (fun c -> firstBreaker grp anc.SIn anc.SOut c)
-        check (sprintf "%s: every emitted column intertwines EXACTLY at every group element (integer)" tag)
+        check ($"{tag}: every emitted column intertwines EXACTLY at every group element (integer)")
               (breakers.Length = 0)
-              (if breakers.Length = 0 then sprintf "%d columns x %d elements, all exact" cols.Length rf.Order
-               else sprintf "%d column(s) break, first at word %s" breakers.Length breakers.[0])
+              (if breakers.Length = 0 then $"{cols.Length} columns x {rf.Order} elements, all exact"
+               else $"{breakers.Length} column(s) break, first at word {breakers.[0]}")
 
         // ====================================================================
         // 3. THE GRAM CLOSED FORM — d*I_e per cell, entrywise
         // ====================================================================
         match basisProjector dd cols with
         | None ->
-            check (sprintf "%s: Gram (B^T B) is invertible over Q" tag) false
+            check ($"{tag}: Gram (B^T B) is invertible over Q") false
                   "Gaussian elimination found a zero pivot - the emitted basis is dependent"
         | Some bs ->
             let mutable gramOk = true
@@ -507,11 +506,11 @@ let runPgOracleTests () : BlockResult =
                             gramBad <- sprintf "[%d][%d] = %O but the closed form says %O" p q bs.Gram.[p].[q] predicted
                         gramOk <- false
             // ... and the cells really do carry e columns apiece.
-            let cellSizes = cols |> Array.toList |> List.groupBy (fun c -> c.Cell)
+            let cellSizes = cols |> Array.toList |> List.groupBy (_.Cell)
             let sizesOk =
                 cellSizes |> List.forall (fun (_, cs) ->
                     List.length cs = endDim (pgIrrep grp (List.head cs).Label).Fs)
-            check (sprintf "%s: Gram = d*I_e per cell EXACTLY (%d cells, %d^2 entries)" tag (List.length cellSizes) cols.Length)
+            check ($"{tag}: Gram = d*I_e per cell EXACTLY ({(List.length cellSizes)} cells, {cols.Length}^2 entries)")
                   (gramOk && sizesOk)
                   (if not gramOk then gramBad
                    elif not sizesOk then "a cell does not carry e columns"
@@ -522,17 +521,16 @@ let runPgOracleTests () : BlockResult =
             // 4. THE PIN: P_basis = P_ref ENTRYWISE OVER Q
             // ================================================================
             let (diffs, firstDiff) = compareExact bs.P rf.P
-            check (sprintf "%s: B(B^T B)^-1 B^T = P_ref ENTRYWISE over Q, %d^2 entries, zero tolerance" tag dd)
+            check ($"{tag}: B(B^T B)^-1 B^T = P_ref ENTRYWISE over Q, {dd}^2 entries, zero tolerance")
                   (diffs = 0 && bs.Trace = rf.Trace)
-                  (if diffs = 0 then sprintf "identical; tr = %s on both sides" (Rat.show bs.Trace)
-                   else sprintf "%d of %d entries differ, %s (tr %s vs %s)"
-                            diffs (dd * dd) firstDiff (Rat.show bs.Trace) (Rat.show rf.Trace))
+                  (if diffs = 0 then $"identical; tr = {(Rat.show bs.Trace)} on both sides"
+                   else $"{diffs} of {(dd * dd)} entries differ, {firstDiff} (tr {(Rat.show bs.Trace)} vs {(Rat.show rf.Trace)})")
             if want = 0 then
                 let zeroOk =
                     rf.P |> Array.forall (Array.forall (fun v -> v = Rat.zero))
-                check (sprintf "%s: the ZERO anchor — P_ref is the zero matrix and the emitted basis is empty" tag)
+                check ($"{tag}: the ZERO anchor — P_ref is the zero matrix and the emitted basis is empty")
                       (zeroOk && cols.Length = 0 && diffs = 0)
-                      (sprintf "%d columns, tr = %s" cols.Length (Rat.show rf.Trace))
+                      ($"{cols.Length} columns, tr = {(Rat.show rf.Trace)}")
 
             // ================================================================
             // 5. NEGATIVE CONTROL (i) — DROP THE J COLUMNS
@@ -540,10 +538,10 @@ let runPgOracleTests () : BlockResult =
             let jCols = cols |> Array.filter (fun c -> c.K > 0)
             if jCols.Length > 0 then
                 let kept = cols |> Array.filter (fun c -> c.K = 0)
-                let affectedCells = jCols |> Array.map (fun c -> c.Cell) |> Array.distinct |> Array.length
+                let affectedCells = jCols |> Array.map (_.Cell) |> Array.distinct |> Array.length
                 match basisProjector dd kept with
                 | None ->
-                    check (sprintf "%s: NC(i) dropping the J columns -> trace deficit and P_basis <> P_ref" tag)
+                    check ($"{tag}: NC(i) dropping the J columns -> trace deficit and P_basis <> P_ref")
                           false "the reduced Gram was singular - control inconclusive"
                 | Some nb ->
                     let (nd, nfirst) = compareExact nb.P rf.P
@@ -571,14 +569,14 @@ let runPgOracleTests () : BlockResult =
             | Some (bi, bo) ->
                 let spur = cellColumn grp anc.SIn anc.SOut bi bo 0 0 [| [| 1; 0 |]; [| 0; -1 |] |]
                 let breaker = firstBreaker grp anc.SIn anc.SOut spur
-                check (sprintf "%s: NC(iii) the spurious End column diag(1,-1) is NOT an intertwiner — it dies at a named element" tag)
+                check ($"{tag}: NC(iii) the spurious End column diag(1,-1) is NOT an intertwiner — it dies at a named element")
                       (breaker = Some "r")
                       (sprintf "first breaking word = %s (R90 does not commute with diag(1,-1))"
                            (match breaker with Some w -> w | None -> "<none: the control did not fire>"))
                 let extended = Array.append cols [| spur |]
                 match basisProjector dd extended with
                 | None ->
-                    check (sprintf "%s: NC(iii) spurious column -> trace rises by 1 and P_basis <> P_ref" tag)
+                    check ($"{tag}: NC(iii) spurious column -> trace rises by 1 and P_basis <> P_ref")
                           false "the extended Gram was singular - control inconclusive"
                 | Some nb ->
                     let (nd, nfirst) = compareExact nb.P rf.P
@@ -589,7 +587,7 @@ let runPgOracleTests () : BlockResult =
                         nb.Gram.[n].[n] = bigint spur.Dim
                         && [ 0 .. n - 1 ] |> List.forall (fun p ->
                                nb.Gram.[n].[p] = BigInteger.Zero && nb.Gram.[p].[n] = BigInteger.Zero)
-                    check (sprintf "%s: NC(iii) tr rises to %d, P_basis <> P_ref — while the Gram closed form stays BLIND" tag (want + 1))
+                    check ($"{tag}: NC(iii) tr rises to {(want + 1)}, P_basis <> P_ref — while the Gram closed form stays BLIND")
                           (nb.Trace = Rat.ofInt (want + 1) && nd > 0 && gramBlind)
                           (sprintf "tr = %s (want %d); Gram[%d][%d] = %O = d with zero off-diagonal (indistinguishable from an honest column); %d of %d entries differ, %s"
                                (Rat.show nb.Trace) (want + 1) n n nb.Gram.[n].[n] nd (dd * dd) nfirst)
@@ -605,15 +603,15 @@ let runPgOracleTests () : BlockResult =
             pgHomBlocks grp anc.SIn anc.SOut
             |> List.exists (fun (_, _, (l, _), _) -> endDim (pgIrrep grp l).Fs > 1)
         if hasComplex then
-            check (sprintf "%s: NC(ii) the naive sum m_i*n_i says %d, but tr(P_ref) = %d — the FS correction is not optional" tag naive want)
+            check ($"{tag}: NC(ii) the naive sum m_i*n_i says {naive}, but tr(P_ref) = {want} — the FS correction is not optional")
                   (naive <> want && rf.Trace = Rat.ofInt want)
-                  (sprintf "naive %d vs FS-weighted %d vs exact trace %s" naive want (Rat.show rf.Trace))
+                  ($"naive {naive} vs FS-weighted {want} vs exact trace {(Rat.show rf.Trace)}")
         else
-            check (sprintf "%s: NC(ii) control is SILENT here — every label is of real type, so naive = FS = %d" tag want)
+            check ($"{tag}: NC(ii) control is SILENT here — every label is of real type, so naive = FS = {want}")
                   (naive = want && rf.Trace = Rat.ofInt want)
-                  (sprintf "naive %d = FS-weighted %d = exact trace %s" naive want (Rat.show rf.Trace))
+                  ($"naive {naive} = FS-weighted {want} = exact trace {(Rat.show rf.Trace)}")
 
     sw.Stop()
     printFooter "PG Oracle"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed; sprintf "%d ms" sw.ElapsedMilliseconds ]
+        [ $"{passed} passed"; $"{failed} failed"; $"{sw.ElapsedMilliseconds} ms" ]
     { Block = "PG Oracle"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

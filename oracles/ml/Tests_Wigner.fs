@@ -130,8 +130,7 @@ module Tests_Wigner =
                     let m2 = abs (e.C2 - l2)
                     let m3 = abs (e.C3 - l3)
                     m3 = abs (m1 - m2) || m3 = m1 + m2)
-            check (sprintf "real sparsity |m3| in {||m1|-|m2||, |m1|+|m2|} for (%d,%d,%d), %d nonzeros"
-                       l1 l2 l3 entries.Length) allOk
+            check ($"real sparsity |m3| in {{||m1|-|m2||, |m1|+|m2|}} for ({l1},{l2},{l3}), {entries.Length} nonzeros") allOk
 
         // THE SPEC DISCREPANCY, demonstrated: in the real basis the complex
         // rule m1 + m2 = m3 does NOT characterize the support. For
@@ -143,7 +142,7 @@ module Tests_Wigner =
         let violations =
             Wigner.realCGSparse 1 1 2
             |> Array.filter (fun e -> (e.C1 - 1) + (e.C2 - 1) <> e.C3 - 2)
-        check (sprintf "real (1,1,2): %d nonzeros violate the complex m-rule" violations.Length)
+        check $"real (1,1,2): {violations.Length} nonzeros violate the complex m-rule"
             (violations.Length > 0)
 
         section "wigner: Gaunt cross-validation against spherical harmonics"

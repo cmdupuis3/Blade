@@ -97,7 +97,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
     // The synthesized name must be free: splicing a second `f__grad` beside a
     // user function of that name would silently shadow one of them.
     (if Map.containsKey (fname + gradSuffix) ctx.Decls then
-        err fname (sprintf "a function named '%s%s' already exists in this module; grad would synthesize a colliding declaration -- rename it" fname gradSuffix)
+        err fname $"a function named '{fname}{gradSuffix}' already exists in this module; grad would synthesize a colliding declaration -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
     // Return type must be a Float scalar (checked syntactically; the
@@ -173,7 +173,7 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
                  | _ -> Some n)
             | _ -> None)
     match badArrayLocal with
-    | Some n -> err fname (sprintf "differentiable array local '%s' must be initialized by an array literal (aliases are not differentiable)" n)
+    | Some n -> err fname $"differentiable array local '{n}' must be initialized by an array literal (aliases are not differentiable)"
     | None ->
     let scalarCots = scalarDiff |> List.map (fun p -> NLet (dName p, true, fLit 0.0))
 
@@ -239,7 +239,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
     let isFloatish (t: TypeExpr) =
         isFloatTy t || (match t with TyNamed (("Float" | "Float64" | "Float32"), _ :: _) -> true | _ -> false)
     (if Map.containsKey (fname + jvpSuffix) ctx.Decls then
-        err fname (sprintf "a function named '%s%s' already exists in this module; jvp would synthesize a colliding declaration -- rename it" fname jvpSuffix)
+        err fname $"a function named '{fname}{jvpSuffix}' already exists in this module; jvp would synthesize a colliding declaration -- rename it"
      else Ok ())
     |> Result.bind (fun () ->
     match fd.ReturnType |> Option.map (resolveTy ctx) with
@@ -265,7 +265,7 @@ let private synthesizeJvp (ctx: Ctx) (trusted: bool) (fd: FunctionDecl) : Result
     let pickTangentPrefix (allNames: string list) =
         tangentPrefix.Value <-
             (let rec pick k =
-                let cand = if k = 0 then "__t_" else sprintf "__t%d_" k
+                let cand = if k = 0 then "__t_" else $"__t{k}_"
                 if allNames |> List.exists (fun n -> n.StartsWith cand) then pick (k + 1) else cand
              pick 0)
     prepareForSweeps ctx fd surrogateOf pickTangentPrefix trusted |> Result.bind (fun prep ->
@@ -363,9 +363,9 @@ let rec private rewriteExpr (requestsOrdered: ResizeArray<string * string>)
                      anticipated.Add (fname + suffix) |> ignore
                      Ok (re (ExprVar (fname + suffix)))
                  | ExprKind.ExprVar fname ->
-                     Error (sprintf "%s: '%s' is not a top-level function in this module (%s differentiates same-module named functions)" which fname which)
-                 | _ -> Error (sprintf "%s: argument must be a named top-level function (e.g. ad.%s(loss))" which which))
-         | _ -> Error (sprintf "%s: expects exactly one argument, the function to differentiate" which))
+                     Error $"{which}: '{fname}' is not a top-level function in this module ({which} differentiates same-module named functions)"
+                 | _ -> Error $"{which}: argument must be a named top-level function (e.g. ad.{which}(loss))")
+         | _ -> Error $"{which}: expects exactly one argument, the function to differentiate")
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
     | ExprKind.ExprApp (f, args) ->
         r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> re (ExprApp (f', args'))))
@@ -570,7 +570,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
                         else
                         match Map.tryFind fname available with
                         | None ->
-                            Error (sprintf "%s: '%s' is not available to differentiate (compose ad.grad/ad.jvp within one expression)" mode fname)
+                            Error $"{mode}: '{fname}' is not available to differentiate (compose ad.grad/ad.jvp within one expression)"
                         | Some fd ->
                             // Stamp the ambient synthesis span with the
                             // ROOT source decl's span (composition chains
@@ -698,14 +698,14 @@ let fuseProgram (program: Program) : Program =
                     funcDecls <- Map.add fd.Name fd funcDecls
                     if not (containsPipelineOp fd.Body) then d else
                     let ctx = ctxNow ()
-                    let ps = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+                    let ps = fd.Params |> List.map _.Name |> Set.ofList
                     let paramArrays =
                         fd.Params
                         |> List.filter (fun p ->
                             match p.Type with
                             | Some t -> (match resolveArrayTy ctx t with TyArray _ -> true | _ -> false)
                             | None -> false)
-                        |> List.map (fun p -> p.Name)
+                        |> List.map _.Name
                         |> Set.ofList
                     let body, _ =
                         fusePipelinesEnv ctx

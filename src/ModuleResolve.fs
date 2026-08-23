@@ -16,7 +16,7 @@
 //        a. $BLADE_STDLIB, when set and it exists (the override);
 //        b. <dir of the running Blade.exe>/stdlib, then that directory's
 //           parents up to `probeDepth` levels -- so a dev tree finds
-//           <repo>/stdlib from bin/Debug/net7.0 and bin/Release/net7.0 alike,
+//           <repo>/stdlib from bin/Debug/net10.0 and bin/Release/net10.0 alike,
 //           and a deployed tree finds the copy the .fsproj drops next to the
 //           binary;
 //        c. the same upward probe from the current working directory.
@@ -88,7 +88,7 @@ let isBuiltinModule (qname: QualifiedName) : bool =
 // Stdlib discovery
 
 /// How many parent directories the stdlib probe walks up from a starting
-/// point. bin/<config>/net7.0 -> repo root is 3; 5 leaves room for a
+/// point. bin/<config>/net10.0 -> repo root is 3; 5 leaves room for a
 /// publish layout without turning the probe into a filesystem crawl.
 let private probeDepth = 5
 
@@ -108,7 +108,7 @@ let private upwardStdlibCandidates (start: string) : string list =
 ///
 /// It exists because those two are not interchangeable and the copy used to
 /// win. `upwardStdlibCandidates` is nearest-first, so from
-/// bin/Release/net7.0/Blade.exe the copy at bin/Release/net7.0/stdlib shadowed
+/// bin/Release/net10.0/Blade.exe the copy at bin/Release/net10.0/stdlib shadowed
 /// <repo>/stdlib three levels up -- which meant a stdlib edit did nothing until
 /// a rebuild, and (because MSBuild's PreserveNewest compares timestamps) a
 /// RESTORED-OLDER file did nothing even then, surfacing later as a type error
@@ -213,20 +213,20 @@ let private scanFile (path: string) (source: string) : string * (QualifiedName *
 
 let private notFoundDiag (dotted: string) (span: Span) (candidates: string list) =
     let listed = candidates |> List.map (sprintf "  %s") |> String.concat "\n"
-    mkError "BL2004" PhResolve span (sprintf "module '%s' not found" dotted)
-    |> withNote (sprintf "searched:\n%s" listed)
+    mkError "BL2004" PhResolve span $"module '{dotted}' not found"
+    |> withNote $"searched:\n{listed}"
     |> withNote "set BLADE_STDLIB to point at a stdlib directory, or place the module beside the file that imports it"
 
 let private cycleDiag (chain: string list) (span: Span) =
     mkError "BL2005" PhResolve span
-        (sprintf "import cycle: %s" (String.concat " -> " chain))
+        ($"""import cycle: {(String.concat " -> " chain)}""")
     |> withNote "modules are compiled in dependency order, which a cycle makes impossible; break the cycle by moving the shared declarations into a third module"
 
 let private duplicateDiag (dotted: string) (pathA: string) (pathB: string) (span: Span) =
     mkError "BL2006" PhResolve span
-        (sprintf "module '%s' is declared by two files" dotted)
-    |> withNote (sprintf "first:  %s" pathA)
-    |> withNote (sprintf "second: %s" pathB)
+        $"module '{dotted}' is declared by two files"
+    |> withNote $"first:  {pathA}"
+    |> withNote $"second: {pathB}"
 
 /// A resolved file whose `module` header disagrees with the name it was
 /// imported under. Worth its own message because the import would otherwise
@@ -234,9 +234,9 @@ let private duplicateDiag (dotted: string) (pathA: string) (pathB: string) (span
 /// DECLARED name, so `import a.b` only ever binds a file that says `module a.b`.
 let private mismatchDiag (dotted: string) (declared: string) (path: string) (span: Span) =
     mkError "BL2006" PhResolve span
-        (sprintf "module '%s' resolved to a file that declares 'module %s'" dotted declared)
-    |> withNote (sprintf "file: %s" path)
-    |> withNote (sprintf "rename the header to `module %s`, or import it as `%s`" dotted declared)
+        $"module '{dotted}' resolved to a file that declares 'module {declared}'"
+    |> withNote $"file: {path}"
+    |> withNote $"rename the header to `module {dotted}`, or import it as `{declared}`"
 
 // Resolution
 
@@ -311,7 +311,7 @@ let resolveEntryWith (preScanned: Map<string, string * ModuleDecl>)
                 try readSource path
                 with ex ->
                     errors.Add(mkError "BL2004" PhResolve via
-                                   (sprintf "cannot read module file '%s': %s" path ex.Message))
+                                   $"cannot read module file '{path}': {ex.Message}")
                     ""
             let (stamp, declared, imports, parsed) =
                 match Map.tryFind path preScanned with

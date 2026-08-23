@@ -80,7 +80,7 @@ let blockCount (rgs: int[]) : int =
 /// and S(a, b) = 0 for b > a. int64 is overkill at m <= 6, just overflow safety.
 let stirling2 (m: int) (j: int) : int64 =
     if m < 0 || j < 0 then
-        failwithf "internal: stirling2 with a negative argument (m = %d, j = %d)" m j
+        failwith $"internal: stirling2 with a negative argument (m = {m}, j = {j})"
     elif j > m then 0L
     else
         let mutable prev : int64[] = Array.zeroCreate (j + 1)
@@ -98,8 +98,8 @@ let stirling2 (m: int) (j: int) : int64 =
 /// 1) -- the convention behind `permBiasDim(0, N) = 1`: an L = 0 output is
 /// the invariant readout, with exactly one Sn-linear form, not zero.
 let partitionCount (m: int) (n: int) : int64 =
-    if m < 0 then failwithf "internal: partitionCount with negative m (%d)" m
-    if n < 0 then failwithf "internal: partitionCount with negative block bound (%d)" n
+    if m < 0 then failwith $"internal: partitionCount with negative m ({m})"
+    if n < 0 then failwith $"internal: partitionCount with negative block bound ({n})"
     let mutable acc = 0L
     for j in 0 .. min n m do
         acc <- acc + stirling2 m j
@@ -112,8 +112,7 @@ let partitionCount (m: int) (n: int) : int64 =
 /// the header (`coarsens g_a g_b` = B_{g_b} evaluated at witness RGS(g_a)).
 let coarsens (gCoarse: int[]) (gFine: int[]) : bool =
     if gCoarse.Length <> gFine.Length then
-        failwithf "internal: coarsens on partitions of different sizes (%d vs %d)"
-            gCoarse.Length gFine.Length
+        failwith $"internal: coarsens on partitions of different sizes ({gCoarse.Length} vs {gFine.Length})"
     let m = gFine.Length
     let mutable ok = true
     for i in 0 .. m - 1 do
@@ -154,8 +153,7 @@ let private certify (m: int) (maxBlocks: int) (parts: int[] list) : unit =
     let got = int64 (List.length parts)
     let want = partitionCount m maxBlocks
     if got <> want then
-        failwithf "internal: the RGS odometer enumerated %d partitions of [%d] with <= %d blocks, but the Stirling recurrence says %d"
-            got m maxBlocks want
+        failwith $"internal: the RGS odometer enumerated {got} partitions of [{m}] with <= {maxBlocks} blocks, but the Stirling recurrence says {want}"
     // (2) the witness-evaluation matrix W.[a].[b] = coarsens g_a g_b is
     //     unitriangular over the emitted order: unit diagonal, and nothing
     //     below it (a basis function is 1 at a LATER witness only).
@@ -178,12 +176,11 @@ let private certify (m: int) (maxBlocks: int) (parts: int[] list) : unit =
 /// holds verbatim there too), but the surface refuses it anyway, see
 /// `checkPermSizing`.
 let permPartitions (m: int) (maxBlocks: int) : int[] list =
-    if m < 0 then failwithf "internal: permPartitions with negative position count (%d)" m
+    if m < 0 then failwith $"internal: permPartitions with negative position count ({m})"
     if m > maxPositions then
-        failwithf "internal: permPartitions with %d positions -- the S_n surface is capped at K + L <= %d (retired transforms-as-types plan section 3.6)"
-            m maxPositions
+        failwith $"internal: permPartitions with {m} positions -- the S_n surface is capped at K + L <= {maxPositions} (retired transforms-as-types plan section 3.6)"
     if maxBlocks < 0 then
-        failwithf "internal: permPartitions with negative block bound (%d)" maxBlocks
+        failwith $"internal: permPartitions with negative block bound ({maxBlocks})"
     let parts =
         rgsOdometer m
         |> List.filter (fun rgs -> blockCount rgs <= maxBlocks)
@@ -210,12 +207,12 @@ let permBiasDim (l: int) (n: int) : int =
 /// message; `mLabel` spells m the way the caller's arguments do.
 let checkPermSizing (what: string) (mLabel: string) (m: int) (n: int) : Result<unit, string> =
     if m < 0 then
-        Error (sprintf "%s: %s must be >= 0 (got %d)" what mLabel m)
+        Error $"{what}: {mLabel} must be >= 0 (got {m})"
     elif m > maxPositions then
         Error (sprintf "%s: %s = %d exceeds the cap of %d -- the S_n weight basis is one partition of the %s positions per weight (Bell(%d) = %d at the cap), and the emitted kernel is one loop nest per partition (retired transforms-as-types plan section 3.6)"
                    what mLabel m maxPositions mLabel maxPositions (partitionCount maxPositions maxPositions))
     elif n < 1 then
-        Error (sprintf "%s: N must be a static int >= 1 (got %d) -- it is the node-axis extent" what n)
+        Error $"{what}: N must be a static int >= 1 (got {n}) -- it is the node-axis extent"
     elif n < m then
         Error (sprintf "%s: N = %d is smaller than %s = %d. The S_n surface requires a static N >= %s so the weight basis is the FULL partition lattice of the %d positions (Bell(%d) = %d weights); at N = %d the lattice truncates to the partitions with at most N blocks (%d weights) -- a different basis, so the count, the weight layout and the emitted kernel all change. That TRUNCATED-BASIS variant is unsupported rather than silently substituted: raise N, or lower %s"
                    what n mLabel m mLabel m m (partitionCount m m) n (partitionCount m n) mLabel)

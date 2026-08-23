@@ -159,8 +159,8 @@ let private spaceCache = Dictionary<int * int, CellSpace>()
 
 let private cellSpace (j: int) (l: int) : CellSpace =
     if j < 1 || j > 4 then
-        failwithf "internal: SymPowerTables j = %d out of scope (1..4, plan section 6.5)" j
-    if l < 0 then failwithf "internal: SymPowerTables negative l (%d)" l
+        failwith $"internal: SymPowerTables j = {j} out of scope (1..4, plan section 6.5)"
+    if l < 0 then failwith $"internal: SymPowerTables negative l ({l})"
     match spaceCache.TryGetValue((j, l)) with
     | true, v -> v
     | _ ->
@@ -336,8 +336,7 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
             let mult = canon.Length
             let expectedMult = expected |> Map.tryFind L |> Option.defaultValue 0
             if mult <> expectedMult then
-                failwithf "internal: SymPowerTables(%d,%d): ker E at weight %d has dim %d but powerSpec says %d"
-                    j l L mult expectedMult
+                failwith $"internal: SymPowerTables({j},{l}): ker E at weight {L} has dim {mult} but powerSpec says {expectedMult}"
             if mult > 0 then
                 let toFull (v: Rat[]) =
                     let full = Array.create nCells Rat.zero
@@ -359,18 +358,18 @@ let symPowerExact (j: int) (l: int) : ExactWeightSpace list =
                                 v.[i] <- Rat.sub v.[i] (Rat.mul coef prev.[i])
                     let n2 = gramDotSp sp v v
                     if Rat.isZero n2 then
-                        failwithf "internal: SymPowerTables(%d,%d) L=%d: Gram-Schmidt hit a zero norm" j l L
+                        failwith $"internal: SymPowerTables({j},{l}) L={L}: Gram-Schmidt hit a zero norm"
                     gs.Add v
                     norm2.Add n2
                 // Re-verify E.v = 0 exactly for every RREF and GS row.
                 for v in Seq.append (Seq.ofArray rrefFull) gs do
                     if applyAct sp.EAct v |> Array.exists (fun x -> not (Rat.isZero x)) then
-                        failwithf "internal: SymPowerTables(%d,%d) L=%d: kernel vector not annihilated by E" j l L
+                        failwith $"internal: SymPowerTables({j},{l}) L={L}: kernel vector not annihilated by E"
                 spaces.Add { L = L; WeightCells = cols; Pivots = pivots
                              RrefRows = rrefFull; GsRows = gs.ToArray(); Norm2 = norm2.ToArray() }
         let total = spaces |> Seq.sumBy (fun w -> w.RrefRows.Length * (2 * w.L + 1))
         if total <> nCells then
-            failwithf "internal: SymPowerTables(%d,%d): occurrences cover %d of %d dimensions" j l total nCells
+            failwith $"internal: SymPowerTables({j},{l}): occurrences cover {total} of {nCells} dimensions"
         let res = List.ofSeq spaces
         exactCache.[(j, l)] <- res
         res
@@ -441,7 +440,7 @@ let symPowerTable (j: int) (l: int) : SymPowerTable =
                     if step > 0 then vec <- applyAct sp.FAct vec  // integer lowering
                     let n2 = gramDotSp sp vec vec
                     if Rat.isZero n2 then
-                        failwithf "internal: SymPowerTables(%d,%d) L=%d copy %d: lowering lost the vector at M=%d" j l L r M
+                        failwith $"internal: SymPowerTables({j},{l}) L={L} copy {r}: lowering lost the vector at M={M}"
                     let invNorm = 1.0 / sqrt (Rat.toFloat n2)   // diagonal unitarization
                     // Per-M realization: expand each monomial's arrangements through conj(U).
                     let dM = Array.zeroCreate<Complex> nCells

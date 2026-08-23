@@ -222,10 +222,7 @@ let internal isNestedLoopComputeArg (e: IRExpr) : bool =
 /// `arr<i>` placeholder and the nest peels an identifier that was never
 /// declared. Hoisting it to its own let-RHS routes it through the ordinary
 /// array-literal emission, exactly as let-binding it by hand would.
-let internal isInlineArrayLitArg (e: IRExpr) : bool =
-    match e with
-    | IRArrayLit _ -> true
-    | _ -> false
+let internal isInlineArrayLitArg (e: IRExpr) : bool = e.IsIRArrayLit
 
 /// An ARRAY-VALUED SELECT sitting directly in a loop form's `Arrays` list --
 /// the third instance of the same gap as `isInlineArrayLitArg`. A recursive

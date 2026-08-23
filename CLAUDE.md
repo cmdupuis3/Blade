@@ -78,7 +78,7 @@ legacy/                    pre-rename Blade-DSL artifacts. Do not imitate.
 dotnet build Blade.fsproj -c Release
 ```
 
-The binary is `bin/Release/net7.0/Blade.exe` (below, `blade` = that exe or
+The binary is `bin/Release/net10.0/Blade.exe` (below, `blade` = that exe or
 `dotnet run --project Blade.fsproj -c Release --`):
 
 ```bash
@@ -92,7 +92,7 @@ blade test                    # full default suite
 `--strict-pins` (valid on `check`/`emit`/`compile`/`run`) promotes BL4010 pin suggestions to
 errors; it also has its own test block, `blade test strict-pins`.
 
-Requirements: .NET 7 SDK; MSYS2 **ucrt64** g++ on PATH for anything that compiles C++
+Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything that compiles C++
 (`C:\msys64\ucrt64\bin`). `blade test cuda` additionally needs a vcvars64 environment
 (cl.exe + nvcc) with ucrt64 layered on top.
 

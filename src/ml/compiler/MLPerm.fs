@@ -122,7 +122,7 @@ let private bl4012 (span: Span) (msg: string) : Blade.Diagnostics.Diagnostic =
 let private statusStr (st: PowStatus) : string =
     match st with
     | Pow 0 -> "invariant (Pow 0 -- fixed by every node relabelling)"
-    | Pow k -> sprintf "node-covariant of rank %d (Pow %d -- a flat N^%d buffer transforming as sigma^(x%d))" k k k k
+    | Pow k -> $"node-covariant of rank {k} (Pow {k} -- a flat N^{k} buffer transforming as sigma^(x{k}))"
     | PowUnsized -> "invariant-shaped but of unestablished extent (it cannot be claimed fixed: if its cell count lands in a node-power space, an arbitrary buffer there is not S_n-fixed)"
     | POpaque -> "unclassifiable"
 
@@ -146,7 +146,7 @@ let private staticArgValue (statics: StaticEnv) (e: Expr) : Result<StaticValue, 
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some sv -> Ok sv
-        | None -> Error (sprintf "'%s' is not a `let static` binding" name)
+        | None -> Error $"'{name}' is not a `let static` binding"
     | _ -> Error "expected a `let static` binding name or literal"
 
 // Certified-signature table
@@ -172,7 +172,7 @@ let rec private statusOfIndex (depth: int) (n: int) (aliases: Map<string, TypeEx
     match ix with
     | TyIdx extentE ->
         evalExpr statics fuel extentE
-        |> Result.mapError (fun m -> sprintf "the Idx<> extent does not resolve statically (%s) -- a perm-certified signature is classified by extent" m)
+        |> Result.mapError (fun m -> $"the Idx<> extent does not resolve statically ({m}) -- a perm-certified signature is classified by extent")
         |> Result.bind (fun sv ->
             match sv with
             | SVInt m ->
@@ -185,9 +185,9 @@ let rec private statusOfIndex (depth: int) (n: int) (aliases: Map<string, TypeEx
     | TyNamed (nm, []) when depth > 0 && (Map.containsKey nm aliases) ->
         statusOfIndex (depth - 1) n aliases statics (Map.find nm aliases)
     | TyNamed (nm, _) ->
-        Error (sprintf "'%s' is not an `Idx<>` index type. %s" nm v2Note)
+        Error $"'{nm}' is not an `Idx<>` index type. {v2Note}"
     | _ ->
-        Error (sprintf "only plain `Idx<>` axes are classified in a perm-certified signature. %s" v2Note)
+        Error $"only plain `Idx<>` axes are classified in a perm-certified signature. {v2Note}"
 
 /// Classify a signature annotation. Certified functions must be fully
 /// annotated; the rank-1 `Array<_ like Idx<M>>` shape is the only array form.
@@ -199,7 +199,7 @@ and private statusOfType (depth: int) (n: int) (aliases: Map<string, TypeExpr>) 
         | [] -> Ok (Pow 0)
         | [ ix ] -> statusOfIndex depth n aliases statics ix
         | _ ->
-            Error (sprintf "a rank-%d array cannot be classified in a perm-certified signature. %s" idxs.Length v2Note)
+            Error $"a rank-{idxs.Length} array cannot be classified in a perm-certified signature. {v2Note}"
     | TyNamed (nm, []) when depth > 0 && (Map.containsKey nm aliases) ->
         // `type X = Idx<N>` / `type Y = Float` used bare in a parameter slot.
         statusOfType (depth - 1) n aliases statics (Map.find nm aliases)
@@ -210,7 +210,7 @@ and private statusOfType (depth: int) (n: int) (aliases: Map<string, TypeExpr>) 
     | TyBounded (baseTy, _, _) -> statusOfType depth n aliases statics baseTy
     | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyBool | TyComplex128 -> Ok (Pow 0)
     | _ ->
-        Error (sprintf "cannot classify this annotation in a perm-certified signature (supported: scalars and `Array<_ like Idx<M>>`). %s" v2Note)
+        Error $"cannot classify this annotation in a perm-certified signature (supported: scalars and `Array<_ like Idx<M>>`). {v2Note}"
 
 /// The conjunct's single argument: an int literal or a `let static` name.
 /// N >= 2 is required -- see powClass.
@@ -223,14 +223,14 @@ let private resolveN (statics: StaticEnv) (funcName: string) (args: string list)
             | _ ->
                 match Map.tryFind a statics.Values with
                 | Some (SVInt n) -> Ok (int n)
-                | Some _ -> Error (sprintf "function '%s': perm_equiv(%s) -- '%s' is a `let static` binding but not an int; N is the node-axis extent" funcName a a)
-                | None -> Error (sprintf "function '%s': perm_equiv(%s) -- N must be an int literal or the name of a `let static` int binding (the node-axis extent)" funcName a)
+                | Some _ -> Error $"function '{funcName}': perm_equiv({a}) -- '{a}' is a `let static` binding but not an int; N is the node-axis extent"
+                | None -> Error $"function '{funcName}': perm_equiv({a}) -- N must be an int literal or the name of a `let static` int binding (the node-axis extent)"
         raw |> Result.bind (fun n ->
             if n < 2 then
-                Error (sprintf "function '%s': perm_equiv(%d) -- N must be >= 2. Node-covariance is classified by the FLAT extent of a parameter (Idx<M> is Pow k iff M = N^k), and only N >= 2 makes the powers N^0 < N^1 < ... strictly increasing, hence the rank unique; at N = 1 every extent is 1 = N^k for every k. S_1 is the trivial group, so the certificate would be vacuous in any case" funcName n)
+                Error $"function '{funcName}': perm_equiv({n}) -- N must be >= 2. Node-covariance is classified by the FLAT extent of a parameter (Idx<M> is Pow k iff M = N^k), and only N >= 2 makes the powers N^0 < N^1 < ... strictly increasing, hence the rank unique; at N = 1 every extent is 1 = N^k for every k. S_1 is the trivial group, so the certificate would be vacuous in any case"
             else Ok n)
     | _ ->
-        Error (sprintf "function '%s': perm_equiv expects exactly one argument -- the node-axis extent N, as in `where ml.perm_equiv(4)`" funcName)
+        Error $"function '{funcName}': perm_equiv expects exactly one argument -- the node-axis extent N, as in `where ml.perm_equiv(4)`"
 
 /// Pre-scan: every DeclFunction carrying a normalized ("__ml_perm_equiv", [N])
 /// conjunct gets a certified signature. Errors are BL4012 at the decl.
@@ -247,7 +247,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                 match conjs with
                 | [] -> Ok table
                 | _ :: _ :: _ ->
-                    fail (sprintf "function '%s': duplicate perm_equiv constraints -- declare exactly one node-axis extent" fd.Name)
+                    fail $"function '{fd.Name}': duplicate perm_equiv constraints -- declare exactly one node-axis extent"
                 | [ (_, args) ] ->
                     match resolveN statics fd.Name args with
                     | Error m -> fail m
@@ -258,7 +258,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                                 acc |> Result.bind (fun ps ->
                                     match p.Type with
                                     | None ->
-                                        Error (sprintf "function '%s': a perm-certified function must annotate every parameter and its return type ('%s' is unannotated) -- the certificate is read off the extents" fd.Name p.Name)
+                                        Error $"function '{fd.Name}': a perm-certified function must annotate every parameter and its return type ('{p.Name}' is unannotated) -- the certificate is read off the extents"
                                     | Some t ->
                                         statusOfType aliasDepth n aliases statics t
                                         |> Result.mapError (sprintf "function '%s', parameter '%s': %s" fd.Name p.Name)
@@ -268,7 +268,7 @@ let buildCertTable (statics: StaticEnv) (decls: Located<Decl> list)
                         | Error m -> fail m
                         | Ok ps ->
                             match fd.ReturnType with
-                            | None -> fail (sprintf "function '%s': a perm-certified function must annotate its return type" fd.Name)
+                            | None -> fail $"function '{fd.Name}': a perm-certified function must annotate its return type"
                             | Some rt ->
                                 match statusOfType aliasDepth n aliases statics rt
                                       |> Result.mapError (sprintf "function '%s', return type: %s" fd.Name) with
@@ -395,7 +395,7 @@ let private combinePointwise (sts: PowStatus list) : Result<PowStatus, string> =
 
 let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
     : Result<PowStatus, Blade.Diagnostics.Diagnostic> =
-    let reject msg = Error (bl4012 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
+    let reject msg = Error (bl4012 e.Span $"function '{ctx.FuncName}': {msg}")
     let j = judge ctx env
     match e.Kind with
     | ExprKind.ExprLit _ -> Ok (Pow 0)
@@ -408,11 +408,11 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
         |> Result.bind (fun sts ->
             match sts |> List.tryFind (fun s -> match s with Pow k -> k > 0 | _ -> false) with
             | Some st ->
-                reject (sprintf "packing a %s into a literal aggregate loses its node-axis structure -- the aggregate does not transform as a node power" (statusStr st))
+                reject $"packing a {statusStr st} into a literal aggregate loses its node-axis structure -- the aggregate does not transform as a node power"
             | None ->
                 match powClass (int64 ctx.N) (int64 es.Length) with
                 | Some k when k > 0 ->
-                    reject (sprintf "a %d-cell literal aggregate lands in the node-power space N^%d, and an arbitrary constant there is NOT S_n-invariant (only the constants with every cell equal are). The complete space of equivariant constants is ml.derive_perm_bias(%d, %d, b)" es.Length k k ctx.N)
+                    reject $"a {es.Length}-cell literal aggregate lands in the node-power space N^{k}, and an arbitrary constant there is NOT S_n-invariant (only the constants with every cell equal are). The complete space of equivariant constants is ml.derive_perm_bias({k}, {ctx.N}, b)"
                 | _ -> if sts |> List.exists ((=) POpaque) then Ok POpaque else Ok (Pow 0))
     | ExprKind.ExprVar n ->
         match Map.tryFind n env with
@@ -454,15 +454,14 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
             match srcSts |> List.tryFindIndex (fun s -> match s with Pow k -> k > 0 | _ -> false) with
             | Some i ->
                 Error (bl4012 sources.[i].Span
-                           (sprintf "function '%s': the kernel of this former would receive COMPONENTS of a source that is %s; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"
-                                ctx.FuncName (statusStr srcSts.[i])))
+                           ($"function '{ctx.FuncName}': the kernel of this former would receive COMPONENTS of a source that is {(statusStr srcSts.[i])}; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"))
             | None ->
                 let covariant =
                     freeVars Set.empty e |> Set.toList |> List.tryFind (fun n ->
                         match Map.tryFind n env with Some (Pow k) -> k > 0 | _ -> false)
                 match covariant with
                 | Some n ->
-                    reject (sprintf "the kernel of this former would receive COMPONENTS of node-covariant '%s'; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear" n)
+                    reject $"the kernel of this former would receive COMPONENTS of node-covariant '{n}'; component access inside perm-certified bodies requires per-axis tracking, which is not implemented. Use the whole-array elementwise operators (pointwise maps commute with relabelling) or ml.derive_perm_linear"
                 | None ->
                     // Only a single source, itself proven fixed, transfers
                     // that proof to the result; anything else is unsized.
@@ -478,7 +477,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
             // invariant, rejecting Rep * Rep outright (BL4008).
             | OpAdd | OpSub | OpMul | OpDiv ->
                 combinePointwise [ sl; sr ]
-                |> Result.mapError (fun m -> bl4012 e.Span (sprintf "function '%s': %s" ctx.FuncName m))
+                |> Result.mapError (fun m -> bl4012 e.Span $"function '{ctx.FuncName}': {m}")
             | _ ->
                 match sl, sr with
                 | Pow 0, Pow 0 -> Ok (Pow 0)
@@ -492,7 +491,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                 j t |> Result.bind (fun st ->
                 j f |> Result.bind (fun sf ->
                     if st = sf then Ok st
-                    else reject (sprintf "if branches disagree: then-branch is %s, else-branch is %s" (statusStr st) (statusStr sf))))
+                    else reject $"if branches disagree: then-branch is {statusStr st}, else-branch is {statusStr sf}"))
             | _ -> reject "an if condition inside a perm-certified body must be invariant -- branching on a node-covariant value makes the result depend on the node labelling")
     | ExprKind.ExprMatch (scrut, cases) ->
         j scrut |> Result.bind (fun ss ->
@@ -513,12 +512,12 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
             | _, (Pow 0 | PowUnsized) -> judge ctx (bindPatternVars PowUnsized env binding.Pattern) body
             | _, _ -> reject "cannot destructure a node-covariant value -- bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
-        let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
+        let captured = freeVars (Set.ofList (ps |> List.map _.Name)) lamBody
         let covCapture =
             captured |> Set.toList |> List.tryFind (fun n ->
                 match Map.tryFind n env with Some (Pow k) -> k > 0 | _ -> false)
         match covCapture with
-        | Some n -> reject (sprintf "lambda captures node-covariant '%s' -- factor node work into perm-certified functions instead" n)
+        | Some n -> reject $"lambda captures node-covariant '{n}' -- factor node work into perm-certified functions instead"
         | None -> Ok (Pow 0)
     | ExprKind.ExprAssign (l, r) ->
         judgeAssign ctx env e.Span l r |> Result.map (fun () -> Pow 0)
@@ -551,9 +550,9 @@ let rec private judge (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr)
                 | Pow 0, Pow 0 -> Ok (Pow 0)
                 | POpaque, _ | _, POpaque -> Ok POpaque
                 | (PowUnsized, _ | _, PowUnsized) ->
-                    Error (bl4012 e.Span (sprintf "function '%s': reduce over a value of unestablished extent cannot be called invariant -- if the source lands in the node-power space its cells move with the labelling, and the combiner is not checked for commutativity. Annotate the source's extent, or use ml.derive_perm_linear(K, 0, %d, x, w), the complete invariant readout" ctx.FuncName ctx.N))
+                    Error (bl4012 e.Span $"function '{ctx.FuncName}': reduce over a value of unestablished extent cannot be called invariant -- if the source lands in the node-power space its cells move with the labelling, and the combiner is not checked for commutativity. Annotate the source's extent, or use ml.derive_perm_linear(K, 0, {ctx.N}, x, w), the complete invariant readout")
                 | _ ->
-                    Error (bl4012 e.Span (sprintf "function '%s': reduce over a node-covariant value is invariant only for a commutative combiner, which is not checked -- the certified invariant readout is ml.derive_perm_linear(K, 0, %d, x, w), whose basis is COMPLETE (every S_n-invariant linear form on the node power is one weight setting)" ctx.FuncName ctx.N))))
+                    Error (bl4012 e.Span $"function '{ctx.FuncName}': reduce over a node-covariant value is invariant only for a commutative combiner, which is not checked -- the certified invariant readout is ml.derive_perm_linear(K, 0, {ctx.N}, x, w), whose basis is COMPLETE (every S_n-invariant linear form on the node power is one weight setting)")))
     | _ -> Ok POpaque
 
 and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt list)
@@ -568,14 +567,14 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt lis
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
                     | _, (Pow 0 | PowUnsized) -> Ok (bindPatternVars PowUnsized env binding.Pattern)
                     | _, _ ->
-                        Error (bl4012 binding.Value.Span (sprintf "function '%s': cannot destructure a node-covariant value -- bind it whole" ctx.FuncName)))
+                        Error (bl4012 binding.Value.Span $"function '{ctx.FuncName}': cannot destructure a node-covariant value -- bind it whole"))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
             | StmtAssign (l, _, r) -> judgeAssign ctx env l.Span l r |> Result.map (fun () -> env)
             | StmtForIn (v, range, body) ->
                 judge ctx env range |> Result.bind (fun sr ->
                     match sr with
                     | Pow k when k > 0 ->
-                        Error (bl4012 range.Span (sprintf "function '%s': cannot iterate a node-covariant value as a range" ctx.FuncName))
+                        Error (bl4012 range.Span $"function '{ctx.FuncName}': cannot iterate a node-covariant value as a range")
                     | _ ->
                         judgeStmts ctx (Map.add v PowUnsized env) body |> Result.map (fun _ -> env))
             | _ -> Ok env))
@@ -585,13 +584,13 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, PowStatus>) (stmts: Stmt lis
 /// into a node power are the write-side twin of the component READ v1 defers.
 and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l: Expr) (r: Expr)
     : Result<unit, Blade.Diagnostics.Diagnostic> =
-    let fail msg = Error (bl4012 span (sprintf "function '%s': %s" ctx.FuncName msg))
+    let fail msg = Error (bl4012 span $"function '{ctx.FuncName}': {msg}")
     judge ctx env r |> Result.bind (fun sr ->
         match l.Kind with
         | ExprKind.ExprVar n ->
             match Map.tryFind n env with
             | Some st when st = sr -> Ok ()
-            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s -- a mut binding must keep one status" n (statusStr st) (statusStr sr))
+            | Some st -> fail $"assignment changes '{n}' from {statusStr st} to {statusStr sr} -- a mut binding must keep one status"
             | None -> Ok ()
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, idxArgs) ->
             // element write: INDICES are judged first (catalog finding 2 --
@@ -605,21 +604,18 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l
                         | Pow 0 -> Ok ()
                         | PowUnsized ->
                             Error (bl4012 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is invariant-shaped but of unestablished extent -- the judgment cannot rule out that the cell it selects moves with the node labelling"
-                                            ctx.FuncName))
+                                       ($"function '{ctx.FuncName}': an array index must be invariant inside a perm-certified body, and this one is invariant-shaped but of unestablished extent -- the judgment cannot rule out that the cell it selects moves with the node labelling"))
                         | Pow _ ->
                             Error (bl4012 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, but this one is %s -- the cell it selects moves with the node labelling"
-                                            ctx.FuncName (statusStr si)))
+                                       ($"function '{ctx.FuncName}': an array index must be invariant inside a perm-certified body, but this one is {(statusStr si)} -- the cell it selects moves with the node labelling"))
                         | POpaque ->
                             Error (bl4012 a.Span
-                                       (sprintf "function '%s': an array index must be invariant inside a perm-certified body, and this one is unclassifiable -- the judgment cannot rule out that the cell it selects moves with the node labelling. Index with a static offset or a value the judgment can see"
-                                            ctx.FuncName)))))
+                                       ($"function '{ctx.FuncName}': an array index must be invariant inside a perm-certified body, and this one is unclassifiable -- the judgment cannot rule out that the cell it selects moves with the node labelling. Index with a static offset or a value the judgment can see")))))
                 (Ok ())
             |> Result.bind (fun () ->
                 match Map.tryFind n env with
                 | Some (Pow k) when k > 0 ->
-                    fail (sprintf "element-assignment into node-covariant '%s' writes ONE cell of a node power, which cannot be told from an equivariant reassembly without per-axis tracking. Build node powers with ml.derive_perm_linear / ml.derive_perm_bias / ml.perm_matmul, or with whole-array elementwise arithmetic" n)
+                    fail $"element-assignment into node-covariant '{n}' writes ONE cell of a node power, which cannot be told from an equivariant reassembly without per-axis tracking. Build node powers with ml.derive_perm_linear / ml.derive_perm_bias / ml.perm_matmul, or with whole-array elementwise arithmetic"
                 | _ ->
                     match sr with
                     | Pow k when k > 0 -> fail "cannot store a node-covariant value into an array element"
@@ -631,30 +627,27 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, PowStatus>) (span: Span) (l
 
 and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr) (args: Expr list)
     : Result<PowStatus, Blade.Diagnostics.Diagnostic> =
-    let reject msg = Error (bl4012 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
+    let reject msg = Error (bl4012 e.Span $"function '{ctx.FuncName}': {msg}")
     let judgeAll args = judgeEach (judge ctx env) args
     let requirePow (what: string) (k: int) (argE: Expr) =
         judge ctx env argE |> Result.bind (fun s ->
             if s = Pow k then Ok ()
             elif s = PowUnsized && k = 0 then
                 Error (bl4012 argE.Span
-                           (sprintf "function '%s': %s must be invariant, and this argument is invariant-SHAPED but of unestablished extent -- the op's theorem holds only if those cells do not move when the nodes are relabelled, and a buffer that lands in the node-power space does move. Annotate the extent, or build the equivariant constants with ml.derive_perm_bias"
-                                ctx.FuncName what))
+                           ($"function '{ctx.FuncName}': {what} must be invariant, and this argument is invariant-SHAPED but of unestablished extent -- the op's theorem holds only if those cells do not move when the nodes are relabelled, and a buffer that lands in the node-power space does move. Annotate the extent, or build the equivariant constants with ml.derive_perm_bias"))
             else
                 Error (bl4012 argE.Span
-                           (sprintf "function '%s': %s must be %s, but the argument is %s"
-                                ctx.FuncName what (statusStr (Pow k)) (statusStr s))))
+                           ($"function '{ctx.FuncName}': {what} must be {(statusStr (Pow k))}, but the argument is {(statusStr s)}")))
     let staticInt (what: string) (argE: Expr) : Result<int, Blade.Diagnostics.Diagnostic> =
         staticArgValue ctx.Statics argE
         |> Result.bind (fun sv -> match sv with SVInt n -> Ok (int n) | _ -> Error "must be a static int")
-        |> Result.mapError (fun m -> bl4012 argE.Span (sprintf "function '%s': %s: %s" ctx.FuncName what m))
+        |> Result.mapError (fun m -> bl4012 argE.Span $"function '{ctx.FuncName}': {what}: {m}")
     /// The op's N must be THE certificate's N: one function body, one node axis.
     let requireN (op: string) (n': int) (argE: Expr) =
         if n' = ctx.N then Ok ()
         else
             Error (bl4012 argE.Span
-                       (sprintf "function '%s': ml.%s is called with N = %d, but this function is certified `ml.perm_equiv(%d)`. A certificate names ONE node axis -- an S_%d-equivariant op proves nothing about S_%d relabellings. Match the extents, or split the body into two certified functions"
-                            ctx.FuncName op n' ctx.N n' ctx.N))
+                       ($"function '{ctx.FuncName}': ml.{op} is called with N = {n'}, but this function is certified `ml.perm_equiv({ctx.N})`. A certificate names ONE node axis -- an S_{n'}-equivariant op proves nothing about S_{ctx.N} relabellings. Match the extents, or split the body into two certified functions"))
     match f.Kind with
     // ml ops (surface-visible pre-rewrite)
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.MlAliases ->
@@ -683,32 +676,32 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                      // (P A P^T)(P B P^T) = P (A B) P^T -- shipped BY NAME.
                      Pow 2))))
          | ("derive_perm_linear" | "derive_perm_bias" | "perm_matmul"), _ ->
-             reject (sprintf "%s: unrecognized call shape inside a perm-certified body" op)
+             reject $"{op}: unrecognized call shape inside a perm-certified body"
          | _ ->
              // every other ml.* op: its arguments live in irreps or sizing
              // space, neither carrying a node axis, so invariants in/out.
              judgeAll args |> Result.bind (fun sts ->
                  if sts |> List.forall ((=) (Pow 0)) then Ok (Pow 0)
                  elif sts |> List.forall (fun st -> st = Pow 0 || st = PowUnsized) then Ok PowUnsized
-                 else reject (sprintf "ml.%s carries no S_n rule for node-covariant arguments -- the node-axis ops are ml.derive_perm_linear, ml.derive_perm_bias and ml.perm_matmul" op)))
+                 else reject $"ml.{op} carries no S_n rule for node-covariant arguments -- the node-axis ops are ml.derive_perm_linear, ml.derive_perm_bias and ml.perm_matmul"))
     // named callees
     | ExprKind.ExprVar fn ->
         match Map.tryFind fn ctx.Certs with
         | Some cert ->
             if cert.N <> ctx.N then
-                reject (sprintf "call to '%s': it is certified for N = %d, this function for N = %d -- certificates do not transfer between node-axis extents" fn cert.N ctx.N)
+                reject $"call to '{fn}': it is certified for N = {cert.N}, this function for N = {ctx.N} -- certificates do not transfer between node-axis extents"
             elif List.length args <> List.length cert.Params then
-                reject (sprintf "call to '%s': expected %d arguments" fn (List.length cert.Params))
+                reject $"call to '{fn}': expected {List.length cert.Params} arguments"
             else
                 (List.zip cert.Params args)
                 |> List.fold (fun acc ((pName, pSt), argE) ->
                     acc |> Result.bind (fun () ->
                         match pSt with
-                        | POpaque -> reject (sprintf "call to '%s': parameter '%s' is unclassifiable" fn pName)
+                        | POpaque -> reject $"call to '{fn}': parameter '{pName}' is unclassifiable"
                         // Unreachable from a signature (statusOfType answers Pow
                         // or Error); stated so a future classifier can't slip past.
-                        | PowUnsized -> reject (sprintf "call to '%s': parameter '%s' has no established extent" fn pName)
-                        | Pow k -> requirePow (sprintf "'%s' parameter '%s'" fn pName) k argE))
+                        | PowUnsized -> reject $"call to '{fn}': parameter '{pName}' has no established extent"
+                        | Pow k -> requirePow $"'{fn}' parameter '{pName}'" k argE))
                     (Ok ())
                 |> Result.map (fun () -> cert.Return)
         | None ->
@@ -716,7 +709,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
             | Some (Pow k) when k > 0 ->
                 // A read out of a node power, LEGAL for a bound loop-variable
                 // index; v1 has no such tracking, so it refuses uniformly.
-                reject (sprintf "component access into node-covariant '%s' inside a perm-certified body requires per-axis tracking, which is not implemented: a bound-index read (which reassembles equivariantly) cannot be told from a fixed-offset one (which does not). Whole-array elementwise operators are pointwise, hence equivariant, and ml.derive_perm_linear(K, 0, %d, x, w) is the complete invariant readout" fn ctx.N)
+                reject $"component access into node-covariant '{fn}' inside a perm-certified body requires per-axis tracking, which is not implemented: a bound-index read (which reassembles equivariantly) cannot be told from a fixed-offset one (which does not). Whole-array elementwise operators are pointwise, hence equivariant, and ml.derive_perm_linear(K, 0, {ctx.N}, x, w) is the complete invariant readout"
             | _ ->
                 judgeAll args |> Result.bind (fun sts ->
                     match sts |> List.tryFindIndex (fun s -> s <> Pow 0 && s <> PowUnsized) with
@@ -744,11 +737,10 @@ and private judgeApp (ctx: Ctx) (env: Map<string, PowStatus>) (e: Expr) (f: Expr
                         // is EQUIVARIANT -- opposite of MLEquiv's verdict.
                         if isPointwiseBuiltin fn then
                             combinePointwise sts
-                            |> Result.mapError (fun m -> bl4012 e.Span (sprintf "function '%s': %s" ctx.FuncName m))
+                            |> Result.mapError (fun m -> bl4012 e.Span $"function '{ctx.FuncName}': {m}")
                         else
                             Error (bl4012 args.[i].Span
-                                       (sprintf "function '%s': a node-covariant value escapes to '%s', which carries no perm certificate -- certify it with `where ml.perm_equiv(%d)` or pass only invariants"
-                                            ctx.FuncName fn ctx.N)))
+                                       ($"function '{ctx.FuncName}': a node-covariant value escapes to '{fn}', which carries no perm certificate -- certify it with `where ml.perm_equiv({ctx.N})` or pass only invariants")))
     | _ ->
         judgeAll args |> Result.bind (fun sts ->
             judge ctx env f |> Result.bind (fun sf ->
@@ -773,7 +765,7 @@ let judgeFunction (certs: Map<string, PermSig>) (statics: StaticEnv) (mlAliases:
             if st = cert.Return then []
             else
                 [ bl4012 fd.Body.Span
-                      (sprintf "function '%s': the body is %s but the declared return type says %s -- the certificate requires them to agree" fd.Name (statusStr st) (statusStr cert.Return)) ]
+                      $"function '{fd.Name}': the body is {statusStr st} but the declared return type says {statusStr cert.Return} -- the certificate requires them to agree" ]
 
 // Constraint-registry handler
 
@@ -787,10 +779,10 @@ let private permHandler : Blade.Constraints.ConstraintHandler = {
         | [ a ] ->
             match System.Int32.TryParse a with
             | true, n when n < 2 ->
-                Error (sprintf "function '%s': perm_equiv(%d) -- N must be >= 2 (the node-axis extent; S_1 is trivial and the flat extent keying needs strictly increasing powers)" funcName n)
+                Error $"function '{funcName}': perm_equiv({n}) -- N must be >= 2 (the node-axis extent; S_1 is trivial and the flat extent keying needs strictly increasing powers)"
             | _ -> Ok () // an int >= 2, or a `let static` name the elaborator resolves
         | _ ->
-            Error (sprintf "function '%s': perm_equiv expects exactly one argument -- the node-axis extent N, as in `where ml.perm_equiv(4)`" funcName)
+            Error $"function '{funcName}': perm_equiv expects exactly one argument -- the node-axis extent N, as in `where ml.perm_equiv(4)`"
     EnterBody = fun _ _ -> ()
     ExitBody = fun _ _ -> ()
     Discharge = fun _ _ _ -> Ok ()

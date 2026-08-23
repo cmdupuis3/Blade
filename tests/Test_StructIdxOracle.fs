@@ -108,30 +108,30 @@ let runStructIdxOracleTests () : BlockResult =
                 (fun cell -> Ok (pred cell))
         match theirs with
         | Error e ->
-            check (sprintf "%s: StructIdxSpec.enumerateBox succeeds" label) false e
+            check ($"{label}: StructIdxSpec.enumerateBox succeeds") false e
             None
         | Ok box ->
-            check (sprintf "%s: enumerateBox succeeds" label) true
-                  (sprintf "card %d" box.Card)
+            check ($"{label}: enumerateBox succeeds") true
+                  ($"card {box.Card}")
             // ORDER first: it is the strictly stronger claim, and when it
             // passes the set check below is guaranteed, so a lone SET failure
             // can only mean the two routes disagree on membership.
-            check (sprintf "%s: entries agree in ORDER (list equality)" label)
+            check ($"{label}: entries agree in ORDER (list equality)")
                   (box.Entries = mine)
-                  (if box.Entries = mine then sprintf "%d entries" mine.Length
-                   else sprintf "spec [%s] vs oracle [%s]" (show box.Entries) (show mine))
-            check (sprintf "%s: entries agree as a SET" label)
+                  (if box.Entries = mine then $"{mine.Length} entries"
+                   else $"spec [{(show box.Entries)}] vs oracle [{(show mine)}]")
+            check ($"{label}: entries agree as a SET")
                   (Set.ofList box.Entries = Set.ofList mine)
-                  (sprintf "spec %d, oracle %d" box.Entries.Length mine.Length)
+                  ($"spec {box.Entries.Length}, oracle {mine.Length}")
             // Card is asserted against BOTH the oracle's count and the spec's
             // own list, so a closed-form card that drifts from the entries it
             // describes fails here rather than silently downstream.
-            check (sprintf "%s: Card equals the oracle's count" label)
+            check ($"{label}: Card equals the oracle's count")
                   (box.Card = mine.Length)
-                  (sprintf "spec Card %d, oracle count %d" box.Card mine.Length)
-            check (sprintf "%s: Card equals the spec's OWN entry count" label)
+                  ($"spec Card {box.Card}, oracle count {mine.Length}")
+            check ($"{label}: Card equals the spec's OWN entry count")
                   (box.Card = box.Entries.Length)
-                  (sprintf "Card %d, |Entries| %d" box.Card box.Entries.Length)
+                  ($"Card {box.Card}, |Entries| {box.Entries.Length}")
             Some (box, mine)
 
     // -----------------------------------------------------------------------
@@ -168,7 +168,7 @@ let runStructIdxOracleTests () : BlockResult =
         let bySum v = box.Entries |> List.filter (fun r -> List.item 2 r = v) |> List.length
         check "CGm112: the 2/3/2 split by m_out = -1, 0, +1"
               (bySum -1L = 2 && bySum 0L = 3 && bySum 1L = 2)
-              (sprintf "%d/%d/%d" (bySum -1L) (bySum 0L) (bySum 1L))
+              ($"{(bySum -1L)}/{(bySum 0L)}/{(bySum 1L)}")
         // Every entry actually satisfies the constraint, and every entry lies
         // in the box. Cheap, but it is the check that catches an enumerator
         // emitting a correctly-SIZED wrong set.
@@ -197,7 +197,7 @@ let runStructIdxOracleTests () : BlockResult =
     // -----------------------------------------------------------------------
     let sweep lo =
         let fields = [ ("m1", -1L, 1L); ("m2", -1L, 1L); ("m_out", -lo, lo) ]
-        compareRoutes (sprintf "sweep lo=%d" lo) fields cgPred
+        compareRoutes ($"sweep lo={lo}") fields cgPred
     let cards =
         [ 0L; 1L; 2L ] |> List.map (fun lo ->
             match sweep lo with Some (b, _) -> b.Card | None -> -1)
@@ -308,10 +308,10 @@ let runStructIdxOracleTests () : BlockResult =
     check "an undecidable cell FAILS the enumeration (it is not treated as false)"
           (match failed3 with Error _ -> true | Ok _ -> false)
           (match failed3 with
-           | Ok b -> sprintf "returned Ok with card %d" b.Card
+           | Ok b -> $"returned Ok with card {b.Card}"
            | Error e -> e)
 
     printFooter "Struct Idx Oracle (third route)"
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+        [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "Struct Idx Oracle"; Passed = passed; Failed = failed
       Skipped = 0; FailedNames = failedNames }

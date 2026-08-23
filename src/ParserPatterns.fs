@@ -58,7 +58,7 @@ and parseAtomicPattern (tokens: Token list) : ParseResult<Pattern> =
     
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Unexpected token in pattern: %s" (describeToken kind)) line col
+        error $"Unexpected token in pattern: {describeToken kind}" line col
     
     | None ->
         errorEof "Expected pattern but got end of file"
@@ -129,7 +129,7 @@ and parseStructPattern (name: string) (tokens: Token list) : ParseResult<Pattern
 let parseIdentList (tokens: Token list) : ParseResult<string list> =
     let rec loop acc toks =
         match toks with
-        | t :: rest when (match t.Kind with TokIdent _ -> true | _ -> false) ->
+        | t :: rest when t.Kind.IsTokIdent ->
             let name = match t.Kind with TokIdent n -> n | _ -> ""
             match rest with
             | t2 :: rest2 when t2.Kind = TokComma -> loop (name :: acc) rest2
@@ -194,7 +194,7 @@ let rec private parseOmpArgs (acc: (string * int) list) (tokens: Token list) : P
             match rest with
             | t2 :: rest2 when t2.Kind = TokComma -> parseOmpArgs acc' rest2
             | _ -> Ok (List.rev acc', rest)
-        | _ -> error (sprintf "Expected integer in omp(...) but got %s" (describeToken t.Kind)) t.Line t.Col
+        | _ -> error $"Expected integer in omp(...) but got {describeToken t.Kind}" t.Line t.Col
     | [] -> errorEof "Expected integer in omp(...) but got end of file"
 
 let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
@@ -206,9 +206,9 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
     // here with steering; shape-dependent checks (device eligibility, fold
     // reassociation) stay in codegen.
     let rec loop comms (antis: string list list) (par: ParallelStrategy list) custom toks =
-        let isOmp = function Omp _ -> true | _ -> false
-        let isCuda = function Cuda _ -> true | _ -> false
-        let isMpi = function Mpi -> true | _ -> false
+        let isOmp (s: ParallelStrategy) = s.IsOmp
+        let isCuda (s: ParallelStrategy) = s.IsCuda
+        let isMpi (s: ParallelStrategy) = s.IsMpi
         let rejectPair (line: int) (col: int) (incoming: string) =
             if List.length par >= 2 then
                 error "At most two parallelization strategies per where-clause (outer, inner)" line col
@@ -283,7 +283,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                     expectIdent afterLParen >>= fun key afterKey ->
                     if key <> "block" then
                         let line, col = currentPos afterLParen
-                        error (sprintf "Expected 'block' in cuda(...) but got '%s'" key) line col
+                        error $"Expected 'block' in cuda(...) but got '{key}'" line col
                     else
                         expect TokColon afterKey >>= fun _ afterColon ->
                         match afterColon with
@@ -292,7 +292,7 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
                             | TokInt n ->
                                 expect TokRParen rest >>= fun _ remaining ->
                                 loop comms antis (par @ [Cuda { BlockSize = int n }]) custom remaining
-                            | _ -> error (sprintf "Expected integer block size but got %s" (describeToken t.Kind)) t.Line t.Col
+                            | _ -> error $"Expected integer block size but got {describeToken t.Kind}" t.Line t.Col
                         | [] -> errorEof "Expected integer block size but got end of file"
                 | _ ->
                     // bare `cuda` => default block size
@@ -336,9 +336,9 @@ let parseWhereClause (tokens: Token list) : ParseResult<WhereClause> =
             let line, col = currentPos toks
             match dupInAnti, bothWays with
             | Some n, _ ->
-                error (sprintf "'%s' appears in two anticomm(...) groups: an argument belongs to at most one anticommutativity relation (the groups would fuse into one axis with two contradictory layouts)" n) line col
+                error $"'{n}' appears in two anticomm(...) groups: an argument belongs to at most one anticommutativity relation (the groups would fuse into one axis with two contradictory layouts)" line col
             | _, Some n ->
-                error (sprintf "'%s' is declared both comm(...) and anticomm(...): one exchange cannot be both commutative (inclusive triangle, diagonal stored) and anticommutative (strict triangle, diagonal zero)" n) line col
+                error $"'{n}' is declared both comm(...) and anticomm(...): one exchange cannot be both commutative (inclusive triangle, diagonal stored) and anticommutative (strict triangle, diagonal zero)" line col
             | None, None ->
             success {
                 Commutativity = List.rev comms

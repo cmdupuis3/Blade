@@ -571,7 +571,7 @@ type internal SymmetricBehavior() =
         member _.ClassName = "Symmetric"
         member _.Symmetry = SymSymmetric
         member _.Validate ix =
-            if ix.Rank < 2 then Error (sprintf "Symmetric index requires rank >= 2 (got %d): a symmetry relation needs at least two components" ix.Rank)
+            if ix.Rank < 2 then Error $"Symmetric index requires rank >= 2 (got {ix.Rank}): a symmetry relation needs at least two components"
             else Ok ()
         member _.TransposeWithin () = TIdentity
         member _.Canonicalize () = CanonSort        // sort within group, diagonal kept
@@ -584,7 +584,7 @@ type internal AntisymmetricBehavior() =
         member _.ClassName = "Antisymmetric"
         member _.Symmetry = SymAntisymmetric
         member _.Validate ix =
-            if ix.Rank < 2 then Error (sprintf "Antisymmetric index requires rank >= 2 (got %d): an antisymmetry relation needs at least two components" ix.Rank)
+            if ix.Rank < 2 then Error $"Antisymmetric index requires rank >= 2 (got {ix.Rank}): an antisymmetry relation needs at least two components"
             else Ok ()
         member _.TransposeWithin () = TNegatedCopy
         member _.Canonicalize () = CanonSortStrict  // sort; implicit-zero on repeat
@@ -597,7 +597,7 @@ type internal HermitianBehavior() =
         member _.ClassName = "Hermitian"
         member _.Symmetry = SymHermitian
         member _.Validate ix =
-            if ix.Rank <> 2 then Error (sprintf "Hermitian index requires rank = 2 (got %d): the Hermitian relation is defined on a matrix (two components)" ix.Rank)
+            if ix.Rank <> 2 then Error $"Hermitian index requires rank = 2 (got {ix.Rank}): the Hermitian relation is defined on a matrix (two components)"
             else Ok ()
         member _.TransposeWithin () = TConjugatedCopy
         member _.Canonicalize () = CanonSort        // sort within group, diagonal kept (real)
@@ -625,8 +625,7 @@ AntisymIdx at lowering and must never reach a SymWreath record" (List.length lev
             else
                 let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
                 if ix.Rank <> axes then
-                    Error (sprintf "Wreath index %s acts on %d raw axes but the record's Rank is %d"
-                                   (ppOrbitLevels levels) axes ix.Rank)
+                    Error ($"Wreath index {(ppOrbitLevels levels)} acts on {axes} raw axes but the record's Rank is {ix.Rank}")
                 else Ok ()
         // Swapping two axes of a wreath class is a permutation of the raw
         // axes not necessarily in the group (only within-level and block-
@@ -751,7 +750,7 @@ mixes one with a dense or triangular block."
             let symmVec = buildSymmVec outputType
             if hasRealSymmetry symmVec then AllocSymmetric
             else AllocDense
-        | [ single ] when single.Rank = (arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)) ->
+        | [ single ] when single.Rank = (arr.IndexTypes |> List.sumBy _.Rank) ->
             // Exactly one antisymmetric index spanning every dimension: the
             // pure-antisymmetric shape allocate_antisym supports. Placement-axis
             // routine confirms (PlaceCombinatorial SymAntisymmetric -> AllocAntisymmetric).
@@ -843,7 +842,7 @@ let buildLoopNestCodeGen
         (match arrays.[pos] with IRRange _ | IRVirtualReverse _ -> true | _ -> false)
     let paramSpan pos =
         if isVirtualSrc pos && pos < arrayTypes.Length then
-            max 1 (arrayTypes.[pos].IndexTypes |> List.sumBy (fun ix -> ix.Rank))
+            max 1 (arrayTypes.[pos].IndexTypes |> List.sumBy _.Rank)
         else 1
     let paramStart pos = List.init (max 0 pos) paramSpan |> List.sum
 
@@ -878,9 +877,9 @@ let buildLoopNestCodeGen
 
     // Helper: create an ElementBinding for an array at a given arity component
     let mkElement (arrayPos: int) (rankComponent: int) (dimIndex: int) =
-        let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
+        let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else $"arr{arrayPos}"
         let arrType = if arrayPos < arrayTypes.Length then Some arrayTypes.[arrayPos] else None
-        let elemType = arrType |> Option.map (fun t -> t.ElemType) |> Option.defaultValue (IRTScalar ETFloat64)
+        let elemType = arrType |> Option.map _.ElemType |> Option.defaultValue (IRTScalar ETFloat64)
         // ArrayRank counts LOOP LEVELS, not total index rank: a compound slot is
         // ONE level (the cardinality axis) regardless of mask rank, matching
         // buildRawLoopLevels. For dense/symmetric slots level count == Rank, so
@@ -901,7 +900,7 @@ let buildLoopNestCodeGen
         let slotTag =
             arrType
             |> Option.bind (fun t -> slotAt t.IndexTypes rankComponent)
-            |> Option.bind (fun ix -> ix.Tag)
+            |> Option.bind _.Tag
         let virtualKind =
             if arrayPos < arrays.Length then
                 match arrays.[arrayPos] with
@@ -929,8 +928,8 @@ let buildLoopNestCodeGen
             if isVirtualSrc arrayPos then paramStart arrayPos + rankComponent
             else paramStart arrayPos
         let param = if flatParamIdx >= 0 && flatParamIdx < kernelParams.Length then Some kernelParams.[flatParamIdx] else None
-        let paramName = param |> Option.map (fun p -> p.Name) |> Option.defaultValue (sprintf "p%d" arrayPos)
-        let paramVarId = param |> Option.map (fun p -> p.VarId) |> Option.defaultValue -1
+        let paramName = param |> Option.map _.Name |> Option.defaultValue $"p{arrayPos}"
+        let paramVarId = param |> Option.map _.VarId |> Option.defaultValue -1
         {
             ArrayPosition = arrayPos
             ArrayName = arrName
@@ -958,7 +957,7 @@ let buildLoopNestCodeGen
             // correctly -- a single-record shortcut hardcoding dim 0 would not.
             let sharedRecords = info.SharedIndexTypes
             // Reference first real array for extent lookups
-            let refArrayName = if arrayNames.Length > 0 then arrayNames.[0] else "arr0"
+            let refArrayName = if not (List.isEmpty arrayNames) then arrayNames.[0] else "arr0"
             // Base dim in refArray's extents for each record = cumulative prior
             // rank; also equals the record's base global loop level.
             let baseDims =
@@ -971,7 +970,7 @@ let buildLoopNestCodeGen
                 let isTriangular = sr.Symmetry = SymSymmetric || isAntisymmetric
                 [0 .. sr.Rank - 1] |> List.map (fun k ->
                     let level = baseDim + k
-                    let indexName = sprintf "__i%d" level
+                    let indexName = $"__i{level}"
                     // Triangular bounds chain within the RECORD's own levels only.
                     let deps = if isTriangular && k > 0 then [baseDim .. level - 1] else []
                     let strictOffset =
@@ -1054,9 +1053,9 @@ let buildLoopNestCodeGen
             
             loopLevels |> List.map (fun levelInfo ->
                 let level = levelInfo.GlobalLevelIndex
-                let indexName = sprintf "__i%d" level
+                let indexName = $"__i{level}"
                 let arrayPos = levelInfo.ArrayIndex
-                let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else sprintf "arr%d" arrayPos
+                let arrName = if arrayPos < arrayNames.Length then arrayNames.[arrayPos] else $"arr{arrayPos}"
                 
                 let deps = if level < boundDependencies.Length then boundDependencies.[level] else []
                 let isTriangular = level < triangularLevels.Length && triangularLevels.[level]

@@ -77,15 +77,15 @@ let buildCertTable (decls: Located<Decl> list)
                 let fail msg = Error (bl4009 d.Span msg)
                 match conjs with
                 | [] -> Ok table
-                | _ :: _ :: _ -> fail (sprintf "function '%s': duplicate galilean constraints -- declare one, listing every boost-variant parameter" fd.Name)
+                | _ :: _ :: _ -> fail $"function '{fd.Name}': duplicate galilean constraints -- declare one, listing every boost-variant parameter"
                 | [ (_, args) ] ->
                     if args.IsEmpty then
-                        fail (sprintf "function '%s': galilean(...) must name at least one boost-variant (velocity) parameter" fd.Name)
+                        fail $"function '{fd.Name}': galilean(...) must name at least one boost-variant (velocity) parameter"
                     else
-                        let pNames = fd.Params |> List.map (fun p -> p.Name)
+                        let pNames = fd.Params |> List.map _.Name
                         match args |> List.tryFind (fun a -> not (List.contains a pNames)) with
                         | Some bad ->
-                            fail (sprintf "function '%s': galilean argument '%s' is not a parameter of this function" fd.Name bad)
+                            fail $"function '{fd.Name}': galilean argument '{bad}' is not a parameter of this function"
                         | None ->
                             let ps =
                                 fd.Params
@@ -125,7 +125,7 @@ type private Ctx = {
 
 let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
     : Result<BoostStatus, Blade.Diagnostics.Diagnostic> =
-    let reject msg = Error (bl4009 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
+    let reject msg = Error (bl4009 e.Span $"function '{ctx.FuncName}': {msg}")
     let j = judge ctx env
     match e.Kind with
     | ExprKind.ExprLit _ -> Ok BInv
@@ -180,7 +180,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
                 j t |> Result.bind (fun st ->
                 j f |> Result.bind (fun sf ->
                     if st = sf then Ok st
-                    else reject (sprintf "if branches disagree: then-branch is %s, else-branch is %s" (statusStr st) (statusStr sf))))
+                    else reject $"if branches disagree: then-branch is {statusStr st}, else-branch is {statusStr sf}"))
             | _ -> reject "an if condition inside a galilean-certified body must be boost-invariant -- branching on a frame-dependent value makes the result frame-dependent")
     | ExprKind.ExprMatch (scrut, cases) ->
         j scrut |> Result.bind (fun ss ->
@@ -201,12 +201,12 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
             | _, BInv -> judge ctx (bindPatternVars BInv env binding.Pattern) body
             | _, _ -> reject "cannot destructure a boost-variant value -- bind it whole")
     | ExprKind.ExprLambda (ps, _, lamBody) ->
-        let captured = freeVars (Set.ofList (ps |> List.map (fun p -> p.Name))) lamBody
+        let captured = freeVars (Set.ofList (ps |> List.map _.Name)) lamBody
         let varCapture =
             captured |> Set.toList |> List.tryFind (fun n ->
                 match Map.tryFind n env with Some BVar -> true | _ -> false)
         match varCapture with
-        | Some n -> reject (sprintf "lambda captures boost-variant '%s' -- factor velocity work into galilean-certified functions instead" n)
+        | Some n -> reject $"lambda captures boost-variant '{n}' -- factor velocity work into galilean-certified functions instead"
         | None -> Ok BInv
     | ExprKind.ExprAssign (l, r) ->
         judgeAssign ctx env e.Span l r |> Result.map (fun () -> BInv)
@@ -231,7 +231,7 @@ let rec private judge (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr)
                 match ss, si with
                 | BInv, BInv -> Ok BInv
                 | BVar, _ | _, BVar ->
-                    Error (bl4009 e.Span (sprintf "function '%s': reduce over a boost-variant value scales the frame shift -- fold only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName))
+                    Error (bl4009 e.Span $"function '{ctx.FuncName}': reduce over a boost-variant value scales the frame shift -- fold only boost-invariant combinations (differences, sgs.grad, sgs.stress)")
                 | _ -> Ok BOpaque))
     | _ -> Ok BOpaque
 
@@ -270,14 +270,14 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, BoostStatus>) (stmts: Stmt l
                     | PatternKind.PatVar n, _ -> Ok (Map.add n sv env)
                     | _, BInv -> Ok (bindPatternVars BInv env binding.Pattern)
                     | _, _ ->
-                        Error (bl4009 binding.Value.Span (sprintf "function '%s': cannot destructure a boost-variant value -- bind it whole" ctx.FuncName)))
+                        Error (bl4009 binding.Value.Span $"function '{ctx.FuncName}': cannot destructure a boost-variant value -- bind it whole"))
             | StmtExpr e2 -> judge ctx env e2 |> Result.map (fun _ -> env)
             | StmtAssign (l, _, r) -> judgeAssign ctx env l.Span l r |> Result.map (fun () -> env)
             | StmtForIn (v, range, body) ->
                 judge ctx env range |> Result.bind (fun sr ->
                     match sr with
                     | BVar ->
-                        Error (bl4009 range.Span (sprintf "function '%s': cannot iterate a boost-variant value as a range" ctx.FuncName))
+                        Error (bl4009 range.Span $"function '{ctx.FuncName}': cannot iterate a boost-variant value as a range")
                     | _ ->
                         judgeStmts ctx (Map.add v BInv env) body |> Result.map (fun _ -> env))
             | _ -> Ok env))
@@ -287,13 +287,13 @@ and private judgeStmts (ctx: Ctx) (env: Map<string, BoostStatus>) (stmts: Stmt l
 /// match the container's (else it breaks the container's uniform shift).
 and private judgeAssign (ctx: Ctx) (env: Map<string, BoostStatus>) (span: Span) (l: Expr) (r: Expr)
     : Result<unit, Blade.Diagnostics.Diagnostic> =
-    let fail msg = Error (bl4009 span (sprintf "function '%s': %s" ctx.FuncName msg))
+    let fail msg = Error (bl4009 span $"function '{ctx.FuncName}': {msg}")
     judge ctx env r |> Result.bind (fun sr ->
         match l.Kind with
         | ExprKind.ExprVar n ->
             match Map.tryFind n env with
             | Some st when st = sr -> Ok ()
-            | Some st -> fail (sprintf "assignment changes '%s' from %s to %s -- a mut binding must keep one boost status" n (statusStr st) (statusStr sr))
+            | Some st -> fail $"assignment changes '{n}' from {statusStr st} to {statusStr sr} -- a mut binding must keep one boost status"
             | None -> Ok ()
         | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, idxArgs) ->
             // indices must be boost-invariant; the value matches the container.
@@ -307,7 +307,7 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, BoostStatus>) (span: Span) 
             |> Result.bind (fun () ->
                 match Map.tryFind n env, sr with
                 | Some BVar, BVar -> Ok ()
-                | Some BVar, _ -> fail (sprintf "writing a non-boost-variant element into boost-variant '%s' breaks its uniform frame shift" n)
+                | Some BVar, _ -> fail $"writing a non-boost-variant element into boost-variant '{n}' breaks its uniform frame shift"
                 | _, BVar -> fail "cannot store a boost-variant value into a boost-invariant container"
                 | _, _ -> Ok ())
         | _ ->
@@ -317,7 +317,7 @@ and private judgeAssign (ctx: Ctx) (env: Map<string, BoostStatus>) (span: Span) 
 
 and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Expr) (args: Expr list)
     : Result<BoostStatus, Blade.Diagnostics.Diagnostic> =
-    let reject msg = Error (bl4009 e.Span (sprintf "function '%s': %s" ctx.FuncName msg))
+    let reject msg = Error (bl4009 e.Span $"function '{ctx.FuncName}': {msg}")
     let judgeAll args = judgeEach (judge ctx env) args
     match f.Kind with
     // sgs formers: the axiomatic rules
@@ -343,18 +343,18 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
          | _ ->
              judgeAll args |> Result.bind (fun sts ->
                  if sts |> List.forall ((=) BInv) then Ok BInv
-                 else reject (sprintf "sgs.%s carries no galilean axiom for boost-variant arguments" op)))
+                 else reject $"sgs.{op} carries no galilean axiom for boost-variant arguments"))
     // ml ops: invariants in, invariants out
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, op) when Set.contains alias ctx.MlAliases ->
         judgeAll args |> Result.bind (fun sts ->
             if sts |> List.forall ((=) BInv) then Ok BInv
-            else reject (sprintf "ml.%s does not accept boost-variant arguments -- velocities enter models only through boost-invariant combinations (differences, sgs.grad, sgs.stress)" op))
+            else reject $"ml.{op} does not accept boost-variant arguments -- velocities enter models only through boost-invariant combinations (differences, sgs.grad, sgs.stress)")
     // named callees
     | ExprKind.ExprVar fn ->
         match Map.tryFind fn ctx.Certs with
         | Some cert ->
             if List.length args <> List.length cert.Params then
-                reject (sprintf "call to '%s': expected %d arguments" fn (List.length cert.Params))
+                reject $"call to '{fn}': expected {List.length cert.Params} arguments"
             else
                 (List.zip cert.Params args)
                 |> List.fold (fun acc ((pName, pSt), argE) ->
@@ -363,8 +363,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
                             if sa = pSt then Ok ()
                             else
                                 Error (bl4009 argE.Span
-                                           (sprintf "function '%s': '%s' parameter '%s' is %s, but the argument is %s"
-                                                ctx.FuncName fn pName (statusStr pSt) (statusStr sa))))))
+                                           ($"function '{ctx.FuncName}': '{fn}' parameter '{pName}' is {(statusStr pSt)}, but the argument is {(statusStr sa)}")))))
                     (Ok ())
                 |> Result.map (fun () -> BInv) // v1: certified functions return boost-invariant values
         | None ->
@@ -373,7 +372,7 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
                 // indexing is index-stable: elements are themselves BVar.
                 judgeAll args |> Result.bind (fun sts ->
                     if sts |> List.forall ((=) BInv) then Ok BVar
-                    else reject (sprintf "indexing into boost-variant '%s' requires boost-invariant indices" fn))
+                    else reject $"indexing into boost-variant '{fn}' requires boost-invariant indices")
             | Some BInv | None ->
                 // a BVar argument escapes the discipline.
                 judgeAll args |> Result.bind (fun sts ->
@@ -387,11 +386,11 @@ and private judgeApp (ctx: Ctx) (env: Map<string, BoostStatus>) (e: Expr) (f: Ex
                         match sts.[i] with
                         | BVar ->
                             Error (bl4009 args.[i].Span
-                                       (sprintf "function '%s': a boost-variant value escapes to '%s', which carries no galilean certificate -- certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)" ctx.FuncName fn))
+                                       $"function '{ctx.FuncName}': a boost-variant value escapes to '{fn}', which carries no galilean certificate -- certify it with `where ml.galilean(...)` or pass only boost-invariant combinations (differences, sgs.grad, sgs.stress)")
                         | _ ->
                             Error (bl4009 args.[i].Span
-                                       (sprintf "function '%s': an argument to '%s' cannot be classified as boost-invariant or boost-variant -- a galilean-certified body admits a call only when every argument is provably boost-invariant, so rewrite this argument in terms the judgment reads (parameters, differences, sgs.grad, sgs.stress)" ctx.FuncName fn)))
-            | Some BOpaque -> reject (sprintf "cannot classify the callee '%s'" fn)
+                                       $"function '{ctx.FuncName}': an argument to '{fn}' cannot be classified as boost-invariant or boost-variant -- a galilean-certified body admits a call only when every argument is provably boost-invariant, so rewrite this argument in terms the judgment reads (parameters, differences, sgs.grad, sgs.stress)"))
+            | Some BOpaque -> reject $"cannot classify the callee '{fn}'"
     | _ ->
         judgeAll args |> Result.bind (fun sts ->
             judge ctx env f |> Result.bind (fun sf ->
@@ -413,7 +412,7 @@ let judgeFunction (certs: Map<string, GalSig>) (mlAliases: Set<string>) (sgsAlia
         | Ok BInv -> []
         | Ok st ->
             [ bl4009 fd.Body.Span
-                  (sprintf "function '%s': the body is %s -- a galilean-certified function must return a boost-invariant value" fd.Name (statusStr st)) ]
+                  $"function '{fd.Name}': the body is {statusStr st} -- a galilean-certified function must return a boost-invariant value" ]
 
 // The inference channel -- BL4014. Transplanted from the equiv channel:
 // hypothesize `where ml.galilean(S)` on an uncertified function, run
@@ -474,7 +473,7 @@ let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
         match d.Value with
         | DeclFunction fd when (conjunctsOf "__ml_galilean" fd).IsEmpty
                                && not (Map.containsKey fd.Name gcerts) ->
-            let pNames = fd.Params |> List.map (fun p -> p.Name)
+            let pNames = fd.Params |> List.map _.Name
             let bound = Set.ofList pNames
             let free = freeVars bound fd.Body
             // Skip self-recursive bodies -- the circularity Deduce.fs refuses.
@@ -500,12 +499,11 @@ let inferGalileanCertificates (mlAliases: Set<string>) (sgsAliases: Set<string>)
                     let ordered = order |> List.filter (fun n -> List.contains n closure)
                     let closureNote =
                         if ordered.IsEmpty then ""
-                        else sprintf " (also requires pinning: %s)" (String.concat ", " ordered)
+                        else $""" (also requires pinning: {(String.concat ", " ordered)})"""
                     for vs in hits do
                         let ps = String.concat ", " vs
                         let msg =
-                            sprintf "function '%s' judges boost-invariant with velocity parameter(s) %s: add 'where ml.galilean(%s)'%s"
-                                fd.Name ps ps closureNote
+                            $"function '{fd.Name}' judges boost-invariant with velocity parameter(s) {ps}: add 'where ml.galilean({ps})'{closureNote}"
                         out <- (msg, d.Span) :: out
                         // Structured twin, hosted on MLEquiv's channel so one
                         // `deduced[]` array carries both disciplines.
@@ -538,10 +536,10 @@ let private galileanHandler : Blade.Constraints.ConstraintHandler = {
     Describe = "galilean(u, ...) -- certifies the function invariant under a constant Galilean boost of the listed velocity parameters; the ML elaborator proves the body combines them only boost-invariantly"
     Validate = fun funcName paramNames args ->
         if args.IsEmpty then
-            Error (sprintf "function '%s': galilean(...) must name at least one boost-variant (velocity) parameter" funcName)
+            Error $"function '{funcName}': galilean(...) must name at least one boost-variant (velocity) parameter"
         else
             match args |> List.tryFind (fun a -> not (List.contains a paramNames)) with
-            | Some bad -> Error (sprintf "function '%s': galilean argument '%s' is not a parameter of this function" funcName bad)
+            | Some bad -> Error $"function '{funcName}': galilean argument '{bad}' is not a parameter of this function"
             | None -> Ok ()
     EnterBody = fun _ _ -> ()
     ExitBody = fun _ _ -> ()

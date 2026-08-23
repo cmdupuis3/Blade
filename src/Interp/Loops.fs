@@ -515,7 +515,7 @@ and private forceSequence (st: InterpState) (env: Env) (elems: IRExpr list) (wra
     let wrap s = wrappers |> List.fold (fun acc w -> IRFunctorMap (w, acc)) s
     let childVals = elems |> List.map (fun e -> forceExpr st env (wrap e))
     match childVals with
-    | (VArray first) :: _ when childVals |> List.forall (function VArray _ -> true | _ -> false) ->
+    | (VArray first) :: _ when childVals |> List.forall _.IsVArray ->
         // Stack child rows into a rank-added array [N, child_extents...]. Built
         // as an SNested record directly (mkDenseArray reshapes a FLAT store; the
         // rows are already nested stores). Printing keys off the binding type, so
@@ -783,7 +783,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     | None ->
     gateInputs info0
     let info = applyFunctorWrappers st info0 wrappers
-    let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
+    let arrayNames = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
     // HALO-EXTENT RUNTIME GUARD (BL8009) -- the interpreter twin of
     // genApplyCombinator's haloExtentGuards, checked ONCE before the nest.
@@ -845,7 +845,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     let realAt (pos: int) =
         match inputs.TryGetValue pos with
         | true, SReal a -> a
-        | _ -> raise (InterpUnsupported (sprintf "expected a materialized array at position %d" pos))
+        | _ -> raise (InterpUnsupported $"expected a materialized array at position {pos}")
     // Loop-level extent (mirror genLoopBoundExpr's EXTENT, pre-subtraction). A
     // fused-joint level's extent is the PRODUCT of the array's first d plain-dense
     // extents (the compound-axis cardinality), not a single dim.
@@ -887,7 +887,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
         // output, so the dense path is untouched.
         let outerExtents = cg.Bindings |> List.map levelExtent
         let trailingExtents =
-            let flatRank = arr.IndexTypes |> List.sumBy (fun ix -> ix.Rank)
+            let flatRank = arr.IndexTypes |> List.sumBy _.Rank
             let missing = flatRank - outerExtents.Length
             if missing <= 0 then []
             else
@@ -922,7 +922,7 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
         interpretNest st env cg inputs realAt levelExtent
             (if rowShaped then OutArrayRows outArr else OutArray outArr)
         VArray outArr
-    | other -> raise (InterpUnsupported (sprintf "apply output type %s" (nodeTypeName other)))
+    | other -> raise (InterpUnsupported $"apply output type {nodeTypeName other}")
 
 and private nodeTypeName (ty: IRType) : string =
     let case, _ = Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(ty, typeof<IRType>)
@@ -988,7 +988,7 @@ and private materializeWreathApply
     let (elemTy, outIdxTys) =
         match info0.OutputType with
         | ArrayElem arr -> (arr.ElemType, arr.IndexTypes)
-        | other -> raise (InterpUnsupported (sprintf "OrbIdx application output type %s" (nodeTypeName other)))
+        | other -> raise (InterpUnsupported $"OrbIdx application output type {nodeTypeName other}")
     let n =
         match tie.BaseExtent with
         | IRLit (IRLitInt v) -> v
@@ -1017,8 +1017,7 @@ and private materializeWreathApply
         match Blade.OrbRank.visitStreamChecked (orbRankLevels tie.OutputLevels) (int n) with
         | Ok s -> s
         | Error detail ->
-            raise (InterpUnsupported (sprintf "OrbIdx%s at extent %d: %s"
-                                              (ppOrbitLevels tie.OutputLevels) n detail))
+            raise (InterpUnsupported ($"OrbIdx{(ppOrbitLevels tie.OutputLevels)} at extent {n}: {detail}"))
     let mutable pos = 0L
     for tuple in stream do
         let t = List.toArray tuple
@@ -1037,8 +1036,7 @@ and private materializeWreathApply
     // `orb_cell_count`: a short stream leaves the pool tail zero-initialized
     // (plausible-looking data), and a long one would already have thrown.
     if pos <> int64 (A.wreathCellCount out) then
-        failwithf "OrbIdx%s at extent %d: the traversal visited %d cells but the class's fold says %d"
-                  (ppOrbitLevels tie.OutputLevels) n pos (A.wreathCellCount out)
+        failwith $"OrbIdx{(ppOrbitLevels tie.OutputLevels)} at extent {n}: the traversal visited {pos} cells but the class's fold says {(A.wreathCellCount out)}"
     st.Cells <- st.Cells + pos
     VArray out
 
@@ -1079,12 +1077,12 @@ and private materializeCompoundRangeMap
     let (table, rankOf, card) = A.buildCompoundIndex leadExtents maskBits
     // Kernel + per-coordinate param plan from the SAME loop-nest builder CodeGen
     // uses (so the kernel body + param identities cannot drift).
-    let arrayNames = info0.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
+    let arrayNames = info0.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info0 arrayNames "out" st.Builder
     let (elemTy, outIdxTys) =
         match cg.OutputType with
         | ArrayElem arr -> (arr.ElemType, arr.IndexTypes)
-        | other -> raise (InterpUnsupported (sprintf "range<CompoundIdx> map output type %s" (nodeTypeName other)))
+        | other -> raise (InterpUnsupported $"range<CompoundIdx> map output type {nodeTypeName other}")
     // Kernel env: captures + reusable param cells (as interpretNest builds them).
     let kenv = envChild env
     bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
@@ -1162,12 +1160,12 @@ and private materializeSparseRangeMap
         raise (InterpUnsupported "functor-map wrapper over a range<SparseIdx> map")
     let keys = resolveSparseKeys st env src leadRank
     let (rankOf, card) = A.buildSparseIndex keys
-    let arrayNames = info0.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
+    let arrayNames = info0.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info0 arrayNames "out" st.Builder
     let (elemTy, outIdxTys) =
         match cg.OutputType with
         | ArrayElem arr -> (arr.ElemType, arr.IndexTypes)
-        | other -> raise (InterpUnsupported (sprintf "range<SparseIdx> map output type %s" (nodeTypeName other)))
+        | other -> raise (InterpUnsupported $"range<SparseIdx> map output type {nodeTypeName other}")
     let kenv = envChild env
     bindKernelCaptures st env kenv cg.Captures cg.KernelExpr
     let paramCells = Dictionary<IRId, ValueRef>()
@@ -1238,13 +1236,13 @@ and private materializeCompoundHaloMap
               IndexTypes = []
               Extents = [| card |]
               Data = SInt (Array.init (int card) (fun r -> table.[r].[0])) }
-    let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
+    let arrayNames = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
     let elemTy =
         match cg.OutputType with
         | ArrayElem arr -> arr.ElemType
         | IRTScalar et -> IRTScalar et
-        | other -> raise (InterpUnsupported (sprintf "compound-halo map output type %s" (nodeTypeName other)))
+        | other -> raise (InterpUnsupported $"compound-halo map output type {nodeTypeName other}")
     let param =
         match cg.KernelParams with
         | [ p ] -> p
@@ -1302,13 +1300,13 @@ and private materializeRowPeelMap (st: InterpState) (env: Env) (info: ApplyInfo)
         match resolveArraySource st env info.Arrays.[0] with
         | SReal a -> a
         | _ -> raise (InterpUnsupported "row-peel map: input is not a materialized array")
-    let arrayNames = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
+    let arrayNames = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
     let cg = buildLoopNestCodeGen info arrayNames "out" st.Builder
     let elemTy =
         match cg.OutputType with
         | ArrayElem arr -> arr.ElemType
         | IRTScalar et -> IRTScalar et
-        | other -> raise (InterpUnsupported (sprintf "row-peel map output type %s" (nodeTypeName other)))
+        | other -> raise (InterpUnsupported $"row-peel map output type {nodeTypeName other}")
     let param =
         match cg.KernelParams with
         | [ p ] -> p
@@ -1413,7 +1411,7 @@ and materializeCompoundBinding
     let forceArr (e: IRExpr) (what: string) : BladeArray =
         match force st env (Core.evalExpr st env e) with
         | VArray a -> a
-        | _ -> raise (InterpUnsupported (sprintf "compound() %s operand is not an array" what))
+        | _ -> raise (InterpUnsupported $"compound() {what} operand is not an array")
     match binding.Type with
     | ArrayElem arrTy ->
         let dense = forceArr denseExpr "dense"
@@ -1525,7 +1523,7 @@ and private bindKernelCaptures (st: InterpState) (env: Env) (kenv: Env) (caps: C
                     referencedComputed <- true
                 if Set.contains c.Id referenced then
                     raise (InterpUnsupported
-                               (sprintf "kernel capture '%s' not resolvable by id (nested HM-specialized kernel)" c.Name))
+                               $"kernel capture '{c.Name}' not resolvable by id (nested HM-specialized kernel)")
 
 // interpretNest: the nest interpreter (analog of genLoopNest). Outermost-first
 // recursion; bound = Extent - SumBoundDependencies - StrictOffset; per-level
@@ -1558,7 +1556,7 @@ and private interpretNest
     let reynoldsPlan : (ValueRef[] * Blade.ReynoldsCore.ReynoldsTermPlan) option =
         if cg.HasReynolds && cg.KernelParams.Length >= 2 then
             let n = cg.KernelParams.Length
-            let paramNames = Array.init n (fun i -> sprintf "__rp%d" i)
+            let paramNames = Array.init n (fun i -> $"__rp{i}")
             let permNameMap (perm: int list) : Map<int, string> =
                 cg.KernelParams
                 |> List.mapi (fun i p -> (p.VarId, paramNames.[perm.[i]]))
@@ -1578,7 +1576,7 @@ and private interpretNest
     //               the multiply. Empty plan -> 0.0.
     let scaleCoeff (c: int) (v: Value) : Value = N.evalBinOp IRMul (VFloat (float c)) v
     let evalReynolds (pcells: ValueRef[]) (plan: Blade.ReynoldsCore.ReynoldsTermPlan) : Value =
-        let origVals = pcells |> Array.map (fun c -> c.V)
+        let origVals = pcells |> Array.map _.V
         let evalPerm (perm: int list) : Value =
             perm |> List.iteri (fun i src -> pcells.[i].V <- origVals.[src])
             force st kenv (Core.evalExpr st kenv cg.KernelExpr)
@@ -1836,9 +1834,9 @@ let rec private forceReduceCompute (st: InterpState) (env: Env) (comp: IRExpr) (
     let accVals =
         infos |> List.mapi (fun li info ->
             gateInputs info
-            let names = info.Arrays |> List.mapi (fun i _ -> sprintf "a%d" i)
+            let names = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
             let cg = buildLoopNestCodeGen info names "acc" st.Builder
-            if hasRealSymmetry cg.OutputSymmVec || cg.HasReynolds || (cg.Bindings |> List.exists (fun b -> b.FusedRank.IsSome)) then
+            if hasRealSymmetry cg.OutputSymmVec || cg.HasReynolds || (cg.Bindings |> List.exists _.FusedRank.IsSome) then
                 raise (InterpUnsupported "reduce over symmetric/Reynolds/fused computation (M2.5)")
             let inputs = Dictionary<int, ArraySource>()
             // FUSED, not materialized: see resolveFusedArraySource. A deferred
@@ -1925,7 +1923,7 @@ let rec evalArrayNode (st: InterpState) (env: Env) (expr: IRExpr) : Value =
             | IRBind _ | IRGuard _ | IRSequence _ | IRZip _ -> true
             | IRVar (id, _) ->
                 (match envTryFind env id with
-                 | Some c -> (match c.V with VDeferred _ -> true | _ -> false)
+                 | Some c -> c.V.IsVDeferred
                  | None -> false)
             | _ -> false
         if isChoiceComp left || isChoiceComp right then VDeferred (expr, env)

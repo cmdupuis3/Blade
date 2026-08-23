@@ -143,23 +143,23 @@ let powerDecl (name: string) (n: int) (fftName: string) : FunctionDecl =
 let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDecl =
     let outDims = List.replicate (k - 1) n
     let outSize = prodInts outDims
-    let fvars = [ for j in 0 .. k - 2 -> sprintf "f%d" j ]
+    let fvars = [ for j in 0 .. k - 2 -> $"f{j}" ]
     let strides = [ for j in 0 .. k - 2 -> prodInts (List.replicate (k - 2 - j) n) ]
     let flatIdx =
         List.map2 (fun fv st -> mul (v fv) (iLit st)) fvars strides
         |> List.reduce add
     let ffts =
-        [ for i in 1 .. k -> sLet (sprintf "s%d" i) (syn (ExprApp (v fftName, [ v (sprintf "x%d" i) ]))) ]
+        [ for i in 1 .. k -> sLet $"s{i}" (syn (ExprApp (v fftName, [ v $"x{i}" ]))) ]
     let chain =
         [ yield sLet "a1" (idx "s1" (v "f0"))
           for j in 2 .. k - 1 do
-            yield sLet (sprintf "a%d" j)
-                       (mul (v (sprintf "a%d" (j - 1))) (idx (sprintf "s%d" j) (v (sprintf "f%d" (j - 1))))) ]
+            yield sLet $"a{j}"
+                       (mul (v $"a{j - 1}") (idx $"s{j}" (v $"f{j - 1}"))) ]
     let inner =
         sLet "sm" (modE (fvars |> List.map v |> List.reduce add) (iLit n))
         :: chain
         @ [ sAssign (idx "pp" flatIdx)
-                    (mul (v (sprintf "a%d" (k - 1))) (conjE (idx (sprintf "s%d" k) (v "sm")))) ]
+                    (mul (v $"a{k - 1}") (conjE (idx $"s{k}" (v "sm")))) ]
     let stmts =
         ffts
         @ [ sLetMut "pp" (cplxZerosLit outSize) ]
@@ -172,7 +172,7 @@ let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDe
             // Rank-(k-1): reshape the flat work array through a nested literal of runtime reads (element-type-agnostic,
             // so the MathDecls helper serves complex cells too).
             blockE (stmts @ [ sLet "po" (nestedFromFlatN "pp" outDims 0) ], Some (v "po"))
-    let ps = [ for i in 1 .. k -> (sprintf "x%d" i, tyFloatArr n) ]
+    let ps = [ for i in 1 .. k -> ($"x{i}", tyFloatArr n) ]
     mkFunc name ps (tyCplxTensor outDims) body
 
 // fft2 / ifft2 -- separable 2-D DFT over a rank-2 field (rows, then columns). Both passes work on flat row-major complex

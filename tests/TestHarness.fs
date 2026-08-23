@@ -70,7 +70,7 @@ let tryParsePrintedFloats (name: string) (stdout: string) : float[] option =
             let inner = l.Substring(prefix.Length, l.Length - prefix.Length - 1)
             let toks =
                 inner.Replace("[", "").Replace("]", "").Split(',')
-                |> Array.map (fun s -> s.Trim())
+                |> Array.map (_.Trim())
                 |> Array.filter (fun s -> s <> "")
             let parsed =
                 toks |> Array.map (fun s ->
@@ -160,15 +160,15 @@ let printGrandTotal (blocks: BlockResult list) =
     printfn "%s\n" rule
     // Per-block lines, aligned on the block name.
     let nameWidth =
-        blocks |> List.map (fun b -> b.Block.Length) |> (fun ls -> if ls.IsEmpty then 0 else List.max ls)
+        blocks |> List.map (_.Block.Length) |> (fun ls -> if ls.IsEmpty then 0 else List.max ls)
     for b in blocks do
-        let skipNote = if b.Skipped > 0 then sprintf ", %d skipped" b.Skipped else ""
+        let skipNote = if b.Skipped > 0 then $", {b.Skipped} skipped" else ""
         printfn "  %s  %d passed, %d failed%s" (b.Block.PadRight nameWidth) b.Passed b.Failed skipNote
-    let totalPassed  = blocks |> List.sumBy (fun b -> b.Passed)
-    let totalFailed  = blocks |> List.sumBy (fun b -> b.Failed)
-    let totalSkipped = blocks |> List.sumBy (fun b -> b.Skipped)
+    let totalPassed  = blocks |> List.sumBy (_.Passed)
+    let totalFailed  = blocks |> List.sumBy (_.Failed)
+    let totalSkipped = blocks |> List.sumBy (_.Skipped)
     printfn "%s" (String.replicate ruleWidth "-")
-    let skipTotal = if totalSkipped > 0 then sprintf ", %d skipped" totalSkipped else ""
+    let skipTotal = if totalSkipped > 0 then $", {totalSkipped} skipped" else ""
     printfn "  TOTAL: %d passed, %d failed%s" totalPassed totalFailed skipTotal
     // Failed-test roll-up. Capped: this is an INDEX into the per-block output
     // above (every failure already printed its own "[FAIL]: ..." line with the

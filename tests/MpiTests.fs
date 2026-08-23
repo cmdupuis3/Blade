@@ -50,7 +50,7 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
         let genVariant (name: string) (src: string) : Result<string, string> =
             try
                 match lower src with
-                | Error e -> Error (sprintf "lower failed: %s" e)
+                | Error e -> Error ($"lower failed: {e}")
                 | Ok ir0 ->
                     // Hard-fail on validation errors rather than generating from
                     // invalid IR (was `| Error _ -> ir0`). The serial/mpi
@@ -58,14 +58,14 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
                     // both would be equally wrong and would still agree.
                     match IRValidate.validateIR ir0 with
                     | Error validationErrors ->
-                        Error (sprintf "IR validation failed: %s" (String.concat "; " validationErrors))
+                        Error ($"""IR validation failed: {(String.concat "; " validationErrors)}""")
                     | Ok ir ->
                     let (cppCode, _w) = CodeGen.genSelfContainedProgramFromIR ir name
                     let safe = sanitizeFileName name
                     let cppFile = Path.Combine(outputDir, safe + ".cpp")
                     File.WriteAllText(cppFile, cppCode)
                     Ok cppFile
-            with ex -> Error (sprintf "codegen failed: %s" ex.Message)
+            with ex -> Error ($"codegen failed: {ex.Message}")
 
         let resultLines (s: string) =
             (s.Replace("\r\n", "\n").Trim()).Split('\n')
@@ -86,8 +86,8 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
         // One differential case: serial oracle (gate off, inertness pinned)
         // vs MPI build (gate on, scaffolding pinned) at -n 1, 2, and 4.
         let runMpiCase (label: string) (src: string) : unit =
-            let serialName = sprintf "mpi_%s_serial" label
-            let mpiName = sprintf "mpi_%s_mpi" label
+            let serialName = $"mpi_{label}_serial"
+            let mpiName = $"mpi_{label}_mpi"
             for stem in [serialName; mpiName] do
                 for ext in [".cpp"; ".exe"; ".out"] do
                     let f = Path.Combine(outputDir, stem + ext)
@@ -102,12 +102,12 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
                         Error "serial variant unexpectedly emitted MPI scaffolding (gate leak)"
                     else
                         match compileCpp cppFile outputDir with
-                        | Error e -> Error (sprintf "serial compile: %s" e)
+                        | Error e -> Error ($"serial compile: {e}")
                         | Ok exe ->
                             match runExecutable exe with
-                            | Error e -> Error (sprintf "serial run: %s" e)
+                            | Error e -> Error ($"serial run: {e}")
                             | Ok (0, out) -> Ok out
-                            | Ok (code, out) -> Error (sprintf "serial run exit %d:\n%s" code out)
+                            | Ok (code, out) -> Error ($"serial run exit {code}:\n{out}")
             let mpiOuts =
                 setMpiEmitMode true
                 try
@@ -119,23 +119,23 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
                             Error "mpi variant did not emit MPI scaffolding"
                         else
                             match compileCpp cppFile outputDir with
-                            | Error e -> Error (sprintf "mpi compile: %s" e)
+                            | Error e -> Error ($"mpi compile: {e}")
                             | Ok exe ->
                                 let runs =
                                     [1; 2; 4]
                                     |> List.map (fun n ->
                                         match runExecutableMpi n exe with
-                                        | Error e -> Error (sprintf "-n %d: %s" n e)
+                                        | Error e -> Error ($"-n {n}: {e}")
                                         | Ok (0, out) -> Ok (n, out)
-                                        | Ok (code, out) -> Error (sprintf "-n %d exit %d:\n%s" n code out))
+                                        | Ok (code, out) -> Error ($"-n {n} exit {code}:\n{out}"))
                                 match runs |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
                                 | Some e -> Error e
                                 | None -> Ok (runs |> List.map (function Ok r -> r | Error _ -> failwith "unreachable"))
                 finally
                     setMpiEmitMode false
             match serialOut, mpiOuts with
-            | Error e, _ -> fail label (sprintf "serial oracle: %s" e)
-            | _, Error e -> fail label (sprintf "mpi: %s" e)
+            | Error e, _ -> fail label ($"serial oracle: {e}")
+            | _, Error e -> fail label ($"mpi: {e}")
             | Ok sOut, Ok runs ->
                 let oracle = resultLines sOut
                 let mismatches =
@@ -148,24 +148,24 @@ let runMpiTests () : Blade.Tests.TestHarness.BlockResult =
                     pass label "mpi -n 1/2/4 all match serial oracle"
                 else
                     let (n, out) = List.head mismatches
-                    fail label (sprintf "-n %d output differs from serial oracle" n)
+                    fail label ($"-n {n} output differs from serial oracle")
                     printfn "    serial: %s" oracle
                     printfn "    -n %d:  %s" n (resultLines out)
 
         // Ineligible-shape case: under the gate the generated source must
         // carry the loud #error marker (never a silently serialized nest).
         let runRejectCase (label: string) (src: string) (expectFragment: string) : unit =
-            let nm = sprintf "mpi_%s_reject" label
+            let nm = $"mpi_{label}_reject"
             setMpiEmitMode true
             try
                 match genVariant nm src with
-                | Error e -> fail label (sprintf "codegen: %s" e)
+                | Error e -> fail label ($"codegen: {e}")
                 | Ok cppFile ->
                     let cpp = File.ReadAllText cppFile
                     if cpp.Contains "#error \"mpi:" && cpp.Contains expectFragment then
                         pass label "ineligible shape rejected with #error"
                     else
-                        fail label (sprintf "expected #error with '%s' in generated source" expectFragment)
+                        fail label ($"expected #error with '{expectFragment}' in generated source")
             finally
                 setMpiEmitMode false
 

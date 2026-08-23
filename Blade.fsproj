@@ -13,8 +13,8 @@
          The RuntimeIdentifier CONDITION is load-bearing, not decoration.
          ReadyToRun requires a RID, and the SDK's RID inference reacts to a bare
          `PublishReadyToRun=true` by inferring one for `dotnet build` too, which
-         silently relocates the dev binary from bin/Release/net7.0/Blade.exe to
-         bin/Release/net7.0/win-x64/Blade.exe and breaks every consumer of the
+         silently relocates the dev binary from bin/Release/net10.0/Blade.exe to
+         bin/Release/net10.0/win-x64/Blade.exe and breaks every consumer of the
          documented path. Gating on an explicitly supplied RID keeps the default
          build byte-for-byte where it was: `dotnet build -c Release` passes no
          RID, so this property never materializes.
@@ -533,7 +533,7 @@
   <!-- C++ runtime headers. Read at codegen time via AppContext.BaseDirectory.
        PreserveNewest copies on first build and on file change. The Link
        directive controls the destination subpath inside the output dir,
-       so headers end up at bin/<config>/net7.0/cpp/ regardless of where
+       so headers end up at bin/<config>/net10.0/cpp/ regardless of where
        dotnet run is invoked from. -->
   <!-- On-disk .blade test corpus (tests/Corpus.fs loads it). Copied next to
        the binary so the suite runs regardless of the working directory. -->
@@ -581,11 +581,11 @@
        `Blade.exe run` on a file that says `import units.SI` work from any
        working directory in a DEPLOYED tree, with no environment variable set.
        The glob has no Link metadata, so each file keeps its relative path and
-       lands at bin/config/net7.0/stdlib/units/SI.blade, the same arrangement
+       lands at bin/config/net10.0/stdlib/units/SI.blade, the same arrangement
        tests/corpus/** already uses. BLADE_STDLIB overrides.
 
        In a CHECKOUT this copy is redundant (ModuleResolve.fs's probe reaches
-       the repo's own stdlib from bin/<config>/net7.0 by itself) and it used to
+       the repo's own stdlib from bin/<config>/net10.0 by itself) and it used to
        WIN, because that probe is nearest-first. Fixed on the resolver side:
        see upwardRepoStdlibCandidates, where a directory holding Blade.fsproj
        now takes precedence, so source beats copy in a dev tree while a tree

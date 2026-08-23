@@ -102,8 +102,7 @@ let private requireScalar (what: string) (t: IRType) : Sc =
     match scalarTyOf t with
     | Some sc -> sc
     | None ->
-        refuse (sprintf "%s has type %s -- the llvm lane handles Int64/Float64/Bool/String scalars only"
-                    what (Blade.IRPrint.ppIRType t))
+        refuse ($"{what} has type {(Blade.IRPrint.ppIRType t)} -- the llvm lane handles Int64/Float64/Bool/String scalars only")
 
 // ---------------------------------------------------------------------------
 // The fact layer (plan section 5)
@@ -276,7 +275,7 @@ let private computeModuleFacts (m: IRModule) (callables: Map<IRId, IRCallable>) 
     // the monotone facts below, fatal for the read census (a doubled count is
     // never sole-read).
     let distinctCallables =
-        callables |> Map.toSeq |> Seq.map snd |> Seq.distinctBy (fun cl -> cl.Id) |> Seq.toList
+        callables |> Map.toSeq |> Seq.map snd |> Seq.distinctBy (_.Id) |> Seq.toList
     // RECURSION IS A CYCLE, NOT A SELF-CALL. This used to ask only "does
     // cl's body call cl", which is blind to every cycle of length > 1 --
     // and those are reachable: a NESTED function sees the enclosing name
@@ -453,19 +452,19 @@ type private BrInstr =
     { Cond: string; IfTrue: string; IfFalse: string }
 
 let private renderBin (i: BinInstr) =
-    sprintf "%s = %s%s %s %s, %s" i.Dest i.Opcode i.Flags (llTy i.Ty) i.Lhs i.Rhs
+    $"{i.Dest} = {i.Opcode}{i.Flags} {(llTy i.Ty)} {i.Lhs}, {i.Rhs}"
 
 let private renderCmp (i: CmpInstr) =
-    sprintf "%s = %s %s %s %s, %s" i.Dest i.Kind i.Pred (llTy i.Ty) i.Lhs i.Rhs
+    $"{i.Dest} = {i.Kind} {i.Pred} {(llTy i.Ty)} {i.Lhs}, {i.Rhs}"
 
 let private renderConv (i: ConvInstr) =
-    sprintf "%s = %s %s %s to %s" i.Dest i.Opcode (llTy i.From) i.Value (llTy i.To)
+    $"{i.Dest} = {i.Opcode} {(llTy i.From)} {i.Value} to {(llTy i.To)}"
 
 let private renderCall (i: CallInstr) =
-    let args = i.Args |> List.map (fun (t, v) -> sprintf "%s %s" (llTy t) v) |> String.concat ", "
+    let args = i.Args |> List.map (fun (t, v) -> $"{(llTy t)} {v}") |> String.concat ", "
     match i.Dest with
-    | Some d -> sprintf "%s = call %s %s(%s)" d (llTy i.RetTy) i.Callee args
-    | None -> sprintf "call %s %s(%s)" (llTy i.RetTy) i.Callee args
+    | Some d -> $"{d} = call {(llTy i.RetTy)} {i.Callee}({args})"
+    | None -> $"call {(llTy i.RetTy)} {i.Callee}({args})"
 
 let private renderBr (i: BrInstr) =
     sprintf "br i1 %s, label %%%s, label %%%s" i.Cond i.IfTrue i.IfFalse
@@ -528,9 +527,9 @@ let private grpExtent =
     | GRagged _ -> refuse "a ragged index group where a single static extent is required"
     | GDynDense _ -> refuse "a runtime-extent axis where a static extent is required"
 /// Antisymmetric groups are STRICT (i < j) and store no diagonal.
-let private grpStrict = function GAnti _ -> true | _ -> false
+let private grpStrict (g: Grp) = g.IsGAnti
 let private grpCompact = function GSym _ | GAnti _ -> true | _ -> false
-let private isRaggedGrp = function GRagged _ -> true | _ -> false
+let private isRaggedGrp (g: Grp) = g.IsGRagged
 let private hasRagged (gs: Grp list) = gs |> List.exists isRaggedGrp
 
 /// How many AXES a group spans, as extents (a rank-2 group spans two).
@@ -769,7 +768,7 @@ let private newCtx (callables: Map<IRId, IRCallable>) (facts: ModuleFacts) =
 
 let private nextN (c: Ctx) = c.Counter <- c.Counter + 1; c.Counter
 let private freshReg (c: Ctx) = sprintf "%%r%d" (nextN c)
-let private freshLbl (c: Ctx) (tag: string) = sprintf "%s%d" tag (nextN c)
+let private freshLbl (c: Ctx) (tag: string) = $"{tag}{nextN c}"
 let private ln (c: Ctx) (s: string) = c.Body.Add("  " + s)
 let private lbl (c: Ctx) (l: string) = c.Body.Add(l + ":")
 let private need (c: Ctx) (decl: string) = c.Externs.Add decl |> ignore
@@ -780,7 +779,7 @@ let private attrRef (c: Ctx) (g: int) : string =
     if not (factEnabled factFnAttrs) then ""
     else
         c.UsedAttrGroups.Add g |> ignore
-        sprintf " #%d" g
+        $" #{g}"
 
 /// The uniform parameter decoration (` noundef`), or nothing when parameter
 /// attributes are off.
@@ -896,17 +895,17 @@ let private needShim (c: Ctx) (name: string) : unit =
     let f =
         match Map.tryFind name shimTable with
         | Some f -> f
-        | None -> refuse (sprintf "the shim symbol '%s', which has no declaration in shimTable" name)
+        | None -> refuse ($"the shim symbol '{name}', which has no declaration in shimTable")
     let args = f.Args |> List.map (fun t -> t + paramAttr ()) |> String.concat ", "
     let ret =
         if factEnabled factParamAttrs && f.RetAttrs <> "" then f.RetAttrs + " " + f.Ret else f.Ret
-    need c (sprintf "declare %s @%s(%s)%s" ret name args (attrRef c f.Group))
+    need c ($"declare {ret} @{name}({args}){(attrRef c f.Group)}")
 
 /// Reserve an entry-block slot. Every `alloca` in this file goes through
 /// here; see `Ctx.Allocas` for why none may be emitted in place.
 let private allocaOf (c: Ctx) (llType: string) : string =
     let reg = freshReg c
-    c.Allocas.Add(sprintf "  %s = alloca %s" reg llType)
+    c.Allocas.Add($"  {reg} = alloca {llType}")
     reg
 
 // ---------------------------------------------------------------------------
@@ -928,7 +927,7 @@ let private pushPoolScope (c: Ctx) : unit =
 let private keepPool (c: Ctx) (poolReg: string) : unit =
     for scope in c.PoolScopes do
         for (p, slot) in scope.Pools do
-            if p = poolReg then ln c (sprintf "store ptr null, ptr %s" slot)
+            if p = poolReg then ln c ($"store ptr null, ptr {slot}")
 
 /// Close the innermost scope. With `emitFrees`, each tracking slot is loaded
 /// and freed -- a null slot (branch never taken, or pool kept) frees
@@ -945,12 +944,12 @@ let private popPoolScope (c: Ctx) (keepReg: string option) (emitFrees: bool) : u
         c.AnyFrees <- true
         needShim c "blade_free"
         let resets =
-            freed |> List.map (fun (_, slot) -> sprintf "  store ptr null, ptr %s" slot)
+            freed |> List.map (fun (_, slot) -> $"  store ptr null, ptr {slot}")
         c.Body.InsertRange(scope.At, resets)
         for (_, slot) in freed do
             let p = freshReg c
-            ln c (sprintf "%s = load ptr, ptr %s" p slot)
-            ln c (sprintf "call void @blade_free(ptr %s)" p)
+            ln c ($"{p} = load ptr, ptr {slot}")
+            ln c ($"call void @blade_free(ptr {p})")
 
 /// A double as its EXACT bit pattern. `.ll` accepts `double 0x<16 hex>`, and
 /// that spelling is the only one immune to the decimal round-trip question
@@ -965,7 +964,7 @@ let private stringGlobal (c: Ctx) (s: string) : string =
     | true, g -> g
     | _ ->
         let bytes = Encoding.UTF8.GetBytes s
-        let name = sprintf "@.blade.str.%d" c.StringPool.Count
+        let name = $"@.blade.str.{c.StringPool.Count}"
         let sb = StringBuilder()
         for b in bytes do
             // `\` and `"` would end the token; anything outside printable
@@ -973,7 +972,7 @@ let private stringGlobal (c: Ctx) (s: string) : string =
             if b >= 0x20uy && b < 0x7Fuy && b <> 0x22uy && b <> 0x5Cuy then sb.Append(char b) |> ignore
             else sb.AppendFormat("\\{0:X2}", b) |> ignore
         sb.Append("\\00") |> ignore
-        c.Globals.Add(sprintf "%s = private unnamed_addr constant [%d x i8] c\"%s\"" name (bytes.Length + 1) (sb.ToString()))
+        c.Globals.Add($"{name} = private unnamed_addr constant [{bytes.Length + 1} x i8] c\"{(sb.ToString())}\"")
         c.StringPool.[s] <- name
         name
 
@@ -1019,7 +1018,7 @@ let private coerce (c: Ctx) (target: Sc) (v: Val) : Val =
             ln c (renderCmp { Dest = dest; Kind = "fcmp"; Pred = "une"; Ty = ScF64; Lhs = v.Reg; Rhs = f64Const 0.0 })
             { Reg = dest; Ty = ScBool }
         | _ ->
-            refuse (sprintf "no conversion from %s to %s" (llTy v.Ty) (llTy target))
+            refuse ($"no conversion from {(llTy v.Ty)} to {(llTy target)}")
 
 /// The binary-operand common type. Mirrors `IR.promoteElemType` restricted to
 /// the widths v1 carries.
@@ -1137,8 +1136,7 @@ let private requireArray (what: string) (t: IRType) : Sc * Grp list =
     match arrayShapeOf t with
     | Some s -> s
     | None ->
-        refuse (sprintf "%s has type %s -- the llvm lane handles arrays over static Idx<n> axes and rank-2 Sym/Antisym groups only"
-                    what (Blade.IRPrint.ppIRType t))
+        refuse ($"{what} has type {(Blade.IRPrint.ppIRType t)} -- the llvm lane handles arrays over static Idx<n> axes and rank-2 Sym/Antisym groups only")
 
 /// The RAGGED-PAIR array type: a static plain outer axis over a ragged-family
 /// (or DepIdx) inner. Deliberately NOT folded into arrayShapeOf: every
@@ -1164,24 +1162,24 @@ let private raggedArrShape (t: IRType) : (Sc * int64) option =
 /// when it returns, and terminates it.
 let private emitCountedLoopTo (c: Ctx) (bound: string) (body: string -> unit) : unit =
     let iv = allocaOf c "i64"
-    ln c (sprintf "store i64 0, ptr %s" iv)
+    ln c ($"store i64 0, ptr {iv}")
     let lCond = freshLbl c "loop.cond"
     let lBody = freshLbl c "loop.body"
     let lEnd = freshLbl c "loop.end"
     ln c (sprintf "br label %%%s" lCond)
     lbl c lCond
     let i = freshReg c
-    ln c (sprintf "%s = load i64, ptr %s" i iv)
+    ln c ($"{i} = load i64, ptr {iv}")
     let t = freshReg c
     ln c (renderCmp { Dest = t; Kind = "icmp"; Pred = "slt"; Ty = ScI64; Lhs = i; Rhs = bound })
     ln c (renderBr { Cond = t; IfTrue = lBody; IfFalse = lEnd })
     lbl c lBody
     body i
     let i2 = freshReg c
-    ln c (sprintf "%s = load i64, ptr %s" i2 iv)
+    ln c ($"{i2} = load i64, ptr {iv}")
     let i3 = freshReg c
     ln c (renderBin { Dest = i3; Opcode = "add"; Flags = ""; Ty = ScI64; Lhs = i2; Rhs = "1" })
-    ln c (sprintf "store i64 %s, ptr %s" i3 iv)
+    ln c ($"store i64 {i3}, ptr {iv}")
     ln c (sprintf "br label %%%s" lCond)
     lbl c lEnd
 
@@ -1241,10 +1239,9 @@ let private tryLitI64 (s: string) : int64 option =
 /// can touch it, so consecutive rows share one load (the previous row's hi IS
 /// this row's lo) and a small outer loop can fold the loads away entirely.
 let private raggedTableGlobal (c: Ctx) (offsets: int64[]) : string =
-    let name = sprintf "@.blade.roff.%d" (nextN c)
+    let name = $"@.blade.roff.{nextN c}"
     let body = offsets |> Array.map (sprintf "i64 %d") |> String.concat ", "
-    c.Globals.Add(sprintf "%s = private unnamed_addr constant [%d x i64] [%s], align 64"
-                      name offsets.Length body)
+    c.Globals.Add($"{name} = private unnamed_addr constant [{offsets.Length} x i64] [{body}], align 64")
     name
 
 /// offsets[i] as an operand: folded to a literal when the table and the index
@@ -1257,9 +1254,9 @@ let private raggedOffAt (c: Ctx) (table: RaggedTable) (i: string) : string =
     | _ ->
         let sym = match table with RtStatic (_, s) -> s | RtDynamic p -> p
         let g = freshReg c
-        ln c (sprintf "%s = getelementptr inbounds i64, ptr %s, i64 %s" g sym i)
+        ln c ($"{g} = getelementptr inbounds i64, ptr {sym}, i64 {i}")
         let v = freshReg c
-        ln c (sprintf "%s = load i64, ptr %s" v g)
+        ln c ($"{v} = load i64, ptr {g}")
         v
 
 /// The length of row i: offsets[i+1] - offsets[i], folded when it can be.
@@ -1348,7 +1345,7 @@ let private grpOffset (c: Ctx) (g: Grp) (idxs: Val list) : string =
         let n = grpExtent g
         let strict = grpStrict g
         if List.length idxs <> r then
-            refuse (sprintf "a rank-%d compact index group addressed by %d coordinates" r (List.length idxs))
+            refuse ($"a rank-{r} compact index group addressed by {List.length idxs} coordinates")
         let sInc = if strict then 1L else 0L
         let mutable lo = "0"
         let mutable acc = "0"
@@ -1386,16 +1383,16 @@ let private storageOffset (c: Ctx) (groups: Grp list) (idxs: Val list) : string 
 
 let private gepCell (c: Ctx) (elem: Sc) (basePtr: string) (off: string) : string =
     let p = freshReg c
-    ln c (sprintf "%s = getelementptr inbounds %s, ptr %s, i64 %s" p (poolTy elem) basePtr off)
+    ln c ($"{p} = getelementptr inbounds {(poolTy elem)}, ptr {basePtr}, i64 {off}")
     p
 
 let private loadCell (c: Ctx) (elem: Sc) (ptr: string) : Val =
     let raw = freshReg c
-    ln c (sprintf "%s = load %s, ptr %s" raw (poolTy elem) ptr)
+    ln c ($"{raw} = load {(poolTy elem)}, ptr {ptr}")
     match elem with
     | ScBool ->
         let b = freshReg c
-        ln c (sprintf "%s = icmp ne i8 %s, 0" b raw)
+        ln c ($"{b} = icmp ne i8 {raw}, 0")
         { Reg = b; Ty = ScBool }
     | _ -> { Reg = raw; Ty = elem }
 
@@ -1403,9 +1400,9 @@ let private storeCell (c: Ctx) (elem: Sc) (ptr: string) (v: Val) : unit =
     match elem with
     | ScBool ->
         let w = freshReg c
-        ln c (sprintf "%s = zext i1 %s to i8" w v.Reg)
-        ln c (sprintf "store i8 %s, ptr %s" w ptr)
-    | _ -> ln c (sprintf "store %s %s, ptr %s" (poolTy elem) v.Reg ptr)
+        ln c ($"{w} = zext i1 {v.Reg} to i8")
+        ln c ($"store i8 {w}, ptr {ptr}")
+    | _ -> ln c ($"store {(poolTy elem)} {v.Reg}, ptr {ptr}")
 
 /// An UNINITIALIZED pool of `n` cells -- `n` an OPERAND, so a runtime-sized
 /// ragged pool and a literal-sized dense one are the same call.
@@ -1431,7 +1428,7 @@ let private allocPool (c: Ctx) (elem: Sc) (n: string) : string =
     // allocated on one branch frees without a dominance argument.
     if c.PoolScopes.Count > 0 then
         let slot = allocaOf c "ptr"
-        ln c (sprintf "store ptr %s, ptr %s" p slot)
+        ln c ($"store ptr {p}, ptr {slot}")
         c.PoolScopes.[c.PoolScopes.Count - 1].Pools.Add(p, slot)
     p
 
@@ -1531,9 +1528,9 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
                         let gt = freshReg c
                         ln c (renderCmp { Dest = gt; Kind = "icmp"; Pred = "sgt"; Ty = ScI64; Lhs = x; Rhs = y })
                         let lo = freshReg c
-                        ln c (sprintf "%s = select i1 %s, i64 %s, i64 %s" lo gt y x)
+                        ln c ($"{lo} = select i1 {gt}, i64 {y}, i64 {x}")
                         let hi = freshReg c
-                        ln c (sprintf "%s = select i1 %s, i64 %s, i64 %s" hi gt x y)
+                        ln c ($"{hi} = select i1 {gt}, i64 {x}, i64 {y}")
                         arr.[q] <- lo
                         arr.[q + 1] <- hi
                         swapFlags <- gt :: swapFlags
@@ -1565,7 +1562,7 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
         let fold1 (op: string) (regs: string list) =
             regs |> List.reduce (fun x y ->
                 let d = freshReg c
-                ln c (sprintf "%s = %s i1 %s, %s" d op x y)
+                ln c ($"{d} = {op} i1 {x}, {y}")
                 d)
         let eqAny = fold1 "or" diags
         let swXor = fold1 "xor" swaps
@@ -1588,20 +1585,20 @@ let private canonRead (c: Ctx) (a: ArrVal) (idxs: Val list) : Val =
         let redirected =
             storage |> List.map (fun v ->
                 let r = freshReg c
-                ln c (sprintf "%s = select i1 %s, i64 0, i64 %s" r eqAny v.Reg)
+                ln c ($"{r} = select i1 {eqAny}, i64 0, i64 {v.Reg}")
                 { Reg = r; Ty = ScI64 })
         let v = coerce c ety (readCell c a redirected)
         let negated =
             match ety with
             | ScF64 ->
                 let d = freshReg c
-                ln c (sprintf "%s = fneg double %s" d v.Reg)
+                ln c ($"{d} = fneg double {v.Reg}")
                 d
             | _ -> i64Bin c "sub" "0" v.Reg
         let signed = freshReg c
-        ln c (sprintf "%s = select i1 %s, %s %s, %s %s" signed swXor (llTy ety) negated (llTy ety) v.Reg)
+        ln c ($"{signed} = select i1 {swXor}, {(llTy ety)} {negated}, {(llTy ety)} {v.Reg}")
         let final = freshReg c
-        ln c (sprintf "%s = select i1 %s, %s %s, %s %s" final eqAny (llTy ety) zero (llTy ety) signed)
+        ln c ($"{final} = select i1 {eqAny}, {(llTy ety)} {zero}, {(llTy ety)} {signed}")
         { Reg = final; Ty = ety }
 
 /// Split a shape after `k` AXES, or refuse. A peel may only land on a GROUP
@@ -1870,7 +1867,7 @@ let private emitSimplexR (c: Ctx) (r: int) (n: int64) (strict: bool) (tile: int6
     | None, _ -> onBlock (fun () -> emitSimplexSerialR c r n strict body)
     | Some b, 2 -> emitSimplex2 c n strict (Some b) onBlock (fun i p off -> body [ i; p ] off)
     | Some _, _ ->
-        refuse (sprintf "a BLOCKED rank-%d simplex (the blocked schedule is rank-2 only; the serial rank-%d nest is supported)" r r)
+        refuse ($"a BLOCKED rank-{r} simplex (the blocked schedule is rank-2 only; the serial rank-{r} nest is supported)")
 
 /// Enumerate a whole shape's STORAGE coordinates, innermost group last,
 /// handing the body the coordinates and the pool offset. Dense groups are
@@ -1917,14 +1914,13 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | true, (slot, sc) -> loadSlot c slot sc
          | _ ->
              if c.Callables.ContainsKey id then
-                 refuse (sprintf "function '%s' used as a value -- the llvm lane emits direct calls only"
-                             (c.Callables.[id]).Name)
-             else refuse (sprintf "reference to an unbound variable (ir id %d)" id))
+                 refuse ($"function '{(c.Callables.[id]).Name}' used as a value -- the llvm lane emits direct calls only")
+             else refuse ($"reference to an unbound variable (ir id {id})"))
 
     | IRParam (name, _, _) ->
         (match c.NameSlots.TryGetValue name with
          | true, (slot, sc) -> loadSlot c slot sc
-         | _ -> refuse (sprintf "reference to parameter '%s' outside a function body" name))
+         | _ -> refuse ($"reference to parameter '{name}' outside a function body"))
 
     | IRBinOp (mode, op, l, r) ->
         if mode = IROuter then refuse "an outer-product binary operator ([+], [*])"
@@ -1989,7 +1985,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
              (match c.Slots.TryGetValue id with
               | true, (slot, sc) ->
                   let v = coerce c sc (emitExpr c value)
-                  ln c (sprintf "store %s %s, ptr %s" (llTy sc) v.Reg slot)
+                  ln c ($"store {(llTy sc)} {v.Reg}, ptr {slot}")
                   { Reg = ""; Ty = ScVoid }
               | _ ->
                   if c.ArrSlots.ContainsKey id then
@@ -2038,8 +2034,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
             | _ -> emitArr c arrExpr
         let idxs = idxExprs |> List.map (fun ix -> coerce c ScI64 (emitExpr c ix))
         if List.length idxs <> a.Rank then
-            refuse (sprintf "a partial index (%d of %d) in value position"
-                        (List.length idxs) a.Rank)
+            refuse ($"a partial index ({(List.length idxs)} of {a.Rank}) in value position")
         // THE ONE PLACE ABSOLUTE COORDINATES ENTER. Everything else in this
         // file works in storage coordinates; a subscript the user wrote is
         // absolute and may name a mirror cell, so it canonicalizes here.
@@ -2052,7 +2047,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | Some (_, groups) ->
              let extents = axisExtents groups
              if dim < 0 || dim >= List.length extents then
-                 refuse (sprintf "extents(_, %d) outside the array's rank" dim)
+                 refuse ($"extents(_, {dim}) outside the array's rank")
              { Reg = string extents.[dim]; Ty = ScI64 }
          | None ->
              let a = emitArr c arrExpr
@@ -2061,7 +2056,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
               | groups, d ->
                   let extents = axisExtents groups
                   if d < 0 || d >= List.length extents then
-                      refuse (sprintf "extents(_, %d) outside the array's rank" d)
+                      refuse ($"extents(_, {d}) outside the array's rank")
                   { Reg = string extents.[d]; Ty = ScI64 }))
 
     | IRRank arrExpr ->
@@ -2076,12 +2071,12 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     | IRReduceCompute (compExpr, kernelExpr, initExpr) ->
         (match emitReduceCompute c compExpr kernelExpr initExpr with
          | [ v ] -> v
-         | vs -> refuse (sprintf "a fused reduction producing %d accumulators in scalar position" (List.length vs)))
+         | vs -> refuse ($"a fused reduction producing {List.length vs} accumulators in scalar position"))
 
     | IRTupleProj (parent, idx, _) ->
         (match tupleComponent c parent idx with
          | VScalar v -> v
-         | _ -> refuse (sprintf "tuple projection [%d] of a non-scalar component in value position" idx))
+         | _ -> refuse ($"tuple projection [{idx}] of a non-scalar component in value position"))
 
     | IRPure inner -> emitExpr c inner
     | IRCompute inner -> emitExpr c inner
@@ -2130,7 +2125,7 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     | IRProdSum args -> emitProdSum c args
 
     | other ->
-        refuse (sprintf "the IR node %s in value position -- no arm in the llvm lane" (caseName other))
+        refuse ($"the IR node {(caseName other)} in value position -- no arm in the llvm lane")
 
 /// `for k in lo..hi { ... }` -- a SEQUENTIAL counted loop, laid down by the
 /// same `emitCountedLoopTo` every other loop in this file uses, with the body
@@ -2170,7 +2165,7 @@ and private emitForRange (c: Ctx) (vid: IRId) (lo: IRExpr) (hi: IRExpr) (body: I
     forceLoopBodyProducers c body
     let before = arrSlotSnapshot c
     emitCountedLoopTo c trips (fun k ->
-        ln c (sprintf "store i64 %s, ptr %s" (i64Add c loV.Reg k) slot)
+        ln c ($"store i64 {(i64Add c loV.Reg k)}, ptr {slot}")
         // Each trip is a tracking scope: a step's materializations (a rank-2
         // `let rec`'s per-step slice, a copy-on-alias) are dead when the trip
         // ends, and freeing them here is what keeps a long trajectory's
@@ -2244,7 +2239,7 @@ and private requireArrSlotsStable (c: Ctx) (before: (IRId * ArrVal) list) : unit
         match c.ArrSlots.TryGetValue id with
         | true, now when obj.ReferenceEquals(now, a) -> ()
         | _ ->
-            refuse (sprintf "an array binding (ir id %d) rebound inside a for-range loop -- its storage would not outlive the loop body" id)
+            refuse ($"an array binding (ir id {id}) rebound inside a for-range loop -- its storage would not outlive the loop body")
 
 /// `prodsum(x1..xk)` = `sum_t prod_l x_l(t)` over rank-1 operands of equal
 /// extent: ONE loop, one accumulator, ascending -- the shape the moment
@@ -2287,7 +2282,7 @@ and private emitProdSum (c: Ctx) (args: IRExpr list) : Val =
     // factors of one element is a different reassociation nobody licensed.
     let accFlags =
         withFoldFmf c (Blade.CodeGenState.fpReassocEnabled ()) (fun () -> fmfFor c ty)
-    ln c (sprintf "store %s %s, ptr %s" (llTy ty) (match ty with ScF64 -> f64Const 0.0 | _ -> "0") acc)
+    ln c ($"""store {(llTy ty)} {(match ty with ScF64 -> f64Const 0.0 | _ -> "0")}, ptr {acc}""")
     emitCountedLoopTo c (soleExtentOp head) (fun t ->
         let iv = { Reg = t; Ty = ScI64 }
         let mutable prod = coerce c ty (readCell c head [ iv ])
@@ -2299,7 +2294,7 @@ and private emitProdSum (c: Ctx) (args: IRExpr list) : Val =
         let cur = loadSlot c acc ty
         let s = freshReg c
         ln c (renderBin { Dest = s; Opcode = (if ty = ScF64 then "fadd" else "add"); Flags = accFlags; Ty = ty; Lhs = cur.Reg; Rhs = prod.Reg })
-        ln c (sprintf "store %s %s, ptr %s" (llTy ty) s acc))
+        ln c ($"store {(llTy ty)} {s}, ptr {acc}"))
     loadSlot c acc ty
 
 /// `c >>= k`: bind the continuation's parameter to the computation and answer
@@ -2308,7 +2303,7 @@ and private bindContinuationBody (c: Ctx) (comp: IRExpr) (cont: IRExpr) : IRExpr
     let cl =
         match resolveCallable cont with
         | Some cl when cl.Params.Length = 1 -> cl
-        | Some cl -> refuse (sprintf "a bind continuation '%s' of %d parameters" cl.Name cl.Params.Length)
+        | Some cl -> refuse ($"a bind continuation '{cl.Name}' of {cl.Params.Length} parameters")
         | None -> refuse "a bind whose continuation does not resolve to a callable"
     let p = List.head cl.Params
     (match classifyValue c comp with
@@ -2320,7 +2315,7 @@ and private bindContinuationBody (c: Ctx) (comp: IRExpr) (cont: IRExpr) : IRExpr
 and private tupleComponent (c: Ctx) (parent: IRExpr) (idx: int) : ValKind =
     let parts = emitTupleParts c parent
     if idx < 0 || idx >= List.length parts then
-        refuse (sprintf "tuple projection [%d] outside a pack of %d" idx (List.length parts))
+        refuse ($"tuple projection [{idx}] outside a pack of {List.length parts}")
     parts.[idx]
 
 /// The per-AXIS extents of an array-valued EXPRESSION -- what `extents()` and
@@ -2342,12 +2337,12 @@ and private storeSlot (c: Ctx) (slot: string option) (ty: Sc) (v: Val) : unit =
     match slot with
     | Some s ->
         let v = coerce c ty v
-        ln c (sprintf "store %s %s, ptr %s" (llTy ty) v.Reg s)
+        ln c ($"store {(llTy ty)} {v.Reg}, ptr {s}")
     | None -> ()
 
 and private loadSlot (c: Ctx) (slot: string) (ty: Sc) : Val =
     let dest = freshReg c
-    ln c (sprintf "%s = load %s, ptr %s" dest (llTy ty) slot)
+    ln c ($"{dest} = load {(llTy ty)}, ptr {slot}")
     { Reg = dest; Ty = ty }
 
 and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
@@ -2373,7 +2368,7 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
         let a = coerce c ScF64 (emitExpr c l)
         let b = coerce c ScF64 (emitExpr c r)
         callLibm2 c "atan2" a b
-    | IRMath2 name -> refuse (sprintf "the binary math intrinsic '%s'" name)
+    | IRMath2 name -> refuse ($"the binary math intrinsic '{name}'")
     | _ ->
         let a0 = emitExpr c l
         let b0 = emitExpr c r
@@ -2407,14 +2402,14 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
                 | ScI64, IRMul -> "mul"
                 // C++ integer division and `%` truncate toward zero: sdiv/srem.
                 | ScI64, IRDiv -> "sdiv" | ScI64, IRMod -> "srem"
-                | _ -> refuse (sprintf "arithmetic on %s operands" (llTy common))
+                | _ -> refuse ($"arithmetic on {(llTy common)} operands")
             ln c (renderBin { Dest = dest; Opcode = opcode; Flags = fmfFor c common; Ty = common; Lhs = a.Reg; Rhs = b.Reg })
             { Reg = dest; Ty = common }
 
 and private emitShortCircuit (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
     let slot = allocaOf c "i1"
     let a = coerce c ScBool (emitExpr c l)
-    ln c (sprintf "store i1 %s, ptr %s" a.Reg slot)
+    ln c ($"store i1 {a.Reg}, ptr {slot}")
     let lRhs = freshLbl c "sc.rhs"
     let lEnd = freshLbl c "sc.end"
     // `&&` evaluates the right side only when the left held; `||` only when it
@@ -2423,7 +2418,7 @@ and private emitShortCircuit (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Va
     else ln c (renderBr { Cond = a.Reg; IfTrue = lEnd; IfFalse = lRhs })
     lbl c lRhs
     let b = coerce c ScBool (emitExpr c r)
-    ln c (sprintf "store i1 %s, ptr %s" b.Reg slot)
+    ln c ($"store i1 {b.Reg}, ptr {slot}")
     ln c (sprintf "br label %%%s" lEnd)
     lbl c lEnd
     loadSlot c slot ScBool
@@ -2435,12 +2430,12 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
         let dest = freshReg c
         (match v.Ty with
          | ScF64 ->
-             ln c (sprintf "%s = fneg%s double %s" dest (fmfFor c ScF64) v.Reg)
+             ln c ($"{dest} = fneg{(fmfFor c ScF64)} double {v.Reg}")
              { Reg = dest; Ty = ScF64 }
          | ScI64 ->
              ln c (renderBin { Dest = dest; Opcode = "sub"; Flags = ""; Ty = ScI64; Lhs = "0"; Rhs = v.Reg })
              { Reg = dest; Ty = ScI64 }
-         | other -> refuse (sprintf "negation of a %s value" (llTy other)))
+         | other -> refuse ($"negation of a {(llTy other)} value"))
     | IRNot ->
         let v = coerce c ScBool (emitExpr c x)
         let dest = freshReg c
@@ -2456,17 +2451,17 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
         (match Map.tryFind name libmUnary with
          | Some fn -> callLibm1 c fn (coerce c ScF64 (emitExpr c x))
          | None when name = "lgamma" || name = "digamma" ->
-             refuse (sprintf "%s -- Blade's own series lives in blade_runtime.hpp and has no libm twin" name)
-         | None -> refuse (sprintf "the math intrinsic '%s'" name))
+             refuse ($"{name} -- Blade's own series lives in blade_runtime.hpp and has no libm twin")
+         | None -> refuse ($"the math intrinsic '{name}'"))
 
 and private callLibm1 (c: Ctx) (fn: string) (arg: Val) : Val =
-    need c (sprintf "declare double @%s(double%s)%s" fn (paramAttr ()) (attrRef c grpExternReturns))
+    need c ($"declare double @{fn}(double{(paramAttr ())}){(attrRef c grpExternReturns)}")
     let dest = freshReg c
     ln c (renderCall { Dest = Some dest; RetTy = ScF64; Callee = "@" + fn; Args = [ ScF64, arg.Reg ] })
     { Reg = dest; Ty = ScF64 }
 
 and private callLibm2 (c: Ctx) (fn: string) (a: Val) (b: Val) : Val =
-    need c (sprintf "declare double @%s(double%s, double%s)%s" fn (paramAttr ()) (paramAttr ()) (attrRef c grpExternReturns))
+    need c ($"declare double @{fn}(double{(paramAttr ())}, double{(paramAttr ())}){(attrRef c grpExternReturns)}")
     let dest = freshReg c
     ln c (renderCall { Dest = Some dest; RetTy = ScF64; Callee = "@" + fn; Args = [ ScF64, a.Reg; ScF64, b.Reg ] })
     { Reg = dest; Ty = ScF64 }
@@ -2491,7 +2486,7 @@ and private emitMatch (c: Ctx) (whole: IRExpr) (scrutinee: IRExpr) (cases: IRMat
              | IRPatWild -> ()
              | IRPatVar vid ->
                  let slotV = allocaOf c (llTy sv.Ty)
-                 ln c (sprintf "store %s %s, ptr %s" (llTy sv.Ty) sv.Reg slotV)
+                 ln c ($"store {(llTy sv.Ty)} {sv.Reg}, ptr {slotV}")
                  c.Slots.[vid] <- (slotV, sv.Ty)
              | IRPatLit lit ->
                  let lv = coerce c sv.Ty (emitExpr c (IRLit lit))
@@ -2538,9 +2533,9 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
              | Some cl -> cl
              | None -> refuse "a call to a function the module does not define (indirect or higher-order)")
         | _ -> refuse "an indirect / higher-order call"
-    if callable.IsArityPoly then refuse (sprintf "a call to the arity-polymorphic function '%s'" callable.Name)
+    if callable.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{callable.Name}'")
     if callable.IsCudaKernel || callable.IsMpiParallel then
-        refuse (sprintf "a call to '%s', which carries a cuda/mpi strategy" callable.Name)
+        refuse ($"a call to '{callable.Name}', which carries a cuda/mpi strategy")
     // An `omp` clause is a LICENCE to parallelize, not a demand: emitting the
     // serial body answers the same values. (Licensed reassociation is a
     // separate question and stays off -- see the numeric policy above.)
@@ -2551,7 +2546,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
     // re-entered inline refuses rather than looping.
     if not (List.isEmpty callable.Captures) then
         if not (c.Inlining.Add callable.Id) then
-            refuse (sprintf "a recursive call to '%s', which captures enclosing bindings" callable.Name)
+            refuse ($"a recursive call to '{callable.Name}', which captures enclosing bindings")
         try
             let kargs =
                 List.zip callable.Params args
@@ -2564,8 +2559,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
         finally c.Inlining.Remove callable.Id |> ignore
     else
     if List.length callable.Params <> List.length args then
-        refuse (sprintf "a partial application of '%s' (%d of %d arguments)"
-                    callable.Name (List.length args) (List.length callable.Params))
+        refuse ($"a partial application of '{callable.Name}' ({(List.length args)} of {(List.length callable.Params)} arguments)")
     let sym = ensureFunction c callable
     // An array argument crosses as its POOL POINTER, which is also what makes
     // `mut` work: the callee's element writes land in the caller's storage
@@ -2578,7 +2572,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
             | Some (elem, groups) ->
                 let av = materializeExpr c a
                 if av.Elem <> elem || av.Groups <> groups then
-                    refuse (sprintf "argument shape disagrees with parameter '%s' of '%s'" p.Name callable.Name)
+                    refuse ($"argument shape disagrees with parameter '{p.Name}' of '{callable.Name}'")
                 (match av.Src with
                  | APool ptr -> [ (ScStr, ptr) ]
                  | _ -> refuse "an unmaterialized array argument")
@@ -2594,10 +2588,9 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
                          let tp = match table with RtStatic (_, sym) -> sym | RtDynamic reg -> reg
                          [ (ScStr, ptr); (ScStr, tp) ]
                      | _ ->
-                         refuse (sprintf "argument shape disagrees with ragged parameter '%s' of '%s'"
-                                     p.Name callable.Name))
+                         refuse ($"argument shape disagrees with ragged parameter '{p.Name}' of '{callable.Name}'"))
                 | None ->
-                    let sc = requireScalar (sprintf "parameter '%s' of '%s'" p.Name callable.Name) p.Type
+                    let sc = requireScalar ($"parameter '{p.Name}' of '{callable.Name}'") p.Type
                     let v = coerce c sc (emitExpr c a)
                     [ (sc, v.Reg) ])
     match arrayShapeOf callable.RetType with
@@ -2612,11 +2605,11 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
         // freed.
         if c.PoolScopes.Count > 0 && c.Facts.FreshReturns.Contains callable.Id then
             let slot = allocaOf c "ptr"
-            ln c (sprintf "store ptr %s, ptr %s" dest slot)
+            ln c ($"store ptr {dest}, ptr {slot}")
             c.PoolScopes.[c.PoolScopes.Count - 1].Pools.Add(dest, slot)
         { Reg = dest; Ty = ScStr }
     | None ->
-    let retTy = requireScalar (sprintf "the return type of '%s'" callable.Name) callable.RetType
+    let retTy = requireScalar ($"the return type of '{callable.Name}'") callable.RetType
     if retTy = ScVoid then
         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = sym; Args = argVals })
         { Reg = ""; Ty = ScVoid }
@@ -2632,7 +2625,7 @@ and private ensureFunction (c: Ctx) (cl: IRCallable) : string =
     match c.Emitted.TryGetValue cl.Id with
     | true, sym -> sym
     | _ ->
-        let sym = sprintf "@bl_%s_%d" (sanitizeSym cl.Name) cl.Id
+        let sym = $"@bl_{(sanitizeSym cl.Name)}_{cl.Id}"
         c.Emitted.[cl.Id] <- sym
         c.Pending.Enqueue cl
         sym
@@ -2654,7 +2647,7 @@ and private ensureSlot (c: Ctx) (varId: IRId) (ty: Sc) : string =
 
 and private bindScalar (c: Ctx) (varId: IRId) (name: string) (v: Val) : unit =
     let slot = ensureSlot c varId v.Ty
-    ln c (sprintf "store %s %s, ptr %s" (llTy v.Ty) v.Reg slot)
+    ln c ($"store {(llTy v.Ty)} {v.Reg}, ptr {slot}")
     if name <> "" then c.NameSlots.[name] <- (slot, v.Ty)
 
 and private bindArray (c: Ctx) (varId: IRId) (name: string) (a: ArrVal) : unit =
@@ -2743,12 +2736,12 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
          | _ ->
              if c.LoopObjs.Contains id then
                  refuse "a loop object (method_for/object_for) used where an array is required"
-             else refuse (sprintf "reference to an unbound array (ir id %d)" id))
+             else refuse ($"reference to an unbound array (ir id {id})"))
 
     | IRParam (name, _, _) ->
         (match c.NameArrSlots.TryGetValue name with
          | true, a -> a
-         | _ -> refuse (sprintf "reference to array parameter '%s' outside a function body" name))
+         | _ -> refuse ($"reference to array parameter '{name}' outside a function body"))
 
     | IRArrayLit (elems, arrType) -> emitArrayLit c elems arrType
 
@@ -2800,7 +2793,7 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
     | IRTupleProj (parent, idx, _) ->
         (match tupleComponent c parent idx with
          | VArray a -> a
-         | _ -> refuse (sprintf "tuple projection [%d] of a non-array component in array position" idx))
+         | _ -> refuse ($"tuple projection [{idx}] of a non-array component in array position"))
 
     | IRLet (id, value, body) ->
         bindLet c id value
@@ -2841,17 +2834,17 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
         ln c (renderBr { Cond = cv.Reg; IfTrue = lThen; IfFalse = lElse })
         lbl c lThen
         let a = materialize c (emitArr c tb)
-        ln c (sprintf "store ptr %s, ptr %s" (poolOf a) slot)
+        ln c ($"store ptr {(poolOf a)}, ptr {slot}")
         ln c (sprintf "br label %%%s" lEnd)
         lbl c lElse
         let b = materialize c (emitArr c fb)
         if b.Elem <> a.Elem || b.Groups <> a.Groups then
             refuse "an if-expression whose branches are arrays of different static shapes"
-        ln c (sprintf "store ptr %s, ptr %s" (poolOf b) slot)
+        ln c ($"store ptr {(poolOf b)}, ptr {slot}")
         ln c (sprintf "br label %%%s" lEnd)
         lbl c lEnd
         let p = freshReg c
-        ln c (sprintf "%s = load ptr, ptr %s" p slot)
+        ln c ($"{p} = load ptr, ptr {slot}")
         { a with Src = APool p }
 
     // Elementwise `<|>`: keep the left cell when it is non-zero, else the
@@ -2883,7 +2876,7 @@ and private emitArr (c: Ctx) (e: IRExpr) : ArrVal =
     | IRZip _ -> refuse "zip(...) outside a method_for (a bare zip has no materialized shape)"
 
     | other ->
-        refuse (sprintf "the IR node %s in array position -- no arm in the llvm lane" (caseName other))
+        refuse ($"the IR node {(caseName other)} in array position -- no arm in the llvm lane")
 
 and private addI64 (c: Ctx) (a: Val) (b: Val) : Val =
     if b.Reg = "0" then a
@@ -2894,10 +2887,10 @@ and private addI64 (c: Ctx) (a: Val) (b: Val) : Val =
 
 and private staticExtentOf (ix: IRIndexType) (what: string) : int64 =
     if ix.IxKind <> IxKPlain || ix.Symmetry <> SymNone || ix.Rank <> 1 then
-        refuse (sprintf "a %s over a non-dense index type" what)
+        refuse ($"a {what} over a non-dense index type")
     match Blade.IRPrint.tryEvalIntIR ix.Extent with
     | Some n -> n
-    | None -> refuse (sprintf "a %s over a runtime extent" what)
+    | None -> refuse ($"a {what} over a runtime extent")
 
 /// A RAGGED literal. Row lengths come from the LITERAL'S OWN STRUCTURE,
 /// exactly as the C++ lane's computeRaggedRowLengths reads them -- the closed
@@ -2905,8 +2898,7 @@ and private staticExtentOf (ix: IRIndexType) (what: string) : int64 =
 /// (no row table), one constant offsets global.
 and private emitRaggedLit (c: Ctx) (elems: IRExpr list) (elem: Sc) (rows: int64) : ArrVal =
     if int64 (List.length elems) <> rows then
-        refuse (sprintf "a ragged literal with %d rows for a declared outer extent of %d"
-                    (List.length elems) rows)
+        refuse ($"a ragged literal with {(List.length elems)} rows for a declared outer extent of {rows}")
     let rowElems =
         elems |> List.map (fun e ->
             match e with
@@ -2938,7 +2930,7 @@ and private emitArrayLit (c: Ctx) (elems: IRExpr list) (arrType: IRArrayType) : 
     let flat = flatten elems
     let total = shapeCells groups
     if int64 flat.Length <> total then
-        refuse (sprintf "an array literal with %d values for a shape of %d cells" flat.Length total)
+        refuse ($"an array literal with {flat.Length} values for a shape of {total} cells")
     let ptr = allocPool c elem (string total)
     flat |> List.iteri (fun i x ->
         let v = coerce c elem (emitExpr c x)
@@ -3089,7 +3081,7 @@ and private bindKernelParam (c: Ctx) (p: IRParam) (arg: KArg) : unit =
         (match arrayShapeOf p.Type with
          | Some (e, gs) when e = a.Elem && gs = a.Groups -> ()
          | Some _ ->
-             refuse (sprintf "kernel parameter '%s' whose declared shape disagrees with the peeled row" p.Name)
+             refuse ($"kernel parameter '{p.Name}' whose declared shape disagrees with the peeled row")
          | None ->
              // A rank-polymorphic kernel param can be declared T^k and still
              // arrive as a row; accept whatever the peel produced.
@@ -3106,10 +3098,9 @@ and private bindKernelParam (c: Ctx) (p: IRParam) (arg: KArg) : unit =
 /// instead, since IR ids are program-unique.
 and private applyKernel (c: Ctx) (cl: IRCallable) (args: KArg list) : Val =
     if cl.IsCudaKernel || cl.IsMpiParallel then
-        refuse (sprintf "the kernel '%s', which carries a cuda/mpi strategy" cl.Name)
+        refuse ($"the kernel '{cl.Name}', which carries a cuda/mpi strategy")
     if List.length cl.Params <> List.length args then
-        refuse (sprintf "a kernel '%s' applied to %d of its %d parameters"
-                    cl.Name (List.length args) (List.length cl.Params))
+        refuse ($"a kernel '{cl.Name}' applied to {(List.length args)} of its {(List.length cl.Params)} parameters")
     List.iter2 (bindKernelParam c) cl.Params args
     emitExpr c cl.Body
 
@@ -3152,7 +3143,7 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
      | _ -> ())
     let cg =
         buildLoopNestCodeGen info
-            (info.Arrays |> List.mapi (fun i _ -> sprintf "__a%d" i))
+            (info.Arrays |> List.mapi (fun i _ -> $"__a{i}"))
             "__out" (IRBuilder())
     if List.isEmpty cg.Bindings then refuse "a combinator that produced no loop levels"
     for b in cg.Bindings do
@@ -3212,7 +3203,7 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
         |> List.mapi (fun li b -> (li, b))
         |> List.collect (fun (li, b) ->
             b.Elements |> List.filter (fun el -> el.ArrayPosition = pos) |> List.map (fun el -> (li, el)))
-    let positions = cg.Bindings |> List.collect (fun b -> b.Elements |> List.map (fun el -> el.ArrayPosition)) |> List.distinct
+    let positions = cg.Bindings |> List.collect (fun b -> b.Elements |> List.map (_.ArrayPosition)) |> List.distinct
     let paramOf (varId: IRId) =
         cg.KernelParams |> List.tryFind (fun p -> p.VarId = varId)
     // A real array's subscript at a triangular level is the ABSOLUTE
@@ -3239,7 +3230,7 @@ and private applyToArr (c: Ctx) (info: ApplyInfo) : ArrVal =
             else
                 let permNames (perm: int list) =
                     cg.KernelParams
-                    |> List.mapi (fun i p -> (p.VarId, sprintf "__perm%d" perm.[i]))
+                    |> List.mapi (fun i p -> (p.VarId, $"__perm{perm.[i]}"))
                     |> List.fold (fun acc (vid, nm) -> Map.add vid nm acc) Map.empty
                 Some (Blade.ReynoldsCore.reynoldsTermPlan n cg.IsAntisymmetric
                         (fun perm -> Blade.CodeGenLoopNest.canonicalKey (permNames perm) cg.KernelExpr))
@@ -3467,8 +3458,7 @@ and private applyRaggedPeel (c: Ctx) (info: ApplyInfo) (cl: IRCallable) : ArrVal
                         | [ g ] -> coerce c2 elem (applyKernel c2 cl [ KArray (rowView c2 a [ g ]) ])
                         | _ -> refuse "a ragged peel read at other than its row coordinate") }
     | arrays, ps ->
-        refuse (sprintf "a ragged combinator over %d arrays and %d kernel parameters -- mixing ragged operands with other arrays or multi-parameter kernels is not supported"
-                    (List.length arrays) (List.length ps))
+        refuse ($"a ragged combinator over {(List.length arrays)} arrays and {(List.length ps)} kernel parameters -- mixing ragged operands with other arrays or multi-parameter kernels is not supported")
 
 /// `object_for(k)` applied directly to arrays -- the shape `A + B`, `A * 2.0`
 /// and `A [+] B` lower to (Lowering.lowerTypedBinOp). InputRanks says which:
@@ -3590,7 +3580,7 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
     let cl =
         match resolveCallable kernelExpr with
         | Some cl when cl.Params.Length = 2 -> cl
-        | Some cl -> refuse (sprintf "a fold kernel '%s' of %d parameters" cl.Name cl.Params.Length)
+        | Some cl -> refuse ($"a fold kernel '{cl.Name}' of {cl.Params.Length} parameters")
         | None -> refuse "a reduce whose kernel does not resolve to a callable"
     let accTy =
         match scalarTyOf cl.RetType with
@@ -3609,14 +3599,14 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         match initExpr with
         | Some ini ->
             let v = coerce c accTy (emitExpr c ini)
-            ln c (sprintf "store %s %s, ptr %s" (llTy accTy) v.Reg acc)
+            ln c ($"store {(llTy accTy)} {v.Reg}, ptr {acc}")
             0L
         | None ->
             (match tryLitI64 bound with
              | Some n when n < 1L -> refuse "reduce over a statically empty array"
              | _ -> ())
             let v0 = coerce c accTy (readCell c a [ { Reg = "0"; Ty = ScI64 } ])
-            ln c (sprintf "store %s %s, ptr %s" (llTy accTy) v0.Reg acc)
+            ln c ($"store {(llTy accTy)} {v0.Reg}, ptr {acc}")
             1L
     let licensed = foldFmfDecorable cl
     let trips =
@@ -3635,7 +3625,7 @@ and private emitReduce (c: Ctx) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr
         let next =
             withFoldFmf c licensed (fun () ->
                 coerce c accTy (applyKernel c cl [ KScalar cur; KScalar cell ]))
-        ln c (sprintf "store %s %s, ptr %s" (llTy accTy) next.Reg acc))
+        ln c ($"store {(llTy accTy)} {next.Reg}, ptr {acc}"))
     loadSlot c acc accTy
 
 /// A fold over a COMPACT (simplex) domain: every canonical cell, once.
@@ -3683,7 +3673,7 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
     let fmf = foldFmfDecorable cl
     let combine (dst: string) (cur: Val) (cell: Val) =
         let next = withFoldFmf c fmf (fun () -> coerce c accTy (applyKernel c cl [ KScalar cur; KScalar cell ]))
-        ln c (sprintf "store %s %s, ptr %s" (llTy accTy) next.Reg dst)
+        ln c ($"store {(llTy accTy)} {next.Reg}, ptr {dst}")
     // The seed. Cell 0 in POOL order is also the first cell in BLOCK order
     // (block (0,0) comes first, and its first row is row 0), so an unseeded
     // fold starts from the same value either way -- and every remaining cell
@@ -3692,14 +3682,14 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
         match initExpr with
         | Some ini ->
             let v = coerce c accTy (emitExpr c ini)
-            ln c (sprintf "store %s %s, ptr %s" (llTy accTy) v.Reg acc)
+            ln c ($"store {(llTy accTy)} {v.Reg}, ptr {acc}")
             true
         | None -> false
     let haveTotal = allocaOf c "i1"
-    ln c (sprintf "store i1 %s, ptr %s" (if seeded then "true" else "false") haveTotal)
+    ln c ($"""store i1 {(if seeded then "true" else "false")}, ptr {haveTotal}""")
     let feed (dst: string) (haveFlag: string) (cell: Val) =
         let h = freshReg c
-        ln c (sprintf "%s = load i1, ptr %s" h haveFlag)
+        ln c ($"{h} = load i1, ptr {haveFlag}")
         let lHave = freshLbl c "fold.have"
         let lFirst = freshLbl c "fold.first"
         let lEnd = freshLbl c "fold.done"
@@ -3709,8 +3699,8 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
         ln c (sprintf "br label %%%s" lEnd)
         lbl c lFirst
         let v0 = coerce c accTy cell
-        ln c (sprintf "store %s %s, ptr %s" (llTy accTy) v0.Reg dst)
-        ln c (sprintf "store i1 true, ptr %s" haveFlag)
+        ln c ($"store {(llTy accTy)} {v0.Reg}, ptr {dst}")
+        ln c ($"store i1 true, ptr {haveFlag}")
         ln c (sprintf "br label %%%s" lEnd)
         lbl c lEnd
     match soleSimplexR a.Groups with
@@ -3742,12 +3732,12 @@ and private emitCompactFold (c: Ctx) (a: ArrVal) (cl: IRCallable) (accTy: Sc) (i
             let havePart = allocaOf c "i1"
             emitSimplexR c r n strict (Some b)
                 (fun emitBlock ->
-                    ln c (sprintf "store i1 false, ptr %s" havePart)
+                    ln c ($"store i1 false, ptr {havePart}")
                     emitBlock ()
                     // The brick's partial joins the total HERE, so the combine
                     // order is exactly `SimplexBlocksCore.blockSequence`.
                     let hp = freshReg c
-                    ln c (sprintf "%s = load i1, ptr %s" hp havePart)
+                    ln c ($"{hp} = load i1, ptr {havePart}")
                     let lJoin = freshLbl c "brick.join"
                     let lSkip = freshLbl c "brick.skip"
                     ln c (renderBr { Cond = hp; IfTrue = lJoin; IfFalse = lSkip })
@@ -3788,7 +3778,7 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
             let cl =
                 match resolveCallable k with
                 | Some cl when cl.Params.Length = 2 -> cl
-                | Some cl -> refuse (sprintf "a fold kernel '%s' of %d parameters" cl.Name cl.Params.Length)
+                | Some cl -> refuse ($"a fold kernel '{cl.Name}' of {cl.Params.Length} parameters")
                 | None -> refuse "a fused reduction whose kernel does not resolve to a callable"
             let ty =
                 match scalarTyOf cl.RetType with
@@ -3796,7 +3786,7 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
                 | _ -> a.Elem
             let slot = allocaOf c (llTy ty)
             let seed = coerce c ty (emitExpr c s)
-            ln c (sprintf "store %s %s, ptr %s" (llTy ty) seed.Reg slot)
+            ln c ($"store {(llTy ty)} {seed.Reg}, ptr {slot}")
             // PER LEG: one leg of a join may be a `comm`-declared kernel and
             // its neighbour an arbitrary one, and they share a nest without
             // sharing a license.
@@ -3818,7 +3808,7 @@ and private emitReduceCompute (c: Ctx) (compExpr: IRExpr) (kernelExpr: IRExpr) (
             let next =
                 withFoldFmf c licensed (fun () ->
                     coerce c ty (applyKernel c cl [ KScalar cur; KScalar cell ]))
-            ln c (sprintf "store %s %s, ptr %s" (llTy ty) next.Reg slot))
+            ln c ($"store {(llTy ty)} {next.Reg}, ptr {slot}"))
     plans |> List.map (fun (_, _, ty, slot, _) -> loadSlot c slot ty)
 
 /// Flatten a pack expression into its components. `<&>` (independent) and
@@ -3860,7 +3850,7 @@ and private emitTupleParts (c: Ctx) (e: IRExpr) : ValKind list =
     | other ->
         match Blade.IR.stripUnits (typeOf other) with
         | IRTTuple _ ->
-            refuse (sprintf "the IR node %s in pack position -- the llvm lane builds packs from tuples, <&>/<&!> legs and reduction joins only" (caseName other))
+            refuse ($"the IR node {(caseName other)} in pack position -- the llvm lane builds packs from tuples, <&>/<&!> legs and reduction joins only")
         | _ -> [ classifyValue c other ]
 
 /// A call whose RESULT is an array. The ABI is the same one every array uses:
@@ -3899,9 +3889,9 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     c.NameSlots <- Dictionary()
     c.NameArrSlots <- Dictionary()
     if not (List.isEmpty cl.Captures) then
-        refuse (sprintf "the function '%s', which captures enclosing bindings" cl.Name)
+        refuse ($"the function '{cl.Name}', which captures enclosing bindings")
     if (raggedArrShape cl.RetType).IsSome then
-        refuse (sprintf "'%s' returns a ragged array (ragged returns are not in the llvm lane yet)" cl.Name)
+        refuse ($"'{cl.Name}' returns a ragged array (ragged returns are not in the llvm lane yet)")
     // An array parameter arrives as a bare `ptr` with its shape baked from the
     // declared type -- never a descriptor struct (plan section 5). A `mut`
     // parameter needs no separate treatment: the pointer IS the caller's pool,
@@ -3915,8 +3905,8 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
                 match raggedArrShape p.Type with
                 | Some (elem, rows) -> (i, p, PRagged (elem, rows))
                 | None ->
-                    let sc = requireScalar (sprintf "parameter '%s' of '%s'" p.Name cl.Name) p.Type
-                    if sc = ScVoid then refuse (sprintf "a unit parameter on '%s'" cl.Name)
+                    let sc = requireScalar ($"parameter '{p.Name}' of '{cl.Name}'") p.Type
+                    if sc = ScVoid then refuse ($"a unit parameter on '{cl.Name}'")
                     (i, p, PScalar sc))
     // Parameter facts. `noundef` on everything (no undef/poison channel exists
     // in this emitter); `readonly` on pointers only when a whole-module scan
@@ -3976,7 +3966,7 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
         // this frame's slots, which do not survive the return.
         let result = materialize c (emitArr c cl.Body)
         if result.Elem <> elem || result.Groups <> groups then
-            refuse (sprintf "the body of '%s' produces a shape its return type does not declare" cl.Name)
+            refuse ($"the body of '{cl.Name}' produces a shape its return type does not declare")
         (match result.Src with
          | APool p ->
              // Free the frame's temps, sparing the result. What the result IS
@@ -3995,15 +3985,15 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
              if tracked then popPoolScope c (Some p) true
              elif isParam then popPoolScope c None true
              else popPoolScope c None false
-             ln c (sprintf "ret ptr %s" p)
+             ln c ($"ret ptr {p}")
          | _ -> refuse "an unmaterialized array return")
-        [ yield sprintf "define internal ptr %s(%s)%s {" sym signature fnAttrs
+        [ yield $$"""define internal ptr {{sym}}({{signature}}){{fnAttrs}} {"""
           yield "entry:"
           yield! c.Allocas
           yield! c.Body
           yield "}" ]
     | None ->
-    let retTy = requireScalar (sprintf "the return type of '%s'" cl.Name) cl.RetType
+    let retTy = requireScalar ($"the return type of '{cl.Name}'") cl.RetType
     let result = emitExpr c cl.Body
     if retTy = ScVoid then
         popPoolScope c None true
@@ -4011,8 +4001,8 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     else
         let result = coerce c retTy result
         popPoolScope c None true
-        ln c (sprintf "ret %s %s" (llTy retTy) result.Reg)
-    [ yield sprintf "define internal %s %s(%s)%s {" (llTy retTy) sym signature fnAttrs
+        ln c ($"ret {(llTy retTy)} {result.Reg}")
+    [ yield $$"""define internal {{(llTy retTy)}} {{sym}}({{signature}}){{fnAttrs}} {"""
       yield "entry:"
       yield! c.Allocas
       yield! c.Body
@@ -4026,9 +4016,9 @@ let private mergeModules (modules: IRModule list) : IRModule =
     | [ m ] -> m
     | ms ->
         { Name = "merged"
-          Types = ms |> List.collect (fun m -> m.Types)
-          Functions = ms |> List.collect (fun m -> m.Functions)
-          Bindings = ms |> List.collect (fun m -> m.Bindings)
+          Types = ms |> List.collect (_.Types)
+          Functions = ms |> List.collect (_.Functions)
+          Bindings = ms |> List.collect (_.Bindings)
           StaticFunctionUsage = ms |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.StaticFunctionUsage) Map.empty
           ProviderReads = ms |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderReads) Map.empty
           ProviderWrites = ms |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderWrites) Map.empty
@@ -4052,8 +4042,8 @@ let private checkModuleScope (m: IRModule) : unit =
         // Index-type and alias declarations are typecheck-time identity; they
         // carry no storage and reach the back end as nothing at all.
         | IRTDAlias _ | IRTDIndexType _ | IRTDEnumIdx _ -> ()
-        | IRTDStruct (name, _) -> refuse (sprintf "the struct type '%s'" name)
-        | IRTDVariant (name, _) -> refuse (sprintf "the variant type '%s'" name)
+        | IRTDStruct (name, _) -> refuse ($"the struct type '{name}'")
+        | IRTDVariant (name, _) -> refuse ($"the variant type '{name}'")
 
 // ---------------------------------------------------------------------------
 // Printing
@@ -4086,8 +4076,8 @@ let private outVal (c: Ctx) (v: Val) : unit =
         // boolalpha's "true"/"false".
         needShim c "blade_out_bool"
         let w = freshReg c
-        ln c (sprintf "%s = zext i1 %s to i32" w v.Reg)
-        ln c (sprintf "call void @blade_out_bool(i32 %s)" w)
+        ln c ($"{w} = zext i1 {v.Reg} to i32")
+        ln c ($"call void @blade_out_bool(i32 {w})")
     | ScVoid -> ()
 
 let private emitIfThen (c: Ctx) (cond: string) (thenPart: unit -> unit) : unit =
@@ -4103,11 +4093,11 @@ let private emitIfThen (c: Ctx) (cond: string) (thenPart: unit -> unit) : unit =
 /// C++ printers use, so a leading element never gets a comma.
 let private emitSeparator (c: Ctx) (flag: string) : unit =
     let f = freshReg c
-    ln c (sprintf "%s = load i1, ptr %s" f flag)
+    ln c ($"{f} = load i1, ptr {flag}")
     let nf = freshReg c
     ln c (renderBin { Dest = nf; Opcode = "xor"; Flags = ""; Ty = ScBool; Lhs = f; Rhs = "true" })
     emitIfThen c nf (fun () -> outStr c ", ")
-    ln c (sprintf "store i1 false, ptr %s" flag)
+    ln c ($"store i1 false, ptr {flag}")
 
 /// The C++ lane's `genPrintArraySymAware` in LLVM: ONE regime for every rank
 /// (rank 2 nests, everything else runs flat), with the per-axis bound of a
@@ -4142,14 +4132,14 @@ let private emitArrayPrintGeneric (c: Ctx) (label: string) (a: ArrVal) : unit =
             emitIfThen c t (fun () -> outStr c ", ")
             outStr c "["
             let flag = allocaOf c "i1"
-            ln c (sprintf "store i1 true, ptr %s" flag)
+            ln c ($"store i1 true, ptr {flag}")
             emitCountedLoopTo c (boundOf 1 [ i ]) (fun j ->
                 emitSeparator c flag
                 outVal c (readCell c a [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
             outStr c "]")
     else
         let flag = allocaOf c "i1"
-        ln c (sprintf "store i1 true, ptr %s" flag)
+        ln c ($"store i1 true, ptr {flag}")
         let rec go (d: int) (prior: string list) =
             if d = rank then
                 emitSeparator c flag
@@ -4173,7 +4163,7 @@ let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
             emitIfThen c t (fun () -> outStr c ", ")
             outStr c "["
             let flag = allocaOf c "i1"
-            ln c (sprintf "store i1 true, ptr %s" flag)
+            ln c ($"store i1 true, ptr {flag}")
             emitCountedLoopTo c (raggedLenAt c table i) (fun j ->
                 emitSeparator c flag
                 outVal c (readCell c a [ { Reg = i; Ty = ScI64 }; { Reg = j; Ty = ScI64 } ]))
@@ -4182,7 +4172,7 @@ let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
     | [ GDynDense len ] ->
         outStr c (label + " = [")
         let flag = allocaOf c "i1"
-        ln c (sprintf "store i1 true, ptr %s" flag)
+        ln c ($"store i1 true, ptr {flag}")
         emitCountedLoopTo c len (fun j ->
             emitSeparator c flag
             outVal c (readCell c a [ { Reg = j; Ty = ScI64 } ]))
@@ -4267,8 +4257,8 @@ let private emitPrints (c: Ctx) (bindings: IRBinding list) : unit =
                     // boolean widens at the call and the shim prints boolalpha.
                     needShim c "blade_print_bool"
                     let w = freshReg c
-                    ln c (sprintf "%s = zext i1 %s to i32" w v.Reg)
-                    ln c (sprintf "call void @blade_print_bool(ptr %s, i32 %s)" label w)
+                    ln c ($"{w} = zext i1 {v.Reg} to i32")
+                    ln c ($"call void @blade_print_bool(ptr {label}, i32 {w})")
                 | ScVoid -> ()
             | _ ->
                 match c.ArrSlots.TryGetValue b.Id with
@@ -4306,7 +4296,7 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
     // and nothing calls it, so `norecurse` holds unconditionally; termination
     // is the module-wide question every other function faces.
     let mainAttrs = attrRef c (if c.Facts.AnyRecursion then grpFnNoRecurse else grpFnTerminating)
-    [ yield sprintf "define i32 @main()%s {" mainAttrs
+    [ yield $$"""define i32 @main(){{mainAttrs}} {"""
       yield "entry:"
       yield! c.Allocas
       yield! c.Body
@@ -4374,7 +4364,7 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             if c.UsedAttrGroups.Count > 0 then
                 put ""
                 for g in c.UsedAttrGroups do
-                    put (sprintf "attributes #%d = { %s }" g (attrGroupText c.AnyFrees g))
+                    put ($$"""attributes #{{g}} = { {{(attrGroupText c.AnyFrees g)}} }""")
             Ok (sb.ToString())
             finally Blade.IR.restoreAnalysisContext prevCtx
     with LlvmRefusal reason -> Error reason

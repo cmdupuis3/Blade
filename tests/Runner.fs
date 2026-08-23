@@ -316,7 +316,7 @@ let private runFsharpPipelineLocked (source: string) (testName: string) (outputD
                             let refusalDiags = CodeGen.takeUnhandledIRNodeDiagnostics ()
                             FpCppGenerated (ir, srcFile, codegenWarnings, backendReq, emittedErrorGuard, refusalDiags, cppCode)
                         with ex ->
-                            FpGenError (ir, sprintf "Generation failed: %s" ex.Message)
+                            FpGenError (ir, $"Generation failed: {ex.Message}")
         outcome, capturedWarnings
     )
 
@@ -445,7 +445,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
         // because no artifact exists -- which is also what makes a
         // `REJECT-AT: codegen` probe skip here instead of failing for the
         // absence of a `#error` guard this back end cannot emit.
-        let msg = sprintf "Skipped: llvm lane refused: %s" reason
+        let msg = $"Skipped: llvm lane refused: {reason}"
         { TestName = testName; IRResult = Ok ir; CppGenerated = false;
           CppFile = None; CompileResult = Error msg; RunResult = Error msg;
           ValueCheckResult = Error [msg]; HasExpectedValues = not expectedValues.IsEmpty; AbortExpectation = abortExpectation
@@ -482,7 +482,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
                 | Ok (0, output) ->
                     if expectedValues.IsEmpty then Ok ()
                     else checkExpectedValues expectedValues output
-                | Ok (code, _) -> Error [sprintf "Exit code %d" code]
+                | Ok (code, _) -> Error [$"Exit code {code}"]
                 | Error e -> Error [e]
             { TestName = testName; IRResult = Ok ir; CppGenerated = true;
               CppFile = Some llFile; CompileResult = Ok exeFile; RunResult = runResult;
@@ -543,7 +543,7 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
                     | Ok (0, output) ->
                         if expectedValues.IsEmpty then Ok ()
                         else checkExpectedValues expectedValues output
-                    | Ok (code, _) -> Error [sprintf "Exit code %d" code]
+                    | Ok (code, _) -> Error [$"Exit code {code}"]
                     | Error e -> Error [e]
 
                 { TestName = testName; IRResult = Ok ir; CppGenerated = true;
@@ -581,7 +581,7 @@ let isFullPass (result: FullTestResult) =
 
 /// Determine if IR passed (regardless of C++)
 let isIRPass (result: FullTestResult) =
-    match result.IRResult with Ok _ -> true | _ -> false
+    result.IRResult.IsOk
 
 /// A test whose name ends in "(rejects)" is an intentional reject-probe: the
 /// CORRECT outcome is that the compiler REFUSES it, at the stage pinned by
@@ -608,10 +608,10 @@ let private matchesDiagPin (p: DiagPin) (d: Blade.Diagnostics.Diagnostic) =
 
 let private renderPin (p: DiagPin) =
     sprintf "%s%s" p.PinCode
-        (match p.PinStart with Some (l, c) -> sprintf " @ %d:%d" l c | None -> "")
+        (match p.PinStart with Some (l, c) -> $" @ {l}:{c}" | None -> "")
 
 let private renderDiag (d: Blade.Diagnostics.Diagnostic) =
-    sprintf "%s @ %d:%d" d.Code d.Span.StartLine d.Span.StartCol
+    $"{d.Code} @ {d.Span.StartLine}:{d.Span.StartCol}"
 
 let private clip (n: int) (s: string) =
     let one = s.Replace("\r\n", " ").Replace("\n", " ").Trim()
@@ -663,8 +663,8 @@ let private rejectReasonMisses (result: FullTestResult) : string list =
         let (diags, text) = rejectEvidence result
         let actual =
             if diags.IsEmpty then
-                sprintf "no coded diagnostics were produced; refusal text: %s" (clip 200 text)
-            else sprintf "produced %s" (diags |> List.map renderDiag |> String.concat ", ")
+                $"no coded diagnostics were produced; refusal text: {(clip 200 text)}"
+            else $"""produced {(diags |> List.map renderDiag |> String.concat ", ")}"""
         let mutable remaining = diags
         let codeMisses = ResizeArray<string>()
         for p in result.DiagPins do
@@ -673,13 +673,13 @@ let private rejectReasonMisses (result: FullTestResult) : string list =
                 remaining <- remaining |> List.indexed |> List.filter (fun (j, _) -> j <> i) |> List.map snd
             | None ->
                 if not (text.Contains p.PinCode) then
-                    codeMisses.Add (sprintf "expected // ERROR: %s but %s" (renderPin p) actual)
+                    codeMisses.Add ($"expected // ERROR: {(renderPin p)} but {actual}")
         let containsMisses =
             result.DiagContains
             |> List.filter (fun s ->
                 not (diags |> List.exists (fun d -> d.Message.Contains s)) && not (text.Contains s))
             |> List.map (fun s ->
-                sprintf "expected the rejection to mention '%s' but %s" s actual)
+                $"expected the rejection to mention '{s}' but {actual}")
         (List.ofSeq codeMisses) @ containsMisses
 
 /// The first line of a possibly multi-line message, for a one-line detail.
@@ -717,11 +717,11 @@ let warningPinMisses (warnPins: string list) (codegenPins: string list)
                      (warnings: Blade.Diagnostics.Diagnostic list)
                      (codegenWarnings: string list) : string list =
     let pinnedCodes = Set.ofList warnPins
-    let firedCodes = warnings |> List.map (fun d -> d.Code) |> Set.ofList
+    let firedCodes = warnings |> List.map (_.Code) |> Set.ofList
     let unpinned =
         warnings
         |> List.filter (fun d -> not (pinnedCodes.Contains d.Code))
-        |> List.map (fun d -> sprintf "unpinned warning[%s]: %s" d.Code (firstLineOf d.Message))
+        |> List.map (fun d -> $"unpinned warning[{d.Code}]: {(firstLineOf d.Message)}")
         |> List.distinct
     let unfired =
         warnPins
@@ -731,7 +731,7 @@ let warningPinMisses (warnPins: string list) (codegenPins: string list)
     let unpinnedCodegen =
         codegenWarnings
         |> List.filter (fun w -> not (codegenPins |> List.exists (fun p -> w.Contains p)))
-        |> List.map (fun w -> sprintf "unpinned codegen warning: %s" (firstLineOf w))
+        |> List.map (fun w -> $"unpinned codegen warning: {(firstLineOf w)}")
         |> List.distinct
     let unfiredCodegen =
         codegenPins
@@ -773,7 +773,7 @@ let private stageStatuses (result: FullTestResult) : (string * string) list =
     let runStatus =
         match result.RunResult with
         | Ok (0, _) -> "OK"
-        | Ok (code, _) -> sprintf "EXIT(%d)" code
+        | Ok (code, _) -> $"EXIT({code})"
         | Error e when isSkipError e -> "SKIP"
         | Error _ -> "FAIL"
     let valueStatus =
@@ -849,8 +849,7 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
 
     if not result.MalformedExpectLines.IsEmpty then
         Blade.Tests.TestHarness.Fail,
-        sprintf "unparseable EXPECT pin(s): %s"
-            (result.MalformedExpectLines |> String.concat " | ")
+        $"""unparseable EXPECT pin(s): {(result.MalformedExpectLines |> String.concat " | ")}"""
 
     elif not (resultWarningPinMisses result).IsEmpty then
         // Rule 1b, and deliberately AHEAD of the probe branches. A "(rejects)"
@@ -871,11 +870,10 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
                 match rejectReasonMisses result with
                 | [] ->
                     Blade.Tests.TestHarness.Pass,
-                    sprintf "correctly rejected during lowering%s" pinNote
+                    $"correctly rejected during lowering{pinNote}"
                 | misses ->
                     Blade.Tests.TestHarness.Fail,
-                    sprintf "rejected during lowering, but NOT for the pinned reason: %s"
-                        (String.concat " ; " misses)
+                    $"""rejected during lowering, but NOT for the pinned reason: {(String.concat " ; " misses)}"""
             | Ok _ ->
                 Blade.Tests.TestHarness.Fail,
                 "expected rejection during lowering, but the program lowered"
@@ -923,11 +921,10 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
                         match rejectReasonMisses result with
                         | [] ->
                             Blade.Tests.TestHarness.Pass,
-                            sprintf "correctly rejected by the emitted #error guard%s" pinNote
+                            $"correctly rejected by the emitted #error guard{pinNote}"
                         | misses ->
                             Blade.Tests.TestHarness.Fail,
-                            sprintf "the #error guard fired, but NOT for the pinned reason: %s"
-                                (String.concat " ; " misses)
+                            $"""the #error guard fired, but NOT for the pinned reason: {(String.concat " ; " misses)}"""
                     | Ok _ ->
                         Blade.Tests.TestHarness.Fail,
                         "#error guard emitted but the C++ compiled anyway"
@@ -946,34 +943,34 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
             "abort-probe has no // ABORT: pin -- any nonzero exit would satisfy it, so it asserts nothing"
         elif isExpectedAbort result then
             let code = match result.RunResult with Ok (c, _) -> c | _ -> 0
-            Blade.Tests.TestHarness.Pass, sprintf "aborted as expected (exit %d)" code
+            Blade.Tests.TestHarness.Pass, $"aborted as expected (exit {code})"
         else
             let detail =
                 match result.RunResult with
                 | Ok (code, output) when code <> 0 ->
                     match result.AbortExpectation |> List.tryFind (fun sub -> not (output.Contains sub)) with
-                    | Some sub -> sprintf "aborted (exit %d) but output lacks '%s'" code sub
-                    | None -> sprintf "aborted as expected (exit %d)" code
+                    | Some sub -> $"aborted (exit {code}) but output lacks '{sub}'"
+                    | None -> $"aborted as expected (exit {code})"
                 | Ok (0, _) -> "expected runtime abort but exited 0"
                 | _ ->
                     match stages |> List.tryFind (fun (_, s) -> s = "FAIL" || s = "SKIP") with
-                    | Some (stg, "SKIP") -> sprintf "%s skipped" stg
-                    | Some (stg, _) -> sprintf "expected runtime abort but %s failed" stg
+                    | Some (stg, "SKIP") -> $"{stg} skipped"
+                    | Some (stg, _) -> $"expected runtime abort but {stg} failed"
                     | None -> "expected runtime abort"
             if anySkip && not anyFail then Blade.Tests.TestHarness.Skip, detail
             else Blade.Tests.TestHarness.Fail, detail
 
     elif anyFail then
         let (stg, st) = stages |> List.find (fun (_, s) -> s = "FAIL" || s.StartsWith "EXIT")
-        let detail = if st.StartsWith "EXIT" then sprintf "%s %s" stg st else sprintf "%s failed" stg
+        let detail = if st.StartsWith "EXIT" then $"{stg} {st}" else $"{stg} failed"
         Blade.Tests.TestHarness.Fail, detail
     elif anySkip then
         let (stg, _) = stages |> List.find (fun (_, s) -> s = "SKIP")
-        Blade.Tests.TestHarness.Skip, sprintf "%s skipped" stg
+        Blade.Tests.TestHarness.Skip, $"{stg} skipped"
     else
         // One-liner for passes (#3): the stages that ran, as the detail.
         Blade.Tests.TestHarness.Pass,
-        sprintf "(%s)" (stages |> List.map fst |> String.concat ",")
+        $"""({(stages |> List.map fst |> String.concat ",")})"""
 
 /// THE verdict for a test classified by its own name (see classifyWithDetailAs
 /// for the forced-reject-probe variant the interp gate needs).
@@ -1034,7 +1031,7 @@ let isCorrectOutcome (result: FullTestResult) =
 
 /// Run test category with IR only
 let runTestCategory name tests =
-    printHeader (sprintf "Blade-DSL: %s Tests" name)
+    printHeader ($"Blade-DSL: {name} Tests")
     printfn "Running %d tests...\n" (List.length tests)
     
     let mutable passed = 0
@@ -1064,7 +1061,7 @@ let runTestCategory name tests =
 
 /// Run multi-file module tests (IR-only)
 let runMultiFileTests (name: string) (tests: (string * (string * string) list) list) =
-    printHeader (sprintf "Blade-DSL: %s Tests (Multi-File)" name)
+    printHeader ($"Blade-DSL: {name} Tests (Multi-File)")
     printfn "Running %d tests...\n" (List.length tests)
     
     let mutable passed = 0
@@ -1095,7 +1092,7 @@ let runMultiFileTests (name: string) (tests: (string * (string * string) list) l
 
 /// Run multi-file module tests with full C++ pipeline
 let runMultiFileTestsFull (name: string) (tests: (string * (string * string) list) list) (outputDir: string) =
-    printHeader (sprintf "Blade-DSL: %s Tests (Multi-File, Full C++ Pipeline)" name)
+    printHeader ($"Blade-DSL: {name} Tests (Multi-File, Full C++ Pipeline)")
 
     // THIS BLOCK IS C++-ONLY, and says so rather than pretending otherwise.
     //
@@ -1112,7 +1109,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
     if currentCorpusBackend () <> CppBackend then
         printfn "SKIPPED: this block drives the C++ emitter directly, so it cannot report on another back end."
         printfn "         %d multi-file test(s) not run.\n" (List.length tests)
-        printFooter name [ "0 passed"; "0 failed"; sprintf "%d skipped" (List.length tests) ]
+        printFooter name [ "0 passed"; "0 failed"; $"{(List.length tests)} skipped" ]
         { Block = name; Passed = 0; Failed = 0; Skipped = List.length tests; FailedNames = [] }
     else
 
@@ -1142,14 +1139,14 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
         let (lowered, capturedWarnings) = lowerMultiSourceCaptured sources
         match lowered with
         | Error e ->
-            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "lower: %s" e)
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"lower: {e}")
             failed <- failed + 1
             failedNames <- failedNames @ [testName]
         | Ok ir ->
             match IRValidate.validateIR ir with
             | Error validationErrors ->
                 let joined = String.concat "; " validationErrors
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "IR validation: %s" joined)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"IR validation: {joined}")
                 failed <- failed + 1
                 failedNames <- failedNames @ [testName]
             | Ok ir ->
@@ -1181,7 +1178,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                         Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Skip testName e
                         skipped <- skipped + 1
                     | Error e ->
-                        Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "compile: %s" e)
+                        Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"compile: {e}")
                         failed <- failed + 1
                         failedNames <- failedNames @ [testName]
                     | Ok exeFile ->
@@ -1197,7 +1194,7 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                             let malformed = parseMalformedExpectLines mainSource
                             if not malformed.IsEmpty then
                                 Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName
-                                    (sprintf "unparseable EXPECT pin(s): %s" (String.concat " | " malformed))
+                                    ($"""unparseable EXPECT pin(s): {(String.concat " | " malformed)}""")
                                 failed <- failed + 1
                                 failedNames <- failedNames @ [testName]
                             elif expectedValues.IsEmpty then
@@ -1209,31 +1206,31 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass testName ""
                                     passed <- passed + 1
                                 | Error msgs ->
-                                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "values: %s" (String.concat "; " msgs))
+                                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"""values: {(String.concat "; " msgs)}""")
                                     failed <- failed + 1
                                     failedNames <- failedNames @ [testName]
                         | Ok (code, output) ->
-                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "exit %d: %s" code output)
+                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"exit {code}: {output}")
                             failed <- failed + 1
                             failedNames <- failedNames @ [testName]
                         | Error e ->
-                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "run: %s" e)
+                            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"run: {e}")
                             failed <- failed + 1
                             failedNames <- failedNames @ [testName]
                 else
                     Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Skip testName "no g++"
                     skipped <- skipped + 1
             with ex ->
-                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName (sprintf "gen: %s" ex.Message)
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"gen: {ex.Message}")
                 failed <- failed + 1
                 failedNames <- failedNames @ [testName]
 
-    Blade.Tests.TestHarness.printFooter name [sprintf "%d passed" passed; sprintf "%d failed" failed; sprintf "%d skipped" skipped]
+    Blade.Tests.TestHarness.printFooter name [$"{passed} passed"; $"{failed} failed"; $"{skipped} skipped"]
     { Block = name; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }
 
 /// Run test category with full C++ compilation and execution
 let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDir: string) =
-    printHeader (sprintf "Blade-DSL: %s Tests (Full C++ Pipeline)" name)
+    printHeader ($"Blade-DSL: {name} Tests (Full C++ Pipeline)")
     
     // Check g++ availability
     let gppAvailable = checkGppAvailable ()
@@ -1275,7 +1272,7 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
                 | Error e when e = "IR failed" -> "IR fail"
                 | Error e when isSkipError e -> "skip"
                 | Error _ -> "compile fail"
-            let line = sprintf "[%d/%d] %s... %s" (idx + 1) total testName status
+            let line = $"[{(idx + 1)}/{total}] {testName}... {status}"
             
             // Buffer this result and flush any sequential completions
             resultBuffer.[idx] <- line
@@ -1344,8 +1341,8 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     let irPassed = results |> List.filter isIRPass |> List.length
     let irFailed = results.Length - irPassed
     let fullPassed = results |> List.filter isFullPass |> List.length
-    let compiled = results |> List.filter (fun r -> match r.CompileResult with Ok _ -> true | _ -> false) |> List.length
-    let generated = results |> List.filter (fun r -> r.CppGenerated) |> List.length
+    let compiled = results |> List.filter (_.CompileResult.IsOk) |> List.length
+    let generated = results |> List.filter (_.CppGenerated) |> List.length
 
     // Probe population. A reject-probe that lowers is NOT counted as an
     // expected rejection here — only one that actually got refused at the
@@ -1419,11 +1416,11 @@ let runTestCategoryFull (name: string) (tests: (string * string) list) (outputDi
     // The BlockResult IS the verdict tally: same classifier, same numbers as
     // the "Verdict:" line above and as every per-test [PASS]/[FAIL]/[SKIP].
     { Block = name; Passed = passed; Failed = failed;
-      Skipped = skipped; FailedNames = failedResults |> List.map (fun r -> r.TestName) }
+      Skipped = skipped; FailedNames = failedResults |> List.map (_.TestName) }
 
 /// Run tests with C++ generation only (no compilation)
 let runTestCategoryGenOnly (name: string) (tests: (string * string) list) (outputDir: string) =
-    printHeader (sprintf "Blade-DSL: %s Tests (Generate C++ Only)" name)
+    printHeader ($"Blade-DSL: {name} Tests (Generate C++ Only)")
     
     // Ensure output directory exists
     if not (Directory.Exists outputDir) then

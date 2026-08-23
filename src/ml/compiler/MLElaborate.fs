@@ -257,10 +257,10 @@ let private tpBodyStmts (cfg: TPConfig) (wName: string) : Stmt list * Expr =
         paths |> List.map (fun (b1, b2, bo) ->
             Blade.ML.WignerTables.realCGSparse cfg.Spec1.[b1].L cfg.Spec2.[b2].L cfg.SpecOut.[bo].L)
     let cgOff = (0, cgPerPath) ||> List.scan (fun acc es -> acc + es.Length)
-    let cgC1 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map (fun e -> e.C1))
-    let cgC2 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map (fun e -> e.C2))
-    let cgC3 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map (fun e -> e.C3))
-    let cgCo = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map (fun e -> e.Coef))
+    let cgC1 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map _.C1)
+    let cgC2 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map _.C2)
+    let cgC3 = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map _.C3)
+    let cgCo = cgPerPath |> List.collect (fun es -> es |> Array.toList |> List.map _.Coef)
     let nPaths = paths.Length
     // out(pSO(p) + mo*pDO(p) + c3(t)) += coef(t) * w(woff(p) + (mo*m1 + u1)*m2 + u2)
     //                                     * x(pS1(p) + u1*pD1(p) + c1(t))
@@ -354,15 +354,13 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
     // The S2 split is a partition of the dense parameter space -- cheap to
     // check here, and a violation would mis-size a user's weight buffer.
     if not (s2TpSplitIsPartition s) then
-        Error (err5000 (sprintf "internal: the S2 split of the self-TP weight space is not a partition (sym %d + alt %d <> dense %d)"
-                            (symTpWeightDim s) (altTpWeightDim s) (tpWeightDim cfg)))
+        Error (err5000 ($"internal: the S2 split of the self-TP weight space is not a partition (sym {(symTpWeightDim s)} + alt {(altTpWeightDim s)} <> dense {(tpWeightDim cfg)})"))
     elif packedDim = 0 || cells.IsEmpty then
         Error (err5000 "internal: empty S2 component reached kernel synthesis (the call site must reject it as BL4007)")
     // Every packed slot must be read by exactly one (cell, mo): the cells
     // cover the buffer the user is asked to supply, or parameters are dead.
-    elif cells |> List.sumBy (fun c -> c.MultO) <> packedDim then
-        Error (err5000 (sprintf "internal: the fused S2 cell table reads %d of the %d packed weight slots"
-                            (cells |> List.sumBy (fun c -> c.MultO)) packedDim))
+    elif cells |> List.sumBy _.MultO <> packedDim then
+        Error (err5000 ($"internal: the fused S2 cell table reads {(cells |> List.sumBy _.MultO)} of the {packedDim} packed weight slots"))
     else
     let dO = totalDim cfg.SpecOut
     let paths = tpPaths cfg |> List.toArray
@@ -388,14 +386,14 @@ let private deriveS2TpDecl (name: string) (s: Spec) (comp: S2Component) : Result
     let tIdx (t: string) = idx t (v "t")
     let stmts =
         [ sLetMut "out" (zerosLit dO)
-          sLet "__k_oa" (kI (fun c -> c.OffA))
-          sLet "__k_ob" (kI (fun c -> c.OffB))
-          sLet "__k_oo" (kI (fun c -> c.OutOff))
-          sLet "__k_do" (kI (fun c -> c.OutDim))
-          sLet "__k_nm" (kI (fun c -> c.MultO))
-          sLet "__k_wb" (kI (fun c -> c.WBase))
-          sLet "__k_ws" (kI (fun c -> c.WStride))
-          sLet "__k_ps" (floatArrLit (cells |> List.map (fun c -> c.PairSign)))
+          sLet "__k_oa" (kI _.OffA)
+          sLet "__k_ob" (kI _.OffB)
+          sLet "__k_oo" (kI _.OutOff)
+          sLet "__k_do" (kI _.OutDim)
+          sLet "__k_nm" (kI _.MultO)
+          sLet "__k_wb" (kI _.WBase)
+          sLet "__k_ws" (kI _.WStride)
+          sLet "__k_ps" (floatArrLit (cells |> List.map _.PairSign))
           sLet "__k_cl" (kI (fun c -> fst (Map.find c.Path cgRange)))
           sLet "__k_ch" (kI (fun c -> snd (Map.find c.Path cgRange)))
           sLet "__cg_c1" (intArrLit (pick (fun (a, _, _, _, _, _) -> a)))
@@ -453,19 +451,18 @@ let private symLiftDecl (name: string) (s: Spec) (k: int) : Result<FunctionDecl,
     let n = totalDim s
     let cells = binomial (n + k - 1) k
     if cells > 100000L then
-        Error (err5000 (sprintf "sym_lift: the degree-%d monomial space of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit -- lift a smaller spec (ml.scalars/ml.linear first) or lower K"
-                            k n (n + k - 1) k cells))
+        Error (err5000 ($"sym_lift: the degree-{k} monomial space of a dim-{n} input has C({(n + k - 1)}, {k}) = {cells} cells, over the 100000-cell limit -- lift a smaller spec (ml.scalars/ml.linear first) or lower K"))
     else
     let tuples = symMultisets n k
     let nCells = tuples.Length
     let stmts =
         [ yield sLetMut "out" (zerosLit nCells)
           for j in 0 .. k - 1 do
-            yield sLet (sprintf "__m%d" j) (intArrLit (tuples |> List.map (fun t -> t.[j])))
+            yield sLet $"__m{j}" (intArrLit (tuples |> List.map (fun t -> t.[j])))
           yield StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit nCells)),
                     [ sAssign (idx "out" (v "c"))
                               ([ 0 .. k - 1 ]
-                               |> List.map (fun j -> idx "x" (idx (sprintf "__m%d" j) (v "c")))
+                               |> List.map (fun j -> idx "x" (idx $"__m{j}" (v "c")))
                                |> List.reduce mul) ]) ]
     Ok (mkFunc name [ ("x", tyIrrepsArr s) ] (tyFloatArr nCells)
             (syn (ExprBlock (stmts, Some (v "out")))))
@@ -546,21 +543,20 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
                 else
                     let occs = (Blade.ML.SymPowerTables.symPowerTable u.Degree u.CopyL).Occurrences |> List.toArray
                     if u.Occ < 0 || u.Occ >= occs.Length then
-                        Some (sprintf "T_{%d,%d} has %d occurrences but a label selects index %d"
-                                  u.Degree u.CopyL occs.Length u.Occ)
+                        Some ($"T_{{{u.Degree},{u.CopyL}}} has {occs.Length} occurrences but a label selects index {u.Occ}")
                     elif occs.[u.Occ].L <> u.OccL || occs.[u.Occ].Copy <> u.OccCopy then
                         Some (sprintf "T_{%d,%d} occurrence %d is (L=%d, copy=%d) but the label basis says (L=%d, copy=%d)"
                                   u.Degree u.CopyL u.Occ occs.[u.Occ].L occs.[u.Occ].Copy u.OccL u.OccCopy)
                     else None))
     if occProblem.IsSome then
-        Error (err5000 (sprintf "internal: derive_poly occurrence order drift -- %s" occProblem.Value))
+        Error (err5000 $"internal: derive_poly occurrence order drift -- {occProblem.Value}")
     elif wDim <> polyWeightDim s k sOut then
         Error (err5000 (sprintf "internal: derive_poly enumerated %d weight slots label by label but poly_weight_dim says %d (spec %A, K %d, out %A)"
                             wDim (polyWeightDim s k sOut) s k sOut))
     else
     let stmts = ResizeArray<Stmt> ()
     let mutable ctr = 0
-    let fresh (p: string) = ctr <- ctr + 1; sprintf "__%s%d" p ctr
+    let fresh (p: string) = ctr <- ctr + 1; $"__{p}{ctr}"
     stmts.Add (sLetMut "out" (zerosLit (totalDim sOut)))
     stmts.Add (sLetMut "__lf" (zerosLit (max lfDim 1)))
     // 1. monomial buffers, one per used (copy, degree), degree >= 2
@@ -578,11 +574,11 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
         monNames <- Map.add (c, j) nm monNames
         stmts.Add (sLetMut nm (zerosLit tuples.Length))
         for a in 0 .. j - 1 do
-            stmts.Add (sLet (sprintf "%s_i%d" nm a) (intArrLit (tuples |> List.map (fun t -> off + t.[a]))))
+            stmts.Add (sLet $"{nm}_i{a}" (intArrLit (tuples |> List.map (fun t -> off + t.[a]))))
         stmts.Add (StmtForIn ("c", syn (ExprDotDot (iLit 0, iLit tuples.Length)),
                      [ sAccum (idx nm (v "c"))
                               ([ 0 .. j - 1 ]
-                               |> List.map (fun a -> idx "x" (idx (sprintf "%s_i%d" nm a) (v "c")))
+                               |> List.map (fun a -> idx "x" (idx $"{nm}_i{a}" (v "c")))
                                |> List.reduce mul) ]))
     // 2. the T_{j,l} matvec, sparse (row, cell, coef)
     let emitMatvec (dstName: string) (dstBase: int) (u: PolyCopyUse) =
@@ -615,7 +611,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
         stmts.Add (sLet (nm + "_1") (intArrLit (cg |> List.map (fun e -> aBase + e.C1))))
         stmts.Add (sLet (nm + "_2") (intArrLit (cg |> List.map (fun e -> bBase + e.C2))))
         stmts.Add (sLet (nm + "_3") (intArrLit (cg |> List.map (fun e -> dstBase + e.C3))))
-        stmts.Add (sLet (nm + "_v") (floatArrLit (cg |> List.map (fun e -> e.Coef))))
+        stmts.Add (sLet (nm + "_v") (floatArrLit (cg |> List.map _.Coef)))
         stmts.Add (StmtForIn ("t", syn (ExprDotDot (iLit 0, iLit cg.Length)),
                      [ sAccum (idx dstName (idx (nm + "_3") (v "t")))
                               (mul (mul (idx (nm + "_v") (v "t")) (idx aName (idx (nm + "_1") (v "t"))))
@@ -624,7 +620,7 @@ let private derivePolyDecl (name: string) (s: Spec) (k: int) (sOut: Spec) : Resu
     // prefixes keyed by the whole (uses, chain) prefix. First appearance IS a
     // topological order -- a child key extends its parent's.
     let mutable nodes : Map<string, string> = Map.empty
-    let useKey (u: PolyCopyUse) = sprintf "%d.%d.%d" u.Copy u.Degree u.Occ
+    let useKey (u: PolyCopyUse) = $"{u.Copy}.{u.Degree}.{u.Occ}"
     let prefixKey (lb: PolyLabel) (m: int) =
         let us = lb.Uses |> List.truncate m |> List.map useKey |> String.concat ","
         let ch = lb.Chain |> List.truncate (m - 1) |> List.map string |> String.concat ","
@@ -893,8 +889,7 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
             let basis = Blade.ML.PointSpec.endBasis ir
             let e = List.length basis
             if not (Blade.ML.PointSpec.matEq (List.head basis) (Blade.ML.PointSpec.matId d)) then
-                failwithf "internal: the End-basis of %s::%s does not lead with the identity -- the e = 1 emission path assumes it"
-                    grp.Name label
+                failwith $"internal: the End-basis of {grp.Name}::{label} does not lead with the identity -- the e = 1 emission path assumes it"
             let thisOff = wOff
             wOff <- wOff + mOut * mIn * e
             // The weight index of scalar `k` of cell (mo, mi): cells in
@@ -939,16 +934,14 @@ let private derivePgLinearDecl (name: string) (grp: Blade.ML.PointSpec.PointGrou
                                if jv = 1 then yield sAccum outAt (mul (v "wj") (xAt k))
                                elif jv = -1 then yield sAccum outAt (mul (v "wjn") (xAt k))
                                elif jv <> 0 then
-                                   failwithf "internal: the baked J of %s::%s has entry %d at (%d, %d) -- the emitted two-term form bakes J SPARSE and handles only {0, +-1} (the shipped roster's matrix-rationality boundary)"
-                                       grp.Name label jv c k ]) ] ])
+                                   failwith $"internal: the baked J of {grp.Name}::{label} has entry {jv} at ({c}, {k}) -- the emitted two-term form bakes J SPARSE and handles only {{0, +-1}} (the shipped roster's matrix-rationality boundary)" ]) ] ])
     let wDim = wOff
     // The count is the theorem because the basis is emitted: the number of
     // weight slots the kernel actually reads, checked against the number the
     // user sized their buffer by (`ml.pg_hom_dim`).
     let declared = Blade.ML.PointSpec.pgHomDim grp specIn specOut
     if wDim <> declared then
-        Error (err5000 (sprintf "internal: derive_pg_linear emitted %d weight slots but pg_hom_dim(%s, ...) says %d"
-                            wDim grp.Name declared))
+        Error (err5000 ($"internal: derive_pg_linear emitted {wDim} weight slots but pg_hom_dim({grp.Name}, ...) says {declared}"))
     else
         let body =
             syn (ExprBlock (
@@ -1044,7 +1037,7 @@ let private permNestStmts (k: int) (l: int) (n: int) (coefName: string) (readsX:
                           (parts: int[] list) : Stmt list =
     parts |> List.mapi (fun g rgs ->
         let nBlocks = Blade.ML.PermSpec.blockCount rgs
-        let bv (j: int) = sprintf "__pv%d_%d" g j
+        let bv (j: int) = $"__pv{g}_{j}"
         // sum_{i=lo..hi-1} v_{gamma(i)} * N^{hi-1-i}: the flat row-major index
         // of one axis run. The EMPTY run (K = 0 bias inputs, or L = 0
         // outputs) is the single cell 0 -- N^0 = 1.
@@ -1073,16 +1066,14 @@ let private derivePermLinearDecl (name: string) (k: int) (l: int) (n: int)
     let inCells = permPow n k
     let outCells = permPow n l
     if inCells > int64 permCellCap || outCells > int64 permCellCap then
-        Error (err5000 (sprintf "derive_perm_linear: the flat node-power buffers of K = %d, L = %d, N = %d are N^K and N^L cells, and at least one is over the %d-cell limit -- the emitted kernel materializes the output as a literal zero array of that extent. Lower N (the node-axis extent), or lower K / L"
-                            k l n permCellCap))
+        Error (err5000 ($"derive_perm_linear: the flat node-power buffers of K = {k}, L = {l}, N = {n} are N^K and N^L cells, and at least one is over the {permCellCap}-cell limit -- the emitted kernel materializes the output as a literal zero array of that extent. Lower N (the node-axis extent), or lower K / L"))
     else
     let parts = Blade.ML.PermSpec.permPartitions (k + l) n
     let wDim = List.length parts
     // The count is the theorem because the basis is emitted: one nest per
     // weight slot, checked against the number the user sized their buffer by.
     if wDim <> Blade.ML.PermSpec.permWeightDim k l n then
-        Error (err5000 (sprintf "internal: derive_perm_linear emitted %d loop nests but perm_weight_dim(%d, %d, %d) says %d"
-                            wDim k l n (Blade.ML.PermSpec.permWeightDim k l n)))
+        Error (err5000 ($"internal: derive_perm_linear emitted {wDim} loop nests but perm_weight_dim({k}, {l}, {n}) says {(Blade.ML.PermSpec.permWeightDim k l n)}"))
     else
         let stmts = sLetMut "out" (zerosLit (int outCells)) :: permNestStmts k l n "w" true parts
         Ok (mkFunc name [ ("x", tyFloatArr (int inCells)); ("w", tyFloatArr wDim) ]
@@ -1099,14 +1090,12 @@ let private derivePermBiasDecl (name: string) (l: int) (n: int)
     : Result<FunctionDecl, ElabError> =
     let outCells = permPow n l
     if outCells > int64 permCellCap then
-        Error (err5000 (sprintf "derive_perm_bias: the flat node-power buffer of L = %d, N = %d is N^L cells, over the %d-cell limit -- the emitted kernel materializes it as a literal zero array of that extent. Lower N (the node-axis extent), or lower L"
-                            l n permCellCap))
+        Error (err5000 ($"derive_perm_bias: the flat node-power buffer of L = {l}, N = {n} is N^L cells, over the {permCellCap}-cell limit -- the emitted kernel materializes it as a literal zero array of that extent. Lower N (the node-axis extent), or lower L"))
     else
     let parts = Blade.ML.PermSpec.permPartitions l n
     let bDim = List.length parts
     if bDim <> Blade.ML.PermSpec.permBiasDim l n then
-        Error (err5000 (sprintf "internal: derive_perm_bias emitted %d loop nests but perm_bias_dim(%d, %d) says %d"
-                            bDim l n (Blade.ML.PermSpec.permBiasDim l n)))
+        Error (err5000 ($"internal: derive_perm_bias emitted {bDim} loop nests but perm_bias_dim({l}, {n}) says {(Blade.ML.PermSpec.permBiasDim l n)}"))
     else
         let stmts = sLetMut "out" (zerosLit (int outCells)) :: permNestStmts 0 l n "b" false parts
         Ok (mkFunc name [ ("b", tyFloatArr bDim) ] (tyFloatArr (int outCells))
@@ -1284,8 +1273,8 @@ let private staticArg (statics: StaticEnv) (what: string) (e: Expr) : Result<Sta
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some sv -> Ok sv
-        | None -> Error (err5000 (sprintf "%s: '%s' is not a `let static` binding (ML op configs must be static)" what name))
-    | _ -> Error (err5000 (sprintf "%s: config argument must be a `let static` binding name or literal" what))
+        | None -> Error (err5000 $"{what}: '{name}' is not a `let static` binding (ML op configs must be static)")
+    | _ -> Error (err5000 $"{what}: config argument must be a `let static` binding name or literal")
 
 /// Resolve the GROUP argument of a point-group op. Two accepted spellings,
 /// tried in order: (1) a `let static` binding holding a STRING -- the
@@ -1308,10 +1297,10 @@ let private pgGroupArg (statics: StaticEnv) (what: string) (e: Expr)
         match Map.tryFind name statics.Values with
         | Some (SVString s) -> byName s
         | Some _ ->
-            Error (err5000 (sprintf "%s: '%s' is a `let static` binding but not a STRING -- GROUP names a registered point group, e.g. \"C4\"" what name))
+            Error (err5000 ($"{what}: '{name}' is a `let static` binding but not a STRING -- GROUP names a registered point group, e.g. \"C4\""))
         | None -> byName name
     | _ ->
-        Error (err5000 (sprintf "%s: GROUP must be a point-group name (a bare C4 / D4, a string literal, or a `let static` string binding)" what))
+        Error (err5000 $"{what}: GROUP must be a point-group name (a bare C4 / D4, a string literal, or a `let static` string binding)")
 
 let private ensureSigmoid (st: ElabState) : string =
     match st.SigmoidName with
@@ -1328,7 +1317,7 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
     | Some n -> Ok n
     | None ->
         st.Counter <- st.Counter + 1
-        let n = sprintf "__ml_%d" st.Counter
+        let n = $"__ml_{st.Counter}"
         make n |> Result.map (fun decl ->
             st.Made <- Map.add key n st.Made
             st.Decls <- st.Decls @ [ decl ]
@@ -1355,7 +1344,7 @@ let private elabLinear (st: ElabState) (statics: StaticEnv) (what: string) (site
         // whole hom-space is zero; a partial miss keeps the classic
         // all_irreps_present framing from linearBlocks.
         if homDim si so = 0 then
-            Error (err4007 (sprintf "%s: no equivariant linear map exists from the input spec to the output spec -- by Schur's lemma an equivariant linear map can only connect irreps of identical (l, parity), and these specs share none: every admissible map is zero" what))
+            Error (err4007 $"{what}: no equivariant linear map exists from the input spec to the output spec -- by Schur's lemma an equivariant linear map can only connect irreps of identical (l, parity), and these specs share none: every admissible map is zero")
         else
             Error (err4007 (detail + " -- the only equivariant map into that block is zero (Schur's lemma); ml.derive_linear gives the zero-completed complete basis")))
     |> Result.bind (fun rows ->
@@ -1442,16 +1431,14 @@ let private elabDerivePoly (st: ElabState) (statics: StaticEnv) (site: Expr)
             let n = totalDim s
             let cells = binomial (n + k - 1) k
             if cells > 100000L then
-                Error (err5000 (sprintf "derive_poly: the degree-%d symmetric power of a dim-%d input has C(%d, %d) = %d cells, over the 100000-cell limit -- the label basis is one vector per cell, so the emitted kernel would be unusable; lower K, or reduce the input spec first (ml.scalars / ml.linear). The channel-shared degree-K op that amortizes one basis over many multiplicity slots is future work"
-                                    k n (n + k - 1) k cells))
+                Error (err5000 ($"derive_poly: the degree-{k} symmetric power of a dim-{n} input has C({(n + k - 1)}, {k}) = {cells} cells, over the 100000-cell limit -- the label basis is one vector per cell, so the emitted kernel would be unusable; lower K, or reduce the input spec first (ml.scalars / ml.linear). The channel-shared degree-K op that amortizes one basis over many multiplicity slots is future work"))
             elif polyWeightDim s k sOut = 0 then
-                Error (err4007 (sprintf "derive_poly: no equivariant degree-%d polynomial map exists from the input spec to the output spec -- by Schur's lemma a degree-%d homogeneous equivariant map is a linear map out of Sym^%d of the input (ml.sym_spec(SPEC, %d)), which can only connect irreps of identical (l, parity), and those specs share none: every admissible map is zero"
-                                    k k k k))
+                Error (err4007 ($"derive_poly: no equivariant degree-{k} polynomial map exists from the input spec to the output spec -- by Schur's lemma a degree-{k} homogeneous equivariant map is a linear map out of Sym^{k} of the input (ml.sym_spec(SPEC, {k})), which can only connect irreps of identical (l, parity), and those specs share none: every admissible map is zero"))
             else
                 ensure st (fingerprint "derive_poly" (box (s, k, sOut))) (fun n2 -> derivePolyDecl n2 s k sOut)
                 |> Result.map (fun n2 -> inheritSpan site (ExprApp (v n2, [ xE; wE ])))
         | SVInt kk ->
-            Error (err5000 (sprintf "derive_poly: K must be a static int in 1..4 (got %d) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)" kk))
+            Error (err5000 $"derive_poly: K must be a static int in 1..4 (got {kk}) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)")
         | _ -> Error (err5000 "derive_poly: K must be a static int"))))))
 
 /// Shared elaboration for derive_pg_linear: resolve the group, decode the
@@ -1476,8 +1463,7 @@ let private elabDerivePgLinear (st: ElabState) (statics: StaticEnv) (site: Expr)
     (Blade.ML.Statics.pgSpecOfStatic "derive_pg_linear SOUT" grp svo |> Result.mapError err5000)
     |> Result.bind (fun so ->
         if Blade.ML.PointSpec.pgHomDim grp si so = 0 then
-            Error (err4007 (sprintf "derive_pg_linear: no %s-equivariant linear map exists from the input spec to the output spec -- by Schur's lemma over R an equivariant linear map can only connect irreducible blocks carrying the SAME label, and these specs share none: every admissible map is zero"
-                                grp.Name))
+            Error (err4007 ($"derive_pg_linear: no {grp.Name}-equivariant linear map exists from the input spec to the output spec -- by Schur's lemma over R an equivariant linear map can only connect irreducible blocks carrying the SAME label, and these specs share none: every admissible map is zero"))
         else
             ensure st (fingerprint "pg_linear" (box (grp.Name, si, so)))
                 (fun n -> derivePgLinearDecl n grp si so)
@@ -1504,11 +1490,11 @@ let private elabDerivePermLinear (st: ElabState) (statics: StaticEnv) (site: Exp
         match kv, lv, nv with
         | SVInt kk, SVInt ll, SVInt nn ->
             if kk < 1L then
-                Error (err5000 (sprintf "derive_perm_linear: K must be a static int >= 1 (got %d) -- K = 0 has no input axes, so the map is a CONSTANT and its complete basis is the rep-introduction form ml.derive_perm_bias(L, N, b), whose buffer is sized by ml.perm_bias_dim(L, N) rather than ml.perm_weight_dim(0, L, N)" kk))
+                Error (err5000 $"derive_perm_linear: K must be a static int >= 1 (got {kk}) -- K = 0 has no input axes, so the map is a CONSTANT and its complete basis is the rep-introduction form ml.derive_perm_bias(L, N, b), whose buffer is sized by ml.perm_bias_dim(L, N) rather than ml.perm_weight_dim(0, L, N)")
             elif ll < 0L then
-                Error (err5000 (sprintf "derive_perm_linear: L must be a static int >= 0 (got %d) -- L = 0 is the invariant readout, a one-cell Idx<1> result" ll))
+                Error (err5000 $"derive_perm_linear: L must be a static int >= 0 (got {ll}) -- L = 0 is the invariant readout, a one-cell Idx<1> result")
             elif not (permRangeOk kk ll nn) then
-                Error (err5000 (sprintf "derive_perm_linear: K, L and N are static ints out of any sane range (got %d, %d, %d)" kk ll nn))
+                Error (err5000 $"derive_perm_linear: K, L and N are static ints out of any sane range (got {kk}, {ll}, {nn})")
             else
                 let k, l, n = int kk, int ll, int nn
                 Blade.ML.PermSpec.checkPermSizing "derive_perm_linear" "K + L" (k + l) n
@@ -1529,9 +1515,9 @@ let private elabDerivePermBias (st: ElabState) (statics: StaticEnv) (site: Expr)
         match lv, nv with
         | SVInt ll, SVInt nn ->
             if ll < 0L then
-                Error (err5000 (sprintf "derive_perm_bias: L must be a static int >= 0 (got %d)" ll))
+                Error (err5000 $"derive_perm_bias: L must be a static int >= 0 (got {ll})")
             elif not (permRangeOk 0L ll nn) then
-                Error (err5000 (sprintf "derive_perm_bias: L and N are static ints out of any sane range (got %d, %d)" ll nn))
+                Error (err5000 $"derive_perm_bias: L and N are static ints out of any sane range (got {ll}, {nn})")
             else
                 let l, n = int ll, int nn
                 Blade.ML.PermSpec.checkPermSizing "derive_perm_bias" "L" l n
@@ -1554,14 +1540,13 @@ let private elabPermMatmul (st: ElabState) (statics: StaticEnv) (site: Expr)
         match nv with
         | SVInt nn ->
             if nn < 1L then
-                Error (err5000 (sprintf "perm_matmul: N must be a static int >= 1 (got %d) -- it is the node-axis extent, and the buffers are the flat row-major N^2 matrices" nn))
+                Error (err5000 $"perm_matmul: N must be a static int >= 1 (got {nn}) -- it is the node-axis extent, and the buffers are the flat row-major N^2 matrices")
             elif not (permRangeOk 0L 0L nn) then
-                Error (err5000 (sprintf "perm_matmul: N is a static int out of any sane range (got %d)" nn))
+                Error (err5000 $"perm_matmul: N is a static int out of any sane range (got {nn})")
             else
                 let n = int nn
                 if permPow n 2 > int64 permCellCap then
-                    Error (err5000 (sprintf "perm_matmul: the flat node-power buffers of N = %d are N^2 = %d cells, over the %d-cell limit -- the emitted kernel materializes the result as a literal zero array of that extent. Lower N (the node-axis extent)"
-                                        n (n * n) permCellCap))
+                    Error (err5000 ($"perm_matmul: the flat node-power buffers of N = {n} are N^2 = {(n * n)} cells, over the {permCellCap}-cell limit -- the emitted kernel materializes the result as a literal zero array of that extent. Lower N (the node-axis extent)"))
                 else
                     ensure st (fingerprint "perm_matmul" (box n)) (fun nm -> Ok (permMatmulDecl nm n))
                     |> Result.map (fun nm -> inheritSpan site (ExprApp (v nm, [ aE; bE ])))
@@ -1616,7 +1601,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                         let names =
                             missing
                             |> List.map (fun (_, entry) ->
-                                sprintf "(l=%d, %s)" entry.L (if entry.Parity = 0 then "even" else "odd"))
+                                $"""(l={entry.L}, {(if entry.Parity = 0 then "even" else "odd")})""")
                             |> String.concat ", "
                         let plural = missing.Length > 1
                         Error (err4007 (sprintf "tensor_product: output irrep%s %s %s unreachable from the inputs -- no Clebsch-Gordan path satisfies the triangle inequality |l1-l2| <= l <= l1+l2 with parity p1*p2, so by Schur's lemma the only equivariant map into %s is zero"
@@ -1726,7 +1711,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                         ensure st (fingerprint "sym_lift" (box (s, int k))) (fun n -> symLiftDecl n s (int k))
                         |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ xE ])))
                     | SVInt k ->
-                        Error (err5000 (sprintf "sym_lift: K must be a static int in 1..4 (got %d) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)" k))
+                        Error (err5000 $"sym_lift: K must be a static int in 1..4 (got {k}) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)")
                     | _ -> Error (err5000 "sym_lift: K must be a static int"))))
             | "sym_lift", _ -> Error (err5000 "sym_lift: expected sym_lift(SPEC, K, x) with x of type Array<Float like IrrepsIdx<SPEC>>; the result is a plain Idx<C(total_dim(SPEC)+K-1, K)> monomial vector")
             | "tensor_to_irreps", [ gE ] ->
@@ -1747,7 +1732,7 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
                             (tyIrrepsArr Blade.ML.CartesianBridge.tauSpec) (tyFloatArr 6)))
                 |> Result.map (fun n -> inheritSpan e (ExprApp (v n, [ tE ])))
             | "irreps_to_sym", _ -> Error (err5000 "irreps_to_sym: expected irreps_to_sym(t) with t transforming as IrrepsIdx<[(0,0,1), (2,0,1)]>")
-            | _ -> Error (err5000 (sprintf "%s: unrecognized ML-op call shape" op)))
+            | _ -> Error (err5000 $"{op}: unrecognized ML-op call shape"))
     | ExprKind.ExprLit _ | ExprKind.ExprVar _ -> Ok e
     | ExprKind.ExprApp (f, args) ->
         r f |> Result.bind (fun f' -> rList args |> Result.map (fun args' -> inheritSpan e (ExprApp (f', args'))))
@@ -1967,7 +1952,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         // Fold failures are the type-checker's to report; elaboration only
         // needs the successfully folded environment.
         match Blade.StaticEval.resolveStatics decls1 with
-        | Error e -> Error (Choice1Of2 (err5000 (sprintf "ML elaboration: static resolution failed: %s" e)))
+        | Error e -> Error (Choice1Of2 (err5000 $"ML elaboration: static resolution failed: {e}"))
         | Ok (statics, _) ->
             // The equiv judgment runs HERE, at the pass-1/pass-2 seam: `ml.*`
             // op calls are still surface-visible, and specs resolve through

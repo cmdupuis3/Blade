@@ -40,7 +40,7 @@ let failureMessage (funcName: string) (gn: string) (f: PX.DischargeFailure) : st
             funcName gn f.Element f.Component f.Monomial (PX.Rat.render f.Lhs) (PX.Rat.render f.Rhs)
     let constantNote =
         if f.RepDegree = 0 then
-            sprintf ". That term is a CONSTANT: a constant summand of an equivariant map must be fixed by the whole group, i.e. supported on trivial-label cells (every generator matrix the identity) and unmoved by the component group. A constant in a non-trivial-label cell breaks equivariance no matter what the rest of the body does"
+            ". That term is a CONSTANT: a constant summand of an equivariant map must be fixed by the whole group, i.e. supported on trivial-label cells (every generator matrix the identity) and unmoved by the component group. A constant in a non-trivial-label cell breaks equivariance no matter what the rest of the body does"
         else ""
     let nearMissNote =
         if f.NearMiss then
@@ -58,8 +58,7 @@ let lieFailureMessage (funcName: string) (gn: string) (f: LD.LieFailure) : strin
         sprintf "function '%s': the body IS a polynomial, and it is not %s-equivariant. The identity Df(x)(A x) = A f(x) fails at Lie generator %s, in output component %d, at the term %s: the left side has coefficient %s, the right side %s"
             funcName gn f.Generator f.Component f.Monomial (LD.Radical.render f.Lhs) (LD.Radical.render f.Rhs)
     let residualNote =
-        sprintf ". The residual's nonzero radical components: %s (acceptance is componentwise zero over the rationals -- every generator entry is q*sqrt(n), and no product of two irrationals ever occurs, so this is exact)"
-            (LD.Radical.render (LD.Radical.sub f.Lhs f.Rhs))
+        $". The residual's nonzero radical components: {(LD.Radical.render (LD.Radical.sub f.Lhs f.Rhs))} (acceptance is componentwise zero over the rationals -- every generator entry is q*sqrt(n), and no product of two irrationals ever occurs, so this is exact)"
     let constantNote =
         if f.RepDegree = 0 then
             ". That term is a CONSTANT: a constant summand of an equivariant map must be fixed by the whole group, i.e. supported on (l = 0, even) cells. A constant in an l > 0 block breaks equivariance no matter what the rest of the body does"
@@ -82,5 +81,4 @@ let inversionFailureMessage (funcName: string) (f: LD.InversionFailure) : string
 
 /// The cap note appended to the surfacing composition diagnostic.
 let capNote (funcName: string) (why: string) : string =
-    sprintf " [the equivariance engine did not run on '%s': %s (caps: degree <= %d, <= %d expanded terms); the verdict above is composition's]"
-        funcName why PX.maxRepDegree PX.maxTerms
+    $" [the equivariance engine did not run on '{funcName}': {why} (caps: degree <= {PX.maxRepDegree}, <= {PX.maxTerms} expanded terms); the verdict above is composition's]"

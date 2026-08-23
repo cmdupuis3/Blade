@@ -43,18 +43,18 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 callable.Params
                 |> List.map (fun p ->
                     match p.Type with
-                    | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
-                    | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+                    | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
+                    | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
                 |> String.concat ", "
             let allArgs =
-                (callable.Params |> List.map (fun p -> p.Name))
+                (callable.Params |> List.map (_.Name))
                 @ (captureForwardArgs names callable.Captures)
                 |> String.concat ", "
-            sprintf "[&](%s) { return %s(%s); }" paramSig safeName allArgs
+            $$"""[&]({{paramSig}}) { return {{safeName}}({{allArgs}}); }"""
         | _ ->
             match Map.tryFind id names with
             | Some name -> name
-            | None -> sprintf "__v%d" id
+            | None -> $"__v{id}"
     | IRParam (name, _, _) -> name
     | IRHaloUnhash (w, off) ->
         // halo window read over a masked domain: coordinate of the present
@@ -66,12 +66,12 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // operator[] type; a cast would make the wrapper-vs-raw-pointer
         // subscript overloads ambiguous.
         let wS = exprToCppCore subst names w
-        sprintf "%s[(%dL)][0]" wS off
+        $"{wS}[({off}L)][0]"
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppCore subst names l
         let rStr = exprToCppCore subst names r
         match op with
-        | IRCaret -> sprintf "pow(%s, %s)" lStr rStr
+        | IRCaret -> $"pow({lStr}, {rStr})"
         | IRMath2 name -> renderMath2 name lStr rStr
         | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
@@ -80,17 +80,14 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // would wrongly promote to std::complex<double>, so emit the operand
         // bare).
         let inner = exprToCppCore subst names e
-        if isComplexType (inferExprType e) then sprintf "%s(%s)" (complexFnName "conj") inner
+        if isComplexType (inferExprType e) then $"""{(complexFnName "conj")}({inner})"""
         else inner
     | IRUnaryOp (op, e) ->
         renderUnaryOpTyped op (inferExprType e) (exprToCppCore subst names e)
     | IRIf (cond, thenBr, elseBr) ->
-        sprintf "(%s ? %s : %s)" 
-            (exprToCppCore subst names cond) 
-            (exprToCppCore subst names thenBr) 
-            (exprToCppCore subst names elseBr)
+        $"({(exprToCppCore subst names cond)} ? {(exprToCppCore subst names thenBr)} : {(exprToCppCore subst names elseBr)})"
     | IRTuple exprs ->
-        sprintf "std::make_tuple(%s)" (exprs |> List.map (exprToCppCore subst names) |> String.concat ", ")
+        $"""std::make_tuple({(exprs |> List.map (exprToCppCore subst names) |> String.concat ", ")})"""
     | IRComplex (re, im) ->
         // Determine width from the component type. checkExpr enforces
         // that Complex128 components are Float64 and Complex64 are
@@ -100,10 +97,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match inferExprType re with
             | IRTScalar ETFloat32 -> complexCppTypeName ETComplex64
             | _ -> complexCppTypeName ETComplex128  // Float64 default
-        sprintf "%s(%s, %s)" cppType (exprToCppCore subst names re) (exprToCppCore subst names im)
+        $"{cppType}({(exprToCppCore subst names re)}, {(exprToCppCore subst names im)})"
     | IRTupleProj (e, i, isFlat) ->
         if not isFlat then
-            sprintf "std::get<%d>(%s)" i (exprToCppCore subst names e)
+            $"std::get<{i}>({(exprToCppCore subst names e)})"
         else
             // Flat projection into potentially nested tuple -- compute navigation path
             let parentTy = inferExprType e
@@ -123,13 +120,13 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                     found |> Option.defaultValue [i]
                 | _ -> [i]
             let path = findPath parentTy i
-            path |> List.fold (fun acc idx -> sprintf "std::get<%d>(%s)" idx acc) (exprToCppCore subst names e)
+            path |> List.fold (fun acc idx -> $"std::get<{idx}>({acc})") (exprToCppCore subst names e)
     | IRFieldAccess (obj, field) ->
-        sprintf "%s.%s" (exprToCppCore subst names obj) field
+        $"{(exprToCppCore subst names obj)}.{field}"
     | IRStructLit (typeName, fields) ->
         let fieldInits = fields |> List.map (fun (fname, e) -> 
-            sprintf ".%s = %s" fname (exprToCppCore subst names e)) |> String.concat ", "
-        sprintf "%s { %s }" typeName fieldInits
+            $".{fname} = {(exprToCppCore subst names e)}") |> String.concat ", "
+        $$"""{{typeName}} { {{fieldInits}} }"""
     | IRIndex (arr, indices, _) ->
         // Carousel substitution (reference equality, see SubstMap): a dense
         // halo window read hoisted to a rotating local renders as that local.
@@ -160,7 +157,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 match a, inferExprType a with
                 | (IRVar _ | IRParam _), ArrayElem _ -> [argStr]
                 | _ -> [argStr])
-        sprintf "%s(%s)" funcStr (argStrs @ captureArgs |> String.concat ", ")
+        $"""{funcStr}({(argStrs @ captureArgs |> String.concat ", ")})"""
     | IRLet (id, value, body) ->
         renderLetExpr subst names id value body
     | IRMethodFor _ -> exprError "loop object used as value"
@@ -183,7 +180,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         let rank = match inferExprType arr with
                    | ArrayElem at -> arrayRank at
                    | _ -> 0
-        sprintf "%dL" rank
+        $"{rank}L"
     | IRExtent (arr, dim) ->
         renderExtentExpr subst names arr dim
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
@@ -202,7 +199,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             match headTy with
             | ArrayElem at -> elemTypeToCpp at.ElemType
             | t -> elemTypeToCpp t
-        let product = argStrs |> List.map (fun a -> sprintf "%s[__pt]" a) |> String.concat " * "
+        let product = argStrs |> List.map (fun a -> $"{a}[__pt]") |> String.concat " * "
         // A peeled ragged/grouped ROW param is a RaggedRow<T>, which carries
         // its length inline as `.len` and has no `.extents` at all -- the same
         // rule mask / reduce / extents already apply. Reached by the grouped
@@ -210,12 +207,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // prodsum(ra, rb)`, where every operand is such a row.
         let prodSumBound (ty: IRType) (nameStr: string) =
             match ty with
-            | ArrayElem a when isRaggedRowType a -> sprintf "%s.len" nameStr
+            | ArrayElem a when isRaggedRowType a -> $"{nameStr}.len"
             | _ -> literalOrRuntimeExtent ty nameStr 0
         let serialBound = prodSumBound headTy (List.head argStrs)
         let serialForm =
-            sprintf "[&]() { %s __ps = 0; for (size_t __pt = 0; __pt < %s; __pt++) { __ps += %s; } return __ps; }()"
-                elemStr serialBound product
+            $"[&]() {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < {serialBound}; __pt++) {{ __ps += {product}; }} return __ps; }}()"
         if not (fpReassocEnabled ()) then serialForm
         else
             // BLADE_FP_REASSOC: the same summation, reassociated. `prodsum`'s
@@ -240,13 +236,13 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 && s |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_')
             let needAlias = argStrs |> List.exists (isPlainName >> not)
             let opNames =
-                if needAlias then argStrs |> List.mapi (fun i _ -> sprintf "__pa%d" i)
+                if needAlias then argStrs |> List.mapi (fun i _ -> $"__pa{i}")
                 else argStrs
             let aliasDecls =
                 if not needAlias then []
-                else List.map2 (fun n s -> sprintf "auto&& %s = %s;" n s) opNames argStrs
+                else List.map2 (fun n s -> $"auto&& {n} = {s};") opNames argStrs
             let prodAt (i: string) =
-                opNames |> List.map (fun a -> sprintf "%s[%s]" a i) |> String.concat " * "
+                opNames |> List.map (fun a -> $"{a}[{i}]") |> String.concat " * "
             let boundOn = prodSumBound headTy (List.head opNames)
             // WHICH FORM. `omp simd reduction(+:__ps)` where the element type
             // admits it (`simdReducibleElem`), the K-lane chains otherwise.
@@ -281,11 +277,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 let simdStmts = fpReassocSimdStmts "+" "__ps" "__pt" "0" "__pn" [] prodAt
                 let body =
                     aliasDecls
-                    @ [ sprintf "const size_t __pn = %s;" boundOn
-                        sprintf "%s __ps = 0;" elemStr ]
+                    @ [ $"const size_t __pn = {boundOn};"
+                        $"{elemStr} __ps = 0;" ]
                     @ simdStmts
                     @ [ "return __ps;" ]
-                sprintf "[&]() { %s }()" (String.concat " " body)
+                $$"""[&]() { {{(String.concat " " body)}} }()"""
             else
             // ARITY-AWARE lane count. One lane iteration of an L-operand
             // prodsum keeps L loaded values plus its accumulator live, so the
@@ -298,19 +294,18 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             let kLanes = laneCountForStreams (List.length argStrs)
             let (laneStmts, resultLane) =
                 fpReassocLaneStmts kLanes elemStr "__pl" "__pt" "0" "__pn" prodAt
-                    (fun acc rhs -> sprintf "%s += %s;" acc rhs)
+                    (fun acc rhs -> $"{acc} += {rhs};")
             let shortFallback =
                 // Below K elements there is nothing to interleave, so this is
                 // the serial chain verbatim -- same seed (the additive
                 // identity), same ascending order, hence the same double.
-                sprintf "if (__pn < (size_t)%d) { %s __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) { __ps += %s; } return __ps; }"
-                    kLanes elemStr (prodAt "__pt")
+                $"""if (__pn < (size_t){kLanes}) {{ {elemStr} __ps = 0; for (size_t __pt = 0; __pt < __pn; __pt++) {{ __ps += {(prodAt "__pt")}; }} return __ps; }}"""
             let body =
                 aliasDecls
-                @ [ sprintf "const size_t __pn = %s;" boundOn; shortFallback ]
+                @ [ $"const size_t __pn = {boundOn};"; shortFallback ]
                 @ laneStmts
-                @ [ sprintf "return %s;" resultLane ]
-            sprintf "[&]() { %s }()" (String.concat " " body)
+                @ [ $"return {resultLane};" ]
+            $$"""[&]() { {{(String.concat " " body)}} }()"""
     | IRDisplayEmit (head, quoted, dataExpr, metaTail) ->
         // One display-frame line on stdout (docs/display-frames.md), answering
         // bool. The head / quoting flag / meta tail are elaboration-time
@@ -327,13 +322,13 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // JSON text of a rank-1/rank-2 numeric array. The helper streams with
         // setprecision(15) -- the print block's own rule -- so the
         // interpreter's CppFormat.formatFloat15 mirror gives byte parity.
-        sprintf "blade_display::json%d(%s)" rank (exprToCppCore subst names dataExpr)
+        $"blade_display::json{rank}({(exprToCppCore subst names dataExpr)})"
     | IRDisplayNum dataExpr ->
-        sprintf "blade_display::jsonnum(%s)" (exprToCppCore subst names dataExpr)
+        $"blade_display::jsonnum({(exprToCppCore subst names dataExpr)})"
     | IRDisplayStr dataExpr ->
         // A user string as a quoted, escaped JSON string. Shares the frame
         // escape table with the quoted-payload path (Frame.jsonString).
-        sprintf "blade_display::jsonstr(%s)" (exprToCppCore subst names dataExpr)
+        $"blade_display::jsonstr({(exprToCppCore subst names dataExpr)})"
     | IRContains (arrExpr, valueExpr) ->
         // Linear-scan membership test as an IIFE returning bool.
         let arrStr = exprToCppCore subst names arrExpr
@@ -347,25 +342,24 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // Dense scan bound goes through the shared literal-or-runtime rule (a
         // compound's cardinality is genuinely dynamic and has no literal form).
         let bound =
-            if isR1Compound then sprintf "%s.idx->cardinality" arrStr
+            if isR1Compound then $"{arrStr}.idx->cardinality"
             else literalOrRuntimeExtent (inferExprType arrExpr) arrStr 0
-        let elemAt = if isR1Compound then sprintf "%s.data[__ci]" arrStr else sprintf "%s[__ci]" arrStr
-        sprintf "[&]() { for (size_t __ci = 0; __ci < %s; __ci++) { if (%s == %s) return true; } return false; }()"
-            bound elemAt valStr
+        let elemAt = if isR1Compound then $"{arrStr}.data[__ci]" else $"{arrStr}[__ci]"
+        $"[&]() {{ for (size_t __ci = 0; __ci < {bound}; __ci++) {{ if ({elemAt} == {valStr}) return true; }} return false; }}()"
 
-    | IRArity (Some n, _) -> sprintf "%d" n
+    | IRArity (Some n, _) -> string n
     | IRArity (None, paramName) -> 
         // Arity of poly pack - use tuple_size on the named parameter
-        sprintf "std::tuple_size_v<std::decay_t<decltype(%s)>>" paramName
+        $"std::tuple_size_v<std::decay_t<decltype({paramName})>>"
     | IRBind (comp, cont) ->
         // Monadic bind - comp >>= cont
-        sprintf "%s(%s)" (exprToCppCore subst names cont) (exprToCppCore subst names comp)
+        $"{(exprToCppCore subst names cont)}({(exprToCppCore subst names comp)})"
     | IRReynolds (kernel, isAntisym) ->
         // Reynolds operator wraps kernel
         exprError "reynolds wrapper in expression position"
     | IRZip arrs ->
         // In expression context (e.g. inside a kernel body), zip produces a tuple
-        sprintf "std::make_tuple(%s)" (arrs |> List.map (exprToCppCore subst names) |> String.concat ", ")
+        $"""std::make_tuple({(arrs |> List.map (exprToCppCore subst names) |> String.concat ", ")})"""
     | IRStack _ ->
         // Statement-shaped (declares a pool + copy nests, like transpose).
         // Reached only when a stack lands in a bare expression position.
@@ -375,9 +369,9 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRSlice (arr, dim, start, stop) ->
         exprError "slice not yet implemented in codegen"
     | IRCurry (arr, idx, resultRank) ->
-        sprintf "%s[%s]" (exprToCppCore subst names arr) (exprToCppCore subst names idx)
+        $"{(exprToCppCore subst names arr)}[{(exprToCppCore subst names idx)}]"
     | IRTupleCons (head, tail) ->
-        sprintf "std::tuple_cat(std::make_tuple(%s), %s)" (exprToCppCore subst names head) (exprToCppCore subst names tail)
+        $"std::tuple_cat(std::make_tuple({(exprToCppCore subst names head)}), {(exprToCppCore subst names tail)})"
     | IRTupleDecons tuple ->
         exprToCppCore subst names tuple  // Decons is handled by projection
     | IRMatch (scrutinee, cases) ->
@@ -387,8 +381,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
         match idx with
-        | IRLit (IRLitInt n) -> sprintf "std::get<%d>(%s)" n (exprToCppCore subst names pack)
-        | _ -> sprintf "%s[%s]" (exprToCppCore subst names pack) (exprToCppCore subst names idx)
+        | IRLit (IRLitInt n) -> $"std::get<{n}>({(exprToCppCore subst names pack)})"
+        | _ -> $"{(exprToCppCore subst names pack)}[{(exprToCppCore subst names idx)}]"
     | IRPolyTail _ ->
         exprError "IRPolyTail should not reach codegen (parameter pack was not monomorphized)"
     | IRParallel (a, b, _) ->
@@ -401,7 +395,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // the interpreter's Loops.fs/Core.fs choice arms).
         let aStr = exprToCppCore subst names a
         let bStr = exprToCppCore subst names b
-        sprintf "([&](){ auto __choice_l = %s; return __choice_l != 0 ? __choice_l : %s; })()" aStr bStr
+        $$"""([&](){ auto __choice_l = {{aStr}}; return __choice_l != 0 ? __choice_l : {{bStr}}; })()"""
     | IRFallback _ ->
         exprError "<|:> (allocated-fallback) in expression position -- it combines whole arrays; bind it and materialize with |> compute"
     | IRGuard (cond, body) ->
@@ -414,12 +408,12 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | IRTScalar ETInt64 | IRTScalar ETInt32 -> "0L"
             | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> "0L"
             | _ -> "0.0"
-        sprintf "(%s ? %s : %s)" condStr bodyStr zeroStr
+        $"({condStr} ? {bodyStr} : {zeroStr})"
     | IRCompose (f, g) ->
         // f >> g = [&](auto... args) { return g(f(args...)); }
         let fStr = exprToCppCore subst names f
         let gStr = exprToCppCore subst names g
-        sprintf "[&](auto... __args) { return %s(%s(__args...)); }" gStr fStr
+        $$"""[&](auto... __args) { return {{gStr}}({{fStr}}(__args...)); }"""
     | IRComposeObj (f, g) ->
         exprError "compose_obj in expression position"
     | IRComposeMeth (f, g) ->
@@ -431,17 +425,16 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRConstraintCheck (cond, message, span) ->
         // Expression-position fallback: a portable IIFE so the guard still
         // fires if it lands somewhere other than a statement slot.
-        sprintf "([&](){ if (!(%s)) { blade_rt::panic(\"BL8001\", \"%s\", %s); } return 0; })()"
-            (exprToCppCore subst names cond) message (panicSpanArgs span)
+        $"([&](){{ if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)}); }} return 0; }})()"
     | IRAssign (target, value) ->
         let targetStr =
             match target with
-            | LVVar id -> Map.tryFind id names |> Option.defaultValue (sprintf "__v%d" id)
+            | LVVar id -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
             | LVIndex (arr, idxs) ->
                 let arrStr = exprToCppCore subst names arr
-                let idxStr = idxs |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i)) |> String.concat ""
-                sprintf "%s%s" arrStr idxStr
-            | LVField (obj, f) -> sprintf "%s.%s" (exprToCppCore subst names obj) f
+                let idxStr = idxs |> List.map (fun i -> $"[{(exprToCppCore subst names i)}]") |> String.concat ""
+                $"{arrStr}{idxStr}"
+            | LVField (obj, f) -> $"{(exprToCppCore subst names obj)}.{f}"
             | LVOther e -> exprError "invalid assignment target"
         // Copy-in-place: a sole-owner mut keeps ONE pool for the whole program. The
         // wrapper is NOT repointed at the RHS; the RHS's elements are copied
@@ -450,10 +443,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // -- at rank 1 the leaf arm just returns `&data[0]`, i.e. `data` itself.
         match copyInPlaceAssign target value with
         | Some (_, rid, n) ->
-            let rhsStr = Map.tryFind rid names |> Option.defaultValue (sprintf "__v%d" rid)
-            sprintf "std::copy_n(pool_base(%s.data), %d, pool_base(%s.data))" rhsStr n targetStr
+            let rhsStr = Map.tryFind rid names |> Option.defaultValue ($"__v{rid}")
+            $"std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data))"
         | None ->
-            sprintf "%s = %s" targetStr (exprToCppCore subst names value)
+            $"{targetStr} = {(exprToCppCore subst names value)}"
     | IRForRange (vid, lo, hi, body) ->
         exprError "for-range loop in expression position"
     | IROpaqueExtent ->
@@ -466,7 +459,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | other ->
         // A hole in the back end, not a refusal -- see `recordUnhandledIRNode`.
         recordUnhandledIRNode "expression position" (other.GetType().Name)
-        exprError (sprintf "unsupported IR node: %s" (other.GetType().Name))
+        exprError ($"unsupported IR node: {(other.GetType().Name)}")
 
 /// Generate inline combinator application as an IIFE expression, for `L <@> f`
 /// in expression context (not a let RHS or function-body return -- those route
@@ -488,8 +481,8 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     // for compact-group random access; iteration reads (canonical by
     // construction) keep the raw subscript to stay zero-overhead.
     let rawSubscript () =
-        let idxStr = indices |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i)) |> String.concat ""
-        sprintf "%s%s" arrStr idxStr
+        let idxStr = indices |> List.map (fun i -> $"[{(exprToCppCore subst names i)}]") |> String.concat ""
+        $"{arrStr}{idxStr}"
     // OrbIdx (depth >= 2) subscript -- docs/plan-orbidx-decompaction.md section 2's
     // read at an ARBITRARY raw tuple:
     //     dense[t] = 0                                if canon(t) is zero-set
@@ -514,15 +507,14 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                 let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
                 raise (Blade.Diagnostics.BladeDiagnosticException
                         (Blade.Diagnostics.Codes.iceCodegen
-                            (sprintf "internal: a wreath subscript reached codegen in an unsupported shape (%s) -- OrbIdx%s spans %d raw axes and takes exactly that many flat coordinates; TypeCheck should have refused this"
-                                     why (ppOrbitLevels (orbitLevelsOf ix)) (max 1 ix.Rank))))
+                            ($"internal: a wreath subscript reached codegen in an unsupported shape ({why}) -- OrbIdx{(ppOrbitLevels (orbitLevelsOf ix))} spans {(max 1 ix.Rank)} raw axes and takes exactly that many flat coordinates; TypeCheck should have refused this")))
             (match arrTy.IndexTypes with
              | [ ix ] ->
                  let axes = max 1 ix.Rank
-                 if indices |> List.exists (function IRTuple _ -> true | _ -> false) then
+                 if indices |> List.exists (_.IsIRTuple) then
                      bail "a tuple index"
                  elif indices.Length <> axes then
-                     bail (sprintf "%d coordinates" indices.Length)
+                     bail ($"{indices.Length} coordinates")
                  else
                      let elemStr = elemTypeToCpp arrTy.ElemType
                      let levelArgs = orbLevelArgs (orbitLevelsOf ix)
@@ -530,10 +522,9 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                      let coordBuf = "__orbrd"
                      let coordInit =
                          indices
-                         |> List.map (fun i -> sprintf "(int)(%s)" (exprToCppCore subst names i))
+                         |> List.map (fun i -> $"(int)({(exprToCppCore subst names i)})")
                          |> String.concat ", "
-                     Some (sprintf "([&]() -> %s { int %s[%d] = { %s }; return orbit_wreath_utilities::orb_read<%s, %s>(%s, %s, (int)(%s)); }())"
-                                   elemStr coordBuf axes coordInit elemStr levelArgs arrStr coordBuf nStr)
+                     Some ($"([&]() -> {elemStr} {{ int {coordBuf}[{axes}] = {{ {coordInit} }}; return orbit_wreath_utilities::orb_read<{elemStr}, {levelArgs}>({arrStr}, {coordBuf}, (int)({nStr})); }}())")
              | _ -> bail "a wreath group combined with other index slots")
         | _ -> None
     let lazyCompactRead () : string option =
@@ -589,26 +580,26 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                             | TfConjugateOnSwap -> "nested_array_utilities::ReadTransform::ConjugateOnSwap"
                         let g = groupNum
                         groupNum <- groupNum + 1
-                        sb.Append(sprintf "std::array<size_t,%d> __g%d = { %s }; " a g (String.concat ", " these)) |> ignore
-                        sb.Append(sprintf "bool __z%d; int __p%d = nested_array_utilities::canon_fold<%d>(__g%d, %s, __z%d); " g g a g strictArg g) |> ignore
-                        sb.Append(sprintf "if (__z%d) return %s(); " g elemTypeStr) |> ignore
-                        sb.Append(sprintf "auto __c%d = nested_array_utilities::canon_left_justify<%d>(__g%d, %s); " g a g strictArg) |> ignore
+                        sb.Append($$"""std::array<size_t,{{a}}> __g{{g}} = { {{(String.concat ", " these)}} }; """) |> ignore
+                        sb.Append($"bool __z{g}; int __p{g} = nested_array_utilities::canon_fold<{a}>(__g{g}, {strictArg}, __z{g}); ") |> ignore
+                        sb.Append($"if (__z{g}) return {elemTypeStr}(); ") |> ignore
+                        sb.Append($"auto __c{g} = nested_array_utilities::canon_left_justify<{a}>(__g{g}, {strictArg}); ") |> ignore
                         for j in 0 .. a - 1 do
-                            fetchParts <- fetchParts @ [ sprintf "[__c%d[%d]]" g j ]
-                        transforms <- transforms @ [ (sprintf "__p%d" g, tf) ]
+                            fetchParts <- fetchParts @ [ $"[__c{g}[{j}]]" ]
+                        transforms <- transforms @ [ ($"__p{g}", tf) ]
                     elif s.Symmetry <> SymNone && a = 1 then
                         // arity-1 compact (e.g. SymIdx<1> = Idx): no fold.
-                        fetchParts <- fetchParts @ [ sprintf "[%s]" these.[0] ]
+                        fetchParts <- fetchParts @ [ $"[{these.[0]}]" ]
                     else
                         // plain slot(s): pass each index through directly.
-                        for t in these do fetchParts <- fetchParts @ [ sprintf "[%s]" t ]
+                        for t in these do fetchParts <- fetchParts @ [ $"[{t}]" ]
                 if not ok then None
                 else
                     let fetch = String.concat "" fetchParts
                     // chain transforms: v0 = transform(base, p0); v1 = transform(v0,p1); ...
                     let body = System.Text.StringBuilder()
                     body.Append(sb.ToString()) |> ignore
-                    body.Append(sprintf "%s __v = %s%s; " elemTypeStr arrStr fetch) |> ignore
+                    body.Append($"{elemTypeStr} __v = {arrStr}{fetch}; ") |> ignore
                     match transforms with
                     | [] ->
                         // No real fold happened (shouldn't reach: anyCompact true) -- return raw.
@@ -616,11 +607,11 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                     | _ ->
                         let mutable prev = "__v"
                         transforms |> List.iteri (fun i (pv, tf) ->
-                            let outv = sprintf "__tv%d" i
-                            body.Append(sprintf "%s %s = nested_array_utilities::canon_transform<%s>(%s, %s, %s); " elemTypeStr outv elemTypeStr prev pv tf) |> ignore
+                            let outv = $"__tv{i}"
+                            body.Append($"{elemTypeStr} {outv} = nested_array_utilities::canon_transform<{elemTypeStr}>({prev}, {pv}, {tf}); ") |> ignore
                             prev <- outv)
-                        body.Append(sprintf "return %s;" prev) |> ignore
-                    Some (sprintf "([&]() -> %s { %s }())" elemTypeStr (body.ToString()))
+                        body.Append($"return {prev};") |> ignore
+                    Some ($$"""([&]() -> {{elemTypeStr}} { {{(body.ToString())}} }())""")
             else None
         | _ -> None
     // Compound tuple indexing (formalism 4.5): when `arr` is a Compound<T,RANK>
@@ -651,10 +642,10 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
             let k1 =
                 arrTy.IndexTypes
                 |> List.tryFind headKind
-                |> Option.map (fun ix -> ix.Rank)
+                |> Option.map (_.Rank)
             let indices =
                 match k1, indices with
-                | Some 1, first :: rest when (match first with IRTuple _ -> false | _ -> true) ->
+                | Some 1, first :: rest when (not first.IsIRTuple) ->
                     IRTuple [first] :: rest
                 | _ -> indices
             match indices with
@@ -662,7 +653,7 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                 let k =
                     arrTy.IndexTypes
                     |> List.tryFind headKind
-                    |> Option.map (fun ix -> ix.Rank)
+                    |> Option.map (_.Rank)
                     |> Option.defaultValue coords.Length
                 let trailingDims =
                     match arrTy.IndexTypes with
@@ -682,9 +673,9 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                     if not isSparse then
                         raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan "internal: a partial compound index tuple reached codegen -- partial/wildcard reads on CompoundIdx were removed (use SparseIdx); the typecheck flat-subscript packing should have made this unreachable"))
                     elif not (List.isEmpty trailingIdxs) then
-                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "Partial sparse indexing combined with a SUPPLIED trailing index is not yet supported; leave the trailing dim free (omit it or write `_`), or index the residual separately (let r = S((...)); r(...)).")))
+                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ("Partial sparse indexing combined with a SUPPLIED trailing index is not yet supported; leave the trailing dim free (omit it or write `_`), or index the residual separately (let r = S((...)); r(...)).")))
                     elif trailingDims.Length > 1 then
-                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan (sprintf "Partial sparse indexing with %d trailing dimensions is not supported (multi-trailing is unsupported throughout: the wrapper stores only the trailing-stride product, not per-dim extents)." trailingDims.Length)))
+                        raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan ($"Partial sparse indexing with {trailingDims.Length} trailing dimensions is not supported (multi-trailing is unsupported throughout: the wrapper stores only the trailing-stride product, not per-dim extents).")))
                     else
                         let hasTrail = not (List.isEmpty trailingDims)
                         let elemStr = elemTypeToCpp arrTy.ElemType
@@ -692,28 +683,25 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                         // the Blade level; a bare int64 VARIABLE inside a
                         // std::array<size_t,J> brace-init is a narrowing
                         // error (literals are exempt as constant exprs).
-                        let pinnedVals = pinned |> List.map (fun (_, c) -> sprintf "(size_t)(%s)" (exprToCppCore subst names c))
-                        let pinnedArr = sprintf "std::array<size_t, %d>{%s}" j (String.concat ", " pinnedVals)
+                        let pinnedVals = pinned |> List.map (fun (_, c) -> $"(size_t)({(exprToCppCore subst names c)})")
+                        let pinnedArr = $"""std::array<size_t, {j}>{{{(String.concat ", " pinnedVals)}}}"""
                         let posArr =
-                            sprintf "std::array<size_t, %d>{%s}" j
-                                (pinned |> List.map (fst >> string) |> String.concat ", ")
+                            $"""std::array<size_t, {j}>{{{(pinned |> List.map (fst >> string) |> String.concat ", ")}}}"""
                         if residualRank >= 2 then
-                            Some (sprintf "nested_array_utilities::make_partial_sparse_gather<%s, %d, %d>(%s, %s, %s)"
-                                          elemStr k j arrStr pinnedArr posArr)
+                            Some ($"nested_array_utilities::make_partial_sparse_gather<{elemStr}, {k}, {j}>({arrStr}, {pinnedArr}, {posArr})")
                         else
                             let fn = if hasTrail then "make_sparse_gather_dense_trail" else "make_sparse_gather_dense"
-                            Some (sprintf "nested_array_utilities::%s<%s, %d, %d>(%s, %s, %s)"
-                                          fn elemStr k j arrStr pinnedArr posArr)
+                            Some ($"nested_array_utilities::{fn}<{elemStr}, {k}, {j}>({arrStr}, {pinnedArr}, {posArr})")
                 | CompoundFull ->
                     // j = k: full index. (size_t) casts are needed because an
                     // int64-typed coordinate VARIABLE (e.g. a lifted-lambda
                     // param) is a narrowing error in a std::array<size_t>
                     // brace-init (literals and size_t loop vars are exempt).
-                    let coordStrs = coords |> List.map (fun c -> sprintf "(size_t)(%s)" (exprToCppCore subst names c))
-                    let coordArr = sprintf "std::array<size_t, %d>{%s}" k (String.concat ", " coordStrs)
+                    let coordStrs = coords |> List.map (fun c -> $"(size_t)({(exprToCppCore subst names c)})")
+                    let coordArr = $"""std::array<size_t, {k}>{{{(String.concat ", " coordStrs)}}}"""
                     if List.isEmpty trailingDims then
                         // No trailing dims: scalar cell.
-                        Some (sprintf "%s(%s)" arrStr coordArr)
+                        Some ($"{arrStr}({coordArr})")
                     elif trailingIdxs.Length >= trailingDims.Length then
                         // Trailing dims fully supplied: scalar via operator()
                         // with the (single) trailing offset. Multi-trailing is
@@ -724,16 +712,16 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                             match trailingIdxs with
                             | t :: _ -> exprToCppCore subst names t
                             | [] -> "0"
-                        Some (sprintf "%s(%s, %s)" arrStr coordArr trailStr)
+                        Some ($"{arrStr}({coordArr}, {trailStr})")
                     else
                         // Trailing dims remain unindexed: sub-view base pointer.
                         // Any partially-supplied trailing indices then subscript
                         // the returned T* in slot order.
                         let restSubs =
                             trailingIdxs
-                            |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i))
+                            |> List.map (fun i -> $"[{(exprToCppCore subst names i)}]")
                             |> String.concat ""
-                        Some (sprintf "%s.row(%s)%s" arrStr coordArr restSubs)
+                        Some ($"{arrStr}.row({coordArr}){restSubs}")
             | _ -> None  // compound array but first index isn't a tuple (shouldn't reach: TypeCheck enforces the tuple form)
         | _ -> None
     // Plain dense PARTIAL positional read in EXPRESSION position: `A(i)` with
@@ -763,7 +751,7 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     // the row shapes differ and the aggregate would lie.
     let densePartialSubviewExpr () : string option =
         if List.isEmpty indices
-           || indices |> List.exists (function IRTuple _ -> true | _ -> false) then None
+           || indices |> List.exists (_.IsIRTuple) then None
         else
             match inferExprType arr with
             | ArrayElem arrTy
@@ -777,10 +765,9 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                 let residTy = { arrTy with IndexTypes = List.skip indices.Length arrTy.IndexTypes }
                 let subscripts =
                     indices
-                    |> List.map (fun i -> sprintf "[%s]" (exprToCppCore subst names i))
+                    |> List.map (fun i -> $"[{(exprToCppCore subst names i)}]")
                     |> String.concat ""
-                Some (sprintf "%s{ %s.data%s, %s.extents + %d }"
-                          (cppArrayTypeStr residTy) arrStr subscripts arrStr indices.Length)
+                Some ($"{(cppArrayTypeStr residTy)}{{ {arrStr}.data{subscripts}, {arrStr}.extents + {indices.Length} }}")
             | _ -> None
     match compoundRead () with
     | Some code -> code
@@ -813,7 +800,7 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                 match case.Guard with
                 | Some guard ->
                     let guardStr = exprToCppCore subst names' guard
-                    sprintf "(%s ? %s : %s)" guardStr bodyStr abortExpr
+                    $"({guardStr} ? {bodyStr} : {abortExpr})"
                 | None -> bodyStr
             match case.Pattern with
             | IRPatVar varId ->
@@ -822,11 +809,11 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                     (collectVarRefsIR case.Body).Contains varId ||
                     (case.Guard |> Option.map (fun g -> (collectVarRefsIR g).Contains varId) |> Option.defaultValue false)
                 if varUsed then
-                    let varName = sprintf "__match_%d" varId
+                    let varName = $"__match_{varId}"
                     let names' = Map.add varId varName names
                     let bodyStr = exprToCppCore subst names' case.Body
                     let guardedBody = wrapGuard bodyStr names'
-                    sprintf "[&]() { auto %s = %s; return %s; }()" varName scrut guardedBody
+                    $$"""[&]() { auto {{varName}} = {{scrut}}; return {{guardedBody}}; }()"""
                 else
                     wrapGuard (exprToCppCore subst names case.Body) names
             | IRPatWild ->
@@ -834,17 +821,17 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
             | IRPatLit lit ->
                 let litStr = litToCpp lit
                 let bodyStr = wrapGuard (exprToCppCore subst names case.Body) names
-                sprintf "(%s == %s ? %s : %s)" scrut litStr bodyStr abortExpr
+                $"({scrut} == {litStr} ? {bodyStr} : {abortExpr})"
             | IRPatVariant (ctorName, tag, innerOpt, isEnum) ->
                 // Last variant case -- extract payload and evaluate body
                 match innerOpt with
                 | Some (IRPatVar varId) ->
-                    let varName = sprintf "__match_%d" varId
+                    let varName = $"__match_{varId}"
                     let names' = Map.add varId varName names
-                    let extractExpr = sprintf "std::get<%s_T>(%s).value" ctorName scrut
+                    let extractExpr = $"std::get<{ctorName}_T>({scrut}).value"
                     let bodyStr = exprToCppCore subst names' case.Body
                     let guardedBody = wrapGuard bodyStr names'
-                    sprintf "[&]() { auto %s = %s; return %s; }()" varName extractExpr guardedBody
+                    $$"""[&]() { auto {{varName}} = {{extractExpr}}; return {{guardedBody}}; }()"""
                 | _ ->
                     wrapGuard (exprToCppCore subst names case.Body) names
             | IRPatTuple innerPats ->
@@ -852,15 +839,15 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                 let bindings =
                     innerPats |> List.mapi (fun idx pat ->
                         match pat with
-                        | IRPatVar varId -> Some (varId, sprintf "__match_%d" varId, idx)
+                        | IRPatVar varId -> Some (varId, $"__match_{varId}", idx)
                         | _ -> None)
                     |> List.choose id
                 let bindingDecls = bindings |> List.map (fun (_, name, idx) ->
-                    sprintf "auto %s = std::get<%d>(%s)" name idx scrut) |> String.concat "; "
+                    $"auto {name} = std::get<{idx}>({scrut})") |> String.concat "; "
                 let names' = bindings |> List.fold (fun acc (id, name, _) -> Map.add id name acc) names
                 let bodyStr = exprToCppCore subst names' case.Body
                 let guardedBody = wrapGuard bodyStr names'
-                sprintf "[&]() { %s; return %s; }()" bindingDecls guardedBody
+                $$"""[&]() { {{bindingDecls}}; return {{guardedBody}}; }()"""
             | _ ->
                 wrapGuard (exprToCppCore subst names case.Body) names
         | case :: rest ->
@@ -872,32 +859,32 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                     match case.Guard with
                     | Some guard -> 
                         let guardStr = exprToCppCore subst names guard
-                        sprintf "(%s ? %s : %s)" guardStr (exprToCppCore subst names case.Body) restStr
+                        $"({guardStr} ? {(exprToCppCore subst names case.Body)} : {restStr})"
                     | None -> exprToCppCore subst names case.Body
-                sprintf "(%s == %s ? %s : %s)" scrut litStr bodyStr restStr
+                $"({scrut} == {litStr} ? {bodyStr} : {restStr})"
             | IRPatVar varId ->
                 let varUsed =
                     (collectVarRefsIR case.Body).Contains varId ||
                     (case.Guard |> Option.map (fun g -> (collectVarRefsIR g).Contains varId) |> Option.defaultValue false)
                 if varUsed then
-                    let varName = sprintf "__match_%d" varId
+                    let varName = $"__match_{varId}"
                     match case.Guard with
                     | Some guard ->
                         // Variable pattern with guard, variable used
                         let guardStr = exprToCppWithVarCore subst names varId varName guard
                         let bodyStr = exprToCppWithVarCore subst names varId varName case.Body
-                        sprintf "[&]() { auto %s = %s; return %s ? %s : %s; }()" varName scrut guardStr bodyStr restStr
+                        $$"""[&]() { auto {{varName}} = {{scrut}}; return {{guardStr}} ? {{bodyStr}} : {{restStr}}; }()"""
                     | None ->
                         // Variable pattern without guard - always matches, variable used
                         let bodyStr = exprToCppWithVarCore subst names varId varName case.Body
-                        sprintf "[&]() { auto %s = %s; return %s; }()" varName scrut bodyStr
+                        $$"""[&]() { auto {{varName}} = {{scrut}}; return {{bodyStr}}; }()"""
                 else
                     match case.Guard with
                     | Some guard ->
                         // Variable unused, but has guard
                         let guardStr = exprToCppCore subst names guard
                         let bodyStr = exprToCppCore subst names case.Body
-                        sprintf "(%s ? %s : %s)" guardStr bodyStr restStr
+                        $"({guardStr} ? {bodyStr} : {restStr})"
                     | None ->
                         // Variable unused, no guard - always matches (like wildcard)
                         exprToCppCore subst names case.Body
@@ -906,7 +893,7 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                 | Some guard ->
                     let guardStr = exprToCppCore subst names guard
                     let bodyStr = exprToCppCore subst names case.Body
-                    sprintf "(%s ? %s : %s)" guardStr bodyStr restStr
+                    $"({guardStr} ? {bodyStr} : {restStr})"
                 | None ->
                     // Wildcard without guard - always matches
                     exprToCppCore subst names case.Body
@@ -916,13 +903,13 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                     match pats with
                     | [] -> []
                     | IRPatVar varId :: rest ->
-                        let varName = sprintf "__match_%d" varId
+                        let varName = $"__match_{varId}"
                         (varId, varName) :: collectVarBindings rest (idx + 1)
                     | _ :: rest -> collectVarBindings rest (idx + 1)
                 
                 let bindings = collectVarBindings innerPats 0
                 let bindingDecls = bindings |> List.mapi (fun idx (_, name) ->
-                    sprintf "auto %s = std::get<%d>(%s)" name idx scrut) |> String.concat "; "
+                    $"auto {name} = std::get<{idx}>({scrut})") |> String.concat "; "
                 
                 // Extend names map with bindings
                 let names' = bindings |> List.fold (fun acc (id, name) -> Map.add id name acc) names
@@ -931,35 +918,35 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                 | Some guard ->
                     let guardStr = exprToCppCore subst names' guard
                     let bodyStr = exprToCppCore subst names' case.Body
-                    sprintf "[&]() { %s; return %s ? %s : %s; }()" bindingDecls guardStr bodyStr restStr
+                    $$"""[&]() { {{bindingDecls}}; return {{guardStr}} ? {{bodyStr}} : {{restStr}}; }()"""
                 | None ->
                     let bodyStr = exprToCppCore subst names' case.Body
-                    sprintf "[&]() { %s; return %s; }()" bindingDecls bodyStr
+                    $$"""[&]() { {{bindingDecls}}; return {{bodyStr}}; }()"""
             | IRPatVariant (ctorName, tag, innerOpt, isEnum) ->
                 // Variant pattern - check variant type and optionally bind inner value
                 let checkExpr =
-                    if isEnum then sprintf "%s == %s" scrut ctorName
-                    else sprintf "std::holds_alternative<%s_T>(%s)" ctorName scrut
+                    if isEnum then $"{scrut} == {ctorName}"
+                    else $"std::holds_alternative<{ctorName}_T>({scrut})"
                 
                 match innerOpt with
                 | Some (IRPatVar varId) ->
                     // Variant with inner value binding
-                    let varName = sprintf "__match_%d" varId
+                    let varName = $"__match_{varId}"
                     let names' = Map.add varId varName names
-                    let extractExpr = sprintf "std::get<%s_T>(%s).value" ctorName scrut
+                    let extractExpr = $"std::get<{ctorName}_T>({scrut}).value"
                     let bodyStr = exprToCppCore subst names' case.Body
-                    sprintf "(%s ? [&]() { auto %s = %s; return %s; }() : %s)" checkExpr varName extractExpr bodyStr restStr
+                    $$"""({{checkExpr}} ? [&]() { auto {{varName}} = {{extractExpr}}; return {{bodyStr}}; }() : {{restStr}})"""
                 | Some _ ->
                     // Other inner patterns - fallback
                     let bodyStr = exprToCppCore subst names case.Body
-                    sprintf "(%s ? %s : %s)" checkExpr bodyStr restStr
+                    $"({checkExpr} ? {bodyStr} : {restStr})"
                 | None ->
                     // Variant without inner value
                     let bodyStr = exprToCppCore subst names case.Body
-                    sprintf "(%s ? %s : %s)" checkExpr bodyStr restStr
+                    $"({checkExpr} ? {bodyStr} : {restStr})"
             | _ ->
                 // Unsupported pattern - fallback
-                sprintf "(true ? %s : %s)" (exprToCppCore subst names case.Body) restStr
+                $"(true ? {(exprToCppCore subst names case.Body)} : {restStr})"
     genCase cases
 
 
@@ -1029,10 +1016,10 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         | ArrayElem at -> isRaggedRowType at
         | _ -> false
     let reduceAccAt (i: string) =
-        if isCompound then sprintf "%s.data[%s]" arrStr i else sprintf "%s[%s]" arrStr i
+        if isCompound then $"{arrStr}.data[{i}]" else $"{arrStr}[{i}]"
     let reduceBound =
-        if isCompound then sprintf "(%s.idx->cardinality * %s.trailing_stride)" arrStr arrStr
-        elif isRagged then sprintf "%s.len" arrStr
+        if isCompound then $"({arrStr}.idx->cardinality * {arrStr}.trailing_stride)"
+        elif isRagged then $"{arrStr}.len"
         // Dense operand: shared literal-or-runtime rule. Compound cardinality
         // and a RaggedRow's `.len` are genuinely dynamic and stay runtime reads.
         else literalOrRuntimeExtent (inferExprType arrExpr) arrStr 0
@@ -1095,21 +1082,20 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         let laneForm (loExpr: string) (seedStr: string) (guard: string) =
             let (laneStmts, resultLane) =
                 fpReassocLaneStmts foldLaneCount elemStr "__rlane" "__ri" "__rlo" "__rn" reduceAccAt
-                    (fun acc rhs -> sprintf "%s = %s(%s, %s);" acc wname acc rhs)
+                    (fun acc rhs -> $"{acc} = {wname}({acc}, {rhs});")
             let stmts =
-                [ sprintf "const size_t __rn = %s;" reduceBound
-                  sprintf "%s __r = %s;" elemStr seedStr
-                  sprintf "const size_t __rlo = %s;" loExpr
+                [ $"const size_t __rn = {reduceBound};"
+                  $"{elemStr} __r = {seedStr};"
+                  $"const size_t __rlo = {loExpr};"
                   // `__rn < __rlo` cannot happen once the guard has run, but the
                   // saturating count costs nothing and keeps the short-branch
                   // test from wrapping around if it ever could.
-                  sprintf "const size_t __rcnt = (__rn > __rlo) ? (__rn - __rlo) : (size_t)0;"
-                  sprintf "if (__rcnt < (size_t)%d) { for (size_t __ri = __rlo; __ri < __rn; __ri++) { __r = %s(__r, %s); } return __r; }"
-                      foldLaneCount wname (reduceAccAt "__ri") ]
+                  "const size_t __rcnt = (__rn > __rlo) ? (__rn - __rlo) : (size_t)0;"
+                  $"""if (__rcnt < (size_t){foldLaneCount}) {{ for (size_t __ri = __rlo; __ri < __rn; __ri++) {{ __r = {wname}(__r, {(reduceAccAt "__ri")}); }} return __r; }}""" ]
                 @ laneStmts
-                @ [ sprintf "__r = %s(__r, %s);" wname resultLane
+                @ [ $"__r = {wname}(__r, {resultLane});"
                     "return __r;" ]
-            sprintf "[&]() { %s%s%s %s }()" ompNote guard wrapperStr (String.concat " " stmts)
+            $$"""[&]() { {{ompNote}}{{guard}}{{wrapperStr}} {{(String.concat " " stmts)}} }()"""
         let mayLane = fpReassocEnabled () && foldReorderLicensed callable
         match initExpr with
         | Some initE ->
@@ -1124,7 +1110,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
         | None ->
         let guard =
             if reduceNonEmpty then ""
-            else sprintf "if (%s == 0) { blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); } " reduceBound
+            else $"if ({reduceBound} == 0) {{ blade_rt::panic(\"BL8003\", \"reduce: empty array, no reduction possible\", nullptr, 0); }} "
         if mayLane then laneForm "1" (reduceAccAt "0") guard
         else
         sprintf "[&]() { %s%s%s %s __r = %s; for (size_t __ri = 1; __ri < %s; __ri++) { __r = %s(__r, %s); } return __r; }()"
@@ -1136,7 +1122,7 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
 
 and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : string =
     // For inline let expressions, we need statement context
-    let names' = Map.add id (sprintf "__v%d" id) names
+    let names' = Map.add id ($"__v{id}") names
     if isUnitExpr value then
         // Unit-valued binding. lowerTypedBlock sequences STATEMENTS
         // (assignments, for-in loops) through dummy lets, so a unit value
@@ -1156,9 +1142,9 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
             // Effectful value, unit body: whole let is a void expression.
             let bodyStmts = renderUnitStmts subst names' body
             let stmts = [stmtPrelude; bodyStmts] |> List.filter (fun s -> s <> "") |> String.concat " "
-            sprintf "([&]() { %s }())" stmts
+            $$"""([&]() { {{stmts}} }())"""
         else
-            sprintf "([&]() { %s return %s; }())" stmtPrelude (exprToCppCore subst names' body)
+            $$"""([&]() { {{stmtPrelude}} return {{(exprToCppCore subst names' body)}}; }())"""
     else
         // The lift pass produces IRLet bindings whose value can be
         // an inline form (mask/sort/intersect/union). These can't be
@@ -1174,7 +1160,7 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
         // materializeInlineForm's note).
         let inlineElemTypeStr (form: IRExpr) =
             lazy (inferInlineElemTypeStr "IRLet inline form" form)
-        match materializeInlineForm subst names (sprintf "__v%d" id) (inlineElemTypeStr value) value with
+        match materializeInlineForm subst names ($"__v{id}") (inlineElemTypeStr value) value with
         // Expression position: the materialization is spliced into an IIFE, so
         // there is no statement scope whose exit could carry a free. Drop the
         // descriptors (unchanged pre-existing leak).
@@ -1183,20 +1169,20 @@ and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : s
                 if isUnitExpr body then "((void)0)"
                 else exprToCppCore subst names' body
             let prelude = preludeStmts |> String.concat " "
-            sprintf "([&]() { %s return %s; }())" prelude bodyStr
+            $$"""([&]() { {{prelude}} return {{bodyStr}}; }())"""
         | None ->
             let valStr = exprToCppCore subst names value
             match body with
             | IRLit IRLitUnit ->
-                sprintf "([&]() { auto __v%d = %s; }())" id valStr
+                $$"""([&]() { auto __v{{id}} = {{valStr}}; }())"""
             | b when isUnitExpr b ->
                 // Unit-typed but effectful tail (assignment / for-in as the
                 // block's last statement): emit its statement form rather
                 // than a `return` of a statement expression.
-                sprintf "([&]() { auto __v%d = %s; %s }())" id valStr (renderUnitStmts subst names' b)
+                $$"""([&]() { auto __v{{id}} = {{valStr}}; {{(renderUnitStmts subst names' b)}} }())"""
             | _ ->
                 let bodyStr = exprToCppCore subst names' body
-                sprintf "([&]() { auto __v%d = %s; return %s; }())" id valStr bodyStr
+                $$"""([&]() { auto __v{{id}} = {{valStr}}; return {{bodyStr}}; }())"""
 
 
 /// Render a unit-typed side-effecting expression -- a STATEMENT that
@@ -1210,39 +1196,38 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
     match expr with
     | IRLit IRLitUnit -> ""
     | IRAssign _ ->
-        sprintf "%s;" (exprToCppCore subst names expr)
+        $"{(exprToCppCore subst names expr)};"
     | IRConstraintCheck (cond, message, span) ->
-        sprintf "if (!(%s)) { blade_rt::panic(\"BL8001\", \"%s\", %s); }"
-            (exprToCppCore subst names cond) message (panicSpanArgs span)
+        $"if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)}); }}"
     | IRForRange (vid, lo, hi, body) ->
         // Same loop-var naming (__k<id>) and int64_t convention as
         // genForRangeBinding / EmitCpp.forLoopFrom, so inlined kernel
         // loops read like their module-level counterparts. int64_t, not
         // size_t: the loop var is the user's Int64 for-in variable, and an
         // unsigned binding wraps negative intermediates in body arithmetic.
-        let varName = sprintf "__k%d" vid
+        let varName = $"__k{vid}"
         let names' = Map.add vid varName names
         let loStr = exprToCppCore subst names lo
         let hiStr = exprToCppCore subst names hi
         let bodyStmts = renderUnitStmts subst names' body
-        sprintf "for (int64_t %s = %s; %s < %s; %s++) { %s }" varName loStr varName hiStr varName bodyStmts
+        $$"""for (int64_t {{varName}} = {{loStr}}; {{varName}} < {{hiStr}}; {{varName}}++) { {{bodyStmts}} }"""
     | IRLet (letId, value, body) ->
         // Statement-position let chain (a nested block): declare non-unit
         // values, splice unit statements, continue down the chain. Inline
         // forms (mask/sort/...) get their multi-statement materialization,
         // mirroring renderLetExpr's expression-position handling.
-        let names' = Map.add letId (sprintf "__v%d" letId) names
+        let names' = Map.add letId ($"__v{letId}") names
         let valueStmt =
             if isUnitExpr value then
                 renderUnitStmts subst names value
             else
                 // Lazy for the same reason as renderLetExpr's site above: this
                 // arm sees every statement-position let value, inline form or not.
-                match materializeInlineForm subst names (sprintf "__v%d" letId) (lazy (inferInlineElemTypeStr "statement-position let" value)) value with
+                match materializeInlineForm subst names ($"__v{letId}") (lazy (inferInlineElemTypeStr "statement-position let" value)) value with
                 // Inline statement TEXT for an enclosing IIFE -- same
                 // no-scope-exit situation as renderLetExpr above; drop.
                 | Some (prelude, _) -> prelude |> String.concat " "
-                | None -> sprintf "auto __v%d = %s;" letId (exprToCppCore subst names value)
+                | None -> $"auto __v{letId} = {(exprToCppCore subst names value)};"
         [valueStmt; renderUnitStmts subst names' body]
         |> List.filter (fun s -> s <> "")
         |> String.concat " "
@@ -1255,7 +1240,7 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
         // Not statically unit: evaluate for side effects, discard the value.
         // Also the safety net for unhandled statement forms -- a visible
         // C++ expression beats a silent drop.
-        sprintf "(void)(%s);" (exprToCppCore subst names other)
+        $"(void)({(exprToCppCore subst names other)});"
 
 
 and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : string =
@@ -1268,7 +1253,7 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
     match inferExprType arr with
     | ArrayElem at when dim < at.IndexTypes.Length ->
         match tryEvalIntIR at.IndexTypes.[dim].Extent with
-        | Some n -> sprintf "%dL" n
+        | Some n -> $"{n}L"
         | None ->
             let arrName = exprToCppCore subst names arr
             // A rank-1 ragged/dep-idx operand is a RaggedRow<T> (per
@@ -1284,11 +1269,11 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
             // same ill-posedness rule as ragged slots.)
             let isRank1Compound = (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
             if isRaggedRow && dim = 0 then
-                sprintf "(int64_t)(%s.len)" arrName
+                $"(int64_t)({arrName}.len)"
             elif isRank1Compound && dim = 0 then
-                sprintf "(int64_t)(%s.idx->cardinality)" arrName
+                $"(int64_t)({arrName}.idx->cardinality)"
             else
-                sprintf "(int64_t)(%s.extents[%d])" arrName dim
+                $"(int64_t)({arrName}.extents[{dim}])"
     | _ ->
         // `extents(range<T>)`: a virtual range has no materialized C++ object
         // to read `.extents[]` off, but its slot extents are part of the IR --
@@ -1298,7 +1283,7 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
         match arr with
         | IRRange (idxTys, _) when dim < idxTys.Length ->
             (match tryEvalIntIR idxTys.[dim].Extent with
-             | Some n -> sprintf "%dL" n
+             | Some n -> $"{n}L"
              | None -> exprError "extents(range<...>): the range's extent is not statically evaluable, and a virtual range has no runtime object to read it from -- take extents of a materialized array instead")
         | _ ->
             // Should be unreachable -- typecheck rejects non-arrays. Surface a
@@ -1310,9 +1295,9 @@ and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: A
     let arrayNames = 
         info.Arrays |> List.mapi (fun i arr ->
             match arr with
-            | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue (sprintf "arr%d" i)
+            | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"arr{i}")
             | IRParam (name, _, _) -> name
-            | _ -> sprintf "arr%d" i)
+            | _ -> $"arr{i}")
     
     // Kernel resolution is unified via `resolveCallable`; the wrapper carries
     // the kernel's own signature directly (sections are honestly typed via
@@ -1334,7 +1319,7 @@ and genApplyCombinatorExpr (subst: SubstMap) (names: Map<IRId, string>) (info: A
     // elementwise row. No correct program reaches here (verified: no
     // corpus/examples kernel has an array-valued elementwise body), so reject
     // loudly rather than emit wrong code.
-    exprError (sprintf "array-valued elementwise kernel body not supported inside a kernel (%d-array inline combinator); reduce the row to a scalar with prodsum or reduce, or compute the elementwise product at top level" arrayNames.Length)
+    exprError ($"array-valued elementwise kernel body not supported inside a kernel ({arrayNames.Length}-array inline combinator); reduce the row to a scalar with prodsum or reduce, or compute the elementwise product at top level")
 
 /// Convert IRExpr to C++ with an additional variable binding
 and exprToCppWithVarCore (subst: SubstMap) (names: Map<IRId, string>) (varId: IRId) (varName: string) (expr: IRExpr) : string =
@@ -1434,18 +1419,18 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
     // length inline as .len; everything else reads .extents[0].
     let srcBoundDim =
         match inferExprType arrExpr with
-        | ArrayElem a when isRaggedRowType a -> (sprintf "%s.len" arrName, false)
+        | ArrayElem a when isRaggedRowType a -> ($"{arrName}.len", false)
         | ArrayElem a -> extentDimOfArray a arrName 0
-        | _ -> (sprintf "%s.extents[0]" arrName, false)
+        | _ -> ($"{arrName}.extents[0]", false)
     let srcBound = fst srcBoundDim
     // Companion extents table under the shared rule (emitExtentsTable): heap
     // when the bound is a runtime read, static constexpr when the source's
     // index record pinned it. NOT a frame-local `size_t[1]` -- this mask can be
     // returned out of the function body that built it.
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [srcBoundDim]
+        emitExtentsTable "" ($"{varName}_extents") 1 [srcBoundDim]
     if maskRank <> 1 then
-        Some ([refusalErrorLine "" (sprintf "Blade codegen: mask over a rank-%d array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)" maskRank)], [])
+        Some ([refusalErrorLine "" ($"Blade codegen: mask over a rank-{maskRank} array is not yet supported (rank-1 only for now; rank-k masks land with the compound composition round)")], [])
     else
     match resolveCallable predExpr with
     | Some callable when callable.Params.Length = 1 ->
@@ -1453,7 +1438,7 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // predicate runs as a linear scan (genCallableWrapper calls the
         // predicate by NAME, so a hoisted set would be unqueried).
         let (wrapperCode, wname) = genCallableWrapper names varName callable
-        let predParamName = sprintf "__%s_x" varName
+        let predParamName = $"__{varName}_x"
         // Source element type (elemTypeStr is the RESULT type, i.e. bool).
         let srcElemStr =
             match inferExprType arrExpr with
@@ -1461,10 +1446,10 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             | _ -> "double"
         Some (
             wrapperCode @ extentsDecl @ [
-                sprintf "Array<bool, 1> %s = { new bool[%s], %s_extents };" varName srcBound varName
-                sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" srcBound
-                sprintf "    %s %s = %s[__mi];" srcElemStr predParamName arrName
-                sprintf "    %s[__mi] = %s(%s);" varName wname predParamName
+                $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };"""
+                $$"""for (size_t __mi = 0; __mi < {{srcBound}}; __mi++) {"""
+                $"    {srcElemStr} {predParamName} = {arrName}[__mi];"
+                $"    {varName}[__mi] = {wname}({predParamName});"
                 "}"
             ],
             // Raw `new bool[n]` backing plus whatever `<varName>_extents` turned
@@ -1477,8 +1462,8 @@ and materializeMaskForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // Degenerate (unresolved predicate): all-true mask; #error would be
         // kinder but this mirrors the prior fallback's shape.
         Some (extentsDecl @ [
-            sprintf "Array<bool, 1> %s = { new bool[%s], %s_extents };" varName srcBound varName
-            sprintf "for (size_t __mi = 0; __mi < %s; __mi++) %s[__mi] = true;" srcBound varName
+            $$"""Array<bool, 1> {{varName}} = { new bool[{{srcBound}}], {{varName}}_extents };"""
+            $"for (size_t __mi = 0; __mi < {srcBound}; __mi++) {varName}[__mi] = true;"
         ], [MatRawData (varName, ownedExtents)])
 
 
@@ -1499,23 +1484,23 @@ and materializeIntersectForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     // shared companion-extents rule -- which is what lets the result be
     // returned out of the function body that computed it.
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [(sprintf "%s__count" varName, false)]
+        emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
-        sprintf "std::unordered_set<%s> %s__b_set;" elemTypeStr varName
-        sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) %s__b_set.insert(%s[__si]);" bName varName bName
-        sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
-        sprintf "size_t %s__count = 0;" varName
-        sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
-        sprintf "    %s __x = %s[__si];" elemTypeStr aName
-        sprintf "    if (%s__b_set.count(__x) && %s__seen.insert(__x).second) %s__count++;" varName varName varName
+        $"std::unordered_set<{elemTypeStr}> {varName}__b_set;"
+        $"for (size_t __si = 0; __si < {bName}.extents[0]; __si++) {varName}__b_set.insert({bName}[__si]);"
+        $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
+        $"size_t {varName}__count = 0;"
+        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
+        $"    {elemTypeStr} __x = {aName}[__si];"
+        $"    if ({varName}__b_set.count(__x) && {varName}__seen.insert(__x).second) {varName}__count++;"
         "}"
     ] @ extentsDecl @ [
-        sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
-        sprintf "%s__seen.clear();" varName
-        sprintf "size_t %s__fill = 0;" varName
-        sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
-        sprintf "    %s __x = %s[__si];" elemTypeStr aName
-        sprintf "    if (%s__b_set.count(__x) && %s__seen.insert(__x).second) %s[%s__fill++] = __x;" varName varName varName varName
+        $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{varName}}__count], {{varName}}_extents };"""
+        $"{varName}__seen.clear();"
+        $"size_t {varName}__fill = 0;"
+        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
+        $"    {elemTypeStr} __x = {aName}[__si];"
+        $"    if ({varName}__b_set.count(__x) && {varName}__seen.insert(__x).second) {varName}[{varName}__fill++] = __x;"
         "}"
     ], [MatRawData (varName, ownedExtents)])
 
@@ -1530,25 +1515,25 @@ and materializeUnionForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
     let bName = exprToCppCore subst names bExpr
     // Data-dependent cardinality: always the heap arm (see the intersect form).
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [(sprintf "%s__count" varName, false)]
+        emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
-        sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
-        sprintf "size_t %s__count = 0;" varName
-        sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
-        sprintf "    if (%s__seen.insert(%s[__si]).second) %s__count++;" varName aName varName
+        $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
+        $"size_t {varName}__count = 0;"
+        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
+        $"    if ({varName}__seen.insert({aName}[__si]).second) {varName}__count++;"
         "}"
-        sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
-        sprintf "    if (%s__seen.insert(%s[__si]).second) %s__count++;" varName bName varName
+        $$"""for (size_t __si = 0; __si < {{bName}}.extents[0]; __si++) {"""
+        $"    if ({varName}__seen.insert({bName}[__si]).second) {varName}__count++;"
         "}"
     ] @ extentsDecl @ [
-        sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
-        sprintf "%s__seen.clear();" varName
-        sprintf "size_t %s__fill = 0;" varName
-        sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" aName
-        sprintf "    if (%s__seen.insert(%s[__si]).second) %s[%s__fill++] = %s[__si];" varName aName varName varName aName
+        $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{varName}}__count], {{varName}}_extents };"""
+        $"{varName}__seen.clear();"
+        $"size_t {varName}__fill = 0;"
+        $$"""for (size_t __si = 0; __si < {{aName}}.extents[0]; __si++) {"""
+        $"    if ({varName}__seen.insert({aName}[__si]).second) {varName}[{varName}__fill++] = {aName}[__si];"
         "}"
-        sprintf "for (size_t __si = 0; __si < %s.extents[0]; __si++) {" bName
-        sprintf "    if (%s__seen.insert(%s[__si]).second) %s[%s__fill++] = %s[__si];" varName bName varName varName bName
+        $$"""for (size_t __si = 0; __si < {{bName}}.extents[0]; __si++) {"""
+        $"    if ({varName}__seen.insert({bName}[__si]).second) {varName}[{varName}__fill++] = {bName}[__si];"
         "}"
     ], [MatRawData (varName, ownedExtents)])
 
@@ -1561,19 +1546,19 @@ and materializeUniqueForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     let aName = exprToCppCore subst names aExpr
     // Data-dependent cardinality: always the heap arm (see the intersect form).
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [(sprintf "%s__count" varName, false)]
+        emitExtentsTable "" ($"{varName}_extents") 1 [($"{varName}__count", false)]
     Some ([
-        sprintf "std::unordered_set<%s> %s__seen;" elemTypeStr varName
-        sprintf "size_t %s__count = 0;" varName
-        sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
-        sprintf "    if (%s__seen.insert(%s[__ui]).second) %s__count++;" varName aName varName
+        $"std::unordered_set<{elemTypeStr}> {varName}__seen;"
+        $"size_t {varName}__count = 0;"
+        $$"""for (size_t __ui = 0; __ui < {{aName}}.extents[0]; __ui++) {"""
+        $"    if ({varName}__seen.insert({aName}[__ui]).second) {varName}__count++;"
         "}"
     ] @ extentsDecl @ [
-        sprintf "Array<%s, 1> %s = { new %s[%s__count], %s_extents };" elemTypeStr varName elemTypeStr varName varName
-        sprintf "%s__seen.clear();" varName
-        sprintf "size_t %s__fill = 0;" varName
-        sprintf "for (size_t __ui = 0; __ui < %s.extents[0]; __ui++) {" aName
-        sprintf "    if (%s__seen.insert(%s[__ui]).second) %s[%s__fill++] = %s[__ui];" varName aName varName varName aName
+        $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{varName}}__count], {{varName}}_extents };"""
+        $"{varName}__seen.clear();"
+        $"size_t {varName}__fill = 0;"
+        $$"""for (size_t __ui = 0; __ui < {{aName}}.extents[0]; __ui++) {"""
+        $"    if ({varName}__seen.insert({aName}[__ui]).second) {varName}[{varName}__fill++] = {aName}[__ui];"
         "}"
     ], [MatRawData (varName, ownedExtents)])
 
@@ -1602,17 +1587,17 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         | ArrayElem at -> (isCompoundArrayType at || isSparseArrayType at) && at.IndexTypes.Length = 1
         | _ -> false
     let srcBoundDim =
-        if isR1Compound then (sprintf "%s.idx->cardinality" arrName, false)
+        if isR1Compound then ($"{arrName}.idx->cardinality", false)
         else
             match inferExprType arrExpr with
             | ArrayElem at -> extentDimOfArray at arrName 0
-            | _ -> (sprintf "%s.extents[0]" arrName, false)
+            | _ -> ($"{arrName}.extents[0]", false)
     let srcBound = fst srcBoundDim
     // Shared companion-extents rule: a sorted result is a value like any other
     // and may be returned, so the table must outlive this frame.
     let (extentsDecl, ownedExtents) =
-        emitExtentsTable "" (sprintf "%s_extents" varName) 1 [srcBoundDim]
-    let srcAt (i: string) = if isR1Compound then sprintf "%s.data[%s]" arrName i else sprintf "%s[%s]" arrName i
+        emitExtentsTable "" ($"{varName}_extents") 1 [srcBoundDim]
+    let srcAt (i: string) = if isR1Compound then $"{arrName}.data[{i}]" else $"{arrName}[{i}]"
     let (wrapperCode, keyCall) =
         match resolveCallable keyExpr with
         | Some callable when callable.Params.Length = 1 ->
@@ -1621,14 +1606,14 @@ and materializeSortForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         | _ -> ([], "[](auto) { return 0; }")  // degenerate fallback
     Some (
         wrapperCode @ [
-            sprintf "size_t* %s__perm = new size_t[%s];" varName srcBound
-            sprintf "for (size_t __pi = 0; __pi < %s; __pi++) %s__perm[__pi] = __pi;" srcBound varName
-            sprintf "std::stable_sort(%s__perm, %s__perm + %s, [&](size_t __a, size_t __b) {" varName varName srcBound
-            sprintf "    return %s(%s) < %s(%s);" keyCall (srcAt "__a") keyCall (srcAt "__b")
+            $"size_t* {varName}__perm = new size_t[{srcBound}];"
+            $"for (size_t __pi = 0; __pi < {srcBound}; __pi++) {varName}__perm[__pi] = __pi;"
+            $$"""std::stable_sort({{varName}}__perm, {{varName}}__perm + {{srcBound}}, [&](size_t __a, size_t __b) {"""
+            $"""    return {keyCall}({(srcAt "__a")}) < {keyCall}({(srcAt "__b")});"""
             "});"
         ] @ extentsDecl @ [
-            sprintf "Array<%s, 1> %s = { new %s[%s], %s_extents };" elemTypeStr varName elemTypeStr srcBound varName
-            sprintf "for (size_t __si = 0; __si < %s; __si++) %s[__si] = %s;" srcBound varName (srcAt (sprintf "%s__perm[__si]" varName))
+            $$"""Array<{{elemTypeStr}}, 1> {{varName}} = { new {{elemTypeStr}}[{{srcBound}}], {{varName}}_extents };"""
+            $"""for (size_t __si = 0; __si < {srcBound}; __si++) {varName}[__si] = {(srcAt (sprintf "%s__perm[__si]" varName))};"""
         ],
         // Two raw buffers: the permutation scratch (`size_t*`, dead after the
         // gather) and the output backing behind the Array<T,1> wrapper, the
@@ -1650,9 +1635,9 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     (match inferExprType arrExpr with
      | ArrayElem arrTy ->
         let rank = arrTy.IndexTypes.Length
-        let extentsName = sprintf "%s_extents" varName
+        let extentsName = $"{varName}_extents"
         // Source loop variables, one per dimension.
-        let srcVar d = sprintf "__t%s_%d" varName d
+        let srcVar d = $"__t{varName}_{d}"
         // Destination extents = source extents with d1/d2 swapped.
         let swapDim d = if d = d1 then d2 elif d = d2 then d1 else d
         // Shared companion-extents rule (emitExtentsTable): the transposed
@@ -1671,14 +1656,13 @@ and materializeTransposeForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let openLoops =
             [ for d in 0 .. rank - 1 ->
                 let ind = String.replicate d "    "
-                sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {"
-                    ind (srcVar d) (srcVar d) (literalOrRuntimeExtentOfArray arrTy arrName d) (srcVar d) ]
+                $"{ind}for (size_t {(srcVar d)} = 0; {(srcVar d)} < {(literalOrRuntimeExtentOfArray arrTy arrName d)}; {(srcVar d)}++) {{" ]
         // dst's dimension d is fed by source dimension swapDim(d).
-        let srcIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (srcVar d) ] |> String.concat ""
-        let dstIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (srcVar (swapDim d)) ] |> String.concat ""
+        let srcIdx = [ for d in 0 .. rank - 1 -> $"[{(srcVar d)}]" ] |> String.concat ""
+        let dstIdx = [ for d in 0 .. rank - 1 -> $"[{(srcVar (swapDim d))}]" ] |> String.concat ""
         let bodyInd = String.replicate rank "    "
-        let body = [ sprintf "%s%s%s = %s%s;" bodyInd varName dstIdx arrName srcIdx ]
-        let closeLoops = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
+        let body = [ $"{bodyInd}{varName}{dstIdx} = {arrName}{srcIdx};" ]
+        let closeLoops = [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
         Some (extentDecl @ [allocDecl] @ openLoops @ body @ closeLoops,
               [MatPool (varName, elemTypeStr, rank, "nullptr", None, ownedExtents)])
      | _ -> None)
@@ -1706,13 +1690,13 @@ and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
          | ArrayElem at ->
             let srcRank = at.IndexTypes.Length
             let outRank = srcRank + 1
-            let extentsName = sprintf "%s_extents" varName
+            let extentsName = $"{varName}_extents"
             // Shared companion-extents rule: the fresh leading axis is always a
             // literal (the operand COUNT), so the table goes static-constexpr
             // exactly when the sources' own axes are pinned too.
             let (extentDecl, ownedExtents) =
                 emitExtentsTable "" extentsName outRank
-                    ((sprintf "%d" arrs.Length, true)
+                    ((string arrs.Length, true)
                      :: [ for d in 0 .. srcRank - 1 -> extentDimOfArray at firstName d ])
             let allocDecl =
                 arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = outRank; Name = varName
@@ -1720,7 +1704,7 @@ and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
             // One copy nest per source. The loop variables are declared in each
             // `for` init, so sibling nests at the same level reuse the names
             // without colliding.
-            let loopVar d = sprintf "__sk%s_%d" varName d
+            let loopVar d = $"__sk{varName}_{d}"
             // Each nest reads its OWN source's index records, not the first
             // source's: TypeCheck has proven the operands share extents at
             // runtime, but not that they were all pinned to literals by shape
@@ -1731,16 +1715,15 @@ and materializeStackForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
                 let srcBoundAt d =
                     match List.item k srcTypes with
                     | ArrayElem st -> literalOrRuntimeExtentOfArray st srcName d
-                    | _ -> sprintf "%s.extents[%d]" srcName d
+                    | _ -> $"{srcName}.extents[{d}]"
                 let opens =
                     [ for d in 0 .. srcRank - 1 ->
                         let ind = String.replicate d "    "
-                        sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {"
-                            ind (loopVar d) (loopVar d) (srcBoundAt d) (loopVar d) ]
-                let srcIdx = [ for d in 0 .. srcRank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                        $"{ind}for (size_t {(loopVar d)} = 0; {(loopVar d)} < {(srcBoundAt d)}; {(loopVar d)}++) {{" ]
+                let srcIdx = [ for d in 0 .. srcRank - 1 -> $"[{(loopVar d)}]" ] |> String.concat ""
                 let bodyInd = String.replicate srcRank "    "
-                let body = [ sprintf "%s%s[%d]%s = %s%s;" bodyInd varName k srcIdx srcName srcIdx ]
-                let closes = [ for d in srcRank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
+                let body = [ $"{bodyInd}{varName}[{k}]{srcIdx} = {srcName}{srcIdx};" ]
+                let closes = [ for d in srcRank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
                 opens @ body @ closes
             Some (extentDecl @ [allocDecl] @ (srcNames |> List.mapi copyNest |> List.concat),
                   [MatPool (varName, elemTypeStr, outRank, "nullptr", None, ownedExtents)])
@@ -1763,8 +1746,8 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         (match inferExprType first with
          | ArrayElem at ->
             let rank = at.IndexTypes.Length
-            let extentsName = sprintf "%s_extents" varName
-            let joinedExtent = srcNames |> List.map (fun s -> sprintf "%s.extents[%d]" s dim) |> String.concat " + "
+            let extentsName = $"{varName}_extents"
+            let joinedExtent = srcNames |> List.map (fun s -> $"{s}.extents[{dim}]") |> String.concat " + "
             // Shared companion-extents rule. The CONCATENATED axis is a sum of
             // runtime reads, so a join always lands on the heap arm -- which is
             // the arm that survives being returned.
@@ -1776,8 +1759,8 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             let allocDecl =
                 arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = rank; Name = varName
                              Symm = "nullptr"; Strict = None; Extents = extentsName }
-            let offName = sprintf "%s_joff" varName
-            let loopVar d = sprintf "__jn%s_%d" varName d
+            let offName = $"{varName}_joff"
+            let loopVar d = $"__jn{varName}_{d}"
             // Per-source records, same reasoning as stack: the concatenated
             // axis differs between operands by construction, so the first
             // source's extents are not the others' even in principle.
@@ -1786,22 +1769,21 @@ and materializeJoinForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 let srcBoundAt d =
                     match List.item k srcTypes with
                     | ArrayElem st -> literalOrRuntimeExtentOfArray st srcName d
-                    | _ -> sprintf "%s.extents[%d]" srcName d
+                    | _ -> $"{srcName}.extents[{d}]"
                 let opens =
                     [ for d in 0 .. rank - 1 ->
                         let ind = String.replicate d "    "
-                        sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {"
-                            ind (loopVar d) (loopVar d) (srcBoundAt d) (loopVar d) ]
-                let srcIdx = [ for d in 0 .. rank - 1 -> sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                        $"{ind}for (size_t {(loopVar d)} = 0; {(loopVar d)} < {(srcBoundAt d)}; {(loopVar d)}++) {{" ]
+                let srcIdx = [ for d in 0 .. rank - 1 -> $"[{(loopVar d)}]" ] |> String.concat ""
                 let dstIdx =
                     [ for d in 0 .. rank - 1 ->
-                        if d = dim then sprintf "[%s + %s]" (loopVar d) offName
-                        else sprintf "[%s]" (loopVar d) ] |> String.concat ""
+                        if d = dim then $"[{(loopVar d)} + {offName}]"
+                        else $"[{(loopVar d)}]" ] |> String.concat ""
                 let bodyInd = String.replicate rank "    "
-                let body = [ sprintf "%s%s%s = %s%s;" bodyInd varName dstIdx srcName srcIdx ]
-                let closes = [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
-                opens @ body @ closes @ [ sprintf "%s += %s.extents[%d];" offName srcName dim ]
-            Some (extentDecl @ [allocDecl; sprintf "size_t %s = 0;" offName]
+                let body = [ $"{bodyInd}{varName}{dstIdx} = {srcName}{srcIdx};" ]
+                let closes = [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
+                opens @ body @ closes @ [ $"{offName} += {srcName}.extents[{dim}];" ]
+            Some (extentDecl @ [allocDecl; $"size_t {offName} = 0;"]
                   @ (srcNames |> List.mapi copyNest |> List.concat),
                   [MatPool (varName, elemTypeStr, rank, "nullptr", None, ownedExtents)])
          | _ -> None)
@@ -1860,30 +1842,28 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let axes = max 1 ix.Rank
         let levelArgs = orbLevelArgs (orbitLevelsOf ix)
         let nStr = exprToCppCore subst names (orbitBaseExtent ix)
-        let extentsName = sprintf "%s_extents" varName
-        let lv k = sprintf "__odc%s_%d" varName k
-        let coordBuf = sprintf "__odc%s_c" varName
+        let extentsName = $"{varName}_extents"
+        let lv k = $"__odc{varName}_{k}"
+        let coordBuf = $"__odc{varName}_c"
         // Shared companion-extents rule. The orbit base extent is rendered
         // through a cast expression rather than a bare literal, so this is the
         // heap arm unconditionally -- correct, and returnable.
         let (extentDecl, ownedExtents) =
             emitExtentsTable "" extentsName axes
-                [ for _ in 0 .. axes - 1 -> (sprintf "(size_t)(%s)" nStr, false) ]
+                [ for _ in 0 .. axes - 1 -> ($"(size_t)({nStr})", false) ]
         let allocDecl =
             arrayAlloc { Ind = ""; Elem = elemTypeStr; Rank = axes; Name = varName
                          Symm = "nullptr"; Strict = None; Extents = extentsName }
         let opens =
             [ for k in 0 .. axes - 1 ->
-                sprintf "%sfor (size_t %s = 0; %s < (size_t)(%s); %s++) {"
-                        (String.replicate k "    ") (lv k) (lv k) nStr (lv k) ]
+                $"""{(String.replicate k "    ")}for (size_t {(lv k)} = 0; {(lv k)} < (size_t)({nStr}); {(lv k)}++) {{""" ]
         let bodyInd = String.replicate axes "    "
-        let dstSubs = [ for k in 0 .. axes - 1 -> sprintf "[%s]" (lv k) ] |> String.concat ""
-        let coordInit = [ for k in 0 .. axes - 1 -> sprintf "(int)%s" (lv k) ] |> String.concat ", "
+        let dstSubs = [ for k in 0 .. axes - 1 -> $"[{(lv k)}]" ] |> String.concat ""
+        let coordInit = [ for k in 0 .. axes - 1 -> $"(int){(lv k)}" ] |> String.concat ", "
         let body =
-            [ sprintf "%sint %s[%d] = { %s };" bodyInd coordBuf axes coordInit
-              sprintf "%s%s%s = orbit_wreath_utilities::orb_read<%s, %s>(%s, %s, (int)(%s));"
-                      bodyInd varName dstSubs elemTypeStr levelArgs arrName coordBuf nStr ]
-        let closes = [ for k in axes - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate k "    ") ]
+            [ $$"""{{bodyInd}}int {{coordBuf}}[{{axes}}] = { {{coordInit}} };"""
+              $"{bodyInd}{varName}{dstSubs} = orbit_wreath_utilities::orb_read<{elemTypeStr}, {levelArgs}>({arrName}, {coordBuf}, (int)({nStr}));" ]
+        let closes = [ for k in axes - 1 .. -1 .. 0 -> $"""{(String.replicate k "    ")}}}""" ]
         Some (extentDecl @ [ allocDecl ] @ opens @ body @ closes,
               [ MatPool (varName, elemTypeStr, axes, "nullptr", None, ownedExtents) ])
      | ArrayElem arrTy ->
@@ -1901,9 +1881,9 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             | None -> (0, SymNone)
         // Leading free loop variables and the per-dimension subscript they
         // contribute (prefixed to both the output and source addresses).
-        let leadVar j = sprintf "__dc%s_S%d" varName j
-        let leadSubs = [ for j in 0 .. leadingN - 1 -> sprintf "[%s]" (leadVar j) ] |> String.concat ""
-        let extentsName = sprintf "%s_extents" varName
+        let leadVar j = $"__dc{varName}_S{j}"
+        let leadSubs = [ for j in 0 .. leadingN - 1 -> $"[{(leadVar j)}]" ] |> String.concat ""
+        let extentsName = $"{varName}_extents"
         // `n` is the shared extent of EVERY axis of the fission, and this one
         // binding renders every bound the emitter produces -- the gather nests,
         // the scatter nests, and the output extents table. Reading it through
@@ -1950,7 +1930,7 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                 emitGroup 1            // the freed axis (always a singleton)
                 emitGroup bLen
                 List.ofSeq acc
-            let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) mask
+            let symmArg = hoistSymmDecl ($"{varName}_symm") mask
             // Total output rank = leading free dims + the fission group's
             // r expanded axes. All axes share extent n (== arrName.extents[0]).
             let totalRank = leadingN + r
@@ -1965,7 +1945,7 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             // Emit a left-justified canonical nest for a group. Returns the
             // generated loop-open lines, the storage subscript ("[v0][v1]..")
             // and the names of the per-level LOGICAL vars (prefix sums).
-            let lvName tag k = sprintf "__dc%s_%s%d" varName tag k
+            let lvName tag k = $"__dc{varName}_{tag}{k}"
             let emitGroupNest (tag: string) (len: int) (startIndent: int)
                 : string list * string * string list =
                 let mutable lines = []
@@ -1977,24 +1957,24 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                     let logName = v + "_log"
                     let bound =
                         if k = 0 then nExpr
-                        else sprintf "%s - %s" nExpr ((lvName tag (k-1)) + "_log")
+                        else $"""{nExpr} - {((lvName tag (k-1)) + "_log")}"""
                     let logRhs =
                         if k = 0 then v
-                        else sprintf "%s + %s" ((lvName tag (k-1)) + "_log") v
+                        else $"""{((lvName tag (k-1)) + "_log")} + {v}"""
                     lines <- lines @
                         [ forLoop ind v bound
-                          sprintf "%s    size_t %s = %s;" ind logName logRhs ]
-                    subs <- subs + sprintf "[%s]" v
+                          $"{ind}    size_t {logName} = {logRhs};" ]
+                    subs <- subs + $"[{v}]"
                     logs <- logs @ [logName]
                 (lines, subs, logs)
-            let fv = sprintf "__dc%s_F" varName
+            let fv = $"__dc{varName}_F"
             // Leading free dims become the outermost loops; the fission nest
             // is emitted indented beneath them. Their indices are prefixed
             // (leadSubs) to both the output and source addresses.
             let leadLines =
                 [ for j in 0 .. leadingN - 1 ->
                     let ind = String.replicate j "    "
-                    sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind (leadVar j) (leadVar j) nExpr (leadVar j) ]
+                    $$"""{{ind}}for (size_t {{(leadVar j)}} = 0; {{(leadVar j)}} < {{nExpr}}; {{(leadVar j)}}++) {""" ]
             let mutable depth = leadingN
             let (lLines, lSubs, lLogs) = emitGroupNest "L" aLen depth
             depth <- depth + aLen
@@ -2008,18 +1988,18 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             let arrInit = logicalTuple |> String.concat ", "
             let srcSub =
                 [ for k in 0 .. r - 1 ->
-                    if k = 0 then sprintf "[__dc%s_t[0]]" varName
-                    else sprintf "[__dc%s_t[%d] - __dc%s_t[%d]]" varName k varName (k-1) ]
+                    if k = 0 then $"[__dc{varName}_t[0]]"
+                    else $"[__dc{varName}_t[{k}] - __dc{varName}_t[{k-1}]]" ]
                 |> String.concat ""
             // Free leading dims map identically source->dest, so prefix them
             // to both subscripts.
-            let outSub = leadSubs + lSubs + sprintf "[%s]" fv + rSubs
+            let outSub = leadSubs + lSubs + $"[{fv}]" + rSubs
             let srcSubFull = leadSubs + srcSub
             let body =
-                [ sprintf "%ssize_t __dc%s_t[%d] = { %s };" bodyInd varName r arrInit
-                  sprintf "%sstd::sort(__dc%s_t, __dc%s_t + %d);" bodyInd varName varName r
-                  sprintf "%s%s%s = %s%s;" bodyInd varName outSub arrName srcSubFull ]
-            let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
+                [ $$"""{{bodyInd}}size_t __dc{{varName}}_t[{{r}}] = { {{arrInit}} };"""
+                  $"{bodyInd}std::sort(__dc{varName}_t, __dc{varName}_t + {r});"
+                  $"{bodyInd}{varName}{outSub} = {arrName}{srcSubFull};" ]
+            let closes = [ for dd in depth - 1 .. -1 .. 0 -> $"""{(String.replicate dd "    ")}}}""" ]
             Some (extentDecl @ [allocDecl] @ leadLines @ lLines @ [fLine] @ rLines @ body @ closes,
                   [MatPool (varName, elemTypeStr, totalRank, symmArg, None, ownedExtents)])
          | SymAntisymmetric when r = 2 ->
@@ -2029,20 +2009,19 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             let (extentDecl, ownedExtents) =
                 emitExtentsTable "" extentsName 2 [nDim; nDim]
             let allocDecl =
-                sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
-                    elemTypeStr varName elemTypeStr extentsName extentsName
-            let a = sprintf "__dc%s_a" varName
-            let b = sprintf "__dc%s_b" varName
+                $"Array<{elemTypeStr}, 2> {varName} = {{ allocate<typename promote<{elemTypeStr}, 2>::type, nullptr>({extentsName}), {extentsName} }};"
+            let a = $"__dc{varName}_a"
+            let b = $"__dc{varName}_b"
             let zeroFill =
-                [ sprintf "for (size_t __dcz0 = 0; __dcz0 < %s; __dcz0++)" nExpr
-                  sprintf "    for (size_t __dcz1 = 0; __dcz1 < %s; __dcz1++)" nExpr
-                  sprintf "        %s[__dcz0][__dcz1] = 0;" varName ]
+                [ $"for (size_t __dcz0 = 0; __dcz0 < {nExpr}; __dcz0++)"
+                  $"    for (size_t __dcz1 = 0; __dcz1 < {nExpr}; __dcz1++)"
+                  $"        {varName}[__dcz0][__dcz1] = 0;" ]
             let loops =
-                [ sprintf "for (size_t %s = 0; %s < %s; %s++) {" a a nExpr a
-                  sprintf "    for (size_t %s = 0; %s + 1 < %s - %s; %s++) {" b b nExpr a b
-                  sprintf "        size_t __dci = %s; size_t __dcj = %s + %s + 1;" a a b
-                  sprintf "        %s[__dci][__dcj] = %s[%s][%s];" varName arrName a b
-                  sprintf "        %s[__dcj][__dci] = -(%s[%s][%s]);" varName arrName a b
+                [ $$"""for (size_t {{a}} = 0; {{a}} < {{nExpr}}; {{a}}++) {"""
+                  $$"""    for (size_t {{b}} = 0; {{b}} + 1 < {{nExpr}} - {{a}}; {{b}}++) {"""
+                  $"        size_t __dci = {a}; size_t __dcj = {a} + {b} + 1;"
+                  $"        {varName}[__dci][__dcj] = {arrName}[{a}][{b}];"
+                  $"        {varName}[__dcj][__dci] = -({arrName}[{a}][{b}]);"
                   "    }"
                   "}" ]
             Some (extentDecl @ [allocDecl] @ zeroFill @ loops,
@@ -2058,16 +2037,15 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             let (extentDecl, ownedExtents) =
                 emitExtentsTable "" extentsName 2 [nDim; nDim]
             let allocDecl =
-                sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
-                    elemTypeStr varName elemTypeStr extentsName extentsName
-            let a = sprintf "__dc%s_a" varName
-            let b = sprintf "__dc%s_b" varName
+                $"Array<{elemTypeStr}, 2> {varName} = {{ allocate<typename promote<{elemTypeStr}, 2>::type, nullptr>({extentsName}), {extentsName} }};"
+            let a = $"__dc{varName}_a"
+            let b = $"__dc{varName}_b"
             let loops =
-                [ sprintf "for (size_t %s = 0; %s < %s; %s++) {" a a nExpr a
-                  sprintf "    for (size_t %s = 0; %s + %s < %s; %s++) {" b a b nExpr b
-                  sprintf "        size_t __dci = %s; size_t __dcj = %s + %s;" a a b
-                  sprintf "        %s[__dci][__dcj] = %s[%s][%s];" varName arrName a b
-                  sprintf "        if (__dci != __dcj) %s[__dcj][__dci] = nested_array_utilities::conj_scalar(%s[%s][%s]);" varName arrName a b
+                [ $$"""for (size_t {{a}} = 0; {{a}} < {{nExpr}}; {{a}}++) {"""
+                  $$"""    for (size_t {{b}} = 0; {{a}} + {{b}} < {{nExpr}}; {{b}}++) {"""
+                  $"        size_t __dci = {a}; size_t __dcj = {a} + {b};"
+                  $"        {varName}[__dci][__dcj] = {arrName}[{a}][{b}];"
+                  $"        if (__dci != __dcj) {varName}[__dcj][__dci] = nested_array_utilities::conj_scalar({arrName}[{a}][{b}]);"
                   "    }"
                   "}" ]
             Some (extentDecl @ [allocDecl] @ loops,
@@ -2124,8 +2102,8 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                         strict <- strict @ [0]
                         g <- g + 1
                 (symm, strict)
-            let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) symmMaskVec
-            let strictArg = hoistSymmDecl (sprintf "%s_strict" varName) strictMaskVec
+            let symmArg = hoistSymmDecl ($"{varName}_symm") symmMaskVec
+            let strictArg = hoistSymmDecl ($"{varName}_strict") strictMaskVec
             let (extentDecl, ownedExtents) =
                 emitExtentsTable "" extentsName r [ for _ in 1 .. r -> nDim ]
             let allocDecl =
@@ -2151,28 +2129,28 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
                     gi <- gi + 1
                     for k in 0 .. slotRank - 1 do
                         let ind = String.replicate depth "    "
-                        let v = sprintf "__dc%s_g%d_%d" varName g k
+                        let v = $"__dc{varName}_g{g}_{k}"
                         let logName = v + "_log"
                         let bound =
                             if k = 0 then nExpr
-                            else sprintf "%s - %s - 1" nExpr (sprintf "__dc%s_g%d_%d_log" varName g (k-1))
+                            else $"""{nExpr} - {(sprintf "__dc%s_g%d_%d_log" varName g (k-1))} - 1"""
                         let logRhs =
                             if k = 0 then v
-                            else sprintf "%s + %s + 1" (sprintf "__dc%s_g%d_%d_log" varName g (k-1)) v
+                            else $"""{(sprintf "__dc%s_g%d_%d_log" varName g (k-1))} + {v} + 1"""
                         loopLines <- loopLines @
                             [ forLoop ind v bound
-                              sprintf "%s    size_t %s = %s;" ind logName logRhs ]
-                        storeSubs <- storeSubs + sprintf "[%s]" v
+                              $"{ind}    size_t {logName} = {logRhs};" ]
+                        storeSubs <- storeSubs + $"[{v}]"
                         logTuple <- logTuple @ [logName]
                         depth <- depth + 1
                 | _ ->
                     // "plain" (degenerate residual) or "freed": one dense axis.
-                    let v = sprintf "__dc%s_p%d" varName pi
+                    let v = $"__dc{varName}_p{pi}"
                     pi <- pi + 1
                     let ind = String.replicate depth "    "
                     loopLines <- loopLines @
                         [ forLoop ind v nExpr ]
-                    storeSubs <- storeSubs + sprintf "[%s]" v
+                    storeSubs <- storeSubs + $"[{v}]"
                     logTuple <- logTuple @ [v]
                     depth <- depth + 1
             let bodyInd = String.replicate depth "    "
@@ -2183,17 +2161,16 @@ and materializeDecompactForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             // yields parity + zero flag (repeat => antisym 0).
             let srcSub =
                 [ for k in 0 .. r - 1 ->
-                    if k = 0 then sprintf "[__dc%s_t[0]]" varName
-                    else sprintf "[__dc%s_t[%d] - __dc%s_t[%d] - 1]" varName k varName (k-1) ]
+                    if k = 0 then $"[__dc{varName}_t[0]]"
+                    else $"[__dc{varName}_t[{k}] - __dc{varName}_t[{k-1}] - 1]" ]
                 |> String.concat ""
             let body =
-                [ sprintf "%sstd::array<size_t,%d> __dc%s_a = { %s };" bodyInd r varName arrInit
-                  sprintf "%sbool __dc%s_z; int __dc%s_p = nested_array_utilities::canon_fold<%d>(__dc%s_a, true, __dc%s_z);" bodyInd varName varName r varName varName
-                  sprintf "%ssize_t __dc%s_t[%d] = { %s };" bodyInd varName r
-                      (String.concat ", " [ for k in 0 .. r - 1 -> sprintf "__dc%s_a[%d]" varName k ])
+                [ $$"""{{bodyInd}}std::array<size_t,{{r}}> __dc{{varName}}_a = { {{arrInit}} };"""
+                  $"{bodyInd}bool __dc{varName}_z; int __dc{varName}_p = nested_array_utilities::canon_fold<{r}>(__dc{varName}_a, true, __dc{varName}_z);"
+                  $"""{bodyInd}size_t __dc{varName}_t[{r}] = {{ {(String.concat ", " [ for k in 0 .. r - 1 -> $"__dc{varName}_a[{k}]" ])} }};"""
                   sprintf "%s%s%s = __dc%s_z ? %s() : nested_array_utilities::canon_transform<%s>(%s%s, __dc%s_p, nested_array_utilities::ReadTransform::NegateOnSwap);"
                       bodyInd varName storeSubs varName elemTypeStr elemTypeStr arrName srcSub varName ]
-            let closes = [ for dd in depth - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate dd "    ") ]
+            let closes = [ for dd in depth - 1 .. -1 .. 0 -> $"""{(String.replicate dd "    ")}}}""" ]
             Some (extentDecl @ [allocDecl] @ loopLines @ body @ closes,
                   [MatPool (varName, elemTypeStr, r, symmArg, Some strictArg, ownedExtents)])
          | _ -> None)
@@ -2207,13 +2184,13 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
     // array and run a flat contiguous-pool transform (negate_pool /
     // conjugate_pool). Every array reaching here has compact storage (one
     // contiguous pool), so pool_base + count is correct and storage-agnostic.
-    let isConj = (match form with IRArrayConjugate _ -> true | _ -> false)
+    let isConj = (form.IsIRArrayConjugate)
     let arrName = exprToCppCore subst names arrExpr
     let srcType = inferExprType arrExpr
     (match srcType with
      | ArrayElem arrTy ->
         let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
-        let extentsName = sprintf "%s_extents" varName
+        let extentsName = $"{varName}_extents"
         // Same-shape extents: copy the source's logical extents, through the
         // shared companion-extents rule so the result survives a return.
         let (extentDecl, ownedExtents) =
@@ -2228,17 +2205,17 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
                 // Compact-grouped SYMM (antisym grouped like symmetric) so it
                 // aligns with the STRICT mask emitAllocRhs hoists.
                 let (sVec, _) = buildSymmVecWithStrict srcType
-                if hasRealSymmetry sVec then hoistSymmDecl (sprintf "%s_symm" varName) sVec
+                if hasRealSymmetry sVec then hoistSymmDecl ($"{varName}_symm") sVec
                 else "nullptr"
             | _ ->
                 let symmVec = buildSymmVec srcType
-                if hasRealSymmetry symmVec then hoistSymmDecl (sprintf "%s_symm" varName) symmVec
+                if hasRealSymmetry symmVec then hoistSymmDecl ($"{varName}_symm") symmVec
                 else "nullptr"
         let allocRhs =
             match emitAllocRhs spec elemTypeStr rank symmArg extentsName with
             | Ok rhs -> rhs
-            | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
-        let allocDecl = sprintf "Array<%s, %d> %s = %s;" elemTypeStr rank varName allocRhs
+            | Error msg -> recordCodegenRefusal msg; $"{{ nullptr, {extentsName} }};\n#error \"{msg}\""
+        let allocDecl = $"Array<{elemTypeStr}, {rank}> {varName} = {allocRhs};"
         // Element count: count_antisym for antisym storage, count_leaves
         // (with the SYMM mask) otherwise. Matches the allocator's traversal.
         let countExpr =
@@ -2247,21 +2224,21 @@ and materializeNegateConjugateForm (subst: SubstMap) (names: Map<IRId, string>) 
                 // Strict storage: all-ones mask + DIAGONALS=false, same as the
                 // unified allocate path.
                 let allOnes = List.replicate rank 1
-                let cMask = hoistSymmDecl (sprintf "%s_anti" extentsName) allOnes
-                sprintf "count_leaves<typename promote<%s, %d>::type, %s, false>(%s)" elemTypeStr rank cMask extentsName
+                let cMask = hoistSymmDecl ($"{extentsName}_anti") allOnes
+                $"count_leaves<typename promote<{elemTypeStr}, {rank}>::type, {cMask}, false>({extentsName})"
             | AllocPerGroupStrict strictVec ->
                 // Mixed strictness: count via the per-group-strict recurrence
                 // using the same SYMM + STRICT masks the allocator used.
-                let cStrict = hoistSymmDecl (sprintf "%s_cstrict" extentsName) strictVec
-                sprintf "count_leaves_strict<typename promote<%s, %d>::type, %s, %s>(%s)" elemTypeStr rank symmArg cStrict extentsName
+                let cStrict = hoistSymmDecl ($"{extentsName}_cstrict") strictVec
+                $"count_leaves_strict<typename promote<{elemTypeStr}, {rank}>::type, {symmArg}, {cStrict}>({extentsName})"
             | _ ->
                 // Symmetric/Hermitian/dense: DIAGONALS defaults true, DEPTH defaults 0.
-                sprintf "count_leaves<typename promote<%s, %d>::type, %s>(%s)" elemTypeStr rank symmArg extentsName
-        let countName = sprintf "%s_n" varName
+                $"count_leaves<typename promote<{elemTypeStr}, {rank}>::type, {symmArg}>({extentsName})"
+        let countName = $"{varName}_n"
         let routine = if isConj then "conjugate_pool" else "negate_pool"
         let call =
-            [ sprintf "size_t %s = %s;" countName countExpr
-              sprintf "%s(pool_base(%s.data), pool_base(%s.data), %s);" routine varName arrName countName ]
+            [ $"size_t {countName} = {countExpr};"
+              $"{routine}(pool_base({varName}.data), pool_base({arrName}.data), {countName});" ]
         // The storage class is the SOURCE's, so the free must go back through
         // deallocArgsFor with the same spec that emitAllocRhs consumed above
         // (antisym's `mask, false` triple included).
@@ -2284,7 +2261,7 @@ and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
     (match srcType with
      | ArrayElem arrTy ->
         let rank = arrTy.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
-        let extentsName = sprintf "%s_extents" varName
+        let extentsName = $"{varName}_extents"
         // Shared companion-extents rule, as in the negate/conjugate twin above.
         let (extentDecl, ownedExtents) =
             emitExtentsTable "" extentsName rank
@@ -2294,32 +2271,32 @@ and materializeArrayCopyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             match spec with
             | AllocPerGroupStrict _ ->
                 let (sVec, _) = buildSymmVecWithStrict srcType
-                if hasRealSymmetry sVec then hoistSymmDecl (sprintf "%s_symm" varName) sVec
+                if hasRealSymmetry sVec then hoistSymmDecl ($"{varName}_symm") sVec
                 else "nullptr"
             | _ ->
                 let symmVec = buildSymmVec srcType
-                if hasRealSymmetry symmVec then hoistSymmDecl (sprintf "%s_symm" varName) symmVec
+                if hasRealSymmetry symmVec then hoistSymmDecl ($"{varName}_symm") symmVec
                 else "nullptr"
         let allocRhs =
             match emitAllocRhs spec elemTypeStr rank symmArg extentsName with
             | Ok rhs -> rhs
-            | Error msg -> recordCodegenRefusal msg; sprintf "{ nullptr, %s };\n#error \"%s\"" extentsName msg
-        let allocDecl = sprintf "Array<%s, %d> %s = %s;" elemTypeStr rank varName allocRhs
+            | Error msg -> recordCodegenRefusal msg; $"{{ nullptr, {extentsName} }};\n#error \"{msg}\""
+        let allocDecl = $"Array<{elemTypeStr}, {rank}> {varName} = {allocRhs};"
         let countExpr =
             match spec with
             | AllocAntisymmetric ->
                 let allOnes = List.replicate rank 1
-                let cMask = hoistSymmDecl (sprintf "%s_anti" extentsName) allOnes
-                sprintf "count_leaves<typename promote<%s, %d>::type, %s, false>(%s)" elemTypeStr rank cMask extentsName
+                let cMask = hoistSymmDecl ($"{extentsName}_anti") allOnes
+                $"count_leaves<typename promote<{elemTypeStr}, {rank}>::type, {cMask}, false>({extentsName})"
             | AllocPerGroupStrict strictVec ->
-                let cStrict = hoistSymmDecl (sprintf "%s_cstrict" extentsName) strictVec
-                sprintf "count_leaves_strict<typename promote<%s, %d>::type, %s, %s>(%s)" elemTypeStr rank symmArg cStrict extentsName
+                let cStrict = hoistSymmDecl ($"{extentsName}_cstrict") strictVec
+                $"count_leaves_strict<typename promote<{elemTypeStr}, {rank}>::type, {symmArg}, {cStrict}>({extentsName})"
             | _ ->
-                sprintf "count_leaves<typename promote<%s, %d>::type, %s>(%s)" elemTypeStr rank symmArg extentsName
-        let countName = sprintf "%s_n" varName
+                $"count_leaves<typename promote<{elemTypeStr}, {rank}>::type, {symmArg}>({extentsName})"
+        let countName = $"{varName}_n"
         let call =
-            [ sprintf "size_t %s = %s;" countName countExpr
-              sprintf "std::copy_n(pool_base(%s.data), %s, pool_base(%s.data));" arrName countName varName ]
+            [ $"size_t {countName} = {countExpr};"
+              $"std::copy_n(pool_base({arrName}.data), {countName}, pool_base({varName}.data));" ]
         Some (extentDecl @ [allocDecl] @ call,
               [MatPoolSpec (varName, spec, elemTypeStr, rank, symmArg, extentsName, ownedExtents)])
      | _ -> None)
@@ -2363,7 +2340,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         let pDim = extentDimOfArray ra rName 0
         let mExtent = fst mDim
         let pExtent = fst pDim
-        let extentsName = sprintf "%s_extents" varName
+        let extentsName = $"{varName}_extents"
         // Row-pointer hoists for the contraction loop. `&X[i][0]` (not `X[i]`)
         // is the one spelling that works for every operand wrapper the arms
         // below already index with `X[i][__gk]`: `Array<T,2>::operator[]` hands
@@ -2384,15 +2361,15 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // needs a reassociation licence this site does not have; see the
         // byte-identity note below).
         let lRowDecl name idx =
-            sprintf "const %s* BLADE_RESTRICT %s = &%s[%s][0];" (irTypeToCpp la.ElemType) name lName idx
+            $"const {(irTypeToCpp la.ElemType)}* BLADE_RESTRICT {name} = &{lName}[{idx}][0];"
         let rRowDecl name idx =
-            sprintf "const %s* BLADE_RESTRICT %s = &%s[%s][0];" (irTypeToCpp ra.ElemType) name rName idx
+            $"const {(irTypeToCpp ra.ElemType)}* BLADE_RESTRICT {name} = &{rName}[{idx}][0];"
         // conj wrapper on B's element (std::conj; identity-safe on reals via
         // conj_scalar). Use conj_scalar to keep one spelling for real/complex.
         // Reads go through the hoisted rows; the multiplication, its operand
         // order and its conjugation are untouched.
         let mulTerm lRow rRow =
-            sprintf "%s[__gk] * nested_array_utilities::conj_scalar(%s[__gk])" lRow rRow
+            $"{lRow}[__gk] * nested_array_utilities::conj_scalar({rRow}[__gk])"
         // The dispatch decision is NOT made here. LinAlgPatterns classifies the
         // node and `shimEntryPoint` applies the BLAS availability gate; a
         // routed call emits ONE `blade_linalg::` call, and NO route emits the
@@ -2443,10 +2420,9 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             let (extentDecl, ownedExtents) =
                 emitExtentsTable "" extentsName 2 [mDim; mDim]
             let symmVec = [1; 1]
-            let symmArg = hoistSymmDecl (sprintf "%s_symm" varName) symmVec
+            let symmArg = hoistSymmDecl ($"{varName}_symm") symmVec
             let allocDecl =
-                sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, %s>(%s), %s };"
-                    outElemStr varName outElemStr symmArg extentsName extentsName
+                $"Array<{outElemStr}, 2> {varName} = {{ allocate<typename promote<{outElemStr}, 2>::type, {symmArg}>({extentsName}), {extentsName} }};"
             let loop =
                 match shimEntry with
                 | Some entry ->
@@ -2460,8 +2436,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // SPACE-JOINED into a single-line IIFE at expression
                     // positions, where a line comment would swallow the rest of
                     // the statement.
-                    [ sprintf "/* %s dispatch: gram(A, A) = A * A^T -> packed upper triangle */ %s(%s, %s, %s.data, %s, %s.data);"
-                          dispatchTag entry mExtent nExtent lName lCells varName ]
+                    [ $"/* {dispatchTag} dispatch: gram(A, A) = A * A^T -> packed upper triangle */ {entry}({mExtent}, {nExtent}, {lName}.data, {lCells}, {varName}.data);" ]
                 | None ->
                     // THREADING (see BLADE_OMP_PARALLEL_FOR_DYNAMIC in
                     // cpp/blade_portability.hpp for the spelling, and the
@@ -2484,18 +2459,18 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // `ompThreadEmissionEnabled`.
                     [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
                        else ompThreadsSuppressedBlockMarker ())
-                      sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
-                      sprintf "    %s" (lRowDecl "__growi" "__gi")
-                      sprintf "    for (size_t __gjr = 0; __gjr < %s - __gi; __gjr++) {" mExtent
-                      sprintf "        size_t __gj = __gi + __gjr;"
-                      sprintf "        %s" (rRowDecl "__growj" "__gj")
-                      sprintf "        %s __gacc = %s();" outElemStr outElemStr
-                      sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                      sprintf "            __gacc += %s;" (mulTerm "__growi" "__growj")
-                      sprintf "        }"
-                      sprintf "        %s[__gi][__gjr] = __gacc;" varName
-                      sprintf "    }"
-                      sprintf "}" ]
+                      $$"""for (size_t __gi = 0; __gi < {{mExtent}}; __gi++) {"""
+                      $"""    {(lRowDecl "__growi" "__gi")}"""
+                      $$"""    for (size_t __gjr = 0; __gjr < {{mExtent}} - __gi; __gjr++) {"""
+                      "        size_t __gj = __gi + __gjr;"
+                      $"""        {(rRowDecl "__growj" "__gj")}"""
+                      $"        {outElemStr} __gacc = {outElemStr}();"
+                      $$"""        for (size_t __gk = 0; __gk < {{nExtent}}; __gk++) {"""
+                      $"""            __gacc += {(mulTerm "__growi" "__growj")};"""
+                      "        }"
+                      $"        {varName}[__gi][__gjr] = __gacc;"
+                      "    }"
+                      "}" ]
             // NOTE: `outElemStr`, not `elemTypeStr` -- gram promotes to complex
             // when either operand is complex, and the free must name the type
             // the allocation actually used. (The BLAS staging buffers above are
@@ -2507,8 +2482,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             let (extentDecl, ownedExtents) =
                 emitExtentsTable "" extentsName 2 [mDim; pDim]
             let allocDecl =
-                sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
-                    outElemStr varName outElemStr extentsName extentsName
+                $"Array<{outElemStr}, 2> {varName} = {{ allocate<typename promote<{outElemStr}, 2>::type, nullptr>({extentsName}), {extentsName} }};"
             let loop =
                 match shimEntry with
                 | Some entry ->
@@ -2628,8 +2602,8 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                                     | Some d -> d
                                     | None -> 6
                             | _ -> runtimeKnee
-                    let accName k = sprintf "__gacc%d" k
-                    let rowName k = sprintf "__growj%d" k
+                    let accName k = $"__gacc{k}"
+                    let rowName k = $"__growj{k}"
                     // NOTE: every element below is an EXPLICIT `yield`.
                     // The `if doJam` arm forces it: introducing one
                     // explicit yield turns OFF F#'s implicit yields for
@@ -2638,31 +2612,31 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // silently missing lines in the emitted C++.
                     [ yield (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
                              else ompThreadsSuppressedBlockMarker ())
-                      yield sprintf "for (size_t __gi = 0; __gi < %s; __gi++) {" mExtent
-                      yield sprintf "    %s" (lRowDecl "__growi" "__gi")
-                      yield sprintf "    size_t __gj = 0;"
+                      yield $$"""for (size_t __gi = 0; __gi < {{mExtent}}; __gi++) {"""
+                      yield $"""    {(lRowDecl "__growi" "__gi")}"""
+                      yield "    size_t __gj = 0;"
                       if doJam then
-                          yield sprintf "    for (; __gj + %d <= %s; __gj += %d) {" jamR pExtent jamR
+                          yield $$"""    for (; __gj + {{jamR}} <= {{pExtent}}; __gj += {{jamR}}) {"""
                           yield! [ for k in 0 .. jamR - 1 ->
-                                     sprintf "        %s" (rRowDecl (rowName k) (sprintf "__gj + %d" k)) ]
+                                     $"""        {(rRowDecl (rowName k) (sprintf "__gj + %d" k))}""" ]
                           yield! [ for k in 0 .. jamR - 1 ->
-                                     sprintf "        %s %s = %s();" outElemStr (accName k) outElemStr ]
-                          yield sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
+                                     $"        {outElemStr} {(accName k)} = {outElemStr}();" ]
+                          yield $$"""        for (size_t __gk = 0; __gk < {{nExtent}}; __gk++) {"""
                           yield! [ for k in 0 .. jamR - 1 ->
-                                     sprintf "            %s += %s;" (accName k) (mulTerm "__growi" (rowName k)) ]
-                          yield sprintf "        }"
+                                     $"""            {(accName k)} += {(mulTerm "__growi" (rowName k))};""" ]
+                          yield "        }"
                           yield! [ for k in 0 .. jamR - 1 ->
-                                     sprintf "        %s[__gi][__gj + %d] = %s;" varName k (accName k) ]
-                          yield sprintf "    }"
-                      yield sprintf "    for (; __gj < %s; __gj++) {" pExtent
-                      yield sprintf "        %s" (rRowDecl "__growj" "__gj")
-                      yield sprintf "        %s __gacc = %s();" outElemStr outElemStr
-                      yield sprintf "        for (size_t __gk = 0; __gk < %s; __gk++) {" nExtent
-                      yield sprintf "            __gacc += %s;" (mulTerm "__growi" "__growj")
-                      yield sprintf "        }"
-                      yield sprintf "        %s[__gi][__gj] = __gacc;" varName
-                      yield sprintf "    }"
-                      yield sprintf "}" ]
+                                     $"        {varName}[__gi][__gj + {k}] = {(accName k)};" ]
+                          yield "    }"
+                      yield $$"""    for (; __gj < {{pExtent}}; __gj++) {"""
+                      yield $"""        {(rRowDecl "__growj" "__gj")}"""
+                      yield $"        {outElemStr} __gacc = {outElemStr}();"
+                      yield $$"""        for (size_t __gk = 0; __gk < {{nExtent}}; __gk++) {"""
+                      yield $"""            __gacc += {(mulTerm "__growi" "__growj")};"""
+                      yield "        }"
+                      yield $"        {varName}[__gi][__gj] = __gacc;"
+                      yield "    }"
+                      yield "}" ]
             Some (extentDecl @ [allocDecl] @ loop,
                   [MatPool (varName, outElemStr, 2, "nullptr", None, ownedExtents)])
      | _ -> None)
@@ -2746,7 +2720,7 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         let mExtent = fst mDim
         let kExtent = literalOrRuntimeExtentOfArray la lName 1
         let nExtent = fst nDim
-        let extentsName = sprintf "%s_extents" varName
+        let extentsName = $"{varName}_extents"
         // Pool capacities for the shim's contiguity probe -- see
         // `denseCellCountExpr` and the note in materializeGramForm.
         let lCells = denseCellCountExpr lTy lName
@@ -2765,8 +2739,7 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         let (extentDecl, ownedExtents) =
             emitExtentsTable "" extentsName 2 [mDim; nDim]
         let allocDecl =
-            sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s), %s };"
-                outElemStr varName outElemStr extentsName extentsName
+            $"Array<{outElemStr}, 2> {varName} = {{ allocate<typename promote<{outElemStr}, 2>::type, nullptr>({extentsName}), {extentsName} }};"
         let loop =
             match shimEntry with
             | Some entry ->
@@ -2807,18 +2780,18 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                 // `ompThreadEmissionEnabled`.
                 [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
                    else ompThreadsSuppressedBlockMarker ())
-                  sprintf "for (size_t __mi = 0; __mi < %s; __mi++) {" mExtent
-                  sprintf "    %s* BLADE_RESTRICT __mcrow = &%s[__mi][0];" outElemStr varName
-                  sprintf "    for (size_t __mj = 0; __mj < %s; __mj++) { __mcrow[__mj] = %s(); }" nExtent outElemStr
-                  sprintf "    for (size_t __mt = 0; __mt < %s; __mt++) {" kExtent
-                  sprintf "        const %s __ma = %s[__mi][__mt];" outElemStr lName
-                  sprintf "        const %s* BLADE_RESTRICT __mbrow = &%s[__mt][0];" (irTypeToCpp ra.ElemType) rName
-                  sprintf "        BLADE_IVDEP"
-                  sprintf "        for (size_t __mj = 0; __mj < %s; __mj++) {" nExtent
-                  sprintf "            __mcrow[__mj] += __ma * __mbrow[__mj];"
-                  sprintf "        }"
-                  sprintf "    }"
-                  sprintf "}" ]
+                  $$"""for (size_t __mi = 0; __mi < {{mExtent}}; __mi++) {"""
+                  $"    {outElemStr}* BLADE_RESTRICT __mcrow = &{varName}[__mi][0];"
+                  $$"""    for (size_t __mj = 0; __mj < {{nExtent}}; __mj++) { __mcrow[__mj] = {{outElemStr}}(); }"""
+                  $$"""    for (size_t __mt = 0; __mt < {{kExtent}}; __mt++) {"""
+                  $"        const {outElemStr} __ma = {lName}[__mi][__mt];"
+                  $"        const {(irTypeToCpp ra.ElemType)}* BLADE_RESTRICT __mbrow = &{rName}[__mt][0];"
+                  "        BLADE_IVDEP"
+                  $$"""        for (size_t __mj = 0; __mj < {{nExtent}}; __mj++) {"""
+                  "            __mcrow[__mj] += __ma * __mbrow[__mj];"
+                  "        }"
+                  "    }"
+                  "}" ]
         Some (extentDecl @ [allocDecl] @ loop,
               [MatPool (varName, outElemStr, 2, "nullptr", None, ownedExtents)])
      | _ -> None)
@@ -2867,11 +2840,11 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                 | IRTScalar ETComplex128 -> irTypeToCpp (IRTScalar ETFloat64)
                 | IRTScalar ETComplex64 -> irTypeToCpp (IRTScalar ETFloat32)
                 | t -> irTypeToCpp t
-            let nExtent = sprintf "%s.extents[0]" srcName
-            let qName = sprintf "%s__q" varName
-            let lamName = sprintf "%s__lam" varName
-            let qExtents = sprintf "%s_extents" qName
-            let lamExtents = sprintf "%s_extents" lamName
+            let nExtent = $"{srcName}.extents[0]"
+            let qName = $"{varName}__q"
+            let lamName = $"{varName}__lam"
+            let qExtents = $"{qName}_extents"
+            let lamExtents = $"{lamName}_extents"
             // `n` COMES FROM `.extents[0]`, AND THAT IS RIGHT FOR BOTH ROUTES --
             // measured, not assumed. A rank-2 compact pool's extents table holds
             // the LOGICAL extents, not the packed cell count: `gram(A, A)`
@@ -2895,10 +2868,10 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             let (operandArg, routeLabel) =
                 match c.Route with
                 | Blade.LinAlgPatterns.RouteEighPacked ->
-                    (sprintf "nested_array_utilities::pool_base(%s.data)" srcName,
+                    ($"nested_array_utilities::pool_base({srcName}.data)",
                      "packed upper-triangular operand, zero conversion")
                 | _ ->
-                    (sprintf "%s.data" srcName, "dense operand, symmetry asserted")
+                    ($"{srcName}.data", "dense operand, symmetry asserted")
             // Both tables go through the shared companion-extents rule. `n` is
             // the runtime `.extents[0]` read argued for above, so both land on
             // the heap arm -- which is also what lets a destructured `Q` or
@@ -2919,16 +2892,14 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // would swallow the rest of the statement (the lesson math/057
             // taught the gram emitter).
             let dispatch =
-                sprintf "/* lapack dispatch: eigh(S) -> (Q, LAM), %s */ %s(%s, %s, %s.data, %s.data);"
-                    routeLabel entry nExtent operandArg lamName qName
+                $"/* lapack dispatch: eigh(S) -> (Q, LAM), {routeLabel} */ {entry}({nExtent}, {operandArg}, {lamName}.data, {qName}.data);"
             // The binding value the existing destructuring consumes. Spelled
             // with the EXPLICIT tuple type rather than `auto` so it matches the
             // `std::tuple<Array<double, 2>, Array<double, 1>>` form a
             // tuple-returning function's result already binds as -- one shape for
             // both producers.
             let tupleLine =
-                sprintf "std::tuple<Array<%s, 2>, Array<%s, 1>> %s = std::make_tuple(%s, %s);"
-                    qElemStr lamElemStr varName qName lamName
+                $"std::tuple<Array<{qElemStr}, 2>, Array<{lamElemStr}, 1>> {varName} = std::make_tuple({qName}, {lamName});"
             // BOTH POOLS ARE REGISTERED, safe via the OWNER-ID path, not
             // return-NAME matching: eigh's pools aren't named after the
             // binding (`<binding>__q`/`__lam`), so `genFuncBodyScoped`'s return
@@ -3009,15 +2980,15 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
     (match aTy, bTy with
      | ArrayElem aa, ArrayElem ba ->
         let outElemStr = irTypeToCpp aa.ElemType
-        let nExtent = sprintf "%s.extents[0]" aName
-        let extentsName = sprintf "%s_extents" varName
+        let nExtent = $"{aName}.extents[0]"
+        let extentsName = $"{varName}_extents"
         // Derived names, the `materializeEighForm` convention: everything this
         // form introduces at statement level is prefixed by the binding, so two
         // solves in one scope cannot collide. The loop-body temporaries below
         // need no prefix -- each is scoped to its own `for` body.
-        let nName = sprintf "%s__n" varName
-        let luName = sprintf "%s__lu" varName
-        let infoName = sprintf "%s__info" varName
+        let nName = $"{varName}__n"
+        let luName = $"{varName}__lu"
+        let infoName = $"{varName}__info"
         let call = Blade.LinAlgPatterns.classifySolve aa ba
         // HostBlas asked DIRECTLY, not through `resolveNodeRoute`: the CudaBlas
         // policy row for Solve is `Native` (cuSOLVER is a separate library), so
@@ -3032,15 +3003,14 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         let (extentDecl, ownedExtents) =
             emitExtentsTable "" extentsName 1 [(nExtent, false)]
         let allocDecl =
-            sprintf "Array<%s, 1> %s = { allocate<typename promote<%s, 1>::type, nullptr>(%s), %s };"
-                outElemStr varName outElemStr extentsName extentsName
+            $"Array<{outElemStr}, 1> {varName} = {{ allocate<typename promote<{outElemStr}, 1>::type, nullptr>({extentsName}), {extentsName} }};"
         // BLOCK comments only, never `//`: these lines are SPACE-JOINED into a
         // single-line IIFE at expression positions, where a line comment would
         // swallow the rest of the statement (the lesson math/057 taught the
         // gram emitter).
         let panicLine (ind: string) =
-            sprintf "%sblade_rt::panic(\"BL8007\", \"%s\", nullptr, 0);" ind solveSingularMessage
-        let luCell (i: string) (j: string) = sprintf "%s[%s * %s + %s]" luName i nName j
+            $"{ind}blade_rt::panic(\"BL8007\", \"{solveSingularMessage}\", nullptr, 0);"
+        let luCell (i: string) (j: string) = $"{luName}[{i} * {nName} + {j}]"
         let body =
             match shimEntry with
             | Some entry ->
@@ -3051,12 +3021,11 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
                 // `info` comes back for THIS site to judge, keeping the panic
                 // message in one place shared with the native arm rather than
                 // duplicating it inside a header that has no runtime include.
-                [ sprintf "const size_t %s = %s;" nName nExtent
-                  sprintf "/* lapack dispatch: solve(A, b) -> x, dense square operand, single right-hand side */ int %s = %s(%s, %s.data, %s.data, %s.data);"
-                      infoName entry nName aName bName varName
-                  sprintf "if (%s != 0) { %s }" infoName (panicLine "") ]
+                [ $"const size_t {nName} = {nExtent};"
+                  $"/* lapack dispatch: solve(A, b) -> x, dense square operand, single right-hand side */ int {infoName} = {entry}({nName}, {aName}.data, {bName}.data, {varName}.data);"
+                  $$"""if ({{infoName}} != 0) { {{(panicLine "")}} }""" ]
             | None ->
-                [ sprintf "const size_t %s = %s;" nName nExtent
+                [ $"const size_t {nName} = {nExtent};"
                   // The working copy. LU overwrites it, so A itself is never
                   // touched -- `solve(A, b)` twice over the same A is the same
                   // answer twice, which a factor-in-place would quietly break.
@@ -3075,61 +3044,60 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
                   // needs no licence. Above the threshold the vector path is
                   // unchanged; `resize` on a default-constructed vector is the
                   // only allocation, and it never runs for small n.
-                  sprintf "%s %s__stk[64];" outElemStr luName
-                  sprintf "std::vector<%s> %s__heap;" outElemStr luName
-                  sprintf "%s* %s;" outElemStr luName
-                  sprintf "if (%s <= 8) { %s = %s__stk; } else { %s__heap.resize(%s * %s); %s = %s__heap.data(); }"
-                      nName luName luName luName nName nName luName luName
-                  sprintf "for (size_t __si = 0; __si < %s; __si++) {" nName
-                  sprintf "    for (size_t __sj = 0; __sj < %s; __sj++) { %s = %s[__si][__sj]; }" nName (luCell "__si" "__sj") aName
+                  $"{outElemStr} {luName}__stk[64];"
+                  $"std::vector<{outElemStr}> {luName}__heap;"
+                  $"{outElemStr}* {luName};"
+                  $"if ({nName} <= 8) {{ {luName} = {luName}__stk; }} else {{ {luName}__heap.resize({nName} * {nName}); {luName} = {luName}__heap.data(); }}"
+                  $$"""for (size_t __si = 0; __si < {{nName}}; __si++) {"""
+                  $$"""    for (size_t __sj = 0; __sj < {{nName}}; __sj++) { {{(luCell "__si" "__sj")}} = {{aName}}[__si][__sj]; }"""
                   // x starts life as b and is transformed in place: the forward
                   // substitution is FUSED INTO the elimination (each multiplier
                   // is applied to the right-hand side the moment it is formed),
                   // so there is no separate L-solve pass and no permutation
                   // vector to replay. `solveArray` does exactly this.
-                  sprintf "    %s[__si] = %s[__si];" varName bName
-                  sprintf "}"
-                  sprintf "for (size_t __sk = 0; __sk < %s; __sk++) {" nName
-                  sprintf "    size_t __sp = __sk;"
-                  sprintf "    %s __sbig = std::fabs(%s);" outElemStr (luCell "__sk" "__sk")
-                  sprintf "    for (size_t __si = __sk + 1; __si < %s; __si++) {" nName
-                  sprintf "        %s __sm = std::fabs(%s);" outElemStr (luCell "__si" "__sk")
+                  $"    {varName}[__si] = {bName}[__si];"
+                  "}"
+                  $$"""for (size_t __sk = 0; __sk < {{nName}}; __sk++) {"""
+                  "    size_t __sp = __sk;"
+                  $"""    {outElemStr} __sbig = std::fabs({(luCell "__sk" "__sk")});"""
+                  $$"""    for (size_t __si = __sk + 1; __si < {{nName}}; __si++) {"""
+                  $"""        {outElemStr} __sm = std::fabs({(luCell "__si" "__sk")});"""
                   // STRICT `>`: first maximal magnitude wins. See the pivot-rule
                   // note above -- this single character is the tie-break.
-                  sprintf "        if (__sm > __sbig) { __sbig = __sm; __sp = __si; }"
-                  sprintf "    }"
-                  sprintf "    if (%s == %s(0)) { %s }" (luCell "__sp" "__sk") outElemStr (panicLine "")
-                  sprintf "    if (__sp != __sk) {"
-                  sprintf "        for (size_t __sj = 0; __sj < %s; __sj++) {" nName
-                  sprintf "            %s __st = %s;" outElemStr (luCell "__sk" "__sj")
-                  sprintf "            %s = %s;" (luCell "__sk" "__sj") (luCell "__sp" "__sj")
-                  sprintf "            %s = __st;" (luCell "__sp" "__sj")
-                  sprintf "        }"
-                  sprintf "        %s __sxt = %s[__sk]; %s[__sk] = %s[__sp]; %s[__sp] = __sxt;" outElemStr varName varName varName varName
-                  sprintf "    }"
-                  sprintf "    for (size_t __si = __sk + 1; __si < %s; __si++) {" nName
-                  sprintf "        %s __sf = %s / %s;" outElemStr (luCell "__si" "__sk") (luCell "__sk" "__sk")
-                  sprintf "        %s = __sf;" (luCell "__si" "__sk")
-                  sprintf "        for (size_t __sj = __sk + 1; __sj < %s; __sj++) {" nName
+                  "        if (__sm > __sbig) { __sbig = __sm; __sp = __si; }"
+                  "    }"
+                  $$"""    if ({{(luCell "__sp" "__sk")}} == {{outElemStr}}(0)) { {{(panicLine "")}} }"""
+                  "    if (__sp != __sk) {"
+                  $$"""        for (size_t __sj = 0; __sj < {{nName}}; __sj++) {"""
+                  $"""            {outElemStr} __st = {(luCell "__sk" "__sj")};"""
+                  $"""            {(luCell "__sk" "__sj")} = {(luCell "__sp" "__sj")};"""
+                  $"""            {(luCell "__sp" "__sj")} = __st;"""
+                  "        }"
+                  $"        {outElemStr} __sxt = {varName}[__sk]; {varName}[__sk] = {varName}[__sp]; {varName}[__sp] = __sxt;"
+                  "    }"
+                  $$"""    for (size_t __si = __sk + 1; __si < {{nName}}; __si++) {"""
+                  $"""        {outElemStr} __sf = {(luCell "__si" "__sk")} / {(luCell "__sk" "__sk")};"""
+                  $"""        {(luCell "__si" "__sk")} = __sf;"""
+                  $$"""        for (size_t __sj = __sk + 1; __sj < {{nName}}; __sj++) {"""
                   // Written `a = a - f * b`, never `a -= f * b`: identical in
                   // C++, but the explicit form is the one the interpreter twin
                   // reads as a single subtract-of-a-product, so the two texts
                   // can be diffed against each other by eye.
-                  sprintf "            %s = %s - __sf * %s;" (luCell "__si" "__sj") (luCell "__si" "__sj") (luCell "__sk" "__sj")
-                  sprintf "        }"
-                  sprintf "        %s[__si] = %s[__si] - __sf * %s[__sk];" varName varName varName
-                  sprintf "    }"
-                  sprintf "}"
+                  $"""            {(luCell "__si" "__sj")} = {(luCell "__si" "__sj")} - __sf * {(luCell "__sk" "__sj")};"""
+                  "        }"
+                  $"        {varName}[__si] = {varName}[__si] - __sf * {varName}[__sk];"
+                  "    }"
+                  "}"
                   // Back substitution, k descending. Counted DOWN through an
                   // unsigned `__skk` from n to 1 rather than `for (size_t k = n
                   // - 1; k >= 0; k--)`, which never terminates on an unsigned
                   // index -- and would read as correct.
-                  sprintf "for (size_t __skk = %s; __skk > 0; __skk--) {" nName
-                  sprintf "    size_t __sk = __skk - 1;"
-                  sprintf "    %s __ss = %s[__sk];" outElemStr varName
-                  sprintf "    for (size_t __sj = __sk + 1; __sj < %s; __sj++) { __ss = __ss - %s * %s[__sj]; }" nName (luCell "__sk" "__sj") varName
-                  sprintf "    %s[__sk] = __ss / %s;" varName (luCell "__sk" "__sk")
-                  sprintf "}" ]
+                  $$"""for (size_t __skk = {{nName}}; __skk > 0; __skk--) {"""
+                  "    size_t __sk = __skk - 1;"
+                  $"    {outElemStr} __ss = {varName}[__sk];"
+                  $$"""    for (size_t __sj = __sk + 1; __sj < {{nName}}; __sj++) { __ss = __ss - {{(luCell "__sk" "__sj")}} * {{varName}}[__sj]; }"""
+                  $"""    {varName}[__sk] = __ss / {(luCell "__sk" "__sk")};"""
+                  "}" ]
         // Everything the form introduces beyond `varName` itself is wrapped in
         // one block so a second solve in the same scope re-declares nothing.
         // `varName` and its extents table stay OUTSIDE it -- they are the value.

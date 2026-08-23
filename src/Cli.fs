@@ -83,10 +83,10 @@ let private dispatchInner (args: string[]) : int =
             | "--mpi" :: n :: tl ->
                 (match System.Int32.TryParse n with
                  | true, v when v > 0 -> mpiRanks <- Some v; parse tl
-                 | _ -> bad <- Some (sprintf "--mpi expects a positive rank count, got '%s'" n))
+                 | _ -> bad <- Some $"--mpi expects a positive rank count, got '{n}'")
             | ["--mpi"] -> bad <- Some "--mpi requires a rank count (e.g. run prog.blade --mpi 4)"
             | f :: tl when file.IsNone && not (f.StartsWith "--") -> file <- Some f; parse tl
-            | f :: _ -> bad <- Some (sprintf "unexpected argument '%s'" f)
+            | f :: _ -> bad <- Some $"unexpected argument '{f}'"
         parse rest
         match bad, file with
         | Some msg, _ -> eprintfn "Error: %s" msg; 1
@@ -140,7 +140,7 @@ let private dispatchInner (args: string[]) : int =
     | [||] -> runFullSuite defaultFullSuiteOptions
     | [| "--full" |] -> runFullSuite defaultFullSuiteOptions
     | [| "--help" |] -> printUsage (); 0
-    | _ -> usageFailure (sprintf "unrecognized command: %s" (String.Join(" ", args)))
+    | _ -> usageFailure ($"""unrecognized command: {(String.Join(" ", args))}""")
 
 /// Top-level error boundary: turns any escaping exception into a rendered
 /// diagnostic on stderr (exit 1) instead of a raw .NET stack trace. A typed

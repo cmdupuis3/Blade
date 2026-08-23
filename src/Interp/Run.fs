@@ -149,8 +149,8 @@ let private printableModule (program: IRProgram) : IRModule =
     | [ single ] -> single
     | many ->
         { many.Head with
-            Functions = many |> List.collect (fun m -> m.Functions)
-            Bindings = many |> List.collect (fun m -> m.Bindings)
+            Functions = many |> List.collect _.Functions
+            Bindings = many |> List.collect _.Bindings
             MutableArrayLets = many |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty }
 
 // Random-fill bindings (rand.<fam>, RandomInits/RandGen).
@@ -202,7 +202,7 @@ let private weightsPool (v: Value) (k: int) : float[] =
         | SFloat data when data.Length = k -> data
         | SFloat data ->
             raise (Core.InterpUnsupported
-                     (sprintf "rand.categorical weights pool has %d elements but the pinned extent is %d" data.Length k))
+                     $"rand.categorical weights pool has {data.Length} elements but the pinned extent is {k}")
         | _ -> raise (Core.InterpUnsupported "rand.categorical weights are not a dense Float64 pool")
     | _ -> raise (Core.InterpUnsupported "rand.categorical weights did not evaluate to an array")
 
@@ -302,12 +302,12 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
         let levels = Blade.IR.orbitLevelsOf ix
         let refuse (why: string) =
             failwith (Blade.IR.orbitStorageUnsupported
-                          (sprintf "provider read of '%s' (%s)" spec.VarName why) levels)
+                          $"provider read of '{spec.VarName}' ({why})" levels)
         match Blade.ProviderRegistry.tryFind spec.Provider with
-        | None -> refuse (sprintf "provider '%s' is not registered" spec.Provider)
+        | None -> refuse $"provider '{spec.Provider}' is not registered"
         | Some pspec ->
         match pspec.ReadWreathPool with
-        | None -> refuse (sprintf "provider '%s' stores no OrbIdx pools" spec.Provider)
+        | None -> refuse $"provider '{spec.Provider}' stores no OrbIdx pools"
         | Some readPool ->
             if spec.VarType.IndexTypes.Length <> 1 then
                 refuse "a wreath group combined with other index groups has no pool layout"
@@ -320,7 +320,7 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                 // Unlike the dense arm below, this is NOT a SKIP: the compiled
                 // side reads the same store from the same path, so a failure
                 // here is a real disagreement, not an un-interpreted feature.
-                failwithf "provider read of '%s' from '%s': %s" spec.VarName spec.FilePath e
+                failwith $"provider read of '{spec.VarName}' from '{spec.FilePath}': {e}"
             | Ok data ->
                 // The pool arrives as ONE axis of `cardinality` cells; allocWreath
                 // sizes the store from cellCountChecked (the same fold that
@@ -330,8 +330,7 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                 let cells = ArrayOps.wreathCellCount arr
                 let got = data.DimLengths |> List.fold (*) 1
                 if got <> cells then
-                    failwithf "provider read of '%s': the store's pool holds %d cells but OrbIdx%s at extent %d has %d"
-                              spec.VarName got (Blade.IR.ppOrbitLevels levels) n cells
+                    failwith $"provider read of '{spec.VarName}': the store's pool holds {got} cells but OrbIdx{(Blade.IR.ppOrbitLevels levels)} at extent {n} has {cells}"
                 let put (i: int) (v: Value) = ArrayOps.wreathWriteAt arr (int64 i) v
                 (match ArrayOps.elemThrough spec.VarType.ElemType, data.Payload with
                  | Some (ETFloat64 | ETFloat32), Blade.ProviderRegistry.PFloats xs -> xs |> Array.iteri (fun i x -> put i (VFloat x))
@@ -340,7 +339,7 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                  | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PFloats xs -> xs |> Array.iteri (fun i x -> put i (VInt (int64 x)))
                  | _ ->
                      raise (Core.InterpUnsupported
-                             (sprintf "provider read of '%s' into a non-numeric element type" spec.VarName)))
+                             $"provider read of '{spec.VarName}' into a non-numeric element type"))
                 state.Cells <- state.Cells + int64 cells
                 VArray arr
     elif spec.VarType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone && ix.Rank >= 2) then
@@ -348,7 +347,7 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
     else
         match Blade.ProviderRegistry.tryFind spec.Provider with
         | None ->
-            raise (Core.InterpUnsupported (sprintf "provider '%s' is not registered (ProviderStatics.install)" spec.Provider))
+            raise (Core.InterpUnsupported $"provider '{spec.Provider}' is not registered (ProviderStatics.install)")
         | Some pspec ->
             match pspec.ReadVarData spec.FilePath spec.VarName with
             | Error e ->
@@ -356,7 +355,7 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                 // store relative to the compiler cwd, a packed var ReadVarData
                 // refuses, a corrupt chunk, ...). No faithful image -> SKIP rather
                 // than diverge; the caller classifies SKIP-UNSUPPORTED.
-                raise (Core.InterpUnsupported (sprintf "provider read of '%s' from '%s': %s" spec.VarName spec.FilePath e))
+                raise (Core.InterpUnsupported $"provider read of '{spec.VarName}' from '{spec.FilePath}': {e}")
             | Ok data ->
                 let arrTy = spec.VarType
                 let extents = data.DimLengths |> List.map int64 |> Array.ofList
@@ -368,7 +367,7 @@ let private materializeProviderRead (state: Core.InterpState) (binding: IRBindin
                     | Some (ETInt64 | ETInt32), Blade.ProviderRegistry.PFloats xs -> SInt (xs |> Array.map int64)
                     | _ ->
                         raise (Core.InterpUnsupported
-                                (sprintf "provider read of '%s' into a non-numeric element type" spec.VarName))
+                                $"provider read of '{spec.VarName}' into a non-numeric element type")
                 let card = extents |> Array.fold (fun acc e -> acc * e) 1L
                 state.Cells <- state.Cells + card
                 VArray (ArrayOps.mkDenseArray arrTy.ElemType arrTy.IndexTypes extents store)
@@ -485,7 +484,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // extending keeps its whole prefix warm.
     let outValues =
         program.Modules
-        |> List.collect (fun m -> m.Bindings)
+        |> List.collect _.Bindings
         |> List.fold (fun acc b ->
             match envTryFind root b.Id with
             | Some cell when memoizableValue cell.V && not (frameEmitters.Contains b.Name) ->
@@ -544,22 +543,22 @@ let runProgramMemo (program: IRProgram) (testName: string) (limits: InterpLimits
             let frames = match stateRef.Value with Some st -> Core.capturedFrames st | None -> []
             ({ ExitCode = ExitPanic; Stdout = ""; Stderr = formatPanic code msg file line frames }, emptyMemo)
         | Core.InterpUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
         // Array layer's own "not yet interpreted" signal: ArrayOps compiles
         // before Core, so it raises its own ArrayOpUnsupported instead, which
         // must SKIP-classify identically (Interp/ArrayOps.fs CONTRACT NOTE (2)).
         | ArrayOps.ArrayOpUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
         | Print.PrintUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
         // Scalar-numerics layer's own signal, on the same footing and for the
         // same reason (Numerics.fs compiles before Core, so it cannot raise
         // InterpUnsupported): a complex intrinsic this build cannot reproduce
         // bit-exactly is a gap in the INTERPRETER, not a fault in the program.
         | Numerics.NumericsUnsupported feature ->
-            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = sprintf "interp-unsupported: %s" feature }, emptyMemo)
+            ({ ExitCode = ExitUnsupported; Stdout = ""; Stderr = $"interp-unsupported: {feature}" }, emptyMemo)
         | ex ->
-            ({ ExitCode = ExitInterpBug; Stdout = ""; Stderr = sprintf "interp-error: %s" ex.Message }, emptyMemo))
+            ({ ExitCode = ExitInterpBug; Stdout = ""; Stderr = $"interp-error: {ex.Message}" }, emptyMemo))
 
 /// The one-shot form: no memo in, memo discarded. Every caller outside the
 /// REPL/notebook session lanes (tests, the differential gate, `blade test

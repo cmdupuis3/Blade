@@ -52,19 +52,19 @@ let runDiagCorpusTests () : BlockResult =
             let ok =
                 not pins.IsEmpty && unmatchedPins.IsEmpty && remaining.IsEmpty && missingContains.IsEmpty
             let detail =
-                if ok then sprintf "%d diagnostic(s) as pinned" diags.Length
+                if ok then $"{diags.Length} diagnostic(s) as pinned"
                 else
                     [ if pins.IsEmpty then yield "file has no // ERROR: pins"
                       for p in unmatchedPins ->
                         sprintf "pin %s%s matched nothing" p.PinCode
-                            (match p.PinStart with Some (l, c) -> sprintf " @ %d:%d" l c | None -> "")
+                            (match p.PinStart with Some (l, c) -> $" @ {l}:{c}" | None -> "")
                       for d in remaining ->
-                        sprintf "UNPINNED %s @ %d:%d: %s" d.Code d.Span.StartLine d.Span.StartCol d.Message
-                      for s in missingContains -> sprintf "no message contains '%s'" s ]
+                        $"UNPINNED {d.Code} @ {d.Span.StartLine}:{d.Span.StartCol}: {d.Message}"
+                      for s in missingContains -> $"no message contains '{s}'" ]
                     |> String.concat " ; "
             check name ok detail
 
-    printFooter "Diagnostics Corpus" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
+    printFooter "Diagnostics Corpus" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Diagnostics Corpus"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 
 /// Stage-6a equivariance-certificate suggestions (BL4011), pinned over the
@@ -126,12 +126,12 @@ let runCertSuggestTests () : BlockResult =
         let detail =
             if ok then
                 if pins.IsEmpty then "no suggestions (asserted)"
-                else sprintf "%d suggestion(s) as pinned" pins.Length
+                else $"{pins.Length} suggestion(s) as pinned"
             else
-                [ for p in unmatched -> sprintf "PIN NOT PRODUCED: %s" p
-                  for r in remaining -> sprintf "UNPINNED SUGGESTION: %s" r ]
+                [ for p in unmatched -> $"PIN NOT PRODUCED: {p}"
+                  for r in remaining -> $"UNPINNED SUGGESTION: {r}" ]
                 |> String.concat " ; "
         check name ok detail
 
-    printFooter "Equiv Certificate Suggestions" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
+    printFooter "Equiv Certificate Suggestions" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Equiv Certificate Suggestions"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

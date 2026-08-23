@@ -124,30 +124,30 @@ let groupOfName (n: string) : GroupT =
 
 let private specStrT (s: (int * int * int) list) : string =
     s
-    |> List.map (fun (l, p, m) -> sprintf "(%d, %d, %d)" l p m)
+    |> List.map (fun (l, p, m) -> $"({l}, {p}, {m})")
     |> String.concat ", "
     |> sprintf "[%s]"
 
 let private pgSpecStrT (s: (string * int) list) : string =
     s
-    |> List.map (fun (label, m) -> sprintf "(\"%s\", %d)" label m)
+    |> List.map (fun (label, m) -> $"(\"{label}\", {m})")
     |> String.concat ", "
     |> sprintf "[%s]"
 
 /// Mirror of MLEquiv.repStr -- the INDEX TYPE the user would have to write.
 let repStrT (r: RepSpecT) : string =
     match r with
-    | TO3Spec s -> sprintf "IrrepsIdx<%s>" (specStrT s)
-    | TPgSpecT (g, s) -> sprintf "PgIrrepsIdx<%s, %s>" g (pgSpecStrT s)
+    | TO3Spec s -> $"IrrepsIdx<{specStrT s}>"
+    | TPgSpecT (g, s) -> $"PgIrrepsIdx<{g}, {pgSpecStrT s}>"
 
 /// Mirror of MLEquiv.sigSummary, phrase for phrase -- this string is the
 /// differential's comparison key.
 let sigSummaryT (sg: RepSigT) : string =
     let one (n, st) =
         match st with
-        | TRep r -> sprintf "%s transforms as %s" n (repStrT r)
-        | TInv _ -> sprintf "%s invariant" n
-        | _ -> sprintf "%s unclassifiable" n
+        | TRep r -> $"{n} transforms as {repStrT r}"
+        | TInv _ -> $"{n} invariant"
+        | _ -> $"{n} unclassifiable"
     let ps =
         if sg.Params.IsEmpty then "(no parameters)"
         else sg.Params |> List.map one |> String.concat ", "
@@ -156,12 +156,12 @@ let sigSummaryT (sg: RepSigT) : string =
         | TRep r -> repStrT r
         | TInv _ -> "invariant"
         | _ -> "unclassifiable"
-    sprintf "%s -> %s" ps ret
+    $"{ps} -> {ret}"
 
 // Lattice algebra (mirrors of MLEquiv's binShape / meetShape / joinStatus).
 
-let private isInvT (s: RepStatusT) = match s with TInv _ -> true | _ -> false
-let private isRepT (s: RepStatusT) = match s with TRep _ -> true | _ -> false
+let private isInvT (s: RepStatusT) = s.IsTInv
+let private isRepT (s: RepStatusT) = s.IsTRep
 
 /// Shape of an elementwise binary combination (broadcast: scalar op aggregate
 /// is the aggregate). Never claims scalar unless BOTH operands are scalar.
@@ -256,13 +256,13 @@ let rec classifyTypeR (g: GroupT) (resolve: IRType -> IRType) (ty: IRType)
             // An O(3) axis under a point-group cert needs `ml.restrict`'s
             // branching rules to say anything: decline rather than guess.
             | _ :: _, _ ->
-                Error (sprintf "it carries an O(3) IrrepsIdx axis, but the certificate names the point group %s; reading an O(3) module as a %s-module needs a restriction this checker does not have" pg pg)
+                Error $"it carries an O(3) IrrepsIdx axis, but the certificate names the point group {pg}; reading an O(3) module as a {pg}-module needs a restriction this checker does not have"
             | [], [ (gn, _) ] when gn <> pg ->
-                Error (sprintf "its PgIrrepsIdx axis names point group %s while the certificate names %s, and certificates do not transfer between groups -- this checker knows each registered group's frozen table and no map between two of them" gn pg)
+                Error $"its PgIrrepsIdx axis names point group {gn} while the certificate names {pg}, and certificates do not transfer between groups -- this checker knows each registered group's frozen table and no map between two of them"
             | [], [ (_, entries) ] when n = 1 -> Ok (TRep (TPgSpecT (pg, entries)))
             | [], [] -> Ok (TInv (TInvAgg (Some n)))
             | _ ->
-                Error (sprintf "it is a multi-index array mixing a PgIrrepsIdx axis with %d other axis/axes, which is outside the supported fragment" (n - List.length pgs))
+                Error $"it is a multi-index array mixing a PgIrrepsIdx axis with {n - List.length pgs} other axis/axes, which is outside the supported fragment"
         | GO3 | GSO3 ->
             match irreps with
             // No irreps axis: a plain (or pg-tagged) buffer is invariant.
@@ -271,7 +271,7 @@ let rec classifyTypeR (g: GroupT) (resolve: IRType -> IRType) (ty: IRType)
             // Multi-index arrays mixing an irreps axis with others are
             // outside the supported fragment, exactly as at the seam.
             | _ ->
-                Error (sprintf "it is a %d-index array carrying %d IrrepsIdx axis/axes; only a single-axis irreps array is supported" n (List.length irreps))
+                Error $"it is a {n}-index array carrying {List.length irreps} IrrepsIdx axis/axes; only a single-axis irreps array is supported"
     // Named type (struct/sum): invariant but unestablished shape, never
     // scales a rep (mirrors the seam's `TyNamed` arm).
     | IRTNamed _ -> Ok (TInv TInvShapeUnknown)
@@ -563,7 +563,7 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
              | TRep s1, TRep s2, (OpAdd | OpSub) ->
                  if s1 = s2 then TRep s1
                  else
-                     dcl (sprintf "adding or subtracting two representations with DIFFERENT laws (%s and %s): the sum transforms under neither" (repStrT s1) (repStrT s2))
+                     dcl $"adding or subtracting two representations with DIFFERENT laws ({repStrT s1} and {repStrT s2}): the sum transforms under neither"
              // Elementwise product of two reps is Clebsch-Gordan's job, not
              // pointwise. (Perm ADMITS this one -- commutes with relabelling.)
              | TRep _, TRep _, _ ->
@@ -629,7 +629,7 @@ let private statusOf (ctx: RepCtx) : Map<IRId, RepStatusT> -> TypedExpr -> RepSt
                        | Some k when Set.contains k (invariantOffsetsT ctx.Group spec) ->
                            TInv TInvScalar
                        | Some k ->
-                           dcl (sprintf "raw indexing at offset %d reads a basis-dependent component of an l > 0 block of %s" k (repStrT (TO3Spec spec)))
+                           dcl $"raw indexing at offset {k} reads a basis-dependent component of an l > 0 block of {repStrT (TO3Spec spec)}"
                        | None ->
                            dcl "indexing a representation-typed value needs a LITERAL offset this walker can place inside a trivial block; a computed index could land anywhere")
                   | _ ->
@@ -691,7 +691,7 @@ type SigRefusal = {
 }
 
 /// The rendered one-liner, for an abstain reason or a tooling tooltip.
-let sigRefusalStr (r: SigRefusal) : string = sprintf "%s does not classify: %s" r.Position r.Why
+let sigRefusalStr (r: SigRefusal) : string = $"{r.Position} does not classify: {r.Why}"
 
 /// Classify a whole signature under a group hypothesis. `Error` when ANY
 /// position is unclassifiable -- the seam's `certSigOf -> Error` path: a
@@ -701,7 +701,7 @@ let classifySignature (g: GroupT) (resolve: IRType -> IRType) (owner: string)
                       (parms: RepParam list) (retTy: IRType) : Result<RepSigT, SigRefusal> =
     let ps = parms |> List.map (fun p -> (p.PName, classifyTypeR g resolve p.PType))
     match ps |> List.tryPick (fun (n, r) -> match r with Error w -> Some (n, w) | Ok _ -> None) with
-    | Some (n, w) -> Error { Position = sprintf "parameter '%s'" n; Why = w }
+    | Some (n, w) -> Error { Position = $"parameter '{n}'"; Why = w }
     | None ->
         match classifyTypeR g resolve retTy with
         | Error w -> Error { Position = "the return type"; Why = w }
@@ -862,7 +862,7 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
         let g = groupOfName groupName
         match classifySignature g resolve owner parms retTy with
         | Error e ->
-            RepAbstain (sprintf "signature not classifiable by the typed classifier: %s" (sigRefusalStr e))
+            RepAbstain $"signature not classifiable by the typed classifier: {sigRefusalStr e}"
         | Ok sg ->
             let ctx = {
                 Group = g
@@ -898,7 +898,7 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
             // decline (no cause channel; see `DeclineCause`).
             let declineReason () =
                 match ctx.Decline.Value with
-                | Some c -> sprintf "walker declined: %s" c.Why
+                | Some c -> $"walker declined: {c.Why}"
                 | None -> "walker declined (outside the composition fragment)"
             match bodySt with
             | TBottom -> engineFallback (declineReason ())
@@ -908,8 +908,7 @@ let checkDeclaredRep (certified: System.Collections.Generic.Dictionary<IRId, Rep
                 (match sg.Return with
                  | TRep ds ->
                      RepDisagree (
-                         sprintf "the typed walker derives %s for the body of '%s', but the declared certificate's return transforms as %s"
-                             (repStrT bs) owner (repStrT ds))
+                         $"the typed walker derives {(repStrT bs)} for the body of '{owner}', but the declared certificate's return transforms as {(repStrT ds)}")
                  // Derived rep vs declared invariant: a modeling gap, abstain.
                  | _ -> engineUpgradeOnly "derived a representation where the declaration is invariant")
             | _ -> engineUpgradeOnly "derived an invariant where the declaration is a representation"
@@ -929,7 +928,7 @@ let deduceFunctionRep (certified: System.Collections.Generic.Dictionary<IRId, Re
                       (owner: string) (funcId: IRId)
                       (parms: RepParam list) (retTy: IRType)
                       (body: TypedExpr) : RepProposal option =
-    let sigTys = (parms |> List.map (fun p -> p.PType)) @ [ retTy ]
+    let sigTys = (parms |> List.map (_.PType)) @ [ retTy ]
     let candidates = candidatesFor resolve sigTys
     if candidates.IsEmpty then None
     elif sigTys |> List.exists (isUnresolvedTy resolve) then

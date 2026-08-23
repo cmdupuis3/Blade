@@ -88,9 +88,9 @@ let private cppOf (lapackOn: bool) (testName: string) (src: string) : Result<str
     use _gate = pinLapack lapackOn
     try
         match lower src with
-        | Error e -> Error (sprintf "lower: %s" e)
+        | Error e -> Error ($"lower: {e}")
         | Ok ir -> Ok (fst (CodeGen.genSelfContainedProgramFromIR ir testName))
-    with ex -> Error (sprintf "codegen raised: %s" ex.Message)
+    with ex -> Error ($"codegen raised: {ex.Message}")
 
 let private lapackInclude = "#include \"blade_lapack.hpp\""
 
@@ -415,9 +415,9 @@ let runLapackEmissionTests () : BlockResult =
             let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
             let present = mustNotContain |> List.filter cpp.Contains
             if not missing.IsEmpty then
-                fail name (sprintf "generated C++ lacks: %s" (String.concat " | " missing))
+                fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then
-                fail name (sprintf "generated C++ unexpectedly contains: %s" (String.concat " | " present))
+                fail name ($"""generated C++ unexpectedly contains: {(String.concat " | " present)}""")
             else
                 passed <- passed + 1
                 resultLine Pass name (if gateOn then "routing as expected (gate on)"
@@ -431,7 +431,7 @@ let runLapackEmissionTests () : BlockResult =
         | Error e when e.Contains expectedFragment ->
             passed <- passed + 1
             resultLine Pass name "rejected at typecheck (gate on)"
-        | Error e -> fail name (sprintf "rejected, but not for the pinned reason: %s" e)
+        | Error e -> fail name ($"rejected, but not for the pinned reason: {e}")
 
     // ---- the packed route's REACHABILITY, recorded as a test ----
     //
@@ -461,8 +461,8 @@ let runLapackEmissionTests () : BlockResult =
         | Ok _ -> fail name "expected BL5200 from MathElaborate.arrayShape, but the program compiled"
         | Error e when e.Contains "statically known" ->
             passed <- passed + 1
-            resultLine Pass name (sprintf "refused identically (gate %s)" (if gateOn then "on" else "off"))
-        | Error e -> fail name (sprintf "refused, but not for the pinned reason: %s" e)
+            resultLine Pass name ($"""refused identically (gate {(if gateOn then "on" else "off")})""")
+        | Error e -> fail name ($"refused, but not for the pinned reason: {e}")
 
     // ---- the availability gate itself ----
     //
@@ -517,6 +517,6 @@ let runLapackEmissionTests () : BlockResult =
             resultLine Pass name (sprintf "%A" actual)
         else fail name (sprintf "expected %A, got %A" expected actual)
 
-    printFooter "LAPACK Eigensolver Dispatch" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "LAPACK Eigensolver Dispatch" [$"{passed} passed"; $"{failed} failed"]
     { Block = "LAPACK Eigensolver Dispatch"; Passed = passed; Failed = failed; Skipped = 0
       FailedNames = failedNames }

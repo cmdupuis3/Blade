@@ -150,8 +150,8 @@ let binOpToCpp = function
 let renderMath2 (name: string) (lStr: string) (rStr: string) : string =
     let q (fn: string) = if inCudaDeviceDialect () then fn else "std::" + fn
     match name with
-    | "log_base" -> sprintf "(%s(%s) / %s(%s))" (q "log") lStr (q "log") rStr
-    | _ -> sprintf "%s(%s, %s)" (q name) lStr rStr
+    | "log_base" -> $"""({(q "log")}({lStr}) / {(q "log")}({rStr}))"""
+    | _ -> $"{(q name)}({lStr}, {rStr})"
 
 /// Convert unary operator to C++ string
 let unaryOpToCpp = function
@@ -209,17 +209,17 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
     if inCudaDeviceDialect () then
         if isComplexType operandTy then
             match op with
-            | IRReal -> sprintf "(%s).real()" inner
-            | IRImag -> sprintf "(%s).imag()" inner
-            | IRArg -> sprintf "thrust::arg(%s)" inner
-            | IRMath name -> sprintf "thrust::%s(%s)" name inner
-            | _ -> sprintf "%s(%s)" (unaryOpToCpp op) inner
+            | IRReal -> $"({inner}).real()"
+            | IRImag -> $"({inner}).imag()"
+            | IRArg -> $"thrust::arg({inner})"
+            | IRMath name -> $"thrust::{name}({inner})"
+            | _ -> $"{(unaryOpToCpp op)}({inner})"
         else
             match op with
-            | IRMath name -> sprintf "%s(%s)" name inner
-            | _ -> sprintf "%s(%s)" (unaryOpToCpp op) inner
+            | IRMath name -> $"{name}({inner})"
+            | _ -> $"{(unaryOpToCpp op)}({inner})"
     else
-        sprintf "%s(%s)" (unaryOpToCpp op) inner
+        $"{(unaryOpToCpp op)}({inner})"
 
 /// Coerce a rendered scalar operand to match std::complex's SAME-TYPE-ONLY
 /// operator overload set (`complex<double> * 2` and `complex<double> *
@@ -231,13 +231,13 @@ let coerceComplexOperand (resultElem: ElemType) (operandElem: ElemType) (rendere
     | ETComplex128 ->
         match operandElem with
         | ETComplex128 | ETFloat64 -> rendered
-        | ETComplex64 -> sprintf "%s(%s)" (complexCppTypeName ETComplex128) rendered
-        | ETFloat32 | ETInt64 | ETInt32 -> sprintf "(double)(%s)" rendered
+        | ETComplex64 -> $"{(complexCppTypeName ETComplex128)}({rendered})"
+        | ETFloat32 | ETInt64 | ETInt32 -> $"(double)({rendered})"
         | _ -> rendered
     | ETComplex64 ->
         match operandElem with
         | ETComplex64 | ETFloat32 -> rendered
-        | ETInt64 | ETInt32 -> sprintf "(float)(%s)" rendered
+        | ETInt64 | ETInt32 -> $"(float)({rendered})"
         | _ -> rendered
     | _ -> rendered
 
@@ -253,9 +253,9 @@ let emitBinOpWithComplexCoercion
         | Some ((ETComplex64 | ETComplex128) as resElem) ->
             let lC = coerceComplexOperand resElem le lStr
             let rC = coerceComplexOperand resElem re rStr
-            sprintf "(%s %s %s)" lC (binToCpp op) rC
-        | _ -> sprintf "(%s %s %s)" lStr (binToCpp op) rStr
-    | _ -> sprintf "(%s %s %s)" lStr (binToCpp op) rStr
+            $"({lC} {(binToCpp op)} {rC})"
+        | _ -> $"({lStr} {(binToCpp op)} {rStr})"
+    | _ -> $"({lStr} {(binToCpp op)} {rStr})"
 
 /// Render a float as a C++ double literal. `sprintf "%g"` would violate two
 /// invariants: ROUND-TRIP precision (%g truncates to 6 sig figs, breaking any
@@ -295,36 +295,36 @@ let escapeStringLit (s: string) : string =
 /// Used for kernel bodies in inline generation
 let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
-    | IRLit (IRLitInt n) -> sprintf "%dL" n
+    | IRLit (IRLitInt n) -> $"{n}L"
     | IRLit (IRLitFloat f) -> floatToCppLiteral f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
-    | IRLit (IRLitString s) -> sprintf "std::string(%s)" (escapeStringLit s)
+    | IRLit (IRLitString s) -> $"std::string({(escapeStringLit s)})"
     | IRLit IRLitUnit -> "((void)0)"
-    | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue (sprintf "__v%d" id)
+    | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
     | IRParam (name, _, _) -> name
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppSimple names l
         let rStr = exprToCppSimple names r
         match op with
-        | IRCaret -> sprintf "pow(%s, %s)" lStr rStr
+        | IRCaret -> $"pow({lStr}, {rStr})"
         | IRMath2 name -> renderMath2 name lStr rStr
         | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         let inner = exprToCppSimple names e
-        if isComplexType (inferExprType e) then sprintf "%s(%s)" (complexFnName "conj") inner
+        if isComplexType (inferExprType e) then $"""{(complexFnName "conj")}({inner})"""
         else inner
     | IRUnaryOp (op, e) -> renderUnaryOpTyped op (inferExprType e) (exprToCppSimple names e)
     | IRGuard (cond, body) ->
-        sprintf "(%s ? %s : 0.0)" (exprToCppSimple names cond) (exprToCppSimple names body)
-    | other -> sprintf "BLADE_UNSUPPORTED_EXPR_%s" (other.GetType().Name.ToUpper())
+        $"({(exprToCppSimple names cond)} ? {(exprToCppSimple names body)} : 0.0)"
+    | other -> $"BLADE_UNSUPPORTED_EXPR_{(other.GetType().Name.ToUpper())}"
 
 /// Convert IRLit to C++ literal string
 let litToCpp (lit: IRLit) : string =
     match lit with
-    | IRLitInt n -> sprintf "%dL" n
+    | IRLitInt n -> $"{n}L"
     | IRLitFloat f -> floatToCppLiteral f
     | IRLitBool b -> if b then "true" else "false"
-    | IRLitString s -> sprintf "std::string(%s)" (escapeStringLit s)
+    | IRLitString s -> $"std::string({(escapeStringLit s)})"
     | IRLitUnit -> "((void)0)"  // Valid C++ no-op; should be elided by callers
 
 // isRaggedArrayType / isRaggedRowType / isDepIdxArrayType /
@@ -398,16 +398,15 @@ let copyInPlaceAssign (target: IRExpr) (value: IRExpr) : (IRId * IRId * int) opt
 /// Returns (emitted lines, index variable name). Heap-allocated; the caller owns
 /// bundling it into a Compound<T,RANK> wrapper (P0b).
 let genCompoundIndexFromMask (maskName: string) (rank: int) (idxName: string) : string list * string =
-    let extentTerms = [ for d in 0 .. rank - 1 -> sprintf "%s.extents[%d]" maskName d ]
+    let extentTerms = [ for d in 0 .. rank - 1 -> $"{maskName}.extents[{d}]" ]
     let extentsInit = String.concat ", " extentTerms
     let gridExpr = String.concat " * " extentTerms
     let lines =
-        [ sprintf "std::array<size_t, %d> %s_extents = { %s };" rank idxName extentsInit
-          sprintf "size_t %s_grid = %s;" idxName gridExpr
-          sprintf "bool* %s_pool = nested_array_utilities::pool_base(%s.data);" idxName maskName
-          sprintf "std::vector<bool> %s_maskvec(%s_pool, %s_pool + %s_grid);" idxName idxName idxName idxName
-          sprintf "compound_index_t<%d>* %s = new compound_index_t<%d>(\"%s\", %s_extents, %s_maskvec);"
-                  rank idxName rank idxName idxName idxName ]
+        [ $$"""std::array<size_t, {{rank}}> {{idxName}}_extents = { {{extentsInit}} };"""
+          $"size_t {idxName}_grid = {gridExpr};"
+          $"bool* {idxName}_pool = nested_array_utilities::pool_base({maskName}.data);"
+          $"std::vector<bool> {idxName}_maskvec({idxName}_pool, {idxName}_pool + {idxName}_grid);"
+          $"compound_index_t<{rank}>* {idxName} = new compound_index_t<{rank}>(\"{idxName}\", {idxName}_extents, {idxName}_maskvec);" ]
     (lines, idxName)
 
 /// Emit the construction of a standalone `sparse_index_t<RANK>` -- the sparse
@@ -427,24 +426,22 @@ let genSparseIndexFromKeys (source: SparseKeysSource) (keysName: string option) 
     | SkStatic entries ->
         let rows =
             entries
-            |> List.map (fun e -> sprintf "{ %s }" (e |> List.map string |> String.concat ", "))
+            |> List.map (fun e -> $$"""{ {{(e |> List.map string |> String.concat ", ")}} }""")
             |> String.concat ", "
-        [ sprintf "std::vector<std::array<size_t, %d>> %s_keys = { %s };" rank idxName rows
-          sprintf "sparse_index_t<%d>* %s = new sparse_index_t<%d>(\"%s\", std::move(%s_keys));"
-                  rank idxName rank idxName idxName ]
+        [ $$"""std::vector<std::array<size_t, {{rank}}>> {{idxName}}_keys = { {{rows}} };"""
+          $"sparse_index_t<{rank}>* {idxName} = new sparse_index_t<{rank}>(\"{idxName}\", std::move({idxName}_keys));" ]
     | SkRuntime _ ->
         match keysName with
         | Some kn ->
             let entryInit =
-                if rank = 1 then sprintf "{ (size_t)(%s[__r]) }" kn
+                if rank = 1 then $$"""{ (size_t)({{kn}}[__r]) }"""
                 else
-                    [ for c in 0 .. rank - 1 -> sprintf "(size_t)std::get<%d>(%s[__r])" c kn ]
+                    [ for c in 0 .. rank - 1 -> $"(size_t)std::get<{c}>({kn}[__r])" ]
                     |> String.concat ", "
                     |> sprintf "{ %s }"
-            [ sprintf "std::vector<std::array<size_t, %d>> %s_keys(%s.extents[0]);" rank idxName kn
-              sprintf "for (size_t __r = 0; __r < %s.extents[0]; __r++) %s_keys[__r] = %s;" kn idxName entryInit
-              sprintf "sparse_index_t<%d>* %s = new sparse_index_t<%d>(\"%s\", std::move(%s_keys));"
-                      rank idxName rank idxName idxName ]
+            [ $"std::vector<std::array<size_t, {rank}>> {idxName}_keys({kn}.extents[0]);"
+              $"for (size_t __r = 0; __r < {kn}.extents[0]; __r++) {idxName}_keys[__r] = {entryInit};"
+              $"sparse_index_t<{rank}>* {idxName} = new sparse_index_t<{rank}>(\"{idxName}\", std::move({idxName}_keys));" ]
         | None ->
             [ refusalErrorLine "" "SparseIdx: runtime keys variable not found in scope at codegen" ]
 
@@ -511,7 +508,7 @@ let groupedCaptureGkOf (c: CaptureInfo) : IRId option =
 let gkSidecarStem (names: Map<IRId, string>) (gkId: IRId) : string =
     match Map.tryFind gkId names with
     | Some n -> n
-    | None -> sprintf "__gk%d" gkId
+    | None -> $"__gk{gkId}"
 
 /// Distinct gk ids across a callable's captures, in first-appearance order
 /// (the order both the signature and every call site iterate).
@@ -523,8 +520,8 @@ let groupedCaptureGks (caps: CaptureInfo list) : IRId list =
 let gkSidecarParams (caps: CaptureInfo list) : string list =
     groupedCaptureGks caps
     |> List.collect (fun gkId ->
-        [ sprintf "size_t __gk%d__ngroups" gkId
-          sprintf "const size_t* __gk%d__offsets" gkId ])
+        [ $"size_t __gk{gkId}__ngroups"
+          $"const size_t* __gk{gkId}__offsets" ])
 
 /// Capture ARGUMENTS at a call/wrapper site: the regular captures resolved
 /// through the active name map, then the gk side-state pairs in the same
@@ -534,7 +531,7 @@ let captureForwardArgs (names: Map<IRId, string>) (caps: CaptureInfo list) : str
     @ (groupedCaptureGks caps
        |> List.collect (fun gkId ->
            let stem = gkSidecarStem names gkId
-           [ sprintf "%s__ngroups" stem; sprintf "%s__offsets" stem ]))
+           [ $"{stem}__ngroups"; $"{stem}__offsets" ]))
 
 /// The pre-pass behind groupedCaptureGkOf: every `let <id> = group_by(_, gk)`
 /// in any function body (and any module-level group_by binding) contributes
@@ -683,20 +680,20 @@ let extentsOnlyGroupBysCell () : Set<IRId> ref =
 let genCallableWrapper (names: Map<IRId, string>) (suffix: string) (callable: IRCallable) : string list * string =
     let safeName = sanitizeCppName callable.Name
     let wrapperName =
-        if suffix = "" then sprintf "__wrap_%d" callable.Id
-        else sprintf "__wrap_%d_%s" callable.Id suffix
+        if suffix = "" then $"__wrap_{callable.Id}"
+        else $"__wrap_{callable.Id}_{suffix}"
     let paramSig =
         callable.Params
         |> List.map (fun p ->
             match p.Type with
-            | ArrayElem arr -> sprintf "%s %s" (cppArrayTypeStr arr) p.Name
-            | _ -> sprintf "%s %s" (irTypeToCpp p.Type) p.Name)
+            | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
+            | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
         |> String.concat ", "
-    let regularArgs = callable.Params |> List.map (fun p -> p.Name)
+    let regularArgs = callable.Params |> List.map (_.Name)
     let captureArgs = captureForwardArgs names callable.Captures
     let allArgs = (regularArgs @ captureArgs) |> String.concat ", "
     let code =
-        [sprintf "auto %s = [&](%s) { return %s(%s); };" wrapperName paramSig safeName allArgs]
+        [$$"""auto {{wrapperName}} = [&]({{paramSig}}) { return {{safeName}}({{allArgs}}); };"""]
     (code, wrapperName)
 
 /// Whether a callee's return value is a pool the CALLER owns. `FreshPool` means
@@ -828,7 +825,7 @@ let routeKernelBodyThroughCall (info: ApplyInfo) (cg: LoopNestCodeGen) : LoopNes
         match resolveKernel info.Kernel with
         | Some rk when not (List.isEmpty rk.Callable.Params)
                        && not rk.Reynolds.HasReynolds ->
-            let paramTypes = rk.Callable.Params |> List.map (fun p -> p.Type)
+            let paramTypes = rk.Callable.Params |> List.map (_.Type)
             let funcTy = mkFuncArrow paramTypes rk.Callable.RetType
             let args = rk.Callable.Params |> List.map (fun p -> IRVar (p.VarId, p.Type))
             { cg with KernelExpr = IRApp (IRVar (rk.Callable.Id, funcTy), args, rk.Callable.RetType) }
@@ -878,7 +875,7 @@ let internal denseCellCountOfArray (arr: IRArrayType) (name: string) : string =
         (match ix with IxDense -> true | _ -> false) && ix.Rank <= 1
     match arr.IndexTypes with
     | [ i0; i1 ] when denseSlot i0 && denseSlot i1 ->
-        sprintf "(%s.extents[0] * %s.extents[1])" name name
+        $"({name}.extents[0] * {name}.extents[1])"
     | _ -> "0"
 
 let internal denseCellCountExpr (ty: IRType) (name: string) : string =
@@ -979,8 +976,8 @@ let internal literalExtentOfArray (arr: IRArrayType) (dim: int) : int64 option =
 /// `IRType` wrapper below.
 let internal literalOrRuntimeExtentOfArray (arr: IRArrayType) (name: string) (dim: int) : string =
     match literalExtentOfArray arr dim with
-    | Some n -> sprintf "%d" n
-    | None -> sprintf "%s.extents[%d]" name dim
+    | Some n -> string n
+    | None -> $"{name}.extents[{dim}]"
 
 /// The same answer as `literalOrRuntimeExtentOfArray`, PAIRED with whether the
 /// rendered text is a literal -- the `(value, isLiteral)` shape
@@ -990,8 +987,8 @@ let internal literalOrRuntimeExtentOfArray (arr: IRArrayType) (name: string) (di
 /// value-only spelling for loop bounds.
 let internal extentDimOfArray (arr: IRArrayType) (name: string) (dim: int) : string * bool =
     match literalExtentOfArray arr dim with
-    | Some n -> (sprintf "%d" n, true)
-    | None -> (sprintf "%s.extents[%d]" name dim, false)
+    | Some n -> (string n, true)
+    | None -> ($"{name}.extents[{dim}]", false)
 
 /// THE shared companion-extents rule. Every emitter that materializes an
 /// `Array<T,R>` needs a table for its shape; this decides which of the two
@@ -1035,12 +1032,11 @@ let internal extentDimOfArray (arr: IRArrayType) (name: string) (dim: int) : str
 let emitExtentsTable (ind: string) (extentsName: string) (rank: int)
                      (dims: (string * bool) list) : string list * string option =
     if rank > 0 && dims |> List.forall snd then
-        ([ sprintf "%sstatic constexpr const size_t %s[%d] = { %s };"
-               ind extentsName rank (dims |> List.map fst |> String.concat ", ") ],
+        ([ $"""{ind}static constexpr const size_t {extentsName}[{rank}] = {{ {(dims |> List.map fst |> String.concat ", ")} }};""" ],
          None)
     else
-        ((sprintf "%ssize_t* %s = new size_t[%d];" ind extentsName rank)
-         :: (dims |> List.mapi (fun d (e, _) -> sprintf "%s%s[%d] = %s;" ind extentsName d e)),
+        (($"{ind}size_t* {extentsName} = new size_t[{rank}];")
+         :: (dims |> List.mapi (fun d (e, _) -> $"{ind}{extentsName}[{d}] = {e};")),
          Some extentsName)
 
 /// The word a dispatch marker comment leads with, for a route resolved by
@@ -1150,7 +1146,7 @@ let literalOrRuntimeExtent (ty: IRType) (name: string) (dim: int) : string =
     // twice existed and both times disagreed on exactly that mapping.
     match ty with
     | ArrayElem at -> literalOrRuntimeExtentOfArray at name dim
-    | _ -> sprintf "%s.extents[%d]" name dim
+    | _ -> $"{name}.extents[{dim}]"
 
 /// The deterministic K-lane accumulation body, as unindented C++ statements.
 /// SHARED by every `fpReassocEnabled ()` site so the emitted shape -- and
@@ -1201,19 +1197,19 @@ let internal fpReassocLaneStmts
         (elemAt: string -> string)
         (combine: string -> string -> string)
         : string list * string =
-    let lane (l: int) = sprintf "%s%d" lanePrefix l
+    let lane (l: int) = $"{lanePrefix}{l}"
     // Lane l's seed index. `lo` is the literal 0 at the intrinsic sites, and
     // `0 + 3` would be noise there; everywhere else it is a hoisted `const`.
-    let atLo (l: int) = if loExpr = "0" then string l else sprintf "%s + %d" loExpr l
+    let atLo (l: int) = if loExpr = "0" then string l else $"{loExpr} + {l}"
     let stmts =
-        [ for l in 0 .. k - 1 -> sprintf "%s %s = %s;" elemStr (lane l) (elemAt (atLo l)) ]
-        @ [ sprintf "size_t %s = %s;" idxName (atLo k)
-            sprintf "for (; %s + %d <= %s; %s += %d) {" idxName k hiExpr idxName k ]
+        [ for l in 0 .. k - 1 -> $"{elemStr} {(lane l)} = {(elemAt (atLo l))};" ]
+        @ [ $"size_t {idxName} = {(atLo k)};"
+            $$"""for (; {{idxName}} + {{k}} <= {{hiExpr}}; {{idxName}} += {{k}}) {""" ]
         @ [ for l in 0 .. k - 1 ->
-              "    " + combine (lane l) (elemAt (sprintf "%s + %d" idxName l)) ]
+              "    " + combine (lane l) (elemAt ($"{idxName} + {l}")) ]
         @ [ "}" ]
         @ [ for l in 0 .. k - 2 ->
-              sprintf "if (%s < %s) { %s %s++; }" idxName hiExpr (combine (lane l) (elemAt idxName)) idxName ]
+              $$"""if ({{idxName}} < {{hiExpr}}) { {{(combine (lane l) (elemAt idxName))}} {{idxName}}++; }""" ]
         @ [ for l in 1 .. k - 1 -> combine (lane 0) (lane l) ]
     (stmts, lane 0)
 
@@ -1309,10 +1305,10 @@ let internal fpReassocSimdStmts
         (prelude: string list)
         (elemAt: string -> string)
         : string list =
-    [ sprintf "BLADE_OMP_SIMD_REDUCTION(%s:%s)" opStr accName
-      sprintf "for (size_t %s = %s; %s < %s; %s++) {" idxName loExpr idxName hiExpr idxName ]
+    [ $"BLADE_OMP_SIMD_REDUCTION({opStr}:{accName})"
+      $$"""for (size_t {{idxName}} = {{loExpr}}; {{idxName}} < {{hiExpr}}; {{idxName}}++) {""" ]
     @ (prelude |> List.map (fun s -> "    " + s))
-    @ [ sprintf "    %s = %s %s %s;" accName accName opStr (elemAt idxName)
+    @ [ $"    {accName} = {accName} {opStr} {(elemAt idxName)};"
         "}" ]
 
 /// The reduction operator the simd form would use for a fold through

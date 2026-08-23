@@ -127,10 +127,10 @@ let runRepCheckAgreementTests () : BlockResult =
             filesWithCerts <- filesWithCerts + 1
             let detail =
                 if disagreements.IsEmpty then
-                    sprintf "%d confirm, %d abstain" confirms abstains
+                    $"{confirms} confirm, {abstains} abstain"
                 else
                     disagreements
-                    |> List.map (fun (owner, d, _) -> sprintf "%s: %s" owner d)
+                    |> List.map (fun (owner, d, _) -> $"{owner}: {d}")
                     |> String.concat " | "
             check name disagreements.IsEmpty detail
 
@@ -144,17 +144,15 @@ let runRepCheckAgreementTests () : BlockResult =
     // e.g. a classifier regression that makes every signature unclassifiable.
     check "corpus: the validation actually confirms certificates"
         (totConfirm > 0)
-        (sprintf "%d confirmed" totConfirm)
+        ($"{totConfirm} confirmed")
 
     printSubHeader "abstention census (C2's shrinking target)"
     for KeyValue (reason, n) in reasonTally do
-        resultLine Skip (sprintf "abstain x%d" n) reason
+        resultLine Skip ($"abstain x{n}") reason
     resultLine Skip "abstain by origin"
-        (sprintf "%d elaborator-generated (C2's direct target), %d source-written"
-            genAbstain (totAbstain - genAbstain))
+        ($"{genAbstain} elaborator-generated (C2's direct target), {(totAbstain - genAbstain)} source-written")
     resultLine Skip "confirm by origin"
-        (sprintf "%d elaborator-generated, %d source-written"
-            genConfirm (totConfirm - genConfirm))
+        ($"{genConfirm} elaborator-generated, {(totConfirm - genConfirm)} source-written")
 
     // ========================================================================
     // 3. The disagree path, constructed artificially
@@ -180,7 +178,7 @@ let runRepCheckAgreementTests () : BlockResult =
     // definite transformation law for the same body, and they differ.
     let vDisagree = validateSynthetic tyA tyB bodyIdent
     check "self-test: spec contradiction disagrees"
-        (match vDisagree with Blade.DeduceRep.RepDisagree _ -> true | _ -> false)
+        vDisagree.IsRepDisagree
         (verdictName vDisagree)
     check "self-test: the disagreement names both laws"
         (match vDisagree with
@@ -194,7 +192,7 @@ let runRepCheckAgreementTests () : BlockResult =
     let bodyOpaque = mkTyped TExprWildcard tyA
     let vAbstain = validateSynthetic tyA tyA bodyOpaque
     check "self-test: unjudgeable body abstains"
-        (match vAbstain with Blade.DeduceRep.RepAbstain _ -> true | _ -> false)
+        vAbstain.IsRepAbstain
         (verdictName vAbstain)
 
     // ========================================================================
@@ -228,14 +226,14 @@ let runRepCheckAgreementTests () : BlockResult =
     Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> None)
     let vHookNa = validateSynthetic tyA tyA bodyOpaque
     check "hook: None leaves the verdict at abstain"
-        (match vHookNa with Blade.DeduceRep.RepAbstain _ -> true | _ -> false)
+        vHookNa.IsRepAbstain
         (verdictName vHookNa)
 
     // A discharger that throws may not crash the compilation.
     Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> failwith "boom")
     let vHookBoom = validateSynthetic tyA tyA bodyOpaque
     check "hook: a throwing discharger degrades to abstain"
-        (match vHookBoom with Blade.DeduceRep.RepAbstain _ -> true | _ -> false)
+        vHookBoom.IsRepAbstain
         (verdictName vHookBoom)
 
     // The hook receives the PARAMETER LIST alongside the signature — the widened
@@ -256,7 +254,7 @@ let runRepCheckAgreementTests () : BlockResult =
     Blade.DeduceRep.EngineDischarge.register (fun _r _p _sg _body -> Some Blade.DeduceRep.EngineConfirms)
     let vHookNoOverride = validateSynthetic tyA tyB bodyIdent
     check "hook: cannot override a composition disagreement"
-        (match vHookNoOverride with Blade.DeduceRep.RepDisagree _ -> true | _ -> false)
+        vHookNoOverride.IsRepDisagree
         (verdictName vHookNoOverride)
 
     // Clearing is how a test isolates itself; the next real compilation
@@ -270,11 +268,11 @@ let runRepCheckAgreementTests () : BlockResult =
     Blade.DeduceRep.RepCheckCensus.reset ()
 
     printFooter "Equiv Certificate Agreement (C1)"
-        [ sprintf "%d passed" passed
-          sprintf "%d failure(s)" failed
-          sprintf "%d confirm" totConfirm
-          sprintf "%d abstain" totAbstain
-          sprintf "%d disagree" totDisagree ]
+        [ $"{passed} passed"
+          $"{failed} failure(s)"
+          $"{totConfirm} confirm"
+          $"{totAbstain} abstain"
+          $"{totDisagree} disagree" ]
     { Block = "Equiv Certificate Agreement (C1)"
       Passed = passed
       Failed = failed

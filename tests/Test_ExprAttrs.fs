@@ -550,8 +550,8 @@ let runAttrsTests () : Blade.Tests.TestHarness.BlockResult =
         else
             failed <- failed + 1
             failedNames <- failedNames @ [t.Name]
-            let detail = sprintf "expected %s, got %s" (fmtAttrs expected) (fmtAttrs actual)
+            let detail = $"expected {(fmtAttrs expected)}, got {(fmtAttrs actual)}"
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail t.Name detail
-    Blade.Tests.TestHarness.printFooter "ExprAttrs" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    Blade.Tests.TestHarness.printFooter "ExprAttrs" [$"{passed} passed"; $"{failed} failed"]
     { Block = "ExprAttrs"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
 

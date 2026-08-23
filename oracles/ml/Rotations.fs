@@ -75,7 +75,7 @@ module Rotations =
                         ok <- true
                 with _ -> ()
                 attempt <- attempt + 1
-            if not ok then failwithf "wignerD: could not fit D for l=%d" l
+            if not ok then failwith $"wignerD: could not fit D for l={l}"
             result
 
     /// Apply the block-diagonal representation of R (per the spec's block

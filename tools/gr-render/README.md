@@ -51,7 +51,7 @@ That is a separate, not-yet-solved packaging problem (vendoring or fetching GR i
    next step.
 2. **Beside the running `Blade.exe`** (a deployed toolchain's own directory).
 3. **`tools/gr-render/`, walking up from `Blade.exe` up to 8 directory levels** (a dev
-   checkout, where `Blade.exe` runs out of `bin/Release/net7.0/` under the repo root).
+   checkout, where `Blade.exe` runs out of `bin/Release/net10.0/` under the repo root).
 
 At steps 2 and 3, **each location is checked for the platform-stamped name FIRST, then the
 plain `gr-render[.exe]` SECOND** — a `gr-render-win32-x64.exe` sitting next to a leftover

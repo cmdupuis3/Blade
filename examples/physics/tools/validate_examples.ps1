@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $physDir = Split-Path -Parent $PSScriptRoot
 if ($BladeExe -eq "") {
     $repoRoot = Split-Path -Parent (Split-Path -Parent $physDir)
-    $BladeExe = Join-Path $repoRoot "bin\Release\net7.0\Blade.exe"
+    $BladeExe = Join-Path $repoRoot "bin\Release\net10.0\Blade.exe"
 }
 $inv = [System.Globalization.CultureInfo]::InvariantCulture
 

@@ -228,7 +228,7 @@ let checkIndexTypeRules (env: AliasEnv) (declName: string) (span: Span)
 
     | PosForbidden role ->
         mkErr (
-            sprintf "Index types cannot appear as %s. " role
+            $"Index types cannot appear as {role}. "
             + "Index types are type-level constructs; they are permitted only "
             + "as array index domains (`Array<T like ___>`), as foreign-key "
             + "element types (aliased: `Array<X like Y>`), in alias bodies "
@@ -302,7 +302,7 @@ let private patternName (pat: Pattern) : string =
     | PatternKind.PatVar n -> n
     | PatternKind.PatTuple pats ->
         let names = pats |> List.choose (fun p -> match p.Kind with PatternKind.PatVar n -> Some n | _ -> None)
-        sprintf "(%s)" (String.concat ", " names)
+        $"""({(String.concat ", " names)})"""
     | _ -> "_"
 
 /// Validate a single declaration. Returns (errors, updated alias env).
@@ -311,20 +311,20 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
     let span = decl.Span
     match decl.Value with
     | DeclType (TyDeclAlias (name, _, body)) ->
-        let declName = sprintf "in type alias '%s'" name
+        let declName = $"in type alias '{name}'"
         let errs = validateTypeExpr env declName span PosAliasBody body
         let newEnv = Map.add name body env
         (errs, newEnv)
 
     | DeclType (TyDeclStruct (name, _, fields, _invariant, _isStatic)) ->
-        let declName = sprintf "in struct '%s'" name
+        let declName = $"in struct '{name}'"
         let errs =
             fields |> List.collect (fun f ->
                 validateTypeExpr env declName span (PosForbidden "struct fields") f.Type)
         (errs, env)
 
     | DeclType (TyDeclSum (name, _, variants)) ->
-        let declName = sprintf "in sum type '%s'" name
+        let declName = $"in sum type '{name}'"
         let errs =
             variants |> List.collect (fun v ->
                 match v.Data with
@@ -337,13 +337,13 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
         // Each member body validates like a type-alias body and extends the
         // alias env like one.
         members |> List.fold (fun (accErrs, accEnv) (mname, mty) ->
-            let declName = sprintf "in mutual-group member '%s'" mname
+            let declName = $"in mutual-group member '{mname}'"
             let errs = validateTypeExpr accEnv declName span PosAliasBody mty
             (accErrs @ errs, Map.add mname mty accEnv)) ([], env)
 
     | DeclFunction f ->
         let kind = if f.IsStatic then "static function" else "function"
-        let declName = sprintf "in %s '%s'" kind f.Name
+        let declName = $"in {kind} '{f.Name}'"
         let paramPos =
             if f.IsStatic then PosStaticFnParam
             else PosForbidden "regular function parameters"
@@ -362,7 +362,7 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
         (paramErrs @ returnErrs, env)
 
     | DeclLet binding ->
-        let declName = sprintf "in let binding '%s'" (patternName binding.Pattern)
+        let declName = $"in let binding '{patternName binding.Pattern}'"
         let errs =
             match binding.Type with
             | Some t ->
@@ -371,7 +371,7 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
         (errs, env)
 
     | DeclStatic binding ->
-        let declName = sprintf "in let static binding '%s'" (patternName binding.Pattern)
+        let declName = $"in let static binding '{patternName binding.Pattern}'"
         let errs =
             match binding.Type with
             | Some t ->
@@ -380,7 +380,7 @@ let validateDecl (env: AliasEnv) (decl: Located<Decl>) : ValidationError list * 
         (errs, env)
 
     | DeclInterface i ->
-        let declName = sprintf "in interface '%s'" i.Name
+        let declName = $"in interface '{i.Name}'"
         let errs =
             i.Methods |> List.collect (fun m ->
                 let paramErrs =

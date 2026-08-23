@@ -550,9 +550,9 @@ let ppType (t: IRType) : string =
 /// own line (long array types stay readable).
 let private formatFunctionSig (ps: (string * string) list) (ret: string) =
     match ps with
-    | [] -> sprintf "() -> %s" ret
+    | [] -> $"() -> {ret}"
     | _ ->
-        let paramLines = ps |> List.map (fun (n, t) -> sprintf "    %s: %s" n t)
+        let paramLines = ps |> List.map (fun (n, t) -> $"    {n}: {t}")
         sprintf "(\n%s\n) -> %s" (String.concat ",\n" paramLines) ret
 
 // Abstract (type-variable) rendering -- shared with the REPL. Post-zonk,
@@ -603,7 +603,7 @@ let rec collectVarNames (ann: TypeExpr) (t: IRType) : (int * string) list =
     match ann, t with
     | TyVar (name, arity), IRTInfer id ->
         let disp = match arity with
-                   | Some k when k > 0 -> sprintf "%s^%d" name k
+                   | Some k when k > 0 -> $"{name}^{k}"
                    | _ -> name
         [(id, disp)]
     | TyNamed (name, []), IRTInfer id -> [(id, name)]
@@ -622,7 +622,7 @@ let rec collectVarNames (ann: TypeExpr) (t: IRType) : (int * string) list =
 /// Fresh-letter pool for inference vars no source annotation names.
 let private typeVarPool =
     seq { yield! ["T"; "U"; "V"; "W"]
-          for i in 1 .. 1000 -> sprintf "T%d" i }
+          for i in 1 .. 1000 -> $"T{i}" }
 
 /// A per-signature abstract-type renderer: consistent letters across every
 /// type it prints (a function's params + return share one namespace).
@@ -682,23 +682,21 @@ let rec private ppConcrete (names: Map<IRId, string>) (t: IRType) : string =
     match t with
     | ArrayElem arr ->
         let indices = arr.IndexTypes |> List.map (ppIndexTypeIn names) |> String.concat ", "
-        sprintf "Array<%s like %s>" (ppConcrete names arr.ElemType) indices
+        $"Array<{ppConcrete names arr.ElemType} like {indices}>"
     | FuncElem (paramTys, retTy) ->
         let piece ty =
             match ty with
-            | FuncElem _ -> sprintf "(%s)" (ppConcrete names ty)
+            | FuncElem _ -> $"({ppConcrete names ty})"
             | _ -> ppConcrete names ty
         String.concat " -> " ((paramTys |> List.map piece) @ [ppConcrete names retTy])
-    | IRTTuple ts -> sprintf "(%s)" (ts |> List.map (ppConcrete names) |> String.concat ", ")
-    | IRTComputation inner -> sprintf "Computation<%s>" (ppConcrete names inner)
+    | IRTTuple ts -> $"""({(ts |> List.map (ppConcrete names) |> String.concat ", ")})"""
+    | IRTComputation inner -> $"Computation<{ppConcrete names inner}>"
     // Re-rendered here (not the context-free printer upstream) so the whole
     // tooltip obeys the name/literal/`_` rule.
     | IRTGroupKeys (outer, source, _) ->
-        sprintf "GroupKeys<%s, %s>" (ppIndexTypeIn names outer) (ppIndexTypeIn names source)
+        $"GroupKeys<{ppIndexTypeIn names outer}, {ppIndexTypeIn names source}>"
     | IRTDist (order, elem, axes) ->
-        sprintf "Dist<%d, %s like %s>"
-            order (ppConcrete names elem)
-            (axes |> List.map (ppIndexTypeIn names) |> String.concat ", ")
+        $"""Dist<{order}, {(ppConcrete names elem)} like {(axes |> List.map (ppIndexTypeIn names) |> String.concat ", ")}>"""
     | other -> ppIRTypeIn names other
 
 /// Every name `builtinCallOf` below can return, in arm order -- the companion
@@ -785,7 +783,7 @@ let private collectCalls (tp: TypedProgram) : CallInfo list =
         let hit = builtinCallOf te
         (match hit with
          | Some (name, args) when te.Span.StartLine > 0 ->
-             acc.Add (mkCall name te.Span (args |> List.map (fun a -> a.Type)) te.Type)
+             acc.Add (mkCall name te.Span (args |> List.map _.Type) te.Type)
          | _ -> ())
         // `hermitian` consumed its own transpose node above; recursing would
         // report that expansion a second time.
@@ -882,7 +880,7 @@ let private mlGeneratedArgs (tp: TypedProgram) : Map<(int * int * int * int), IR
         (match te.Kind with
          | TExprApp ({ Kind = TExprVar (fn, _, _) }, args)
              when fn.StartsWith "__ml" && te.Span.StartLine > 0 ->
-             acc.[clampSpan te.Span] <- (args |> List.map (fun a -> a.Type))
+             acc.[clampSpan te.Span] <- (args |> List.map _.Type)
          | _ -> ())
         for c in Blade.TypeCheck.typedExprChildren te do walk c
     for m in tp.Modules do
@@ -1124,21 +1122,21 @@ let private whereConjuncts (wc: WhereClause option) : string list =
     | Some w ->
         let comms =
             w.Commutativity
-            |> List.map (fun group -> sprintf "comm(%s)" (String.concat ", " group))
+            |> List.map (fun group -> $"""comm({(String.concat ", " group)})""")
         let antis =
             w.Antisymmetry
-            |> List.map (fun group -> sprintf "anticomm(%s)" (String.concat ", " group))
+            |> List.map (fun group -> $"""anticomm({(String.concat ", " group)})""")
         let pars =
             w.Parallel
             |> List.map (function
                 | Omp s ->
-                    let vars = s.Vars |> List.map (fun (v, n) -> sprintf "%s: %d" v n)
-                    sprintf "omp(%s)" (String.concat ", " vars)
-                | Cuda s -> sprintf "cuda(block: %d)" s.BlockSize
+                    let vars = s.Vars |> List.map (fun (v, n) -> $"{v}: {n}")
+                    $"""omp({(String.concat ", " vars)})"""
+                | Cuda s -> $"cuda(block: {s.BlockSize})"
                 | Mpi -> "mpi")
         let customs =
             w.Custom
-            |> List.map (fun (name, args) -> sprintf "%s(%s)" name (String.concat ", " args))
+            |> List.map (fun (name, args) -> $"""{name}({(String.concat ", " args)})""")
         comms @ antis @ pars @ customs
 
 /// Collapse adjacent-pair parities into canonical pin-clause strings: a
@@ -1164,7 +1162,7 @@ let private parityClauses (names: string list) (parities: Blade.Deduce.Parity li
             if j + 1 < nameArr.Length then
                 let group = [ for x in i .. j + 1 -> nameArr.[x] ]
                 if group |> List.forall (fun n -> not (n.StartsWith "__")) then
-                    clauses.Add(sprintf "%s(%s)" kw (String.concat ", " group))
+                    clauses.Add($"""{kw}({(String.concat ", " group)})""")
             i <- j + 1
     List.ofSeq clauses
 
@@ -1196,14 +1194,14 @@ let rec private ppDefaultExpr (e: Expr) : string =
         let s = sprintf "%g" f
         if s.Contains "." || s.Contains "e" || s.Contains "E" then s else s + ".0"
     | ExprLit (LitBool b) -> if b then "true" else "false"
-    | ExprLit (LitString s) -> sprintf "\"%s\"" s
+    | ExprLit (LitString s) -> $"\"{s}\""
     | ExprVar n -> n
     | ExprUnaryOp (OpNeg, inner) -> "-" + ppDefaultExpr inner
-    | ExprBinOp (_, op, l, r) -> sprintf "%s %s %s" (ppDefaultExpr l) (binOpToken op) (ppDefaultExpr r)
-    | ExprApp (f, args) -> sprintf "%s(%s)" (ppDefaultExpr f) (args |> List.map ppDefaultExpr |> String.concat ", ")
-    | ExprField (b, f) -> sprintf "%s.%s" (ppDefaultExpr b) f
+    | ExprBinOp (_, op, l, r) -> $"{ppDefaultExpr l} {binOpToken op} {ppDefaultExpr r}"
+    | ExprApp (f, args) -> $"""{(ppDefaultExpr f)}({(args |> List.map ppDefaultExpr |> String.concat ", ")})"""
+    | ExprField (b, f) -> $"{ppDefaultExpr b}.{f}"
     | ExprTyped (inner, _) -> ppDefaultExpr inner
-    | ExprTuple es -> sprintf "(%s)" (es |> List.map ppDefaultExpr |> String.concat ", ")
+    | ExprTuple es -> $"""({(es |> List.map ppDefaultExpr |> String.concat ", ")})"""
     | _ -> "..."
 
 let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: TypedProgram) =
@@ -1258,7 +1256,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
         let srcAnnotated =
             match Map.tryFind f.Name srcFuncs with
             | Some src when src.Params.Length = f.Params.Length ->
-                src.Params |> List.map (fun p -> p.Type.IsSome) |> List.toArray
+                src.Params |> List.map _.Type.IsSome |> List.toArray
             | _ -> f.Params |> List.map (fun _ -> true) |> List.toArray
         // Surface defaults by param position (for the optional "default"
         // field on params[] -- signature help shows what an omitted arg gets).
@@ -1285,7 +1283,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
              | Some (names, parities) -> parityClauses names parities
              | None -> [])
             @ (match Map.tryFind f.Name dedPacks with
-               | Some (packName, Blade.Deduce.PInv) -> [sprintf "comm(%s)" packName]
+               | Some (packName, Blade.Deduce.PInv) -> [$"comm({packName})"]
                | _ -> [])
         acc.Add { Scope = ""; EName = f.Name; EKind = kind
                   ETypeStr = formatFunctionSig (ps |> List.map (fun (n, t, _, _) -> (n, t))) ret
@@ -1312,7 +1310,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
     // Erased dists: the flat pushforward formers are register-only, with no
     // decl under the user's name. Rebuild Dist<order, elem like axes> from
     // the first component's inferred type (inverts exactly).
-    let named = HashSet<string>(acc |> Seq.filter (fun e -> e.Scope = "") |> Seq.map (fun e -> e.EName))
+    let named = HashSet<string>(acc |> Seq.filter (fun e -> e.Scope = "") |> Seq.map _.EName)
     for (name, order, comps) in Blade.Ppl.Elaborate.IdeDists.entries () do
         if not (named.Contains name) then
             match comps with
@@ -1354,7 +1352,7 @@ let private readOperandProvenance (aliases: Map<string, string>) (v: Expr) : (st
         match operand.Kind with
         | ExprKind.ExprField ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar store }, section) }, field)
             when section = "vars" || section = "dims" ->
-            Some (store, sprintf "%s.%s" section field)
+            Some (store, $"{section}.{field}")
         | _ -> None
     | _ -> None
 
@@ -1389,7 +1387,7 @@ let private collectProviderStores (prog: Ast.Program) : ProviderInfo list =
                 pm.Types
                 |> List.tryPick (function
                     | IRTDStruct (n, fields)
-                        when n = label || n = sprintf "%s__%s" store label -> Some fields
+                        when n = label || n = $"{store}__{label}" -> Some fields
                     | _ -> None)
                 |> Option.defaultValue []
                 |> List.map (fun (fn, ft) -> { MName = fn; MType = ppIn ft })
@@ -1482,7 +1480,7 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
                     block.Split('\n')
                     |> Array.filter (fun l -> paramRes |> List.forall (fun re -> not (re.IsMatch l)))
                     |> String.concat "\n"
-                    |> fun s -> s.Trim()
+                    |> _.Trim()
                 else block
             let ps =
                 e.EParams
@@ -1731,7 +1729,7 @@ let private collectReferences (prog: Ast.Program) (tp: TypedProgram) (lines: str
         |> List.groupBy (fun r -> (r.RName, r.RKind, r.RDef))
         |> List.map (fun (_, group) ->
             { List.head group with
-                RUses = group |> List.collect (fun r -> r.RUses) |> List.distinct })
+                RUses = group |> List.collect _.RUses |> List.distinct })
     // `type X = ...` names: no IRId exists and no TExprVar ever names one, so
     // these are standalone def-only entries -- still worth emitting, since a
     // type alias is renameable and belongs in the outline.
@@ -1844,7 +1842,7 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                 if sameFile then clampSpan d.Span else (1, 1, 1, 1)
             let message =
                 if sameFile then d.Message
-                else sprintf "%s (in %s)" d.Message (defaultArg d.Span.File "?")
+                else $"""{d.Message} (in {(defaultArg d.Span.File "?")})"""
             diags.Add { Severity = "error"; Line = line; Col = col
                         EndLine = endLine; EndCol = endCol
                         Message = message; Code = d.Code }
@@ -1944,9 +1942,9 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                     let withCtx =
                         match e.Context with
                         | [] -> baseMsg
-                        | ctx -> sprintf "%s (%s)" baseMsg (String.concat "; " (List.rev ctx))
+                        | ctx -> $"""{baseMsg} ({(String.concat "; " (List.rev ctx))})"""
                     if foreign then
-                        sprintf "%s (in %s)" withCtx (defaultArg e.Span.File "?")
+                        $"""{withCtx} (in {(defaultArg e.Span.File "?")})"""
                     else withCtx
                 diags.Add { Severity = "error"; Line = line; Col = col
                             EndLine = endLine; EndCol = endCol; Message = msg; Code = code }
@@ -2012,7 +2010,7 @@ let ideCheck (filePath: string) : int =
         if not (File.Exists filePath) then
             let missing =
                 { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                  Message = sprintf "File not found: %s" filePath; Code = "" }
+                  Message = $"File not found: {filePath}"; Code = "" }
             (renderJson noEnvelope [missing] [] [] [] [] [] [], 1)
         else
             ideCheckSource filePath (File.ReadAllText filePath)

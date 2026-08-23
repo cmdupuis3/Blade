@@ -160,15 +160,15 @@ module Streaming =
     /// p = 2, 3, 4 lines reproduce Pebay (2008) exactly.
     let mergeFormulaText (p: int) : string =
         let sb = System.Text.StringBuilder()
-        sb.Append(sprintf "M%d' = M%d_A + M%d_B" p p p) |> ignore
+        sb.Append($"M{p}' = M{p}_A + M{p}_B") |> ignore
         for k in 1 .. p do
             let src = p - k
             if src <> 1 then
                 let c = Combinatorics.binomial p k
-                let coef = if c = 1 then "" else sprintf "%d*" c
-                let mA = if src = 0 then "n_A" else sprintf "M%d_A" src
-                let mB = if src = 0 then "n_B" else sprintf "M%d_B" src
-                sb.Append(sprintf "\n        + %s[ %s*(-n_B*d/n)^%d + %s*(n_A*d/n)^%d ]" coef mA k mB k) |> ignore
+                let coef = if c = 1 then "" else $"{c}*"
+                let mA = if src = 0 then "n_A" else $"M{src}_A"
+                let mB = if src = 0 then "n_B" else $"M{src}_B"
+                sb.Append($"\n        + {coef}[ {mA}*(-n_B*d/n)^{k} + {mB}*(n_A*d/n)^{k} ]") |> ignore
         sb.ToString()
 
     /// The numerically DOOMED baseline: accumulate raw power sums, recover

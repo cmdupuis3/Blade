@@ -20,17 +20,17 @@ let specOfStatic (what: string) (v: StaticValue) : Result<Spec, string> =
     let entryOf (e: StaticValue) =
         match e with
         | SVTuple [ SVInt l; SVInt p; SVInt m ] ->
-            if l < 0L then Error (sprintf "%s: l must be >= 0" what)
-            elif p <> 0L && p <> 1L then Error (sprintf "%s: parity must be 0 (even) or 1 (odd)" what)
-            elif m < 1L then Error (sprintf "%s: multiplicity must be >= 1" what)
+            if l < 0L then Error $"{what}: l must be >= 0"
+            elif p <> 0L && p <> 1L then Error $"{what}: parity must be 0 (even) or 1 (odd)"
+            elif m < 1L then Error $"{what}: multiplicity must be >= 1"
             else Ok ({ L = int l; Parity = int p; Mult = int m } : SpecEntry)
-        | _ -> Error (sprintf "%s: spec entries must be (l, parity, mult) int triples" what)
+        | _ -> Error $"{what}: spec entries must be (l, parity, mult) int triples"
     match v with
     | SVTuple entries when not entries.IsEmpty ->
         entries |> List.fold (fun acc e ->
             acc |> Result.bind (fun es -> entryOf e |> Result.map (fun x -> es @ [x])))
             (Ok [])
-    | _ -> Error (sprintf "%s: expected a static array of (l, parity, mult) triples" what)
+    | _ -> Error $"{what}: expected a static array of (l, parity, mult) triples"
 
 /// Convert a static (spec1, spec2, specOut) triple to a TP config.
 let cfgOfStatic (what: string) (v: StaticValue) : Result<TPConfig, string> =
@@ -40,7 +40,7 @@ let cfgOfStatic (what: string) (v: StaticValue) : Result<TPConfig, string> =
         specOfStatic (what + " spec2") s2 |> Result.bind (fun b ->
         specOfStatic (what + " specOut") so |> Result.map (fun c ->
             ({ Spec1 = a; Spec2 = b; SpecOut = c } : TPConfig))))
-    | _ -> Error (sprintf "%s: expected a static (spec1, spec2, specOut) triple" what)
+    | _ -> Error $"{what}: expected a static (spec1, spec2, specOut) triple"
 
 // Point-group block-spec twin of the decoders above, kept separate: a
 // point-group spec names blocks by frozen LABEL, not (l, parity); diagnostics quote the group's roster.
@@ -50,8 +50,7 @@ let cfgOfStatic (what: string) (v: StaticValue) : Result<TPConfig, string> =
 let pgGroupByName (what: string) (name: string) : Result<PointGroup, string> =
     if List.contains name pointGroupNames then Ok (pointGroup name)
     else
-        Error (sprintf "%s: '%s' is not a registered point group -- the registry is {%s}. The roster boundary is MATRIX RATIONALITY (every generator entry in {0, +-1}), not crystallography"
-                   what name (String.concat ", " pointGroupNames))
+        Error ($"""{what}: '{name}' is not a registered point group -- the registry is {{{(String.concat ", " pointGroupNames)}}}. The roster boundary is MATRIX RATIONALITY (every generator entry in {{0, +-1}}), not crystallography""")
 
 /// The expression-position spelling: a static STRING naming a registered
 /// group. (In TYPE position -- `PgIrrepsIdx<C4, SPEC>` -- it's a bare identifier straight to `pgGroupByName`.)
@@ -66,24 +65,24 @@ let pgGroupOfStatic (what: string) (v: StaticValue) : Result<PointGroup, string>
 /// tuples against `grp`'s frozen character table. The unknown-label
 /// diagnostic lives HERE, not the counting layer: the fix is to list the group's whole roster (3-5 labels for a finite group).
 let pgSpecOfStatic (what: string) (grp: PointGroup) (v: StaticValue) : Result<PgSpec, string> =
-    let roster = grp.Irreps |> List.map (fun ir -> ir.Name) |> String.concat ", "
+    let roster = grp.Irreps |> List.map _.Name |> String.concat ", "
     let entryOf (e: StaticValue) =
         match e with
         | SVTuple [ SVString label; SVInt m ] ->
             if not (grp.Irreps |> List.exists (fun ir -> ir.Name = label)) then
-                Error (sprintf "%s: '%s' is not a label of point group %s -- its labels are {%s}" what label grp.Name roster)
+                Error $"{what}: '{label}' is not a label of point group {grp.Name} -- its labels are {{{roster}}}"
             elif m < 1L then
-                Error (sprintf "%s: multiplicity must be >= 1 (label '%s' carries %d)" what label m)
+                Error $"{what}: multiplicity must be >= 1 (label '{label}' carries {m})"
             else Ok ((label, int m) : string * int)
         | _ ->
-            Error (sprintf "%s: spec entries must be (LABEL_NAME, mult) tuples -- a STRING label from %s's table {%s} and an int multiplicity" what grp.Name roster)
+            Error $"{what}: spec entries must be (LABEL_NAME, mult) tuples -- a STRING label from {grp.Name}'s table {{{roster}}} and an int multiplicity"
     match v with
     | SVTuple entries when not entries.IsEmpty ->
         entries |> List.fold (fun acc e ->
             acc |> Result.bind (fun es -> entryOf e |> Result.map (fun x -> es @ [x])))
             (Ok [])
     | _ ->
-        Error (sprintf "%s: expected a static array of (LABEL_NAME, mult) tuples over point group %s {%s}" what grp.Name roster)
+        Error $"{what}: expected a static array of (LABEL_NAME, mult) tuples over point group {grp.Name} {{{roster}}}"
 
 /// The pg twin of `specToStatic`: a point-group spec as (LABEL_NAME, mult)
 /// tuples. `SVString` is first-class in StaticEval, so this costs no new static machinery.
@@ -175,7 +174,7 @@ let install () =
         // conditioning degrades beyond, and body-order expansions live at k <= 4.
         let kArg (name: string) (k: int64) : Result<int, string> =
             if k < 1L || k > 4L then
-                Error (sprintf "%s: K must be a static int in 1..4 (got %d) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)" name k)
+                Error $"{name}: K must be a static int in 1..4 (got {k}) -- the symmetric-power surface is capped at degree 4 (retired transforms-as-types plan section 6.5)"
             else Ok (int k)
         let registerPower (name: string) (kind: PowerKind) =
             registerStaticBuiltin (statName name) (fun args ->
@@ -185,9 +184,9 @@ let install () =
                     kArg name k |> Result.bind (fun k ->
                         let res = powerSpec kind s k
                         if res.IsEmpty then
-                            Error (sprintf "%s: the exterior power is ZERO for K > dim V (K = %d, total_dim = %d) -- there is no spec to name" name k (totalDim s))
+                            Error $"{name}: the exterior power is ZERO for K > dim V (K = {k}, total_dim = {totalDim s}) -- there is no spec to name"
                         else Ok (specToStatic res)))
-                | _ -> Error (sprintf "%s: expected (SPEC, K) static arguments" name))
+                | _ -> Error $"{name}: expected (SPEC, K) static arguments")
         registerPower "sym_spec" PowSym
         registerPower "alt_spec" PowAlt
         // The degree-K parameter-count theorem: free-weight count of a degree-K
@@ -215,9 +214,9 @@ let install () =
             match args with
             | [ SVInt k; SVInt l; SVInt n ] ->
                 if k < 0L || l < 0L then
-                    Error (sprintf "perm_weight_dim: K and L must be static ints >= 0 (got %d, %d)" k l)
+                    Error $"perm_weight_dim: K and L must be static ints >= 0 (got {k}, {l})"
                 elif k > 64L || l > 64L || n > 1000000L || n < -1L then
-                    Error (sprintf "perm_weight_dim: K, L and N are static ints out of any sane range (got %d, %d, %d)" k l n)
+                    Error $"perm_weight_dim: K, L and N are static ints out of any sane range (got {k}, {l}, {n})"
                 else
                     let k, l, n = int k, int l, int n
                     checkPermSizing "perm_weight_dim" "K + L" (k + l) n
@@ -227,9 +226,9 @@ let install () =
             match args with
             | [ SVInt l; SVInt n ] ->
                 if l < 0L then
-                    Error (sprintf "perm_bias_dim: L must be a static int >= 0 (got %d)" l)
+                    Error $"perm_bias_dim: L must be a static int >= 0 (got {l})"
                 elif l > 64L || n > 1000000L || n < -1L then
-                    Error (sprintf "perm_bias_dim: L and N are static ints out of any sane range (got %d, %d)" l n)
+                    Error $"perm_bias_dim: L and N are static ints out of any sane range (got {l}, {n})"
                 else
                     let l, n = int l, int n
                     checkPermSizing "perm_bias_dim" "L" l n
@@ -251,9 +250,9 @@ let install () =
                 | [ spec; SVInt b ] ->
                     specOfStatic name spec |> Result.bind (fun s ->
                         if b < 0L || b >= int64 s.Length then
-                            Error (sprintf "%s: block index %d out of range (spec has %d blocks)" name b s.Length)
+                            Error $"{name}: block index {b} out of range (spec has {s.Length} blocks)"
                         else Ok (SVInt (int64 (f s (int b)))))
-                | _ -> Error (sprintf "%s: expected (spec, block) static arguments" name))
+                | _ -> Error $"{name}: expected (spec, block) static arguments")
         registerBlockAccessor "irreps_l" (fun s b -> s.[b].L)
         registerBlockAccessor "irreps_parity" (fun s b -> s.[b].Parity)
         registerBlockAccessor "irreps_mult" (fun s b -> s.[b].Mult)
@@ -297,9 +296,9 @@ let install () =
                     pgGroupOfStatic (name + " GROUP") grp |> Result.bind (fun g ->
                     pgSpecOfStatic (name + " SPEC") g spec |> Result.bind (fun s ->
                         if b < 0L || b >= int64 s.Length then
-                            Error (sprintf "%s: block index %d out of range (spec has %d blocks)" name b s.Length)
+                            Error $"{name}: block index {b} out of range (spec has {s.Length} blocks)"
                         else Ok (SVInt (int64 (f g s (int b))))))
-                | _ -> Error (sprintf "%s: expected (GROUP, SPEC, BLOCK) static arguments" name))
+                | _ -> Error $"{name}: expected (GROUP, SPEC, BLOCK) static arguments")
         // RESTRICTION: the first spec-valued pg builtin -- `ml.derive_pg_linear`
         // now consumes a derived spec, which is why this exists. `pg_restrict`
         // names the point-group module an O(3) space becomes under the

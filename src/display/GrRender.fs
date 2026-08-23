@@ -80,7 +80,7 @@ let private platformTag () : string =
         | Architecture.X64 -> "x64"
         | Architecture.Arm64 -> "arm64"
         | other -> (string other).ToLowerInvariant()
-    sprintf "%s-%s" os arch
+    $"{os}-{arch}"
 
 /// The platform-stamped artifact name gr-render/package.ps1 emits, e.g.
 /// `gr-render-win32-x64.exe`. Checked BEFORE the plain `helperLeaf` at every
@@ -90,7 +90,7 @@ let private platformTag () : string =
 /// or an older manual build.
 let stampedHelperLeaf =
     let ext = if OperatingSystem.IsWindows() then ".exe" else ""
-    sprintf "gr-render-%s%s" (platformTag ()) ext
+    $"gr-render-{platformTag ()}{ext}"
 
 /// Names tried at each search location, in preference order: the
 /// platform-stamped prebuilt first, the plain name second. `distinct` just
@@ -101,7 +101,7 @@ let private candidateLeaves = [ stampedHelperLeaf; helperLeaf ] |> List.distinct
 
 /// How many directory levels above the running binary are searched for
 /// `tools/gr-render/`. A dev checkout runs Blade.exe out of
-/// `bin/Release/net7.0/` (3 levels), the test harness out of scratch dirs
+/// `bin/Release/net10.0/` (3 levels), the test harness out of scratch dirs
 /// below that; 8 covers those without walking to the drive root.
 [<Literal>]
 let MaxWalkUp = 8
@@ -133,7 +133,7 @@ let resolveHelperFrom (baseDir: string) : Result<string, string> =
     if not (String.IsNullOrWhiteSpace explicitPath) then
         let p = explicitPath.Trim()
         if File.Exists p then Ok (Path.GetFullPath p)
-        else Error (sprintf "gr-render helper not found: BLADE_GR_RENDER points at '%s', which does not exist" p)
+        else Error $"gr-render helper not found: BLADE_GR_RENDER points at '{p}', which does not exist"
     else
         let besideMatch =
             candidateLeaves
@@ -157,8 +157,7 @@ let resolveHelperFrom (baseDir: string) : Result<string, string> =
             | Some p -> Ok p
             | None ->
                 let names = String.concat " or " candidateLeaves
-                Error (sprintf "gr-render helper not found (looked for %s beside %s and in tools/gr-render up to %d levels above it; set BLADE_GR_RENDER to override)"
-                               names (baseDir.TrimEnd(Path.DirectorySeparatorChar)) MaxWalkUp)
+                Error ($"gr-render helper not found (looked for {names} beside {(baseDir.TrimEnd(Path.DirectorySeparatorChar))} and in tools/gr-render up to {MaxWalkUp} levels above it; set BLADE_GR_RENDER to override)")
 
 let resolveHelper () : Result<string, string> = resolveHelperFrom AppContext.BaseDirectory
 
@@ -175,7 +174,7 @@ let resolveGrEnv () : Result<GrEnv, string> =
         let root = grdir.Trim()
         let bin = Path.Combine(root, "bin")
         if Directory.Exists bin then Ok { GrDir = root; GrBin = bin }
-        else Error (sprintf "GR unavailable: GRDIR bin missing (%s does not exist)" bin)
+        else Error $"GR unavailable: GRDIR bin missing ({bin} does not exist)"
 
 /// Can this process render at all?
 type Availability =
@@ -245,7 +244,7 @@ let private writeLine (w: Worker) (line: string) : Result<unit, string> =
         w.Stdin.Write '\n'
         w.Stdin.Flush ()
         Ok ()
-    with ex -> Error (sprintf "gr-render worker is not accepting requests: %s" ex.Message)
+    with ex -> Error $"gr-render worker is not accepting requests: {ex.Message}"
 
 /// One response line, or a reason. A null read is EOF -- the worker died
 /// mid-request, which is the crash-isolation case: report it and let the next
@@ -254,10 +253,10 @@ let private readLineWithin (w: Worker) (timeoutMs: int) : Result<string, string>
     let t = Task.Run(fun () -> w.Stdout.ReadLine())
     let completed = try t.Wait timeoutMs with _ -> true
     if not completed then
-        Error (sprintf "gr-render worker timed out after %d ms" timeoutMs)
+        Error $"gr-render worker timed out after {timeoutMs} ms"
     else
         match (try Ok t.Result with ex -> Error ex.Message) with
-        | Error msg -> Error (sprintf "gr-render worker went away: %s" msg)
+        | Error msg -> Error $"gr-render worker went away: {msg}"
         | Ok null -> Error "gr-render worker exited without answering"
         | Ok line -> Ok line
 
@@ -295,7 +294,7 @@ let private spawn (helper: string) (gr: GrEnv) : Result<Worker, string> =
             if existingPath = "" then gr.GrBin
             else gr.GrBin + string Path.PathSeparator + existingPath
         let p = new Process(StartInfo = psi)
-        if not (p.Start()) then Error (sprintf "could not start the gr-render helper (%s)" helper)
+        if not (p.Start()) then Error $"could not start the gr-render helper ({helper})"
         else
             // stderr is free-form worker logging. It MUST be drained or a
             // chatty worker fills the pipe buffer and blocks forever mid-render.
@@ -303,7 +302,7 @@ let private spawn (helper: string) (gr: GrEnv) : Result<Worker, string> =
             p.BeginErrorReadLine()
             Ok { Proc = p; Stdin = p.StandardInput; Stdout = p.StandardOutput }
     with ex ->
-        Error (sprintf "could not start the gr-render helper (%s): %s" helper ex.Message)
+        Error $"could not start the gr-render helper ({helper}): {ex.Message}"
 
 /// Spawn + liveness ping. The ping is what turns "the exe started" into "the
 /// exe speaks this protocol": a helper from a different build, or one that dies
@@ -321,7 +320,7 @@ let private startWorker () : Result<Worker, string> =
                 worker <- Some w
                 nextId <- nextId + 1
                 let id = nextId
-                let ping = sprintf "{\"id\":%d,\"cmd\":\"ping\"}" id
+                let ping = $"{{\"id\":{id},\"cmd\":\"ping\"}}"
                 let ok =
                     match writeLine w ping with
                     | Error e -> Error e
@@ -337,9 +336,9 @@ let private startWorker () : Result<Worker, string> =
                                     | true, v -> v.ValueKind = JsonValueKind.True
                                     | _ -> false
                                 if okProp then Ok ()
-                                else Error (sprintf "gr-render worker did not answer its startup ping with ok:true (%s)" line)
+                                else Error $"gr-render worker did not answer its startup ping with ok:true ({line})"
                             with ex ->
-                                Error (sprintf "gr-render worker sent a malformed startup ping response: %s" ex.Message)
+                                Error $"gr-render worker sent a malformed startup ping response: {ex.Message}"
                 match ok with
                 | Ok () -> Ok w
                 | Error reason ->
@@ -369,11 +368,10 @@ let render (spec: string) (width: int) (height: int) (format: string) : Result<s
         nextId <- nextId + 1
         let id = nextId
         let req =
-            sprintf "{\"id\":%d,\"cmd\":\"render\",\"spec\":%s,\"width\":%d,\"height\":%d,\"format\":\"%s\"}"
-                    id spec width height format
+            $"{{\"id\":{id},\"cmd\":\"render\",\"spec\":{spec},\"width\":{width},\"height\":{height},\"format\":\"{format}\"}}"
         let malformed (detail: string) =
             killWorker ()
-            Error (sprintf "gr-render worker sent a malformed response: %s" detail)
+            Error $"gr-render worker sent a malformed response: {detail}"
         match writeLine w req with
         | Error reason ->
             killWorker ()
@@ -388,7 +386,7 @@ let render (spec: string) (width: int) (height: int) (format: string) : Result<s
                     try Ok (JsonDocument.Parse line)
                     with ex -> Error ex.Message
                 match parsed with
-                | Error msg -> malformed (sprintf "%s -- %s" msg (line.Substring(0, min 200 line.Length)))
+                | Error msg -> malformed $"{msg} -- {line.Substring(0, min 200 line.Length)}"
                 | Ok doc ->
                     use doc = doc
                     let root = doc.RootElement
@@ -421,7 +419,7 @@ let render (spec: string) (width: int) (height: int) (format: string) : Result<s
                                     match root.TryGetProperty "error" with
                                     | true, v when v.ValueKind = JsonValueKind.String -> v.GetString()
                                     | _ -> "(no reason given)"
-                                Error (sprintf "render failed: %s" msg)
+                                Error $"render failed: {msg}"
                             | _ -> malformed "response carries no boolean \"ok\""
 
 /// Stop the worker. Called when the serve process is going down; best-effort

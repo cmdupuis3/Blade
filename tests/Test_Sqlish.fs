@@ -126,13 +126,13 @@ let runGatherElisionTests () : BlockResult =
         | Error e -> fail name e
         | Ok cpp ->
             let flat =
-                cpp.Split('\n') |> Array.map (fun l -> l.TrimStart()) |> String.concat "\n"
+                cpp.Split('\n') |> Array.map (_.TrimStart()) |> String.concat "\n"
             let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
             let present = mustNotContain |> List.filter flat.Contains
             if not missing.IsEmpty then
-                fail name (sprintf "generated C++ lacks: %s" (String.concat " | " missing))
+                fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then
-                fail name (sprintf "generated C++ still contains: %s" (String.concat " | " present))
+                fail name ($"""generated C++ still contains: {(String.concat " | " present)}""")
             else
                 passed <- passed + 1
                 resultLine Pass name "emission shape as expected"

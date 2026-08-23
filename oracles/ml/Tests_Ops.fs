@@ -32,7 +32,7 @@ module Tests_Ops =
         let cfg = { Spec1 = specIn; Spec2 = specSh; SpecOut = specOut }
 
         let ps = TensorProduct.paths cfg
-        check (sprintf "example config has 7 paths (got %d)" ps.Length) (ps.Length = 7)
+        check $"example config has 7 paths (got {ps.Length})" (ps.Length = 7)
         // Hand-enumerated: 0e*0e->0e, 0e*1o->1o, 0e*2e->2e, 1o*0e->1o,
         //                  1o*1o->0e, 1o*1o->2e, 1o*2e->1o.
         let expectedPaths =
@@ -53,7 +53,7 @@ module Tests_Ops =
                 io.L >= abs (i1.L - i2.L) && io.L <= i1.L + i2.L
                 && io.P = parityMul i1.P i2.P)
         check "all paths satisfy CG selection rules" rulesOk
-        check (sprintf "weightDim = 1472 (got %d)" (TensorProduct.weightDim cfg))
+        check $"weightDim = 1472 (got {TensorProduct.weightDim cfg})"
             (TensorProduct.weightDim cfg = 1472)
         check "allValidOutputs true for example config" (TensorProduct.allValidOutputs cfg)
 
@@ -99,7 +99,7 @@ module Tests_Ops =
                 TensorProduct.tensorProduct eCfg w
                     (Rotations.applyRep eCfg.Spec1 r x)
                     (Rotations.applyRep eCfg.Spec2 r y)
-            checkArrayClose (sprintf "TP equivariance trial %d" trial) 1e-7 outThenRot rotThenOut
+            checkArrayClose $"TP equivariance trial {trial}" 1e-7 outThenRot rotThenOut
 
         section "tensor product: 1x1->1 is the cross product"
 
@@ -139,7 +139,7 @@ module Tests_Ops =
         check "allIrrepsPresent true" (Linear.allIrrepsPresent lSpecIn lSpecOut)
         check "allIrrepsPresent false when output irrep missing"
             (not (Linear.allIrrepsPresent (mkSpec [ (0, Even, 4) ]) lSpecOut))
-        check (sprintf "linear weightDim = 27 (got %d)" (Linear.weightDim lSpecIn lSpecOut))
+        check $"linear weightDim = 27 (got {Linear.weightDim lSpecIn lSpecOut})"
             (Linear.weightDim lSpecIn lSpecOut = 27)
 
         let lw = randArray rng 27

@@ -117,5 +117,5 @@ let runOracleTests () : BlockResult =
          && exactSimplexRatio 2 [1000] > 1.99 && exactSimplexRatio 2 [1000] < 2.0
          && close (exactSimplexRatio 2 [2; 2]) (16.0/9.0)) ""
 
-    printFooter "Oracle Review" [sprintf "%d passed" passed; sprintf "%d failure(s)" failed]
+    printFooter "Oracle Review" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Oracle Review"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

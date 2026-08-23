@@ -237,8 +237,8 @@ let revalidate (tp: TypedProgram) : FnVerdict list =
 
 let tally (vs: FnVerdict list) : int * int * int =
     let c = vs |> List.filter (fun v -> v.Verdict = Blade.DeduceRep.RepConfirm) |> List.length
-    let a = vs |> List.filter (fun v -> match v.Verdict with Blade.DeduceRep.RepAbstain _ -> true | _ -> false) |> List.length
-    let d = vs |> List.filter (fun v -> match v.Verdict with Blade.DeduceRep.RepDisagree _ -> true | _ -> false) |> List.length
+    let a = vs |> List.filter (_.Verdict.IsRepAbstain) |> List.length
+    let d = vs |> List.filter (_.Verdict.IsRepDisagree) |> List.length
     (c, a, d)
 
 // ============================================================================
@@ -262,7 +262,7 @@ let checkOnly (source: string) : Result<TypedProgram, Blade.Diagnostics.Diagnost
 /// two disciplines, which have no typed lattice at all until C3 builds them.
 /// Everything else is refused by machinery that is not an equivariance walker.
 let channelOf (ds: Blade.Diagnostics.Diagnostic list) : string =
-    let codes = ds |> List.map (fun d -> d.Code) |> List.distinct
+    let codes = ds |> List.map (_.Code) |> List.distinct
     if List.contains "BL4008" codes then "equiv"
     elif List.contains "BL4009" codes then "galilean"
     elif List.contains "BL4012" codes then "perm"
@@ -293,7 +293,7 @@ let seamOffenders (ds: Blade.Diagnostics.Diagnostic list) : Set<string> =
 
 let private firstMessage (ds: Blade.Diagnostics.Diagnostic list) =
     match ds with
-    | d :: _ -> sprintf "[%s] %s" d.Code d.Message
+    | d :: _ -> $"[{d.Code}] {d.Message}"
     | [] -> "(no diagnostic)"
 
 let private clip (n: int) (s: string) =
@@ -340,11 +340,11 @@ let runRepRejectCensusTests () : BlockResult =
 
     let (s1, n1) = shadowEquiv "function f(x: T) where ml.equiv(O3) -> T = x\n"
     check "shadow: a pin is rewritten, the rest of the line is untouched"
-        (n1 = 1 && s1 = sprintf "function f(x: T) where %s(O3) -> T = x\n" shadowName)
+        (n1 = 1 && s1 = $"function f(x: T) where {shadowName}(O3) -> T = x\n")
         (clip 120 s1)
 
     let (_, n2) = shadowEquiv "// prose that mentions ml.equiv(O3) at length\n"
-    check "shadow: a comment line is left alone" (n2 = 0) (sprintf "%d rewrite(s)" n2)
+    check "shadow: a comment line is left alone" (n2 = 0) ($"{n2} rewrite(s)")
 
     let (s3, n3) = shadowEquiv "function f() where ml.equiv(O3), ml.perm_equiv(4) -> T = 1\n"
     check "shadow: a sibling conjunct survives"
@@ -352,7 +352,7 @@ let runRepRejectCensusTests () : BlockResult =
         (clip 120 s3)
 
     let (_, n4) = shadowEquiv "let x = ml.equivalence(3)\nlet y = ml.equiv_hint\n"
-    check "shadow: only a call-shaped `ml.equiv(` matches" (n4 = 0) (sprintf "%d rewrite(s)" n4)
+    check "shadow: only a call-shaped `ml.equiv(` matches" (n4 = 0) ($"{n4} rewrite(s)")
 
     let (s5, n5) = shadowEquiv "function f() where ml.equiv (SO3) -> T = 1\n"
     check "shadow: a space before the paren still matches"
@@ -399,8 +399,8 @@ let runRepRejectCensusTests () : BlockResult =
     Blade.DeduceRep.RepCheckDisagreements.reset ()
     Blade.DeduceRep.RepCheckCensus.reset ()
 
-    let rejects = records |> List.filter (fun r -> r.SeamDiags.IsSome)
-    let accepted = records |> List.filter (fun r -> r.SeamDiags.IsNone)
+    let rejects = records |> List.filter (_.SeamDiags.IsSome)
+    let accepted = records |> List.filter (_.SeamDiags.IsNone)
     let equivRejects = rejects |> List.filter (fun r -> channelOf r.SeamDiags.Value = "equiv")
 
     // -- the per-file census lines (informational) ---------------------
@@ -408,7 +408,7 @@ let runRepRejectCensusTests () : BlockResult =
         let ch = channelOf r.SeamDiags.Value
         let typedPart =
             match r.TypedVerdicts with
-            | Error ds -> sprintf "TYPED-UNREACHABLE %s" (clip 90 (firstMessage ds))
+            | Error ds -> $"TYPED-UNREACHABLE {(clip 90 (firstMessage ds))}"
             | Ok vs when vs.IsEmpty -> "no certificate to validate"
             | Ok vs ->
                 let offenders = seamOffenders r.SeamDiags.Value
@@ -420,7 +420,7 @@ let runRepRejectCensusTests () : BlockResult =
                         (verdictName v.Verdict)
                         (if d = "" then "" else "(" + clip 70 d + ")"))
                 |> String.concat " ; "
-        resultLine Skip (sprintf "REJECT %s" r.Name)
+        resultLine Skip ($"REJECT {r.Name}")
             (sprintf "seam=%s offenders=[%s] %s || typed (* = named by the seam): %s"
                 ch (String.concat "," (Set.toList (seamOffenders r.SeamDiags.Value)))
                 (clip 90 (firstMessage r.SeamDiags.Value)) typedPart)
@@ -456,7 +456,7 @@ let runRepRejectCensusTests () : BlockResult =
             | Ok vs ->
                 for v in vs do
                     if v.FromSource && v.Verdict = Blade.DeduceRep.RepConfirm && offenders.Contains v.Owner then
-                        yield sprintf "%s: %s|%s" r.Name v.Owner v.Group
+                        yield $"{r.Name}: {v.Owner}|{v.Group}"
             | Error _ -> () ]
     // MEASURED: exactly one, corpus 051 (`ml.y_to` bound to a DEAD `let` inside
     // a C4-certified body). The seam refuses the O(3) op BY NAME wherever it
@@ -472,8 +472,7 @@ let runRepRejectCensusTests () : BlockResult =
             sprintf "%d equiv-channel rejection(s); the typed validation would ACCEPT exactly one of them: %s"
                 equivRejects.Length (String.concat " ; " knownPermissive)
          else
-            sprintf "expected [%s], measured [%s]"
-                (String.concat " ; " knownPermissive) (String.concat " ; " alarming))
+            $"""expected [{(String.concat " ; " knownPermissive)}], measured [{(String.concat " ; " alarming)}]""")
 
     // -- obligation 3: the calibration
     printSubHeader "Calibration: out-of-band re-validation vs the live C1 census"
@@ -494,7 +493,7 @@ let runRepRejectCensusTests () : BlockResult =
             // the whole method.
             calMismatch <-
                 calMismatch
-                @ [ sprintf "%s: accepted unshadowed, REFUSED shadowed: %s" r.Name (clip 90 (firstMessage ds)) ]
+                @ [ $"{r.Name}: accepted unshadowed, REFUSED shadowed: {(clip 90 (firstMessage ds))}" ]
     check "3. out-of-band re-validation reproduces the live census on every accepted file"
         calMismatch.IsEmpty
         (if calMismatch.IsEmpty then
@@ -504,11 +503,11 @@ let runRepRejectCensusTests () : BlockResult =
 
     // -- obligation 4: non-vacuity
     printSubHeader "Harness health"
-    let totalShadowed = records |> List.sumBy (fun r -> r.Shadowed)
+    let totalShadowed = records |> List.sumBy (_.Shadowed)
     check "4a. the shadow rewrite fires"
-        (totalShadowed > 0) (sprintf "%d source pin(s) shadowed across the category" totalShadowed)
+        (totalShadowed > 0) ($"{totalShadowed} source pin(s) shadowed across the category")
     check "4b. the corpus still contains equiv-channel rejections"
-        (not equivRejects.IsEmpty) (sprintf "%d of %d rejection(s) are BL4008" equivRejects.Length rejects.Length)
+        (not equivRejects.IsEmpty) ($"{equivRejects.Length} of {rejects.Length} rejection(s) are BL4008")
     let oobTriple =
         accepted
         |> List.fold (fun (c, a, d) r ->
@@ -525,7 +524,7 @@ let runRepRejectCensusTests () : BlockResult =
     check "4d. every equiv-channel rejection carried a source pin to shadow"
         unshadowedRejects.IsEmpty
         (if unshadowedRejects.IsEmpty then "the shadow rewrite reached all of them"
-         else unshadowedRejects |> List.map (fun r -> r.Name) |> String.concat ", ")
+         else unshadowedRejects |> List.map (_.Name) |> String.concat ", ")
 
     // ------------------------------------------------------------------
     // The census roll-up (informational)
@@ -538,7 +537,7 @@ let runRepRejectCensusTests () : BlockResult =
         |> List.countBy id
         |> List.sortBy fst
     for (ch, n) in byChannel do
-        resultLine Skip (sprintf "seam rejections on channel '%s'" ch) (sprintf "%d file(s)" n)
+        resultLine Skip ($"seam rejections on channel '{ch}'") ($"{n} file(s)")
 
     // Per-FILE verdict, decided by the functions the seam actually named. A
     // file counts as "would still be refused" iff the typed side DISAGREES on
@@ -557,7 +556,7 @@ let runRepRejectCensusTests () : BlockResult =
             perFile <- perFile @ [ (r.Name, "REFUSED-ANYWAY " + (match ds with d :: _ -> d.Code | [] -> "?")) ]
         | Ok vs ->
             let mine = vs |> List.filter (fun v -> v.FromSource && offenders.Contains v.Owner)
-            let disagrees = mine |> List.filter (fun v -> match v.Verdict with Blade.DeduceRep.RepDisagree _ -> true | _ -> false)
+            let disagrees = mine |> List.filter (_.Verdict.IsRepDisagree)
             for v in mine do
                 match v.Verdict with
                 | Blade.DeduceRep.RepAbstain reason ->
@@ -565,7 +564,7 @@ let runRepRejectCensusTests () : BlockResult =
                 | _ -> ()
             if not disagrees.IsEmpty then
                 nWouldReject <- nWouldReject + 1
-                perFile <- perFile @ [ (r.Name, sprintf "DISAGREE (%d/%d offender(s))" disagrees.Length mine.Length) ]
+                perFile <- perFile @ [ (r.Name, $"DISAGREE ({disagrees.Length}/{mine.Length} offender(s))") ]
             else
                 nWouldPass <- nWouldPass + 1
                 let how =
@@ -574,13 +573,13 @@ let runRepRejectCensusTests () : BlockResult =
                 perFile <- perFile @ [ (r.Name, how) ]
 
     for (n, v) in perFile do
-        resultLine Skip (sprintf "verdict %s" v) n
+        resultLine Skip ($"verdict {v}") n
 
     resultLine Skip "equiv rejections: per-file typed verdict"
         (sprintf "%d of %d would still be REFUSED (typed disagrees), %d would COMPILE (typed abstains or confirms), %d are refused by a later stage anyway"
             nWouldReject equivRejects.Length nWouldPass nUnreach)
     for KeyValue (reason, n) in reasonTally do
-        resultLine Skip (sprintf "abstain x%d" n) reason
+        resultLine Skip ($"abstain x{n}") reason
 
     // ------------------------------------------------------------------
     // Message parity: the diagnostics corpus, pin by pin
@@ -615,13 +614,13 @@ let runRepRejectCensusTests () : BlockResult =
             let spanPins = pins |> List.filter (fun p -> p.PinCode = "BL4008" && p.PinStart.IsSome)
             let disagreeSpans =
                 typed
-                |> List.filter (fun v -> match v.Verdict with Blade.DeduceRep.RepDisagree _ -> true | _ -> false)
+                |> List.filter (_.Verdict.IsRepDisagree)
                 |> List.map (fun v -> (v.BodySpan.StartLine, v.BodySpan.StartCol))
             let spanOk =
                 spanPins |> List.filter (fun p -> List.contains p.PinStart.Value disagreeSpans)
             spanTotal <- spanTotal + spanPins.Length
             spanSurvive <- spanSurvive + spanOk.Length
-            resultLine Skip (sprintf "pins %s" name)
+            resultLine Skip ($"pins {name}")
                 (sprintf "%d/%d ERROR-CONTAINS survive, %d/%d span pin(s) survive%s; typed says: %s"
                     survived.Length contains.Length spanOk.Length spanPins.Length
                     (if died.IsEmpty then "" else " | DIES: " + (died |> List.map (clip 55) |> String.concat " / "))
@@ -633,13 +632,12 @@ let runRepRejectCensusTests () : BlockResult =
             diagFiles pinsSurvive pinsTotal spanSurvive spanTotal)
 
     printFooter "Equiv Rejection-Parity Census (C3 gate)"
-        [ sprintf "%d passed" passed
-          sprintf "%d failure(s)" failed
-          sprintf "%d seam rejection(s)" rejects.Length
-          sprintf "%d on the equiv channel" equivRejects.Length
-          sprintf "typed would refuse %d, let through %d, %d refused anyway"
-              nWouldReject nWouldPass nUnreach
-          sprintf "message pins surviving: %d/%d text, %d/%d span" pinsSurvive pinsTotal spanSurvive spanTotal ]
+        [ $"{passed} passed"
+          $"{failed} failure(s)"
+          $"{rejects.Length} seam rejection(s)"
+          $"{equivRejects.Length} on the equiv channel"
+          $"typed would refuse {nWouldReject}, let through {nWouldPass}, {nUnreach} refused anyway"
+          $"message pins surviving: {pinsSurvive}/{pinsTotal} text, {spanSurvive}/{spanTotal} span" ]
     { Block = "Equiv Rejection-Parity Census (C3 gate)"
       Passed = passed
       Failed = failed

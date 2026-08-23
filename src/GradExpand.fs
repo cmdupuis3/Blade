@@ -89,8 +89,8 @@ let internal (|IndexIota|_|) (e: Expr) =
     | ExprKind.ExprCompute { Kind = ExprKind.ExprBinOp (_, OpApply,
                                         { Kind = ExprKind.ExprMethodFor [{ Kind = ExprKind.ExprRange _ }] },
                                         { Kind = ExprKind.ExprLambda ([p], _, { Kind = ExprKind.ExprVar b }) }) }
-            when p.Name = b -> Some ()
-    | _ -> None
+            when p.Name = b -> true
+    | _ -> false
 
 /// `sort(<iota>, lambda(<p>: I) -> <key>[x := <A>(<p>)])`: the shape both
 /// synthesized permutation sorts have. Recognizes an ALREADY-EXPANDED body on a
@@ -209,7 +209,7 @@ let internal expandSort (fname: string) (ctx: Ctx)
     | ExprKind.ExprVar src ->
         (match Map.tryFind src idxTys with
          | None ->
-             err fname (sprintf "differentiating `sort` needs a named array operand with a declared rank-1 index type; '%s' has none (annotate the parameter or local as `Array<Float like I>`, or sort a parameter directly)" src)
+             err fname $"differentiating `sort` needs a named array operand with a declared rank-1 index type; '{src}' has none (annotate the parameter or local as `Array<Float like I>`, or sort a parameter directly)"
          // The expansion SPELLS the index type three times (`range<I>` plus
          // the key and gather lambda annotations), and every syntactic
          // occurrence of an ANONYMOUS `Idx<n>` gets its own nominal identity
@@ -219,7 +219,7 @@ let internal expandSort (fname: string) (ctx: Ctx)
          // the whole function. (The C2 map rule is unaffected: it spells the
          // index type ONCE.)
          | Some ity when (match ity with TyNamed (_, []) -> false | _ -> true) ->
-             err fname (sprintf "differentiating `sort` needs the sorted array's index type to be a NAMED alias (v1): '%s' is declared over an anonymous index type, whose occurrences do not share an identity, so the synthesized permutation would not unify with it. Add `type I = Idx<n>` and declare the array as `Array<Float like I>`" src)
+             err fname $"differentiating `sort` needs the sorted array's index type to be a NAMED alias (v1): '{src}' is declared over an anonymous index type, whose occurrences do not share an identity, so the synthesized permutation would not unify with it. Add `type I = Idx<n>` and declare the array as `Array<Float like I>`"
          | Some ity ->
         // The key must be a lambda of one parameter reading only THAT
         // element. A key closing over ANY other binding in the differentiated
@@ -239,7 +239,7 @@ let internal expandSort (fname: string) (ctx: Ctx)
         | ExprKind.ExprLambda ([kp], _, kbody) ->
             let closedOver = Set.remove kp.Name preBound
             if mentionsDeep closedOver kbody then
-                err fname (sprintf "differentiating `sort` requires a key that reads ONLY the sorted element: the key of '%s' closes over another binding in scope, so the permutation would depend on data whose contribution the derivative drops (v1). Precompute the key into the sorted array, or sort outside the differentiated function" name)
+                err fname $"differentiating `sort` requires a key that reads ONLY the sorted element: the key of '{name}' closes over another binding in scope, so the permutation would depend on data whose contribution the derivative drops (v1). Precompute the key into the sorted array, or sort outside the differentiated function"
             else
             let iotaN = sortIotaName name
             let permN = sortPermName name
@@ -255,7 +255,7 @@ let internal expandSort (fname: string) (ctx: Ctx)
                 [iotaN; permN; invN]
                 |> List.filter (fun n -> Set.contains n preBound)
             if not (List.isEmpty collided) && not alreadyPerm then
-                err fname (sprintf "binding '%s' collides with a name the sort expansion synthesizes for '%s'; rename it" (List.head collided) name)
+                err fname $"binding '{List.head collided}' collides with a name the sort expansion synthesizes for '{name}'; rename it"
             else
             let pv = "__spk"
             // The permutation is an ARGSORT of the ORIGINAL INDICES under the
@@ -272,14 +272,14 @@ let internal expandSort (fname: string) (ctx: Ctx)
             // refusal, not a half-substituted key.
             match substKern kp.Name (syn (ExprApp (v src, [v pv]))) kbody with
             | None ->
-                err fname (sprintf "differentiating `sort` cannot rebuild the key of '%s' over the permutation: a binder or an unsupported form stands between the key parameter '%s' and its use, so the composed key cannot be proved capture-free (v1). Simplify the key, or precompute it into the sorted array" name kp.Name)
+                err fname $"differentiating `sort` cannot rebuild the key of '{name}' over the permutation: a binder or an unsupported form stands between the key parameter '{kp.Name}' and its use, so the composed key cannot be proved capture-free (v1). Simplify the key, or precompute it into the sorted array"
             | Some permKeyBody ->
             // A key that never reads its element sorts by a constant. The
             // permutation would then carry no reference to the sorted array,
             // and `collectSortPlans` -- which recovers the plumbing by SHAPE,
             // because inlining renames locals -- would have nothing to key on.
             if not (mentionsDeep (Set.singleton pv) permKeyBody) then
-                err fname (sprintf "differentiating `sort` requires a key that reads the sorted element: the key of '%s' is constant, so the sort is an identity the derivative cannot trace (v1); drop the sort instead" name)
+                err fname $"differentiating `sort` requires a key that reads the sorted element: the key of '{name}' is constant, so the sort is an identity the derivative cannot trace (v1); drop the sort instead"
             else
             let iotaLet =
                 if alreadyPerm then []
@@ -299,11 +299,11 @@ let internal expandSort (fname: string) (ctx: Ctx)
             Ok (iotaLet @ permLet @ invLet,
                 { Perm = permN; InvPerm = (if wantInv then invN else ""); IdxTy = ity; Src = src })
         | ExprKind.ExprLambda _ ->
-            err fname (sprintf "differentiating `sort` requires a single-parameter key lambda (the sorted element); the key of '%s' takes a different arity" name)
+            err fname $"differentiating `sort` requires a single-parameter key lambda (the sorted element); the key of '{name}' takes a different arity"
         | _ ->
-            err fname (sprintf "differentiating `sort` requires an explicit key lambda `lambda(x: T) -> ...`; the key of '%s' is not a lambda (v1)" name))
+            err fname $"differentiating `sort` requires an explicit key lambda `lambda(x: T) -> ...`; the key of '{name}' is not a lambda (v1)")
     | _ ->
-        err fname (sprintf "differentiating `sort` requires a named array operand (v1); bind the sorted array to a `let` first (in '%s')" name)
+        err fname $"differentiating `sort` requires a named array operand (v1); bind the sorted array to a `let` first (in '{name}')"
 
 /// A map application, decomposed. `method_for(ops) <@> k` and
 /// `object_for(k) <@> ops` are the SAME loop written two ways, and every
@@ -425,7 +425,7 @@ let rec internal walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (in
     // second validation here would refuse bindings that are never applied.
     | { Kind = ExprKind.ExprObjectFor kern } when errMode.Value = "jvp" ->
         let captures (ps: LambdaParam list) (body: Expr) =
-            let bound = ps |> List.map (fun p -> p.Name) |> Set.ofList
+            let bound = ps |> List.map _.Name |> Set.ofList
             Set.difference (allVarsDeep body) bound
         (match kern.Kind with
          | ExprKind.ExprLambda (ps, _, kbody)
@@ -551,7 +551,7 @@ let rec internal patGuardExprs (p: Pattern) : Expr list =
     | PatternKind.PatTyped (sub, _) -> patGuardExprs sub
 
 let internal captureMsg (src: string) (tgt: string) : string =
-    sprintf "inlining would rename '%s' to '%s', which a nested binder of the same name would capture -- rename the local binder" src tgt
+    $"inlining would rename '{src}' to '{tgt}', which a nested binder of the same name would capture -- rename the local binder"
 
 /// Does `name` occur FREE in `e` -- i.e. would `renameExpr` rewrite at least
 /// one reference to it? Exhaustive over ExprKind and SHADOWING-AWARE, arm for
@@ -611,8 +611,8 @@ let rec internal occursFree (name: string) (e: Expr) : bool =
     // Binders. Params shadow the defaults as well as the body (renameExpr
     // renames both with the shadowed map).
     | ExprKind.ExprLambda (ps, _, body) ->
-        under (ps |> List.map (fun p -> p.Name))
-              (body :: (ps |> List.choose (fun p -> p.Default)))
+        under (ps |> List.map _.Name)
+              (body :: (ps |> List.choose _.Default))
     // A `let`'s VALUE is outside its own binder; the guards and body are in.
     | ExprKind.ExprLet (b, body) ->
         o b.Value || under (patternBoundNames b.Pattern) (patGuardExprs b.Pattern @ [body])
@@ -756,9 +756,9 @@ let rec internal renameExpr (ren: Map<string, string>) (e: Expr) : Result<Expr, 
     // Binders: shadow, check capture against the scope's actual contents,
     // then rename the bodies.
     | ExprKind.ExprLambda (ps, wc, body) ->
-        let names = ps |> List.map (fun p -> p.Name)
+        let names = ps |> List.map _.Name
         let ren' = shadowNames names ren
-        captureCheck ren' names (body :: (ps |> List.choose (fun p -> p.Default))) |> Result.bind (fun () ->
+        captureCheck ren' names (body :: (ps |> List.choose _.Default)) |> Result.bind (fun () ->
         ps
         |> traverseR (fun p ->
             match p.Default with
@@ -1037,9 +1037,9 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
     : Result<Stmt list * int, string> =
     match arrayLiteralExtents (resolveArrayTy ctx annot) with
     | None ->
-        err fname (sprintf "recursive array '%s': a differentiable recursive array needs an `Array<Float like Idx<n>>` annotation with a literal extent (v1)" name)
+        err fname $"recursive array '{name}': a differentiable recursive array needs an `Array<Float like Idx<n>>` annotation with a literal extent (v1)"
     | Some (false, _) ->
-        err fname (sprintf "recursive array '%s': only Float-element recursive arrays are differentiable (v1)" name)
+        err fname $"recursive array '{name}': only Float-element recursive arrays are differentiable (v1)"
     | Some (true, [n]) ->
         let bufName = name
         let bufVar = syn (ExprVar bufName)
@@ -1101,10 +1101,10 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
                 | ExprKind.ExprIf (c, t, f2) -> onlyPrevReads c && onlyPrevReads t && onlyPrevReads f2
                 | _ -> false
             match def.SeedArm with
-            | None -> err fname (sprintf "recursive array '%s': a recurrence needs a `zero :: n` seed arm to be differentiable (v1)" name)
+            | None -> err fname $"recursive array '{name}': a recurrence needs a `zero :: n` seed arm to be differentiable (v1)"
             | Some (seedStep, seedExpr) ->
                 if not (onlyPrevReads def.SliceExpr) then
-                    err fname (sprintf "recursive array '%s': forward mode differentiates recurrences reading the immediate predecessor `prefix(n - 1)` only (deeper lags rely on implicit-zero reads a direct loop cannot supply, v1)" name)
+                    err fname $"recursive array '{name}': forward mode differentiates recurrences reading the immediate predecessor `prefix(n - 1)` only (deeper lags rely on implicit-zero reads a direct loop cannot supply, v1)"
                 else
                     let sliceB = subst prefixVar bufVar def.SliceExpr
                     let seedWrite = [ StmtExpr (syn (ExprAssign (sAt (iLit 0L), subst seedStep (iLit 0L) seedExpr))) ]
@@ -1147,9 +1147,9 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
                            [ StmtExpr (syn (ExprAssign (sAt (v stepVar), def.SliceExpr))) ])
             Ok (bufLet :: (seedStmts @ [loop]), n)
         | _ ->
-            err fname (sprintf "recursive array '%s' is not differentiable (v1): only additive prefix recurrences `prefix :: prefix(n-1) + <increment>` (with a `zero :: n` seed arm and a prefix-free increment) and prefix-free construction are supported" name)
+            err fname $"recursive array '{name}' is not differentiable (v1): only additive prefix recurrences `prefix :: prefix(n-1) + <increment>` (with a `zero :: n` seed arm and a prefix-free increment) and prefix-free construction are supported"
     | Some (true, exts) ->
-        err fname (sprintf "recursive array '%s': only rank-1 (scalar-slice) recursive arrays are differentiable (v1); a rank-%d recursive array is not supported" name exts.Length)
+        err fname $"recursive array '{name}': only rank-1 (scalar-slice) recursive arrays are differentiable (v1); a rank-{exts.Length} recursive array is not supported"
 
 /// Rewrite additive `reduce(SRC, (+)[, init])` occurrences inside `e` into an
 /// accumulator loop (returned as a prefix of statements) plus a reference to
@@ -1211,7 +1211,7 @@ let rec internal hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, i
                                 syn (ExprDotDot (iLit 0L, iLit (int64 cnt))),
                                 [ StmtExpr (syn (ExprAssign (v accName, combine (v accName) readK))) ])
                  Ok (srcPre @ [accLet; loop], v accName)
-             | None -> err fname (sprintf "reduce source '%s' has no statically-known extent in differentiated code; reduce over a param/let array with an `Idx<n>` extent or over an inline array literal (v1)" nm))
+             | None -> err fname $"reduce source '{nm}' has no statically-known extent in differentiated code; reduce over a param/let array with an `Idx<n>` extent or over an inline array literal (v1)")
         | _ -> err fname "reduce in differentiated code requires an array-variable or inline-array-literal source; deferred/former reductions are not differentiable (v1)")))
     | ExprKind.ExprBinOp (m, op, l, r) ->
         recurse l |> Result.bind (fun (pl, l') ->

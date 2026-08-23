@@ -39,7 +39,7 @@ module Linear =
             invalidArg "x" "input length does not match specIn"
         let offs = weightOffsets specIn specOut
         if weights.Length <> offs.[specOut.Length] then
-            invalidArg "weights" (sprintf "weight length %d, expected %d" weights.Length offs.[specOut.Length])
+            invalidArg "weights" $"weight length {weights.Length}, expected {offs.[specOut.Length]}"
         let sIn = IrrepsIdx.blockStarts specIn
         let sOut = IrrepsIdx.blockStarts specOut
         let out = Array.zeroCreate (Irreps.totalDim specOut)
@@ -85,7 +85,7 @@ module Linear =
         if x.Length <> Irreps.totalDim specIn then
             invalidArg "x" "input length does not match specIn"
         if weights.Length <> homWeightDim specIn specOut then
-            invalidArg "weights" (sprintf "weight length %d, expected %d" weights.Length (homWeightDim specIn specOut))
+            invalidArg "weights" $"weight length {weights.Length}, expected {homWeightDim specIn specOut}"
         let sIn = IrrepsIdx.blockStarts specIn
         let sOut = IrrepsIdx.blockStarts specOut
         let out = Array.zeroCreate (Irreps.totalDim specOut)

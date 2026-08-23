@@ -114,7 +114,7 @@ let runGrRenderTests () : BlockResult =
     /// expected = actual, or a Fail carrying both.
     let pin name (expected: string) (actual: string) =
         if expected = actual then record name Pass ""
-        else record name Fail (sprintf "expected %s, got %s" expected actual)
+        else record name Fail ($"expected {expected}, got {actual}")
     let ok name (cond: bool) (detail: string) =
         if cond then record name Pass "" else record name Fail detail
 
@@ -196,7 +196,7 @@ let runGrRenderTests () : BlockResult =
      | [ bad; pong ] ->
          ok "an id-less renderPlot errors and the loop takes the next request"
             (bad.Contains "\"id\":null" && bad.Contains "requires an integer" && pong.Contains "\"id\":4")
-            (sprintf "%s / %s" bad pong)
+            ($"{bad} / {pong}")
      | other -> record "an id-less renderPlot errors and the loop takes the next request" Fail (sprintf "%A" other))
 
     // ---- 3. Resolution --------------------------------------------------
@@ -308,7 +308,7 @@ let runGrRenderTests () : BlockResult =
             ok "not found anywhere names both the stamped and plain leaf"
                (e.Contains GR.stampedHelperLeaf && e.Contains "gr-render.exe" && e.Contains " or ")
                e
-        | Ok p -> record "not found anywhere names both the stamped and plain leaf" Fail (sprintf "unexpectedly resolved: %s" p))
+        | Ok p -> record "not found anywhere names both the stamped and plain leaf" Fail ($"unexpectedly resolved: {p}"))
 
     // ---- 4. The worker protocol, against a fake helper ---------------------
 
@@ -479,7 +479,7 @@ let runGrRenderTests () : BlockResult =
     let passed, failed, skipped = count Pass, count Fail, count Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = Fail) |> Seq.map fst |> List.ofSeq
     let parts =
-        [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
-        @ (if skipped > 0 then [ sprintf "%d skipped" skipped ] else [])
+        [ $"{passed} passed"; $"{failed} failed" ]
+        @ (if skipped > 0 then [ $"{skipped} skipped" ] else [])
     printFooter blockName parts
     { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }

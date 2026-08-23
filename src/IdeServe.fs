@@ -155,7 +155,7 @@ let private tryStrList (root: JsonElement) (name: string) : string list option =
         else
             let items = [ for e in v.EnumerateArray() -> e ]
             if items |> List.forall (fun e -> e.ValueKind = JsonValueKind.String)
-            then Some (items |> List.map (fun e -> e.GetString()))
+            then Some (items |> List.map _.GetString())
             else None)
 
 /// The RAW JSON TEXT of an object-valued property; None when it is absent or
@@ -251,11 +251,11 @@ let private tryDim (root: JsonElement) (name: string) (dflt: int) : Result<int, 
     match tryProp root name with
     | None -> Ok dflt
     | Some v ->
-        if v.ValueKind <> JsonValueKind.Number then Error (sprintf "\"%s\" must be an integer" name)
+        if v.ValueKind <> JsonValueKind.Number then Error $"\"{name}\" must be an integer"
         else
             match v.TryGetInt32() with
             | true, n -> Ok (clampDim n)
-            | _ -> Error (sprintf "\"%s\" must be an integer" name)
+            | _ -> Error $"\"{name}\" must be an integer"
 
 /// The three formats the worker can print, and the mime each frame carries.
 /// All three are binary as far as the frame format is concerned -- `svg+xml`
@@ -281,9 +281,9 @@ let renderPlotResponse (id: int) (format: string) (plotId: string option) (data:
     let head = Blade.Display.Frame.headFor (mimeForFormat format)
     let idEntry =
         match plotId with
-        | Some p -> sprintf "\"id\":\"%s\"," (Blade.Display.Frame.escape p)
+        | Some p -> $"\"id\":\"{Blade.Display.Frame.escape p}\","
         | None -> ""
-    sprintf "{\"id\":%d,\"frame\":%s\"%s\",\"meta\":{%s\"backend\":\"gr\"}}}" id head data idEntry
+    $"{{\"id\":{id},\"frame\":{head}\"{data}\",\"meta\":{{{idEntry}\"backend\":\"gr\"}}}}}}"
 
 // The loop
 
@@ -304,7 +304,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
         output.Flush ()
     let errorResponse (id: int option) (msg: string) =
         let idJson = match id with Some i -> string i | None -> "null"
-        respond (sprintf "{\"id\":%s,\"error\":\"%s\"}" idJson (Blade.Ide.jsonEscape msg))
+        respond $"{{\"id\":{idJson},\"error\":\"{Blade.Ide.jsonEscape msg}\"}}"
     // Provider relative data paths resolve against the process working
     // directory, which one-shot `ide check` inherited from the editor (= the
     // checked file's directory). A persistent process has to reproduce that
@@ -399,8 +399,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
             | Some "ping" ->
                 (match id with
                  | Some i ->
-                     respond (sprintf "{\"id\":%d,\"ok\":true,\"serve\":1,\"version\":\"%s\"}"
-                                      i (Blade.Ide.jsonEscape version))
+                     respond ($"{{\"id\":{i},\"ok\":true,\"serve\":1,\"version\":\"{(Blade.Ide.jsonEscape version)}\"}}")
                  | None -> errorResponse None "\"ping\" requires an integer \"id\"")
                 true
             | Some "check" ->
@@ -413,7 +412,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                      | ("fast" | "full") as tier -> runCheck i tier file source
                      | other ->
                          errorResponse (Some i)
-                             (sprintf "unknown tier '%s' (expected \"fast\" or \"full\")" other))
+                             $"unknown tier '{other}' (expected \"fast\" or \"full\")")
                 true
             | Some "checkCells" ->
                 // No `session`: an empty `cells` array is a legitimate request
@@ -428,7 +427,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                      | ("fast" | "full") as tier -> runCheckCells i tier file cells
                      | other ->
                          errorResponse (Some i)
-                             (sprintf "unknown tier '%s' (expected \"fast\" or \"full\")" other))
+                             $"unknown tier '{other}' (expected \"fast\" or \"full\")")
                 true
             | Some "eval" ->
                 (match id, tryStr root "session", tryStr root "source" with
@@ -448,7 +447,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                      (match sessions.TryGetValue key with
                       | true, s -> s.Reset()
                       | _ -> ())
-                     respond (sprintf "{\"id\":%d,\"ok\":true}" i))
+                     respond $"{{\"id\":{i},\"ok\":true}}")
                 true
             | Some "surface" ->
                 // A pure read of tables compiled INTO this binary: no
@@ -485,7 +484,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                                      match v.GetString() with
                                      | ("png" | "svg" | "pdf") as f -> Ok f
                                      | other ->
-                                         Error (sprintf "unknown format '%s' (expected \"png\", \"svg\" or \"pdf\")" other)
+                                         Error $"unknown format '{other}' (expected \"png\", \"svg\" or \"pdf\")"
                          match fmt, tryDim root "width" DefaultWidth, tryDim root "height" DefaultHeight with
                          | Error e, _, _ | _, Error e, _ | _, _, Error e -> errorResponse (Some i) e
                          | Ok format, Ok width, Ok height ->
@@ -494,7 +493,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                              | Ok data -> respond (renderPlotResponse i format (tryStr root "plotId") data))
                 true
             | Some other ->
-                errorResponse id (sprintf "unknown cmd '%s'" other)
+                errorResponse id $"unknown cmd '{other}'"
                 true
             | None ->
                 errorResponse id "request has no \"cmd\" string"

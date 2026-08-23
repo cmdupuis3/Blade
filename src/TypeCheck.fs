@@ -56,8 +56,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             let errs =
                 failures |> List.map (fun (f: StaticEval.StaticFailure) ->
                     let msg =
-                        sprintf "`let static %s` does not evaluate at compile time: %s. `let static` asserts a compile-time value -- use plain `let` for values computed at runtime."
-                            (f.Names |> String.concat ", ") f.Reason
+                        $"""`let static {(f.Names |> String.concat ", ")}` does not evaluate at compile time: {f.Reason}. `let static` asserts a compile-time value -- use plain `let` for values computed at runtime."""
                     locateError f.Span env' (Other msg))
             env', errs
         | Error msg ->
@@ -108,18 +107,18 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
 
         let declName =
             match d.Value with
-            | DeclLet b -> sprintf "in let binding '%s'" (match b.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_")
-            | DeclStatic b -> sprintf "in static binding '%s'" (match b.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_")
-            | DeclFunction f -> sprintf "in function '%s'" f.Name
+            | DeclLet b -> $"""in let binding '{(match b.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_")}'"""
+            | DeclStatic b -> $"""in static binding '{(match b.Pattern.Kind with PatternKind.PatVar n -> n | _ -> "_")}'"""
+            | DeclFunction f -> $"in function '{f.Name}'"
             | DeclType td ->
                 match td with
-                | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _, _) | TyDeclSum (n, _, _) -> sprintf "in type '%s'" n
+                | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _, _) | TyDeclSum (n, _, _) -> $"in type '{n}'"
                 | TyDeclMutualGroup (members, _) ->
-                    sprintf "in mutual group '%s'" (members |> List.map fst |> String.concat ", ")
-            | DeclInterface i -> sprintf "in interface '%s'" i.Name
+                    $"""in mutual group '{(members |> List.map fst |> String.concat ", ")}'"""
+            | DeclInterface i -> $"in interface '{i.Name}'"
             | DeclImpl impl -> sprintf "in impl for '%A'" impl.ForType
-            | DeclImport (qn, _) -> sprintf "in import '%s'" (String.concat "." qn)
-            | DeclUnit u -> sprintf "in unit '%s'" u.Name
+            | DeclImport (qn, _) -> $"""in import '{(String.concat "." qn)}'"""
+            | DeclUnit u -> $"in unit '{u.Name}'"
         let envWithCtx = pushContext declName currentEnv
         match checkDecl envWithCtx d.Value with
         | Ok (td, env') ->
@@ -290,7 +289,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
             | None -> None
         with Blade.ML.LieDischarge.LieGuardFailure msg ->
             Some (Blade.DeduceRep.EngineRefutes
-                    (sprintf "the Lie-discharge post-accept guard tripped while validating this body: %s" msg)))
+                    $"the Lie-discharge post-accept guard tripped while validating this body: {msg}"))
     IdeDeductions.reset ()
     // Staged-former unfold FIRST: `static method_for/object_for/for`
     // argument lists elaborate to plain formers before any other stage
@@ -369,7 +368,7 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
             Blade.DeduceRep.RepCheckDisagreements.get ()
             |> List.map (fun (owner, detail, span) ->
                 { Error =
-                    Other (sprintf "internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '%s': %s. This is a bug in the Blade compiler, not in your program -- please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)" owner detail)
+                    Other $"internal compiler error: equivariance certificate validation disagrees with the elaboration checker for '{owner}': {detail}. This is a bug in the Blade compiler, not in your program -- please report it (the certificate itself was accepted by the checking authority; only the typed second opinion dissents)"
                   Span = span
                   Context = [ "equiv certificate validation" ]
                   Code = Some "BL9004" })

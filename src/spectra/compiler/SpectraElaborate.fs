@@ -125,40 +125,40 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
         if extents |> List.forall Option.isSome then
             Ok (label, classifyElem elem, extents |> List.map Option.get)
         else
-            Error (sprintf "%s: every axis extent of %s must be statically known (Idx<n> directly or through aliases)" what label)
-    let noShape name = Error (sprintf "%s: '%s' has no declared array shape -- %s" what name shapeSources)
+            Error $"{what}: every axis extent of {label} must be statically known (Idx<n> directly or through aliases)"
+    let noShape name = Error $"{what}: '{name}' has no declared array shape -- {shapeSources}"
     match e.Kind with
     // A name: the innermost binder wins; a local binder with no array annotation shadows an outer one.
     | ExprKind.ExprVar name ->
         match Map.tryFind name scope with
-        | Some (Some shape) -> finish (sprintf "'%s'" name) shape
+        | Some (Some shape) -> finish $"'{name}'" shape
         | Some None -> noShape name
         | None ->
             match Map.tryFind name ctx.Arrays with
-            | Some shape -> finish (sprintf "'%s'" name) shape
+            | Some shape -> finish $"'{name}'" shape
             | None -> noShape name
     // An ascription: the universal escape hatch for a shape the elaborator cannot otherwise see.
     | ExprKind.ExprTyped (_, ty) ->
         match resolveTop ctx.Aliases 8 ty with
         | TyArray (elem, idxs) -> finish "the ascribed expression" (elem, idxs)
-        | _ -> Error (sprintf "%s: the ascription must name an array type (Array<... like Idx<...>, ...>)" what)
+        | _ -> Error $"{what}: the ascription must name an array type (Array<... like Idx<...>, ...>)"
     // A call whose function has an annotated array return type. GUARD: in Blade arrays ARE functions, so `A(i)` and `f(x)`
     // are the same node -- exclude known array names so an index read stays on the error path.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _)
             when not (Map.containsKey f scope) && not (Map.containsKey f ctx.Arrays) ->
         match Map.tryFind f ctx.Funcs with
-        | Some shape -> finish (sprintf "the result of '%s'" f) shape
-        | None -> Error (sprintf "%s: '%s' has no annotated array return type -- %s" what f shapeSources)
+        | Some shape -> finish $"the result of '{f}'" shape
+        | None -> Error $"{what}: '{f}' has no annotated array return type -- {shapeSources}"
     | _ ->
-        Error (sprintf "%s: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<... like Idx<...>, ...>)` -- %s" what shapeSources)
+        Error $"{what}: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<... like Idx<...>, ...>)` -- {shapeSources}"
 
 /// A real rank-1 signal of static length.
 let private realSignal (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Result<int, string> =
     arrayShape ctx scope what e |> Result.bind (fun (label, elem, dims) ->
         match elem, dims with
         | ElemFloat, [n] -> Ok n
-        | ElemFloat, _ -> Error (sprintf "%s: %s must be rank-1 (Array<Float64 like Idx<n>>)" what label)
-        | _, _ -> Error (sprintf "%s: %s must have Float64 elements (a real signal)" what label))
+        | ElemFloat, _ -> Error $"{what}: {label} must be rank-1 (Array<Float64 like Idx<n>>)"
+        | _, _ -> Error $"{what}: {label} must have Float64 elements (a real signal)")
 
 // Elaboration state (fingerprint-deduped generated decls)
 type private ElabState = {
@@ -176,7 +176,7 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
     | Some n -> Ok n
     | None ->
         st.Counter <- st.Counter + 1
-        let n = sprintf "__spectra_%d" st.Counter
+        let n = $"__spectra_{st.Counter}"
         make n |> Result.map (fun decl ->
             st.Made <- Map.add key n st.Made
             st.Decls <- st.Decls @ [ decl ]
@@ -211,32 +211,32 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
             | ElemComplex, [n] ->
                 ensure st (fingerprint "ifft" (box n)) (fun nm -> Ok (ifftDecl nm n))
                 |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
-            | ElemComplex, _ -> Error (sprintf "ifft: %s must be rank-1 (Array<Complex128 like Idx<n>>)" label)
-            | _, _ -> Error (sprintf "ifft: %s must have Complex128 elements (ifft takes the complex spectrum; rebind the fft result with a full Array<Complex128 like Idx<n>> annotation first)" label))
+            | ElemComplex, _ -> Error $"ifft: {label} must be rank-1 (Array<Complex128 like Idx<n>>)"
+            | _, _ -> Error $"ifft: {label} must have Complex128 elements (ifft takes the complex spectrum; rebind the fft result with a full Array<Complex128 like Idx<n>> annotation first)")
     | "ifft", _ -> Error "ifft: expected ifft(X) -- real inverse synthesis of a complex spectrum (carries the 1/n)"
     | "fft2", [xE] ->
         arrayShape ctx scope "fft2" xE |> Result.bind (fun (label, elem, dims) ->
             match elem, dims with
             | ElemFloat, [r; c] ->
                 if r * c > maxOutCells then
-                    Error (sprintf "fft2: the %dx%d field has %d cells; spectra outputs are capped at %d (the generated initializers scale with it) -- reduce the grid" r c (r * c) maxOutCells)
+                    Error $"fft2: the {r}x{c} field has {r * c} cells; spectra outputs are capped at {maxOutCells} (the generated initializers scale with it) -- reduce the grid"
                 else
                     ensure st (fingerprint "fft2" (box (r, c))) (fun nm -> Ok (fft2Decl nm r c))
                     |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
-            | ElemFloat, _ -> Error (sprintf "fft2: %s must be rank-2 (Array<Float64 like Idx<r>, Idx<c>>)" label)
-            | _, _ -> Error (sprintf "fft2: %s must have Float64 elements (a real 2-D field)" label))
+            | ElemFloat, _ -> Error $"fft2: {label} must be rank-2 (Array<Float64 like Idx<r>, Idx<c>>)"
+            | _, _ -> Error $"fft2: {label} must have Float64 elements (a real 2-D field)")
     | "fft2", _ -> Error "fft2: expected fft2(X) -- the unnormalized forward 2-D DFT of a real rank-2 field"
     | "ifft2", [xE] ->
         arrayShape ctx scope "ifft2" xE |> Result.bind (fun (label, elem, dims) ->
             match elem, dims with
             | ElemComplex, [r; c] ->
                 if r * c > maxOutCells then
-                    Error (sprintf "ifft2: the %dx%d spectrum has %d cells; spectra outputs are capped at %d (the generated initializers scale with it) -- reduce the grid" r c (r * c) maxOutCells)
+                    Error $"ifft2: the {r}x{c} spectrum has {r * c} cells; spectra outputs are capped at {maxOutCells} (the generated initializers scale with it) -- reduce the grid"
                 else
                     ensure st (fingerprint "ifft2" (box (r, c))) (fun nm -> Ok (ifft2Decl nm r c))
                     |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), [xE])))
-            | ElemComplex, _ -> Error (sprintf "ifft2: %s must be rank-2 (Array<Complex128 like Idx<r>, Idx<c>>)" label)
-            | _, _ -> Error (sprintf "ifft2: %s must have Complex128 elements (ifft2 takes the complex spectrum; rebind the fft2 result with a full Array<Complex128 like Idx<r>, Idx<c>> annotation first)" label))
+            | ElemComplex, _ -> Error $"ifft2: {label} must be rank-2 (Array<Complex128 like Idx<r>, Idx<c>>)"
+            | _, _ -> Error $"ifft2: {label} must have Complex128 elements (ifft2 takes the complex spectrum; rebind the fft2 result with a full Array<Complex128 like Idx<r>, Idx<c>> annotation first)")
     | "ifft2", _ -> Error "ifft2: expected ifft2(X) -- real inverse synthesis of a rank-2 complex spectrum (carries the 1/(r*c))"
     | "power", [xE] ->
         realSignal ctx scope "power" xE |> Result.bind (fun n ->
@@ -255,17 +255,16 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
             | [n] ->
                 let cells = pown n (k - 1)
                 if cells > maxOutCells then
-                    Error (sprintf "polyspec: the order-%d output at n=%d has %d cells; the output is capped at %d (the generated initializers scale with it) -- reduce n or the order" k n cells maxOutCells)
+                    Error $"polyspec: the order-{k} output at n={n} has {cells} cells; the output is capped at {maxOutCells} (the generated initializers scale with it) -- reduce n or the order"
                 else
                     let fftName = ensureFft st n
                     ensure st (fingerprint "polyspec" (box (n, k))) (fun nm -> Ok (polyspecDecl nm n k fftName))
                     |> Result.map (fun nm -> syn (ExprApp (syn (ExprVar nm), args)))
             | _ ->
-                Error (sprintf "polyspec: all signals must share one static length (got %s)"
-                               (ns |> List.map string |> String.concat ", ")))
+                Error ($"""polyspec: all signals must share one static length (got {(ns |> List.map string |> String.concat ", ")})"""))
     | "polyspec", args ->
-        Error (sprintf "polyspec: the argument count IS the polyspectrum order and must be 2..4 (got %d) -- k=2 cross-power, k=3 bispectrum, k=4 trispectrum; the generator is order-generic, raise the cap when needed" args.Length)
-    | _ -> Error (sprintf "spectra: unknown op '%s' (available: %s)" op opList)
+        Error $"polyspec: the argument count IS the polyspectrum order and must be 2..4 (got {args.Length}) -- k=2 cross-power, k=3 bispectrum, k=4 trispectrum; the generator is order-generic, raise the cap when needed"
+    | _ -> Error $"spectra: unknown op '{op}' (available: {opList})"
 
 // Rewrite walker (MathElaborate's shape)
 let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (scope: Scope) (e: Expr)
@@ -454,7 +453,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
     else
         let declsNoImport = decls |> List.filter (not << isSpectraImport)
         match resolveStatics declsNoImport with
-        | Error e -> Error (sprintf "spectra elaboration: static resolution failed: %s" e)
+        | Error e -> Error $"spectra elaboration: static resolution failed: {e}"
         | Ok (statics, _) ->
             let tyAliases = collectAliases declsNoImport
             let ctx = { Arrays = collectArrays tyAliases declsNoImport

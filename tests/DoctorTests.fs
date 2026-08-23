@@ -48,8 +48,8 @@ let runDoctorTests () : BlockResult =
     let checks = Doctor.collectChecks ()
     let expectedKeys = ["dotnet"; "stdlib"; "gpp"; "blas"; "lapack"; "netcdf"; "mpi"; "cuda"; "llvm"; "make"; "gfortran"; "git"; "coq"]
     check "row set and order stable"
-        ((checks |> List.map (fun c -> c.Key)) = expectedKeys)
-        (sprintf "%d rows" checks.Length)
+        ((checks |> List.map (_.Key)) = expectedKeys)
+        ($"{checks.Length} rows")
     check "every row carries a detail"
         (checks |> List.forall (fun c -> c.Detail <> ""))
         "no blank rows"
@@ -94,5 +94,5 @@ let runDoctorTests () : BlockResult =
         with _ -> false
     check "renderJson parses; counts and field kinds hold" parsedOk "extension/CI contract"
 
-    printFooter "Doctor" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "Doctor" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Doctor"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

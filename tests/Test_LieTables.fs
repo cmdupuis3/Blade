@@ -236,7 +236,7 @@ let private wignerDLocal (l: int) (r: float [][]) : float [][] =
                     for i in 0 .. n - 1 do resid <- max resid (abs (lhs.[i] - rhs.[i]))
                 if resid < 1e-9 then result <- d
             attempt <- attempt + 1
-        if isNull (box result) then failwithf "Test_LieTables: could not fit D for l = %d" l
+        if isNull (box result) then failwith $"Test_LieTables: could not fit D for l = {l}"
         result
 
 // ---------------------------------------------------------------------------
@@ -302,14 +302,14 @@ type private Judged = {
 
 let private judgeSource (src: string) (fname: string) : Judged =
     match Blade.Parser.parseProgram src with
-    | Error e -> failwithf "Test_LieTables: parse failed: %s" e.Message
+    | Error e -> failwith $"Test_LieTables: parse failed: {e.Message}"
     | Ok prog ->
-        let decls = prog.Modules |> List.collect (fun m -> m.Decls) |> normalizeConjuncts
+        let decls = prog.Modules |> List.collect (_.Decls) |> normalizeConjuncts
         match Blade.StaticEval.resolveStatics decls with
-        | Error e -> failwithf "Test_LieTables: static resolution failed: %s" e
+        | Error e -> failwith $"Test_LieTables: static resolution failed: {e}"
         | Ok (statics, _) ->
             match Blade.ML.Equiv.buildCertTable statics decls with
-            | Error d -> failwithf "Test_LieTables: cert table failed: %s" d.Message
+            | Error d -> failwith $"Test_LieTables: cert table failed: {d.Message}"
             | Ok certs ->
                 let fd =
                     decls
@@ -318,13 +318,13 @@ let private judgeSource (src: string) (fname: string) : Judged =
                         | DeclFunction f when f.Name = fname -> Some f
                         | _ -> None)
                 match fd with
-                | None -> failwithf "Test_LieTables: no function '%s' in the source" fname
+                | None -> failwith $"Test_LieTables: no function '{fname}' in the source"
                 | Some fd ->
                     let grp = (Map.find fname certs).Group
                     let globals = Blade.ML.Equiv.buildGlobalShapes grp statics decls
                     { Composition =
                         Blade.ML.Equiv.judgeFunction grp certs statics globals mlAliases fd
-                        |> List.map (fun d -> d.Message)
+                        |> List.map (_.Message)
                       Engine = Blade.ML.Equiv.engineVerdict certs statics fd }
 
 // The standing sources for layers 3-5. Written once, reused by the positive
@@ -418,7 +418,7 @@ let runLieTablesTests () : BlockResult =
                 let d = wignerDLocal l (rot th)
                 let e = matExp (matScale th a)
                 worst <- max worst (maxAbsDiff d e)
-            check (sprintf "EXP-PIN l=%d %s: exp(theta·A) = D_l(R_%s(theta)) at 5 angles" l axn (axn.Substring 1))
+            check ($"EXP-PIN l={l} {axn}: exp(theta·A) = D_l(R_{(axn.Substring 1)}(theta)) at 5 angles")
                   (worst < 1e-10) (sprintf "worst %.3g" worst)
             worstL <- max worstL worst
         // The house composition R = Rz(0.7)·Ry(1.1), the angle pair every
@@ -429,7 +429,7 @@ let runLieTablesTests () : BlockResult =
             matMul (matExp (matScale 0.7 (rMatFloat (LD.blockGenerator LD.Lz l))))
                    (matExp (matScale 1.1 (rMatFloat (LD.blockGenerator LD.Ly l))))
         let wh = maxAbsDiff dHouse eHouse
-        check (sprintf "EXP-PIN l=%d: exp(0.7·Lz)·exp(1.1·Ly) = D_l(Rz(0.7)·Ry(1.1)) [the house R]" l)
+        check ($"EXP-PIN l={l}: exp(0.7·Lz)·exp(1.1·Ly) = D_l(Rz(0.7)·Ry(1.1)) [the house R]")
               (wh < 1e-10) (sprintf "worst %.3g" wh)
         worstL <- max worstL wh
         expWorstAll <- max expWorstAll worstL
@@ -476,18 +476,18 @@ let runLieTablesTests () : BlockResult =
                 Seq.forall (fun i ->
                     Seq.forall (fun j -> g.[i].[j] = LD.Radical.neg g.[j].[i]) (seq { 0 .. d - 1 }))
                     (seq { 0 .. d - 1 }))
-        check (sprintf "l=%d: all three generators exactly skew-symmetric (componentwise)" l) skew ""
+        check ($"l={l}: all three generators exactly skew-symmetric (componentwise)") skew ""
         // The so(3) brackets, exactly — this is where Radical.mul earns its
         // keep, and it is the check that would catch a wrong ladder sign that
         // skew-symmetry alone cannot see.
         let br a b c = rMatIsZero (rMatSub (rMatSub (rMatMul a b) (rMatMul b a)) c)
-        check (sprintf "l=%d: [Lx,Ly] = Lz, [Ly,Lz] = Lx, [Lz,Lx] = Ly EXACTLY" l)
+        check ($"l={l}: [Lx,Ly] = Lz, [Ly,Lz] = Lx, [Lz,Lx] = Ly EXACTLY")
               (br gx gy gz && br gy gz gx && br gz gx gy) ""
         // Casimir: Lx² + Ly² + Lz² = −l(l+1)·I, exactly.
         let cas = rMatAdd (rMatAdd (rMatMul gx gx) (rMatMul gy gy)) (rMatMul gz gz)
         let want =
             Array.init d (fun i -> Array.init d (fun j -> if i = j then LD.Radical.ofInt (-(l * (l + 1))) else LD.Radical.zero))
-        check (sprintf "l=%d: Casimir Lx^2+Ly^2+Lz^2 = -%d·I EXACTLY" l (l * (l + 1)))
+        check ($"l={l}: Casimir Lx^2+Ly^2+Lz^2 = -{(l * (l + 1))}·I EXACTLY")
               (rMatIsZero (rMatSub cas want)) ""
     // The coded-convention shapes, pinned as data so a table edit has to
     // confront them: L_z integer, L_x/L_y at l = 2 carrying sqrt(3) and 1.
@@ -501,7 +501,7 @@ let runLieTablesTests () : BlockResult =
            && gy2.[3].[2] = LD.Radical.ofSqrt PX.Rat.one 3
            && gy2.[3].[4] = LD.Radical.ofInt -1
            && gy2.[4].[3] = LD.Radical.ofInt 1)
-          (sprintf "A[2][3] = %s" (LD.Radical.render gy2.[2].[3]))
+          ($"A[2][3] = {(LD.Radical.render gy2.[2].[3])}")
     // Parity is separate from the algebra — the whole reason O(3) is 3 + 1.
     // [(0,e,2),(1,o,1),(2,e,2)] = 2 + 3 + 10 = 15 components; only the l=1
     // block is odd, and the parity is per COMPONENT, not per block.
@@ -678,7 +678,7 @@ function mix(x: Array<Float like IrrepsIdx<SV>>, y: Array<Float like IrrepsIdx<S
     List.iter2
         (fun (label, body) name ->
             let j = judgeSource (src body) name
-            check (sprintf "DIFFERENTIAL (%s): composition accepts AND the engine independently discharges" label)
+            check ($"DIFFERENTIAL ({label}): composition accepts AND the engine independently discharges")
                   (j.Composition.IsEmpty && j.Engine = Some (Ok ()))
                   (sprintf "composition %d diags, engine %s"
                        j.Composition.Length
@@ -699,5 +699,5 @@ function tilt(x: Array<Float like IrrepsIdx<SV>>)
           (not brj.Composition.IsEmpty
            && (match brj.Engine with Some (Error _) -> true | _ -> false)) ""
 
-    printFooter "Lie Tables" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "Lie Tables" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "Lie Tables"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

@@ -80,7 +80,7 @@ let netcdfSpec : Blade.ProviderRegistry.ProviderSpec = {
             let file = Blade.NetcdfProvider.load path
             file.Vars
             |> List.tryFind (fun v -> v.Name = varName)
-            |> Option.map (fun v -> v.Dims |> List.map (fun d -> d.Name))
+            |> Option.map (fun v -> v.Dims |> List.map (_.Name))
         with _ -> None
     Fingerprint = fileHash
     VersionStamp = fun path ->
@@ -99,15 +99,15 @@ let private foldCache =
 let private readAndFoldUncached (provider: string) (path: string) (varName: string) : Result<StaticValue, string> =
     match Blade.ProviderRegistry.tryFind provider with
     | None ->
-        Error (sprintf "provider '%s' is not registered -- was ProviderStatics.install () run?" provider)
+        Error $"provider '{provider}' is not registered -- was ProviderStatics.install () run?"
     | Some spec ->
         match spec.ReadVarData path varName with
         | Error e ->
-            Error (sprintf "provider fold of '%s' from '%s' failed: %s" varName path e)
+            Error $"provider fold of '{varName}' from '{path}' failed: {e}"
         | Ok data ->
             let count = data.DimLengths |> List.fold (*) 1
             if count > foldCeiling then
-                Error (sprintf "'%s' has %d elements -- beyond the %d-element fold ceiling; large closed inputs take the runtime schedule (bind with a plain `let ... |> %s.read`)" varName count foldCeiling provider)
+                Error $"'{varName}' has {count} elements -- beyond the {foldCeiling}-element fold ceiling; large closed inputs take the runtime schedule (bind with a plain `let ... |> {provider}.read`)"
             else
                 let h = spec.Fingerprint path
                 provenance.Add((path, varName, h))

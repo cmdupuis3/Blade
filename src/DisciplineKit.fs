@@ -497,7 +497,7 @@ let structuralArm
                       let outSt = ops.ClassifyTy expr.Type
                       let elementwise =
                           isElementwiseArith
-                              (lam.Params |> List.map (fun p -> p.VarId) |> Set.ofList)
+                              (lam.Params |> List.map (_.VarId) |> Set.ofList)
                               lam.Body
                       ctx.Rules.FormerConclusion kSt outSt elementwise anyCovSrc
                   | _ -> if anyCovSrc then ops.Bottom else ops.Opaque)

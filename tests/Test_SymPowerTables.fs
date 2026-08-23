@@ -49,7 +49,7 @@ let runSymPowerTablesTests () : BlockResult =
                 exact |> List.forall (fun ws ->
                     Seq.append ws.RrefRows ws.GsRows
                     |> Seq.forall (fun v -> applyE j l v |> Array.forall Rat.isZero))
-            check (sprintf "T_{%d,%d}: E·v = 0 exact (all RREF+GS rows)" j l) allKilled ""
+            check ($"T_{{{j},{l}}}: E·v = 0 exact (all RREF+GS rows)") allKilled ""
 
             // Occurrence counts per L = powerSpec [(l,p,1)] j multiplicities.
             let got = exact |> List.map (fun ws -> ws.L, ws.RrefRows.Length) |> Map.ofList
@@ -60,9 +60,9 @@ let runSymPowerTablesTests () : BlockResult =
                 |> Map.ofList
             let countsStr =
                 got |> Map.toList |> List.sortByDescending fst
-                    |> List.map (fun (lL, m) -> sprintf "%d:%d" lL m) |> String.concat " "
-            check (sprintf "T_{%d,%d}: occurrence counts = powerSpec" j l) (got = want)
-                  (sprintf "L:mult = %s" countsStr)
+                    |> List.map (fun (lL, m) -> $"{lL}:{m}") |> String.concat " "
+            check ($"T_{{{j},{l}}}: occurrence counts = powerSpec") (got = want)
+                  ($"L:mult = {countsStr}")
 
             // Exact rational Gram within each multiplicity space: pairwise
             // gramDot of the GS rows is 0 off-diagonal and Norm2 on-diagonal
@@ -75,7 +75,7 @@ let runSymPowerTablesTests () : BlockResult =
                     |> Seq.forall (fun (r, s) ->
                         let d = gramDot j l ws.GsRows.[r] ws.GsRows.[s]
                         if r = s then d = ws.Norm2.[r] && not (Rat.isZero d) else Rat.isZero d))
-            check (sprintf "T_{%d,%d}: exact rational Gram = I per multiplicity space" j l) gramExactOk ""
+            check ($"T_{{{j},{l}}}: exact rational Gram = I per multiplicity space") gramExactOk ""
 
             // Float Gram = I across ALL rows of the whole (j,l) family —
             // identity (3): Σ_I T[r,I]·T[r',I]/N_I = δ, including cross-L and
@@ -88,7 +88,7 @@ let runSymPowerTablesTests () : BlockResult =
                     for i in 0 .. nCells - 1 do
                         s <- s + rows.[a].[i] * rows.[b].[i] / tbl.CellMult.[i]
                     dev <- max dev (abs (s - (if a = b then 1.0 else 0.0)))
-            check (sprintf "T_{%d,%d}: float Gram = I over all %d rows (1e-14)" j l rows.Length)
+            check ($"T_{{{j},{l}}}: float Gram = I over all {rows.Length} rows (1e-14)")
                   (dev < 1e-14) (sprintf "max dev %g" dev)
 
             // Phase rule per occurrence: the realized branch is the derived
@@ -105,7 +105,7 @@ let runSymPowerTablesTests () : BlockResult =
                     && (o.MaxIm > o.MaxRe) = o.Flipped
                     && small < 1e-10 * big
                     && big > 0.1 * big && big > 0.05)
-            check (sprintf "T_{%d,%d}: phase rule (j·l+L parity) + 5-order gap" j l) phaseOk
+            check ($"T_{{{j},{l}}}: phase rule (j·l+L parity) + 5-order gap") phaseOk
                   (sprintf "worst min/max residual ratio %g" worstRatio)
 
     // ---- j = 1 must be the identity table ---------------------------------
@@ -131,8 +131,8 @@ let runSymPowerTablesTests () : BlockResult =
     let v3 = s32.Occurrences |> List.filter (fun o -> o.L = 3)
     check "V3 in Sym3(V2): exists, mult 1, realized from the imaginary branch (−i)"
           (v3.Length = 1 && v3.Head.Flipped && v3.Head.MaxIm > v3.Head.MaxRe)
-          (sprintf "maxRe %g, maxIm %g" (v3 |> List.tryHead |> Option.map (fun o -> o.MaxRe) |> Option.defaultValue nan)
-                                        (v3 |> List.tryHead |> Option.map (fun o -> o.MaxIm) |> Option.defaultValue nan))
+          (sprintf "maxRe %g, maxIm %g" (v3 |> List.tryHead |> Option.map (_.MaxRe) |> Option.defaultValue nan)
+                                        (v3 |> List.tryHead |> Option.map (_.MaxIm) |> Option.defaultValue nan))
 
     // ---- T_{3,1} L=1: the |v|²·v line --------------------------------------
     // Weight-1 kernel of Sym³(V_1) is 1-dimensional; in divided-power
@@ -281,11 +281,11 @@ let runSymPowerTablesTests () : BlockResult =
     // ---- anchor A = [(0,e,1); (1,o,1)], k = 3 -------------------------------
     let anchorA = mkSpec [ (0, 0, 1); (1, 1, 1) ]
     let labA3 = MLS.polyLabels anchorA 3
-    let sectorsA3 = labA3 |> List.map (fun lb -> lb.Sector) |> List.distinct
+    let sectorsA3 = labA3 |> List.map (_.Sector) |> List.distinct
     check "anchor A k=3: 4 sectors, lex ascending over copies"
           (sectorsA3 = [ [0;0;0]; [0;0;1]; [0;1;1]; [1;1;1] ]) (sprintf "%A" sectorsA3)
 
-    let perSectorA3 = labA3 |> List.countBy (fun lb -> lb.Sector) |> List.map snd
+    let perSectorA3 = labA3 |> List.countBy (_.Sector) |> List.map snd
     check "anchor A k=3: 6 labels, per-sector 1/1/2/2"
           (labA3.Length = 6 && perSectorA3 = [ 1; 1; 2; 2 ])
           (sprintf "%d labels, per sector %A" labA3.Length perSectorA3)
@@ -312,7 +312,7 @@ let runSymPowerTablesTests () : BlockResult =
     check "anchor A k=3: full label list (enumeration-order convention pin)"
           (labA3Shape = labA3Expected) (if labA3Shape = labA3Expected then "" else sprintf "%A" labA3Shape)
 
-    let multA3 = labA3 |> List.map (fun lb -> lb.Multinomial)
+    let multA3 = labA3 |> List.map (_.Multinomial)
     check "anchor A k=3: sector multinomials k!/∏j_c! = 1,3,3,3,1,1"
           (multA3 = [ 1L; 3L; 3L; 3L; 1L; 1L ]) (sprintf "%A" multA3)
 
@@ -338,7 +338,7 @@ let runSymPowerTablesTests () : BlockResult =
         let cells = MLS.s2TpCells MLS.S2Sym s
         let twoDistinct = labs |> List.filter (fun lb -> lb.Uses.Length = 2) |> List.length
         let sameCopy = labs |> List.filter (fun lb -> lb.Uses.Length = 1) |> List.length
-        let mirror = cells |> List.filter (fun c -> c.IsMirror) |> List.length
+        let mirror = cells |> List.filter (_.IsMirror) |> List.length
         let diagOff = cells |> List.filter (fun c -> not c.IsMirror && c.OffA <> c.OffB) |> List.length
         let diagDiag = cells |> List.filter (fun c -> not c.IsMirror && c.OffA = c.OffB) |> List.length
         // Per-(L, P) alignment: a cell's output block is located by OutOff.
@@ -349,7 +349,7 @@ let runSymPowerTablesTests () : BlockResult =
             |> Map.ofList
         let cellCounts = cells |> List.countBy (fun c -> outAt.[c.OutOff]) |> Map.ofList
         let labCounts = labs |> List.countBy (fun lb -> (lb.L, lb.Parity)) |> Map.ofList
-        check (sprintf "k=2 alignment %s: distinct-copy sectors = mirror + off-diag cells, repeated = u1=u2 cells" nm)
+        check ($"k=2 alignment {nm}: distinct-copy sectors = mirror + off-diag cells, repeated = u1=u2 cells")
               (twoDistinct = mirror + diagOff && sameCopy = diagDiag && cellCounts = labCounts)
               (sprintf "labels %d+%d, cells %d+%d+%d, per-(L,P) %s"
                        twoDistinct sameCopy mirror diagOff diagDiag
@@ -357,8 +357,8 @@ let runSymPowerTablesTests () : BlockResult =
         // and the stage-1 weight count, re-derived through the label layer
         let viaLabels = MLS.polyWeightDimViaLabels s 2 sOut
         let stage1 = MLS.symTpWeightDim s
-        check (sprintf "k=2 weight dim %s: polyWeightDimViaLabels(s,2,tp_spec) = symTpWeightDim" nm)
-              (viaLabels = stage1) (sprintf "%d vs %d" viaLabels stage1)
+        check ($"k=2 weight dim {nm}: polyWeightDimViaLabels(s,2,tp_spec) = symTpWeightDim")
+              (viaLabels = stage1) ($"{viaLabels} vs {stage1}")
 
     // ---- the 15-spec sweep, k ∈ {2,3,4} -------------------------------------
     let sweep =
@@ -391,8 +391,8 @@ let runSymPowerTablesTests () : BlockResult =
             if cnt <> want || dimSum <> expect then
                 sweepOk <- false
                 sweepBad <- sprintf "%A k=%d: %A vs %A (dim %d vs %d)" s k (Map.toList cnt) (Map.toList want) dimSum expect
-    check (sprintf "sweep: label counts = sym_spec and Σ count·(2L+1) = C(n+k−1,k), 15 specs × k ∈ {2,3,4}")
-          sweepOk (if sweepOk then sprintf "%d labels total" sweepLabels else sweepBad)
+    check "sweep: label counts = sym_spec and Σ count·(2L+1) = C(n+k−1,k), 15 specs × k ∈ {2,3,4}"
+          sweepOk (if sweepOk then $"{sweepLabels} labels total" else sweepBad)
 
     let mutable wdOk = true
     let mutable wdBad = ""
@@ -403,7 +403,7 @@ let runSymPowerTablesTests () : BlockResult =
                 let b = MLS.polyWeightDim s k sOut
                 if a <> b then
                     wdOk <- false
-                    wdBad <- sprintf "%s k=%d out=%s: %d vs %d" nm k on a b
+                    wdBad <- $"{nm} k={k} out={on}: {a} vs {b}"
     check "polyWeightDimViaLabels = polyWeightDim (3 anchors × k ∈ {2,3,4} × 3 output specs)"
           wdOk wdBad
 
@@ -424,14 +424,14 @@ let runSymPowerTablesTests () : BlockResult =
     // Single-copy spec: the labels are exactly the Sym⁴(V₂) occurrences.
     let sV2 = mkSpec [ (2, 0, 1) ]
     let labV2 = MLS.polyLabels sV2 4
-    let v2Counts = labV2 |> List.map (fun lb -> lb.L) |> List.countBy id |> List.sortByDescending fst
+    let v2Counts = labV2 |> List.map (_.L) |> List.countBy id |> List.sortByDescending fst
     check "single-copy [(2,e,1)] k=4: labels = Sym⁴(V₂) occurrences, 8:1 6:1 5:1 4:2 2:2 0:1"
           (labV2.Length = 8
            && v2Counts = [ (8, 1); (6, 1); (5, 1); (4, 2); (2, 2); (0, 1) ]
            && labV2 |> List.forall (fun lb -> lb.Sector = [0;0;0;0] && lb.Chain = [] && lb.Parity = 0
                                               && lb.Uses.Length = 1 && lb.Uses.Head.Degree = 4))
           (sprintf "%d labels, L:mult %s" labV2.Length
-                   (v2Counts |> List.map (fun (l, m) -> sprintf "%d:%d" l m) |> String.concat " "))
+                   (v2Counts |> List.map (fun (l, m) -> $"{l}:{m}") |> String.concat " "))
     check "single-copy [(2,e,1)] k=4: label order = symOccurrences order"
           ((labV2 |> List.map (fun lb -> (lb.Uses.Head.OccL, lb.Uses.Head.OccCopy))) = MLS.symOccurrences 2 0 4) ""
 
@@ -441,5 +441,5 @@ let runSymPowerTablesTests () : BlockResult =
           (lab0.Length = 1 && lab0.Head.Sector = [] && lab0.Head.Uses = []
            && lab0.Head.Chain = [] && lab0.Head.L = 0 && lab0.Head.Parity = 0) ""
 
-    printFooter "SymPower Tables" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "SymPower Tables" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "SymPower Tables"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

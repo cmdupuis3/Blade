@@ -144,5 +144,5 @@ let runWignerTablesTests () : BlockResult =
     check "homDim duplicate entries aggregate"
           (MLS.homDim (mkS [ (0, 0, 1); (0, 0, 2) ]) (mkS [ (0, 0, 3) ]) = 9) ""
 
-    printFooter "Wigner Tables" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "Wigner Tables" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "Wigner Tables"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

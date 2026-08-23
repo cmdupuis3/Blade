@@ -32,14 +32,14 @@ module OracleDump =
             let cg = Wigner.realCGSparse l1 l2 lo
             printfn "//   path %d: (b1=%d,l1=%d) x (b2=%d,l2=%d) -> (bo=%d,lo=%d), %d entries"
                 pi p.B1 l1 p.B2 l2 p.BOut lo cg.Length
-            let c1 = cg |> Array.map (fun e -> e.C1)
-            let c2 = cg |> Array.map (fun e -> e.C2)
-            let c3 = cg |> Array.map (fun e -> e.C3)
-            let co = cg |> Array.map (fun e -> e.Coef)
-            arrInt (sprintf "%s_p%d_c1" label pi) c1
-            arrInt (sprintf "%s_p%d_c2" label pi) c2
-            arrInt (sprintf "%s_p%d_c3" label pi) c3
-            arr (sprintf "%s_p%d_coef" label pi) co
+            let c1 = cg |> Array.map _.C1
+            let c2 = cg |> Array.map _.C2
+            let c3 = cg |> Array.map _.C3
+            let co = cg |> Array.map _.Coef
+            arrInt $"{label}_p{pi}_c1" c1
+            arrInt $"{label}_p{pi}_c2" c2
+            arrInt $"{label}_p{pi}_c3" c3
+            arr $"{label}_p{pi}_coef" co
 
     let dump () =
         let graphs, w1, w2, w3, wr, br = TrainingOracle.mkDataset ()
@@ -58,8 +58,8 @@ module OracleDump =
         printfn ""
         for s in 0 .. graphs.Length - 1 do
             let g = graphs.[s]
-            arr (sprintf "pos%d" s) g.Pos
-            arr (sprintf "feat%d" s) g.NodeFeat
+            arr $"pos{s}" g.Pos
+            arr $"feat{s}" g.NodeFeat
             printfn "target%d = %s" s (f2s g.Target)
         printfn ""
         arr "w1_init" w1
@@ -95,7 +95,7 @@ module OracleDump =
         let specStr (s: SpecEntry[]) =
             s
             |> Array.map (fun e ->
-                sprintf "(%d, %d, %d)" e.Ir.L (if e.Ir.P = Even then 0 else 1) e.Mult)
+                $"({e.Ir.L}, {if e.Ir.P = Even then 0 else 1}, {e.Mult})")
             |> String.concat ", "
         printfn "// tp_spec = [%s]; total_dim = %d" (specStr sFull) (Irreps.totalDim sFull)
         let cfgFull : TPConfig = { Spec1 = s1o; Spec2 = s1o; SpecOut = sFull }

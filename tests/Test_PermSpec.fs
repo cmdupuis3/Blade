@@ -113,10 +113,10 @@ let runPermSpecTests () : BlockResult =
     let p0 = permPartitions 0 6
     check "m=0: one partition (the empty RGS), b = 0 — Bell(0) = 1"
           (p0.Length = 1 && p0.Head.Length = 0 && blockCount p0.Head = 0)
-          (sprintf "%d partition(s)" p0.Length)
+          ($"{p0.Length} partition(s)")
     check "m=0: Stirling route agrees (S(0,0) = 1 is the j = 0 term)"
           (partitionCount 0 6 = 1L && partitionCount 0 0 = 1L && stirling2 0 0 = 1L)
-          (sprintf "partitionCount 0 6 = %d" (partitionCount 0 6))
+          ($"partitionCount 0 6 = {(partitionCount 0 6)}")
     check "m=0: perm_bias_dim(0, N) = 1 — the L = 0 invariant readout"
           (permBiasDim 0 1 = 1 && permBiasDim 0 5 = 1 && permWeightDim 0 0 3 = 1) ""
 
@@ -137,13 +137,13 @@ let runPermSpecTests () : BlockResult =
     // "not this convention yet", not "cannot".
     check "truncated m=4, N=2: S(4,1) + S(4,2) = 1 + 7 = 8"
           ((permPartitions 4 2).Length = 8 && stirling2 4 1 = 1L && stirling2 4 2 = 7L)
-          (sprintf "%d" (permPartitions 4 2).Length)
+          (string (permPartitions 4 2).Length)
     check "truncated m=4, N=3: + S(4,3) = 6 -> 14"
           ((permPartitions 4 3).Length = 14 && stirling2 4 3 = 6L)
-          (sprintf "%d" (permPartitions 4 3).Length)
+          (string (permPartitions 4 3).Length)
     check "truncated m=5, N=2: S(5,1) + S(5,2) = 1 + 15 = 16"
           ((permPartitions 5 2).Length = 16 && stirling2 5 2 = 15L)
-          (sprintf "%d" (permPartitions 5 2).Length)
+          (string (permPartitions 5 2).Length)
     check "truncated m=6, N=1: the all-one-block partition alone"
           ((permPartitions 6 1).Length = 1 && (permPartitions 6 1).Head = Array.zeroCreate 6) ""
     // Every truncation is a PREFIX-closed sub-family by block count, and the
@@ -237,7 +237,7 @@ let runPermSpecTests () : BlockResult =
             // duplicate-free on BOTH routes, and the same set
             let ok = odoSet.Count = odo.Length && insSet.Count = ins.Length && odoSet = insSet
             if m = maxPositions then
-                routeDetail <- sprintf "m=6: odometer %d, insertion %d, set %d" odo.Length ins.Length insSet.Count
+                routeDetail <- $"m=6: odometer {odo.Length}, insertion {ins.Length}, set {insSet.Count}"
             ok)
     check "third route (recursive block-insertion) = the RGS odometer as SETS, m = 0..6"
           routesAgree routeDetail
@@ -251,7 +251,7 @@ let runPermSpecTests () : BlockResult =
     check "perm_weight_dim(1, 1, N) = Bell(2) = 2 — DeepSets (a*x + b*sum(x))"
           (permWeightDim 1 1 2 = 2 && permWeightDim 1 1 8 = 2) ""
     check "perm_weight_dim(2, 2, 5) = Bell(4) = 15 — the Maron k=l=2 count"
-          (permWeightDim 2 2 5 = 15) (sprintf "%d" (permWeightDim 2 2 5))
+          (permWeightDim 2 2 5 = 15) (string (permWeightDim 2 2 5))
     check "perm_bias_dim(2, 5) = Bell(2) = 2 — the Maron k=2 bias count"
           (permBiasDim 2 5 = 2) ""
     check "perm_weight_dim(1, 2, 3) = Bell(3) = 5, perm_weight_dim(3, 3, 6) = Bell(6) = 203"
@@ -292,5 +292,5 @@ let runPermSpecTests () : BlockResult =
     check "permWeightDim/permBiasDim themselves compute the truncated basis (the surface, not the layer, is what refuses)"
           (permWeightDim 2 2 2 = 8 && permBiasDim 5 2 = 16) ""
 
-    printFooter "Perm Spec" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "Perm Spec" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "Perm Spec"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

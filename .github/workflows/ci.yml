@@ -97,10 +97,10 @@ jobs:
   # is installed or invoked.
   #
   # ON LINUX, deliberately. Nothing this job does is Windows-specific -- the
-  # build is a plain net7.0 compile with no PackageReferences, and the goldens
+  # build is a plain net10.0 compile with no PackageReferences, and the goldens
   # are four in-process blocks that spawn no compiler and compare .ll text
   # carrying no target triple, no datalayout and no paths. Linux runners boot
-  # faster, install the .NET 7 SDK faster (the Windows image ships 8/9, so it
+  # faster, install the .NET 10 SDK faster (the Windows image may not ship it, so it
   # is a download either way), and bill at 1x where Windows bills at 2x.
   #
   # The Windows lanes do NOT depend on this job, so if the Linux path turns
@@ -116,7 +116,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '7.0.x'
+          dotnet-version: '10.0.x'
 
       # Blade.fsproj is the one exe project: compiler, domain elaborators and
       # the whole test harness in a single binary. The oracles/ projects are
@@ -139,7 +139,7 @@ jobs:
           ./.github/scripts/Invoke-BladeTest.ps1
           -Blade dotnet
           -Name 'llvm goldens'
-          -BladeArgs 'bin/Release/net7.0/Blade.dll','test','llvm','goldens'
+          -BladeArgs 'bin/Release/net10.0/Blade.dll','test','llvm','goldens'
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -344,7 +344,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '7.0.x'
+          dotnet-version: '10.0.x'
 
       # Built here rather than downloaded from `build`: that job produces a
       # Linux apphost, and these lanes want Blade.exe. Two minutes against a
@@ -376,7 +376,7 @@ jobs:
         shell: pwsh
         run: >
           .\.github\scripts\Assert-Toolchain.ps1
-          -Blade .\bin\Release\net7.0\Blade.exe
+          -Blade .\bin\Release\net10.0\Blade.exe
           -Require gpp,llvm,blas,lapack,netcdf,mpi
 
       # Runs BEFORE the lane, so a lane that hangs cannot stop it reporting.
@@ -392,7 +392,7 @@ jobs:
         env:
           VERBS: ${{ matrix.verbs }}
         run: |
-          $exe = '.\bin\Release\net7.0\Blade.exe'
+          $exe = '.\bin\Release\net10.0\Blade.exe'
           $failed = @()
           foreach ($verb in ($env:VERBS -split "`r?`n")) {
             if (-not $verb.Trim()) { continue }
@@ -410,7 +410,7 @@ jobs:
         shell: pwsh
         run: >
           .\.github\scripts\Invoke-BladeTest.ps1
-          -Blade .\bin\Release\net7.0\Blade.exe
+          -Blade .\bin\Release\net10.0\Blade.exe
           -Name 'interpreter differential'
           -BladeArgs 'test','--interp'
 

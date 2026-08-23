@@ -121,7 +121,7 @@ let test_subst_is_consulted_on_reference_hit = {
         let names = Map.empty |> Map.add 1 "B" |> Map.add 2 "i"
         let output = exprToCppWithSubst [(node, "__w_center")] names node
         if output.Trim() = "__w_center" then (true, "")
-        else (false, sprintf "expected exactly \"__w_center\", got: %s" output)
+        else (false, $"expected exactly \"__w_center\", got: {output}")
 }
 
 let allSubstTests : SubstTest list = [
@@ -144,5 +144,5 @@ let runCodeGenSubstTests () : Blade.Tests.TestHarness.BlockResult =
             failed <- failed + 1
             failedNames <- failedNames @ [t.Name]
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail t.Name msg
-    Blade.Tests.TestHarness.printFooter "Subst" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    Blade.Tests.TestHarness.printFooter "Subst" [$"{passed} passed"; $"{failed} failed"]
     { Block = "Subst"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

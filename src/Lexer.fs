@@ -407,11 +407,11 @@ let scanNumber (state: LexerState) =
         if isFloat then
             match Double.TryParse(text) with
             | true, v -> TokFloat v
-            | false, _ -> TokError (sprintf "Invalid float: %s" text)
+            | false, _ -> TokError $"Invalid float: {text}"
         else
             match Int64.TryParse(text) with
             | true, v -> TokInt v
-            | false, _ -> TokError (sprintf "Invalid integer: %s" text)
+            | false, _ -> TokError $"Invalid integer: {text}"
     
     emit state startLine startCol kind
 

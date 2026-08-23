@@ -149,7 +149,7 @@ let internal funcStillPolymorphic (f: IRFuncDef) : bool =
 /// FUNCTION type that still carries an inference var.
 let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
     let allFuncs =
-        program.Modules |> List.collect (fun m -> m.Functions)
+        program.Modules |> List.collect _.Functions
     if not (allFuncs |> List.exists funcStillPolymorphic) then program
     else
     let funcById = allFuncs |> List.map (fun f -> (f.Id, f)) |> Map.ofList
@@ -169,7 +169,7 @@ let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
     // it, so a reference can never be left dangling.
     let bindingIdsReferencedElsewhere =
         program.Modules
-        |> List.collect (fun m -> m.Bindings)
+        |> List.collect _.Bindings
         |> List.map (fun b -> referencedIn b.Value)
         |> List.fold Set.union Set.empty
     let isUnappliedGenericBinding (b: IRBinding) =
@@ -184,7 +184,7 @@ let eliminateDeadPolymorphs (program: IRProgram) : IRProgram =
     let mutable reachable : Set<IRId> = Set.empty
     let mutable frontier =
         program.Modules
-        |> List.collect (fun m -> liveBindingsOf m |> List.map (fun b -> b.Value))
+        |> List.collect (fun m -> liveBindingsOf m |> List.map _.Value)
         |> List.map referencedIn
         |> List.fold Set.union Set.empty
         |> Set.toList
@@ -226,8 +226,8 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     // from "unrelated module's Id that happens to match", so it accepts all
     // program Ids as in-scope.
     let moduleIds =
-        let bindIds = modul.Bindings |> List.map (fun b -> b.Id) |> Set.ofList
-        let funcIds = modul.Functions |> List.map (fun f -> f.Id) |> Set.ofList
+        let bindIds = modul.Bindings |> List.map _.Id |> Set.ofList
+        let funcIds = modul.Functions |> List.map _.Id |> Set.ofList
         Set.unionMany [bindIds; funcIds; externalIds]
 
     // Tag/IxKind agreement: the two encodings must never diverge -- a
@@ -253,33 +253,33 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
 
     // --- Check 1: No unresolved IRTInfer in binding types ---
     for b in modul.Bindings do
-        let ctx = sprintf "in binding '%s'" b.Name
+        let ctx = $"in binding '{b.Name}'"
         match containsInfer b.Type with
-        | Some id -> addError ctx (sprintf "unresolved type variable T?%d in declared type" id)
+        | Some id -> addError ctx $"unresolved type variable T?{id} in declared type"
         | None -> ()
         checkKindAgreement ctx b.Type
         // Also check types inside the expression tree
         for ty in collectTypesInExpr b.Value do
             match containsInfer ty with
-            | Some id -> addError ctx (sprintf "unresolved type variable T?%d in expression" id)
+            | Some id -> addError ctx $"unresolved type variable T?{id} in expression"
             | None -> ()
             checkKindAgreement ctx ty
 
     // --- Check 1b: No unresolved IRTInfer in function types ---
     for f in modul.Functions do
-        let ctx = sprintf "in function '%s'" f.Name
+        let ctx = $"in function '{f.Name}'"
         match containsInfer f.RetType with
-        | Some id -> addError ctx (sprintf "unresolved type variable T?%d in return type" id)
+        | Some id -> addError ctx $"unresolved type variable T?{id} in return type"
         | None -> ()
         checkKindAgreement ctx f.RetType
         for p in f.Params do
             match containsInfer p.Type with
-            | Some id -> addError ctx (sprintf "unresolved type variable T?%d in param '%s'" id p.Name)
+            | Some id -> addError ctx $"unresolved type variable T?{id} in param '{p.Name}'"
             | None -> ()
             checkKindAgreement ctx p.Type
         for ty in collectTypesInExpr f.Body do
             match containsInfer ty with
-            | Some id -> addError ctx (sprintf "unresolved type variable T?%d in body" id)
+            | Some id -> addError ctx $"unresolved type variable T?{id} in body"
             | None -> ()
             checkKindAgreement ctx ty
     
@@ -289,7 +289,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         match expr with
         | IRVar (id, _) ->
             if not (Set.contains id scope) then
-                addError ctx (sprintf "dangling VarId reference: v%d" id)
+                addError ctx $"dangling VarId reference: v{id}"
         | IRLet (id, value, body) ->
             checkScope scope ctx value
             checkScope (Set.add id scope) ctx body
@@ -353,13 +353,13 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     
     let mutable cumulativeScope = moduleIds
     for b in modul.Bindings do
-        let ctx = sprintf "in binding '%s'" b.Name
+        let ctx = $"in binding '{b.Name}'"
         checkScope cumulativeScope ctx b.Value
         cumulativeScope <- Set.add b.Id cumulativeScope
     
     for f in modul.Functions do
-        let ctx = sprintf "in function '%s'" f.Name
-        let paramIds = f.Params |> List.map (fun p -> p.VarId) |> Set.ofList
+        let ctx = $"in function '{f.Name}'"
+        let paramIds = f.Params |> List.map _.VarId |> Set.ofList
         // Lifted lambdas live in module.Functions with their captures in
         // `f.Captures` (separate from `f.Params`). The captures' Ids
         // reference the enclosing source-level var; the lambda's body
@@ -368,7 +368,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         // scope at the validator's `for f in modul.Functions` loop; we
         // have to add the function's own Captures' Ids to the visible
         // scope so the body's references resolve.
-        let captureIds = f.Captures |> List.map (fun c -> c.Id) |> Set.ofList
+        let captureIds = f.Captures |> List.map _.Id |> Set.ofList
         let funcScope = Set.unionMany [moduleIds; paramIds; captureIds]
         checkScope funcScope ctx f.Body
     
@@ -377,11 +377,11 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         match expr with
         | IRApplyCombinator info ->
             if info.Arrays.Length <> info.ArrayTypes.Length then
-                addError ctx (sprintf "ApplyInfo: Arrays.Length=%d != ArrayTypes.Length=%d" info.Arrays.Length info.ArrayTypes.Length)
+                addError ctx $"ApplyInfo: Arrays.Length={info.Arrays.Length} != ArrayTypes.Length={info.ArrayTypes.Length}"
             if info.Arrays.Length <> info.Identities.Length then
-                addError ctx (sprintf "ApplyInfo: Arrays.Length=%d != Identities.Length=%d" info.Arrays.Length info.Identities.Length)
+                addError ctx $"ApplyInfo: Arrays.Length={info.Arrays.Length} != Identities.Length={info.Identities.Length}"
             if info.SDimsPerArray.Length <> info.Arrays.Length && info.SDimsPerArray.Length <> 0 then
-                addError ctx (sprintf "ApplyInfo: SDimsPerArray.Length=%d != Arrays.Length=%d" info.SDimsPerArray.Length info.Arrays.Length)
+                addError ctx $"ApplyInfo: SDimsPerArray.Length={info.SDimsPerArray.Length} != Arrays.Length={info.Arrays.Length}"
             // Canonical apply: Kernel slot is a callable reference, either
             // IRVar(id, _) or IRReynolds(IRVar(id, _), _); `resolveKernel`
             // peels any Reynolds wrapper. `info.Loop = IRObjectFor _` can
@@ -400,12 +400,12 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                 | Some rk ->
                     let lInfo = rk.Callable
                     if lInfo.Params.Length <> info.KernelInputRanks.Length then
-                        addError ctx (sprintf "ApplyInfo: kernel params=%d != KernelInputRanks.Length=%d" lInfo.Params.Length info.KernelInputRanks.Length)
+                        addError ctx $"ApplyInfo: kernel params={lInfo.Params.Length} != KernelInputRanks.Length={info.KernelInputRanks.Length}"
                     // Verify CommGroup indices are in range
                     for cg in lInfo.CommGroups do
                         for idx in cg do
                             if idx < 0 || idx >= lInfo.Params.Length then
-                                addError ctx (sprintf "CommGroup index %d out of range [0, %d)" idx lInfo.Params.Length)
+                                addError ctx $"CommGroup index {idx} out of range [0, {lInfo.Params.Length})"
                 | None ->
                     // Identify the structural form to make the error
                     // actionable for whoever introduced the malformed
@@ -415,7 +415,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                     let shapeDesc =
                         match inner with
                         | IRVar (id, _) ->
-                            sprintf "IRVar(v%d) [id resolves in neither CallablesTable nor synthetic registry]" id
+                            $"IRVar(v{id}) [id resolves in neither CallablesTable nor synthetic registry]"
                         | IRLit _ -> "IRLit [literal in kernel slot]"
                         | IRBinOp _ -> "IRBinOp [unlifted operator expression]"
                         | IRApp _ -> "IRApp [unlifted application]"
@@ -425,7 +425,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                     let prefix =
                         if desc.HasReynolds then "ApplyInfo: IRReynolds inner is"
                         else "ApplyInfo: kernel slot is"
-                    addError ctx (sprintf "%s %s" prefix shapeDesc)
+                    addError ctx $"{prefix} {shapeDesc}"
         | IRComposeApply info ->
             // Compose-apply: InputArrays threaded through a composed
             // object chain. Composition should resolve to IRComposeObj
@@ -442,7 +442,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                     | IRObjectFor _ -> "IRObjectFor [single object, not composed]"
                     | IRMethodFor _ -> "IRMethodFor [should be IRApplyCombinator, not IRComposeApply]"
                     | _ -> "non-compose expression"
-                addError ctx (sprintf "ComposeApplyInfo: Composition is %s; expected IRComposeObj or IRVar" shapeName)
+                addError ctx $"ComposeApplyInfo: Composition is {shapeName}; expected IRComposeObj or IRVar"
         | _ -> ()
         // Recurse into sub-expressions
         match expr with
@@ -459,9 +459,9 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | _ -> ()
     
     for b in modul.Bindings do
-        checkApplyInfo (sprintf "in binding '%s'" b.Name) b.Value
+        checkApplyInfo $"in binding '{b.Name}'" b.Value
     for f in modul.Functions do
-        checkApplyInfo (sprintf "in function '%s'" f.Name) f.Body
+        checkApplyInfo $"in function '{f.Name}'" f.Body
     
     // --- Check 4: No empty match arms ---
     let rec checkEmptyMatch (ctx: string) (expr: IRExpr) =
@@ -478,7 +478,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | _ -> ()
     
     for b in modul.Bindings do
-        checkEmptyMatch (sprintf "in binding '%s'" b.Name) b.Value
+        checkEmptyMatch $"in binding '{b.Name}'" b.Value
 
     // Restore the prior AnalysisContext so the validator doesn't
     // leak its installed CallablesTable to subsequent passes.
@@ -492,13 +492,13 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
 let validateIR (program: IRProgram) : Result<IRProgram, string list> =
     let allIds =
         program.Modules |> List.collect (fun m ->
-            (m.Bindings |> List.map (fun b -> b.Id)) @
-            (m.Functions |> List.map (fun f -> f.Id)))
+            (m.Bindings |> List.map _.Id) @
+            (m.Functions |> List.map _.Id))
         |> Set.ofList
     let allErrors =
         program.Modules |> List.collect (validateModule allIds)
     if allErrors.IsEmpty then
         Ok program
     else
-        let messages = allErrors |> List.map (fun e -> sprintf "[IR Validation] %s: %s" e.Context e.Message)
+        let messages = allErrors |> List.map (fun e -> $"[IR Validation] {e.Context}: {e.Message}")
         Error messages

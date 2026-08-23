@@ -36,8 +36,8 @@ const path = require("path");
  *     `candidates` to override.
  */
 const DEFAULT_CANDIDATES = [
-  path.join(__dirname, "..", "bin", "Release", "net7.0", "Blade.exe"),
-  path.join(__dirname, "..", "bin", "Debug", "net7.0", "Blade.exe"),
+  path.join(__dirname, "..", "bin", "Release", "net10.0", "Blade.exe"),
+  path.join(__dirname, "..", "bin", "Debug", "net10.0", "Blade.exe"),
 ];
 
 /** Newest-mtime existing regular file among `candidates`, or undefined. A
@@ -93,7 +93,7 @@ function isDirectory(p) {
 }
 
 /** How far up from the binary we are willing to look for a checkout. A
- *  standard build sits at `<root>/bin/Release/net7.0/`, which is three
+ *  standard build sits at `<root>/bin/Release/net10.0/`, which is three
  *  parents; the budget leaves room for a variant layout without wandering
  *  into a user's home directory. */
 const MAX_WALK_UP = 5;

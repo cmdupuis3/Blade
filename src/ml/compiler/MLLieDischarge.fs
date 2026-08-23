@@ -147,7 +147,7 @@ type Radical = Map<int, PX.Rat>
 /// radicands are at most 2*l(l+1) ~ 4l^2, a two-digit number at the l <= 8
 /// end of any shipped spec.
 let squarefree (n: int) : int * int =
-    if n <= 0 then failwithf "internal: MLLieDischarge.squarefree of %d" n
+    if n <= 0 then failwith $"internal: MLLieDischarge.squarefree of {n}"
     let mutable rest = n
     let mutable s = 1
     let mutable d = 2
@@ -223,7 +223,7 @@ module Radical =
             |> Map.toList
             |> List.sortBy fst
             |> List.map (fun (k, q) ->
-                if k = 1 then PX.Rat.render q else sprintf "%s*sqrt(%d)" (PX.Rat.render q) k)
+                if k = 1 then PX.Rat.render q else $"{PX.Rat.render q}*sqrt({k})")
             |> String.concat " + "
 
 // The exact generator tables
@@ -248,7 +248,7 @@ let private blockCache = Dictionary<Axis * int, Radical [][]>()
 /// module header for the derivation; shapes are L_z: integers +/-m; L_x,
 /// L_y: (1/2)*sqrt(integer), with the m = 0 seam carrying an extra sqrt(2).
 let blockGenerator (axis: Axis) (l: int) : Radical [][] =
-    if l < 0 then failwithf "internal: MLLieDischarge.blockGenerator negative l (%d)" l
+    if l < 0 then failwith $"internal: MLLieDischarge.blockGenerator negative l ({l})"
     match blockCache.TryGetValue((axis, l)) with
     | true, v -> v
     | _ ->
@@ -438,9 +438,9 @@ let private defectLhs (budget: int ref) (gen: LieGenerator) (comp: PX.Poly)
                         // Cannot arise: the caller builds matrices from the same Rep
                         // parameters the extractor made variables of -- an internal
                         // error, not a silent widening (a missing image would verify a WEAKER identity).
-                        failed <- Some (DischargeCap (sprintf "internal: no Lie action supplied for '%s'" pname))
+                        failed <- Some (DischargeCap $"internal: no Lie action supplied for '{pname}'")
                     | Some mat when i < 0 || i >= mat.Length ->
-                        failed <- Some (DischargeCap (sprintf "internal: component %d of '%s' is outside its %d-dimensional action" i pname mat.Length))
+                        failed <- Some (DischargeCap $"internal: component {i} of '{pname}' is outside its {mat.Length}-dimensional action")
                     | Some mat ->
                         let baseRep =
                             if e = 1 then Map.remove key mono.Rep else Map.add key (e - 1) mono.Rep
@@ -453,7 +453,7 @@ let private defectLhs (budget: int ref) (gen: LieGenerator) (comp: PX.Poly)
                                     out <- radAdd { mono with Rep = rep } (Radical.scale scalar entry) out
                                     budget.Value <- budget.Value - 1
                                     if budget.Value < 0 then
-                                        failed <- Some (DischargeCap (sprintf "the Lie substitution exceeded the %d-term cap" PX.maxTerms))
+                                        failed <- Some (DischargeCap $"the Lie substitution exceeded the {PX.maxTerms}-term cap")
     match failed with
     | Some e -> Error e
     | None -> Ok out
@@ -581,14 +581,14 @@ let discharge (form: PX.PolyForm) (gens: LieGenerator list) (inv: InversionCheck
         gens
         |> List.tryPick (fun g ->
             if g.OutMat.Length <> n then
-                Some (DischargeCap (sprintf "internal: the %s output action is %d-dimensional but the body has %d components" g.Name g.OutMat.Length n))
+                Some (DischargeCap $"internal: the {g.Name} output action is {g.OutMat.Length}-dimensional but the body has {n} components")
             else None)
     match shapeError with
     | Some e -> Error e
     | None ->
         match inv with
         | Some ip when ip.OutPar.Length <> n ->
-            Error (DischargeCap (sprintf "internal: the -I output parity has %d entries but the body has %d components" ip.OutPar.Length n))
+            Error (DischargeCap $"internal: the -I output parity has {ip.OutPar.Length} entries but the body has {n} components")
         | _ ->
             let budget = ref PX.maxTerms
             let rec loopGens (gs: LieGenerator list) : Result<unit, LieError> =

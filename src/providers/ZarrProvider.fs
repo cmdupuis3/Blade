@@ -233,7 +233,7 @@ module SimplexBlocks =
     /// Physical row of each block under "path" order: pathRows.[lexBlockRank] = row index in the store.
     let pathRows (r: int) (T: int64) : int64[] =
         if not (isPowerOfTwo T) then
-            failwithf "simplex-blocks path order requires a power-of-two grid (got %d)" T
+            failwith $"simplex-blocks path order requires a power-of-two grid (got {T})"
         let rows = Array.zeroCreate (int (blockCount r T))
         pathMultisets 0L T r
         |> Seq.iteri (fun i ms ->
@@ -327,17 +327,17 @@ let private dtypeOfCode (code: string) : Result<ZarrDtype, string> =
     | "u2" -> Ok { Code = "u2"; Elem = ETInt64; ByteSize = 2; IsFloat = false }
     | "u4" -> Ok { Code = "u4"; Elem = ETInt64; ByteSize = 4; IsFloat = false }
     | "u8" -> Ok { Code = "u8"; Elem = ETInt64; ByteSize = 8; IsFloat = false }
-    | other -> Error (sprintf "unsupported dtype '%s' (numeric f4/f8/i*/u* only -- bool, complex, datetime and string dtypes are not supported)" other)
+    | other -> Error $"unsupported dtype '{other}' (numeric f4/f8/i*/u* only -- bool, complex, datetime and string dtypes are not supported)"
 
 /// v2 dtype string ("<f8", "|i1", ">f4"): byte-order char + code.
 let zarrDtypeV2 (dtype: string) : Result<ZarrDtype, string> =
     if String.IsNullOrEmpty dtype || dtype.Length < 2 then
-        Error (sprintf "malformed v2 dtype '%s'" dtype)
+        Error $"malformed v2 dtype '{dtype}'"
     else
         match dtype.[0] with
         | '<' | '|' -> dtypeOfCode (dtype.Substring 1)
-        | '>' -> Error (sprintf "big-endian dtype '%s' is not supported (little-endian stores only)" dtype)
-        | _ -> Error (sprintf "malformed v2 dtype '%s' (expected a byte-order prefix '<', '|' or '>')" dtype)
+        | '>' -> Error $"big-endian dtype '{dtype}' is not supported (little-endian stores only)"
+        | _ -> Error $"malformed v2 dtype '{dtype}' (expected a byte-order prefix '<', '|' or '>')"
 
 /// v3 data_type name ("float64", "int32", ...).
 let zarrDtypeV3 (name: string) : Result<ZarrDtype, string> =
@@ -352,7 +352,7 @@ let zarrDtypeV3 (name: string) : Result<ZarrDtype, string> =
     | "uint16" -> dtypeOfCode "u2"
     | "uint32" -> dtypeOfCode "u4"
     | "uint64" -> dtypeOfCode "u8"
-    | other -> Error (sprintf "unsupported data_type '%s' (numeric float32/float64/int*/uint* only)" other)
+    | other -> Error $"unsupported data_type '{other}' (numeric float32/float64/int*/uint* only)"
 
 // JSON parsing helpers
 
@@ -385,7 +385,7 @@ let private parseFill (where_: string) (isFloat: bool) (el: JsonElement option) 
              | "NaN", true -> Ok (FillFloat nan)
              | "Infinity", true -> Ok (FillFloat infinity)
              | "-Infinity", true -> Ok (FillFloat (-infinity))
-             | s, _ -> Error (sprintf "%s: unsupported fill_value '%s'" where_ s))
+             | s, _ -> Error $"{where_}: unsupported fill_value '{s}'")
         | _ -> Error (sprintf "%s: unsupported fill_value kind %A" where_ e.ValueKind)
 
 /// Parse + validate the `blade` layout attribute (spec_version 1 or 2)
@@ -408,11 +408,11 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
             |> Option.defaultValue -1
         let layoutStr = strOf "layout" ""
         if specVersion <> 1 && specVersion <> 2 then
-            Error (sprintf "%s: blade.spec_version %d is not supported (this reader implements spec_version 1 and 2)" where_ specVersion)
+            Error $"{where_}: blade.spec_version {specVersion} is not supported (this reader implements spec_version 1 and 2)"
         elif layoutStr <> "packed" && layoutStr <> "packed-blocks" then
-            Error (sprintf "%s: blade.layout '%s' is not supported ('packed' or 'packed-blocks')" where_ layoutStr)
+            Error $"{where_}: blade.layout '{layoutStr}' is not supported ('packed' or 'packed-blocks')"
         elif strOf "order" "ascending-lex" <> "ascending-lex" then
-            Error (sprintf "%s: blade.order '%s' is not supported ('ascending-lex' only -- the pinned linearized_storage order)" where_ (strOf "order" ""))
+            Error ($"""{where_}: blade.order '{(strOf "order" "")}' is not supported ('ascending-lex' only -- the pinned linearized_storage order)""")
         else
         match tryProp b "index_types" with
         | Some its when its.ValueKind = JsonValueKind.Array && its.GetArrayLength() >= 1 ->
@@ -429,14 +429,14 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                 match kind with
                 | "dense" ->
                     if extent > 0L then Ok (Choice2Of2 extent)
-                    else Error (sprintf "%s: blade.index_types[%d]: dense entry needs a positive extent" where_ i)
+                    else Error $"{where_}: blade.index_types[{i}]: dense entry needs a positive extent"
                 | "sym" | "antisym" ->
                     let rank =
                         tryProp e "rank"
                         |> Option.map (fun v -> if v.ValueKind = JsonValueKind.Number then v.GetInt32() else -1)
                         |> Option.defaultValue -1
-                    if rank < 2 then Error (sprintf "%s: blade.index_types[%d]: packed group needs rank >= 2" where_ i)
-                    elif extent <= 0L then Error (sprintf "%s: blade.index_types[%d]: packed group needs a positive extent" where_ i)
+                    if rank < 2 then Error $"{where_}: blade.index_types[{i}]: packed group needs rank >= 2"
+                    elif extent <= 0L then Error $"{where_}: blade.index_types[{i}]: packed group needs a positive extent"
                     else
                         let sym = if kind = "sym" then SymSymmetric else SymAntisymmetric
                         Ok (Choice1Of2 { Sym = sym; Rank = rank; Extent = extent; Levels = [] })
@@ -444,14 +444,13 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                     // The v1 door, shut by name: v1's kind set is closed, so an
                     // orbit head reaching a v1 reader must be a loud refusal, never
                     // a reinterpretation as some simplex group with matching cardinality.
-                    Error (sprintf "%s: blade.index_types[%d]: kind 'orbit' (an iterated-wreath OrbIdx class) is a spec_version 2 head, but this store declares spec_version %d -- see providers/ZarrTriangularSpec.md"
-                               where_ i specVersion)
+                    Error ($"{where_}: blade.index_types[{i}]: kind 'orbit' (an iterated-wreath OrbIdx class) is a spec_version 2 head, but this store declares spec_version {specVersion} -- see providers/ZarrTriangularSpec.md")
                 | "orbit" ->
                     // levels: [[r, "+"|"-"], ...], OUTERMOST-LAST -- a reader
                     // must not reverse this direction.
                     let parseLevel (j: int) (le: JsonElement) : Result<int * bool, string> =
                         if le.ValueKind <> JsonValueKind.Array || le.GetArrayLength() <> 2 then
-                            Error (sprintf "%s: blade.index_types[%d].levels[%d]: each level is a two-element array [rank, \"+\"|\"-\"]" where_ i j)
+                            Error $"{where_}: blade.index_types[{i}].levels[{j}]: each level is a two-element array [rank, \"+\"|\"-\"]"
                         else
                             let items = le.EnumerateArray() |> Array.ofSeq
                             let r = if items.[0].ValueKind = JsonValueKind.Number then items.[0].GetInt32() else -1
@@ -460,9 +459,9 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                                 // A rank-1 level is the trivial group and normalizes
                                 // away (OrbRank.normalizeLevels), so admitting it
                                 // would put TWO spellings of one class on disk.
-                                Error (sprintf "%s: blade.index_types[%d].levels[%d]: level rank %d is not >= 2 (a rank-1 level is the trivial group and must be omitted, so that one class has one spelling on disk)" where_ i j r)
+                                Error $"{where_}: blade.index_types[{i}].levels[{j}]: level rank {r} is not >= 2 (a rank-1 level is the trivial group and must be omitted, so that one class has one spelling on disk)"
                             elif s <> "+" && s <> "-" then
-                                Error (sprintf "%s: blade.index_types[%d].levels[%d]: sign '%s' is not \"+\" or \"-\"" where_ i j s)
+                                Error $"{where_}: blade.index_types[{i}].levels[{j}]: sign '{s}' is not \"+\" or \"-\""
                             else Ok (r, (s = "+"))
                     match tryProp e "levels" with
                     | Some ls when ls.ValueKind = JsonValueKind.Array ->
@@ -480,20 +479,18 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                                  // The one-spelling rule: OrbIdx<[(r,+)],n> IS SymIdx<r,n>
                                  // and OrbIdx<[(r,-)],n> IS AntisymIdx<r,n>, so a depth-1
                                  // orbit head would be a second spelling of a class that already has one.
-                                 Error (sprintf "%s: blade.index_types[%d]: an 'orbit' head needs depth >= 2 (got %d level(s)). A depth-1 class is written as kind 'sym' / 'antisym' -- OrbIdx<[(r,+)],n> IS SymIdx<r,n> and OrbIdx<[(r,-)],n> IS AntisymIdx<r,n>, and one class gets one spelling on disk"
-                                            where_ i (List.length levels))
+                                 Error ($"{where_}: blade.index_types[{i}]: an 'orbit' head needs depth >= 2 (got {(List.length levels)} level(s)). A depth-1 class is written as kind 'sym' / 'antisym' -- OrbIdx<[(r,+)],n> IS SymIdx<r,n> and OrbIdx<[(r,-)],n> IS AntisymIdx<r,n>, and one class gets one spelling on disk")
                              elif extent <= 0L then
-                                 Error (sprintf "%s: blade.index_types[%d]: orbit head needs a positive extent (the class's base extent n)" where_ i)
+                                 Error $"{where_}: blade.index_types[{i}]: orbit head needs a positive extent (the class's base extent n)"
                              else
                                  let axes = levels |> List.fold (fun a (r, _) -> a * r) 1
                                  Ok (Choice1Of2 { Sym = SymWreath; Rank = axes; Extent = extent; Levels = levels }))
                     | _ ->
-                        Error (sprintf "%s: blade.index_types[%d]: orbit head is missing its 'levels' array" where_ i)
+                        Error $"{where_}: blade.index_types[{i}]: orbit head is missing its 'levels' array"
                 | "herm" ->
-                    Error (sprintf "%s: blade.index_types[%d]: kind 'herm' is reserved (constraint-coupled cells) and not supported" where_ i)
+                    Error $"{where_}: blade.index_types[{i}]: kind 'herm' is reserved (constraint-coupled cells) and not supported"
                 | other ->
-                    Error (sprintf "%s: blade.index_types[%d]: unknown kind '%s' (sym | antisym | dense%s)"
-                               where_ i other (if specVersion >= 2 then " | orbit" else ""))
+                    Error ($"""{where_}: blade.index_types[{i}]: unknown kind '{other}' (sym | antisym | dense{(if specVersion >= 2 then " | orbit" else "")})""")
             let rec collect i acc =
                 if i >= entries.Length then Ok (List.rev acc)
                 else
@@ -507,25 +504,23 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                 | Choice1Of2 group :: rest ->
                     let isOrbit = (group.Sym = SymWreath)
                     let headDesc =
-                        if isOrbit then sprintf "orbit %s" (Blade.IR.ppOrbitLevels group.Levels)
+                        if isOrbit then $"orbit {Blade.IR.ppOrbitLevels group.Levels}"
                         elif group.Sym = SymSymmetric then "sym"
                         else "antisym"
                     if rest |> List.exists (function Choice1Of2 _ -> true | _ -> false) then
-                        Error (sprintf "%s: blade layout supports exactly ONE packed group (and it must be leading)" where_)
+                        Error $"{where_}: blade layout supports exactly ONE packed group (and it must be leading)"
                     elif isOrbit && layoutStr <> "packed" then
                         // 'packed-blocks' decomposes a SIMPLEX by tile multisets (the
                         // block grid of a rank-r simplex is itself SymIdx<r,T>); a
                         // wreath pool's rows shrink per LEVEL, with no tile multiset to decompose by.
-                        Error (sprintf "%s: blade.layout 'packed-blocks' is not defined for an orbit (iterated-wreath) head -- spec_version 2 is the flat single-pool layout only" where_)
+                        Error $"{where_}: blade.layout 'packed-blocks' is not defined for an orbit (iterated-wreath) head -- spec_version 2 is the flat single-pool layout only"
                     elif isOrbit && not (List.isEmpty rest) then
                         // The in-memory side has no trailing dims for a wreath array at all, so this is a refusal, not a mis-shape.
-                        Error (sprintf "%s: blade orbit head with %d trailing dense dim(s) is not yet supported -- a wreath array's in-memory representation is a SOLE flat pool (no index group composes with it), so writers never emit trailing dims beside an orbit head"
-                                   where_ (List.length rest))
+                        Error ($"{where_}: blade orbit head with {(List.length rest)} trailing dense dim(s) is not yet supported -- a wreath array's in-memory representation is a SOLE flat pool (no index group composes with it), so writers never emit trailing dims beside an orbit head")
                     else
                     match packedCardinalityChecked group with
                     | Error detail ->
-                        Error (sprintf "%s: blade packed group (%s, extent %d): cardinality cannot be computed -- %s"
-                                   where_ headDesc group.Extent detail)
+                        Error ($"{where_}: blade packed group ({headDesc}, extent {group.Extent}): cardinality cannot be computed -- {detail}")
                     | Ok card ->
                         let denseDims = rest |> List.map (function Choice2Of2 d -> d | _ -> 0L)
                         if layoutStr = "packed" then
@@ -533,8 +528,7 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                             | pool :: tail when pool = card && tail = denseDims ->
                                 Ok (Some { Group = group; DenseDims = denseDims; Blocks = None })
                             | pool :: _ when pool <> card ->
-                                Error (sprintf "%s: blade packed group (%s, rank %d, extent %d) has cardinality %d but the pool dimension is %d -- a corrupt or mislabeled store"
-                                           where_ headDesc group.Rank group.Extent card (List.head shape))
+                                Error ($"{where_}: blade packed group ({headDesc}, rank {group.Rank}, extent {group.Extent}) has cardinality {card} but the pool dimension is {(List.head shape)} -- a corrupt or mislabeled store")
                             | _ ->
                                 Error (sprintf "%s: blade dense dims %A do not match the physical trailing shape %A" where_ denseDims (List.tail shape))
                         else
@@ -542,7 +536,7 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                             // parameters from the decomposition object.
                             match tryProp b "decomposition" with
                             | None ->
-                                Error (sprintf "%s: blade.layout 'packed-blocks' requires a decomposition object (scheme 'simplex-blocks')" where_)
+                                Error $"{where_}: blade.layout 'packed-blocks' requires a decomposition object (scheme 'simplex-blocks')"
                             | Some d ->
                                 let dStr name dflt =
                                     tryProp d name
@@ -553,7 +547,7 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                                     |> Option.map (fun v -> if v.ValueKind = JsonValueKind.Number then v.GetInt64() else -1L)
                                 let scheme = dStr "scheme" ""
                                 if scheme <> "simplex-blocks" then
-                                    Error (sprintf "%s: blade decomposition scheme '%s' is not supported for packed-blocks ('simplex-blocks' only)" where_ scheme)
+                                    Error $"{where_}: blade decomposition scheme '{scheme}' is not supported for packed-blocks ('simplex-blocks' only)"
                                 else
                                 match dInt "tile", dInt "grid" with
                                 | Some tile, Some grid when tile > 0L && grid > 0L ->
@@ -566,12 +560,12 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                                             if SimplexBlocks.isPowerOfTwo grid then
                                                 match dInt "depth" with
                                                 | Some dep when (1L <<< int dep) <> grid ->
-                                                    Error (sprintf "%s: blade decomposition depth %d does not match grid %d (expected log2)" where_ dep grid)
+                                                    Error $"{where_}: blade decomposition depth {dep} does not match grid {grid} (expected log2)"
                                                 | _ -> Ok OrderPath
-                                            else Error (sprintf "%s: blade block_order 'path' requires a power-of-two grid (got %d)" where_ grid)
-                                        | other -> Error (sprintf "%s: blade block_order '%s' is not supported ('ascending-lex' or 'path')" where_ other)
+                                            else Error $"{where_}: blade block_order 'path' requires a power-of-two grid (got {grid})"
+                                        | other -> Error $"{where_}: blade block_order '{other}' is not supported ('ascending-lex' or 'path')"
                                     if grid <> expectGrid then
-                                        Error (sprintf "%s: blade decomposition grid %d does not match ceil(extent %d / tile %d) = %d" where_ grid group.Extent tile expectGrid)
+                                        Error $"{where_}: blade decomposition grid {grid} does not match ceil(extent {group.Extent} / tile {tile}) = {expectGrid}"
                                     else
                                     match orderRes with
                                     | Error e -> Error e
@@ -587,11 +581,10 @@ let parseBladeLayout (where_: string) (shape: int64 list) (attrs: JsonElement op
                                             Error (sprintf "%s: packed-blocks physical shape %A does not match [blockCount %d, tile^rank %d] @ dense %A"
                                                        where_ shape nBlocks rowW denseDims)
                                 | _ ->
-                                    Error (sprintf "%s: blade decomposition needs positive integer tile and grid" where_)
+                                    Error $"{where_}: blade decomposition needs positive integer tile and grid"
                 | _ ->
-                    Error (sprintf "%s: blade layout's FIRST index_types entry must be the packed group (sym/antisym%s)"
-                               where_ (if specVersion >= 2 then "/orbit" else ""))
-        | _ -> Error (sprintf "%s: blade layout is missing index_types" where_)
+                    Error ($"""{where_}: blade layout's FIRST index_types entry must be the packed group (sym/antisym{(if specVersion >= 2 then "/orbit" else "")})""")
+        | _ -> Error $"{where_}: blade layout is missing index_types"
 
 // Array metadata parsers (pure: JSON text in, Result out -- unit-testable)
 
@@ -600,15 +593,15 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
     try
         use doc = JsonDocument.Parse zarrayJson
         let root = doc.RootElement
-        let where_ = sprintf "array '%s'" name
+        let where_ = $"array '{name}'"
         match tryProp root "shape", tryProp root "chunks", tryProp root "dtype" with
         | Some shapeEl, Some chunksEl, Some dtypeEl ->
             let shape = jsonInt64List shapeEl
             let chunks = jsonInt64List chunksEl
             if shape.Length <> chunks.Length then
-                Error (sprintf "%s: shape rank %d != chunks rank %d" where_ shape.Length chunks.Length)
+                Error $"{where_}: shape rank {shape.Length} != chunks rank {chunks.Length}"
             elif chunks |> List.exists (fun c -> c <= 0L) then
-                Error (sprintf "%s: non-positive chunk extent" where_)
+                Error $"{where_}: non-positive chunk extent"
             else
             // Compression gate (the v1 uncompressed contract).
             let compressorErr =
@@ -621,7 +614,7 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
                         match tryProp c "id" with
                         | Some idEl when idEl.ValueKind = JsonValueKind.String -> idEl.GetString()
                         | _ -> "<unknown>"
-                    Some (sprintf "%s uses compressor '%s' -- compressed Zarr stores are not supported (uncompressed only); see the ZarrCodec extension point" where_ cid)
+                    Some $"{where_} uses compressor '{cid}' -- compressed Zarr stores are not supported (uncompressed only); see the ZarrCodec extension point"
                 | None -> None
             match compressorErr with
             | Some e -> Error e
@@ -631,20 +624,20 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
                 | None -> None
                 | Some f when f.ValueKind = JsonValueKind.Null -> None
                 | Some f when f.ValueKind = JsonValueKind.Array && f.GetArrayLength() = 0 -> None
-                | Some _ -> Some (sprintf "%s uses filters -- not supported (uncompressed, unfiltered only)" where_)
+                | Some _ -> Some $"{where_} uses filters -- not supported (uncompressed, unfiltered only)"
             match filtersErr with
             | Some e -> Error e
             | None ->
             let orderErr =
                 match tryProp root "order" with
                 | Some o when o.ValueKind = JsonValueKind.String && o.GetString() = "C" -> None
-                | Some o when o.ValueKind = JsonValueKind.String -> Some (sprintf "%s has order '%s' -- only C (row-major) order is supported" where_ (o.GetString()))
+                | Some o when o.ValueKind = JsonValueKind.String -> Some $"{where_} has order '{o.GetString()}' -- only C (row-major) order is supported"
                 | _ -> None  // missing order: tolerate, C assumed
             match orderErr with
             | Some e -> Error e
             | None ->
             match zarrDtypeV2 (dtypeEl.GetString()) with
-            | Error e -> Error (sprintf "%s: %s" where_ e)
+            | Error e -> Error $"{where_}: {e}"
             | Ok dt ->
             match parseFill where_ dt.IsFloat (tryProp root "fill_value") with
             | Error e -> Error e
@@ -654,7 +647,7 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
                 | Some s when s.ValueKind = JsonValueKind.String -> s.GetString()
                 | _ -> "."
             if sep <> "." && sep <> "/" then
-                Error (sprintf "%s: unsupported dimension_separator '%s'" where_ sep)
+                Error $"{where_}: unsupported dimension_separator '{sep}'"
             else
             // .zattrs carries both the xarray dim names and the blade layout.
             let (dimNames, bladeRes) =
@@ -676,21 +669,21 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
             Ok { Name = name; ArrayDir = arrayDir; Shape = shape; Chunks = chunks
                  Dtype = dt; DimNames = dimNames; FillValue = fill; Codec = CodecIdentity
                  Blade = blade; Version = 2; ChunkKeySep = sep; ChunkKeyPrefix = "" }
-        | _ -> Error (sprintf "array '%s': .zarray is missing shape/chunks/dtype" name)
+        | _ -> Error $"array '{name}': .zarray is missing shape/chunks/dtype"
     with ex ->
-        Error (sprintf "array '%s': malformed .zarray JSON: %s" name ex.Message)
+        Error $"array '{name}': malformed .zarray JSON: {ex.Message}"
 
 /// Parse a v3 array's `zarr.json`.
 let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Result<ZarrArrayMeta, string> =
     try
         use doc = JsonDocument.Parse zarrJson
         let root = doc.RootElement
-        let where_ = sprintf "array '%s'" name
+        let where_ = $"array '{name}'"
         let nodeType =
             match tryProp root "node_type" with
             | Some nt when nt.ValueKind = JsonValueKind.String -> nt.GetString()
             | _ -> ""
-        if nodeType <> "array" then Error (sprintf "%s: zarr.json node_type is '%s', expected 'array'" where_ nodeType)
+        if nodeType <> "array" then Error $"{where_}: zarr.json node_type is '{nodeType}', expected 'array'"
         else
         match tryProp root "shape", tryProp root "data_type", tryProp root "chunk_grid" with
         | Some shapeEl, Some dtypeEl, Some gridEl ->
@@ -700,18 +693,18 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
                 | Some n when n.ValueKind = JsonValueKind.String -> n.GetString()
                 | _ -> ""
             if gridName <> "regular" then
-                Error (sprintf "%s: chunk_grid '%s' is not supported (regular only)" where_ gridName)
+                Error $"{where_}: chunk_grid '{gridName}' is not supported (regular only)"
             else
             let chunks =
                 tryProp gridEl "configuration"
                 |> Option.bind (fun c -> tryProp c "chunk_shape")
                 |> Option.map jsonInt64List
             match chunks with
-            | None -> Error (sprintf "%s: chunk_grid.configuration.chunk_shape missing" where_)
+            | None -> Error $"{where_}: chunk_grid.configuration.chunk_shape missing"
             | Some chunks when chunks.Length <> shape.Length ->
-                Error (sprintf "%s: shape rank %d != chunk_shape rank %d" where_ shape.Length chunks.Length)
+                Error $"{where_}: shape rank {shape.Length} != chunk_shape rank {chunks.Length}"
             | Some chunks when chunks |> List.exists (fun c -> c <= 0L) ->
-                Error (sprintf "%s: non-positive chunk extent" where_)
+                Error $"{where_}: non-positive chunk extent"
             | Some chunks ->
             // Codec gate: exactly one `bytes` codec, little-endian.
             let codecErr =
@@ -733,17 +726,17 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
                             |> Option.map (fun e -> e.GetString())
                             |> Option.defaultValue "little"
                         if endian = "little" then None
-                        else Some (sprintf "%s: big-endian bytes codec is not supported (little-endian stores only)" where_)
+                        else Some $"{where_}: big-endian bytes codec is not supported (little-endian stores only)"
                     | _ ->
                         let bad = names |> List.filter (fun n -> n <> "bytes")
                         Some (sprintf "%s uses codec(s) %s -- compressed/transformed Zarr stores are not supported (a single little-endian 'bytes' codec only); see the ZarrCodec extension point"
                                   where_ (bad @ (if List.isEmpty bad then names else []) |> List.map (sprintf "'%s'") |> String.concat ", "))
-                | Some _ -> Some (sprintf "%s: malformed codecs" where_)
+                | Some _ -> Some $"{where_}: malformed codecs"
             match codecErr with
             | Some e -> Error e
             | None ->
             match zarrDtypeV3 (dtypeEl.GetString()) with
-            | Error e -> Error (sprintf "%s: %s" where_ e)
+            | Error e -> Error $"{where_}: {e}"
             | Ok dt ->
             match parseFill where_ dt.IsFloat (tryProp root "fill_value") with
             | Error e -> Error e
@@ -766,9 +759,9 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
                     | "v2" -> ("", csep ".")
                     | other -> (other, "!")  // marker checked below
             if sep = "!" then
-                Error (sprintf "%s: unsupported chunk_key_encoding '%s'" where_ prefix)
+                Error $"{where_}: unsupported chunk_key_encoding '{prefix}'"
             elif sep <> "." && sep <> "/" then
-                Error (sprintf "%s: unsupported chunk-key separator '%s'" where_ sep)
+                Error $"{where_}: unsupported chunk-key separator '{sep}'"
             else
             let dimNames =
                 match tryProp root "dimension_names" with
@@ -782,9 +775,9 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
             Ok { Name = name; ArrayDir = arrayDir; Shape = shape; Chunks = chunks
                  Dtype = dt; DimNames = dimNames; FillValue = fill; Codec = CodecIdentity
                  Blade = blade; Version = 3; ChunkKeySep = sep; ChunkKeyPrefix = prefix }
-        | _ -> Error (sprintf "array '%s': zarr.json is missing shape/data_type/chunk_grid" name)
+        | _ -> Error $"array '{name}': zarr.json is missing shape/data_type/chunk_grid"
     with ex ->
-        Error (sprintf "array '%s': malformed zarr.json: %s" name ex.Message)
+        Error $"array '{name}': malformed zarr.json: {ex.Message}"
 
 // Store discovery (the multi-file walk)
 
@@ -801,13 +794,13 @@ let private loadArrayV2 (name: string) (arrayDir: string) : ZarrArrayMeta =
     let zattrs = readTextOpt (Path.Combine(arrayDir, ".zattrs"))
     match parseArrayMetaV2 name arrayDir zarray zattrs with
     | Ok m -> m
-    | Error e -> failwithf "Zarr store: %s" e
+    | Error e -> failwith $"Zarr store: {e}"
 
 let private loadArrayV3 (name: string) (arrayDir: string) : ZarrArrayMeta =
     let zj = File.ReadAllText (Path.Combine(arrayDir, "zarr.json"))
     match parseArrayMetaV3 name arrayDir zj with
     | Ok m -> m
-    | Error e -> failwithf "Zarr store: %s" e
+    | Error e -> failwith $"Zarr store: {e}"
 
 /// Load all metadata from a Zarr store directory. Recognizes, in order: v3
 /// (`zarr.json` group or single array), v2 group (`.zgroup` + array
@@ -816,7 +809,7 @@ let load (path: string) : ZarrStore =
     let full = Path.GetFullPath path
     let checkName (n: string) =
         if not (isValidIdent n) then
-            failwithf "Zarr store '%s': array name '%s' is not a valid identifier (it becomes a struct field)" path n
+            failwith $"Zarr store '{path}': array name '{n}' is not a valid identifier (it becomes a struct field)"
     let leafName () =
         let n = Path.GetFileName (full.TrimEnd [| '/' ; '\\' |])
         let n = if n.EndsWith ".zarr" then n.Substring(0, n.Length - 5) else n
@@ -844,10 +837,10 @@ let load (path: string) : ZarrStore =
                         checkName name
                         Some (loadArrayV3 name d)
                     | _ -> None)
-                |> Array.sortBy (fun a -> a.Name)
+                |> Array.sortBy _.Name
                 |> List.ofArray
             { Path = full; Version = 3; Arrays = arrays }
-        | other -> failwithf "Zarr store '%s': zarr.json node_type '%s' is neither 'group' nor 'array'" path other
+        | other -> failwith $"Zarr store '{path}': zarr.json node_type '{other}' is neither 'group' nor 'array'"
     elif File.Exists (Path.Combine(full, ".zgroup")) then
         let arrays =
             Directory.GetDirectories full
@@ -856,14 +849,14 @@ let load (path: string) : ZarrStore =
                 let name = Path.GetFileName d
                 checkName name
                 loadArrayV2 name d)
-            |> Array.sortBy (fun a -> a.Name)
+            |> Array.sortBy _.Name
             |> List.ofArray
         { Path = full; Version = 2; Arrays = arrays }
     elif File.Exists (Path.Combine(full, ".zarray")) then
         let name = leafName ()
         { Path = full; Version = 2; Arrays = [ loadArrayV2 name full ] }
     else
-        failwithf "'%s' is not a Zarr store (no zarr.json, .zgroup, or .zarray found)" path
+        failwith $"'{path}' is not a Zarr store (no zarr.json, .zgroup, or .zarray found)"
 
 let tryFindArray (store: ZarrStore) (varName: string) : ZarrArrayMeta option =
     store.Arrays |> List.tryFind (fun a -> a.Name = varName)
@@ -909,7 +902,7 @@ let private decodeFloatCell (code: string) (b: byte[]) (off: int) : float =
     match code with
     | "f8" -> BitConverter.ToDouble(b, off)
     | "f4" -> float (BitConverter.ToSingle(b, off))
-    | c -> failwithf "decodeFloatCell: not a float code '%s'" c
+    | c -> failwith $"decodeFloatCell: not a float code '{c}'"
 
 let private decodeIntCell (code: string) (b: byte[]) (off: int) : int64 =
     match code with
@@ -921,7 +914,7 @@ let private decodeIntCell (code: string) (b: byte[]) (off: int) : int64 =
     | "u2" -> int64 (BitConverter.ToUInt16(b, off))
     | "u4" -> int64 (BitConverter.ToUInt32(b, off))
     | "u8" -> int64 (BitConverter.ToUInt64(b, off))
-    | c -> failwithf "decodeIntCell: not an integer code '%s'" c
+    | c -> failwith $"decodeIntCell: not an integer code '{c}'"
 
 /// Read an array's full payload by assembling its chunks. Missing chunk files fill with fill_value (loud error when null); chunk files must be exactly full-chunk-sized (edge chunks are stored padded).
 let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
@@ -948,13 +941,12 @@ let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
                 if File.Exists file then
                     let raw = decodeChunk meta.Codec (File.ReadAllBytes file)
                     if raw.Length <> chunkCount * bs then
-                        failwithf "chunk '%s' of array '%s' is %d bytes, expected %d -- a compressed or corrupt store?"
-                            key meta.Name raw.Length (chunkCount * bs)
+                        failwith $"chunk '{key}' of array '{meta.Name}' is {raw.Length} bytes, expected {(chunkCount * bs)} -- a compressed or corrupt store?"
                     Some raw
                 else
                     match meta.FillValue with
                     | FillNone ->
-                        failwithf "chunk '%s' of array '%s' is missing and fill_value is null -- refusing to invent data" key meta.Name
+                        failwith $"chunk '{key}' of array '{meta.Name}' is missing and fill_value is null -- refusing to invent data"
                     | _ -> None
             // Copy the chunk's intersection with the array bounds (edge
             // chunks are stored full-size; the overhang is ignored).
@@ -988,8 +980,7 @@ let readVarData (path: string) (varName: string) : Result<ZarrVarData, string> =
         let store = load path
         match tryFindArray store varName with
         | None ->
-            Error (sprintf "variable '%s' not found in Zarr store '%s' (arrays: %s)"
-                       varName path (store.Arrays |> List.map (fun a -> a.Name) |> String.concat ", "))
+            Error ($"""variable '{varName}' not found in Zarr store '{path}' (arrays: {(store.Arrays |> List.map _.Name |> String.concat ", ")})""")
         | Some meta -> readArrayData meta
     with ex ->
         Error ex.Message
@@ -999,7 +990,7 @@ let readVarData (path: string) (varName: string) : Result<ZarrVarData, string> =
 /// padded block rows via the shared cell map. Ground truth for tests and the differential gate between the two layouts.
 let readPackedPool (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
     match meta.Blade with
-    | None -> Error (sprintf "variable '%s' has no blade packed layout" meta.Name)
+    | None -> Error $"variable '{meta.Name}' has no blade packed layout"
     | Some layout ->
         match layout.Blocks with
         | None -> readArrayData meta
@@ -1045,8 +1036,8 @@ let private resolvedDimNames (a: ZarrArrayMeta) : string list =
     match a.DimNames with
     | Some ns when ns.Length = a.Shape.Length -> ns
     | Some ns ->
-        failwithf "Zarr array '%s': %d dimension names for rank %d" a.Name ns.Length a.Shape.Length
-    | None -> a.Shape |> List.mapi (fun i _ -> sprintf "%s_dim%d" a.Name i)
+        failwith $"Zarr array '{a.Name}': {ns.Length} dimension names for rank {a.Shape.Length}"
+    | None -> a.Shape |> List.mapi (fun i _ -> $"{a.Name}_dim{i}")
 
 /// Converts a ZarrStore into an IRModule using structs for dims/vars, the
 /// same shape ncFileToModule produces:
@@ -1086,10 +1077,10 @@ let zarrStoreToModule
     for a in store.Arrays do
         for (dn, ext) in sharedDims a do
             if not (isValidIdent dn) then
-                failwithf "Zarr array '%s': dimension name '%s' is not a valid identifier" a.Name dn
+                failwith $"Zarr array '{a.Name}': dimension name '{dn}' is not a valid identifier"
             match dimExtents.TryGetValue dn with
             | true, prev when prev <> ext ->
-                failwithf "Zarr store '%s': dimension '%s' has conflicting extents %d and %d across arrays" store.Path dn prev ext
+                failwith $"Zarr store '{store.Path}': dimension '{dn}' has conflicting extents {prev} and {ext} across arrays"
             | true, _ -> ()
             | _ ->
                 dimExtents.[dn] <- ext
@@ -1112,7 +1103,7 @@ let zarrStoreToModule
     let coordElem (dn: string) : ElemType =
         store.Arrays
         |> List.tryFind (fun a -> a.Name = dn && isCoordinateArr a)
-        |> Option.map (fun a -> a.Dtype.Elem)
+        |> Option.map _.Dtype.Elem
         |> Option.defaultValue ETInt64
 
     // dims struct: one coordinate array per dimension.
@@ -1121,7 +1112,7 @@ let zarrStoreToModule
             let idx = dimMap.[dn]
             let arrType = mkArrayArrow [idx] (IRTScalar (coordElem dn)) (Some (AIDVariable dn))
             (dn, arrType))
-    let dimsStruct = IRTDStruct(sprintf "%s__dims" moduleName, dimsFields)
+    let dimsStruct = IRTDStruct($"{moduleName}__dims", dimsFields)
 
     // vars struct: data arrays (coordinate arrays excluded). A blade-packed
     // array types with its packed group as the LEADING index type, the exact
@@ -1135,7 +1126,7 @@ let zarrStoreToModule
                 |> List.map (fun (dn, _) ->
                     match Map.tryFind dn dimMap with
                     | Some idx -> idx
-                    | None -> failwithf "Zarr array '%s': dimension '%s' not found in module dim map" a.Name dn)
+                    | None -> failwith $"Zarr array '{a.Name}': dimension '{dn}' not found in module dim map")
             let indexTypes =
                 match a.Blade with
                 | Some layout ->
@@ -1151,8 +1142,7 @@ let zarrStoreToModule
                             | OrbNfWreath ls ->
                                 mkWreathIndexRecord (builder.FreshId()) ls (IRLit (IRLitInt g.Extent))
                             | _ ->
-                                failwithf "Zarr array '%s': orbit head %s normalizes to depth <= 1, which parseBladeLayout rejects -- a depth-1 class is stored as kind 'sym'/'antisym'"
-                                          a.Name (ppOrbitLevels g.Levels)
+                                failwith $"Zarr array '{a.Name}': orbit head {(ppOrbitLevels g.Levels)} normalizes to depth <= 1, which parseBladeLayout rejects -- a depth-1 class is stored as kind 'sym'/'antisym'"
                         else
                             { Id = builder.FreshId()
                               Rank = g.Rank
@@ -1170,7 +1160,7 @@ let zarrStoreToModule
                 Identity = Some (AIDVariable a.Name)
             }
             (a.Name, mkArrayLike arrType))
-    let varsStruct = IRTDStruct(sprintf "%s__vars" moduleName, varsFields)
+    let varsStruct = IRTDStruct($"{moduleName}__vars", varsFields)
 
     {
         Name = moduleName
@@ -1247,7 +1237,7 @@ module CppZarr =
         | "u2" -> "uint16_t"
         | "u4" -> "uint32_t"
         | "u8" -> "uint64_t"
-        | c -> failwithf "diskCppOf: unknown dtype code '%s'" c
+        | c -> failwith $"diskCppOf: unknown dtype code '{c}'"
 
     /// v2 dtype string for a Blade elem type (the write format).
     let private v2DtypeOf (t: IRType) : string =
@@ -1268,7 +1258,7 @@ module CppZarr =
 
     /// A loud runtime failure (the ncChecked discipline: never exit 0 with an uninitialized buffer).
     let private zExit (message: string) : string =
-        sprintf "{ std::cerr << \"Zarr error: %s\" << std::endl; std::exit(1); }" message
+        $"{{ std::cerr << \"Zarr error: {message}\" << std::endl; std::exit(1); }}"
 
     /// The chunk-assembly core shared by the dense and packed readers: emits
     /// C++ assembling the (physical, dense) on-disk array into a flat
@@ -1280,7 +1270,7 @@ module CppZarr =
         let varName = meta.Name
         let rank = meta.Shape.Length
         if rank = 0 then
-            failwithf "Zarr codegen: rank-0 variable '%s' has no runtime read (bind it with `let static` instead)" varName
+            failwith $"Zarr codegen: rank-0 variable '{varName}' has no runtime read (bind it with `let static` instead)"
         let diskCpp = diskCppOf meta.Dtype.Code
         let shape = meta.Shape |> List.map int
         let chunks = meta.Chunks |> List.map int
@@ -1301,77 +1291,76 @@ module CppZarr =
         // Chunk key expression from the loop counters, e.g.
         // std::to_string(c0) + "." + std::to_string(c1)  /  "c" "/" ...
         let keyExpr =
-            let coordParts = [ for d in 0 .. rank - 1 -> sprintf "std::to_string(%s_c%d)" v d ]
-            let sepLit = sprintf "\"%s\"" meta.ChunkKeySep
-            let joined = String.concat (sprintf " + %s + " sepLit) coordParts
+            let coordParts = [ for d in 0 .. rank - 1 -> $"std::to_string({v}_c{d})" ]
+            let sepLit = $"\"{meta.ChunkKeySep}\""
+            let joined = String.concat $" + {sepLit} + " coordParts
             if meta.ChunkKeyPrefix = "" then joined
-            else sprintf "std::string(\"%s\") + %s + %s" meta.ChunkKeyPrefix sepLit joined
+            else $"std::string(\"{meta.ChunkKeyPrefix}\") + {sepLit} + {joined}"
 
         let fillDecl =
             match meta.FillValue with
-            | FillFloat f -> [ sprintf "%s %s_fillv = (%s)%s;" elemCpp v elemCpp (fmtF f) ]
-            | FillInt n -> [ sprintf "%s %s_fillv = (%s)%dLL;" elemCpp v elemCpp n ]
+            | FillFloat f -> [ $"{elemCpp} {v}_fillv = ({elemCpp}){fmtF f};" ]
+            | FillInt n -> [ $"{elemCpp} {v}_fillv = ({elemCpp}){n}LL;" ]
             | FillNone -> []
 
         let header =
-            [ sprintf "// Read %s from zarr store %s (v%d, uncompressed)" varName (normPath storePath) meta.Version
+            [ $"// Read {varName} from zarr store {normPath storePath} (v{meta.Version}, uncompressed)"
               sprintf "{ std::ifstream %s_zm(\"%s/%s\"); if (!%s_zm) %s }"
                   v arrayDir metaFile v
-                  (zExit (sprintf "array '%s' not found in store '%s' (missing %s)" varName (normPath storePath) metaFile))
-              sprintf "%s* %s_flat = new %s[%d];" elemCpp v elemCpp total
-              sprintf "%s* %s_cbuf = new %s[%d];" diskCpp v diskCpp chunkCount ]
+                  (zExit $"array '{varName}' not found in store '{normPath storePath}' (missing {metaFile})")
+              $"{elemCpp}* {v}_flat = new {elemCpp}[{total}];"
+              $"{diskCpp}* {v}_cbuf = new {diskCpp}[{chunkCount}];" ]
             @ fillDecl
 
         // Grid loops.
         let gridLoops =
             [ for d in 0 .. rank - 1 ->
                 let ind = String.replicate d "    "
-                sprintf "%sfor (size_t %s_c%d = 0; %s_c%d < %d; %s_c%d++) {" ind v d v d grid.[d] v d ]
+                $"{ind}for (size_t {v}_c{d} = 0; {v}_c{d} < {grid.[d]}; {v}_c{d}++) {{" ]
         let gInd = String.replicate rank "    "
 
         // In-bounds limits per dim (edge chunks are stored padded; copy the
         // intersection only).
         let limDecls =
             [ for d in 0 .. rank - 1 do
-                yield sprintf "%ssize_t %s_lim%d = %d - %s_c%d * %d;" gInd v d shape.[d] v d chunks.[d]
-                yield sprintf "%sif (%s_lim%d > %d) %s_lim%d = %d;" gInd v d chunks.[d] v d chunks.[d] ]
+                yield $"{gInd}size_t {v}_lim{d} = {shape.[d]} - {v}_c{d} * {chunks.[d]};"
+                yield $"{gInd}if ({v}_lim{d} > {chunks.[d]}) {v}_lim{d} = {chunks.[d]};" ]
 
         // Copy loops (shared shape by both branches): global index from
         // (chunkCoord*chunk + local) with row-major strides.
         let copyLoops (assign: string) =
             [ for d in 0 .. rank - 1 ->
                 let ind = gInd + String.replicate (d + 1) "    "
-                sprintf "%sfor (size_t %s_l%d = 0; %s_l%d < %s_lim%d; %s_l%d++) {" ind v d v d v d v d ]
+                $"{ind}for (size_t {v}_l{d} = 0; {v}_l{d} < {v}_lim{d}; {v}_l{d}++) {{" ]
             @ [ gInd + String.replicate (rank + 1) "    " + assign ]
             @ [ for d in rank - 1 .. -1 .. 0 -> gInd + String.replicate (d + 1) "    " + "}" ]
         let gIdx =
-            [ for d in 0 .. rank - 1 -> sprintf "(%s_c%d * %d + %s_l%d) * %d" v d chunks.[d] v d gStr.[d] ]
+            [ for d in 0 .. rank - 1 -> $"({v}_c{d} * {chunks.[d]} + {v}_l{d}) * {gStr.[d]}" ]
             |> String.concat " + "
         let cIdx =
-            [ for d in 0 .. rank - 1 -> sprintf "%s_l%d * %d" v d cStr.[d] ]
+            [ for d in 0 .. rank - 1 -> $"{v}_l{d} * {cStr.[d]}" ]
             |> String.concat " + "
 
         let presentBranch =
-            [ gInd + sprintf "if (%s_cf) {" v
-              gInd + sprintf "    %s_cf.read((char*)%s_cbuf, %d);" v v chunkBytes
-              gInd + sprintf "    if (%s_cf.gcount() != (std::streamsize)%d) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short (expected %d bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }"
-                  v chunkBytes v varName chunkBytes ]
-            @ (copyLoops (sprintf "%s_flat[%s] = (%s)%s_cbuf[%s];" v gIdx elemCpp v cIdx))
+            [ gInd + $"if ({v}_cf) {{"
+              gInd + $"    {v}_cf.read((char*){v}_cbuf, {chunkBytes});"
+              gInd + $"    if ({v}_cf.gcount() != (std::streamsize){chunkBytes}) {{ std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{varName}' is short (expected {chunkBytes} bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }}" ]
+            @ (copyLoops $"{v}_flat[{gIdx}] = ({elemCpp}){v}_cbuf[{cIdx}];")
         let missingBranch =
             match meta.FillValue with
             | FillNone ->
                 [ gInd + "} else {"
-                  gInd + sprintf "    std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is missing and fill_value is null\" << std::endl; std::exit(1);" v varName
+                  gInd + $"    std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{varName}' is missing and fill_value is null\" << std::endl; std::exit(1);"
                   gInd + "}" ]
             | _ ->
                 [ gInd + "} else {" ]
-                @ (copyLoops (sprintf "%s_flat[%s] = %s_fillv;" v gIdx v) |> List.map (fun s -> "    " + s))
+                @ (copyLoops $"{v}_flat[{gIdx}] = {v}_fillv;" |> List.map (fun s -> "    " + s))
                 @ [ gInd + "}" ]
 
         let chunkBody =
             limDecls
-            @ [ gInd + sprintf "std::string %s_key = %s;" v keyExpr
-                gInd + sprintf "std::ifstream %s_cf(std::string(\"%s/\") + %s_key, std::ios::binary);" v arrayDir v ]
+            @ [ gInd + $"std::string {v}_key = {keyExpr};"
+                gInd + $"std::ifstream {v}_cf(std::string(\"{arrayDir}/\") + {v}_key, std::ios::binary);" ]
             @ presentBranch
             @ missingBranch
 
@@ -1381,7 +1370,7 @@ module CppZarr =
         @ gridLoops
         @ chunkBody
         @ gridClose
-        @ [ sprintf "delete[] %s_cbuf;" v ]
+        @ [ $"delete[] {v}_cbuf;" ]
 
     /// Generates C++ to read a DENSE variable: chunk assembly into
     /// `<v>_flat`, then the same materialization as CppNetcdf.genReadVar
@@ -1391,9 +1380,9 @@ module CppZarr =
         let meta =
             match tryFindArray store varName with
             | Some m -> m
-            | None -> failwithf "Zarr codegen: variable '%s' not found in store '%s'" varName storePath
+            | None -> failwith $"Zarr codegen: variable '{varName}' not found in store '{storePath}'"
         if meta.Blade.IsSome then
-            failwithf "Zarr codegen: variable '%s' is blade-packed; the dense reader cannot materialize it (this indicates a typing inconsistency)" varName
+            failwith $"Zarr codegen: variable '{varName}' is blade-packed; the dense reader cannot materialize it (this indicates a typing inconsistency)"
         let v = cppVarName
         let elemCpp = elemCppOf arrType.ElemType
         let shape = meta.Shape |> List.map int
@@ -1401,29 +1390,28 @@ module CppZarr =
         let assemble = genAssembleFlat storePath store meta v elemCpp
 
         let extentDecls =
-            shape |> List.mapi (fun i n -> sprintf "size_t %s_extent_%d = %d;" v i n)
-        let extentNames = shape |> List.mapi (fun i _ -> sprintf "%s_extent_%d" v i)
-        let idxVars = [ for i in 0 .. rank - 1 -> sprintf "%s_i%d" v i ]
+            shape |> List.mapi (fun i n -> $"size_t {v}_extent_{i} = {n};")
+        let extentNames = shape |> List.mapi (fun i _ -> $"{v}_extent_{i}")
+        let idxVars = [ for i in 0 .. rank - 1 -> $"{v}_i{i}" ]
         let openLoops =
             idxVars |> List.mapi (fun d iv ->
                 let ind = String.replicate d "    "
-                sprintf "%sfor (size_t %s = 0; %s < %s; %s++) {" ind iv iv extentNames.[d] iv)
+                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames.[d]}; {iv}++) {{")
         let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
         let flatIdx =
             let mutable acc = idxVars.[0]
             for i in 1 .. rank - 1 do
-                acc <- sprintf "(%s) * %s + %s" acc extentNames.[i] idxVars.[i]
+                acc <- $"({acc}) * {extentNames.[i]} + {idxVars.[i]}"
             acc
         let bodyInd = String.replicate rank "    "
         let materialize =
             extentDecls
-            @ [ sprintf "size_t %s_extents[] = { %s };" v (String.concat ", " extentNames)
-                sprintf "Array<%s, %d> %s = { allocate<typename promote<%s, %d>::type, nullptr>(%s_extents), %s_extents };"
-                    elemCpp rank v elemCpp rank v v ]
+            @ [ $"""size_t {v}_extents[] = {{ {(String.concat ", " extentNames)} }};"""
+                $"Array<{elemCpp}, {rank}> {v} = {{ allocate<typename promote<{elemCpp}, {rank}>::type, nullptr>({v}_extents), {v}_extents }};" ]
             @ openLoops
-            @ [ sprintf "%s%s%s = %s_flat[%s];" bodyInd v nestedSub v flatIdx ]
-            @ [ for d in rank - 1 .. -1 .. 0 -> sprintf "%s}" (String.replicate d "    ") ]
-            @ [ sprintf "delete[] %s_flat;" v ]
+            @ [ $"{bodyInd}{v}{nestedSub} = {v}_flat[{flatIdx}];" ]
+            @ [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
+            @ [ $"delete[] {v}_flat;" ]
 
         assemble @ materialize
 
@@ -1465,37 +1453,37 @@ module CppZarr =
             | OrderLex -> []
             | OrderPath ->
                 if nBlocks > 1_000_000L then
-                    failwithf "Zarr codegen: variable '%s': path-order block table would need %d entries -- beyond the emission cap" meta.Name nBlocks
+                    failwith $"Zarr codegen: variable '{meta.Name}': path-order block table would need {nBlocks} entries -- beyond the emission cap"
                 let rows = SimplexBlocks.pathRows r T
-                [ sprintf "static const size_t %s_sbrow[%d] = { %s };" v rows.Length (rows |> Array.map string |> String.concat ", ") ]
+                [ $"""static const size_t {v}_sbrow[{rows.Length}] = {{ {(rows |> Array.map string |> String.concat ", ")} }};""" ]
         let rowExpr =
             match info.Order with
-            | OrderLex -> sprintf "%s_sb" v
-            | OrderPath -> sprintf "%s_sbrow[%s_sb]" v v
+            | OrderLex -> $"{v}_sb"
+            | OrderPath -> $"{v}_sbrow[{v}_sb]"
         // Runtime chunk key for physical coords (row, 0, 0...): the block
         // row is the only varying chunk coordinate.
         let keyExpr =
             let sep = meta.ChunkKeySep
             let zeros = List.replicate (1 + trailExts.Length) "0" |> String.concat sep
-            let core = sprintf "std::to_string(%s_row) + \"%s%s\"" v sep zeros
+            let core = $"std::to_string({v}_row) + \"{sep}{zeros}\""
             if meta.ChunkKeyPrefix = "" then core
-            else sprintf "std::string(\"%s%s\") + %s" meta.ChunkKeyPrefix sep core
+            else $"std::string(\"{meta.ChunkKeyPrefix}{sep}\") + {core}"
 
         let fillDecl =
             match meta.FillValue with
-            | FillFloat f -> [ sprintf "%s %s_fillv = (%s)%s;" elemCpp v elemCpp (fmtF f) ]
-            | FillInt fi -> [ sprintf "%s %s_fillv = (%s)%dLL;" elemCpp v elemCpp fi ]
+            | FillFloat f -> [ $"{elemCpp} {v}_fillv = ({elemCpp}){fmtF f};" ]
+            | FillInt fi -> [ $"{elemCpp} {v}_fillv = ({elemCpp}){fi}LL;" ]
             | FillNone -> []
 
         // Distribution: balanced flat-cell range [dlo, dhi) per rank (same
         // q/rem split as the MPI compute decomposition).
         let distDecls =
             if not distribute then [] else
-            [ sprintf "// zarr mpi: distributed simplex-blocks read of '%s' (rank-scoped chunk I/O + Allgatherv)" meta.Name
-              sprintf "size_t %s_dq = %dUL / (size_t)__blade_mpi_size;" v card
+            [ $"// zarr mpi: distributed simplex-blocks read of '{meta.Name}' (rank-scoped chunk I/O + Allgatherv)"
+              $"size_t {v}_dq = {card}UL / (size_t)__blade_mpi_size;"
               sprintf "size_t %s_dr = %dUL %% (size_t)__blade_mpi_size;" v card
-              sprintf "size_t %s_dlo = (size_t)__blade_mpi_rank * %s_dq + ((size_t)__blade_mpi_rank < %s_dr ? (size_t)__blade_mpi_rank : %s_dr);" v v v v
-              sprintf "size_t %s_dhi = %s_dlo + %s_dq + ((size_t)__blade_mpi_rank < %s_dr ? 1 : 0);" v v v v ]
+              $"size_t {v}_dlo = (size_t)__blade_mpi_rank * {v}_dq + ((size_t)__blade_mpi_rank < {v}_dr ? (size_t)__blade_mpi_rank : {v}_dr);"
+              $"size_t {v}_dhi = {v}_dlo + {v}_dq + ((size_t)__blade_mpi_rank < {v}_dr ? 1 : 0);" ]
 
         // Window skip: any tile interval disjoint from [wlo, whi) means no
         // block cell can be fully inside the window.
@@ -1504,7 +1492,7 @@ module CppZarr =
             | None -> []
             | Some (wlo, whi) ->
                 [ for k in 0 .. r - 1 ->
-                    sprintf "    if (%s_sbt[%d] * %d >= %dUL || (%s_sbt[%d] + 1) * %d <= %dUL) continue;" v k B whi v k B wlo ]
+                    $"    if ({v}_sbt[{k}] * {B} >= {whi}UL || ({v}_sbt[{k}] + 1) * {B} <= {wlo}UL) continue;" ]
 
         // Ownership skip (distribute): exact block pool range via greedy
         // first/last cells (within-block enumeration is pool-monotone).
@@ -1513,57 +1501,54 @@ module CppZarr =
             let fwd =
                 [ for k in 0 .. r - 1 do
                     if k = 0 then
-                        yield sprintf "    { size_t lo = %s_sbt[0] * %d; size_t hi = (%s_sbt[0] + 1) * %d; if (hi > %dUL) hi = %dUL; %s_fc[0] = lo; if (lo >= hi) %s_emptyb = true; }" v B v B n n v v
+                        yield $"    {{ size_t lo = {v}_sbt[0] * {B}; size_t hi = ({v}_sbt[0] + 1) * {B}; if (hi > {n}UL) hi = {n}UL; {v}_fc[0] = lo; if (lo >= hi) {v}_emptyb = true; }}"
                     else
-                        yield sprintf "    { size_t lo = %s_sbt[%d] * %d; size_t p = %s_fc[%d] + %d; if (p > lo) lo = p; size_t hi = (%s_sbt[%d] + 1) * %d; if (hi > %dUL) hi = %dUL; %s_fc[%d] = lo; if (lo >= hi) %s_emptyb = true; }" v k B v (k - 1) sInc v k B n n v k v ]
+                        yield $"    {{ size_t lo = {v}_sbt[{k}] * {B}; size_t p = {v}_fc[{k - 1}] + {sInc}; if (p > lo) lo = p; size_t hi = ({v}_sbt[{k}] + 1) * {B}; if (hi > {n}UL) hi = {n}UL; {v}_fc[{k}] = lo; if (lo >= hi) {v}_emptyb = true; }}" ]
             let bwd =
                 [ for k in r - 2 .. -1 .. 0 ->
                     if strict then
-                        sprintf "    { size_t cap; if (%s_lc[%d] < 1) { %s_emptyb = true; cap = 0; } else cap = %s_lc[%d] - 1; size_t hi = (%s_sbt[%d] + 1) * %d; if (hi > %dUL) hi = %dUL; size_t c = hi - 1; if (cap < c) c = cap; %s_lc[%d] = c; if (c < %s_sbt[%d] * %d) %s_emptyb = true; }" v (k + 1) v v (k + 1) v k B n n v k v k B v
+                        $"    {{ size_t cap; if ({v}_lc[{k + 1}] < 1) {{ {v}_emptyb = true; cap = 0; }} else cap = {v}_lc[{k + 1}] - 1; size_t hi = ({v}_sbt[{k}] + 1) * {B}; if (hi > {n}UL) hi = {n}UL; size_t c = hi - 1; if (cap < c) c = cap; {v}_lc[{k}] = c; if (c < {v}_sbt[{k}] * {B}) {v}_emptyb = true; }}"
                     else
-                        sprintf "    { size_t cap = %s_lc[%d]; size_t hi = (%s_sbt[%d] + 1) * %d; if (hi > %dUL) hi = %dUL; size_t c = hi - 1; if (cap < c) c = cap; %s_lc[%d] = c; if (c < %s_sbt[%d] * %d) %s_emptyb = true; }" v (k + 1) v k B n n v k v k B v ]
-            [ sprintf "    std::array<size_t, %d> %s_fc; std::array<size_t, %d> %s_lc;" r v r v
-              sprintf "    bool %s_emptyb = false;" v ]
+                        $"    {{ size_t cap = {v}_lc[{k + 1}]; size_t hi = ({v}_sbt[{k}] + 1) * {B}; if (hi > {n}UL) hi = {n}UL; size_t c = hi - 1; if (cap < c) c = cap; {v}_lc[{k}] = c; if (c < {v}_sbt[{k}] * {B}) {v}_emptyb = true; }}" ]
+            [ $"    std::array<size_t, {r}> {v}_fc; std::array<size_t, {r}> {v}_lc;"
+              $"    bool {v}_emptyb = false;" ]
             @ fwd
-            @ [ sprintf "    { size_t hi = (%s_sbt[%d] + 1) * %d; if (hi > %dUL) hi = %dUL; %s_lc[%d] = hi - 1; }" v (r - 1) B n n v (r - 1) ]
+            @ [ $"    {{ size_t hi = ({v}_sbt[{r - 1}] + 1) * {B}; if (hi > {n}UL) hi = {n}UL; {v}_lc[{r - 1}] = hi - 1; }}" ]
             @ bwd
-            @ [ sprintf "    if (%s_emptyb) continue;" v
-                sprintf "    if (linearized_storage::%s::linearize<%d>(%s_lc, %dUL) < %s_dlo || linearized_storage::%s::linearize<%d>(%s_fc, %dUL) >= %s_dhi) continue;" nsName r v n v nsName r v n v ]
+            @ [ $"    if ({v}_emptyb) continue;"
+                $"    if (linearized_storage::{nsName}::linearize<{r}>({v}_lc, {n}UL) < {v}_dlo || linearized_storage::{nsName}::linearize<{r}>({v}_fc, {n}UL) >= {v}_dhi) continue;" ]
 
         // Per-block chunk read (missing chunk -> fill_value / loud on null).
         let chunkRead =
-            [ sprintf "    size_t %s_row = %s;" v rowExpr
-              sprintf "    std::string %s_key = %s;" v keyExpr
-              sprintf "    std::ifstream %s_cf(std::string(\"%s/\") + %s_key, std::ios::binary);" v arrayDir v
-              sprintf "    bool %s_have = (bool)%s_cf;" v v ]
+            [ $"    size_t {v}_row = {rowExpr};"
+              $"    std::string {v}_key = {keyExpr};"
+              $"    std::ifstream {v}_cf(std::string(\"{arrayDir}/\") + {v}_key, std::ios::binary);"
+              $"    bool {v}_have = (bool){v}_cf;" ]
             @ (match meta.FillValue with
                | FillNone ->
-                   [ sprintf "    if (!%s_have) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is missing and fill_value is null\" << std::endl; std::exit(1); }" v v meta.Name ]
+                   [ $"    if (!{v}_have) {{ std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{meta.Name}' is missing and fill_value is null\" << std::endl; std::exit(1); }}" ]
                | _ -> [])
-            @ [ sprintf "    if (%s_have) {" v
-                sprintf "        %s_cf.read((char*)%s_cbuf, %d);" v v chunkBytes
-                sprintf "        if (%s_cf.gcount() != (std::streamsize)%d) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short (expected %d bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }" v chunkBytes v meta.Name chunkBytes
+            @ [ $"    if ({v}_have) {{"
+                $"        {v}_cf.read((char*){v}_cbuf, {chunkBytes});"
+                $"        if ({v}_cf.gcount() != (std::streamsize){chunkBytes}) {{ std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{meta.Name}' is short (expected {chunkBytes} bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }}"
                 "    }" ]
 
         // Branch-free intra-block bounds per level.
         let cellLoops =
             [ for k in 0 .. r - 1 do
                 let ind = String.replicate (k + 1) "    "
-                yield sprintf "%ssize_t %s_lo%d = %s_sbt[%d] * %d;" ind v k v k B
+                yield $"{ind}size_t {v}_lo{k} = {v}_sbt[{k}] * {B};"
                 if k > 0 then
-                    yield sprintf "%s{ size_t %s_p = %s_i%d + %d; if (%s_p > %s_lo%d) %s_lo%d = %s_p; }"
-                              ind v v (k - 1) sInc v v k v k v
-                yield sprintf "%ssize_t %s_hi%d = (%s_sbt[%d] + 1) * %d; if (%s_hi%d > %d) %s_hi%d = %d;"
-                          ind v k v k B v k n v k n
-                yield sprintf "%sfor (size_t %s_i%d = %s_lo%d; %s_i%d < %s_hi%d; %s_i%d++) {"
-                          ind v k v k v k v k v k ]
+                    yield $"{ind}{{ size_t {v}_p = {v}_i{(k - 1)} + {sInc}; if ({v}_p > {v}_lo{k}) {v}_lo{k} = {v}_p; }}"
+                yield $"{ind}size_t {v}_hi{k} = ({v}_sbt[{k}] + 1) * {B}; if ({v}_hi{k} > {n}) {v}_hi{k} = {n};"
+                yield $"{ind}for (size_t {v}_i{k} = {v}_lo{k}; {v}_i{k} < {v}_hi{k}; {v}_i{k}++) {{" ]
         let bodyInd = String.replicate (r + 1) "    "
-        let coordsInit = [ for k in 0 .. r - 1 -> sprintf "%s_i%d" v k ] |> String.concat ", "
-        let trailVars = trailExts |> List.mapi (fun i _ -> sprintf "%s_sbt%d" v i)
+        let coordsInit = [ for k in 0 .. r - 1 -> $"{v}_i{k}" ] |> String.concat ", "
+        let trailVars = trailExts |> List.mapi (fun i _ -> $"{v}_sbt{i}")
         let guardInd = if distribute then "    " else ""
         let trailOpen =
             trailVars |> List.mapi (fun i tv ->
-                sprintf "%sfor (size_t %s = 0; %s < %d; %s++) {" (bodyInd + guardInd + String.replicate i "    ") tv tv trailExts.[i] tv)
+                $"""{(bodyInd + guardInd + String.replicate i "    ")}for (size_t {tv} = 0; {tv} < {trailExts.[i]}; {tv}++) {{""")
         let trailClose =
             [ for i in trailVars.Length - 1 .. -1 .. 0 -> bodyInd + guardInd + String.replicate i "    " + "}" ]
         let trailIdx =
@@ -1571,25 +1556,23 @@ module CppZarr =
             else
                 let mutable acc = trailVars.[0]
                 for i in 1 .. trailVars.Length - 1 do
-                    acc <- sprintf "(%s) * %d + %s" acc trailExts.[i] trailVars.[i]
+                    acc <- $"({acc}) * {trailExts.[i]} + {trailVars.[i]}"
                 acc
         let valueExpr =
             match meta.FillValue with
-            | FillNone -> sprintf "(%s)%s_cbuf[%s_local * %d + %s]" elemCpp v v trail trailIdx
-            | _ -> sprintf "(%s_have ? (%s)%s_cbuf[%s_local * %d + %s] : %s_fillv)" v elemCpp v v trail trailIdx v
+            | FillNone -> $"({elemCpp}){v}_cbuf[{v}_local * {trail} + {trailIdx}]"
+            | _ -> $"({v}_have ? ({elemCpp}){v}_cbuf[{v}_local * {trail} + {trailIdx}] : {v}_fillv)"
         let assign =
-            sprintf "%s%s_flat[%s_pool * %d + %s] = %s;"
-                (bodyInd + guardInd + String.replicate trailVars.Length "    ")
-                v v trail trailIdx valueExpr
+            $"""{(bodyInd + guardInd + String.replicate trailVars.Length "    ")}{v}_flat[{v}_pool * {trail} + {trailIdx}] = {valueExpr};"""
         let cellBody =
-            [ bodyInd + sprintf "std::array<size_t, %d> %s_sbc = { %s };" r v coordsInit
-              bodyInd + sprintf "size_t %s_pool = linearized_storage::%s::linearize<%d>(%s_sbc, %dUL);" v nsName r v n ]
-            @ (if distribute then [ bodyInd + sprintf "if (%s_pool >= %s_dlo && %s_pool < %s_dhi) {" v v v v ] else [])
+            [ bodyInd + $"std::array<size_t, {r}> {v}_sbc = {{ {coordsInit} }};"
+              bodyInd + $"size_t {v}_pool = linearized_storage::{nsName}::linearize<{r}>({v}_sbc, {n}UL);" ]
+            @ (if distribute then [ bodyInd + $"if ({v}_pool >= {v}_dlo && {v}_pool < {v}_dhi) {{" ] else [])
             @ trailOpen
             @ [ assign ]
             @ trailClose
             @ (if distribute then [ bodyInd + "}" ] else [])
-            @ [ bodyInd + sprintf "%s_local++;" v ]
+            @ [ bodyInd + $"{v}_local++;" ]
         let cellClose = [ for k in r - 1 .. -1 .. 0 -> String.replicate (k + 1) "    " + "}" ]
 
         // Post-loop restoration under distribution: contiguous cell-range
@@ -1600,40 +1583,39 @@ module CppZarr =
             | "float" -> "MPI_FLOAT"
             | "long long" -> "MPI_LONG_LONG"
             | "int" -> "MPI_INT"
-            | other -> failwithf "Zarr codegen: variable '%s': no MPI datatype for element type '%s'" meta.Name other
+            | other -> failwith $"Zarr codegen: variable '{meta.Name}': no MPI datatype for element type '{other}'"
         let gather =
             if not distribute then [] else
-            [ sprintf "if (__blade_mpi_size > 1) { // zarr mpi: restore full pool of '%s' on all ranks" meta.Name
-              sprintf "    if (%dULL > 2147483647ULL) { MPI_Abort(MPI_COMM_WORLD, 13); }" (card * trail)
-              sprintf "    int* %s_cnt = new int[__blade_mpi_size]; int* %s_dsp = new int[__blade_mpi_size];" v v
+            [ $"if (__blade_mpi_size > 1) {{ // zarr mpi: restore full pool of '{meta.Name}' on all ranks"
+              $"    if ({card * trail}ULL > 2147483647ULL) {{ MPI_Abort(MPI_COMM_WORLD, 13); }}"
+              $"    int* {v}_cnt = new int[__blade_mpi_size]; int* {v}_dsp = new int[__blade_mpi_size];"
               "    for (int __r = 0; __r < __blade_mpi_size; __r++) {"
-              sprintf "        size_t __lo = (size_t)__r * %s_dq + ((size_t)__r < %s_dr ? (size_t)__r : %s_dr);" v v v
-              sprintf "        size_t __hi = __lo + %s_dq + ((size_t)__r < %s_dr ? 1 : 0);" v v
-              sprintf "        %s_cnt[__r] = (int)((__hi - __lo) * %d); %s_dsp[__r] = (int)(__lo * %d);" v trail v trail
+              $"        size_t __lo = (size_t)__r * {v}_dq + ((size_t)__r < {v}_dr ? (size_t)__r : {v}_dr);"
+              $"        size_t __hi = __lo + {v}_dq + ((size_t)__r < {v}_dr ? 1 : 0);"
+              $"        {v}_cnt[__r] = (int)((__hi - __lo) * {trail}); {v}_dsp[__r] = (int)(__lo * {trail});"
               "    }"
-              sprintf "    MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, %s_flat, %s_cnt, %s_dsp, %s, MPI_COMM_WORLD);" v v v mpiDtype
-              sprintf "    delete[] %s_cnt; delete[] %s_dsp;" v v
+              $"    MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, {v}_flat, {v}_cnt, {v}_dsp, {mpiDtype}, MPI_COMM_WORLD);"
+              $"    delete[] {v}_cnt; delete[] {v}_dsp;"
               "}" ]
 
-        [ sprintf "// Read %s from zarr store %s (simplex-blocks: %d blocks, grid %d, tile %d)" meta.Name (normPath storePath) nBlocks T B
-          sprintf "{ std::ifstream %s_zm(\"%s/%s\"); if (!%s_zm) { std::cerr << \"Zarr error: array '%s' not found in store '%s' (missing %s)\" << std::endl; std::exit(1); } }"
-              v arrayDir metaFile v meta.Name (normPath storePath) metaFile ]
+        [ $"// Read {meta.Name} from zarr store {normPath storePath} (simplex-blocks: {nBlocks} blocks, grid {T}, tile {B})"
+          $"{{ std::ifstream {v}_zm(\"{arrayDir}/{metaFile}\"); if (!{v}_zm) {{ std::cerr << \"Zarr error: array '{meta.Name}' not found in store '{(normPath storePath)}' (missing {metaFile})\" << std::endl; std::exit(1); }} }}" ]
         @ tableDecl
         @ fillDecl
         @ distDecls
-        @ [ sprintf "%s* %s_flat = new %s[%d];" elemCpp v elemCpp (card * trail)
-            sprintf "%s* %s_cbuf = new %s[%d];" diskCpp v diskCpp chunkCells
-            sprintf "for (size_t %s_sb = 0; %s_sb < %d; %s_sb++) {" v v nBlocks v
-            sprintf "    auto %s_sbt = linearized_storage::symmetric::unlinearize<%d>(%s_sb, %dUL);" v r v T ]
+        @ [ $"{elemCpp}* {v}_flat = new {elemCpp}[{card * trail}];"
+            $"{diskCpp}* {v}_cbuf = new {diskCpp}[{chunkCells}];"
+            $"for (size_t {v}_sb = 0; {v}_sb < {nBlocks}; {v}_sb++) {{"
+            $"    auto {v}_sbt = linearized_storage::symmetric::unlinearize<{r}>({v}_sb, {T}UL);" ]
         @ windowSkipLines
         @ ownershipSkipLines
         @ chunkRead
-        @ [ sprintf "    size_t %s_local = 0;" v ]
+        @ [ $"    size_t {v}_local = 0;" ]
         @ cellLoops
         @ cellBody
         @ cellClose
         @ [ "}"
-            sprintf "delete[] %s_cbuf;" v ]
+            $"delete[] {v}_cbuf;" ]
         @ gather
 
     /// Generates C++ assembling a blade-packed variable's canonical flat pool
@@ -1647,10 +1629,10 @@ module CppZarr =
         let meta =
             match tryFindArray store varName with
             | Some m -> m
-            | None -> failwithf "Zarr codegen: variable '%s' not found in store '%s'" varName storePath
+            | None -> failwith $"Zarr codegen: variable '{varName}' not found in store '{storePath}'"
         match meta.Blade with
         | None ->
-            failwithf "Zarr codegen: variable '%s' has no blade packed layout but was typed packed (this indicates a typing inconsistency)" varName
+            failwith $"Zarr codegen: variable '{varName}' has no blade packed layout but was typed packed (this indicates a typing inconsistency)"
         | Some layout when layout.Group.Sym = SymWreath ->
             // The store's pool IS the in-memory representation, so assembly is
             // the ordinary flat chunk walk and downstream "materialization" is
@@ -1669,13 +1651,13 @@ module CppZarr =
                                varName (Blade.IR.ppOrbitLevels declLevels) declExtent
                                (Blade.IR.ppOrbitLevels g.Levels) g.Extent
              | _ ->
-                 failwithf "Zarr codegen: variable '%s': the store declares an orbit (iterated-wreath) head, so the variable must type as a SOLE OrbIdx group" varName)
+                 failwith $"Zarr codegen: variable '{varName}': the store declares an orbit (iterated-wreath) head, so the variable must type as a SOLE OrbIdx group")
             if opts.Window.IsSome then
-                failwithf "Zarr codegen: variable '%s': z.read_window over an OrbIdx (iterated-wreath) pool is not supported -- a wreath class has no translated sub-class to window into" varName
+                failwith $"Zarr codegen: variable '{varName}': z.read_window over an OrbIdx (iterated-wreath) pool is not supported -- a wreath class has no translated sub-class to window into"
             if opts.Distribute then
-                failwithf "Zarr codegen: variable '%s': the MPI-distributed read is not defined for an OrbIdx (iterated-wreath) pool (spec_version 2 is the flat single-pool layout only)" varName
+                failwith $"Zarr codegen: variable '{varName}': the MPI-distributed read is not defined for an OrbIdx (iterated-wreath) pool (spec_version 2 is the flat single-pool layout only)"
             if layout.Blocks.IsSome then
-                failwithf "Zarr codegen: variable '%s': 'packed-blocks' is not defined for an orbit head" varName
+                failwith $"Zarr codegen: variable '{varName}': 'packed-blocks' is not defined for an orbit head"
             genAssembleFlat storePath store meta cppVarName (elemCppOf arrType.ElemType)
         | Some layout ->
             let g = layout.Group
@@ -1684,7 +1666,7 @@ module CppZarr =
                 | None -> g.Extent
                 | Some (lo, hi) ->
                     if lo < 0L || lo >= hi || hi > g.Extent then
-                        failwithf "Zarr codegen: variable '%s': window [%d, %d) is outside the packed extent %d" varName lo hi g.Extent
+                        failwith $"Zarr codegen: variable '{varName}': window [{lo}, {hi}) is outside the packed extent {g.Extent}"
                     hi - lo
             (match arrType.IndexTypes with
              | lead :: rest ->
@@ -1700,7 +1682,7 @@ module CppZarr =
                  if not (leadOk && restOk) then
                      failwithf "Zarr codegen: variable '%s': declared packed type does not match the store's blade layout (group %A rank %d expected lead extent %d, dense %A)"
                          varName g.Sym g.Rank expectedLead layout.DenseDims
-             | [] -> failwithf "Zarr codegen: variable '%s': packed read with no index types" varName)
+             | [] -> failwith $"Zarr codegen: variable '{varName}': packed read with no index types")
             let elemCpp = elemCppOf arrType.ElemType
             match opts.Window with
             | None ->
@@ -1729,14 +1711,14 @@ module CppZarr =
                 let wLoops =
                     [ for k in 0 .. r - 1 ->
                         let ind = String.replicate (k + 1) "    "
-                        let lo = if k = 0 then sprintf "%dUL" wlo else sprintf "%s_w%d + %d" v (k - 1) sInc
-                        sprintf "%sfor (size_t %s_w%d = %s; %s_w%d < %dUL; %s_w%d++) {" ind v k lo v k whi v k ]
+                        let lo = if k = 0 then $"{wlo}UL" else $"{v}_w{k - 1} + {sInc}"
+                        $"{ind}for (size_t {v}_w{k} = {lo}; {v}_w{k} < {whi}UL; {v}_w{k}++) {{" ]
                 let bodyInd = String.replicate (r + 1) "    "
-                let coordsInit = [ for k in 0 .. r - 1 -> sprintf "%s_w%d" v k ] |> String.concat ", "
-                let trailVars = trailExts |> List.mapi (fun i _ -> sprintf "%s_wt%d" v i)
+                let coordsInit = [ for k in 0 .. r - 1 -> $"{v}_w{k}" ] |> String.concat ", "
+                let trailVars = trailExts |> List.mapi (fun i _ -> $"{v}_wt{i}")
                 let trailOpen =
                     trailVars |> List.mapi (fun i tv ->
-                        sprintf "%sfor (size_t %s = 0; %s < %d; %s++) {" (bodyInd + String.replicate i "    ") tv tv trailExts.[i] tv)
+                        $"""{(bodyInd + String.replicate i "    ")}for (size_t {tv} = 0; {tv} < {trailExts.[i]}; {tv}++) {{""")
                 let trailClose =
                     [ for i in trailVars.Length - 1 .. -1 .. 0 -> bodyInd + String.replicate i "    " + "}" ]
                 let trailIdx =
@@ -1744,23 +1726,23 @@ module CppZarr =
                     else
                         let mutable acc = trailVars.[0]
                         for i in 1 .. trailVars.Length - 1 do
-                            acc <- sprintf "(%s) * %d + %s" acc trailExts.[i] trailVars.[i]
+                            acc <- $"({acc}) * {trailExts.[i]} + {trailVars.[i]}"
                         acc
                 let wClose = [ for k in r - 1 .. -1 .. 0 -> String.replicate (k + 1) "    " + "}" ]
                 assemble
-                @ [ sprintf "// window [%d, %d) extraction: translated %s sub-simplex (%d cells)" wlo whi nsName wcard
-                    sprintf "%s* %s_flat = new %s[%d];" elemCpp v elemCpp (wcard * trail)
-                    sprintf "size_t %s_wdst = 0;" v ]
+                @ [ $"// window [{wlo}, {whi}) extraction: translated {nsName} sub-simplex ({wcard} cells)"
+                    $"{elemCpp}* {v}_flat = new {elemCpp}[{wcard * trail}];"
+                    $"size_t {v}_wdst = 0;" ]
                 @ wLoops
-                @ [ bodyInd + sprintf "std::array<size_t, %d> %s_wc = { %s };" r v coordsInit
-                    bodyInd + sprintf "size_t %s_wsrc = linearized_storage::%s::linearize<%d>(%s_wc, %dUL);" v nsName r v n ]
+                @ [ bodyInd + $"std::array<size_t, {r}> {v}_wc = {{ {coordsInit} }};"
+                    bodyInd + $"size_t {v}_wsrc = linearized_storage::{nsName}::linearize<{r}>({v}_wc, {n}UL);" ]
                 @ trailOpen
                 @ [ bodyInd + String.replicate trailVars.Length "    "
-                    + sprintf "%s_flat[%s_wdst * %d + %s] = %s_flat[%s_wsrc * %d + %s];" v v trail trailIdx srcV v trail trailIdx ]
+                    + $"{v}_flat[{v}_wdst * {trail} + {trailIdx}] = {srcV}_flat[{v}_wsrc * {trail} + {trailIdx}];" ]
                 @ trailClose
-                @ [ bodyInd + sprintf "%s_wdst++;" v ]
+                @ [ bodyInd + $"{v}_wdst++;" ]
                 @ wClose
-                @ [ sprintf "delete[] %s_flat;" srcV ]
+                @ [ $"delete[] {srcV}_flat;" ]
 
     /// STREAMED fiber reads, hoisted prologue: metadata existence check, the fiber buffer, a per-t-chunk segment buffer, and the fill value. Dense variables only (site dims dense, fiber = the LAST axis).
     let genStreamOpen (storePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
@@ -1768,13 +1750,13 @@ module CppZarr =
         let meta =
             match tryFindArray store varName with
             | Some m -> m
-            | None -> failwithf "Zarr codegen: variable '%s' not found in store '%s'" varName storePath
+            | None -> failwith $"Zarr codegen: variable '{varName}' not found in store '{storePath}'"
         if meta.Blade.IsSome then
-            failwithf "Zarr stream of '%s': packed variables are not streamable (bind with .read)" varName
+            failwith $"Zarr stream of '{varName}': packed variables are not streamable (bind with .read)"
         if arrType.IndexTypes |> List.exists (fun ix -> ix.Symmetry <> SymNone || ix.Rank <> 1) then
-            failwithf "Zarr stream of '%s': dense variables only" varName
+            failwith $"Zarr stream of '{varName}': dense variables only"
         if meta.Shape.Length < 2 then
-            failwithf "Zarr stream of '%s': needs at least one site dim plus the trailing fiber axis (rank >= 2)" varName
+            failwith $"Zarr stream of '{varName}': needs at least one site dim plus the trailing fiber axis (rank >= 2)"
         let v = cppVarName
         let elemCpp = elemCppOf arrType.ElemType
         let diskCpp = diskCppOf meta.Dtype.Code
@@ -1786,14 +1768,13 @@ module CppZarr =
         let metaFile = if meta.Version = 3 then "zarr.json" else ".zarray"
         let fillDecl =
             match meta.FillValue with
-            | FillFloat f -> [ sprintf "%s %s_fillv = (%s)%s;" elemCpp v elemCpp (fmtF f) ]
-            | FillInt fi -> [ sprintf "%s %s_fillv = (%s)%dLL;" elemCpp v elemCpp fi ]
+            | FillFloat f -> [ $"{elemCpp} {v}_fillv = ({elemCpp}){fmtF f};" ]
+            | FillInt fi -> [ $"{elemCpp} {v}_fillv = ({elemCpp}){fi}LL;" ]
             | FillNone -> []
-        [ sprintf "// Stream %s from zarr store %s (chunked fiber reads at the S/T boundary)" varName (normPath storePath)
-          sprintf "{ std::ifstream %s_zm(\"%s/%s\"); if (!%s_zm) { std::cerr << \"Zarr error: array '%s' not found in store '%s' (missing %s)\" << std::endl; std::exit(1); } }"
-              v arrayDir metaFile v varName (normPath storePath) metaFile
-          sprintf "size_t %s_fiber_ext[1] = { %d };" v fiberLen
-          sprintf "%s* %s_fseg = new %s[%d];" diskCpp v diskCpp ctT ]
+        [ $"// Stream {varName} from zarr store {normPath storePath} (chunked fiber reads at the S/T boundary)"
+          $"{{ std::ifstream {v}_zm(\"{arrayDir}/{metaFile}\"); if (!{v}_zm) {{ std::cerr << \"Zarr error: array '{varName}' not found in store '{(normPath storePath)}' (missing {metaFile})\" << std::endl; std::exit(1); }} }}"
+          $"size_t {v}_fiber_ext[1] = {{ {fiberLen} }};"
+          $"{diskCpp}* {v}_fseg = new {diskCpp}[{ctT}];" ]
         @ fillDecl
 
     /// STREAMED fiber reads, in-nest: assemble one trailing-axis fiber at the
@@ -1804,7 +1785,7 @@ module CppZarr =
         let meta =
             match tryFindArray store varName with
             | Some m -> m
-            | None -> failwithf "Zarr codegen: variable '%s' not found in store '%s'" varName storePath
+            | None -> failwith $"Zarr codegen: variable '{varName}' not found in store '{storePath}'"
         let v = cppVarName
         let elemCpp = elemCppOf arrType.ElemType
         let bs = meta.Dtype.ByteSize
@@ -1812,7 +1793,7 @@ module CppZarr =
         let chunks = meta.Chunks
         let d = shape.Length - 1
         if siteExprs.Length <> d then
-            failwithf "Zarr stream of '%s': %d site coordinates for %d site dims" varName siteExprs.Length d
+            failwith $"Zarr stream of '{varName}': {siteExprs.Length} site coordinates for {d} site dims"
         let fiberLen = List.last shape
         let ctT = List.last chunks
         let gridT = (fiberLen + ctT - 1L) / ctT
@@ -1822,36 +1803,36 @@ module CppZarr =
         // Chunk key from site-chunk coords + the t-chunk counter.
         let sep = meta.ChunkKeySep
         let coordParts =
-            [ for k in 0 .. d - 1 -> sprintf "std::to_string((size_t)(%s) / %d)" siteExprs.[k] chunks.[k] ]
-            @ [ sprintf "std::to_string(%s_tc)" v ]
-        let joined = String.concat (sprintf " + \"%s\" + " sep) coordParts
+            [ for k in 0 .. d - 1 -> $"std::to_string((size_t)({siteExprs.[k]}) / {chunks.[k]})" ]
+            @ [ $"std::to_string({v}_tc)" ]
+        let joined = String.concat $" + \"{sep}\" + " coordParts
         let keyExpr =
             if meta.ChunkKeyPrefix = "" then joined
-            else sprintf "std::string(\"%s%s\") + %s" meta.ChunkKeyPrefix sep joined
+            else $"std::string(\"{meta.ChunkKeyPrefix}{sep}\") + {joined}"
         // Within-chunk fiber start (elements): Horner over chunk-local site
         // coords with chunk-internal strides, times the t-chunk extent.
         let offExpr =
             let mutable acc = sprintf "((size_t)(%s) %% %d)" siteExprs.[0] chunks.[0]
             for k in 1 .. d - 1 do
                 acc <- sprintf "(%s * %d + (size_t)(%s) %% %d)" acc chunks.[k] siteExprs.[k] chunks.[k]
-            sprintf "%s * %d" acc ctT
+            $"{acc} * {ctT}"
         let missingBranch =
             match meta.FillValue with
             | FillNone ->
-                [ sprintf "    } else { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is missing and fill_value is null\" << std::endl; std::exit(1); }" v varName ]
+                [ $"    }} else {{ std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{varName}' is missing and fill_value is null\" << std::endl; std::exit(1); }}" ]
             | _ ->
                 [ "    } else {"
-                  sprintf "        for (size_t %s_q = 0; %s_q < %s_len; %s_q++) %s[%s_tc * %d + %s_q] = %s_fillv;" v v v v destBuf v ctT v v
+                  $"        for (size_t {v}_q = 0; {v}_q < {v}_len; {v}_q++) {destBuf}[{v}_tc * {ctT} + {v}_q] = {v}_fillv;"
                   "    }" ]
-        [ sprintf "for (size_t %s_tc = 0; %s_tc < %d; %s_tc++) {" v v gridT v
-          sprintf "    std::string %s_key = %s;" v keyExpr
-          sprintf "    size_t %s_len = %d - %s_tc * %d; if (%s_len > %d) %s_len = %d;" v fiberLen v ctT v ctT v ctT
-          sprintf "    std::ifstream %s_cf(std::string(\"%s/\") + %s_key, std::ios::binary);" v arrayDir v
-          sprintf "    if (%s_cf) {" v
-          sprintf "        %s_cf.seekg((std::streamoff)((%s) * %d));" v offExpr bs
-          sprintf "        %s_cf.read((char*)%s_fseg, %s_len * %d);" v v v bs
-          sprintf "        if (%s_cf.gcount() != (std::streamsize)(%s_len * %d)) { std::cerr << \"Zarr error: chunk '\" << %s_key << \"' of '%s' is short -- a compressed or corrupt store?\" << std::endl; std::exit(1); }" v v bs v varName
-          sprintf "        for (size_t %s_q = 0; %s_q < %s_len; %s_q++) %s[%s_tc * %d + %s_q] = (%s)%s_fseg[%s_q];" v v v v destBuf v ctT v elemCpp v v ]
+        [ $"for (size_t {v}_tc = 0; {v}_tc < {gridT}; {v}_tc++) {{"
+          $"    std::string {v}_key = {keyExpr};"
+          $"    size_t {v}_len = {fiberLen} - {v}_tc * {ctT}; if ({v}_len > {ctT}) {v}_len = {ctT};"
+          $"    std::ifstream {v}_cf(std::string(\"{arrayDir}/\") + {v}_key, std::ios::binary);"
+          $"    if ({v}_cf) {{"
+          $"        {v}_cf.seekg((std::streamoff)(({offExpr}) * {bs}));"
+          $"        {v}_cf.read((char*){v}_fseg, {v}_len * {bs});"
+          $"        if ({v}_cf.gcount() != (std::streamsize)({v}_len * {bs})) {{ std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{varName}' is short -- a compressed or corrupt store?\" << std::endl; std::exit(1); }}"
+          $"        for (size_t {v}_q = 0; {v}_q < {v}_len; {v}_q++) {destBuf}[{v}_tc * {ctT} + {v}_q] = ({elemCpp}){v}_fseg[{v}_q];" ]
         @ missingBranch
         @ [ "}" ]
 
@@ -1871,33 +1852,30 @@ module CppZarr =
         let litExtent (context: string) (e: IRExpr) =
             match e with
             | IRLit (IRLitInt n) -> n
-            | _ -> failwithf "Zarr write of '%s' requires literal extents (%s)" varName context
+            | _ -> failwith $"Zarr write of '{varName}' requires literal extents ({context})"
         let (shape, bladeAttrJson) =
             match packedLead with
             | Some lead when lead.Symmetry = SymWreath ->
                 // The array IS the flat pool, so the on-disk shape is [cardinality]
                 // and the caller's buffer is copied verbatim (no trailing dims: a wreath group never composes with another index group).
                 if arrType.IndexTypes.Length <> 1 then
-                    failwithf "Zarr write of '%s': an OrbIdx (iterated-wreath) group is stored as a SOLE flat pool; %d index groups were declared"
-                              varName arrType.IndexTypes.Length
+                    failwith $"Zarr write of '{varName}': an OrbIdx (iterated-wreath) group is stored as a SOLE flat pool; {arrType.IndexTypes.Length} index groups were declared"
                 let levels = Blade.IR.orbitLevelsOf lead
                 if List.isEmpty levels then
-                    failwithf "Zarr write of '%s': the wreath record carries no level list (its Extent must be the IROrbitClass marker)" varName
+                    failwith $"Zarr write of '{varName}': the wreath record carries no level list (its Extent must be the IROrbitClass marker)"
                 let n = litExtent "orbit base extent" (Blade.IR.orbitBaseExtent lead)
                 let group = { Sym = SymWreath; Rank = lead.Rank; Extent = n; Levels = levels }
                 let card =
                     match packedCardinalityChecked group with
                     | Ok c -> c
                     | Error detail ->
-                        failwithf "Zarr write of '%s': OrbIdx%s at extent %d -- %s"
-                                  varName (Blade.IR.ppOrbitLevels levels) n detail
+                        failwith $"Zarr write of '{varName}': OrbIdx{(Blade.IR.ppOrbitLevels levels)} at extent {n} -- {detail}"
                 let levelsJson =
                     levels
                     |> List.map (fun (r, plus) -> sprintf "[%d, \\\"%s\\\"]" r (if plus then "+" else "-"))
                     |> String.concat ", "
                 let attr =
-                    sprintf ", \\\"blade\\\": {\\\"spec_version\\\": 2, \\\"layout\\\": \\\"packed\\\", \\\"order\\\": \\\"ascending-lex\\\", \\\"index_types\\\": [{\\\"kind\\\": \\\"orbit\\\", \\\"levels\\\": [%s], \\\"extent\\\": %d}], \\\"decomposition\\\": {\\\"scheme\\\": \\\"flat-ranges\\\"}}"
-                        levelsJson n
+                    $", \\\"blade\\\": {{\\\"spec_version\\\": 2, \\\"layout\\\": \\\"packed\\\", \\\"order\\\": \\\"ascending-lex\\\", \\\"index_types\\\": [{{\\\"kind\\\": \\\"orbit\\\", \\\"levels\\\": [{levelsJson}], \\\"extent\\\": {n}}}], \\\"decomposition\\\": {{\\\"scheme\\\": \\\"flat-ranges\\\"}}}}"
                 ([card], attr)
             | Some lead ->
                 (match lead.Symmetry with
@@ -1906,13 +1884,13 @@ module CppZarr =
                 let trailing =
                     arrType.IndexTypes |> List.tail |> List.map (fun ix ->
                         if ix.Symmetry <> SymNone || ix.Rank <> 1 then
-                            failwithf "Zarr write of '%s': only one leading packed group plus dense trailing dims is supported" varName
+                            failwith $"Zarr write of '{varName}': only one leading packed group plus dense trailing dims is supported"
                         litExtent "trailing dim" ix.Extent)
                 let group = { Sym = lead.Symmetry; Rank = lead.Rank; Extent = litExtent "packed extent" lead.Extent; Levels = [] }
                 let card = packedCardinality group
                 let kindStr = if group.Sym = SymSymmetric then "sym" else "antisym"
                 let idxEntries =
-                    (sprintf "{\\\"kind\\\": \\\"%s\\\", \\\"rank\\\": %d, \\\"extent\\\": %d}" kindStr group.Rank group.Extent)
+                    $"{{\\\"kind\\\": \\\"{kindStr}\\\", \\\"rank\\\": {group.Rank}, \\\"extent\\\": {group.Extent}}}"
                     :: (trailing |> List.map (sprintf "{\\\"kind\\\": \\\"dense\\\", \\\"extent\\\": %d}"))
                 // spec_version stays 1 for a depth-1 head: version 2 admits
                 // sym/antisym unchanged, so stamping 2 here would only make
@@ -1930,36 +1908,35 @@ module CppZarr =
         let dtype = v2DtypeOf arrType.ElemType
         let total = shape |> List.fold (fun a b -> a * b) 1L
         let root = normPath storePath
-        let arrayDir = sprintf "%s/%s" root varName
+        let arrayDir = $"{root}/{varName}"
         let shapeJson = shape |> List.map string |> String.concat ", "
         let dims =
             if dimNames.Length >= rank then List.truncate rank dimNames
-            else [ for i in 0 .. rank - 1 -> sprintf "dim%d" i ]
+            else [ for i in 0 .. rank - 1 -> $"dim{i}" ]
         // Escaped for splicing inside the C++ string literal (like the
         // .zarray body below): the emitted code must print {"..."} JSON.
-        let dimsJson = dims |> List.map (fun d -> sprintf "\\\"%s\\\"" d) |> String.concat ", "
+        let dimsJson = dims |> List.map (fun d -> $"\\\"{d}\\\"") |> String.concat ", "
         let zarrayJson =
-            sprintf "{\\\"zarr_format\\\": 2, \\\"shape\\\": [%s], \\\"chunks\\\": [%s], \\\"dtype\\\": \\\"%s\\\", \\\"compressor\\\": null, \\\"fill_value\\\": 0, \\\"order\\\": \\\"C\\\", \\\"filters\\\": null}"
-                shapeJson shapeJson dtype
-        let zattrsJson = sprintf "{\\\"_ARRAY_DIMENSIONS\\\": [%s]%s}" dimsJson bladeAttrJson
+            $"{{\\\"zarr_format\\\": 2, \\\"shape\\\": [{shapeJson}], \\\"chunks\\\": [{shapeJson}], \\\"dtype\\\": \\\"{dtype}\\\", \\\"compressor\\\": null, \\\"fill_value\\\": 0, \\\"order\\\": \\\"C\\\", \\\"filters\\\": null}}"
+        let zattrsJson = $"{{\\\"_ARRAY_DIMENSIONS\\\": [{dimsJson}]{bladeAttrJson}}}"
         let chunkKey0 =
             if rank = 0 then "0"
             else List.replicate rank "0" |> String.concat "."
         let wCheck (stream: string) (context: string) =
-            sprintf "if (!%s.good()) %s" stream (zExit context)
+            $"if (!{stream}.good()) {zExit context}"
         [
-            sprintf "// Write %s to zarr store %s (v2, uncompressed, single chunk)" varName root
+            $"// Write {varName} to zarr store {root} (v2, uncompressed, single chunk)"
             sprintf "{ std::error_code %s_ec; std::filesystem::create_directories(\"%s\", %s_ec); if (%s_ec) %s }"
-                v arrayDir v v (zExit (sprintf "cannot create store directory '%s'" arrayDir))
+                v arrayDir v v (zExit $"cannot create store directory '{arrayDir}'")
             sprintf "{ std::ofstream %s_zg(\"%s/.zgroup\", std::ios::trunc); %s_zg << \"{\\\"zarr_format\\\": 2}\"; %s }"
-                v root v (wCheck (sprintf "%s_zg" v) (sprintf "cannot write '%s/.zgroup'" root))
+                v root v (wCheck $"{v}_zg" $"cannot write '{root}/.zgroup'")
             sprintf "{ std::ofstream %s_za(\"%s/.zarray\", std::ios::trunc); %s_za << \"%s\"; %s }"
-                v arrayDir v zarrayJson (wCheck (sprintf "%s_za" v) (sprintf "cannot write '%s/.zarray'" arrayDir))
+                v arrayDir v zarrayJson (wCheck $"{v}_za" $"cannot write '{arrayDir}/.zarray'")
             sprintf "{ std::ofstream %s_zt(\"%s/.zattrs\", std::ios::trunc); %s_zt << \"%s\"; %s }"
-                v arrayDir v zattrsJson (wCheck (sprintf "%s_zt" v) (sprintf "cannot write '%s/.zattrs'" arrayDir))
+                v arrayDir v zattrsJson (wCheck $"{v}_zt" $"cannot write '{arrayDir}/.zattrs'")
             sprintf "{ std::ofstream %s_ch(\"%s/%s\", std::ios::binary | std::ios::trunc); %s_ch.write((const char*)%s_flat, sizeof(%s) * %d); %s }"
                 v arrayDir chunkKey0 v v elemCpp total
-                (wCheck (sprintf "%s_ch" v) (sprintf "cannot write chunk '%s/%s'" arrayDir chunkKey0))
+                (wCheck $"{v}_ch" $"cannot write chunk '{arrayDir}/{chunkKey0}'")
         ]
 
     /// Required C++ includes for Zarr I/O (std only -- no link flags).
@@ -2043,10 +2020,10 @@ module ZarrWrite =
                     layout.Group.Levels
                     |> List.map (fun (r, plus) -> sprintf "[%d, \"%s\"]" r (if plus then "+" else "-"))
                     |> String.concat ", "
-                sprintf "{\"kind\": \"orbit\", \"levels\": [%s], \"extent\": %d}" levelsJson layout.Group.Extent
+                $"{{\"kind\": \"orbit\", \"levels\": [{levelsJson}], \"extent\": {layout.Group.Extent}}}"
             else
                 let kindStr = if layout.Group.Sym = SymSymmetric then "sym" else "antisym"
-                sprintf "{\"kind\": \"%s\", \"rank\": %d, \"extent\": %d}" kindStr layout.Group.Rank layout.Group.Extent
+                $"{{\"kind\": \"{kindStr}\", \"rank\": {layout.Group.Rank}, \"extent\": {layout.Group.Extent}}}"
         let idxEntries =
             headEntry :: (layout.DenseDims |> List.map (sprintf "{\"kind\": \"dense\", \"extent\": %d}"))
         let (layoutStr, decompJson) =
@@ -2055,7 +2032,7 @@ module ZarrWrite =
             | Some i ->
                 let orderStr = match i.Order with OrderLex -> "ascending-lex" | OrderPath -> "path"
                 ("packed-blocks",
-                 sprintf "{\"scheme\": \"simplex-blocks\", \"tile\": %d, \"grid\": %d, \"block_order\": \"%s\"}" i.Tile i.Grid orderStr)
+                 $"{{\"scheme\": \"simplex-blocks\", \"tile\": {i.Tile}, \"grid\": {i.Grid}, \"block_order\": \"{orderStr}\"}}")
         sprintf "{\"spec_version\": %d, \"layout\": \"%s\", \"order\": \"ascending-lex\", \"index_types\": [%s], \"decomposition\": %s}"
             (if isOrbit then 2 else 1) layoutStr (String.concat ", " idxEntries) decompJson
 
@@ -2166,20 +2143,19 @@ module ZarrWrite =
             let chunksJson = var.Chunks |> List.map string |> String.concat ", "
             File.WriteAllText(
                 Path.Combine(arrayDir, ".zarray"),
-                sprintf "{\"zarr_format\": 2, \"shape\": [%s], \"chunks\": [%s], \"dtype\": \"%s\", \"compressor\": null, \"fill_value\": %s, \"order\": \"C\", \"filters\": null}"
-                    shapeJson chunksJson dtype (jsonNum var.FillValue))
+                $"{{\"zarr_format\": 2, \"shape\": [{shapeJson}], \"chunks\": [{chunksJson}], \"dtype\": \"{dtype}\", \"compressor\": null, \"fill_value\": {(jsonNum var.FillValue)}, \"order\": \"C\", \"filters\": null}}")
             let attrParts =
                 [ match var.DimNames with
                   | Some dims ->
                       yield sprintf "\"_ARRAY_DIMENSIONS\": [%s]" (dims |> List.map (sprintf "\"%s\"") |> String.concat ", ")
                   | None -> ()
                   match var.Blade with
-                  | Some layout -> yield sprintf "\"blade\": %s" (bladeAttrValue layout)
+                  | Some layout -> yield $"\"blade\": {bladeAttrValue layout}"
                   | None -> () ]
             if not attrParts.IsEmpty then
                 File.WriteAllText(
                     Path.Combine(arrayDir, ".zattrs"),
-                    sprintf "{%s}" (String.concat ", " attrParts))
+                    $"""{{{(String.concat ", " attrParts)}}}""")
             writeChunks arrayDir var "." ""
 
     /// Write a Zarr v3 group store (zarr.json nodes, "c/"-prefixed keys).
@@ -2203,12 +2179,11 @@ module ZarrWrite =
                 | None -> ""
             let attrsJson =
                 match var.Blade with
-                | Some layout -> sprintf ", \"attributes\": {\"blade\": %s}" (bladeAttrValue layout)
+                | Some layout -> $", \"attributes\": {{\"blade\": {bladeAttrValue layout}}}"
                 | None -> ""
             File.WriteAllText(
                 Path.Combine(arrayDir, "zarr.json"),
-                sprintf "{\"zarr_format\": 3, \"node_type\": \"array\", \"shape\": [%s], \"data_type\": \"%s\", \"chunk_grid\": {\"name\": \"regular\", \"configuration\": {\"chunk_shape\": [%s]}}, \"chunk_key_encoding\": {\"name\": \"default\", \"configuration\": {\"separator\": \"/\"}}, \"fill_value\": %s, \"codecs\": [{\"name\": \"bytes\", \"configuration\": {\"endian\": \"little\"}}]%s%s}"
-                    shapeJson dataType chunksJson fillJson dimsJson attrsJson)
+                $"{{\"zarr_format\": 3, \"node_type\": \"array\", \"shape\": [{shapeJson}], \"data_type\": \"{dataType}\", \"chunk_grid\": {{\"name\": \"regular\", \"configuration\": {{\"chunk_shape\": [{chunksJson}]}}}}, \"chunk_key_encoding\": {{\"name\": \"default\", \"configuration\": {{\"separator\": \"/\"}}}}, \"fill_value\": {fillJson}, \"codecs\": [{{\"name\": \"bytes\", \"configuration\": {{\"endian\": \"little\"}}}}]{dimsJson}{attrsJson}}}")
             writeChunks arrayDir var "/" "c"
 
 // Provider registration record
@@ -2232,7 +2207,7 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
             let store = load path
             match tryFindArray store varName with
             | Some m when m.Blade.IsSome ->
-                Error (sprintf "variable '%s' has a packed (blade: layout=packed) pool layout -- triangular and orbit (iterated-wreath) variables do not fold at compile time; bind with a plain `let ... |> <alias>.read`" varName)
+                Error $"variable '{varName}' has a packed (blade: layout=packed) pool layout -- triangular and orbit (iterated-wreath) variables do not fold at compile time; bind with a plain `let ... |> <alias>.read`"
             | _ -> readVarData path varName |> Result.map adaptVarData
         with ex -> Error ex.Message
     GenReadVar = CppZarr.genReadVar
@@ -2245,14 +2220,14 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
             let store = load path
             match tryFindArray store varName with
             | None ->
-                Error (sprintf "variable '%s' not found in Zarr store '%s'" varName path)
+                Error $"variable '{varName}' not found in Zarr store '{path}'"
             | Some m ->
                 match m.Blade with
                 | Some l when l.Group.Sym = SymWreath -> readPackedPool m |> Result.map adaptVarData
                 | Some _ ->
-                    Error (sprintf "variable '%s' has a depth-1 packed (sym/antisym) layout, not an orbit head" varName)
+                    Error $"variable '{varName}' has a depth-1 packed (sym/antisym) layout, not an orbit head"
                 | None ->
-                    Error (sprintf "variable '%s' is an ordinary dense array, not an orbit (iterated-wreath) pool" varName)
+                    Error $"variable '{varName}' is an ordinary dense array, not an orbit (iterated-wreath) pool"
         with ex -> Error ex.Message)
     GenReadCompoundVar = None  // load_compound: rejected loudly in v1
     GenWriteVar = CppZarr.genWriteVar
@@ -2261,7 +2236,7 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
     Includes = CppZarr.genIncludes
     VarDimNames = fun path varName ->
         try
-            load path |> fun s -> tryFindArray s varName |> Option.bind (fun m -> m.DimNames)
+            load path |> fun s -> tryFindArray s varName |> Option.bind _.DimNames
         with _ -> None
     Fingerprint = storeFingerprint
     VersionStamp = storeVersionStamp

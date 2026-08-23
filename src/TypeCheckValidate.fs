@@ -157,7 +157,7 @@ let rec internal rewriteImportedStaticRefs (seed: Map<string, StaticEval.StaticV
         | Some sv -> staticValueToImportExpr expr.Span sv
         | None -> expr
     | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, field) ->
-        match Map.tryFind (sprintf "%s.%s" alias field) seed with
+        match Map.tryFind $"{alias}.{field}" seed with
         | Some sv -> staticValueToImportExpr expr.Span sv
         | None -> expr
     | ExprKind.ExprField (obj, field) -> inheritSpan expr (ExprField (go obj, field))
@@ -179,7 +179,7 @@ let rec internal rewriteImportedStaticRefs (seed: Map<string, StaticEval.StaticV
     | ExprKind.ExprStruct (name, fields, spread) -> inheritSpan expr (ExprStruct (name, fields |> List.map (fun (n, e) -> (n, go e)), spread |> Option.map go))
     | ExprKind.ExprTyped (e, t) -> inheritSpan expr (ExprTyped (go e, t))
     | ExprKind.ExprLambda (parms, whereClause, body) ->
-        let bound = parms |> List.map (fun p -> p.Name)
+        let bound = parms |> List.map (_.Name)
         inheritSpan expr (ExprLambda (parms, whereClause, goWithout bound body))
     | _ -> expr
 and internal rewriteImportedStaticRefsStmt (seed: Map<string, StaticEval.StaticValue>) (stmt: Stmt) : Stmt =
@@ -204,7 +204,7 @@ let internal seedImportedStaticsIntoDecls (seed: Map<string, StaticEval.StaticVa
         | DeclStatic binding ->
             { locDecl with Value = DeclStatic { binding with Value = rewriteImportedStaticRefs seed binding.Value } }
         | DeclFunction fd when fd.IsStatic ->
-            let paramNames = fd.Params |> List.map (fun p -> p.Name)
+            let paramNames = fd.Params |> List.map (_.Name)
             let seed' = paramNames |> List.fold (fun (s: Map<string, StaticEval.StaticValue>) n -> Map.remove n s) seed
             { locDecl with Value = DeclFunction { fd with Body = rewriteImportedStaticRefs seed' fd.Body } }
         | _ -> locDecl)
@@ -229,7 +229,7 @@ let internal importedStaticSeed (env: TypeEnv) (decls: Located<Decl> list) : Map
                 | ImportQualified aliasOpt ->
                     let alias = aliasOpt |> Option.defaultValue (List.last qname)
                     exports.StaticValues
-                    |> Map.fold (fun acc2 k v -> Map.add (sprintf "%s.%s" alias k) v acc2) acc
+                    |> Map.fold (fun acc2 k v -> Map.add $"{alias}.{k}" v acc2) acc
                 | ImportSelective names ->
                     names |> List.fold (fun acc2 n ->
                         match Map.tryFind n exports.StaticValues with
@@ -259,7 +259,7 @@ let rec internal collectAppRankErrors (subst: Subst) (expr: TypedExpr) : Compile
         | TExprApp (tFunc, tArgs) ->
             match subst.Resolve tFunc.Type with
             | FuncElem (paramTys, _) ->
-                match firstArgRankClash subst paramTys (tArgs |> List.map (fun a -> a.Type)) with
+                match firstArgRankClash subst paramTys (tArgs |> List.map (_.Type)) with
                 | Some (i, pr, ar, pTy, aTy) ->
                     let arg = List.item i tArgs
                     [ { Error = ArgRankMismatch (i + 1, pr, ar,
@@ -353,17 +353,17 @@ let internal groupKeysLetRhs (b: TypedBinding) : string option * TypedExpr =
     | _ -> (Some "as another binding's value", b.Value)
 
 let rec internal collectGroupKeysEscapes (subst: Subst) (pos: string option) (expr: TypedExpr) : CompileError list =
-    let isGk (e: TypedExpr) = match subst.Resolve e.Type with IRTGroupKeys _ -> true | _ -> false
+    let isGk (e: TypedExpr) = (subst.Resolve e.Type).IsIRTGroupKeys
     let describe (e: TypedExpr) =
         match e.Kind with
         | TExprGroupKeys _ -> "a `group_keys(...)` call"
-        | TExprVar (n, _, _) -> sprintf "the group_keys binding '%s'" n
+        | TExprVar (n, _, _) -> $"the group_keys binding '{n}'"
         | _ -> "a group_keys result"
     // A block is TRANSPARENT here: its type is its final expression's, and its
     // span covers the whole body, so firing on the block would point the
     // caret at the innocent first statement. Descend and let the final
     // expression carry the enclosing position instead.
-    let isBlock = match expr.Kind with TExprBlock _ -> true | _ -> false
+    let isBlock = expr.Kind.IsTExprBlock
     match pos with
     | Some phrase when isGk expr && not isBlock ->
         [ { Error = GroupKeysEscapes (describe expr, phrase); Span = expr.Span; Context = []; Code = None } ]

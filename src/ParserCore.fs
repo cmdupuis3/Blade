@@ -157,18 +157,18 @@ let private keywordText =
     keywords |> Map.toList |> List.map (fun (s, k) -> (k, s)) |> Map.ofList
 let describeToken (kind: TokenKind) : string =
     match kind with
-    | TokInt v -> sprintf "integer literal %d" v
+    | TokInt v -> $"integer literal {v}"
     | TokFloat v -> sprintf "float literal %g" v
-    | TokString s -> sprintf "string literal \"%s\"" s
-    | TokChar c -> sprintf "character literal '%c'" c
+    | TokString s -> $"string literal \"{s}\""
+    | TokChar c -> $"character literal '{c}'"
     | TokBool b -> sprintf "boolean literal %b" b
-    | TokIdent n -> sprintf "identifier '%s'" n
+    | TokIdent n -> $"identifier '{n}'"
     | TokKeyword kw ->
         match Map.tryFind kw keywordText with
-        | Some s -> sprintf "keyword '%s'" s
+        | Some s -> $"keyword '{s}'"
         | None -> sprintf "keyword %A" kw
-    | TokOp s -> sprintf "'%s'" s
-    | TokNamedInfix s -> sprintf "operator ':%s:'" s
+    | TokOp s -> $"'{s}'"
+    | TokNamedInfix s -> $"operator ':{s}:'"
     | TokLParen -> "'('"
     | TokRParen -> "')'"
     | TokLBracket -> "'['"
@@ -188,7 +188,7 @@ let describeToken (kind: TokenKind) : string =
     | TokQuestion -> "'?'"
     | TokNewline -> "end of line"
     | TokEOF -> "end of file"
-    | TokError s -> sprintf "invalid token (%s)" s
+    | TokError s -> $"invalid token ({s})"
 
 let currentPos (tokens: Token list) =
     match tokens with
@@ -269,7 +269,7 @@ let internal mkP (startToks: Token list) (remaining: Token list) (kind: PatternK
 /// (head = actual token, empty = EOF). Humanized message + BL1001, except
 /// "got end of file" which is classified BL1002.
 let expectedError (expected: TokenKind) (tokens: Token list) : ParseResult<'T> =
-    let msg actual = sprintf "Expected %s but got %s" (describeToken expected) (describeToken actual)
+    let msg actual = $"Expected {describeToken expected} but got {describeToken actual}"
     match tokens with
     | t :: _ when t.Kind = TokEOF -> errorFull "BL1002" (msg TokEOF) t.Line t.Col t.EndLine t.EndCol
     | t :: _ -> errorFull "BL1001" (msg t.Kind) t.Line t.Col t.EndLine t.EndCol
@@ -338,8 +338,8 @@ let expectIdent (tokens: Token list) : ParseResult<string> =
     | t :: rest ->
         match t.Kind with
         | TokIdent name -> Ok (name, rest)
-        | TokEOF -> errorFull "BL1002" (sprintf "Expected identifier but got %s" (describeToken TokEOF)) t.Line t.Col t.EndLine t.EndCol
-        | _ -> errorFull "BL1001" (sprintf "Expected identifier but got %s" (describeToken t.Kind)) t.Line t.Col t.EndLine t.EndCol
+        | TokEOF -> errorFull "BL1002" $"Expected identifier but got {describeToken TokEOF}" t.Line t.Col t.EndLine t.EndCol
+        | _ -> errorFull "BL1001" $"Expected identifier but got {describeToken t.Kind}" t.Line t.Col t.EndLine t.EndCol
     | [] -> errorEof "Expected identifier but got end of file"
 
 /// Expect a closing > for type parameters. Handles >> by splitting: consume
@@ -353,8 +353,8 @@ let expectGt (tokens: Token list) : ParseResult<unit> =
         // Split >>: consume first >, leave second > with adjusted position
         let remainingGt = { t with Kind = TokOp ">"; Col = t.Col + 1; Length = 1 }
         Ok ((), remainingGt :: rest)
-    | t :: _ when t.Kind = TokEOF -> errorFull "BL1002" (sprintf "Expected '>' but got %s" (describeToken TokEOF)) t.Line t.Col t.EndLine t.EndCol
-    | t :: _ -> errorFull "BL1001" (sprintf "Expected '>' but got %s" (describeToken t.Kind)) t.Line t.Col t.EndLine t.EndCol
+    | t :: _ when t.Kind = TokEOF -> errorFull "BL1002" $"Expected '>' but got {describeToken TokEOF}" t.Line t.Col t.EndLine t.EndCol
+    | t :: _ -> errorFull "BL1001" $"Expected '>' but got {describeToken t.Kind}" t.Line t.Col t.EndLine t.EndCol
     | [] -> errorEof "Expected '>' but got end of file"
 
 // Bind operator for chaining parsers
@@ -378,8 +378,8 @@ let (|LiteralTok|_|) = function
     | _ -> None
 
 let (|PipelineOp|_|) = function
-    | TokOp "|>" -> Some ()
-    | _ -> None
+    | TokOp "|>" -> true
+    | _ -> false
 
 let (|ChoiceOp|_|) = function
     | TokOp "<|>" -> Some OpChoice
@@ -608,7 +608,7 @@ and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
         success (mkE tokens remaining (ExprArrayLit elems)) remaining
     | Some kind ->
         let line, col = currentPos tokens
-        error (sprintf "Expected simple expression but got %s" (describeToken kind)) line col
+        error $"Expected simple expression but got {describeToken kind}" line col
     | None ->
         errorEof "Expected expression but got end of file"
 
@@ -653,7 +653,7 @@ let parseRankExpr (tokens: Token list) : ParseResult<Expr> =
         success (mkExpr (headSpan tokens) (ExprVar name)) (advance tokens)
     | Some t ->
         let line, col = currentPos tokens
-        error (sprintf "Expected rank expression (integer, arity, or identifier), got %s" (describeToken t)) line col
+        error $"Expected rank expression (integer, arity, or identifier), got {describeToken t}" line col
     | None ->
         errorEof "Expected rank expression but got end of file"
 
@@ -683,7 +683,7 @@ type TypeArg =
 let isNamedTypeArg (tokens: Token list) : bool =
     match tokens with
     | t1 :: t2 :: _ ->
-        (match t1.Kind with TokIdent _ -> true | _ -> false) && t2.Kind = TokOp "="
+        t1.Kind.IsTokIdent && t2.Kind = TokOp "="
     | _ -> false
 
 // Unit-expression grammar (shared by Unit-declaration right-hand sides and

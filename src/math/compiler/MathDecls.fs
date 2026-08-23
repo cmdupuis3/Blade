@@ -533,7 +533,7 @@ let unfoldDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
         [ for k in 0 .. nRank - 1 ->
             if k = mode then 0
             else prodInts [ for mm in 0 .. k - 1 do if mm <> mode then yield dims.[mm] ] ]
-    let ivars = [ for k in 0 .. nRank - 1 -> sprintf "i%d" k ]
+    let ivars = [ for k in 0 .. nRank - 1 -> $"i{k}" ]
     let colIdx =
         [ for k in 0 .. nRank - 1 do
             if k <> mode then yield mul (v ivars.[k]) (iLit jw.[k]) ]
@@ -553,7 +553,7 @@ let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : Fu
     let iMode = dims.[mode]
     let outDims = dims |> List.mapi (fun k d -> if k = mode then jOut else d)
     let outStrides = [ for k in 0 .. nRank - 1 -> prodInts (List.skip (k + 1) outDims) ]
-    let ovars = [ for k in 0 .. nRank - 1 -> sprintf "o%d" k ]
+    let ovars = [ for k in 0 .. nRank - 1 -> $"o{k}" ]
     let flatOut =
         [ for k in 0 .. nRank - 1 -> mul (v ovars.[k]) (iLit outStrides.[k]) ]
         |> List.reduce add
@@ -579,10 +579,10 @@ let modeProductDecl (name: string) (dims: int list) (mode: int) (jOut: int) : Fu
 let gramDecl (name: string) (dims: int list) (mode: int) : FunctionDecl =
     let nRank = dims.Length
     let g = dims.[mode]
-    let otherVars = [ for k in 0 .. nRank - 1 do if k <> mode then yield sprintf "i%d" k ]
+    let otherVars = [ for k in 0 .. nRank - 1 do if k <> mode then yield $"i{k}" ]
     let otherExts = [ for k in 0 .. nRank - 1 do if k <> mode then yield dims.[k] ]
     let readAt (modeVar: string) =
-        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v modeVar else v (sprintf "i%d" k) ]))
+        syn (ExprApp (v "x", [ for k in 0 .. nRank - 1 -> if k = mode then v modeVar else v $"i{k}" ]))
     let othersNest = loopNest otherVars otherExts [ sAccum (v "acc") (mul (readAt "a") (readAt "b")) ]
     let body =
         blockE (
@@ -604,7 +604,7 @@ let modeProdTDecl (name: string) (dims: int list) (mode: int) (rOut: int) : Func
     let iMode = dims.[mode]
     let outDims = dims |> List.mapi (fun k d -> if k = mode then rOut else d)
     let outStrides = [ for k in 0 .. nRank - 1 -> prodInts (List.skip (k + 1) outDims) ]
-    let ovars = [ for k in 0 .. nRank - 1 -> sprintf "o%d" k ]
+    let ovars = [ for k in 0 .. nRank - 1 -> $"o{k}" ]
     let flatOut =
         [ for k in 0 .. nRank - 1 -> mul (v ovars.[k]) (iLit outStrides.[k]) ]
         |> List.reduce add
@@ -635,24 +635,24 @@ let hosvdDecl (name: string) (dims: int list) (ranks: int list)
     let nRank = dims.Length
     let stmts =
         [ for mode in 0 .. nRank - 1 do
-            yield sLet (sprintf "g%d" mode) (syn (ExprApp (v gramNames.[mode], [ v "x" ])))
-            yield StmtLet { Pattern = synPat (PatTuple [ synPat (PatVar (sprintf "q%d" mode)); synPat (PatVar (sprintf "l%d" mode)) ])
+            yield sLet $"g{mode}" (syn (ExprApp (v gramNames.[mode], [ v "x" ])))
+            yield StmtLet { Pattern = synPat (PatTuple [ synPat (PatVar $"q{mode}"); synPat (PatVar $"l{mode}") ])
                             Type = None
-                            Value = syn (ExprApp (v eighNames.[mode], [ v (sprintf "g%d" mode) ]))
+                            Value = syn (ExprApp (v eighNames.[mode], [ v $"g{mode}" ]))
                             Mutability = BindLet } ]
         @ [ for mode in 0 .. nRank - 1 ->
-              let src = if mode = 0 then "x" else sprintf "c%d" (mode - 1)
-              sLet (sprintf "c%d" mode) (syn (ExprApp (v mptNames.[mode], [ v src; v (sprintf "q%d" mode) ]))) ]
+              let src = if mode = 0 then "x" else $"c{mode - 1}"
+              sLet $"c{mode}" (syn (ExprApp (v mptNames.[mode], [ v src; v $"q{mode}" ]))) ]
         @ [ for mode in 0 .. nRank - 1 ->
               // U_mode = leading ranks[mode] columns of q_mode (literal-index reads; bound to a let, tuple-of-variables boundary)
-              sLet (sprintf "u%d" mode)
+              sLet $"u{mode}"
                    (syn (ExprArrayLit
                         [ for i in 0 .. dims.[mode] - 1 ->
                             syn (ExprArrayLit
                                 [ for r in 0 .. ranks.[mode] - 1 ->
-                                    idx2 (sprintf "q%d" mode) (iLit i) (iLit r) ]) ])) ]
+                                    idx2 $"q{mode}" (iLit i) (iLit r) ]) ])) ]
     let retTuple =
-        tupleE(v (sprintf "c%d" (nRank - 1)) :: [ for mode in 0 .. nRank - 1 -> v (sprintf "u%d" mode) ])
+        tupleE(v $"c{nRank - 1}" :: [ for mode in 0 .. nRank - 1 -> v $"u{mode}" ])
     let retTy =
         TyTuple (tyFloatTensor ranks :: [ for mode in 0 .. nRank - 1 -> tyFloatMat dims.[mode] ranks.[mode] ])
     mkFunc name [ ("x", tyFloatTensor dims) ] retTy (blockE (stmts, Some retTuple))

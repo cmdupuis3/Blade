@@ -96,7 +96,7 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
         if rawLines.Length > 0 && rawLines.[rawLines.Length - 1] = "" then
             rawLines.[.. rawLines.Length - 2]
         else rawLines
-    if lines.Length = 0 then Error (sprintf "'%s' is empty" path)
+    if lines.Length = 0 then Error $"'{path}' is empty"
     else
         let mutable err = None
         let cells =
@@ -104,14 +104,14 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
                 let lineNo = i + 1
                 if err.IsSome then [||]
                 elif line = "" then
-                    err <- Some (sprintf "blank line in '%s' at line %d" path lineNo); [||]
+                    err <- Some $"blank line in '{path}' at line {lineNo}"; [||]
                 elif line.Contains "\"" then
-                    err <- Some (sprintf "quote character in '%s' at line %d -- quoting/escaping is not supported (v1)" path lineNo); [||]
+                    err <- Some $"quote character in '{path}' at line {lineNo} -- quoting/escaping is not supported (v1)"; [||]
                 else
                     let row = line.Split ','
                     match row |> Array.tryFindIndex (fun c -> c.Trim() = "") with
                     | Some ci ->
-                        err <- Some (sprintf "empty cell (column %d) in '%s' at line %d" (ci + 1) path lineNo); [||]
+                        err <- Some $"empty cell (column {ci + 1}) in '{path}' at line {lineNo}"; [||]
                     | None -> row |> Array.map (fun c -> c.Trim()))
         match err with
         | Some e -> Error e
@@ -119,20 +119,20 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
             let width = cells.[0].Length
             match cells |> Array.tryFindIndex (fun r -> r.Length <> width) with
             | Some i ->
-                Error (sprintf "ragged row in '%s' at line %d: %d cells where line 1 has %d" path (i + 1) cells.[i].Length width)
+                Error $"ragged row in '{path}' at line {i + 1}: {cells.[i].Length} cells where line 1 has {width}"
             | None -> Ok cells
 
 /// Parse + classify: sniffing rule, label validation, dtype inference.
 /// Returns the metadata plus the full cell grid.
 let parseFile (path: string) : Result<CsvFile * string[][], string> =
     if not (File.Exists path) then
-        Error (sprintf "CSV file not found: '%s' (resolved against cwd '%s')" path (Directory.GetCurrentDirectory()))
+        Error $"CSV file not found: '{path}' (resolved against cwd '{Directory.GetCurrentDirectory()}')"
     else
     parseCells path (File.ReadAllText path) |> Result.bind (fun cells ->
         let headered = not (cells.[0] |> Array.forall isNumericCell)
         let dataRows = if headered then cells.[1..] else cells
         if dataRows.Length = 0 then
-            Error (sprintf "'%s' has a header row but no data rows" path)
+            Error $"'{path}' has a header row but no data rows"
         else
             // Validate every data cell numeric; name the first offender.
             let mutable bad = None
@@ -141,7 +141,7 @@ let parseFile (path: string) : Result<CsvFile * string[][], string> =
                     match dataRows.[i] |> Array.tryFindIndex (not << isNumericCell) with
                     | Some ci ->
                         let lineNo = (if headered then i + 2 else i + 1)
-                        bad <- Some (sprintf "non-numeric cell '%s' (column %d) in '%s' at line %d -- string columns are not supported (v1)" dataRows.[i].[ci] (ci + 1) path lineNo)
+                        bad <- Some $"non-numeric cell '{dataRows.[i].[ci]}' (column {ci + 1}) in '{path}' at line {lineNo} -- string columns are not supported (v1)"
                     | None -> ()
             match bad with
             | Some e -> Error e
@@ -152,7 +152,7 @@ let parseFile (path: string) : Result<CsvFile * string[][], string> =
                         let dup =
                             labels |> List.countBy id |> List.tryFind (fun (_, n) -> n > 1)
                         match dup with
-                        | Some (l, _) -> Error (sprintf "duplicate column label '%s' in '%s'" l path)
+                        | Some (l, _) -> Error $"duplicate column label '{l}' in '{path}'"
                         | None -> Ok (CsvTable (labels, dataRows.Length))
                     else
                         Ok (CsvMatrix (dataRows.Length, cells.[0].Length))
@@ -168,7 +168,7 @@ let parseFile (path: string) : Result<CsvFile * string[][], string> =
 let loadMeta (path: string) : CsvFile =
     match parseFile path with
     | Ok (f, _) -> f
-    | Error e -> failwithf "CSV load failed: %s" e
+    | Error e -> failwith $"CSV load failed: {e}"
 
 // Compile-time payload (static fold + interpreter dense reads)
 
@@ -178,7 +178,7 @@ let DataVarName = "data"
 
 let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry.ProviderVarData, string> =
     if varName <> DataVarName then
-        Error (sprintf "CSV file '%s' has no variable '%s' (the only variable is '%s')" path varName DataVarName)
+        Error $"CSV file '{path}' has no variable '{varName}' (the only variable is '{DataVarName}')"
     else
         parseFile path |> Result.bind (fun (f, cells) ->
             let headered = match f.Shape with CsvTable _ -> true | CsvMatrix _ -> false
@@ -217,7 +217,7 @@ let private anonIdx (builder: IRBuilder) (extent: int64) : IRIndexType =
       Dependencies = [] }
 
 /// The synthesized column-EnumIdx tag for a headered load bound as `name`.
-let colsTagName (moduleName: string) = sprintf "%s_cols" moduleName
+let colsTagName (moduleName: string) = $"{moduleName}_cols"
 
 /// Compile-time metadata -> IRModule. One var `data` in a `<name>__vars`
 /// struct (suffixed so several CSV loads in one program don't clobber each
@@ -250,7 +250,7 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
         IsVirtual = false
         Identity = Some (AIDVariable DataVarName)
     }
-    let varsStruct = IRTDStruct (sprintf "%s__vars" moduleName, [(DataVarName, mkArrayLike arrType)])
+    let varsStruct = IRTDStruct ($"{moduleName}__vars", [(DataVarName, mkArrayLike arrType)])
     {
         Name = moduleName
         Types = enumDefs @ [varsStruct]
@@ -292,7 +292,7 @@ module CppCsv =
     let private cppPath (p: string) = p.Replace("\\", "/")
 
     let private csvExit (v: string) (msg: string) =
-        sprintf "{ std::cerr << \"CSV error: %s\" << std::endl; std::exit(1); }" msg
+        $"{{ std::cerr << \"CSV error: {msg}\" << std::endl; std::exit(1); }}"
 
     /// Emits the parse-and-fill block: opens the file, re-applies the format
     /// rules (BOM/CRLF/quotes/ragged/blank), validates the baked shape, and
@@ -303,54 +303,50 @@ module CppCsv =
         let p = cppPath path
         let convert =
             if isInt then
-                [ sprintf "            long long %s_val = std::strtoll(%s_cs, &%s_end, 10);" v v v ]
+                [ $"            long long {v}_val = std::strtoll({v}_cs, &{v}_end, 10);" ]
             else
-                [ sprintf "            double %s_val = std::strtod(%s_cs, &%s_end);" v v v ]
-        [ sprintf "// Read %s from CSV %s (%d x %d%s)" v p rows cols (if headered then ", headered" else "")
-          sprintf "%s* %s_flat = new %s[%d];" elemCpp v elemCpp (rows * cols)
+                [ $"            double {v}_val = std::strtod({v}_cs, &{v}_end);" ]
+        [ $"""// Read {v} from CSV {p} ({rows} x {cols}{(if headered then ", headered" else "")})"""
+          $"{elemCpp}* {v}_flat = new {elemCpp}[{rows * cols}];"
           "{"
-          sprintf "    std::ifstream %s_in(\"%s\");" v p
-          sprintf "    if (!%s_in) %s" v (csvExit v (sprintf "cannot open '%s'" p))
-          sprintf "    std::string %s_line;" v
-          sprintf "    size_t %s_row = 0, %s_lineno = 0;" v v
-          sprintf "    while (std::getline(%s_in, %s_line)) {" v v
-          sprintf "        %s_lineno++;" v
-          sprintf "        if (!%s_line.empty() && %s_line.back() == '\\r') %s_line.pop_back();" v v v
-          sprintf "        if (%s_lineno == 1 && %s_line.size() >= 3 && (unsigned char)%s_line[0] == 0xEF && (unsigned char)%s_line[1] == 0xBB && (unsigned char)%s_line[2] == 0xBF) %s_line.erase(0, 3);" v v v v v v
+          $"    std::ifstream {v}_in(\"{p}\");"
+          $"""    if (!{v}_in) {(csvExit v $"cannot open '{p}'")}"""
+          $"    std::string {v}_line;"
+          $"    size_t {v}_row = 0, {v}_lineno = 0;"
+          $"    while (std::getline({v}_in, {v}_line)) {{"
+          $"        {v}_lineno++;"
+          $"        if (!{v}_line.empty() && {v}_line.back() == '\\r') {v}_line.pop_back();"
+          $"        if ({v}_lineno == 1 && {v}_line.size() >= 3 && (unsigned char){v}_line[0] == 0xEF && (unsigned char){v}_line[1] == 0xBB && (unsigned char){v}_line[2] == 0xBF) {v}_line.erase(0, 3);"
           // A blank line is legal only as the last line (trailing-newline
           // artifact); getline absorbs one trailing newline, so a blank
           // here means "\n\n" at EOF or an interior blank.
           sprintf "        if (%s_line.empty()) { if (%s_in.peek() == EOF) break; %s }" v v
-              (csvExit v (sprintf "blank line in '%s' at line \" << %s_lineno << \"" p v))
+              (csvExit v $"blank line in '{p}' at line \" << {v}_lineno << \"")
           sprintf "        if (%s_line.find('\"') != std::string::npos) %s" v
-              (csvExit v (sprintf "quote character in '%s' at line \" << %s_lineno << \" -- quoting is not supported (v1)" p v)) ]
+              (csvExit v $"quote character in '{p}' at line \" << {v}_lineno << \" -- quoting is not supported (v1)") ]
         @ (if headered then
-            [ sprintf "        if (%s_lineno == 1) continue;  // header row (labels baked at compile time)" v ]
+            [ $"        if ({v}_lineno == 1) continue;  // header row (labels baked at compile time)" ]
            else [])
-        @ [ sprintf "        if (%s_row >= %d) %s" v rows
-                (csvExit v (sprintf "'%s' has more data rows than the %d baked at compile time -- file changed since compilation?" p rows))
-            sprintf "        size_t %s_col = 0, %s_pos = 0;" v v
+        @ [ $"""        if ({v}_row >= {rows}) {(csvExit v $"'{p}' has more data rows than the {rows} baked at compile time -- file changed since compilation?")}"""
+            $"        size_t {v}_col = 0, {v}_pos = 0;"
             "        while (true) {"
-            sprintf "            size_t %s_comma = %s_line.find(',', %s_pos);" v v v
-            sprintf "            size_t %s_len = (%s_comma == std::string::npos ? %s_line.size() : %s_comma) - %s_pos;" v v v v v
-            sprintf "            std::string %s_cell = %s_line.substr(%s_pos, %s_len);" v v v v
-            sprintf "            if (%s_col >= %d) %s" v cols
-                (csvExit v (sprintf "row at line \" << %s_lineno << \" of '%s' has more than %d cells" v p cols))
-            sprintf "            const char* %s_cs = %s_cell.c_str(); char* %s_end = nullptr;" v v v ]
+            $"            size_t {v}_comma = {v}_line.find(',', {v}_pos);"
+            $"            size_t {v}_len = ({v}_comma == std::string::npos ? {v}_line.size() : {v}_comma) - {v}_pos;"
+            $"            std::string {v}_cell = {v}_line.substr({v}_pos, {v}_len);"
+            $"""            if ({v}_col >= {cols}) {(csvExit v $"row at line \" << {v}_lineno << \" of '{p}' has more than {cols} cells")}"""
+            $"            const char* {v}_cs = {v}_cell.c_str(); char* {v}_end = nullptr;" ]
         @ convert
         @ [ sprintf "            if (%s_end == %s_cs || *%s_end != '\\0') %s" v v v
-                (csvExit v (sprintf "non-numeric cell '\" << %s_cell << \"' in '%s' at line \" << %s_lineno << \"" v p v))
-            sprintf "            %s_flat[%s_row * %d + %s_col] = (%s)%s_val;" v v cols v elemCpp v
-            sprintf "            %s_col++;" v
-            sprintf "            if (%s_comma == std::string::npos) break;" v
-            sprintf "            %s_pos = %s_comma + 1;" v v
+                (csvExit v $"non-numeric cell '\" << {v}_cell << \"' in '{p}' at line \" << {v}_lineno << \"")
+            $"            {v}_flat[{v}_row * {cols} + {v}_col] = ({elemCpp}){v}_val;"
+            $"            {v}_col++;"
+            $"            if ({v}_comma == std::string::npos) break;"
+            $"            {v}_pos = {v}_comma + 1;"
             "        }"
-            sprintf "        if (%s_col != %d) %s" v cols
-                (csvExit v (sprintf "row at line \" << %s_lineno << \" of '%s' has \" << %s_col << \" cells where %d were baked at compile time" v p v cols))
-            sprintf "        %s_row++;" v
+            $"""        if ({v}_col != {cols}) {(csvExit v $"row at line \" << {v}_lineno << \" of '{p}' has \" << {v}_col << \" cells where {cols} were baked at compile time")}"""
+            $"        {v}_row++;"
             "    }"
-            sprintf "    if (%s_row != %d) %s" v rows
-                (csvExit v (sprintf "'%s' has \" << %s_row << \" data rows where %d were baked at compile time -- file changed since compilation?" p v rows))
+            $"""    if ({v}_row != {rows}) {(csvExit v $"'{p}' has \" << {v}_row << \" data rows where {rows} were baked at compile time -- file changed since compilation?")}"""
             "}" ]
 
     /// Dense reader: parse-and-fill into `<v>_flat`, then the standard
@@ -358,7 +354,7 @@ module CppCsv =
     /// the same closing form as CppZarr.genReadVar.
     let genReadVar (path: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         if varName <> DataVarName then
-            failwithf "CSV codegen: variable '%s' not found in '%s' (the only variable is '%s')" varName path DataVarName
+            failwith $"CSV codegen: variable '{varName}' not found in '{path}' (the only variable is '{DataVarName}')"
         let f = loadMeta path
         let headered = match f.Shape with CsvTable _ -> true | CsvMatrix _ -> false
         let rows = int64 (match f.Shape with CsvTable (_, r) -> r | CsvMatrix (r, _) -> r)
@@ -368,16 +364,16 @@ module CppCsv =
         let isInt = (f.Elem = ETInt64)
         let assemble = genParseFill path v elemCpp isInt headered rows cols
         let materialize =
-            [ sprintf "size_t %s_extent_0 = %d;" v rows
-              sprintf "size_t %s_extent_1 = %d;" v cols
-              sprintf "size_t %s_extents[] = { %s_extent_0, %s_extent_1 };" v v v
-              sprintf "Array<%s, 2> %s = { allocate<typename promote<%s, 2>::type, nullptr>(%s_extents), %s_extents };" elemCpp v elemCpp v v
-              sprintf "for (size_t %s_i0 = 0; %s_i0 < %s_extent_0; %s_i0++) {" v v v v
-              sprintf "    for (size_t %s_i1 = 0; %s_i1 < %s_extent_1; %s_i1++) {" v v v v
-              sprintf "        %s[%s_i0][%s_i1] = %s_flat[%s_i0 * %s_extent_1 + %s_i1];" v v v v v v v
+            [ $"size_t {v}_extent_0 = {rows};"
+              $"size_t {v}_extent_1 = {cols};"
+              $"size_t {v}_extents[] = {{ {v}_extent_0, {v}_extent_1 }};"
+              $"Array<{elemCpp}, 2> {v} = {{ allocate<typename promote<{elemCpp}, 2>::type, nullptr>({v}_extents), {v}_extents }};"
+              $"for (size_t {v}_i0 = 0; {v}_i0 < {v}_extent_0; {v}_i0++) {{"
+              $"    for (size_t {v}_i1 = 0; {v}_i1 < {v}_extent_1; {v}_i1++) {{"
+              $"        {v}[{v}_i0][{v}_i1] = {v}_flat[{v}_i0 * {v}_extent_1 + {v}_i1];"
               "    }"
               "}"
-              sprintf "delete[] %s_flat;" v ]
+              $"delete[] {v}_flat;" ]
         assemble @ materialize
 
     /// Dense writer: `<v>_flat` (populated by the write intercept) streamed
@@ -389,41 +385,41 @@ module CppCsv =
         let p = cppPath path
         arrType.IndexTypes |> List.iter (fun ix ->
             if ix.Symmetry <> SymNone || ix.Rank <> 1 then
-                failwithf "CSV write of '%s': packed/compound index groups are not supported -- densify first" varName)
+                failwith $"CSV write of '{varName}': packed/compound index groups are not supported -- densify first")
         let litExtent (e: IRExpr) =
             match e with
             | IRLit (IRLitInt n) -> n
-            | _ -> failwithf "CSV write of '%s' requires literal extents" varName
+            | _ -> failwith $"CSV write of '{varName}' requires literal extents"
         let extents = arrType.IndexTypes |> List.map (fun ix -> litExtent ix.Extent)
         let (rows, cols) =
             match extents with
             | [r] -> (r, 1L)
             | [r; c] -> (r, c)
-            | _ -> failwithf "CSV write of '%s': rank %d is not supported (rank 1 or 2 only)" varName extents.Length
+            | _ -> failwith $"CSV write of '{varName}': rank {extents.Length} is not supported (rank 1 or 2 only)"
         let elemCpp = elemCppOf arrType.ElemType
         let isInt = (elemCpp = "long long" || elemCpp = "int")
         let cellExpr =
             if isInt then
-                [ sprintf "        if (%s_c) %s_out << ',';" v v
-                  sprintf "        %s_out << %s_flat[%s_r * %d + %s_c];" v v v cols v ]
+                [ $"        if ({v}_c) {v}_out << ',';"
+                  $"        {v}_out << {v}_flat[{v}_r * {cols} + {v}_c];" ]
             else
-                [ sprintf "        std::ostringstream %s_os;" v
-                  sprintf "        %s_os << std::setprecision(17) << %s_flat[%s_r * %d + %s_c];" v v v cols v
-                  sprintf "        std::string %s_s = %s_os.str();" v v
-                  sprintf "        if (%s_s.find('.') == std::string::npos && %s_s.find('e') == std::string::npos && %s_s.find('n') == std::string::npos && %s_s.find('i') == std::string::npos) %s_s += \".0\";" v v v v v
-                  sprintf "        if (%s_c) %s_out << ',';" v v
-                  sprintf "        %s_out << %s_s;" v v ]
-        [ sprintf "// Write %s to CSV %s (%d x %d, no header)" varName p rows cols
+                [ $"        std::ostringstream {v}_os;"
+                  $"        {v}_os << std::setprecision(17) << {v}_flat[{v}_r * {cols} + {v}_c];"
+                  $"        std::string {v}_s = {v}_os.str();"
+                  $"        if ({v}_s.find('.') == std::string::npos && {v}_s.find('e') == std::string::npos && {v}_s.find('n') == std::string::npos && {v}_s.find('i') == std::string::npos) {v}_s += \".0\";"
+                  $"        if ({v}_c) {v}_out << ',';"
+                  $"        {v}_out << {v}_s;" ]
+        [ $"// Write {varName} to CSV {p} ({rows} x {cols}, no header)"
           "{"
-          sprintf "    std::ofstream %s_out(\"%s\", std::ios::trunc);" v p
-          sprintf "    if (!%s_out) %s" v (csvExit v (sprintf "cannot open '%s' for writing" p))
-          sprintf "    for (size_t %s_r = 0; %s_r < %d; %s_r++) {" v v rows v
-          sprintf "      for (size_t %s_c = 0; %s_c < %d; %s_c++) {" v v cols v ]
+          $"    std::ofstream {v}_out(\"{p}\", std::ios::trunc);"
+          $"""    if (!{v}_out) {(csvExit v $"cannot open '{p}' for writing")}"""
+          $"    for (size_t {v}_r = 0; {v}_r < {rows}; {v}_r++) {{"
+          $"      for (size_t {v}_c = 0; {v}_c < {cols}; {v}_c++) {{" ]
         @ cellExpr
         @ [ "      }"
-            sprintf "      %s_out << '\\n';" v
+            $"      {v}_out << '\\n';"
             "    }"
-            sprintf "    if (!%s_out.good()) %s" v (csvExit v (sprintf "write failed for '%s'" p))
+            $"""    if (!{v}_out.good()) {(csvExit v $"write failed for '{p}'")}"""
             "}" ]
 
     /// Required C++ includes for CSV I/O (std only -- no link flags).

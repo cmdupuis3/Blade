@@ -49,13 +49,13 @@ let internal preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : R
         |> Map.ofList
     // Every name the SURFACE body binds: the sort expansion checks its
     // synthesized names against this before emitting them.
-    let preBound = Set.union (surfaceBoundNames stmts0) (fd.Params |> List.map (fun p -> p.Name) |> Set.ofList)
+    let preBound = Set.union (surfaceBoundNames stmts0) (fd.Params |> List.map _.Name |> Set.ofList)
     // A sort ANYWHERE other than directly as a `let` initializer has no
     // expansion site, so it is refused here where the message can say why
     // (rather than reaching the sweeps' generic "unsupported form").
     let noNestedSort (what: string) (e: Expr) : Result<unit, string> =
         if containsSort e then
-            err fname (sprintf "differentiating `sort` requires it to be the whole initializer of a `let` (v1); %s contains a nested sort -- bind it with `let s = sort(...)` first" what)
+            err fname $"differentiating `sort` requires it to be the whole initializer of a `let` (v1); {what} contains a nested sort -- bind it with `let s = sort(...)` first"
         else Ok ()
     // ANNOTATED rank-1 array locals, collected in one pass over the surface
     // body rather than threaded through the fold: order does not matter here
@@ -109,7 +109,7 @@ let internal preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : R
                 | StmtLet { Value = { Kind = ExprKind.ExprRecArray _ } } ->
                     err fname "recursive array must bind a single annotated name to be differentiable (v1)"
                 | StmtLet ({ Pattern = { Kind = PatternKind.PatVar nm } } as b) ->
-                    noNestedSort (sprintf "the initializer of '%s'" nm) b.Value |> Result.bind (fun () ->
+                    noNestedSort $"the initializer of '{nm}'" b.Value |> Result.bind (fun () ->
                     hoistReduces fname ctx env b.Value |> Result.map (fun (pre, value') ->
                         let env' =
                             let byAnn =
@@ -169,11 +169,11 @@ let internal maxInlineDepth = 32
 /// invariant a shared gate makes structural.
 let internal checkInlinable (fname: string) (fd: FunctionDecl) (argCount: int)
     : Result<unit, string> =
-    if fd.IsStatic then err fname (sprintf "cannot differentiate through static function '%s'" fd.Name)
+    if fd.IsStatic then err fname $"cannot differentiate through static function '{fd.Name}'"
     elif fd.Params |> List.exists (fun p -> p.Mutability = Mutable) then
-        err fname (sprintf "cannot differentiate through '%s': mut-parameter functions are not inlinable (v1)" fd.Name)
+        err fname $"cannot differentiate through '{fd.Name}': mut-parameter functions are not inlinable (v1)"
     elif argCount <> fd.Params.Length then
-        err fname (sprintf "'%s' called with %d arguments, expects %d" fd.Name argCount fd.Params.Length)
+        err fname $"'{fd.Name}' called with {argCount} arguments, expects {fd.Params.Length}"
     else Ok ()
 
 /// Normalize + inline a function body to the flat NStmt fragment:
@@ -200,7 +200,7 @@ let internal checkInlinable (fname: string) (fd: FunctionDecl) (argCount: int)
 let rec internal normalizeBody (fname: string) (ctx: Ctx) (depth: int) (fd: FunctionDecl)
     : Result<NStmt list * Expr, string> =
     if depth > maxInlineDepth then
-        err fname (sprintf "call inlining exceeded depth %d (recursive functions are not differentiable)" maxInlineDepth)
+        err fname $"call inlining exceeded depth {maxInlineDepth} (recursive functions are not differentiable)"
     else
     match ctx.NormMemo.TryGetValue ((fd.Name, depth)) with
     | true, hit -> Ok hit
@@ -270,13 +270,13 @@ and internal inlineCall (fname: string) (ctx: Ctx) (depth: int)
             |> List.map (fun (p, a) ->
                 match a.Kind with
                 | ExprKind.ExprVar argName -> (p.Name, argName, None)
-                | _ -> (p.Name, sprintf "%s_%s" tag p.Name, Some a))
+                | _ -> (p.Name, $"{tag}_{p.Name}", Some a))
         let paramRen =
             paramBinds |> List.map (fun (pn, target, _) -> (pn, target)) |> Map.ofList
         let localRen =
             boundNames calleeStmts
             |> List.distinct
-            |> List.map (fun n -> (n, sprintf "%s_%s" tag n))
+            |> List.map (fun n -> (n, $"{tag}_{n}"))
             |> Map.ofList
         let ren = Map.fold (fun acc k v -> Map.add k v acc) paramRen localRen
         // Rename refusals (binder capture) carry the mode prefix via `err`
@@ -316,12 +316,12 @@ type internal ParamClass =
 /// unknown-derivative intrinsic, and worse than refusing.
 let internal classifyParam (fname: string) (ctx: Ctx) (p: ParamDecl) : Result<ParamClass, string> =
     match p.Type with
-    | None -> err fname (sprintf "parameter '%s' must have a type annotation" p.Name)
+    | None -> err fname $"parameter '{p.Name}' must have a type annotation"
     | Some t0 ->
         let refuseUnits (what: string) =
-            err fname (sprintf "parameter '%s' %s: unit-carrying parameters are not differentiable (v1) -- a gradient's units are <loss>/<parameter>, which the grad ABI (buffer type = parameter type) cannot express; strip the unit at the call boundary or compute the unit-carrying part outside the differentiated function" p.Name what)
+            err fname $"parameter '{p.Name}' {what}: unit-carrying parameters are not differentiable (v1) -- a gradient's units are <loss>/<parameter>, which the grad ABI (buffer type = parameter type) cannot express; strip the unit at the call boundary or compute the unit-carrying part outside the differentiated function"
         let refuseComplex (what: string) =
-            err fname (sprintf "parameter '%s' %s: complex parameters are not differentiable (v1); complex derivatives need a holomorphic/Wirtinger convention the AD subset does not define" p.Name what)
+            err fname $"parameter '{p.Name}' {what}: complex parameters are not differentiable (v1); complex derivatives need a holomorphic/Wirtinger convention the AD subset does not define"
         let t = resolveTy ctx t0
         match t with
         | _ when isFloatTy t -> Ok DiffScalar
@@ -510,7 +510,7 @@ let internal checkWriteAfterRead (fname: string) (ctx: Ctx) (stmts: NStmt list) 
                 | _ -> ()) false e
         |> Result.bind (fun () ->
             match bad with
-            | Some n -> err fname (sprintf "'%s' is read here but written again later; the reverse sweep re-evaluates forward expressions at FINAL values, so read-then-rewrite of a mutable is not differentiable (bind a fresh let instead)" n)
+            | Some n -> err fname $"'{n}' is read here but written again later; the reverse sweep re-evaluates forward expressions at FINAL values, so read-then-rewrite of a mutable is not differentiable (bind a fresh let instead)"
             | None -> Ok ())
     stmts |> List.mapi (fun i s -> (i, s)) |> iterR (fun (i, s) ->
         match s with
@@ -555,7 +555,7 @@ let internal checkNoScalarOverwrite (fname: string) (diff: Set<string>) (stmts: 
             | NAssign (({ Kind = ExprKind.ExprVar x } as lhs), rhs) when Set.contains x diff ->
                 (match additiveSelf lhs rhs with
                  | Some _ -> Ok ()
-                 | None -> err fname (sprintf "non-additive reassignment of '%s' is not differentiable (the reverse sweep sees final values); bind a fresh `let` instead" x))
+                 | None -> err fname $"non-additive reassignment of '{x}' is not differentiable (the reverse sweep sees final values); bind a fresh `let` instead")
             | NFor (_, _, _, body) -> check body
             | _ -> Ok ())
     check stmts
@@ -575,7 +575,7 @@ let internal checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) 
                 walkExpr fname ctx (fun n -> if Set.contains n loopAccums && bad.IsNone then bad <- Some n) false value
                 |> Result.bind (fun () ->
                     match bad with
-                    | Some n -> err fname (sprintf "loop-body let reads accumulator '%s' mutated in the same loop (mid-iteration values are not recoverable; restructure)" n)
+                    | Some n -> err fname $"loop-body let reads accumulator '{n}' mutated in the same loop (mid-iteration values are not recoverable; restructure)"
                     | None -> Ok ())
             | NLet _ -> Ok ()
             | NAssign (lhs, rhs) when inLoop ->
@@ -585,12 +585,12 @@ let internal checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) 
                      walkExpr fname ctx (fun n -> if Set.contains n loopAccums && bad.IsNone then bad <- Some n) false e
                      |> Result.bind (fun () ->
                          match bad with
-                         | Some n -> err fname (sprintf "accumulation reads accumulator '%s' mutated in the same loop; restructure" n)
+                         | Some n -> err fname $"accumulation reads accumulator '{n}' mutated in the same loop; restructure"
                          | None -> Ok ())
                  | None ->
                      match lhs.Kind with
                      | ExprKind.ExprVar x ->
-                         err fname (sprintf "loop-carried reassignment of '%s' is not additive (`%s = %s +/- e`); only additive accumulation is differentiable in loops (v1)" x x x)
+                         err fname $"loop-carried reassignment of '{x}' is not additive (`{x} = {x} +/- e`); only additive accumulation is differentiable in loops (v1)"
                      | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar a }, _) ->
                          // plain element write inside a loop: allowed as
                          // construction, but the rhs may not read the
@@ -598,7 +598,7 @@ let internal checkLoopDiscipline (fname: string) (ctx: Ctx) (loops: NStmt list) 
                          let mutable bad = false
                          walkExpr fname ctx (fun n -> if n = a then bad <- true) false rhs
                          |> Result.bind (fun () ->
-                             if bad then err fname (sprintf "array recurrence on '%s' (element write whose rhs reads the same array) is not differentiable (v1)" a)
+                             if bad then err fname $"array recurrence on '{a}' (element write whose rhs reads the same array) is not differentiable (v1)"
                              else Ok ())
                      | _ -> err fname "unsupported assignment target")
             | NAssign _ -> Ok ()

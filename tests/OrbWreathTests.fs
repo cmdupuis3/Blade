@@ -74,7 +74,7 @@ let private runDumpDiffs (exePath: string) (cppDir: string) : int * int * string
         | Some(code, out, err) when code <> 0 ->
             f <- f + 1
             names <- names @ [ "--specs failed" ]
-            resultLine Fail "--specs enumerates the C++ menu" (sprintf "exit %d: %s" code (err.Trim()))
+            resultLine Fail "--specs enumerates the C++ menu" ($"exit {code}: {(err.Trim())}")
             []
         | Some(_, out, _) ->
             let specs =
@@ -85,11 +85,11 @@ let private runDumpDiffs (exePath: string) (cppDir: string) : int * int * string
                 f <- f + 1
                 names <- names @ [ "--specs menu too small" ]
                 resultLine Fail "--specs enumerates the C++ menu"
-                           (sprintf "only %d specs (closure is 51)" specs.Length)
+                           ($"only {specs.Length} specs (closure is 51)")
                 []
             else
                 p <- p + 1
-                resultLine Pass "--specs enumerates the C++ menu" (sprintf "%d specs" specs.Length)
+                resultLine Pass "--specs enumerates the C++ menu" ($"{specs.Length} specs")
                 specs
                 |> List.map (fun spec ->
                     match parseSpec spec with
@@ -99,13 +99,13 @@ let private runDumpDiffs (exePath: string) (cppDir: string) : int * int * string
     // consecutive timeouts the rest of the sweep is abandoned as one failure.
     let mutable consecTimeouts = 0
     for (spec, levels, n) in cases do
-        let name = sprintf "dump diff \"%s\" n=%d vs OrbRank.visitStream" spec n
+        let name = $"dump diff \"{spec}\" n={n} vs OrbRank.visitStream"
         if consecTimeouts >= 3 then ()
         elif n < 0 then
             f <- f + 1; names <- names @ [ name ]
             resultLine Fail name "unparseable spec from --specs"
         else
-            match runTool exePath (sprintf "--dump \"%s\" %d" spec n) cppDir with
+            match runTool exePath ($"--dump \"{spec}\" {n}") cppDir with
             | None ->
                 consecTimeouts <- consecTimeouts + 1
                 f <- f + 1; names <- names @ [ name ]
@@ -115,7 +115,7 @@ let private runDumpDiffs (exePath: string) (cppDir: string) : int * int * string
             | Some(code, _, err) when code <> 0 ->
                 consecTimeouts <- 0
                 f <- f + 1; names <- names @ [ name ]
-                resultLine Fail name (sprintf "--dump exit %d: %s" code (err.Trim()))
+                resultLine Fail name ($"--dump exit {code}: {(err.Trim())}")
             | Some(_, out, _) ->
                 consecTimeouts <- 0
                 // A malformed line must score a FAIL, not throw out of the
@@ -139,12 +139,12 @@ let private runDumpDiffs (exePath: string) (cppDir: string) : int * int * string
                     let want = visitStream levels n |> List.ofSeq
                     if got = want then
                         p <- p + 1
-                        resultLine Pass name (sprintf "%d cells, exact stream match" got.Length)
+                        resultLine Pass name ($"{got.Length} cells, exact stream match")
                     else
                         f <- f + 1; names <- names @ [ name ]
                         let detail =
                             if got.Length <> want.Length then
-                                sprintf "C++ emits %d cells, F# %d" got.Length want.Length
+                                $"C++ emits {got.Length} cells, F# {want.Length}"
                             else
                                 let i = List.zip got want |> List.findIndex (fun (a, b) -> a <> b)
                                 sprintf "first divergence at %d: C++ %A, F# %A" i (List.item i got) (List.item i want)
@@ -180,7 +180,7 @@ let runOrbWreathTests () : Blade.Tests.TestHarness.BlockResult =
         // C++20: the header's level lists are template packs with `if constexpr`
         // sign dispatch (c++17 suffices for neither the pack idioms nor the
         // concepts-adjacent diagnostics the file leans on).
-        let args = sprintf "-std=c++20 %s -o \"%s\" \"%s\"" (optFlags ()) exePath testSrc
+        let args = $"-std=c++20 {(optFlags ())} -o \"{exePath}\" \"{testSrc}\""
         let psi = ProcessStartInfo("g++", args)
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true

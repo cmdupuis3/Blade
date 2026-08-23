@@ -20,7 +20,7 @@ A VS Code extension is available [here](https://github.com/cmdupuis3/Blade-REPL)
 
 ## Requirements
 
-Building the compiler needs only the **.NET SDK 7+** (zero NuGet dependencies):
+Building the compiler needs only the **.NET SDK 10** (F# 10; zero NuGet dependencies):
 
 ```bash
 git clone https://github.com/cmdupuis3/Blade && cd Blade && dotnet build -c Release

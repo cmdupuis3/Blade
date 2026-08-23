@@ -250,14 +250,14 @@ let draws (kind: string) (key: int64) (pars: float list) (n: int) : float[] =
     | "bernoulli", [p]          -> bernoulli key p n
     | "beta", [a; b]            -> beta key a b n
     | ("uniform" | "normal" | "exponential" | "gamma" | "poisson" | "bernoulli" | "beta"), _ ->
-        failwithf "RandMirror.draws: rand kind '%s' got %d parameter(s)" kind (List.length pars)
+        failwith $"RandMirror.draws: rand kind '{kind}' got {List.length pars} parameter(s)"
     | "categorical", _ ->
         // Not a widening oversight: categorical draws are int64 and belong to
         // `drawsCategorical`. Reaching here means a caller routed the array-
         // parameter family through the scalar-parameter dispatch.
         failwith "RandMirror.draws: 'categorical' is an int64 fill -- use drawsCategorical"
     | other, _ ->
-        failwithf "RandMirror.draws: unknown rand kind '%s' (expected uniform | normal | exponential | gamma | poisson | bernoulli | beta)" other
+        failwith $"RandMirror.draws: unknown rand kind '{other}' (expected uniform | normal | exponential | gamma | poisson | bernoulli | beta)"
 
 /// Int64 counterpart of `draws` for the one array-parameter family. Kept
 /// separate rather than folded into `draws` because the return type differs
@@ -265,7 +265,7 @@ let draws (kind: string) (key: int64) (pars: float list) (n: int) : float[] =
 let drawsCategorical (kind: string) (key: int64) (weights: float[]) (n: int) : int64[] =
     match kind with
     | "categorical" -> categorical key weights n
-    | other -> failwithf "RandMirror.drawsCategorical: unknown int64 rand kind '%s' (expected categorical)" other
+    | other -> failwith $"RandMirror.drawsCategorical: unknown int64 rand kind '{other}' (expected categorical)"
 
 // RandomFillSpec executor.
 

@@ -64,7 +64,7 @@ let private runDiffCase (outputDir: string) (caseName: string) (edgiSrc: string)
                 let srcAbs = Path.GetFullPath srcPath
                 let exeExt = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then ".exe" else ".out"
                 let exeAbs = Path.ChangeExtension(srcAbs, exeExt)
-                let cpsi = ProcessStartInfo("g++", sprintf "-std=c++17 %s -fopenmp -o \"%s\" \"%s\"" (optFlags ()) exeAbs srcAbs)
+                let cpsi = ProcessStartInfo("g++", $"-std=c++17 {(optFlags ())} -fopenmp -o \"{exeAbs}\" \"{srcAbs}\"")
                 cpsi.RedirectStandardError <- true
                 cpsi.UseShellExecute <- false
                 cpsi.WorkingDirectory <- Path.GetDirectoryName(srcAbs)
@@ -150,12 +150,12 @@ let private diffCaseAntisymReynolds (outputDir: string) : bool =
         let arrArgs = List.replicate r "A" |> String.concat ", "
         let expectedLit = expected |> List.map (sprintf "%g") |> String.concat ", "
         let src =
-            sprintf "let A = [%s]\n" aLit +
-            sprintf "let L = method_for(%s)\n" arrArgs +
-            sprintf "let g = lambda(%s) where comm(%s) -> %s\n" paramList paramList kEdgi +
+            $"let A = [{aLit}]\n" +
+            $"let L = method_for({arrArgs})\n" +
+            $"let g = lambda({paramList}) where comm({paramList}) -> {kEdgi}\n" +
             "let result = L <@> reynolds(g, Antisymmetric) |> compute\n" +
-            sprintf "// EXPECT: result = [%s]\n" expectedLit
-        let caseName = sprintf "antisymReynolds_r%d_n%d" r n
+            $"// EXPECT: result = [{expectedLit}]\n"
+        let caseName = $"antisymReynolds_r{r}_n{n}"
         if not (runDiffCase outputDir caseName src) then ok <- false
     ok
 
@@ -174,17 +174,17 @@ let private diffCaseGramHermitian (outputDir: string) : bool =
         // `%g` (which prints 2.0 as "2") would make the literal ill-typed.
         let fl (x: float) = sprintf "%.1f" x
         let rowLit i =
-            [ for j in 0 .. k-1 -> sprintf "complex(%s, %s)" (fl re.[i,j]) (fl im.[i,j]) ]
+            [ for j in 0 .. k-1 -> $"complex({(fl re.[i,j])}, {(fl im.[i,j])})" ]
             |> String.concat ", "
         let arrLit =
-            [ for i in 0 .. m-1 -> sprintf "    [%s]" (rowLit i) ] |> String.concat ",\n"
+            [ for i in 0 .. m-1 -> $"    [{(rowLit i)}]" ] |> String.concat ",\n"
         let expectedLit =
             expected |> List.map (fun (r,i) -> sprintf "(%g, %g)" r i) |> String.concat ", "
         let src =
-            sprintf "let A: Array<Complex128 like Idx<%d>, Idx<%d>> = [\n%s\n]\n" m k arrLit +
+            $"let A: Array<Complex128 like Idx<{m}>, Idx<{k}>> = [\n{arrLit}\n]\n" +
             "let result = gram(A, A)\n" +
-            sprintf "// EXPECT: result = [%s]\n" expectedLit
-        let caseName = sprintf "gramHermitian_m%d_k%d" m k
+            $"// EXPECT: result = [{expectedLit}]\n"
+        let caseName = $"gramHermitian_m{m}_k{k}"
         if not (runDiffCase outputDir caseName src) then ok <- false
     ok
 
@@ -210,13 +210,13 @@ let private diffCaseDecompact (outputDir: string) : bool =
                     yield symSrc.[(min i j, max i j)] ]
         let symExpect = symDense |> List.map (sprintf "%g") |> String.concat ", "
         let symSrcEdgi =
-            sprintf "let A = [%s]\n" aLit +
+            $"let A = [{aLit}]\n" +
             "let L = method_for(A, A)\n" +
             "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
             "let sym = L <@> reynolds(g) |> compute\n" +
             "let result = decompact(sym, 0)\n" +
-            sprintf "// EXPECT: result = [%s]\n" symExpect
-        if not (runDiffCase outputDir (sprintf "decompactSym_n%d" n) symSrcEdgi) then ok <- false
+            $"// EXPECT: result = [{symExpect}]\n"
+        if not (runDiffCase outputDir ($"decompactSym_n{n}") symSrcEdgi) then ok <- false
         // ANTISYM: dense[i][j] = +src (i<j), -src (i>j), 0 (i==j)
         let antiSrc = oracleAntiReynolds2 a g
         let antiDense =
@@ -227,13 +227,13 @@ let private diffCaseDecompact (outputDir: string) : bool =
                     else yield 0.0 ]
         let antiExpect = antiDense |> List.map (sprintf "%g") |> String.concat ", "
         let antiSrcEdgi =
-            sprintf "let A = [%s]\n" aLit +
+            $"let A = [{aLit}]\n" +
             "let L = method_for(A, A)\n" +
             "let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y\n" +
             "let anti = L <@> reynolds(g, Antisymmetric) |> compute\n" +
             "let result = decompact(anti, 0)\n" +
-            sprintf "// EXPECT: result = [%s]\n" antiExpect
-        if not (runDiffCase outputDir (sprintf "decompactAnti_n%d" n) antiSrcEdgi) then ok <- false
+            $"// EXPECT: result = [{antiExpect}]\n"
+        if not (runDiffCase outputDir ($"decompactAnti_n{n}") antiSrcEdgi) then ok <- false
     // --- Hermitian (complex), via gram, several random A ---
     for (m, k) in [ (2,3); (3,2); (3,3) ] do
         let re = Array2D.init m k (fun _ _ -> float (rng.Next(-3, 4)))
@@ -256,15 +256,15 @@ let private diffCaseDecompact (outputDir: string) : bool =
                     // lower triangle (H[j][i] = conj(H[i][j])), so no extra flip.
                     yield hAt i j ]
         let fl (x: float) = sprintf "%.1f" x
-        let rowLit i = [ for j in 0 .. k-1 -> sprintf "complex(%s, %s)" (fl re.[i,j]) (fl im.[i,j]) ] |> String.concat ", "
-        let arrLit = [ for i in 0 .. m-1 -> sprintf "    [%s]" (rowLit i) ] |> String.concat ",\n"
+        let rowLit i = [ for j in 0 .. k-1 -> $"complex({(fl re.[i,j])}, {(fl im.[i,j])})" ] |> String.concat ", "
+        let arrLit = [ for i in 0 .. m-1 -> $"    [{(rowLit i)}]" ] |> String.concat ",\n"
         let expectLit = dense |> List.map (fun (r,i) -> sprintf "(%g, %g)" r i) |> String.concat ", "
         let src =
-            sprintf "let A: Array<Complex128 like Idx<%d>, Idx<%d>> = [\n%s\n]\n" m k arrLit +
+            $"let A: Array<Complex128 like Idx<{m}>, Idx<{k}>> = [\n{arrLit}\n]\n" +
             "let H = gram(A, A)\n" +
             "let result = decompact(H, 0)\n" +
-            sprintf "// EXPECT: result = [%s]\n" expectLit
-        if not (runDiffCase outputDir (sprintf "decompactHerm_m%d_k%d" m k) src) then ok <- false
+            $"// EXPECT: result = [{expectLit}]\n"
+        if not (runDiffCase outputDir ($"decompactHerm_m{m}_k{k}") src) then ok <- false
     ok
 
 /// The single differential test: true iff every case agrees with its oracle.

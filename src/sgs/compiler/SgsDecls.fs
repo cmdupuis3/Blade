@@ -122,7 +122,7 @@ let stressDecl (name: string) (n: int) (w: int) : FunctionDecl =
           yield sAccum (idx "sm" (add (iLit (2 * m3)) cellBase)) (v "x2")
           yield! (packPairs |> Array.toList |> List.mapi (fun p (a, b) ->
                       sAccum (idx "pp" (add (iLit (p * m3)) cellBase))
-                             (mul (v (sprintf "x%d" a)) (v (sprintf "x%d" b))))) ]
+                             (mul (v $"x{a}") (v $"x{b}")))) ]
     let assemble =
         packPairs |> Array.toList |> List.mapi (fun p (a, b) ->
             sAssign (idx "out" (add (iLit (p * m3)) cellBase))

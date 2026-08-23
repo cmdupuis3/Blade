@@ -3,7 +3,7 @@
 // Bit-exact reimplementation of the scalar arithmetic that CodeGen emits, so the
 // interpreter's printed output byte-matches the g++ -std=c++17 -O2 binaries (the
 // differential gate). Every rule here was pinned empirically against the actual
-// toolchain (MSYS2 ucrt64 g++ 15.2 + .NET 7 on Windows). The mechanisms:
+// toolchain (MSYS2 ucrt64 g++ 15.2 + .NET 10 on Windows). The mechanisms:
 //
 //   * Real binops mirror C++ usual-arithmetic-conversion promotion and integer
 //     wraparound/truncation. The one non-obvious case: `int64 op float32` is
@@ -564,7 +564,7 @@ let complexMath (name: string) (re: float) (im: float) : float * float =
             else (abs y / t, (if y < 0.0 then -u else u))
     | _ ->
         raise (NumericsUnsupported
-                (sprintf "complex intrinsic '%s' is not yet bit-verified in the interpreter" name))
+                $"complex intrinsic '{name}' is not yet bit-verified in the interpreter")
 
 /// z ^ w for complex: best-effort exp(w * log z); NOT bit-verified (see above).
 let private complexCaret (l: Value) (r: Value) : Value =
@@ -737,7 +737,7 @@ let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
     | IRMath2 "atan2" -> VFloat (mathAtan2 (asF64 l) (asF64 r))
     | IRMath2 "log_base" -> VFloat (math1 "log" (asF64 l) / math1 "log" (asF64 r))
     | IRMath2 name ->
-        raise (InterpPanic("BL8010", sprintf "unknown binary math intrinsic '%s'" name, None, 0))
+        raise (InterpPanic("BL8010", $"unknown binary math intrinsic '{name}'", None, 0))
     | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
 
 /// abs(x): std::abs, whose C++ overload preserves the operand's numeric type

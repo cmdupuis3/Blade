@@ -99,14 +99,14 @@ let findSharedLib (prefix: string) (stem: string) : string option =
         match os with Windows -> ["bin"; "lib"] | Linux -> ["lib"; "lib64"] | MacOS -> ["lib"]
     let exactNames =
         match os with
-        | Windows -> [sprintf "lib%s.dll" stem; sprintf "%s.dll" stem]
-        | Linux -> [sprintf "lib%s.so" stem]
-        | MacOS -> [sprintf "lib%s.dylib" stem]
+        | Windows -> [$"lib{stem}.dll"; $"{stem}.dll"]
+        | Linux -> [$"lib{stem}.so"]
+        | MacOS -> [$"lib{stem}.dylib"]
     let patterns =
         match os with
-        | Windows -> [sprintf "*%s*.dll" stem]
-        | Linux -> [sprintf "lib%s.so.*" stem]
-        | MacOS -> [sprintf "lib%s.*.dylib" stem]
+        | Windows -> [$"*{stem}*.dll"]
+        | Linux -> [$"lib{stem}.so.*"]
+        | MacOS -> [$"lib{stem}.*.dylib"]
     let tryDir (d: string) =
         let dir = Path.Combine(prefix, d)
         if not (Directory.Exists dir) then None

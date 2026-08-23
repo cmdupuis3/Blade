@@ -163,11 +163,11 @@ module Mono =
     /// How a monomial reads in a diagnostic: `x(0)^2 * w(3)`, or `1` for the
     /// constant. Rep factors first, in key order, so rendering is deterministic.
     let render (m: Mono) : string =
-        let pow (s: string) (e: int) = if e = 1 then s else sprintf "%s^%d" s e
-        let reps = [ for KeyValue ((p, i), e) in m.Rep -> pow (sprintf "%s(%d)" p i) e ]
+        let pow (s: string) (e: int) = if e = 1 then s else $"{s}^{e}"
+        let reps = [ for KeyValue ((p, i), e) in m.Rep -> pow $"{p}({i})" e ]
         let invs =
             [ for KeyValue (a, e) in m.Inv ->
-                pow (match a.Index with Some i -> sprintf "%s(%d)" a.Name i | None -> a.Name) e ]
+                pow (match a.Index with Some i -> $"{a.Name}({i})" | None -> a.Name) e ]
         match reps @ invs with
         | [] -> "1"
         | fs -> String.concat " * " fs
@@ -313,13 +313,13 @@ let private outside (msg: string) (span: Span) = Error (OutsideFragment (msg, sp
 let charge (bud: Budget) (p: Poly) : Result<Poly, ExtractError> =
     let n = Poly.terms p
     if n > maxTerms then
-        Error (CapBreach (sprintf "the expanded form exceeded the %d-term cap" maxTerms))
+        Error (CapBreach $"the expanded form exceeded the {maxTerms}-term cap")
     elif Poly.repDegree p > maxRepDegree then
-        Error (CapBreach (sprintf "the body's degree in the representation components exceeds the degree-%d cap" maxRepDegree))
+        Error (CapBreach $"the body's degree in the representation components exceeds the degree-{maxRepDegree} cap")
     else
         bud.Remaining <- bud.Remaining - n
         if bud.Remaining < 0 then
-            Error (CapBreach (sprintf "the expanded form exceeded the %d-term cap" maxTerms))
+            Error (CapBreach $"the expanded form exceeded the {maxTerms}-term cap")
         else Ok p
 
 let chargeVec (bud: Budget) (ps: Poly []) : Result<Val, ExtractError> =
@@ -338,7 +338,7 @@ let binOp (bud: Budget) (span: Span) (op: BinOp) (vl: Val) (vr: Val)
     let bad msg = outside msg span
     match vl, vr with
     | VOpaque n, _ | _, VOpaque n ->
-        bad (sprintf "the shape of invariant '%s' is not decidable from its declared type" n)
+        bad $"the shape of invariant '{n}' is not decidable from its declared type"
     | VInvArr _, _ | _, VInvArr _ ->
         bad "an invariant array has no polynomial form -- read its cells at static indices"
     | VScalar a, VScalar b ->
@@ -357,7 +357,7 @@ let binOp (bud: Budget) (span: Span) (op: BinOp) (vl: Val) (vr: Val)
         | _ -> bad "this operator is outside the polynomial fragment"
     | VVec a, VVec b ->
         if a.Length <> b.Length then
-            bad (sprintf "whole-array arithmetic needs equal shapes (%d vs %d components)" a.Length b.Length)
+            bad $"whole-array arithmetic needs equal shapes ({a.Length} vs {b.Length} components)"
         else
             match op with
             | OpAdd -> Array.map2 Poly.add a b |> chargeVec bud
@@ -406,15 +406,15 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
             | Some (SVFloat f) ->
                 match Rat.tryOfFloatExact f with
                 | Some r -> constPoly ctx r
-                | None -> outside (sprintf "static '%s' is not a finite number" n) e.Span
-            | _ -> outside (sprintf "'%s' is not a parameter, a let binding or a numeric static" n) e.Span
+                | None -> outside $"static '{n}' is not a finite number" e.Span
+            | _ -> outside $"'{n}' is not a parameter, a let binding or a numeric static" e.Span
     | ExprKind.ExprUnaryOp (OpNeg, inner) ->
         extractVal ctx env inner |> Result.bind (fun v ->
             match v with
             | VScalar p -> Ok (VScalar (Poly.neg p))
             | VVec ps -> Ok (VVec (ps |> Array.map Poly.neg))
             | VInvArr _ -> outside "an invariant array has no polynomial form -- read its cells at static indices" e.Span
-            | VOpaque n -> outside (sprintf "the shape of invariant '%s' is not decidable from its declared type" n) e.Span)
+            | VOpaque n -> outside $"the shape of invariant '{n}' is not decidable from its declared type" e.Span)
     | ExprKind.ExprUnaryOp _ -> outside "this unary operator is outside the polynomial fragment" e.Span
     | ExprKind.ExprBinOp (Elementwise, op, l, r) ->
         extractVal ctx env l |> Result.bind (fun vl ->
@@ -463,16 +463,16 @@ let rec private extractVal (ctx: Ctx) (env: Map<string, Val>) (e: Expr) : Result
             | Some (VVec ps) ->
                 match staticIndex ctx idxE with
                 | Some i when i >= 0 && i < ps.Length -> Ok (VScalar ps.[i])
-                | Some i -> outside (sprintf "index %d is outside '%s' (%d components)" i n ps.Length) e.Span
-                | None -> outside (sprintf "indexing '%s' needs a static offset" n) e.Span
+                | Some i -> outside $"index {i} is outside '{n}' ({ps.Length} components)" e.Span
+                | None -> outside $"indexing '{n}' needs a static offset" e.Span
             | Some (VInvArr name) ->
                 match staticIndex ctx idxE with
                 | Some i -> charge ctx.Bud (Poly.ofMono (Mono.invAtom { Name = name; Index = Some i })) |> Result.map VScalar
-                | None -> outside (sprintf "indexing the invariant '%s' needs a static offset" name) e.Span
-            | Some (VScalar _) -> outside (sprintf "'%s' is a scalar, not an array" n) e.Span
+                | None -> outside $"indexing the invariant '{name}' needs a static offset" e.Span
+            | Some (VScalar _) -> outside $"'{n}' is a scalar, not an array" e.Span
             | Some (VOpaque name) ->
-                outside (sprintf "the shape of invariant '%s' is not decidable from its declared type" name) e.Span
-            | None -> outside (sprintf "call to '%s': calls are outside the polynomial fragment" n) e.Span
+                outside $"the shape of invariant '{name}' is not decidable from its declared type" e.Span
+            | None -> outside $"call to '{n}': calls are outside the polynomial fragment" e.Span
         | _ -> outside "calls are outside the polynomial fragment" e.Span
     | _ -> outside "this expression is outside the polynomial fragment" e.Span
 
@@ -498,7 +498,7 @@ let extract (psig: PolySig) (statics: StaticEnv) (fd: FunctionDecl) : Result<Pol
         | VScalar p, None -> Ok { Components = [| p |] }
         | VVec ps, Some n when ps.Length = n -> Ok { Components = ps }
         | VVec ps, Some n ->
-            outside (sprintf "the body assembles %d components but the declared return has %d" ps.Length n) fd.Body.Span
+            outside $"the body assembles {ps.Length} components but the declared return has {n}" fd.Body.Span
         | VVec _, None -> outside "the body is an array but the declared return is a scalar" fd.Body.Span
         | VScalar _, Some _ -> outside "the body is a scalar but the declared return is a representation-typed array" fd.Body.Span
         | (VInvArr _ | VOpaque _), _ -> outside "the body is an invariant parameter with no polynomial form" fd.Body.Span)
@@ -569,14 +569,14 @@ let private substitute (budget: int ref) (images: Map<string * int, Poly>) (p: P
                     // images from the same Rep params the extractor used.
                     match Map.tryFind key images with
                     | None ->
-                        failed <- Some (DischargeCap (sprintf "internal: no group action supplied for '%s' component %d" (fst key) (snd key)))
+                        failed <- Some (DischargeCap $"internal: no group action supplied for '{fst key}' component {snd key}")
                     | Some img ->
                         for _ in 1 .. e do
                             if failed.IsNone then
                                 acc <- Poly.mul acc img
                                 budget.Value <- budget.Value - Poly.terms acc
                                 if budget.Value < 0 || Poly.terms acc > maxTerms then
-                                    failed <- Some (DischargeCap (sprintf "the substituted form exceeded the %d-term cap" maxTerms))
+                                    failed <- Some (DischargeCap $"the substituted form exceeded the {maxTerms}-term cap")
             if failed.IsNone then out <- Poly.add out acc
     match failed with
     | Some e -> Error e

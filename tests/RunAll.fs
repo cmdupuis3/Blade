@@ -484,7 +484,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
           match diffOracle with Some b -> yield b | None -> ()
           yield! extras ]
     Blade.Tests.TestHarness.printGrandTotal blocks
-    let anyFailed = blocks |> List.sumBy (fun b -> b.Failed)
+    let anyFailed = blocks |> List.sumBy (_.Failed)
     if anyFailed = 0 then 0 else 1
 
 /// Full suite with no caller-supplied blocks (standalone/back-compat form).

@@ -139,7 +139,7 @@ let private staticFn (name: string) (ps: string list) (body: Expr) =
 let private envOf (decls: Located<Decl> list) : StaticEnv =
     match resolveStatics decls with
     | Ok (env, _) -> env
-    | Error e -> failwithf "test setup: resolveStatics failed: %s" e
+    | Error e -> failwith $"test setup: resolveStatics failed: {e}"
 
 /// Fold `idx_card(NAME)` exactly as a `let static` would, through the
 /// syntactic-builtin path registered by StructIdxSpec.install ().
@@ -207,7 +207,7 @@ let runStructIdxSpecTests () : BlockResult =
     let anchor = okOr Unchecked.defaultof<_> (cg 1L)
     check "CGm112 (l1 = l2 = 1, m_out in -1..1): box 27, card 7 — the plan's §5 anchor"
           (boxVolume (cgBox 1L 1L 1L) = 27L && anchor.Card = 7)
-          (sprintf "box %d, card %d" (boxVolume (cgBox 1L 1L 1L)) anchor.Card)
+          ($"box {(boxVolume (cgBox 1L 1L 1L))}, card {anchor.Card}")
 
     check "the lo-sweep is 3 / 7 / 9 (lo = 0, 1, 2), 9 being the (2l1+1)(2l2+1) saturation"
           ([ 0L; 1L; 2L ] |> List.map (fun lo -> (okOr Unchecked.defaultof<_> (cg lo)).Card) = [ 3; 7; 9 ])
@@ -218,8 +218,7 @@ let runStructIdxSpecTests () : BlockResult =
     check "SUM-CHECK: every lo in 0..3 agrees with the dense pair count (independent triple loop)"
           ([ 0L; 1L; 2L; 3L ] |> List.forall (fun lo ->
                 (okOr Unchecked.defaultof<_> (cg lo)).Card = densePairCount 1 1 (int lo)))
-          (sprintf "dense = %d/%d/%d/%d"
-               (densePairCount 1 1 0) (densePairCount 1 1 1) (densePairCount 1 1 2) (densePairCount 1 1 3))
+          ($"dense = {(densePairCount 1 1 0)}/{(densePairCount 1 1 1)}/{(densePairCount 1 1 2)}/{(densePairCount 1 1 3)}")
 
     // Saturation, stated as an identity rather than a number: past lo = l1+l2
     // the constraint stops cutting and card is the (2l1+1)(2l2+1) pair count.
@@ -278,7 +277,7 @@ let runStructIdxSpecTests () : BlockResult =
                                   { Field = "m_out"; Lo = -1L; Hi = 1L } ]
            | Error _ -> false)
           (match structStaticFence (cgEnv 1L) "CGm112" with
-           | Ok s -> s.Fields |> List.map (fun f -> sprintf "%s:%d..%d" f.Field f.Lo f.Hi) |> String.concat " "
+           | Ok s -> s.Fields |> List.map (fun f -> $"{f.Field}:{f.Lo}..{f.Hi}") |> String.concat " "
            | Error m -> m)
 
     check "the fence hands out the DECLARED conjuncts only (the box already enforces the bounds)"
@@ -364,7 +363,7 @@ let runStructIdxSpecTests () : BlockResult =
            | Ok (env, failures) -> failures.IsEmpty && Map.tryFind "a_card" env.Values = Some (SVInt 7L)
            | Error _ -> false)
           (match depRes with
-           | Ok (_, fs) when not fs.IsEmpty -> fs |> List.map (fun f -> f.Reason) |> String.concat "; "
+           | Ok (_, fs) when not fs.IsEmpty -> fs |> List.map (_.Reason) |> String.concat "; "
            | Ok (env, _) -> sprintf "%A" (Map.tryFind "a_card" env.Values)
            | Error m -> m)
 
@@ -546,9 +545,9 @@ let runStructIdxSpecTests () : BlockResult =
     // unguarded fold would take.
     let wideDecls =
         [ for lvl in 0 .. 23 ->
-            staticFn (sprintf "w%d" lvl) [ "n" ]
-                (bin OpAdd (e (ExprApp (v (sprintf "w%d" (lvl + 1)), [ v "n" ])))
-                           (e (ExprApp (v (sprintf "w%d" (lvl + 1)), [ v "n" ]))))
+            staticFn ($"w{lvl}") [ "n" ]
+                (bin OpAdd (e (ExprApp (v ($"w{(lvl + 1)}"), [ v "n" ])))
+                           (e (ExprApp (v ($"w{(lvl + 1)}"), [ v "n" ]))))
           yield staticFn "w24" [ "n" ] (v "n") ]
     let wide = evalExpr (envOf wideDecls) maxSteps (e (ExprApp (v "w0", [ lit 1L ])))
     check "NEGATIVE: a WIDE shallow fold (2^24 nodes at depth 24) is refused by the STEP budget"
@@ -558,9 +557,9 @@ let runStructIdxSpecTests () : BlockResult =
     // leaves is comfortably inside 100,000 steps.
     let narrowDecls =
         [ for lvl in 0 .. 12 ->
-            staticFn (sprintf "n%d" lvl) [ "n" ]
-                (bin OpAdd (e (ExprApp (v (sprintf "n%d" (lvl + 1)), [ v "n" ])))
-                           (e (ExprApp (v (sprintf "n%d" (lvl + 1)), [ v "n" ]))))
+            staticFn ($"n{lvl}") [ "n" ]
+                (bin OpAdd (e (ExprApp (v ($"n{(lvl + 1)}"), [ v "n" ])))
+                           (e (ExprApp (v ($"n{(lvl + 1)}"), [ v "n" ]))))
           yield staticFn "n13" [ "n" ] (lit 1L) ]
     let narrow = evalExpr (envOf narrowDecls) maxSteps (e (ExprApp (v "n0", [ lit 0L ])))
     check "a branching fold that FITS the step budget still folds (2^13 leaves = 8192)"
@@ -597,12 +596,12 @@ let runStructIdxSpecTests () : BlockResult =
           (match scattered with
            | Ok r -> r.Card = List.length r.Entries && r.Entries = List.sort r.Entries && r.Card > 0
            | Error _ -> false)
-          (match scattered with Ok r -> sprintf "card %d of 250" r.Card | Error m -> m)
+          (match scattered with Ok r -> $"card {r.Card} of 250" | Error m -> m)
     let needle =
         enumerateBox "Needle" (box3 [ "a", 0L, 9L; "b", 0L, 9L; "c", 0L, 9L ])
             (fun cell -> Ok (get cell "a" = 7L && get cell "b" = 3L && get cell "c" = 5L))
     check "the certificate survives a single-solution box (999 of 1000 prefixes pruned by the heads route)"
           (match needle with Ok r -> r.Card = 1 && r.Entries = [ [ 7L; 3L; 5L ] ] | Error _ -> false) ""
 
-    printFooter "Struct Idx" [ sprintf "%d passed" passed; sprintf "%d failed" failed ]
+    printFooter "Struct Idx" [ $"{passed} passed"; $"{failed} failed" ]
     { Block = "Struct Idx"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

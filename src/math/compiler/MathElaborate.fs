@@ -127,32 +127,32 @@ let private arrayShape (ctx: Ctx) (scope: Scope) (what: string) (e: Expr) : Resu
         if extents |> List.forall Option.isSome then
             Ok (label, extents |> List.map Option.get)
         else
-            Error (sprintf "%s: every axis extent of %s must be statically known (Idx<n> directly or through aliases)" what label)
-    let noShape name = Error (sprintf "%s: '%s' has no declared array shape -- %s" what name shapeSources)
+            Error $"{what}: every axis extent of {label} must be statically known (Idx<n> directly or through aliases)"
+    let noShape name = Error $"{what}: '{name}' has no declared array shape -- {shapeSources}"
     match e.Kind with
     // A name: the innermost binder wins; a local binder with no array annotation shadows an outer one.
     | ExprKind.ExprVar name ->
         match Map.tryFind name scope with
-        | Some (Some shape) -> finish (sprintf "'%s'" name) shape
+        | Some (Some shape) -> finish $"'{name}'" shape
         | Some None -> noShape name
         | None ->
             match Map.tryFind name ctx.Arrays with
-            | Some shape -> finish (sprintf "'%s'" name) shape
+            | Some shape -> finish $"'{name}'" shape
             | None -> noShape name
     // An ascription: the universal escape hatch for a shape this pass cannot otherwise see.
     | ExprKind.ExprTyped (_, ty) ->
         match resolveTop ctx.Aliases 8 ty with
         | TyArray (elem, idxs) -> finish "the ascribed expression" (elem, idxs)
-        | _ -> Error (sprintf "%s: the ascription must name an array type (Array<Float64 like Idx<...>, ...>)" what)
+        | _ -> Error $"{what}: the ascription must name an array type (Array<Float64 like Idx<...>, ...>)"
     // A call whose function has an annotated array return type. GUARD: in Blade arrays ARE functions, so `A(i)` and `f(x)`
     // are the same node -- exclude known array names so an index read stays on the error path.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, _)
             when not (Map.containsKey f scope) && not (Map.containsKey f ctx.Arrays) ->
         match Map.tryFind f ctx.Funcs with
-        | Some shape -> finish (sprintf "the result of '%s'" f) shape
-        | None -> Error (sprintf "%s: '%s' has no annotated array return type -- %s" what f shapeSources)
+        | Some shape -> finish $"the result of '{f}'" shape
+        | None -> Error $"{what}: '{f}' has no annotated array return type -- {shapeSources}"
     | _ ->
-        Error (sprintf "%s: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` -- %s" what shapeSources)
+        Error $"{what}: the array argument must be a plain variable naming an annotated let, an annotated parameter, a call of a function with an annotated array return type, or an ascription `(expr : Array<Float64 like Idx<...>, ...>)` -- {shapeSources}"
 
 /// Resolve a static-argument expression: a plain variable naming a `let static` binding, or an inline int literal.
 let private staticArg (statics: StaticEnv) (what: string) (e: Expr) : Result<StaticValue, string> =
@@ -161,14 +161,14 @@ let private staticArg (statics: StaticEnv) (what: string) (e: Expr) : Result<Sta
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
         | Some sv -> Ok sv
-        | None -> Error (sprintf "%s: '%s' is not a `let static` binding (math op configs must be static)" what name)
-    | _ -> Error (sprintf "%s: config argument must be a `let static` binding name or literal" what)
+        | None -> Error $"{what}: '{name}' is not a `let static` binding (math op configs must be static)"
+    | _ -> Error $"{what}: config argument must be a `let static` binding name or literal"
 
 let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int, string> =
     staticArg statics what e |> Result.bind (fun sv ->
         match sv with
         | SVInt n -> Ok (int n)
-        | _ -> Error (sprintf "%s: expected a static int" what))
+        | _ -> Error $"{what}: expected a static int")
 
 // Elaboration state (fingerprint-deduped generated decls)
 type private ElabState = {
@@ -188,7 +188,7 @@ let private ensure (st: ElabState) (key: string) (make: string -> Result<Functio
     | Some n -> Ok n
     | None ->
         st.Counter <- st.Counter + 1
-        let n = sprintf "__math_%d" st.Counter
+        let n = $"__math_{st.Counter}"
         make n |> Result.map (fun decl ->
             st.Made <- Map.add key n st.Made
             st.Decls <- st.Decls @ [ decl ]
@@ -213,8 +213,8 @@ let private sweepsArg (statics: StaticEnv) (what: string) (rest: Expr list) : Re
     | [] -> Ok defaultSweeps
     | [swE] ->
         staticInt statics (what + " SWEEPS") swE |> Result.bind (fun s ->
-            if s >= 1 then Ok s else Error (sprintf "%s: SWEEPS must be >= 1" what))
-    | _ -> Error (sprintf "%s: at most one SWEEPS argument" what)
+            if s >= 1 then Ok s else Error $"{what}: SWEEPS must be >= 1")
+    | _ -> Error $"{what}: at most one SWEEPS argument"
 
 /// Elaborate one qualified op call. Arguments arrive already rewritten.
 let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args: Expr list) : Result<Expr, string> =
@@ -231,7 +231,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 // DECLARED shapes and rejects the same programs with the same messages -- only what it lowers to changed.
                 Ok (syn (ExprApp (v "__math_matmul", [aE; bE])))
             | [_; k], [k2; _] ->
-                Error (sprintf "matmul: inner extents disagree (A is ..x%d, B is %dx..)" k k2)
+                Error $"matmul: inner extents disagree (A is ..x{k}, B is {k2}x..)"
             | _ -> Error "matmul: both arguments must be rank-2 (mxk * kxn)"))
     | "matmul", _ -> Error "matmul: expected matmul(A, B)"
     | "solve", [aE; bE] ->
@@ -248,9 +248,9 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 // level down, at emission. That keeps the surface's meaning independent of the build.
                 Ok (syn (ExprApp (v "__math_solve", [aE; bE])))
             | [n; n2], _ when n <> n2 ->
-                Error (sprintf "solve: A must be square (got %dx%d)" n n2)
+                Error $"solve: A must be square (got {n}x{n2})"
             | [n; _], [m] ->
-                Error (sprintf "solve: b's extent must match A's dimension (A is %dx%d, b is length %d)" n n m)
+                Error $"solve: b's extent must match A's dimension (A is {n}x{n}, b is length {m})"
             | [_; _], _ ->
                 Error "solve: b must be rank-1 (Array<Float64 like Idx<n>>)"
             | _ -> Error "solve: A must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>)"))
@@ -263,7 +263,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 ensure st (fingerprint "svd" (box (m, n, sweeps))) (fun nm -> Ok (svdDecl nm m n sweeps))
                 |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
             | [m; n] ->
-                Error (sprintf "svd: m < n unsupported (%dx%d); svd the transpose (transpose(A, [0, 1])) and swap U/V" m n)
+                Error $"svd: m < n unsupported ({m}x{n}); svd the transpose (transpose(A, [0, 1])) and swap U/V"
             | _ -> Error "svd: the argument must be rank-2 (Array<Float64 like Idx<m>, Idx<n>>)"))
     | "svd", _ -> Error "svd: expected svd(A) or svd(A, SWEEPS)"
     | "eigh", (aE :: rest) ->
@@ -288,7 +288,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 else
                     ensure st (fingerprint "eigh" (box (n, sweeps))) (fun nm -> Ok (eighDecl nm n sweeps))
                     |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
-            | [n; n2] -> Error (sprintf "eigh: the argument must be square (got %dx%d); symmetry is assumed, not checked" n n2)
+            | [n; n2] -> Error $"eigh: the argument must be square (got {n}x{n2}); symmetry is assumed, not checked"
             | _ -> Error "eigh: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>, symmetric)"))
     | "eigh", _ -> Error "eigh: expected eigh(S) or eigh(S, SWEEPS)"
     | "eig", (aE :: rest) ->
@@ -305,7 +305,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                 maxIterRes |> Result.bind (fun maxIter ->
                     ensure st (fingerprint "eig" (box (n, maxIter))) (fun nm -> Ok (eigDecl nm n maxIter))
                     |> Result.map (fun nm -> syn (ExprApp (v nm, [aE]))))
-            | [n; n2] -> Error (sprintf "eig: the argument must be square (got %dx%d)" n n2)
+            | [n; n2] -> Error $"eig: the argument must be square (got {n}x{n2})"
             | _ -> Error "eig: the argument must be rank-2 square (Array<Float64 like Idx<n>, Idx<n>>)")
     | "eig", _ -> Error "eig: expected eig(A) or eig(A, MAXITER) -- returns (LRE, LIM) by descending modulus"
     | "unfold", [xE; modeE] ->
@@ -313,9 +313,9 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         arrayShape ctx scope "unfold" xE |> Result.bind (fun (_, dims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
-                Error (sprintf "unfold: tensor rank must be 2..4 (got rank %d); the generator is rank-generic -- raise the cap when needed" r)
+                Error $"unfold: tensor rank must be 2..4 (got rank {r}); the generator is rank-generic -- raise the cap when needed"
             elif mode < 0 || mode >= r then
-                Error (sprintf "unfold: MODE must be in 0..%d for a rank-%d tensor (got %d)" (r - 1) r mode)
+                Error $"unfold: MODE must be in 0..{r - 1} for a rank-{r} tensor (got {mode})"
             else
                 ensure st (fingerprint "unfold" (box (dims, mode))) (fun nm -> Ok (unfoldDecl nm dims mode))
                 |> Result.map (fun nm -> syn (ExprApp (v nm, [xE])))))
@@ -326,9 +326,9 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         arrayShape ctx scope "mode_product" uE |> Result.bind (fun (_, uDims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
-                Error (sprintf "mode_product: tensor rank must be 2..4 (got rank %d)" r)
+                Error $"mode_product: tensor rank must be 2..4 (got rank {r})"
             elif mode < 0 || mode >= r then
-                Error (sprintf "mode_product: MODE must be in 0..%d for a rank-%d tensor (got %d)" (r - 1) r mode)
+                Error $"mode_product: MODE must be in 0..{r - 1} for a rank-{r} tensor (got {mode})"
             else
                 match uDims with
                 | [jOut; im] when im = dims.[mode] ->
@@ -336,19 +336,19 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                         (fun nm -> Ok (modeProductDecl nm dims mode jOut))
                     |> Result.map (fun nm -> syn (ExprApp (v nm, [xE; uE])))
                 | [_; im] ->
-                    Error (sprintf "mode_product: U's second extent must match the mode-%d extent (U is ..x%d, mode extent is %d)" mode im dims.[mode])
+                    Error $"mode_product: U's second extent must match the mode-{mode} extent (U is ..x{im}, mode extent is {dims.[mode]})"
                 | _ -> Error "mode_product: U must be rank-2 (Array<Float64 like Idx<j>, Idx<i_mode>>)")))
     | "mode_product", _ -> Error "mode_product: expected mode_product(X, U, MODE) with a static MODE"
     | "hosvd", (xE :: rankArgs) ->
         arrayShape ctx scope "hosvd" xE |> Result.bind (fun (_, dims) ->
             let r = dims.Length
             if r < 2 || r > 4 then
-                Error (sprintf "hosvd: tensor rank must be 2..4 (got rank %d)" r)
+                Error $"hosvd: tensor rank must be 2..4 (got rank {r})"
             else
                 let ranksRes =
                     if List.isEmpty rankArgs then Ok dims
                     elif rankArgs.Length <> r then
-                        Error (sprintf "hosvd: expected %d truncation ranks for a rank-%d tensor (got %d); use hosvd(X) for the full decomposition" r r rankArgs.Length)
+                        Error $"hosvd: expected {r} truncation ranks for a rank-{r} tensor (got {rankArgs.Length}); use hosvd(X) for the full decomposition"
                     else
                         rankArgs |> List.fold (fun acc rE ->
                             acc |> Result.bind (fun rs ->
@@ -379,7 +379,7 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
                             (fun nm -> Ok (hosvdDecl nm dims ranks gramNames eighNames mptNames))
                         |> Result.map (fun nm -> syn (ExprApp (v nm, [xE])))))
     | "hosvd", _ -> Error "hosvd: expected hosvd(X) or hosvd(X, R1, ..., RN) with static ranks"
-    | _ -> Error (sprintf "math: unknown op '%s' (available: %s)" op opList)
+    | _ -> Error $"math: unknown op '{op}' (available: {opList})"
 
 // Rewrite walker (same shape as MLElaborate.rewriteExpr)
 let rec private rewriteExpr (st: ElabState) (ctx: Ctx) (aliases: Set<string>) (scope: Scope) (e: Expr)
@@ -574,7 +574,7 @@ let private expandModule (decls: Located<Decl> list) : Result<Located<Decl> list
         // Fold failures are the type-checker's to report; elaboration only
         // needs the successfully folded environment.
         match resolveStatics declsNoImport with
-        | Error e -> Error (sprintf "math elaboration: static resolution failed: %s" e)
+        | Error e -> Error $"math elaboration: static resolution failed: {e}"
         | Ok (statics, _) ->
             let tyAliases = collectAliases declsNoImport
             let ctx = { Arrays = collectArrays tyAliases declsNoImport

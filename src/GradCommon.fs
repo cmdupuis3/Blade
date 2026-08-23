@@ -218,7 +218,7 @@ type internal Ctx = {
 
 let internal fresh (ctx: Ctx) (prefix: string) : string =
     ctx.Fresh.Value <- ctx.Fresh.Value + 1
-    sprintf "%s%d" prefix ctx.Fresh.Value
+    $"{prefix}{ctx.Fresh.Value}"
 
 /// The VALUES of the visible module bindings (pipeline fusion's environment).
 let internal moduleLetValues (ctx: Ctx) : Map<string, Expr> =
@@ -237,7 +237,7 @@ let internal moduleLetTys (ctx: Ctx) : Map<string, TypeExpr> =
 let internal errMode = ref "grad"
 
 let internal err (fname: string) (msg: string) : Result<'a, string> =
-    Error (sprintf "%s(%s): %s" errMode.Value fname msg)
+    Error $"{errMode.Value}({fname}): {msg}"
 
 // Kernel-shape refusal wording, spoken by more than one site.
 //
@@ -250,7 +250,7 @@ let internal err (fname: string) (msg: string) : Result<'a, string> =
 
 /// A named kernel whose body is a block -- a v1 restriction with a fix.
 let internal kernBlockBodyMsg (f: string) : string =
-    sprintf "kernel '%s' has a block body; only expression-bodied named functions are differentiable as kernels (v1)" f
+    $"kernel '{f}' has a block body; only expression-bodied named functions are differentiable as kernels (v1)"
 
 /// Anything else in the kernel position of a `<@>`.
 let internal kernUnsupportedMsg =
@@ -546,7 +546,7 @@ let internal substParam (fname: string) (pname: string) (repl: Expr) (body: Expr
         match substKern pname repl body with
         | Some b -> Ok b
         | None ->
-            err fname (sprintf "cannot substitute '%s' into the kernel body: a binder or an unsupported form stands between the parameter and its use, so the substitution cannot be proved capture-free" pname)
+            err fname $"cannot substitute '{pname}' into the kernel body: a binder or an unsupported form stands between the parameter and its use, so the substitution cannot be proved capture-free"
 
 /// The same substitution for a whole batch, in ONE walk instead of one walk
 /// per name. The pack unroller peels a `head :: tail` one element at a time

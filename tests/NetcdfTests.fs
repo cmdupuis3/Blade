@@ -70,8 +70,8 @@ let runNetcdfTests () =
         | :? System.IO.FileNotFoundException ->
             printfn "  SKIP %s: sample.nc not found" what
         | _ ->
-            check (sprintf "%s: no unexpected exception" what) false
-                (sprintf "%s: %s" (ex.GetType().Name) ex.Message)
+            check ($"{what}: no unexpected exception") false
+                ($"{(ex.GetType().Name)}: {ex.Message}")
 
     // The string-side twin of `unexpected`'s DllNotFoundException arm: the
     // checker surfaces a typecheck-TIME missing-library condition as BL2007
@@ -134,11 +134,11 @@ let runNetcdfTests () =
             | _ -> None)
 
     check "Module name is 'sample'"
-        (modul.Name = "sample") (sprintf "got '%s'" modul.Name)
+        (modul.Name = "sample") ($"got '{modul.Name}'")
 
     // 3 index types + dims struct + vars struct = 5 type defs
     check "Module has 5 type defs (3 idx + 2 structs)"
-        (modul.Types.Length = 5) (sprintf "got %d" modul.Types.Length)
+        (modul.Types.Length = 5) ($"got {modul.Types.Length}")
 
     let idxTypeNames =
         modul.Types |> List.choose (function
@@ -175,7 +175,7 @@ let runNetcdfTests () =
         (dimsFields.IsSome) ""
     check "dims has 3 fields (lat, lon, time)"
         (dimsFields.Value.Length = 3)
-        (sprintf "got %d" (match dimsFields with Some f -> f.Length | None -> 0))
+        ($"got {(match dimsFields with Some f -> f.Length | None -> 0)}")
     check "dims field names"
         (dimsFields.Value |> List.map fst = ["lat"; "lon"; "time"])
         (sprintf "got %A" (dimsFields.Value |> List.map fst))
@@ -185,7 +185,7 @@ let runNetcdfTests () =
         (varsFields.IsSome) ""
     check "vars has 1 field (A)"
         (varsFields.Value.Length = 1)
-        (sprintf "got %d" (match varsFields with Some f -> f.Length | None -> 0))
+        ($"got {(match varsFields with Some f -> f.Length | None -> 0)}")
 
     let varAType = varsFields.Value |> List.tryPick (fun (n, t) -> if n = "A" then Some t else None)
     check "vars.A exists" (varAType.IsSome) ""
@@ -195,7 +195,7 @@ let runNetcdfTests () =
         check "A element type is Float64"
             (arr.ElemType = IRTScalar ETFloat64) (sprintf "got %A" arr.ElemType)
         check "A has 3 index types"
-            (arr.IndexTypes.Length = 3) (sprintf "got %d" arr.IndexTypes.Length)
+            (arr.IndexTypes.Length = 3) ($"got {arr.IndexTypes.Length}")
         check "A index types have no tags"
             (arr.IndexTypes |> List.forall (fun i -> i.Tag = None)) ""
         check "A identity is AIDVariable 'A'"
@@ -239,7 +239,7 @@ let runNetcdfTests () =
     match fieldOf "sample__vars" "A" with
     | Some (ArrayElem arr) ->
         check "sample.vars.A resolves to a rank-3 array"
-            (arr.IndexTypes.Length = 3) (sprintf "got %d" arr.IndexTypes.Length)
+            (arr.IndexTypes.Length = 3) ($"got {arr.IndexTypes.Length}")
         check "sample.vars.A element type is Float64"
             (arr.ElemType = IRTScalar ETFloat64) (sprintf "got %A" arr.ElemType)
     | other ->
@@ -250,31 +250,31 @@ let runNetcdfTests () =
     // `Array<Float64 like sample.index.x>` instead of hand-copying the extent.
     // Qualified only — a bare `x` would clobber across stores.
     let axisOf dim =
-        match lookupTypeDef (sprintf "sample.index.%s" dim) envP with
+        match lookupTypeDef ($"sample.index.{dim}") envP with
         | Some (TDIIndexType (_, idx, _)) -> Some idx
         | _ -> None
 
     let fileDims =
         modul.Types |> List.choose (function IRTDIndexType (n, idx) -> Some (n, idx) | _ -> None)
     check "provider declares at least one named axis"
-        (not fileDims.IsEmpty) (sprintf "got %d" fileDims.Length)
+        (not fileDims.IsEmpty) ($"got {fileDims.Length}")
 
     for (dimName, srcIdx) in fileDims do
         match axisOf dimName with
         | Some idx ->
-            check (sprintf "sample.index.%s is registered" dimName) true ""
-            check (sprintf "sample.index.%s keeps the file's extent" dimName)
+            check ($"sample.index.{dimName} is registered") true ""
+            check ($"sample.index.{dimName} keeps the file's extent")
                 (idx.Extent = srcIdx.Extent) (sprintf "got %A want %A" idx.Extent srcIdx.Extent)
             // Tag must stay as the provider built it (None): a synthesized tag
             // here would make annotated arrays fail to unify with the store's.
-            check (sprintf "sample.index.%s keeps the provider's tag" dimName)
+            check ($"sample.index.{dimName} keeps the provider's tag")
                 (idx.Tag = srcIdx.Tag) (sprintf "got %A want %A" idx.Tag srcIdx.Tag)
         | None ->
-            check (sprintf "sample.index.%s is registered" dimName) false "not found"
+            check ($"sample.index.{dimName} is registered") false "not found"
 
     // Bare dimension names must NOT leak into the global type namespace.
     for (dimName, _) in fileDims do
-        check (sprintf "bare '%s' is not registered globally" dimName)
+        check ($"bare '{dimName}' is not registered globally")
             ((lookupTypeDef dimName envP).IsNone) "bare name would clobber across stores"
 
     // ---------------------------------------------------------------
@@ -404,13 +404,13 @@ let runNetcdfTests () =
     match compoundViewType (cBuilder.FreshId()) cVarArr cMaskArr cMaskIR with
     | Ok (ArrayElem arr) ->
         check "load_compound: collapses to a single compound index"
-            (arr.IndexTypes.Length = 1) (sprintf "got %d" arr.IndexTypes.Length)
+            (arr.IndexTypes.Length = 1) ($"got {arr.IndexTypes.Length}")
         check "load_compound: compound index has rank 3"
-            (arr.IndexTypes.[0].Rank = 3) (sprintf "got %d" arr.IndexTypes.[0].Rank)
+            (arr.IndexTypes.[0].Rank = 3) ($"got {arr.IndexTypes.[0].Rank}")
         check "load_compound: tagged __compoundidx"
             (arr.IndexTypes.[0].IxKind = IxKCompound) (sprintf "got %A" arr.IndexTypes.[0].Tag)
         check "load_compound: carries the mask as the compound extent"
-            (match arr.IndexTypes.[0].Extent with IRCompoundMask _ -> true | _ -> false) ""
+            arr.IndexTypes.[0].Extent.IsIRCompoundMask ""
         check "load_compound: element type preserved (Float32)"
             (arr.ElemType = IRTScalar ETFloat32) (sprintf "got %A" arr.ElemType)
     | Ok other -> check "load_compound: result is an array" false (sprintf "got %A" other)
@@ -429,12 +429,12 @@ let runNetcdfTests () =
     (match compoundViewType (cBuilder.FreshId()) cVarArr cPartialMask cMaskIR with
      | Ok (ArrayElem parr) ->
          check "load_compound: partial mask -> compound + trailing slot"
-             (parr.IndexTypes.Length = 2) (sprintf "got %d slots" parr.IndexTypes.Length)
+             (parr.IndexTypes.Length = 2) ($"got {parr.IndexTypes.Length} slots")
          check "load_compound: partial compound index has rank 2"
              (parr.IndexTypes.[0].Rank = 2 && parr.IndexTypes.[0].IxKind = IxKCompound)
              (sprintf "got rank %d tag %A" parr.IndexTypes.[0].Rank parr.IndexTypes.[0].Tag)
          check "load_compound: trailing dim preserved (3rd var dim)"
-             (parr.IndexTypes.[1].Id = cId3) (sprintf "got Id %d" parr.IndexTypes.[1].Id)
+             (parr.IndexTypes.[1].Id = cId3) ($"got Id {parr.IndexTypes.[1].Id}")
      | Ok other -> check "load_compound: partial result is an array" false (sprintf "got %A" other)
      | Error e -> check "load_compound: partial (leading-prefix) mask succeeds" false e)
 
@@ -456,13 +456,13 @@ let runNetcdfTests () =
     (match compoundViewType (cBuilder.FreshId()) cVarArr cMask1of3 cMaskIR with
      | Ok (ArrayElem qarr) ->
          check "load_compound: rank-1 mask over rank-3 -> compound + 2 trailing slots"
-             (qarr.IndexTypes.Length = 3) (sprintf "got %d slots" qarr.IndexTypes.Length)
+             (qarr.IndexTypes.Length = 3) ($"got {qarr.IndexTypes.Length} slots")
          check "load_compound: rank-1 leading compound index has rank 1"
              (qarr.IndexTypes.[0].Rank = 1 && qarr.IndexTypes.[0].IxKind = IxKCompound)
              (sprintf "got rank %d tag %A" qarr.IndexTypes.[0].Rank qarr.IndexTypes.[0].Tag)
          check "load_compound: rank-1 leading preserves trailing dims in order"
              (qarr.IndexTypes.[1].Id = cId2 && qarr.IndexTypes.[2].Id = cId3)
-             (sprintf "got Ids %d, %d" qarr.IndexTypes.[1].Id qarr.IndexTypes.[2].Id)
+             ($"got Ids {qarr.IndexTypes.[1].Id}, {qarr.IndexTypes.[2].Id}")
      | Ok other -> check "load_compound: rank-1 result is an array" false (sprintf "got %A" other)
      | Error e -> check "load_compound: rank-1 leading mask succeeds" false e)
 
@@ -526,10 +526,10 @@ let runNetcdfTests () =
      | Ok (ArrayElem compArr) ->
          let rawLevels = buildRawLoopLevels [compArr] (computeSDimsPerArray [compArr])
          check "compound iteration: CompoundIdx slot is one loop axis (not leadRank)"
-             (rawLevels.Length = 2) (sprintf "got %d levels" rawLevels.Length)
+             (rawLevels.Length = 2) ($"got {rawLevels.Length} levels")
          check "compound iteration: compound level tagged __compoundidx, mask rank in SourceRank"
              (rawLevels.Length = 2 && rawLevels.[0].IndexSpace.Tag = Some "__compoundidx" && rawLevels.[0].IndexSpace.SourceRank = 2)
-             (sprintf "got %d levels" rawLevels.Length)
+             ($"got {rawLevels.Length} levels")
          check "compound iteration: trailing dim stays its own dense level"
              (rawLevels.Length = 2 && rawLevels.[1].IndexSpace.Tag = None) ""
      | Ok other -> check "compound iteration: partial compound is an array" false (sprintf "got %A" other)
@@ -546,7 +546,7 @@ let runNetcdfTests () =
     let compoundNames = CodeGen.compoundArrayNamesOf [compBinding]
     let compHdr = CodeGen.genForLoopHeader compoundNames compBinding
     check "compound iteration: loop header bounds on idx->cardinality"
-        (compHdr.Contains "__i0 < data.idx->cardinality;") (sprintf "got: %s" compHdr)
+        (compHdr.Contains "__i0 < data.idx->cardinality;") ($"got: {compHdr}")
 
     // A compound array's trailing dim: a literal extent keeps its literal bound
     // (IRLit arm); a NON-literal extent bounds on trailing_stride, since the
@@ -560,10 +560,10 @@ let runNetcdfTests () =
         { litTrailB with Extent = IRVar (999, IRTScalar ETInt64) }
     let litHdr = CodeGen.genForLoopHeader compoundNames litTrailB
     check "compound iteration: literal trailing extent keeps its literal bound"
-        (litHdr.Contains "__i1 < 50;") (sprintf "got: %s" litHdr)
+        (litHdr.Contains "__i1 < 50;") ($"got: {litHdr}")
     let dynHdr = CodeGen.genForLoopHeader compoundNames dynTrailB
     check "compound iteration: non-literal trailing extent bounds on trailing_stride"
-        (dynHdr.Contains "__i1 < data.trailing_stride;") (sprintf "got: %s" dynHdr)
+        (dynHdr.Contains "__i1 < data.trailing_stride;") ($"got: {dynHdr}")
 
     // genElementBindingNew compound access: the compound axis peels against the
     // compact .data buffer. All-dims (no trailing, ArrayRank 1) -> scalar leaf
@@ -575,10 +575,10 @@ let runNetcdfTests () =
           ArrayRank = arrRank; Virtual = RealArray; SlotTag = None }
     let (leafCode, _) = CodeGen.genElementBindingNew compBinding (mkCompElem 1) "data"
     check "compound iteration: all-dims access peels the compact leaf data[r]"
-        (leafCode.Contains "= data.data[__i0];") (sprintf "got: %s" leafCode)
+        (leafCode.Contains "= data.data[__i0];") ($"got: {leafCode}")
     let (rowCode, _) = CodeGen.genElementBindingNew compBinding (mkCompElem 2) "data"
     check "compound iteration: partial access peels the trailing row base"
-        (rowCode.Contains "data.data + __i0 * data.trailing_stride") (sprintf "got: %s" rowCode)
+        (rowCode.Contains "data.data + __i0 * data.trailing_stride") ($"got: {rowCode}")
 
     // compoundOutputSubscript: the compact WRITE address mirrors the read.
     // all-dims (compound binding only) -> .data[r]; partial (one trailing) ->
@@ -603,7 +603,7 @@ let runNetcdfTests () =
         match parseProgram src with
         | Ok program ->
             program.Modules.[0].Decls
-            |> List.map (fun d -> d.Value)
+            |> List.map (_.Value)
             |> List.tryPick (fun d ->
                 match d with
                 | DeclLet b -> (match b.Value.Kind with ExprKind.ExprRange tys -> Some (List.length tys) | _ -> None)
@@ -639,7 +639,7 @@ let runNetcdfTests () =
                  check "range<I> map: compiles" true ""
                  (match runExecutable exe with
                   | Ok (0, _) -> check "range<I> map: runs (exit 0)" true ""
-                  | Ok (c, o) -> check "range<I> map: runs (exit 0)" false (sprintf "exit %d: %s" c o)
+                  | Ok (c, o) -> check "range<I> map: runs (exit 0)" false ($"exit {c}: {o}")
                   | Error e -> check "range<I> map: runs (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP range<I> map compile: %s" e
@@ -666,7 +666,7 @@ let runNetcdfTests () =
                  check "range<I1,I2> map: compiles" true ""
                  (match runExecutable exe with
                   | Ok (0, _) -> check "range<I1,I2> map: runs (exit 0)" true ""
-                  | Ok (c, o) -> check "range<I1,I2> map: runs (exit 0)" false (sprintf "exit %d: %s" c o)
+                  | Ok (c, o) -> check "range<I1,I2> map: runs (exit 0)" false ($"exit {c}: {o}")
                   | Error e -> check "range<I1,I2> map: runs (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP range2 compile: %s" e
@@ -701,10 +701,10 @@ let runNetcdfTests () =
                   | Ok (0, _) -> check "range<SymIdx<2,N>> map: runs (multi-rank params bind)" true ""
                   | Ok (c, o) ->
                       check "range<SymIdx<2,N>> map: runs (multi-rank params bind)" false
-                          (sprintf "compiled, then exited %d: %s" c o)
+                          ($"compiled, then exited {c}: {o}")
                   | Error e ->
                       check "range<SymIdx<2,N>> map: runs (multi-rank params bind)" false
-                          (sprintf "compiled, but could not be run: %s" e))
+                          ($"compiled, but could not be run: {e}"))
              | Error e when isSkipError e -> printfn "  SKIP range<SymIdx> compile: %s" e
              // A codegen gap for a symmetric range output is a known frontier;
              // keep it a SKIP, but say so explicitly rather than by omission.
@@ -744,11 +744,11 @@ let runNetcdfTests () =
     // Both variables should reference the same IRIndexType (same Id)
     let tempIdxIds =
         match vars2.Value |> List.tryPick (fun (n,t) -> if n = "temperature" then Some t else None) with
-        | Some (ArrayElem a) -> a.IndexTypes |> List.map (fun i -> i.Id)
+        | Some (ArrayElem a) -> a.IndexTypes |> List.map (_.Id)
         | _ -> []
     let pressIdxIds =
         match vars2.Value |> List.tryPick (fun (n,t) -> if n = "pressure" then Some t else None) with
-        | Some (ArrayElem a) -> a.IndexTypes |> List.map (fun i -> i.Id)
+        | Some (ArrayElem a) -> a.IndexTypes |> List.map (_.Id)
         | _ -> []
     
     check "temperature and pressure share same lat index Id"
@@ -797,7 +797,7 @@ let runNetcdfTests () =
     // With external map, no IRTDIndexType defs are generated
     let idx3 = modul3.Types |> List.choose (function IRTDIndexType _ -> Some () | _ -> None)
     check "External map: no IRTDIndexType defs generated"
-        (idx3.IsEmpty) (sprintf "got %d" idx3.Length)
+        (idx3.IsEmpty) ($"got {idx3.Length}")
     
     // Both modules' vars should reference the shared lat/lon Ids
     let vars3 = findStruct "file1__vars" modul3
@@ -952,7 +952,7 @@ let runNetcdfTests () =
             for td in liveModule.Types do
                 match td with
                 | IRTDIndexType (name, idx) ->
-                    let ext = match idx.Extent with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "?"
+                    let ext = match idx.Extent with IRLit (IRLitInt n) -> string n | _ -> "?"
                     printfn "      type %s = Idx<%s>" name ext
                 | IRTDStruct (name, fields) ->
                     printfn "      struct %s = {" name
@@ -977,10 +977,10 @@ let sample = NetCDF.load("tests/fixtures/sample.nc")
     match parseProgram bladeSource with
     | Ok program ->
         check "Parse succeeds" true ""
-        let decls = program.Modules.[0].Decls |> List.map (fun d -> d.Value)
+        let decls = program.Modules.[0].Decls |> List.map (_.Value)
         
         check "First decl is DeclImport"
-            (match decls.[0] with DeclImport _ -> true | _ -> false)
+            decls.[0].IsDeclImport
             (sprintf "got %A" decls.[0])
         
         check "Import has correct qualified name"
@@ -990,7 +990,7 @@ let sample = NetCDF.load("tests/fixtures/sample.nc")
             (sprintf "got %A" decls.[0])
 
         check "Second decl is DeclLet"
-            (match decls.[1] with DeclLet _ -> true | _ -> false)
+            decls.[1].IsDeclLet
             (sprintf "got %A" decls.[1])
 
         // Test lowering (requires sample.nc + libnetcdf)
@@ -1006,7 +1006,7 @@ let sample = NetCDF.load("tests/fixtures/sample.nc")
                 for td in modul.Types do
                     match td with
                     | IRTDIndexType (name, idx) ->
-                        let ext = match idx.Extent with IRLit (IRLitInt n) -> sprintf "%d" n | _ -> "?"
+                        let ext = match idx.Extent with IRLit (IRLitInt n) -> string n | _ -> "?"
                         printfn "    type %s = Idx<%s>" name ext
                     | IRTDStruct (name, fields) ->
                         printfn "    struct %s = {" name
@@ -1043,7 +1043,7 @@ let sample = NetCDF.load("tests/fixtures/sample.nc")
         with ex -> unexpected "lower" ex
 
     | Error e ->
-        check "Parse succeeds" false (sprintf "%d:%d %s" e.Line e.Col e.Message)
+        check "Parse succeeds" false ($"{e.Line}:{e.Col} {e.Message}")
 
     // ---------------------------------------------------------------
     // load_compound |> NetCDF.read: full lowering + codegen wiring (slice 2b).
@@ -1068,11 +1068,11 @@ let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.rea
             let modul = ir.Modules.[0]
             check "load_compound|>read: ProviderReads populated"
                 (not (Map.isEmpty modul.ProviderReads))
-                (sprintf "got %d entries" modul.ProviderReads.Count)
+                ($"got {modul.ProviderReads.Count} entries")
             (match modul.ProviderReads |> Map.toList |> List.tryHead |> Option.map snd with
              | Some spec ->
                  check "load_compound|>read: recovered var name B"
-                     (spec.VarName = "B") (sprintf "got '%s'" spec.VarName)
+                     (spec.VarName = "B") ($"got '{spec.VarName}'")
                  check "load_compound|>read: recovered mask name B_mask"
                      (spec.MaskName = Some "B_mask") (sprintf "got %A" spec.MaskName)
              | None -> ())
@@ -1101,7 +1101,7 @@ let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.rea
                  File.Copy("tests/fixtures/sample.nc", Path.Combine(lcOutDir, "tests", "fixtures", "sample.nc"), true)
                  (match runExecutable exePath with
                   | Ok (0, _) -> check "load_compound e2e: runs to completion (exit 0)" true ""
-                  | Ok (code, out) -> check "load_compound e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code out)
+                  | Ok (code, out) -> check "load_compound e2e: runs to completion (exit 0)" false ($"exit {code}: {out}")
                   | Error e -> check "load_compound e2e: runs to completion (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP load_compound e2e (compile skipped): %s" e
@@ -1115,7 +1115,7 @@ let data = NetCDF.load_compound(sample.vars.B, sample.vars.B_mask) |> NetCDF.rea
             // lacking B/B_mask is a broken fixture the block must report, since
             // every assertion above depends on it.
             if nativeLibUnavailable e then printfn "  SKIP load_compound|>read: %s" e
-            else check "load_compound|>read: lowers" false (sprintf "lower error: %s" e)
+            else check "load_compound|>read: lowers" false ($"lower error: {e}")
     with ex -> unexpected "load_compound|>read" ex
 
     // ---------------------------------------------------------------
@@ -1158,7 +1158,7 @@ let out = method_for(data) <@> lambda(x) -> x + x |> compute
                  File.Copy("tests/fixtures/sample.nc", Path.Combine(lcOutDir, "tests", "fixtures", "sample.nc"), true)
                  (match runExecutable exePath with
                   | Ok (0, _) -> check "compound map e2e: runs to completion (exit 0)" true ""
-                  | Ok (code, runOut) -> check "compound map e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Ok (code, runOut) -> check "compound map e2e: runs to completion (exit 0)" false ($"exit {code}: {runOut}")
                   | Error e -> check "compound map e2e: runs to completion (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP compound map e2e (compile skipped): %s" e
@@ -1167,7 +1167,7 @@ let out = method_for(data) <@> lambda(x) -> x + x |> compute
             printfn "  SKIP compound map: %s" e
         | Error e ->
             check "compound map: lowers (method_for over a compound)" false
-                (sprintf "lower error: %s" e)
+                ($"lower error: {e}")
     with ex -> unexpected "compound map" ex
 
     // ---------------------------------------------------------------
@@ -1238,7 +1238,7 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                             | Some parsed ->
                                 if parsed.Length <> expected.Length then
                                     check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
-                                        (sprintf "expected %d values, got %d" expected.Length parsed.Length)
+                                        ($"expected {expected.Length} values, got {parsed.Length}")
                                 else
                                     // Float32 data printed at precision 15 round-trips exactly and
                                     // x+x is exact in fp, so the tolerance only guards the parse.
@@ -1256,7 +1256,7 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                                "A did not read back as floats"
                        | Error e ->
                            check "dense read e2e: out values match libnetcdf ground truth (2*A)" false
-                               (sprintf "ground-truth read failed: %s" e))
+                               ($"ground-truth read failed: {e}"))
                       // A missing .nc at RUNTIME must fail loudly, not print garbage:
                       // the same exe run from a fresh dir without sample.nc has to exit
                       // nonzero with a NetCDF error on stderr (netcdf.dll resolves via
@@ -1270,12 +1270,12 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                            | Ok (code, missOut) ->
                                check "dense read e2e: missing sample.nc at runtime fails loudly (nonzero exit + NetCDF error)"
                                    (code <> 0 && missOut.Contains "NetCDF error")
-                                   (sprintf "exit %d: %s" code (missOut.Substring(0, min 200 missOut.Length)))
+                                   ($"exit {code}: {(missOut.Substring(0, min 200 missOut.Length))}")
                            | Error e ->
                                check "dense read e2e: missing sample.nc at runtime fails loudly (nonzero exit + NetCDF error)" false e)
                        finally
                           try Directory.Delete(missingDir, true) with _ -> ())
-                  | Ok (code, runOut) -> check "dense read e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Ok (code, runOut) -> check "dense read e2e: runs to completion (exit 0)" false ($"exit {code}: {runOut}")
                   | Error e -> check "dense read e2e: runs to completion (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP dense read e2e (compile skipped): %s" e
@@ -1283,7 +1283,7 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
         | Error e when nativeLibUnavailable e ->
             printfn "  SKIP dense read: %s" e
         | Error e ->
-            check "dense read: lowers (plain provider var read)" false (sprintf "lower error: %s" e)
+            check "dense read: lowers (plain provider var read)" false ($"lower error: {e}")
     with ex -> unexpected "dense read" ex
 
     // ---------------------------------------------------------------
@@ -1322,18 +1322,18 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
                  check "fill_random e2e: compiles" true ""
                  (match runExecutable exePath with
                   | Ok (0, _) -> check "fill_random e2e: runs to completion (exit 0)" true ""
-                  | Ok (code, runOut) -> check "fill_random e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Ok (code, runOut) -> check "fill_random e2e: runs to completion (exit 0)" false ($"exit {code}: {runOut}")
                   | Error e -> check "fill_random e2e: runs to completion (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP fill_random e2e (compile skipped): %s" e
                  else check "fill_random e2e: compiles" false e)
         | Error e ->
-            check "fill_random: lowers" false (sprintf "lower error: %s" e)
+            check "fill_random: lowers" false ($"lower error: {e}")
     // Hermetic block (no libnetcdf, no sample.nc), so there is no skip condition
     // here at all: any exception is a failure.
     with ex ->
         check "fill_random: no unexpected exception" false
-            (sprintf "%s: %s" (ex.GetType().Name) ex.Message)
+            ($"{(ex.GetType().Name)}: {ex.Message}")
 
     // ---------------------------------------------------------------
     // Relational pipeline over a provider read: the SQL builtins consume an
@@ -1378,7 +1378,7 @@ let top = ranked(0)
             let gapMarker = "/* dynamic */"
             check "relational pipeline: provider read has a resolved extent (no unresolved-extent placeholder)"
                 (not (cppCode.Contains gapMarker))
-                (sprintf "generated C++ still contains '%s' -- a provider-read extent went unresolved" gapMarker)
+                ($"generated C++ still contains '{gapMarker}' -- a provider-read extent went unresolved")
             let relOutDir = "./generated_cpp_tests"
             if not (Directory.Exists relOutDir) then Directory.CreateDirectory relOutDir |> ignore
             CodeGen.deployRuntimeHeaders relOutDir
@@ -1395,12 +1395,12 @@ let top = ranked(0)
                       let hasLine (expect: string) =
                           runOut.Split('\n') |> Array.exists (fun l -> l.Trim() = expect)
                       check "relational pipeline e2e: COUNT after WHERE (n_high = 10)"
-                          (hasLine "n_high = 10") (sprintf "output was: %s" runOut)
+                          (hasLine "n_high = 10") ($"output was: {runOut}")
                       check "relational pipeline e2e: SUM after WHERE (total_high = 155)"
                           (hasLine "total_high = 155") ""
                       check "relational pipeline e2e: ORDER BY desc head (top = 20)"
                           (hasLine "top = 20") ""
-                  | Ok (code, runOut) -> check "relational pipeline e2e: runs to completion (exit 0)" false (sprintf "exit %d: %s" code runOut)
+                  | Ok (code, runOut) -> check "relational pipeline e2e: runs to completion (exit 0)" false ($"exit {code}: {runOut}")
                   | Error e -> check "relational pipeline e2e: runs to completion (exit 0)" false e)
              | Error e ->
                  if isSkipError e then printfn "  SKIP relational pipeline e2e (compile skipped): %s" e
@@ -1408,7 +1408,7 @@ let top = ranked(0)
         | Error e when nativeLibUnavailable e ->
             printfn "  SKIP relational pipeline: %s" e
         | Error e ->
-            check "relational pipeline: lowers" false (sprintf "lower error: %s" e)
+            check "relational pipeline: lowers" false ($"lower error: {e}")
     with ex -> unexpected "relational pipeline" ex
 
     // ---------------------------------------------------------------
@@ -1446,13 +1446,13 @@ let s = reduce(xd, (+))
         | Error e ->
             check "wrong section accessor: the diagnostic names the missing field and its struct"
                 (e.Contains "struct sample__vars has no field 'xdim'")
-                (sprintf "got: %s" e)
+                ($"got: {e}")
             check "wrong section accessor: the diagnostic names the accessor that works"
                 (e.Contains "sample.dims.xdim")
-                (sprintf "got: %s" e)
+                ($"got: {e}")
             check "wrong section accessor: the diagnostic lists the fields that DO exist"
                 (e.Contains "available fields:" && e.Contains "A")
-                (sprintf "got: %s" e)
+                ($"got: {e}")
     with ex -> unexpected "wrong section accessor" ex
 
     // ---------------------------------------------------------------
@@ -1531,16 +1531,16 @@ let arrays = NetCDF.load("definitely_absent_9f3a.nc")
             check "missing file: lowering returns Error (no unhandled exception)" true ""
             check "missing file: error names the missing file and cwd"
                 (msg.Contains "not found" && msg.Contains "definitely_absent_9f3a.nc")
-                (sprintf "got: %s" msg)
+                ($"got: {msg}")
      with
      | ex ->
         // The whole point of the fix: lowering must NOT throw here.
         check "missing file: lowering does not throw an unhandled exception" false
-            (sprintf "unexpected exception: %s" ex.Message))
+            ($"unexpected exception: {ex.Message}"))
 
     // ---------------------------------------------------------------
     // Summary
     // ---------------------------------------------------------------
-    printFooter "NetCDF Provider" [sprintf "%d passed" passed; sprintf "%d failed" failed]
+    printFooter "NetCDF Provider" [$"{passed} passed"; $"{failed} failed"]
     if failed > 0 then 1 else 0
 

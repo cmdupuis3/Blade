@@ -101,7 +101,7 @@ let internal whereIsInert (w: WhereClause option) : bool =
 /// How a kernel names itself in a diagnostic.
 let internal kernName (k: Expr) : string =
     match k.Kind with
-    | ExprKind.ExprVar n -> sprintf "'%s'" n
+    | ExprKind.ExprVar n -> $"'{n}'"
     | _ -> "<lambda>"
 
 /// Fuse two stage kernels into one. `k1` runs FIRST and may have any arity
@@ -116,8 +116,7 @@ let internal fuseKernels (ctx: Ctx) (at: Expr) (k1: Expr) (k2: Expr) : Result<Ex
     let norm (ordinal: string) (k: Expr) =
         match asKernelLambda ctx k with
         | Ok (_, _, _, Some _) ->
-            Error (sprintf "fusing a pipeline does not support a `reynolds(...)` stage kernel (the %s stage kernel %s is one)"
-                       ordinal (kernName k))
+            Error ($"fusing a pipeline does not support a `reynolds(...)` stage kernel (the {ordinal} stage kernel {(kernName k)} is one)")
         | Ok (ps, wc, body, None) -> Ok (ps, wc, body)
         | Error (KernBlockBody f) ->
             Error (kernBlockBodyMsg f)
@@ -135,8 +134,7 @@ let internal fuseKernels (ctx: Ctx) (at: Expr) (k1: Expr) (k2: Expr) : Result<Ex
                 acc |> Option.bind (substKern p.Name (inheritSpan k1 (ExprVar newN)))) (Some b1)
         match b1' |> Option.bind (fun b -> substKern p2.Name b b2) with
         | None ->
-            Error (sprintf "fusing a pipeline cannot substitute through the stage kernels %s and %s (a binder or an unsupported form stands between the stages)"
-                       (kernName k1) (kernName k2))
+            Error ($"fusing a pipeline cannot substitute through the stage kernels {(kernName k1)} and {(kernName k2)} (a binder or an unsupported form stands between the stages)")
         | Some body ->
             // Carry the first stage's DECLARED parameter types onto the fused
             // lambda. An annotation is a constraint as much as a hint --
@@ -147,11 +145,9 @@ let internal fuseKernels (ctx: Ctx) (at: Expr) (k1: Expr) (k2: Expr) : Result<Ex
                     { Name = newN; Type = p.Type; Default = None; NameSpan = noSpan })
             Ok (inheritSpan at (ExprLambda (ps, wc1 |> Option.map (renameWhereVars ren), body)))
     | [_] ->
-        Error (sprintf "fusing a pipeline cannot carry the second stage's `where` clause: stage kernel %s declares one, but its parameter does not survive the fusion"
-                   (kernName k2))
+        Error ($"fusing a pipeline cannot carry the second stage's `where` clause: stage kernel {(kernName k2)} declares one, but its parameter does not survive the fusion")
     | _ ->
-        Error (sprintf "differentiating a pipeline requires each stage after the first to take exactly one argument; stage kernel %s takes %d"
-                   (kernName k2) ps2.Length)))
+        Error ($"differentiating a pipeline requires each stage after the first to take exactly one argument; stage kernel {(kernName k2)} takes {ps2.Length}")))
 
 /// A span-insensitive key for a loop's operand list, so `@>>` can insist
 /// that both computations iterate the SAME loop before it merges them.
@@ -385,7 +381,7 @@ let internal fusePipelinesEnv (ctx: Ctx) (env0: Map<string, Expr>) (arrays0: Set
         | ExprKind.ExprTupleIndex (t, i) -> re (ExprTupleIndex (g t, i))
         | ExprKind.ExprLambda (ps, wc, b) ->
             // the lambda's own parameters shadow anything the env knows
-            let names = ps |> List.map (fun p -> p.Name)
+            let names = ps |> List.map _.Name
             let env2 = names |> List.fold (fun (m: Map<string, Expr>) n -> Map.remove n m) env
             let arr2 = names |> List.fold (fun s n -> Set.remove n s) arrays
             re (ExprLambda (ps, wc, go env2 arr2 b))
@@ -431,7 +427,7 @@ let internal fusePipelinesEnv (ctx: Ctx) (env0: Map<string, Expr>) (arrays0: Set
 /// array-vs-computation decision.
 let internal fuseFunctionBody (ctx: Ctx) (fd: FunctionDecl) : Expr * string list =
     if not (containsPipelineOp fd.Body) then (fd.Body, []) else
-    let paramNames = fd.Params |> List.map (fun p -> p.Name) |> Set.ofList
+    let paramNames = fd.Params |> List.map _.Name |> Set.ofList
     let env =
         moduleLetValues ctx
         |> Map.filter (fun n _ -> not (Set.contains n paramNames))
@@ -447,7 +443,7 @@ let internal fuseFunctionBody (ctx: Ctx) (fd: FunctionDecl) : Expr * string list
             match p.Type with
             | Some t -> (match resolveArrayTy ctx t with TyArray _ -> true | _ -> false)
             | None -> false)
-        |> List.map (fun p -> p.Name)
+        |> List.map _.Name
         |> Set.ofList
     fusePipelinesEnv ctx env (Set.union (Set.difference moduleArrays paramNames) paramArrays) fd.Body
 
@@ -556,7 +552,7 @@ let internal classifyPeelKernel (rp: string) (body: Expr) : Result<PeelKernel op
                 | ExprKind.ExprReduce (src, { Kind = ExprKind.ExprSection op }, _, _)
                     when isVarNamed rp src && op <> OpAdd ->
                     let opName = (match op with OpMul -> "(*)" | OpSub -> "(-)" | OpDiv -> "(/)" | _ -> "this")
-                    Error (sprintf "the per-group %s aggregate is not sum-decomposable, so differentiating it needs the group axis MATERIALIZED -- and a group-space accumulator needs a group count known at COMPILE time, which a grouping does not have (v1). The auto-lowered subset is the group-linear one: `reduce(r, (+))`, `reduce(r, (+)) / extents(r)`, `extents(r)`" opName)
+                    Error $"the per-group {opName} aggregate is not sum-decomposable, so differentiating it needs the group axis MATERIALIZED -- and a group-space accumulator needs a group count known at COMPILE time, which a grouping does not have (v1). The auto-lowered subset is the group-linear one: `reduce(r, (+))`, `reduce(r, (+)) / extents(r)`, `extents(r)`"
                 | _ -> Ok None
 
 /// Is this init the additive identity, i.e. does it contribute nothing?

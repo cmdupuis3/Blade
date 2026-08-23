@@ -149,7 +149,7 @@ module TrainingOracle =
         let specStr (s: SpecEntry[]) =
             s
             |> Array.map (fun e ->
-                sprintf "(%d, %d, %d)" e.Ir.L (if e.Ir.P = Even then 0 else 1) e.Mult)
+                $"({e.Ir.L}, {if e.Ir.P = Even then 0 else 1}, {e.Mult})")
             |> String.concat ", "
         printfn "// GSPEC = [%s]  TAUSPEC = [%s]" (specStr gspec) (specStr tspec)
         printfn "// HSPEC = tp_spec(GSPEC, GSPEC) = [%s]  total_dim = %d" (specStr hspec) (Irreps.totalDim hspec)
@@ -157,8 +157,8 @@ module TrainingOracle =
         let w2dim = Irreps.homDim hspec tspec
         printfn "// tp_full_weight_dim = %d  hom_dim = %d" w1dim w2dim
         for s in 0 .. data.Length - 1 do
-            arr (sprintf "train_g%d" s) (fst data.[s])
-            arr (sprintf "train_t%d" s) (snd data.[s])
+            arr $"train_g{s}" (fst data.[s])
+            arr $"train_t{s}" (snd data.[s])
         let w10 = Array.init w1dim (fun i -> 0.03 * float (i + 1) * (if i % 2 = 0 then 1.0 else -1.0))
         let w20 = Array.init w2dim (fun i -> 0.1 * float (i + 1) * (if i % 2 = 0 then 1.0 else -1.0))
         arr "w1_init" w10

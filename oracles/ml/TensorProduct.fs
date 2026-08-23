@@ -66,7 +66,7 @@ module TensorProduct =
         if not (allValidOutputs cfg) then
             invalidArg "cfg" "tensor_product: some output irrep is unreachable (all_valid_outputs fails)"
         if weights.Length <> weightDim cfg then
-            invalidArg "weights" (sprintf "weight length %d, expected %d" weights.Length (weightDim cfg))
+            invalidArg "weights" $"weight length {weights.Length}, expected {weightDim cfg}"
         if x.Length <> Irreps.totalDim cfg.Spec1 then
             invalidArg "x" "input 1 length does not match spec1"
         if y.Length <> Irreps.totalDim cfg.Spec2 then

@@ -6,7 +6,7 @@
 // is diffed against, value by value.
 //
 // Pinning an oracle: copy a fully-gated build to ./oracle, e.g.
-//   Copy-Item bin\Release\net7.0 oracle -Recurse
+//   Copy-Item bin\Release\net10.0 oracle -Recurse
 // The harness skips cleanly (with that hint) when no oracle is pinned.
 // Deliberately NOT part of the default suite: it g++-compiles every test
 // twice. Run standalone: `blade test diff-oracle [category]`.
@@ -49,7 +49,7 @@ let correctedSlice : Set<string> = Set.empty
 /// the g++ compile that `blade run` performs internally.
 let private runBlade (exePath: string) (srcFile: string) : Result<string, string> =
     try
-        let psi = ProcessStartInfo(exePath, sprintf "run \"%s\"" srcFile)
+        let psi = ProcessStartInfo(exePath, $"run \"{srcFile}\"")
         psi.RedirectStandardOutput <- true
         psi.RedirectStandardError <- true
         psi.UseShellExecute <- false
@@ -61,7 +61,7 @@ let private runBlade (exePath: string) (srcFile: string) : Result<string, string
             (try proc.Kill() with _ -> ())
             Error "timed out (>180s)"
         elif proc.ExitCode <> 0 then
-            Error (sprintf "exit %d: %s" proc.ExitCode (errT.Result.Trim()))
+            Error ($"exit {proc.ExitCode}: {(errT.Result.Trim())}")
         else Ok outT.Result
     with ex -> Error ex.Message
 
@@ -97,7 +97,7 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
     use _fpPin = pinFpContractOff ()
     if not (File.Exists oracleExe) then
         printfn "Skipped: no pinned oracle at %s" (Path.GetFullPath oracleExe)
-        printfn "         Pin one from a fully-gated build:  Copy-Item bin\\Release\\net7.0 oracle -Recurse"
+        printfn "         Pin one from a fully-gated build:  Copy-Item bin\\Release\\net10.0 oracle -Recurse"
         { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     elif not capabilities.Value.HasGpp then
         printfn "Skipped: requires g++."
@@ -117,7 +117,7 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
         let mutable skipped = 0
         let mutable failedNames : string list = []
         for cat in categories do
-            printSubHeader (sprintf "category: %s" cat)
+            printSubHeader ($"category: {cat}")
             for (name, source) in category cat do
                 if name.EndsWith "(rejects)" then
                     skipped <- skipped + 1   // reject-probes have no values to diff
@@ -147,12 +147,12 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
                     | Error e, _ ->
                         failed <- failed + 1
                         failedNames <- failedNames @ [name]
-                        resultLine Fail name (sprintf "current binary failed: %s" e)
+                        resultLine Fail name ($"current binary failed: {e}")
                     | _, Error e ->
                         // Oracle can't run it (e.g. feature added after pinning):
                         // that's a skip with a note, not a divergence.
                         skipped <- skipped + 1
-                        resultLine Skip name (sprintf "oracle failed: %s" e)
+                        resultLine Skip name ($"oracle failed: {e}")
         printFooter blockName
-            [ sprintf "%d passed" passed; sprintf "%d failed" failed; sprintf "%d skipped" skipped ]
+            [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
         { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }

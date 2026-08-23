@@ -30,7 +30,7 @@ let computeSDimsPerArray (arrayTypes: IRArrayType list) : int list =
     arrayTypes |> List.map (fun arr ->
         arr.IndexTypes 
         |> List.filter (fun idx -> idx.Kind = SDimension) 
-        |> List.sumBy (fun idx -> idx.Rank))
+        |> List.sumBy _.Rank)
 
 /// Build the RAW (by-array, unreordered) loop levels: one level per S-dimension
 /// arity component, emitted array-by-array in index-type order. Pre-grouping
@@ -134,7 +134,7 @@ let fuseJointSLevels
             | _ -> IRBinOp (IRElementwise, IRMul, a, b))
     let fused =
         rawLevels
-        |> List.groupBy (fun l -> l.ArrayIndex)
+        |> List.groupBy _.ArrayIndex
         |> List.collect (fun (arrIdx, lvls) ->
             let recs = if arrIdx < sRecordsByArray.Length then sRecordsByArray.[arrIdx] else []
             let isVirtual = arrIdx < arrayTypes.Length && arrayTypes.[arrIdx].IsVirtual
@@ -167,7 +167,7 @@ let fuseJointSLevels
                       RankIndex = 0
                       IndexSpace =
                         { Tag = None
-                          Extent = productExtent (recs |> List.map (fun r -> r.Extent))
+                          Extent = productExtent (recs |> List.map _.Extent)
                           Symmetry = SymNone
                           Kind = SDimension
                           SourceRank = recs.Length }
@@ -199,7 +199,7 @@ let rawAxisGroups
         i < identities.Length && j < identities.Length &&
         sameIdentity identities.[i] identities.[j]
     let sLevelCount =
-        let counts = rawLevels |> List.countBy (fun l -> l.ArrayIndex) |> Map.ofList
+        let counts = rawLevels |> List.countBy _.ArrayIndex |> Map.ofList
         fun arrIdx -> match counts.TryFind arrIdx with Some c -> c | None -> 0
     let mergesWith (lv: LoopLevelInfo) (prior: LoopLevelInfo) : bool =
         let withinType =
@@ -327,7 +327,7 @@ let computeAllSymcomStates
         // side's S-block must be a single level (d = 1 or fused): mirrors
         // rawAxisGroups.mergesWith.acrossArray exactly.
         let sLevelCount =
-            let counts = levels |> List.countBy (fun l -> l.ArrayIndex) |> Map.ofList
+            let counts = levels |> List.countBy _.ArrayIndex |> Map.ofList
             fun arrIdx -> match counts.TryFind arrIdx with Some c -> c | None -> 0
 
         let countSymmetricGroup (level: LoopLevelInfo) =
@@ -755,7 +755,7 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                             elif groupIsDeclaredAntisym memberIdxs then SymAntisymmetric
                             else SymSymmetric
                         let prodExtent =
-                            factors |> List.map (fun f -> f.Extent)
+                            factors |> List.map _.Extent
                                     |> List.reduce (fun a b ->
                                         match a, b with
                                         | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))

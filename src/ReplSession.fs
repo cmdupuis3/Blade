@@ -71,7 +71,7 @@ module ReplTypes =
             | _ -> []
         let pp = Blade.Ide.abstractRenderer seed
         let ps = tf.Params |> List.map (fun p -> pp p.Type)
-        sprintf "(%s) -> %s" (String.concat ", " ps) (pp tf.ReturnType)
+        $"""({(String.concat ", " ps)}) -> {(pp tf.ReturnType)}"""
 
     /// Build the top-level name -> display info map from an ALREADY-lowered
     /// session (the same front-end pass the interpreter runs, so it never
@@ -236,11 +236,11 @@ module ReplTypes =
                 let value = displayValue t value
                 let tyStr = Blade.Ide.abstractRenderer [] t
                 if isPrimitive t then
-                    if isTransient then sprintf "%s: %s" tyStr value
-                    else sprintf "%s = %s: %s" name tyStr value
+                    if isTransient then $"{tyStr}: {value}"
+                    else $"{name} = {tyStr}: {value}"
                 else
-                    if isTransient then sprintf "%s\n\t%s" value tyStr
-                    else sprintf "%s = %s\n\t%s" name value tyStr
+                    if isTransient then $"{value}\n\t{tyStr}"
+                    else $"{name} = {value}\n\t{tyStr}"
             | Some (RFunc _) -> line
             | None -> if isTransient then value else line
 
@@ -421,7 +421,7 @@ let outNameRe = Regex(@"^([A-Za-z_][A-Za-z0-9_]*) = ", RegexOptions.Compiled)
 let private identTokensRe = Regex(@"[A-Za-z_][A-Za-z0-9_]*", RegexOptions.Compiled)
 
 let private referencedNames (snippet: string) : Set<string> =
-    identTokensRe.Matches snippet |> Seq.map (fun m -> m.Value) |> Set.ofSeq
+    identTokensRe.Matches snippet |> Seq.map _.Value |> Set.ofSeq
 
 /// Classification looks at the first non-comment, non-blank line so a
 /// doc-commented declaration isn't mistaken for a bare expression.
@@ -945,7 +945,7 @@ type ReplSession(runCwd: string) =
         let slots = ResizeArray<MixedSlot>()
         let freshName (stem: string) =
             let inUse = candidate |> Seq.choose bindingName |> Set.ofSeq
-            Seq.initInfinite (fun i -> if i = 0 then stem else sprintf "%s%d" stem i)
+            Seq.initInfinite (fun i -> if i = 0 then stem else $"{stem}{i}")
             |> Seq.find (fun n -> not (Set.contains n inUse))
         for (subLine, text) in segments do
             let head = classifyTarget text
@@ -966,7 +966,7 @@ type ReplSession(runCwd: string) =
                 // opens with a comment still gets a parseable binding.
                 let isAssign = assignRe.IsMatch head
                 let hidden = freshName (if isAssign then "__assign" else "it")
-                let prefix = sprintf "let %s = " hidden
+                let prefix = $"let {hidden} = "
                 let (wrapped, row) = wrapAtSignificantLine prefix text
                 candidate.Add wrapped
                 slots.Add
@@ -995,9 +995,9 @@ type ReplSession(runCwd: string) =
         let candidate = ResizeArray(snippets)
         let hidden =
             let inUse = candidate |> Seq.choose bindingName |> Set.ofSeq
-            Seq.initInfinite (fun i -> if i = 0 then "__assign" else sprintf "__assign%d" i)
+            Seq.initInfinite (fun i -> if i = 0 then "__assign" else $"__assign{i}")
             |> Seq.find (fun n -> not (Set.contains n inUse))
-        let (text, row) = wrapAtSignificantLine (sprintf "let %s = " hidden) trimmed
+        let (text, row) = wrapAtSignificantLine $"let {hidden} = " trimmed
         candidate.Add text
         (candidate, candidate.Count - 1, hidden, row)
 
@@ -1012,10 +1012,10 @@ type ReplSession(runCwd: string) =
     member _.ExpressionCandidate(trimmed: string) : ResizeArray<string> * int * string * int =
         let transient =
             let inUse = snippets |> Seq.choose bindingName |> Set.ofSeq
-            Seq.initInfinite (fun i -> if i = 0 then "it" else sprintf "it%d" i)
+            Seq.initInfinite (fun i -> if i = 0 then "it" else $"it{i}")
             |> Seq.find (fun n -> not (Set.contains n inUse))
         let candidate = ResizeArray(snippets)
-        let (text, row) = wrapAtSignificantLine (sprintf "let %s = " transient) trimmed
+        let (text, row) = wrapAtSignificantLine $"let {transient} = " trimmed
         candidate.Add text
         (candidate, candidate.Count - 1, transient, row)
 
@@ -1246,7 +1246,7 @@ type ReplSession(runCwd: string) =
         elif not (List.isEmpty (List.tail segments)) then
             let (candidate, slots) = this.MixedCandidate segments
             let committed =
-                let drop = slots |> List.filter (fun s -> s.Transient) |> List.map (fun s -> s.Index) |> Set.ofList
+                let drop = slots |> List.filter _.Transient |> List.map _.Index |> Set.ofList
                 let out = ResizeArray<string>()
                 for i in 0 .. candidate.Count - 1 do
                     if not (Set.contains i drop) then out.Add candidate.[i]
@@ -1272,7 +1272,7 @@ type ReplSession(runCwd: string) =
             // `(T^1, T^1) -> T^1`). An identifier naming a VALUE keeps the
             // anonymous echo: it has a printed value to show, which is the
             // thing being asked for.
-            let lastExpr = slots |> List.tryLast |> Option.filter (fun s -> s.Transient)
+            let lastExpr = slots |> List.tryLast |> Option.filter _.Transient
             let report (info: Map<string, ReplTypes.Info>) =
                 match lastExpr with
                 | Some s ->
@@ -1302,7 +1302,7 @@ type ReplSession(runCwd: string) =
             // A reassignment is a statement, not a value ask: silent, like a
             // declaration. The mutation itself persists (the wrapper commits).
             evalWith candidate
-                     [ { Index = idx; Prefix = (sprintf "let %s = " hidden).Length
+                     [ { Index = idx; Prefix = $"let {hidden} = ".Length
                          PrefixRow = row; SubLine = leadPad + 1 } ]
                      None [] (fun _ -> []) (Some candidate)
         else
@@ -1330,7 +1330,7 @@ type ReplSession(runCwd: string) =
                 // to name a function still echoes from the declaration, not
                 // the wrapper -- the same rule the mixed lane applies.
                 evalWith candidate
-                         [ { Index = idx; Prefix = (sprintf "let %s = " transient).Length
+                         [ { Index = idx; Prefix = $"let {transient} = ".Length
                              PrefixRow = row; SubLine = leadPad + 1 } ]
                          (Some transient) [ transient ]
                          (fun info ->
@@ -1410,8 +1410,8 @@ let private wrapCellExpressions (k: int) (src: string) : string * (int * int) li
             exprRows
             |> List.mapi (fun j row ->
                 let prefix =
-                    if exprRows.Length = 1 then sprintf "let __cell%d = " k
-                    else sprintf "let __cell%d_%d = " k j
+                    if exprRows.Length = 1 then $"let __cell{k} = "
+                    else $"let __cell{k}_{j} = "
                 wrapped.[row] <- prefix + wrapped.[row]
                 (row, prefix.Length))
         (String.concat "\n" wrapped, wraps)
@@ -1485,7 +1485,7 @@ let assembleCells (cells: string list) : string * Blade.Ide.CellWindow list =
             // require: those are committed to a live session, and this assembly
             // commits nothing.
             slots.Add { Cell = k; Text = src; Wrap = wraps })
-    let source = String.concat "\n" (slots |> Seq.map (fun s -> s.Text)) + "\n"
+    let source = String.concat "\n" (slots |> Seq.map _.Text) + "\n"
     // One walk converts each slot into the absolute range it occupies: the join
     // contributes exactly one newline between neighbours, so the next slot opens
     // on the line after this one closes.
