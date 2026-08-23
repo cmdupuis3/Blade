@@ -79,17 +79,28 @@ jobs:
             asset: gr-0.73.26-Debian-x86_64.tar.gz
             sha256: ""
 
-          # ---- macOS Intel: UNVERIFIED. macos-13 is GitHub's last x86_64
-          # image; later macos-* images are arm64-only, which is why arm64
+          # ---- macOS Intel: UNVERIFIED. This was macos-13, which GitHub
+          # RETIRED -- and a matrix leg naming a label no runner carries does
+          # not fail, it sits in the queue forever, which is exactly how this
+          # leg "failed": silently, with no log to read. macos-15-intel is the
+          # current standard x86_64 image (standard runners are free and
+          # unlimited on public repositories); macos-26-intel is the newer one.
+          # The plain macos-14/15/26 labels are all arm64, which is why arm64
           # gets its own matrix entry below instead of relying on Rosetta.
           - name: macos-x64
-            os: macos-13
+            os: macos-15-intel
             platform: darwin
             arch: x64
             asset: gr-0.73.26-Darwin-x86_64.tar.gz
             sha256: ""
 
-          # ---- macOS Apple Silicon: UNVERIFIED.
+          # ---- macOS Apple Silicon: UNVERIFIED. macos-14 is DEPRECATED
+          # (GitHub supports the latest two macOS versions). It still resolves
+          # today, but when it is retired this leg will queue forever exactly
+          # the way macos-13 just did. Bumping it to macos-15 is a deliberate
+          # call rather than housekeeping -- it also raises the macOS version
+          # the shipped arm64 binary is built against, and so the oldest macOS
+          # that binary will run on -- so it is left alone here.
           - name: macos-arm64
             os: macos-14
             platform: darwin
