@@ -11,7 +11,7 @@
   "main": "index.js",
   "types": "types/index.d.ts",
   "engines": {
-    "node": ">=16"
+    "node": ">=24"
   },
   "scripts": {
     "generate-surface": "node scripts/generate-surface.js"
