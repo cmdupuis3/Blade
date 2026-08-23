@@ -78,6 +78,17 @@ function Resolve-GrDir {
 $gr = Resolve-GrDir -Explicit $GrDir
 $env:GRDIR = $gr
 $env:PATH = (Join-Path $gr 'bin') + [System.IO.Path]::PathSeparator + $env:PATH
+# PATH is how Windows finds libGR.dll; the POSIX loaders don't look there at
+# all, so the same job needs LD_LIBRARY_PATH (linux) / DYLD_LIBRARY_PATH
+# (macOS) pointed at GR's lib/. Without this the exe builds and then dies at
+# startup on `libGR.so: cannot open shared object file`. UNVERIFIED like the
+# rest of the non-Windows path -- no linux or macOS box was available.
+if (-not $onWindows) {
+    $grLib = Join-Path $gr 'lib'
+    $sep = [System.IO.Path]::PathSeparator
+    $env:LD_LIBRARY_PATH = $grLib + $sep + $env:LD_LIBRARY_PATH
+    $env:DYLD_LIBRARY_PATH = $grLib + $sep + $env:DYLD_LIBRARY_PATH
+}
 $env:GKS_WSTYPE = '100'
 if (Test-Path Env:\GR_DISPLAY) { Remove-Item Env:\GR_DISPLAY }
 

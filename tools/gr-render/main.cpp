@@ -8,8 +8,12 @@
 // See README.md for the full contract.  Every GR-touching detail worth knowing
 // is commented in render.hpp.
 #include <fcntl.h>
+#ifdef _WIN32
 #include <io.h>
 #include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +29,43 @@
 
 namespace {
 
+// ---- platform shim ---------------------------------------------------------
+//
+// This file was written against the MSVC/UCRT spellings (_dup, _setmode,
+// _putenv, ...).  Off Windows they are the same calls without the leading
+// underscore, with two exceptions worth stating rather than hiding:
+//
+//   - _setmode(fd, _O_BINARY) has no POSIX counterpart because it has nothing
+//     to do: a POSIX fd is already binary, there is no CRLF translation to
+//     turn off.  binaryFd/binaryStream are deliberate no-ops there, not TODOs.
+//   - _putenv takes one "NAME=VALUE" string; setenv takes the two halves plus
+//     an overwrite flag.  setEnvVar hands both spellings the same pair, so
+//     `setEnvVar("GR_DISPLAY", "")` sets an EMPTY value on both -- it does not
+//     unset the variable, which is what GR needs (see setupEnv below).
+namespace plat {
+
+#ifdef _WIN32
+constexpr char kPathSep = '\\';
+inline int dupFd(int fd) { return _dup(fd); }
+inline int redirectFd(int from, int to) { return _dup2(from, to); }
+inline void binaryFd(int fd) { _setmode(fd, _O_BINARY); }
+inline void binaryStream(std::FILE *f) { _setmode(_fileno(f), _O_BINARY); }
+inline std::FILE *fdOpen(int fd, const char *mode) { return _fdopen(fd, mode); }
+inline void setEnvVar(const char *name, const char *value) { _putenv_s(name, value); }
+inline long processId() { return long(_getpid()); }
+#else
+constexpr char kPathSep = '/';
+inline int dupFd(int fd) { return ::dup(fd); }
+inline int redirectFd(int from, int to) { return ::dup2(from, to); }
+inline void binaryFd(int) {}
+inline void binaryStream(std::FILE *) {}
+inline std::FILE *fdOpen(int fd, const char *mode) { return ::fdopen(fd, mode); }
+inline void setEnvVar(const char *name, const char *value) { ::setenv(name, value, 1); }
+inline long processId() { return long(::getpid()); }
+#endif
+
+}  // namespace plat
+
 FILE *g_out = nullptr;  // the REAL stdout; fd 1 is rewired to stderr
 long g_counter = 0;
 
@@ -32,11 +73,11 @@ long g_counter = 0;
 // serve mode stdout carries NDJSON only, so fd 1 is pointed at stderr and the
 // original handle is kept privately for responses.
 void captureStdout() {
-  int saved = _dup(1);
+  int saved = plat::dupFd(1);
   if (saved >= 0) {
-    _dup2(2, 1);
-    _setmode(saved, _O_BINARY);
-    g_out = _fdopen(saved, "wb");
+    plat::redirectFd(2, 1);
+    plat::binaryFd(saved);
+    g_out = plat::fdOpen(saved, "wb");
   }
   if (!g_out) g_out = stdout;
 }
@@ -51,8 +92,8 @@ void writeLine(const std::string &s) {
 // GKS_WSTYPE is cached in a static on first use, so this has to happen before
 // any GR entry point runs.
 void setupEnv() {
-  _putenv("GKS_WSTYPE=100");
-  _putenv("GR_DISPLAY=");
+  plat::setEnvVar("GKS_WSTYPE", "100");
+  plat::setEnvVar("GR_DISPLAY", "");
   const char *grdir = std::getenv("GRDIR");
   if (!grdir || !*grdir)
     throw std::runtime_error(
@@ -60,15 +101,23 @@ void setupEnv() {
         "be on PATH) -- without it GR dies with an access violation");
 }
 
+// TEMP/TMP are the Windows spelling; POSIX spells it TMPDIR and guarantees
+// /tmp when even that is unset.  Without the POSIX arm this fell through to
+// ".", i.e. it scattered render temp files across whatever directory the
+// caller happened to be in.
 std::string tempDir() {
   const char *t = std::getenv("TEMP");
   if (!t || !*t) t = std::getenv("TMP");
+#ifndef _WIN32
+  if (!t || !*t) t = std::getenv("TMPDIR");
+  if (!t || !*t) t = "/tmp";
+#endif
   if (!t || !*t) t = ".";
   return std::string(t);
 }
 
 std::string tempFile(const std::string &ext) {
-  return tempDir() + "\\gr-render-" + std::to_string(_getpid()) + "-" +
+  return tempDir() + plat::kPathSep + "gr-render-" + std::to_string(plat::processId()) + "-" +
          std::to_string(++g_counter) + "." + ext;
 }
 
@@ -121,7 +170,7 @@ int optInt(const bj::Value &req, const char *key, int fallback) {
 // ---- serve mode ------------------------------------------------------------
 
 int serve() {
-  _setmode(_fileno(stdin), _O_BINARY);
+  plat::binaryStream(stdin);
   std::string line;
   while (std::getline(std::cin, line)) {
     while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
@@ -170,7 +219,7 @@ int serve() {
 // ---- one-shot mode ---------------------------------------------------------
 
 std::string readStdin() {
-  _setmode(_fileno(stdin), _O_BINARY);
+  plat::binaryStream(stdin);
   std::string all;
   char buf[65536];
   std::size_t n;
