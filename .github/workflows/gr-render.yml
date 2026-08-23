@@ -112,7 +112,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # ---- toolchain --------------------------------------------------------
 
@@ -220,7 +220,7 @@ jobs:
       # ---- publish ---------------------------------------------------------
 
       - name: Upload gr-render-${{ matrix.platform }}-${{ matrix.arch }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gr-render-${{ matrix.platform }}-${{ matrix.arch }}
           path: tools/gr-render/dist/*

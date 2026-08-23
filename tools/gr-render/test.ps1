@@ -108,9 +108,26 @@ if (-not (Test-Path $exe)) {
     exit 1
 }
 
+# TEMP is a Windows-only environment variable: off Windows it is simply not
+# set, and `Join-Path $null ...` is a terminating parameter-binding error under
+# $ErrorActionPreference = 'Stop'. That killed the whole suite on the linux and
+# macOS legs before a single check ran.
+#
+# This resolves the SAME directory main.cpp's tempDir() picks, in the same
+# order, on purpose: the "no temp render files left behind" check at the end
+# scans $tempRoot for the files the EXE wrote, so if the two disagreed that
+# check would scan an empty directory and pass without proving anything.
+$tempRoot = $env:TEMP
+if (-not $tempRoot) { $tempRoot = $env:TMP }
+if (-not $onWindows) {
+    if (-not $tempRoot) { $tempRoot = $env:TMPDIR }
+    if (-not $tempRoot) { $tempRoot = '/tmp' }
+}
+if (-not $tempRoot) { $tempRoot = [System.IO.Path]::GetTempPath() }
+
 # Everything transient lands here; cwd is this dir so stray gks.* files are
 # easy to spot.
-$work = Join-Path $env:TEMP ("gr-render-test-" + $PID)
+$work = Join-Path $tempRoot ("gr-render-test-" + $PID)
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 New-Item -ItemType Directory -Force $work | Out-Null
 Push-Location $work
@@ -320,7 +337,7 @@ Check 'no gksqt.exe process alive' ($gks.Count -eq 0) ("{0} found" -f $gks.Count
 $strays = @(Get-ChildItem -Path $work -Filter 'gks.*' -ErrorAction SilentlyContinue)
 Check 'no stray gks.* files in cwd' ($strays.Count -eq 0) (($strays | ForEach-Object { $_.Name }) -join ',')
 
-$tempLeft = @(Get-ChildItem -Path $env:TEMP -Filter 'gr-render-*.png' -ErrorAction SilentlyContinue)
+$tempLeft = @(Get-ChildItem -Path $tempRoot -Filter 'gr-render-*.png' -ErrorAction SilentlyContinue)
 Check 'no temp render files left behind' ($tempLeft.Count -eq 0) (($tempLeft | ForEach-Object { $_.Name }) -join ',')
 
 # ---- done ------------------------------------------------------------------
