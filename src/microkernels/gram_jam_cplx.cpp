@@ -1,11 +1,13 @@
 // gram_jam_cplx.cpp -- the shipped jam at R=2..8 on COMPLEX and on FLOAT32.
 //
-// Why these two element types matter more than f64: materializeGramForm's own
-// comment says `shimEntry = None` covers "shapes outside the shim's f64 domain
-// (complex zherk/zgemm, float32 ssyrk/sgemm)".  So for complex and float32 the
-// NATIVE jammed nest is not merely the default -- it is the ONLY arm, at every
-// BLAS setting.  R=5 was tuned on f64, which is the one element type where
-// correction 18 says the arm is usually dead code.
+// NOTE the premise this file was written under was FALSE.  It relied on a
+// stale materializeGramForm comment claiming complex/float32 sit "outside the
+// shim's f64 domain" and therefore always take the native nest.  They do not:
+// precisionOf maps s/c/z and blade_linalg.hpp defines all four precision
+// entry points, so complex routes to BLAS exactly like f64 does.  What this
+// instrument measured anyway turned out to decide the emitter: complex peaks
+// at 1.23x, REGRESSES at R >= 6, and is not bit-identical at R=2 -- which is
+// why a3837e6 makes complex decline the jam entirely.
 //
 // Complex also changes the register budget: one std::complex<double>
 // accumulator is 2 doubles, so R=5 costs 10 scalar registers of accumulator,

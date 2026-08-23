@@ -2399,8 +2399,12 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // scalar loops below -- the DEFAULT path, since BLAS is off by
         // default; it is also the single copy of this arithmetic the
         // interpreter and pinned-oracle differentials cover. `shimEntry =
-        // None` covers both gate-off and shapes outside the shim's f64 domain
-        // (complex zherk/zgemm, float32 ssyrk/sgemm).
+        // None` means the gate is off or the route resolved Native -- NOT an
+        // element-type restriction: precisionOf maps s/d/c/z and the shim
+        // defines all four precision entry points, so complex and float32
+        // route to BLAS exactly like f64. (An earlier comment here claimed an
+        // "f64 domain"; a microkernel was built on that claim before it was
+        // checked -- see src/microkernels/gram_jam_cplx.cpp.)
         //
         // Output allocation/layout is IDENTICAL on both paths (packed
         // symmetric for same-array, dense otherwise); the shim writes through

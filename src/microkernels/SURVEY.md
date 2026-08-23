@@ -3,7 +3,13 @@
 **2026-08-21. Audit of five parallel surveys** (folds/recurrences, linalg/contractions,
 emission mechanics, irregular storage, elementwise/AD/ML), each read-only, each ranking
 its leads by (estimated win) x (confidence) x (frequency in the corpus). Companion to
-`README.md`, which carries the six *built* kernels and their verdicts.
+`README.md`, which carries the built kernels and their verdicts.
+
+**Read the README's corrections before trusting an estimate here.** This census is the
+input that chose what to build; several of its estimates did not survive being built
+(the 13.95x jam headline was sample-major, the 116-reduce census contains zero jammable
+sites, and the estimated repack win measured as a loss). Where this file and the
+README's corrections disagree, the corrections are the measurement.
 
 Two surveys grounded their claims in the **1483 emitted `.cpp`/`.ll` files** left in
 `generated_cpp_tests/` by a prior suite run, so the census numbers below are observed

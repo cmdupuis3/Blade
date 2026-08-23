@@ -1,8 +1,10 @@
-// deadtile.cpp -- is the SHIPPED jam a REGRESSION when p < R?
+// deadtile.cpp -- is a dead jam tile (p < R) a REGRESSION?
 //
-// materializeGramForm bakes the extents as literals, so at p = 3 the emitted
-// tile guard is `for (; __gj + 5 <= 3; __gj += 5)` -- provably false, and the
-// whole tile body is dead code.  The question is whether emitting it costs
+// When this was written the emitter shipped a fixed R=5, so at p = 3 the
+// emitted tile guard was `for (; __gj + 5 <= 3; __gj += 5)` -- provably false,
+// the whole tile body dead code.  a3837e6 now derives R from a literal p, so a
+// dead tile can only arise on the RUNTIME-EXTENT path (fixed R=5); this
+// instrument answers whether that residual case costs anything.  The question is whether emitting it costs
 // anything anyway: extra text for gcc to fold, a differently shaped CFG, a
 // different inlining/unrolling decision in the surviving remainder.
 //

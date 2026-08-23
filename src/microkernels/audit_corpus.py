@@ -1,7 +1,7 @@
 import os, re, sys
 from fractions import Fraction
 
-ROOT = r"C:\Users\cdupu\Documents\GitHub\Blade\tests\corpus"
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "corpus")
 
 # The two byte-exactness gates' slices, read out of tests/InterpDiff.fs / DiffOracle.fs
 M0 = ["basic","guards","static","intrinsics"]
