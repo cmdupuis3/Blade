@@ -119,8 +119,12 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
         for cat in categories do
             printSubHeader ($"category: {cat}")
             for (name, source) in category cat do
-                if name.EndsWith "(rejects)" then
-                    skipped <- skipped + 1   // reject-probes have no values to diff
+                if name.EndsWith "(rejects)" || name.EndsWith "(aborts)" then
+                    // Neither shape has values to diff: a reject-probe never
+                    // reaches codegen, and an `(aborts)` test terminates non-zero BY
+                    // DESIGN (its `// ABORT:` pin is what the main harness checks),
+                    // which `runBlade` cannot distinguish from a real failure.
+                    skipped <- skipped + 1
                 else
                     let safe = sanitizeFileName name + ".blade"
                     let mineSrc = Path.Combine(mineDir, safe)
