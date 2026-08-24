@@ -38,6 +38,11 @@ struct Trace {
   std::string colorscale = "Viridis";
   int ncontours = 10;
   bool lines = false, markers = false;
+  // Fixed color range (plotly zmin/zmax on a grid trace). When set, colors,
+  // contour levels and the colorbar follow [zmin, zmax] instead of the data
+  // range -- what keeps one color scale across the frames of an animation.
+  bool zfixed = false;
+  double zmin = 0.0, zmax = 0.0;
 
   bool isGrid() const { return kind != Kind::Scatter; }
 };
@@ -142,6 +147,20 @@ inline void readGrid(const bj::Value &tr, Trace &t) {
         std::swap(t.z[std::size_t(i) * t.nx + j],
                   t.z[std::size_t(t.ny - 1 - i) * t.nx + j]);
     for (int i = 0; i < t.ny / 2; ++i) std::swap(t.y[std::size_t(i)], t.y[std::size_t(t.ny - 1 - i)]);
+  }
+
+  // Fixed color range: plotly semantics make a present zmin/zmax pair
+  // authoritative (plot.blade also stamps "zauto":false, which needs no
+  // reading -- the pair's presence is the signal). A degenerate or
+  // non-finite pair falls back to the automatic range rather than erroring,
+  // the same presentation-not-data rule unknown colorscales follow.
+  const bj::Value *zlo = tr.get("zmin");
+  const bj::Value *zhi = tr.get("zmax");
+  if (zlo && zlo->is(bj::Type::Number) && zhi && zhi->is(bj::Type::Number) &&
+      std::isfinite(zlo->number) && std::isfinite(zhi->number) && zhi->number > zlo->number) {
+    t.zfixed = true;
+    t.zmin = zlo->number;
+    t.zmax = zhi->number;
   }
 }
 

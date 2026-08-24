@@ -244,7 +244,7 @@ accordingly.
 
 | plot.blade factory | trace | GR path |
 |---|---|---|
-| `plot.contourf` | `contour` + `contours.coloring="fill"` | `gr_contourf` |
+| `plot.contourf` | `contour` + `contours.coloring="fill"` | `gr_contourf` (major_h −1: fills only, no level lines — 0 strokes every level black, which turns steep small-scale data into solid blobs) |
 | `plot.contour` | `contour` + `contours.coloring="lines"` | `gr_contour` (colored lines) |
 | `plot.heatmap` | `heatmap` | `gr_cellarray` (there is no `gr_heatmap`) |
 | `plot.line` | `scatter` + `mode="lines"` | `gr_polyline` |
@@ -259,6 +259,14 @@ has no equivalent). Unknown names fall back to Viridis, matching `plot.blade`.
 
 Multiple traces per figure are supported: grid traces draw first, then line/scatter traces
 in plotly's default qualitative palette (installed at colour indices 980+).
+
+A grid trace carrying a finite `zmin`/`zmax` pair with `zmax > zmin` (what `plot.blade`'s
+`zmin`/`zmax` slots emit, alongside `"zauto":false`) fixes the color range: colors, contour
+levels and the colorbar all follow `[zmin, zmax]` instead of the data range, and out-of-range
+cells clamp to the end colors. That is what holds one color scale across the frames of an
+animation. A degenerate or non-finite pair falls back to the automatic range, the same
+presentation-not-data rule unknown colorscale names follow. The first grid trace declaring a
+pair wins, mirroring colorbar ownership.
 
 ### Input tolerances
 

@@ -1,0 +1,29 @@
+// TEST: Plot Factories Accept Float32
+// ============================================================================
+// Float32 data through the generic factories, at every shape the radar
+// notebook exercises: a Float32 series into `line` (mixed with a Float64
+// x-axis), a Float32 GRID into `contourf` (with the fixed-range pair), and
+// a Float32 ROW VIEW from partial indexing into `line`.
+//
+// This pins the ELEMENT-POLYMORPHISM-SURVIVES-THE-SHAPE rule at the
+// `__display_json_array` shaping arm (TypeCheckInfer): the factories'
+// X^1/Y^1/Z vars must stay HM-polymorphic through the json shaping, or
+// zonk defaults them to Float64 and a Float32 argument meets an emitted
+// `Array<double>` parameter ("could not convert Array<float> to
+// Array<double>" in g++ -- measured before the fix). The frame lines ride
+// stdout, so `blade test interp display` diffs the serialized JSON across
+// both lanes: float32 values must serialize identically from the compiled
+// float and the interpreter's VFloat32.
+// ============================================================================
+import plot
+type I4 = Idx<4>
+let xs: Array<Float64 like I4> = [0.0, 1.0, 2.0, 3.0]
+let ys: Array<Float32 like I4> = [0.5, 1.5, 0.25, 2.0]
+let zs: Array<Float32 like I4, I4> = [[1.0, 2.0, 3.0, 4.0], [2.0, 3.0, 4.0, 5.0], [3.0, 4.0, 5.0, 6.0], [4.0, 5.0, 6.0, 7.0]]
+let p1 = plot.line(xs, ys, "f32 series": title)
+let p2 = plot.contourf(xs, xs, zs, 0.0: zmin, 8.0: zmax)
+let row = zs((1 : I4))
+let p3 = plot.line(xs, row)
+// EXPECT: p1 = true
+// EXPECT: p2 = true
+// EXPECT: p3 = true

@@ -1,4 +1,4 @@
-// Blade plot module, v1 (plotly-only).
+﻿// Blade plot module, v1 (plotly-only).
 //
 // `import plot` gives the plotting factories; each one serializes a plotly
 // figure (application/vnd.plotly.v1+json) and hands it to `display.emit`,
@@ -104,9 +104,9 @@
 //     (say 4000 x 12) is resampled on BOTH, so the short axis repeats
 //     samples. The frame is then bounded by B*B samples whatever the input
 //     shape, which is the property that keeps the cap a cap.
-//   * A DECIMATED SAMPLE IS A FLOAT. The resampling kernel multiplies by
-//     1.0, so an integer grid comes back as floating-point JSON on the
-//     decimated path and as integer JSON on the untouched path.
+//   * A DECIMATED SAMPLE KEEPS ITS SOURCE TYPE. An integer grid serializes
+//     as integer JSON on BOTH paths, and a Float32 grid stays Float32:
+//     resampling selects original data, it does not convert it.
 module plot
 
 import display as d
@@ -126,6 +126,19 @@ Unit ylabel: 1
 /// Longest grid axis, in samples, that reaches the panel undecimated
 /// (grid factories only -- see the DECIMATION note in the module header).
 Unit maxdim: 1
+/// Lower bound of a FIXED color range (grid factories). Inert until zmax is
+/// given -- see the zmax marker below.
+Unit zmin: 1
+/// Upper bound of a FIXED color range (grid factories). A non-negative zmax
+/// ACTIVATES the pair: the trace gains `"zauto":false,"zmin":L,"zmax":H` and
+/// a viewer colors (and levels) the grid against [zmin, zmax] instead of the
+/// frame's own data range -- which is what keeps a color scale steady across
+/// frames of an animation. Left at its default (-1, meaning "automatic"),
+/// the trace is BYTE-IDENTICAL to what this module emitted before the pair
+/// existed, the same compatibility rule the `backend` slot follows. The
+/// activation test is `zmax >= 0`, so an all-negative fixed range is not
+/// expressible in v1 (rain rates, spectra and moduli do not miss it).
+Unit zmax: 1
 /// Renderer the program would PREFER the viewer paint this figure with:
 /// 0 = plotly (the default), 1 = GR. Out-of-table indices fall back to the
 /// default rather than erroring, like `cmap`. This is a HINT carried in the
@@ -157,28 +170,31 @@ function __cmap_name(c: Int64<cmap>) -> String =
     if c == 1 then "Plasma" else if c == 2 then "Cividis" else if c == 3 then "Greys" else if c == 4 then "RdBu" else "Viridis"
 
 // Rank-1 axis resamplers, one per budget. `na` is the SOURCE length; sample
-// k reads source index (k * na) / B. The `* 1.0` is load-bearing: without it
-// the kernel body types as the loop index (Nat<__B*>) rather than the array
-// read, and json_array refuses it.
+// k reads source index (k * na) / B. The sample keeps the SOURCE's element
+// type: these kernels used to end in a `* 1.0`, because a kernel reading a
+// captured generic array typed its output as the LOOP INDEX (Nat<__B*>)
+// rather than as what the body reads, and json_array refused it. That was a
+// deduction bug (an HM-polymorphic kernel return being overwritten by the
+// iterated array's element type), not a property of the resampling.
 
 /// Resample a rank-1 axis to 16 samples.
 function __ax16(a: Array<T like Idx<n>>, na: Int64) -> String =
-    d.json_array((method_for(range<__B16>) <@> lambda(k) -> a((k * na) / 16) * 1.0) |> compute)
+    d.json_array((method_for(range<__B16>) <@> lambda(k) -> a((k * na) / 16)) |> compute)
 /// Resample a rank-1 axis to 32 samples.
 function __ax32(a: Array<T like Idx<n>>, na: Int64) -> String =
-    d.json_array((method_for(range<__B32>) <@> lambda(k) -> a((k * na) / 32) * 1.0) |> compute)
+    d.json_array((method_for(range<__B32>) <@> lambda(k) -> a((k * na) / 32)) |> compute)
 /// Resample a rank-1 axis to 64 samples.
 function __ax64(a: Array<T like Idx<n>>, na: Int64) -> String =
-    d.json_array((method_for(range<__B64>) <@> lambda(k) -> a((k * na) / 64) * 1.0) |> compute)
+    d.json_array((method_for(range<__B64>) <@> lambda(k) -> a((k * na) / 64)) |> compute)
 /// Resample a rank-1 axis to 128 samples.
 function __ax128(a: Array<T like Idx<n>>, na: Int64) -> String =
-    d.json_array((method_for(range<__B128>) <@> lambda(k) -> a((k * na) / 128) * 1.0) |> compute)
+    d.json_array((method_for(range<__B128>) <@> lambda(k) -> a((k * na) / 128)) |> compute)
 /// Resample a rank-1 axis to 256 samples.
 function __ax256(a: Array<T like Idx<n>>, na: Int64) -> String =
-    d.json_array((method_for(range<__B256>) <@> lambda(k) -> a((k * na) / 256) * 1.0) |> compute)
+    d.json_array((method_for(range<__B256>) <@> lambda(k) -> a((k * na) / 256)) |> compute)
 /// Resample a rank-1 axis to 512 samples.
 function __ax512(a: Array<T like Idx<n>>, na: Int64) -> String =
-    d.json_array((method_for(range<__B512>) <@> lambda(k) -> a((k * na) / 512) * 1.0) |> compute)
+    d.json_array((method_for(range<__B512>) <@> lambda(k) -> a((k * na) / 512)) |> compute)
 
 // Rank-2 grid resamplers. `hr` / `hc` are the SOURCE row / column counts;
 // cell (i, j) reads z((i * hr) / B, (j * hc) / B) -- the same map the axis
@@ -186,22 +202,22 @@ function __ax512(a: Array<T like Idx<n>>, na: Int64) -> String =
 
 /// Resample a rank-2 grid to 16x16 samples.
 function __gr16(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
-    d.json_array((method_for(range<__B16, __B16>) <@> lambda(i, j) -> z((i * hr) / 16, (j * hc) / 16) * 1.0) |> compute)
+    d.json_array((method_for(range<__B16, __B16>) <@> lambda(i, j) -> z((i * hr) / 16, (j * hc) / 16)) |> compute)
 /// Resample a rank-2 grid to 32x32 samples.
 function __gr32(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
-    d.json_array((method_for(range<__B32, __B32>) <@> lambda(i, j) -> z((i * hr) / 32, (j * hc) / 32) * 1.0) |> compute)
+    d.json_array((method_for(range<__B32, __B32>) <@> lambda(i, j) -> z((i * hr) / 32, (j * hc) / 32)) |> compute)
 /// Resample a rank-2 grid to 64x64 samples.
 function __gr64(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
-    d.json_array((method_for(range<__B64, __B64>) <@> lambda(i, j) -> z((i * hr) / 64, (j * hc) / 64) * 1.0) |> compute)
+    d.json_array((method_for(range<__B64, __B64>) <@> lambda(i, j) -> z((i * hr) / 64, (j * hc) / 64)) |> compute)
 /// Resample a rank-2 grid to 128x128 samples.
 function __gr128(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
-    d.json_array((method_for(range<__B128, __B128>) <@> lambda(i, j) -> z((i * hr) / 128, (j * hc) / 128) * 1.0) |> compute)
+    d.json_array((method_for(range<__B128, __B128>) <@> lambda(i, j) -> z((i * hr) / 128, (j * hc) / 128)) |> compute)
 /// Resample a rank-2 grid to 256x256 samples.
 function __gr256(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
-    d.json_array((method_for(range<__B256, __B256>) <@> lambda(i, j) -> z((i * hr) / 256, (j * hc) / 256) * 1.0) |> compute)
+    d.json_array((method_for(range<__B256, __B256>) <@> lambda(i, j) -> z((i * hr) / 256, (j * hc) / 256)) |> compute)
 /// Resample a rank-2 grid to 512x512 samples.
 function __gr512(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64) -> String =
-    d.json_array((method_for(range<__B512, __B512>) <@> lambda(i, j) -> z((i * hr) / 512, (j * hc) / 512) * 1.0) |> compute)
+    d.json_array((method_for(range<__B512, __B512>) <@> lambda(i, j) -> z((i * hr) / 512, (j * hc) / 512)) |> compute)
 
 /// Serialize one axis, decimated when `big` says the figure is over the cap.
 /// The budget ladder is a chain of CALLS, not of inline formers: a kernel
@@ -224,6 +240,13 @@ function __grid_json(z: Array<T like Idx<nr>, Idx<nc>>, hr: Int64, hc: Int64, bi
     if m >= 128 then __gr128(z, hr, hc) else (
     if m >= 64 then __gr64(z, hr, hc) else (
     if m >= 32 then __gr32(z, hr, hc) else __gr16(z, hr, hc)))))) else d.json_array(z)
+
+/// The fixed color-range fragment of a grid trace: empty -- and the trace
+/// byte-identical to the pre-zmin/zmax module -- until `hi` is non-negative
+/// (see the zmax marker above). Emitted with its own trailing comma so the
+/// call site splices it between the trace's `"type"` entry and `xy`.
+function __zrange_json(lo: Float64<zmin>, hi: Float64<zmax>) -> String =
+    if hi >= 0.0 then "\"zauto\":false,\"zmin\":" + d.json_num(lo) + ",\"zmax\":" + d.json_num(hi) + "," else ""
 
 /// The figure's layout object. Empty strings mean "no entry"; the constant
 /// `"autosize":true` tail keeps the object valid JSON whatever is omitted.
@@ -264,39 +287,42 @@ function __emit_fig(trace: String, layout: String, b: Int64<backend>) -> Bool = 
 /// Filled contour plot of z over the x/y grid.
 function contourf(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                   n: Int64<levels> = 10, c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
+                  lo: Float64<zmin> = 0.0, hi: Float64<zmax> = -1.0,
                   t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
                   b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
-    let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"fill\"},\"ncontours\":" + d.json_num(n) + "}"
+    let trace = "{\"type\":\"contour\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"fill\"},\"ncontours\":" + d.json_num(n) + "}"
     __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Line contour plot of z over the x/y grid.
 function contour(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                  n: Int64<levels> = 10, c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
+                 lo: Float64<zmin> = 0.0, hi: Float64<zmax> = -1.0,
                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
                  b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
-    let trace = "{\"type\":\"contour\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"lines\"},\"ncontours\":" + d.json_num(n) + "}"
+    let trace = "{\"type\":\"contour\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"lines\"},\"ncontours\":" + d.json_num(n) + "}"
     __emit_fig(trace, __layout(t, xl, yl), b)
 }
 
 /// Heatmap of z over the x/y grid.
 function heatmap(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                  c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
+                 lo: Float64<zmin> = 0.0, hi: Float64<zmax> = -1.0,
                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
                  b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
-    let trace = "{\"type\":\"heatmap\"," + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\"}"
+    let trace = "{\"type\":\"heatmap\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\"}"
     __emit_fig(trace, __layout(t, xl, yl), b)
 }
 

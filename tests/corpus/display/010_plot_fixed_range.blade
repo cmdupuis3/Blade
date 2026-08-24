@@ -1,0 +1,31 @@
+// TEST: Plot Fixed Color Range Slots
+// ============================================================================
+// The zmin/zmax option pair on the grid factories (the animation-stability
+// slots: a frame sequence rendered with one pair keeps one color scale).
+// Routing follows 004: flat and chained spellings, swapped tag order, and
+// defaults. What is specific to this pair:
+//
+//   * ACTIVATION IS zmax >= 0 (plot.blade's __zrange_json). (a, b) activate
+//     -- their traces gain `"zauto":false,"zmin":L,"zmax":H` ahead of "x" --
+//     across both spellings and both orders.
+//   * zmin ALONE IS INERT (c): with zmax left at its -1 default the trace
+//     must stay byte-identical to the no-slot call (d), which is also what
+//     keeps every pre-pair frame pin in this directory honest.
+//   * The pair rides the PAYLOAD, not the meta -- combining with `1: backend`
+//     (e) moves the meta exactly as 004's g/h/i cases and nothing else.
+//
+// The frame lines this file writes to stdout are diffed across the compiled
+// and interpreter lanes by `blade test interp display`; the emitting module
+// is shared Blade source, so parity is structural, not re-implemented.
+// ============================================================================
+import plot
+let a = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 0.0: zmin, 50.0: zmax)
+let b = plot.heatmap([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]])(5.0: zmax)(2.0: zmin)
+let c = plot.contour([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 3.0: zmin)
+let d = plot.contour([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]])
+let e = plot.contourf([0.0, 1.0], [0.0, 1.0], [[1.0, 2.0], [3.0, 4.0]], 25.0: zmax, 1: backend)
+// EXPECT: a = true
+// EXPECT: b = true
+// EXPECT: c = true
+// EXPECT: d = true
+// EXPECT: e = true

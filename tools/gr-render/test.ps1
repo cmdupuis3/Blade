@@ -175,7 +175,7 @@ function Get-Sha256 {
 # ---- 1. one-shot render of every fixture ----------------------------------
 
 $plotFixtures = @('contourf', 'contour_lines', 'heatmap', 'line', 'scatter',
-    'labeled_cividis', 'line_gaps', 'contourf_200')
+    'labeled_cividis', 'line_gaps', 'contourf_200', 'contourf_fixed_range')
 
 foreach ($name in $plotFixtures) {
     $spec = Join-Path $fixtures "$name.json"
@@ -212,6 +212,21 @@ $info = Get-PngInfo $png
 Check 'odd size rounds down to even' `
     ($r.ExitCode -eq 0 -and $null -ne $info -and $info.Width -eq 800 -and $info.Height -eq 600) `
     $(if ($info) { "got $($info.Width)x$($info.Height)" } else { $r.StdErr })
+
+# ---- 2b. fixed color range engages -----------------------------------------
+# The fixed-range fixture is its own data (max 12) under a [0,100] range; the
+# same figure with the zmin/zmax pair stripped renders against the automatic
+# (data) range. If the pair actually drives the colors, levels and colorbar,
+# the two renders cannot be byte-identical.
+$autoSpec = Join-Path $work 'fixed_range_auto.json'
+(Get-Content -Raw (Join-Path $fixtures 'contourf_fixed_range.json')) `
+    -replace '"zauto":false,"zmin":0,"zmax":100,', '' | Set-Content $autoSpec -NoNewline
+$fixedPng = Join-Path $work 'range_fixed.png'
+$autoPng = Join-Path $work 'range_auto.png'
+$rf = Invoke-OneShot -Fixture (Join-Path $fixtures 'contourf_fixed_range.json') -Out $fixedPng -Width 640 -Height 480
+$ra = Invoke-OneShot -Fixture $autoSpec -Out $autoPng -Width 640 -Height 480
+Check 'fixed range: both variants render' ($rf.ExitCode -eq 0 -and $ra.ExitCode -eq 0) "$($rf.StdErr) $($ra.StdErr)"
+Check 'fixed range: differs from automatic range' ((Get-Sha256 $fixedPng) -ne (Get-Sha256 $autoPng))
 
 # ---- 3. determinism --------------------------------------------------------
 

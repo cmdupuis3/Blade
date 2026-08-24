@@ -1,4 +1,4 @@
-// render.hpp -- the figure -> GR translator.
+﻿// render.hpp -- the figure -> GR translator.
 //
 // One render is: gr_beginprint(temp file) ... draw ... gr_endprint(), then the
 // bytes are read back and the temp file removed.  GR has no in-memory print
@@ -192,6 +192,17 @@ class Renderer {
     xr_.widen();
     yr_.widen();
     zr_.widen();
+    // A trace-declared fixed color range (figure.hpp's zfixed) overrides the
+    // pooled data range wholesale: gr_setspace, both drawing paths and the
+    // colorbar all read zr_, so this one assignment is the entire feature.
+    // First declaring grid trace wins, mirroring which trace owns the
+    // colorbar.
+    for (const Trace &t : fig_.traces)
+      if (t.isGrid() && t.zfixed) {
+        zr_.lo = t.zmin;
+        zr_.hi = t.zmax;
+        break;
+      }
     // Grid traces must fill their axes exactly (a heatmap with a white margin
     // looks broken), but a line/scatter-only figure gets plotly-ish breathing
     // room: snap the window out to the next tick boundary.
@@ -319,12 +330,24 @@ class Renderer {
       h[std::size_t(i)] = zr_.lo + (zr_.hi - zr_.lo) * double(i) / double(nh - 1);
     // GR's contouring cannot see holes: non-finite cells sink to the floor of
     // the colour range (documented fidelity gap vs plotly's transparent gaps).
+    // Finite cells clamp into [zr_.lo, zr_.hi]: a no-op for an automatic
+    // range (lo/hi ARE the data extremes) and the defined out-of-range
+    // behavior for a fixed one, matching colorIndex's clamp on the heatmap
+    // path.
     std::vector<double> z(t.z);
-    for (double &v : z)
+    for (double &v : z) {
       if (!std::isfinite(v)) v = zr_.lo;
+      else if (v < zr_.lo) v = zr_.lo;
+      else if (v > zr_.hi) v = zr_.hi;
+    }
     std::vector<double> x(t.x), y(t.y);
     if (filled) {
-      gr_contourf(t.nx, t.ny, nh, x.data(), y.data(), h.data(), z.data(), 0);
+      // major_h: 0 draws an UNLABELED black line at every level on top of the
+      // fills -- on steep small-scale data (radar cells) the packed lines
+      // merge into solid black blobs. A negative value suppresses the lines
+      // entirely (measured against GR 0.73.26), which is also much closer to
+      // how plotly's filled contours read.
+      gr_contourf(t.nx, t.ny, nh, x.data(), y.data(), h.data(), z.data(), -1);
     } else {
       gr_setlinewidth(1.5);
       gr_contour(t.nx, t.ny, nh, x.data(), y.data(), h.data(), z.data(), 1000);
