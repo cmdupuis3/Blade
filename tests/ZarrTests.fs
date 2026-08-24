@@ -643,6 +643,102 @@ let out = method_for(A) <@> lambda(x) -> x + x |> compute
         with ex -> check ($"e2e v{version}") false ex.Message
 
     // ---------------------------------------------------------------
+    // 10b. Dimension names that collide with C-library globals.
+    //
+    // Every store dimension derives a named index type, and codegen emits one
+    // `using <name> = int64_t;` per index type into the GLOBAL namespace. A
+    // store with a dimension named `time` -- the geoscience default, so the
+    // common case rather than an exotic one -- therefore emitted
+    // `using time = int64_t;` against <ctime>'s `time`, and g++ refused the
+    // whole translation unit with "redeclared as different kind of entity".
+    // `j0` covers the same hazard from <cmath>'s Bessel functions.
+    //
+    // The mangling is an EMISSION concern (CodeGenState.indexTypeCppName), so
+    // the fixture asserts both halves: the Blade-visible names are untouched
+    // (`sample.dims.time` still resolves in source), and the emitted C++ never
+    // carries the bare alias.
+    // ---------------------------------------------------------------
+    printfn "\n--- reserved-identifier dim names: `time` / `j0` ---"
+    (let rsvStore = fixStore "zarr_reserved_dims"
+     let rsvInDir = Path.Combine(e2eDir, rsvStore)
+     let rsvVars : ZarrWrite.WriteVar list = [
+        // Coordinate array for the `time` dimension (1-D and same-named, the
+        // shape xarray writes), so `sample.dims.time` is readable too.
+        { Name = "time"; DimNames = Some ["time"]; Shape = [3L]; Chunks = [3L]
+          FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 [| 10.0; 20.0; 30.0 |]
+          OmitChunks = []; Blade = None }
+        { Name = "T"; DimNames = Some ["time"; "j0"]; Shape = [3L; 2L]; Chunks = [3L; 2L]
+          FillValue = FillFloat 0.0; Data = ZarrWrite.WF64 [| 1.0 .. 6.0 |]
+          OmitChunks = []; Blade = None } ]
+     (try Directory.Delete(rsvStore, true) with _ -> ())
+     (try Directory.Delete(rsvInDir, true) with _ -> ())
+     ZarrWrite.writeStoreV3 rsvStore rsvVars
+     ZarrWrite.writeStoreV3 rsvInDir rsvVars
+     let rsvSource = sprintf """
+import zarr as z
+
+let sample = z.load("%s")
+let T = sample.vars.T |> z.read
+let ts = sample.dims.time |> z.read
+let total = reduce(T, (+), axes = 2)
+let tsum = reduce(ts, (+))
+"""
+                         rsvStore
+     /// `name = <number>` on its own line, InvariantCulture.
+     let printedScalar (name: string) (out: string) : float option =
+        out.Split('\n')
+        |> Array.tryPick (fun l ->
+            let l = l.Trim()
+            let prefix = name + " = "
+            if l.StartsWith prefix then
+                match Double.TryParse(l.Substring prefix.Length,
+                                      Globalization.NumberStyles.Float,
+                                      Globalization.CultureInfo.InvariantCulture) with
+                | true, v -> Some v
+                | _ -> None
+            else None)
+     try
+        match lower rsvSource with
+        | Ok ir ->
+            let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "zarr_reserved_dims"
+            check "reserved dims: no bare `using time =` / `using j0 =` emitted"
+                (not (cppCode.Contains "using time = ") && not (cppCode.Contains "using j0 = "))
+                "bare alias still emitted -- g++ would refuse the TU"
+            check "reserved dims: mangled aliases emitted instead"
+                (cppCode.Contains "using time_ = int64_t;" && cppCode.Contains "using j0_ = int64_t;")
+                "expected time_ / j0_ aliases"
+            CodeGen.deployRuntimeHeaders e2eDir
+            let rsvCpp = Path.Combine(e2eDir, "zarr_reserved_dims.cpp")
+            File.WriteAllText(rsvCpp, cppCode)
+            (match compileCpp rsvCpp e2eDir with
+             | Ok exePath ->
+                 // The gate this section exists for: before the mangling, g++
+                 // died here on the `time` alias alone.
+                 check "reserved dims: compiles (the alias no longer redeclares a C-library global)" true ""
+                 (match runExecutable exePath with
+                  | Ok (0, runOut) ->
+                      check "reserved dims: total = sum(T) = 21"
+                          (match printedScalar "total" runOut with
+                           | Some v -> abs (v - 21.0) <= 1e-9
+                           | None -> false)
+                          runOut
+                      check "reserved dims: tsum = sum(time coord) = 60"
+                          (match printedScalar "tsum" runOut with
+                           | Some v -> abs (v - 60.0) <= 1e-9
+                           | None -> false)
+                          runOut
+                  | Ok (code, runOut) -> check "reserved dims: runs (exit 0)" false ($"exit {code}: {runOut}")
+                  | Error e -> check "reserved dims: runs (exit 0)" false e)
+             | Error e ->
+                 if isSkipError e then printfn "  SKIP zarr reserved-dim e2e (compile skipped): %s" e
+                 else check "reserved dims: compiles" false e)
+        | Error e ->
+            // Names the Blade-side half of the invariant: mangling happens at
+            // EMISSION, so `sample.dims.time` must still resolve in source.
+            check "reserved dims: lowers (`time` is still the Blade-visible dim name)" false e
+     with ex -> check "reserved dims e2e" false ex.Message)
+
+    // ---------------------------------------------------------------
     // 11. Write -> read roundtrip e2e (the Blade-side writer)
     // ---------------------------------------------------------------
     printfn "\n--- write e2e: z.read |> z.write -> F# reads it back ---"

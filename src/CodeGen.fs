@@ -1977,14 +1977,20 @@ let genTypeDefs (modul: IRModule) : string list =
             // rather than bare int64_t. The alias is transparent --
             // int64_t-compatible -- but makes generated C++ self-documenting
             // and leaves a hook for future strong typing.
-            [$"using {name} = int64_t;"; ""]
+            //
+            // The alias lands in the GLOBAL namespace, so the name goes
+            // through indexTypeCppName: a provider derives an index type per
+            // store dimension, and `time` (the geoscience default) would
+            // otherwise redeclare <ctime>'s `time`. irTypeToCpp's IRefNamed
+            // arm applies the same function, so references still resolve.
+            [$"using {(indexTypeCppName name)} = int64_t;"; ""]
         | IRTDEnumIdx (name, _, values) ->
             // EnumIdx alias: render as the underlying runtime type. All-int
             // values -> int64_t; all-string values -> std::string. The chosen
             // C++ type must match what the Case 2 reverse-lookup dispatch
             // and any keys array stored under this type expect.
             let underlying = EnumValue.underlyingElemType values
-            [$"using {name} = {(primTypeToCpp underlying)};"; ""]
+            [$"using {(indexTypeCppName name)} = {(primTypeToCpp underlying)};"; ""]
     )
 
 // Every printer below takes the binding's SOURCE name and splits it in two:

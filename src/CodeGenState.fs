@@ -1148,6 +1148,80 @@ let sanitizeCppName (name: string) : string =
     if Set.contains name cppReservedWords then name + "_"
     else name
 
+/// Identifiers the generated TU's own includes declare at GLOBAL scope. None
+/// of them is a C++ keyword, so `cppReservedWords` does not catch them, but a
+/// `using <name> = ...;` alias redeclares them just as fatally:
+///
+///     using time = int64_t;   // error: redeclared as different kind of entity
+///
+/// which is what a Zarr/NetCDF store with a dimension named `time` -- the
+/// geoscience default -- used to emit. The list is the C standard library
+/// (<cmath>/<cstdlib>/<cstdio>/<cstring>/<ctime>/<cctype>, all included or
+/// pulled in transitively), the two `using std::` declarations the preamble
+/// hoists into global scope, and the POSIX names MinGW and glibc leak from the
+/// same headers. Blade's OWN runtime headers need no entries: everything they
+/// declare lives in a namespace.
+let cppLibraryGlobals = Set.ofList [
+    // <cmath>, plus the non-standard Bessel/gamma names both MinGW and glibc declare
+    "abs"; "acos"; "acosh"; "asin"; "asinh"; "atan"; "atan2"; "atanh"; "cbrt"
+    "ceil"; "copysign"; "cos"; "cosh"; "drem"; "erf"; "erfc"; "exp"; "exp2"
+    "expm1"; "fabs"; "fdim"; "floor"; "fma"; "fmax"; "fmin"; "fmod"; "frexp"
+    "gamma"; "hypot"; "ilogb"; "j0"; "j1"; "jn"; "ldexp"; "lgamma"; "llrint"
+    "llround"; "log"; "log10"; "log1p"; "log2"; "logb"; "lrint"; "lround"
+    "modf"; "nan"; "nearbyint"; "nextafter"; "nexttoward"; "pow"; "remainder"
+    "remquo"; "rint"; "round"; "scalbln"; "scalbn"; "significand"; "sin"
+    "sinh"; "sqrt"; "tan"; "tanh"; "tgamma"; "trunc"; "y0"; "y1"; "yn"
+    // <cstdlib>
+    "abort"; "atexit"; "atof"; "atoi"; "atol"; "atoll"; "bsearch"; "calloc"
+    "div"; "free"; "getenv"; "labs"; "ldiv"; "llabs"; "lldiv"; "malloc"
+    "mblen"; "mbstowcs"; "mbtowc"; "qsort"; "rand"; "realloc"; "srand"
+    "strtod"; "strtof"; "strtol"; "strtold"; "strtoll"; "strtoul"; "strtoull"
+    "system"; "wcstombs"; "wctomb"
+    // <cstdio>
+    "clearerr"; "fclose"; "feof"; "ferror"; "fflush"; "fgetc"; "fgetpos"
+    "fgets"; "fopen"; "fprintf"; "fputc"; "fputs"; "fread"; "freopen"
+    "fscanf"; "fseek"; "fsetpos"; "ftell"; "fwrite"; "getc"; "getchar"
+    "gets"; "perror"; "printf"; "putc"; "putchar"; "puts"; "remove"; "rename"
+    "rewind"; "scanf"; "setbuf"; "setvbuf"; "snprintf"; "sprintf"; "sscanf"
+    "tmpfile"; "tmpnam"; "ungetc"; "vfprintf"; "vprintf"; "vsprintf"
+    // <cstring>
+    "memchr"; "memcmp"; "memcpy"; "memmove"; "memset"; "strcat"; "strchr"
+    "strcmp"; "strcoll"; "strcpy"; "strcspn"; "strerror"; "strlen"; "strncat"
+    "strncmp"; "strncpy"; "strpbrk"; "strrchr"; "strspn"; "strstr"; "strtok"
+    "strxfrm"
+    // <ctime> -- reached transitively through <chrono> and pthread.h
+    "asctime"; "clock"; "ctime"; "difftime"; "gmtime"; "localtime"; "mktime"
+    "strftime"; "time"
+    // <cctype>, <csignal>, <csetjmp>, <clocale>
+    "isalnum"; "isalpha"; "isblank"; "iscntrl"; "isdigit"; "isgraph"
+    "islower"; "isprint"; "ispunct"; "isspace"; "isupper"; "isxdigit"
+    "tolower"; "toupper"; "longjmp"; "raise"; "setjmp"; "signal"
+    "localeconv"; "setlocale"
+    // Hoisted into global scope by the preamble's `using std::cout/endl;`
+    "cout"; "endl"
+    // POSIX names MinGW/glibc declare alongside the above
+    "access"; "close"; "daylight"; "dup"; "environ"; "index"; "kill"; "link"
+    "open"; "optarg"; "optind"; "pclose"; "pipe"; "popen"; "random"; "read"
+    "recv"; "rindex"; "select"; "send"; "sleep"; "socket"; "srandom"; "stat"
+    "timezone"; "times"; "tzname"; "unlink"; "wait"; "write"
+]
+
+/// Emitted spelling for an INDEX TYPE's C++ alias. `using <name> = int64_t;`
+/// declares a name in the global namespace, so it must dodge both C++ keywords
+/// and the library globals above -- unlike an ordinary binding, which lands in
+/// a function body and may legally shadow `time`.
+///
+/// Every emission of an index type name goes through here: the `using` itself
+/// (CodeGen.genTypeDefs) and every reference to it (irTypeToCpp's IRefNamed
+/// arm). A name that collides gains a `_` suffix, the same convention
+/// `sanitizeCppName` uses; a name that does not is emitted verbatim, so the
+/// generated C++ for the overwhelming majority of index types is byte-identical
+/// to what it was before this guard existed.
+let indexTypeCppName (name: string) : string =
+    if Set.contains name cppReservedWords || Set.contains name cppLibraryGlobals
+    then name + "_"
+    else name
+
 let addVarName id name ctx = 
     { ctx with VarNames = Map.add id (sanitizeCppName name) ctx.VarNames }
 
@@ -1368,7 +1442,7 @@ and irTypeToCpp = function
         // erase to the raw inner type rather than leaking the tag as a C++
         // type name. User aliases (no "__") render their emitted typedef.
         | IRefNamed name when name.StartsWith("__") -> irTypeToCpp inner
-        | IRefNamed name -> name
+        | IRefNamed name -> indexTypeCppName name
         | IRefAnon _ -> irTypeToCpp inner
         // The `Base<_>` wildcard names no index type, so there is no `using`
         // alias to render -- erase to the inner type, same as IRefAnon.

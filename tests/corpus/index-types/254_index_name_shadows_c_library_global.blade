@@ -1,0 +1,36 @@
+// TEST: Index Type Named After A C Library Global
+// Each named index type emits one `using <name> = int64_t;` into the GENERATED
+// C++ at global scope, so a name that a C library already declares there takes
+// the whole translation unit down -- g++ says "redeclared as different kind of
+// entity" and nothing compiles. `time` below is <ctime>'s, `j0` is one of
+// <cmath>'s Bessel functions, and `remove` is <cstdio>'s.
+//
+// These are not exotic names: a Zarr or NetCDF store derives one index type per
+// dimension, and `time` is the geoscience default, so every such store used to
+// refuse to compile. The mangling is an EMISSION concern -- the Blade-visible
+// index type is still spelled `time` everywhere below, and only the C++
+// identifier moves -- which is what keeps a provider's dimension names, chosen
+// by whoever wrote the data, out of the compiler's naming decisions.
+type time = Idx<4>
+type j0 = Idx<3>
+
+let hours: Array<Float64 like time> = [0.0, 6.0, 12.0, 18.0]
+let day = reduce(hours, (+))
+// EXPECT: day = 36
+
+// The named index type still governs indexing and rank the way any other does.
+let grid: Array<Float64 like time, j0> = [[1.0, 2.0, 3.0],
+                                          [4.0, 5.0, 6.0],
+                                          [7.0, 8.0, 9.0],
+                                          [10.0, 11.0, 12.0]]
+let rows = reduce(grid, (+))
+// EXPECT: rows = [6, 15, 24, 33]
+let total = reduce(grid, (+), axes = 2)
+// EXPECT: total = 78
+
+// A binding may carry a colliding name too -- that one lands in a function body
+// and legally shadows the library declaration, so it is emitted verbatim.
+let remove = 2.0
+// EXPECT: remove = 2
+let scaled = hours * remove
+// EXPECT: scaled = [0, 12, 24, 36]

@@ -157,6 +157,24 @@ let runNetcdfTests () =
     check "lat extent is 180"
         (latExtent = Some 180L) (sprintf "got %A" latExtent)
 
+    // Every dimension becomes a global `using <name> = int64_t;`, so a
+    // dimension name that a C library already declares at global scope takes
+    // the whole TU down: `time` -- the geoscience default, and the name this
+    // very mock uses -- collided with <ctime>'s `time`, and g++ refused with
+    // "redeclared as different kind of entity". The Blade-visible index type
+    // is still named `time` (asserted above); only the emitted C++ spelling
+    // moves, and only for names that actually collide.
+    let mockTypeDefLines = genTypeDefs modul
+    let mockUsings = mockTypeDefLines |> List.filter (fun l -> l.StartsWith "using")
+    check "dim `time` emits a mangled C++ alias, never a bare `using time =`"
+        (List.contains "using time_ = int64_t;" mockUsings
+         && not (List.contains "using time = int64_t;" mockUsings))
+        (sprintf "got %A" mockUsings)
+    check "dims colliding with nothing keep their spelling (lat, lon)"
+        (List.contains "using lat = int64_t;" mockUsings
+         && List.contains "using lon = int64_t;" mockUsings)
+        (sprintf "got %A" mockUsings)
+
     let timeExtent =
         modul.Types |> List.tryPick (function
             | IRTDIndexType ("time", idx) ->
