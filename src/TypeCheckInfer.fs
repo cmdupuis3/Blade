@@ -759,8 +759,26 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                           Kind = SDimension; Dependencies = []
                       }
+                      // ELEMENT POLYMORPHISM SURVIVES THE SHAPE, same as
+                      // requireArrayArgMinRank (TypeCheckSupport.fs): when the
+                      // var being shaped is a signature var, the fresh element
+                      // var must inherit the polymorphic mark, or zonk defaults
+                      // it to Float64 and the enclosing function collapses to
+                      // one element type. Measured on stdlib/plot.blade's
+                      // `line(x: X^1, y: Y^1)`: a Float32 series argument met
+                      // params already frozen at Array<double> and died in g++
+                      // ("could not convert Array<float> to Array<double>"),
+                      // because THIS arm shaped X/Y with a plain builder var.
+                      let freshElem =
+                          if env.Subst.IsPolymorphicId vid then
+                              let e = env.Subst.Fresh()
+                              (match e with
+                               | IRTInfer eid -> env.Subst.MarkPolymorphic eid
+                               | _ -> ())
+                              e
+                          else env.Builder.FreshInferType()
                       let freshArrType = {
-                          ElemType = env.Builder.FreshInferType()
+                          ElemType = freshElem
                           IndexTypes = List.init k freshIdx
                           IsVirtual = false; Identity = None
                       }
@@ -4841,6 +4859,41 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn; Default = None; NameSpan = noSpan }], None, body))))))
                 inferExpr env synth |> Result.map (stampElemUnits env resUnits)
             | _ ->
+            // FLOAT LITERALS ARE WIDTH-POLYMORPHIC. A bare float literal beside
+            // a Float32 or Complex64 partner adopts Float32 (the complex
+            // promotion table then keeps Complex64) instead of dragging the op
+            // to Float64/Complex128: `a32 * 1.0` stays Float32, exactly as
+            // `a32 * 2` (an Int64 literal) always has via the Float32 arm of
+            // the promotion rules. LITERALS ONLY -- a Float64 VARIABLE still
+            // promotes -- and only beside a NARROW partner, so every
+            // Float64/Complex128 program types byte-identically to before.
+            // This site also serves the array/scalar broadcast arm above: its
+            // synthesized kernel body (`__bx <op> lit`, with `__bx` annotated
+            // at the array's element type) re-enters inferBinOp and lands here.
+            let partnerNarrow (t: IRType) =
+                match IR.stripUnits t with
+                | ArrayElem arr ->
+                    (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                     | IRTScalar (ETFloat32 | ETComplex64) -> true
+                     | _ -> false)
+                | IRTScalar (ETFloat32 | ETComplex64) -> true
+                | _ -> false
+            let adaptFloatLit (lit: TypedExpr) (partner: TypedExpr) : TypedExpr =
+                let bareF64 (t: TypedExpr) =
+                    match IR.stripUnits (env.Subst.Resolve t.Type) with
+                    | IRTScalar ETFloat64 -> true
+                    | _ -> false
+                if not (bareF64 lit && partnerNarrow (env.Subst.Resolve partner.Type)) then lit
+                else
+                    match lit.Kind with
+                    | TExprLit (LitFloat _) -> { lit with Type = IRTScalar ETFloat32 }
+                    | TExprUnaryOp (OpNeg, ({ Kind = TExprLit (LitFloat _) } as inner)) ->
+                        { lit with
+                            Kind = TExprUnaryOp (OpNeg, { inner with Type = IRTScalar ETFloat32 })
+                            Type = IRTScalar ETFloat32 }
+                    | _ -> lit
+            let tL = adaptFloatLit tL tR
+            let tR = adaptFloatLit tR tL
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
@@ -8316,6 +8369,20 @@ and buildApplyInfo (env: TypeEnv)
             | IRTUnitAnnotated (IRTScalar _, _) as t -> restampScalar t
             | IRTNamed _ as t -> t                                 // struct/sum rows: Array<Struct> output
             | IRTTuple _ as t -> t                                 // tuple rows: Array<(..,..)> output
+            // AN HM-POLYMORPHIC RETURN SURVIVES THE FALLBACK. A kernel that
+            // reads a captured generic array (`lambda(k) -> a(k)` with
+            // `a: Array<T like Idx<n>>`) types its body as the SIGNATURE var
+            // `T`, which is unresolved on purpose -- monomorphization fills it
+            // per call site. The fallback below would overwrite it with the
+            // ITERATED array's element type, and when the iteration is a
+            // `range<I>` those elements are `Nat<I>`: the map's output was
+            // typed as the LOOP INDEX rather than what the body reads.
+            // Measured on stdlib/plot.blade's decimation ladder, where the
+            // helpers carry a `* 1.0` for exactly this reason -- which is also
+            // why an integer grid used to decimate to floating-point JSON.
+            // Only MARKED vars are kept: an ordinary unconstrained var is
+            // monomorphic by construction and still takes the fallback.
+            | IRTInfer vid when env.Subst.IsPolymorphicId vid -> resolved
             | _ ->
                 // Fall back to common element type of input arrays when the
                 // return type is unresolved (IRTInfer) or has no

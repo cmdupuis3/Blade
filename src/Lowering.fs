@@ -841,7 +841,8 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | IRTScalar ETInt32 | IRTScalar ETInt64 -> IRLit (IRLitInt 0L)
         | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> IRLit (IRLitInt 0L)
         | IRTScalar ETBool -> IRLit (IRLitBool false)
-        | IRTScalar ETFloat32 | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
+        | IRTScalar ETFloat32 -> IRLit (IRLitFloat32 0.0f)
+        | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
         | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
         | ArrayElem _ ->
             // An array-typed zero that reached lowering sits in a position
@@ -1004,11 +1005,17 @@ and lowerLiteralValued lit (ty: IRType) : IRLit =
     match lit with
     | LitInt n ->
         match ty with
-        | AnyPrimElem (ETFloat32 | ETFloat64) -> IRLitFloat (float n)
+        | AnyPrimElem ETFloat32 -> IRLitFloat32 (float32 n)
+        | AnyPrimElem ETFloat64 -> IRLitFloat (float n)
         | _ -> IRLitInt n
     | LitFloat f ->
         match ty with
         | AnyPrimElem (ETInt32 | ETInt64) -> IRLitInt (int64 f)  // defensive; narrowing normally rejected
+        // A literal in a Float32 position carries its WIDTH into the IR
+        // (see IRLitFloat32's doc): the value is rounded here, once, so
+        // every consumer -- codegen, the interpreter, typeOf -- agrees on
+        // the same float32 quantity.
+        | AnyPrimElem ETFloat32 -> IRLitFloat32 (float32 f)
         | _ -> IRLitFloat f
     | _ -> lowerLiteralToIRLit lit
 

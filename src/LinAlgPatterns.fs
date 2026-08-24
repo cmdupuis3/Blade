@@ -1207,7 +1207,7 @@ type NestScale =
 let (|ProdSumScaled|_|) (e: IRExpr) : (IRExpr list * NestScale option) option =
     let scalarOk (s: IRExpr) =
         (match s with
-         | IRLit (IRLitFloat _) | IRLit (IRLitInt _) | IRVar _ -> true
+         | IRLit (IRLitFloat _) | IRLit (IRLitFloat32 _) | IRLit (IRLitInt _) | IRVar _ -> true
          | _ -> false)
         && (match typeOf s with
             | IRTScalar ETFloat64 | IRTScalar ETFloat32 -> true

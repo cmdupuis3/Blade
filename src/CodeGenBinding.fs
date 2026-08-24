@@ -1068,6 +1068,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                     | IRTScalar ETBool -> IRLit (IRLitBool false)
                     | IRTScalar ETInt64 | IRTScalar ETInt32 -> IRLit (IRLitInt 0L)
                     | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> IRLit (IRLitInt 0L)
+                    | IRTScalar ETFloat32 -> IRLit (IRLitFloat32 0.0f)
                     | _ -> IRLit (IRLitFloat 0.0)
                 let buildGuarded (c: IRCallable) : IRExpr =
                     let zeroVal = zeroForReturnType c.RetType

@@ -1,4 +1,4 @@
-// TEST: Plot Inline Compute Argument
+﻿// TEST: Plot Inline Compute Argument
 // ============================================================================
 // A DEFERRED PIPELINE materialized INLINE in a generic function's argument
 // slot: `(method_for(range<Y, X>) <@> k) |> compute`.
@@ -23,10 +23,10 @@ let x = [0.0, 1.0, 2.0]
 let y = [0.0, 1.0]
 // Direct argument position: the spelling that used to fail.
 let direct = plot.heatmap(x, y,
-    (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute,
+    (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j)) |> compute,
     "scan 0": title)
 // The let-bound control.
-let grid = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute
+let grid = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j)) |> compute
 let bound = plot.heatmap(x, y, grid, "scan 0": title)
 // EXPECT: direct = true
 // EXPECT: bound = true

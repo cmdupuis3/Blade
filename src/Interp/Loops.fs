@@ -480,6 +480,7 @@ and private forceGuard (st: InterpState) (env: Env) (cond: IRExpr) (body: IRExpr
             | IRTScalar ETBool -> IRLit (IRLitBool false)
             | IRTScalar ETInt64 | IRTScalar ETInt32 -> IRLit (IRLitInt 0L)
             | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> IRLit (IRLitInt 0L)
+            | IRTScalar ETFloat32 -> IRLit (IRLitFloat32 0.0f)
             | _ -> IRLit (IRLitFloat 0.0)
         let buildGuarded (c: IRCallable) : IRExpr =
             let synthetic = { c with Id = st.Builder.FreshId(); Body = IRIf (cond, c.Body, zeroForReturnType c.RetType) }

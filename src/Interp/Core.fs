@@ -313,6 +313,8 @@ let private litMatches (lit: IRLit) (v: Value) : bool =
     | IRLitInt n, VChar c -> n = int64 (int c)
     | IRLitFloat f, VFloat g -> f = g
     | IRLitFloat f, VFloat32 g -> f = float g
+    | IRLitFloat32 f, VFloat32 g -> f = g
+    | IRLitFloat32 f, VFloat g -> float f = g
     | IRLitBool a, VBool b -> a = b
     | IRLitString a, VString b -> System.String.Equals(a, b, System.StringComparison.Ordinal)
     | IRLitUnit, VUnit -> true
@@ -451,6 +453,7 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         match lit with
         | IRLitInt n -> VInt n            // Blade's default integer is Int64; narrower
         | IRLitFloat f -> VFloat f        // int contexts coerce through arithmetic, not here
+        | IRLitFloat32 f -> VFloat32 f    // width reconciled at lowering (lowerLiteralValued)
         | IRLitBool b -> VBool b
         | IRLitString s -> VString s
         | IRLitUnit -> VUnit

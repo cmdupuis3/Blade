@@ -1905,6 +1905,11 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     match e with
     | IRLit (IRLitInt n) -> { Reg = string n; Ty = ScI64 }
     | IRLit (IRLitFloat f) -> { Reg = f64Const f; Ty = ScF64 }
+    // The LLVM lane has no ScF32 (IRTScalar ETFloat32 maps to no scalar and
+    // the gate declines Float32 programs), so a Float32 literal that somehow
+    // arrives is widened -- value-preserving, and unreachable until an f32
+    // scalar type exists here.
+    | IRLit (IRLitFloat32 f) -> { Reg = f64Const (float f); Ty = ScF64 }
     | IRLit (IRLitBool b) -> { Reg = (if b then "true" else "false"); Ty = ScBool }
     | IRLit (IRLitString s) -> { Reg = stringGlobal c s; Ty = ScStr }
     | IRLit IRLitUnit -> { Reg = ""; Ty = ScVoid }

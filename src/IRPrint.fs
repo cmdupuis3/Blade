@@ -232,6 +232,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     match expr with
     | IRLit (IRLitInt n) -> string n
     | IRLit (IRLitFloat f) -> sprintf "%f" f
+    | IRLit (IRLitFloat32 f) -> sprintf "%ff32" f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
     | IRLit (IRLitString s) -> $"\"{s}\""
     | IRLit IRLitUnit -> "()"

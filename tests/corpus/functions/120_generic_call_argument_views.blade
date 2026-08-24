@@ -1,4 +1,4 @@
-// TEST: Generic Call Argument View Forms
+﻿// TEST: Generic Call Argument View Forms
 // ============================================================================
 // The stdlib-free twin of tests/corpus/display/008 and 009: what those pin
 // through `plot.contourf`, this pins through a two-deep generic chain of its
@@ -35,9 +35,9 @@ let view_direct = grid_total(R((1 : Scan)))
 let view = R((1 : Scan))
 let view_bound = grid_total(view)
 // Inline deferred pipeline, straight into the argument slot.
-let comp_direct = grid_total((method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute)
+let comp_direct = grid_total((method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j)) |> compute)
 // The same pipeline, let-bound first.
-let comp = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute
+let comp = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j)) |> compute
 let comp_bound = grid_total(comp)
 // EXPECT: view_direct = 51
 // EXPECT: view_bound = 51

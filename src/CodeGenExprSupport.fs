@@ -271,6 +271,17 @@ let floatToCppLiteral (f: float) : string =
         let s = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
         if s.Contains "." || s.Contains "e" || s.Contains "E" then s else s + ".0"
 
+/// The Float32 twin: an `f`-suffixed C++ literal, so float-context arithmetic
+/// stays in float (a width-less `1.0` would promote the op to double and then
+/// narrow at the store -- rejected by -Werror=float-conversion).
+let float32ToCppLiteral (f: float32) : string =
+    if System.Single.IsNaN f then "std::numeric_limits<float>::quiet_NaN()"
+    elif System.Single.IsPositiveInfinity f then "std::numeric_limits<float>::infinity()"
+    elif System.Single.IsNegativeInfinity f then "(-std::numeric_limits<float>::infinity())"
+    else
+        let s = f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+        (if s.Contains "." || s.Contains "e" || s.Contains "E" then s else s + ".0") + "f"
+
 /// Quote a Blade string value as a C++ string literal. Escapes the minimal
 /// set that would otherwise break the surrounding "..." token: backslash,
 /// double-quote, and the four common control characters. Other characters
@@ -297,6 +308,7 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
     | IRLit (IRLitInt n) -> $"{n}L"
     | IRLit (IRLitFloat f) -> floatToCppLiteral f
+    | IRLit (IRLitFloat32 f) -> float32ToCppLiteral f
     | IRLit (IRLitBool b) -> if b then "true" else "false"
     | IRLit (IRLitString s) -> $"std::string({(escapeStringLit s)})"
     | IRLit IRLitUnit -> "((void)0)"
@@ -323,6 +335,7 @@ let litToCpp (lit: IRLit) : string =
     match lit with
     | IRLitInt n -> $"{n}L"
     | IRLitFloat f -> floatToCppLiteral f
+    | IRLitFloat32 f -> float32ToCppLiteral f
     | IRLitBool b -> if b then "true" else "false"
     | IRLitString s -> $"std::string({(escapeStringLit s)})"
     | IRLitUnit -> "((void)0)"  // Valid C++ no-op; should be elided by callers

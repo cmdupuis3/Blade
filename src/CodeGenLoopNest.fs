@@ -997,6 +997,7 @@ let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
         // constants and wrongly deduplicate structurally-different
         // Reynolds terms (multiplicity miscount).
         | IRLitFloat f -> floatToCppLiteral f
+        | IRLitFloat32 f -> float32ToCppLiteral f
         | IRLitBool b -> if b then "true" else "false"
         | IRLitString s -> $"\"{s}\""
         | IRLitUnit -> "()"
@@ -2928,9 +2929,11 @@ let genProgram (functions: (string * LoopNestCodeGen) list) : string =
 let rec extractLiteralValues (expr: IRExpr) : float list =
     match expr with
     | IRLit (IRLitFloat f) -> [f]
+    | IRLit (IRLitFloat32 f) -> [float f]
     | IRLit (IRLitInt n) -> [float n]
     | IRLit (IRLitBool b) -> [if b then 1.0 else 0.0]
     | IRUnaryOp (IRNeg, IRLit (IRLitFloat f)) -> [-f]
+    | IRUnaryOp (IRNeg, IRLit (IRLitFloat32 f)) -> [float -f]
     | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> [float -n]
     | IRArrayLit (elements, _) -> elements |> List.collect extractLiteralValues
     | _ -> []

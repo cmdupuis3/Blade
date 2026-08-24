@@ -15,6 +15,12 @@ open System
 type IRLit =
     | IRLitInt of int64
     | IRLitFloat of float
+    /// A float literal RECONCILED to a Float32 position (lowerLiteralValued):
+    /// width is part of the literal so `typeOf` answers ETFloat32 and codegen
+    /// emits an `f`-suffixed C++ literal -- a width-less `1.0` beside float
+    /// operands promotes the op to double and then narrows at the store,
+    /// which -Werror=float-conversion rejects.
+    | IRLitFloat32 of float32
     | IRLitBool of bool
     | IRLitString of string
     | IRLitUnit
@@ -2127,6 +2133,7 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRComposeApply info -> Some info.OutputType
     | IRLit (IRLitInt _) -> Some (IRTScalar ETInt64)
     | IRLit (IRLitFloat _) -> Some (IRTScalar ETFloat64)
+    | IRLit (IRLitFloat32 _) -> Some (IRTScalar ETFloat32)
     | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
     | IRLit IRLitUnit -> Some IRTUnit
