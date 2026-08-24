@@ -1,0 +1,7 @@
+// TEST: float to int without visible rounding (rejects)
+// An Int-target cast of a float refuses unless the rounding is the operand
+// itself: truncation must be spelled.
+// ERROR: BL3019
+// ERROR-CONTAINS: spell the rounding at the cast site
+let x = 2.9
+let bad = Int64(x)

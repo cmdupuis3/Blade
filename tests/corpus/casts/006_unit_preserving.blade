@@ -1,0 +1,15 @@
+// TEST: casts preserve units
+// ============================================================================
+// A cast changes representation width, not the quantity: units ride through.
+// The proof is that the cast results still ADD to unit-carrying values of the
+// same dimension (a dropped annotation would make `back + d` a unit mismatch
+// and refuse to compile).
+// ============================================================================
+Unit meters
+let d: Float<meters> = 2.5
+let d32 = Float32(d)
+let back = Float64(d32)
+let total = back + d
+// EXPECT: d32 = 2.5
+// EXPECT: back = 2.5
+// EXPECT: total = 5

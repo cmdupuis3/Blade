@@ -188,6 +188,17 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
         (match kernelCallBody rc name args with
          | Error m -> Error m
          | Ok (body, rc') -> adjointOf rc' body cot)
+    // Explicit numeric cast. An int-target cast (`Int64(floor(x))`) is
+    // int-valued -- no gradient flows, same as extents. A float/complex
+    // target is the identity linear map at AD's Float64 working width, so
+    // the cotangent passes straight through to the operand (whose own
+    // classification decides: `Float64(extents(xs))` bottoms out in the
+    // int-valued extents and contributes nothing).
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [inner])
+            when (Blade.Types.castTargetOf name).IsSome ->
+        (match Blade.Types.castTargetOf name with
+         | Some (Blade.Types.ETInt32 | Blade.Types.ETInt64) -> Ok []
+         | _ -> adjointOf rc inner cot)
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, _) ->
         // Array read of non-diff data (a param, local, or module binding):
         // genuinely no adjoint. Anything ELSE named here is a call the
@@ -245,6 +256,8 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
     | ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) ->
         Ok []   // boolean-valued: no adjoint
     | ExprKind.ExprBinOp (_, OpMod, _, _) -> Ok []  // int-valued
+    | ExprKind.ExprExtents _ -> Ok []  // int-valued size: no adjoint (the
+                                       // tangent sweep's twin arm answers 0)
     | ExprKind.ExprArrayLit _ ->
         err rc.Fname "array literals may only appear as let initializers in differentiated code"
     | _ -> err rc.Fname "unsupported expression form in differentiated code (adjoint)"
@@ -566,6 +579,18 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) } when Map.containsKey name rc.Ctx.Decls ->
         kernelCallBody rc name args
         |> Result.bind (fun (body, rc') -> tangentOfExpr rc' body)
+    // Explicit numeric cast: int targets are int-valued (literal-zero
+    // tangent, same as extents); float/complex targets are the identity
+    // linear map, so the tangent is the SAME cast applied to the operand's
+    // tangent (keeping the tangent's width coherent with the primal's).
+    | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [inner]) }
+            when (Blade.Types.castTargetOf name).IsSome ->
+        (match Blade.Types.castTargetOf name with
+         | Some (Blade.Types.ETInt32 | Blade.Types.ETInt64) -> Ok (fLit 0.0)
+         | _ ->
+             tangentOfExpr rc inner |> Result.map (fun t ->
+                 if isZeroLit t then t
+                 else mkExpr e.Span (ExprKind.ExprApp (mkExpr e.Span (ExprKind.ExprVar name), [t]))))
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, _) } ->
         // A name that carries differentiable data but was never registered
         // as an ARRAY cannot be read as a constant: that combination means

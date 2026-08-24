@@ -240,6 +240,21 @@ module Codes =
             // array of unknown extent that only failed much later, in the
             // provider emitter, with a message about runtime extents.
             "BL3018", "unknown struct field"
+            // BL3019: an explicit numeric cast (`Float32(x)`, `Int64(...)`)
+            // the type system refuses: a complex source into a real/int
+            // target (project with real/imag/abs first), a float->int cast
+            // whose rounding is not visible at the cast site (only
+            // `Int64(floor(x))` / `Int64(ceil(x))` truncate on license), a
+            // non-numeric operand, an operand whose type is not yet known,
+            // or a wrong arity.
+            "BL3019", "invalid numeric cast"
+            // BL3020: WARNING. Mixed-elem-type arithmetic silently converts
+            // one operand (Int64 beside Float64 goes to float; Float32
+            // beside Float64 drags the op to Float64; narrow complex widens).
+            // Literals adapt silently by design -- this fires only when a
+            // NON-literal operand is converted, and names the explicit cast
+            // that says it out loud.
+            "BL3020", "implicit numeric conversion"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"

@@ -2252,6 +2252,7 @@ let rec internal dispatchTest (rest: string list) : int =
             match cat.ToLower().TrimStart('-') with
             | "basic" -> Some ("Basic", basicTests)
             | "intrinsics" -> Some ("Intrinsics", intrinsicsTests)
+            | "casts" -> Some ("Casts", castsTests)
             | "ad" -> Some ("AD", adTests)
             | "ad-jvp" | "adjvp" -> Some ("AD JVP", adJvpTests)
             | "ad-jvp-comb" | "adjvpcomb" -> Some ("AD JVP Combinators", adJvpCombTests)

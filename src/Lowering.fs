@@ -430,6 +430,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         | OpImag -> IRUnaryOp (IRImag, e)
         | OpArg -> IRUnaryOp (IRArg, e)
         | OpMath name -> IRUnaryOp (IRMath name, e)
+        | OpCast name ->
+            // The name is a numericCastTargets key by construction (only
+            // TypeCheck's cast arm builds OpCast); resolve it to the target
+            // element type here, where Types.fs is in scope.
+            match Blade.Types.castTargetOf name with
+            | Some et -> IRUnaryOp (IRCast et, e)
+            | None -> failwith $"internal: OpCast head '{name}' is not a numeric cast target"
     
     | TExprApp (func, args) when
         (match func.Type, args with

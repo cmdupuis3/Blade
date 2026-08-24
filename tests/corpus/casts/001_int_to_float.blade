@@ -1,0 +1,16 @@
+// TEST: cast int to float widths
+// ============================================================================
+// The explicit spellings of int -> float conversion: Float64/Float32/Float
+// heads applied to a concrete Int64. `5.0 * Float32(a)` is the motivating
+// idiom -- the literal adapts to the cast's Float32 (adaptFloatLit), so the
+// product stays narrow with no BL3020 implicit-conversion warning.
+// ============================================================================
+let a: Int64 = 5
+let f64 = Float64(a)
+let f32 = Float32(a)
+let alias = Float(a)
+let b = 5.0 * Float32(a)
+// EXPECT: f64 = 5
+// EXPECT: f32 = 5
+// EXPECT: alias = 5
+// EXPECT: b = 25

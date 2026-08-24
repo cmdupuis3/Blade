@@ -88,9 +88,9 @@ where omp(st: 1) = {
 
     // Quantities are terminal, so these derived values are structurally
     // dimensioned; assert once per binding, where the value is named.
-    let h: Float64<time> = (t_max - t_min) / (n_segments + 1.0)
+    let h: Float64<time> = (t_max - t_min) / (Float64(n_segments) + 1.0)
     let seg_span: Float64<time> = 2.0 * h
-    let hi: Float64<time> = (n_segments + 1.0) * h
+    let hi: Float64<time> = (Float64(n_segments) + 1.0) * h
 
     // Segment-independent, so hoisted out of everything below.
     let tap = segment_taper(ts, seg_span)
@@ -104,7 +104,7 @@ where omp(st: 1) = {
     let keys = (ts <@> lambda(t) ->
         if t >= 0.0 && t <= hi then {
             let k = floor(t / h)
-            let kmax = 1.0 * n_segments
+            let kmax = Float64(n_segments)
             if k > kmax then kmax else k
         } else 0.0 - 1.0) |> compute
     let gk  = group_keys(keys)
@@ -113,7 +113,7 @@ where omp(st: 1) = {
     let gw2 = group_by(w2, gk)
 
     // Frequency-independent per-cell sums, hoisted clear of the omega loop.
-    let n_cell  = (gt  <@> lambda(row: T^1) -> 1.0 * extents(row)) |> compute
+    let n_cell  = (gt  <@> lambda(row: T^1) -> Float64(extents(row))) |> compute
     let w2_cell = (gw2 <@> lambda(row: T^1) -> reduce(row, (+))) |> compute
     let u_cell  = (gu  <@> lambda(row: T^1) -> reduce(row, (+))) |> compute
 
@@ -177,17 +177,17 @@ where omp(st: 1) = {
         // whole rows, leaving one Est per frequency. The two outputs travel
         // as one complex so the frequency map stays rank 1.
         let acc = reduce(segv, lambda(a: T^1, b: T^1) -> a + b)
-        complex(acc("power") / n_segments,
-                atan2(acc("sin_arg") / n_segments, acc("cos_arg") / n_segments))
+        complex(acc("power") / Float64(n_segments),
+                atan2(acc("sin_arg") / Float64(n_segments), acc("cos_arg") / Float64(n_segments)))
     } |> compute
 
     let mod_avg = real(spec)
     let arg_avg = imag(spec)
 
     // Welch normalization, verbatim from the reference.
-    let nsegs = 2.0 * n_samples / (n_segments + 1.0)
+    let nsegs = 2.0 * Float64(n_samples) / (Float64(n_segments) + 1.0)
     let df = reduce(freqs, (+)) / nsegs
-    let factors = 2.0 / (n_segments * nsegs * df) * (s_var / (df * reduce(mod_avg, (+))))
+    let factors = 2.0 / (Float64(n_segments) * nsegs * df) * (s_var / (df * reduce(mod_avg, (+))))
 
     complex(cos(arg_avg), sin(arg_avg)) * mod_avg * factors
 }

@@ -40,3 +40,4 @@ let (hp, ht) = ad.jvp(ad.grad(loss))(v0, c0, gv, gc, [0.0, 0.0, 0.0, 0.0, 0.0], 
 // EXPECT: tgc = [0, 0]
 // and the tangent of the primal is <dL/dc, seed> = mean of group 0
 // EXPECT: ht = 26.6666666666667
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

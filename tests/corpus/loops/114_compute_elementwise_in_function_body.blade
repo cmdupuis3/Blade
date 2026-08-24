@@ -10,14 +10,14 @@
 // one agrees with the uncomputed one, VALUE and all: var([1,2,3,4]) = 1.25.
 // ============================================================================
 function varC(x: T^1) = {
-    let n = 1.0 * extents(x)
+    let n = Float64(extents(x))
     let xbar = reduce(x, (+)) / n
     let dx = (x - xbar) |> compute
     prodsum(dx, dx) / n
 }
 
 function varU(x: T^1) = {
-    let n = 1.0 * extents(x)
+    let n = Float64(extents(x))
     let xbar = reduce(x, (+)) / n
     let dx = x - xbar
     prodsum(dx, dx) / n

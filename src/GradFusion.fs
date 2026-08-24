@@ -537,8 +537,20 @@ let internal peelCountOf (rp: string) (e: Expr) : bool =
 /// group-linear, where the generic extent message would misdescribe the wall.
 let internal classifyPeelKernel (rp: string) (body: Expr) : Result<PeelKernel option, string> =
     let b = stripTypedE body
+    // The mean's denominator may be the count itself or its explicit float
+    // cast -- `reduce(r, (+)) / Float64(extents(r))`, the BL3020-clean
+    // spelling -- the VALUE is identical (int->float division promotes), so
+    // the classification is unchanged. Bare PKCount is deliberately NOT
+    // cast-transparent: there the wrapper changes the peel's element type.
+    let castWrappedCount (e: Expr) =
+        match (stripTypedE e).Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar cn }, [inner]) ->
+            (match Blade.Types.castTargetOf cn with
+             | Some (Blade.Types.ETFloat32 | Blade.Types.ETFloat64) -> peelCountOf rp inner
+             | _ -> false)
+        | _ -> false
     match b.Kind with
-    | ExprKind.ExprBinOp (_, OpDiv, num, den) when peelCountOf rp den ->
+    | ExprKind.ExprBinOp (_, OpDiv, num, den) when peelCountOf rp den || castWrappedCount den ->
         (match peelSumOf rp num with
          | Some initOpt -> Ok (Some (PKMean initOpt))
          | None -> Ok None)

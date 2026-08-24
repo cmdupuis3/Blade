@@ -224,6 +224,7 @@ let ppUnaryOp = function
     | IRImag -> "imag"
     | IRArg -> "arg"
     | IRMath name -> name
+    | IRCast et -> castNameOf et  // prints like the source spelling: Float32(x)
 
 /// Pretty print IR expressions with optional name mapping for variables
 let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =

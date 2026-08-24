@@ -100,6 +100,13 @@ type UnaryOp =
                         // surface form is a plain call `exp(x)`; TypeCheck
                         // rewrites unbound whitelisted names to this op
                         // (user definitions of the same name shadow it)
+    | OpCast of string  // explicit numeric cast: Float32(x)/Int64(floor(x))/...
+                        // Payload is the cast head AS WRITTEN ("Float", "Int64");
+                        // Types.castTargetOf maps it to the target ElemType
+                        // (a string, not an ElemType, because Ast.fs compiles
+                        // before Types.fs). Same plain-call surface + shadowing
+                        // rule as OpMath; only TypeCheck's cast arm constructs
+                        // it, so the name is always a numericCastTargets key.
 
 type AssignOp =
     | AssignEq    // =

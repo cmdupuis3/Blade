@@ -100,7 +100,7 @@ let SIGQ = {
     let WCOS = method_for(range<Idx<400>, Idx<256>>) <@> lambda(k: Int64, u: Int64) -> {
         let i = u / 16
         let j = u - 16 * i
-        AMPM(i, j) * cos((EV(i) - EV(j)) * (0.34999999999999998 * (1.0 * k)))
+        AMPM(i, j) * cos((EV(i) - EV(j)) * (0.34999999999999998 * Float64(k)))
     } |> compute
     method_for(WCOS) <@> lambda(row: Array<Float64 like Idx<256>>) -> reduce(row, (+)) |> compute
 }

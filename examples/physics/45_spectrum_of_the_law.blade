@@ -52,7 +52,7 @@ let GMC: Array<Float64 like Idx<9>, Idx<9>> = {
         let a = s / 500
         let kk = s - 500 * a
         let amp = 0.8 + 0.2 * AMPI(a)
-        let tf = 0.05 * (1.0 * kk)
+        let tf = 0.05 * Float64(kk)
         let x = amp * cos(tf)
         let p = 0.0 - amp * sin(tf)
         if i < 1 then x else if i < 2 then p else if i < 3 then x * x
@@ -66,7 +66,7 @@ let AMC = {
         let a = s / 500
         let kk = s - 500 * a
         let amp = 0.8 + 0.2 * AMPI(a)
-        let tf = 0.05 * (1.0 * kk)
+        let tf = 0.05 * Float64(kk)
         let x = amp * cos(tf)
         let p = 0.0 - amp * sin(tf)
         if i < 1 then x else if i < 2 then p else if i < 3 then x * x
@@ -77,7 +77,7 @@ let AMC = {
         let a = s / 500
         let kk = s - 500 * a
         let amp = 0.8 + 0.2 * AMPI(a)
-        let tf = 0.05 * (1.0 * kk)
+        let tf = 0.05 * Float64(kk)
         let x = amp * cos(tf)
         let p = 0.0 - amp * sin(tf)
         let f = 0.0 - x
@@ -98,7 +98,7 @@ let (REC, IMC) = m.eig(LKC)
 // ---- Gram matrices, damped (240 closed-form samples, phase 0.05*k) ----
 let GMD: Array<Float64 like Idx<9>, Idx<9>> = {
     let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
-        let tf = 0.05 * (1.0 * k)
+        let tf = 0.05 * Float64(k)
         let e = exp(0.0 - 0.15 * tf)
         let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
         let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
@@ -110,7 +110,7 @@ let GMD: Array<Float64 like Idx<9>, Idx<9>> = {
 }
 let AMD = {
     let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
-        let tf = 0.05 * (1.0 * k)
+        let tf = 0.05 * Float64(k)
         let e = exp(0.0 - 0.15 * tf)
         let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
         let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
@@ -119,7 +119,7 @@ let AMD = {
         else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
     } |> compute
     let DD = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
-        let tf = 0.05 * (1.0 * k)
+        let tf = 0.05 * Float64(k)
         let e = exp(0.0 - 0.15 * tf)
         let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
         let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949

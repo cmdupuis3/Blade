@@ -12,7 +12,7 @@
 type Steps = Idx<5>
 let RS = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0, 7.0, 8.0, 9.0]]
 function rmeta(A: Array<Float64 like Idx<3>, RaggedIdx<_>>, n: Int64) -> Float64 = {
-    let d = method_for(A) <@> lambda(e) -> e * 2.0 + 1.0 * n |> compute
+    let d = method_for(A) <@> lambda(e) -> e * 2.0 + Float64(n) |> compute
     let dsums = method_for(d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
     let dtot = reduce(dsums, (+))
     let asums = method_for(A) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute

@@ -224,6 +224,7 @@ first-class construct:
 | filter / WHERE | `mask(xs, pred)` + `compound(data, mask)`; compose masks with `&&`/`\|\|` | a filter loop |
 | stencil / lags / rolling window | `method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1))` | index arithmetic with edge guards |
 | index generation | `range<Idx<8>>` virtual array | materialized iota |
+| numeric width/class conversion | `Float64(n)`, `Float32(x)`, `Int64(floor(x))` — scalar type name in call position; arrays lift elementwise | `* 1.0` fudges; implicit int→float mixes (warn BL3020); bare `Int64(x)` on a float (BL3019 — the rounding must be visible at the cast site) |
 | pipeline of stages | compose values: `object_for(f) >>@ object_for(g)`, apply with `<@>`, materialize with `\|> compute` | eager temporaries per stage |
 | recurrence / time-stepping / running state | `let rec` recursive array (see below) | `let mut` + a loop |
 | symmetric pairwise stats (covariance, comoments) | `where comm(a, b)` kernels, `reynolds(...)`, `gram(R, R)` | hand-written triangular loops |

@@ -86,3 +86,4 @@ let gv3 = ad.grad(loss_k)(v0, c0, kk2, dv3, dc3)
 // EXPECT: gv3 = 265
 // EXPECT: dv3 = [0.666666666666667, 0.666666666666667, 0.666666666666667, 2.5, 2.5]
 // EXPECT: dc3 = [20, 45]
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

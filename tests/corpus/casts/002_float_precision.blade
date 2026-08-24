@@ -1,0 +1,15 @@
+// TEST: cast between float widths
+// ============================================================================
+// Explicit width changes in BOTH directions -- Float64 -> Float32 narrowing
+// is legal precisely because it is spelled. 0.1 is not representable in
+// float32, so the narrowed value prints the f32-rounded quantity: the pin is
+// the proof the conversion really happened at float32 width.
+// ============================================================================
+let wide: Float64 = 2.5
+let narrow = Float32(wide)
+let back = Float64(narrow)
+let tenth: Float64 = 0.1
+let tenth32 = Float32(tenth)
+// EXPECT: narrow = 2.5
+// EXPECT: back = 2.5
+// EXPECT: tenth32 = 0.100000001490116

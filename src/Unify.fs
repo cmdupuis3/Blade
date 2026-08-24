@@ -209,6 +209,12 @@ type TypeError =
     | IntrinsicComplexScalarOnly of name: string
     | IntrinsicNeedsComplex of name: string * got: string
     | ComplexArity of got: int
+    /// BL3019. An explicit numeric cast (`Float32(x)`, `Int64(floor(x))`)
+    /// refused: complex source into a real/int target, a float->int cast
+    /// without the rounding visible at the cast site, a non-numeric operand,
+    /// an operand whose type is not yet known, or a wrong arity. Payload is
+    /// the complete message.
+    | InvalidCast of message: string
     | ReduceEmptyArray of extent: int64
     | ProdsumExtentMismatch of a: int64 * b: int64
     | GramNeedsRank2 of leftRank: int * rightRank: int

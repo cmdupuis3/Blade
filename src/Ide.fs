@@ -763,6 +763,7 @@ let private builtinCallOf (te: TypedExpr) : (string * TypedExpr list) option =
     | TExprProdSum args -> Some ("prodsum", args)
     | TExprFillRandom m -> Some ("fill_random", [m])
     | TExprUnaryOp (OpMath name, a) -> Some (name, [a])
+    | TExprUnaryOp (OpCast name, a) -> Some (name, [a])
     | TExprUnaryOp (OpConj, a) -> Some ("conj", [a])
     | _ -> None
 

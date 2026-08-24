@@ -176,6 +176,13 @@ let unaryOpToCpp = function
     | IRMath "digamma" -> "blade_rt::digamma"
     | IRMath name -> "std::" + name  // function-call form via the generic
                                      // `op(expr)` unary arm
+    // Explicit numeric cast. Complex targets use the constructor form
+    // (std::complex<T>(x) -- also the licensed spelling for the EXPLICIT
+    // complex<float>(complex<double>) narrowing ctor); everything else is
+    // static_cast. complexCppTypeName picks thrust:: in the device dialect;
+    // static_cast is dialect-neutral.
+    | IRCast ((ETComplex64 | ETComplex128) as et) -> complexCppTypeName et
+    | IRCast et -> $"static_cast<{primTypeToCpp et}>"
 
 /// Namespace-qualified spelling of a <complex>-vocabulary function in the
 /// current dialect (std:: on the host, thrust:: inside CUDA device bodies).

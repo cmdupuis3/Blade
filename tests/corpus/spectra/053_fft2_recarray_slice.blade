@@ -17,7 +17,7 @@ let acc = {
         match acc_arr with
         | zero -> zero
         | zero :: s -> zero :: 0.0
-        | prefix :: n -> prefix :: prefix(n - 1) + (1.0 * n) * dcbin(sp.fft2(f))
+        | prefix :: n -> prefix :: prefix(n - 1) + Float64(n) * dcbin(sp.fft2(f))
     acc_arr((3 : Steps))
 }
 // EXPECT: acc = 720

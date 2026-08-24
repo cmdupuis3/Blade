@@ -1,0 +1,7 @@
+// TEST: complex source into a real target (rejects)
+// A complex value never casts to a real/int target: which real is meant is
+// exactly the information the cast cannot carry -- project it first.
+// ERROR: BL3019
+// ERROR-CONTAINS: real(z), imag(z), abs(z), or arg(z)
+let z = complex(1.0, 2.0)
+let bad = Float64(z)

@@ -1,0 +1,18 @@
+// TEST: casts lift over arrays
+// ============================================================================
+// An array operand lifts elementwise, the same eager synthesis as `cos(A)`:
+// `Float32(A)` is `(method_for(A) <@> lambda(v) -> Float32(v)) |> compute`.
+// The 0.1 element pins the width (f32-rounded print); the kernel spelling
+// underneath is also written out by hand and must agree.
+// ============================================================================
+type I = Idx<4>
+let A: Array<Float64 like I> = [0.1, 0.5, 0.75, 1.0]
+let A32 = Float32(A)
+let manual = (method_for(A) <@> lambda(v) -> Float32(v)) |> compute
+let widened = Float64(A32)
+let counts: Array<Int64 like I> = [1, 2, 3, 4]
+let cf = Float64(counts)
+// EXPECT: A32 = [0.100000001490116, 0.5, 0.75, 1]
+// EXPECT: manual = [0.100000001490116, 0.5, 0.75, 1]
+// EXPECT: widened = [0.100000001490116, 0.5, 0.75, 1]
+// EXPECT: cf = [1, 2, 3, 4]

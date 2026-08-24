@@ -31,3 +31,4 @@ let rec FIacc: Array<Float like Idx<5>> =
 // EXPECT: FIacc = [0, -0.5, -0.5, 0, 1]
 let FI = FIacc(4)
 // EXPECT: FI = 1.0
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

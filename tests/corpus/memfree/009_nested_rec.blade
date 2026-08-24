@@ -9,7 +9,7 @@ type C = Idx<4>
 type Outer = Idx<4>
 type Inner = Idx<4>
 function bump(u: Array<Float like C>, m: Int64) -> Array<Float like C> = {
-    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 1.0 * m |> compute
+    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + Float64(m) |> compute
     u + 0.1 * t
 }
 let rec otraj: Array<Float like Outer, C> =

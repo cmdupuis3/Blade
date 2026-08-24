@@ -1,0 +1,15 @@
+// TEST: cast between int widths
+// ============================================================================
+// Int64 <-> Int32 in both directions, plus the `Int` alias (Int32, exactly
+// what the name means in type position). Explicit narrowing is legal -- the
+// spelling IS the license -- and identity casts are no-ops.
+// ============================================================================
+let big: Int64 = 70000
+let small = Int32(big)
+let back = Int64(small)
+let alias = Int(big)
+let ident = Int64(big)
+// EXPECT: small = 70000
+// EXPECT: back = 70000
+// EXPECT: alias = 70000
+// EXPECT: ident = 70000

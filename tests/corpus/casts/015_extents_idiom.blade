@@ -1,0 +1,14 @@
+// TEST: the mean idiom with an explicit count cast
+// ============================================================================
+// `reduce(A, (+)) / extents(A)` promotes the Int64 count implicitly (and
+// warns BL3020); the blessed spelling casts the count. Both values agree --
+// int->float division promotes to the same double -- so the cast changes the
+// warning, never the number.
+// ============================================================================
+type I = Idx<4>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+let n = extents(A)
+let mean = reduce(A, (+)) / Float64(n)
+let mean32 = Float32(reduce(A, (+))) / Float32(n)
+// EXPECT: mean = 2.5
+// EXPECT: mean32 = 2.5

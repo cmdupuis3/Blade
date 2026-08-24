@@ -49,6 +49,14 @@ type IRUnaryOp =
                         // renders as std::<name>(arg), result Float64
                         // (complex operand preserves the complex type,
                         //  except abs which always yields the real magnitude)
+    | IRCast of ElemType  // explicit numeric cast (Float32(x)/Int64(floor(x))):
+                          // result type is always the target element type.
+                          // Renders as static_cast<T>(arg) for real/int
+                          // targets and the std::complex<T>(arg) constructor
+                          // for complex targets. Legality (complex source
+                          // never casts real; float->int only through a
+                          // visible floor/ceil) is TypeCheck's job -- by the
+                          // time this node exists the conversion is licensed.
 
 /// IR Expressions - SSA-like representation
 type IRExpr =
@@ -2442,7 +2450,9 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
          | IRMath _ ->
              (match typeOf operand with
               | IRTScalar (ETComplex64 | ETComplex128) as ct -> ct
-              | _ -> IRTScalar ETFloat64))
+              | _ -> IRTScalar ETFloat64)
+         // A cast's type is its target, whatever the operand resolved to.
+         | IRCast et -> IRTScalar et)
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
     | IRComplex (re, _) ->
         // Complex type derived from component width: Float32 -> Complex64,

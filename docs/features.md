@@ -10,6 +10,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | Feature | Usage | Status | Description / Notes |
 |---------|-------|--------|---------------------|
 | Base numeric types | `Int32/Int64/Float32/Float64/`<br>`Complex64/Complex128` | Core | Double-check for exhaustiveness |
+| Explicit numeric casts | `Float32(x)`, `Float64(extents(a))`,<br>`Int64(floor(x))`, `Complex128(r)` | Core | Scalar type name in call position; shadowable plain-call intrinsic. Complex→real refuses (BL3019: project with `real`/`imag`/`abs`/`arg`); float→int only through a floor/ceil visible at the cast site. Arrays lift elementwise. Implicit mixed-type promotion of a non-literal operand warns BL3020 |
 | Type variables | `A -> B -> ...` | Core | Same letter = same type in a signature |
 | Complex conjugates | `conj(x)` | Core |  |
 | Units of measure | `Unit meters`, `Float<velocity>`,<br> unit arithmetic | Core | Annotations on primitive types only |

@@ -1,0 +1,20 @@
+// TEST: cast complex widths and real embedding
+// ============================================================================
+// Real -> complex is the exact embedding (imaginary part 0); Complex128 <->
+// Complex64 converts in both directions (the narrowing direction is C++'s
+// EXPLICIT complex<float>(complex<double>) constructor, which is why it
+// needs the cast spelling at all). Dyadic values keep the pins exact at both
+// component widths.
+// ============================================================================
+let r: Float64 = 2.5
+let z128 = Complex128(r)
+let z64 = Complex64(1.5)
+let widened = Complex128(z64)
+let narrowed = Complex64(complex(0.25, -0.5))
+let n: Int64 = 3
+let zi = Complex128(n)
+// EXPECT: z128 = (2.5, 0)
+// EXPECT: z64 = (1.5, 0)
+// EXPECT: widened = (1.5, 0)
+// EXPECT: narrowed = (0.25, -0.5)
+// EXPECT: zi = (3, 0)

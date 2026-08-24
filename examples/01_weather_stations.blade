@@ -62,7 +62,7 @@ let from_audited = mask(r_station, lambda(s) -> contains(audited, s))
 let audited_temps = compound(r_temp, from_audited)
 let n_audited = extents(audited_temps)
 let sum_audited = reduce(audited_temps, (+))
-let mean_audited = sum_audited / (1.0 * n_audited)
+let mean_audited = sum_audited / Float64(n_audited)
 // EXPECT: n_audited = 9
 // EXPECT: sum_audited = 69.0
 // EXPECT: mean_audited = 7.66666666666667
@@ -81,7 +81,7 @@ let station_sums = method_for(by_station)
     <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+))
     |> compute
 let station_means = method_for(by_station)
-    <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) / (1.0 * extents(g))
+    <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) / Float64(extents(g))
     |> compute
 let grand_total = reduce(station_sums, (+))
 // EXPECT: station_sums = [48.0, 36.0, 12.0, 51.0, 36.0, -3.0]

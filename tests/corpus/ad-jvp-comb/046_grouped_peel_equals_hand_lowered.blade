@@ -38,3 +38,4 @@ let dot = reduce(dv * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
 let resid = jt - dot
 // EXPECT: jp = 228.333333333333
 // EXPECT: resid = 0
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

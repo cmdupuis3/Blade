@@ -100,7 +100,7 @@ let private asRejectProbes (tests: (string * string) list) =
 
 /// All tests combined
 let allTests =
-    basicTests @ intrinsicsTests @ adTests @ adJvpTests @ adJvpCombTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
+    basicTests @ intrinsicsTests @ castsTests @ adTests @ adJvpTests @ adJvpCombTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
     @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ tupleTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
     @ indexTypeTests @ mutabilityTests @ asRejectProbes mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ asRejectProbes displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ asRejectProbes unitErrorTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes

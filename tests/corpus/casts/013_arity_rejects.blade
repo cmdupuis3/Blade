@@ -1,0 +1,5 @@
+// TEST: cast arity (rejects)
+// A numeric cast converts exactly one value.
+// ERROR: BL3019
+// ERROR-CONTAINS: takes exactly 1 argument
+let bad = Float32(1.0, 2.0)

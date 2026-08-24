@@ -42,3 +42,4 @@ let mut dc = [0.0, 0.0, 0.0]
 let aL = ad.grad(loss)(v0, kk, c0, dv, dc)
 let agree = abs(aL - rL) < 1.0e-12
 // EXPECT: agree = true
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

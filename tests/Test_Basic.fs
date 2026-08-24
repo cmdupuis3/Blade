@@ -11,6 +11,10 @@ let basicTests = category "basic"
 /// Scalar math intrinsics (exp/log/sqrt/trig family; ML-module prerequisite)
 let intrinsicsTests = category "intrinsics"
 
+/// Explicit numeric casts (Float32(x)/Int64(floor(x))/...) and the BL3020
+/// implicit-conversion warning
+let castsTests = category "casts"
+
 /// grad() — reverse-mode AD source transform (Grad.fs)
 let adTests = category "ad"
 

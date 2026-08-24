@@ -2458,6 +2458,13 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
          | None when name = "lgamma" || name = "digamma" ->
              refuse ($"{name} -- Blade's own series lives in blade_runtime.hpp and has no libm twin")
          | None -> refuse ($"the math intrinsic '{name}'"))
+    // Explicit numeric cast: the lane's own scalar coercion (sitofp/fptosi)
+    // covers the Float64/Int64 targets; the widths this lane has no scalar
+    // for (Float32/Int32/complex) refuse like every other Float32/complex
+    // program does.
+    | IRCast ETFloat64 -> coerce c ScF64 (emitExpr c x)
+    | IRCast ETInt64 -> coerce c ScI64 (emitExpr c x)
+    | IRCast et -> refuse ($"a numeric cast to {(Blade.Types.castNameOf et)}")
 
 and private callLibm1 (c: Ctx) (fn: string) (arg: Val) : Val =
     need c ($"declare double @{fn}(double{(paramAttr ())}){(attrRef c grpExternReturns)}")

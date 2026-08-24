@@ -81,10 +81,10 @@ let v0 = r20 - e0 * e0
 let v1 = r11 - e0 * e0
 
 // exact spectral moments of the true covariance (path-graph cosine bands)
-let tm1 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0), (+)) / 96.0
-let tm2 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)), (+)) / 96.0
-let tm3 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)), (+)) / 96.0
-let tm4 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * (k + 1)  / 97.0)), (+)) / 96.0
+let tm1 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0), (+)) / 96.0
+let tm2 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)), (+)) / 96.0
+let tm3 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)), (+)) / 96.0
+let tm4 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)), (+)) / 96.0
 let tvar_spec = tm2 - tm1 * tm1
 let v1r = v1 / v0
 

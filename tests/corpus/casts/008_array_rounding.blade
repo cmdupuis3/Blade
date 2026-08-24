@@ -1,0 +1,14 @@
+// TEST: array rounding casts fuse floor into the kernel
+// ============================================================================
+// `Int64(floor(A))` on an array fuses the rounding and the cast into ONE
+// synthesized kernel over A (one traversal, gate visible in the body); the
+// hand-written kernel spelling must agree.
+// ============================================================================
+type I = Idx<4>
+let A: Array<Float64 like I> = [2.9, -2.5, 0.5, 7.0]
+let down = Int64(floor(A))
+let up = Int64(ceil(A))
+let manual = (method_for(A) <@> lambda(v) -> Int64(floor(v))) |> compute
+// EXPECT: down = [2, -3, 0, 7]
+// EXPECT: up = [3, -2, 1, 7]
+// EXPECT: manual = [2, -3, 0, 7]

@@ -8,7 +8,7 @@
 type C = Idx<4>
 type Steps = Idx<6>
 function bump(u: Array<Float like C>, n: Int64) -> Array<Float like C> = {
-    let a = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 1.0 * n |> compute
+    let a = method_for(range<C>) <@> lambda(i) -> 1.0 * i + Float64(n) |> compute
     let b = a
     let sa = reduce(a, (+))
     let sb = reduce(b, (+))

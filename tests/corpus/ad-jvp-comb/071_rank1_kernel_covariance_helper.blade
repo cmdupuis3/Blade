@@ -30,3 +30,4 @@ let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
 // WARN: BL4003
 // EXPECT: v = 4.666666666666667
 // EXPECT: t = -2.6666666666666665
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

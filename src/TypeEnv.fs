@@ -649,6 +649,7 @@ class IS implemented, and the dense result folds like any other array." op level
     | IntrinsicNeedsArray op -> $"{op}() requires an array as argument"
     | IntrinsicNotComplex name -> $"{name} is not defined for complex operands."
     | IntrinsicNeedsNumeric name -> $"{name} expects a numeric operand."
+    | InvalidCast msg -> msg
     | AbsNeedsNumericScalar got -> $"abs expects a numeric scalar operand, got {got}"
     | IntrinsicComplexScalarOnly name -> $"{name} applies to complex scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(z) -> {name}(z) |> compute)."
     | IntrinsicNeedsComplex (name, got) -> $"{name} expects a complex operand, got {got}"
@@ -843,6 +844,10 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // construction error", and this one is raised nowhere near a
             // constructor.
             | StructFieldUnknown _ -> "BL3018"
+            // Explicit numeric cast refusals get their own code: BL3007's
+            // "invalid builtin argument" bucket would bury the one message
+            // users need (how to license the conversion they meant).
+            | InvalidCast _ -> "BL3019"
             | StructFieldDuplicate _ | StructNoField _ | StructMissingField _
             | StructFieldType _ | UnknownStructType _ | StructBoundScope _
             | StaticStructField _

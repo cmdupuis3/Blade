@@ -1,0 +1,10 @@
+// TEST: rounding gate holds inside a kernel body (rejects)
+// In a kernel body the cast operand is a parameter apply-site unification
+// has not bound yet, so the cast defers -- the legality judgment reruns
+// after unification (findBadDeferredCast) and the gate still holds:
+// `Int64(v)` over float elements refuses, `Int64(floor(v))` licenses.
+// ERROR: BL3019
+// ERROR-CONTAINS: spell the rounding at the cast site
+type I = Idx<3>
+let A: Array<Float64 like I> = [1.5, 2.5, 3.5]
+let bad = (method_for(A) <@> lambda(v) -> Int64(v)) |> compute

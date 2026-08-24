@@ -1,0 +1,16 @@
+// TEST: float to int through the rounding gate
+// ============================================================================
+// A float source casts to an int target ONLY through a floor/ceil visible at
+// the cast site: `Int64(floor(x))`. The truncation is exact (the operand is
+// already integral), matching C++ static_cast after std::floor/std::ceil.
+// Negative values pin the floor-vs-truncate distinction: floor(-2.5) = -3.
+// ============================================================================
+let x = 2.9
+let down = Int64(floor(x))
+let up = Int64(ceil(x))
+let neg = Int64(floor(-2.5))
+let narrow = Int32(ceil(0.5))
+// EXPECT: down = 2
+// EXPECT: up = 3
+// EXPECT: neg = -3
+// EXPECT: narrow = 1

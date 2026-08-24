@@ -14,7 +14,7 @@ type C = Idx<4>
 type Steps = Idx<5>
 let mut STG = method_for(range<C>) <@> lambda(i) -> 0.0 * i |> compute
 function stepf(n: Int64) -> Float = {
-    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 2.0 * n |> compute
+    let t = method_for(range<C>) <@> lambda(i) -> 1.0 * i + 2.0 * Float64(n) |> compute
     STG = t
     reduce(t, (+)) * 0.5
 }

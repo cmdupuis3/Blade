@@ -53,7 +53,7 @@ function taper(ts_sub: Tuple<T<time>^1, U^1>, lower: T<time>, upper: T<time>) = 
     let beta = 1.0 - alpha
     let span = upper - lower
     let w = (t_sub <@> lambda(t) -> alpha - beta * cos(two_pi * t / span)) |> compute
-    let scale = prodsum(w, w) / extents(w)
+    let scale = prodsum(w, w) / Float64(extents(w))
     (s_sub * w / sqrt(scale)) |> compute
 }
 
@@ -79,7 +79,7 @@ function taperAbs(ts_sub: Tuple<T^1, U^1>, lower: T, upper: T) = {
     let beta = 1.0 - alpha
     let span = upper - lower
     let w = (t_sub <@> lambda(t) -> alpha - beta * cos(two_pi * t / span)) |> compute
-    let scale = prodsum(w, w) / extents(w)
+    let scale = prodsum(w, w) / Float64(extents(w))
     (s_sub * w / sqrt(scale)) |> compute
 }
 

@@ -19,3 +19,4 @@ function q(x: Float, k: Int) -> Float = x ^ k
 let (qv, dqdx) = ad.grad(q)(0.0 - 2.0, 3)
 // EXPECT: qv = -8.0
 // EXPECT: dqdx = 12.0
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

@@ -25,3 +25,4 @@ let gv = ad.grad(loss)([10.0, 20.0, 30.0, 40.0, 50.0], [0, 1, 0, 0, 1], [2.0, 5.
 // EXPECT: gv = 228.333333333333
 // EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
 // EXPECT: dc = [26.6666666666667, 35]
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

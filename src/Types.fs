@@ -690,6 +690,39 @@ type ElemType =
     // Named index references (value and element position) are represented
     // at the IRType level as `IRTIdxTagged (inner, IRefNamed name)` below.
 
+/// Explicit numeric cast heads: the surface scalar type names accepted in
+/// CALL position (`Float32(x)`, `Int64(floor(x))`), mapped to the target
+/// element type. Deliberately the same aliases as type position
+/// (TypeLower.lowerTypeExpr's scalar arms: "Int" is Int32, "Float"/"Double"
+/// are Float64) so a name means one thing in type and cast position alike.
+/// Narrower than TypeLower.builtinScalarNames on purpose: Nat/Bool/String/
+/// Char/Void/Poly/Array are not value conversions. Keep the three tables'
+/// name sets consistent when adding a scalar.
+let numericCastTargets : Map<string, ElemType> =
+    Map.ofList [
+        "Int", ETInt32; "Int32", ETInt32; "Int64", ETInt64
+        "Float", ETFloat64; "Float64", ETFloat64; "Double", ETFloat64
+        "Float32", ETFloat32
+        "Complex64", ETComplex64; "Complex128", ETComplex128 ]
+
+/// Target element type of a numeric cast head, None for any other name.
+let castTargetOf (name: string) : ElemType option =
+    Map.tryFind name numericCastTargets
+
+/// The canonical cast-head spelling for an element type -- used by messages
+/// that suggest an explicit cast ("make it explicit with Float64(...)").
+let castNameOf (et: ElemType) : string =
+    match et with
+    | ETInt32 -> "Int32"
+    | ETInt64 -> "Int64"
+    | ETFloat32 -> "Float32"
+    | ETFloat64 -> "Float64"
+    | ETComplex64 -> "Complex64"
+    | ETComplex128 -> "Complex128"
+    | ETBool -> "Bool"
+    | ETUnit -> "Void"
+    | ETString -> "String"
+
 
 // The IRType family, generic over the extent representation 'Ext. In IR.fs,
 // IRIndexType.Extent is an IRExpr -- the coupling that fused types to

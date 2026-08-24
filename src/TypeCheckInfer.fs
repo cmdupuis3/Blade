@@ -578,6 +578,18 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "complex" }, args) when (lookupVar "complex" env).IsNone ->
         Error (ComplexArity args.Length)
 
+    // ---- Explicit numeric casts: Float32(x), Int64(floor(x)), ... ----
+    // A scalar type name in call position is a conversion intrinsic --
+    // plain-call, shadowable like abs/complex. The accepted heads are
+    // Types.numericCastTargets; the work (legality, the float->int rounding
+    // gate, units, array lifting) is in inferNumericCast.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, [arg])
+            when (castTargetOf name).IsSome && (lookupVar name env).IsNone ->
+        inferNumericCast env expr.Span name (castTargetOf name).Value arg
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args)
+            when (castTargetOf name).IsSome && (lookupVar name env).IsNone ->
+        Error (InvalidCast $"{name} takes exactly 1 argument (got {args.Length}): a numeric cast converts one value, {name}(x).")
+
     // ---- prodsum(x1, ..., xk): fused fiber product-sum ----
     // Sigma_t Pi_l xl(t) over rank-1 arrays of equal extent -- the k-fold
     // generalization of a dot product, and the comoment primitive the PPL
@@ -3974,8 +3986,13 @@ and inferUnaryOp (env: TypeEnv) op operand : TypeResult<TypedExpr> =
                         | OpArg -> IRTScalar ETFloat64
                         // OpMath is synthesized by the ExprApp intrinsic
                         // intercept, never parsed as ExprUnaryOp -- this arm
-                        // is exhaustiveness only.
+                        // is exhaustiveness only. OpCast likewise (built only
+                        // by the cast arm).
                         | OpMath _ -> IRTScalar ETFloat64
+                        | OpCast name ->
+                            (match castTargetOf name with
+                             | Some et -> IRTScalar et
+                             | None -> IRTScalar ETFloat64)
             Ok (mkTyped (TExprUnaryOp (op, tOp)) resTy))
 
 // ---- Module-qualified value/function: `Math.pi`, `MathLib.double(x)` ----
@@ -4274,6 +4291,197 @@ and internal wreathLeafRefusal (opName: string) (leaves: TypedExpr list) : TypeE
         OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix),
                                  sprintf "%s over a wreath-producing leaf (nest merging needs a level \
 list to share, and a wreath's nest is the segment-peeled orb_visit traversal)" opName))
+
+/// BL3020: mixed-elem-type arithmetic converts one operand implicitly (the
+/// binop promotion rules in inferArithType). Literals adapt silently by
+/// design -- adaptFloatLit and the flexible literal vars are how `a32 * 1.0`
+/// stays Float32 -- so only a NON-literal converted operand warns, naming the
+/// explicit cast. Int-with-int width mixes are excluded: bareResult performs
+/// no int widening (the left operand's type stands), so there is no
+/// conversion to report. A float embedding into the SAME-component-width
+/// complex (Float64 beside Complex128, Float32 beside Complex64) is exact
+/// and stays silent: the scalar-complex product is ordinary math notation.
+/// Width CREEP -- Complex64 dragged to Complex128, Float32 to Float64, any
+/// int converted at all -- warns.
+and warnImplicitNumericMix (env: TypeEnv) (lSpan: Span) (rSpan: Span) (tL: TypedExpr) (tR: TypedExpr) : unit =
+    let elemOf (t: TypedExpr) =
+        match IR.stripUnits (env.Subst.Resolve t.Type) with
+        | IRTScalar et -> Some et
+        | ArrayElem arr ->
+            (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+             | IRTScalar et -> Some et
+             | _ -> None)
+        | _ -> None
+    let numeric = function
+        | ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 -> true
+        | _ -> false
+    let isIntElem = function ETInt32 | ETInt64 -> true | _ -> false
+    let rec literalish (k: TypedExprKind) =
+        match k with
+        | TExprLit _ -> true
+        | TExprUnaryOp (OpNeg, inner) -> literalish inner.Kind
+        | _ -> false
+    match elemOf tL, elemOf tR with
+    | Some le, Some re when le <> re && numeric le && numeric re && not (isIntElem le && isIntElem re) ->
+        // The ACTUAL result element, mirroring inferArithType's bareResult
+        // (NOT bare promoteElemType: `Int64 * Float32` computes and types
+        // Float32 -- C++'s usual arithmetic conversions -- while the
+        // promotion table would claim Float64; only the complex mixes take
+        // the table's answer, because the typed result at 5983-5985 and the
+        // operand coercions both do).
+        let actualJoin =
+            match IR.promoteElemType le re with
+            | Some (ETComplex64 | ETComplex128 as c) -> Some c
+            | _ ->
+                if le = ETFloat64 || re = ETFloat64 then Some ETFloat64
+                elif le = ETFloat32 || re = ETFloat32 then Some ETFloat32
+                else None
+        match actualJoin with
+        | Some join ->
+            let exactEmbed (src: ElemType) =
+                (src = ETFloat64 && join = ETComplex128) || (src = ETFloat32 && join = ETComplex64)
+            let warnSide (t: TypedExpr) (src: ElemType) (surfaceSpan: Span) =
+                if src <> join && not (literalish t.Kind) && not (exactEmbed src) then
+                    let span = if t.Span = noSpan then surfaceSpan else t.Span
+                    emitWarning env "BL3020" span
+                        ($"implicit numeric conversion: this {castNameOf src} operand is converted to "
+                         + $"{castNameOf join} by mixed-type promotion; write {castNameOf join}(...) around it "
+                         + "to make the conversion explicit (or convert the other operand instead)")
+            warnSide tL le lSpan
+            warnSide tR re rSpan
+        | None -> ()
+    | _ -> ()
+
+/// ---- Explicit numeric casts: Float32(x), Int64(floor(x)), Complex64(z) ----
+/// A scalar type name in CALL position converts one numeric value -- the
+/// explicit spelling of the conversions the language performs nowhere
+/// implicitly. Same plain-call surface and shadowing rule as abs/complex;
+/// the accepted heads and their targets are Types.numericCastTargets (the
+/// type-position aliases included, so `Int` casts to Int32 and
+/// `Float`/`Double` to Float64, exactly what those names mean after `:`).
+///
+/// Legality: int<->int (both directions, explicit narrowing wraps like the
+/// C++ it compiles to), int->float, int->complex, float<->float,
+/// float->complex, complex<->complex, and the identity. A complex source
+/// never casts to a real/int target (project with real/imag/abs/arg). A
+/// float source casts to an int target ONLY through a floor/ceil visible at
+/// the cast site -- `Int64(floor(x))` -- so truncation is always spelled.
+/// The gate is judged on the TYPED operand (`OpMath "floor"`), so a user
+/// function shadowing floor does not license, and a rounded value that took
+/// a detour through a let-binding refuses on purpose.
+///
+/// Units ride through unchanged (a cast changes representation width, not
+/// the quantity); the float->int gate composes, since floor/ceil already
+/// require a dimensionless operand. Nat/index-tagged sources read out as
+/// the underlying integer -- one-way on purpose: no cast target is ever a
+/// Nat/index type, so provenance (bounds safety) cannot be laundered back in.
+and inferNumericCast (env: TypeEnv) (span: Span) (name: string) (target: ElemType) (arg: Expr) : TypeResult<TypedExpr> =
+    let isIntElem = function ETInt32 | ETInt64 -> true | _ -> false
+    let isFloatElem = function ETFloat32 | ETFloat64 -> true | _ -> false
+    let isComplexElem = function ETComplex64 | ETComplex128 -> true | _ -> false
+    let isRoundedOperand (t: TypedExpr) =
+        match t.Kind with
+        | TExprUnaryOp (OpMath ("floor" | "ceil"), _) -> true
+        | _ -> false
+    let complexSourceErr () =
+        Error (InvalidCast ($"{name}() cannot cast a complex value: project a real component first -- "
+                            + "real(z), imag(z), abs(z), or arg(z)."))
+    let roundingGateErr () =
+        Error (InvalidCast ($"{name}() would truncate a float: spell the rounding at the cast site -- "
+                            + $"{name}(floor(x)) or {name}(ceil(x))."))
+    inferExpr env arg |> Result.bind (fun tArg ->
+        // A literal argument's width-flexible var binds to its natural
+        // default first (Int64 / Float64), so the cast is a CONVERSION of a
+        // concretely-typed value -- `Float32(5.7)` narrows the double 5.7,
+        // byte-identical between the compiled and interpreted lanes -- and
+        // never a context that retypes the literal.
+        let rec literalDefault (k: TypedExprKind) =
+            match k with
+            | TExprLit (LitInt _) -> Some ETInt64
+            | TExprLit (LitFloat _) -> Some ETFloat64
+            | TExprUnaryOp (OpNeg, inner) -> literalDefault inner.Kind
+            | _ -> None
+        let bindLit =
+            match env.Subst.Resolve tArg.Type, literalDefault tArg.Kind with
+            | IRTInfer _, Some et -> unify env.Subst tArg.Type (IRTScalar et)
+            | _ -> Ok ()
+        bindLit |> Result.bind (fun () ->
+        let resolved = env.Subst.Resolve tArg.Type
+        let mkCast (resTy: IRType) =
+            Ok (mkTypedSpan (TExprUnaryOp (OpCast name, tArg)) resTy span)
+        let scalarResult (units: UnitSig option) =
+            match units with
+            | Some u -> IRTUnitAnnotated (IRTScalar target, u)
+            | None -> IRTScalar target
+        let judgeScalar (src: ElemType) (units: UnitSig option) =
+            match src with
+            | ETBool | ETString | ETUnit ->
+                Error (InvalidCast $"{name}() expects a numeric operand; got {ppIRType resolved}.")
+            | _ when isComplexElem src && not (isComplexElem target) -> complexSourceErr ()
+            | _ when isFloatElem src && isIntElem target && not (isRoundedOperand tArg) -> roundingGateErr ()
+            | _ -> mkCast (scalarResult units)
+        match resolved with
+        | ArrayElem arr ->
+            // ARRAY operand: lift elementwise, the same eager synthesis as
+            // `cos(A)` -- `(method_for(A) <@> kernel) |> compute`. The
+            // kernel must be a LAMBDA (a cast head is not a value); its
+            // param stays unannotated: the cast defers inside the body and
+            // apply-site unification binds the param to the element type
+            // (units ride through kernelBodyUnits' OpCast rule). Element
+            // CLASS is judged here so the message names the cast.
+            let elemBare = IR.stripUnits (env.Subst.Resolve arr.ElemType)
+            let castOf (e: Expr) = mkExpr e.Span (ExprApp (mkExpr e.Span (ExprVar name), [e]))
+            let liftOver (source: Expr) (mkBody: Expr -> Expr) =
+                let sp = arg.Span
+                let param : LambdaParam = { Name = "__castv"; Type = None; Default = None; NameSpan = noSpan }
+                let body = mkBody (mkExpr sp (ExprVar "__castv"))
+                inferExpr env (mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                    mkExpr sp (ExprMethodFor [source]),
+                    mkExpr sp (ExprLambda ([param], None, body)))))))
+            match elemBare with
+            | IRTScalar (ETBool | ETString | ETUnit) ->
+                Error (InvalidCast $"{name}() expects numeric elements; got an array of {ppIRType elemBare} elements.")
+            | IRTScalar src when isComplexElem src && not (isComplexElem target) -> complexSourceErr ()
+            | IRTScalar src when isFloatElem src && isIntElem target ->
+                // Rounding gate, array flavor: the direct spelling
+                // `Int64(floor(A))` fuses rounding and cast into ONE kernel
+                // over floor's own operand (one traversal, and the gate
+                // stays visible in the synthesized body); anything else
+                // refuses with the kernel spelling.
+                (match arg.Kind with
+                 | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar rname }, [inner])
+                        when (rname = "floor" || rname = "ceil") && (lookupVar rname env).IsNone ->
+                     liftOver inner (fun v -> castOf (mkExpr v.Span (ExprApp (mkExpr v.Span (ExprVar rname), [v]))))
+                 | _ ->
+                     Error (InvalidCast ($"{name}() would truncate float elements: spell the rounding at the "
+                                         + $"cast site -- {name}(floor(A)) / {name}(ceil(A)) -- or put both in "
+                                         + $"one kernel: method_for(A) <@> lambda(v) -> {name}(floor(v))")))
+            | _ -> liftOver arg castOf
+        | _ ->
+            let bare = IR.stripUnits resolved
+            let units = IR.getUnits resolved
+            match bare with
+            | IRTScalar src -> judgeScalar src units
+            | IRTNat _ -> mkCast (scalarResult units)
+            | IRTIdxTagged (inner, _) ->
+                (match IR.stripUnits inner with
+                 | IRTScalar src -> judgeScalar src units
+                 | _ -> Error (InvalidCast $"{name}() expects a numeric operand; got {ppIRType resolved}."))
+            | IRTInfer _ when env.InLambdaBody ->
+                // KERNEL-BODY DEFERRAL, same shape as the math intrinsics'
+                // IRTInfer arm: the operand is a kernel parameter apply-site
+                // unification has not bound yet. The RESULT type needs no
+                // deferral -- a cast's type is its target -- but the
+                // legality judgment needs the source, so buildApplyInfo's
+                // findBadDeferredCast re-judges this node once the param is
+                // bound.
+                mkCast (IRTScalar target)
+            | IRTInfer _ ->
+                Error (InvalidCast ($"{name}() needs a concretely-typed operand, and this one's type is not "
+                                    + "determined here -- annotate the value (or the parameter it came from) "
+                                    + "with a concrete numeric type."))
+            | _ ->
+                Error (InvalidCast $"{name}() expects a numeric operand; got {ppIRType resolved}.")))
 
 and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     // REDUCTION JOIN, Form 1: `object_for(<&!>) <@> (r1, r2, ...)`. The
@@ -4898,6 +5106,11 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
             inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy0 ->
+                // BL3020: a mixed-elem-type op converts a NON-literal operand
+                // implicitly. Warn only once the op has typed successfully,
+                // so a real error is never accompanied by advice about a
+                // program that doesn't compile anyway.
+                warnImplicitNumericMix env left.Span right.Span tL tR
                 // S1 SEAM 2 (docs/plan-kernel-body-materialization.md, M-B, the
                 // concrete-operand triple). One operand is a real array, the
                 // other an UNRESOLVED inference var -- the shape an enclosing
@@ -5465,6 +5678,12 @@ and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig o
     | OpMath (("floor" | "ceil") as name) ->
         requireDimensionless
             $"{name}() argument (rounding is not scale-invariant: floor(3.7 m) = 3 m, but the same length as 370 cm floors to 370 cm = 3.7 m; divide by a reference quantity to get a dimensionless count first)"
+    | OpCast _ ->
+        // A numeric cast changes representation width, not the quantity:
+        // units ride through unchanged. (float->int casts only exist
+        // through floor/ceil, which already required a dimensionless
+        // operand, so the int side composes.)
+        Ok u
     | OpMath name ->
         requireDimensionless
             $"{name}() argument (a transcendental sums powers of its argument, so it is defined only on dimensionless values; divide by a reference quantity first)"
@@ -8070,6 +8289,38 @@ and buildApplyInfo (env: TypeEnv)
             | TExprBinOp (_, OpMath2 name, l, r)
                     when isComplexOperand l || isComplexOperand r -> Some name
             | _ -> typedExprChildren e |> List.tryPick findBadComplexIntrinsic
+        // (3b) A CAST whose deferred operand resolved to a class the cast
+        //     refuses eagerly in scalar position: a complex source under a
+        //     real/int target, or the float->int rounding gate. Same
+        //     deferral story as (3): in a kernel body the operand is a
+        //     param, so inferNumericCast stamps the (fixed) target type and
+        //     leaves the legality judgment to this walk, once apply-site
+        //     unification has bound the param. The gate reads the operand's
+        //     KIND -- `Int64(floor(v))` licenses, `Int64(v)` refuses -- which
+        //     is final regardless of when the types resolved.
+        let rec findBadDeferredCast (e: TypedExpr) : TypeError option =
+            let srcElem (o: TypedExpr) =
+                match IR.stripUnits (env.Subst.Resolve o.Type) with
+                | IRTScalar et -> Some et
+                | _ -> None
+            let bad =
+                match e.Kind with
+                | TExprUnaryOp (OpCast cname, operand) ->
+                    (match srcElem operand, castTargetOf cname with
+                     | Some (ETComplex64 | ETComplex128), Some (ETInt32 | ETInt64 | ETFloat32 | ETFloat64) ->
+                         Some (InvalidCast ($"{cname}() cannot cast a complex value: project a real component first -- "
+                                            + "real(z), imag(z), abs(z), or arg(z)."))
+                     | Some (ETFloat32 | ETFloat64), Some (ETInt32 | ETInt64) when
+                             (match operand.Kind with
+                              | TExprUnaryOp (OpMath ("floor" | "ceil"), _) -> false
+                              | _ -> true) ->
+                         Some (InvalidCast ($"{cname}() would truncate a float: spell the rounding at the cast site -- "
+                                            + $"{cname}(floor(x)) or {cname}(ceil(x))."))
+                     | _ -> None)
+                | _ -> None
+            match bad with
+            | Some _ -> bad
+            | None -> typedExprChildren e |> List.tryPick findBadDeferredCast
         // AN ARRAY-VALUED KERNEL RETURN IS NOW SUPPORTED (stage S3,
         // docs/plan-kernel-body-materialization.md manifestation M-C). The S0
         // guard that stood here -- "kernelOutputRank >= 1 and the body is not a
@@ -8098,6 +8349,9 @@ and buildApplyInfo (env: TypeEnv)
         | None ->
         match findBadComplexIntrinsic lambdaInfo.Body with
         | Some name -> Error (IntrinsicNotComplex name)
+        | None ->
+        match findBadDeferredCast lambdaInfo.Body with
+        | Some err -> Error err
         | None ->
         // HALO-EXTENT AGREEMENT (BL3016, the halo twin of kernelExtentClash).
         // A halo's declared inner extent is written by hand while the array it
@@ -8323,6 +8577,14 @@ and buildApplyInfo (env: TypeEnv)
                     (match elemOfType e2.Type, elemOfType node.Type with
                      | Some ETComplex64, Some ETFloat64 -> withElem node ETFloat32
                      | _ -> node)
+                | TExprUnaryOp (OpCast cname, e) ->
+                    // A cast's stamp is always its target: never upgrade the
+                    // node itself; still walk the operand so ITS deferred
+                    // stamps are corrected. (Legality of a complex operand
+                    // under a real target is findBadDeferredCast's judgment,
+                    // not a stamp.)
+                    let e2 = walk e
+                    { t with Kind = TExprUnaryOp (OpCast cname, e2) }
                 | TExprIf (c, a, b) ->
                     let a2, b2 = walk a, walk b
                     let node = { t with Kind = TExprIf (c, a2, b2) }

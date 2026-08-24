@@ -89,11 +89,31 @@ tdim_extent ::= literal | input.extent(dim) | tdim_extent op tdim_extent
                 where op ∈ {+, -, *, /}
 ```
 
-### 2.4 Value types and promotion
+### 2.4 Value types, casts, and promotion
 
-Base types: `Int32/Int64/Float32/Float64/Complex64/Complex128`. Promotion:
-float beats int (implicit int→float only), wider beats narrower within a
-category, complex promotes componentwise. `Int64 × Float32 → Float64`.
+Base types: `Int32/Int64/Float32/Float64/Complex64/Complex128`. Conversions
+are EXPLICIT: a scalar type name in call position is a numeric cast —
+`Float32(x)`, `Float64(extents(a))`, `Complex128(r)` — a plain-call
+intrinsic, shadowable like `abs`/`complex`, with the type-position aliases
+included (`Int` casts to Int32, `Float`/`Double` to Float64). Legal
+conversions: int↔int, int→float, int→complex, float↔float, float→complex,
+complex↔complex, and the identity; units ride through unchanged. Refused
+(BL3019): a complex source into a real/int target — which real is meant is
+exactly what the cast cannot say; project with `real`/`imag`/`abs`/`arg` —
+and a float source into an int target unless the rounding is visible at the
+cast site, `Int64(floor(x))` / `Int64(ceil(x))`, so truncation is always
+spelled (a rounded value bound to a name and cast later refuses on
+purpose). Array operands lift elementwise like `cos(A)`; `Int64(floor(A))`
+fuses the rounding and the cast into one kernel.
+
+Mixed-type arithmetic still promotes — float beats int, wider beats
+narrower within a category, complex promotes componentwise, and a mixed
+int/float op computes at the float operand's width (`Int64 × Float32 →
+Float32`, C++'s usual arithmetic conversions) — but the conversion of a
+NON-literal operand now warns (BL3020), naming the explicit cast. Literals
+adapt silently by design (`a32 * 1.0` stays Float32), as does the exact
+same-component-width real→complex embedding (`w * z` over Float64 and
+Complex128).
 
 Type variables (single capitals) are universally quantified within a
 signature; the same letter denotes the same type; `cast<A,B>` is the promotion

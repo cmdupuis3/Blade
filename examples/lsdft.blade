@@ -83,8 +83,8 @@ where omp(st_raw: 1) = {
         // is nothing to project onto and the cell comes back nan. That is the
         // formula being honest, not a defect: leave 0 out of `omegas`, or read
         // only the `a` quadrature there.
-        let a = real(P) / sqrt((n + abs(Z2)) / 2)
-        let b = imag(P) / sqrt((n - abs(Z2)) / 2)
+        let a = real(P) / sqrt((Float64(n) + abs(Z2)) / 2)
+        let b = imag(P) / sqrt((Float64(n) - abs(Z2)) / 2)
 
         complex(a, b) * exp(i * w * t_zero) / sqrt(2.0 * s_var)
     }

@@ -55,3 +55,4 @@ let agree = abs(fd - t) < 0.000001 * (abs(t) + 1.0)
 // EXPECT: t = -2.6666666666666665
 // EXPECT: presid = 0
 // EXPECT: agree = true
+// WARN: BL3020  (the implicit int->float promotion here is deliberate)

@@ -763,6 +763,58 @@ let evalMath (name: string) (v: Value) : Value =
         // that rare path is computed through double here, a documented minor divergence.
         | other -> VFloat (math1 name (asF64 other))
 
+/// Explicit numeric cast, matching CodeGen's static_cast / complex-constructor
+/// emission bit for bit: float->int truncates toward zero (C++ static_cast;
+/// TypeCheck only licenses it through floor/ceil, so the value is already
+/// integral), int64->int32 wraps two's-complement, and a Complex64 target
+/// squeezes both components through float32 -- VComplex stores doubles (the
+/// Value DU has no width-tagged complex case), so the narrowing is applied to
+/// the components exactly where C++ stores complex<float>.
+let private evalCast (target: ElemType) (v: Value) : Value =
+    let bad () =
+        raise (InterpPanic("BL8010", $"numeric cast to {castNameOf target} on an unsupported operand (typecheck licenses casts, so this is an interpreter bug)", None, 0))
+    let asRealF64 () =
+        match v with
+        | VInt n -> float n
+        | VInt32 n -> float n
+        | VFloat f -> f
+        | VFloat32 f -> float f
+        | _ -> bad ()
+    match target with
+    | ETFloat64 -> VFloat (asRealF64 ())
+    | ETFloat32 ->
+        // Narrow through float32 with a single rounding from the SOURCE type:
+        // C++ converts int64->float directly, so don't detour via double.
+        (match v with
+         | VInt n -> VFloat32 (float32 n)
+         | VInt32 n -> VFloat32 (float32 n)
+         | VFloat f -> VFloat32 (float32 f)
+         | VFloat32 f -> VFloat32 f
+         | _ -> bad ())
+    | ETInt64 ->
+        (match v with
+         | VInt n -> VInt n
+         | VInt32 n -> VInt (int64 n)
+         | VFloat f -> VInt (int64 f)
+         | VFloat32 f -> VInt (int64 f)
+         | _ -> bad ())
+    | ETInt32 ->
+        (match v with
+         | VInt n -> VInt32 (int32 n)
+         | VInt32 n -> VInt32 n
+         | VFloat f -> VInt32 (int32 f)
+         | VFloat32 f -> VInt32 (int32 f)
+         | _ -> bad ())
+    | ETComplex128 ->
+        (match v with
+         | VComplex _ -> v
+         | _ -> VComplex (asRealF64 (), 0.0))
+    | ETComplex64 ->
+        (match v with
+         | VComplex (r, i) -> VComplex (float (float32 r), float (float32 i))
+         | _ -> VComplex (float (float32 (asRealF64 ())), 0.0))
+    | ETBool | ETUnit | ETString -> bad ()
+
 /// Evaluate a scalar unary operator, matching CodeGen's IRUnaryOp emission.
 let evalUnaryOp (op: IRUnaryOp) (v: Value) : Value =
     match op with
@@ -787,3 +839,4 @@ let evalUnaryOp (op: IRUnaryOp) (v: Value) : Value =
     | IRArg ->
         let (r, i) = asComplex v in VFloat (complexArg r i)
     | IRMath name -> evalMath name v
+    | IRCast target -> evalCast target v

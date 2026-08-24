@@ -1,0 +1,18 @@
+// TEST: jvp through an explicit count cast
+// ============================================================================
+// The BL3020-clean mean spelling stays differentiable: a float-target cast
+// is the identity linear map (its tangent is the same cast of the operand's
+// tangent), and `Float64(extents(xs))` bottoms out in the int-valued extents
+// whose tangent is the literal zero -- so the quotient rule's second term
+// folds away exactly as it does for the bare-extents spelling.
+// mean = 2.5; seed [1,0,0,0] -> d(mean) = 1/4.
+// ============================================================================
+import ad as ad
+type I = Idx<4>
+function mean_cast(xs: Array<Float like I>) -> Float = {
+    reduce(xs, (+)) / Float64(extents(xs))
+}
+let (v, t) = ad.jvp(mean_cast)([1.0, 2.0, 3.0, 4.0], [1.0, 0.0, 0.0, 0.0])
+// WARN: BL4003
+// EXPECT: v = 2.5
+// EXPECT: t = 0.25

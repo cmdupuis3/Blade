@@ -324,6 +324,28 @@
       ],
       "docs": []
     },
+    "BL3019": {
+      "title": "invalid numeric cast",
+      "explanation": "An explicit numeric cast -- a scalar type name in call position, `Float32(x)`, `Int64(floor(x))`, `Complex128(r)` -- was refused. The legal conversions are int<->int, int->float, int->complex, float<->float, float->complex, complex<->complex, and the identity. Two refusals carry the design: a COMPLEX source never casts to a real/int target, because which real is meant (real part, magnitude, phase) is exactly the information the cast cannot carry; and a FLOAT source casts to an int target only through a floor/ceil application visible at the cast site -- `Int64(floor(x))` -- so truncation is always spelled, never implied. The gate reads the operand as written: a rounded value that took a detour through a let-binding refuses on purpose, and a user function shadowing `floor` does not license. This code also covers non-numeric operands (Bool/String), operands whose type is not yet determined, and a cast applied to more or fewer than one argument.",
+      "fix": "For float->int, spell the rounding at the cast site: `Int64(floor(x))` or `Int64(ceil(x))` (arrays: `Int64(floor(A))`, or put both in one kernel, `method_for(A) <@> lambda(v) -> Int64(floor(v))`). For complex->real, project a component first: `real(z)`, `imag(z)`, `abs(z)`, or `arg(z)`. For an undetermined operand, annotate the value or the parameter it came from with a concrete numeric type.",
+      "examples": [
+        "tests/corpus/casts/009_int_gate_rejects.blade",
+        "tests/corpus/casts/010_rounding_detour_rejects.blade",
+        "tests/corpus/casts/011_complex_to_real_rejects.blade",
+        "tests/corpus/casts/012_kernel_gate_rejects.blade",
+        "tests/corpus/casts/013_arity_rejects.blade"
+      ],
+      "docs": []
+    },
+    "BL3020": {
+      "title": "implicit numeric conversion",
+      "explanation": "A WARNING, not an error. Mixed-element-type arithmetic still promotes -- an Int64 beside a Float64 computes in double, a Float32 beside a Float64 drags the operation to Float64, a narrow complex widens -- but the conversion of a NON-literal operand is no longer silent: this warning names the operand that is converted and the type it becomes. Literals stay exempt (a literal adapting to its context is typing, not a runtime conversion: `a32 * 1.0` still computes in Float32 with no warning), and so does the exact same-component-width real->complex embedding (`w * z` over Float64 and Complex128), which loses nothing.",
+      "fix": "Wrap the converted operand in the explicit cast the message names -- `sum / Float64(n)` instead of `sum / n` -- or convert the other operand instead if the narrow width was the intent (`Float32(x) * a32`). In a test that deliberately exercises the promotion, pin it with `// WARN: BL3020`.",
+      "examples": [
+        "tests/corpus/casts/014_implicit_warning.blade"
+      ],
+      "docs": []
+    },
     "BL3999": {
       "title": "type error",
       "explanation": "The type band's catch-all, carried by every checker error that has no more specific code of its own. A large and deliberately heterogeneous set: the message is the diagnosis, not the code.",
