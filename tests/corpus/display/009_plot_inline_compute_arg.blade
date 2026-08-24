@@ -1,0 +1,33 @@
+// TEST: Plot Inline Compute Argument
+// ============================================================================
+// A DEFERRED PIPELINE materialized INLINE in a generic function's argument
+// slot: `(method_for(range<Y, X>) <@> k) |> compute`.
+//
+// The `|> compute` wrapper erases at the type level -- it materializes a
+// computation without changing what is computed -- but it is a node with no
+// carried type sitting on top of an `IRApplyCombinator` that carries its
+// output type perfectly well. In argument position that hid the element type
+// from the HM call site and took the whole `plot` generic chain down with a
+// BL6001 cascade; binding the pipeline to a `let` first worked. Both spellings
+// are pinned, and they must emit the same frame.
+//
+// The kernel reads a rank-3 store through a pinned leading coordinate, which
+// is the shape a scan/time axis actually has in a NetCDF or Zarr program.
+// ============================================================================
+import plot
+type Scan = Idx<2>
+type Y = Idx<2>
+type X = Idx<3>
+let R: Array<Float32 like Scan, Y, X> = [[[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]], [[6.0, 7.0, 8.0], [9.0, 10.0, 11.0]]]
+let x = [0.0, 1.0, 2.0]
+let y = [0.0, 1.0]
+// Direct argument position: the spelling that used to fail.
+let direct = plot.heatmap(x, y,
+    (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute,
+    "scan 0": title)
+// The let-bound control.
+let grid = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute
+let bound = plot.heatmap(x, y, grid, "scan 0": title)
+// EXPECT: direct = true
+// EXPECT: bound = true
+// EXPECT: grid = [[0, 1, 2.25], [3, 4, 5.5]]

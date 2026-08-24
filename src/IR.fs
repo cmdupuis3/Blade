@@ -2114,8 +2114,8 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
     mapIRExpr substInNode expr
 
 /// Types carried directly on a node -- no reconstruction, no environment.
-/// The shared first tier of the canonical typing (audit section 2.2): the whole of
-/// exprTypeIfKnown below, and the first arm of typeOf.
+/// The shared first tier of the canonical typing (audit section 2.2): the first
+/// arm of typeOf, and the base case every arm of exprTypeIfKnown bottoms out in.
 let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     match expr with
     | IRVar (_, ty) -> Some ty
@@ -2131,38 +2131,6 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
     | IRLit IRLitUnit -> Some IRTUnit
     | _ -> None
-
-/// Get the type of an IRExpr where determinable from the node directly --
-/// deliberately the CarriedType tier only, NOT the full typeOf
-/// reconstruction. Used at HM call sites to extract arg types for
-/// unification against param types: a reconstructed type could carry
-/// pre-substitution type variables, so only node-carried types are safe.
-/// Anything else returns None; the call site falls back to the function's
-/// declared type-var positions.
-let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
-    match expr with
-    | CarriedType ty -> Some ty
-    // A TUPLE LITERAL carries no type of its own -- `IRTuple` is a bare
-    // component list -- so an HM call site whose argument is written
-    // `f((a, b))` learned NOTHING about the parameter's component type vars.
-    // With `f(st: Tuple<T^1, U^1>)` that leaves T and U unbound, `paramVarsCovered`
-    // false, no specialization generated, and the (dropped) HM original's call
-    // site left dangling: `blade check` passes and IR validation then reports
-    // BL6001 "unresolved type variable" plus a dangling VarId. Measured on
-    // `functions/059`'s fully-abstract spelling, `sql-group-by/029`'s
-    // `rowdotT`, and `examples/lswosa.blade`'s `hanning`/`wosa_lsdft`.
-    //
-    // Recursing COMPONENTWISE keeps the node-carried discipline this function
-    // exists to enforce: every leaf type still comes from `CarriedType`, and a
-    // tuple with even one unknown component still answers None rather than
-    // inventing a partial type.
-    | IRTuple es ->
-        let comps = es |> List.map exprTypeIfKnown
-        if comps |> List.forall Option.isSome then
-            Some (IRTTuple (comps |> List.map Option.get))
-        else None
-    | _ -> None
-
 
 /// Map from struct name to its fields, used by typeOf for IRFieldAccess
 /// resolution. Built at liftInlineFormsModule entry, used throughout the
@@ -2284,9 +2252,11 @@ let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
 // re-derive it -- multiple hand-maintained derivations invite silent
 // divergence between them (a wrong-codegen bug class). The three roles:
 //   - typeOf                -- the full reconstruction (this section)
-//   - exprTypeIfKnown       -- the CarriedType subset only (HM call sites
-//                             must not unify against reconstructed types;
-//                             see its doc comment)
+//   - exprTypeIfKnown       -- CarriedType plus the view/wrapper forms that
+//                             DELEGATE their rule here (defined after this
+//                             section, which is why); HM call sites must not
+//                             unify against a freely reconstructed type. See
+//                             its doc comment.
 //   - CodeGen.inferExprType -- thin alias of typeOf
 //
 // Dispatch is organized as active-pattern families feeding a top-level
@@ -2924,3 +2894,71 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     | IROpaqueExtent | IRRange _ ->
         unreachableTyping "IntValued" expr
 
+/// Get the type of an IRExpr where the node itself determines it: the whole of
+/// the `CarriedType` tier, plus the few VIEW and WRAPPER forms whose type is a
+/// structural function of a child that is itself known this way. Used at HM
+/// call sites to extract argument types for unification against parameter
+/// types.
+///
+/// Deliberately NOT `typeOf`. A full reconstruction climbs through nodes whose
+/// type can still be pre-substitution or environment-dependent, and a
+/// confidently WRONG type here mints a wrong specialization -- worse than no
+/// specialization. What every arm below has in common is that its LEAVES still
+/// come from `CarriedType`: an arm answers None the moment a child does,
+/// rather than inventing a partial type. Anything else returns None, and the
+/// call site falls back to the callee's declared type-var positions.
+///
+/// Sits after `typeOf` purely so the view arms can DELEGATE their structural
+/// rule to it instead of restating it -- a second hand-maintained peel rule is
+/// exactly the silent-divergence hazard the canonical-typing section exists to
+/// prevent.
+let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
+    match expr with
+    | CarriedType ty -> Some ty
+    // A TUPLE LITERAL carries no type of its own -- `IRTuple` is a bare
+    // component list -- so an HM call site whose argument is written
+    // `f((a, b))` learned NOTHING about the parameter's component type vars.
+    // With `f(st: Tuple<T^1, U^1>)` that leaves T and U unbound, `paramVarsCovered`
+    // false, no specialization generated, and the (dropped) HM original's call
+    // site left dangling: `blade check` passes and IR validation then reports
+    // BL6001 "unresolved type variable" plus a dangling VarId. Measured on
+    // `functions/059`'s fully-abstract spelling, `sql-group-by/029`'s
+    // `rowdotT`, and `examples/lswosa.blade`'s `hanning`/`wosa_lsdft`.
+    //
+    // Recursing COMPONENTWISE keeps the node-carried discipline this function
+    // exists to enforce: every leaf type still comes from `CarriedType`, and a
+    // tuple with even one unknown component still answers None rather than
+    // inventing a partial type.
+    | IRTuple es ->
+        let comps = es |> List.map exprTypeIfKnown
+        if comps |> List.forall Option.isSome then
+            Some (IRTTuple (comps |> List.map Option.get))
+        else None
+    // COMPUTATION WRAPPERS erase at the type level (they are `TypeVia`
+    // pass-throughs): `xs |> compute` materializes a deferred computation
+    // without changing WHAT it computes. Written inline in an argument slot --
+    // `plot.heatmap(x, y, (method_for(range<Y, X>) <@> k) |> compute)` -- the
+    // wrapper hid an `IRApplyCombinator`, which carries its `OutputType`
+    // perfectly well; the callee's element var went unlearned and every
+    // generic helper BEHIND the call then failed to specialize, so the program
+    // died in a BL6001 spray naming stdlib helpers it never mentions. Binding
+    // the pipeline to a `let` first was the only spelling that worked, for the
+    // uninteresting reason that a binding reference is an `IRVar`.
+    | IRCompute inner | IRPure inner -> exprTypeIfKnown inner
+    // A PARTIAL INDEX -- the row view `R(36)` on an `Array<T like Scan, Y, X>`
+    // -- carries no type either; peeling the indexed dimensions off the head's
+    // type is what gives it one, and that peel is `typeOf`'s rule, not a fresh
+    // one (compound and sparse heads take a residual-slot rule rather than
+    // positional peeling). Requiring the head to be a KNOWN ARRAY keeps the
+    // discipline and keeps `typeOf` on its reconstructing path: it re-derives
+    // the very head type this guard just accepted.
+    //
+    // The sibling view forms -- IRSlice, IRCurry, IRSubset -- must NOT be
+    // routed here: `typeOf` leaves them deliberately untyped (IRTUnit), which
+    // is precisely the wrong-but-concrete answer this function exists to
+    // refuse.
+    | IRIndex (arr, _, _) ->
+        (match exprTypeIfKnown arr with
+         | Some (ArrayElem _) -> Some (typeOf expr)
+         | _ -> None)
+    | _ -> None

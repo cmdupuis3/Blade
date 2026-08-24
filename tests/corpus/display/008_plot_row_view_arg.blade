@@ -1,0 +1,37 @@
+// TEST: Plot Row View Argument
+// ============================================================================
+// A ROW VIEW handed STRAIGHT to a generic module function.
+//
+// `R(scan)` on an `Array<Float32 like Scan, Y, X>` peels the leading axis and
+// yields a rank-2 view -- exactly the shape `plot.contourf`'s `z` parameter
+// asks for. But a partial index carries no type on its own node, so the HM
+// call site learned NOTHING about the callee's element var, `paramVarsCovered`
+// stayed false, and every generic helper BEHIND the call (`__axis_json`,
+// `__grid_json`, the whole `__ax*`/`__gr*` decimation ladder) went
+// unspecialized: `blade check` passed and the program then died in a BL6001
+// spray naming stdlib helpers it never mentions. Lifting the same view to a
+// `let` first was the only spelling that worked, for the uninteresting reason
+// that a binding reference is an IRVar and an IRVar carries its type.
+//
+// Both spellings are pinned here, and the frames they emit are the SAME frame:
+// that is the property the fix has to preserve.
+// ============================================================================
+import plot
+type Scan = Idx<2>
+type Y = Idx<2>
+type X = Idx<3>
+let R: Array<Float32 like Scan, Y, X> = [[[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]], [[6.0, 7.0, 8.0], [9.0, 10.0, 11.0]]]
+let x = [0.0, 1.0, 2.0]
+let y = [0.0, 1.0]
+// Direct argument position: the spelling that used to fail.
+let direct = plot.contourf(x, y, R((1 : Scan)), "scan 1": title)
+// The let-bound control, byte-identical by construction.
+let frame = R((1 : Scan))
+let bound = plot.contourf(x, y, frame, "scan 1": title)
+// A second factory over the same view, so the shared `__grid_json` ladder is
+// reached from more than one specialization.
+let heat = plot.heatmap(x, y, R((0 : Scan)))
+// EXPECT: direct = true
+// EXPECT: bound = true
+// EXPECT: frame = [[6, 7, 8], [9, 10, 11]]
+// EXPECT: heat = true

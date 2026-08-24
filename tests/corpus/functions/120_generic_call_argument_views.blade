@@ -1,0 +1,45 @@
+// TEST: Generic Call Argument View Forms
+// ============================================================================
+// The stdlib-free twin of tests/corpus/display/008 and 009: what those pin
+// through `plot.contourf`, this pins through a two-deep generic chain of its
+// own, so the guard survives any reshaping of stdlib/plot.blade.
+//
+// HM specialization is CALL-SITE driven -- it learns the callee's type vars by
+// unifying each parameter against the ARGUMENT's type -- and it reads that
+// argument type off the node. Two perfectly ordinary rank-2 spellings carry no
+// type on their node:
+//
+//   * a PARTIAL INDEX, the row view `R((1 : Scan))` peeling a rank-3 store;
+//   * an inline `|> compute`, the wrapper over a deferred pipeline.
+//
+// Each answered "type unknown", so `T` went unlearned, no specialization was
+// minted, and the drop-the-generic-original step left the whole chain behind
+// the call dangling -- `blade check` passed and IR validation then reported a
+// spray of BL6001 "unresolved type variable". Binding the very same expression
+// to a `let` first worked, for the uninteresting reason that a binding
+// reference is an IRVar and an IRVar carries its type. Direct and let-bound
+// spellings are pinned side by side below precisely because they must agree.
+//
+// `grid_total` calls `row_sums`, so the inner call only becomes concrete after
+// the outer specialization lands: this pins the FIXPOINT, not just one site.
+// ============================================================================
+type Scan = Idx<2>
+type Y = Idx<2>
+type X = Idx<3>
+function row_sums(g: Array<T like Idx<nr>, Idx<nc>>) -> Array<T like Idx<nr>> = reduce(g, (+))
+function grid_total(g: Array<T like Idx<nr>, Idx<nc>>) -> T = reduce(row_sums(g), (+))
+let R: Array<Float64 like Scan, Y, X> = [[[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]], [[6.0, 7.0, 8.0], [9.0, 10.0, 11.0]]]
+// Row view, straight into the argument slot.
+let view_direct = grid_total(R((1 : Scan)))
+// The same view, let-bound first -- the spelling that always worked.
+let view = R((1 : Scan))
+let view_bound = grid_total(view)
+// Inline deferred pipeline, straight into the argument slot.
+let comp_direct = grid_total((method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute)
+// The same pipeline, let-bound first.
+let comp = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j) * 1.0) |> compute
+let comp_bound = grid_total(comp)
+// EXPECT: view_direct = 51
+// EXPECT: view_bound = 51
+// EXPECT: comp_direct = 15.75
+// EXPECT: comp_bound = 15.75
