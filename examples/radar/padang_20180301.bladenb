@@ -1,0 +1,125 @@
+// %% [markdown]
+// # Padang radar rain rates, 2018-03-01 — a GR graphics notebook
+//
+// One day of PPI rain-rate scans from the Padang radar (143 scans, ~10 min
+// apart, 500×500 grid), read through the **Zarr type provider** and plotted
+// through `stdlib/plot.blade` with the GR backend hint (`1: backend`): the
+// Plots panel's plotly ⇄ GR toggle renders these figures with
+// `tools/gr-render` (gr_contourf / gr_polyline) instead of plotly.
+//
+// The store is built from the raw `.nc4` scans by
+// `examples/radar/make_padang_zarr.py`:
+//
+// ```
+// python examples/radar/make_padang_zarr.py <dir-of-nc4-scans>
+// ```
+//
+// which stacks the lowest-elevation sweep (z = 0) into
+// `rain_rate(scan, y, x)` float32, cuts 1-D lat/lon axes from the files'
+// curvilinear coordinate grids, converts file-name timestamps to minutes
+// since midnight, maps the −9999 fill to 0.0 ("no rain detected"), and
+// prints the day's rainiest point for the cells below. The `scan` dimension
+// is deliberately not named `time`: a provider dim named `time` collides
+// with the C library in generated C++.
+//
+// %%
+import zarr as z
+import plot
+
+let store = z.load("C:/Users/cdupu/Data/radar/Padang_rain_rates_March_2018_1/Padang_rain_rates_20180301/padang_20180301.zarr")
+
+type Scan = store.index.scan            // 143 scans, one per ~10 min
+type Y = store.index.y                  // 500 rows (latitude)
+type X = store.index.x                  // 500 columns (longitude)
+
+let R: Array<Float32 like Scan, Y, X> = store.vars.rain_rate |> z.read   // mm/h
+let lat: Array<Float64 like Y> = store.vars.lat |> z.read                // degrees N
+let lon: Array<Float64 like X> = store.vars.lon |> z.read                // degrees E
+let t_min: Array<Float64 like Scan> = store.vars.time_min |> z.read     // minutes since 00Z
+
+// %% [markdown]
+// ## Time series at the day's rainiest point
+//
+// make_padang_zarr.py reports the pixel with the largest time-summed rain
+// *outside the radar's ground-clutter disk* (pixels within ~25 px of the
+// grid center claim rain 100% of the day — backscatter, not weather):
+// **iy = 303, ix = 50** (0.306°S, 98.513°E), whose 307 mm/h spike at scan
+// **36** (06:08Z) is also the day's overall maximum. The index literals are
+// cast inline (`(303 : Y)`) because index provenance is part of the type
+// and a bare `let static` Int64 does not coerce to `Nat<Y>`
+// (BL4003/BL3001).
+//
+// The extraction is dimensional currying, not a loop: with the scan axis
+// transposed to the trailing position, `Rt(x, y)` *is* the series. The
+// trade is explicit — `transpose` is a hard transpose, so this moves the
+// whole 36.5M-element array once (~0.9 s) where a per-point gather reads
+// 143 elements; it amortizes the moment more than a handful of series are
+// read, and the layout matches what the series *means*.
+//
+// The series stays Float32 end to end: the factories monomorphize per
+// element type, and float literals adopt the Float32 width beside Float32
+// operands, so no conversion is written anywhere.
+//
+// %%
+let Rt = transpose(R, [0, 2])           // (scan, y, x) -> (x, y, scan)
+let ts = Rt((50 : X), (303 : Y))
+let ts_total = reduce(ts, (+))          // cross-check: 534.70 (f32 accumulation)
+
+let p_series = plot.line(t_min, ts,
+    "Rain rate at (0.306S, 98.513E), 2018-03-01": title,
+    "minutes since 00Z": xlabel, "mm/h": ylabel, 1: backend)
+
+// %% [markdown]
+// ## The peak scan: full disk, then filled contours of the storm
+//
+// Scan 36 (06:08Z). `R((36 : Scan))` is a row view by partial indexing —
+// dimensional currying again — and flows straight into the factories at
+// Float32.
+//
+// Both maps FIX the color range at [0, 50] mm/h with the zmin/zmax slots:
+// the storm's 307 mm/h core would otherwise own the whole scale and flatten
+// everything else into the bottom band — and an animation over frames with
+// automatic ranges would flicker. 50 is the day's 99.9th-percentile wet
+// pixel (47.8); values above it clamp to the top color.
+//
+// The full disk is a HEATMAP, not contours: at 500×500 the convective cells
+// span only a few pixels each, and contour boundary lines swamp them at
+// that scale (gr_cellarray colors every cell, no boundaries). The filled-
+// contour plot is drawn where contours make sense — the 128×128 `rain_zoom`
+// cutout the merge script writes around the rainiest point. The cutout is
+// declared at the DATA boundary because it cannot be cut here: index-tag
+// arithmetic (`R(36, i + 239, j)`) is forbidden by design, so a sub-window
+// is a different index space and belongs to the store.
+//
+// %%
+let frame = R((36 : Scan))
+let frame_mean = reduce(frame, (+), axes = 2) / 500.0^2   // sanity readout, mm/h over the full disk
+
+let p_disk = plot.heatmap(lon, lat, frame, 0.0: zmin, 50.0: zmax,
+    "Rain rate (mm/h), 2018-03-01 06:08Z": title,
+    "longitude": xlabel, "latitude": ylabel, 1: backend)
+
+// %%
+type Yz = store.index.yz                // the cutout's own 128-point axes
+type Xz = store.index.xz
+let Rz: Array<Float32 like Scan, Yz, Xz> = store.vars.rain_zoom |> z.read
+let lat_z: Array<Float64 like Yz> = store.vars.lat_zoom |> z.read
+let lon_z: Array<Float64 like Xz> = store.vars.lon_zoom |> z.read
+
+let storm = Rz((36 : Scan))
+
+let p_storm = plot.contourf(lon_z, lat_z, storm, 20: levels, 0.0: zmin, 50.0: zmax,
+    "Storm cell off Padang (mm/h), 06:08Z": title,
+    "longitude": xlabel, "latitude": ylabel, 1: backend)
+
+// %% [markdown]
+// ## The whole day as video
+//
+// The remaining step lives outside the notebook, and outside the repo — a
+// local driver script. Its shape: generate a one-shot Blade program with
+// one plot call per scan (each fixing `zmin`/`zmax` so the color scale
+// cannot flicker between frames, HH:MM in each title), run it ONCE and
+// harvest the 143 display frames from stdout (sentinel lines,
+// `src/display/DisplayFrame.fs`), render each through one warm
+// `gr-render --serve` worker, and assemble the PNGs with ffmpeg. See
+// `examples/radar/README.md` for the two traps worth knowing.
