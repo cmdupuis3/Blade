@@ -1,4 +1,4 @@
-# Padang radar: a GR graphics notebook
+# Padang radar: a GR graphics notebook + video
 
 One day of PPI rain-rate scans (Padang, 2018-03-01: 143 `.nc4` files, ~10 min apart,
 500×500 grid, 6 elevations) plotted through Blade's display lane with the GR backend:
@@ -8,31 +8,28 @@ One day of PPI rain-rate scans (Padang, 2018-03-01: 143 `.nc4` files, ~10 min ap
 
 | file | what |
 |---|---|
-| `make_padang_zarr.py` | merges the raw `.nc4` scans into ONE Zarr v3 store in exactly the uncompressed subset `src/providers/ZarrProvider.fs` reads; picks the day's rainiest non-clutter point and a 128×128 storm cutout |
+| `make_padang_zarr.fsx` | merges the raw `.nc4` scans into ONE Zarr v3 store, reading through `NetcdfProvider.readVarData` and writing through `ZarrWrite.writeStoreV3` — the repo's own provider code both ways, so the store is what `ZarrProvider` reads back by construction; also picks the day's rainiest non-clutter point and the 128×128 storm cutout |
 | `padang_20180301.bladenb` | the notebook: Zarr provider load → storm time series (`plot.line`) → full-disk heatmap + zoomed filled contours, all `1: backend` (GR) with fixed `zmin`/`zmax` color ranges |
+| `render_video.fsx` | the whole day as one video: generates a 143-frame Blade program, harvests the display frames from a single `blade run`, and pipes them into `gr-render --video` |
 
 ## Running
 
 ```
-python examples/radar/make_padang_zarr.py <dir-of-nc4-scans>   # once, writes <parent>/padang_<date>.zarr
+dotnet fsi examples/radar/make_padang_zarr.fsx <dir-of-nc4-scans>   # once, writes <parent>/padang_<date>.zarr
 # open the notebook, or run its flat text: blade run examples/radar/padang_20180301.bladenb works too
+dotnet fsi examples/radar/render_video.fsx <store.zarr>             # full-disk heatmap video
+dotnet fsi examples/radar/render_video.fsx <store.zarr> --var rain_zoom
 ```
 
-Needs: the built compiler (`bin/Release/net10.0/Blade.exe`), MSYS2 ucrt64 g++ on PATH,
-`GRDIR` set (gr-render's environment contract, `tools/gr-render/README.md`), and Python
-with numpy + netCDF4.
+Needs: the built compiler (`bin/Release/net10.0/Blade.exe`), MSYS2 ucrt64 g++ on PATH, and
+`GRDIR` set (gr-render's environment contract, `tools/gr-render/README.md`). No ffmpeg, no
+image library, no Python: GR writes the video itself and the merge runs on the repo's own
+provider code.
 
-## Rendering the whole day to video
-
-Not in the repo — the driver is a local script. Its shape, if you rebuild it: generate a
-one-shot Blade program with one plot call per scan (each fixing `zmin`/`zmax` so the
-color scale cannot flicker between frames, `HH:MM` in each title), run it ONCE and
-harvest the display frames from stdout (sentinel lines, `src/display/DisplayFrame.fs` —
-capture stdout as BYTES, the sentinel is `\x01`-delimited), feed each frame's spec to a
-warm `gr-render --serve` worker, then encode with ffmpeg. Two notes worth keeping: GR's
-PNGs have transparent backgrounds, which ffmpeg composites onto black and thereby
-swallows every (black) label, so flatten onto white first; and 143 frames cost ~55 s in
-`blade run` and ~22 s in the render worker.
+**`make_padang_zarr.fsx` needs netCDF's `bin` AHEAD of MSYS2 on `PATH`** —
+`$env:NETCDF_DIRin` ships its own `zlib1.dll`, and MSYS2's copy shadows it, which
+surfaces as `Unable to load DLL 'netcdf'`. (`Blade.exe` handles this itself; a bare `fsi`
+does not.)
 
 ## Things this corpus taught the toolchain (facts to keep)
 
@@ -44,7 +41,7 @@ swallows every (black) label, so flatten onto white first; and 143 frames cost ~
 * **`zmin`/`zmax` slots** (added for this): the grid factories fix the color range —
   `zmax >= 0` activates, default `-1.0` keeps the automatic range and the trace
   byte-identical. gr-render honors the pair for colors, contour levels and the colorbar,
-  clamping out-of-range cells. `tests/corpus/display/008_plot_fixed_range.blade`,
+  clamping out-of-range cells. `tests/corpus/display/010_plot_fixed_range.blade`,
   `tools/gr-render/fixtures/contourf_fixed_range.json`.
 * **`gr_contourf` gets `major_h = -1`** — 0 strokes an unlabeled black line at every
   level, which turns steep few-pixel radar cells into solid black blobs.
@@ -73,7 +70,15 @@ swallows every (black) label, so flatten onto white first; and 143 frames cost ~
   The hard transpose moves the whole array once (~0.9 s for 36.5M elements) where a
   gather reads 143 values, so it pays off as soon as more than a few series are read.
 * **The radar's clutter disk lies.** Pixels within ~25 px of the grid center report rain
-  ~100 % of the day; `make_padang_zarr.py` excludes a 40 px disk when picking the
+  ~100 % of the day; `make_padang_zarr.fsx` excludes a 40 px disk when picking the
   rainiest point.
-* **GR PNGs have transparent backgrounds** — ffmpeg composites them onto black and
-  swallows the (black) text; `render_video.py` flattens onto white first.
+* **GR renders video natively, and the by-hand pipeline was a mistake.**
+  `videoplugin.dll` is a statically linked ffmpeg (h264/vp8/theora/gif), so
+  `gr_beginprint("day.mp4")` plus a `clearws`/`updatews` cycle per frame is the whole
+  job. The first version of this driver instead encoded 143 PNGs, base64'd them through the
+  serve protocol, flattened each onto white (GR's *still* driver has a transparent
+  background, which ffmpeg composites onto black, swallowing every black label — its
+  *video* driver does not), then shelled out to ffmpeg. `gr-render --video` replaced all
+  of it: two fewer dependencies and one encode instead of two. `GKS_VIDEO_OPTS`
+  (`<width>x<height>@<framerate>`) is not optional — without it the video driver ignores
+  the workstation viewport and invents its own size.

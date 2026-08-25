@@ -8,10 +8,10 @@
 // `tools/gr-render` (gr_contourf / gr_polyline) instead of plotly.
 //
 // The store is built from the raw `.nc4` scans by
-// `examples/radar/make_padang_zarr.py`:
+// `examples/radar/make_padang_zarr.fsx`:
 //
 // ```
-// python examples/radar/make_padang_zarr.py <dir-of-nc4-scans>
+// dotnet fsi examples/radar/make_padang_zarr.fsx <dir-of-nc4-scans>
 // ```
 //
 // which stacks the lowest-elevation sweep (z = 0) into
@@ -40,7 +40,7 @@ let t_min: Array<Float64 like Scan> = store.vars.time_min |> z.read     // minut
 // %% [markdown]
 // ## Time series at the day's rainiest point
 //
-// make_padang_zarr.py reports the pixel with the largest time-summed rain
+// make_padang_zarr.fsx reports the pixel with the largest time-summed rain
 // *outside the radar's ground-clutter disk* (pixels within ~25 px of the
 // grid center claim rain 100% of the day — backscatter, not weather):
 // **iy = 303, ix = 50** (0.306°S, 98.513°E), whose 307 mm/h spike at scan
@@ -93,7 +93,11 @@ let p_series = plot.line(t_min, ts,
 //
 // %%
 let frame = R((36 : Scan))
-let frame_mean = reduce(frame, (+), axes = 2) / 500.0^2   // sanity readout, mm/h over the full disk
+let frame_mean = reduce(Float64(frame), (+), axes = 2) / 500.0^2   // sanity readout, mm/h
+// The cast is load-bearing twice over: `frame` is Float32, so without it the
+// fold promotes implicitly (BL3020) -- and summing 250k Float32 values in
+// Float32 is the wrong way to do it anyway. Converting the ARRAY says the
+// accumulation happens in Float64 and says it once, at the operand.
 
 let p_disk = plot.heatmap(lon, lat, frame, 0.0: zmin, 50.0: zmax,
     "Rain rate (mm/h), 2018-03-01 06:08Z": title,
@@ -115,11 +119,17 @@ let p_storm = plot.contourf(lon_z, lat_z, storm, 20: levels, 0.0: zmin, 50.0: zm
 // %% [markdown]
 // ## The whole day as video
 //
-// The remaining step lives outside the notebook, and outside the repo — a
-// local driver script. Its shape: generate a one-shot Blade program with
-// one plot call per scan (each fixing `zmin`/`zmax` so the color scale
-// cannot flicker between frames, HH:MM in each title), run it ONCE and
-// harvest the 143 display frames from stdout (sentinel lines,
-// `src/display/DisplayFrame.fs`), render each through one warm
-// `gr-render --serve` worker, and assemble the PNGs with ffmpeg. See
-// `examples/radar/README.md` for the two traps worth knowing.
+// The remaining step lives outside the notebook, in
+// `examples/radar/render_video.fsx`: it generates a one-shot Blade program with
+// one plot call per scan (each fixing `zmin`/`zmax` so the color scale cannot
+// flicker between frames, HH:MM in each title), runs it ONCE and harvests the
+// 143 display frames from stdout (sentinel lines,
+// `src/display/DisplayFrame.fs`), then pipes those specs straight into
+// `gr-render --video`. GR writes the movie itself — its video plugin is a
+// statically linked ffmpeg — so there are no intermediate PNGs and nothing
+// else needs to be installed.
+//
+// ```
+// dotnet fsi examples/radar/render_video.fsx <store.zarr>                  # full disk, heatmap
+// dotnet fsi examples/radar/render_video.fsx <store.zarr> --var rain_zoom  # storm cutout
+// ```
