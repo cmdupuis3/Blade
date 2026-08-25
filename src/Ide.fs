@@ -1886,8 +1886,11 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                  | [] -> tp
                  | ms -> { tp with Modules = [ List.last ms ] }
         // Fresh provider-module registry (the load site records into it
-        // during typeCheck; collectProviderStores reads it).
+        // during typeCheck; collectProviderStores reads it), and with it the
+        // icechunk axis mint table -- both are per-compilation AsyncLocal
+        // side-channels a previous check must not leak into this one.
         Blade.ProviderRegistry.IdeStores.reset ()
+        Blade.IcechunkProvider.resetAxisMint ()
         // Suggestions and warnings are NOT error-exclusive: a file with
         // a type error earned every nudge before hitting it. All three
         // channels are AsyncLocal, so Error reads them like Ok does.

@@ -895,10 +895,110 @@ let private newMemo<'k, 'v when 'k: equality> () : ConcurrentDictionary<'k, 'v> 
     memoClearers.Add(fun () -> d.Clear())
     d
 
+// ---------------------------------------------------------------------------
+// The axis mint table (plan §5.3)
+// ---------------------------------------------------------------------------
+//
+// Two checkouts of one repo share the index type for dimension `d` IFF the
+// axis is UNCHANGED between their snapshots (§5.2): same dim name, same
+// extent, and -- when a coordinate variable named after the dim exists -- the
+// same coordinate CONTENT, decided from metadata alone (`coordFingerprint`
+// below). An unchanged axis hands the recorded `IRIndexType` to
+// `zarrStoreToModule`'s `externalDimMap`, so both checkouts' arrays are built
+// over ONE identity and `unify` succeeds by its ordinary Id rule -- no
+// unifier arm learns that checkouts exist. A diverged axis mints a fresh
+// identity, and cross-checkout arithmetic refuses as an index-type mismatch.
+//
+// The table is per COMPILATION (AsyncLocal, mirroring
+// `ProviderRegistry.IdeStores`) and repo-scoped: `repoPath` is in the key, so
+// two repos never share. The path is the one the SOURCE wrote -- two spellings
+// of one directory are two repos here, exactly as they are to the read memos
+// above.
+
+/// One identity an axis has carried in this compilation.
+type AxisIdentity = {
+    Extent: int64
+    /// `None` when the checkout has no coordinate variable named after the
+    /// dim: there is no data to compare, so name + extent IS the identity
+    /// (§5.2 condition 3 is vacuous).
+    CoordFP: string option
+    /// What actually makes two checkouts' arrays unify: `unify` compares index
+    /// slots by Id + Tag (Unify.fs:990-992), so this record -- Id and all -- is
+    /// what every matching checkout passes in through `externalDimMap`.
+    IndexType: IRIndexType
+    /// Canonical refspecs that presented this identity ("branch:main"), first
+    /// seen first.
+    Refs: string list
+    /// Why this identity differs from the one it SPLIT FROM. `None` for the
+    /// first identity an axis had. Recorded for §5.3's divergence diagnostic
+    /// ("axis 'lat' diverged between checkouts ..."), which v1 does not emit
+    /// yet -- the split still refuses, with the generic mismatch.
+    SplitReason: string option
+}
+
+/// Every identity one `(repoPath, dimName)` has carried, NEWEST FIRST. A
+/// one-element list is the shared case; a longer one is the split history.
+/// Lookup scans the WHOLE list rather than just the head, so a program that
+/// checks out A, then a diverged B, then A again gives A back its original
+/// identity instead of minting a third.
+type AxisMint = { Identities: AxisIdentity list }
+
+/// Reserved id floor for axis-mint index types. These ids are spliced into
+/// modules built by OTHER `IRBuilder`s -- typecheck's, lowering's, and the
+/// throwaway one `ProviderStatics.storeAxes` builds per axis query -- and
+/// every one of those counts up from 0, so an id captured from one of them
+/// could collide with an unrelated index type minted by another and make two
+/// strangers unify. A reserved range no builder ever reaches removes the
+/// question. Codegen already reserves 0x40000000 upward for the same reason
+/// (CodeGen.fs:2701) and synthetic sentinels take the negative range (IR.fs);
+/// this sits between the builders and codegen.
+let axisIdBase = 0x30000000
+
+/// Per-compilation storage for the mint table. AsyncLocal for the same reason
+/// `IdeStores` is: the test harness compiles programs in parallel, each in its
+/// own async context.
+module AxisMintTable =
+    open System.Threading
+
+    let private table = new AsyncLocal<Map<string * string, AxisMint>>()
+    let private current () = match box table.Value with null -> Map.empty | _ -> table.Value
+
+    /// Fresh compilation: wired everywhere `IdeStores.reset` is, and folded
+    /// into `resetCaches`.
+    let reset () = table.Value <- Map.empty
+
+    let tryFind (repoPath: string) (dimName: string) : AxisMint option =
+        Map.tryFind (repoPath, dimName) (current ())
+
+    let put (repoPath: string) (dimName: string) (mint: AxisMint) : unit =
+        table.Value <- Map.add (repoPath, dimName) mint (current ())
+
+    let private idLock = obj ()
+    let mutable private nextId = axisIdBase
+
+    /// A fresh reserved-range index-type id. Process-global and monotonic ON
+    /// PURPOSE: `reset` drops the table but never rewinds this, so an id from
+    /// an earlier compilation can never be minted again and mistaken for a
+    /// live identity.
+    let freshId () : int =
+        lock idLock (fun () ->
+            let id = nextId
+            nextId <- nextId + 1
+            id)
+
+/// Drop the axis mint table (§5.3). A compilation must not inherit another
+/// one's axis identities -- and in a process that never exits (the REPL, the
+/// IDE daemon, the test harness) the table would otherwise grow without bound.
+let resetAxisMint () : unit = AxisMintTable.reset ()
+
 /// Drop every memoized read. Compilation never needs this -- the stamps handle
-/// it -- but a test that regenerates a fixture repo AT THE SAME PATH does.
+/// it -- but a test that regenerates a fixture repo AT THE SAME PATH does. The
+/// axis mint table goes with them: its identities were decided FROM those
+/// reads, so keeping them across a regenerated fixture would answer from a repo
+/// that no longer exists.
 let resetCaches () : unit =
     for clear in memoClearers do clear ()
+    resetAxisMint ()
 
 // ---------------------------------------------------------------------------
 // Reading metadata files
@@ -1376,6 +1476,178 @@ let readWreathPool (path: string) (varName: string) : Result<Blade.ProviderRegis
             | None -> Error $"variable '{varName}' is an ordinary dense array, not an orbit (iterated-wreath) pool")
 
 // ---------------------------------------------------------------------------
+// Axis identity: the coordinate fingerprint (plan §5.2)
+// ---------------------------------------------------------------------------
+
+let private sha256Hex (bytes: byte[]) : string =
+    use sha = System.Security.Cryptography.SHA256.Create()
+    sha.ComputeHash bytes |> Array.map (sprintf "%02x") |> String.concat ""
+
+/// One chunk location, canonically. Inline bytes hash; a native ref is its
+/// content-addressed chunk id plus the byte range it claims; a coordinate no
+/// manifest covers is the fill ABSENCE, which is a fact about the axis exactly
+/// as much as a present chunk is.
+let private chunkLocText (loc: ChunkLoc) : string =
+    match loc with
+    | Fill -> "-"
+    | Inline b -> "i:" + sha256Hex b
+    | Native nc -> $"c:{base32Encode nc.ChunkId}+{nc.Offset}+{nc.Length}"
+
+/// The §5.2 fingerprint of dimension `dimName`'s coordinate variable in this
+/// checkout, or `None` when the checkout has no coordinate variable named
+/// after the dim (then name + extent is the whole identity).
+///
+/// METADATA ONLY -- the coordinate array's stable node id, its `user_data`
+/// bytes, and its chunk-ref table -- so comparing two axes never reads a
+/// chunk. Chunk files and manifests are immutable, so equal refs imply
+/// byte-identical content, and a commit that never touched the coordinate
+/// array keeps pointing at the same chunk ids: the common case (data commits
+/// on a fixed grid) compares equal instantly. The failure direction is a false
+/// NEGATIVE -- a compaction that rewrites a manifest to new ids with identical
+/// bytes refuses arithmetic that would have been sound -- never a false accept.
+///
+/// The three components stay NAMED rather than collapsing into one hash, so
+/// the divergence diagnostic can eventually say WHICH of them moved.
+///
+/// Reading the coordinate array's manifests is the only file access this adds
+/// over a P2 checkout load, and `resolveArray` memoizes it alongside every
+/// other read of the same checkout.
+let private coordFingerprint (key: string) (ck: CheckoutHandle)
+                             (arrays: ZarrProvider.ZarrArrayMeta list)
+                             (dimName: string) : string option =
+    // The Zarr module builder's own coordinate rule (`isCoordinateArr`): a
+    // dense rank-1 array named after its single, NAMED dimension. An array
+    // whose dimension name is synthesized (`lat_dim0`) is not a coordinate of
+    // `lat` -- and is not in the dims struct either.
+    let isCoord (a: ZarrProvider.ZarrArrayMeta) =
+        a.Name = dimName && a.Blade.IsNone && a.Shape.Length = 1 && a.DimNames = Some [dimName]
+    if not (arrays |> List.exists isCoord) then None
+    else
+        match resolveArray key dimName with
+        | Error _ ->
+            // The coordinate variable is there but its manifests would not
+            // read. Equal to ITSELF (the same snapshot re-checked out shares)
+            // and to nothing else: the snapshot id is what makes it so.
+            Some $"unreadable@{base32Encode ck.SnapshotId}"
+        | Ok ra ->
+            let grid =
+                ZarrProvider.gridDims ra.Meta.Shape ra.Meta.Chunks
+                |> List.map string |> String.concat "x"
+            let refs = ra.Table |> Array.map chunkLocText |> String.concat ","
+            let chunksHash = sha256Hex (Text.Encoding.UTF8.GetBytes $"{grid}|{refs}")
+            let userHash = sha256Hex (Text.Encoding.UTF8.GetBytes ra.Node.UserDataJson)
+            Some $"node={base32Encode ra.Node.Id};user={userHash};chunks={chunksHash}"
+
+/// Prefix of the axis tag. `__`-prefixed on purpose -- see `axisTag`.
+let axisTagPrefix = "__icaxis|"
+
+/// The identity an axis carries in the TYPE, beyond its Id. Shape:
+///
+///     __icaxis|lat@ic_wx:9f3a       the axis as this repo first presented it
+///     __icaxis|lat@ic_wx:9f3a#2     the SECOND identity that (repo, dim) took on
+///
+/// The repo label is the directory name plus four hex of the path's digest, so
+/// two repos that happen to share a directory name are still distinct axes --
+/// §5.3's "different repos never share", stated where the type system can read
+/// it.
+///
+/// WHY A TAG AND NOT JUST THE ID. §5.3 expects the shared `IRIndexType.Id` to
+/// carry the whole story ("unify then succeeds by the ordinary Id rule"). It
+/// carries the SHARING half and none of the refusal half: `unify`'s ArrayElem
+/// arm compares rank, tags and symmetry and NEVER Ids (Unify.fs:887-911 --
+/// Unify.fs:990's Id rule is the IRTArrow SLOT arm, which arrays do not take),
+/// and co-iteration decides axis agreement from `Tag` alone
+/// (`indexNamesCoIterable` at rank 1, `indexRecordsAgree` for the rank->=2
+/// product). Untagged provider axes are "some axis of this extent", so two of
+/// them co-iterate freely -- measurably: before this, subtracting a variable of
+/// one repo from the same variable of a DIFFERENT repo typechecked. The tag is
+/// what makes a diverged axis refuse.
+///
+/// WHY `__`. A tag is also a user-facing NAME, and three seams key on that:
+/// `checkArrayIndexTags` skips `__` slots, `elemTypeForIterationIndex` hands
+/// `Nat<tag>` to iteration params only for non-`__` tags, and `unify`'s
+/// `isSyntheticTag` exempts `__` tags from its incompatibility rule.
+/// A plain name (`lat@ic_wx:9f3a`) therefore turns every ordinary `A(2, 1)`
+/// into a BL4003 "indexed with untagged integer" warning advising a cast to a
+/// name the user never wrote, and makes `type Lat = ck.index.lat` (which
+/// re-tags with the ALIAS name, TypeCheckInfer.fs:13059) refuse an ascription
+/// that works for every other provider. `__` keeps all three quiet while
+/// leaving the two co-iteration predicates -- which have no `__` exemption --
+/// free to refuse. The cost is that a function BOUNDARY (plain `unify`) still
+/// accepts a diverged axis; arithmetic, which is where a difference is
+/// actually written, does not.
+let private axisTag (repoPath: string) (dimName: string) (ordinal: int) : string =
+    let baseName =
+        let trimmed = repoPath.TrimEnd([| '/'; '\\' |])
+        let n = try Path.GetFileName trimmed with _ -> ""
+        if String.IsNullOrEmpty n then "repo" else n
+    let digest = (sha256Hex (Text.Encoding.UTF8.GetBytes repoPath)).Substring(0, 4)
+    let suffix = if ordinal <= 1 then "" else $"#{ordinal}"
+    $"{axisTagPrefix}{dimName}@{baseName}:{digest}{suffix}"
+
+/// Why one identity of an axis differs from an older one, for the split
+/// history (and, later, for the divergence diagnostic).
+let private splitReason (older: AxisIdentity) (extent: int64) (fp: string option) : string =
+    if older.Extent <> extent then $"extent {older.Extent} -> {extent}"
+    else
+        match older.CoordFP, fp with
+        | None, Some _ -> "a coordinate variable appeared"
+        | Some _, None -> "the coordinate variable was removed"
+        | _ -> "coordinate content differs"
+
+/// Look one axis up in the mint table and return the index type this
+/// checkout's arrays must be built over: the RECORDED identity when the axis
+/// is unchanged (§5.2), a fresh one otherwise. Records what it decided either
+/// way.
+///
+/// `fresh` is the record `zarrStoreToModule` just minted for this dim;
+/// everything but its Id and Tag is kept, so the shape of a provider axis type
+/// is stated in exactly one place (ZarrProvider's `zarrDimToNamedIndexType`).
+/// The Id comes from the reserved range (`axisIdBase`) and the Tag from
+/// `axisTag`, which is the half that actually refuses.
+let private resolveAxis (repoPath: string) (refText: string) (dimName: string)
+                        (extent: int64) (fp: string option) (fresh: IRIndexType) : IRIndexType =
+    let matches (i: AxisIdentity) = i.Extent = extent && i.CoordFP = fp
+    let born (reason: string option) (ordinal: int) = {
+        Extent = extent
+        CoordFP = fp
+        IndexType = { fresh with
+                        Id = AxisMintTable.freshId ()
+                        Tag = Some (axisTag repoPath dimName ordinal) }
+        Refs = [refText]
+        SplitReason = reason
+    }
+    match AxisMintTable.tryFind repoPath dimName with
+    | Some mint ->
+        match mint.Identities |> List.tryFind matches with
+        | Some hit ->
+            // Unchanged axis: the SAME identity -- same Id, same name -- so the
+            // two modules' arrays are over one index space and co-iterate.
+            if not (List.contains refText hit.Refs) then
+                let updated = { hit with Refs = hit.Refs @ [refText] }
+                AxisMintTable.put repoPath dimName
+                    { Identities = mint.Identities |> List.map (fun i -> if matches i then updated else i) }
+            hit.IndexType
+        | None ->
+            let split =
+                born (Some (splitReason (List.head mint.Identities) extent fp))
+                     (mint.Identities.Length + 1)
+            AxisMintTable.put repoPath dimName { Identities = split :: mint.Identities }
+            split.IndexType
+    | None ->
+        let first = born None 1
+        AxisMintTable.put repoPath dimName { Identities = [first] }
+        first.IndexType
+
+/// The identities one `(repoPath, dimName)` has carried in this compilation,
+/// newest first -- empty when the axis has not been seen. The divergence
+/// diagnostic and the axis-sharing tests read the table through here.
+let axisIdentities (repoPath: string) (dimName: string) : AxisIdentity list =
+    match AxisMintTable.tryFind repoPath dimName with
+    | Some mint -> mint.Identities
+    | None -> []
+
+// ---------------------------------------------------------------------------
 // Mapping to Blade IR modules
 // ---------------------------------------------------------------------------
 
@@ -1405,8 +1677,11 @@ let emptyRepoModule (moduleName: string) : IRModule = {
 /// index-type minting, the dims/vars struct shapes, coordinate-array
 /// detection and packed-layout typing are inherited, not re-derived.
 ///
-/// `externalDimMap` is None: the axis mint table that lets two checkouts of
-/// one repo SHARE an index type for an unchanged axis (§5.3) is phase P3.
+/// Axis identity (§5.3) rides `externalDimMap`: every dimension is resolved
+/// against the repo-scoped mint table first, so an axis this compilation has
+/// already seen UNCHANGED in another checkout of the same repo comes back with
+/// the identity it had there, and a diverged one gets a fresh identity that
+/// refuses to unify with it.
 ///
 /// Hierarchy (§9): root-level arrays only. Nested arrays are simply not
 /// fields (the Zarr provider's one-level rule, where a subgroup directory is
@@ -1414,6 +1689,7 @@ let emptyRepoModule (moduleName: string) : IRModule = {
 /// refuses loudly, because it would have to become a struct field.
 let checkoutToModule (builder: IRBuilder) (moduleName: string) (ck: CheckoutHandle) : IRModule =
     let key = formatKey { RepoPath = ck.Repo.Root; Ref = Some ck.Ref }
+    let refText = $"{kindToken (fst ck.Ref)}:{snd ck.Ref}"
     let arrays =
         ck.Snapshot.Nodes
         |> List.filter (fun n -> n.Kind = NodeArray)
@@ -1430,7 +1706,31 @@ let checkoutToModule (builder: IRBuilder) (moduleName: string) (ck: CheckoutHand
             | Ok meta -> meta
             | Error e -> failwith e)
     let store : ZarrProvider.ZarrStore = { Path = key; Version = 3; Arrays = arrays }
-    ZarrProvider.zarrStoreToModule builder moduleName store None
+    // Pass 1 builds the module the way a lone checkout always has. Its
+    // index-type defs ARE the dimension universe -- names, extents, and the
+    // exact record shape a provider axis carries -- which is why this reads
+    // them back instead of re-deriving the Zarr builder's `sharedDims` rule
+    // (a packed array's pool dimension is deliberately not in it).
+    let minted = ZarrProvider.zarrStoreToModule builder moduleName store None
+    let mintedDims =
+        minted.Types |> List.choose (function IRTDIndexType (n, it) -> Some (n, it) | _ -> None)
+    if List.isEmpty mintedDims then minted
+    else
+        let dims =
+            mintedDims |> List.map (fun (dimName, fresh) ->
+                let extent = match fresh.Extent with IRLit (IRLitInt v) -> v | _ -> -1L
+                let fp = coordFingerprint key ck arrays dimName
+                (dimName, resolveAxis ck.Repo.Root refText dimName extent fp fresh))
+        // Pass 2 rebuilds over the resolved identities. `externalDimMap` is
+        // ALL-OR-NOTHING at the Zarr end: a supplied map REPLACES the dim map
+        // entirely and suppresses the index-type defs, so it has to cover every
+        // dimension, and the defs are re-attached here in pass 1's order. The
+        // module that comes out is shaped exactly as it was before P3 --
+        // `registerProviderModule`'s `<binding>.index.<dim>` registration,
+        // ProviderStatics' axis-extent read and the IDE hovers all read those
+        // defs back.
+        let m = ZarrProvider.zarrStoreToModule builder moduleName store (Some (Map.ofList dims))
+        { m with Types = (dims |> List.map IRTDIndexType) @ m.Types }
 
 /// Provider contract entry point. A BARE path binds the repo handle (an empty
 /// module) after header-level validation; a canonical key with a refspec
@@ -1502,8 +1802,11 @@ let fingerprint (path: string) : string =
     try
         match load path with
         | Ok (LoadedCheckout ck) ->
-            let (kind, name) = ck.Ref
-            $"{kindToken kind}:{name}@{base32Encode ck.SnapshotId}"
+            // The bare snapshot id: provenance is CONTENT identity, so two
+            // refs at the same snapshot share it -- and the refspec already
+            // rides in the canonical key printed beside it, so repeating it
+            // here doubled the ref in every [provenance] line.
+            base32Encode ck.SnapshotId
         | _ -> placeholderFingerprint path
     with _ -> placeholderFingerprint path
 

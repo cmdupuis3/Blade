@@ -1317,6 +1317,361 @@ let total = reduce(A, (+), axes = 2)
      with ex -> check "e2e: icechunk read" false ex.Message)
 
     // ---------------------------------------------------------------
+    // 12. Axis identity across checkouts (plan §5)
+    // ---------------------------------------------------------------
+    // Two checkouts of one repo share the index type for a dimension IFF the
+    // AXIS is unchanged between their snapshots: same name, same extent, and
+    // -- when a coordinate variable named after the dim exists -- the same
+    // coordinate content, decided from METADATA ALONE (node id, user_data
+    // bytes, chunk-ref table). No chunk is read to answer the question.
+    //
+    // The observable consequence is the point, and it is asserted at BOTH
+    // levels: the index types two modules carry have the same `Id` (which is
+    // what `unify` compares), and a source-level program that subtracts one
+    // checkout's variable from another's typechecks -- or, when the axis
+    // diverged, refuses.
+    printfn "\n--- axis identity across checkouts ---"
+
+    /// `dim -> index-type Id` for a checkout module. Ids are what unification
+    /// compares, so two checkouts SHARE an axis exactly when these agree.
+    let axisIdsOf (m: IRModule) : Map<string, int> =
+        m.Types
+        |> List.choose (function IRTDIndexType (n, it) -> Some (n, it.Id) | _ -> None)
+        |> Map.ofList
+
+    /// The index-type Ids of one variable of a checkout module, in order --
+    /// the array type's OWN slots, not the module's type defs.
+    let varIdsOf (m: IRModule) (binding: string) (varName: string) : int list option =
+        m.Types
+        |> List.tryPick (function IRTDStruct (n, fs) when n = binding + "__vars" -> Some fs | _ -> None)
+        |> Option.defaultValue []
+        |> List.tryPick (fun (n, t) ->
+            if n <> varName then None else
+            match t with
+            | ArrayElem at -> Some (at.IndexTypes |> List.map (_.Id))
+            | _ -> None)
+
+    let axisModule (binding: string) (key: string) : IRModule =
+        loadAsModule (IRBuilder()) binding key
+
+    /// The refusal a diverged axis earns: the ordinary NAMED-AXIS refusal, in
+    /// whichever of its two wordings applies -- the rank->=2 product rule
+    /// ("same axis tags and extents") for a 2-D variable, BL3999's rank-1
+    /// co-iteration message for a 1-D one. Both are the same fact: two index
+    /// types with different names are not one index space.
+    let refusesOnAxes (r: Result<'a, string>) : bool =
+        match r with
+        | Error e -> e.Contains "same axis tags and extents" || e.Contains "DIFFERENT index types"
+        | Ok _ -> false
+
+    /// A cross-checkout differencing program over one repo: the §5 headline.
+    /// `ck2.vars.temp - ck1.vars.temp` typechecks only if the two checkouts'
+    /// axes unify.
+    let crossCheckoutSrc (root: string) =
+        sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck1 = repo.checkout("v1.0", ic.tag)
+let ck2 = repo.checkout("main")
+let A = ck1.vars.temp |> ic.read
+let B = ck2.vars.temp |> ic.read
+let d = B - A
+let total = reduce(d, (+), axes = 2)
+"""
+                root
+
+    // Every axis fixture is its own repo root, so one section's identities can
+    // never answer another's -- `repoPath` is half the mint-table key.
+    let axisCoordRoot = fixRepo "ic_axis_coord"      // coordinate REWRITTEN, same extent
+    let axisRegridRoot = fixRepo "ic_axis_regrid"    // coordinate REGRIDDED, new extent
+    let axisNoCoordRoot = fixRepo "ic_axis_nocoord"  // dims with NO coordinate variable
+    let axisTwinRoot = fixRepo "ic_axis_twin"        // a byte-identical SECOND repo
+
+    let latShifted = [| 100.0; 101.0; 102.0; 103.0; 104.0 |]
+    let lat6 = [| 0.0; 1.0; 2.0; 3.0; 4.0; 5.0 |]
+    let temp6x4 = Array.init 24 (fun i -> float (i + 1))
+
+    /// Same grid, same `temp`, `lat` rewritten between the two commits. The
+    /// coordinate array's node id is unchanged (ids are derived from the NAME),
+    /// so what has to notice the difference is the chunk-ref table.
+    let coordRewriteSpec : IW.RepoSpec =
+        let lon = IW.mkArray "lon" ["lon"] [4L] [4L] (IW.IceF64 lonData)
+        let temp = { IW.mkArray "temp" ["lat"; "lon"] [5L; 4L] [3L; 2L] (IW.IceF64 tempV1) with
+                       InlineThreshold = 0 }
+        let lat (d: float[]) = IW.mkArray "lat" ["lat"] [5L] [5L] (IW.IceF64 d)
+        { IW.emptyRepo with
+            Seed = 11
+            Snapshots = [ IW.mkSnapshot "s1" [ lat latData; lon; temp ]
+                          IW.mkSnapshot "s2" [ lat latShifted; lon; temp ] ]
+            Branches = [ ("main", "s2") ]
+            Tags = [ ("v1.0", "s1") ] }
+
+    /// A regrid: `lat` (and therefore `temp`) changes EXTENT between commits.
+    let regridSpec : IW.RepoSpec =
+        let lon = IW.mkArray "lon" ["lon"] [4L] [4L] (IW.IceF64 lonData)
+        { IW.emptyRepo with
+            Seed = 12
+            Snapshots =
+                [ IW.mkSnapshot "s1"
+                    [ IW.mkArray "lat" ["lat"] [5L] [5L] (IW.IceF64 latData); lon
+                      { IW.mkArray "temp" ["lat"; "lon"] [5L; 4L] [3L; 2L] (IW.IceF64 tempV1) with
+                          InlineThreshold = 0 } ]
+                  IW.mkSnapshot "s2"
+                    [ IW.mkArray "lat" ["lat"] [6L] [6L] (IW.IceF64 lat6); lon
+                      { IW.mkArray "temp" ["lat"; "lon"] [6L; 4L] [3L; 2L] (IW.IceF64 temp6x4) with
+                          InlineThreshold = 0 } ] ]
+            Branches = [ ("main", "s2") ]
+            Tags = [ ("v1.0", "s1") ] }
+
+    /// `temp` over named dimensions with NO coordinate arrays: §5.2 condition
+    /// (3) is vacuous, so name + extent IS the identity.
+    let noCoordSpec : IW.RepoSpec =
+        let temp (d: float[]) =
+            { IW.mkArray "temp" ["row"; "col"] [5L; 4L] [3L; 2L] (IW.IceF64 d) with
+                InlineThreshold = 0 }
+        { IW.emptyRepo with
+            Seed = 13
+            Snapshots = [ IW.mkSnapshot "s1" [ temp tempV1 ]; IW.mkSnapshot "s2" [ temp tempV2 ] ]
+            Branches = [ ("main", "s2") ]
+            Tags = [ ("v1.0", "s1") ] }
+
+    (try
+        IW.writeRepo axisCoordRoot coordRewriteSpec
+        IW.writeRepo axisRegridRoot regridSpec
+        IW.writeRepo axisNoCoordRoot noCoordSpec
+        IW.writeRepo axisTwinRoot wxFull
+        // The fixtures were just (re)written at paths earlier sections may
+        // already have read; drop the mtime-keyed memos AND the identities
+        // decided from them before asking anything.
+        resetCaches ()
+
+        // (a) The same ref, checked out twice. Nothing changed because nothing
+        // could have: every axis compares equal to itself.
+        let sameA = axisModule "ck1" mainKey
+        let sameB = axisModule "ck2" mainKey
+        check "axis: the same ref checked out twice shares every axis identity"
+            (axisIdsOf sameA = axisIdsOf sameB && (axisIdsOf sameA).Count = 2)
+            (sprintf "%A vs %A" (axisIdsOf sameA) (axisIdsOf sameB))
+        check "axis: two checkouts of one ref give `temp` the same index slots"
+            (varIdsOf sameA "ck1" "temp" = varIdsOf sameB "ck2" "temp"
+             && (varIdsOf sameA "ck1" "temp").IsSome)
+            (sprintf "%A vs %A" (varIdsOf sameA "ck1" "temp") (varIdsOf sameB "ck2" "temp"))
+
+        // (b) THE HEADLINE. `main` and `v1.0` differ only in `temp`'s cells --
+        // the coordinate arrays are untouched, so their node ids, user_data and
+        // manifest ids are identical and the axes are the SAME axes.
+        let mainM = axisModule "ck2" mainKey
+        let tagM = axisModule "ck1" tagKey
+        check "axis: a data-only commit leaves lat and lon SHARED across checkouts"
+            (axisIdsOf mainM = axisIdsOf tagM && (axisIdsOf mainM).Count = 2)
+            (sprintf "%A vs %A" (axisIdsOf mainM) (axisIdsOf tagM))
+        check "axis: the differencing pair's `temp` arrays carry the same index slots"
+            (varIdsOf mainM "ck2" "temp" = varIdsOf tagM "ck1" "temp"
+             && (varIdsOf mainM "ck2" "temp") = Some [ (axisIdsOf mainM).["lat"]; (axisIdsOf mainM).["lon"] ])
+            (sprintf "%A vs %A" (varIdsOf mainM "ck2" "temp") (varIdsOf tagM "ck1" "temp"))
+        check "axis: a shared axis records ONE identity, presented by both refs"
+            (match axisIdentities wxRoot "lat" with
+             | [ one ] -> List.sort one.Refs = ["branch:main"; "tag:v1.0"] && one.CoordFP.IsSome
+             | _ -> false)
+            (sprintf "%A" (axisIdentities wxRoot "lat" |> List.map (fun i -> (i.Refs, i.SplitReason))))
+        check "axis: the shared identity is a NAMED axis, and both checkouts use that name"
+            (match axisIdentities wxRoot "lat" with
+             | [ one ] ->
+                 (defaultArg one.IndexType.Tag "").StartsWith (axisTagPrefix + "lat@")
+                 && one.IndexType.Id >= axisIdBase
+             | _ -> false)
+            (sprintf "%A" (axisIdentities wxRoot "lat" |> List.map (fun i -> (i.IndexType.Tag, i.IndexType.Id))))
+
+        // ... and the consequence that matters: the program compiles.
+        (match lower (crossCheckoutSrc wxRoot) with
+         | Ok _ -> check "axis: `ck2.vars.temp - ck1.vars.temp` TYPECHECKS across a data-only commit" true ""
+         | Error e ->
+             check "axis: `ck2.vars.temp - ck1.vars.temp` TYPECHECKS across a data-only commit" false e)
+
+        // Naming an axis must not make ORDINARY use of a checkout noisy. The
+        // tag is `__`-prefixed exactly so the three seams that read a tag as a
+        // user-facing NAME stay quiet: no BL4003 "indexed with untagged
+        // integer" on a plain subscript, and an alias through
+        // `<binding>.index.<dim>` (which re-tags with the ALIAS name) still
+        // ascribes. Both regressed when the tag was a plain name.
+        (let quiet =
+            sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+let A = ck.vars.temp |> ic.read
+type Lat = ck.index.lat
+type Lon = ck.index.lon
+let cell = A(2, 1)
+let B: Array<Float64 like Lat, Lon> = A
+let total = reduce(B, (+), axes = 2)
+"""
+                    wxRoot
+         let (r, warns) = Blade.Lowering.lowerCaptured quiet
+         check "axis: a named axis does not make ordinary subscripting noisy (no BL4003)"
+             ((match r with Ok _ -> true | Error _ -> false)
+              && not (warns |> List.exists (fun (d: Blade.Diagnostics.Diagnostic) -> d.Code = "BL4003")))
+             (match r with
+              | Error e -> e
+              | Ok _ -> warns |> List.map (fun d -> d.Code + ": " + d.Message) |> String.concat "; "))
+
+        // (c) The coordinate variable itself was rewritten (same extent, same
+        // node id): a different axis, and arithmetic across it refuses.
+        let coordMain = axisModule "ck2" (axisCoordRoot + "@branch:main")
+        let coordTag = axisModule "ck1" (axisCoordRoot + "@tag:v1.0")
+        check "axis: a REWRITTEN coordinate splits the identity (lat differs)"
+            ((axisIdsOf coordMain).["lat"] <> (axisIdsOf coordTag).["lat"])
+            (sprintf "%A vs %A" (axisIdsOf coordMain) (axisIdsOf coordTag))
+        check "axis: the split is PER-AXIS -- untouched lon still shares"
+            ((axisIdsOf coordMain).["lon"] = (axisIdsOf coordTag).["lon"])
+            (sprintf "%A vs %A" (axisIdsOf coordMain) (axisIdsOf coordTag))
+        check "axis: the split records WHY (coordinate content, not extent)"
+            (match axisIdentities axisCoordRoot "lat" with
+             | newest :: _ :: [] -> newest.SplitReason = Some "coordinate content differs"
+             | _ -> false)
+            (sprintf "%A" (axisIdentities axisCoordRoot "lat" |> List.map (fun i -> i.SplitReason)))
+        // The refusal is the ordinary named-axis one (BL3999): the two
+        // identities carry DIFFERENT axis names, and a named index type does
+        // not co-iterate with a differently-named one merely by matching
+        // extent. Ids alone would not do this -- `unify`'s ArrayElem arm never
+        // compares them.
+        check "axis: the split identities carry different axis NAMES"
+            (match axisIdentities axisCoordRoot "lat" with
+             | newest :: older :: [] ->
+                 newest.IndexType.Tag <> older.IndexType.Tag
+                 && (defaultArg newest.IndexType.Tag "").StartsWith (axisTagPrefix + "lat@")
+             | _ -> false)
+            (sprintf "%A" (axisIdentities axisCoordRoot "lat" |> List.map (fun i -> i.IndexType.Tag)))
+        (let r = lower (crossCheckoutSrc axisCoordRoot)
+         check "axis: differencing across a REWRITTEN coordinate is REFUSED"
+             (refusesOnAxes r)
+             (match r with
+              | Error e -> e
+              | Ok _ -> "the program typechecked, so the two checkouts' lat axes co-iterated"))
+
+        // (d) A regrid: the extent moved, which is a split before any
+        // coordinate content is even compared.
+        let regridMain = axisModule "ck2" (axisRegridRoot + "@branch:main")
+        let regridTag = axisModule "ck1" (axisRegridRoot + "@tag:v1.0")
+        check "axis: a REGRID (extent 5 -> 6) splits the identity"
+            ((axisIdsOf regridMain).["lat"] <> (axisIdsOf regridTag).["lat"]
+             && (axisIdsOf regridMain).["lon"] = (axisIdsOf regridTag).["lon"])
+            (sprintf "%A vs %A" (axisIdsOf regridMain) (axisIdsOf regridTag))
+        // Both extents in the reason, in the order the two checkouts were
+        // loaded -- `main` (6) is read above before `v1.0` (5).
+        check "axis: the regrid split names the EXTENT"
+            (match axisIdentities axisRegridRoot "lat" with
+             | newest :: _ :: [] -> newest.SplitReason = Some "extent 6 -> 5"
+             | _ -> false)
+            (sprintf "%A" (axisIdentities axisRegridRoot "lat" |> List.map (fun i -> i.SplitReason)))
+        (let r = lower (crossCheckoutSrc axisRegridRoot)
+         check "axis: differencing across a REGRID is REFUSED"
+             (match r with Error _ -> true | Ok _ -> false)
+             "the program typechecked, so two differently-sized lat axes unified")
+
+        // (e) No coordinate variable: nothing to compare, so name + extent is
+        // the whole identity and a data-only commit still shares.
+        let ncMain = axisModule "ck2" (axisNoCoordRoot + "@branch:main")
+        let ncTag = axisModule "ck1" (axisNoCoordRoot + "@tag:v1.0")
+        check "axis: dims with NO coordinate variable share on name + extent"
+            (axisIdsOf ncMain = axisIdsOf ncTag && (axisIdsOf ncMain).Count = 2)
+            (sprintf "%A vs %A" (axisIdsOf ncMain) (axisIdsOf ncTag))
+        check "axis: a coordinate-less axis records no fingerprint at all"
+            (match axisIdentities axisNoCoordRoot "row" with
+             | [ one ] -> one.CoordFP.IsNone && one.Extent = 5L
+             | _ -> false)
+            (sprintf "%A" (axisIdentities axisNoCoordRoot "row" |> List.map (fun i -> (i.CoordFP, i.Extent))))
+        (match lower (crossCheckoutSrc axisNoCoordRoot) with
+         | Ok _ -> check "axis: differencing across a coordinate-less grid TYPECHECKS" true ""
+         | Error e -> check "axis: differencing across a coordinate-less grid TYPECHECKS" false e)
+
+        // (f) A byte-identical SECOND repo. Same dim names, same extents, same
+        // coordinate bytes -- and no sharing, because there is no identity
+        // between two repos to anchor one.
+        let twinM = axisModule "ck3" (axisTwinRoot + "@branch:main")
+        check "axis: two DIFFERENT repos never share, however identical"
+            ((axisIdsOf twinM).["lat"] <> (axisIdsOf mainM).["lat"]
+             && (axisIdsOf twinM).["lon"] <> (axisIdsOf mainM).["lon"]
+             && (axisIdsOf twinM).Count = 2)
+            (sprintf "%A vs %A" (axisIdsOf twinM) (axisIdsOf mainM))
+        check "axis: the twin repo's axes are a separate mint-table entry"
+            ((axisIdentities axisTwinRoot "lat").Length = 1
+             && (axisIdentities wxRoot "lat").Length = 1)
+            (sprintf "twin %d, wx %d"
+                 (axisIdentities axisTwinRoot "lat").Length (axisIdentities wxRoot "lat").Length)
+        (let crossRepo =
+            sprintf """
+import icechunk as ic
+
+let r1 = ic.load("%s")
+let r2 = ic.load("%s")
+let ck1 = r1.checkout("main")
+let ck2 = r2.checkout("main")
+let A = ck1.vars.temp |> ic.read
+let B = ck2.vars.temp |> ic.read
+let d = B - A
+let total = reduce(d, (+), axes = 2)
+"""
+                    wxRoot axisTwinRoot
+         let r = lower crossRepo
+         check "axis: differencing ACROSS REPOS is refused, identical bytes and all"
+             (refusesOnAxes r)
+             (match r with Error e -> e | Ok _ -> "the program typechecked across two repos"))
+
+        // (g) The table is per COMPILATION. Both resets clear it, and the next
+        // compilation mints identities of its own -- ids from a dead table can
+        // never come back and be mistaken for live ones.
+        let beforeReset = (axisIdsOf (axisModule "ck" mainKey)).["lat"]
+        resetAxisMint ()
+        check "axis: resetAxisMint clears the table" (axisIdentities wxRoot "lat" = []) ""
+        let afterReset = (axisIdsOf (axisModule "ck" mainKey)).["lat"]
+        check "axis: the next compilation mints a FRESH identity (no leak)"
+            (afterReset <> beforeReset) $"{beforeReset} vs {afterReset}"
+        resetCaches ()
+        check "axis: resetCaches clears the mint table too" (axisIdentities wxRoot "lat" = []) ""
+        let afterCaches = (axisIdsOf (axisModule "ck" mainKey)).["lat"]
+        check "axis: and that one is fresh as well"
+            (afterCaches <> afterReset && afterCaches <> beforeReset)
+            $"{beforeReset}, {afterReset}, {afterCaches}"
+     with ex -> check "axis: identity across checkouts" false ex.Message)
+
+    // The differencing program, compiled and RUN: sharing is not a
+    // typechecker-only property. tempV2 sums to 2100 and tempV1 to 210, so the
+    // difference sums to 1890 -- computed cell by cell over axes both
+    // checkouts agree on.
+    (try
+        let axisE2eRoot = fixRepo "ic_axis_e2e"
+        IW.writeRepoAt [ axisE2eRoot; Path.Combine(e2eDir, axisE2eRoot) ] wxFull
+        resetCaches ()
+        match lower (crossCheckoutSrc axisE2eRoot) with
+        | Error e -> check "axis e2e: the cross-checkout difference lowers" false e
+        | Ok ir ->
+            check "axis e2e: both checkouts' reads reach ProviderReads"
+                ((ir.Modules.[0].ProviderReads
+                  |> Map.filter (fun _ s -> s.Provider = "icechunk" && s.VarName = "temp")
+                  |> Map.count) = 2)
+                (sprintf "%d icechunk temp reads" (ir.Modules.[0].ProviderReads |> Map.count))
+            let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "icechunk_axis_diff"
+            CodeGen.deployRuntimeHeaders e2eDir
+            let cppFile = Path.Combine(e2eDir, "icechunk_axis_diff.cpp")
+            File.WriteAllText(cppFile, cppCode)
+            (match compileCpp cppFile e2eDir with
+             | Ok exePath ->
+                 (match runExecutable exePath with
+                  | Ok (0, runOut) ->
+                      check "axis e2e: total = sum(tempV2 - tempV1) = 1890"
+                          (match printedScalar "total" runOut with
+                           | Some v -> abs (v - 1890.0) <= 1e-9
+                           | None -> false)
+                          runOut
+                  | Ok (code, runOut) -> check "axis e2e: runs (exit 0)" false ($"exit {code}: {runOut}")
+                  | Error e -> check "axis e2e: runs (exit 0)" false e)
+             | Error e -> baselineFailed "icechunk axis-difference e2e" e)
+     with ex -> check "axis e2e: cross-checkout difference" false ex.Message)
+
+    // ---------------------------------------------------------------
     // Summary
     // ---------------------------------------------------------------
     printFooter "Icechunk Provider" [$"{passed} passed"; $"{failed} failed"]
