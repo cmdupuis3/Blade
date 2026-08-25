@@ -594,8 +594,25 @@ back silently by design (lowering owns those diagnostics — so the ambiguity
 cell errors under `emit`/`run`/the notebook lane, not bare `check`), and
 `blade run` executes the compiled exe under a different cwd than the caller's
 (the fixture-mirroring trick in the e2e tests exists for this; the notebook
-lane interprets and is unaffected). The full REPL notebook-lane pass remains
-open alongside the icechunk-python oracle check.
+lane interprets and is unaffected).
+
+**Notebook lane: PASSES** (`blade repl`, the interpreter — so provider reads,
+checkouts and axis identity all work without codegen): `mean_drift = -0.5`,
+and both refusal cells fire, the ambiguity one included (the REPL lowers, so
+unlike bare `check` it surfaces BL6002). One rule the lane imposes and the
+notebook now states: **a cell's working directory is the notebook's own
+directory**, so the store path is `data/station_temps.icechunk`, not the
+repo-root-relative spelling a `blade run` from the root would want. Also
+worth knowing when a notebook "can't find the provider": the VS Code
+extension resolves its binary through `blade.compilerPath` first, and a
+stale pin (e.g. a pre-net10 `bin/Release/net7.0/Blade.exe`) fails as
+`BL2004 module 'icechunk' not found` — an old binary, not a broken import.
+The vendored `node_modules/@blade-lang/ide-protocol/resolveCompiler.js`
+carries pre-net10 `net7.0` candidates too; the repo's own
+`protocol/resolveCompiler.js` is already correct, so that copy is stale
+vendoring for the ide-protocol branch to re-sync.
+
+The icechunk-python oracle cross-check remains the one open verification.
 
 ## 14. Risks
 

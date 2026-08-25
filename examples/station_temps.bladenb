@@ -29,7 +29,9 @@
 // %%
 import icechunk as ic
 
-let repo = ic.load("examples/data/station_temps.icechunk")
+// The path is relative to THIS FILE: a notebook cell evaluates with the
+// notebook's own directory as its working directory.
+let repo = ic.load("data/station_temps.icechunk")
 
 // %% [markdown]
 // `repo` is a **repo handle** — it has no variables, because "the data" is
