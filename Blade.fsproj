@@ -123,6 +123,12 @@
     <Compile Include="src/providers/NetcdfProvider.fs" />
     <Compile Include="src/providers/ZarrProvider.fs" />
     <Compile Include="src/providers/CsvProvider.fs" />
+    <!-- Icechunk (versioned Zarr) provider: repo/ref resolution and the
+         39-byte header parser are live; payload decode is stubbed behind a
+         named seam pending the plan's section 6.2 dependency decision. Reuses
+         ZarrProvider's metadata parsers, so it must follow ZarrProvider.fs;
+         registered by ProviderStatics.fs, which it must precede. -->
+    <Compile Include="src/providers/IcechunkProvider.fs" />
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
     <!-- The generic half of an equivariance-family judgment (C3 stage 0,
@@ -153,6 +159,14 @@
          argument is a struct NAME, not a value). Needs Ast + StaticEval only;
          must precede TypeCheck.fs, which installs it. -->
     <Compile Include="src/StructIdxSpec.fs" />
+    <!-- The icechunk `checkout` desugar (docs/plans/plan-icechunk-provider.md
+         section 4): `repo.checkout(ref[, marker])` -> the canonical load shape
+         `alias.load("<path>@<kind>:<ref>")`, so no downstream phase needs an
+         arm for it. Needs Ast + Diagnostics ONLY (it runs before the provider
+         registry is installed); must precede its three consumers: TypeCheck.fs
+         (runs it first in the typeCheck pipeline, ahead of Unfold), Lowering.fs
+         (re-applies it to the raw decl list) and Ide.fs. -->
+    <Compile Include="src/ProviderDesugar.fs" />
     <!-- Staged-former unfold pass (staged tower Phase 1): eliminates
          `static method_for/object_for/for` before every elaboration stage.
          Needs Ast + StaticEval only; runs first in typeCheck's pipeline. -->
@@ -516,6 +530,10 @@
     <Compile Include="tests/NetcdfTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
     <Compile Include="tests/CsvTests.fs" />
+    <Compile Include="tests/IcechunkTests.fs" />
+    <!-- The checkout-desugar pass's own pins (src/ProviderDesugar.fs). Pure
+         in-process AST rewrite: no store, no registry, no g++, never skips. -->
+    <Compile Include="tests/ProviderDesugarTests.fs" />
     <Compile Include="tests/MpiTests.fs" />
     <Compile Include="tests/HybridTests.fs" />
     <Compile Include="tests/DiffOracle.fs" />

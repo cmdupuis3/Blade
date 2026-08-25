@@ -162,6 +162,7 @@ let install () =
     Blade.ProviderRegistry.register netcdfSpec
     Blade.ProviderRegistry.register Blade.ZarrProvider.spec
     Blade.ProviderRegistry.register Blade.CsvProvider.spec
+    Blade.ProviderRegistry.register Blade.IcechunkProvider.spec
     registerProviderReader readAndFold
     registerProviderIndexReader axisExtent
     registerProviderNames (Blade.ProviderRegistry.names () |> Set.ofList)

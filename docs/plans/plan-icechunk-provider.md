@@ -147,6 +147,19 @@ let drift = temp_now - temp_then                // unifies iff temp's axes are
   not exist at the surface; `branch:`/`tag:`/`snap:` survive only inside the
   canonical key (§3.1).
 
+  **Surface outcome (2026-08-24): the desugar erases the marker,** so v1
+  ships this syntax with no unit machinery at all — `repo.checkout("v1.0",
+  ic.tag)` is rewritten whole, and `ic.tag` never reaches typecheck (writing
+  `let t = ic.tag` fails as the ordinary unknown-member refusal, which is
+  correct). Making the markers genuine unit-carrying values (usable outside
+  checkout position, hoverable) costs two touch points — a units slot on
+  `ProviderSpec` plus registration in the provider-import arm
+  (TypeCheckInfer.fs:12329–12337) — recorded as v-next. The
+  tempting alternative, a stdlib `icechunk.blade` carrying the `Unit` decls,
+  is a dead end twice over: `ModuleResolve.isBuiltinModule` deliberately steps
+  over registered provider names, and a module-exports hit would *shadow* the
+  provider alias, breaking `ic.load` recognition entirely.
+
 ### 3.1 The canonical key
 
 The entire provider contract — `LoadAsModule`, `ReadVarData`, `GenReadVar`,
@@ -215,6 +228,20 @@ its nominal type does not satisfy `providerAliasName`, so alias verbs cannot
 mis-fire against it. The desugar stays deliberately concrete to icechunk — no
 generic "derived-binding verb" registry slot until a second provider actually
 wants one.
+
+**Desugar outcome (2026-08-24): LANDED as designed** — `src/ProviderDesugar.fs`
+(`expand` for the diagnosing pipeline entry, `desugarOrIdentity` for the
+others), wired at three sites: the typeCheck pipeline ahead of `Unfold.expand`,
+the raw decl list at the top of `lowerTypedProgram` (the single funnel every
+lowering caller passes through — which is where StaticEval's `providerRoots`
+scan gets fed), and the IDE entry-buffer check. All three raw-AST load-shape
+matchers in the repo receive desugared ASTs; malformed checkouts on a recorded
+repo surface as BL3007 at the checkout call's span, and the rewrite fires only
+at a top-level binding's RHS — the only position any binding→path carrier
+recognizes a load in. Known edges, accepted: tests that call `resolveStatics`
+directly on their own parse must desugar first, and hovers inside multi-file
+*member* buffers see undesugared checkouts (compile behavior is unaffected —
+typeCheck desugars the whole module set).
 
 ## 5. Axis identity across checkouts — the theory
 

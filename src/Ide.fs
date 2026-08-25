@@ -1826,6 +1826,14 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                     Message = e.Message; Code = e.Code }
         exitCode <- 1
     | Ok program ->
+        // Provider checkout desugar, on the same terms as the compile lane:
+        // `repo.checkout(ref)` becomes the load shape every payload collector
+        // below already recognizes (collectProviderStores, readProvenance), so
+        // a checkout binding gets its store hover instead of nothing.
+        // `typeCheck` re-runs the pass internally (it is idempotent); a
+        // wrong-shaped checkout is left alone here and surfaces as the
+        // checker's diagnostic, which is where the editor wants it anyway.
+        let program = Blade.ProviderDesugar.desugarOrIdentity program
         // File-based imports (`import units.SI`) are resolved here for the
         // same reason `blade check` resolves them: without it the editor
         // squiggles every `Float<newton>` in a file that compiles fine.

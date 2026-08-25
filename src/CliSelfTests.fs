@@ -2283,6 +2283,15 @@ let rec internal dispatchTest (rest: string list) : int =
         // CSV provider tests. Fully hermetic; only the e2e compile+run blocks
         // need g++ and skip without it.
         Blade.Tests.CsvTests.runCsvTests ()
+    | [ "icechunk" ] ->
+        // Icechunk provider tests. Fully hermetic AND pure: parsers over bytes,
+        // strings and synthetic domain values, plus hand-assembled 39-byte repo
+        // headers in a temp dir. No g++, no real repo, no skips.
+        Blade.Tests.IcechunkTests.runIcechunkTests ()
+    | [ "provider-desugar" ] | [ "providerdesugar" ] ->
+        // The icechunk checkout desugar (src/ProviderDesugar.fs). Pure
+        // in-process AST rewrite; no toolchain, no fixtures, never skips.
+        Blade.Tests.ProviderDesugarTests.runProviderDesugarTests ()
     | [ "hybrid" ] ->
         // Mixed-parallelism tests: order-table parse + gate-off degradation
         // run always; mpi+omp differentials need mpiexec and skip without it.

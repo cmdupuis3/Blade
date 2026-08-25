@@ -430,8 +430,8 @@ let runZarrTests () =
     Blade.ProviderStatics.install ()
     check "registry: zarr registered"
         (match Blade.ProviderRegistry.tryFind "zarr" with Some s -> s.Name = "zarr" | None -> false) ""
-    check "registry: csv + netcdf registered too"
-        ((Blade.ProviderRegistry.names ()) |> List.sort = ["csv"; "netcdf"; "zarr"]) (sprintf "%A" (Blade.ProviderRegistry.names ()))
+    check "registry: csv + icechunk + netcdf registered too"
+        ((Blade.ProviderRegistry.names ()) |> List.sort = ["csv"; "icechunk"; "netcdf"; "zarr"]) (sprintf "%A" (Blade.ProviderRegistry.names ()))
     check "registry: zarr rejects load_compound (no compound reader)"
         (match Blade.ProviderRegistry.tryFind "zarr" with Some s -> s.GenReadCompoundVar.IsNone | None -> false) ""
     check "registry: zarr needs no link flags"

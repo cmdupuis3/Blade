@@ -2224,6 +2224,15 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
 
 /// Lower a typed program (with optional raw program for static evaluation)
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
+    // The raw decl list callers hand us is the program they PARSED, not the
+    // one `TypeCheck.typeCheck` desugared inside itself -- so the icechunk
+    // checkout rewrite is applied again here, ahead of Phase 0's
+    // `resolveStatics` (whose `providerRoots` scan reads exactly this list,
+    // and whose miss is silent). Idempotent -- a rewritten binding loads a
+    // path carrying `@`, which the repo-handle scan declines -- and
+    // reference-equal for programs with no `import icechunk`. Errors cannot
+    // arise on this path: typecheck ran `expand` first and rejected them.
+    let rawProgram = rawProgram |> Option.map Blade.ProviderDesugar.desugarOrIdentity
     let env = { emptyTypedEnv() with Builder = builder }
     let mutable currentExports = Map.empty<string, ModuleExport>
     let mutable irModules = []
