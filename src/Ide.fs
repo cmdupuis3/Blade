@@ -1343,23 +1343,42 @@ let private providerAliases (prog: Ast.Program) : Map<string, string> =
             | _ -> ()
     acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
 
-/// The `store.vars.v` / `store.dims.v` receiver of a `|> alias.read` (the
-/// pipe desugars to `alias.read(store.vars.v)`), recovered from the
-/// untyped RHS so a top-level provider-read binding names its source.
-let private readOperandProvenance (aliases: Map<string, string>) (v: Expr) : (string * string) option =
-    match v.Kind with
-    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, meth) }, [operand])
-        when (meth = "read" || meth = "stream") && aliases.ContainsKey alias ->
+/// The `store.vars.v` / `store.dims.v` receiver of a provider-verb call (the
+/// pipe desugars to `alias.read(store.vars.v)`), recovered from the untyped
+/// RHS so a top-level provider-read binding names its source. `read`/`stream`
+/// take the view alone; `read_window` adds window bounds and `load_compound`
+/// a mask, view first in both. `write` takes a prior named binding, never a
+/// view, so its provenance is that binding's own, when one was recorded
+/// (`priorOf` -- the caller accumulates in declaration order).
+let private readOperandProvenance (aliases: Map<string, string>) (priorOf: string -> (string * string) option)
+                                  (v: Expr) : (string * string) option =
+    let storeMember (operand: Expr) =
         match operand.Kind with
         | ExprKind.ExprField ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar store }, section) }, field)
             when section = "vars" || section = "dims" ->
             Some (store, $"{section}.{field}")
         | _ -> None
+    match v.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, meth) }, args)
+        when aliases.ContainsKey alias ->
+        (match meth, args with
+         | ("read" | "stream"), [operand]                    // alias.read(v) / alias.stream(v)
+         | "read_window", [operand; _; _]                    // alias.read_window(v, lo, hi)
+         | "load_compound", [operand; _] ->                  // alias.load_compound(v, mask)
+             storeMember operand
+         | "write", [_; { Kind = ExprKind.ExprVar src }] ->  // alias.write("path", v)
+             priorOf src
+         | _ -> None)
     | _ -> None
 
-/// bindingName -> (store, "vars.v") for module-level provider reads.
+/// bindingName -> (store, "vars.v") for module-level provider reads (and
+/// writes, chased to the source binding they persist).
 let private readProvenance (prog: Ast.Program) (aliases: Map<string, string>) : Map<string, string * string> =
     let acc = Dictionary<string, string * string>()
+    let priorOf name =
+        match acc.TryGetValue name with
+        | true, pr -> Some pr
+        | _ -> None
     if not aliases.IsEmpty then
         for m in prog.Modules do
             for ld in m.Decls do
@@ -1367,7 +1386,7 @@ let private readProvenance (prog: Ast.Program) (aliases: Map<string, string>) : 
                 | DeclLet b | DeclStatic b ->
                     match b.Pattern.Kind with
                     | PatternKind.PatVar name ->
-                        match readOperandProvenance aliases b.Value with
+                        match readOperandProvenance aliases priorOf b.Value with
                         | Some pr -> acc.[name] <- pr
                         | None -> ()
                     | _ -> ()

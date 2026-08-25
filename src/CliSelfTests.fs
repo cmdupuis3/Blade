@@ -490,6 +490,54 @@ let private runIdeServeTests () : TH.BlockResult =
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
+        // 6b. Provider-read provenance, one binding per verb shape: `read`
+        // and `stream` take the store view directly, `load_compound` takes
+        // it first of two, and a `write` chases the named binding it
+        // persists back to THAT binding's provenance. Hermetic: a real 2x2
+        // int csv on disk, so the load typechecks and the fast tier keeps
+        // its bindings; nothing here lowers, so csv's codegen-time
+        // stream/load_compound refusals never fire.
+        Blade.ProviderStatics.install ()
+        let provStoreCsv = Path.Combine(tmpDir, "prov_store.csv")
+        File.WriteAllText(provStoreCsv, "1,2\n3,4\n")
+        let provReadSource =
+            "import csv as c\n"
+            + sprintf "let store = c.load(\"%s\")\n" (provStoreCsv.Replace('\\', '/'))
+            + "let obs = store.vars.data |> c.read\n"
+            + "let strm = c.stream(store.vars.data)\n"
+            + "let cmp = c.load_compound(store.vars.data, store.vars.data)\n"
+            + sprintf "let saved = c.write(\"%s\", obs)\n"
+                      ((Path.Combine(tmpDir, "prov_out.csv")).Replace('\\', '/'))
+        let (provJson, provReadCode) =
+            Blade.Ide.ideCheckSource (Path.Combine(tmpDir, "provread.blade")) provReadSource
+        // The literal `"providerRead":{...}` object inside `bname`'s binding
+        // (bounded by the next `"name":` key), or a marker when absent.
+        let provOf (bname: string) =
+            let key = sprintf "\"name\":\"%s\"" bname
+            let start = provJson.IndexOf key
+            if start < 0 then "no-binding" else
+            let next = provJson.IndexOf("\"name\":\"", start + key.Length)
+            let seg = if next < 0 then provJson.Substring start else provJson.Substring(start, next - start)
+            let pk = "\"providerRead\":"
+            let ps = seg.IndexOf pk
+            if ps < 0 then "none" else
+            let pe = seg.IndexOf('}', ps)
+            seg.Substring(ps + pk.Length, pe - ps - pk.Length + 1)
+        let expectedProv = "{\"store\":\"store\",\"member\":\"vars.data\"}"
+        let name = "check payload: providerRead covers read/stream/load_compound, write chases its source"
+        if provReadCode = 0 && provOf "obs" = expectedProv && provOf "strm" = expectedProv
+           && provOf "cmp" = expectedProv && provOf "saved" = expectedProv then
+            record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "exit %d, obs=%s strm=%s cmp=%s saved=%s" provReadCode
+                            (provOf "obs") (provOf "strm") (provOf "cmp") (provOf "saved"))
+        let name = "check payload: providers[] describes the loaded csv store"
+        if provJson.Contains "\"store\":\"store\",\"alias\":\"c\",\"provider\":\"csv\"" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail (provJson.Substring(0, min 400 provJson.Length))
+
         // 7. A parse error is data, not an incident: diagnostics come back and
         // the loop takes the next request.
         let (code, responses, _) = drive [checkReq 13 "fast" hmPath "let ="; pingReq 14; shutdownReq]

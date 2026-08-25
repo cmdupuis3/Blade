@@ -91,7 +91,10 @@ export interface Binding {
    *  stripped out (they travel on `params[]`). */
   doc?: string;
   /** Provenance for a top-level provider read
-   *  (`let x = store.vars.v |> alias.read`). */
+   *  (`let x = store.vars.v |> alias.read`; also `alias.stream`,
+   *  `alias.read_window`, `alias.load_compound`). A top-level
+   *  `alias.write("path", x)` binding carries its source binding `x`'s
+   *  provenance, when `x` recorded one. */
   providerRead?: { store: string; member: string };
   /** Functions only. */
   params?: Param[];
