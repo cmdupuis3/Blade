@@ -384,7 +384,18 @@ A reads-only and matches the repo's self-contained style; B additionally buys a
 FlatBuffers **writer**, which makes hermetic on-the-fly fixtures (the `ZarrWrite`
 discipline) cheap and later enables writes-as-commits (§11). FlatBuffers'
 forward-compatibility (unknown fields ignored) protects both options equally;
-the spec-version byte is the loud gate. Decision deliberately deferred.
+the spec-version byte is the loud gate.
+
+**DECIDED (2026-08-25): Option B** — ZstdSharp.Port for zstd, Google.FlatBuffers
+runtime + vendored `flatc`-generated accessors from icechunk's own
+`icechunk-format/flatbuffers/*.fbs`, pinned to the icechunk release the spec
+facts were taken from. One mechanical consequence: `flatc` emits C#, not F#, so
+the generated code (and the .fbs files beside it, with a README recording the
+pinned source commit and the exact flatc invocation) lives in a small
+class-library csproj that Blade.fsproj takes a ProjectReference to — the first
+project reference and the first NuGet packages in the build. `blade test
+icechunk` gains golden-bytes tests so a runtime/codegen version bump that
+changes wire behavior fails loudly rather than drifting.
 
 ## 7. Runtime C++: the baked chunk table
 

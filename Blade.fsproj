@@ -728,4 +728,14 @@
     </None>
   </ItemGroup>
 
+  <!-- Icechunk payload decode, the plan's section 6.2 Option B (the FIRST
+       external references in this project, a deliberate decision recorded in
+       docs/plans/plan-icechunk-provider.md): ZstdSharp is a managed-only zstd
+       port (no native library), and Blade.IcechunkFormat is the vendored
+       flatc-generated accessor library over icechunk's own schemas. -->
+  <ItemGroup>
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <ProjectReference Include="src/providers/icechunk-format/Blade.IcechunkFormat.csproj" />
+  </ItemGroup>
+
 </Project>

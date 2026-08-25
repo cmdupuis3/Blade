@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Vendored Icechunk on-disk format accessors: flatc-generated C# from the
+       schemas in schema/ (see README.md for the pinned source commit and the
+       exact flatc invocation). C# because flatc emits no F#; Blade.fsproj takes
+       a ProjectReference. Regenerate ONLY by the README recipe, never by hand-
+       editing generated/ - the golden-bytes tests in tests/IcechunkTests.fs pin
+       the wire behavior. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Blade.IcechunkFormat</RootNamespace>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.FlatBuffers" Version="25.2.10" />
+  </ItemGroup>
+
+</Project>
