@@ -916,8 +916,29 @@ let private decodeIntCell (code: string) (b: byte[]) (off: int) : int64 =
     | "u8" -> int64 (BitConverter.ToUInt64(b, off))
     | c -> failwith $"decodeIntCell: not an integer code '{c}'"
 
-/// Read an array's full payload by assembling its chunks. Missing chunk files fill with fill_value (loud error when null); chunk files must be exactly full-chunk-sized (edge chunks are stored padded).
-let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
+/// The chunk-source seam. Everything ABOVE it -- the padded-chunk size check,
+/// fill handling, edge intersection, the row-major scatter, packed-pool
+/// reassembly -- is shared; below it sits the one store-shaped act of turning
+/// a chunk-grid coordinate into bytes. `Fetch` answers None for a coordinate
+/// the source does not store (Zarr: no chunk file), which is what becomes fill
+/// semantics above; `Label` names the chunk in a diagnostic. A second source
+/// (an Icechunk manifest's inline bytes / (file, offset, length) table) plugs
+/// in here and inherits the assembly core verbatim.
+type ChunkSource = {
+    Label: int64 list -> string
+    Fetch: int64 list -> byte[] option
+}
+
+/// Zarr's chunk source: one file per chunk key under the array directory, through the codec seam.
+let zarrChunkSource (meta: ZarrArrayMeta) : ChunkSource =
+    { Label = chunkKey meta
+      Fetch = fun coords ->
+        let file = Path.Combine(meta.ArrayDir, (chunkKey meta coords).Replace('/', Path.DirectorySeparatorChar))
+        if File.Exists file then Some (decodeChunk meta.Codec (File.ReadAllBytes file))
+        else None }
+
+/// Read an array's full payload by assembling its chunks out of `src`. Absent chunks fill with fill_value (loud error when null); chunk bytes must be exactly full-chunk-sized (edge chunks are stored padded).
+let readArrayDataFrom (src: ChunkSource) (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
     try
         let shape = meta.Shape |> List.map int
         let chunks = meta.Chunks |> List.map int
@@ -935,18 +956,16 @@ let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
         let outI = if meta.Dtype.IsFloat then [||] else Array.zeroCreate<int64> (max total 1)
         for coords in gridCoords meta.Shape meta.Chunks do
             let coordsArr = coords |> List.map int |> List.toArray
-            let key = chunkKey meta coords
-            let file = Path.Combine(meta.ArrayDir, key.Replace('/', Path.DirectorySeparatorChar))
             let chunkBytes =
-                if File.Exists file then
-                    let raw = decodeChunk meta.Codec (File.ReadAllBytes file)
+                match src.Fetch coords with
+                | Some raw ->
                     if raw.Length <> chunkCount * bs then
-                        failwith $"chunk '{key}' of array '{meta.Name}' is {raw.Length} bytes, expected {(chunkCount * bs)} -- a compressed or corrupt store?"
+                        failwith $"chunk '{src.Label coords}' of array '{meta.Name}' is {raw.Length} bytes, expected {(chunkCount * bs)} -- a compressed or corrupt store?"
                     Some raw
-                else
+                | None ->
                     match meta.FillValue with
                     | FillNone ->
-                        failwith $"chunk '{key}' of array '{meta.Name}' is missing and fill_value is null -- refusing to invent data"
+                        failwith $"chunk '{src.Label coords}' of array '{meta.Name}' is missing and fill_value is null -- refusing to invent data"
                     | _ -> None
             // Copy the chunk's intersection with the array bounds (edge
             // chunks are stored full-size; the overhang is ignored).
@@ -974,6 +993,10 @@ let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
     with ex ->
         Error ex.Message
 
+/// Read an array's full payload out of its Zarr store directory.
+let readArrayData (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
+    readArrayDataFrom (zarrChunkSource meta) meta
+
 /// Read a variable's full payload at compile time (provider contract).
 let readVarData (path: string) (varName: string) : Result<ZarrVarData, string> =
     try
@@ -987,15 +1010,16 @@ let readVarData (path: string) (varName: string) : Result<ZarrVarData, string> =
 
 /// Canonical pool of a packed variable regardless of physical layout:
 /// "packed" reads the pool directly; "packed-blocks" reassembles it from the
-/// padded block rows via the shared cell map. Ground truth for tests and the differential gate between the two layouts.
-let readPackedPool (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
+/// padded block rows via the shared cell map. Ground truth for tests and the
+/// differential gate between the two layouts -- and, like the dense read, blind to where the chunks came from.
+let readPackedPoolFrom (src: ChunkSource) (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
     match meta.Blade with
     | None -> Error $"variable '{meta.Name}' has no blade packed layout"
     | Some layout ->
         match layout.Blocks with
-        | None -> readArrayData meta
+        | None -> readArrayDataFrom src meta
         | Some info ->
-            match readArrayData meta with
+            match readArrayDataFrom src meta with
             | Error e -> Error e
             | Ok phys ->
                 let g = layout.Group
@@ -1015,6 +1039,10 @@ let readPackedPool (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
                 match phys.Payload with
                 | ZFloats xs -> Ok { DimLengths = dims; Payload = ZFloats (remap xs 0.0) }
                 | ZInts xs -> Ok { DimLengths = dims; Payload = ZInts (remap xs 0L) }
+
+/// Canonical pool of a packed variable stored as a Zarr directory.
+let readPackedPool (meta: ZarrArrayMeta) : Result<ZarrVarData, string> =
+    readPackedPoolFrom (zarrChunkSource meta) meta
 
 // Mapping to Blade IR types (mirrors NetcdfProvider.ncFileToModule)
 
@@ -1260,12 +1288,67 @@ module CppZarr =
     let private zExit (message: string) : string =
         $"{{ std::cerr << \"Zarr error: {message}\" << std::endl; std::exit(1); }}"
 
+    /// The codegen twin of `ChunkSource`: how the EMITTED C++ gets one chunk's
+    /// bytes into `<v>_cbuf`. `Prologue` is emitted once, ahead of the buffers
+    /// (Zarr's store-existence probe; a baked chunk table for a source that has
+    /// one); `Locate`, `Present`, and `Read` shape the per-chunk acquisition
+    /// inside the grid loops, whose counters `<v>_c0 .. <v>_c{rank-1}` ARE the
+    /// chunk coordinate; `Ident` is the C++ expression naming the chunk in a
+    /// diagnostic. Each line-producing field is indented by its caller. The core
+    /// keeps everything else -- grid loops, edge intersection, the fill branch,
+    /// the flat scatter -- so the two sources cannot drift.
+    type ChunkFetch = {
+        Prologue: string list
+        Locate: string -> string list
+        Present: string
+        Read: string -> string list
+        Ident: string
+    }
+
+    /// A chunk fetch instantiated for one emitted variable: the C++ name prefix and the exact byte size of a (padded) chunk.
+    type ChunkFetchEmitter = string -> int -> ChunkFetch
+
+    /// Zarr's chunk fetch: the chunk-key string built from the grid counters, opened as one file under the array directory.
+    let zarrChunkFetch (storePath: string) (store: ZarrStore) (meta: ZarrArrayMeta) : ChunkFetchEmitter =
+        fun v chunkBytes ->
+            let varName = meta.Name
+            let rank = meta.Shape.Length
+            // Bake the path AS GIVEN (netcdf parity): a relative store path
+            // resolves against the executable's working directory at runtime,
+            // not against wherever the compiler happened to run.
+            let arrayDir =
+                let rel = Path.GetRelativePath(store.Path, meta.ArrayDir)
+                normPath (if rel = "." then storePath else Path.Combine(storePath, rel))
+            let metaFile = if meta.Version = 3 then "zarr.json" else ".zarray"
+            // Chunk key expression from the loop counters, e.g.
+            // std::to_string(c0) + "." + std::to_string(c1)  /  "c" "/" ...
+            let keyExpr =
+                let coordParts = [ for d in 0 .. rank - 1 -> $"std::to_string({v}_c{d})" ]
+                let sepLit = $"\"{meta.ChunkKeySep}\""
+                let joined = String.concat $" + {sepLit} + " coordParts
+                if meta.ChunkKeyPrefix = "" then joined
+                else $"std::string(\"{meta.ChunkKeyPrefix}\") + {sepLit} + {joined}"
+            { Prologue =
+                [ $"// Read {varName} from zarr store {normPath storePath} (v{meta.Version}, uncompressed)"
+                  sprintf "{ std::ifstream %s_zm(\"%s/%s\"); if (!%s_zm) %s }"
+                      v arrayDir metaFile v
+                      (zExit $"array '{varName}' not found in store '{normPath storePath}' (missing {metaFile})") ]
+              Locate = fun ind ->
+                [ ind + $"std::string {v}_key = {keyExpr};"
+                  ind + $"std::ifstream {v}_cf(std::string(\"{arrayDir}/\") + {v}_key, std::ios::binary);" ]
+              Present = $"{v}_cf"
+              Read = fun ind ->
+                [ ind + $"{v}_cf.read((char*){v}_cbuf, {chunkBytes});"
+                  ind + $"if ({v}_cf.gcount() != (std::streamsize){chunkBytes}) {{ std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{varName}' is short (expected {chunkBytes} bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }}" ]
+              Ident = $"{v}_key" }
+
     /// The chunk-assembly core shared by the dense and packed readers: emits
     /// C++ assembling the (physical, dense) on-disk array into a flat
-    /// row-major buffer `<cppVarName>_flat` of type `elemCpp`. All metadata is
-    /// baked at compile time -- the generated program parses no JSON. Missing
-    /// chunks fill with fill_value (or fail loudly when null). Caller owns (and must delete[]) `<cppVarName>_flat`.
-    let private genAssembleFlat (storePath: string) (store: ZarrStore) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string) : string list =
+    /// row-major buffer `<cppVarName>_flat` of type `elemCpp`, one chunk at a
+    /// time out of `fetch`. All metadata is baked at compile time -- the
+    /// generated program parses no JSON. Absent chunks fill with fill_value
+    /// (or fail loudly when null). Caller owns (and must delete[]) `<cppVarName>_flat`.
+    let genAssembleFlatVia (fetch: ChunkFetchEmitter) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string) : string list =
         let v = cppVarName
         let varName = meta.Name
         let rank = meta.Shape.Length
@@ -1280,22 +1363,7 @@ module CppZarr =
         let total = shape |> List.fold (*) 1
         let chunkCount = chunks |> List.fold (*) 1
         let chunkBytes = chunkCount * meta.Dtype.ByteSize
-        // Bake the path AS GIVEN (netcdf parity): a relative store path
-        // resolves against the executable's working directory at runtime,
-        // not against wherever the compiler happened to run.
-        let arrayDir =
-            let rel = Path.GetRelativePath(store.Path, meta.ArrayDir)
-            normPath (if rel = "." then storePath else Path.Combine(storePath, rel))
-        let metaFile = if meta.Version = 3 then "zarr.json" else ".zarray"
-
-        // Chunk key expression from the loop counters, e.g.
-        // std::to_string(c0) + "." + std::to_string(c1)  /  "c" "/" ...
-        let keyExpr =
-            let coordParts = [ for d in 0 .. rank - 1 -> $"std::to_string({v}_c{d})" ]
-            let sepLit = $"\"{meta.ChunkKeySep}\""
-            let joined = String.concat $" + {sepLit} + " coordParts
-            if meta.ChunkKeyPrefix = "" then joined
-            else $"std::string(\"{meta.ChunkKeyPrefix}\") + {sepLit} + {joined}"
+        let src = fetch v chunkBytes
 
         let fillDecl =
             match meta.FillValue with
@@ -1304,12 +1372,9 @@ module CppZarr =
             | FillNone -> []
 
         let header =
-            [ $"// Read {varName} from zarr store {normPath storePath} (v{meta.Version}, uncompressed)"
-              sprintf "{ std::ifstream %s_zm(\"%s/%s\"); if (!%s_zm) %s }"
-                  v arrayDir metaFile v
-                  (zExit $"array '{varName}' not found in store '{normPath storePath}' (missing {metaFile})")
-              $"{elemCpp}* {v}_flat = new {elemCpp}[{total}];"
-              $"{diskCpp}* {v}_cbuf = new {diskCpp}[{chunkCount}];" ]
+            src.Prologue
+            @ [ $"{elemCpp}* {v}_flat = new {elemCpp}[{total}];"
+                $"{diskCpp}* {v}_cbuf = new {diskCpp}[{chunkCount}];" ]
             @ fillDecl
 
         // Grid loops.
@@ -1342,15 +1407,14 @@ module CppZarr =
             |> String.concat " + "
 
         let presentBranch =
-            [ gInd + $"if ({v}_cf) {{"
-              gInd + $"    {v}_cf.read((char*){v}_cbuf, {chunkBytes});"
-              gInd + $"    if ({v}_cf.gcount() != (std::streamsize){chunkBytes}) {{ std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{varName}' is short (expected {chunkBytes} bytes) -- a compressed or corrupt store?\" << std::endl; std::exit(1); }}" ]
+            [ gInd + $"if ({src.Present}) {{" ]
+            @ src.Read (gInd + "    ")
             @ (copyLoops $"{v}_flat[{gIdx}] = ({elemCpp}){v}_cbuf[{cIdx}];")
         let missingBranch =
             match meta.FillValue with
             | FillNone ->
                 [ gInd + "} else {"
-                  gInd + $"    std::cerr << \"Zarr error: chunk '\" << {v}_key << \"' of '{varName}' is missing and fill_value is null\" << std::endl; std::exit(1);"
+                  gInd + $"    std::cerr << \"Zarr error: chunk '\" << {src.Ident} << \"' of '{varName}' is missing and fill_value is null\" << std::endl; std::exit(1);"
                   gInd + "}" ]
             | _ ->
                 [ gInd + "} else {" ]
@@ -1359,8 +1423,7 @@ module CppZarr =
 
         let chunkBody =
             limDecls
-            @ [ gInd + $"std::string {v}_key = {keyExpr};"
-                gInd + $"std::ifstream {v}_cf(std::string(\"{arrayDir}/\") + {v}_key, std::ios::binary);" ]
+            @ src.Locate gInd
             @ presentBranch
             @ missingBranch
 
@@ -1371,6 +1434,10 @@ module CppZarr =
         @ chunkBody
         @ gridClose
         @ [ $"delete[] {v}_cbuf;" ]
+
+    /// The assembly core over a Zarr store directory (its file-per-chunk-key fetch).
+    let private genAssembleFlat (storePath: string) (store: ZarrStore) (meta: ZarrArrayMeta) (cppVarName: string) (elemCpp: string) : string list =
+        genAssembleFlatVia (zarrChunkFetch storePath store meta) meta cppVarName elemCpp
 
     /// Generates C++ to read a DENSE variable: chunk assembly into
     /// `<v>_flat`, then the same materialization as CppNetcdf.genReadVar

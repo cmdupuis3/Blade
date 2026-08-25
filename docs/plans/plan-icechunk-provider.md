@@ -382,6 +382,20 @@ The generated program stays pure `<fstream>`/`<filesystem>` C++17 —
 `LinkNeeds = "none"`. Dense, packed (sym/antisym), orbit, `read_window`, and
 the MPI-distributed packed read all ride the shared core unchanged.
 
+**P0 outcome (2026-08-24): LANDED, with two scope corrections.** The seam
+landed as `ChunkSource` (F#: `Label` + `Fetch`, post-codec bytes, `None` =
+fill) and `ChunkFetchEmitter` (codegen: `Prologue`/`Locate`/`Present`/`Read`/
+`Ident`), with `genAssembleFlatVia` public for the Icechunk instance; nine
+emit programs (dense v2/v3, packed flat, orbit, window flat, window blocks,
+stream, null-fill, int dtype) verified byte-identical pre/post. Corrections to
+the prose above: (a) the **packed-blocks** layout has its own assembler
+(`genAssemblePackedBlocks`) with differently-shaped per-block I/O that does
+NOT route through the shared core — P4 must either give it a second
+`ChunkFetch` wiring or merge the assemblers; (b) the fill-branch *body* stays
+in the shared core (the emitter owns detection + acquisition only), and
+`genStreamOpen`/`genStreamFiber` still bake their own partial-read I/O,
+consistent with streams being `None` in §8.
+
 ## 8. ProviderSpec assembly
 
 Registered as `"icechunk"` in `ProviderStatics.install` (ProviderStatics.fs:161);
@@ -461,7 +475,7 @@ icechunk-python** (non-hermetic compile); **"export to plain Zarr first"**
 
 | phase | deliverable | gate |
 |---|---|---|
-| P0 | ChunkSource seam in ZarrProvider: F# fetcher param + codegen fetch-emitter param; zero behavior change | `blade test zarr` green; emitted C++ for existing Zarr fixtures byte-identical |
+| P0 | ChunkSource seam in ZarrProvider: F# fetcher param + codegen fetch-emitter param; zero behavior change | **LANDED** — byte-identical across nine emit programs; `blade test zarr` confirmation rides the next runner pass. Packed-blocks assembler intentionally NOT shared (see §7 outcome; moves to P4) |
 | P1 | §6.2 decision made; format reader: header, zstd, FlatBuffers repo/snapshot/manifest models; refusal gates (spec-1, Offline, virtual, deleted tags) | parses a repo written by icechunk-python 2.1.x; every refusal fires with its named message; parser unit tests hermetic |
 | P2 | Provider + surface: spec registration, repo-handle load, the checkout desugar pass, ref units + marker constants, canonical key, memoized resolution; dense reads, folds, `blade test icechunk` lane | e2e compile+run reading branch, tag, and snapshot checkouts (bare and marker forms); fold provenance prints snapshot IDs; interp parity; IDE hover on a checkout binding shows the store |
 | P3 | Axis mint table + `externalDimMap` wiring + divergence recording | sharing tests of §10 pass: unchanged axes unify across checkouts, diverged axes refuse |
