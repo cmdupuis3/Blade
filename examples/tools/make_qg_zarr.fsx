@@ -21,13 +21,34 @@
 // (Regenerates the committed store in place; idempotent.)
 
 #r "System.Security.Cryptography"
+// The prefix of Blade.fsproj's compile order that IR.fs and ZarrProvider need,
+// in that order -- fsi has no project file, so the dependency chain is spelled
+// out here. (Blade.fsproj is the source of truth if this ever drifts again:
+// this list went stale when src/OrbRank.fs was added and IR.fs began
+// referencing it, which broke the script with "The type 'OrbRank' is not
+// defined" long before it reached any of its own code.)
+#load "../../src/Runtime.fs"
+#load "../../src/Platforms.fs"
 #load "../../src/Ast.fs"
+#load "../../src/Diagnostics.fs"
 #load "../../src/Types.fs"
-#load "../../src/Ir.fs"
+#load "../../src/PerfCounters.fs"
+#load "../../src/SimplexBlocksCore.fs"
+#load "../../src/OrbRank.fs"
+#load "../../src/IR.fs"
+#load "../../src/IRLoopStructure.fs"
+#load "../../src/IRStorage.fs"
+#load "../../src/IRLift.fs"
+#load "../../src/IRMono.fs"
+#load "../../src/IRPrint.fs"
+#load "../../src/IRValidate.fs"
 #load "../../src/providers/ProviderRegistry.fs"
 #load "../../src/providers/ZarrProvider.fs"
-#load "../../src/spectra/Rand.fs"
-#load "../../src/spectra/Fft.fs"
+// BladeSpectra moved to its own oracle project in the 2026-08 reorg
+// (oracles/spectra/BladeSpectra.fsproj); these are the same two files, and
+// Rand precedes Fft there too.
+#load "../../oracles/spectra/Rand.fs"
+#load "../../oracles/spectra/Fft.fs"
 
 open System
 open Blade.ZarrProvider
