@@ -13,6 +13,18 @@
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
+  <!-- The repo-wide Directory.Build.props sets EnableDefaultItems=false (it is
+       written for Blade.fsproj, which sits at the repo ROOT and would otherwise
+       sweep docs/, proofs/ and the fixtures into its item groups). That property
+       reaches THIS project too, so without an explicit glob the SDK compiles
+       nothing here and the assembly comes out empty - which type-checks fine
+       until the first F# reference to `generated.*` fails to resolve. The glob
+       is deliberately a WILDCARD, not a hand-maintained list: generated/ is
+       machine-written by the README's flatc invocation. -->
+  <ItemGroup>
+    <Compile Include="generated/**/*.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Google.FlatBuffers" Version="25.2.10" />
   </ItemGroup>

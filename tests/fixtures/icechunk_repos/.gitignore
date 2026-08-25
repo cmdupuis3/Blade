@@ -1,0 +1,9 @@
+# Icechunk fixture repos are GENERATED (Blade.IcechunkWrite, at test time) --
+# nothing in here is committed but this file and the README beside it.
+#
+# The zarr_stores/ precedent is why this exists from day one: that directory's
+# README says nothing is committed, yet 161 generated files are tracked,
+# because there was no .gitignore to enforce the claim.
+*
+!.gitignore
+!README.md

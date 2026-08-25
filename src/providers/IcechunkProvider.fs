@@ -28,22 +28,27 @@
 //     single `bytes` codec, little-endian, numeric dtypes, regular chunk
 //     grid, the `blade` packed/orbit layout attribute) is inherited verbatim.
 //
-// THE PAYLOAD SEAM. Icechunk metadata payloads are (usually zstd-compressed)
-// FlatBuffers, and Blade.fsproj has zero PackageReferences today. The plan's
-// §6.2 dependency decision (hand-rolled FlatBuffers reader vs the NuGet
-// package; ZstdSharp.Port for zstd) is DEFERRED, so exactly two functions in
-// this file are honest stubs -- `decompress` and `decodePayload`. Everything
-// else is written and typed against them: the parsers, the domain model, the
-// refusal gates, the ref resolver, the module builder and the ProviderSpec
-// are real, and completing P1 replaces those two stubs and nothing else.
-// Refusals that need NO payload (missing repo, not an Icechunk file, spec-1
-// header, unknown compression, object-store URL, malformed canonical key)
-// fire today with their named messages.
+// THE PAYLOAD DECODE (plan §6.2, DECIDED: option B). Metadata payloads are
+// (usually zstd-compressed) FlatBuffers. zstd is ZstdSharp.Port, a MANAGED-only
+// port -- no native library, so the compiler keeps its "pure .NET at compile
+// time" property; the FlatBuffers accessors are the flatc-generated C# vendored
+// under providers/icechunk-format (namespace `generated`), pinned to icechunk
+// v2.1.2's own schemas. Both are COMPILE-TIME-ONLY dependencies: neither
+// reaches the emitted program, because every ref, manifest and chunk byte
+// range is resolved here and baked as static tables (see CppIcechunk below).
+//
+// CONSISTENCY. Ref resolution (and everything under it) is memoized per
+// (canonical key, repo-file mtime) -- plan §3.1 -- so typecheck, static folds,
+// lowering and codegen all see the SAME snapshot even if a writer commits
+// mid-compilation. That closes a TOCTOU the Zarr provider structurally has,
+// since it re-walks its store directory in every phase.
 module Blade.IcechunkProvider
 
 open System
+open System.Collections.Concurrent
 open System.IO
 open Blade.IR
+open Blade.Types
 
 // ---------------------------------------------------------------------------
 // The canonical key (plan §3.1)
@@ -345,12 +350,15 @@ let statusName (s: RepoStatus) : string =
 type SnapshotInfo = {
     /// 12-byte object id; `base32Encode` gives the snapshots/ file name.
     Id: byte[]
-    /// The schema's `parent_offset`: the parent snapshot's position in this
-    /// same list. Whether it is an absolute index or a distance back is
-    /// pinned when the payload decoder lands (§6.2) -- the READ path never
-    /// walks ancestry (§5.2 rejects tx-log/ancestry mechanisms outright).
+    /// The schema's `parent_offset`: the parent's ABSOLUTE index in this same
+    /// list ("offset from the start of the list, not from this entry"), with
+    /// -1 meaning no parent -- the initial snapshot. The READ path never walks
+    /// ancestry (§5.2 rejects tx-log/ancestry mechanisms outright); this is
+    /// carried for provenance only.
     ParentOffset: int
-    /// Commit time, Unix milliseconds.
+    /// Commit time, Unix MILLISECONDS. The wire field is microseconds
+    /// (`flushed_at`, "non-leap microseconds since Jan 1, 1970 UTC"); the
+    /// decoder divides.
     FlushedAtMillis: int64
     /// Commit message.
     Message: string
@@ -377,6 +385,19 @@ type NodeKind =
     | NodeGroup
     | NodeArray
 
+/// One dimension as the SNAPSHOT records it structurally (ArrayNodeData's
+/// `shape_v2`, or the V1 `shape` when a repo still carries one). Cross-checked
+/// against the node's own `zarr.json` -- the two must agree (§6.1).
+type DimShape = {
+    /// Total elements along this dimension.
+    ArrayLength: int64
+    /// Chunks along this dimension. `None` when the record came from the V1
+    /// `DimensionShape`, whose `chunk_length` the schema itself marks
+    /// possibly-inaccurate ("the authoritative chunk size comes from the Zarr
+    /// metadata in user_data"), so there is nothing trustworthy to compare.
+    NumChunks: int64 option
+}
+
 /// One `NodeSnapshot` entry of a snapshot (the entries are sorted by path).
 type NodeMeta = {
     /// 8-byte node id, STABLE across snapshots for the node's lifetime --
@@ -391,8 +412,11 @@ type NodeMeta = {
     /// attribute rides along unchanged). Parsed with the Zarr provider's own
     /// `parseArrayMetaV3`, inheriting every v1 gate.
     UserDataJson: string
+    /// Structural shape from ArrayNodeData; empty for a group.
+    Shape: DimShape list
     /// Dimension names as stored STRUCTURALLY in ArrayNodeData -- cross-checked
     /// against the JSON's `dimension_names` (loud on disagreement, §6.1).
+    /// None when the snapshot leaves any of them unnamed.
     DimensionNames: string list option
     /// Per manifest holding some of this array's chunks: the manifest's
     /// 12-byte object id and, per dimension, the half-open chunk-index range
@@ -416,17 +440,27 @@ type ChunkLoc =
     | Inline of byte[]
     | Native of NativeChunk
 
-/// A native chunk ref: a byte range of a file under $ROOT/chunks/. The
+/// A native chunk ref: a byte range of the file `$ROOT/chunks/<ChunkId>`. The
 /// reference writer emits one chunk per file (offset 0), but the schema
 /// permits packing, so readers must honor offset and length.
+///
+/// The 12-byte id rather than a path, so the decoders stay PURE -- a decoded
+/// manifest says the same thing wherever the repo happens to sit, and unit
+/// tests need no repo on disk. `nativeChunkFile` joins it to a root.
 and NativeChunk = {
-    File: string
+    ChunkId: byte[]
     Offset: int64
     Length: int64
 }
 
+/// The file a native chunk ref names, under a repo root.
+let nativeChunkFile (root: string) (nc: NativeChunk) : string =
+    chunkPath root nc.ChunkId
+
 /// The named refusal for a virtual chunk ref (§9). The decoder calls this
 /// rather than inventing a ChunkLoc case, so the refusal has one wording.
+/// At decode time the owner is known only by its (spec-stable) NODE ID, which
+/// is what `arrayName` carries.
 let virtualChunkRefused (arrayName: string) (location: string) : string =
     $"icechunk array '{arrayName}': VIRTUAL chunk refs are not supported in v1 (this chunk points at '{location}', a file outside the repo) -- the emitted reader only opens files under the repo's chunks/ directory; rewrite the virtual refs into native chunks, or read the referenced store directly"
 
@@ -460,47 +494,275 @@ let payloadKindName (p: Payload) : string =
     | PManifest _ -> "Manifest"
     | PTransactionLog -> "TransactionLog"
 
+/// A chunk-grid coordinate, for diagnostics: "[0, 3]".
+let private coordText (c: int64 list) : string =
+    "[" + (c |> List.map string |> String.concat ", ") + "]"
+
 // ---------------------------------------------------------------------------
-// THE DEFERRED SEAM (plan §6.2) -- the only two stubs in this file
+// Payload decode: zstd (ZstdSharp.Port) + FlatBuffers (vendored accessors)
 // ---------------------------------------------------------------------------
 
-/// What a user sees today wherever a payload would be needed. P1's completion
-/// replaces `decodePayload`'s body and this message goes away with it.
-let pendingPayloadDecode =
-    "icechunk payload decode pending the §6.2 dependency decision (docs/plans/plan-icechunk-provider.md)"
+/// A decode refusal whose message is ALREADY FINAL. It travels out of the
+/// decoders unwrapped, so a named refusal (a virtual chunk ref, an unknown
+/// union arm, a violated exactly-one rule) is never buried under a generic
+/// "malformed FlatBuffer".
+exception IcechunkDecodeError of string
 
-/// The zstd half of the same decision (real writers compress metadata, so
-/// this is unavoidable either way -- see the §6.2 option table).
-let pendingZstd =
-    "icechunk zstd decompression pending the §6.2 dependency decision (docs/plans/plan-icechunk-provider.md)"
+let private iceErr (message: string) = raise (IcechunkDecodeError message)
 
-/// The step ABOVE the payload seam: turning a resolved chunk table into
-/// bytes rides the shared chunk-source core (plan §7 / phase P0).
-let pendingChunkSource =
-    "icechunk chunk assembly pending the shared ChunkSource seam (docs/plans/plan-icechunk-provider.md §7, phase P0)"
+/// Ceiling on a decompressed metadata payload. Metadata is small even for big
+/// stores (a manifest for a million chunks is tens of MB); the cap exists so a
+/// corrupt frame header cannot ask for the address space.
+let maxPayloadBytes = 1 <<< 30
 
-/// SEAM: zstd decompression of a metadata payload. A named stub, NOT a
-/// silent pass-through -- returning the compressed bytes would hand the
-/// decoder garbage and fail somewhere far away from the cause.
+// zstd's two sentinel returns from a frame header: the frame recorded no
+// content size, or the header could not be read at all.
+let private zstdContentSizeUnknown = UInt64.MaxValue - 1UL
+let private zstdContentSizeError = UInt64.MaxValue
+
+/// zstd decompression of a metadata payload (header compression byte 1),
+/// through the managed ZstdSharp port. Sized from the frame's content size
+/// when it records one, otherwise by grow-and-retry -- icechunk's writer uses
+/// the streaming encoder, which does not always pledge a size. Every failure
+/// names the BYTE COUNTS: "the payload did not decompress" without them is
+/// unactionable.
 let decompress (bytes: byte[]) : Result<byte[], string> =
-    ignore bytes
-    Error pendingZstd
+    if isNull (box bytes) then
+        Error "icechunk: zstd decompression was handed a null payload"
+    elif bytes.Length = 0 then
+        Error $"icechunk: the file carries a {headerSize}-byte header and NO payload -- a zstd frame is never zero bytes"
+    else
+    try
+        use dec = new ZstdSharp.Decompressor()
+        let hinted = ZstdSharp.Decompressor.GetDecompressedSize(bytes, 0, bytes.Length)
+        let sized = hinted <> zstdContentSizeUnknown && hinted <> zstdContentSizeError
+        if sized && hinted = 0UL then Ok [||]
+        elif sized && hinted > uint64 maxPayloadBytes then
+            Error $"icechunk: the zstd frame in a {bytes.Length}-byte payload declares {hinted} decompressed bytes, past this reader's {maxPayloadBytes}-byte metadata cap"
+        elif sized then
+            let out = Array.zeroCreate<byte> (int hinted)
+            let written = dec.Unwrap(bytes, 0, bytes.Length, out, 0, out.Length)
+            if written <> out.Length then
+                Error $"icechunk: zstd decompression of a {bytes.Length}-byte payload produced {written} bytes, but the frame header declares {out.Length}"
+            else Ok out
+        else
+            // No content size in the frame header: grow and retry.
+            let rec grow (cap: int) : Result<byte[], string> =
+                let out = Array.zeroCreate<byte> cap
+                let mutable written = 0
+                if dec.TryUnwrap(bytes, 0, bytes.Length, out, 0, cap, &written) then
+                    Ok (if written = cap then out else Array.sub out 0 written)
+                elif cap >= maxPayloadBytes then
+                    Error $"icechunk: the zstd frame in a {bytes.Length}-byte payload does not record its decompressed size and needs more than this reader's {maxPayloadBytes}-byte metadata cap"
+                else
+                    grow (min maxPayloadBytes (cap * 2))
+            let start = int (min (int64 maxPayloadBytes) (max 65536L (int64 bytes.Length * 8L)))
+            grow start
+    with ex ->
+        Error $"icechunk: zstd decompression of a {bytes.Length}-byte payload failed: {ex.Message}"
 
 /// Post-header bytes -> plaintext payload bytes, per the header's compression
-/// byte. Identity for compression 0; the `decompress` seam for compression 1.
+/// byte. Identity for compression 0; `decompress` for compression 1.
 let decompressPayload (compression: Compression) (bytes: byte[]) : Result<byte[], string> =
     match compression with
     | CompNone -> Ok bytes
     | CompZstd -> decompress bytes
 
-/// SEAM: post-header, post-decompression bytes -> domain values. The bytes
-/// are a FlatBuffer whose root table is chosen by the file type. Everything
-/// downstream of this function is written and typed against it; completing
-/// P1 replaces this body and nothing else in the file.
+/// The 12 bytes of a required `ObjectId12` (snapshot / manifest / chunk id).
+let private oid12 (id: Nullable<generated.ObjectId12>) (what: string) : byte[] =
+    if not id.HasValue then
+        iceErr $"icechunk: {what} is missing its 12-byte object id (a required FlatBuffers field)"
+    else
+        let v = id.Value
+        Array.init 12 (fun j -> v.Bytes j)
+
+/// The 8 bytes of a required `ObjectId8` (node id).
+let private oid8 (id: Nullable<generated.ObjectId8>) (what: string) : byte[] =
+    if not id.HasValue then
+        iceErr $"icechunk: {what} is missing its 8-byte node id (a required FlatBuffers field)"
+    else
+        let v = id.Value
+        Array.init 8 (fun j -> v.Bytes j)
+
+/// `Repo` root table -> RepoInfo. Branches and tags stay SEPARATE lists (they
+/// are separate namespaces), deleted tags come across as tombstones, and the
+/// availability enum is mapped by name rather than by a numeric fallthrough.
+let private decodeRepoInfo (bytes: byte[]) : RepoInfo =
+    let r = generated.Repo.GetRootAsRepo(Google.FlatBuffers.ByteBuffer(bytes))
+    // The table repeats the header's spec byte. 0 means the field was left at
+    // its flatbuffers default (absent); a genuine disagreement means the repo
+    // file contradicts its own header.
+    if r.SpecVersion <> 0uy && int r.SpecVersion <> supportedSpecVersion then
+        iceErr $"icechunk repo file: the Repo table records spec version {int r.SpecVersion}, but the file header records {supportedSpecVersion} -- the repo file contradicts itself"
+    if not r.Status.HasValue then
+        iceErr "icechunk repo file: no RepoStatus table (a required field) -- availability is unknown, and this reader will not guess Online"
+    let status =
+        match r.Status.Value.Availability with
+        | generated.RepoAvailability.Online -> StatusOnline
+        | generated.RepoAvailability.ReadOnly -> StatusReadOnly
+        | generated.RepoAvailability.Offline -> StatusOffline
+        | other ->
+            iceErr $"icechunk repo file: unknown RepoAvailability {int other} -- this reader knows Online (0), ReadOnly (1) and Offline (2)"
+    let refList (len: int) (get: int -> Nullable<generated.Ref>) (what: string) =
+        [ for i in 0 .. len - 1 ->
+            let rf = get i
+            if not rf.HasValue then iceErr $"icechunk repo file: {what} entry {i} is absent"
+            elif isNull rf.Value.Name then iceErr $"icechunk repo file: {what} entry {i} has no name (a required field)"
+            else (rf.Value.Name, int rf.Value.SnapshotIndex) ]
+    { Branches = refList r.BranchesLength (fun i -> r.Branches(i)) "branches"
+      Tags = refList r.TagsLength (fun i -> r.Tags(i)) "tags"
+      DeletedTags =
+        [ for i in 0 .. r.DeletedTagsLength - 1 ->
+            let t = r.DeletedTags(i)
+            if isNull t then iceErr $"icechunk repo file: deleted_tags entry {i} is null" else t ]
+      Snapshots =
+        [ for i in 0 .. r.SnapshotsLength - 1 ->
+            let s = r.Snapshots(i)
+            if not s.HasValue then iceErr $"icechunk repo file: snapshots entry {i} is absent"
+            else
+                let sv = s.Value
+                { Id = oid12 sv.Id $"repo file snapshot entry {i}"
+                  ParentOffset = sv.ParentOffset
+                  FlushedAtMillis = int64 (sv.FlushedAt / 1000UL)
+                  Message = (if isNull sv.Message then "" else sv.Message) } ]
+      Status = status }
+
+/// `Snapshot` root table -> Snapshot. `user_data` is decoded as UTF-8 and kept
+/// VERBATIM (it is the node's zarr.json); the structural shape and dimension
+/// names come across so `arrayMetaOfNode` can cross-check them against it.
+let private decodeSnapshot (bytes: byte[]) : Snapshot =
+    let s = generated.Snapshot.GetRootAsSnapshot(Google.FlatBuffers.ByteBuffer(bytes))
+    let nodes =
+        [ for i in 0 .. s.NodesLength - 1 ->
+            let nOpt = s.Nodes(i)
+            if not nOpt.HasValue then iceErr $"icechunk snapshot: node entry {i} is absent"
+            else
+            let ns = nOpt.Value
+            let path =
+                if isNull ns.Path then iceErr $"icechunk snapshot: node entry {i} has no path (a required field)"
+                else ns.Path
+            let ud = ns.GetUserDataArray()
+            if isNull ud then
+                iceErr $"icechunk snapshot node '{path}': no user_data (a required field) -- user_data IS the node's zarr.json, so there is no metadata to read"
+            let json = Text.Encoding.UTF8.GetString ud
+            let nodeId = oid8 ns.Id $"snapshot node '{path}'"
+            match ns.NodeDataType with
+            | generated.NodeData.Group ->
+                { Id = nodeId; Path = path; Kind = NodeGroup; UserDataJson = json
+                  Shape = []; DimensionNames = None; ManifestRefs = [] }
+            | generated.NodeData.Array ->
+                let a = ns.NodeDataAsArray()
+                let shape =
+                    if a.ShapeV2Length > 0 then
+                        [ for d in 0 .. a.ShapeV2Length - 1 ->
+                            let ds = a.ShapeV2(d)
+                            if not ds.HasValue then iceErr $"icechunk snapshot node '{path}': shape_v2 entry {d} is absent"
+                            else { ArrayLength = int64 ds.Value.ArrayLength; NumChunks = Some (int64 ds.Value.NumChunks) } ]
+                    elif a.ShapeLength > 0 then
+                        [ for d in 0 .. a.ShapeLength - 1 ->
+                            let ds = a.Shape(d)
+                            if not ds.HasValue then iceErr $"icechunk snapshot node '{path}': shape entry {d} is absent"
+                            else { ArrayLength = int64 ds.Value.ArrayLength; NumChunks = None } ]
+                    else []
+                let dimNames =
+                    if a.DimensionNamesLength = 0 then None
+                    else
+                        let ns_ =
+                            [ for d in 0 .. a.DimensionNamesLength - 1 ->
+                                let dn = a.DimensionNames(d)
+                                if dn.HasValue && not (isNull dn.Value.Name) then dn.Value.Name else "" ]
+                        if ns_ |> List.exists String.IsNullOrEmpty then None else Some ns_
+                let manifests =
+                    [ for m in 0 .. a.ManifestsLength - 1 ->
+                        let mrOpt = a.Manifests(m)
+                        if not mrOpt.HasValue then iceErr $"icechunk snapshot node '{path}': manifest ref {m} is absent"
+                        else
+                            let mr = mrOpt.Value
+                            let mid = oid12 mr.ObjectId $"manifest ref {m} of snapshot node '{path}'"
+                            let extents =
+                                [ for e in 0 .. mr.ExtentsLength - 1 ->
+                                    let rg = mr.Extents(e)
+                                    if not rg.HasValue then iceErr $"icechunk snapshot node '{path}': manifest ref {m} has no extent for dimension {e}"
+                                    else (int64 rg.Value.From, int64 rg.Value.To) ]
+                            (mid, extents) ]
+                { Id = nodeId; Path = path; Kind = NodeArray; UserDataJson = json
+                  Shape = shape; DimensionNames = dimNames; ManifestRefs = manifests }
+            | other ->
+                iceErr $"icechunk snapshot node '{path}': the NodeData union arm is {int other}, which is neither Array (1) nor Group (2) -- this snapshot was written by a format this reader does not know" ]
+    { Id = oid12 s.Id "snapshot"; Nodes = nodes }
+
+/// One `ChunkRef` -> ChunkLoc, enforcing the schema's EXACTLY-ONE rule across
+/// the three ref forms. Presence is read from the FlatBuffers field offsets
+/// (an absent vector is null, an absent struct has no value), never from a
+/// length -- an empty inline vector is "present and empty", which is a
+/// different fact from "not inline".
+let private decodeChunkRef (owner: string) (cr: generated.ChunkRef) : ChunkRef =
+    let index = [ for j in 0 .. cr.IndexLength - 1 -> int64 (cr.Index(j)) ]
+    let inlineBytes = cr.GetInlineArray()
+    let hasInline = not (isNull inlineBytes)
+    let chunkId = cr.ChunkId
+    let hasNative = chunkId.HasValue
+    let location = cr.Location
+    let hasLocation = not (isNull location)
+    let hasCompressedLocation = not (isNull (cr.GetCompressedLocationArray()))
+    let hasVirtual = hasLocation || hasCompressedLocation
+    let forms = (if hasInline then 1 else 0) + (if hasNative then 1 else 0) + (if hasVirtual then 1 else 0)
+    if forms <> 1 then
+        let named =
+            [ (if hasInline then Some "inline" else None)
+              (if hasNative then Some "chunk_id" else None)
+              (if hasLocation then Some "location" else None)
+              (if hasCompressedLocation then Some "compressed_location" else None) ]
+            |> List.choose id
+        let listing = if List.isEmpty named then "none of them" else String.concat " AND " named
+        iceErr $"icechunk manifest for node '{owner}': chunk ref {coordText index} sets {listing} -- the schema requires EXACTLY ONE of inline / chunk_id / location to be present. (A writer using the flatbuffers OBJECT api must null the unused fields explicitly: ChunkRefT initializes chunk_id to a zero object id, and that zero id lands on the wire.)"
+    elif hasVirtual then
+        iceErr (virtualChunkRefused owner (if hasLocation then location else "<zstd-dictionary-compressed location>"))
+    elif hasInline then
+        { Index = index; Loc = Inline inlineBytes }
+    else
+        let cid = oid12 chunkId $"native chunk ref {coordText index} of node '{owner}'"
+        { Index = index
+          Loc = Native { ChunkId = cid; Offset = int64 cr.Offset; Length = int64 cr.Length } }
+
+/// `Manifest` root table -> the per-array chunk tables it holds.
+let private decodeManifest (bytes: byte[]) : ArrayManifest list =
+    let m = generated.Manifest.GetRootAsManifest(Google.FlatBuffers.ByteBuffer(bytes))
+    [ for i in 0 .. m.ArraysLength - 1 ->
+        let amOpt = m.Arrays(i)
+        if not amOpt.HasValue then iceErr $"icechunk manifest: array entry {i} is absent"
+        else
+        let am = amOpt.Value
+        let nodeId = oid8 am.NodeId $"manifest array entry {i}"
+        let owner = base32Encode nodeId
+        { NodeId = nodeId
+          Refs =
+            [ for j in 0 .. am.RefsLength - 1 ->
+                let crOpt = am.Refs(j)
+                if not crOpt.HasValue then iceErr $"icechunk manifest for node '{owner}': chunk ref entry {j} is absent"
+                else decodeChunkRef owner crOpt.Value ] } ]
+
+/// Post-header, post-decompression bytes -> domain values. The bytes are a
+/// FlatBuffer whose root table is chosen by the file type. PURE: no repo path
+/// enters here, so a decoded value says the same thing wherever the repo sits.
+/// Transaction logs decode to nothing on purpose: they are PRUNABLE under 2.1,
+/// so no read path may depend on their contents.
 let decodePayload (fileType: FileType) (bytes: byte[]) : Result<Payload, string> =
-    ignore fileType
-    ignore bytes
-    Error pendingPayloadDecode
+    if isNull (box bytes) then
+        Error $"icechunk: a null {fileTypeName fileType} payload"
+    else
+    try
+        match fileType with
+        | FtRepoInfo -> Ok (PRepoInfo (decodeRepoInfo bytes))
+        | FtSnapshot -> Ok (PSnapshot (decodeSnapshot bytes))
+        | FtManifest -> Ok (PManifest (decodeManifest bytes))
+        | FtTransactionLog -> Ok PTransactionLog
+        | FtAttributes | FtChunk | FtUnknown _ ->
+            Error $"icechunk: {fileTypeName fileType} payloads have no reader -- this reader decodes RepoInfo, Snapshot and Manifest files only"
+    with
+    | IcechunkDecodeError m -> Error m
+    | ex ->
+        Error $"icechunk: the {fileTypeName fileType} payload ({bytes.Length} bytes) is not a readable FlatBuffer: {ex.Message}"
 
 // ---------------------------------------------------------------------------
 // Ref resolution (pure: RepoInfo in, snapshot id out)
@@ -589,7 +851,57 @@ let resolveRef (info: RepoInfo) (kind: RefKind) (name: string) : Result<byte[], 
                 Error $"icechunk: '{name}' is ambiguous -- it names a {kindsText} in this repo, and branches, tags and snapshots are separate namespaces with no precedence order between them. Name the namespace with a marker ({markers}): e.g. checkout(\"{name}\", ic.{firstKind}), or the canonical key form '@{firstKind}:{name}'")
 
 // ---------------------------------------------------------------------------
-// Reading metadata files (header REAL today; payload at the seam)
+// Memoized resolution (plan §3.1)
+// ---------------------------------------------------------------------------
+
+/// mtime ticks of `$ROOT/repo`. The repo file is the ONLY mutable object in a
+/// repo, so this one O(1) stat is a complete change stamp for the whole store
+/// -- which is what makes it a sound memo key, and what `VersionStamp` reports.
+let private repoStamp (repoPath: string) : int64 =
+    try
+        let f = repoFilePath repoPath
+        if File.Exists f then File.GetLastWriteTimeUtc(f).Ticks else 0L
+    with _ -> 0L
+
+/// The memo key's stamp: mtime ticks AND byte length. The length is there for
+/// the fixture case -- a generated repo REWRITTEN AT THE SAME PATH within one
+/// filesystem timestamp tick would otherwise hit a stale entry. Test code that
+/// regenerates a repo in place should still call `resetCaches` rather than
+/// rely on this; `VersionStamp` deliberately stays plain mtime ticks (§8).
+let private repoMemoStamp (repoPath: string) : int64 * int64 =
+    try
+        let f = repoFilePath repoPath
+        if File.Exists f then
+            let fi = FileInfo f
+            (fi.LastWriteTimeUtc.Ticks, fi.Length)
+        else (0L, 0L)
+    with _ -> (0L, 0L)
+
+/// Bound on each memo, so a long-lived process (the REPL, the test harness)
+/// cannot grow one without limit. Correctness never depends on a hit: a miss
+/// just re-reads the same immutable files.
+let private memoCap = 512
+
+let private memoize (d: ConcurrentDictionary<'k, 'v>) (k: 'k) (f: unit -> 'v) : 'v =
+    if d.Count > memoCap then d.Clear()
+    d.GetOrAdd(k, Func<'k, 'v>(fun _ -> f ()))
+
+/// Registered clearers, so `resetCaches` does not have to name every memo (and
+/// cannot silently miss one added later).
+let private memoClearers = ResizeArray<unit -> unit>()
+
+let private newMemo<'k, 'v when 'k: equality> () : ConcurrentDictionary<'k, 'v> =
+    let d = ConcurrentDictionary<'k, 'v>()
+    memoClearers.Add(fun () -> d.Clear())
+    d
+
+/// Drop every memoized read. Compilation never needs this -- the stamps handle
+/// it -- but a test that regenerates a fixture repo AT THE SAME PATH does.
+let resetCaches () : unit =
+    for clear in memoClearers do clear ()
+
+// ---------------------------------------------------------------------------
+// Reading metadata files
 // ---------------------------------------------------------------------------
 
 /// The first `headerSize` bytes of a file (short reads tolerated: a truncated
@@ -605,7 +917,7 @@ let private readHeaderBytes (file: string) : byte[] =
     Array.sub buf 0 off
 
 /// Header-only validation of an existing metadata file. Everything decidable
-/// from 39 bytes: magic, spec version, file type, compression byte. LIVE.
+/// from 39 bytes: magic, spec version, file type, compression byte.
 let private validateFileHeader (where_: string) (file: string) (expected: FileType) : Result<FileHeader, string> =
     try
         parseHeader where_ (readHeaderBytes file)
@@ -618,8 +930,8 @@ let private validateFileHeader (where_: string) (file: string) (expected: FileTy
 
 /// Pre-payload validation of a repo root: the path is local, the directory
 /// exists, `$ROOT/repo` exists, and its 39-byte header is a spec-2 RepoInfo
-/// header with a known compression byte. EVERY refusal here fires today --
-/// this is what a bare `ic.load(path)` runs.
+/// header with a known compression byte. This is what a bare `ic.load(path)`
+/// runs before it binds the repo handle.
 let validateRepoFile (root: string) : Result<FileHeader, string> =
     checkLocalPath root
     |> Result.bind (fun () ->
@@ -631,8 +943,8 @@ let validateRepoFile (root: string) : Result<FileHeader, string> =
         else
             validateFileHeader $"icechunk repo file '{file}'" file FtRepoInfo)
 
-/// Read a metadata file whole: header (real), file-type check (real),
-/// decompression (identity, or the zstd seam), payload bytes out.
+/// Read a metadata file whole: header, file-type check, decompression, and the
+/// plaintext payload bytes out.
 let private readMetadataFile (where_: string) (file: string) (expected: FileType) : Result<FileHeader * byte[], string> =
     let raw =
         try Ok (File.ReadAllBytes file)
@@ -673,7 +985,7 @@ type Loaded =
     | LoadedRepo of RepoHandle
     | LoadedCheckout of CheckoutHandle
 
-/// Read and decode `$ROOT/repo`. Header REAL, payload at the seam.
+/// Read and decode `$ROOT/repo`.
 let readRepoHandle (root: string) : Result<RepoHandle, string> =
     checkLocalPath root
     |> Result.bind (fun () -> validateRepoFile root |> Result.map ignore)
@@ -688,58 +1000,77 @@ let readRepoHandle (root: string) : Result<RepoHandle, string> =
             | other ->
                 Error $"icechunk repo file '{repoFilePath root}' decoded as a {payloadKindName other} table, not a RepoInfo"))
 
-/// Read and decode `$ROOT/snapshots/<id>`.
-let readSnapshot (root: string) (snapshotId: byte[]) : Result<Snapshot, string> =
-    let file = snapshotPath root snapshotId
-    let where_ = $"icechunk snapshot '{base32Encode snapshotId}'"
-    if not (File.Exists file) then
-        Error $"{where_}: '{file}' is missing -- the snapshot a ref names must exist; an expired/garbage-collected snapshot cannot be read"
-    else
-        readMetadataFile where_ file FtSnapshot
-        |> Result.bind (fun (header, payload) ->
-            decodePayload header.FileType payload
-            |> Result.bind (fun decoded ->
-                match decoded with
-                | PSnapshot snap -> Ok snap
-                | other -> Error $"{where_} decoded as a {payloadKindName other} table, not a Snapshot"))
+let private snapshotMemo = newMemo<string * string * (int64 * int64), Result<Snapshot, string>> ()
+let private manifestMemo = newMemo<string * string * (int64 * int64), Result<ArrayManifest list, string>> ()
 
-/// Read and decode `$ROOT/manifests/<id>`.
+/// Read and decode `$ROOT/snapshots/<id>`. Snapshots are immutable, so the
+/// memo only ever re-reads after the repo file itself changed.
+let readSnapshot (root: string) (snapshotId: byte[]) : Result<Snapshot, string> =
+    memoize snapshotMemo (root, base32Encode snapshotId, repoMemoStamp root) (fun () ->
+        let file = snapshotPath root snapshotId
+        let where_ = $"icechunk snapshot '{base32Encode snapshotId}'"
+        if not (File.Exists file) then
+            Error $"{where_}: '{file}' is missing -- the snapshot a ref names must exist; an expired/garbage-collected snapshot cannot be read"
+        else
+            readMetadataFile where_ file FtSnapshot
+            |> Result.bind (fun (header, payload) ->
+                decodePayload header.FileType payload
+                |> Result.bind (fun decoded ->
+                    match decoded with
+                    | PSnapshot snap -> Ok snap
+                    | other -> Error $"{where_} decoded as a {payloadKindName other} table, not a Snapshot")))
+
+/// Read and decode `$ROOT/manifests/<id>`. One manifest commonly covers
+/// several arrays, so this memo is what keeps a multi-variable program from
+/// re-decompressing the same file per variable.
 let readManifest (root: string) (manifestId: byte[]) : Result<ArrayManifest list, string> =
-    let file = manifestPath root manifestId
-    let where_ = $"icechunk manifest '{base32Encode manifestId}'"
-    if not (File.Exists file) then
-        Error $"{where_}: '{file}' is missing -- manifests are immutable and must outlive every snapshot referencing them"
-    else
-        readMetadataFile where_ file FtManifest
-        |> Result.bind (fun (header, payload) ->
-            decodePayload header.FileType payload
-            |> Result.bind (fun decoded ->
-                match decoded with
-                | PManifest arrays -> Ok arrays
-                | other -> Error $"{where_} decoded as a {payloadKindName other} table, not a Manifest"))
+    memoize manifestMemo (root, base32Encode manifestId, repoMemoStamp root) (fun () ->
+        let file = manifestPath root manifestId
+        let where_ = $"icechunk manifest '{base32Encode manifestId}'"
+        if not (File.Exists file) then
+            Error $"{where_}: '{file}' is missing -- manifests are immutable and must outlive every snapshot referencing them"
+        else
+            readMetadataFile where_ file FtManifest
+            |> Result.bind (fun (header, payload) ->
+                decodePayload header.FileType payload
+                |> Result.bind (fun decoded ->
+                    match decoded with
+                    | PManifest arrays -> Ok arrays
+                    | other -> Error $"{where_} decoded as a {payloadKindName other} table, not a Manifest")))
+
+let private loadMemo = newMemo<string * (int64 * int64), Result<Loaded, string>> ()
+
+let private loadUncached (key: RepoKey) : Result<Loaded, string> =
+    readRepoHandle key.RepoPath
+    |> Result.bind (fun repo ->
+        match key.Ref with
+        // A bare handle carries no ref to resolve, so `resolveRef`'s own
+        // status gate never runs for it -- gate here instead, so an Offline
+        // repo refuses at ic.load itself rather than only at first checkout.
+        | None -> statusGate repo.Info |> Result.map (fun () -> LoadedRepo repo)
+        | Some (kind, name) ->
+            resolveRef repo.Info kind name
+            |> Result.mapError (fun e -> $"{e} (repo '{key.RepoPath}')")
+            |> Result.bind (fun snapshotId ->
+                readSnapshot key.RepoPath snapshotId
+                |> Result.map (fun snap ->
+                    LoadedCheckout {
+                        Repo = repo
+                        Ref = (kind, name)
+                        SnapshotId = snapshotId
+                        Snapshot = snap })))
 
 /// Open a canonical key: parse it, read the repo file, and (when the key
-/// carries a refspec) resolve the ref and read its snapshot. Every step above
-/// the payload seam is real; today the seam is where this stops, so the error
-/// a user sees is the pending message WITH the path and ref context.
+/// carries a refspec) resolve the ref and read its snapshot.
+///
+/// MEMOIZED per (key, repo-file mtime), which is the plan's §3.1 consistency
+/// point: typecheck, static folds, lowering and codegen all resolve through
+/// here, and while the repo file is unchanged they all get the SAME snapshot,
+/// even if a writer commits mid-compilation.
 let load (path: string) : Result<Loaded, string> =
-    parseKey path
-    |> Result.bind (fun key ->
-        readRepoHandle key.RepoPath
-        |> Result.bind (fun repo ->
-            match key.Ref with
-            | None -> Ok (LoadedRepo repo)
-            | Some (kind, name) ->
-                resolveRef repo.Info kind name
-                |> Result.mapError (fun e -> $"{e} (repo '{key.RepoPath}')")
-                |> Result.bind (fun snapshotId ->
-                    readSnapshot key.RepoPath snapshotId
-                    |> Result.map (fun snap ->
-                        LoadedCheckout {
-                            Repo = repo
-                            Ref = (kind, name)
-                            SnapshotId = snapshotId
-                            Snapshot = snap }))))
+    match parseKey path with
+    | Error e -> Error e
+    | Ok key -> memoize loadMemo (path, repoMemoStamp key.RepoPath) (fun () -> loadUncached key)
 
 // ---------------------------------------------------------------------------
 // Arrays inside a checkout
@@ -772,21 +1103,54 @@ let arrayNames (ck: CheckoutHandle) : string list =
     |> List.filter (fun n -> n.Kind = NodeArray)
     |> List.choose (fun n -> match nodeVarName n.Path with Ok nm -> Some nm | Error _ -> None)
 
-/// Find a variable in a checkout and parse its `zarr.json` user data with the
-/// ZARR provider's v3 parser -- the JSON is verbatim `zarr.json` (§2), so
-/// every Zarr v1 gate applies unchanged. A name that exists only inside a
-/// nested group is refused BY NAME rather than reported as missing.
+/// Parse one node's `zarr.json` user data with the ZARR provider's v3 parser
+/// -- the JSON is verbatim `zarr.json` (§2), so every Zarr v1 gate applies
+/// unchanged -- and then CROSS-CHECK the snapshot's own structural record
+/// against it (§6.1): rank, per-dimension extent, chunk count, dimension
+/// names. A snapshot that disagrees with the metadata it carries is a
+/// corrupt repo, and this is the only place that can notice.
+///
+/// `arrayDir` is empty on purpose: chunks live under $ROOT/chunks by object
+/// id, never beside the metadata, and this provider never takes the chunk-key
+/// path, so there is no directory to name.
+let private arrayMetaOfNode (varName: string) (node: NodeMeta) : Result<ZarrProvider.ZarrArrayMeta, string> =
+    ZarrProvider.parseArrayMetaV3 varName "" node.UserDataJson
+    |> Result.mapError (fun e -> $"icechunk array '{node.Path}': {e}")
+    |> Result.bind (fun meta ->
+        let where_ = $"icechunk array '{node.Path}'"
+        if node.Shape.Length <> meta.Shape.Length then
+            Error $"{where_}: the snapshot records {node.Shape.Length} structural dimension(s), but the zarr.json it carries declares rank {meta.Shape.Length} -- the snapshot disagrees with its own metadata"
+        else
+            let grid = ZarrProvider.gridDims meta.Shape meta.Chunks
+            let dimErr =
+                List.zip node.Shape (List.zip meta.Shape grid)
+                |> List.mapi (fun i (ds, (ext, nch)) ->
+                    if ds.ArrayLength <> ext then
+                        Some $"{where_}: the snapshot records extent {ds.ArrayLength} for dimension {i}, but its zarr.json declares {ext}"
+                    else
+                        match ds.NumChunks with
+                        | Some k when k <> nch ->
+                            Some $"{where_}: the snapshot records {k} chunk(s) along dimension {i}, but its zarr.json's shape/chunk_shape gives {nch}"
+                        | _ -> None)
+                |> List.tryPick id
+            match dimErr with
+            | Some e -> Error e
+            | None ->
+                match node.DimensionNames, meta.DimNames with
+                | Some sn, Some jn when sn <> jn ->
+                    Error $"""{where_}: the snapshot names its dimensions {String.concat ", " sn}, but its zarr.json names them {String.concat ", " jn}"""
+                | Some sn, None ->
+                    Error $"""{where_}: the snapshot names its dimensions {String.concat ", " sn}, but the zarr.json it carries has no dimension_names -- the module would be built over synthesized axes while the snapshot names real ones"""
+                | _ -> Ok meta)
+
+/// Find a variable in a checkout and parse (and cross-check) its metadata. A
+/// name that exists only inside a nested group is refused BY NAME rather than
+/// reported as missing.
 let findArray (ck: CheckoutHandle) (varName: string) : Result<NodeMeta * ZarrProvider.ZarrArrayMeta, string> =
     let wanted = "/" + varName
     match ck.Snapshot.Nodes |> List.tryFind (fun n -> n.Path = wanted && n.Kind = NodeArray) with
     | Some node ->
-        // The array dir is meaningless for Icechunk (chunks live under
-        // $ROOT/chunks by object id, not beside the metadata), so the repo
-        // root stands in: parseArrayMetaV3 only uses it for chunk-key paths,
-        // which this provider never takes.
-        ZarrProvider.parseArrayMetaV3 varName ck.Repo.Root node.UserDataJson
-        |> Result.mapError (fun e -> $"icechunk array '{node.Path}': {e}")
-        |> Result.map (fun meta -> (node, meta))
+        arrayMetaOfNode varName node |> Result.map (fun meta -> (node, meta))
     | None ->
         match ck.Snapshot.Nodes |> List.tryFind (fun n -> n.Path.EndsWith("/" + varName)) with
         | Some nested ->
@@ -797,9 +1161,6 @@ let findArray (ck: CheckoutHandle) (varName: string) : Result<NodeMeta * ZarrPro
             let names = arrayNames ck
             let listing = if List.isEmpty names then "(none)" else String.concat ", " names
             Error $"variable '{varName}' not found in icechunk snapshot {base32Encode ck.SnapshotId} -- root-level arrays: {listing}"
-
-let private coordText (c: int64 list) : string =
-    "[" + (c |> List.map string |> String.concat ", ") + "]"
 
 /// Union an array's manifests into ONE chunk table in row-major chunk-grid
 /// order: entry `i` locates the chunk at `gridCoords`[i] (§6.1). A coordinate
@@ -835,18 +1196,152 @@ let buildChunkTable (meta: ZarrProvider.ZarrArrayMeta) (manifests: ArrayManifest
     | None -> Ok table
 
 // ---------------------------------------------------------------------------
-// Compile-time payload read (the static fold)
+// The resolved array: metadata + baked chunk table
 // ---------------------------------------------------------------------------
+
+/// One array of one checkout, fully resolved at compile time: its metadata
+/// plus the chunk table (one `ChunkLoc` per chunk-grid coordinate, row-major).
+/// The F# fold path and the C++ emitter read EXACTLY this, so they cannot
+/// disagree about where a chunk lives.
+type ResolvedArray = {
+    /// The repo path AS GIVEN -- a relative path stays relative, which is what
+    /// makes a baked path resolve against the emitted program's working
+    /// directory (netcdf/zarr parity), not the compiler's.
+    Root: string
+    Ref: RefKind * string
+    SnapshotId: byte[]
+    VarName: string
+    Node: NodeMeta
+    Meta: ZarrProvider.ZarrArrayMeta
+    /// Row-major over the chunk grid; `Fill` where no manifest covers a coordinate.
+    Table: ChunkLoc[]
+}
+
+let private repoHandleRefusal (path: string) : string =
+    $"'{path}' is an icechunk REPO HANDLE, not a checkout -- a repo handle has no variables; check a ref out first (`repo.checkout(\"main\")`, whose canonical key is '{path}@branch:main')"
+
+/// Read every manifest an array's node points at, taking only ITS chunk table
+/// out of each. Loud when a manifest ref's extents are the wrong rank, when a
+/// named manifest holds no table for this node, or when a manifest holds a
+/// chunk outside the extents it declares (§2: the extents ARE the coverage
+/// claim the non-overlap invariant is built on).
+let private collectManifests (root: string) (node: NodeMeta) (meta: ZarrProvider.ZarrArrayMeta) : Result<ArrayManifest list, string> =
+    let rank = meta.Shape.Length
+    let rec go acc refs =
+        match refs with
+        | [] -> Ok (List.rev acc)
+        | ((mid: byte[]), (extents: (int64 * int64) list)) :: rest ->
+            let mname = base32Encode mid
+            if extents.Length <> rank then
+                Error $"icechunk array '{node.Path}': manifest '{mname}' declares {extents.Length} chunk-index range(s) for a rank-{rank} array"
+            else
+                match readManifest root mid with
+                | Error e -> Error e
+                | Ok arrays ->
+                    match arrays |> List.tryFind (fun am -> am.NodeId = node.Id) with
+                    | None ->
+                        Error $"icechunk array '{node.Path}': manifest '{mname}' holds no chunk table for node {base32Encode node.Id} -- the snapshot points at a manifest that does not cover this array"
+                    | Some am ->
+                        let outside =
+                            am.Refs |> List.tryFind (fun r ->
+                                r.Index.Length <> rank
+                                || List.exists2 (fun (c: int64) ((lo, hi): int64 * int64) -> c < lo || c >= hi) r.Index extents)
+                        match outside with
+                        | Some r ->
+                            let ext = extents |> List.map (fun (a, b) -> $"[{a}, {b})") |> String.concat " x "
+                            Error $"icechunk array '{node.Path}': manifest '{mname}' declares extents {ext} but holds chunk {coordText r.Index}, outside them"
+                        | None -> go (am :: acc) rest
+    go [] node.ManifestRefs
+
+let private arrayMemo = newMemo<string * string * (int64 * int64), Result<ResolvedArray, string>> ()
+
+/// Resolve one variable of one checkout all the way to its chunk table.
+/// Memoized per (key, variable, repo-file mtime) alongside `load`, so the
+/// typecheck, fold, lowering and codegen passes that each ask for the same
+/// variable pay the manifest decode ONCE and see one answer.
+let resolveArray (path: string) (varName: string) : Result<ResolvedArray, string> =
+    match parseKey path with
+    | Error e -> Error e
+    | Ok key ->
+        memoize arrayMemo (path, varName, repoMemoStamp key.RepoPath) (fun () ->
+            match load path with
+            | Error e -> Error e
+            | Ok (LoadedRepo _) -> Error (repoHandleRefusal path)
+            | Ok (LoadedCheckout ck) ->
+                findArray ck varName
+                |> Result.bind (fun (node, meta) ->
+                    collectManifests ck.Repo.Root node meta
+                    |> Result.bind (fun manifests ->
+                        buildChunkTable meta manifests
+                        |> Result.map (fun table ->
+                            { Root = ck.Repo.Root
+                              Ref = ck.Ref
+                              SnapshotId = ck.SnapshotId
+                              VarName = varName
+                              Node = node
+                              Meta = meta
+                              Table = table }))))
+
+// ---------------------------------------------------------------------------
+// Compile-time payload read (the static fold), through the shared core
+// ---------------------------------------------------------------------------
+
+/// One native chunk's bytes: a byte range of an immutable file under
+/// $ROOT/chunks. Failures throw, because `readArrayDataFrom` turns an
+/// exception into an Error with this message -- never into silent zeros.
+let private readNativeChunk (ra: ResolvedArray) (coords: int64 list) (nc: NativeChunk) : byte[] =
+    let file = nativeChunkFile ra.Root nc
+    if nc.Length < 0L || nc.Length > int64 maxPayloadBytes then
+        failwith $"icechunk array '{ra.VarName}': chunk {coordText coords} declares a {nc.Length}-byte range, which is not a readable chunk length"
+    if not (File.Exists file) then
+        failwith $"icechunk array '{ra.VarName}': chunk file '{file}' for chunk {coordText coords} is missing -- chunk files are immutable, so a missing one means the snapshot was expired or garbage-collected"
+    use fs = File.OpenRead file
+    if nc.Offset < 0L || nc.Offset + nc.Length > fs.Length then
+        failwith $"icechunk array '{ra.VarName}': chunk {coordText coords} claims bytes [{nc.Offset}, {nc.Offset + nc.Length}) of '{file}', which holds {fs.Length} bytes"
+    fs.Seek(nc.Offset, SeekOrigin.Begin) |> ignore
+    let buf = Array.zeroCreate<byte> (int nc.Length)
+    let mutable off = 0
+    let mutable n = 1
+    while off < buf.Length && n > 0 do
+        n <- fs.Read(buf, off, buf.Length - off)
+        off <- off + n
+    if off <> buf.Length then
+        failwith $"icechunk array '{ra.VarName}': chunk {coordText coords} read {off} of {nc.Length} bytes from '{file}'"
+    buf
+
+/// The icechunk `ChunkSource` (plan §7): the baked table answers every
+/// coordinate -- inline bytes come straight out of the manifest, a native
+/// chunk is a byte range of a file under $ROOT/chunks, and a coordinate no
+/// manifest covers is ABSENT, which the shared core turns into fill. Nothing
+/// above this seam is icechunk-specific, so fill handling, edge intersection,
+/// packed-pool reassembly and wreath pools cannot drift from Zarr's.
+let private icechunkChunkSource (ra: ResolvedArray) : ZarrProvider.ChunkSource =
+    let lens = ZarrProvider.gridDims ra.Meta.Shape ra.Meta.Chunks |> List.map int
+    let strides = ZarrProvider.rowMajorStrides lens
+    let flatOf (coords: int64 list) =
+        List.fold2 (fun acc (c: int64) (s: int) -> acc + int c * s) 0 coords strides
+    { Label = coordText
+      Fetch = fun coords ->
+        match ra.Table.[flatOf coords] with
+        | Fill -> None
+        | Inline bytes -> Some (ZarrProvider.decodeChunk ra.Meta.Codec bytes)
+        | Native nc -> Some (ZarrProvider.decodeChunk ra.Meta.Codec (readNativeChunk ra coords nc)) }
+
+let private adaptVarData (d: ZarrProvider.ZarrVarData) : Blade.ProviderRegistry.ProviderVarData =
+    { DimLengths = d.DimLengths
+      Payload =
+        match d.Payload with
+        | ZarrProvider.ZFloats xs -> Blade.ProviderRegistry.PFloats xs
+        | ZarrProvider.ZInts xs -> Blade.ProviderRegistry.PInts xs }
 
 /// Whole-variable read for `let static A = ic.read(ck.vars.A)`. Structured
 /// through the real gates -- key parse, repo file, ref resolution, snapshot,
-/// node lookup, zarr.json parse, the packed-layout steering the Zarr provider
-/// applies -- and ends at the chunk-source seam.
+/// node lookup, zarr.json parse and cross-check, manifests, chunk table --
+/// and then through the SHARED assembly core over the icechunk chunk source.
 let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry.ProviderVarData, string> =
     match load path with
     | Error e -> Error e
-    | Ok (LoadedRepo _) ->
-        Error $"'{path}' is an icechunk REPO HANDLE, not a checkout -- a repo handle has no variables; check a ref out first (`repo.checkout(\"main\")`, whose canonical key is '{path}@branch:main')"
+    | Ok (LoadedRepo _) -> Error (repoHandleRefusal path)
     | Ok (LoadedCheckout ck) ->
         findArray ck varName
         |> Result.bind (fun (_, meta) ->
@@ -854,7 +1349,11 @@ let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry
             // packed carrier, so a pool would fold to a WRONG dense shape.
             if meta.Blade.IsSome then
                 Error $"variable '{varName}' has a packed (blade: layout=packed) pool layout -- triangular and orbit (iterated-wreath) variables do not fold at compile time; bind with a plain `let ... |> <alias>.read`"
-            else Error pendingChunkSource)
+            else
+                resolveArray path varName
+                |> Result.bind (fun ra ->
+                    ZarrProvider.readArrayDataFrom (icechunkChunkSource ra) ra.Meta
+                    |> Result.map adaptVarData))
 
 /// Wreath (OrbIdx depth >= 2) canonical pool read. Presence of this function
 /// in the spec is the provider's wreath CAPABILITY flag at every seam; the
@@ -868,7 +1367,11 @@ let readWreathPool (path: string) (varName: string) : Result<Blade.ProviderRegis
         findArray ck varName
         |> Result.bind (fun (_, meta) ->
             match meta.Blade with
-            | Some l when l.Group.Sym = Blade.Types.SymWreath -> Error pendingChunkSource
+            | Some l when l.Group.Sym = SymWreath ->
+                resolveArray path varName
+                |> Result.bind (fun ra ->
+                    ZarrProvider.readPackedPoolFrom (icechunkChunkSource ra) ra.Meta
+                    |> Result.map adaptVarData)
             | Some _ -> Error $"variable '{varName}' has a depth-1 packed (sym/antisym) layout, not an orbit head"
             | None -> Error $"variable '{varName}' is an ordinary dense array, not an orbit (iterated-wreath) pool")
 
@@ -897,30 +1400,55 @@ let emptyRepoModule (moduleName: string) : IRModule = {
 }
 
 /// The dims/vars module for a resolved checkout. Node user data is verbatim
-/// `zarr.json`, so this delegates to the Zarr provider's `zarrStoreToModule`
-/// once `decodePayload` yields NodeMeta values -- passing `externalDimMap`
-/// from P3's axis-mint table, which is how two checkouts of one repo come to
-/// share index-type identity for an unchanged axis (§5.3).
+/// `zarr.json`, so a checkout presents as a synthetic v3 ZarrStore and the
+/// module itself is built by the Zarr provider's own `zarrStoreToModule` --
+/// index-type minting, the dims/vars struct shapes, coordinate-array
+/// detection and packed-layout typing are inherited, not re-derived.
 ///
-/// Unreachable today: `load` stops at the payload seam above it.
+/// `externalDimMap` is None: the axis mint table that lets two checkouts of
+/// one repo SHARE an index type for an unchanged axis (§5.3) is phase P3.
+///
+/// Hierarchy (§9): root-level arrays only. Nested arrays are simply not
+/// fields (the Zarr provider's one-level rule, where a subgroup directory is
+/// never scanned); a root-level array whose name is not a Blade identifier
+/// refuses loudly, because it would have to become a struct field.
 let checkoutToModule (builder: IRBuilder) (moduleName: string) (ck: CheckoutHandle) : IRModule =
-    ignore builder
-    ignore moduleName
-    let (kind, name) = ck.Ref
-    failwith $"icechunk checkout ({kindToken kind}:{name}) of '{ck.Repo.Root}': {pendingPayloadDecode}"
+    let key = formatKey { RepoPath = ck.Repo.Root; Ref = Some ck.Ref }
+    let arrays =
+        ck.Snapshot.Nodes
+        |> List.filter (fun n -> n.Kind = NodeArray)
+        |> List.choose (fun n ->
+            let rest = if n.Path.StartsWith "/" then n.Path.Substring 1 else n.Path
+            if rest = "" || rest.Contains "/" then None
+            else
+                match nodeVarName n.Path with
+                | Ok name -> Some (name, n)
+                | Error e -> failwith e)
+        |> List.sortBy fst
+        |> List.map (fun (name, n) ->
+            match arrayMetaOfNode name n with
+            | Ok meta -> meta
+            | Error e -> failwith e)
+    let store : ZarrProvider.ZarrStore = { Path = key; Version = 3; Arrays = arrays }
+    ZarrProvider.zarrStoreToModule builder moduleName store None
 
 /// Provider contract entry point. A BARE path binds the repo handle (an empty
-/// module) after the header-level validation that can run today; a canonical
-/// key with a refspec builds the full dims/vars module.
+/// module) after header-level validation; a canonical key with a refspec
+/// resolves the ref and builds the full dims/vars module.
 let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRModule =
     match parseKey path with
     | Error e -> failwith e
     | Ok key ->
         match key.Ref with
         | None ->
-            match validateRepoFile key.RepoPath with
+            // Route through `load`, not a bare `validateRepoFile`, so a
+            // structurally fine but Offline repo still refuses here (plan
+            // §3: the repo file is parsed, and its status gated, AT LOAD).
+            match load path with
             | Error e -> failwith e
-            | Ok _ -> emptyRepoModule moduleName
+            | Ok (LoadedRepo _) -> emptyRepoModule moduleName
+            | Ok (LoadedCheckout _) ->
+                failwith $"icechunk: internal -- canonical key '{path}' carries no refspec but resolved to a checkout"
         | Some _ ->
             match load path with
             | Ok (LoadedCheckout ck) -> checkoutToModule builder moduleName ck
@@ -932,27 +1460,22 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
 // Fingerprint / version stamp
 // ---------------------------------------------------------------------------
 
-/// Fold-memoization stamp: mtime ticks of `$ROOT/repo`. REAL today, and
-/// exact: the repo file is the ONLY mutable object in a repo, so one O(1)
-/// stat replaces the Zarr provider's max-mtime walk over every file. (Polish,
-/// not v1: `tag:` and `snapshot:` keys are immutable and could skip
-/// invalidation entirely.)
+/// Fold-memoization stamp: mtime ticks of `$ROOT/repo`. Exact: the repo file
+/// is the ONLY mutable object in a repo, so one O(1) stat replaces the Zarr
+/// provider's max-mtime walk over every file. (Polish, not v1: `tag:` and
+/// `snapshot:` keys are immutable and could skip invalidation entirely.)
 let versionStamp (path: string) : int64 =
     try
         match parseKey path with
-        | Ok key ->
-            let file = repoFilePath key.RepoPath
-            if File.Exists file then File.GetLastWriteTimeUtc(file).Ticks else 0L
+        | Ok key -> repoStamp key.RepoPath
         | Error _ -> 0L
     with _ -> 0L
 
-/// Fold-provenance token. §8 makes this the RESOLVED SNAPSHOT ID once the
-/// payload decoder lands -- the semantically right provenance, with no
-/// sha256 sweep over the store. Until then it is a stable PLACEHOLDER:
-/// sha256 over the canonical key plus the mutable repo file's bytes, so the
-/// same key against the same repo state yields the same token, and a commit
-/// (which rewrites the repo file) changes it. Never throws.
-let fingerprint (path: string) : string =
+/// The fallback provenance token for a path that names no snapshot: a bare
+/// repo handle, a missing repo, an unresolvable ref. sha256 over the canonical
+/// key plus the mutable repo file's bytes, so the same key against the same
+/// repo state yields the same token. Never throws.
+let private placeholderFingerprint (path: string) : string =
     use sha = System.Security.Cryptography.SHA256.Create()
     let keyBytes = Text.Encoding.UTF8.GetBytes(path + "\n")
     sha.TransformBlock(keyBytes, 0, keyBytes.Length, null, 0) |> ignore
@@ -968,6 +1491,21 @@ let fingerprint (path: string) : string =
         sha.TransformBlock(repoBytes, 0, repoBytes.Length, null, 0) |> ignore
     sha.TransformFinalBlock([||], 0, 0) |> ignore
     sha.Hash |> Array.map (sprintf "%02x") |> String.concat ""
+
+/// Fold-provenance token: the RESOLVED SNAPSHOT ID, prefixed with the refspec
+/// that named it -- "branch:main@1CECHNKREP0F1RSTCMT0" (§8). This is the
+/// semantically right provenance and it costs one already-memoized resolve,
+/// with no sha256 sweep over the store: the snapshot is immutable, so the id
+/// IS the content identity of everything the fold could have read. Never
+/// throws; a path that names no snapshot falls back to the sha256 placeholder.
+let fingerprint (path: string) : string =
+    try
+        match load path with
+        | Ok (LoadedCheckout ck) ->
+            let (kind, name) = ck.Ref
+            $"{kindToken kind}:{name}@{base32Encode ck.SnapshotId}"
+        | _ -> placeholderFingerprint path
+    with _ -> placeholderFingerprint path
 
 // ---------------------------------------------------------------------------
 // C++ code generation (pure std C++17 -- no Icechunk logic in the binary)
@@ -985,32 +1523,277 @@ module CppIcechunk =
           "#include <string>"
           "#include <limits>" ]
 
-    /// Why a read cannot be emitted yet. Pre-payload refusals (bad path,
-    /// missing repo, spec-1 header, unknown compression, malformed key) are
-    /// preferred over the seam's message, so a user who mistyped a path is
-    /// told about the path, not about a deferred dependency decision.
-    let private readBlocker (path: string) : string =
-        match load path with
-        | Ok _ -> pendingChunkSource
-        | Error e -> e
+    let private elemCppOf (t: IRType) : string =
+        match t with
+        | IRTScalar ETFloat32 -> "float"
+        | IRTScalar ETFloat64 -> "double"
+        | IRTScalar ETInt32 -> "int"
+        | IRTScalar ETInt64 -> "long long"
+        | _ -> "double"
 
-    /// Dense reader. Emits a compile-time-baked chunk table (relative path,
-    /// offset, length per grid coordinate; inline chunks as byte-array
-    /// literals; a sentinel for fill) plus one open/seek/read/copy loop --
-    /// see plan §7. Refuses loudly until the seam lands.
+    let private normPath (p: string) : string = p.Replace('\\', '/')
+
+    /// A C++ string literal for a baked path: separators normalized (the
+    /// emitted program is not necessarily built on the compiling host), then
+    /// escaped.
+    let private cppPathLit (p: string) : string =
+        "\"" + (normPath p).Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+    /// Emission cap on a baked chunk table. Beyond this the tables stop being
+    /// a good idea (compile time, object size) and the answer is a differently
+    /// chunked store, not a bigger literal.
+    let private maxBakedChunks = 1_000_000
+
+    /// `static const T name[n] = { ... };`, wrapped so a big table is still a
+    /// readable diff. A trailing comma before `}` is well-formed C++.
+    let private bakedTable (decl: string) (perLine: int) (items: string list) : string list =
+        [ decl + " {" ]
+        @ (items |> List.chunkBySize perLine |> List.map (fun g -> "    " + String.concat ", " g + ","))
+        @ [ "};" ]
+
+    /// Icechunk's chunk fetch: a compile-time-BAKED table indexed by the
+    /// flattened chunk-grid coordinate. The generated program contains no
+    /// icechunk logic -- no FlatBuffers, no zstd, no ref resolution -- because
+    /// the resolved snapshot is immutable, so its chunk table is a constant.
+    ///
+    /// Per emitted variable `v`, over a grid of N chunks (tables always
+    /// declared with at least one entry, since a zero-length array is
+    /// ill-formed C++):
+    ///
+    ///     static const long long v_icoff[N]            byte offset; -1 marks FILL
+    ///     static const char* const v_icfile[N]         chunk-file path, "" if not native
+    ///                                                  -- emitted only if some chunk is native
+    ///     static const unsigned char v_icb<k>[L]       one array per INLINE chunk, in
+    ///                                                  ascending flat-index order
+    ///     static const unsigned char* const v_icinl[N] inline pointer or nullptr
+    ///                                                  -- emitted only if some chunk is inline
+    ///
+    /// There is deliberately no per-chunk LENGTH table: every present chunk's
+    /// declared length is checked against the padded chunk size at compile time
+    /// below, so the length is one baked literal, not N table entries.
+    ///
+    /// `Present` is `v_icoff[v_cidx] >= 0`, so fill is a table lookup rather
+    /// than a failed file open; the shared core still owns the grid loops,
+    /// edge intersection, the fill branch body and the flat scatter.
+    ///
+    /// Every chunk's declared byte length is validated against the padded
+    /// chunk size HERE, at compile time -- the runtime check that survives is
+    /// for a file that changed under the binary (a GC'd pinned snapshot),
+    /// which dies loudly, never as silent zeros.
+    let icechunkChunkFetch (ra: ResolvedArray) : ZarrProvider.CppZarr.ChunkFetchEmitter =
+        fun v chunkBytes ->
+            let meta = ra.Meta
+            let varName = meta.Name
+            let rank = meta.Shape.Length
+            let lens = ZarrProvider.gridDims meta.Shape meta.Chunks |> List.map int
+            let strides = ZarrProvider.rowMajorStrides lens
+            let n = ra.Table.Length
+            if n > maxBakedChunks then
+                failwith $"icechunk codegen: variable '{varName}' has {n} chunks, past the {maxBakedChunks}-entry baked-table cap -- store it with larger chunks"
+            ra.Table
+            |> Array.iteri (fun i loc ->
+                match loc with
+                | Fill -> ()
+                | Inline bytes when bytes.Length <> chunkBytes ->
+                    failwith $"icechunk codegen: variable '{varName}': the inline chunk at flat index {i} holds {bytes.Length} bytes, but a padded chunk of this array is {chunkBytes} -- a compressed or corrupt store?"
+                | Native nc when nc.Length <> int64 chunkBytes ->
+                    failwith $"icechunk codegen: variable '{varName}': the chunk at flat index {i} declares a {nc.Length}-byte range, but a padded chunk of this array is {chunkBytes} bytes -- a compressed or corrupt store?"
+                | _ -> ())
+
+            let tn = max 1 n
+            let entry (f: ChunkLoc -> string) (dflt: string) =
+                [ for i in 0 .. tn - 1 -> if i < n then f ra.Table.[i] else dflt ]
+
+            let anyNative = ra.Table |> Array.exists (function Native _ -> true | _ -> false)
+            let anyInline = ra.Table |> Array.exists (function Inline _ -> true | _ -> false)
+
+            // One byte array per inline chunk, named by its ORDINAL among the
+            // inline chunks (ascending flat index), plus the flat -> ordinal map.
+            let inlineOrdinal = Collections.Generic.Dictionary<int, int>()
+            let inlineBlocks =
+                [ for i in 0 .. n - 1 do
+                    match ra.Table.[i] with
+                    | Inline bytes ->
+                        let k = inlineOrdinal.Count
+                        inlineOrdinal.[i] <- k
+                        yield!
+                            bakedTable
+                                $"static const unsigned char {v}_icb{k}[{bytes.Length}] ="
+                                16
+                                (bytes |> Array.map (sprintf "0x%02x") |> Array.toList)
+                    | _ -> () ]
+
+            let offTable =
+                bakedTable $"static const long long {v}_icoff[{tn}] =" 12
+                    (entry (function
+                            | Fill -> "-1"
+                            | Inline _ -> "0"
+                            | Native nc -> string nc.Offset) "-1")
+            let fileTable =
+                if not anyNative then []
+                else
+                    bakedTable $"static const char* const {v}_icfile[{tn}] =" 4
+                        (entry (function
+                                | Native nc -> cppPathLit (nativeChunkFile ra.Root nc)
+                                | _ -> "\"\"") "\"\"")
+            let inlineTable =
+                if not anyInline then []
+                else
+                    bakedTable $"static const unsigned char* const {v}_icinl[{tn}] =" 8
+                        ([ for i in 0 .. tn - 1 ->
+                            match inlineOrdinal.TryGetValue i with
+                            | true, k -> $"{v}_icb{k}"
+                            | _ -> "nullptr" ])
+
+            let (refKind, refName) = ra.Ref
+            let idx = $"{v}_cidx"
+            let fileExpr = $"{v}_icfile[{idx}]"
+            let offExpr = $"{v}_icoff[{idx}]"
+            let inlExpr = $"{v}_icinl[{idx}]"
+
+            let inlineRead (ind: string) =
+                [ ind + $"{{ const unsigned char* {v}_isrc = {inlExpr};"
+                  ind + $"  char* {v}_idst = (char*){v}_cbuf;"
+                  ind + $"  for (long long {v}_ib = 0; {v}_ib < {chunkBytes}LL; {v}_ib++) {v}_idst[{v}_ib] = (char){v}_isrc[{v}_ib]; }}" ]
+            let nativeRead (ind: string) =
+                [ ind + $"std::ifstream {v}_cf({fileExpr}, std::ios::binary);"
+                  ind + $"if (!{v}_cf) {{ std::cerr << \"Icechunk error: chunk file '\" << {fileExpr} << \"' of '{varName}' cannot be opened -- an expired or garbage-collected snapshot?\" << std::endl; std::exit(1); }}"
+                  ind + $"{v}_cf.seekg((std::streamoff){offExpr});"
+                  ind + $"{v}_cf.read((char*){v}_cbuf, {chunkBytes});"
+                  ind + $"if ({v}_cf.gcount() != (std::streamsize){chunkBytes}) {{ std::cerr << \"Icechunk error: chunk file '\" << {fileExpr} << \"' of '{varName}' is short: expected {chunkBytes} bytes at offset \" << {offExpr} << std::endl; std::exit(1); }}" ]
+
+            let readLines (ind: string) =
+                match anyInline, anyNative with
+                | true, true ->
+                    [ ind + $"if ({inlExpr} != nullptr) {{" ]
+                    @ inlineRead (ind + "    ")
+                    @ [ ind + "} else {" ]
+                    @ nativeRead (ind + "    ")
+                    @ [ ind + "}" ]
+                | true, false -> inlineRead ind
+                | false, true -> nativeRead ind
+                | false, false ->
+                    [ ind + $"// every chunk of '{varName}' is fill in this snapshot: nothing to read" ]
+
+            let flatExpr =
+                if rank = 0 then "0"
+                else [ for d in 0 .. rank - 1 -> $"{v}_c{d} * {strides.[d]}" ] |> String.concat " + "
+
+            let identExpr =
+                let parts = [ for d in 0 .. rank - 1 -> $"std::to_string({v}_c{d})" ]
+                if List.isEmpty parts then "std::string(\"[]\")"
+                else "std::string(\"[\") + " + String.concat " + std::string(\", \") + " parts + " + std::string(\"]\")"
+
+            { Prologue =
+                [ $"// Read {varName} from icechunk repo {normPath ra.Root} ({kindToken refKind}:{refName}, snapshot {base32Encode ra.SnapshotId})"
+                  $"// {n} chunk(s), baked at compile time: the snapshot is immutable, so this table is a constant." ]
+                @ offTable @ fileTable @ inlineBlocks @ inlineTable
+              Locate = fun ind -> [ ind + $"size_t {idx} = {flatExpr};" ]
+              Present = $"{offExpr} >= 0"
+              Read = readLines
+              Ident = identExpr }
+
+    /// Resolve a variable for emission, or die with the reason at the read site.
+    let private resolveOrFail (what: string) (path: string) (varName: string) : ResolvedArray =
+        match resolveArray path varName with
+        | Ok ra -> ra
+        | Error e -> failwith $"icechunk {what} of variable '{varName}' from '{path}': {e}"
+
+    /// Dense reader: the shared assembly core over the baked chunk table into
+    /// `<v>_flat`, then the same materialization CppNetcdf/CppZarr do (nested
+    /// Array via allocate<>, flat->nested copy, buffers released).
     let genReadVar (path: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
-        ignore cppVarName
-        ignore arrType
-        failwith $"icechunk read of variable '{varName}' from '{path}': {readBlocker path}"
+        let ra = resolveOrFail "read" path varName
+        if ra.Meta.Blade.IsSome then
+            failwith $"icechunk codegen: variable '{varName}' is blade-packed; the dense reader cannot materialize it (this indicates a typing inconsistency)"
+        let v = cppVarName
+        let elemCpp = elemCppOf arrType.ElemType
+        let assemble = ZarrProvider.CppZarr.genAssembleFlatVia (icechunkChunkFetch ra) ra.Meta v elemCpp
+        let shape = ra.Meta.Shape |> List.map int
+        let rank = shape.Length
+        let extentDecls = shape |> List.mapi (fun i n -> $"size_t {v}_extent_{i} = {n};")
+        let extentNames = shape |> List.mapi (fun i _ -> $"{v}_extent_{i}")
+        let idxVars = [ for i in 0 .. rank - 1 -> $"{v}_i{i}" ]
+        let openLoops =
+            idxVars |> List.mapi (fun d iv ->
+                let ind = String.replicate d "    "
+                $"{ind}for (size_t {iv} = 0; {iv} < {extentNames.[d]}; {iv}++) {{")
+        let nestedSub = idxVars |> List.map (sprintf "[%s]") |> String.concat ""
+        let flatIdx =
+            let mutable acc = idxVars.[0]
+            for i in 1 .. rank - 1 do
+                acc <- $"({acc}) * {extentNames.[i]} + {idxVars.[i]}"
+            acc
+        let bodyInd = String.replicate rank "    "
+        let materialize =
+            extentDecls
+            @ [ $"""size_t {v}_extents[] = {{ {(String.concat ", " extentNames)} }};"""
+                $"Array<{elemCpp}, {rank}> {v} = {{ allocate<typename promote<{elemCpp}, {rank}>::type, nullptr>({v}_extents), {v}_extents }};" ]
+            @ openLoops
+            @ [ $"{bodyInd}{v}{nestedSub} = {v}_flat[{flatIdx}];" ]
+            @ [ for d in rank - 1 .. -1 .. 0 -> $"""{(String.replicate d "    ")}}}""" ]
+            @ [ $"delete[] {v}_flat;" ]
+        assemble @ materialize
 
-    /// Packed (SymIdx/AntisymIdx) reader; rides the same baked table through
-    /// the shared chunk-source core, including the windowed and
-    /// MPI-distributed forms.
+    /// Packed (SymIdx/AntisymIdx) and orbit (OrbIdx) reader. The store's pool
+    /// IS the in-memory representation, so assembly is the ordinary flat chunk
+    /// walk through the shared core; the codegen intercept owns allocation and
+    /// copy, so this emits `<v>_flat` and nothing else.
+    ///
+    /// Two shapes refuse loudly rather than half-work: the 'packed-blocks'
+    /// layout, whose per-block assembler is NOT routed through the shared core
+    /// (plan §7, P0 outcome (a)), and `read_window`, whose sub-simplex
+    /// extraction sits above the core. Both are phase P4.
     let genReadPacked (path: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) (opts: Blade.ProviderRegistry.PackedReadOpts) : string list =
-        ignore cppVarName
-        ignore arrType
-        ignore opts
-        failwith $"icechunk packed read of variable '{varName}' from '{path}': {readBlocker path}"
+        let ra = resolveOrFail "packed read" path varName
+        let meta = ra.Meta
+        match meta.Blade with
+        | None ->
+            failwith $"icechunk codegen: variable '{varName}' has no blade packed layout but was typed packed (this indicates a typing inconsistency)"
+        | Some layout when layout.Blocks.IsSome ->
+            failwith $"icechunk codegen: variable '{varName}' is stored with the 'packed-blocks' layout, whose per-block chunk I/O does NOT route through the shared chunk-source core (docs/plans/plan-icechunk-provider.md §7, P0 outcome (a)) -- merging the two assemblers is phase P4; store the variable with layout 'packed' to read it from an icechunk repo today"
+        | Some _ when opts.Window.IsSome ->
+            failwith $"icechunk codegen: variable '{varName}': read_window needs the window-extraction emitter that sits ABOVE the shared chunk-source core, which the icechunk reader does not reach yet (docs/plans/plan-icechunk-provider.md §12, phase P4) -- read the whole pool and take the sub-simplex in Blade"
+        | Some layout when layout.Group.Sym = SymWreath ->
+            // Everything that could go wrong is a MISMATCH between the declared
+            // class and the stored one, checked here rather than trusted.
+            let g = layout.Group
+            (match arrType.IndexTypes with
+             | [ lead ] when lead.Symmetry = SymWreath ->
+                 let declLevels = Blade.IR.orbitLevelsOf lead
+                 let declExtent =
+                     match Blade.IR.orbitBaseExtent lead with
+                     | IRLit (IRLitInt n) -> n
+                     | _ -> -1L
+                 if declLevels <> g.Levels || declExtent <> g.Extent then
+                     failwithf "icechunk codegen: variable '%s': declared OrbIdx<%s, %d> does not match the store's orbit head OrbIdx<%s, %d>"
+                               varName (Blade.IR.ppOrbitLevels declLevels) declExtent
+                               (Blade.IR.ppOrbitLevels g.Levels) g.Extent
+             | _ ->
+                 failwith $"icechunk codegen: variable '{varName}': the store declares an orbit (iterated-wreath) head, so the variable must type as a SOLE OrbIdx group")
+            if opts.Distribute then
+                failwith $"icechunk codegen: variable '{varName}': the MPI-distributed read is not defined for an OrbIdx (iterated-wreath) pool (spec_version 2 is the flat single-pool layout only)"
+            ZarrProvider.CppZarr.genAssembleFlatVia (icechunkChunkFetch ra) meta cppVarName (elemCppOf arrType.ElemType)
+        | Some layout ->
+            let g = layout.Group
+            (match arrType.IndexTypes with
+             | lead :: rest ->
+                 let leadOk =
+                     lead.Symmetry = g.Sym && lead.Rank = g.Rank
+                     && (match lead.Extent with IRLit (IRLitInt n) -> n = g.Extent | _ -> false)
+                 let restExtents =
+                     rest |> List.map (fun ix ->
+                         match ix.Extent with IRLit (IRLitInt n) -> n | _ -> -1L)
+                 let restOk =
+                     (rest |> List.forall (fun ix -> ix.Symmetry = SymNone && ix.Rank = 1))
+                     && restExtents = layout.DenseDims
+                 if not (leadOk && restOk) then
+                     failwithf "icechunk codegen: variable '%s': declared packed type does not match the store's blade layout (group %A rank %d expected lead extent %d, dense %A)"
+                         varName g.Sym g.Rank g.Extent layout.DenseDims
+             | [] -> failwith $"icechunk codegen: variable '{varName}': packed read with no index types")
+            // opts.Distribute is ignored for the flat pool layout, exactly as
+            // the Zarr provider does: only the blocks assembler is rank-scoped.
+            ZarrProvider.CppZarr.genAssembleFlatVia (icechunkChunkFetch ra) meta cppVarName (elemCppOf arrType.ElemType)
 
     /// Writes are refused BY NAME: an Icechunk write is a COMMIT, not an
     /// in-place store write (§8, §11).
@@ -1032,8 +1815,7 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
     GenReadVar = CppIcechunk.genReadVar
     // Presence of these two is the provider's packed/wreath CAPABILITY
     // declaration at every codegen and interpreter seam (§8 lists both as v1
-    // via the shared chunk-source core). They refuse with a NAMED pending
-    // message rather than the generic "this provider has no packed support".
+    // via the shared chunk-source core).
     GenReadPacked = Some CppIcechunk.genReadPacked
     ReadWreathPool = Some readWreathPool
     GenReadCompoundVar = None  // load_compound: refused loudly, as Zarr
@@ -1043,13 +1825,18 @@ let spec : Blade.ProviderRegistry.ProviderSpec = {
     Includes = CppIcechunk.genIncludes
     VarDimNames = fun path varName ->
         // Must not throw on an unreadable store: writers fall back to
-        // synthesized dim<i> names when this yields None.
+        // synthesized dim<i> names when this yields None. The zarr.json is
+        // authoritative (it is what builds the module); the snapshot's
+        // structural names stand in when the JSON carries none.
         try
             match load path with
             | Ok (LoadedCheckout ck) ->
-                ck.Snapshot.Nodes
-                |> List.tryFind (fun n -> n.Path = "/" + varName)
-                |> Option.bind (fun n -> n.DimensionNames)
+                match findArray ck varName with
+                | Ok (node, meta) ->
+                    match meta.DimNames with
+                    | Some ns -> Some ns
+                    | None -> node.DimensionNames
+                | Error _ -> None
             | _ -> None
         with _ -> None
     Fingerprint = fingerprint
