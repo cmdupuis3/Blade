@@ -4,6 +4,8 @@
 //              (the figure JSON arrives on stdin)
 //   serve:     gr-render --serve
 //              (NDJSON request per line on stdin, one response line per request)
+//   video:     gr-render --video --out PATH [--width N] [--height N] [--fps N]
+//              (one figure spec per stdin line; each becomes one frame)
 //
 // See README.md for the full contract.  Every GR-touching detail worth knowing
 // is commented in render.hpp.
@@ -129,6 +131,15 @@ struct TempGuard {
 
 bool validFormat(const std::string &f) { return f == "png" || f == "svg" || f == "pdf"; }
 
+// Containers GR's video plugin writes (a statically linked ffmpeg: h264 for
+// mp4, vp8 for webm, theora for ogg).  Kept separate from validFormat because
+// a video is not a still with a different extension -- it consumes a STREAM of
+// specs, which is a different stdin contract, so it is reached only through an
+// explicit --video rather than by extension.
+bool validVideoFormat(const std::string &f) {
+  return f == "mp4" || f == "webm" || f == "ogg" || f == "gif";
+}
+
 std::string extensionOf(const std::string &path) {
   std::size_t dot = path.find_last_of('.');
   std::size_t sep = path.find_last_of("/\\");
@@ -165,6 +176,60 @@ int optInt(const bj::Value &req, const char *key, int fallback) {
   if (!v || v->isNull()) return fallback;
   if (!v->is(bj::Type::Number)) throw bj::Error(std::string(key) + ": expected a number");
   return int(v->number);
+}
+
+// ---- video mode ------------------------------------------------------------
+//
+// One figure spec per LINE (the same shape serve reads, minus the request
+// envelope), one frame each, in order.  Streaming rather than a JSON array of
+// specs is what keeps memory flat: a day of radar is 143 figures of ~1 MB, and
+// the caller is already producing them a line at a time.
+//
+// Frame geometry is fixed for the whole file -- a video has ONE size -- so
+// --width/--height are session-level here, unlike serve's per-request pair.
+int video(const std::string &out, int w, int h, int fps) {
+  plat::binaryStream(stdin);
+  grr::Size sz = grr::normalizeSize(w, h);
+
+  // Written through a temp file for the same reason stills are: a stream that
+  // fails on frame 100 must not leave a truncated movie at the destination.
+  std::string tmp = tempFile(extensionOf(out));
+  TempGuard guard(tmp);
+  std::remove(tmp.c_str());
+
+  long n = 0;
+  {
+    grr::VideoSession session(tmp, sz.w, sz.h, fps);
+    std::string line;
+    while (std::getline(std::cin, line)) {
+      while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+      if (line.find_first_not_of(" \t") == std::string::npos) continue;
+      try {
+        session.frame(grr::readFigure(bj::parse(line)));
+      } catch (const std::exception &e) {
+        // Unlike serve, a bad frame is FATAL: frames are positional, so
+        // skipping one silently would shift every timestamp after it.
+        throw std::runtime_error("frame " + std::to_string(n + 1) + ": " + e.what());
+      }
+      ++n;
+    }
+    if (n == 0) throw std::runtime_error("no figure specs on stdin (one per line)");
+    session.finish();
+  }
+
+  std::vector<unsigned char> bytes = grr::detail::readAll(tmp);
+  FILE *f = std::fopen(out.c_str(), "wb");
+  if (!f) throw std::runtime_error("cannot open --out for writing: " + out);
+  std::size_t wrote = std::fwrite(bytes.data(), 1, bytes.size(), f);
+  bool ok = wrote == bytes.size();
+  if (std::fclose(f) != 0) ok = false;
+  if (!ok) {
+    std::remove(out.c_str());
+    throw std::runtime_error("short write to " + out);
+  }
+  std::fprintf(stderr, "gr-render: wrote %s (%ld frames, %dx%d @ %d fps)\n", out.c_str(), n, sz.w,
+               sz.h, fps);
+  return 0;
 }
 
 // ---- serve mode ------------------------------------------------------------
@@ -233,12 +298,16 @@ void usage(FILE *f) {
                "\n"
                "  gr-render --out PATH [--width N] [--height N] [--format png|svg|pdf]\n"
                "  gr-render --serve\n"
+               "  gr-render --video --out PATH [--width N] [--height N] [--fps N]\n"
                "\n"
                "  --out PATH     destination file; its extension picks the default format\n"
                "  --width N      pixels (default 800; odd values round down to even)\n"
                "  --height N     pixels (default 600; odd values round down to even)\n"
                "  --format F     png (default), svg or pdf\n"
                "  --serve        NDJSON request/response loop on stdin/stdout\n"
+               "  --video        one figure spec per stdin LINE -> one frame each;\n"
+               "                 --out extension picks the container (mp4, webm, ogg, gif)\n"
+               "  --fps N        video frame rate (default 12)\n"
                "\n"
                "Requires GRDIR to point at the GR root, with $GRDIR/bin on PATH.\n");
 }
@@ -248,8 +317,8 @@ void usage(FILE *f) {
 int main(int argc, char **argv) {
   captureStdout();
   std::string out, format;
-  int width = 800, height = 600;
-  bool serveMode = false;
+  int width = 800, height = 600, fps = 12;
+  bool serveMode = false, videoMode = false;
 
   try {
     for (int i = 1; i < argc; ++i) {
@@ -260,6 +329,10 @@ int main(int argc, char **argv) {
       };
       if (a == "--serve") {
         serveMode = true;
+      } else if (a == "--video") {
+        videoMode = true;
+      } else if (a == "--fps") {
+        fps = std::atoi(next("--fps").c_str());
       } else if (a == "--out" || a == "-o") {
         out = next("--out");
       } else if (a == "--width") {
@@ -279,8 +352,22 @@ int main(int argc, char **argv) {
     setupEnv();
 
     if (serveMode) {
+      if (videoMode) throw std::runtime_error("--serve and --video are mutually exclusive");
       if (!out.empty()) throw std::runtime_error("--serve and --out are mutually exclusive");
       return serve();
+    }
+
+    if (videoMode) {
+      if (out.empty()) throw std::runtime_error("--video needs --out PATH");
+      if (!format.empty())
+        throw std::runtime_error("--format is for stills; a video's container comes from --out");
+      std::string ext = extensionOf(out);
+      if (!validVideoFormat(ext))
+        throw std::runtime_error("unsupported video container '" + ext +
+                                 "' (--out must end in .mp4, .webm, .ogg or .gif)");
+      if (width <= 0 || height <= 0) throw std::runtime_error("--width/--height must be positive");
+      if (fps <= 0 || fps > 240) throw std::runtime_error("--fps must be between 1 and 240");
+      return video(out, width, height, fps);
     }
 
     if (out.empty()) throw std::runtime_error("--out PATH is required (or use --serve)");

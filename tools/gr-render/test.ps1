@@ -260,6 +260,129 @@ if ($r.ExitCode -eq 0 -and (Test-Path $pdf)) {
 }
 Check 'pdf render (--format pdf)' $pdfOk $r.StdErr
 
+# ---- 4b. video mode --------------------------------------------------------
+#
+# GR writes movies itself (a statically linked ffmpeg in videoplugin.dll), so
+# --video is one print session spanning many frames rather than N stills glued
+# together downstream.  Nothing here shells out to ffmpeg/ffprobe: the suite
+# stays hermetic, so containers are identified by their magic bytes and frame
+# accounting is checked by the ONE property that needs no decoder -- more
+# frames must produce more bytes.
+
+function Invoke-Video {
+    param([string[]]$Specs, [string]$Out, [int]$Width = 320, [int]$Height = 240,
+          [int]$Fps = 6, [string[]]$ExtraArgs = @())
+    $in = Join-Path $work 'frames.ndjson'
+    # One spec per LINE: each fixture is already a single line of JSON.
+    ($Specs | ForEach-Object { (Get-Content -Raw $_).Trim() }) -join "`n" |
+        Set-Content -Path $in -Encoding ascii
+    $a = @('--video', '--out', $Out, '--width', $Width, '--height', $Height, '--fps', $Fps) + $ExtraArgs
+    $errFile = Join-Path $work 'stderr.txt'
+    $outFile = Join-Path $work 'stdout.txt'
+    $p = Start-Process -FilePath $exe -ArgumentList $a -RedirectStandardInput $in `
+        -RedirectStandardError $errFile -RedirectStandardOutput $outFile -NoNewWindow -Wait -PassThru
+    [pscustomobject]@{
+        ExitCode = $p.ExitCode
+        StdErr   = (Get-Content $errFile -Raw)
+        StdOut   = (Get-Content $outFile -Raw)
+    }
+}
+
+function Test-Magic {
+    param([string]$Path, [int]$Offset, [string]$Expect)
+    if (-not (Test-Path $Path)) { return $false }
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    if ($b.Length -lt ($Offset + $Expect.Length)) { return $false }
+    $got = -join ($b[$Offset..($Offset + $Expect.Length - 1)] | ForEach-Object { [char]$_ })
+    return $got -eq $Expect
+}
+
+$cf = Join-Path $fixtures 'contourf.json'
+$hm = Join-Path $fixtures 'heatmap.json'
+$ln = Join-Path $fixtures 'line.json'
+
+# Every container the plugin writes, identified without a decoder.
+$mp4 = Join-Path $work 'v.mp4'
+$r = Invoke-Video -Specs @($cf, $hm, $ln) -Out $mp4
+Check 'video: mp4 exit 0' ($r.ExitCode -eq 0) $r.StdErr
+Check 'video: mp4 has an ftyp box' (Test-Magic $mp4 4 'ftyp')
+Check 'video: nothing on stdout' ([string]::IsNullOrEmpty($r.StdOut)) $r.StdOut
+Check 'video: frame count reported on stderr' ($r.StdErr -match '3 frames') $r.StdErr
+
+$webm = Join-Path $work 'v.webm'
+$r = Invoke-Video -Specs @($cf, $hm) -Out $webm
+Check 'video: webm exit 0' ($r.ExitCode -eq 0) $r.StdErr
+$webmOk = $false
+if (Test-Path $webm) {
+    $b = [System.IO.File]::ReadAllBytes($webm)
+    # EBML header: 1A 45 DF A3
+    $webmOk = $b.Length -gt 4 -and $b[0] -eq 0x1A -and $b[1] -eq 0x45 -and $b[2] -eq 0xDF -and $b[3] -eq 0xA3
+}
+Check 'video: webm has an EBML header' $webmOk
+
+$gif = Join-Path $work 'v.gif'
+$r = Invoke-Video -Specs @($cf, $hm) -Out $gif
+Check 'video: gif exit 0' ($r.ExitCode -eq 0) $r.StdErr
+Check 'video: gif has a GIF8 signature' (Test-Magic $gif 0 'GIF8')
+
+$ogg = Join-Path $work 'v.ogg'
+$r = Invoke-Video -Specs @($cf, $hm) -Out $ogg
+Check 'video: ogg exit 0' ($r.ExitCode -eq 0) $r.StdErr
+Check 'video: ogg has an OggS signature' (Test-Magic $ogg 0 'OggS')
+
+# Frames actually accumulate: the only claim checkable without a decoder.
+$short = Join-Path $work 'short.mp4'
+$long = Join-Path $work 'long.mp4'
+$null = Invoke-Video -Specs @($cf, $cf) -Out $short
+$null = Invoke-Video -Specs @($cf, $cf, $cf, $cf, $cf, $cf, $cf, $cf) -Out $long
+$grew = (Test-Path $short) -and (Test-Path $long) -and
+        ((Get-Item $long).Length -gt (Get-Item $short).Length)
+Check 'video: 8 frames outweigh 2' $grew
+
+# Same determinism claim the still renders carry.
+$d1 = Join-Path $work 'det1.mp4'
+$d2 = Join-Path $work 'det2.mp4'
+$null = Invoke-Video -Specs @($cf, $hm, $ln) -Out $d1
+$null = Invoke-Video -Specs @($cf, $hm, $ln) -Out $d2
+Check 'video: byte-identical across runs' ((Get-Sha256 $d1) -eq (Get-Sha256 $d2))
+
+# Refusals.  Each names the thing that is wrong, and none leaves a file behind.
+$bad = Join-Path $work 'never.mp4'
+if (Test-Path $bad) { Remove-Item $bad }
+
+$r = Invoke-Video -Specs @($cf) -Out (Join-Path $work 'x.avi')
+Check 'video: unknown container refused' (($r.ExitCode -ne 0) -and ($r.StdErr -match 'unsupported video container'))
+
+$r = Invoke-Video -Specs @($cf) -Out $bad -ExtraArgs @('--format', 'png')
+Check 'video: --format refused' (($r.ExitCode -ne 0) -and ($r.StdErr -match 'container comes from --out'))
+
+$r = Invoke-Video -Specs @($cf) -Out $bad -Fps 0
+Check 'video: fps 0 refused' (($r.ExitCode -ne 0) -and ($r.StdErr -match 'fps'))
+
+$r = Invoke-Video -Specs @($cf) -Out $bad -ExtraArgs @('--serve')
+Check 'video: --serve + --video refused' (($r.ExitCode -ne 0) -and ($r.StdErr -match 'mutually exclusive'))
+
+# Empty input is an error, not a zero-frame file.
+$emptyIn = Join-Path $work 'empty.ndjson'
+Set-Content -Path $emptyIn -Value '' -Encoding ascii
+$errFile = Join-Path $work 'stderr.txt'
+$p = Start-Process -FilePath $exe -ArgumentList @('--video', '--out', $bad) `
+    -RedirectStandardInput $emptyIn -RedirectStandardError $errFile `
+    -RedirectStandardOutput (Join-Path $work 'stdout.txt') -NoNewWindow -Wait -PassThru
+Check 'video: empty stdin refused' (($p.ExitCode -ne 0) -and ((Get-Content $errFile -Raw) -match 'no figure specs'))
+
+# A bad frame is FATAL and POSITIONAL: frames carry meaning by index, so the
+# error names which one rather than skipping it.
+$badFrame = Join-Path $work 'badframe.ndjson'
+((Get-Content -Raw $cf).Trim(), '{"data":[{"type":"nope"}]}') -join "`n" |
+    Set-Content -Path $badFrame -Encoding ascii
+$p = Start-Process -FilePath $exe -ArgumentList @('--video', '--out', $bad) `
+    -RedirectStandardInput $badFrame -RedirectStandardError $errFile `
+    -RedirectStandardOutput (Join-Path $work 'stdout.txt') -NoNewWindow -Wait -PassThru
+$msg = Get-Content $errFile -Raw
+Check 'video: bad frame is fatal and numbered' (($p.ExitCode -ne 0) -and ($msg -match 'frame 2'))
+Check 'video: a failed run leaves no output file' (-not (Test-Path $bad)) $bad
+
 # ---- 5. failure modes ------------------------------------------------------
 
 $badOut = Join-Path $work 'bad.png'

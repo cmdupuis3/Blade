@@ -1,9 +1,10 @@
 # gr-render
 
 Translates a **plotly figure spec** — exactly what `stdlib/plot.blade` emits — into a
-**GR**-rendered image (PNG, SVG or PDF). It is the native half of the Blade Plots panel's
-plotly ⇄ GR toggle: the extension keeps the plotly JSON, and this helper turns that same
-JSON into a static raster on demand.
+**GR**-rendered image (PNG, SVG or PDF), or a stream of them into a **video** (MP4, WebM,
+Ogg, GIF). It is the native half of the Blade Plots panel's plotly ⇄ GR toggle: the
+extension keeps the plotly JSON, and this helper turns that same JSON into a static raster
+on demand.
 
 Nothing here knows about Blade, display frames, or the serve protocol. Input is a figure
 object, output is image bytes.
@@ -210,6 +211,44 @@ Responses:
 > svg/pdf can use the same verb. Whoever writes the `renderPlot` arm in `IdeServe.fs` must
 > read `data`, not `png`.
 
+## Video mode
+
+```
+gr-render --video --out PATH [--width N] [--height N] [--fps N]   < frames.ndjson
+```
+
+GR writes movies itself — `videoplugin.dll` is a statically linked ffmpeg — so a video is
+**one print session spanning many frames**, not N stills glued together by a downstream tool.
+One figure spec per **line** on stdin (the same shape serve reads, minus the request
+envelope); each line becomes one frame, in order.
+
+* the container comes from `--out`'s extension: `.mp4` (h264), `.webm` (vp8), `.ogg`
+  (theora), `.gif`. `--format` is for stills and is **refused** here.
+* `--width` / `--height` default to 800x600 and `--fps` to 12. Geometry is
+  **session-level**, not per-frame: a video has one size.
+* success: exit 0, a one-line summary on **stderr** (`wrote out.mp4 (143 frames, 960x720 @
+  12 fps)`), **stdout empty**.
+* a frame that fails to parse or render is **fatal**, and the message names its 1-based
+  index (`frame 47: ...`). Frames are positional — silently skipping one would shift
+  everything after it — which is the opposite of serve's keep-going rule.
+* like a still, the movie is written to a temp file and moved into place at the end, so a
+  stream that dies at frame 100 leaves **no** file at `--out`.
+* output is byte-deterministic for the same input, same as the still renders.
+
+Why it exists: the alternative is N `--serve` renders, base64 out, PNGs to disk, then
+ffmpeg — which encodes every frame twice and needs an ffmpeg on `PATH`. Straight through GR,
+143 frames of 960x720 take about 2.5 s end to end and need nothing but GR.
+
+Two GR details worth knowing, both handled inside `VideoSession`:
+
+* **`GKS_VIDEO_OPTS` is not optional.** Its syntax is `<width>x<height>@<framerate>` (the
+  plugin's own parse error is the documentation). Without it the video driver ignores the
+  workstation viewport and invents a size — a 640x480 request measured out at 152x114. It is
+  read when the workstation opens, so it is set immediately before `gr_beginprint`.
+* **the video driver paints a white background**, unlike the cairo PNG driver, whose
+  background is transparent. Anything compositing GR stills into a video has to flatten them
+  first; frames written through this mode need no such step.
+
 ## Sizing
 
 cairo (GR's PNG/SVG/PDF backend) is hardwired to 600 dpi, truncates, and forces even
@@ -312,13 +351,16 @@ Hermetic: everything transient lands in `%TEMP%\gr-render-test-<pid>` and is rem
 afterwards. It checks exit codes, PNG signature + IHDR width/height against the *requested*
 size, byte-stability across runs and across the serve worker, the full NDJSON round trip
 (including that a failed render does not kill the loop and that stdout stays clean),
-failure modes (bad JSON, unsupported trace, missing `--out`), svg/pdf smoke tests, and the
+failure modes (bad JSON, unsupported trace, missing `--out`), svg/pdf smoke tests, the
+video mode (every container by magic bytes, frame accumulation, determinism, and its
+refusals — all without an ffmpeg or ffprobe on `PATH`, so the suite stays hermetic), and the
 hygiene invariants: no surviving `gksqt.exe`, no stray `gks.*` in cwd, no leftover temp
 renders. Every check prints `ok`/`FAIL`; the script exits nonzero if any failed.
 
 Fixtures in `fixtures/` are static and hand-checked: one per trace shape, one with
 title + both axis labels + Cividis, one line with `null` *and* `NaN` gaps, one 200×200
-contourf, and one deliberately malformed JSON file.
+contourf, one with a fixed `zmin`/`zmax` colour range, and one deliberately malformed JSON
+file.
 
 ## Source map
 

@@ -119,6 +119,18 @@ inline void decimate(Trace &t, int maxNx, int maxNy) {
   t.ny = int(ri.size());
 }
 
+// Set an environment variable for THIS process.  GR reads several of its knobs
+// (GKS_VIDEO_OPTS among them) when a workstation opens, so a caller that must
+// set one right before gr_beginprint needs this next to that call rather than
+// in main's platform shim.  _putenv_s / setenv differ only in spelling.
+inline void setEnvVar(const char *name, const char *value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  ::setenv(name, value, 1);
+#endif
+}
+
 inline std::vector<unsigned char> readAll(const std::string &path) {
   FILE *f = std::fopen(path.c_str(), "rb");
   if (!f) throw std::runtime_error("could not read back the rendered file: " + path);
@@ -492,5 +504,72 @@ inline void renderToFile(const Figure &fig, int w, int h, const std::string &pat
   }
   gr_endprint();
 }
+
+// A VIDEO is one print session spanning many frames, which is why it cannot go
+// through renderToFile: that opens and closes a workstation per call, and a
+// movie needs gr_beginprint once, a clearws/draw/updatews cycle per frame, and
+// gr_endprint at the end.  GR's video plugin (a statically linked ffmpeg) picks
+// the container from the file extension and takes its geometry from
+// GKS_VIDEO_OPTS -- `<width>x<height>@<framerate>`, which the plugin's own
+// parse error documents.  That variable is read when the workstation OPENS, so
+// it is set here, immediately before gr_beginprint, rather than by the caller:
+// the ordering constraint belongs with the code that depends on it.
+//
+// Without GKS_VIDEO_OPTS the driver ignores the workstation viewport and
+// invents its own size (measured: a 640x480 request came out 152x114), so the
+// variable is not optional for anything that cares about its output geometry.
+//
+// The workstation transform is set ONCE, after gr_beginprint, exactly as
+// renderToFile sets it -- it describes the surface, not the frame.  Each frame
+// then re-derives its own layout from the same w/h, so a video frame is laid
+// out byte-identically to the still render of the same figure.
+class VideoSession {
+ public:
+  VideoSession(const std::string &path, int w, int h, int fps) : w_(w), h_(h) {
+    char opts[64];
+    std::snprintf(opts, sizeof opts, "%dx%d@%d", w, h, fps);
+    detail::setEnvVar("GKS_VIDEO_OPTS", opts);
+    gr_beginprint(const_cast<char *>(path.c_str()));
+    open_ = true;
+    gr_setwsviewport(0.0, (w + 0.5) * 0.0254 / 600.0, 0.0, (h + 0.5) * 0.0254 / 600.0);
+    gr_setwswindow(0.0, w >= h ? 1.0 : double(w) / h, 0.0, h >= w ? 1.0 : double(h) / w);
+  }
+
+  // One frame.  gr_clearws() starts it and gr_updatews() commits it to the
+  // stream; a frame that throws mid-draw leaves the session open so the caller
+  // can decide whether to abandon it (~VideoSession still closes the file).
+  void frame(const Figure &fig) {
+    gr_clearws();
+    Renderer(fig, w_, h_).draw();
+    gr_updatews();
+    ++frames_;
+  }
+
+  // Finalize.  Idempotent, and the destructor calls it, so an exception on the
+  // way out still closes the container rather than leaving a truncated file.
+  void finish() {
+    if (open_) {
+      open_ = false;
+      gr_endprint();
+    }
+  }
+
+  ~VideoSession() {
+    try {
+      finish();
+    } catch (...) {
+    }
+  }
+
+  long frames() const { return frames_; }
+
+  VideoSession(const VideoSession &) = delete;
+  VideoSession &operator=(const VideoSession &) = delete;
+
+ private:
+  int w_, h_;
+  bool open_ = false;
+  long frames_ = 0;
+};
 
 }  // namespace grr
