@@ -344,6 +344,31 @@ inequality it mints fresh (and records *why* the identity split). Notes:
   message (likely its own BL code — five touch points per
   `adding-a-BL-diagnostic-code`) is a fast follow.
 
+**P3 outcome (2026-08-25): LANDED — with one material correction to this
+section.** The §5.3 claim "unify then succeeds by the ordinary Id rule, no
+unifier changes at all" was half wrong: Unify.fs:990's Id rule is the
+`IRTArrow` *slot* arm, and the `ArrayElem` arm compares rank, tags, and
+symmetry — never Ids. Measured before the fix: two *different repos'* `temp`
+arrays subtracted clean. The real carrier of axis provenance at arithmetic
+seams is the index **Tag** (the co-iteration predicates behind BL3999), so
+each minted identity also stamps a synthetic `__icaxis|<dim>@<repo>` tag; the
+`__` prefix is load-bearing — it keeps BL4003 integer-indexing warnings and
+`type Lat = ck.index.lat` ascription behaving exactly as for zarr stores,
+while the co-iteration predicates (which exempt nothing) still refuse
+diverged axes. Residual, stated plainly: a plain-`unify` function boundary
+still accepts a diverged axis; arithmetic refuses. Mechanics that differed
+from the sketch, all recorded in the implementation: `externalDimMap` is
+all-or-nothing and suppresses `IRTDIndexType` defs, so `checkoutToModule`
+runs `zarrStoreToModule` twice (pass 1 discovers the dim universe, pass 2
+rebuilds over resolved identities, re-attaching the defs); minted ids come
+from a reserved `0x30000000` range so the three independent `IRBuilder`s
+that build provider modules cannot collide them; and a mint entry holds a
+LIST of identities, so `A → diverged B → A` re-shares A rather than minting
+a third. `SplitReason` ("extent 6 -> 5", "coordinate content differs", …) is
+recorded and test-pinned but nothing prints it yet — the divergence
+diagnostic stays open. Packed/wreath pool axes still never share
+cross-checkout (P4). Lane: icechunk 289/0.
+
 ## 6. Compile-time metadata reading
 
 ### 6.1 Reader pipeline (pure F#)
@@ -516,7 +541,7 @@ icechunk-python** (non-hermetic compile); **"export to plain Zarr first"**
 | P0 | ChunkSource seam in ZarrProvider: F# fetcher param + codegen fetch-emitter param; zero behavior change | **LANDED** — byte-identical across nine emit programs; `blade test zarr` confirmation rides the next runner pass. Packed-blocks assembler intentionally NOT shared (see §7 outcome; moves to P4) |
 | P1 | §6.2 decision made; format reader: header, zstd, FlatBuffers repo/snapshot/manifest models; refusal gates (spec-1, Offline, virtual, deleted tags) | **LANDED** — Option B deps + vendored accessors; decode/decompress real; every refusal live incl. Offline at the bare load site; `IcechunkWrite` fixture repos round-trip (`icechunk` lane 261/0). The icechunk-python cross-validation remains the one open oracle check |
 | P2 | Provider + surface: spec registration, repo-handle load, the checkout desugar pass, ref units + marker constants, canonical key, memoized resolution; dense reads, folds, `blade test icechunk` lane | **LANDED** — desugar + skeleton + real reads/folds/e2e (compile+run through `repo.checkout`, bare and marker forms; baked chunk tables; provenance prints snapshot IDs); lanes: provider-desugar 44/0, icechunk 261/0, zarr 273/0, full suite 5108/0. `read_window` joined packed-blocks in P4 (its sub-simplex extraction sits above the shared core) |
-| P3 | Axis mint table + `externalDimMap` wiring + divergence recording | sharing tests of §10 pass: unchanged axes unify across checkouts, diverged axes refuse |
+| P3 | Axis mint table + `externalDimMap` wiring + divergence recording | **LANDED** — sharing tests pass (same-ref, data-only commit shares + compiles+runs, coord rewrite refuses, regrid refuses, coordinate-less dims share, cross-repo never shares, resets clear); the mechanism is Tag-based, see the §5 P3 outcome. Open: printing `SplitReason` in the refusal |
 | P4 | Packed / orbit / `read_window` / MPI-distributed parity through the shared core | Zarr's packed/window test shapes mirrored under Icechunk, green |
 
 Landing P2 adds the `| Icechunk | … |` row to `docs/features.md` §15 and updates
@@ -556,6 +581,21 @@ memoization-friendly — they are, per §3.1 — and arrays small enough that
 - **Verification**: cells concatenate into a flat `.blade` (they are
   top-level decls), so `blade run` over the concatenation is the cheap gate;
   a true notebook-lane pass through the REPL tooling is the full gate.
+
+**Notebook outcome (2026-08-25): WRITTEN and verified** —
+`examples/station_temps.bladenb` + `examples/tools/make_station_icechunk.fsx`
++ the committed deterministic repo `examples/data/station_temps.icechunk`
+(snapshot ids stable: raw `TFWGY8Y38WKVN9HJX450`). The passing-cell
+concatenation compiles and runs: `mean_drift = -0.5` exactly, both
+same-snapshot diffs exactly 0; the regrid cell refuses BL3999 and the
+ambiguity cell refuses BL6002 with the marker remedy. Two facts the
+verification surfaced: provider resolution failures at `blade check` fall
+back silently by design (lowering owns those diagnostics — so the ambiguity
+cell errors under `emit`/`run`/the notebook lane, not bare `check`), and
+`blade run` executes the compiled exe under a different cwd than the caller's
+(the fixture-mirroring trick in the e2e tests exists for this; the notebook
+lane interprets and is unaffected). The full REPL notebook-lane pass remains
+open alongside the icechunk-python oracle check.
 
 ## 14. Risks
 
