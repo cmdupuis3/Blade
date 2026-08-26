@@ -1,10 +1,17 @@
 # Blade Feature Module: Graphs and Trees
 
-Status: **design refreshed (2026-08-25), nothing implemented.** This revision
-rewrites the v10-era sketch into current Blade notation and current Blade
-mechanism. The settled theory is kept in substance (§1); what changed is the
-*surface*, and in four places the surface change forced a substantive
-correction — each is marked **[correction]** and argued, not asserted.
+Status: **design refreshed (2026-08-25); implemented through P3+P4
+(2026-08-26).** `TreeIdx<shape>` declares, constructs from a flat preorder
+literal, and serves STATIC whole-path reads `T((c0, c1, …))` in both lanes,
+alongside `extents`, printing and `reduce`. Still refused, each for a stated
+reason: a tree across a function boundary (parameter or return), `method_for` /
+`object_for` operands, `range<>` slots, non-literal or wildcard coordinates,
+paths that stop at an internal node, and reads of a tree slot combined with
+other slots — see the plan doc's §6. This revision rewrites the v10-era sketch
+into current Blade notation and current Blade mechanism. The settled theory is
+kept in substance (§1); what changed is the *surface*, and in four places the
+surface change forced a substantive correction — each is marked
+**[correction]** and argued, not asserted.
 
 Implementation plan: [plans/plan-graphs-trees.md](../plans/plan-graphs-trees.md).
 
@@ -850,7 +857,7 @@ extends.
 | 7 | Dynamic child bound via `BoundedIdx<0, arity>`; BL8003 at runtime | `RaggedIdx` `lens[__g]` runtime peel |
 | 8 | Derived dense axes `LeafIdx`/`NodeIdx`/`ChildIdx` + `preorder`/`postorder` virtual arrays | `range<I>`, `reverse<I>` (formalism §7.3) |
 | 9 | `reduce` over a tree (flat axis); structural fold as `let rec` over `postorder` | formalism §7.5, incl. implicit-zero as the leaf base case |
-| 10 | Tree × array hybrids (`Array<T like TreeIdx<s>, Idx<m>>`) | slot composition; free |
+| 10 | Tree × array hybrids (`Array<T like TreeIdx<s>, Idx<m>>`) | slot composition; free **in the type — measured at P3+P4: the annotation is accepted and allocates as an ordinary rank-2 dense pool, but the READ refuses, because the path fold rewrites the whole subscript to one literal and a residual trailing coordinate has nowhere to go in that rewrite. The residual-view mechanism is P5's.** |
 | 11 | Adjacency graphs as `Array<Nat<N> like N, …>`; bounded walks; `guard`-based collapse | formalism §3.10 unit tagging; §10.4 MonadPlus |
 | 12 | `where acyclic(g)` license, checked not promised; BL8012 | `where comm(...)` surface |
 | 13 | `fix(...)` as a stdlib `static function` over `let rec` + `guard` | formalism §7.5 |

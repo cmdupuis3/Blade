@@ -123,6 +123,13 @@ type TypeError =
     /// `where_` names the site, `shape` renders the class -- the
     /// OrbitStorageUnsupported shape verbatim, and it joins BL4003 the same way.
     | TreeIdxUnsupported of shape: string * where_: string
+    /// A STATIC tree path that is not a complete root-to-leaf path of its
+    /// shape: an out-of-arity child, an over-long path, or one that stops at an
+    /// internal node. `detail` is `TreeRank.treeForwardChecked`'s message,
+    /// which names the failing STEP rather than reporting a bare bad offset.
+    /// Joins BL4003 (the index type is well formed; this READ is out of domain)
+    /// -- the OrbitSubscriptArity precedent, one family over.
+    | TreeIdxPath of shape: string * detail: string
     /// `Base<_>` outside parameter position. `where` names the site.
     | TagWildcardNotParam of where_: string
     // Symmetry / compact-group violations (BL4004)

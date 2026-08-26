@@ -1,0 +1,15 @@
+// TEST: TreeIdx shape mismatch at a declared return type (rejects)
+// T2 seam 3, and the same MEASURED finding as 111: the function-signature door
+// scans `paramTypes @ [retType]`, so a tree-typed RETURN refuses before the
+// body is ever compared against it. The seam is unreachable in this phase and
+// the pin records which door caught it, so the phase that opens the boundary
+// re-checks rather than assumes.
+// REJECT-AT: lower
+let static wide = [5, 0, 0, 0, 0, 0]
+let static deep = [2, 2, 0, 0, 3, 0, 0, 0]
+type WideIdx = TreeIdx<wide>
+type DeepIdx = TreeIdx<deep>
+let A: Array<Float64 like WideIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
+function g() -> Array<Float64 like DeepIdx> = { A }
+// ERROR: BL4003
+// ERROR-CONTAINS: function 'g': DeepIdx (= TreeIdx<[2, 2, 0, 0, 3, 0, 0, 0]>)

@@ -5,12 +5,13 @@
 // class through the refusal channel, i.e. that identity rides the Tag and not
 // the (equal) leaf count. Both shapes below have 3 leaves.
 //
-// P3 OBLIGATION, recorded here so it cannot be forgotten: once a tree-typed
-// value can be constructed, this file gains the VALUE-level three-seam probes
-// -- passing a WideIdx array to a DeepIdx parameter must be refused at (a)
-// unify, (b) direct application (dispatchAppOrIndex does not unify plain-call
-// args), and (c) let-ascription (which overwrites rather than unifies). Each
-// seam enforces separately; one probe does not cover the other two.
+// P3 OBLIGATION DISCHARGED: the value-level three-seam probes are files 110
+// (let-ascription -- reachable, and it fires BL3001), 111 (direct application)
+// and 112 (declared return). 111 and 112 are MEASURED UNREACHABLE while the
+// function-signature door stands: the tree-typed parameter/return refuses first
+// with BL4003, so dispatchAppOrIndex's non-unifying plain-call argument path is
+// never asked about tree identity. Their headers say so, and say to re-run them
+// when the boundary opens.
 // REJECT-AT: lower
 let static wide = [3, 0, 0, 0]
 let static deep = [2, 0, 2, 0, 0]

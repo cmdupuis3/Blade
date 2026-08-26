@@ -9844,18 +9844,16 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
                          | PatVar n -> $"let binding '{n}'"
                          | _ -> "let binding annotation")))
         else
-        // The tree twin of the wreath door above, and ALSO the allocation door:
-        // Blade has no value-less `let`, so refusing a tree-typed annotation
-        // here is what keeps any tree-typed value from ever being constructed --
-        // which is why IRStorage needs no tree arm in this phase.
-        let tree = irTypeTreeShape annotTy
-        if tree.IsSome then
-            Error (TreeIdxUnsupported
-                       (tree.Value,
-                        (match binding.Pattern.Kind with
-                         | PatVar n -> $"let binding '{n}'"
-                         | _ -> "let binding annotation")))
-        else
+        // NO tree door here, deliberately -- this WAS the P2 allocation door and
+        // P3 is precisely its removal. A tree-annotated `let` is the
+        // construction form: the value is a flat literal holding the leaves in
+        // preorder, it checks through the generic annotated-literal arm below
+        // (rank 1, SymNone, so neither the compact nor the wreath arm claims
+        // it), and the result carries the ANNOTATION's array type, so the tree
+        // slot survives while storage, allocation and teardown stay the
+        // ordinary dense path. Only the TYPE carries treeness. The bad-SHAPE
+        // door above still runs first, and the function-signature door still
+        // refuses a tree across a call boundary.
         let badBound =
             boundedAggregateError env
                 (match binding.Pattern.Kind with
@@ -10964,7 +10962,36 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
             | None -> Ok (TStmtForIn (varName, varId, tLo, tHi, List.ofSeq typedBodyStmts))
     | _ -> Error (Other "for-in range must use a..b syntax")
 
+/// A TREE-slotted operand in a loop former. A tree array's cells are its leaves
+/// and the flat pool IS a rank-1 dense array, so iterating it is meaningful --
+/// but `method_for` PRODUCES an array that inherits this operand's index record,
+/// and an inherited tree slot reaches output-storage classification, the
+/// identity/grouping machinery, fusion, and `exprTypeIfKnown`'s HM-argument
+/// whitelist, none of which has a tree reading yet (and whose failure mode there
+/// is a BL6001 spray, not a refusal). `reduce` is unaffected: it CONSUMES the
+/// pool and produces a scalar, which is why it works today.
+///
+/// The clean spelling arrives with the derived dense leaf axis, which is a plain
+/// `Idx<card>` -- every existing optimization applies to it unchanged and no
+/// tree slot ever enters a loop former. Deferred there deliberately.
+///
+/// Applied to the RESULT rather than at an operand scan because inferMethodFor
+/// has four exits that each build their own `arrayTypes`; the loop object's own
+/// `TypedMethodForInfo` is the one place all four agree.
+and treeLoopOperandGuard (tv: TypedExpr) : TypeResult<TypedExpr> =
+    match tv.Kind with
+    | TExprMethodFor info ->
+        (match info.ArrayTypes
+               |> List.tryPick (fun at ->
+                      at.IndexTypes |> List.tryPick (fun ix -> match ix with TreeIdxLike r -> Some r | _ -> None)) with
+         | Some rendered -> Error (TreeIdxUnsupported (rendered, "a method_for / object_for operand"))
+         | None -> Ok tv)
+    | _ -> Ok tv
+
 and inferMethodFor env arrays : TypeResult<TypedExpr> =
+    inferMethodForOperands env arrays |> Result.bind treeLoopOperandGuard
+
+and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
     // Detect method_for(zip(A, B, ...)) -- expand zip into co-iteration
     match arrays with
     | [{ Kind = ExprKind.ExprZip zipExprs }] ->
@@ -12467,11 +12494,23 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if badTree.IsSome then
         Error (TreeIdxShapeFn (funcDecl.Name, badTree.Value))
     else
-    // The tree twin of the wreath gate below, and for the same reason: there is
-    // no position where a tree-typed array can be handled in P2 -- a caller
-    // would have had to allocate one. (The DEDUCED-return twin further down
-    // needs no tree arm: nothing in P2 deduces a tree class, so a tree can only
-    // reach a return type through a DECLARED annotation, which this catches.)
+    // KEPT through P3/P4, where the let-annotation twin was removed. A tree-typed
+    // PARAMETER or RETURN is a different claim from a tree-typed BINDING: a
+    // binding is a pool this translation unit allocates and reads at
+    // statically-known offsets, while a parameter is an ABI -- the callee
+    // receives an Array<T,1> whose treeness lives only in the caller's type, and
+    // a path read inside the callee would fold against a degree sequence the
+    // signature does not transport (the shape rides the caller's Tag, and HM
+    // monomorphization learns ELEMENT bindings, not array SHAPE -- the same wall
+    // declaresAsRaggedRow's KNOWN GAP names). Passing a tree through a boundary
+    // is later work, sharing a mechanism with the partial-path views. Keeping
+    // this door is also what keeps the read fold's blast radius honest: no
+    // cross-function flow, so no monomorphization, no capture forwarding, no
+    // std::function<> slot rendering.
+    //
+    // (The DEDUCED-return twin further down needs no tree arm: nothing deduces a
+    // tree class, so a tree can only reach a return type through a DECLARED
+    // annotation, which this catches.)
     let tree = (paramTypes @ [retType]) |> List.tryPick irTypeTreeShape
     if tree.IsSome then
         Error (TreeIdxUnsupported (tree.Value, $"function '{funcDecl.Name}'"))

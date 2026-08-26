@@ -228,9 +228,8 @@ order is **not** phase order — `src/TreeRank.fs` goes beside `OrbRank.fs`
 | **P0** | Representation decision + probes (§2); the census of `Rank`-assumption sites under the rejected option; this doc's §§1-4 finalized | doc only | written decision naming the rejected alternative and its cost; G1/G2/G4 probe results recorded |
 | **P1** | `src/TreeRank.fs` — dependency-free pure-integer bijection: shape validation (`degrees` well-formedness), cardinality/size/off tables, `forward`/`backward` rank–unrank, `subtree` partial-path resolution | ~400-700 lines | `tests/Test_TreeRank.fs` + `blade test treerank`: round-trip pinned against **brute-force** DFS enumeration of every valid path (the OrbRank discipline), incl. degenerate shapes (single leaf, all-leaf, deep-narrow, wide-shallow) |
 | **P2** — LANDED | Type-level registration, no storage: `IxKTree` + tag pair; lexer + parser with named reject paths; `TyTreeIdx`; `TypeLower` (placeholder idiom); `placementOf`; `Unify`; `IndexTypeValidator`; `Zonk`. Declaration + printing only; every *use* refuses loudly | ~600-900 lines, ~12 files | corpus `trees/` (its OWN category, not `index-types/`): parse OK; bad-shape rejects (empty / non-static / malformed `degrees` → BL4021; the parser's `TreeIdx<>` path → BL1999); the rendered class reaches the user through refusal messages, pinned with `ERROR-CONTAINS`; `checkKindAgreement` green; **T1 alias-laundering probe green; T2 pinned at the TYPE level only** — the three value-level strictness seams are physically unconstructible while every use refuses, so they are recorded as a P3 gate obligation in `trees/013`'s header |
-| **P3** | Storage + reads, **interpreter first**: `IRStorage` alloc + cardinality; full-path reads `T((...))`; `extents`/`rank` intrinsics; `Interp/` arms land in this phase | ~800-1200 lines | `blade test interp index-types` green on the new files; `blade run` parity on literal-tree programs; diff-oracle clean |
-| **P4** | C++ codegen twin: `CodeGenExpr` indexing, `CodeGenLoopNest` preorder iteration (the §3.2 lex-enumeration obligation), type rendering; `src/cpp/` only if tables must materialize; CUDA + LLVM refuse by name | ~800-1500 lines | full category green under `blade run`; **byte-comparison of interp vs codegen output on every new test** (not "tests pass"); full `blade test` for the surface block |
-| **P5** | Partial-path views: short-tuple prefix pinning, `IRTreeProject` residual, subtree views; `T(0)` bare-scalar if P0 said yes; BL4019 refusal | ~400-700 lines | corpus: prefix reads, refusals for over-long / out-of-shape / indeterminate-depth paths; nested-view identity `T((0,))((1,)) == T((0,1))`; derived dense axes + `preorder`/`postorder` |
+| **P3+P4** — LANDED (merged) | The two phases merged because corpus `// EXPECT:` pins validate through the CODEGEN lane, so an interp-only P3 can land no pinned value test. Outcome, and it is much smaller than the estimate: **~200 lines, 4 files, and NO back-end edits at all.** Construction turned out to be free — a tree binding is an ordinary rank-1 dense `Array<T,1>` that checks through the generic annotated-literal arm, so P3's construction work was *deleting* P2's let-annotation door. Reads fold at TYPECHECK: `T((c0,c1,...))` recovers the degree sequence from the Tag, resolves the leaf offset through `TreeRank.treeForwardChecked`, and rewrites to a constant subscript — so both lanes consume the same `IRLit` and are byte-identical by construction. `extents`, print and `reduce` needed zero edits. New `TreeIdxPath` error (BL4003, no new code). | ~200 lines, 4 files | `blade test trees` 28/0/0 skipped; `blade test treerank` 73/0 unchanged; **`blade test interp trees` 29/0 with every value-producing file reporting "values identical"** — that per-file report IS the byte comparison the P4 row demanded; `blade test diff-oracle trees` SKIPS (it is a pinned-oracle-binary lane, and no `oracle/Blade.exe` is pinned in this checkout — it is not an interp-vs-codegen differential); full `blade test` green |
+| **P5** | Partial-path views: short-tuple prefix pinning, `IRTreeProject` residual, subtree views; BL4019 refusal. **Also inherited from P3+P4**: open the function-signature door (parameters/returns), which currently makes T2 seams 2 and 3 unreachable — re-run `trees/111` and `trees/112`, whose pins record which door caught them. And **re-take the `method_for` verdict** once the derived dense leaf axis lands: a leaf axis is a plain `Idx<card>`, so no tree slot ever enters a loop former and the refusal costs nothing. `T(0)` bare-scalar is ALREADY resolved and needs no P5 work: the parser has no 1-tuple form, so `T((0))` is a parenthesized scalar reaching the one-element-path arm, self-limiting to depth-1-leaf shapes (`trees/102`, `trees/108`). | ~400-700 lines | corpus: prefix reads, refusals for over-long / out-of-shape / indeterminate-depth paths; nested-view identity `T((0,))((1,)) == T((0,1))`; derived dense axes + `preorder`/`postorder` |
 | **P6** | Diagnostics through all five touch points; `docs/features.md` row; **formalism §3.2/§3.3 amended** (see risks); README row | small | `blade test surface` (full suite only) |
 | **P7 (deferred arc)** | Graph arc: G1-dependent — `where acyclic(g)` + BL8012 check; `retree`/`flatten`; walk corpus (`let rec` walks, `guard` collapse) | unscoped | corpus for each; the walk examples in the feature doc §5 compile as written |
 | **P8 (deferred arc)** | Sibling symmetry (`sym[...]` — iteration license only, per the design's negative storage result); `DynTreeIdx`; hash-consing | unscoped | P8 starts with math pins, not emitters |
@@ -248,15 +247,52 @@ a tree; `collapse(k)` on the node axis; provider I/O; CUDA and LLVM lanes
 as the active variable (structure is not differentiable — refuse, don't
 zero-fill).
 
+Added by P3+P4, with the reasoning that decides each:
+
+- **`method_for` / `object_for` over a tree operand: REFUSED.** Not because
+  iterating a tree is meaningless — the pool *is* a rank-1 dense array — but
+  because a loop former *produces* an array that inherits the operand's index
+  record, and an inherited tree slot reaches output-storage classification, the
+  identity/grouping machinery, fusion, and `exprTypeIfKnown`'s HM-argument
+  whitelist, none of which has a tree reading (and whose failure mode there is a
+  BL6001 spray, not a refusal). The clean spelling arrives with the derived
+  dense leaf axis, which is a plain `Idx<card>`; re-take the verdict then.
+- **`reduce` over a tree: ALLOWED, and it needed no code.** The asymmetry with
+  `method_for` is the whole point: `reduce` *consumes* the pool and yields a
+  scalar, so nothing inherits the slot. Fold order is preorder over leaves,
+  which is lexicographic over paths.
+- **A tree-typed function PARAMETER or RETURN: still refused.** A binding is a
+  pool this translation unit allocates and reads at statically-known offsets; a
+  parameter is an ABI, and a path read inside the callee would fold against a
+  degree sequence the signature does not transport (the shape rides the
+  caller's Tag, and HM monomorphization learns ELEMENT bindings, not array
+  SHAPE). P5 work, sharing a mechanism with the partial-path views.
+- **A tree slot COMBINED with other slots: constructs, does not read.** The
+  hybrid `Array<F64 like CrystalIdx, Idx<2>>` annotation is accepted and
+  allocates as an ordinary rank-2 dense pool (`trees/116`); the read refuses
+  (`trees/117`), because the fold rewrites the whole subscript to one literal
+  and a residual trailing coordinate has nowhere to go in that rewrite. That is
+  the residual-view shape, and it belongs with the partial paths.
+- **A non-literal coordinate, or a wildcard, in a path: refused.** v1 folds at
+  compile time, so every child selector must be a literal; a hole makes the
+  path partial.
+
 ## 7. Verification
 
 - **P1 is the oracle**: `TreeRank.fs` pinned against brute-force enumeration
   as set AND as order, standalone-`#load`-able for `proofs/` scripts (the
   OrbRank/OrbitEnum structure).
-- **Interp-first (P3) then byte-diff (P4)**: the twin lands before the
-  emitter, and the P4 gate is byte comparison, not suite green.
-- Corpus category `index-types` extends; `blade test interp index-types` and
-  `blade test diff-oracle index-types` take the literal directory name.
+- **Interp-first (P3) then byte-diff (P4)** was the plan; what LANDED made the
+  ordering moot, and better. Because the path folds to an `IRLit` at typecheck,
+  the two lanes do not merely agree — they consume the identical node, so
+  agreement is structural rather than tested. The gate that discharges the
+  byte-comparison obligation is `blade test interp trees`, whose per-file
+  verdict is literally "values identical"; `blade test diff-oracle <cat>` is a
+  *pinned-oracle-binary* lane (current build vs a snapshot at `oracle/Blade.exe`)
+  and skips absent that snapshot — it is not the interp/codegen differential and
+  must not be reported as one.
+- Corpus category is `trees` (its own, not `index-types`); `blade test interp
+  trees` and `blade test diff-oracle trees` take the literal directory name.
 - Full-suite runs for the Surface block; check the TOTAL line and skips.
 - Provider lanes are standalone-only and out of scope until a tree ever gets
   an on-disk encoding.

@@ -1,0 +1,20 @@
+// TEST: TreeIdx shape mismatch at a direct application (rejects)
+// T2 seam 2. MEASURED, and the finding is the point of the file: the seam is
+// UNREACHABLE while the function-signature door stands. A tree-typed PARAMETER
+// refuses first -- with BL4003 naming the function, not the call -- so
+// dispatchAppOrIndex's known non-unifying plain-call argument path is never
+// asked about tree identity in this phase.
+//
+// The later phase that opens the signature door MUST re-run this file rather
+// than assume the seam is covered: at that point the pin below stops firing and
+// whatever the argument check does becomes visible for the first time.
+// REJECT-AT: lower
+let static wide = [5, 0, 0, 0, 0, 0]
+let static deep = [2, 2, 0, 0, 3, 0, 0, 0]
+type WideIdx = TreeIdx<wide>
+type DeepIdx = TreeIdx<deep>
+let A: Array<Float64 like WideIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
+function f(t: Array<Float64 like DeepIdx>) -> Float64 = { 1.0 }
+let v = f(A)
+// ERROR: BL4003
+// ERROR-CONTAINS: function 'f': DeepIdx (= TreeIdx<[2, 2, 0, 0, 3, 0, 0, 0]>)

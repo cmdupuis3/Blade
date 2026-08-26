@@ -767,16 +767,23 @@ complex half)." where_
     // "lands in a later phase" hand-waving -- the user gets the state of the
     // world and a next move.
     | TreeIdxUnsupported (shape, where_) ->
-        sprintf "%s: %s is a declarable index class whose SHAPE is registered -- it parses, it \
-validates, it aliases and it prints -- but nothing yet allocates, reads, iterates or folds one. \
-A tree slot's cells are its LEAVES, addressed by a complete root-to-leaf path, and the address \
-arithmetic that turns a path into a leaf offset is not wired into either back end, so the \
-compiler refuses here rather than compute an address it cannot compute. What works today is the \
-DECLARATION: `let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]` then `type CrystalIdx = \
-TreeIdx<crystal>` names the class, and the shape is checked when you write it. For array storage \
-over the same data now, use the flat leaf axis directly -- a tree \
-IS a flat array with an addressing scheme, so `Idx<n>` over the leaf count carries every value \
-and keeps every existing optimization." where_ shape
+        sprintf "%s: %s is a declarable index class whose cells are its LEAVES, addressed by a \
+complete root-to-leaf path. What works today is a tree-typed BINDING and STATIC whole-path reads \
+of it: `let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]`, `type CrystalIdx = TreeIdx<crystal>`, \
+`let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]` (the literal holds the \
+leaves in preorder), then `T((1, 2))` -- whose path folds to a leaf offset at COMPILE time, \
+which is exactly why the path has to be literal. `extents`, printing and `reduce` all read the \
+pool as the flat rank-1 array it is. This site is not one of those: it needs an address the \
+compiler cannot fold, or it would hand a tree slot to machinery that has no reading for one. \
+For the bulk forms now, iterate the flat leaf axis directly -- a tree IS a flat array with an \
+addressing scheme, so `Idx<n>` over the leaf count carries every value and keeps every existing \
+optimization." where_ shape
+    | TreeIdxPath (shape, detail) ->
+        sprintf "%s: %s. A tree index's domain is its COMPLETE root-to-leaf paths -- \
+every step must name an existing child of the node it reaches, and the path must end at a leaf. \
+A path that stops at an internal node names a SUBTREE, not a cell; subtree views are a later \
+phase. The valid paths of a shape are exactly its leaves in preorder, which is also the order \
+the array's flat storage holds them in." shape detail
     | ComplexArity got -> $"complex expects exactly two float components -- complex(re, im) -- got {got} argument(s)"
     | CumulantOrderExceeds (order, carried) -> $"cumulant: order {order} exceeds the dist's carried order {carried} -- insufficient stochastic order. Construct with a higher order (dist(A, {order})) or project a carried component."
     | DistOrderDisagree (op, leftOrder, rightOrder) -> $"dist {op}: orders disagree ({leftOrder} vs {rightOrder}) -- carry the same stochastic order on both sides"
@@ -914,7 +921,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // both backends refuse, in the front end.
             | OrbitStorageUnsupported _ | OrbitSubscriptArity _
             | OrbitDecompactPartial _ | OrbitFoldUnsupported _
-            | TreeIdxUnsupported _
+            | TreeIdxUnsupported _ | TreeIdxPath _
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
             | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _
             | BoundsInverted _ | BoundsOnAggregate _ -> "BL4003"
