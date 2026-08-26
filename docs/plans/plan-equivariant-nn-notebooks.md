@@ -290,37 +290,148 @@ is one refusal + BL4011 with a pointer to NB1a.
 
 ## 3. NB2 — cell plan
 
-Shares the store, split, budget, and model shape with NB1 (byte-identical
-data is the load-bearing comparability requirement). Original cells:
+**FLESHED OUT 2026-08-26** after NB1b's measured lesson (conformational
+energy lives in pair-distance structure, not centroid multipoles) and three
+further probes (P8/P9, this session). Same store as NB1b —
+`examples/data/aspirin.zarr`, byte-identical data, split, budget — no new
+data tooling.
 
-- **Jet former** ⚑: per point, three `ml.derive_poly(V3, K, sym_spec(V3,K),
-  x_yzx, ones)` calls (K=2,3,4), mean-pooled per sample (and per species) at
-  top level → `Array<Float like SampleIdx, IrrepsIdx<JETSPEC>>`,
-  `JETSPEC = 2×l0 ⊕ l1 ⊕ 2×l2 ⊕ l3 ⊕ l4` (dim 31). The l=3/l=4 content
-  exceeds the `y_to` lmax≤2 cap — the jet sees angular structure NB1 cannot.
-- **Three-route pin cell**: the ✅PROBED P3 identity in-notebook (derive_poly
-  mean vs `sym_to_irreps ∘ ppl.comoments` vs centered `ppl.moments(·,k)`),
-  the `sgs/009` "one quantity, three subsystems" move — this is what licenses
-  trusting orders 3–4 where only one route exists.
-- **Spec-introspection cell**: `ml.irreps_len/_l/_mult/_offset(JETSPEC, b)`
-  printed as statics — the compiler narrating the jet's decomposition.
-- Network input = `derive_linear(JETSPEC, MSPEC, …)`; downstream identical to
-  NB1. A `derive_poly` K=2 head lets l=3/l=4 reach the invariant readout (a
-  linear head would silently drop them — one markdown sentence).
-- **Ablation** ⚑⚑⚑: JET2 (dim 6) / JET23 (16) / JET234 (31), parameters
-  approximately matched by widening MSPEC's l=0 multiplicity, counts printed.
-  Metrics: test MSE, equivariance residual, wall-clock, param count. Non-
-  power-of-two extents, medians (CLAUDE.md bench discipline).
-- Phase-B teaser: one learnable scalar upstream of the former via `ad.jvp`
-  (forward mode differentiates pack comoments — `ad-jvp-comb/079`; reverse
-  mode refuses all combinators, so end-to-end moment learning is future work).
-- Narrative cell: MTP/ACE positioning — the descriptor and the model in one
-  certified type system; a mis-transposed order-3 basis is not a wrong
-  number, it is a program that does not exist.
+### 3.0 The redesign
 
-Honest hedge: comoments discard point identity; if NB2 loses on MSE, the
-monotone order-2→3→4 ablation plus "certified descriptor at a fraction of the
-wall-clock" is still the result. The low-data regime is the fair fight.
+The original jet — comoments of the per-species POSITION cloud — is exactly a
+generalized centroid multipole, and NB1b measured that family carrying almost
+no conformational signal. So NB2 computes its headline jets over the **pair-
+difference cloud**: for each species pair (C-C, C-O, C-H, O-O, O-H, H-H),
+the set of difference vectors {rᵢ − rⱼ}. This is the MTP/ACE object (those
+descriptors are built from neighbor vectors), and the probes make it
+principled:
+
+- The symmetrized pair cloud {±v} kills every odd order IDENTICALLY —
+  ✅PROBED P9: `jet3_max_abs = 0`, exact. The notebook pins this as a parity
+  THEOREM (order-3 jet of a pair cloud is the zero vector, machine-exact).
+- The surviving even orders carry the pair-DISTANCE distribution in their
+  l=0 slots — ✅PROBED P9: `K=2 l0 × √3 = −mean|v|²` and
+  `K=4 l0 × √5 = +mean|v|⁴`, both exact. The jet is an unbinned, certified
+  cousin of the histogram that won in NB1b, plus anisotropy (l=2, l=4) the
+  histogram cannot see.
+
+### 3.1 The descriptor, precisely
+
+Per sample, per species-pair channel c ∈ 6: center nothing (pair differences
+are translation-invariant by construction — one markdown sentence), take
+each unordered pair once, and average `ml.derive_poly(PT, K, sym_spec(PT,K),
+v_yzx, ones)` over the channel's pairs for K = 2 and 4. Aspirin's channel
+pair-counts are static (C9 O4 H8 → 36/36/72/6/32/28 = 210 total). Per
+channel the jet spec is `[(0,0,2),(2,0,2),(4,0,1)]` (dim 21, ✅PROBED P8);
+six channels concatenate to `JETPAIR = [(0,0,12),(2,0,12),(4,0,6)]`
+(dim 126, ✅PROBED). Assembly into the concatenated array is top-level
+uncertified block-major writes at `ml.irreps_offset` positions (the
+ml-ops/016 ascribed-literal idiom; NB1a/NB1b both ship the pattern). Feed
+vectors in the (y,z,x) order (the store's `pos_*_yzx` copies exist already;
+pair differences inherit the permutation).
+
+The ablation's first arm keeps the ORIGINAL per-species position jet
+(K = 2,3,4 of the centered per-species position clouds, spec
+`[(0,0,2),(1,1,1),(2,0,2),(3,1,1),(4,0,1)]` dim 31/species, 93
+concatenated) — expected weak, and that expectation is now a REPORTABLE
+measurement, not a hedge.
+
+### 3.2 Specs and arithmetic (probe-confirmed)
+
+`poly_weight_dim(PT, K, sym_spec(PT,K))` = 2 / 2 / 3 for K = 2/3/4; ones
+weights give the plain orthonormal decomposition. `ml.gated` under O(3)
+ACCEPTS odd l=1/l=3 blocks (✅PROBED P8 — only odd SCALARS are the ml-equiv/008
+trap), so the position-jet arm reuses the standard block. Dead-channel trap:
+`JETPAIR` has no l=1 content, so the pair-arm's embed target spec must not
+carry l=1 blocks at the embed (they would be zero-filled dead weights —
+`hom_dim(JETPAIR, [(0,0,6),(1,1,2),(2,0,2)]) = 96` counts only l0/l2 maps);
+mid-stack odd l can still arise from cross-copy derive_poly paths if wanted.
+Parameter matching to NB1b's 249 is by l=0 multiplicity adjustment, counts
+printed per arm (approximate parity + printed counts, never a claim of exact
+parity).
+
+### 3.3 Cell arc (~16 cells)
+
+md thesis (MTP/ACE positioning; the NB1b lesson stated plainly) · code:
+store + index types + specs + sizing prints · md the parity theorem · code:
+per-channel pair tables (static `let rec` index tables), the jet former ⚑
+(one featurization cell per arm family, measured EARLY — budget note below),
+the order-3 zero pin, the K=2/K=4 l0 moment pins, and the three-route order-2
+pin on the position cloud (P3's identity in-notebook: derive_poly mean vs
+`sym_to_irreps ∘ ppl.comoments` vs centered `ppl.moments`) · code: jet
+introspection (`ml.irreps_len/_l/_mult/_offset` narrated) · md + code: the
+certified network (embed `derive_linear` → gated blocks → `derive_poly` K=2
+head so l=4 content reaches the invariant readout — a linear head silently
+drops it, one markdown sentence) · ONE refusal cell (a raw jet-component
+read, BL4008) with pointers to NB1a's full suite · code ⚑⚑ per arm: three
+training cells (position-jet / pair-K2 / pair-K2+4), EACH ITS OWN CELL —
+each ~NB1b-sized descent stays under the gap-#30 interpreter cliff and gets
+its own memo entry; `plot.stream` channels `jet_pos`, `jet_k2`, `jet_k24`
+(separate bindings) · code: the comparison table — NB1b's numbers pasted as
+literals beside the three arms' computed test MSE/MAE (kcal/mol,
+un-standardized via `e_stats`), param counts, featurization + training
+wall-clock · code: verification — energy invariance under the store's
+rotations for the BEST arm (indicator-sum max, ≤1e-12 pin) + the jet's own
+equivariance (rotate positions, recompute the jet, apply the D-matrix... NO:
+simpler and stronger, recompute-and-compare the INVARIANT readout, the
+NB1b/07 shape) · md + code: Phase-B teaser — one learnable scalar β scaling
+the pair vectors upstream of the former, `d(loss)/dβ` by `ad.jvp` with an FD
+cross-check (`ad-jvp-comb/079` shape; reverse mode through the former is §5)
+· md closing: what the ablation showed, and the §5/§7 road.
+
+### 3.4 Budget
+
+Featurization: ~210 pairs × 500 samples × 2 derive_poly calls ≈ 2×10⁵ small
+fixed kernels — fine compiled; interp cost UNKNOWN and measured FIRST (the
+builder's step 1; if a featurization cell approaches the cliff, halve it by
+splitting per-arm cells or subsetting channels — never by silent sampling).
+Training: 3 descents ≈ 3 × ~25 s interp in separate cells. Total notebook
+ide-serve drive target: ≤ 2.5 min.
+
+**AS BUILT 2026-08-26** — `examples/aspirin_moment_jet.bladenb` (18 md + 23
+code cells; same committed store, byte-untouched). Full ide-serve drive
+113.8 s, 22/22 passing cells `lane:"interp"` + `kept:true`, stream frames on
+all three channels; canaries green. Every theorem pinned exact: order-3 jet
+of the symmetrized pair cloud = 0 exactly (all six channels); K2/K4 l=0
+moment pins at 3.2e-12; three-route ratios exactly ±1 per block; invariance
+of jets RECOMPUTED from rotated geometries ≤5.5e-15; `ad.jvp` vs FD agree.
+Featurization engineering that mattered: channel means as differences of a
+rank-2 running-sum prefix table (6 subtractions, not 6 padded folds), arm-2's
+descriptor as a baked gather out of arm-3's row, and all `ml.*` elaboration
+hoisted ahead of expensive cells (census #40: new elaboration invalidates
+the WHOLE session memo — 17 s/cell until reordered). **THE RESULT — §3.5
+outcome (c), a loss, reported straight**:
+
+| arm | test MSE | test MAE kcal/mol | params | train wall |
+|---|---|---|---|---|
+| constant | 1.0905 | 5.486 | 0 | — |
+| NB1b histogram+multipoles | 0.892 | 5.057 | 249 | 25.7 s |
+| jet_pos (position K=2,3,4) | 1.0505 | 5.373 | 253 | 22.5 s |
+| jet_k2 (pair K=2) | 1.0289 | 5.312 | 248 | 14.6 s |
+| jet_k24 (pair K=2,4) | 1.0520 | 5.345 | 265 | 18.9 s |
+
+All arms beat the constant floor by 3–6 %; all lose to the histogram; l=4
+anisotropy did not pay (inter-arm spread inside 50-step noise). The
+unplanned correlation-diagnostic cell makes the loss clean: no pair-jet
+feature exceeds |r| = 0.1 against energy; the sum-of-r² linear ceiling is
+0.113 (pair) / 0.126 (position) — the models found what was there. The
+notebook's stated conclusion: two moments are not a distribution — a
+dihedral moves specific contacts while barely moving mean|v|² and mean|v|⁴
+of a 36-pair channel, which is exactly the shape NB1b's Gaussian shells
+keep. Named follow-on (not built): RADIAL WINDOWING before the moment —
+MTP/ACE-style w_c(|v|)·v jets — which multiplies channel count, keeps every
+theorem unchanged, and is the natural next arm.
+
+### 3.5 Honest outcomes
+
+Three publishable endings, all real: (a) pair jets rival or beat the
+histogram+multipole baseline — the headline; (b) they land between the
+position jets and the baseline — the ablation IS the result (order-2 → +4
+monotonicity, l=0-only vs full-jet tells whether anisotropy pays); (c) they
+lose — then the certified-descriptor story stands on the theorems (parity
+zero, moment pins, refusals) and the wall-clock, and the notebook says so.
+The K=4 anisotropy content (l=4 blocks) is the one thing no histogram
+carries; whether it pays at N=500 is precisely the experiment.
 
 ## 4. Live-plot infrastructure — IMPLEMENTED 2026-08-25 (this repo committed; Blade-REPL half pending in that repo)
 
@@ -482,10 +593,21 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 38 | `let rec` of `Idx<22500>` SEGFAULTS the compiled lane (exit 139, no diagnostic) | BUG | NB1b build | no (rank-2 rec arrays) | codegen stack/alloc |
 | 39 | `Int` param in Int64 arithmetic needs explicit `Int64(q)` (BL3001) — the two do not unify at that seam | BUG/quirk | NB1b `tri_j` | no | TypeCheck numeric unify |
 
+| 40 | A cell triggering NEW `ml.*` elaboration invalidates the WHOLE interpreter session memo (17 s/cell measured); `ad.grad` elaboration does not | BUG/perf | NB2 probe bisection | NB-soft (order all `ml.*` elaboration before expensive cells) | `Interp/Run.fs` memo restore vs `ReplSession.fs` prefix rule + MLElaborate generated decls |
+| 41 | `ppl.comoments`/`ml.sym_to_irreps` take Cartesian (x,y,z) while `ml.derive_poly` takes (y,z,x): same array to both → l=0 agrees, l=2 comes out rotated | BD (undocumented trap) | NB2 s8/s9 probes | no (one explicit permutation) | doc at the ops / equivariant-nn.md |
+| 42 | Nested `if…else (if…)` with declared `Int` return: inner arms default Int64, BL3001 | BUG/quirk (family of #39) | NB2 3-line repro | no | TypeCheck numeric unify |
+| 43 | `ad.jvp` refuses rank-2 recursive arrays (BL5501 rank-1-only) — running-sum tables not forward-differentiable | MF | NB2 Phase-B teaser | NB2-soft | Grad rec-array arm (seam of #29/#36) |
+| 44 | `reduce(A * B, (+))` in expression position: interpreter ACCEPTS, codegen refuses BL7004 — silent lane divergence for interp-only notebooks | BUG | NB2 `signal_ceiling` | no (bind each reduce) | CodeGen deferred-reduce arm, or make interp refuse identically |
+| 45 | `plot.line` is single-series; overlays need N figures | MF | NB2 build | no | `stdlib/plot.blade` multi-series factory |
+| 46 | Multi-line array literal whose `[` opens on the line after `=` is BL1999 | BD/quirk (family of #33) | NB2 `__pi` | no | doc |
+
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
 grad; nested `let rec` + `reduce` inside grad; `ad.grad` called from inside a
-plain function, so a rec array can drive repeated force evaluations.
+plain function, so a rec array can drive repeated force evaluations. Also
+measured, unattributed: a plain interpreted forward pass costs ~6× a
+grad-expanded forward+backward per evaluation (~130 ms vs ~22 ms in NB2's
+cells 12/13) — the grad-expanded lane is the fast one.
 
 Cross-resolutions from planning: NB1's "no rank≥3 bridge blocks NB2" concern
 is closed by #17's probe; the certifier refusing user-space bridge matrices
@@ -506,11 +628,15 @@ constants compiler-owned.
 4. ✅ **NB1a built + verified 2026-08-26** (see §2a AS BUILT). ✅ **NB1b
    built + verified 2026-08-26** (see §2b AS BUILT; full-stack, 25.7 s
    interp — inside the gap-#30 cliff).
-5. **NB2 build:** three-route pin cell first (it gates everything), then the
-   jet former, ablation last (three descents — the wall-clock budget cell).
-6. **Reverse-mode combinator AD (§5)** — after infra; unlocks NB2 Phase B as
-   a real trained arm rather than a jvp teaser.
-7. Revisit: outputs persistence decision (#9), `ml.rotate` (#14).
+5. ✅ **NB2 built + verified 2026-08-26** (see §3 AS BUILT; outcome (c) with
+   the correlation diagnostic making the loss clean; census grown to 46).
+6. **Reverse-mode combinator AD (§5)** — next; unlocks NB2 Phase B as a real
+   trained arm rather than a jvp teaser.
+7. **Radial-windowed pair jets** (§3 AS BUILT's named follow-on) — the arm
+   that could flip outcome (c); theorems carry over unchanged.
+8. Revisit: outputs persistence decision (#9), `ml.rotate` (#14), the memo
+   bug (#40) and the interp/codegen divergence (#44) as the notebook-UX
+   bugfixes worth doing first.
 
 ## 8. Risks
 
