@@ -22,6 +22,36 @@ open Blade.TypeCheckIde
 open Blade.TypeLower
 open Blade.TypeCheckSupport
 
+/// A CURRIED TREE-READ SPINE: `T(p1)(p2)...(pk)` decomposed into the base
+/// variable and its argument groups, defined only when every group has exactly
+/// one argument and the base names an array whose SOLE index slot is a tree.
+///
+/// This is what lets the view-composition rewrite be depth-general instead of
+/// two-deep. It matters: a spine the rewrite does not claim folds its inner
+/// prefix to a SCALAR and then applies the next group to it, which typechecks
+/// (over-applying a scalar is an old, general hole -- `A(0)(0)` on a plain
+/// rank-1 array passes `check` too) and dies in g++ with "expression cannot be
+/// used as a function". Claiming the whole spine means an over-long path meets
+/// TreeRank's own "outside [0,0)" refusal instead.
+///
+/// Purely syntactic and pre-typing, which is the point: this phase ships no
+/// subtree VALUE, so the only way applications can compose is textually.
+let rec internal treeViewSpine (env: TypeEnv) (e: Expr) : (Expr * Expr list) option =
+    match e.Kind with
+    | ExprKind.ExprVar n ->
+        (match lookupVar n env with
+         | Some vi ->
+             (match env.Subst.Resolve vi.Type with
+              | ArrayElem at ->
+                  (match at.IndexTypes with
+                   | [ ix ] when ix.IxKind = IxKTree -> Some (e, [])
+                   | _ -> None)
+              | _ -> None)
+         | None -> None)
+    | ExprKind.ExprApp (h, [a]) ->
+        treeViewSpine env h |> Option.map (fun (b, prior) -> (b, prior @ [a]))
+    | _ -> None
+
 /// Entry for every expression: stamps the ambient expression span (for
 /// error location, see TypeEnv.locateError) and back-fills the source span
 /// onto the typed node so TypedExpr.Span is live (full-span AST).
@@ -524,6 +554,62 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         (if name = "atan2" then "atan2(y, x) is the quadrant-correct angle of the point (x, y)"
                          else "log_base(x, b) is log x / log b")))
 
+    // ---- leaves(T): the tree pool, retyped onto its derived dense leaf axis ----
+    // ZERO-COPY and zero-node: it returns the SAME typed expression with a new
+    // `.Type`. A tree binding is already an ordinary rank-1 dense Array<T,1>
+    // whose cells are the leaves in preorder (P3), and LeafIdx<S> is a plain
+    // Idx<cardinality>, so the two types describe byte-identical storage and the
+    // retype is a statement about ADDRESSING, not about data. Nothing is
+    // emitted, nothing is copied, and neither back end learns a thing.
+    //
+    // This is what makes the method_for refusal permanently cheap rather than a
+    // standing limitation: `method_for(leaves(T)) <@> f` is an ordinary dense
+    // loop over an ordinary dense array, so vectorization, omp, BLAS routing and
+    // fusion all apply unchanged, and no tree slot ever enters a loop former.
+    //
+    // ONE-WAY on purpose. The inverse (`retree`) would have to CLAIM that a
+    // dense array's cells are a particular shape's leaves in preorder, and
+    // nothing checks that claim -- it is a `where`-clause-shaped assertion, not
+    // a transform. The tree type is where that claim gets made, at construction.
+    //
+    // Plain-call intrinsic, shadowable like abs/complex: `leaves` is a plausible
+    // user variable name, and the lookupVar guard is what keeps this from
+    // stealing it.
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "leaves" }, [arg]) when (lookupVar "leaves" env).IsNone ->
+        inferExpr env arg |> Result.bind (fun tArr ->
+            match env.Subst.Resolve tArr.Type with
+            | ArrayElem at ->
+                (match at.IndexTypes with
+                 | [ ix ] when ix.IxKind = IxKTree ->
+                     // The leaf axis IS this record's extent -- P2 stamps the
+                     // leaf count there -- so there is no re-derivation and no
+                     // second source of truth for the cardinality, and
+                     // `leaves(T)` cannot disagree with `extents(T)`.
+                     let leafAxis =
+                         { ix with Id = env.Builder.FreshId()
+                                   Tag = None; IxKind = IxKPlain }
+                     Ok { tArr with Type = mkArrayLike { at with IndexTypes = [ leafAxis ] } }
+                 // A tree slot BESIDE other slots is the hybrid form. The pool
+                 // is not a bare leaf sequence there, so the retype has no
+                 // meaning yet -- same residual-view boundary the hybrid READ
+                 // sits behind. Routed through TreeIdxUnsupported because there
+                 // IS a class to name.
+                 | _ when at.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKTree) ->
+                     let rendered =
+                         at.IndexTypes
+                         |> List.tryPick (fun ix -> match ix with TreeIdxLike r -> Some r | _ -> None)
+                         |> Option.defaultValue "TreeIdx<?>"
+                     Error (TreeIdxUnsupported (rendered, "leaves(), which takes an array whose SOLE index slot is a tree"))
+                 // No tree slot at all: there is no class to name, so the
+                 // TreeIdxUnsupported template ("<X> is a declarable index
+                 // class...") would read as nonsense about the user's plain
+                 // array. Answer in its own words instead.
+                 | _ ->
+                     Error (Other $"leaves(A) takes a TREE-slotted array and retypes its flat leaf pool onto the derived dense leaf axis LeafIdx<shape>. This argument's type is {ppIRType (env.Subst.Resolve tArr.Type)}, which has no tree slot -- it is already an ordinary dense array, so there is nothing to retype: use it directly."))
+            | _ -> Error (Other "leaves(A) takes a tree-slotted ARRAY: it retypes the tree's flat leaf pool onto its derived dense leaf axis (LeafIdx<shape>), which is an ordinary Idx over the leaf count. This argument is not an array."))
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "leaves" }, args) when (lookupVar "leaves" env).IsNone ->
+        Error (Other $"leaves takes exactly 1 argument (got {args.Length}): leaves(T) retypes one tree-slotted array onto its leaf axis.")
+
     // ---- complex(re, im): complex literal constructor ----
     // The one way to construct a complex value. As a plain call this
     // composes under any operator without the precedence trap a 2-tuple
@@ -914,6 +1000,51 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // interpreter.
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_solve" }, [aExpr; bExpr]) when (lookupVar "__math_solve" env).IsNone ->
         inferSolve env aExpr bExpr
+
+    // ---- TREE VIEW COMPOSITION: `T((p))((q))` is `T((p ++ q))` ----
+    // The nested-view identity, discharged as a pure SURFACE rewrite performed
+    // BEFORE either application is typed. The landed single-path fold then does
+    // all the work, so the identity holds by construction rather than by a
+    // second code path agreeing with the first, and the intermediate never
+    // needs a type at all.
+    //
+    // Deliberately syntactic. This phase ships no subtree VALUE -- an escaping
+    // view would need a real runtime object (pointer + length) and a new IR node
+    // in both lanes -- so the ONLY way two applications can compose is
+    // textually, which is exactly what this arm recognises. `let sub = T((1))`
+    // still refuses through the ordinary fold ("must end at a leaf"), because
+    // there is no second application to splice.
+    //
+    // Guarded on the INNER head resolving to a sole-tree-slotted array, so no
+    // other curried-application form is disturbed: dimensional currying on
+    // ordinary arrays, factory chains and partial application all fall through
+    // untouched.
+    // The whole condition rides in the guard, so this arm is total once entered.
+    // `treeViewSpine` is defined only for a spine of SINGLE-argument groups over
+    // a sole-tree-slotted base, and the non-empty `prior` requires at least two
+    // groups -- so `T((0, 1))` (one group) falls straight through to the
+    // ordinary dispatch and the landed fold, and `let sub = T((1))` still
+    // refuses there with "must end at a leaf". Nothing else curried is
+    // disturbed: dimensional currying on ordinary arrays, factory chains and
+    // partial application never satisfy the base predicate.
+    | ExprKind.ExprApp (func, [outerArg])
+            when (match treeViewSpine env func with
+                  | Some (_, prior) -> not (List.isEmpty prior)
+                  | None -> false) ->
+        // A path fragment is a tuple of coordinates, or a bare scalar -- the
+        // parser has no 1-tuple form, so `T((0))` is a parenthesized scalar and
+        // arrives here as the one-coordinate fragment.
+        let fragment (e: Expr) : Expr list =
+            match e.Kind with
+            | ExprKind.ExprTuple comps -> comps
+            | _ -> [ e ]
+        (match treeViewSpine env func with
+         | Some (baseExpr, prior) ->
+             let groups = prior @ [ outerArg ]
+             let sp = mergeSpan (List.head groups).Span (List.last groups).Span
+             let spliced = mkExpr sp (ExprTuple (groups |> List.collect fragment))
+             inferExpr env (mkExpr expr.Span (ExprApp (baseExpr, [ spliced ])))
+         | None -> Error (Other "unreachable: tree view spine guard"))
 
     | ExprKind.ExprApp (func, args) ->
         // CHAINED FACTORY SUGAR first: `f(x)(a : q1)(b : q2)` flattens to
@@ -12494,27 +12625,21 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if badTree.IsSome then
         Error (TreeIdxShapeFn (funcDecl.Name, badTree.Value))
     else
-    // KEPT through P3/P4, where the let-annotation twin was removed. A tree-typed
-    // PARAMETER or RETURN is a different claim from a tree-typed BINDING: a
-    // binding is a pool this translation unit allocates and reads at
-    // statically-known offsets, while a parameter is an ABI -- the callee
-    // receives an Array<T,1> whose treeness lives only in the caller's type, and
-    // a path read inside the callee would fold against a degree sequence the
-    // signature does not transport (the shape rides the caller's Tag, and HM
-    // monomorphization learns ELEMENT bindings, not array SHAPE -- the same wall
-    // declaresAsRaggedRow's KNOWN GAP names). Passing a tree through a boundary
-    // is later work, sharing a mechanism with the partial-path views. Keeping
-    // this door is also what keeps the read fold's blast radius honest: no
-    // cross-function flow, so no monomorphization, no capture forwarding, no
-    // std::function<> slot rendering.
+    // NO tree door here as of P5, where it was deleted. P3/P4 kept it on an ABI
+    // argument -- "the shape rides the CALLER's Tag, and the signature does not
+    // transport it" -- and P3's own result is what answers that: nothing about a
+    // tree is decided at run time. The callee receives an Array<T,1>, and a path
+    // read inside the callee folds against the CALLEE'S OWN DECLARED tree type,
+    // which is concrete, sits in paramTypes, and is exactly what the fold reads.
+    // There is nothing to transport.
     //
-    // (The DEDUCED-return twin further down needs no tree arm: nothing deduces a
-    // tree class, so a tree can only reach a return type through a DECLARED
-    // annotation, which this catches.)
-    let tree = (paramTypes @ [retType]) |> List.tryPick irTypeTreeShape
-    if tree.IsSome then
-        Error (TreeIdxUnsupported (tree.Value, $"function '{funcDecl.Name}'"))
-    else
+    // What replaces the door is narrower and lives post-zonk:
+    // TypeCheckValidate's collectAppTreeErrors refuses a tree-slotted ARGUMENT
+    // reaching a parameter that does not itself declare a tree slot (an abstract
+    // `T^r`, or a plain array of compatible rank), and refuses a same-rank
+    // SHAPE mismatch between two tree-slotted sides -- the seam direct
+    // application leaves open because it does not unify plain-call args. The
+    // BL4021 bad-shape gate above still runs first.
     // Both parameters AND the return type: either one names an array whose
     // storage would have to exist. (Unlike the tag wildcard, which is LEGAL in
     // parameter position, there is no position where a wreath array can be
@@ -13141,7 +13266,16 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | _ -> body
         let defInfoResult =
             match chasedBody with
-            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
+            // LeafIdx/NodeIdx join the PLAIN-index arm deliberately, NOT the
+            // TyTreeIdx arm below: they lower to an ordinary rank-1 dense
+            // record, so `type Leaves = LeafIdx<crystal>` wants the ordinary
+            // nominative overwrite that `type R = Idx<5>` gets. That is what
+            // gives a user who wants nominal safety over a leaf axis the same
+            // tool every other Idx alias has, while the anonymous form stays
+            // interchangeable with `Idx<n>` -- which is the entire point of the
+            // derived axes.
+            | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ | TyBoundedIdx _
+            | TyLeafIdx _ | TyNodeIdx _ ->
                 let idx = lowerIndexType env 0 chasedBody
                 // Nominative-alias rule: the alias name BECOMES the identity
                 // tag. Two exceptions, both reachable only from stage 3's
@@ -13159,6 +13293,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     | Some (IrrepsTag (_, triples)) ->
                         { idx with Tag = Some (mkIrrepsTag (Some name) triples) }
                     | _ when idx.IxKind = IxKErrorIrrepsBadSpec -> idx
+                    // The tree twin, reachable now that LeafIdx/NodeIdx route
+                    // here: a malformed degree sequence lowered to the shared
+                    // bad-shape marker, and overwriting its Tag with the alias
+                    // name would drop the error kind AND the smuggled detail,
+                    // turning `type L = LeafIdx<[2, 0]>` from a BL4021 into a
+                    // plain index alias over a placeholder extent.
+                    | _ when idx.IxKind = IxKErrorTreeBadShape -> idx
                     // A depth >= 2 wreath record keeps its "__orbidx" sentinel.
                     // Here Tag IS the kind channel (the IR validator enforces
                     // Tag<->IxKind agreement) and there is no parameterized tag

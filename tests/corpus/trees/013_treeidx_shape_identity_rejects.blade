@@ -1,22 +1,25 @@
-// TEST: two TreeIdx shapes are distinct types (rejects)
-// T2 probe, type-level half. The three strictness seams (unify, direct
-// application, let-ascription) all need a tree VALUE to compare, and P2 has no
-// producer -- so what is assertable here is that a shape renders as its OWN
-// class through the refusal channel, i.e. that identity rides the Tag and not
-// the (equal) leaf count. Both shapes below have 3 leaves.
+// TEST: two TreeIdx aliases over one shape are distinct types (rejects)
+// The T2 identity probe, PROMOTED by P5 from the type level to the value level.
 //
-// P3 OBLIGATION DISCHARGED: the value-level three-seam probes are files 110
-// (let-ascription -- reachable, and it fires BL3001), 111 (direct application)
-// and 112 (declared return). 111 and 112 are MEASURED UNREACHABLE while the
-// function-signature door stands: the tree-typed parameter/return refuses first
-// with BL4003, so dispatchAppOrIndex's non-unifying plain-call argument path is
-// never asked about tree identity. Their headers say so, and say to re-run them
-// when the boundary opens.
+// P2 could only assert that a shape renders as its own class through a refusal
+// message, because no tree VALUE could exist. P3/P4 built the value; P5 opened
+// the boundary it has to cross. So the claim this file makes is now the sharp
+// one: identity is the degree sequence PLUS the nominative alias, so two named
+// aliases of the SAME sequence are different types. Equal cardinality was never
+// enough (file 111 pins that with two different sequences); equal SHAPE under
+// another name is not enough either.
+//
+// This is the irreps rule one family over, and the post-zonk sweep restates
+// Unify's TreeTag predicate verbatim rather than approximating it -- the sweep
+// exists because direct application never asks unify, not because it wants a
+// different answer. Anonymous-vs-named stays compatible, which is why file 125
+// can declare its parameter over the alias and pass a value built from it.
 // REJECT-AT: lower
-let static wide = [3, 0, 0, 0]
-let static deep = [2, 0, 2, 0, 0]
-type WideIdx = TreeIdx<wide>
-type DeepIdx = TreeIdx<deep>
-function f(t: Array<Float64 like WideIdx>) -> Float64 = { 1.0 }
+let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
+type CrystalIdx = TreeIdx<crystal>
+type OtherName = TreeIdx<crystal>
+let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
+function f(t: Array<Float64 like OtherName>) -> Float64 = { t((1, 2)) }
+let v = f(T)
 // ERROR: BL4003
-// ERROR-CONTAINS: WideIdx (= TreeIdx<[3, 0, 0, 0]>)
+// ERROR-CONTAINS: whose parameter declares the DIFFERENT tree type

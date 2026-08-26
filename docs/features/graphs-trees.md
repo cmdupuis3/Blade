@@ -1,13 +1,18 @@
 # Blade Feature Module: Graphs and Trees
 
-Status: **design refreshed (2026-08-25); implemented through P3+P4
-(2026-08-26).** `TreeIdx<shape>` declares, constructs from a flat preorder
-literal, and serves STATIC whole-path reads `T((c0, c1, …))` in both lanes,
-alongside `extents`, printing and `reduce`. Still refused, each for a stated
-reason: a tree across a function boundary (parameter or return), `method_for` /
-`object_for` operands, `range<>` slots, non-literal or wildcard coordinates,
-paths that stop at an internal node, and reads of a tree slot combined with
-other slots — see the plan doc's §6. This revision rewrites the v10-era sketch
+Status: **design refreshed (2026-08-25); implemented through P5 (2026-08-26).**
+`TreeIdx<shape>` declares, constructs from a flat preorder literal, serves
+STATIC whole-path reads `T((c0, c1, …))` and their composition
+`T((p))((q))`, and crosses function boundaries — all in both lanes, alongside
+`extents`, printing and `reduce`. The derived dense axes `LeafIdx<S>` /
+`NodeIdx<S>` are plain `Idx` records, and `leaves(T)` retypes a tree's pool onto
+its leaf axis at zero cost, which is the sanctioned route for every bulk form
+(`method_for(leaves(T)) <@> f`). Still refused, each for a stated reason:
+`method_for` / `object_for` over a tree-slotted operand, `range<>` slots,
+non-literal or wildcard coordinates, paths that stop at an internal node
+(including a partial path BOUND to a name — escaping subtree views are cut),
+reads of a tree slot combined with other slots, and a tree argument reaching a
+parameter that declares no tree slot or a different one — see the plan doc's §6. This revision rewrites the v10-era sketch
 into current Blade notation and current Blade mechanism. The settled theory is
 kept in substance (§1); what changed is the *surface*, and in four places the
 surface change forced a substantive correction — each is marked
@@ -395,6 +400,25 @@ Because these are plain `Idx`, **every existing optimization applies unchanged**
 — vectorization, `omp`, BLAS routing, triangular storage where a symmetric
 group sits on top. A tree in Blade is a flat array with an addressing scheme,
 and only the addressing is new.
+
+**Implemented at P5** — `LeafIdx<S>` and `NodeIdx<S>` land as written, lowering
+to plain dense records (`Tag = None`, `IxKPlain`), so `LeafIdx<crystal>` really
+does unify with a bare `Idx<5>`. `range<LeafIdx<S>>` needs no new code and
+discharges the iteration half on its own. Three qualifications, all measured:
+
+- **`leaves(T)` is the retype**, and the doc above did not name it. A tree
+  binding is already the flat pool, so `leaves(T)` returns the *same* node with
+  a new type — zero copy, zero emitted code — and it is the visible point where
+  a program opts out of path addressing into array addressing. It is a
+  shadowable plain-call intrinsic, not a keyword, so `leaves` stays an ordinary
+  name a program may bind.
+- **`ChildIdx<S, p>` is deferred**, not shipped: its extent is `deg(node(p))`,
+  so the former needs a *path in type-argument position*, which is new type
+  grammar rather than a new record. Not free, unlike its two siblings.
+- **`preorder<S>` / `postorder<S>` are deferred**, and only the second is real
+  work: `range<LeafIdx<S>>` and `range<NodeIdx<S>>` already cover iteration,
+  while `postorder` is a genuine PERMUTATION rather than a range and needs a
+  virtual-array kind with its own element mapping.
 
 This also makes **tree × array hybrids free**, closing v10's open question 3
 without new theory: a tree slot composes with ordinary slots like any other.

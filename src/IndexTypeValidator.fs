@@ -67,6 +67,7 @@ let rec isIndexType (env: AliasEnv) (ty: TypeExpr) : bool =
     | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _ | TySparseIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
     | TyIrrepsIdx _ | TyPgIrrepsIdx _ | TyTreeIdx _
+    | TyLeafIdx _ | TyNodeIdx _
     | TyEquivIdx _ -> true
     | TyNamed (n, _) ->
         match Map.tryFind n env with
@@ -99,6 +100,7 @@ let isAnonymousIndexType (ty: TypeExpr) : bool =
     | TyBoundedIdx _ | TyEnumIdx _ | TyCompoundIdx _ | TySparseIdx _
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque
     | TyIrrepsIdx _ | TyPgIrrepsIdx _ | TyTreeIdx _
+    | TyLeafIdx _ | TyNodeIdx _
     | TyEquivIdx _ -> true
     | _ -> false
 
@@ -119,6 +121,10 @@ let rec isKnownStatic (env: AliasEnv) (ty: TypeExpr) : bool =
     // NOT with the RaggedIdx/CompoundIdx/SparseIdx runtime family. The runtime
     // lane is the future `DynTreeIdx`.
     | TyTreeIdx _ -> true
+    // The DERIVED DENSE axes are static for the same reason and one step more
+    // strongly: they read a leaf count / node count off the same static shape
+    // and produce a plain Idx whose extent is already a folded literal.
+    | TyLeafIdx _ | TyNodeIdx _ -> true
     // OrbIdx's level list is integer literals/sign tokens parsed straight into
     // data (Ast.TyOrbIdx), so it is compile-time-known by construction --
     // unlike SparseIdx below, whose payload is an expression this validator

@@ -138,6 +138,8 @@ let rec internal substArityInTy (resolve: Ident -> int option) (unresolved: Resi
     | TyIrrepsIdx e -> TyIrrepsIdx (ex e)
     | TyPgIrrepsIdx (g, e) -> TyPgIrrepsIdx (g, ex e)
     | TyTreeIdx s -> TyTreeIdx (ex s)
+    | TyLeafIdx s -> TyLeafIdx (ex s)
+    | TyNodeIdx s -> TyNodeIdx (ex s)
     | TyHalo (inner, offs) -> TyHalo (ty inner, ex offs)
     | TyConstrained (b, cs) -> TyConstrained (ty b, cs)
     | TyPoly inner -> TyPoly (ty inner)

@@ -775,9 +775,11 @@ leaves in preorder), then `T((1, 2))` -- whose path folds to a leaf offset at CO
 which is exactly why the path has to be literal. `extents`, printing and `reduce` all read the \
 pool as the flat rank-1 array it is. This site is not one of those: it needs an address the \
 compiler cannot fold, or it would hand a tree slot to machinery that has no reading for one. \
-For the bulk forms now, iterate the flat leaf axis directly -- a tree IS a flat array with an \
-addressing scheme, so `Idx<n>` over the leaf count carries every value and keeps every existing \
-optimization." where_ shape
+For BULK work take the derived dense leaf axis: `leaves(T)` retypes the very same storage onto \
+`LeafIdx<shape>`, an ordinary `Idx` over the leaf count -- zero copy, nothing emitted -- so \
+`method_for(leaves(T)) <@> f` and every other array form run with every existing optimization \
+intact. A tree IS a flat array with an addressing scheme, and `leaves` is how you ask for the \
+array half." where_ shape
     | TreeIdxPath (shape, detail) ->
         sprintf "%s: %s. A tree index's domain is its COMPLETE root-to-leaf paths -- \
 every step must name an existing child of the node it reaches, and the path must end at a leaf. \

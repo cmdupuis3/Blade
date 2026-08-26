@@ -93,6 +93,8 @@ and Keyword =
     | KwIrrepsIdx
     | KwPgIrrepsIdx
     | KwTreeIdx
+    | KwLeafIdx
+    | KwNodeIdx
     | KwMethodFor
     | KwObjectFor
     | KwRange
@@ -214,6 +216,8 @@ let keywordEntries : (string * Keyword) list =
       "IrrepsIdx", KwIrrepsIdx
       "PgIrrepsIdx", KwPgIrrepsIdx
       "TreeIdx", KwTreeIdx
+      "LeafIdx", KwLeafIdx
+      "NodeIdx", KwNodeIdx
       "method_for", KwMethodFor
       "object_for", KwObjectFor
       "range", KwRange

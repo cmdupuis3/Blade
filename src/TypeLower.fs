@@ -721,7 +721,7 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         if isAllString then IRTScalar ETString else IRTScalar ETInt64
 
     | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque | TyIrrepsIdx _ | TyPgIrrepsIdx _ | TySparseIdx _
-    | TyTreeIdx _ ->
+    | TyTreeIdx _ | TyLeafIdx _ | TyNodeIdx _ ->
         // DepIdx/RaggedIdx/IrrepsIdx/PgIrrepsIdx/SparseIdx/TreeIdx in non-index position --
         // the pg member takes PARITY with the O(3) one here: same known gap,
         // same treatment. Defensive fallback matching TyCompoundIdx/TyEquivIdx:
@@ -1191,6 +1191,43 @@ is the future DynTreeIdx, not this one")
                     Blade.TreeRank.treeTables degs |> Result.map (fun t -> (degs, t))) with
          | Ok (degs, tables) ->
              mkTreeIndexRecord id None degs (Blade.TreeRank.cardinality tables)
+         | Error detail ->
+             mkTreeErrorRecord id detail)
+    | TyLeafIdx shapeExpr | TyNodeIdx shapeExpr ->
+        // The DERIVED DENSE axes. Same static payload as TreeIdx above and the
+        // same two validations in the same order, but the record produced is an
+        // ORDINARY dense Idx: Tag = None, IxKPlain, extent a folded literal.
+        //
+        // That is the design, not a shortcut. These axes exist so that bulk
+        // numerics over a tree's pool keep every optimization the language
+        // already has, and that requires them to be INDISTINGUISHABLE from a
+        // hand-written Idx<n> -- `LeafIdx<crystal>` unifying with `Idx<5>` is
+        // the feature, not a leak. The nominal identity stays on the TREE type,
+        // and `leaves(T)` is the visible, explicit opt-out; a user who wants a
+        // nominal leaf axis writes `type Leaves = LeafIdx<crystal>` and gets
+        // the ordinary alias tag like any other Idx.
+        //
+        // LeafIdx takes the CARDINALITY (leaf count), NodeIdx the NODE count --
+        // the one payload, two extents, which is why these are two keywords and
+        // not one former with a discriminator.
+        //
+        // The bad-shape marker channel is shared with TreeIdx: a malformed
+        // sequence is the same mistake whichever former named it, so it plants
+        // the same IxKErrorTreeBadShape record and surfaces as the same BL4021.
+        let isLeaf = (match ty with TyLeafIdx _ -> true | _ -> false)
+        (match evalStaticValueExpr env shapeExpr
+               |> Result.mapError (fun e -> $"the shape is not statically evaluable ({e}). \
+A tree shape must be a `let static` binding or an inline literal; a shape computed at run time \
+is the future DynTreeIdx, not this one")
+               |> Result.bind (degreesOfStatic "the shape")
+               |> Result.bind Blade.TreeRank.treeTables with
+         | Ok tables ->
+             let n =
+                 if isLeaf then Blade.TreeRank.cardinality tables
+                 else Blade.TreeRank.nodeCount tables
+             { Id = id; Rank = 1; Extent = IRLit (IRLitInt (int64 n))
+               Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+               Kind = SDimension; Dependencies = [] }
          | Error detail ->
              mkTreeErrorRecord id detail)
     | _ ->
