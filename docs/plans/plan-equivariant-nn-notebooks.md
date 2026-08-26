@@ -167,6 +167,27 @@ Emphasis: the type system doing the thinking; training is almost incidental
    exactly 50 % on the pair. All EXPECT-pinnable.
 12. *md* — closing: what the compiler knew before the first gradient step.
 
+**AS BUILT 2026-08-26** — `examples/tetris_shapes.bladenb` (16 md + 15 code
+cells) + `examples/tools/make_tetris_zarr.fsx` + `examples/data/tetris.zarr`
+(96 train / 48 test clouds, 12+6 seeded rotations per shape). All pins green
+via concatenated `blade run` (11.3 s) AND a full ide-serve drive: every
+passing cell `lane:"interp"` + `kept:true` (training cell 16.2 s, others
+≤0.9 s), refusal cells fail without disturbing the session, the plot cell
+delivers a live `{"event":"display"}` stream frame — §4 verified end-to-end
+in a real eval. Deviations that matter: (a) the certified body is FROZEN at
+a seeded+calibrated point and only the 112-weight invariant readout trains —
+convex, 48/48 reproducible, and inside the interpreter budget (full-stack
+training plateaued with class T mis-ranked at LOWER loss: one-vs-rest
+least-squares pathology); (b) training uses ONE orientation per shape,
+narrated honestly — the readout channels are certified invariants, so the
+other 88 rotated copies contribute identical gradients; (c) the chirality
+channel is a two-step certified TP chain (HSPEC⊗HSPEC→l1-even, ⊗HSPEC→l0-odd)
+because `chiral_shape_1` has a C2 axis — every l=1 feature of it is
+collinear, so any raw triple product vanishes identically; (d) the even-
+ablation "ties at 50%" became the STRONGER exact pin `even_gap = 0`
+(byte-identical mirror-pair scores) plus a sixth refusal cell (`head_o3`):
+the chirality theorem AS a compile error, BL4008 naming the parity-odd read.
+
 ### 2b. NB1b — MD17 aspirin, the benchmark notebook
 
 Emphasis: real data, live training telemetry, and the force-vector
@@ -240,6 +261,32 @@ heavy ones marked ⚑):
    training on forces.
 18. *md* — closing: refusal, deduction, numeric shadow = three views of one
    compile-time fact.
+
+**AS BUILT 2026-08-26** — `examples/aspirin_energy.bladenb` (1072 lines) +
+`examples/tools/make_aspirin_zarr.fsx` (hand-written BCL-only .npy reader;
+fortran-order PROVEN by a bidirectional physical check: the column-major read
+gives covalent bond lengths, the C-major misread provably does not) +
+`examples/data/aspirin.zarr` (962 KB, 13 vars; both coordinate orders;
+standardization stats stored; perm + rotation tables). FULL-STACK training —
+all 249 parameters, batch 20, 50 steps, momentum 0.9 — measured 25.7 s in
+the interpreter lane; complete ide-serve drive green (all cells
+`lane:"interp"` + `kept:true`, refusal cell exits 1 without killing the
+session, two live stream frames on channel `aspirin_loss`). Result, honest:
+test MAE 5.057 kcal/mol vs 5.486 constant-predictor baseline (18 % of energy
+variance; small train/test gap), energy invariance ≤5e-15, force
+equivariance F(R·x)=R·F(x) ≤1.5e-15 with forces from first-order ad.grad
+w.r.t. positions, f_cos vs DFT forces 0.45 (framed as "transforms
+correctly", not "accurate"). Deviations that matter: (a) **N_TRAIN=500, not
+100** — measured, not guessed: at N=100 every descriptor family tried
+(centroid multipoles, pair histograms, local-Y, sGDML's own 210 inverse
+pair distances) lands ABOVE the constant baseline on held-out geometries;
+signal appears between 200 and 500; both subsets strided to span the
+trajectory (the first-K frames of each split are different MD stretches with
+an unlearnable offset); (b) **the descriptor is a pair-distance histogram +
+centroid multipoles** — pooled per-atom Y alone carries essentially no
+conformational signal; the 18 invariant histogram channels are where the
+energy lives (the load-bearing lesson for NB2); (c) the deduction suite here
+is one refusal + BL4011 with a pointer to NB1a.
 
 ## 3. NB2 — cell plan
 
@@ -421,6 +468,24 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 24 | No optimizer beyond plain GD | MF | `ml-e2e/001:273-277` | no (momentum = extra state slots, userland) | stdlib later |
 | 25 | Remembered "gram compact-operand ICE" | UNKNOWN | no corroborating source/corpus evidence found | no | needs a repro before any fix |
 | 26 | Losses must be dimensionless (unit-carrying returns refused) | BD | `Grad.fs:110` | no (standardize in `.fsx`) | document in notebook |
+| 27 | BL4003's suggested remedy `(expr : Tag)` does not typecheck for a non-literal Int (BL3001 expected Nat) — only literals cast | BUG (message) | 3-line repro, NB1a build | no (`__`-prefix exemption) | message text at `TypeCheckInfer.fs:3939` / `TypeCheckSupport.fs:1114` |
+| 28 | Top-level `method_for … \|> compute` array read from a FUNCTION BODY emits C++ that never declares it — raw g++ error, no BL code | BUG | 5-line repro, NB1a build | NB-soft (use `let rec` tables) | the main-local capture seam (`fix/kernel-capture-module-binding`) |
+| 29 | Differentiable `let rec` requires a LITERAL extent; `let static` from sizing builtins rejected (BL5500) | MF | every slice fn in NB1a | NB-soft (write literals) | Grad/GradExpand rec-array arm |
+| 30 | BL8005 step-budget exhaustion does NOT trigger the g++ fallback (`Interp/Repl.fs:132,147` route only 125/70); `MaxSteps` hard-coded | BUG/MF | measured, NB1a build | **NB1b-hard** (cells must be sized to interp) | `Interp/Repl.fs` classification, or settable `MaxSteps` |
+| 31 | Scalar × array AND array + array elementwise inside a reverse-differentiated body: BL7004 kernel-body refusal | MF/WE | NB1a `scores_of`; NB1b probe pr3 | no (componentwise literals) | CodeGen kernel-body arm / `GradExpand.fs` |
+| 32 | `sqrt`/division inside `ml.equiv` bodies leaves the polynomial fragment → component reads then BL4008; normalised pseudoscalars unwritable with reads | BD | NB1a probe | no | doc note in equivariant-nn.md |
+| 33 | Braceless function body cannot continue on a `+`-led line (BL1999) | BD/quirk | NB1a build | no | doc |
+| 34 | BL4014 galilean suggester fires on plain squared-difference and distance-of-two-positions helpers — every bond-length notebook collects warnings | WE (noise) | NB1a + NB1b builds | no | suggester scoping (skip non-velocity params) |
+| 35 | No certified scalar×irreps rescale: `x(i) * d` with `d` from `ml.norms` is BL4008 under a clause — RMS block normalization inexpressible in certified bodies | MF | NB1b probe pr8 | NB-soft (fold scale into bilinear weights) | new `ml.scale(SPEC, s, x)` |
+| 36 | `let rec` with an `IrrepsIdx<SPEC>` leading axis refused in grad'd code (BL5500 demands literal `Idx<n>`) — irreps values need array-literal assembly | MF | NB1b probe pr6 | NB-soft | Grad rec-array arm (same seam as #29) |
+| 37 | `f(args)(i)` — indexing a call result — inside a differentiated body: BL5500 "only named calls and array reads" | WE | NB1b `readout` | no (bind, then index) | `GradExpand.fs` |
+| 38 | `let rec` of `Idx<22500>` SEGFAULTS the compiled lane (exit 139, no diagnostic) | BUG | NB1b build | no (rank-2 rec arrays) | codegen stack/alloc |
+| 39 | `Int` param in Int64 arithmetic needs explicit `Int64(q)` (BL3001) — the two do not unify at that seam | BUG/quirk | NB1b `tri_j` | no | TypeCheck numeric unify |
+
+Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
+computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
+grad; nested `let rec` + `reduce` inside grad; `ad.grad` called from inside a
+plain function, so a rec array can drive repeated force evaluations.
 
 Cross-resolutions from planning: NB1's "no rank≥3 bridge blocks NB2" concern
 is closed by #17's probe; the certifier refusing user-space bridge matrices
@@ -438,9 +503,9 @@ constants compiler-owned.
    store) and `make_aspirin_zarr.fsx` (npz reader, centering, (y,z,x) copies,
    standardization, perm + rotation/D tables); raw inputs from
    `C:\Users\cdupu\Data\`. Fallback `make_nbody_zarr.fsx` if aspirin sours.
-4. **NB1a build** (fast lane — exercises the whole stack at second-scale
-   cost), then **NB1b** (measure the training cell in the interpreter FIRST;
-   trim N/epochs to interactive).
+4. ✅ **NB1a built + verified 2026-08-26** (see §2a AS BUILT). ✅ **NB1b
+   built + verified 2026-08-26** (see §2b AS BUILT; full-stack, 25.7 s
+   interp — inside the gap-#30 cliff).
 5. **NB2 build:** three-route pin cell first (it gates everything), then the
    jet former, ablation last (three descents — the wall-clock budget cell).
 6. **Reverse-mode combinator AD (§5)** — after infra; unlocks NB2 Phase B as
