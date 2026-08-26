@@ -1,6 +1,7 @@
 # Plan: trees and graphs (`TreeIdx<shape>`)
 
-Status: **DESIGN REFRESHED, P0 NEXT** — nothing built. The semantics are in
+Status: **P0 DONE (decision + probes, §10); implementation in flight.** The
+module's corpus category and harness key are **`trees`**. The semantics are in
 [../features/graphs-trees.md](../features/graphs-trees.md) (revised 2026-08-25);
 this document is the compiler-side plan. Method: the seam checklist and cost
 band below were derived by tracing how the three most recent index types
@@ -276,3 +277,57 @@ feature doc §4 for the argument); `Stream<T>` / unbounded iteration;
 hash-consing / subtree sharing; dynamic and distributed trees; `fix` as a
 compiler primitive (stdlib first, measure before promoting); `show_tree`
 printing; MPI decomposition over subtree slabs.
+
+## 10. P0 appendix — decision and probe results (2026-08-26)
+
+**Decision: single tuple slot.** `TreeIdx<s>` occupies ONE arrow slot whose
+domain is complete root-to-leaf paths. Whole-path application `T((c0, c1, …))`
+is the primitive, routed through the tabulated dispatch (`slotPerArg` 1:1, one
+tuple fills the slot — the SparseIdx rule). Partial paths are short-tuple
+prefix pinning with the residual staying in the tree family (P5). Bare-scalar
+`T(c)` as a prefix-of-one rides the rank-1-sparse bare-scalar precedent; probed
+in P5, and if it conflicts, the curried spelling defers with a scope note in
+the feature doc §3.3 — no storage or bijection impact either way.
+
+**Rejected: variable-arrow slots.** Making slot count path-dependent rewrites
+the rank representation: `IRIndexTypeG.Rank : int`, fixed-length `IRTArrow`
+slots, `arr.IndexTypes.Length` at 10+ `TypeCheckInfer` sites,
+`CodeGenExpr.fs:541`'s static rank sum, and the C++ `std::array<size_t, NDIM>`
+key (the census in §2). Nothing about trees needs it once paths live in one
+slot.
+
+**Domain and cardinality, made explicit** (implicit in the feature doc): the
+value domain is complete paths, so **cardinality = leaf count**, and leaves in
+preorder are exactly lexicographic order on paths — the §3.2 enumeration
+obligation holds by construction. Internal nodes are addressable only as
+subtree views (P5); per-node structural computation uses the derived dense
+`NodeIdx` axis. This is the precise generalization of a tensor, whose values
+also live at complete index tuples.
+
+**Payload staging (scope correction).** P2 lands the degree-sequence payload:
+`let static spec = [2, 2, 0, 0, 3, 0, 0, 0]` then `TreeIdx<spec>`, validated
+at lowering by `TreeRank.validateDegrees`. The nested-`leaf` literal sugar
+(feature doc §2.1) is deferred to a polish commit — it needs a static `leaf`
+constant (a StaticEval case or predefined binding), which is surface polish,
+not substrate, and staging it keeps P2's blast radius to the proven
+`IrrepsIdx` pattern.
+
+**Probe results** (worktree baseline c8b3b49, Release build, `blade run`):
+
+- **G1 PASSES.** `let nxt: Array<Nat<Node> like Node> = [1, 2, 0]` is accepted
+  (the literal-coercion rule lifts elementwise into the tagged element type),
+  and `nxt(nxt(0)) = 2` evaluates correctly; iteration-emitted `Nat<Node>`
+  values also store as elements and index back (`A(ids(2))`). Caveat: a bare
+  *literal* subscript against a tagged slot warns BL4003, steering to
+  `(expr : Node)` — tagged flows are quiet. The graph arc's load-bearing
+  assumption holds.
+- **G2 CONFIRMED.** Tuple elements under `let rec` refuse — BL3999 "only
+  Float/Int/Complex element types are supported" — so the parallel-recursive-
+  arrays spelling in the feature doc §5.1 stays the story, as designed.
+- **G5 (new).** `Array<Nat<Node> like Step>` under `let rec` is **also refused
+  by the same BL3999 gate**: the §5.1 walk recurrence as written does not
+  compile today. Graph-arc options (P7): spell walk state as untagged `Int64`
+  and cast at the use sites, or a small BL3999 carve-out for Nat elements
+  (storage-identical to Int). Does not block P1–P5.
+- **G4 DEFERRED to P4** — collapse licensing is a codegen-phase concern; v1
+  simply never offers the node axis to `collapse(k)`.

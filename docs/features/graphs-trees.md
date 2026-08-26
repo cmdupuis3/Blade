@@ -595,6 +595,11 @@ let rec pos: Array<Nat<Node> like Step, Walker> =
     | prefix :: n -> prefix :: (method_for(prefix(n - 1), draws(n)) <@> hop |> compute)
 ```
 
+(Probed 2026-08-26: the `let rec` element gate currently refuses Nat-tagged
+elements — BL3999, Float/Int/Complex only — so the v1 spelling stores untagged
+`Int64` walk state and casts at the read sites; lifting that gate is a P7
+decision. See plan §10, probe G5.)
+
 1024 walkers, 32 steps: one serial sweep over `Step` with a fully parallel map
 inside it. Sequential structure is `let rec`, parallel structure is a loop
 object, and the two nest in the one place where a walk actually has both. No
