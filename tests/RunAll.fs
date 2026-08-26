@@ -82,6 +82,13 @@ let memfreeStressTests = Blade.Tests.Corpus.category "memfree-stress"
 /// `Blade.Tests.RunAll.deferredConcreteTests`, like memfree.
 let deferredConcreteTests = Blade.Tests.Corpus.category "deferred-concrete"
 
+/// trees -- `TreeIdx<shape>` type-level registration (plan-graphs-trees.md P2).
+/// MIXED category: declaration positives plus "(rejects)" probes for bad shapes
+/// and for every USE, so no asRejectProbes wrapper. Declared here (not in a
+/// Test_*.fs) on the memfree precedent -- the category's only consumers are
+/// `allTests` below and CliSelfTests' key map.
+let treeTests = Blade.Tests.Corpus.category "trees"
+
 /// The wholly-negative categories carry no "(rejects)" marker in their own
 /// `// TEST:` names -- every file in them is meant to be refused, so the marker
 /// would be noise -- and Runner's classifier keys on exactly that marker. The
@@ -102,7 +109,7 @@ let private asRejectProbes (tests: (string * string) list) =
 let allTests =
     basicTests @ intrinsicsTests @ castsTests @ adTests @ adJvpTests @ adJvpCombTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
     @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ tupleTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ bracketedTests
-    @ indexTypeTests @ mutabilityTests @ asRejectProbes mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ asRejectProbes displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ asRejectProbes unitErrorTests
+    @ indexTypeTests @ treeTests @ mutabilityTests @ asRejectProbes mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ asRejectProbes displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ asRejectProbes unitErrorTests
     @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
     @ inferenceProbes
     @ funcArrayTests

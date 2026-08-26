@@ -200,11 +200,16 @@ exactly this. Consequences, all inherited rather than invented:
 
 - A shape that is *not* statically evaluable is refused, with the same
   reasoning `RaggedIdx` refuses a runtime `lens` (BL4018: a lens computed at
-  run time can be neither honoured nor compared). Proposed **BL4021 — tree
-  shape not statically evaluable**, steering to `DynTreeIdx` (§7.2).
+  run time can be neither honoured nor compared). **BL4021 — invalid tree
+  shape**: not statically evaluable, or malformed; the non-static half steers
+  to `DynTreeIdx` (§7.2). One code, two mistakes, told apart by the message.
 - The `StaticEval` stack budget applies; a shape is a static value like any
-  other, and very deep generated shapes hit the same cliff. Depth, not
-  cardinality, is the binding constraint.
+  other, and a very deeply *generated* shape hits the same cliff. Depth, not
+  cardinality, is the binding constraint. Measured at P2: the shape's own
+  DEPTH costs nothing at lowering — decoding is a fold and the table build is
+  three iterative passes, so a literal depth-99 chain (`[1, 1, …, 1, 0]`)
+  lowers with no cliff at all. The budget binds on the *expression* that
+  produces the shape, i.e. on a recursive `static function`, not on the tree.
 
 ### 2.3 The canonical internal form: the preorder degree sequence
 

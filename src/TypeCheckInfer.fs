@@ -1163,6 +1163,24 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         | Some ix ->
             Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix), "range<> iteration slot"))
         | None ->
+        // The tree twin of the wreath door above, and the same third front-end
+        // door: `range<TreeIdx<s>>` names an iteration space with no annotation
+        // to catch, so without this the program reaches buildRawLoopLevels'
+        // backstop and dies as a BL9001 internal error.
+        match idxs |> List.tryPick (fun ix -> match ix with TreeIdxLike r -> Some r | _ -> None) with
+        | Some rendered ->
+            Error (TreeIdxUnsupported (rendered, "range<> iteration slot"))
+        | None ->
+        // A bad SHAPE reaching a range slot: the marker record never sees an
+        // annotation consumer, so surface it here too.
+        match idxs |> List.tryPick (fun ix ->
+                          if ix.IxKind = IxKErrorTreeBadShape then
+                              match ix.Extent with
+                              | IRParam (d, _, _) -> Some d
+                              | _ -> Some "invalid shape"
+                          else None) with
+        | Some detail -> Error (TreeIdxShape detail)
+        | None ->
         // A range slot whose extent never resolved. `range<>` is VIRTUAL: it
         // materializes no object, so codegen takes every bound and every
         // output extent from the slot's own Extent expression -- and a
@@ -9574,6 +9592,54 @@ and irTypeWreathLevels (t: IRType) : string option =
     | IRTComputation inner -> irTypeWreathLevels inner
     | _ -> None
 
+/// Detect a `TreeIdx<s>` slot anywhere in a type, returning its rendered class.
+/// Consumed at the let-binding annotation, the function signature and the
+/// `range<>` slot -- the three places a user program can name an array type
+/// without going through an allocation the checker already refuses. P2
+/// registers the TYPE and refuses every USE; P3-P5 replace these with the real
+/// storage and read paths.
+///
+/// Same walker shape as irTypeWreathLevels, including scanning a FuncElem's
+/// PARAMETER slots: a higher-order parameter `f: (Array<F64 like TreeIdx<s>>) -> F64`
+/// still names storage that would have to exist.
+and irTypeTreeShape (t: IRType) : string option =
+    let shapeOf (ix: IRIndexType) =
+        match ix with
+        | TreeIdxLike rendered -> Some rendered
+        | _ -> None
+    match t with
+    | ArrayElem at ->
+        (at.IndexTypes |> List.tryPick shapeOf)
+        |> Option.orElseWith (fun () -> irTypeTreeShape at.ElemType)
+    | IRTTuple ts -> ts |> List.tryPick irTypeTreeShape
+    | FuncElem (ps, r) ->
+        (ps |> List.tryPick irTypeTreeShape)
+        |> Option.orElseWith (fun () -> irTypeTreeShape r)
+    | IRTComputation inner -> irTypeTreeShape inner
+    | _ -> None
+
+/// Detect the TreeIdx bad-shape marker (lowerIndexType's TyTreeIdx arm plants
+/// IxKErrorTreeBadShape when the shape is non-static or malformed, smuggling the
+/// failure detail in the marker's IRParam extent). The irTypeBadIrrepsDetail
+/// pattern verbatim; returns the detail so the diagnostic can say WHAT was wrong.
+and irTypeBadTreeDetail (t: IRType) : string option =
+    let detailOf (ix: IRIndexType) =
+        if ix.IxKind = IxKErrorTreeBadShape then
+            match ix.Extent with
+            | IRParam (detail, _, _) -> Some detail
+            | _ -> Some "invalid shape"
+        else None
+    match t with
+    | ArrayElem at ->
+        (at.IndexTypes |> List.tryPick detailOf)
+        |> Option.orElseWith (fun () -> irTypeBadTreeDetail at.ElemType)
+    | IRTTuple ts -> ts |> List.tryPick irTypeBadTreeDetail
+    | FuncElem (ps, r) ->
+        (ps |> List.tryPick irTypeBadTreeDetail)
+        |> Option.orElseWith (fun () -> irTypeBadTreeDetail r)
+    | IRTComputation inner -> irTypeBadTreeDetail inner
+    | _ -> None
+
 /// Detect an unresolved QUALIFIED index-type path (`store.index.y`). Same
 /// consumption-site pattern as the checks above, and self-marking: a path that
 /// resolves yields the registered record verbatim (the provider builds its
@@ -9584,7 +9650,12 @@ and irTypeWreathLevels (t: IRType) : string option =
 and irTypeUnknownAxisPath (t: IRType) : string option =
     let pathOf (ix: IRIndexType) =
         match ix.Tag with
-        | Some tag when tag.Contains "." && not (tag.StartsWith irrepsTagPrefix) -> Some tag
+        // The tree prefix is exempted for the same reason the irreps one is:
+        // a parameterized tag's payload is not a provider axis path, and a tree
+        // tag holding a dotted alias name would otherwise be misdiagnosed as an
+        // unresolved store dimension.
+        | Some tag when tag.Contains "." && not (tag.StartsWith irrepsTagPrefix)
+                                         && not (tag.StartsWith treeTagPrefix) -> Some tag
         | _ -> None
     match t with
     | ArrayElem at ->
@@ -9755,6 +9826,12 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         if badPgIrreps.IsSome then
             Error (PgIrrepsIdxSpec badPgIrreps.Value)
         else
+        // A bad SHAPE reports BEFORE the use refusal below: a user who mistyped
+        // the degree sequence should hear about the sequence, not about P3.
+        let badTree = irTypeBadTreeDetail annotTy
+        if badTree.IsSome then
+            Error (TreeIdxShape badTree.Value)
+        else
         let badAxis = irTypeUnknownAxisPath annotTy
         if badAxis.IsSome then
             Error (Other (unknownAxisPathMessage badAxis.Value))
@@ -9763,6 +9840,18 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
         if wreath.IsSome then
             Error (OrbitStorageUnsupported
                        (wreath.Value,
+                        (match binding.Pattern.Kind with
+                         | PatVar n -> $"let binding '{n}'"
+                         | _ -> "let binding annotation")))
+        else
+        // The tree twin of the wreath door above, and ALSO the allocation door:
+        // Blade has no value-less `let`, so refusing a tree-typed annotation
+        // here is what keeps any tree-typed value from ever being constructed --
+        // which is why IRStorage needs no tree arm in this phase.
+        let tree = irTypeTreeShape annotTy
+        if tree.IsSome then
+            Error (TreeIdxUnsupported
+                       (tree.Value,
                         (match binding.Pattern.Kind with
                          | PatVar n -> $"let binding '{n}'"
                          | _ -> "let binding annotation")))
@@ -12374,6 +12463,19 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if badPgIrreps.IsSome then
         Error (PgIrrepsIdxSpecFn (funcDecl.Name, badPgIrreps.Value))
     else
+    let badTree = (paramTypes @ [retType]) |> List.tryPick irTypeBadTreeDetail
+    if badTree.IsSome then
+        Error (TreeIdxShapeFn (funcDecl.Name, badTree.Value))
+    else
+    // The tree twin of the wreath gate below, and for the same reason: there is
+    // no position where a tree-typed array can be handled in P2 -- a caller
+    // would have had to allocate one. (The DEDUCED-return twin further down
+    // needs no tree arm: nothing in P2 deduces a tree class, so a tree can only
+    // reach a return type through a DECLARED annotation, which this catches.)
+    let tree = (paramTypes @ [retType]) |> List.tryPick irTypeTreeShape
+    if tree.IsSome then
+        Error (TreeIdxUnsupported (tree.Value, $"function '{funcDecl.Name}'"))
+    else
     // Both parameters AND the return type: either one names an array whose
     // storage would have to exist. (Unlike the tag wildcard, which is LEGAL in
     // parameter position, there is no position where a wreath array can be
@@ -13095,6 +13197,24 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     match idx.Tag with
                     | Some (PgIrrepsTag (group, _, entries)) ->
                         { idx with Tag = Some (mkPgIrrepsTag group (Some name) entries) }
+                    | _ -> idx
+                Ok (TDIIndexType (name, named, chasedBody))
+            | TyTreeIdx _ ->
+                // Nominative-alias rule, replayed for the tree tag (the
+                // IrrepsIdx/PgIrrepsIdx discipline verbatim): the alias name is
+                // FOLDED INTO the identity tag (mkTreeTag (Some name) degs), so
+                // two aliases of the same shape are DISTINCT types while an
+                // anonymous TreeIdx<s> unifies with either. The plain-index
+                // arm's `Tag = Some name` overwrite would drop the degree
+                // sequence AND break the Tag<->IxKind agreement the IR
+                // validator enforces. A bad-shape marker keeps its error tag so
+                // the consumption-site diagnostic still fires through the alias
+                // -- that is the T1 alias-laundering gate.
+                let idx = lowerIndexType env 0 chasedBody
+                let named =
+                    match idx.Tag with
+                    | Some (TreeTag (_, degs)) ->
+                        { idx with Tag = Some (mkTreeTag (Some name) degs) }
                     | _ -> idx
                 Ok (TDIIndexType (name, named, chasedBody))
             | TyEnumIdx valuesExpr ->

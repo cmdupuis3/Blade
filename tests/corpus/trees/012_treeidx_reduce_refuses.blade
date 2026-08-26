@@ -1,0 +1,12 @@
+// TEST: TreeIdx reduce refuses (rejects)
+// No arm in inferReduce, deliberately: the operand would have to be a
+// tree-typed VALUE, and the annotation door above refuses the only way to make
+// one. This file pins that the refusal arrives -- from the binding, before
+// reduce is reached. If it ever starts arriving with a different code, THAT is
+// the signal to add the reduce arm.
+// REJECT-AT: lower
+let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
+type CrystalIdx = TreeIdx<crystal>
+let t: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let s = reduce(t, (+))
+// ERROR: BL4003

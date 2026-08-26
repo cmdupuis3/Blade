@@ -1,0 +1,17 @@
+// TEST: TreeIdx through a chained alias still refuses (rejects)
+// TRAP T1: a structural TypeExpr walk that lacks the TreeIdx arm treats the
+// type as ABSENT, and the sneaky case is alias-body laundering -- `type B = A`
+// carries the arm into positions the walk never probes. If registerTypeDecl's
+// TyTreeIdx arm is missing, B registers as a plain TDIAlias and this program
+// typechecks silently, which is the failure this file exists to catch.
+//
+// The ERROR-CONTAINS doubles as the PRINTING pin: TreeIdxLike's rendering has
+// to reach a user-visible message through a two-step alias chain.
+// REJECT-AT: lower
+let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
+type CrystalIdx = TreeIdx<crystal>
+type Aliased = CrystalIdx
+
+function f(t: Array<Float64 like Aliased>) -> Float64 = { 1.0 }
+// ERROR: BL4003
+// ERROR-CONTAINS: TreeIdx<[2, 2, 0, 0, 3, 0, 0, 0]>

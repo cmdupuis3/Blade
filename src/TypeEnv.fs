@@ -760,6 +760,23 @@ complex half)." where_
     | IrrepsIdxSpecFn (func, detail) -> $"function '{func}': IrrepsIdx: {detail}. The spec must be a static array of (l, parity, mult) int triples -- a `let static` binding or an inline literal like IrrepsIdx<[(0, 0, 2), (1, 1, 2)]>."
     | PgIrrepsIdxSpec detail -> $"PgIrrepsIdx: {detail}. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>."
     | PgIrrepsIdxSpecFn (func, detail) -> $"function '{func}': PgIrrepsIdx: {detail}. The form is PgIrrepsIdx<GROUP, SPEC> with GROUP a registered point group and SPEC a static array of (LABEL_NAME, mult) tuples -- a `let static` binding or an inline literal like PgIrrepsIdx<C4, [(\"A\", 1), (\"E\", 2)]>."
+    | TreeIdxShape detail -> $"TreeIdx: {detail}. The shape is a PREORDER DEGREE SEQUENCE -- the child count of each node in depth-first order -- as a `let static` binding or an inline literal: `let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]` then `TreeIdx<crystal>`. A well-formed sequence sums to nodes - 1 and its prefix walk closes exactly at the last node."
+    | TreeIdxShapeFn (func, detail) -> $"function '{func}': TreeIdx: {detail}. The shape is a PREORDER DEGREE SEQUENCE -- the child count of each node in depth-first order -- as a `let static` binding or an inline literal: `let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]` then `TreeIdx<crystal>`. A well-formed sequence sums to nodes - 1 and its prefix walk closes exactly at the last node."
+    // Voice matched to OrbitStorageUnsupported above: name the site, say what
+    // the class CAN do today, name what is missing, and steer. No
+    // "lands in a later phase" hand-waving -- the user gets the state of the
+    // world and a next move.
+    | TreeIdxUnsupported (shape, where_) ->
+        sprintf "%s: %s is a declarable index class whose SHAPE is registered -- it parses, it \
+validates, it aliases and it prints -- but nothing yet allocates, reads, iterates or folds one. \
+A tree slot's cells are its LEAVES, addressed by a complete root-to-leaf path, and the address \
+arithmetic that turns a path into a leaf offset is not wired into either back end, so the \
+compiler refuses here rather than compute an address it cannot compute. What works today is the \
+DECLARATION: `let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]` then `type CrystalIdx = \
+TreeIdx<crystal>` names the class, and the shape is checked when you write it. For array storage \
+over the same data now, use the flat leaf axis directly -- a tree \
+IS a flat array with an addressing scheme, so `Idx<n>` over the leaf count carries every value \
+and keeps every existing optimization." where_ shape
     | ComplexArity got -> $"complex expects exactly two float components -- complex(re, im) -- got {got} argument(s)"
     | CumulantOrderExceeds (order, carried) -> $"cumulant: order {order} exceeds the dist's carried order {carried} -- insufficient stochastic order. Construct with a higher order (dist(A, {order})) or project a carried component."
     | DistOrderDisagree (op, leftOrder, rightOrder) -> $"dist {op}: orders disagree ({leftOrder} vs {rightOrder}) -- carry the same stochastic order on both sides"
@@ -877,6 +894,11 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // that the literal contradicts. The fix is to reconcile two
             // spellings of one shape, not to stop using RaggedIdx.
             | RaggedLensMismatch _ | RaggedLensNotStatic _ -> "BL4018"
+            // BL4021: one code, two mistakes, BL4018's precedent one line up --
+            // a non-static shape and a malformed degree sequence are both
+            // "invalid tree shape", and the message text is what tells them
+            // apart. The `detail` string carries it.
+            | TreeIdxShape _ | TreeIdxShapeFn _ -> "BL4021"
             | StructWhereNotBool _ | StructWhereError _ | WherePredicateUnannotated _
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"
@@ -892,6 +914,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // both backends refuse, in the front end.
             | OrbitStorageUnsupported _ | OrbitSubscriptArity _
             | OrbitDecompactPartial _ | OrbitFoldUnsupported _
+            | TreeIdxUnsupported _
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _
             | PgIrrepsIdxSpec _ | PgIrrepsIdxSpecFn _ | TagWildcardNotParam _
             | BoundsInverted _ | BoundsOnAggregate _ -> "BL4003"

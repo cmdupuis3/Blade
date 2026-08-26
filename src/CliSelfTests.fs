@@ -2313,6 +2313,7 @@ let rec internal dispatchTest (rest: string list) : int =
             | "deferred-concrete" | "deferredconcrete" -> Some ("Deferred Concrete", Blade.Tests.RunAll.deferredConcreteTests)
             | "memfree" -> Some ("Mem Free", Blade.Tests.RunAll.memfreeTests)
             | "memfree-stress" | "memfreestress" -> Some ("Mem Free Stress", Blade.Tests.RunAll.memfreeStressTests)
+            | "trees" -> Some ("Trees", Blade.Tests.RunAll.treeTests)
             | _ -> None
         match categoryTests with
         | Some (name, tests) ->

@@ -1,0 +1,10 @@
+// TEST: TreeIdx let annotation refuses (rejects)
+// P2 registers the TYPE; every USE refuses. A `let` with an annotation is the
+// allocation path, and Blade has no value-less `let`, so this door is what
+// makes IRStorage need no tree arm in this phase.
+// REJECT-AT: lower
+let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
+type CrystalIdx = TreeIdx<crystal>
+let t: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
+// ERROR: BL4003
+// ERROR-CONTAINS: CrystalIdx

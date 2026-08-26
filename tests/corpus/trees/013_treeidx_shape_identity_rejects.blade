@@ -1,0 +1,21 @@
+// TEST: two TreeIdx shapes are distinct types (rejects)
+// T2 probe, type-level half. The three strictness seams (unify, direct
+// application, let-ascription) all need a tree VALUE to compare, and P2 has no
+// producer -- so what is assertable here is that a shape renders as its OWN
+// class through the refusal channel, i.e. that identity rides the Tag and not
+// the (equal) leaf count. Both shapes below have 3 leaves.
+//
+// P3 OBLIGATION, recorded here so it cannot be forgotten: once a tree-typed
+// value can be constructed, this file gains the VALUE-level three-seam probes
+// -- passing a WideIdx array to a DeepIdx parameter must be refused at (a)
+// unify, (b) direct application (dispatchAppOrIndex does not unify plain-call
+// args), and (c) let-ascription (which overwrites rather than unifies). Each
+// seam enforces separately; one probe does not cover the other two.
+// REJECT-AT: lower
+let static wide = [3, 0, 0, 0]
+let static deep = [2, 0, 2, 0, 0]
+type WideIdx = TreeIdx<wide>
+type DeepIdx = TreeIdx<deep>
+function f(t: Array<Float64 like WideIdx>) -> Float64 = { 1.0 }
+// ERROR: BL4003
+// ERROR-CONTAINS: WideIdx (= TreeIdx<[3, 0, 0, 0]>)

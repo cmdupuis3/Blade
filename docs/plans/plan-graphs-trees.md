@@ -111,8 +111,11 @@ alternative's cost census, and the three probe results.
   arrays erase.
 - Diagnostics: **join existing families first** (the Sparse/Orb shortcut — all
   eight sparse subscript-form errors map to BL4003, runtime reads to BL8003).
-  Mint only: **BL4019** (tree read of indeterminate depth), **BL4021** (shape
-  not statically evaluable; steers to the future `DynTreeIdx`), and for the
+  Mint only: **BL4019** (tree read of indeterminate depth), **BL4021**
+  (*invalid tree shape* — registered in P2 with that title, covering BOTH the
+  non-static shape, which steers to the future `DynTreeIdx`, and the malformed
+  degree sequence; one code, two mistakes told apart by the message text, on
+  BL4018's `RaggedLensMismatch`/`RaggedLensNotStatic` precedent), and for the
   graph arc **BL8012** (`acyclic` construction check — BL8010/BL8011 are
   already occupied by interpreter panic codes in `Interp/Numerics.fs` despite
   not being in the registry; do not reuse them).
@@ -145,10 +148,20 @@ this by having no builder.
 channel**: copy RaggedIdx's plant-a-placeholder idiom (`IxKError*` record +
 `irTypeHas*` scanner at the annotation consumers), never SparseIdx's
 `failwith`. `Unify.indexPairIncompatible` (compares Rank/Tag/Symmetry —
-**never extents**); `TypeEnv` message arm + error→code map (two spots in one
-file); `TypeCheckInfer`/`TypeCheckSupport` dispatch; `Zonk` must descend the
-new arm; `IndexTypeValidator` (which annotation positions are legal, and
-`isKnownStatic` = true for v1).
+**never extents**) needs its **own arm, and this is not optional**: the
+"tag equality decides" reading is false for a PARAMETERIZED tag. The
+gate that would compare two unequal tags is guarded by
+`isSyntheticTag t = t.StartsWith "__"`, and every parameterized tag —
+`__irreps:`, `__pgirreps:`, `__tree:` — starts with `__`, so it is classified
+synthetic and **never gates**. Two different tree shapes are both Rank 1 and
+both `SymNone`, so without an arm they UNIFY. That is why irreps carries the
+`BlockSpecTag` arm ahead of the exemption, and the `TreeTag` arm goes in the
+same place, ahead of it (P2 landed it: identity is the degree sequence plus the
+optional nominative alias). Ragged gets away with no arm only because its
+records carry no distinguishing payload at all. Then: `TypeEnv` message arm +
+error→code map (two spots in one file); `TypeCheckInfer`/`TypeCheckSupport`
+dispatch; `Zonk` must descend the new arm; `IndexTypeValidator` (which
+annotation positions are legal, and `isKnownStatic` = true for v1).
 
 **Back ends — both, always:** the 8 CodeGen files; `CodeGenCuda` and
 `EmitLlvm` may **refuse by name** in v1 (providers do); `src/cpp/` header (the
@@ -214,7 +227,7 @@ order is **not** phase order — `src/TreeRank.fs` goes beside `OrbRank.fs`
 |---|---|---|---|
 | **P0** | Representation decision + probes (§2); the census of `Rank`-assumption sites under the rejected option; this doc's §§1-4 finalized | doc only | written decision naming the rejected alternative and its cost; G1/G2/G4 probe results recorded |
 | **P1** | `src/TreeRank.fs` — dependency-free pure-integer bijection: shape validation (`degrees` well-formedness), cardinality/size/off tables, `forward`/`backward` rank–unrank, `subtree` partial-path resolution | ~400-700 lines | `tests/Test_TreeRank.fs` + `blade test treerank`: round-trip pinned against **brute-force** DFS enumeration of every valid path (the OrbRank discipline), incl. degenerate shapes (single leaf, all-leaf, deep-narrow, wide-shallow) |
-| **P2** | Type-level registration, no storage: `IxKTree` + tag pair; lexer + parser with named reject paths; `TyTreeIdx`; `TypeLower` (placeholder idiom); `placementOf`; `Unify`; `IndexTypeValidator`; `Zonk`. Declaration + printing only; every *use* refuses loudly | ~600-900 lines, ~12 files | corpus `index-types/2xx_treeidx_*`: parse OK; bad-shape rejects (unclosed / empty / non-static → BL4021 / malformed `degrees`); `blade check` prints the type back in house form; `checkKindAgreement` green; **T1 alias-laundering probe + T2 three-seam probes** |
+| **P2** — LANDED | Type-level registration, no storage: `IxKTree` + tag pair; lexer + parser with named reject paths; `TyTreeIdx`; `TypeLower` (placeholder idiom); `placementOf`; `Unify`; `IndexTypeValidator`; `Zonk`. Declaration + printing only; every *use* refuses loudly | ~600-900 lines, ~12 files | corpus `trees/` (its OWN category, not `index-types/`): parse OK; bad-shape rejects (empty / non-static / malformed `degrees` → BL4021; the parser's `TreeIdx<>` path → BL1999); the rendered class reaches the user through refusal messages, pinned with `ERROR-CONTAINS`; `checkKindAgreement` green; **T1 alias-laundering probe green; T2 pinned at the TYPE level only** — the three value-level strictness seams are physically unconstructible while every use refuses, so they are recorded as a P3 gate obligation in `trees/013`'s header |
 | **P3** | Storage + reads, **interpreter first**: `IRStorage` alloc + cardinality; full-path reads `T((...))`; `extents`/`rank` intrinsics; `Interp/` arms land in this phase | ~800-1200 lines | `blade test interp index-types` green on the new files; `blade run` parity on literal-tree programs; diff-oracle clean |
 | **P4** | C++ codegen twin: `CodeGenExpr` indexing, `CodeGenLoopNest` preorder iteration (the §3.2 lex-enumeration obligation), type rendering; `src/cpp/` only if tables must materialize; CUDA + LLVM refuse by name | ~800-1500 lines | full category green under `blade run`; **byte-comparison of interp vs codegen output on every new test** (not "tests pass"); full `blade test` for the surface block |
 | **P5** | Partial-path views: short-tuple prefix pinning, `IRTreeProject` residual, subtree views; `T(0)` bare-scalar if P0 said yes; BL4019 refusal | ~400-700 lines | corpus: prefix reads, refusals for over-long / out-of-shape / indeterminate-depth paths; nested-view identity `T((0,))((1,)) == T((0,1))`; derived dense axes + `preorder`/`postorder` |

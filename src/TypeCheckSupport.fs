@@ -1711,6 +1711,18 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
              let ix = arrTy.IndexTypes |> List.find (fun ix -> ix.Symmetry = SymWreath)
              Error (OrbitStorageUnsupported (ppOrbitLevels (orbitLevelsOf ix),
                                              "array subscript of a wreath group combined with other index slots")))
+    // TREE SUBSCRIPT -- refused in P2. Unreachable by construction while the
+    // annotation and signature doors hold (nothing can allocate a tree-typed
+    // value), which is exactly why it is here: a leak through an alias the
+    // annotation scan never probed (plan trap T1) must surface as a diagnostic,
+    // not as a fresh inference var and a wrong address. Path reads are P3/P5.
+    | ArrayElem arrTy when
+        arrTy.IndexTypes |> List.exists (fun ix -> ix.IxKind = IxKTree) ->
+        let rendered =
+            arrTy.IndexTypes
+            |> List.tryPick (fun ix -> match ix with TreeIdxLike r -> Some r | _ -> None)
+            |> Option.defaultValue "TreeIdx<?>"
+        Error (TreeIdxUnsupported (rendered, "array subscript"))
     // FULL-ARITY READ OF A COMPACT GROUP -- same hole the wreath arm above
     // closes. A rank-k compact slot (SymIdx/AntisymIdx/HermitianIdx) is ONE
     // index record spanning k dims and takes k FLAT subscripts, so `A(i,j)`

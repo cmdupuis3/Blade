@@ -1,0 +1,11 @@
+// TEST: TreeIdx subscript refuses (rejects)
+// Reads of a tree slot are addressed by a complete root-to-leaf PATH, and the
+// path-to-leaf-offset arithmetic is not wired into either back end yet. The
+// signature door catches this one before the subscript arm is reached; the
+// subscript arm exists as the T1 backstop for a leak the annotation scan
+// never probed.
+// REJECT-AT: lower
+let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
+type CrystalIdx = TreeIdx<crystal>
+function f(t: Array<Float64 like CrystalIdx>) -> Float64 = { t(0) }
+// ERROR: BL4003
