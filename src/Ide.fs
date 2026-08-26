@@ -747,7 +747,13 @@ let private builtinCallOf (te: TypedExpr) : (string * TypedExpr list) option =
     | TExprIntersect (a, b) -> Some ("intersect", [a; b])
     | TExprUnion (a, b) -> Some ("union", [a; b])
     | TExprContains (a, v) -> Some ("contains", [a; v])
-    | TExprDisplayEmit (_, _, d, _) -> Some ("display.emit", [d])
+    // Both spellings report under the ONE name `display.emit`: `builtinCallNames`
+    // above is the checked-in enumeration of everything this function can
+    // return (protocol/surface.json is generated from it and a self-test pins
+    // the two together), and `emit_id` is the same builtin with one more
+    // operand, not a second builtin. The id operand IS reported, so the call
+    // record carries both argument types.
+    | TExprDisplayEmit (_, _, d, _, idOpt) -> Some ("display.emit", d :: Option.toList idOpt)
     | TExprGroupBy (v, g) -> Some ("group_by", [v; g])
     | TExprGroupKeys ks -> Some ("group_keys", ks)
     | TExprGroupBucket gk -> Some ("group_bucket", [gk])

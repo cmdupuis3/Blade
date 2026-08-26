@@ -37,6 +37,15 @@ let Version = 1
 /// can never re-open a frame, and no escaping scheme is needed on top.
 let Sentinel = "\u0001blade-display\u0001"
 
+/// The LIVE-PLOT STREAM mime. A frame carrying exactly this mime is the one
+/// kind an `ide serve` eval forwards WHILE the program runs (the `sink` below)
+/// instead of buffering it to end-of-run; every other mime keeps the buffered
+/// path unchanged. Frozen by docs/plans/plan-equivariant-nn-notebooks.md
+/// section 4 and implemented verbatim on both sides of the wire, so it is a
+/// literal here rather than a caller's spelling.
+[<Literal>]
+let StreamMime = "application/vnd.blade.plotstream.v1+json"
+
 /// Prefix for generated `meta.id`s. Frames with equal ids are alternate
 /// renders of the SAME plot, so the panel merges rather than appends -- which
 /// is what makes the REPL's re-run-the-whole-session model harmless: replaying
@@ -64,18 +73,48 @@ let tagForSession (key: string) : string =
 // compiled lane's counterpart is a `static int` in the generated C++.
 let private buffer = ResizeArray<string>()
 let mutable private ordinal = 0
+let mutable private sunk = 0
+
+/// The LIVE FRAME SINK, installed by `IdeServe`'s eval handler for the length
+/// of one evaluation and by nothing else. When it is set, a frame whose mime is
+/// exactly `StreamMime` is handed to it AS IT IS PRODUCED and is NOT buffered
+/// -- which is what turns a training loop's per-batch plot into something the
+/// editor can paint while the loop is still running.
+///
+/// Scope is deliberately narrow, because the alternative breaks the format's
+/// central pin: with no sink (`blade run`, `blade repl`, the corpus, the
+/// interpreter/g++ differential gate) EVERY frame stays an ordinary buffered
+/// sentinel line, byte-identical between the two lanes. The compiled lane has
+/// no sink at all and needs none -- its frames already reach stdout as the
+/// program runs.
+///
+/// A plain mutable is enough: one interpreter run at a time on one worker
+/// thread, and `ide serve` handles one request at a time (IdeServe.serveLoop).
+let mutable sink : (string -> unit) option = None
+
+/// Install the live frame sink. Always paired with `clearSink` in a `finally`.
+let setSink (f: string -> unit) = sink <- Some f
+
+/// Remove the live frame sink; frames go back to the buffer.
+let clearSink () = sink <- None
 
 /// Clear the per-run state. Called at the top of every interpreter run so the
-/// n-th emission of a program is always id `<tag><n>`, run after run.
+/// n-th emission of a program is always id `<tag><n>`, run after run. The sink
+/// is NOT touched: it belongs to the caller that installed it (one eval may
+/// drive more than one run), and only that caller clears it.
 let resetRun () =
     buffer.Clear()
     ordinal <- 0
+    sunk <- 0
 
 /// How many frames this run has emitted so far. Interp/Run.fs brackets each
 /// top-level binding with it to find the frame EMITTERS: a session memo must
 /// never adopt one, because a binding that does not re-run cannot re-emit, and
 /// the editor keys its plot panel on the frames of the run it is showing.
-let emitted () = buffer.Count
+/// Frames handed to the sink count too -- they were emitted, they just did not
+/// travel by way of stdout, and a streaming binding is exactly the one that
+/// must keep re-running.
+let emitted () = buffer.Count + sunk
 
 /// Take the frames this run produced, in emission order.
 let drain () : string list =
@@ -158,12 +197,44 @@ let metaTailOf (metaJson: string) : string option =
         Some (if inner = "" then "" else "," + inner)
     else None
 
+/// One frame line, without its terminating newline, with the `meta.id` text
+/// already decided. The two public composers differ in that ONE substring and
+/// in nothing else, which is the property the byte pins are here to keep.
+let private composeWith (head: string) (quoted: bool) (data: string) (metaTail: string) (idText: string) : string =
+    let payload = if quoted then "\"" + escape data + "\"" else data
+    Sentinel + head + payload + ",\"meta\":{\"id\":\"" + idText + "\"" + metaTail + "}}"
+
 /// One frame line, without its terminating newline. `head` and `metaTail` are
 /// the elaboration-time constants; `data` is the runtime payload; `ord` is this
 /// run's 1-based emission ordinal.
 let composeLine (head: string) (quoted: bool) (data: string) (metaTail: string) (ord: int) : string =
-    let payload = if quoted then "\"" + escape data + "\"" else data
-    Sentinel + head + payload + ",\"meta\":{\"id\":\"" + SessionTag + string ord + "\"" + metaTail + "}}"
+    composeWith head quoted data metaTail (SessionTag + string ord)
+
+/// `composeLine`'s twin for `display.emit_id`: the `meta.id` is a RUNTIME
+/// string rather than `<SessionTag><ordinal>`, escaped exactly like any other
+/// JSON string value (a channel name with a quote in it must not be able to
+/// open a key of its own). Everything else about the line -- head, payload
+/// quoting, meta tail, the closing braces -- is the same bytes `composeLine`
+/// produces, because it is the same code.
+let composeLineId (head: string) (quoted: bool) (data: string) (metaTail: string) (id: string) : string =
+    composeWith head quoted data metaTail (escape id)
+
+/// The head of a stream frame. Head equality IS mime equality: `headFor`
+/// embeds the mime verbatim, so comparing the whole head is the exact test
+/// "this frame's mime is `StreamMime`" without re-parsing the head.
+let private streamHead = headFor StreamMime
+
+/// Route one composed line: to the live sink when one is installed AND this is
+/// a stream frame, otherwise to the run buffer. The no-sink path is the ONLY
+/// path a `blade run` / corpus / differential-gate program can take, and it is
+/// the pre-sink code verbatim.
+let private deliver (head: string) (line: string) : bool =
+    match sink with
+    | Some f when head = streamHead ->
+        sunk <- sunk + 1
+        f line
+    | _ -> buffer.Add line
+    true
 
 /// Interpreter-lane emission: buffer one frame and answer `true` (the value
 /// `display.emit` evaluates to). Buffered rather than written because the
@@ -173,8 +244,18 @@ let composeLine (head: string) (quoted: bool) (data: string) (metaTail: string) 
 /// body, before the timing line and the print block).
 let emit (head: string) (quoted: bool) (data: string) (metaTail: string) : bool =
     ordinal <- ordinal + 1
-    buffer.Add(composeLine head quoted data metaTail ordinal)
-    true
+    deliver head (composeLine head quoted data metaTail ordinal)
+
+/// Interpreter-lane emission with a CALLER-CHOSEN `meta.id` (`display.emit_id`).
+///
+/// The run ordinal is deliberately NOT consumed: an explicit id is already
+/// stable across calls and across a session replay, and leaving the counter
+/// alone means adding a streaming plot to a notebook cannot renumber the
+/// `blade-N` ids of the ordinary `display.emit` frames around it. The generated
+/// C++ (`blade_display::emit_id`) leaves its own counter alone for the same
+/// reason, which is what keeps the two lanes byte-identical.
+let emitId (head: string) (quoted: bool) (data: string) (metaTail: string) (id: string) : bool =
+    deliver head (composeLineId head quoted data metaTail id)
 
 /// Split a program's raw stdout into the text a terminal should show and the
 /// frame JSON strings it carried. Frame lines are always whole lines at column
@@ -277,6 +358,20 @@ let cppRuntime () : string list =
       "    if (quoted) std::cout << '\"' << __blade_display_esc(data) << '\"';"
       "    else std::cout << data;"
       "    std::cout << \",\\\"meta\\\":{\\\"id\\\":\\\"\" << tag << ++__blade_display_ord"
+      "              << \"\\\"\" << metaTail << \"}}\" << \"\\n\";"
+      "    return true;"
+      "}"
+      "// display.emit_id: the same line with a RUNTIME meta.id in place of"
+      "// <tag><ordinal>, escaped like any other JSON string value. The ordinal"
+      "// counter is deliberately untouched -- Blade.Display.Frame.emitId does"
+      "// not consume one either, so an emit_id call never renumbers the plain"
+      "// emit frames around it in EITHER lane."
+      "static inline bool emit_id(const char* head, bool quoted, const std::string& data,"
+      "                           const char* metaTail, const std::string& id) {"
+      "    std::cout << \"\\x01\" \"blade-display\" \"\\x01\" << head;"
+      "    if (quoted) std::cout << '\"' << __blade_display_esc(data) << '\"';"
+      "    else std::cout << data;"
+      "    std::cout << \",\\\"meta\\\":{\\\"id\\\":\\\"\" << __blade_display_esc(id)"
       "              << \"\\\"\" << metaTail << \"}}\" << \"\\n\";"
       "    return true;"
       "}"

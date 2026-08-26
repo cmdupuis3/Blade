@@ -741,9 +741,26 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
          | ExprKind.ExprLit (LitString head), ExprKind.ExprLit (LitBool quoted), ExprKind.ExprLit (LitString metaTail) ->
             checkExpr env (IRTScalar ETString) dataE
             |> Result.map (fun tData ->
-                mkTyped (TExprDisplayEmit (head, quoted, tData, metaTail)) (IRTScalar ETBool))
+                mkTyped (TExprDisplayEmit (head, quoted, tData, metaTail, None)) (IRTScalar ETBool))
          | _ ->
             Error (Other "display.emit: internal marker arguments must be literals (this is a compiler bug -- write display.emit(mime, data) instead of calling __display_emit directly)"))
+
+    // ---- __display_emit_id(head, quoted, id, data, metaTail): display module ----
+    // `display.emit`'s twin with a caller-chosen `meta.id`. Same three
+    // elaboration-time constants and the same self-typed Bool; `id` is a
+    // SECOND runtime String, checked against ETString exactly like the payload
+    // (a chart identity that is not text has no meaning on the wire).
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_emit_id" }, [headE; quotedE; idE; dataE; metaE])
+            when (lookupVar "__display_emit_id" env).IsNone ->
+        (match headE.Kind, quotedE.Kind, metaE.Kind with
+         | ExprKind.ExprLit (LitString head), ExprKind.ExprLit (LitBool quoted), ExprKind.ExprLit (LitString metaTail) ->
+            checkExpr env (IRTScalar ETString) idE
+            |> Result.bind (fun tId ->
+            checkExpr env (IRTScalar ETString) dataE
+            |> Result.map (fun tData ->
+                mkTyped (TExprDisplayEmit (head, quoted, tData, metaTail, Some tId)) (IRTScalar ETBool)))
+         | _ ->
+            Error (Other "display.emit_id: internal marker arguments must be literals (this is a compiler bug -- write display.emit_id(mime, id, data) instead of calling __display_emit_id directly)"))
 
     // ---- __display_json_array(A): display module JSON serialization ----
     // A rank-1 or rank-2 PLAIN-DENSE numeric array rendered as JSON text

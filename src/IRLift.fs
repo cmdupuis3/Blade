@@ -560,7 +560,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     // display.emit's payload is a plain String scalar -- nothing to lift, but
     // the child still recurses so an inline form INSIDE the payload
     // expression is handled like anywhere else.
-    | IRDisplayEmit (h, q, data, m) -> IRDisplayEmit (h, q, liftExpr builder data, m)
+    | IRDisplayEmit (h, q, data, m, idOpt) ->
+        IRDisplayEmit (h, q, liftExpr builder data, m, Option.map (liftExpr builder) idOpt)
 
     // display.json_array consumes an ARRAY: recurse, then hoist an inline
     // form in the data slot into a let, exactly like IRReduce's array slot.

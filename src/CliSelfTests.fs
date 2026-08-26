@@ -1355,6 +1355,51 @@ let private runIdeEvalTests () : TH.BlockResult =
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
+        // 27. STREAMED DISPLAY FRAMES (display-frames.md section 3). A cell
+        // that runs for minutes wants its plot moving while it runs, so a
+        // frame carrying the live-plot stream mime is forwarded the instant it
+        // is produced as an out-of-band event line -- which the client parses
+        // BEFORE the pending-id lookup, so it never settles the request.
+        //
+        // Three things are pinned, and the third is the one that costs if it
+        // is wrong: the event line's exact shape, that a NON-stream frame is
+        // untouched and still arrives in the response's `display` array, and
+        // that a streamed frame is NOT also in that array. Section 3 forbids
+        // delivering one frame twice, and the panel would draw it twice.
+        let streamCell =
+            "import display as d\nlet ok = d.emit_id(\"application/vnd.blade.plotstream.v1+json\", \"chan\", "
+            + "\"{\\\"channel\\\":\\\"chan\\\",\\\"epoch\\\":-1,\\\"x\\\":[0],\\\"y\\\":[1]}\", "
+            + "\"{\\\"stream\\\":true,\\\"backend\\\":\\\"plotly\\\"}\")"
+        let plainCell =
+            "import display as d\nlet png = d.emit(\"image/png\", \"AA==\")"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" streamCell; evalReq 2 "nb" plainCell; shutdownReq ]
+        let name = "a stream frame is forwarded live as an event line, not in display[]"
+        let expectedEvent =
+            "{\"event\":\"display\",\"id\":1,\"frame\":"
+            + "{\"v\":1,\"mime\":\"application/vnd.blade.plotstream.v1+json\",\"encoding\":\"json\","
+            + "\"data\":{\"channel\":\"chan\",\"epoch\":-1,\"x\":[0],\"y\":[1]},"
+            + "\"meta\":{\"id\":\"chan\",\"stream\":true,\"backend\":\"plotly\"}}}"
+        match responses with
+        // The event precedes the response it belongs to: it is written as the
+        // program runs, and the response only exists once the run is over.
+        | [ev; streamed; replayEv; plain] when code = 0
+                                               && ev = expectedEvent
+                                               && streamed.Contains "\"id\":1" && streamed.Contains "\"kept\":true"
+                                               && not (streamed.Contains "display")
+                                               // A session re-runs every kept
+                                               // cell, so eval 2 re-emits cell
+                                               // 1's frame -- forwarded again
+                                               // under ITS id. The id is
+                                               // stable, so the panel merges
+                                               // rather than appending.
+                                               && replayEv.StartsWith "{\"event\":\"display\",\"id\":2,"
+                                               && replayEv.Contains "\"id\":\"chan\""
+                                               && plain.Contains "\"display\":[{\"v\":1,\"mime\":\"image/png\""
+                                               && not (plain.Contains "plotstream") ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally
         Directory.SetCurrentDirectory entryDir

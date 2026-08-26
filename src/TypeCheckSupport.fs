@@ -2306,7 +2306,7 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
         | TExprArrayNegate a -> [a]
         | TExprArrayConjugate a -> [a]
         | TExprContains (a, v) -> [a; v]
-        | TExprDisplayEmit (_, _, d, _) -> [d]
+        | TExprDisplayEmit (_, _, d, _, idOpt) -> d :: Option.toList idOpt
         | TExprDisplayJson (_, d) -> [d]
         | TExprDisplayNum d -> [d]
         | TExprDisplayStr d -> [d]

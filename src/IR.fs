@@ -122,7 +122,13 @@ type IRExpr =
     /// Both back ends share Blade.Display.Frame's byte format -- the
     /// interpreter buffers, the compiled binary writes std::cout, and the
     /// differential gate pins the two together.
-    | IRDisplayEmit of head: string * quoted: bool * data: IRExpr * metaTail: string
+    ///
+    /// `id` is None for `display.emit` (the frame's `meta.id` is the run's
+    /// `<SessionTag><ordinal>`) and Some for `display.emit_id`, whose id is
+    /// that runtime String. One node, one operand of difference: every walker,
+    /// both back ends and the interpreter would otherwise carry a second arm
+    /// that is a copy of the first.
+    | IRDisplayEmit of head: string * quoted: bool * data: IRExpr * metaTail: string * id: IRExpr option
     /// display.json_array(A): rank-1/rank-2 numeric array -> JSON text
     /// (String). Pure (unlike IRDisplayEmit). `rank` pinned at typecheck;
     /// formatting is the shared 15-significant-digit byte-parity rule.
@@ -1836,7 +1842,12 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRIntersect (a, b) -> [a; b], (function [a'; b'] -> IRIntersect (a', b') | _ -> badChildren "IRIntersect")
     | IRUnion (a, b) -> [a; b], (function [a'; b'] -> IRUnion (a', b') | _ -> badChildren "IRUnion")
     | IRContains (a, v) -> [a; v], (function [a'; v'] -> IRContains (a', v') | _ -> badChildren "IRContains")
-    | IRDisplayEmit (h, q, d, m) -> [d], (function [d'] -> IRDisplayEmit (h, q, d', m) | _ -> badChildren "IRDisplayEmit")
+    // The id operand, when present, is a child like the payload: a walker that
+    // skipped it would rewrite the payload and leave a stale id expression.
+    | IRDisplayEmit (h, q, d, m, None) ->
+        [d], (function [d'] -> IRDisplayEmit (h, q, d', m, None) | _ -> badChildren "IRDisplayEmit")
+    | IRDisplayEmit (h, q, d, m, Some i) ->
+        [d; i], (function [d'; i'] -> IRDisplayEmit (h, q, d', m, Some i') | _ -> badChildren "IRDisplayEmit")
     | IRDisplayJson (r, d) -> [d], (function [d'] -> IRDisplayJson (r, d') | _ -> badChildren "IRDisplayJson")
     | IRDisplayNum d -> [d], (function [d'] -> IRDisplayNum d' | _ -> badChildren "IRDisplayNum")
     | IRDisplayStr d -> [d], (function [d'] -> IRDisplayStr d' | _ -> badChildren "IRDisplayStr")

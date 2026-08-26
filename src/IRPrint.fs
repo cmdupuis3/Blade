@@ -526,8 +526,10 @@ let rec exprAttrs (expr: IRExpr) : ExprAttrs =
     //    them, or drop one whose value is unused. This is the "future impure
     //    construct" the header anticipated; the payload's own attrs still
     //    merge in (it can reference bindings like anything else).
-    | IRDisplayEmit (_, _, data, _) ->
-        { exprAttrs data with IsPure = false }
+    | IRDisplayEmit (_, _, data, _, idOpt) ->
+        // The emit_id id is an ordinary operand: its own free vars merge in
+        // beside the payload's, and the whole node stays impure.
+        { mergeMany (exprAttrs data :: (idOpt |> Option.toList |> List.map exprAttrs)) with IsPure = false }
 
     | IRApp (f, args, _) ->
         let baseAttrs = mergeMany (exprAttrs f :: List.map exprAttrs args)
