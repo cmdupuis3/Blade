@@ -18,6 +18,7 @@ re-added after a mass deletion left dangling references).
 | [plan-llvm-backend.md](plan-llvm-backend.md) | IMPLEMENTED through M5, measured | `BLADE_LLVM` lane: emits, refuses whole-program, `blade test llvm` / `llvm-bench`. Codegen 4.5x faster than g++; runtime at parity — the fact-emission thesis stays refuted, R6 (toolchain) is what pays |
 | [plan-mlir-backend.md](plan-mlir-backend.md) | PROPOSAL: unscheduled | If-we-did-it MLIR architecture sketch (cuda-tile target) |
 | [plan-llvm-runtime-shapes.md](plan-llvm-runtime-shapes.md) | RAGGED LANDED; group_by open | LLVM lane emits ragged/grouped shapes natively (RaggedIdx, EnumIdx/group_by): static ragged first (fully compile-time), then operand-valued extents, then CSR group_by — pure `.ll` for annotated key regimes, shim hash only for dynamic discovery |
+| [plan-equivariant-nn-notebooks.md](plan-equivariant-nn-notebooks.md) | INFRA IMPLEMENTED; notebooks next | Three showcase notebooks (NB1a Tetris deduction, NB1b MD17-aspirin benchmark with live per-batch loss streaming, NB2 moment jet via the probe-verified `derive_poly` mean identity) + the display-stream infra (sink, `emit_id`, `plot.stream`) + the C-track reverse-AD patch (§5). 26-entry gap census; flat-state SGD, Int-primal batching, grad-over-provider, in-recursion emit all probe-verified |
 
 Conventions: status changes edit the doc's header and this table — never move or
 rename the file. Docs for landed work may be deleted in bulk sweeps, but sweep
