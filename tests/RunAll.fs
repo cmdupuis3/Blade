@@ -202,6 +202,15 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // mismatch. Plus the hand-unrolled depth-2 E/B/A nest, the depth-1
     // triangular-offset anchors, and the int64 wall at depth 3 / n = 1000.
     let orbRank = Blade.Tests.OrbRankReview.runOrbRankTests ()
+    // The TreeIdx bijection layer (TreeRank.fs, plan-graphs-trees P1): shape
+    // validation, the derived preorder tables, and the path <-> leaf-offset
+    // pair, pinned against a brute-force recursion over an INDEPENDENT
+    // nested-shape ADT — as a SET and as an ORDER, since the leaf-offset order
+    // is contractually the lexicographic order on paths and a forward/backward
+    // round trip cannot catch that convention drifting. Plus subtree
+    // contiguity over every node, the degenerate shapes (single leaf, flat,
+    // deep-narrow, wide-shallow) and a seeded-random sweep.
+    let treeRank = Blade.Tests.TreeRankReview.runTreeRankTests ()
     // Compiler-native CG tables (WignerTables.fs) vs closed forms (ML arc).
     let wigner = Blade.Tests.WignerTablesReview.runWignerTablesTests ()
     // Sym^j(V_l) occurrence tables (SymPowerTables.fs, stage 2b-i): exact
@@ -470,7 +479,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let blocks =
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
-          yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
+          yield shape; yield oracles; yield orbRank; yield treeRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
           yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield moduleResolve
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
