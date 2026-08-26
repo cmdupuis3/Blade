@@ -601,7 +601,7 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 25 | Remembered "gram compact-operand ICE" | UNKNOWN | no corroborating source/corpus evidence found | no | needs a repro before any fix |
 | 26 | Losses must be dimensionless (unit-carrying returns refused) | BD | `Grad.fs:110` | no (standardize in `.fsx`) | document in notebook |
 | 27 | BL4003's suggested remedy `(expr : Tag)` does not typecheck for a non-literal Int (BL3001 expected Nat) — only literals cast | BUG (message) | 3-line repro, NB1a build | no (`__`-prefix exemption) | message text at `TypeCheckInfer.fs:3939` / `TypeCheckSupport.fs:1114` |
-| 28 | Top-level `method_for … \|> compute` array read from a FUNCTION BODY emits C++ that never declares it — raw g++ error, no BL code | BUG | 5-line repro, NB1a build | NB-soft (use `let rec` tables) | the main-local capture seam (`fix/kernel-capture-module-binding`) |
+| 28 | REWRITTEN 2026-08-26 (idiom audit): the originally recorded trigger does NOT reproduce — top-level combinator arrays read from function bodies, kernels, rec arms, and even grad'd bodies all work. The REAL trigger (12-line repro): a function whose body is a `method_for … \|> compute` kernel capturing an ARRAY PARAMETER, calling a helper that reads a MODULE-LEVEL array — the module array's C++ declaration is omitted (raw g++ error, no BL code) | BUG (exact repro) | idiom-audit minimization; bit `rot_flat` in NB1b | NB-soft (one site reverted + annotated) | the main-local capture seam (`fix/kernel-capture-module-binding`) |
 | 29 | Differentiable `let rec` requires a LITERAL extent; `let static` from sizing builtins rejected (BL5500) | MF | every slice fn in NB1a | NB-soft (write literals) | Grad/GradExpand rec-array arm |
 | 30 | BL8005 step-budget exhaustion does NOT trigger the g++ fallback (`Interp/Repl.fs:132,147` route only 125/70); `MaxSteps` hard-coded | BUG/MF | measured, NB1a build | **NB1b-hard** (cells must be sized to interp) | `Interp/Repl.fs` classification, or settable `MaxSteps` |
 | 31 | Scalar × array AND array + array elementwise inside a reverse-differentiated body: BL7004 kernel-body refusal | MF/WE | NB1a `scores_of`; NB1b probe pr3 | no (componentwise literals) | CodeGen kernel-body arm / `GradExpand.fs` |
@@ -624,6 +624,9 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 47 | `ide serve` interleaves live `{"event":"display"}` lines with eval responses on one stdout stream; a one-line-per-request client desynchronises silently and blocks | BD/trap | cost a 10-min hang in the windowed-arm drive harness | no (loop until a non-event line) | doc the read loop in display-frames.md §3 |
 | 48 | Notebook eval responses give the cell-result binding an empty `name` and truncate `value` past ~5 elements — automated drives cannot read full printed values from the protocol | MF | raw response inspected | no (verify via `blade run`) | `IdeServe.handleEval` binding renderer |
 | 49 | Sizing builtins outside `let static` position leak an internal name: `BL2001: Unbound variable: __ml_stat_total_dim` | BUG (message) | 1-line repro | no (use `let static`) | `MLElaborate` static-op arm |
+| 50 | No combinator expresses SEGMENTED assembly: `join` concatenates whole arrays only (segments-at-offsets need a per-segment `subset`; permutation gathers aren't concatenation). Sub-item: heterogeneous-extent `join` WORKS but has zero corpus coverage — a `stack-join/014` pin is owed | MF + missing pin | idiom audit probes | no | `subset`-then-`join` sugar, or a segmented `join` form; corpus pin |
+| 51 | No combinator can produce an `IrrepsIdx`-typed value (operands fenced to plain slots, results hard-code plain/`__seq` indices) — every irreps assembly is an annotated array literal | MF | `TypeCheckInfer.fs:3446/3517/4227` | NB-soft | an `ml.assemble(SPEC, …)` producer, or `join` inheriting an irreps operand's index record |
+| 52 | `replicate(1, pure(x)) \|> compute` collapses to a SCALAR, not a 1-element array; `join` then rejects it BL4004 | BUG/trap | idiom audit probe | no | replicate extent-1 arm |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
@@ -660,9 +663,15 @@ constants compiler-owned.
    null-excess linear signal; best jet MAE; the constraint is now
    optimization, not representation — §5 and longer/regularized training
    are the levers.
-8. ▶ **Idiom audit of NB1b** (user-directed): classify every `let rec` and
-   long positional literal as rewrite / blocked-idiomatic (cite the census
-   gap) / genuinely-sequential; apply the available rewrites byte-stably.
+8. ✅ **Idiom audit of NB1b done 2026-08-26**: 64 `let rec` → 23 (41
+   rewritten to loop objects, 22 blocked with in-file gap citations, 1
+   genuine recurrence kept); the 499-slot `sgd_step` assembly is now
+   heterogeneous-extent `join`; stdout byte-identical; census #28 rewritten
+   with the exact minimized trigger; #50–#52 filed. Follow-ups owed: the
+   same sweep over tetris (26 index-driven sites) and the moment-jet
+   notebook (~197, incl. 13 running-sum scans to re-examine), the
+   `stack-join/014` heterogeneous-join corpus pin, and a CLAUDE.md
+   style-table addition (proposed text in the audit report).
 9. Revisit: outputs persistence decision (#9), `ml.rotate` (#14), the memo
    bug (#40) and the interp/codegen divergence (#44) as the notebook-UX
    bugfixes worth doing first (delegated).

@@ -154,9 +154,7 @@ sizes
 // %%
 // Flat pair index q -> the unordered pair (i, j), i < j, row-major over the
 // strict upper triangle. The row is the largest i with S(i) = (41 i - i^2)/2
-// at most q, i.e. i = floor((41 - sqrt(1681 - 8q))// The pin is the same indicator count: of the eight rotations, how many have a
-// relative deviation `|F(R r) - R F(r)| / |F(r)|` above 1e-12, and how many
-// above 1e-13.2).
+// at most q, i.e. i = floor((41 - sqrt(1681 - 8q)) / 2).
 function tri_i(q: Int) -> Int64 = {
     let d = sqrt(1681.0 - 8.0 * Float64(q))
     Int64(floor((41.0 - d) * 0.5 + 0.000000001))
@@ -165,20 +163,8 @@ function tri_j(q: Int) -> Int64 = {
     let i = tri_i(q)
     Int64(q) - (i * 20 - i * (i - 1) / 2) + i + 1
 }
-let __pi = {
-    let rec a: Array<Int64 like Idx<NPAIR>> =
-        match a with
-        | zero -> zero
-        | prefix :: q -> prefix :: tri_i(q)
-    a
-}
-let __pj = {
-    let rec a: Array<Int64 like Idx<NPAIR>> =
-        match a with
-        | zero -> zero
-        | prefix :: q -> prefix :: tri_j(q)
-    a
-}
+let __pi = method_for(range<Idx<NPAIR>>) <@> lambda(q) -> tri_i(q) |> compute
+let __pj = method_for(range<Idx<NPAIR>>) <@> lambda(q) -> tri_j(q) |> compute
 // Per pair, per species: how much that pair contributes to the species-s
 // histogram. An ordered-pair sum pooled by the CENTRAL atom's species equals
 // the unordered sum with weight w(i, s) + w(j, s) -- computed once, here, so
@@ -189,24 +175,12 @@ function pw_of(m: Int) -> Float = {
     let s = m - q * 3
     (__spec(__pi(q), s) + __spec(__pj(q), s)) * __invn(s)
 }
-let __pw = {
-    let rec a: Array<Float like Idx<630>> =
-        match a with
-        | zero -> zero
-        | prefix :: m -> prefix :: pw_of(m)
-    a
-}
+let __pw = method_for(range<Idx<630>>) <@> lambda(m) -> pw_of(m) |> compute
 // Shell centres and width, in units of the data's own RMS atomic radius.
 let __sig = __stats(2)
 let __isig = 1.0 / __sig
 let __shw = 1.0 / (0.185 * __sig * 0.185 * __sig)
-let __shr = {
-    let rec a: Array<Float like Idx<NBIN>> =
-        match a with
-        | zero -> zero
-        | prefix :: b -> prefix :: (0.34 + 0.2 * Float64(b)) * __sig
-    a
-}
+let __shr = method_for(range<Idx<NBIN>>) <@> lambda(b) -> (0.34 + 0.2 * Float64(b)) * __sig |> compute
 
 function dslot(p: Array<Float like Idx<NP3>>, q: Int) -> Float = {
     let i = __pi(q)
@@ -222,6 +196,12 @@ function gslot(__dt: Array<Float like Idx<NPAIR>>, m: Int) -> Float = {
     let u = __dt(q) - __shr(b)
     exp(-u * u * __shw)
 }
+// From here to `as_h` every `let rec` sits in the call graph of `ad.grad`
+// (`hraw` <- `hfeat` <- `energy`, and `h_tr_of` <- `sq1` <- `loss`), so the
+// declarative form -- `reduce(method_for(range<I>) <@> k |> compute, (+))` --
+// is refused: gap #15, reverse mode admits no combinators (BL5500, the
+// `GradExpand.fs:478/518` fence). The flat `let rec` is the differentiable
+// spelling of a map, not a recurrence: no arm reads `prefix`.
 function pslot(__gb: Array<Float like Idx<1260>>, k: Int) -> Float = {
     let s = k / NBIN
     let b = k - s * NBIN
@@ -252,7 +232,9 @@ function cslot(p: Array<Float like Idx<NP3>>, __yt: Array<Float like Idx<189>>, 
 // channels and 3 pooled l = 0 values, then the l = 1 block (3 multiplicities
 // x 3 components) and the l = 2 block (3 x 5), in the order `IrrepsIdx<HSPEC>`
 // prescribes. Every downstream op reads that order from the spec, not from a
-// convention.
+// convention. It stays a positional literal because it is a PERMUTATION
+// gather of `pb` and `cb`, which no assembly combinator expresses: `stack`
+// demands equal extents and `join` concatenates in operand order (gap #50).
 function hraw(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<DH>> = {
     let rec __dt: Array<Float like Idx<210>> =
         match __dt with
@@ -280,75 +262,37 @@ function hraw(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<DH>> = {
      cb(19), cb(20), cb(21), cb(4), cb(5), cb(6), cb(7), cb(8), cb(13),
      cb(14), cb(15), cb(16), cb(17), cb(22), cb(23), cb(24), cb(25), cb(26)]
 }
+// Flattening a geometry is a map, and nothing here is differentiated, so it
+// is written as one.
 function pos_tr_flat(n: Int) -> Array<Float like Idx<NP3>> = {
     let __row = __pos_tr(n)
-    let rec q: Array<Float like Idx<63>> =
-        match q with
-        | zero -> zero
-        | prefix :: k -> prefix :: __row(k / 3, k - (k / 3) * 3)
-    q
+    method_for(range<Idx<NP3>>) <@> lambda(k) -> __row(k / 3, k - (k / 3) * 3) |> compute
 }
 function pos_te_flat(n: Int) -> Array<Float like Idx<NP3>> = {
     let __row = __pos_te(n)
-    let rec q: Array<Float like Idx<63>> =
-        match q with
-        | zero -> zero
-        | prefix :: k -> prefix :: __row(k / 3, k - (k / 3) * 3)
-    q
+    method_for(range<Idx<NP3>>) <@> lambda(k) -> __row(k / 3, k - (k / 3) * 3) |> compute
 }
 // The featurization depends on no weight, so it is computed ONCE, outside
-// every gradient: one row per geometry.
-let __r2_tr = {
-    let rec h: Array<Float like Idx<NTR>, Idx<DH>> =
-        match h with
-        | zero -> zero
-        | prefix :: n -> prefix :: hraw(pos_tr_flat(n))
-    h
-}
-let __r2_te = {
-    let rec h: Array<Float like Idx<NTE>, Idx<DH>> =
-        match h with
-        | zero -> zero
-        | prefix :: n -> prefix :: hraw(pos_te_flat(n))
-    h
-}
+// every gradient -- which is also what lets these two be row maps: a loop
+// object raising rank by returning a row, rather than a `let rec` faking one.
+let __r2_tr = method_for(range<Idx<NTR>>) <@> lambda(n) -> hraw(pos_tr_flat(n)) |> compute
+let __r2_te = method_for(range<Idx<NTE>>) <@> lambda(n) -> hraw(pos_te_flat(n)) |> compute
 
 // Calibration, per (channel, block). Invariant channels get a centre and a
 // spread; an l > 0 block gets ONE spread shared by its whole multiplicity,
 // because a per-component rescale would not commute with a rotation.
 function rmu(i: Int) -> Float = {
-    let rec a: Array<Float like Idx<NTR>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: __r2_tr(n, i)
-    reduce(a, (+)) / 500.0
+    let col = method_for(range<Idx<NTR>>) <@> lambda(n) -> __r2_tr(n, i) |> compute
+    reduce(col, (+)) / 500.0
 }
 function rms2(i: Int) -> Float = {
-    let rec a: Array<Float like Idx<NTR>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: __r2_tr(n, i) * __r2_tr(n, i)
-    reduce(a, (+)) / 500.0
+    let col = method_for(range<Idx<NTR>>) <@> lambda(n) -> __r2_tr(n, i) * __r2_tr(n, i) |> compute
+    reduce(col, (+)) / 500.0
 }
-let __rmu = {
-    let rec m: Array<Float like Idx<DH>> =
-        match m with
-        | zero -> zero
-        | prefix :: i -> prefix :: rmu(i)
-    m
-}
-let __rms2 = {
-    let rec m: Array<Float like Idx<DH>> =
-        match m with
-        | zero -> zero
-        | prefix :: i -> prefix :: rms2(i)
-    m
-}
+let __rmu = method_for(range<Idx<DH>>) <@> lambda(i) -> rmu(i) |> compute
+let __rms2 = method_for(range<Idx<DH>>) <@> lambda(i) -> rms2(i) |> compute
 function grp_ms(base: Int, d: Int) -> Float = {
-    let rec a: Array<Float like Idx<5>> =
-        match a with
-        | zero -> zero
-        | prefix :: j -> prefix :: (if j < d then __rms2(base + j) else 0.0)
+    let a = method_for(range<Idx<5>>) <@> lambda(j) -> (if j < d then __rms2(base + j) else 0.0) |> compute
     reduce(a, (+)) / Float64(d)
 }
 function hmu_of(i: Int) -> Float = if i < 21 then __rmu(i) else 0.0
@@ -358,20 +302,13 @@ function hsc_of(i: Int) -> Float = {
                   else grp_ms(30 + ((i - 30) / 5) * 5, 5))
     if v < 0.000000000001 then 0.0 else 1.0 / sqrt(v)
 }
-let __hmu = {
-    let rec m: Array<Float like Idx<DH>> =
-        match m with
-        | zero -> zero
-        | prefix :: i -> prefix :: hmu_of(i)
-    m
-}
-let __hsc = {
-    let rec m: Array<Float like Idx<DH>> =
-        match m with
-        | zero -> zero
-        | prefix :: i -> prefix :: hsc_of(i)
-    m
-}
+let __hmu = method_for(range<Idx<DH>>) <@> lambda(i) -> hmu_of(i) |> compute
+let __hsc = method_for(range<Idx<DH>>) <@> lambda(i) -> hsc_of(i) |> compute
+// `as_h` re-types 45 numbers as a representation. It has to be a positional
+// literal: no combinator can produce an `IrrepsIdx` leading axis -- `stack`
+// and `join` fence their operands to plain index slots and hard-code a plain
+// (resp. inherited-plain) result index, so an annotated array literal and the
+// `ml.*` producers are the only two routes to an irreps-typed value (gap #51).
 function as_h(f: Array<Float like Idx<DH>>) -> Array<Float like IrrepsIdx<HSPEC>> =
     [f(0), f(1), f(2), f(3), f(4), f(5), f(6), f(7), f(8), f(9),
      f(10), f(11), f(12), f(13), f(14), f(15), f(16), f(17), f(18), f(19),
@@ -395,13 +332,11 @@ function h_tr_of(n: Int) -> Array<Float like IrrepsIdx<HSPEC>> = {
         | prefix :: k -> prefix :: (__r2_tr(n, k) - __hmu(k)) * __hsc(k)
     as_h(f)
 }
-function h_te_of(n: Int) -> Array<Float like IrrepsIdx<HSPEC>> = {
-    let rec f: Array<Float like Idx<45>> =
-        match f with
-        | zero -> zero
-        | prefix :: k -> prefix :: (__r2_te(n, k) - __hmu(k)) * __hsc(k)
-    as_h(f)
-}
+// The test twin of `h_tr_of`, and the contrast is the point: nothing
+// differentiates through the test split, so this one gets to say what it
+// means. Its identical-looking twin above cannot (gap #15).
+function h_te_of(n: Int) -> Array<Float like IrrepsIdx<HSPEC>> =
+    as_h(method_for(range<Idx<45>>) <@> lambda(k) -> (__r2_te(n, k) - __hmu(k)) * __hsc(k) |> compute)
 // Geometry 0, raw: histogram slot 0 (carbon centres, innermost shell) and
 // the first component of the pooled l = 1 block, then the two calibration
 // scales those slots get. The histogram counts about two pairs; the multipole
@@ -463,6 +398,11 @@ function invariants(h: Array<Float like IrrepsIdx<HSPEC>>,
     let ne = ml.norms(ESPEC, e)
     let n3 = ml.norms(MSPEC, m3)
     let s3 = ml.scalars(MSPEC, m3)
+    // Five segments of five different extents, taken at five different
+    // offsets, concatenated into one. `stack` refuses ragged operands
+    // (BL4004) and `join` concatenates whole arrays in operand order, so
+    // even outside a gradient this needs a `subset`-per-segment first
+    // (gap #50) -- and inside `ad.grad(loss)`, gap #15 forbids both anyway.
     [sh(0), sh(1), sh(2), sh(3), sh(4), sh(5), sh(6), sh(7),
      sh(8), sh(9), sh(10), sh(11), sh(12), sh(13), sh(14), sh(15),
      sh(16), sh(17), sh(18), sh(19), sh(20), nh(21), nh(22), nh(23),
@@ -492,6 +432,11 @@ let static NPAR = 249
 let static NP2 = 498
 let static SW = 499
 
+// Eight slicers rather than one because the return EXTENT differs per block
+// and there is no dependent return type; and each is a `let rec` rather than
+// the obvious `subset(__s, base, n)` because all eight are reached from
+// `ad.grad(loss)`, where every combinator -- `subset` included -- is refused
+// (gap #15). Read them as eight maps that are not allowed to say so.
 function wp(__s: Array<Float like Idx<SW>>, base: Int, k: Int) -> Float = __s(base + k)
 function we_of(__s: Array<Float like Idx<SW>>) -> Array<Float like Idx<WE>> = {
     let rec o: Array<Float like Idx<48>> =
@@ -578,6 +523,8 @@ function ev_raw(h: Array<Float like IrrepsIdx<HSPEC>>, __s: Array<Float like Idx
     let m3 = block_m(m2, scal49(wt3_of(__s), gain_m(m2)), wl3_of(__s))
     invariants(h, e, m3)
 }
+// Positional literal for the same reason as `as_h`: an `IrrepsIdx` result
+// index is unreachable from `stack`/`join`/`sequence` (gap #51).
 function as_ev(c: Array<Float like Idx<NEV>>) -> Array<Float like IrrepsIdx<EVSPEC>> =
     [c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7), c(8), c(9),
      c(10), c(11), c(12), c(13), c(14), c(15), c(16), c(17), c(18), c(19),
@@ -591,53 +538,27 @@ function as_ev(c: Array<Float like Idx<NEV>>) -> Array<Float like IrrepsIdx<EVSP
 // they are measured in. `rand.<family>` is legal only as a bare top-level
 // binding value, so the seed row is drawn first and scaled second.
 let __n0 = r.normal(20260826, SW)
-let __pmask = {
-    let rec m: Array<Float like Idx<SW>> =
-        match m with
-        | zero -> zero
-        | prefix :: k -> prefix :: (if k < OFF_R then 1.0 else 0.0)
-    m
-}
+let __pmask = method_for(range<Idx<SW>>) <@> lambda(k) -> (if k < OFF_R then 1.0 else 0.0) |> compute
 let __w0 = (0.4 * __n0) * __pmask
-let __ev0 = {
-    let rec v: Array<Float like Idx<NTR>, Idx<NEV>> =
-        match v with
-        | zero -> zero
-        | prefix :: n -> prefix :: ev_raw(h_tr_of(n), __w0)
-    v
-}
+let __ev0 = method_for(range<Idx<NTR>>) <@> lambda(n) -> ev_raw(h_tr_of(n), __w0) |> compute
 function evmean(j: Int) -> Float = {
-    let rec a: Array<Float like Idx<NTR>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: __ev0(n, j)
-    reduce(a, (+)) / 500.0
+    let col = method_for(range<Idx<NTR>>) <@> lambda(n) -> __ev0(n, j) |> compute
+    reduce(col, (+)) / 500.0
 }
 function evsd(j: Int) -> Float = {
     let mu = evmean(j)
-    let rec a: Array<Float like Idx<NTR>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: (__ev0(n, j) - mu) * (__ev0(n, j) - mu)
-    sqrt(reduce(a, (+)) / 500.0)
+    let dev = method_for(range<Idx<NTR>>) <@> lambda(n) -> (__ev0(n, j) - mu) * (__ev0(n, j) - mu) |> compute
+    sqrt(reduce(dev, (+)) / 500.0)
 }
-let __ivmu = {
-    let rec m: Array<Float like Idx<NEV>> =
-        match m with
-        | zero -> zero
-        | prefix :: j -> prefix :: evmean(j)
-    m
-}
+let __ivmu = method_for(range<Idx<NEV>>) <@> lambda(j) -> evmean(j) |> compute
 // A channel whose spread is below the calibration floor is scaled BY the
 // floor, not by its own vanishing spread: dividing by 0.002 would hand the
 // readout a hundredfold amplifier on rounding noise.
-let __ivsc = {
-    let rec m: Array<Float like Idx<NEV>> =
-        match m with
-        | zero -> zero
-        | prefix :: j -> prefix :: (if evsd(j) < 0.05 then 20.0 else 1.0 / evsd(j))
-    m
-}
+let __ivsc = method_for(range<Idx<NEV>>) <@> lambda(j) -> (if evsd(j) < 0.05 then 20.0 else 1.0 / evsd(j)) |> compute
+// Back inside the differentiated call graph (`fwd` <- `loss`), so back to the
+// flat `let rec` map: gap #15 again, and gap #36 on top of it -- a `let rec`
+// whose leading axis is `IrrepsIdx` is refused outright, which is why the
+// standardization and the re-typing are two steps rather than one.
 function ev_std(v: Array<Float like Idx<NEV>>) -> Array<Float like IrrepsIdx<EVSPEC>> = {
     let rec c: Array<Float like Idx<39>> =
         match c with
@@ -731,32 +652,33 @@ function sq1(__s: Array<Float like Idx<SW>>, n: Int) -> Float = {
     d * d
 }
 function loss(__s: Array<Float like Idx<SW>>, ep: Int, b: Int) -> Float = {
+    // The batch is a map, not a recurrence -- but this IS the body of
+    // `ad.grad`, so the map has to be spelled as a `let rec` (gap #15).
     let rec errs: Array<Float like Idx<20>> =
         match errs with
         | zero -> zero
         | prefix :: j -> prefix :: sq1(__s, __perm(ep, b * BS + j))
     reduce(errs, (+)) / 20.0
 }
-function blk(__s: Array<Float like Idx<SW>>, base: Int) -> Array<Float like Idx<NPAR>> = {
-    let rec o: Array<Float like Idx<249>> =
-        match o with
-        | zero -> zero
-        | prefix :: k -> prefix :: wp(__s, base, k)
-    o
-}
-function cat_at(__wn: Array<Float like Idx<NPAR>>, __vn: Array<Float like Idx<NPAR>>, lv: Float, k: Int) -> Float =
-    if k < NPAR then __wn(k) else (if k < NP2 then __vn(k - NPAR) else lv)
+function blk(__s: Array<Float like Idx<SW>>, base: Int) -> Array<Float like Idx<NPAR>> =
+    method_for(range<Idx<NPAR>>) <@> lambda(k) -> wp(__s, base, k) |> compute
 function sgd_step(s: Array<Float like Idx<SW>>, ep: Int, b: Int) -> Array<Float like Idx<SW>> = {
     let mut ds = replicate(SW, pure(0.0)) |> compute
     let lv = ad.grad(loss)(s, ep, b, ds)
     let vn = MU * blk(s, NPAR) - LR * blk(ds, 0)
     let wn = blk(s, 0) + vn
-    let rec o: Array<Float like Idx<SW>> =
-        match o with
-        | zero -> zero
-        | prefix :: k -> prefix :: cat_at(wn, vn, lv, k)
-    o
+    // The next row is three segments of UNEQUAL extent -- 249 weights, 249
+    // momenta, one loss. `stack` refuses ragged operands (BL4004); `join` is
+    // the combinator that admits them, and this is legal here precisely
+    // because `sgd_step` CALLS `ad.grad` rather than living inside it.
+    // (`replicate(1, pure(lv)) |> compute` would NOT do: at extent 1 it
+    // collapses to a scalar and `join` then rejects it -- gap #52.)
+    let lrow: Array<Float like Idx<1>> = [lv]
+    join(wn, vn, lrow, 0)
 }
+// THE recursive array of this notebook, and the only one here that earns the
+// name: every row reads the row before it. Nothing about it is index-driven,
+// and no loop object can express it.
 let __traj = {
     let rec t: Array<Float like Idx<NROW>, Idx<SW>> =
         match t with
@@ -824,41 +746,14 @@ function sq_te(__s: Array<Float like Idx<SW>>, n: Int) -> Float = {
     d * d
 }
 function ab_te(__s: Array<Float like Idx<SW>>, n: Int) -> Float = abs(fwd(h_te_of(n), __s) - __e_te(n))
-let te_mse = {
-    let rec a: Array<Float like Idx<NTE>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: sq_te(final_row, n)
-    reduce(a, (+)) / 100.0
-}
-let te_mae = {
-    let rec a: Array<Float like Idx<NTE>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: ab_te(final_row, n)
-    reduce(a, (+)) / 100.0
-}
-let tr_mse = {
-    let rec a: Array<Float like Idx<NTR>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: sq1(final_row, n)
-    reduce(a, (+)) / 500.0
-}
-let base_mse = {
-    let rec a: Array<Float like Idx<NTE>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: __e_te(n) * __e_te(n)
-    reduce(a, (+)) / 100.0
-}
-let base_mae = {
-    let rec a: Array<Float like Idx<NTE>> =
-        match a with
-        | zero -> zero
-        | prefix :: n -> prefix :: abs(__e_te(n))
-    reduce(a, (+)) / 100.0
-}
+// Five scores, five one-line folds. `range<Idx<NTE>>` rather than the split's
+// own index type on purpose: NTE and NTR are the notebook's declared budget,
+// not whatever the store happens to hold.
+let te_mse = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> sq_te(final_row, n) |> compute, (+)) / 100.0
+let te_mae = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> ab_te(final_row, n) |> compute, (+)) / 100.0
+let tr_mse = reduce(method_for(range<Idx<NTR>>) <@> lambda(n) -> sq1(final_row, n) |> compute, (+)) / 500.0
+let base_mse = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> __e_te(n) * __e_te(n) |> compute, (+)) / 100.0
+let base_mae = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> abs(__e_te(n)) |> compute, (+)) / 100.0
 let scores = [base_mse, te_mse, tr_mse, base_mae * __stats(1), te_mae * __stats(1)]
 scores
 
@@ -890,6 +785,12 @@ function rot_slot(k: Int, p: Array<Float like Idx<NP3>>, m: Int) -> Float = {
     let c = m - a * 3
     __rot(k, c * 3) * p(a * 3) + __rot(k, c * 3 + 1) * p(a * 3 + 1) + __rot(k, c * 3 + 2) * p(a * 3 + 2)
 }
+// This one wants to be `method_for(range<Idx<NP3>>) <@> lambda(m) ->
+// rot_slot(k, p, m) |> compute` and cannot be: when a kernel captures an
+// ARRAY PARAMETER (`p`) and its body calls a helper that reads a MODULE-LEVEL
+// array (`rot_slot` reads `__rot`), the emitted C++ never declares that
+// module array -- a raw g++ "'__rot' was not declared in this scope", no BL
+// code (gap #28, now with an exact trigger). The `let rec` is the workaround.
 function rot_flat(k: Int, p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<NP3>> = {
     let rec q: Array<Float like Idx<63>> =
         match q with
@@ -904,28 +805,10 @@ function energy(p: Array<Float like Idx<NP3>>) -> Float = fwd(hfeat(p), final_ro
 let __p0 = pos_te_flat(0)
 let e_ref = energy(__p0)
 function edev(k: Int) -> Float = abs(energy(rot_flat(k, __p0)) - e_ref)
-let __edev = {
-    let rec a: Array<Float like Idx<8>> =
-        match a with
-        | zero -> zero
-        | prefix :: k -> prefix :: edev(k)
-    a
-}
+let __edev = method_for(range<Idx<8>>) <@> lambda(k) -> edev(k) |> compute
 function ind(a: Float, b: Float) -> Float = if a > b then 1.0 else 0.0
-let e_over_1e12 = {
-    let rec a: Array<Float like Idx<8>> =
-        match a with
-        | zero -> zero
-        | prefix :: k -> prefix :: ind(__edev(k), 0.000000000001)
-    reduce(a, (+))
-}
-let e_over_1e13 = {
-    let rec a: Array<Float like Idx<8>> =
-        match a with
-        | zero -> zero
-        | prefix :: k -> prefix :: ind(__edev(k), 0.0000000000001)
-    reduce(a, (+))
-}
+let e_over_1e12 = reduce(method_for(range<Idx<8>>) <@> lambda(k) -> ind(__edev(k), 0.000000000001) |> compute, (+))
+let e_over_1e13 = reduce(method_for(range<Idx<8>>) <@> lambda(k) -> ind(__edev(k), 0.0000000000001) |> compute, (+))
 __edev
 let inv_report = [e_over_1e12, e_over_1e13]
 inv_report
@@ -959,72 +842,40 @@ inv_report
 // a force field. It transforms correctly; it is not accurate.
 
 // %%
+// `ad.grad` is CALLED here, not entered, so everything after the call is
+// ordinary array code: negating the gradient is whole-array arithmetic and
+// the deviations below are folds over elementwise products. Each product is
+// bound before it is reduced -- `reduce(A * B, (+))` in expression position
+// is accepted by the interpreter and refused by codegen (gap #44).
 function force_of(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<NP3>> = {
     let mut dp = replicate(NP3, pure(0.0)) |> compute
     let __e = ad.grad(energy)(p, dp)
-    let rec f: Array<Float like Idx<63>> =
-        match f with
-        | zero -> zero
-        | prefix :: m -> prefix :: 0.0 - dp(m)
-    f
+    method_for(range<Idx<NP3>>) <@> lambda(m) -> 0.0 - dp(m) |> compute
 }
 let __f0 = force_of(__p0)
 let __f0sq = {
-    let rec a: Array<Float like Idx<63>> =
-        match a with
-        | zero -> zero
-        | prefix :: m -> prefix :: __f0(m) * __f0(m)
-    reduce(a, (+))
+    let sq = __f0 * __f0
+    reduce(sq, (+))
 }
 function fdev(k: Int) -> Float = {
     let fk = force_of(rot_flat(k, __p0))
     let rf = rot_flat(k, __f0)
-    let rec d: Array<Float like Idx<63>> =
-        match d with
-        | zero -> zero
-        | prefix :: m -> prefix :: (fk(m) - rf(m)) * (fk(m) - rf(m))
-    sqrt(reduce(d, (+)) / __f0sq)
+    let e = fk - rf
+    let sq = e * e
+    sqrt(reduce(sq, (+)) / __f0sq)
 }
-let force_dev = {
-    let rec a: Array<Float like Idx<8>> =
-        match a with
-        | zero -> zero
-        | prefix :: k -> prefix :: fdev(k)
-    a
-}
-let f_over_1e12 = {
-    let rec a: Array<Float like Idx<8>> =
-        match a with
-        | zero -> zero
-        | prefix :: k -> prefix :: ind(force_dev(k), 0.000000000001)
-    reduce(a, (+))
-}
-let f_over_1e13 = {
-    let rec a: Array<Float like Idx<8>> =
-        match a with
-        | zero -> zero
-        | prefix :: k -> prefix :: ind(force_dev(k), 0.0000000000001)
-    reduce(a, (+))
-}
+let force_dev = method_for(range<Idx<8>>) <@> lambda(k) -> fdev(k) |> compute
+let f_over_1e12 = reduce(method_for(range<Idx<8>>) <@> lambda(k) -> ind(force_dev(k), 0.000000000001) |> compute, (+))
+let f_over_1e13 = reduce(method_for(range<Idx<8>>) <@> lambda(k) -> ind(force_dev(k), 0.0000000000001) |> compute, (+))
 // The reference forces from the store, for the honesty check.
 let __fdft = {
     let __row = __f_te(0)
-    let rec q: Array<Float like Idx<63>> =
-        match q with
-        | zero -> zero
-        | prefix :: m -> prefix :: __row(m / 3, m - (m / 3) * 3)
-    q
+    method_for(range<Idx<NP3>>) <@> lambda(m) -> __row(m / 3, m - (m / 3) * 3) |> compute
 }
 let f_cos = {
-    let rec a: Array<Float like Idx<63>> =
-        match a with
-        | zero -> zero
-        | prefix :: m -> prefix :: __f0(m) * __fdft(m)
-    let rec b: Array<Float like Idx<63>> =
-        match b with
-        | zero -> zero
-        | prefix :: m -> prefix :: __fdft(m) * __fdft(m)
-    reduce(a, (+)) / (sqrt(__f0sq) * sqrt(reduce(b, (+))))
+    let dot = __f0 * __fdft
+    let ref2 = __fdft * __fdft
+    reduce(dot, (+)) / (sqrt(__f0sq) * sqrt(reduce(ref2, (+))))
 }
 force_dev
 f_cos
