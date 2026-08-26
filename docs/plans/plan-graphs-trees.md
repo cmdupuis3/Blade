@@ -1,9 +1,11 @@
 # Plan: trees and graphs (`TreeIdx<shape>`)
 
-Status: **P0–P4 LANDED** (declaration, construction, and static whole-path
-reads, both lanes; full suite 5207/0, independently re-verified). **P5 next:**
-partial-path views and the derived dense axes. The module's corpus category and
-harness key are **`trees`**. The semantics are in
+Status: **P0–P5 LANDED** (declaration, construction, static whole-path reads
+and their composition, the derived dense axes + `leaves(T)` retype, and the
+function-signature door with its shape-identity guard — both lanes; full suite
+5220/0/0, independently re-verified). **Next:** P6 (docs/census rows, formalism
+amendment), then the P7 graph arc and the nested-`leaf` sugar. The module's
+corpus category and harness key are **`trees`**. The semantics are in
 [../features/graphs-trees.md](../features/graphs-trees.md) (revised 2026-08-25);
 this document is the compiler-side plan. Method: the seam checklist and cost
 band below were derived by tracing how the three most recent index types
