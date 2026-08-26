@@ -37,7 +37,7 @@
 //   +mean|v|^4/sqrt5. The jet is an unbinned, basis-free cousin of the histogram
 //   that won, plus the anisotropy the histogram throws away.
 //
-// The experiment is an **ablation with three arms**, trained on the same store,
+// The experiment is an **ablation with four arms**, trained on the same store,
 // the same 500/100 split, the same 50-step budget, the same optimizer, and the
 // same hidden network — differing only in the descriptor:
 //
@@ -46,11 +46,17 @@
 // | `jet_pos` | per-species position jets, K = 2, 3, 4 | the family NB1b measured as weak |
 // | `jet_k2` | pair jets, order 2 only | distances, unbinned |
 // | `jet_k24` | pair jets, orders 2 and 4 | + the l = 4 anisotropy |
+// | `jet_rw` | radially windowed pair jets, K = 1, 2, 3, 4 | + radial resolution, and odd orders |
 //
 // `jet_k2`'s descriptor is a literal sub-array of `jet_k24`'s, so the third
 // arm is a strict refinement of the second and the comparison is clean. The
-// results table near the end sets all three beside NB1b's published numbers.
-// It is reported straight, whichever way it falls.
+// fourth is the arm the first three earn, and it arrives after the measurement
+// that explains them: window the pair cloud by distance before taking the
+// moment, which is the move MTP and ACE are built on, and which is also what
+// lets a species-ordered pair carry ODD orders at all — so it is the only arm
+// here with a polar feature in it. The results table near the end sets all
+// four beside NB1b's published numbers. It is reported straight, whichever way
+// it falls.
 
 // %%
 import ml as ml
@@ -584,10 +590,257 @@ let row0_probe = [jet0(0), jet0(1), jet0(JO1), pos0(0), pos0(PJ1)]
 row0_probe
 
 // %% [markdown]
-// ## Three theorems, as numbers
+// ## Windows before the moment
 //
-// A descriptor deserves the name only if you can say what it contains. Three
-// facts, each pinned on the real molecule rather than on a toy:
+// The three descriptors above are this notebook's original experiment. The
+// cells that follow define a fourth, because the answer the first three give
+// points straight at it; the reasoning is at the end, next to the measurement
+// that motivates it. The definitions live *here*, beside the others, for the
+// reason this notebook states again below: a cell that introduces a new
+// `ml.*` kernel invalidates the interpreter session's whole value memo, so all
+// elaboration goes before the expensive cells, never after.
+//
+// The idea is the one MTP and ACE actually use. A moment of a pair cloud
+// averages over every pair in the channel at once, so a channel's thirty-six
+// pairs -- some bonded at 1.4 Angstrom, some across the ring at 6 -- collapse
+// into two numbers. Multiply each pair by a **radial window**
+// w(r) = exp(-(r - mu)^2 / 2 sigma^2) before averaging and one channel becomes
+// several, one per shell, each seeing its own slice of the distance
+// distribution. The window is a scalar function of |v|, which is an invariant,
+// so **every theorem above survives verbatim**: a windowed moment is still an
+// equivariant polynomial map of the cloud, the odd orders of a centrally
+// symmetric cloud still cancel exactly, and the invariant slot of an even
+// order is still a distance moment -- now of the windowed cloud.
+//
+// Windowing also earns this arm **four** orders where the others had two, and
+// the reason is a fact about the data rather than a tuning choice. An
+// unordered pair has no canonical direction: its cloud contains v and -v
+// alike, so its odd moments vanish identically -- pinned exactly, below. A
+// pair of DIFFERENT species does have one. Order the pair by species and
+// v = r_A - r_B is a well-defined vector, so the three hetero channels (C-O,
+// C-H, O-H) carry real odd content: K = 1 is a shell's mean bond direction, an
+// honestly polar feature no jet in this notebook has had, and K = 3 adds its
+// l = 3 anisotropy. Odd orders therefore live on the three hetero channels,
+// even orders on all six.
+//
+// The shells are two per channel, sitting at that channel's own **quartile
+// pair distances** -- measured once over 25 strided training geometries and
+// baked below as twelve literals -- with sigma one third of their separation.
+// Two shells rather than three because three would carry the arm past 400
+// parameters against NB1b's 249, and when a descriptor outgrows its budget the
+// thing to prune is windows, never orders.
+//
+// Two implementation notes decide the cost and the calibration.
+// `ml.derive_poly` is evaluated once per (pair, order) and each window's jet
+// is a **scalar-weighted running sum** of those values, so the windows are
+// nearly free: 712 polynomial evaluations per geometry against the pair jet's
+// 420, and the window count multiplies only multiply-adds. And each windowed
+// moment is normalised by the **static channel pair count**, not by the
+// realised sum of window weights. A fixed denominator keeps the average linear
+// in the window, so a shell that catches few pairs reports a small moment
+// instead of a loud badly-estimated one; the alternative puts a small number
+// in a denominator and turns a shell's empty tail into noise.
+
+// %%
+// Order 1 is a representation this notebook has not needed until now: Sym^1 of
+// a vector IS the vector, one odd l = 1 block, with exactly one equivariant
+// degree-1 map into it.
+let static SK1 = ml.sym_spec(PT, 1)
+let static WK1 = ml.poly_weight_dim(PT, 1, SK1)
+let static DS1 = ml.total_dim(SK1)
+let static S1L1 = ml.irreps_offset(SK1, 0)
+let __w1 = [1.0]
+let order1_spec = [DS1, WK1, S1L1]
+order1_spec
+// EXPECT: order1_spec = [3, 1, 0]
+
+// Shell centres: the 25th and 75th percentile pair distance of each channel,
+// channel-major -- C-C, C-O, C-H, O-O, O-H, H-H. Widths: one third of each
+// channel's own shell separation.
+let __mu: Array<Float like Idx<12>> = [2.07, 4.15, 2.38, 4.40, 2.45, 5.41, 2.36, 4.24, 3.03, 5.50, 3.92, 6.91]
+let __sg: Array<Float like Idx<12>> = [0.69, 0.69, 0.67, 0.67, 0.99, 0.99, 0.63, 0.63, 0.82, 0.82, 1.00, 1.00]
+// The three hetero channels are C-O (pairs 36..71), C-H (72..143) and O-H
+// (150..181). Their odd-order table covers pairs 36..181 in one contiguous
+// sweep -- the six O-O pairs in the middle are computed and never read, which
+// is cheaper than branching around them. Rows are pair index minus 36.
+let __hlo: Array<Int64 like Idx<3>> = [0, 36, 114]
+let __hhi: Array<Int64 like Idx<3>> = [36, 108, 146]
+let __hinv: Array<Float like Idx<3>> = [0.027777777777777776, 0.013888888888888888, 0.03125]
+
+function wgt(c: Int64, s: Int64, r: Float) -> Float = {
+    let d = (r - __mu(c * 2 + s)) / __sg(c * 2 + s)
+    exp(0.0 - 0.5 * d * d)
+}
+function rlen(v: Array<Float like IrrepsIdx<PT>>) -> Float =
+    sqrt(v(0) * v(0) + v(1) * v(1) + v(2) * v(2))
+
+// One pair's even-order contribution to every window at once: two derive_poly
+// calls, then the 21 numbers scaled by each shell's weight. Column layout is
+// window-major, order-minor -- w0 K2, w0 K4, w1 K2, w1 K4.
+function evec(p: Array<Float like Idx<NP3>>, q: Int) -> Array<Float like Idx<42>> = {
+    let v = pvec(p, q)
+    let c = __chan(q)
+    let r = rlen(v)
+    let w0 = wgt(c, 0, r)
+    let w1 = wgt(c, 1, r)
+    let d2 = ml.derive_poly(PT, 2, SK2, v, __w2)
+    let d4 = ml.derive_poly(PT, 4, SK4, v, __w4)
+    let rec o: Array<Float like Idx<42>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: (if k < 21 then (if k < 6 then w0 * d2(k) else w0 * d4(k - 6))
+                                    else (if k < 27 then w1 * d2(k - 21) else w1 * d4(k - 27)))
+    o
+}
+// The odd orders, over the hetero sweep only. `pvec` already returns
+// r_A - r_B with A the channel's first species and B its second -- the pin in
+// the theorem cell below is what makes that a fact rather than a hope.
+function ovec(p: Array<Float like Idx<NP3>>, u: Int) -> Array<Float like Idx<26>> = {
+    let q = u + 36
+    let v = pvec(p, q)
+    let c = __chan(q)
+    let r = rlen(v)
+    let w0 = wgt(c, 0, r)
+    let w1 = wgt(c, 1, r)
+    let d1 = ml.derive_poly(PT, 1, SK1, v, __w1)
+    let d3 = ml.derive_poly(PT, 3, SK3, v, __w3)
+    let rec o: Array<Float like Idx<26>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: (if k < 13 then (if k < 3 then w0 * d1(k) else w0 * d3(k - 3))
+                                    else (if k < 16 then w1 * d1(k - 13) else w1 * d3(k - 16)))
+    o
+}
+let __ez: Array<Float like Idx<42>> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+let __oz: Array<Float like Idx<26>> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+function etab(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<211>, Idx<42>> = {
+    let rec t: Array<Float like Idx<211>, Idx<42>> =
+        match t with
+        | zero -> zero
+        | zero :: q -> zero :: __ez
+        | prefix :: q -> prefix :: (prefix(q - 1) + evec(p, q - 1))
+    t
+}
+function otab(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<147>, Idx<26>> = {
+    let rec t: Array<Float like Idx<147>, Idx<26>> =
+        match t with
+        | zero -> zero
+        | zero :: u -> zero :: __oz
+        | prefix :: u -> prefix :: (prefix(u - 1) + ovec(p, u - 1))
+    t
+}
+function ech(t: Array<Float like Idx<211>, Idx<42>>, c: Int, m: Int) -> Float =
+    (t(__cst(c + 1), m) - t(__cst(c), m)) * __cinv(c)
+function och(t: Array<Float like Idx<147>, Idx<26>>, h: Int, m: Int) -> Float =
+    (t(__hhi(h), m) - t(__hlo(h), m)) * __hinv(h)
+
+// Six channels x two windows x two even orders is twenty-four l = 0 and
+// twenty-four l = 2 multiplicities, and twelve l = 4 (only K = 4 reaches it).
+// Three hetero channels x two windows x two odd orders is twelve l = 1
+// multiplicities -- K = 1 and K = 3 both land there -- and six l = 3. Slots run
+// channel-major, window-minor, order-minor throughout.
+let static RWSPEC = [(0, 0, 24), (1, 1, 12), (2, 0, 24), (3, 1, 6), (4, 0, 12)]
+let static DRW = ml.total_dim(RWSPEC)
+let static R0 = ml.irreps_offset(RWSPEC, 0)
+let static R1 = ml.irreps_offset(RWSPEC, 1)
+let static R2 = ml.irreps_offset(RWSPEC, 2)
+let static R3 = ml.irreps_offset(RWSPEC, 3)
+let static R4 = ml.irreps_offset(RWSPEC, 4)
+let static NBRW = ml.irreps_len(RWSPEC)
+let rw_blocks = [NBRW, DRW, R0, R1, R2, R3, R4]
+rw_blocks
+// EXPECT: rw_blocks = [5, 330, 0, 24, 60, 180, 222]
+
+function rwrow(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<330>> = {
+    let te = etab(p)
+    let to = otab(p)
+    let rec b0: Array<Float like Idx<24>> =
+        match b0 with
+        | zero -> zero
+        | prefix :: u -> prefix :: (if u - (u / 2) * 2 == 0
+                                    then ech(te, u / 4, ((u / 2) - ((u / 4) * 2)) * 21 + S2L0)
+                                    else ech(te, u / 4, ((u / 2) - ((u / 4) * 2)) * 21 + 6 + S4L0))
+    let rec b1: Array<Float like Idx<36>> =
+        match b1 with
+        | zero -> zero
+        | prefix :: u -> prefix :: (if (u / 3) - ((u / 6) * 2) == 0
+                                    then och(to, u / 12, ((u / 6) - ((u / 12) * 2)) * 13 + S1L1 + u - (u / 3) * 3)
+                                    else och(to, u / 12, ((u / 6) - ((u / 12) * 2)) * 13 + 3 + S3L1 + u - (u / 3) * 3))
+    let rec b2: Array<Float like Idx<120>> =
+        match b2 with
+        | zero -> zero
+        | prefix :: u -> prefix :: (if (u / 5) - ((u / 10) * 2) == 0
+                                    then ech(te, u / 20, ((u / 10) - ((u / 20) * 2)) * 21 + S2L2 + u - (u / 5) * 5)
+                                    else ech(te, u / 20, ((u / 10) - ((u / 20) * 2)) * 21 + 6 + S4L2 + u - (u / 5) * 5))
+    let rec b3: Array<Float like Idx<42>> =
+        match b3 with
+        | zero -> zero
+        | prefix :: u -> prefix :: och(to, u / 14, ((u / 7) - ((u / 14) * 2)) * 13 + 3 + S3L3 + u - (u / 7) * 7)
+    let rec b4: Array<Float like Idx<108>> =
+        match b4 with
+        | zero -> zero
+        | prefix :: u -> prefix :: ech(te, u / 18, ((u / 9) - ((u / 18) * 2)) * 21 + 6 + S4L4 + u - (u / 9) * 9)
+    let rec o: Array<Float like Idx<330>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: (if k < R1 then b0(k)
+                                    else (if k < R2 then b1(k - R1)
+                                          else (if k < R3 then b2(k - R2)
+                                                else (if k < R4 then b3(k - R3) else b4(k - R4)))))
+    o
+}
+// Do the shells actually catch anything? The mean window weight over each
+// channel's own pairs, on geometry 0: six channels, two shells. A shell whose
+// occupancy came out near zero would be a wasted block of the descriptor.
+function wpair(p: Array<Float like Idx<NP3>>, q: Int) -> Array<Float like Idx<2>> = {
+    let v = pvec(p, q)
+    let c = __chan(q)
+    let r = rlen(v)
+    [wgt(c, 0, r), wgt(c, 1, r)]
+}
+function wtab(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<211>, Idx<2>> = {
+    let rec t: Array<Float like Idx<211>, Idx<2>> =
+        match t with
+        | zero -> zero
+        | zero :: q -> zero :: [0.0, 0.0]
+        | prefix :: q -> prefix :: (prefix(q - 1) + wpair(p, q - 1))
+    t
+}
+let __wt0 = wtab(tr_flat(0))
+let shell_occupancy = method_for(range<Idx<6>>, range<Idx<2>>) <@> lambda(c, s) -> (__wt0(__cst(c + 1), s) - __wt0(__cst(c), s)) * __cinv(c) |> compute
+shell_occupancy
+let rw0 = rwrow(tr_flat(0))
+// C-C's near-shell K = 2 invariant, its near-shell K = 4 invariant, the first
+// component of the C-O near-shell mean bond direction, and the first l = 3
+// component -- one slot from each block only this arm has.
+let rw0_probe = [rw0(0), rw0(1), rw0(R1), rw0(R3)]
+rw0_probe
+
+// The fourth arm's own sizing. The descriptor is 330 numbers where the pair
+// jet was 126, so the embed keeps ONE copy of each (l, parity) the descriptor
+// carries -- including l = 1 and l = 3, which `JETPAIR` provably could not fill
+// and this one can. `ml.hom_dim` prices that at 78 weights and the arm lands
+// at 312 against NB1b's 249: comparable, and printed rather than claimed.
+let static EMBD = [(0, 0, 1), (1, 1, 1), (2, 0, 1), (3, 1, 1), (4, 0, 1)]
+let static CFGD = (EMBD, EMBD, HID)
+let static DED = ml.total_dim(EMBD)
+let static WED = ml.hom_dim(RWSPEC, EMBD)
+let static W1D = ml.tp_weight_dim(CFGD)
+let static WPD = ml.poly_weight_dim(EMBD, 2, PH)
+let static NEVD = 89
+let static EVD = [(0, 0, 89)]
+let static WRD = ml.hom_dim(EVD, OUT1)
+let static NPD = WED + W1D + WLH + W2H + WLH + W2H + WLH + WPD + WRD + 1
+let arm_d_params = [WED, W1D, WPD, WRD, DED, NPD]
+arm_d_params
+// EXPECT: arm_d_params = [78, 25, 15, 89, 25, 312]
+
+// %% [markdown]
+// ## Six theorems, as numbers
+//
+// A descriptor deserves the name only if you can say what it contains. Six
+// facts, each pinned on the real molecule rather than on a toy. The first
+// three are about the plain pair jet:
 //
 // **1. Parity.** The pair cloud of a channel is the set {r_i - r_j}, which
 // contains v exactly when it contains -v. `ml.derive_poly` at odd K is an odd
@@ -614,6 +867,38 @@ row0_probe
 // is the trace convention, and beyond it the two routes are the same map. This
 // is the cell that licenses reading the jet as statistics rather than as
 // network internals.
+//
+// The windowed descriptor defined above earns three more, and they are the
+// same three facts with a radial weight inside them.
+//
+// **4. Parity, with a window on it.** A window is a function of |v| alone, so
+// w(|-v|) = w(|v|) and the cancellation of theorem 1 is untouched by it. That
+// matters most where it is not a choice: an unordered C-C pair has no
+// canonical direction, so a homo channel's cloud really is {+-v} and its
+// windowed odd moments are zero as a theorem rather than as a small number.
+// The pin sums the squares of every windowed K = 1 and K = 3 slot of the three
+// homo channels across both shells -- 78 numbers -- and it is 0.
+//
+// **5. The hetero channels do have one.** The other half of that statement is
+// what licenses odd orders at all: for a pair of DIFFERENT species, ordering
+// by species makes v = r_A - r_B well defined. The pair tables are built that
+// way, and the pin checks it in the ordered sense for all 146 hetero pairs --
+// the first atom really carries the channel's first species, not merely one of
+// its two. Then it prints the norm of each hetero channel's near-shell mean
+// bond direction, which is emphatically not zero: a polar feature, on a
+// molecule, from a cloud of difference vectors.
+//
+// **6. The windowed jet is the windowed moment TENSOR.** Theorem 3 again with
+// the window in it, and stated the way that makes the point. The K-th moment
+// of a point cloud is a tensor, sum_p w(|v_p|) v_p^(x)K, and the jet's blocks
+// are its irreps decomposition -- not a list of per-pair numbers that happen to
+// get averaged. The check builds the O-O channel's near-shell second moment as
+// a genuine outer-product accumulation: scale each pair vector by sqrt(w), take
+// the cloud {+-u} so that it is centrally symmetric and its mean is exactly
+// zero, hand the twelve points to `ppl.comoments` and bridge the packed
+// Cartesian tensor with `ml.sym_to_irreps`. Compared block by block with the
+// windowed derive_poly mean, the ratio is one constant per block -- **-1 on
+// l = 0 and +1 on l = 2**, the trace convention theorem 3 already found.
 
 // %%
 // --- 1. parity: the symmetrized order-3 jet of every channel is zero ---------
@@ -736,6 +1021,123 @@ let __cjet = {
 }
 let three_route_ratio = method_for(range<Idx<6>>) <@> lambda(m) -> (__cjet(9, m) / 9.0) / __irr2(m) |> compute
 three_route_ratio
+
+// --- 4. the windowed odd orders of a homo channel are zero -------------------
+function osym(p: Array<Float like Idx<NP3>>, q: Int) -> Array<Float like Idx<26>> = {
+    let v = pvec(p, q)
+    let c = __chan(q)
+    let r = rlen(v)
+    let w0 = wgt(c, 0, r)
+    let w1 = wgt(c, 1, r)
+    let d1 = 0.5 * (ml.derive_poly(PT, 1, SK1, v, __w1) + ml.derive_poly(PT, 1, SK1, negv(v), __w1))
+    let d3 = 0.5 * (ml.derive_poly(PT, 3, SK3, v, __w3) + ml.derive_poly(PT, 3, SK3, negv(v), __w3))
+    let rec o: Array<Float like Idx<26>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: (if k < 13 then (if k < 3 then w0 * d1(k) else w0 * d3(k - 3))
+                                    else (if k < 16 then w1 * d1(k - 13) else w1 * d3(k - 16)))
+    o
+}
+function ostab(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<211>, Idx<26>> = {
+    let rec t: Array<Float like Idx<211>, Idx<26>> =
+        match t with
+        | zero -> zero
+        | zero :: q -> zero :: __oz
+        | prefix :: q -> prefix :: (prefix(q - 1) + osym(p, q - 1))
+    t
+}
+function osch(t: Array<Float like Idx<211>, Idx<26>>, c: Int, m: Int) -> Float =
+    (t(__cst(c + 1), m) - t(__cst(c), m)) * __cinv(c)
+// C-C, O-O, H-H: the three channels whose pairs share a species.
+let __hom: Array<Int64 like Idx<3>> = [0, 3, 5]
+let __ost0 = ostab(__p0)
+let windowed_odd_energy = {
+    let rec a: Array<Float like Idx<78>> =
+        match a with
+        | zero -> zero
+        | prefix :: u -> prefix :: osch(__ost0, __hom(u / 26), u - (u / 26) * 26) * osch(__ost0, __hom(u / 26), u - (u / 26) * 26)
+    reduce(a, (+))
+}
+windowed_odd_energy
+// EXPECT: windowed_odd_energy = 0
+
+// --- 5. the hetero channels carry a canonical direction ----------------------
+function ord_bad(u: Int) -> Float = {
+    let q = u + 36
+    let c = __chan(q)
+    let hit = __spec(__pi(q), __ca(c)) * __spec(__pj(q), __cb(c))
+    if hit > 0.5 then 0.0 else 1.0
+}
+let hetero_order_bad = {
+    let rec a: Array<Float like Idx<146>> =
+        match a with
+        | zero -> zero
+        | prefix :: u -> prefix :: ord_bad(u)
+    reduce(a, (+))
+}
+hetero_order_bad
+// EXPECT: hetero_order_bad = 0
+let __rwe0 = etab(__p0)
+let __rwo0 = otab(__p0)
+// The length of each hetero channel's near-shell K = 1 moment: the mean
+// direction of a C-O, C-H and O-H bond, in Angstrom.
+function k1n(h: Int) -> Float = {
+    let rec a: Array<Float like Idx<3>> =
+        match a with
+        | zero -> zero
+        | prefix :: m -> prefix :: och(__rwo0, h, S1L1 + m) * och(__rwo0, h, S1L1 + m)
+    sqrt(reduce(a, (+)))
+}
+let k1_hetero_norms = method_for(range<Idx<3>>) <@> lambda(h) -> k1n(h) |> compute
+k1_hetero_norms
+let k1_all_nonzero = {
+    let rec a: Array<Float like Idx<3>> =
+        match a with
+        | zero -> zero
+        | prefix :: h -> prefix :: ind(k1n(h), 0.01)
+    reduce(a, (+))
+}
+k1_all_nonzero
+// EXPECT: k1_all_nonzero = 3
+
+// --- 6. the windowed K = 2 jet is the windowed moment tensor -----------------
+// The O-O channel's six pair vectors in plain Cartesian order, each scaled by
+// the square root of its near-shell weight -- so that the ORDINARY second
+// moment of the scaled cloud is the WEIGHTED second moment of the original.
+function cpv(v: Int, u: Int) -> Float = __c0(__pi(144 + u) * 3 + v) - __c0(__pj(144 + u) * 3 + v)
+function cpw(u: Int) -> Float = {
+    let r = sqrt(cpv(0, u) * cpv(0, u) + cpv(1, u) * cpv(1, u) + cpv(2, u) * cpv(2, u))
+    sqrt(wgt(3, 0, r))
+}
+// Twelve points, +u and -u, so the cloud's mean is exactly zero and
+// `ppl.comoments` -- which centres -- computes the raw moment after all.
+function wc(v: Int, k: Int) -> Float =
+    if k < 6 then cpw(k) * cpv(v, k) else 0.0 - cpw(k - 6) * cpv(v, k - 6)
+type WinPt = Idx<12>
+let __wcloud: Array<Float64 like CVar, WinPt> = [
+    [wc(0, 0), wc(0, 1), wc(0, 2), wc(0, 3), wc(0, 4), wc(0, 5),
+     wc(0, 6), wc(0, 7), wc(0, 8), wc(0, 9), wc(0, 10), wc(0, 11)],
+    [wc(1, 0), wc(1, 1), wc(1, 2), wc(1, 3), wc(1, 4), wc(1, 5),
+     wc(1, 6), wc(1, 7), wc(1, 8), wc(1, 9), wc(1, 10), wc(1, 11)],
+    [wc(2, 0), wc(2, 1), wc(2, 2), wc(2, 3), wc(2, 4), wc(2, 5),
+     wc(2, 6), wc(2, 7), wc(2, 8), wc(2, 9), wc(2, 10), wc(2, 11)]]
+let __wcov = ppl.comoments(__wcloud, 2)
+let __wirr = ml.sym_to_irreps(__wcov)
+let win_moment_ratio = method_for(range<Idx<6>>) <@> lambda(m) -> ech(__rwe0, 3, S2L0 + m) / __wirr(m) |> compute
+win_moment_ratio
+function win_res(m: Int) -> Float = {
+    let want = if m == 0 then 0.0 - 1.0 else 1.0
+    abs(ech(__rwe0, 3, S2L0 + m) / __wirr(m) - want)
+}
+let win_moment_pins_over_1e9 = {
+    let rec a: Array<Float like Idx<6>> =
+        match a with
+        | zero -> zero
+        | prefix :: m -> prefix :: ind(win_res(m), 0.000000001)
+    reduce(a, (+))
+}
+win_moment_pins_over_1e9
+// EXPECT: win_moment_pins_over_1e9 = 0
 
 // %% [markdown]
 // ## Reading the descriptor's own shape back
@@ -1111,6 +1513,187 @@ function as_ev_c(c: Array<Float like Idx<NEVC>>) -> Array<Float like IrrepsIdx<E
      c(11), c(12), c(13), c(14), c(15), c(16), c(17), c(18), c(19), c(20), 
      c(21), c(22), c(23), c(24), c(25), c(26), c(27), c(28), c(29), c(30), 
      c(31), c(32), c(33), c(34), c(35), c(36), c(37), c(38)
+]
+
+// --- the fourth arm's network, defined here for the same reason -------------
+// Identical machinery, one more descriptor. The embed is the only place the
+// arms can differ structurally, and this one differs in the only way that
+// matters: `EMBD` keeps an l = 1 and an l = 3 block, because `RWSPEC` has them
+// to give. Everything downstream -- the two shared blocks, the gate, the
+// degree-2 polynomial head that is the only route from l = 4 to an invariant --
+// is the code the other three arms already ran.
+function embed_d(x: Array<Float like IrrepsIdx<RWSPEC>>, we: Array<Float like Idx<WED>>)
+                 where ml.equiv(O3) -> Array<Float like IrrepsIdx<EMBD>> =
+    ml.gated(EMBD, ml.derive_linear(RWSPEC, EMBD, we, x))
+function block1_d(x: Array<Float like IrrepsIdx<EMBD>>, wt: Array<Float like Idx<W1D>>,
+                  wl: Array<Float like Idx<WLH>>)
+                  where ml.equiv(O3) -> Array<Float like IrrepsIdx<HID>> = {
+    let t = ml.tensor_product(CFGD, x, x, wt)
+    let g = ml.gated(HID, t)
+    ml.linear(HID, HID, wl, g)
+}
+function head_d(e: Array<Float like IrrepsIdx<EMBD>>, wp: Array<Float like Idx<WPD>>)
+                where ml.equiv(O3) -> Array<Float like IrrepsIdx<PH>> =
+    ml.derive_poly(EMBD, 2, PH, e, wp)
+function readout_d(ev: Array<Float like IrrepsIdx<EVD>>, wr: Array<Float like Idx<WRD>>)
+                   where ml.equiv(O3) -> Float = {
+    let __o = ml.scalars(OUT1, ml.derive_linear(EVD, OUT1, wr, ev))
+    __o(0)
+}
+// Twenty-four descriptor scalars, fifty-four descriptor norms -- one per l > 0
+// multiplicity, which is what an equivariant readout is allowed to see of a
+// vector -- then the embedding's four norms and the tail of the stack.
+function inv_d(x: Array<Float like IrrepsIdx<RWSPEC>>, e: Array<Float like IrrepsIdx<EMBD>>,
+               m3: Array<Float like IrrepsIdx<HID>>, ph: Array<Float like IrrepsIdx<PH>>)
+               -> Array<Float like Idx<NEVD>> = {
+    let sx = ml.scalars(RWSPEC, x)
+    let nx = ml.norms(RWSPEC, x)
+    let ne = ml.norms(EMBD, e)
+    let sm = ml.scalars(HID, m3)
+    let nm = ml.norms(HID, m3)
+    let sp = ml.scalars(PH, ph)
+    [
+    sx(0), sx(1), sx(2), sx(3), sx(4), sx(5), sx(6), sx(7), sx(8), sx(9), 
+    sx(10), sx(11), sx(12), sx(13), sx(14), sx(15), sx(16), sx(17), sx(18), 
+    sx(19), sx(20), sx(21), sx(22), sx(23), nx(24), nx(25), nx(26), nx(27), 
+    nx(28), nx(29), nx(30), nx(31), nx(32), nx(33), nx(34), nx(35), nx(36), 
+    nx(37), nx(38), nx(39), nx(40), nx(41), nx(42), nx(43), nx(44), nx(45), 
+    nx(46), nx(47), nx(48), nx(49), nx(50), nx(51), nx(52), nx(53), nx(54), 
+    nx(55), nx(56), nx(57), nx(58), nx(59), nx(60), nx(61), nx(62), nx(63), 
+    nx(64), nx(65), nx(66), nx(67), nx(68), nx(69), nx(70), nx(71), nx(72), 
+    nx(73), nx(74), nx(75), nx(76), nx(77), ne(1), ne(2), ne(3), ne(4), 
+    sm(0), sm(1), sm(2), nm(3), sp(0), sp(1), sp(2)
+]
+}
+// Arm 4's own flat state: 312 weights, 312 momentum slots, one loss slot. The
+// first three arms share a 583-slot layout sized by their widest blocks; this
+// arm's embed and readout are both wider than any of theirs, so it gets its
+// own rather than inflating theirs -- which would have redrawn their seed row
+// and quietly changed three published numbers.
+let static OFFD_E = 0
+let static OFFD_T1 = 78
+let static OFFD_L1 = 103
+let static OFFD_T2 = 113
+let static OFFD_L2 = 150
+let static OFFD_T3 = 160
+let static OFFD_L3 = 197
+let static OFFD_P = 207
+let static OFFD_R = 222
+let static OFFD_B = 311
+let static NPARD = 312
+let static NP2D = 624
+let static SWD = 625
+
+function wpd(__s: Array<Float like Idx<SWD>>, base: Int, k: Int) -> Float = __s(base + k)
+function sld10(__s: Array<Float like Idx<SWD>>, base: Int) -> Array<Float like Idx<10>> = {
+    let rec o: Array<Float like Idx<10>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: wpd(__s, base, k)
+    o
+}
+function sld37(__s: Array<Float like Idx<SWD>>, base: Int) -> Array<Float like Idx<37>> = {
+    let rec o: Array<Float like Idx<37>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: wpd(__s, base, k)
+    o
+}
+function we_d(__s: Array<Float like Idx<SWD>>) -> Array<Float like Idx<78>> = {
+    let rec o: Array<Float like Idx<78>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: wpd(__s, OFFD_E, k)
+    o
+}
+function wt_d(__s: Array<Float like Idx<SWD>>) -> Array<Float like Idx<25>> = {
+    let rec o: Array<Float like Idx<25>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: wpd(__s, OFFD_T1, k)
+    o
+}
+function wpp_d(__s: Array<Float like Idx<SWD>>) -> Array<Float like Idx<15>> = {
+    let rec o: Array<Float like Idx<15>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: wpd(__s, OFFD_P, k)
+    o
+}
+function wr_d(__s: Array<Float like Idx<SWD>>) -> Array<Float like Idx<89>> = {
+    let rec o: Array<Float like Idx<89>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: wpd(__s, OFFD_R, k)
+    o
+}
+function gn_d(x: Array<Float like IrrepsIdx<EMBD>>) -> Float = {
+    let n = ml.norms(EMBD, x)
+    5.0 / (n(0) * n(0) + n(1) * n(1) + n(2) * n(2) + n(3) * n(3) + n(4) * n(4) + 1.0)
+}
+function sc25(w: Array<Float like Idx<25>>, s: Float) -> Array<Float like Idx<25>> = {
+    let rec o: Array<Float like Idx<25>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: w(k) * s
+    o
+}
+function ev_d(x: Array<Float like IrrepsIdx<RWSPEC>>, __s: Array<Float like Idx<SWD>>)
+              -> Array<Float like Idx<NEVD>> = {
+    let e = embed_d(x, we_d(__s))
+    let m1 = block1_d(e, sc25(wt_d(__s), gn_d(e)), sld10(__s, OFFD_L1))
+    let m2 = block_h(m1, sc37(sld37(__s, OFFD_T2), gn_h(m1)), sld10(__s, OFFD_L2))
+    let m3 = block_h(m2, sc37(sld37(__s, OFFD_T3), gn_h(m2)), sld10(__s, OFFD_L3))
+    inv_d(x, e, m3, head_d(e, wpp_d(__s)))
+}
+function as_ev_d(c: Array<Float like Idx<NEVD>>) -> Array<Float like IrrepsIdx<EVD>> = [
+    c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7), c(8), c(9), c(10), 
+    c(11), c(12), c(13), c(14), c(15), c(16), c(17), c(18), c(19), c(20), 
+    c(21), c(22), c(23), c(24), c(25), c(26), c(27), c(28), c(29), c(30), 
+    c(31), c(32), c(33), c(34), c(35), c(36), c(37), c(38), c(39), c(40), 
+    c(41), c(42), c(43), c(44), c(45), c(46), c(47), c(48), c(49), c(50), 
+    c(51), c(52), c(53), c(54), c(55), c(56), c(57), c(58), c(59), c(60), 
+    c(61), c(62), c(63), c(64), c(65), c(66), c(67), c(68), c(69), c(70), 
+    c(71), c(72), c(73), c(74), c(75), c(76), c(77), c(78), c(79), c(80), 
+    c(81), c(82), c(83), c(84), c(85), c(86), c(87), c(88)
+]
+function as_rw(f: Array<Float like Idx<330>>) -> Array<Float like IrrepsIdx<RWSPEC>> = [
+    f(0), f(1), f(2), f(3), f(4), f(5), f(6), f(7), f(8), f(9), f(10), 
+    f(11), f(12), f(13), f(14), f(15), f(16), f(17), f(18), f(19), f(20), 
+    f(21), f(22), f(23), f(24), f(25), f(26), f(27), f(28), f(29), f(30), 
+    f(31), f(32), f(33), f(34), f(35), f(36), f(37), f(38), f(39), f(40), 
+    f(41), f(42), f(43), f(44), f(45), f(46), f(47), f(48), f(49), f(50), 
+    f(51), f(52), f(53), f(54), f(55), f(56), f(57), f(58), f(59), f(60), 
+    f(61), f(62), f(63), f(64), f(65), f(66), f(67), f(68), f(69), f(70), 
+    f(71), f(72), f(73), f(74), f(75), f(76), f(77), f(78), f(79), f(80), 
+    f(81), f(82), f(83), f(84), f(85), f(86), f(87), f(88), f(89), f(90), 
+    f(91), f(92), f(93), f(94), f(95), f(96), f(97), f(98), f(99), f(100), 
+    f(101), f(102), f(103), f(104), f(105), f(106), f(107), f(108), f(109), 
+    f(110), f(111), f(112), f(113), f(114), f(115), f(116), f(117), f(118), 
+    f(119), f(120), f(121), f(122), f(123), f(124), f(125), f(126), f(127), 
+    f(128), f(129), f(130), f(131), f(132), f(133), f(134), f(135), f(136), 
+    f(137), f(138), f(139), f(140), f(141), f(142), f(143), f(144), f(145), 
+    f(146), f(147), f(148), f(149), f(150), f(151), f(152), f(153), f(154), 
+    f(155), f(156), f(157), f(158), f(159), f(160), f(161), f(162), f(163), 
+    f(164), f(165), f(166), f(167), f(168), f(169), f(170), f(171), f(172), 
+    f(173), f(174), f(175), f(176), f(177), f(178), f(179), f(180), f(181), 
+    f(182), f(183), f(184), f(185), f(186), f(187), f(188), f(189), f(190), 
+    f(191), f(192), f(193), f(194), f(195), f(196), f(197), f(198), f(199), 
+    f(200), f(201), f(202), f(203), f(204), f(205), f(206), f(207), f(208), 
+    f(209), f(210), f(211), f(212), f(213), f(214), f(215), f(216), f(217), 
+    f(218), f(219), f(220), f(221), f(222), f(223), f(224), f(225), f(226), 
+    f(227), f(228), f(229), f(230), f(231), f(232), f(233), f(234), f(235), 
+    f(236), f(237), f(238), f(239), f(240), f(241), f(242), f(243), f(244), 
+    f(245), f(246), f(247), f(248), f(249), f(250), f(251), f(252), f(253), 
+    f(254), f(255), f(256), f(257), f(258), f(259), f(260), f(261), f(262), 
+    f(263), f(264), f(265), f(266), f(267), f(268), f(269), f(270), f(271), 
+    f(272), f(273), f(274), f(275), f(276), f(277), f(278), f(279), f(280), 
+    f(281), f(282), f(283), f(284), f(285), f(286), f(287), f(288), f(289), 
+    f(290), f(291), f(292), f(293), f(294), f(295), f(296), f(297), f(298), 
+    f(299), f(300), f(301), f(302), f(303), f(304), f(305), f(306), f(307), 
+    f(308), f(309), f(310), f(311), f(312), f(313), f(314), f(315), f(316), 
+    f(317), f(318), f(319), f(320), f(321), f(322), f(323), f(324), f(325), 
+    f(326), f(327), f(328), f(329)
 ]
 
 // %% [markdown]
@@ -1875,9 +2458,10 @@ final_loss_c
 //
 // `plot.stream` carries one epoch's batch losses at a time under a stable
 // channel name and the panel merges the chunks as they arrive, so a long run
-// fills its chart in live rather than at the end. The three channels are
-// `jet_pos`, `jet_k2` and `jet_k24`; the three final `plot.line` figures are the
-// versions that persist as this cell's output.
+// fills its chart in live rather than at the end. Three channels so far --
+// `jet_pos`, `jet_k2` and `jet_k24` -- with a fourth, `jet_rw`, arriving with
+// the windowed arm below; the final `plot.line` figures are the versions that
+// persist as their cells' output.
 
 // %%
 let __axc0 = method_for(range<Idx<NB>>) <@> lambda(n) -> Float64(n) |> compute
@@ -2038,7 +2622,11 @@ train_mse_best
 // quantities the parity and moment theorems certified — top out near 0.09. The
 // sum of squared correlations, an optimistic ceiling on what any linear readout
 // could extract, is 0.113 for the pair jet and 0.126 for the position jet. The
-// models found roughly what was there.
+// models found roughly what was there. (That ceiling is not calibrated against
+// anything yet — a sum of squared correlations grows with the number of
+// features whether or not any of them knows anything. The next section adds
+// the shuffled-label control that says what these numbers are worth, and the
+// answer for 0.113 is: not much above its own noise floor.)
 //
 // That is the result, and it is a statement about descriptors rather than
 // about this notebook's budget. **Two moments are not a distribution.** A
@@ -2056,7 +2644,7 @@ train_mse_best
 // this notebook survives that change unaltered — a radial weight is an
 // invariant scalar, so parity still kills the odd orders and the invariant
 // slots are still distance moments, now of a windowed cloud. That is the
-// experiment this one earns.
+// experiment this one earns, and the rest of this notebook runs it.
 
 // %%
 function corr_j(k: Int) -> Float = {
@@ -2127,6 +2715,551 @@ let signal_ceiling = [jet_signal, pos_signal]
 signal_ceiling
 
 // %% [markdown]
+// ## The fourth arm
+//
+// So: window the pair vectors and take the moment of the windowed cloud. The
+// descriptor, the theorems and the network were all defined near the top of
+// this notebook, for the memo reason stated there; what is left is the
+// experiment, and it is run exactly like the other three. Same store, same
+// 500/100 split spanning the trajectory, same batch of 20, same fifty steps,
+// same momentum 0.9 and learning rate 0.002, same seed stream, same optimizer
+// code. Twelve shells across six channels, four orders, 330 features, 312
+// parameters against the pair jet's 265.
+//
+// One thing is done differently on purpose, and it is the reason this arm is
+// worth running rather than merely worth proposing: **the diagnostic comes
+// before the training**. The correlation cell above is what turned three
+// disappointing numbers into a statement about descriptors, and it needs no
+// gradient. So the same measurement runs on the windowed features first, and
+// whatever the arm then does at fifty steps has to be read against a ceiling
+// that was already on the table.
+
+// %%
+let __rwtr = {
+    let rec h: Array<Float like Idx<500>, Idx<330>> =
+        match h with
+        | zero -> zero
+        | prefix :: n -> prefix :: rwrow(tr_flat(n))
+    h
+}
+__rwtr(499, 0)
+
+// %%
+let __rwte = {
+    let rec h: Array<Float like Idx<100>, Idx<330>> =
+        match h with
+        | zero -> zero
+        | prefix :: n -> prefix :: rwrow(te_flat(n))
+    h
+}
+__rwte(99, 0)
+
+// %%
+// The same calibration discipline as the pair jet, over the same block
+// structure: an invariant slot gets a centre and a spread, an l > 0
+// multiplicity gets one shared spread and no centre. `RWSPEC`'s blocks are
+// widths 1, 3, 5, 7 and 9, so the grouping arithmetic is the position jet's,
+// with this descriptor's offsets in it.
+function dmu_of(k: Int) -> Float = {
+    let rec a: Array<Float like Idx<500>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: __rwtr(n, k)
+    reduce(a, (+)) / 500.0
+}
+function dms_of(k: Int) -> Float = {
+    let rec a: Array<Float like Idx<500>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: __rwtr(n, k) * __rwtr(n, k)
+    reduce(a, (+)) / 500.0
+}
+let __dmu = {
+    let rec m: Array<Float like Idx<330>> =
+        match m with
+        | zero -> zero
+        | prefix :: k -> prefix :: dmu_of(k)
+    m
+}
+let __dms = {
+    let rec m: Array<Float like Idx<330>> =
+        match m with
+        | zero -> zero
+        | prefix :: k -> prefix :: dms_of(k)
+    m
+}
+function dgs(k: Int) -> Int64 = {
+    let kk = Int64(k)
+    let a = R1 + ((kk - R1) / 3) * 3
+    let b = R2 + ((kk - R2) / 5) * 5
+    let c = R3 + ((kk - R3) / 7) * 7
+    let d = R4 + ((kk - R4) / 9) * 9
+    if kk < R1 then kk else (if kk < R2 then a else (if kk < R3 then b else (if kk < R4 then c else d)))
+}
+function dgl(k: Int) -> Int64 = if k < R1 then 1 else (if k < R2 then 3 else (if k < R3 then 5 else (if k < R4 then 7 else 9)))
+function grp_ms330(ms: Array<Float like Idx<330>>, g: Int64, d: Int64) -> Float = {
+    let rec a: Array<Float like Idx<9>> =
+        match a with
+        | zero -> zero
+        | prefix :: j -> prefix :: (if Int64(j) < d then ms(g + Int64(j)) else 0.0)
+    reduce(a, (+)) / Float64(d)
+}
+function dsc_of(k: Int) -> Float = {
+    let d = dgl(k)
+    let base = grp_ms330(__dms, dgs(k), d)
+    let v = if k < R1 then base - __dmu(k) * __dmu(k) else base
+    if v < 0.000000000001 then 0.0 else 1.0 / sqrt(v)
+}
+let __dcen = {
+    let rec m: Array<Float like Idx<330>> =
+        match m with
+        | zero -> zero
+        | prefix :: k -> prefix :: (if k < R1 then __dmu(k) else 0.0)
+    m
+}
+let __dsc = {
+    let rec m: Array<Float like Idx<330>> =
+        match m with
+        | zero -> zero
+        | prefix :: k -> prefix :: dsc_of(k)
+    m
+}
+function dstd(row: Array<Float like Idx<330>>) -> Array<Float like Idx<330>> = {
+    let rec o: Array<Float like Idx<330>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: (row(k) - __dcen(k)) * __dsc(k)
+    o
+}
+let __dtr = {
+    let rec h: Array<Float like Idx<500>, Idx<330>> =
+        match h with
+        | zero -> zero
+        | prefix :: n -> prefix :: dstd(__rwtr(n))
+    h
+}
+let __dte = {
+    let rec h: Array<Float like Idx<100>, Idx<330>> =
+        match h with
+        | zero -> zero
+        | prefix :: n -> prefix :: dstd(__rwte(n))
+    h
+}
+function xd_tr(n: Int) -> Array<Float like IrrepsIdx<RWSPEC>> = {
+    let rec o: Array<Float like Idx<330>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: __dtr(n, k)
+    as_rw(o)
+}
+function xd_te(n: Int) -> Array<Float like IrrepsIdx<RWSPEC>> = {
+    let rec o: Array<Float like Idx<330>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: __dte(n, k)
+    as_rw(o)
+}
+// Geometry 0's C-C near-shell K = 2 invariant raw and standardized, and the
+// shared scale of the C-O near-shell mean-direction multiplicity.
+let calib_probe_d = [__rwtr(0, 0), __dtr(0, 0), __dsc(0), __dsc(R1)]
+calib_probe_d
+
+// %% [markdown]
+// ## The pre-registered question
+//
+// Before a single gradient step: how much energy signal is in these features?
+// The measurement is the one that explained the first three arms -- the
+// correlation of each standardized feature with the standardized energy over
+// the 500 training geometries, the count of features clearing |r| = 0.1, and
+// the sum of squared correlations, which is an optimistic ceiling on what any
+// linear readout could pull out of them.
+//
+// The pair jet's numbers, for comparison, are on the table already: **zero**
+// features above 0.1, ceiling **0.113**. If windowing is the fix the last
+// section argued it was, these numbers move. If they do not, the arm is
+// answered before it trains, and fifty steps of descent cannot overturn a
+// ceiling.
+//
+// With one addition the previous section did without, and should not have. A
+// sum of squared correlations grows with the number of features whether or not
+// any of them knows anything, and this descriptor has 330 where the pair jet
+// had 126 -- so the raw comparison is rigged in the new arm's favour before
+// the data is consulted. The cell therefore measures the same statistic a
+// second time with the **labels shuffled**, pairing each geometry's features
+// with another geometry's energy. That is this metric, on these features, at
+// this sample size, with the answer removed by construction, and it costs
+// nothing: the store already ships two random permutations of the training
+// indices for the optimizer's epoch schedule. What is worth reading is not
+// either ceiling but the gap between a ceiling and its own null.
+
+// %%
+function corr_d(k: Int) -> Float = {
+    let rec a: Array<Float like Idx<500>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: __dtr(n, k) * __e_tr(n)
+    let rec b: Array<Float like Idx<500>> =
+        match b with
+        | zero -> zero
+        | prefix :: n -> prefix :: __dtr(n, k) * __dtr(n, k)
+    let sxy = reduce(a, (+)) / 500.0
+    let sxx = reduce(b, (+)) / 500.0
+    if sxx < 0.000000001 then 0.0 else sxy / sqrt(sxx)
+}
+let __dcorr = {
+    let rec a: Array<Float like Idx<330>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: abs(corr_d(k))
+    a
+}
+// The twenty-four invariant slots: six channels x two shells x two even
+// orders, channel-major, window-minor, order-minor.
+let rw_l0_corr = method_for(range<Idx<24>>) <@> lambda(k) -> corr_d(k) |> compute
+rw_l0_corr
+let rw_over_0p10 = {
+    let rec a: Array<Float like Idx<330>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: ind2(__dcorr(k), 0.1)
+    reduce(a, (+))
+}
+let rw_over_0p20 = {
+    let rec a: Array<Float like Idx<330>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: ind2(__dcorr(k), 0.2)
+    reduce(a, (+))
+}
+// Features above |r| = 0.1 and above 0.2; then the ceiling, beside the pair
+// jet's 0.113 and the position jet's 0.126.
+let rw_feature_counts = [rw_over_0p10, rw_over_0p20]
+rw_feature_counts
+let rw_signal = reduce(__dcorr * __dcorr, (+))
+let ceiling_compare = [rw_signal, jet_signal, pos_signal]
+ceiling_compare
+// A sum of squared correlations grows with the number of features whether or
+// not any of them knows anything, and this descriptor has 330 where the pair
+// jet had 126. So the same metric is measured again with the labels SHUFFLED:
+// each geometry's features paired with another geometry's energy, using the
+// two random permutations the store already ships for the optimizer's epoch
+// schedule. That is this exact statistic, on these exact features, at this
+// exact sample size, with the answer removed by construction -- and it is the
+// only thing that makes the two ceilings comparable.
+function corr_dn(k: Int, ep: Int) -> Float = {
+    let rec a: Array<Float like Idx<500>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: __dtr(n, k) * __e_tr(__perm(ep, n))
+    let rec b: Array<Float like Idx<500>> =
+        match b with
+        | zero -> zero
+        | prefix :: n -> prefix :: __dtr(n, k) * __dtr(n, k)
+    let sxy = reduce(a, (+)) / 500.0
+    let sxx = reduce(b, (+)) / 500.0
+    if sxx < 0.000000001 then 0.0 else sxy / sqrt(sxx)
+}
+function corr_jn(k: Int, ep: Int) -> Float = {
+    let rec a: Array<Float like Idx<500>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: __ftr(n, k) * __e_tr(__perm(ep, n))
+    let rec b: Array<Float like Idx<500>> =
+        match b with
+        | zero -> zero
+        | prefix :: n -> prefix :: __ftr(n, k) * __ftr(n, k)
+    let sxy = reduce(a, (+)) / 500.0
+    let sxx = reduce(b, (+)) / 500.0
+    if sxx < 0.000000001 then 0.0 else sxy / sqrt(sxx)
+}
+let __dn0 = {
+    let rec a: Array<Float like Idx<330>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: abs(corr_dn(k, 0))
+    a
+}
+let __dn1 = {
+    let rec a: Array<Float like Idx<330>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: abs(corr_dn(k, 1))
+    a
+}
+let __jn0 = {
+    let rec a: Array<Float like Idx<126>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: abs(corr_jn(k, 0))
+    a
+}
+let __jn1 = {
+    let rec a: Array<Float like Idx<126>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: abs(corr_jn(k, 1))
+    a
+}
+let rw_null0 = reduce(__dn0 * __dn0, (+))
+let rw_null1 = reduce(__dn1 * __dn1, (+))
+let jet_null0 = reduce(__jn0 * __jn0, (+))
+let jet_null1 = reduce(__jn1 * __jn1, (+))
+// Windowed jet: real ceiling then two shuffled ones. Pair jet: the same three.
+let rw_vs_null = [rw_signal, rw_null0, rw_null1]
+rw_vs_null
+let jet_vs_null = [jet_signal, jet_null0, jet_null1]
+jet_vs_null
+function cnt330(a: Array<Float like Idx<330>>) -> Float = {
+    let rec o: Array<Float like Idx<330>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: ind2(a(k), 0.1)
+    reduce(o, (+))
+}
+function cnt126(a: Array<Float like Idx<126>>) -> Float = {
+    let rec o: Array<Float like Idx<126>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: ind2(a(k), 0.1)
+    reduce(o, (+))
+}
+// Features above |r| = 0.1: windowed real / shuffled / shuffled, then the pair
+// jet's real / shuffled / shuffled.
+let over_0p10_vs_null = [rw_over_0p10, cnt330(__dn0), cnt330(__dn1),
+                         jet_over_0p10, cnt126(__jn0), cnt126(__jn1)]
+over_0p10_vs_null
+
+// %% [markdown]
+// ## Arm 4's weights
+//
+// The same seed stream as the other three -- `r.normal(20260826, ...)`, drawn
+// bare at top level because that is the only place the language permits it --
+// masked to this arm's own layout, with the readout weights and the bias
+// starting at zero. One pass over a strided tenth of the training set fixes
+// the numeric scale of each of the 89 readout channels, exactly as before.
+
+// %%
+function used_d(k: Int) -> Float = {
+    let a = inblk(k, OFFD_E, WED) + inblk(k, OFFD_T1, W1D) + inblk(k, OFFD_L1, WLH)
+    let b = inblk(k, OFFD_T2, W2H) + inblk(k, OFFD_L2, WLH) + inblk(k, OFFD_T3, W2H)
+    let c = inblk(k, OFFD_L3, WLH) + inblk(k, OFFD_P, WPD)
+    a + b + c
+}
+let __n1 = r.normal(20260826, SWD)
+let __md = {
+    let rec m: Array<Float like Idx<625>> =
+        match m with
+        | zero -> zero
+        | prefix :: k -> prefix :: used_d(k)
+    m
+}
+let __w0d = (0.4 * __n1) * __md
+function ev0_d(j: Int) -> Array<Float like Idx<NEVD>> = ev_d(xd_tr(j * 10), __w0d)
+let __e0d = {
+    let rec v: Array<Float like Idx<50>, Idx<89>> =
+        match v with
+        | zero -> zero
+        | prefix :: j -> prefix :: ev0_d(j)
+    v
+}
+function cmu89(t: Array<Float like Idx<50>, Idx<89>>, j: Int) -> Float = {
+    let rec a: Array<Float like Idx<50>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: t(n, j)
+    reduce(a, (+)) / 50.0
+}
+function csd89(t: Array<Float like Idx<50>, Idx<89>>, j: Int) -> Float = {
+    let mu = cmu89(t, j)
+    let rec a: Array<Float like Idx<50>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: (t(n, j) - mu) * (t(n, j) - mu)
+    sqrt(reduce(a, (+)) / 50.0)
+}
+let __mud = {
+    let rec m: Array<Float like Idx<89>> =
+        match m with
+        | zero -> zero
+        | prefix :: j -> prefix :: cmu89(__e0d, j)
+    m
+}
+let __scd = {
+    let rec m: Array<Float like Idx<89>> =
+        match m with
+        | zero -> zero
+        | prefix :: j -> prefix :: (if csd89(__e0d, j) < 0.05 then 20.0 else 1.0 / csd89(__e0d, j))
+    m
+}
+function fwd_d(x: Array<Float like IrrepsIdx<RWSPEC>>, __s: Array<Float like Idx<SWD>>) -> Float = {
+    let v = ev_d(x, __s)
+    let rec c: Array<Float like Idx<89>> =
+        match c with
+        | zero -> zero
+        | prefix :: j -> prefix :: (v(j) - __mud(j)) * __scd(j)
+    readout_d(as_ev_d(c), wr_d(__s)) + __s(OFFD_B)
+}
+let init_pred_d = fwd_d(xd_tr(0), __w0d)
+init_pred_d
+// EXPECT: init_pred_d = 0
+
+// %%
+function blk_d(__s: Array<Float like Idx<SWD>>, base: Int) -> Array<Float like Idx<NPARD>> = {
+    let rec o: Array<Float like Idx<312>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: wpd(__s, base, k)
+    o
+}
+function cat_at_d(__wn: Array<Float like Idx<NPARD>>, __vn: Array<Float like Idx<NPARD>>,
+                  lv: Float, k: Int) -> Float =
+    if k < NPARD then __wn(k) else (if k < NP2D then __vn(k - NPARD) else lv)
+function sq_d(__s: Array<Float like Idx<SWD>>, n: Int) -> Float = {
+    let d = fwd_d(xd_tr(n), __s) - __e_tr(n)
+    d * d
+}
+function loss_d(__s: Array<Float like Idx<SWD>>, ep: Int, b: Int) -> Float = {
+    let rec errs: Array<Float like Idx<20>> =
+        match errs with
+        | zero -> zero
+        | prefix :: j -> prefix :: sq_d(__s, __perm(ep, b * BS + j))
+    reduce(errs, (+)) / 20.0
+}
+function step_d(s: Array<Float like Idx<SWD>>, ep: Int, b: Int) -> Array<Float like Idx<SWD>> = {
+    let mut ds = replicate(SWD, pure(0.0)) |> compute
+    let lv = ad.grad(loss_d)(s, ep, b, ds)
+    let vn = MU * blk_d(s, NPARD) - LR * blk_d(ds, 0)
+    let wn = blk_d(s, 0) + vn
+    let rec o: Array<Float like Idx<625>> =
+        match o with
+        | zero -> zero
+        | prefix :: k -> prefix :: cat_at_d(wn, vn, lv, k)
+    o
+}
+let __tjd = {
+    let rec t: Array<Float like Idx<51>, Idx<625>> =
+        match t with
+        | zero -> zero
+        | zero :: n -> zero :: __w0d
+        | prefix :: n -> prefix :: step_d(prefix(n - 1), (n - 1) / NB, (n - 1) - ((n - 1) / NB) * NB)
+    t
+}
+let __fd = __tjd(NSTEP)
+function ld_at(n: Int) -> Float = __tjd(n + 1)(NP2D)
+let loss_d_curve = method_for(range<Idx<NSTEP>>) <@> lambda(n) -> ld_at(n) |> compute
+let final_loss_d = __fd(NP2D)
+final_loss_d
+
+// %%
+let __axd0 = method_for(range<Idx<NB>>) <@> lambda(n) -> Float64(n) |> compute
+let __axd1 = method_for(range<Idx<NB>>) <@> lambda(n) -> Float64(n + NB) |> compute
+let __lyd0 = method_for(range<Idx<NB>>) <@> lambda(n) -> ld_at(n) |> compute
+let __lyd1 = method_for(range<Idx<NB>>) <@> lambda(n) -> ld_at(n + NB) |> compute
+let stream_d0 = plot.stream("jet_rw", __axd0, __lyd0, 0: epoch,
+                            "radial-windowed jet: mini-batch loss": title,
+                            "batch": xlabel, "mean squared error": ylabel)
+let stream_d1 = plot.stream("jet_rw", __axd1, __lyd1, 1: epoch,
+                            "radial-windowed jet: mini-batch loss": title,
+                            "batch": xlabel, "mean squared error": ylabel)
+let plot_d = plot.line(__axall, loss_d_curve,
+                       "arm 4: radial-windowed jet, mini-batch loss": title,
+                       "batch": xlabel, "mean squared error": ylabel)
+plot_d
+
+// %% [markdown]
+// ## The table, extended
+//
+// Six rows, differing in nothing but the descriptor -- same store, same split,
+// same seed stream, same fifty steps, same optimizer, same hidden stack. The
+// first two are literals (a constant predictor, and NB1b's published
+// histogram-plus-multipoles model on the same data); the rest are computed by
+// the cell below.
+//
+// | arm | descriptor | features | params | test MSE | test MAE kcal/mol |
+// |---|---|---|---|---|---|
+// | constant | predict the training mean | 0 | 0 | 1.091 | 5.486 |
+// | NB1b | pair-distance histogram + centroid multipoles | 45 | 249 | 0.892 | 5.057 |
+// | jet_pos | position jets, K = 2, 3, 4 | 93 | 253 | 1.051 | 5.373 |
+// | jet_k2 | pair jets, K = 2 | 36 | 248 | 1.029 | 5.312 |
+// | jet_k24 | pair jets, K = 2 and 4 | 126 | 265 | 1.052 | 5.345 |
+// | jet_rw | windowed pair jets, K = 1, 2, 3, 4 | 330 | 312 | 1.063 | **5.207** |
+//
+// The windowed arm has the **best held-out mean absolute error of the four**,
+// 5.207 against the next best arm's 5.312 and the constant predictor's 5.486,
+// and the **worst mean squared error**, 1.063. Those two facts are one fact: it is
+// right more often and wrong by more when it is wrong. The cell below prints
+// where that comes from -- its training error is 0.860 against a test error of
+// 1.063, a gap of 0.20, where the pair-jet arm's gap was 0.11 from a training
+// error it never pushed below 0.946. The descriptor got better; the fit, at
+// fifty steps with 312 parameters on 500 geometries, spent the improvement on
+// the training set. (The MAE ordering across arms is a two-per-cent effect and
+// carries the same caveat the first three did: inter-arm spread is inside the
+// noise of a fifty-step descent. The train/test gap and the pre-registered
+// ceiling are the numbers doing the work here.)
+//
+// That is the ablation's answer, and it is not the answer the previous section
+// was hoping for. It is also not a null one: the diagnostic moved, the fit
+// followed it into the training data, and the two together say something
+// specific about which half of the problem is now the binding constraint.
+
+// %%
+function te_sq_d(n: Int) -> Float = {
+    let d = fwd_d(xd_te(n), __fd) - __e_te(n)
+    d * d
+}
+function te_ab_d(n: Int) -> Float = abs(fwd_d(xd_te(n), __fd) - __e_te(n))
+let mse_d = {
+    let rec a: Array<Float like Idx<100>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: te_sq_d(n)
+    reduce(a, (+)) / 100.0
+}
+let mae_d = {
+    let rec a: Array<Float like Idx<100>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: te_ab_d(n)
+    reduce(a, (+)) * __stats(1) / 100.0
+}
+let tr_mse_d = {
+    let rec a: Array<Float like Idx<500>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: sq_d(__fd, n)
+    reduce(a, (+)) / 500.0
+}
+// row order: constant baseline, NB1b (literal), arm 1, arm 2, arm 3, arm 4.
+let test_mse_all = [base_mse, 0.892, mse_a, mse_b, mse_c, mse_d]
+test_mse_all
+let test_mae_all = [base_mae, 5.057, mae_a, mae_b, mae_c, mae_d]
+test_mae_all
+let param_counts_all = [0, 249, NPA, NPB, NPC, NPD]
+param_counts_all
+// EXPECT: param_counts_all = [0, 249, 253, 248, 265, 312]
+// Arm 4's own train-set error beside its test error: the gap is what separates
+// a result from a memorization.
+let train_test_d = [tr_mse_d, mse_d]
+train_test_d
+// Where the gap opens. `__tjd` holds every step's weights, so the held-out
+// error at step 10 and step 25 costs two more passes over the test split. This
+// is a diagnostic, not a model-selection rule: picking a step by its test
+// error would be reading the answer off the exam.
+function mse_at(w: Array<Float like Idx<SWD>>) -> Float = {
+    let rec a: Array<Float like Idx<100>> =
+        match a with
+        | zero -> zero
+        | prefix :: n -> prefix :: (fwd_d(xd_te(n), w) - __e_te(n)) * (fwd_d(xd_te(n), w) - __e_te(n))
+    reduce(a, (+)) / 100.0
+}
+let mse_d_traj = [mse_at(__tjd(10)), mse_at(__tjd(25)), mse_d]
+mse_d_traj
+// Train and test side by side for the pair jet and the windowed jet: the pair
+// jet barely fits its training set, the windowed jet fits it and pays for it.
+let gap_compare = [train_mse_best, mse_c, tr_mse_d, mse_d]
+gap_compare
+
+// %% [markdown]
 // ## Verification: the energy does not move
 //
 // Eight rotations, sampled by the same Haar routine the ML oracle's own
@@ -2195,6 +3328,42 @@ __edev
 let invariance_report = [e_over_1e12, e_over_1e13]
 invariance_report
 // EXPECT: invariance_report = [0, 0]
+
+// The windowed jet, from the same rotated coordinates, through the same
+// chain. This one exercises strictly more: 712 `derive_poly` calls per
+// geometry, twelve radial weights computed from lengths that must themselves
+// be rotation-invariant, and -- new here -- the odd blocks, whose l = 1 and
+// l = 3 content is exactly what a wrong permutation would rotate quietly into
+// something else.
+function energy_d(p: Array<Float like Idx<NP3>>) -> Float =
+    fwd_d(as_rw(dstd(rwrow(p))), __fd)
+let d_ref = energy_d(te_flat(0))
+function ddev(k: Int) -> Float = abs(energy_d(rot_yzx(k, __pc0)) - d_ref)
+let __ddev = {
+    let rec a: Array<Float like Idx<8>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: ddev(k)
+    a
+}
+let d_over_1e12 = {
+    let rec a: Array<Float like Idx<8>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: ind2(__ddev(k), 0.000000000001)
+    reduce(a, (+))
+}
+let d_over_1e13 = {
+    let rec a: Array<Float like Idx<8>> =
+        match a with
+        | zero -> zero
+        | prefix :: k -> prefix :: ind2(__ddev(k), 0.0000000000001)
+    reduce(a, (+))
+}
+__ddev
+let rw_invariance_report = [d_over_1e12, d_over_1e13]
+rw_invariance_report
+// EXPECT: rw_invariance_report = [0, 0]
 
 // %% [markdown]
 // ## Phase B, in miniature
@@ -2360,42 +3529,76 @@ jvp_agrees
 //
 // As a **refusal**: `anisotropy`, the plausible-looking read of the jet's first
 // l = 2 component, is a program that does not exist. As a **deduction**: the
-// compiler wrote `where ml.equiv(O3)` on thirteen functions in the network cell
-// that never asked for it, `inv_c` included, with the exact spec each argument
-// transforms under. As a **number**: the energy of arm 3 — recomputed from
-// scratch through 420 `derive_poly` calls per rotated geometry — does not move
-// under any of the eight rotations, to the last bits of a double.
+// compiler wrote `where ml.equiv(O3)` on seventeen functions in the network
+// cells that never asked for it, `inv_c` and `inv_d` included, with the exact
+// spec each argument transforms under. As a **number**: the energies of arms 3
+// and 4 -- recomputed from scratch through 420 and 712 `derive_poly` calls per
+// rotated geometry, the second of them including odd blocks that a wrong
+// coordinate permutation would have quietly rotated into something else -- do
+// not move under any of the eight rotations, to the last bits of a double.
 //
 // And as an **experiment**, which is the part a type system cannot decide, the
-// answer is a loss and it is worth stating plainly. The three arms differ in
-// nothing but their descriptor — same store, same split, same seed row, same
-// optimizer, same state layout, same fifty steps — and all three land near
-// 1.03-1.05 test MSE against a constant-predictor baseline of 1.09 and NB1b's
-// histogram at 0.892. Order 2 alone (1.029) very slightly beats order 2 plus
-// order 4 (1.052), so the l = 4 anisotropy did not pay here; but the gap
-// between the arms is inside the noise of a fifty-step descent, and the
-// correlation cell explains why nothing else could have happened. The signal
-// is not in these features to be found. Two moments of a thirty-six-pair
-// distance distribution are a coarse summary of it, and aspirin's energy lives
-// in the shape.
+// four arms have to be read in two steps, because they answer two different
+// questions.
 //
-// That is a real result about a real descriptor family, and it is the second
-// one this arc has produced: NB1b measured that centroid multipoles carry no
-// conformational signal, and this notebook measures that low-order pair
-// moments carry very little either — while pinning exactly what they DO carry,
-// to the last bit. Knowing what a descriptor contains is what makes a negative
-// result informative rather than merely disappointing.
+// **The first three arms are a statement about the descriptor.** They differ
+// in nothing but which jet they see, and all three land near 1.03-1.05 test
+// MSE against a constant-predictor baseline of 1.09 and NB1b's histogram at
+// 0.892. Order 2 alone very slightly beats order 2 plus order 4, so the l = 4
+// anisotropy did not pay; the spread between them is inside the noise of a
+// fifty-step descent, and the correlation cell explains why nothing else could
+// have happened. Two moments of a thirty-six-pair distance distribution are a
+// coarse summary of it, and aspirin's energy lives in the shape.
 //
-// The theorems, though, were. The order-3 jet of a centrally symmetric cloud is
-// zero because `ml.sym_spec(PT, 3)` has only odd blocks — a fact about
-// representations, which is why the number is 0 and not 1e-16. The invariant
-// slots are distance moments because Sym^K's l = 0 block is the trace part. And
-// the moment jet is the moment matrix because both routes are the same
-// equivariant map written twice. A descriptor you can say those three things
-// about is a different object from a descriptor you can only measure.
+// **The fourth arm is a statement about which half of the problem binds.** It
+// makes the coarseness go away in the way MTP and ACE do -- twelve radial
+// shells instead of six flat channels, four orders instead of two, a polar
+// K = 1 feature the symmetric cloud could never have had -- and the
+// pre-registered diagnostic says the descriptor really did change. Ten of its
+// 330 features clear |r| = 0.1 against one to four when the labels are
+// shuffled; its linear ceiling is 0.484 against shuffled ceilings of 0.20 and
+// 0.31. Do the same subtraction for the pair jet and the excess over its own
+// null is 0.02 against the windowed jet's roughly 0.23. That is an order of
+// magnitude more linear signal, measured before a single gradient step, with a
+// control that costs nothing because the store already ships the
+// permutations.
+//
+// And then the fit did not collect it. Arm 4 has the best held-out mean
+// absolute error of the four, 5.207 kcal/mol against the next best arm's 5.312
+// and a constant predictor's 5.486 -- a two-per-cent margin, inside fifty-step
+// noise and claimed no harder than that -- and the worst mean squared error,
+// 1.063: right more often, and wrong by more when it is wrong. The number that
+// is not noise is the gap. Its training error is 0.860 where arm 3's was
+// 0.946, so train and test separated by 0.20 against 0.11 while the test
+// number did not improve. Fifty steps of momentum SGD, 312 parameters, 500
+// geometries: the extra information went into the training set.
+//
+// That is a different sentence from the one the first three arms earned, and
+// the difference is the point. "The features do not know" and "the fit does
+// not collect what the features know" are distinguishable claims, and this
+// notebook distinguishes them with a shuffled-label control and a train/test
+// gap rather than with an opinion. The binding constraint moved. Where it went
+// -- step budget, regularisation, sample size, or a readout that is 89 linear
+// weights on 89 invariants -- is the next experiment, and it is no longer a
+// question about representation theory.
+//
+// The theorems, meanwhile, held throughout, and windowing did not cost one of
+// them. The order-3 jet of a centrally symmetric cloud is zero because
+// `ml.sym_spec(PT, 3)` has only odd blocks -- a fact about representations,
+// which is why the number is 0 and not 1e-16 -- and the windowed order-1 and
+// order-3 jets of the homo channels are zero for exactly the same reason, a
+// radial weight being a function of |v| alone. The hetero channels do carry a
+// direction, checked pair by pair in the ordered sense, which is what licenses
+// the odd orders at all. The invariant slots are distance moments because
+// Sym^K's l = 0 block is the trace part. And the windowed jet is the windowed
+// moment TENSOR: an outer-product accumulation over the symmetrized cloud,
+// bridged by `ml.sym_to_irreps`, agrees with the polynomial route block by
+// block at exactly -1 and +1. A descriptor you can say those things about is a
+// different object from a descriptor you can only measure.
 //
 // The road from here is section 5 of `docs/plans/plan-equivariant-nn-notebooks.md`:
 // teach reverse mode the combinator lane, and the `beta` above stops being a
-// finite-difference demonstration and becomes a trained parameter — a learnable
-// transform upstream of a certified moment jet, with the certificate intact all
-// the way down.
+// finite-difference demonstration and becomes a trained parameter. The twelve
+// numbers in `__mu` and `__sg` are exactly the parameters an MTP or ACE model
+// fits rather than bakes -- a learnable radial basis upstream of a certified
+// moment jet, with the certificate intact all the way down.

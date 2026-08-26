@@ -418,9 +418,30 @@ feature exceeds |r| = 0.1 against energy; the sum-of-r² linear ceiling is
 notebook's stated conclusion: two moments are not a distribution — a
 dihedral moves specific contacts while barely moving mean|v|² and mean|v|⁴
 of a 36-pair channel, which is exactly the shape NB1b's Gaussian shells
-keep. Named follow-on (not built): RADIAL WINDOWING before the moment —
-MTP/ACE-style w_c(|v|)·v jets — which multiplies channel count, keeps every
-theorem unchanged, and is the natural next arm.
+keep.
+
+**RADIAL-WINDOWED ARM BUILT 2026-08-26** (user-directed: first FOUR moments,
+each a moment of the sample tensor as a whole). As shipped: 6 channels × 2
+Gaussian shells (25th/75th-percentile centres, baked) × K=1..4 — odd orders
+on the three HETERO channels only, where species ordering makes v = r_A−r_B
+canonical (K=1 = windowed mean bond vector; homo-channel odd moments pinned
+exactly zero, 78 slots); `RWSPEC` dim 330; 312 params; one `derive_poly` per
+(pair, order) with windows as scalar weights in running-sum tables (712
+calls/geometry). Whole-tensor pin: √w-scaled symmetrized O-O cloud through
+`ppl.comoments → sym_to_irreps` vs the weighted derive_poly mean, ratio
+exactly ±1 per block. **The diagnostic got corrected**: sum-of-r² grows with
+feature count, so a shuffled-label null (via the store's own perm table) now
+calibrates it — the unwindowed jet's 0.113 ceiling is barely above its own
+noise floor (excess ≈0.02), while the windowed jet measures excess 0.23 with
+10 features over |r|=0.1 (vs ≤1 under the null): **windowing bought ~10× the
+linear signal, before any gradient step**. Result: outcome (b), sharp — best
+jet MAE 5.207 (vs 5.057 histogram, 5.31–5.37 other arms) but worst MSE
+1.063 and a doubled train/test gap (0.20 vs 0.11): the representation
+improved measurably; 50 steps of plain SGD could not collect it — **the
+binding constraint moved from representation to optimization** (more steps /
+regularization / the §5-unlocked training improvements are the named next
+lever). Full drive 201.4 s, 31/31 passing cells interp+kept, four stream
+channels live; canaries green.
 
 ### 3.5 Honest outcomes
 
@@ -599,7 +620,10 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 43 | `ad.jvp` refuses rank-2 recursive arrays (BL5501 rank-1-only) — running-sum tables not forward-differentiable | MF | NB2 Phase-B teaser | NB2-soft | Grad rec-array arm (seam of #29/#36) |
 | 44 | `reduce(A * B, (+))` in expression position: interpreter ACCEPTS, codegen refuses BL7004 — silent lane divergence for interp-only notebooks | BUG | NB2 `signal_ceiling` | no (bind each reduce) | CodeGen deferred-reduce arm, or make interp refuse identically |
 | 45 | `plot.line` is single-series; overlays need N figures | MF | NB2 build | no | `stdlib/plot.blade` multi-series factory |
-| 46 | Multi-line array literal whose `[` opens on the line after `=` is BL1999 | BD/quirk (family of #33) | NB2 `__pi` | no | doc |
+| 46 | Multi-line array literal whose `[` opens on the line after `=` is BL1999 | BD/quirk (family of #33) | NB2 `__pi`; re-hit in the windowed arm | no | doc |
+| 47 | `ide serve` interleaves live `{"event":"display"}` lines with eval responses on one stdout stream; a one-line-per-request client desynchronises silently and blocks | BD/trap | cost a 10-min hang in the windowed-arm drive harness | no (loop until a non-event line) | doc the read loop in display-frames.md §3 |
+| 48 | Notebook eval responses give the cell-result binding an empty `name` and truncate `value` past ~5 elements — automated drives cannot read full printed values from the protocol | MF | raw response inspected | no (verify via `blade run`) | `IdeServe.handleEval` binding renderer |
+| 49 | Sizing builtins outside `let static` position leak an internal name: `BL2001: Unbound variable: __ml_stat_total_dim` | BUG (message) | 1-line repro | no (use `let static`) | `MLElaborate` static-op arm |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
@@ -632,11 +656,16 @@ constants compiler-owned.
    the correlation diagnostic making the loss clean; census grown to 46).
 6. **Reverse-mode combinator AD (§5)** — next; unlocks NB2 Phase B as a real
    trained arm rather than a jvp teaser.
-7. **Radial-windowed pair jets** (§3 AS BUILT's named follow-on) — the arm
-   that could flip outcome (c); theorems carry over unchanged.
-8. Revisit: outputs persistence decision (#9), `ml.rotate` (#14), the memo
+7. ✅ **Radial-windowed pair jets built 2026-08-26** (§3 AS BUILT): 10× the
+   null-excess linear signal; best jet MAE; the constraint is now
+   optimization, not representation — §5 and longer/regularized training
+   are the levers.
+8. ▶ **Idiom audit of NB1b** (user-directed): classify every `let rec` and
+   long positional literal as rewrite / blocked-idiomatic (cite the census
+   gap) / genuinely-sequential; apply the available rewrites byte-stably.
+9. Revisit: outputs persistence decision (#9), `ml.rotate` (#14), the memo
    bug (#40) and the interp/codegen divergence (#44) as the notebook-UX
-   bugfixes worth doing first.
+   bugfixes worth doing first (delegated).
 
 ## 8. Risks
 
