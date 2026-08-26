@@ -61,6 +61,13 @@ let field (lats: float[]) (bias: bool) : float[] =
            for lo in 0 .. nLon - 1 ->
              baseTemp lats.[la] lo t + (if bias && lo >= 8 then 1.5 else 0.0) |]
 
+/// The domain's latitude span as a CF-style bounds pair. Two cells, so a
+/// compile-time fold of it stays legible: `let static` materializes a provider
+/// array as a structural TUPLE (StaticValue has no array carrier), which is
+/// informative at 2 elements and noise at 24.
+let latBounds (lats: float[]) =
+    mkArray "lat_bounds" ["bnds"] [2L] [2L] (IceF64 [| lats.[0]; lats.[lats.Length - 1] |])
+
 let coord name (vals: float[]) (dim: string) =
     mkArray name [dim] [int64 vals.Length] [int64 vals.Length] (IceF64 vals)
 
@@ -76,6 +83,7 @@ let coarseCoords = [
     coord "time_hours" timeHours "time"
     coord "lat" latCoarse "lat"
     coord "lon" lonVals "lon"
+    latBounds latCoarse
 ]
 
 let spec =
@@ -88,7 +96,8 @@ let spec =
             mkSnapshot "s_regrid"    (tempArray latFine   false ::
                                       [ coord "time_hours" timeHours "time"
                                         coord "lat" latFine "lat"
-                                        coord "lon" lonVals "lon" ])
+                                        coord "lon" lonVals "lon"
+                                        latBounds latFine ])
         ]
         Branches = [ "main", "s_corrected"; "regrid", "s_regrid"; "release", "s_corrected" ]
         Tags = [ "v1.0", "s_raw"; "release", "s_raw" ]

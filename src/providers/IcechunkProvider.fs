@@ -1541,6 +1541,27 @@ let private coordFingerprint (key: string) (ck: CheckoutHandle)
 /// Prefix of the axis tag. `__`-prefixed on purpose -- see `axisTag`.
 let axisTagPrefix = "__icaxis|"
 
+/// The DIM NAME inside an axis tag, for display only: `__icaxis|lat@ic_wx:9f3a`
+/// -> `lat`, and `...#2` -> `lat#2`. The tag is `__`-prefixed so every seam that
+/// reads a tag as a user-written NAME leaves it alone (see `axisTag`), and the
+/// type printer's nominal-name map drops it for exactly that reason -- so a
+/// checkout array printed as `Array<Float64 like Idx<24>, Idx<10>, Idx<12>>`
+/// while the store's own dim names sat inside the tag. This hands the printer
+/// back the one part of the tag that IS a name. The split ordinal rides along on
+/// purpose: two identities of one dim that no longer unify must not print
+/// identically.
+let tryAxisTagName (tag: string) : string option =
+    if not (tag.StartsWith axisTagPrefix) then None
+    else
+        let rest = tag.Substring axisTagPrefix.Length
+        match rest.IndexOf '@' with
+        | i when i > 0 ->
+            let dim = rest.Substring(0, i)
+            match rest.IndexOf '#' with
+            | h when h > i -> Some (dim + rest.Substring h)
+            | _ -> Some dim
+        | _ -> None
+
 /// The identity an axis carries in the TYPE, beyond its Id. Shape:
 ///
 ///     __icaxis|lat@ic_wx:9f3a       the axis as this repo first presented it

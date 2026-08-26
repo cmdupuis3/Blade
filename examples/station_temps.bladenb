@@ -25,12 +25,10 @@
 // coordinate arrays are byte-identical to v1.0's; branch `regrid` rewrites
 // the latitude axis at twice the resolution; and `release` exists as both
 // a branch *and* a tag, deliberately.
-
+//
 // %%
 import icechunk as ic
 
-// The path is relative to THIS FILE: a notebook cell evaluates with the
-// notebook's own directory as its working directory.
 let repo = ic.load("data/station_temps.icechunk")
 
 // %% [markdown]
@@ -38,7 +36,7 @@ let repo = ic.load("data/station_temps.icechunk")
 // not a meaningful notion until a ref says *which* data. `checkout` is the
 // factory: give it a branch, tag, or snapshot id, and the result is a typed
 // store whose dims and vars come from that snapshot's metadata.
-
+//
 // %%
 let now = repo.checkout("main")
 let temp_now = now.vars.temp |> ic.read
@@ -49,9 +47,17 @@ mean_now
 // A compile-time fold announces exactly which commit fed it: watch the
 // `[provenance] folded ... snapshot ...` line — that is the snapshot id,
 // straight from the ref resolution, not a checksum.
-
+//
+// Note what a folded array *is*. `let static` asks for a value the compiler
+// can hold, and the compile-time value language has no array carrier, so the
+// cells arrive as a structural **tuple** -- the staging model, not a quirk of
+// this provider. The array path is the plain `|> ic.read` above. So fold small
+// things: this two-cell latitude-bounds pair reads nicely, where folding the
+// field itself would hand back a 2880-element tuple.
+//
 // %%
-let static hours = ic.read(now.vars.time_hours)
+let static lat_span = ic.read(now.vars.lat_bounds)
+lat_span
 
 // %% [markdown]
 // Branches and tags are **separate namespaces** in Icechunk, so a bare name
@@ -59,7 +65,7 @@ let static hours = ic.read(now.vars.time_hours)
 // unit-typed markers — `ic.branch`, `ic.tag`, `ic.snapshot` — and
 // `checkout` dispatches on the marker's *unit*: same method, three
 // namespaces, disambiguated by type rather than by string prefixes.
-
+//
 // %%
 let v1 = repo.checkout("v1.0", ic.tag)
 let temp_v1 = v1.vars.temp |> ic.read
@@ -77,7 +83,7 @@ let temp_v1 = v1.vars.temp |> ic.read
 //
 // The bias band is 4 of 12 longitudes at +1.5 K, so the mean drift is
 // −0.5 K exactly.
-
+//
 // %%
 let drift = temp_now - temp_v1
 let mean_drift = reduce(drift, (+), axes = 3) / 2880.0
@@ -88,7 +94,7 @@ mean_drift
 // A tag can move only by deliberate re-tagging; a snapshot id can never
 // move. Pinning one makes a program bit-exactly reproducible — the compiled
 // binary reads those chunks or fails loudly, forever.
-
+//
 // %%
 let pinned = repo.checkout("TFWGY8Y38WKVN9HJX450", ic.snapshot)
 let temp_pin = pinned.vars.temp |> ic.read
@@ -103,7 +109,7 @@ reduce(temp_pin - temp_v1, (+), axes = 3)
 // `main`'s, so mixing them refuses at compile time. **This cell fails on
 // purpose**: the point is the error, an index-type mismatch naming the two
 // incompatible axes, instead of a silently wrong broadcast.
-
+//
 // %%
 let rg = repo.checkout("regrid")
 let bad = (rg.vars.temp |> ic.read) - temp_now
@@ -115,14 +121,14 @@ let bad = (rg.vars.temp |> ic.read) - temp_now
 // are separate namespaces. A bare checkout refuses rather than guess.
 // **This cell fails on purpose**; the message names both candidates and the
 // marker spellings that resolve them.
-
+//
 // %%
 let rel = repo.checkout("release")
 
 // %% [markdown]
 // The remedy is the marker — and the tag `release` turns out to be the raw
 // snapshot again:
-
+//
 // %%
 let rel_tag = repo.checkout("release", ic.tag)
 let rel_temp = rel_tag.vars.temp |> ic.read

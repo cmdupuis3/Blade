@@ -612,6 +612,22 @@ carries pre-net10 `net7.0` candidates too; the repo's own
 `protocol/resolveCompiler.js` is already correct, so that copy is stale
 vendoring for the ide-protocol branch to re-sync.
 
+Two display facts the first real notebook run surfaced, both fixed rather than
+explained away. (1) A checkout's arrays printed as `Array<Float64 like Idx<24>,
+Idx<10>, Idx<12>>`: the type printer's nominal-name map reads `IRIndexType.Tag`
+and drops `__`-prefixed tags as synthetic, which is exactly what P3's axis tag
+is — so the store's own dim names sat inside the tag, unreadable.
+`IcechunkProvider.tryAxisTagName` now decodes the name (and the split ordinal)
+back out for `Ide.indexNamesOf`, giving `Array<Float64 like Idx<time>, Idx<lat>,
+Idx<lon>>` — the same `Idx<Name>` house form a user-declared alias prints in,
+and a diverged identity reads as `Idx<lat#2>` rather than colliding on sight.
+Display only; zarr and netcdf are untouched. (2) `let static` over a provider
+array materializes as a structural TUPLE, since `StaticValue` has no array
+carrier (`ProviderStatics.shapeValue` nests `SVTuple`s) — by design, not a
+provider bug, and identical under zarr. Indexing one is not a supported static
+form, so the notebook folds a two-cell `lat_bounds` pair and says what the
+tuple is.
+
 The icechunk-python oracle cross-check remains the one open verification.
 
 ## 14. Risks

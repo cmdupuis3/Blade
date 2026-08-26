@@ -507,7 +507,15 @@ let rec private indexNamesOf (t: IRType) : (IRId * string) list =
             |> List.choose (fun idx ->
                 match idx.Tag with
                 | Some tag when not (tag.StartsWith "__") -> Some (idx.Id, tag)
-                | _ -> None)
+                // A provider AXIS tag is `__`-prefixed so the type system reads it
+                // as synthetic (IcechunkProvider.axisTag says why), but the dim name
+                // inside it is exactly the user-facing name this map wants -- without
+                // it a checkout array prints as `Idx<24>, Idx<10>, Idx<12>` while the
+                // store calls those axes time, lat and lon.
+                | Some tag ->
+                    Blade.IcechunkProvider.tryAxisTagName tag
+                    |> Option.map (fun name -> (idx.Id, name))
+                | None -> None)
         fromIndices @ indexNamesOf arr.ElemType
     | IRTTuple ts -> ts |> List.collect indexNamesOf
     | _ -> []
