@@ -158,8 +158,17 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
                 else Some (NLet (dName n, true, fLit 0.0))
             | _ -> None)
     // reject function-level diff array locals whose initializer has neither
-    // a literal shape nor (C6) a combinator reverse rule with known dims
+    // a literal shape nor (C6) a combinator reverse rule with known dims.
+    //
+    // The REASON is carried alongside the name. One message used to answer
+    // for every rejection here, and it said "aliases are not differentiable"
+    // -- true of an alias, and actively misleading about the two forms that
+    // reach this check most often: `compound` and `<|:>` are neither aliases
+    // nor shape-unknown, they are combinators whose reverse rule does not
+    // exist, for reasons worth stating.
     let badArrayLocal =
+        let dimsMsg (form: string) =
+            $"is initialized by {form}, whose shape is not statically known here; the reverse sweep sizes a cotangent BUFFER from it, so a partial answer is not available -- annotate the binding `Array<Float like Idx<n>, ...>`, or build it from operands with literal extents"
         stmts |> List.tryPick (fun s ->
             match s with
             | NLet (n, _, value) when Set.contains n diff && Set.contains n arrays ->
@@ -170,10 +179,34 @@ let private synthesize (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, stri
                           | ExprKind.ExprPure _ | ExprKind.ExprCompute _
                           | ExprKind.ExprSort _ | ExprKind.ExprSequence _
                           | ExprKind.ExprReplicate _ } when Map.containsKey n dimsEnv -> None
-                 | _ -> Some n)
+                 // The `pure`/`compute`/annotation wrappers are transparent
+                 // to WHICH combinator this is, so the specific arms below
+                 // look through them: `a <|:> b |> compute` parses with the
+                 // `compute` outermost and would otherwise be reported as a
+                 // shape problem rather than as the fallback it is.
+                 | _ ->
+                 let rec peel (e: Expr) =
+                     match e.Kind with
+                     | ExprKind.ExprCompute i | ExprKind.ExprPure i | ExprKind.ExprTyped (i, _) -> peel i
+                     | _ -> e
+                 match (peel value).Kind with
+                 | ExprKind.ExprCompound _ ->
+                     Some (n, "is initialized by `compound`, a GATHER through a mask. Its adjoint is the scatter `cot <|:> zeros` -- spellable in the surface (plan-ad-combinators.md 2.12) but a whole-array statement the reverse lane has no rule for, and the compacted extent is a RUNTIME value the static shape env cannot hold (v1). Forward mode (`ad.jvp`) differentiates it; in reverse, apply the mask outside the differentiated function")
+                 | ExprKind.ExprBinOp (_, OpFallback, _, _) ->
+                     Some (n, "is initialized by `<|:>`, which selects by ALLOCATION rather than by value -- linear in both legs, and forward mode differentiates it for exactly that reason. Its adjoint is a storage-keyed SPLIT, and which split (dense-left copies the cotangent whole; compound-left routes it through the mask and its complement) depends on the left operand's INDEX TYPE -- which this pre-typecheck transform cannot see (v1). Use `ad.jvp`, or move the fallback outside the differentiated function")
+                 | _ ->
+                 match value with
+                 | { Kind = ExprKind.ExprVar _ } -> Some (n, dimsMsg "an array alias")
+                 | { Kind = ExprKind.ExprTranspose _ | ExprKind.ExprStack _
+                          | ExprKind.ExprJoin _ | ExprKind.ExprGram _ | ExprKind.ExprGuard _
+                          | ExprKind.ExprPure _ | ExprKind.ExprCompute _
+                          | ExprKind.ExprSort _ | ExprKind.ExprSequence _
+                          | ExprKind.ExprReplicate _ } -> Some (n, dimsMsg "a reindexing combinator")
+                 | _ ->
+                     Some (n, "must be initialized by an array literal, a constant fill, or a combinator with a reverse rule (`transpose`/`stack`/`sequence`/`replicate`/`join`/`gram`/`guard`/`sort`/`pure`/`compute`); a bare alias or an unsupported combinator is not differentiable in reverse mode"))
             | _ -> None)
     match badArrayLocal with
-    | Some n -> err fname $"differentiable array local '{n}' must be initialized by an array literal (aliases are not differentiable)"
+    | Some (n, why) -> err fname $"differentiable array local '{n}' {why}"
     | None ->
     let scalarCots = scalarDiff |> List.map (fun p -> NLet (dName p, true, fLit 0.0))
 

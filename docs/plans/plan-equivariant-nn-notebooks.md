@@ -539,7 +539,14 @@ re-run-to-see. Decide before NB1 ships.
 Committed workstream (user decision 2026-08-25), amending
 `plan-ad-combinators.md` §4 C6's "do not build a general
 reverse-through-combinators pass — and stop." The amendment is deliberately
-narrower than a general pass, and C6's own reasoning still bounds it:
+narrower than a general pass, and C6's own reasoning still bounds it.
+**STATUS 2026-08-26: item 2 LANDED** (`GradNormalize.expandEagerMap`; census
+row 15 carries the coverage and surviving refusals; suites 5134/0); **items
+1 and 3 were ALREADY LANDED 2026-08-17** (commit `915b32d`/PR #38 carried the
+C1 reverse flows incl. stack/sequence/replicate/transpose/join/sort and the
+`gram` adjoint — this plan's item-1/3 framing was stale; the reverse-AD
+build added `<*>` and the per-construct refusal messages). Items as
+originally scoped:
 
 1. **C1 linear-closure lowering into grad's lane** (C6's own first
    recommendation): `pure`, `|> compute`, `<*>`, `stack`, `sequence`,
@@ -588,7 +595,7 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 12 | No `rand.shuffle`/permutation (categorical = with-replacement) | MF | `RandElaborate.fs:90-98` | NB1-soft | `.fsx` perm table; later: rand op |
 | 13 | No `max` intrinsic / max-fold (`reduce(A, max)` = BL2001 unbound) | MF | ✅PROBED P7b | NB1-soft | indicator-sum idiom; later: intrinsic |
 | 14 | No in-language rotation/Wigner-D application (`ml.rotate`/`rep_matrix`); certificates bake D literals | MF | `WignerTables.fs` is CG-only; `MLElaborate.fs:1228-1234` op set | NB1/NB2-soft (`.fsx` tables from `oracles/ml/Rotations.fs:33-148`) | new ml op mirroring oracle `repMatrix` |
-| 15 | Reverse-mode `ad.grad` refuses all combinators ⇒ no AD through ppl formers / `method_for` | MF | `GradExpand.fs:478,518`; `ad-jvp-comb/083` | NB2-hard for Phase B only | `GradExpand.fs` (the C-track); `ad.jvp` works now |
+| 15 | Reverse-mode `ad.grad` refused all combinators | MF | was `GradExpand.fs:478,518` | — | **PARTLY FIXED 2026-08-26** (§5 item 2): `GradNormalize.expandEagerMap` rewrites an eager map that is a `let`'s whole initializer into the element-write loop grad's v1 subset already differentiates — `range<Idx<n>>`, named static-extent arrays, `zip`, `<*>`, multi-slot outer products, both spellings, loop object/kernel behind a `let`. Grad through the ppl pool-path former SHAPE with a learnable upstream scalar pinned end-to-end (`ad-jvp-comb/101`), identity-pretransform equality exact. Still refused, each by its own message: rank-carrying kernel params, `where`-clause kernels, `range<SymIdx>`, `reynolds`, `Poly<…>` packs, `halo`, array-literal kernel bodies, `compound`, `<|:>` |
 | 16 | `ppl.comoments(A, k)` is k=2 only | MF/WE | `PplElaborate.fs:446,466` | no — center + `ppl.moments(·,k)`; better: derive_poly route | `PplElaborate.fs` subset-lattice expansion |
 | 17 | Cartesian bridge rank-2 only (no sym3/4_to_irreps) | MF/WE | `CartesianBridge.fs:1,54-76` | no — ✅PROBED P3 derive_poly route | optional: source rows from `SymPowerTables` |
 | 18 | `ml.y_to` capped at lmax ≤ 2 | MF | `MLElaborate.fs:207-209` | no (depth from stacking; jet carries l=3,4) | `yToDecl` closed forms |
@@ -628,6 +635,9 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 51 | No combinator can produce an `IrrepsIdx`-typed value (operands fenced to plain slots, results hard-code plain/`__seq` indices) — every irreps assembly is an annotated array literal | MF | `TypeCheckInfer.fs:3446/3517/4227` | NB-soft | an `ml.assemble(SPEC, …)` producer, or `join` inheriting an irreps operand's index record |
 | 52 | `replicate(1, pure(x)) \|> compute` collapses to a SCALAR, not a 1-element array; `join` then rejects it BL4004 | BUG/trap | idiom audit probe | no | replicate extent-1 arm |
 | 53 | User-defined fixed-rank scalar functions do NOT lift over arrays (`ind(A, 2.5)` → BL3001 "neither broadcasts nor reduces rank") — intrinsics lift, user fns don't, which pins 20 otherwise-collapsible map sites in NB1b. OPEN QUESTION: does declaring the fn with `T^0` params (arity polymorphism) recover the lift? | BD? / doc | lifting-collapse pass probe | no (explicit maps) | probe the `T^0` spelling; then doc or a lifting rule |
+| 54 | `ppl` formers cannot appear inside a differentiated FUNCTION at all — `PplElaborate.expand` matches module-level `DeclLet` only (`:4288/:4296`), while grad differentiates function parameters; the end-to-end former test pins the elaborated SHAPE instead (deviations recorded in `ad-jvp-comb/101`) | MF (seam) | reverse-AD build | NB2 Phase-B-soft | `PplElaborate` in-function elaboration |
+| 55 | Reverse `compound`/`<|:>` are pipeline-SLOT problems, not effort: the `<|:>` adjoint's split depends on the left operand's index type, which does not exist at a pre-typecheck transform; `compound` reverse needs a whole-array scatter over a runtime compacted extent grad's static shape env cannot hold | BD (architecture) | `ad-jvp-comb/106/107` pin the named refusals | no | a post-typecheck AD slot, someday |
+| 56 | Forward mode is now NARROWER than reverse on maps: `tangentOfMapCore` accepts only named array params/`halo`/`range`, so `ad.jvp` refuses `zip` operands, maps over locals, let-bound kernels, `<*>` — the jvp-vs-grad differential gate is unavailable there (the rec-array lane twin substitutes) | MF (asymmetry) | reverse-AD build | no | extend `tangentOfMapCore` to the lowering's coverage |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
@@ -658,8 +668,12 @@ constants compiler-owned.
    interp — inside the gap-#30 cliff).
 5. ✅ **NB2 built + verified 2026-08-26** (see §3 AS BUILT; outcome (c) with
    the correlation diagnostic making the loss clean; census grown to 46).
-6. **Reverse-mode combinator AD (§5)** — next; unlocks NB2 Phase B as a real
-   trained arm rather than a jvp teaser.
+6. ✅ **Reverse-mode combinator AD (§5) — core LANDED 2026-08-26**: the
+   eager-map lowering (item 2) with exact identity-pretransform equality;
+   items 1/3 turned out already landed 2026-08-17; walls filed as census
+   #54–#56. NB2 Phase B is now buildable as a real trained arm (through the
+   pool-path former shape; the in-function ppl-former seam #54 is the
+   remaining surface nicety).
 7. ✅ **Radial-windowed pair jets built 2026-08-26** (§3 AS BUILT): 10× the
    null-excess linear signal; best jet MAE; the constraint is now
    optimization, not representation — §5 and longer/regularized training
