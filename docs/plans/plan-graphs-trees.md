@@ -1,0 +1,278 @@
+# Plan: trees and graphs (`TreeIdx<shape>`)
+
+Status: **DESIGN REFRESHED, P0 NEXT** — nothing built. The semantics are in
+[../features/graphs-trees.md](../features/graphs-trees.md) (revised 2026-08-25);
+this document is the compiler-side plan. Method: the seam checklist and cost
+band below were derived by tracing how the three most recent index types
+(`RaggedIdx`, `SparseIdx`/`CompoundIdx`, `OrbIdx`) actually landed, file by
+file. Line numbers cite the working tree as of this writing and will drift.
+
+## 1. What and why
+
+The feature is **trees**; graphs need no new index type. The refreshed design
+deleted `Trace<N>` and `DAGIdx` (visited sets are values; acyclicity is a
+checkable `where acyclic(g)` license), so the graph story reduces to adjacency
+arrays over existing index types, `let rec` bounded walks, and one new `where`
+attribute. All compiler work of substance is `TreeIdx<shape>`:
+
+- static shapes (`let static` nest of `leaf` / `degrees([...])`), lowered to a
+  preorder degree sequence carried in a parameterized tag;
+- flat preorder storage — pool + `off` + `deg` + `size`, a superset of the
+  `Ragged<T>` CSR descriptor;
+- path indexing through one index slot whose domain is paths, with
+  contiguous subtree views;
+- derived dense axes (`LeafIdx`/`NodeIdx`/`ChildIdx`, `preorder`/`postorder`
+  virtual arrays) so bulk numerics stay on plain `Idx` and keep every existing
+  optimization.
+
+**Cost band, calibrated on precedent.** SparseIdx = 34 files touched, zero new
+files. RaggedIdx = zero new files, ~14 carrying kind dispatch. OrbIdx = five
+new files (~4,000 lines: `OrbRank.fs`, a C++ header, its standalone test
+binary, two F# test files), ~24 touched, two harness keys, three `proofs/`
+artifacts. The split is entirely "does it need a new bijection". **TreeIdx
+needs one, so budget the OrbIdx band**, and expect the refusal surface to be a
+larger share than the happy path (OrbIdx's ~26 `TypeCheckInfer` seams are
+mostly refusals).
+
+## 2. P0 — the representation decision (this phase can kill the feature)
+
+Nothing in Blade today varies an array's *slot count*. The formalism's index
+contract (§3.2) is stated for "every index type of arity r"; `IRIndexTypeG.Rank`
+is a static `int` (src/Types.fs:741); an array is `IRTArrow` over a
+**fixed-length** slot list (src/Types.fs:846); rank is read as
+`arr.IndexTypes.Length` at 10+ `TypeCheckInfer.fs` sites and summed statically
+in codegen (`CodeGenExpr.fs:541`); the C++ key is `std::array<size_t, NDIM>`
+(src/cpp/index_types.h:38). A variable-length path fits none of that as-is.
+
+**The escape hatch is a fully worked precedent: `SparseIdx` partial reads
+deliver variable-length addressing inside ONE slot.** The mechanism, verified
+end to end:
+
+1. `_` parses to `ExprWildcard` (ParserGrammar.fs:447); typecheck rewrites each
+   wildcard to a **unit literal** (TypeCheckSupport.fs:1795-1814) — unit is
+   never a valid coordinate, so nothing downstream needs a wildcard concept.
+2. `tabulatedResidualType` (TypeCheckSupport.fs:1251-1275) is parameterized
+   purely by the **count** of free positions, never by which ones; position
+   info rides in the tuple as sentinels, read back at emission.
+3. `classifyCompoundIndexTuple` (IR.fs:2353-2365) classifies once and is shared
+   by typecheck, C++ codegen, and the interpreter, so the three cannot disagree.
+
+A tree path is exactly a variable-length tuple with a pinned prefix — the same
+split (shape from a count, addressing from sentinel positions) applies.
+
+**Decision to write down in P0:**
+
+- **Chosen (recommended): single tuple slot.** `TreeIdx<s>` occupies one arrow
+  slot with path-domain; whole-path reads `T((0,1))` are the primitive;
+  partial paths are short-tuple prefix pinning with an
+  `IRTreeProject(parent, prefixLen)` residual extent marker (the
+  `IRCompoundProject` pattern), and the residual stays in the tree family
+  (the SparseIdx residual rule).
+- **Rejected (record why): variable-arrow.** Making slot count path-dependent
+  is a rank-representation rewrite touching every `IndexTypes.Length` site,
+  `expandedRows`, the codegen rank sums, and the C++ `NDIM` key. The plan must
+  name this cost explicitly, per house style.
+- **Open sub-question P0 must settle in writing:** whether bare-scalar
+  application `T(0)` can ride the same tabulated dispatch as a prefix-of-one
+  pin (rank-1 sparse already takes a bare scalar, and 1-tuples do not exist in
+  the parser), giving `T(0)(1) ≡ T((0,1))` through residual application. If it
+  cannot, the curried spelling defers to its own arc and the feature doc's §3.2
+  gets a scope note. This is the one place the census and the design pull in
+  different directions; neither constrains the storage or the bijection.
+
+P0 also runs the design's gate probes, since each is a check that could reshape
+scope (feature doc §7.1):
+
+- **G1 (load-bearing for the whole graph story):** `Array<Nat<I> like J>` —
+  index values as array *elements* — is demonstrated nowhere in the corpus
+  (only a comment at src/IR.fs:209). Write the probe first; if it fails, the
+  graph half needs its own repair phase before anything else. (Index-tag
+  *arithmetic* stays forbidden by design; the need is storage + round-trip.)
+- **G2:** struct/tuple elements under `let rec` — confirm parallel recursive
+  arrays remain sufficient for walk state.
+- **G4:** non-affine bounds refuse `collapse(k)` on the node axis (the ragged
+  precedent); confirm the derived dense axes recover it.
+
+Deliverable: P0 appendix in this file — the decision, the rejected
+alternative's cost census, and the three probe results.
+
+## 3. Decided surface (from the feature doc — not re-litigated here)
+
+- Shape: `let static` nested literal over `leaf`, or `degrees([...])`;
+  canonical form = preorder degree sequence; identity = its hash.
+- Kind `IxKTree`, parameterized tag `__tree:<name>:<payload>` — the
+  `IxKIrreps` discipline (Types.fs:182-216): `mkTreeTag` / `(|TreeTag|_|)`,
+  `ixKindSentinel -> None`, prefix arm in `ixKindOfTag`. No new
+  `IRIndexTypeG` field.
+- Storage: preorder pool + `off`/`deg`/`size` tables; subtree views are
+  pointer + length + sub-shape (the `RaggedRow<T>` peel shape).
+- Derived dense axes are plain `Idx<n>`; `preorder<s>`/`postorder<s>` virtual
+  arrays erase.
+- Diagnostics: **join existing families first** (the Sparse/Orb shortcut — all
+  eight sparse subscript-form errors map to BL4003, runtime reads to BL8003).
+  Mint only: **BL4019** (tree read of indeterminate depth), **BL4021** (shape
+  not statically evaluable; steers to the future `DynTreeIdx`), and for the
+  graph arc **BL8012** (`acyclic` construction check — BL8010/BL8011 are
+  already occupied by interpreter panic codes in `Interp/Numerics.fs` despite
+  not being in the registry; do not reuse them).
+
+## 4. Seam checklist
+
+The full trace of how Ragged/Sparse/Orb each landed lives in the session notes;
+what follows is the checklist a TreeIdx implementer walks, in pipeline order.
+
+**Mandatory core** (all in `src/Types.fs` + `src/IR.fs` + `src/IRStorage.fs`):
+`IxKind` case; `ixKindSentinel`; `ixKindOfTag` (prefix arm — note the
+**silent catch-all** `| _ -> IxKPlain`); `IRValidate.checkKindAgreement` is the
+hard gate that Tag and IxKind agree; `placementOf` (also has a catch-all);
+the **exhaustive family active pattern** at IR.fs:1243-1274 — the one seam
+that will not compile if forgotten, so route as much dispatch as possible
+through it; `IRStorage` cardinality fold + `allocRoutineFor` (FS0025-exhaustive
+by design) + an `IIndexTypeBehavior` object; a smart constructor stamping Tag
+and IxKind together.
+
+**Front end:** `Lexer.fs` keyword (`KwTreeIdx`, plus `leaf` as a contextual
+constant); `Ast.fs` `TyTreeIdx of shape: Expr` (payloads that are values ride
+as `Expr`, folded by StaticEval — the `TySparseIdx of keys: Expr` pattern);
+`ParserTypes.fs` production with **named reject paths** (OrbIdx has three
+dedicated reject tests just for its bracket grammar). If a builder *expression*
+is ever added (`tree(...)`), it costs forwarding arms in **15 files** (every
+domain elaborator, all four `Grad*` passes, `Unfold.fs`, `Ide.fs`) — v1 avoids
+this by having no builder.
+
+**Middle:** `TypeLower.lowerTypeExpr` arm — and lowering **has no error
+channel**: copy RaggedIdx's plant-a-placeholder idiom (`IxKError*` record +
+`irTypeHas*` scanner at the annotation consumers), never SparseIdx's
+`failwith`. `Unify.indexPairIncompatible` (compares Rank/Tag/Symmetry —
+**never extents**); `TypeEnv` message arm + error→code map (two spots in one
+file); `TypeCheckInfer`/`TypeCheckSupport` dispatch; `Zonk` must descend the
+new arm; `IndexTypeValidator` (which annotation positions are legal, and
+`isKnownStatic` = true for v1).
+
+**Back ends — both, always:** the 8 CodeGen files; `CodeGenCuda` and
+`EmitLlvm` may **refuse by name** in v1 (providers do); `src/cpp/` header (the
+tables may mostly inline at codegen — index_types.h's own comment notes dense
+types need no runtime object); the 6 `src/Interp/` files. Interp and codegen
+are differential twins; neither gate runs by default (`--interp` /
+`--diff-oracle`).
+
+**Diagnostics — five touch points, not three:** Unify DU case → TypeEnv
+(formatTypeError + code map) → `Diagnostics.fs` registry → generated
+`protocol/surface.json` (`blade ide surface`, LF-only) → hand-authored
+`protocol/data/diagnostics.json` (title byte-identical, example paths must
+exist and contain the code string). Gate: `blade test surface` — reachable
+**only from the full suite**.
+
+**Tests/docs:** corpus `tests/corpus/index-types/` (254 files today);
+`tests/Test_TreeRank.fs` + `tests/Test_TypeStructure.fs` pins; harness keys in
+`CliSelfTests.fs` (`"treerank" | "tree-rank"`, the orbrank pattern);
+`docs/features.md` row; `docs/formalism.md` §3.2/§3.3 rows; this file's status
+header + the `docs/plans/README.md` row.
+
+**fsproj:** `EnableDefaultItems=false`, manual dependency order, and compile
+order is **not** phase order — `src/TreeRank.fs` goes beside `OrbRank.fs`
+(~line 103: after the Grad group, before IR.fs, dependency-free by policy so
+`proofs/` scripts can `#load` it standalone).
+
+### Traps (each observed live, not hypothetical)
+
+- **T1 — structural `TypeExpr` walks silently skip unknown arms** (the
+  `TyBounded` hazard class, three measured repros). A new arm has the same
+  hazard in reverse: every walk lacking it treats TreeIdx as absent. The
+  sneaky case is alias-body laundering — `type B = TreeIdx<s>` carries the arm
+  into positions the walk never probes. P2's gate includes this probe.
+- **T2 — three independent strictness seams**: `unify`, direct application
+  (`dispatchAppOrIndex` never unifies plain-call args), and `let`-ascription
+  (overwrites, does not unify). Plus the eager-vs-zonked sub-trap: run the
+  predicate twice, eagerly and over the zonked module. Probe all three before
+  believing a rule is closed. Extents are never compared anywhere.
+- **T3 — `exprTypeIfKnown` whitelist** (IR.fs:2932): an unlisted node kind in
+  HM argument position → no specialization → **BL6001 spray** naming stdlib
+  helpers the program never mentions. Any new view/indexing IR node makes an
+  explicit, justified call either way (`IRSlice`/`IRCurry`/`IRSubset` are
+  deliberately OFF).
+- **T6 — the two silent catch-alls** (`ixKindOfTag`, `placementOf`) will
+  quietly classify TreeIdx as a plain dense `Idx` if the arms are missed;
+  neither fails the build. Prefer the FS0025-exhaustive dispatch points.
+- **T7 — paired refusal texts** (front-half TypeEnv renderer vs back-half IR
+  producer) are corpus-pinned separately and nothing enforces agreement
+  (OrbIdx's known hazard). Inherited by any type that refuses from both halves.
+- **T10 — never store resolved payload values in `Extent`** — it would change
+  index-type *identity* (two distinct shape bindings with equal values would
+  start unifying). Recompute on demand (`RaggedLensSource` pattern); the
+  degree sequence rides the Tag, not the Extent.
+- **T11 — a marker payload with no consumer silently diverges** from what
+  construction actually bakes (the BL4018 bug, found late). If a tree marker
+  names data, land the agreement check in the same change.
+- **Harness: exits 0 with failures** — gate on the TOTAL line, absence of
+  `Failed tests:`, and the `, N skipped` suffix.
+
+## 5. Phasing
+
+| phase | deliverable | size | gate |
+|---|---|---|---|
+| **P0** | Representation decision + probes (§2); the census of `Rank`-assumption sites under the rejected option; this doc's §§1-4 finalized | doc only | written decision naming the rejected alternative and its cost; G1/G2/G4 probe results recorded |
+| **P1** | `src/TreeRank.fs` — dependency-free pure-integer bijection: shape validation (`degrees` well-formedness), cardinality/size/off tables, `forward`/`backward` rank–unrank, `subtree` partial-path resolution | ~400-700 lines | `tests/Test_TreeRank.fs` + `blade test treerank`: round-trip pinned against **brute-force** DFS enumeration of every valid path (the OrbRank discipline), incl. degenerate shapes (single leaf, all-leaf, deep-narrow, wide-shallow) |
+| **P2** | Type-level registration, no storage: `IxKTree` + tag pair; lexer + parser with named reject paths; `TyTreeIdx`; `TypeLower` (placeholder idiom); `placementOf`; `Unify`; `IndexTypeValidator`; `Zonk`. Declaration + printing only; every *use* refuses loudly | ~600-900 lines, ~12 files | corpus `index-types/2xx_treeidx_*`: parse OK; bad-shape rejects (unclosed / empty / non-static → BL4021 / malformed `degrees`); `blade check` prints the type back in house form; `checkKindAgreement` green; **T1 alias-laundering probe + T2 three-seam probes** |
+| **P3** | Storage + reads, **interpreter first**: `IRStorage` alloc + cardinality; full-path reads `T((...))`; `extents`/`rank` intrinsics; `Interp/` arms land in this phase | ~800-1200 lines | `blade test interp index-types` green on the new files; `blade run` parity on literal-tree programs; diff-oracle clean |
+| **P4** | C++ codegen twin: `CodeGenExpr` indexing, `CodeGenLoopNest` preorder iteration (the §3.2 lex-enumeration obligation), type rendering; `src/cpp/` only if tables must materialize; CUDA + LLVM refuse by name | ~800-1500 lines | full category green under `blade run`; **byte-comparison of interp vs codegen output on every new test** (not "tests pass"); full `blade test` for the surface block |
+| **P5** | Partial-path views: short-tuple prefix pinning, `IRTreeProject` residual, subtree views; `T(0)` bare-scalar if P0 said yes; BL4019 refusal | ~400-700 lines | corpus: prefix reads, refusals for over-long / out-of-shape / indeterminate-depth paths; nested-view identity `T((0,))((1,)) == T((0,1))`; derived dense axes + `preorder`/`postorder` |
+| **P6** | Diagnostics through all five touch points; `docs/features.md` row; **formalism §3.2/§3.3 amended** (see risks); README row | small | `blade test surface` (full suite only) |
+| **P7 (deferred arc)** | Graph arc: G1-dependent — `where acyclic(g)` + BL8012 check; `retree`/`flatten`; walk corpus (`let rec` walks, `guard` collapse) | unscoped | corpus for each; the walk examples in the feature doc §5 compile as written |
+| **P8 (deferred arc)** | Sibling symmetry (`sym[...]` — iteration license only, per the design's negative storage result); `DynTreeIdx`; hash-consing | unscoped | P8 starts with math pins, not emitters |
+
+Phase rows get their outcome edited in place as they land, icechunk-style.
+
+## 6. v1 refusals (loud, specific, by name)
+
+Non-static shapes (BL4021, steers to `DynTreeIdx`); reads of indeterminate
+depth (BL4019, names the three ways out); out-of-arity dynamic child at
+runtime (BL8003 family); shapes over a cardinality ceiling; writing a deduced
+tree class down as an annotation (the BL4003/BL4015 precedent); `transpose` of
+a tree; `collapse(k)` on the node axis; provider I/O; CUDA and LLVM lanes
+(refuse by name); symmetric trees; dynamic insert/delete; `grad` with a shape
+as the active variable (structure is not differentiable — refuse, don't
+zero-fill).
+
+## 7. Verification
+
+- **P1 is the oracle**: `TreeRank.fs` pinned against brute-force enumeration
+  as set AND as order, standalone-`#load`-able for `proofs/` scripts (the
+  OrbRank/OrbitEnum structure).
+- **Interp-first (P3) then byte-diff (P4)**: the twin lands before the
+  emitter, and the P4 gate is byte comparison, not suite green.
+- Corpus category `index-types` extends; `blade test interp index-types` and
+  `blade test diff-oracle index-types` take the literal directory name.
+- Full-suite runs for the Surface block; check the TOTAL line and skips.
+- Provider lanes are standalone-only and out of scope until a tree ever gets
+  an on-disk encoding.
+
+## 8. Risks
+
+- **The P0 decision is the whole feature.** The rejected variable-arrow option
+  is a rank-representation rewrite; if the single-slot option later proves
+  unable to express the curried spelling, the cost is a scope note, not a
+  rewrite — that asymmetry is why single-slot is the recommendation.
+- **G1 failing** would gut the graph arc (P7) — probe it in P0, not when P7
+  starts.
+- **T1 blast radius is invisible at compile time**; the P2 gate carries the
+  probe for it.
+- **Twin drift between P3 and P4** — the byte-comparison gate exists because
+  "tests pass" hides divergence the corpus doesn't pin.
+- **The formalism is a deliverable, not documentation.** §3.2's contract table
+  says "arity r"; the single-tuple-slot decision fits it only once the table
+  states that a slot's domain may be tuples/paths (as sparse already implies).
+  Leaving the table unamended is how the next index type inherits a bad model.
+- **`blade test surface` is full-suite-only**; a category-scoped green run
+  will not catch a missing `diagnostics.json` entry.
+- **StaticEval depth cliff** on deep generated shapes — depth, not
+  cardinality, is the binding constraint; the P2 reject set includes a
+  too-deep shape with a clean diagnostic rather than a stack fault.
+
+## 9. Out of scope (recorded)
+
+`Trace<N>` and `DAGIdx` as index types (deleted by the design revision — see
+feature doc §4 for the argument); `Stream<T>` / unbounded iteration;
+hash-consing / subtree sharing; dynamic and distributed trees; `fix` as a
+compiler primitive (stdlib first, measure before promoting); `show_tree`
+printing; MPI decomposition over subtree slabs.

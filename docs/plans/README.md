@@ -18,6 +18,7 @@ re-added after a mass deletion left dangling references).
 | [plan-llvm-backend.md](plan-llvm-backend.md) | IMPLEMENTED through M5, measured | `BLADE_LLVM` lane: emits, refuses whole-program, `blade test llvm` / `llvm-bench`. Codegen 4.5x faster than g++; runtime at parity — the fact-emission thesis stays refuted, R6 (toolchain) is what pays |
 | [plan-mlir-backend.md](plan-mlir-backend.md) | PROPOSAL: unscheduled | If-we-did-it MLIR architecture sketch (cuda-tile target) |
 | [plan-llvm-runtime-shapes.md](plan-llvm-runtime-shapes.md) | RAGGED LANDED; group_by open | LLVM lane emits ragged/grouped shapes natively (RaggedIdx, EnumIdx/group_by): static ragged first (fully compile-time), then operand-valued extents, then CSR group_by — pure `.ll` for annotated key regimes, shim hash only for dynamic discovery |
+| [plan-graphs-trees.md](plan-graphs-trees.md) | DESIGN REFRESHED; P0 next | `TreeIdx<shape>` static trees: flat preorder storage on the ragged CSR shape, one path-domain slot (the SparseIdx escape hatch), derived dense axes. Graphs need NO new index type — `Trace`/`DAGIdx` deleted in the design refresh (`docs/features/graphs-trees.md`); walks are `let rec`, collapse is MonadPlus, acyclicity is a checked `where acyclic(g)` license |
 
 Conventions: status changes edit the doc's header and this table — never move or
 rename the file. Docs for landed work may be deleted in bulk sweeps, but sweep
