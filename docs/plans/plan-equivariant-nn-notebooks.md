@@ -627,6 +627,7 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 50 | No combinator expresses SEGMENTED assembly: `join` concatenates whole arrays only (segments-at-offsets need a per-segment `subset`; permutation gathers aren't concatenation). Sub-item: heterogeneous-extent `join` WORKS but has zero corpus coverage — a `stack-join/014` pin is owed | MF + missing pin | idiom audit probes | no | `subset`-then-`join` sugar, or a segmented `join` form; corpus pin |
 | 51 | No combinator can produce an `IrrepsIdx`-typed value (operands fenced to plain slots, results hard-code plain/`__seq` indices) — every irreps assembly is an annotated array literal | MF | `TypeCheckInfer.fs:3446/3517/4227` | NB-soft | an `ml.assemble(SPEC, …)` producer, or `join` inheriting an irreps operand's index record |
 | 52 | `replicate(1, pure(x)) \|> compute` collapses to a SCALAR, not a 1-element array; `join` then rejects it BL4004 | BUG/trap | idiom audit probe | no | replicate extent-1 arm |
+| 53 | User-defined fixed-rank scalar functions do NOT lift over arrays (`ind(A, 2.5)` → BL3001 "neither broadcasts nor reduces rank") — intrinsics lift, user fns don't, which pins 20 otherwise-collapsible map sites in NB1b. OPEN QUESTION: does declaring the fn with `T^0` params (arity polymorphism) recover the lift? | BD? / doc | lifting-collapse pass probe | no (explicit maps) | probe the `T^0` spelling; then doc or a lifting rule |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside

@@ -746,14 +746,19 @@ function sq_te(__s: Array<Float like Idx<SW>>, n: Int) -> Float = {
     d * d
 }
 function ab_te(__s: Array<Float like Idx<SW>>, n: Int) -> Float = abs(fwd(h_te_of(n), __s) - __e_te(n))
-// Five scores, five one-line folds. `range<Idx<NTE>>` rather than the split's
-// own index type on purpose: NTE and NTR are the notebook's declared budget,
-// not whatever the store happens to hold.
+// Five scores, five one-line folds. The three that re-run the model need the
+// sample index, and take it from `range<Idx<NTE>>` rather than the split's own
+// index type on purpose: NTE and NTR are the notebook's declared budget, not
+// whatever the store happens to hold. The two baselines need no index at all.
+// They are arithmetic on the stored energies, and `abs(__e_te)` iterates
+// because `__e_te` has an outer dimension and `abs` does not -- the loop is
+// implied by the relative dimensions of the operand and the function, so
+// writing it out would be over-specifying a decision already made.
 let te_mse = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> sq_te(final_row, n) |> compute, (+)) / 100.0
 let te_mae = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> ab_te(final_row, n) |> compute, (+)) / 100.0
 let tr_mse = reduce(method_for(range<Idx<NTR>>) <@> lambda(n) -> sq1(final_row, n) |> compute, (+)) / 500.0
-let base_mse = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> __e_te(n) * __e_te(n) |> compute, (+)) / 100.0
-let base_mae = reduce(method_for(range<Idx<NTE>>) <@> lambda(n) -> abs(__e_te(n)) |> compute, (+)) / 100.0
+let base_mse = reduce(__e_te * __e_te, (+)) / 100.0
+let base_mae = reduce(abs(__e_te), (+)) / 100.0
 let scores = [base_mse, te_mse, tr_mse, base_mae * __stats(1), te_mae * __stats(1)]
 scores
 
@@ -844,13 +849,16 @@ inv_report
 // %%
 // `ad.grad` is CALLED here, not entered, so everything after the call is
 // ordinary array code: negating the gradient is whole-array arithmetic and
-// the deviations below are folds over elementwise products. Each product is
-// bound before it is reduced -- `reduce(A * B, (+))` in expression position
-// is accepted by the interpreter and refused by codegen (gap #44).
+// the deviations below are folds over elementwise products. The products
+// are bound before being reduced as a historical note: gap #44 (codegen
+// refusing `reduce(A * B, (+))` in expression position while the
+// interpreter accepted it) forced this spelling, and was FIXED 2026-08-26
+// -- both lanes now accept the inline form, as the test-MSE cell above
+// already uses. The named intermediates read fine either way, so they stay.
 function force_of(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<NP3>> = {
     let mut dp = replicate(NP3, pure(0.0)) |> compute
     let __e = ad.grad(energy)(p, dp)
-    method_for(range<Idx<NP3>>) <@> lambda(m) -> 0.0 - dp(m) |> compute
+    0.0 - dp
 }
 let __f0 = force_of(__p0)
 let __f0sq = {
