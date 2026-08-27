@@ -3602,3 +3602,44 @@ jvp_agrees
 // numbers in `__mu` and `__sg` are exactly the parameters an MTP or ACE model
 // fits rather than bakes -- a learnable radial basis upstream of a certified
 // moment jet, with the certificate intact all the way down.
+
+// %% [markdown]
+// ## Postscript: the next experiment was run
+//
+// The question the paragraph above left open -- step budget, regularisation,
+// sample size, readout capacity -- has a measured answer, and it is none of
+// them. A four-arm campaign (2026-08-27; scratch replicas reproduced every
+// number in this notebook to four decimals first, three seeds per claim, no
+// test-set tuning) found:
+//
+// - **Optimization moves neither arm on the test split.** Full-batch
+//   heavy-ball, weight decay, LR schedules, and 8-64x the step budget leave
+//   every histogram config in test MSE 0.87-0.98 and every jet config in
+//   1.03-1.10. Training happily collects the windowed jet's signal into
+//   TRAIN MSE 0.76-0.80; the test set never pays for it.
+// - **The real axis is in-segment vs out-of-segment generalization.** A
+//   validation split strided through the training trajectory REVERSES the
+//   model ranking relative to the held-out test segment (the jet "wins" on
+//   interleaved frames and loses out-of-segment). The shuffled-label
+//   ceilings above are ceilings on the training trajectory, not on the test
+//   chemistry.
+// - **The section-5 road was built and driven.** Reverse mode now
+//   differentiates the learnable-window loss end to end: mu/sigma as
+//   trained parameters reproduce this notebook's fixed pipeline at
+//   initialization to 2.4e-12, then move at most 0.086 A off the percentile
+//   init and gain nothing. The featurization was not the constraint either.
+// - **Atom-centered local jets** (the MTP/ACE locality this global
+//   descriptor lacks) double the null-excess linear ceiling to 0.46 -- the
+//   best of any jet configuration -- and still lose to the histogram
+//   out-of-segment.
+// - **Marginal value, paired:** jets concatenated onto the histogram versus
+//   the histogram alone, same seeds, changes test MSE by +0.015 +/- 0.029.
+//   Nothing, and at high capacity the concatenation overfits (validation
+//   0.60, test 1.07).
+//
+// So the honest sentence sharpens: the features know things about the
+// training trajectory that the test segment does not ask. Whether moment
+// jets lack CHEMISTRY or merely lack EXTRAPOLATION is answerable -- re-split
+// train/test at random over the union of both segments -- but that changes
+// the benchmark definition this notebook committed to, so it is recorded
+// here as the open question rather than run as arm five.

@@ -443,6 +443,26 @@ regularization / the §5-unlocked training improvements are the named next
 lever). Full drive 201.4 s, 31/31 passing cells interp+kept, four stream
 channels live; canaries green.
 
+**EXPERIMENT CAMPAIGN 2026-08-27 — decisive negative; the diagnosis above is
+REFUTED.** Four arms, scratch-replicated to 4 decimals before varying
+anything, 3 seeds per claim, validation carved from train (no test-set
+tuning): (E1) optimization moves NEITHER arm on the test split — every
+histogram config lands 0.87–0.98, every jet config 1.03–1.10, at 8–64× the
+step budget with weight decay and schedules; training collects the jet's
+signal into TRAIN MSE 0.76–0.80 and the test never pays. The binding axis is
+**in-segment vs out-of-segment generalization**: a strided in-trajectory
+validation REVERSES rankings vs the held-out segment (census #61). (E2)
+learnable windows through the §5 lowering are mechanically flawless (exact
+init-identity 2.4e-12 — census #62) and null: μ/σ move ≤0.086 Å and gain
+nothing. (E3) atom-centered local jets double the null-excess ceiling to
+0.46 and still lose (one seed diverged — needs clipping before family
+claims). (E4) paired marginal value of jets ON TOP of the histogram:
++0.015 ± 0.029 — nothing; at capacity the concat overfits (val 0.60 → test
+1.07). Nothing promoted; the notebook carries a postscript cell. The one
+experiment that would separate "jets lack chemistry" from "jets lack
+extrapolation" — random re-split over the union — changes the benchmark
+definition and is left as the user's call.
+
 ### 3.5 Honest outcomes
 
 Three publishable endings, all real: (a) pair jets rival or beat the
@@ -638,6 +658,12 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 54 | `ppl` formers cannot appear inside a differentiated FUNCTION at all — `PplElaborate.expand` matches module-level `DeclLet` only (`:4288/:4296`), while grad differentiates function parameters; the end-to-end former test pins the elaborated SHAPE instead (deviations recorded in `ad-jvp-comb/101`) | MF (seam) | reverse-AD build | NB2 Phase-B-soft | `PplElaborate` in-function elaboration |
 | 55 | Reverse `compound`/`<|:>` are pipeline-SLOT problems, not effort: the `<|:>` adjoint's split depends on the left operand's index type, which does not exist at a pre-typecheck transform; `compound` reverse needs a whole-array scatter over a runtime compacted extent grad's static shape env cannot hold | BD (architecture) | `ad-jvp-comb/106/107` pin the named refusals | no | a post-typecheck AD slot, someday |
 | 56 | Forward mode is now NARROWER than reverse on maps: `tangentOfMapCore` accepts only named array params/`halo`/`range`, so `ad.jvp` refuses `zip` operands, maps over locals, let-bound kernels, `<*>` — the jvp-vs-grad differential gate is unavailable there (the rec-array lane twin substitutes) | MF (asymmetry) | reverse-AD build | no | extend `tangentOfMapCore` to the lowering's coverage |
+| 57 | `blade run` kills compiled executables at a hard 120 s wall ("Execution timed out after 120s"), no flag to raise it | BUG/MF | every ≥2-min training run in the campaign | no (`blade compile` + run the exe directly) | run-verb timeout flag |
+| 58 | Rank-2 `let rec` with leading extent ~105,000 segfaults compiled, silently (exit 139); 10,500 rows fine — extends #38 beyond rank-1 | BUG | campaign E1 harness | no (chunk the axis) | codegen stack/alloc (same seam as #38) |
+| 59 | Block expressions in rec-arm position: BL5500 "nested block expressions" inside diffed code; BL7001 outside grad when the arm block builds rec+reduce | BD/limit | campaign E2/E3 | no (hoist to named functions) | Grad rec-arm / IRLift |
+| 60 | mask×read does NOT guard out-of-range gathers in fixed-length masked folds over variable-length channels — the read executes regardless (silent wrongness in-bounds, segfault past the end) | BUG/trap | campaign E2 crashes, root-caused | no (mod-wrap the index; the mask kills wrapped terms) | doc + maybe a guarded-gather form |
+| 61 | Validation design on MD17-style trajectory stores: strided in-trajectory val REVERSES model rankings vs the out-of-segment test; temporal-tail val tracks rankings at moderate training but turns optimistic under long training (concat: tail 0.599 → test 1.07) | METHOD (doc) | campaign E1/E4 | notebooks: doc note owed | both notebooks' markdown |
+| 62 | Confirmed working: reverse grad through learnable-featurization graphs (state-dependent local rec window tables, computed-index reads, exp/div), verified by exact init-identity 2.4e-12 | capability (record) | campaign E2 | — | — |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
