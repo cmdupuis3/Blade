@@ -22,6 +22,109 @@ open Blade.TypeCheckIde
 open Blade.TypeLower
 open Blade.TypeCheckSupport
 
+/// ARITY LIFT at a direct call: `add0(A, s)` where `add0(a: T^0, b: T^0)`.
+///
+/// The signature declares ONE rank-0 type variable across several positions,
+/// so a call that MIXES an array with a scalar asks `T` to be two things at
+/// once. The answer arity polymorphism promises -- and the one every
+/// neighbouring construct already gives -- is to LIFT: iterate the array
+/// positions, broadcast the scalar ones, and deduce the output rank from the
+/// arrays. Binary intrinsics do exactly this (`atan2(A, 2.0)`,
+/// `atan2(2.0, A)`, `log_base(A, 10.0)`), and so do the operators
+/// (`A * 2.0`, `100.0 + A`); only the user-defined `T^0` function was left
+/// out, and it did not merely decline -- it emitted a specialization typed
+/// from the FIRST argument and handed it the others verbatim, which g++
+/// rejected with no BL code (see `firstAbstractVarConflict`).
+///
+/// MECHANISM. The same SURFACE re-synthesis `inferBinaryIntrinsic` uses --
+/// `(method_for(...) <@> lambda(..) -> f(..)) |> compute` -- re-inferred from
+/// scratch. So zip co-iteration, array/scalar broadcast in every position,
+/// packed storage, capture analysis and codegen are the ones already proven
+/// for `A + B`; nothing new reaches the back end, and the interpreter needs
+/// no arm of its own because the lifted form is one it already runs. EAGER
+/// (`|> compute`) for the reason `cos(A)` is: a call is a value everywhere
+/// else, so it must not hand back a deferred loop.
+///
+/// The lambda parameters stay UNANNOTATED -- unlike the intrinsics', which
+/// pin Float64 -- because the element type is precisely what `T` becomes:
+/// apply-site unification has to bind it. Scalar positions embed their
+/// SURFACE expression rather than the typed node, so capture analysis sees
+/// the variable references (the array/scalar binop arm's note).
+///
+/// WHAT IT DECLINES, each for a reason that is a refusal rather than a gap:
+///   * a `T^k` parameter with k >= 1 -- that parameter is an ARRAY by
+///     declaration, so a scalar there is the wrong shape, not a broadcast,
+///     and mapping would be inventing an axis;
+///   * array arguments of DIFFERENT ranks -- they share no iteration space,
+///     so there is nothing to deduce an output rank from;
+///   * a signature whose positions each own their own variable -- there is no
+///     conflict to resolve, and today's meaning stands.
+/// Every declined shape falls through to `dispatchAppOrIndex`, where
+/// `firstAbstractVarConflict` judges it.
+///
+/// RE-ENTRY is impossible: the synthesized inner call has an unresolved
+/// lambda parameter in every array position, and the trigger below requires
+/// every argument rank to be KNOWN.
+let internal tryArityLiftCall (env: TypeEnv) (func: Expr) (args: Expr list)
+                              (tArgs: TypedExpr list) (funcTy: IRType) : Expr option =
+    match env.Subst.Resolve funcTy with
+    | FuncElem (paramTys, _) when paramTys.Length = args.Length
+                                  && args.Length = tArgs.Length
+                                  && args.Length > 1
+                                  && not (paramTys |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTPoly)) ->
+        // Every parameter must be an OPEN, rank-0 signature variable: `T^0`,
+        // or its caret-free spellings `T` / `T<u>` which lower to the same
+        // node. `GetArityConstraint` is what separates those from `T^k`:
+        // `LookupOrCreateTypeVar` records the pin only when the caret is >= 1.
+        let openRank0Var (t: IRType) =
+            match env.Subst.Resolve t with
+            | IRTInfer id
+            | IRTUnitAnnotated (IRTInfer id, _) ->
+                (match env.Subst.GetArityConstraint id with
+                 | Some k when k > 0 -> None
+                 | _ -> Some id)
+            | _ -> None
+        let varIds = paramTys |> List.map openRank0Var
+        let argRanks = tArgs |> List.map (fun a -> concreteRankOf env.Subst a.Type)
+        if (varIds |> List.exists Option.isNone) || (argRanks |> List.exists Option.isNone) then None
+        else
+            let ids = varIds |> List.map Option.get
+            let ranks = argRanks |> List.map Option.get
+            let arrayRanks = ranks |> List.filter (fun r -> r > 0) |> List.distinct
+            // MIXED, and unambiguously so: at least one array position, at
+            // least one scalar position, and all array positions at ONE rank.
+            if arrayRanks.Length <> 1 || not (List.contains 0 ranks) then None
+            // ... and the disagreement must actually land on a SHARED
+            // variable. Distinct variables per position (`f(a: T^0, b: U^0)`)
+            // have nothing to reconcile, and lifting them would change the
+            // meaning of a call that is already well typed.
+            elif not (List.zip ids ranks
+                      |> List.groupBy fst
+                      |> List.exists (fun (_, g) -> (g |> List.map snd |> List.distinct).Length > 1)) then None
+            else
+                let sp = args |> List.fold (fun acc (a: Expr) -> mergeSpan acc a.Span) func.Span
+                let uid = env.Builder.FreshId()
+                let arrPositions =
+                    ranks |> List.mapi (fun i r -> (i, r))
+                          |> List.filter (fun (_, r) -> r > 0)
+                          |> List.map fst
+                let pname i = $"__al{uid}_{i}"
+                let lamParams =
+                    arrPositions
+                    |> List.map (fun i ->
+                        ({ Name = pname i; Type = None; Default = None; NameSpan = noSpan } : LambdaParam))
+                let newArgs =
+                    args |> List.mapi (fun i a ->
+                        if List.contains i arrPositions then mkExpr a.Span (ExprVar (pname i)) else a)
+                let former =
+                    match arrPositions with
+                    | [i] -> mkExpr sp (ExprMethodFor [args.[i]])
+                    | many -> mkExpr sp (ExprMethodFor [mkExpr sp (ExprZip (many |> List.map (fun i -> args.[i])))])
+                let body = mkExpr sp (ExprApp (func, newArgs))
+                Some (mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                          former, mkExpr sp (ExprLambda (lamParams, None, body)))))))
+    | _ -> None
+
 /// Entry for every expression: stamps the ambient expression span (for
 /// error location, see TypeEnv.locateError) and back-fills the source span
 /// onto the typed node so TypedExpr.Span is live (full-span AST).
@@ -1056,7 +1159,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     | _ -> None
                 match dischargeErr with
                 | Some msg -> Error (Other msg)
-                | None -> dispatchAppOrIndex env tFunc tArgs))
+                | None ->
+                    // ARITY LIFT before dispatch: a call that mixes arrays
+                    // and scalars across ONE rank-0 signature variable is
+                    // re-synthesized as the map it means. Declines fall
+                    // through to dispatchAppOrIndex, which judges them.
+                    match tryArityLiftCall env func args tArgs tFunc.Type with
+                    | Some synth -> inferExpr env synth
+                    | None -> dispatchAppOrIndex env tFunc tArgs))
 
     // ---- Poly-tuple indexing OR array indexing (brackets) ----
     // `e[i]` is parsed as ExprTupleIndex regardless of e's type. Disambiguate

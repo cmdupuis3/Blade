@@ -1470,6 +1470,134 @@ let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
             | Some pr, Some ar when pr <> ar -> Some (i, pr, ar, pTy, aTy)
             | _ -> None)
 
+/// The ABSTRACT-PARAMETER conflict: two argument positions that teach the
+/// SAME open signature type variable two incompatible types.
+///
+/// `function add0(a: T^0, b: T^0)` declares ONE variable in two positions, so
+/// `add0(A, s)` asks `T` to be both `Array<Float64 like Idx<3>>` and
+/// `Float64`. Nothing refused it. Direct application does not unify
+/// parameters against arguments (see `dispatchAppOrIndex`'s FuncElem arm),
+/// which is exactly what keeps HM alive at this seam -- so `T` stays an open
+/// `IRTInfer` and every check here stands down by design: `concreteRankOf`
+/// and `concreteClassOf` both DECLINE an open variable. IR-phase
+/// monomorphization then took the FIRST teaching and silently discarded the
+/// rest (`IRMono.unifyParamWithArg`'s "inconsistent" arm, whose comment said
+/// the IR validator would catch it -- it does not), emitting a specialization
+/// whose parameters all wear the first argument's type against a call site
+/// that hands it the others verbatim. g++ rejected it. That is a typecheck
+/// ESCAPE: `blade check` clean, then a C++ error carrying no BL code at all.
+///
+/// This is the refusal that closes it, and it is deliberately the exact
+/// MIRROR of what monomorphization would drop -- the same structural walk, so
+/// "the specializer would lose this binding" and "the typechecker refuses"
+/// are one predicate rather than two that can drift apart.
+///
+/// COMPATIBILITY is judged by what the emitted monomorph would accept, not by
+/// type equality: the specialization is built from the FIRST teaching, so a
+/// later argument is fine exactly when it flows into that signature without
+/// conversion. Equal types, and scalars that WIDEN -- `add0(2.5, 3)` is
+/// `double add0(double, double)` fed an int64, which C++ promotes and which
+/// works today; `add0(3, 2.5)` is `int64 add0(int64, int64)` fed a double,
+/// which `-Werror=float-conversion` rejects, and so does this. Anything not
+/// determined here (an argument still open, a shape this walk does not model)
+/// stands down rather than guessing, the same discipline as its neighbours.
+///
+/// Reported as (first teaching's position, conflicting position, first type,
+/// conflicting type), all 0-based.
+let firstAbstractVarConflict (subst: Subst) (paramTys: IRType list) (argTys: IRType list)
+                             : (int * int * IRType * IRType) option =
+    // Peel the wrappers that are transparent to a monomorph's C++ signature:
+    // a unit annotation and an index tag are both erased by codegen, so
+    // neither can make two teachings genuinely different shapes.
+    let rec peel (t: IRType) =
+        match subst.Resolve t with
+        | IRTUnitAnnotated (inner, _) -> peel inner
+        | IRTIdxTagged (inner, _) -> peel inner
+        | r -> r
+    let rec compatible (first: IRType) (later: IRType) : bool =
+        let f = peel first
+        let l = peel later
+        if f = l then true
+        else
+            match f, l with
+            | ArrayElem fa, ArrayElem la ->
+                fa.IndexTypes.Length = la.IndexTypes.Length
+                && compatible fa.ElemType la.ElemType
+            // A rank disagreement is the g++-fatal one: an `Array<double, 1>`
+            // parameter cannot be handed a `double`, in either direction.
+            | ArrayElem _, _ | _, ArrayElem _ -> false
+            | IRTScalar fe, IRTScalar le -> promoteElemType fe le = Some fe
+            // Not determined here, or a shape this walk does not model.
+            | _ -> true
+    // Same two stand-downs as `firstArgRankClash`, for the same reasons: a
+    // variadic `Poly<T^r>` pack makes positional pairing meaningless
+    // (monomorphization owns those calls), and under-application is an arity
+    // error whose own message must not be buried.
+    let isVariadic = paramTys |> List.exists (fun t -> (subst.Resolve t).IsIRTPoly)
+    if isVariadic || argTys.Length < paramTys.Length then None
+    else
+        // What each argument position teaches, in `unifyParamWithArg`'s walk
+        // order -- but KEEPING every teaching instead of the first, because
+        // the discarded ones ARE the defect.
+        let teachings = System.Collections.Generic.List<int * int * IRType>()
+        let rec learn (pos: int) (pTy: IRType) (aTy: IRType) =
+            match subst.Resolve pTy, subst.Resolve aTy with
+            | IRTInfer n, t -> teachings.Add((n, pos, t))
+            | ArrayElem pa, ArrayElem aa -> learn pos pa.ElemType aa.ElemType
+            | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
+                List.zip pts ats |> List.iter (fun (p, a) -> learn pos p a)
+            | IRTUnitAnnotated (pi, _), _ -> learn pos pi aTy
+            | _, IRTUnitAnnotated (ai, _) -> learn pos pTy ai
+            | IRTIdxTagged (pi, _), IRTIdxTagged (ai, _) -> learn pos pi ai
+            | _ -> ()
+        appArgPairs paramTys argTys |> List.iter (fun (i, pTy, aTy) -> learn i pTy aTy)
+        let seen = System.Collections.Generic.Dictionary<int, int * IRType>()
+        teachings
+        |> Seq.tryPick (fun (varId, pos, ty) ->
+            match subst.Resolve ty with
+            // An argument whose own type is still open teaches nothing: it
+            // cannot conflict, and pinning it here would be a guess.
+            | IRTInfer _ -> None
+            | resolved ->
+                match seen.TryGetValue varId with
+                | true, (firstPos, firstTy) ->
+                    if compatible firstTy resolved then None
+                    else Some (firstPos, pos, firstTy, resolved)
+                | _ ->
+                    seen.[varId] <- (pos, resolved)
+                    None)
+
+/// The message for a `firstAbstractVarConflict` verdict. Lives beside the
+/// predicate so the eager seam (`dispatchAppOrIndex`) and the post-zonk sweep
+/// (`collectAppRankErrors`) cannot word the same refusal two ways. Routed
+/// through `Other` (BL3999), the channel the sibling caret-arity refusal
+/// already uses -- this is the same family of judgement about what a `T^k`
+/// annotation claims.
+let abstractVarConflictMessage (subst: Subst) (callee: string)
+                               (firstPos: int) (conflictPos: int)
+                               (firstTy: IRType) (conflictTy: IRType) : string =
+    let rankOf t = concreteRankOf subst t |> Option.defaultValue -1
+    let r1 = rankOf firstTy
+    let r2 = rankOf conflictTy
+    let tail =
+        if r1 >= 1 && r2 >= 1 then
+            "two arrays of different ranks share no iteration space, so nothing here can deduce the "
+            + "output rank -- reshape one of them, or spell the iteration you want with "
+            + "`method_for(...) <@> ...`."
+        elif r1 >= 1 || r2 >= 1 then
+            "a scalar BROADCASTS across a rank-0 parameter list -- `f(A, 2.0)` iterates A and lifts the "
+            + "scalar, exactly as `atan2(A, 2.0)` does -- but a `T^k` parameter with k >= 1 is an ARRAY "
+            + "by declaration, so a scalar in that position is the wrong shape. Pass an array of the "
+            + "declared rank, drop the caret where the value is an element, or give that parameter its "
+            + "own concrete type (`b: Float`)."
+        else
+            "the specialization is built from the FIRST argument's type, so a later argument that would "
+            + "have to NARROW into it is refused -- widen the earlier argument, or cast at the call site."
+    $"arguments {firstPos + 1} and {conflictPos + 1} of {callee} disagree about the same abstract "
+    + $"parameter: the signature spells ONE type variable in both positions, and argument "
+    + $"{firstPos + 1} makes it {(ppIRType (subst.Resolve firstTy))} while argument {conflictPos + 1} "
+    + $"makes it {(ppIRType (subst.Resolve conflictTy))}. " + tail
+
 /// The element-CLASS comparison, the twin of `firstArgRankClash` over the
 /// same pairs: the first position whose two classes are both known and
 /// disagree, as (0-based position, param type, arg type). Same two
@@ -2168,20 +2296,32 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                     ppIRType (env.Subst.Resolve pTy),
                                     ppIRType (env.Subst.Resolve aTy)))
         | None, None, None, None ->
-            // The FIFTH check, last because every one above it names the
+            // The FIFTH check: the ABSTRACT-PARAMETER conflict. Ahead of the
+            // element-class one because it is the only check here that can
+            // see an OPEN parameter at all -- every other check on this
+            // ladder stands down on an unresolved `T^k`, which is precisely
+            // how these calls used to reach g++ unjudged. See
+            // firstAbstractVarConflict.
+            let calleeDesc =
+                match tFunc.Kind with
+                | TExprVar (name, _, _) -> $"'{name}'"
+                | _ -> "this function"
+            match firstAbstractVarConflict env.Subst paramTys (tArgs |> List.map (_.Type)) with
+            | Some (firstPos, conflictPos, firstTy, conflictTy) ->
+                atArg conflictPos
+                Error (Other (abstractVarConflictMessage env.Subst calleeDesc
+                                                         firstPos conflictPos firstTy conflictTy))
+            | None ->
+            // The SIXTH check, last because every one above it names the
             // defect more precisely: element CLASS. See firstArgTypeClash.
             match firstArgTypeClash env.Subst paramTys (tArgs |> List.map (_.Type)) with
             | Some (i, pTy, aTy) ->
                 atArg i
-                let callee =
-                    match tFunc.Kind with
-                    | TExprVar (name, _, _) -> $"'{name}'"
-                    | _ -> "this function"
-                Error (ArgTypeMismatch (i + 1, callee,
+                Error (ArgTypeMismatch (i + 1, calleeDesc,
                                         ppIRType (env.Subst.Resolve pTy),
                                         ppIRType (env.Subst.Resolve aTy)))
             | None ->
-            // The SIXTH check, after element class because a wrong-class
+            // The SEVENTH check, after element class because a wrong-class
             // argument that is also the wrong length should be reported as
             // the class error. See `extentClash` above for why this one is a
             // memory error rather than a typing disagreement.
