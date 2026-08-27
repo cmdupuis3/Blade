@@ -3643,3 +3643,20 @@ jvp_agrees
 // train/test at random over the union of both segments -- but that changes
 // the benchmark definition this notebook committed to, so it is recorded
 // here as the open question rather than run as arm five.
+
+// %% [markdown]
+// **Audit addendum.** One more probe followed the campaign, and it changes
+// how the scoreboard reads. The baseline histogram is itself a moment: a
+// Gaussian shell count is the ZEROTH windowed moment of the pair cloud,
+// `sum_pairs w_s(|v|) * 1` -- the rung below the K = 1..4 ladder this
+// notebook built. Swapping the histogram's central-species pooling for this
+// notebook's own six species-pair channels -- a pure K = 0 windowed jet, 36
+// occupancy slots, same six shells, same network, same budget, same seeds --
+// scores test MSE 0.890 +/- 0.033 against the histogram's 0.899 +/- 0.034
+// (paired difference -0.008 +/- 0.055). The winning descriptor of this
+// whole comparison was in the moment-jet family all along: it is the zeroth
+// moment, and everything K >= 1 adds on top of it is +0.015 +/- 0.029.
+// "Two moments are not a distribution" had the right shape and the wrong
+// culprit -- the distribution's SHAPE information (K >= 1) is what the test
+// segment does not reward; its OCCUPANCY (K = 0, where each pair sits
+// radially) is what it does.
