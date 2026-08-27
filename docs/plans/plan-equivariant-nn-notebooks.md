@@ -558,6 +558,36 @@ items for the builder to verify early: none load-bearing — every Blade
 idiom is proven in NB1a/NB2; the only new math (whitening, quantile map)
 lives in F#.
 
+**AS BUILT 2026-08-27** — `examples/matched_moments.bladenb` (17 md + 23
+code cells) + `make_moments_zarr.fsx` + `examples/data/moments.zarr`
+(3.4 MB, idempotent SHA-verified). Whitening residuals per stored sample:
+max|K1| 8.9e-17, max|K2−I| 1.2e-15; radial match 1.0e-13; the generator
+needed one non-obvious fix — the reference radial profile must be
+trace-normalized to Σr² = 3N, or the whitening and quantile constraint sets
+have no intersection (alternating projections stall at the Jensen gap;
+plateaus at 3.2e-3, measured). All theorem pins green, 25/25: T2 in the
+STRONG form (across-sample variance of the K≤2 features 2.5e-28 over 600
+samples — a K≤2 model is a constant function, pinned, and scores exactly
+50/200); exact-icosahedron K4 anisotropy 1.78e-32 vs octahedron's exact
+2/15; centrosymmetrized K3 literal zero. **THE MONEY TABLE — predicted vs
+measured rung × class (hits/50: iso, octa, tetra, heavy)**: K0
+[50,0,0,50]=100 (chance on the matched three, heavy separated — the
+aspirin winner inverted, exactly as predicted); K≤2 =50 exact (the
+constant); +K3 [13,45,50,49]=157; +K3+K4 [50,48,50,50]=198. Staircase
+100/50/157/198 on prediction. Two honest findings narrated: (1) +K3's
+iso/octa 13/45 split instead of a chance-split — the construction matches
+K3-noise means and second moments but not its FOURTH moments;
+variance-of-variance is a real, weak leak; (2) the plan's "+K3 linear
+ceiling above null" prediction was WRONG for a sharp reason now in the
+notebook: per-sample rotations isotropize every l>0 feature column, so
+linear probes see only l=0 — the +K3 ceiling sits AT null while the
+trained rung scores 157, the cleanest demonstration in the arc that
+invariant-forming nonlinearity is where equivariant learning pays. Full
+ide-serve drive 66.1 s, all passing cells interp+kept, stream frames on
+all four rung channels, fresh-rotation invariance of the trained top rung
+≤3.3e-15 over 256 probes; canaries green. **Zero new compiler gaps** — the
+first build in the arc to need none.
+
 ## 4. Live-plot infrastructure — IMPLEMENTED 2026-08-25 (this repo committed; Blade-REPL half pending in that repo)
 
 Landed in the working trees and verified green: Blade full suite 5119/0 (zero
@@ -749,6 +779,8 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 61 | Validation design on MD17-style trajectory stores: strided in-trajectory val REVERSES model rankings vs the out-of-segment test; temporal-tail val tracks rankings at moderate training but turns optimistic under long training (concat: tail 0.599 → test 1.07) | METHOD (doc) | campaign E1/E4 | notebooks: doc note owed | both notebooks' markdown |
 | 62 | Confirmed working: reverse grad through learnable-featurization graphs (state-dependent local rec window tables, computed-index reads, exp/div), verified by exact init-identity 2.4e-12 | capability (record) | campaign E2 | — | — |
 | 63 | AUDIT RECORD 2026-08-27: the baseline histogram IS the K=0 windowed moment jet — a Gaussian shell count is the zeroth moment `Σ w_s(|v|)·1`. Proven operationally: pair-channel K=0 occupancy (36 slots, same 6 shells, 303 params) scores 0.890±0.033 vs the histogram's 0.899±0.034 on the same seeds (paired −0.008±0.055; probe p_k0 in the campaign scratch). The jet ladder should start at K=0; K≥1 adds +0.015±0.029 on top (E4). Runtime note: compiled exes need ucrt64 on PATH at RUN time too — silent exit-139 otherwise | RECORD | audit probe p_k0.blade | — | NB2 postscript carries it |
+| 64 | Capability record: BL4011's offered clauses on norm-channel functions (`IrrepsIdx<…> → invariant`) paste verbatim and certify — NB3's whole channel family was clause-written by the compiler. NB3 needed ZERO new gap rows: the idiom surface is mature | RECORD | NB3 build | — | — |
+| 65 | Braceless function bodies also refuse an `else`-led continuation line (BL1001), extending #33 beyond `+`-led | BD/quirk (family of #33) | NB3 build | no | doc |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
@@ -798,10 +830,10 @@ constants compiler-owned.
    notebook (~197, incl. 13 running-sum scans to re-examine), the
    `stack-join/014` heterogeneous-join corpus pin, and a CLAUDE.md
    style-table addition (proposed text in the audit report).
-9. ▶ **NB3 — the matched-moment discriminator** (§3b, user-approved
-   2026-08-27): plan complete, build next — the dataset where K>=1 is the
-   only signal by construction and K<=2 blindness is an EXACT pin
-   (per-sample whitening + radial quantile matching).
+9. ✅ **NB3 built + verified 2026-08-27** (§3b AS BUILT): the staircase
+   100/50/157/198 landed on prediction with two exact rows; zero new
+   compiler gaps. NB4 door: the real-data versions (EEG whiten+kurtosis,
+   dMRI crossings, EBSD texture, water tetrahedrality).
 10. Revisit: outputs persistence decision (#9), `ml.rotate` (#14), the memo
    bug (#40) and the interp/codegen divergence (#44) as the notebook-UX
    bugfixes worth doing first (delegated).
