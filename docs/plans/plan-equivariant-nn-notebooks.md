@@ -739,6 +739,27 @@ degeneracy, the disorder census and the refusals — NOT accuracy. That is a
 legitimate notebook, but it is a different claim from NB1b's benchmark and
 must be narrated as one.
 
+**NB4 AS BUILT 2026-08-28** — `examples/cod_crystals.bladenb` (15 md + 17
+code cells; store byte-untouched). All 27 pins green via concatenated
+`blade run` AND a full ide-serve drive (66.2 s, all passing cells
+interp+kept, refusal exit-1 without killing the session, stream frames on
+rung_k2/rung_k4/rung_k34); independently re-verified by the lead (55.9 s
+run, every ok-flag and all three matrices reproduced). Theorems on 1104
+real refinements: l2 max 2.02e-31; derive_poly-vs-F# differential
+2.50e-16; rotation invariance 1.94e-16; bcc/tet l4 gap 1.18e-16 with K3
+gap exactly 2/9; the 9 distorted perovskite A-sites surfaced BY COD ID
+(1010195, 1527540, 1532705, 1541441, 1541552, 1543847, 2105525 train;
+1535910, 2002328 test) with l2 still ≤3.6e-32. **THE MONEY TABLE —
+predicted-before-training vs measured confusion (hits / [46,44,100,85])**:
+K≤2 [0,0,100,0]=100 (a constant model; loss lands on the Σp(1−p)=0.7198
+closed-form floor); even-only [46,44,100,0]=190 with tet→bcc **85/85
+exactly** (loss lands on the degeneracy's 0.3325 floor); +K3
+[46,44,100,85]=275. All three rows on prediction, zero misses — and the
+K≤2 constancy here needs NO whitening: unit normalization fixes the K2
+scalar and the site group kills K1 and l=2 (Neumann is the device, not
+preprocessing). Second consecutive build (after NB3) with zero new
+compiler gaps.
+
 **Recommended shape if NB4 proceeds:** COD or AFLOW structures as the
 classification task (real distortion, definitional labels, static
 coordination filters for fixed extents), with the canonical five-shell
@@ -942,6 +963,8 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 67 | MSYS `pkill -f <script.sh>` silently matches NOTHING (bash.exe owns argv), so background fetch loops survive and duplicate traffic — kill by Win32 PID from `Get-CimInstance Win32_Process` CommandLine match and verify by process count + file-count stability, never by pkill's exit code | BUG/trap | NB4 pipeline (duplicated COD traffic before it was caught) | no | agent practice |
 | 68 | Windows refuses `Directory.Delete` on any process's cwd — store generators must replace store CONTENTS, not the root directory | RECORD | NB4 pipeline | no | sibling generators would hit this too |
 | 69 | Cubic site symmetry QUANTIZES neighbour directions: real COD cubic shells are byte-ideal except free-parameter sites (9/1104, all fcc perovskite A-sites); the K<=2 machine-zero premise is empirically exact on experimental refinements, and bcc/tet are l=4-degenerate in real data exactly as in theory | RECORD (physics) | NB4 store, 1104 samples | reframes NB4's claim | — |
+| 70 | `compound(dense, mask)` reads are KEYED by original index, not positional: reading "slot k" dies at runtime BL8005 `unordered_map::at` with no source location when original-index k is not in the mask; a bare-printed compound binding prints NOTHING (silent); `compound(...) |> compute` refuses BL6002. Positional surfacing = the cumulative-count indicator-gather idiom (cod_crystals Neumann cell) | BUG/trap | NB4 build | no | compound read semantics doc + a positional accessor, someday |
+| 71 | Capability record: int `/` and mod-wrap batch indexing inside `ad.grad`'d losses work (extends #P7a's `%`); mask/compound ACROSS two separately-declared rec arrays needs one NAMED index type (BL3999 otherwise) — Tag identity, consistent with the rank-1-alias rule | RECORD | NB4 build | no | — |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
@@ -991,6 +1014,10 @@ constants compiler-owned.
    notebook (~197, incl. 13 running-sum scans to re-examine), the
    `stack-join/014` heterogeneous-join corpus pin, and a CLAUDE.md
    style-table addition (proposed text in the audit report).
+9a. ✅ **NB4 built + verified 2026-08-28** (§3c AS BUILT): the theorem on
+   1104 real COD refinements, the bcc/tet degeneracy in nature with its
+   confusion matrix landing 85/85 on prediction, the Neumann cell, zero
+   new compiler gaps.
 9. ✅ **NB3 built + verified 2026-08-27** (§3b AS BUILT): the staircase
    100/50/157/198 landed on prediction with two exact rows; zero new
    compiler gaps. NB4 door: the real-data versions (EEG whiten+kurtosis,
