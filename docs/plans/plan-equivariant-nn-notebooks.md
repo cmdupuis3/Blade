@@ -670,6 +670,34 @@ between-class low-order separability. Data kept at
 This closes the directional-statistics branch: crystallography is the only
 live route.
 
+**The full shell table, extended (probe `shells2.blade`, 2026-08-27).**
+Adding the tetrahedral (CN 4) shell and the K=3 jet completes the design:
+
+| shell | K=2 l=2 | K=3 (odd) | K=4 l=4 |
+|---|---|---|---|
+| simple cubic (6) | ~1e-32 | 0 exactly | 0.133333 = 2/15 |
+| fcc (12) | ~1e-32 | 0 exactly | 0.008333 = 1/120 |
+| bcc (8) | ~1e-32 | ~3e-34 | 0.0592593 |
+| hcp (12) | ~3e-33 | **0.0023148** | 0.0021605 |
+| tetrahedral (4) | ~1.7e-32 | **0.222222 = 2/9** | **0.0592593** |
+| icosahedral (12) | ~1.6e-32 | 0 exactly | ~1.6e-33 |
+
+Two facts make K=3 ESSENTIAL rather than decorative, and both are real
+crystallography: **bcc and tetrahedral are exactly degenerate at l=4**
+(0.0592593 both — a cube is a tetrahedron plus its inverse and l=4 is
+even), so only the odd moment separates them; and **hcp carries a nonzero
+odd moment while fcc's is exactly zero** — the eclipsed anticuboctahedron
+is non-centrosymmetric where the cuboctahedron is not, which IS the
+fcc/hcp stacking difference. The rung ladder therefore reads: K<=2 chance
+for every class; +K3 separates the non-centrosymmetric shells; +K4
+separates the rest; icosahedral needs l=6 and stays invisible.
+
+Note for a real-data build: HCP is hexagonal, so its rank-2 isotropy holds
+only at the IDEAL c/a — real hcp metals run c/a 1.57-1.89 and would
+separate at K=2. Cubic classes keep the theorem exact on real data because
+the space group forces it; hcp, if included, is an honest complication to
+narrate rather than a clean rung.
+
 **Recommended shape if NB4 proceeds:** COD or AFLOW structures as the
 classification task (real distortion, definitional labels, static
 coordination filters for fixed extents), with the canonical five-shell
