@@ -588,6 +588,71 @@ all four rung channels, fresh-rotation invariance of the trained top rung
 ≤3.3e-15 over 256 probes; canaries green. **Zero new compiler gaps** — the
 first build in the arc to need none.
 
+## 3c. NB4 groundwork — bond-orientational order (PROBE-VERIFIED 2026-08-27)
+
+The search for a REAL dataset with NB3's profile and no statistics-
+manufacturing preprocessing. Two web sweeps ran; the physics premise was
+then verified in-repo rather than taken on trust (`probes/shells.blade`).
+
+**The probe (decisive).** Five canonical first-neighbour shells as unit
+vectors, through `ml.derive_poly` K=2 and K=4:
+
+| shell | K=2 l=2 power | K=4 l=4 power | Steinhardt Q4 (lit.) |
+|---|---|---|---|
+| simple cubic (6) | 1.2e-32 | 0.133333 = 2/15 | 0.76376 |
+| fcc (12) | 1.4e-32 | 0.008333 = 1/120 | 0.19094 |
+| bcc (8) | 1.7e-32 | 0.059259 | 0.50918 |
+| hcp (12) | 3.2e-33 | 0.002160 | 0.09722 |
+| icosahedral (12) | 1.6e-32 | **1.6e-33** | 0 |
+
+Every shell's K=2 l=2 power is MACHINE ZERO and every shell's K=2 l=0 slot
+is the identical −1/√3: the K<=2 features are exactly equal across all five
+structures, and the l=4 powers reproduce the published Steinhardt Q4 table
+exactly (each is 8/35 × Q4²) — an independent verification that
+`derive_poly` computes the bond-order invariants of the literature.
+Icosahedral order is invisible at l=4 and needs l=6, which is the
+compiler's K<=4 cap (BL5000, census #7) as a physics statement.
+
+**CORRECTION to this plan's own earlier prose:** §3b and the NB4 briefs
+called HCP "hexagonal, so uniaxial at rank 2, a control that separates
+early." That is WRONG for the ideal 12-neighbour shell — its rank-2 tensor
+sums to exactly 4·I (verified above and by hand). All four crystalline
+shells are l<=2-blind; l=4 separates them across 1.5 orders of magnitude.
+The premise is therefore STRONGER than designed, and needs no control
+class caveat. (The probe also caught the error: a 60°-rotated lower
+triangle is the cuboctahedron = fcc, not hcp; hcp is the ECLIPSED
+anticuboctahedron. The wrong shell returned fcc's l=4 power exactly —
+which incidentally demonstrated rotation-invariance of the invariant.)
+
+**Dataset search verdict (both sweeps, URLs fetch-verified).** No
+zero-preprocessing real dataset with documented low-order blindness exists
+in reach. Findings:
+- Directional statistics: NEGATIVE and worth recording. GCMT focal
+  mechanisms (`globalcmt.org/CMTfiles.html`, fixed-width .ndk, P/T/N axes
+  per event) parse trivially but fault-type groups are almost certainly
+  separated by first/second moments — an honest miss. `rotasym`'s sunspot
+  data has the right statistical story (documented rotational-symmetry
+  failure) but ships as R `.rda` — unreadable from .NET. Woodcock/Vollmer
+  polymodal-fabric data (the exact geological analogue) exists only in
+  paper tables, not as downloadable numbers.
+- Crystallography: two VERIFIED candidates, both plain-text CIF —
+  **AFLOW Prototype Encyclopedia** (`aflowlib.org/prototype-encyclopedia/`,
+  ~2127 entries, CC-BY, Strukturbericht label definitional) and **COD**
+  (`crystallography.net/cod/`, 534,681 entries, CC0, space-group label in
+  the header, real experimental distortion as free noise). Both need CIF
+  parse + symmetry-operator expansion + a neighbour cut: declared
+  preprocessing that reads the data, NOT the statistics-manufacturing kind
+  NB3's whitening was. The ideal candidate — a labelled MD/colloid
+  coordinate set — is a genuine gap: `glotzerlab/pythia`'s example set is
+  a dead Bitbucket link (404), and the Zenodo alternatives are ASE .db /
+  Python-pickle at 5.4 GB and 437 GB.
+
+**Recommended shape if NB4 proceeds:** COD or AFLOW structures as the
+classification task (real distortion, definitional labels, static
+coordination filters for fixed extents), with the canonical five-shell
+table above as the theorem/calibration cell — theorem exactness and real
+data in one notebook, and the preprocessing declared in prose.
+
 ## 4. Live-plot infrastructure — IMPLEMENTED 2026-08-25 (this repo committed; Blade-REPL half pending in that repo)
 
 Landed in the working trees and verified green: Blade full suite 5119/0 (zero
