@@ -698,6 +698,47 @@ separate at K=2. Cubic classes keep the theorem exact on real data because
 the space group forces it; hcp, if included, is an honest complication to
 narrate rather than a clean rung.
 
+**COD STORE BUILT + VALIDATED 2026-08-27** —
+`examples/tools/make_cod_zarr.fsx` → `examples/data/cod_shells.zarr`
+(829 train + 275 test, 4 classes, ~785 KB) + `check_cod_shells.blade`, the
+S6 gate. Independently re-run by the lead: **verdict = [1,1,1,1]**.
+
+| class | n(train) | K=2 l=2 (max) | K=3 | K=4 l=4 | canonical |
+|---|---|---|---|---|---|
+| sc | 141 | 2.0e-31 | 3.2e-34 | 0.133333333 | 2/15 |
+| fcc | 133 | 2.8e-32 | 7.1e-5 | 0.0083413 | 1/120 |
+| bcc | 300 | 3.3e-32 | 3.6e-33 | 0.059259259 | 8/135 |
+| tet | 255 | 1.4e-31 | 0.222222222 | 0.059259259 | 8/135 |
+
+**K<=2 blindness is empirically exact on real refinements** (max l=2 power
+2.0e-31 across 1104 samples), the bcc/tet l=4 degeneracy is real in the
+data with K=3 separating them exactly (0 vs 2/9), the F#-vs-`derive_poly`
+differential is 2.5e-16, and rotation invariance is 1.9e-16. Labels are
+assigned by GEOMETRY (F# closed-form harmonics, `power_l = c_l·Q_l²` with
+`c_l = 2^l(l!)²/(2l)!`, so the brief's 8/35 is c₄), never by trusting the
+space group — with a calibration gate asserting all six canonical shells
+before any data is touched. Determinism: hash `804079405b37…` over three
+runs. Reject census across 1377 fetched entries: **disorder (occupancy<1)
+removes 55%**, then CN filters, gap/cleanliness, and geometry matching
+leave 1109 accepted samples. 48.3 MB downloaded total.
+
+**CORRECTION to this section's own earlier prose.** §3c sold COD as "real
+experimental distortion as free noise". That is largely FALSE and the
+reason is itself the interesting physics: **cubic site symmetry QUANTIZES
+neighbour directions** — a symmetry-forced orbit such as (u,u,u)×4 under
+-43m is a perfect tetrahedron for ANY refined free parameter — so
+1095/1104 shells are byte-ideal (distance spread ≤1.2e-15, l4 exactly
+canonical). Exactly 9 samples (0.8%, all fcc perovskite A-sites where free
+anion parameters bend the cuboctahedron) are measurably distorted: l4 up
+to +3.6% off 1/120, K3 up to 0.0027, l2 still ≤2.8e-32. Neumann's
+principle made visible — experiment cannot deviate from what the site
+group forces. CONSEQUENCE FOR NB4: the classes are near-discrete points in
+invariant space, so a classifier on this store is close to a lookup. NB4's
+payload must therefore be the THEOREM verified on real data, the bcc/tet
+degeneracy, the disorder census and the refusals — NOT accuracy. That is a
+legitimate notebook, but it is a different claim from NB1b's benchmark and
+must be narrated as one.
+
 **Recommended shape if NB4 proceeds:** COD or AFLOW structures as the
 classification task (real distortion, definitional labels, static
 coordination filters for fixed extents), with the canonical five-shell
@@ -897,6 +938,10 @@ Blocks: hard/soft per notebook; INFRA = §4 workstream.
 | 63 | AUDIT RECORD 2026-08-27: the baseline histogram IS the K=0 windowed moment jet — a Gaussian shell count is the zeroth moment `Σ w_s(|v|)·1`. Proven operationally: pair-channel K=0 occupancy (36 slots, same 6 shells, 303 params) scores 0.890±0.033 vs the histogram's 0.899±0.034 on the same seeds (paired −0.008±0.055; probe p_k0 in the campaign scratch). The jet ladder should start at K=0; K≥1 adds +0.015±0.029 on top (E4). Runtime note: compiled exes need ucrt64 on PATH at RUN time too — silent exit-139 otherwise | RECORD | audit probe p_k0.blade | — | NB2 postscript carries it |
 | 64 | Capability record: BL4011's offered clauses on norm-channel functions (`IrrepsIdx<…> → invariant`) paste verbatim and certify — NB3's whole channel family was clause-written by the compiler. NB3 needed ZERO new gap rows: the idiom surface is mature | RECORD | NB3 build | — | — |
 | 65 | Braceless function bodies also refuse an `else`-led continuation line (BL1001), extending #33 beyond `+`-led | BD/quirk (family of #33) | NB3 build | no | doc |
+| 66 | COD access verified: `result?space_group_number=N&format=count|json|csv|urls` (JSON `nel` filters elemental entries) + `/cod/<id>.cif`; CC0; per-request TLS is 2-4 s so batch many URLs through ONE keep-alive curl (same serial politeness, ~10x); **disorder (occupancy<1) removes 55% of cubic entries** | RECORD | NB4 pipeline | — | — |
+| 67 | MSYS `pkill -f <script.sh>` silently matches NOTHING (bash.exe owns argv), so background fetch loops survive and duplicate traffic — kill by Win32 PID from `Get-CimInstance Win32_Process` CommandLine match and verify by process count + file-count stability, never by pkill's exit code | BUG/trap | NB4 pipeline (duplicated COD traffic before it was caught) | no | agent practice |
+| 68 | Windows refuses `Directory.Delete` on any process's cwd — store generators must replace store CONTENTS, not the root directory | RECORD | NB4 pipeline | no | sibling generators would hit this too |
+| 69 | Cubic site symmetry QUANTIZES neighbour directions: real COD cubic shells are byte-ideal except free-parameter sites (9/1104, all fcc perovskite A-sites); the K<=2 machine-zero premise is empirically exact on experimental refinements, and bcc/tet are l=4-degenerate in real data exactly as in theory | RECORD (physics) | NB4 store, 1104 samples | reframes NB4's claim | — |
 
 Confirmed-working (recorded for NB2's builder): rank-2 `let rec` reads with
 computed indices inside grad'd bodies; Int64 gathers (rank 1 and 2) inside
