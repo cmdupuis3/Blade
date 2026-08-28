@@ -647,6 +647,29 @@ in reach. Findings:
   a dead Bitbucket link (404), and the Zenodo alternatives are ASE .db /
   Python-pickle at 5.4 GB and 437 GB.
 
+**Sunspot data: CONVERTED, MEASURED, REJECTED (2026-08-27).** R 4.5.2 is
+installed locally, so the `.rda` blocker was tested rather than assumed:
+the two files fetch raw from
+`raw.githubusercontent.com/egarpor/rotasym/master/data/` and `load()` +
+`write.csv` converts them with NO package install — 51,303 sunspot groups,
+1874-2018, columns NOAA/date/cycle/total_area/dist_sun_disc/theta/phi, with
+solar cycle (11-24) as a real label. Format conversion is therefore a
+non-issue and the zarr write would be routine. **The statistics disqualify
+it, in both available framings:**
+- cycle as the label: E[z²] (a K=2 statistic) separates cycles at **14×**
+  the within-cycle sampling error (cycle 11 = 0.036, cycle 22 = 0.100) and
+  the K=1 north-south mean separates at 4.6×. Stronger cycles put spots at
+  higher latitudes, so belt geometry IS the cycle signature — the low
+  orders are maximally informative, the exact opposite of the profile.
+- births vs deaths as the label: nothing separates at ANY order (|z| ≤ 1.4
+  on K1, K2, K3 and two K4 statistics, n = 51,303 each) — no task.
+The search agent's "approximately on-profile" read came from `rotasym`'s
+WITHIN-sample rotational-symmetry test, which is a different question from
+between-class low-order separability. Data kept at
+`C:UserscdupuDatasunspots` (2 MB) in case it is useful elsewhere.
+This closes the directional-statistics branch: crystallography is the only
+live route.
+
 **Recommended shape if NB4 proceeds:** COD or AFLOW structures as the
 classification task (real distortion, definitional labels, static
 coordination filters for fixed extents), with the canonical five-shell
