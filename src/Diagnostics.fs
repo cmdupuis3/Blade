@@ -313,6 +313,23 @@ module Codes =
             // nesting and reads the annotation's lens nowhere, so both cases
             // used to be accepted and then ignored.
             "BL4018", "ragged lens contradicts the literal"
+            // BL4019 and BL4020 are RESERVED, not free: BL4019 is the planned
+            // "tree read of indeterminate depth" refusal (P5, when partial-path
+            // views land) and BL4020 is unallocated. Registering BL4021 out of
+            // order is deliberate -- the plan named it, the docs cite it, and
+            // renumbering later would break every pin.
+            //
+            // BL4021: a `TreeIdx<shape>` whose shape is not a well-formed
+            // preorder degree sequence. TWO mistakes under one code (BL4018's
+            // shape one entry up): the shape does not statically evaluate at all
+            // -- a tree shape is a `let static` value and from nowhere else, so a
+            // run-time shape can be neither honoured nor compared, and that lane
+            // is the future DynTreeIdx -- or it evaluates and is not a tree: a
+            // negative or non-integer entry, an empty sequence, a walk that
+            // closes before the sequence ends (a tail belonging to no tree), or
+            // a sequence that ends before the walk closes (child slots nothing
+            // fills). The message names which.
+            "BL4021", "invalid tree shape"
             // BL5xxx: elaborators
             "BL5000", "ml elaboration error"
             "BL5100", "ppl elaboration error"
