@@ -384,6 +384,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // boundary still rejects a dimension mismatch. Front-end only apart from one
     // value case, which skips cleanly without g++. (Also `blade test module-resolve`.)
     let moduleResolve = Blade.Tests.ModuleResolveTests.runModuleResolveTests ()
+    // The icechunk `checkout` desugar (src/ProviderDesugar.fs): a raw-AST ->
+    // raw-AST rewrite that `TypeCheck.typeCheck` runs on EVERY program, whether
+    // or not it mentions a provider. No store, no registry, no g++, never
+    // skips — the same shape as the normalize/unify blocks — so it is
+    // unconditional here rather than reachable only through the standalone
+    // verb. (Also reachable standalone as `blade test provider-desugar`.)
+    let providerDesugar = Blade.Tests.ProviderDesugarTests.runProviderDesugarBlock ()
     // OpenMP thread-coverage: verifies emitted pragmas form genuine parallel
     // regions when cores are available. Opt-in (see FullSuiteOptions).
     let omp =
@@ -471,7 +478,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield moduleResolve
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield moduleResolve; yield providerDesugar
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

@@ -175,6 +175,17 @@ module Codes =
             // from the cause. Missing/unreadable STORES keep their lowering
             // diagnostics; this fires only for the library itself.
             "BL2007", "provider native library unavailable"
+            // BL2008: the STORE named at a provider load/checkout site cannot be
+            // resolved -- missing repo, bad/ambiguous ref, deleted-tag tombstone,
+            // unsupported spec byte, Offline status, or a snapshot the reader
+            // refuses by name. Sibling of BL2007 (there the LIBRARY is unusable,
+            // here the STORE) -- both are name resolution failing, not a type
+            // judgment.
+            //
+            // Providers opt in by raising Types.ProviderResolutionError; one
+            // that doesn't keeps the historical silent fallback at check and
+            // its own diagnostics at lowering.
+            "BL2008", "provider cannot resolve the store"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"

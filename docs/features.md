@@ -235,6 +235,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 | NetCDF | Core |  |
 | Zarr | Core |  |
 | Triangular Zarr file format | Partly Done | Provides Zarr storage spec for natively triangular or wreath-shaped tensors |
+| Icechunk | Partly Done | Versioned (transactional) Zarr: `repo.checkout` with branch/tag/snapshot unit markers, compile-time snapshot pinning, cross-checkout axis identity. Writes, `read_window`, and packed-blocks reads pending. `.stream` and `load_compound` are REFUSED outright (`GenStreamOpen` / `GenReadCompoundVar` are `None`; the refusals are pinned in the icechunk test lane), not silently degraded — docs/plans/plan-icechunk-provider.md |
 
 ## 16. Backends and performance
 

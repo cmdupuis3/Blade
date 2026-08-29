@@ -291,9 +291,21 @@ let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list
             Some (Blade.DeduceRep.EngineRefutes
                     $"the Lie-discharge post-accept guard tripped while validating this body: {msg}"))
     IdeDeductions.reset ()
-    // Staged-former unfold FIRST: `static method_for/object_for/for`
-    // argument lists elaborate to plain formers before any other stage
-    // (ML/PPL/math/grad and the checker never see ExprStatic).
+    // Provider checkout desugar BEFORE EVERYTHING: `repo.checkout("v1.0",
+    // ic.tag)` becomes the ordinary load shape `ic.load("path@tag:v1.0")`,
+    // so typecheck, every elaborator's own `resolveStatics`, and
+    // `checkModule`'s provider-roots scan all see a form they already
+    // handle. It has to be first because Unfold, immediately below, is
+    // itself the earliest `resolveStatics` consumer -- and StaticEval's miss
+    // would be SILENT ("not foldable"), not an error. No-op, and
+    // reference-equal, for programs with no `import icechunk`.
+    match Blade.ProviderDesugar.expand program with
+    | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["provider checkout desugar"]))
+    | Ok program ->
+    // Staged-former unfold FIRST of the elaborations: `static
+    // method_for/object_for/for` argument lists elaborate to plain formers
+    // before any other stage (ML/PPL/math/grad and the checker never see
+    // ExprStatic).
     match Blade.Unfold.expand program with
     | Error diags -> Error (diags |> List.map (compileErrorOfDiagnostic ["static unfold"]))
     | Ok program ->

@@ -157,11 +157,20 @@ let private axisExtent (provider: string) (path: string) (root: string) (dim: st
     |> Map.tryFind dim
 
 /// Idempotent installation: register every provider spec, then bridge the
-/// compile-time readers and the provider-name set into StaticEval's hooks.
+/// compile-time readers and the provider-name set into StaticEval's hooks --
+/// and the axis-tag DECODERS into Types', which is the same seam one layer
+/// over: a refusal message renders in TypeLower/TypeEnv, both of which compile
+/// long before any provider and must not name one.
 let install () =
     Blade.ProviderRegistry.register netcdfSpec
     Blade.ProviderRegistry.register Blade.ZarrProvider.spec
     Blade.ProviderRegistry.register Blade.CsvProvider.spec
+    Blade.ProviderRegistry.register Blade.IcechunkProvider.spec
     registerProviderReader readAndFold
     registerProviderIndexReader axisExtent
     registerProviderNames (Blade.ProviderRegistry.names () |> Set.ofList)
+    // Diagnostics-only: what turns `__icaxis|lat@wx:9f3a1c...` into `lat` in a
+    // refusal message, and what recovers the mint table's recorded reason for a
+    // split. Unregistered, both sites print exactly what they printed before.
+    Blade.Types.registerProviderAxisTagDecoder Blade.IcechunkProvider.tryProviderTagName
+    Blade.Types.registerProviderAxisSplitReason Blade.IcechunkProvider.trySplitReasonOfTag

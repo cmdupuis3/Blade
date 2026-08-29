@@ -523,11 +523,50 @@ let locateError (span: Span) (env: TypeEnv) (err: TypeError) : CompileError =
 /// in TypeCheck.fs pass this; formatTypeError words the message around it.
 let unitAnnoContext = "<type annotation>"
 
+/// The extra line a TYPE MISMATCH earns when its two sides RENDER IDENTICALLY.
+///
+/// `ppIndexType` prints an index record from its extent and symmetry and reads
+/// no Tag at all, so `expected Array<Float64 like Idx<5>>, got Array<Float64
+/// like Idx<5>>` is exactly what a user sees when two DIFFERENT provider axis
+/// identities meet -- two checkouts whose `lat` diverged, or two repos' `lat`.
+/// The message is then not merely unhelpful, it reads as a compiler bug.
+///
+/// Fixed HERE and not in the printer on purpose: many corpus categories pin
+/// `Idx<n>` in error text, and teaching the global type printer about tags
+/// would rewrite all of them. This is one appended line, so every
+/// ERROR-CONTAINS pin on the sentence above it keeps matching.
+///
+/// Scoped to PROVIDER tags (`isProviderAxisTag`) for the same containment
+/// reason: `__`-prefixed KIND sentinels also vanish from the render, and a note
+/// reading "'__raggedidx' vs '__group_outer'" would be noise in categories that
+/// have nothing to do with providers.
+let private indexIdentityNote (exp: IRType) (act: IRType) : string =
+    let recsOf (t: IRType) =
+        match t with
+        | ArrayElem at -> at.IndexTypes
+        | _ -> []
+    let a, b = recsOf exp, recsOf act
+    if a.Length <> b.Length || a.IsEmpty then ""
+    else
+        List.zip a b
+        |> List.tryPick (fun (x, y) ->
+            match x.Tag, y.Tag with
+            | Some tx, Some ty when tx <> ty && (isProviderAxisTag tx || isProviderAxisTag ty) ->
+                let clause =
+                    match providerSplitClause tx ty with
+                    | Some c -> " " + c
+                    | None -> ""
+                Some $"\nnote: the index types differ by identity: '{(displayTagName tx)}' vs '{(displayTagName ty)}'{clause}"
+            | _ -> None)
+        |> Option.defaultValue ""
+
 /// Format a TypeError as a human-readable string
 let formatTypeError (err: TypeError) : string =
     match err with
     | UnboundVariable name -> $"Unbound variable: {name}"
-    | TypeMismatch (exp, act) -> $"Type mismatch: expected {ppIRType exp}, got {ppIRType act}"
+    | TypeMismatch (exp, act) ->
+        let rendered = $"Type mismatch: expected {ppIRType exp}, got {ppIRType act}"
+        if ppIRType exp = ppIRType act then rendered + indexIdentityNote exp act else rendered
     | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"
     | KernelPackArity msg -> msg
     | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
@@ -542,6 +581,8 @@ let formatTypeError (err: TypeError) : string =
     | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
     | ProviderNativeLoadFailure (provider, path, detail) ->
         $"provider '{provider}' cannot load its native library, so the store '{path}' cannot be read at compile time: {detail}. Every type this store binds is unresolvable until the library loads -- install the provider's runtime, or point its install-root variable at it (NETCDF_DIR for netcdf: the compiler and generated programs then use that install's own libraries)."
+    | ProviderStoreUnresolvable (provider, path, detail) ->
+        $"provider '{provider}' cannot resolve the store '{path}' at compile time: {detail}"
     // Promoted variants (Stage 5): text reproduced verbatim.
     | IndexTagMismatchNamed (expected, actual) -> $"Array index tag mismatch: slot expects '{expected}' but argument has type '{actual}'."
     | IndexTagMismatchAnon expected -> $"Array index tag mismatch: slot expects named tag '{expected}' but argument is an anonymous index value."
@@ -808,6 +849,10 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // native library is unloadable, so the store's names cannot
             // resolve -- same band as BL2004's "module not found".
             | ProviderNativeLoadFailure _ -> "BL2007"
+            // Same band, same reason: the store named at the load site does not
+            // resolve, so no name it binds can. BL2007's sibling, one condition
+            // over (library vs store).
+            | ProviderStoreUnresolvable _ -> "BL2008"
             | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ -> "BL3001"
             | ArityMismatch _ | KernelPackArity _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"

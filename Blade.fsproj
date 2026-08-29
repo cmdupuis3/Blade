@@ -123,6 +123,29 @@
     <Compile Include="src/providers/NetcdfProvider.fs" />
     <Compile Include="src/providers/ZarrProvider.fs" />
     <Compile Include="src/providers/CsvProvider.fs" />
+    <!-- Icechunk (versioned Zarr) provider: repo/ref resolution, the 39-byte
+         header parser and the payload decode are all live. The plan's section
+         6.2 dependency decision landed on the vendored flatc accessors (root
+         tables verified before they are read) plus the managed ZstdSharp.Port,
+         both compile-time only. Reuses ZarrProvider's metadata parsers, so it
+         must follow ZarrProvider.fs; registered by ProviderStatics.fs, which it
+         must precede. -->
+    <Compile Include="src/providers/IcechunkProvider.fs" />
+    <!-- F#-side Icechunk fixture WRITER (tests only): builds real spec-2 repos
+         on local disk through the vendored FlatBuffers object API + ZstdSharp,
+         the ZarrWrite discipline applied to a versioned store. Depends only on
+         the generated accessors and ZstdSharp, NOT on IcechunkProvider (the
+         header layout and Crockford encoder are deliberate independent twins),
+         so its position only has to follow the ProjectReference. -->
+    <Compile Include="src/providers/IcechunkWrite.fs" />
+    <!-- The RepoSpec for the committed demo store
+         (examples/data/station_temps.icechunk), shared by its generator script
+         (examples/tools/make_station_icechunk.fsx, which `#load`s this same
+         file) and by IcechunkTests' regeneration guard, which rebuilds it into
+         a scratch directory and diffs it against the committed bytes. It is a
+         plain value over IcechunkWrite's spec types, so it must follow
+         IcechunkWrite.fs and nothing else constrains it. -->
+    <Compile Include="examples/tools/StationSpec.fs" />
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
     <!-- The generic half of an equivariance-family judgment (C3 stage 0,
@@ -153,6 +176,14 @@
          argument is a struct NAME, not a value). Needs Ast + StaticEval only;
          must precede TypeCheck.fs, which installs it. -->
     <Compile Include="src/StructIdxSpec.fs" />
+    <!-- The icechunk `checkout` desugar (docs/plans/plan-icechunk-provider.md
+         section 4): `repo.checkout(ref[, marker])` -> the canonical load shape
+         `alias.load("<path>@<kind>:<ref>")`, so no downstream phase needs an
+         arm for it. Needs Ast + Diagnostics ONLY (it runs before the provider
+         registry is installed); must precede its three consumers: TypeCheck.fs
+         (runs it first in the typeCheck pipeline, ahead of Unfold), Lowering.fs
+         (re-applies it to the raw decl list) and Ide.fs. -->
+    <Compile Include="src/ProviderDesugar.fs" />
     <!-- Staged-former unfold pass (staged tower Phase 1): eliminates
          `static method_for/object_for/for` before every elaboration stage.
          Needs Ast + StaticEval only; runs first in typeCheck's pipeline. -->
@@ -516,6 +547,10 @@
     <Compile Include="tests/NetcdfTests.fs" />
     <Compile Include="tests/ZarrTests.fs" />
     <Compile Include="tests/CsvTests.fs" />
+    <Compile Include="tests/IcechunkTests.fs" />
+    <!-- The checkout-desugar pass's own pins (src/ProviderDesugar.fs). Pure
+         in-process AST rewrite: no store, no registry, no g++, never skips. -->
+    <Compile Include="tests/ProviderDesugarTests.fs" />
     <Compile Include="tests/MpiTests.fs" />
     <Compile Include="tests/HybridTests.fs" />
     <Compile Include="tests/DiffOracle.fs" />
@@ -708,6 +743,16 @@
       <Link>cpp/linalg_probe_tests.cpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+  </ItemGroup>
+
+  <!-- Icechunk payload decode, the plan's section 6.2 Option B (the FIRST
+       external references in this project, a deliberate decision recorded in
+       docs/plans/plan-icechunk-provider.md): ZstdSharp is a managed-only zstd
+       port (no native library), and Blade.IcechunkFormat is the vendored
+       flatc-generated accessor library over icechunk's own schemas. -->
+  <ItemGroup>
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+    <ProjectReference Include="src/providers/icechunk-format/Blade.IcechunkFormat.csproj" />
   </ItemGroup>
 
 </Project>

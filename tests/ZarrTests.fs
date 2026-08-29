@@ -430,8 +430,8 @@ let runZarrTests () =
     Blade.ProviderStatics.install ()
     check "registry: zarr registered"
         (match Blade.ProviderRegistry.tryFind "zarr" with Some s -> s.Name = "zarr" | None -> false) ""
-    check "registry: csv + netcdf registered too"
-        ((Blade.ProviderRegistry.names ()) |> List.sort = ["csv"; "netcdf"; "zarr"]) (sprintf "%A" (Blade.ProviderRegistry.names ()))
+    check "registry: csv + icechunk + netcdf registered too"
+        ((Blade.ProviderRegistry.names ()) |> List.sort = ["csv"; "icechunk"; "netcdf"; "zarr"]) (sprintf "%A" (Blade.ProviderRegistry.names ()))
     check "registry: zarr rejects load_compound (no compound reader)"
         (match Blade.ProviderRegistry.tryFind "zarr" with Some s -> s.GenReadCompoundVar.IsNone | None -> false) ""
     check "registry: zarr needs no link flags"
@@ -1987,6 +1987,14 @@ let w = z.write("%s", W)
     check "window: out-of-range bounds rejected at typecheck"
         ((typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n").Contains "bounds")
         (typeErrOf "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 7)\n")
+    // The IDE payload agrees: a window read is a provider-read binding, so
+    // the fast tier's `providerRead` names the store member (the 3-arg
+    // read_window arm of Ide.readOperandProvenance).
+    (let ideSrc = "import zarr as z\nlet s = z.load(\"tests/fixtures/zarr_stores/zarr_win_blocks\")\nlet W = z.read_window(s.vars.C, 2, 6)\n"
+     let (ideJson, ideCode) = Blade.Ide.ideCheckSource "zarr_win_ide.blade" ideSrc
+     check "window: ide payload providerRead = {store s, member vars.C}"
+         (ideCode = 0 && ideJson.Contains "\"providerRead\":{\"store\":\"s\",\"member\":\"vars.C\"}")
+         (if ideJson.Length > 400 then ideJson.Substring(0, 400) else ideJson))
     // The dims/vars split is Zarr's too (isCoordinateArr), so the same
     // wrong-section mistake is available here -- and BL3018 answers it with
     // the sibling accessor, in both directions. The seam is shared with

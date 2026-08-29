@@ -318,13 +318,15 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
         with _ -> ()
     let runCheck (id: int) (tier: string) (file: string) (source: string) =
         setCwdFor file
-        // typeCheck resets its own AsyncLocal side-channels; these two it does
-        // not touch. IdeStores would otherwise carry a PREVIOUS file's provider
-        // stores into this payload, and `provenance` is an append-only fold log
-        // that would grow without bound in a process that never exits. The
-        // mtime-keyed caches beside it are left alone -- they were built for
+        // typeCheck resets its own AsyncLocal side-channels; these three it
+        // does not touch. IdeStores would otherwise carry a PREVIOUS file's
+        // provider stores into this payload, the icechunk axis mint table its
+        // axis identities, and `provenance` is an append-only fold log that
+        // would grow without bound in a process that never exits. The
+        // mtime-keyed caches beside them are left alone -- they were built for
         // exactly this daemon shape.
         Blade.ProviderRegistry.IdeStores.reset ()
+        Blade.IcechunkProvider.resetAxisMint ()
         Blade.ProviderStatics.provenance.Clear ()
         let env : Blade.Ide.Envelope = { Id = Some id; Tier = Some tier; Windows = None }
         let upgrade = if tier = "full" then Some fullTierUpgrade else None
@@ -341,6 +343,7 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
         setCwdFor file
         // The same per-request hygiene `runCheck` applies, for the same reasons.
         Blade.ProviderRegistry.IdeStores.reset ()
+        Blade.IcechunkProvider.resetAxisMint ()
         Blade.ProviderStatics.provenance.Clear ()
         let (source, windows) = Blade.ReplSession.assembleCells cells
         let env : Blade.Ide.Envelope = { Id = Some id; Tier = Some tier; Windows = Some windows }
@@ -362,9 +365,10 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
             (try Directory.SetCurrentDirectory dir with _ -> ())
         | _ -> ()
         // The same per-request hygiene the check handler applies: a PREVIOUS
-        // request's provider stores must not follow this evaluation, and
-        // `provenance` would otherwise grow without bound.
+        // request's provider stores and axis identities must not follow this
+        // evaluation, and `provenance` would otherwise grow without bound.
         Blade.ProviderRegistry.IdeStores.reset ()
+        Blade.IcechunkProvider.resetAxisMint ()
         Blade.ProviderStatics.provenance.Clear ()
         let session =
             match sessions.TryGetValue key with
