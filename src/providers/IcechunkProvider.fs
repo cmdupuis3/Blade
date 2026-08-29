@@ -38,10 +38,17 @@
 // range is resolved here and baked as static tables (see CppIcechunk below).
 //
 // CONSISTENCY. Ref resolution (and everything under it) is memoized per
-// (canonical key, repo-file mtime) -- plan §3.1 -- so typecheck, static folds,
-// lowering and codegen all see the SAME snapshot even if a writer commits
-// mid-compilation. That closes a TOCTOU the Zarr provider structurally has,
-// since it re-walks its store directory in every phase.
+// (canonical key, repo-file stamp) -- plan §3.1 -- and the stamp is PINNED:
+// `RepoPinTable` stats `$ROOT/repo` once per repo per compilation and every
+// later consumer reads that recorded value rather than re-statting. So
+// typecheck, static folds, lowering and codegen all see the SAME snapshot even
+// if a writer commits mid-compilation; without the pin the commit would merely
+// be a memo MISS, and the later phases would resolve the newer snapshot while
+// typecheck's types still described the older one. That closes a TOCTOU the
+// Zarr provider structurally has, since it re-walks its store directory in
+// every phase. The pin lives as long as the compilation: `resetAxisMint` /
+// `resetCaches` drop it (Ide.fs and IdeServe.fs already call the former per
+// request).
 module Blade.IcechunkProvider
 
 open System
@@ -105,32 +112,51 @@ let private kindOfToken (tok: string) : RefKind option =
     | "?" -> Some RefBare
     | _ -> None
 
-/// Parse a canonical key. A key with no '@' is a bare repo path; otherwise
-/// everything after the LAST '@' must be "<kind>:<name>" with a known kind --
-/// a malformed suffix is a loud error, never a silently-mistaken path.
+/// Split a key at its refspec, when it HAS one: the last '@' is a refspec
+/// separator only if what follows is `<known-kind>:...`. Everything else --
+/// no '@' at all, an '@' with no ':' after it, an unknown kind token -- means
+/// the '@' is an ordinary character of the repo PATH, because paths really do
+/// contain one: a Windows profile directory (`C:/Users/o@corp/data`), an
+/// email-named share, a credentialed URL (`https://user@host/repo`, which then
+/// reaches `checkLocalPath`'s object-store refusal instead of dying here as a
+/// "malformed key"). The desugar always writes `@<kind>:<name>`, so keys it
+/// produces still split, and re-desugaring one is still a no-op.
+///
+/// MIRRORED, deliberately, by `Blade.ProviderDesugar.isCheckoutKey`
+/// (ProviderDesugar.fs): that pass compiles far earlier than this module --
+/// its consumers are TypeCheck, Lowering and Ide -- so it cannot call this.
+/// The two predicates must agree; change both together.
+let private refSuffixOf (key: string) : (string * RefKind * string) option =
+    let at = key.LastIndexOf '@'
+    if at < 0 then None
+    else
+        let refspec = key.Substring(at + 1)
+        match refspec.IndexOf ':' with
+        | colon when colon > 0 ->
+            match kindOfToken (refspec.Substring(0, colon)) with
+            | Some kind -> Some (key.Substring(0, at), kind, refspec.Substring(colon + 1))
+            | None -> None
+        | _ -> None
+
+/// Does this key carry a refspec (as opposed to being a bare repo path whose
+/// text happens to contain '@')? The public face of `refSuffixOf`.
+let hasRefSuffix (key: string) : bool = (refSuffixOf key).IsSome
+
+/// Parse a canonical key. A key with no `@<known-kind>:` suffix is a bare repo
+/// path; one that has the suffix must complete it -- an empty repo path or an
+/// empty ref name is a loud error, never a silently-mistaken path.
 let parseKey (key: string) : Result<RepoKey, string> =
     if String.IsNullOrWhiteSpace key then
         Error "icechunk: empty store path (expected a repo directory, optionally suffixed \"@<kind>:<name>\")"
     else
-        let at = key.LastIndexOf '@'
-        if at < 0 then Ok { RepoPath = key; Ref = None }
-        else
-            let repoPath = key.Substring(0, at)
-            let refspec = key.Substring(at + 1)
-            let colon = refspec.IndexOf ':'
+        match refSuffixOf key with
+        | None -> Ok { RepoPath = key; Ref = None }
+        | Some (repoPath, kind, name) ->
             if repoPath = "" then
                 Error $"icechunk: malformed store key '{key}' -- the repo path before '@' is empty (expected \"<repoPath>@<kind>:<name>\")"
-            elif colon < 0 then
-                Error $"icechunk: malformed store key '{key}' -- the text after '@' must be \"<kind>:<name>\" with <kind> one of branch, tag, snapshot or ? (got '{refspec}')"
-            else
-                let tok = refspec.Substring(0, colon)
-                let name = refspec.Substring(colon + 1)
-                match kindOfToken tok with
-                | None ->
-                    Error $"icechunk: malformed store key '{key}' -- unknown ref kind '{tok}' (expected branch, tag, snapshot or ?)"
-                | Some _ when name = "" ->
-                    Error $"icechunk: malformed store key '{key}' -- the ref name after ':' is empty"
-                | Some kind -> Ok { RepoPath = repoPath; Ref = Some (kind, name) }
+            elif name = "" then
+                Error $"icechunk: malformed store key '{key}' -- the ref name after ':' is empty"
+            else Ok { RepoPath = repoPath; Ref = Some (kind, name) }
 
 /// Render a canonical key (the inverse of `parseKey` on well-formed input).
 let formatKey (key: RepoKey) : string =
@@ -149,6 +175,34 @@ let checkLocalPath (repoPath: string) : Result<unit, string> =
     | Some s ->
         Error $"icechunk repo '{repoPath}': object-store URLs ('{s}') are not supported -- v1 reads LOCAL FILESYSTEM repos only, because the generated program reads chunks with std::ifstream and links no object-store client; mirror the repo to local disk first"
     | None -> Ok ()
+
+/// The IDENTITY form of a repo path: one directory, however it is spelled, is
+/// ONE repo. `Path.GetFullPath` resolves a relative spelling against the
+/// process working directory -- which the IDE daemon changes PER REQUEST
+/// (IdeServe.fs), so without this the same relative path from two projects is
+/// one memo key -- and folds `.` / `..` / duplicated separators; on Windows the
+/// result case-folds too, because the filesystem does.
+///
+/// KEYING ONLY, and deliberately not a rewrite of `RepoKey.RepoPath`. Nothing
+/// user-facing is rebuilt from this: the chunk paths baked into generated C++
+/// keep the spelling the SOURCE wrote (a relative path stays relative, so the
+/// emitted program resolves it against its OWN working directory -- netcdf/zarr
+/// parity, and what keeps an exe relocatable), and every diagnostic quotes the
+/// user's own text. This is what the read memos, the axis mint table and the
+/// axis-tag digest key on, and nothing else.
+let canonicalRepoPath (repoPath: string) : string =
+    let full = try Path.GetFullPath repoPath with _ -> repoPath
+    let trimmed = full.TrimEnd([| '/'; '\\' |])
+    let trimmed = if trimmed = "" then full else trimmed
+    if OperatingSystem.IsWindows() then trimmed.ToLowerInvariant() else trimmed
+
+/// The identity form of a whole canonical key: the repo path canonicalized,
+/// the refspec left exactly as parsed (ref names are case-sensitive, and they
+/// name nothing on disk).
+let private canonicalKeyOf (key: RepoKey) : string =
+    match key.Ref with
+    | None -> canonicalRepoPath key.RepoPath
+    | Some (kind, name) -> $"{canonicalRepoPath key.RepoPath}@{kindToken kind}:{name}"
 
 // ---------------------------------------------------------------------------
 // Crockford base32 (object ids -> file names)
@@ -521,11 +575,20 @@ let private zstdContentSizeUnknown = UInt64.MaxValue - 1UL
 let private zstdContentSizeError = UInt64.MaxValue
 
 /// zstd decompression of a metadata payload (header compression byte 1),
-/// through the managed ZstdSharp port. Sized from the frame's content size
-/// when it records one, otherwise by grow-and-retry -- icechunk's writer uses
-/// the streaming encoder, which does not always pledge a size. Every failure
-/// names the BYTE COUNTS: "the payload did not decompress" without them is
-/// unactionable.
+/// through the managed ZstdSharp port. Every failure names the BYTE COUNTS:
+/// "the payload did not decompress" without them is unactionable.
+///
+/// THE OUTPUT IS SIZED BY THE DECODE, NEVER BY THE FRAME HEADER. The reference
+/// writer (icechunk-python 2.1.2) emits metadata through a STREAMING zstd
+/// encoder -- frame descriptor 0x00, no `Frame_Content_Size` field -- and for
+/// such a frame `GetDecompressedSize` does not answer "unknown", it answers the
+/// codec's WINDOW SIZE (131072); trusting that as the real length is wrong for
+/// every reference-written file. `Unwrap(ReadOnlySpan, maxDecompressedSize)`
+/// sizes itself from the decode instead, so one call is correct whether or not
+/// the frame pledges a size. The header's declared size is still read, but only
+/// to refuse an absurd one by name before any allocation happens; the cap rides
+/// into `Unwrap` too, so a frame lying in the other direction cannot claim the
+/// address space either.
 let decompress (bytes: byte[]) : Result<byte[], string> =
     if isNull (box bytes) then
         Error "icechunk: zstd decompression was handed a null payload"
@@ -536,28 +599,10 @@ let decompress (bytes: byte[]) : Result<byte[], string> =
         use dec = new ZstdSharp.Decompressor()
         let hinted = ZstdSharp.Decompressor.GetDecompressedSize(bytes, 0, bytes.Length)
         let sized = hinted <> zstdContentSizeUnknown && hinted <> zstdContentSizeError
-        if sized && hinted = 0UL then Ok [||]
-        elif sized && hinted > uint64 maxPayloadBytes then
+        if sized && hinted > uint64 maxPayloadBytes then
             Error $"icechunk: the zstd frame in a {bytes.Length}-byte payload declares {hinted} decompressed bytes, past this reader's {maxPayloadBytes}-byte metadata cap"
-        elif sized then
-            let out = Array.zeroCreate<byte> (int hinted)
-            let written = dec.Unwrap(bytes, 0, bytes.Length, out, 0, out.Length)
-            if written <> out.Length then
-                Error $"icechunk: zstd decompression of a {bytes.Length}-byte payload produced {written} bytes, but the frame header declares {out.Length}"
-            else Ok out
         else
-            // No content size in the frame header: grow and retry.
-            let rec grow (cap: int) : Result<byte[], string> =
-                let out = Array.zeroCreate<byte> cap
-                let mutable written = 0
-                if dec.TryUnwrap(bytes, 0, bytes.Length, out, 0, cap, &written) then
-                    Ok (if written = cap then out else Array.sub out 0 written)
-                elif cap >= maxPayloadBytes then
-                    Error $"icechunk: the zstd frame in a {bytes.Length}-byte payload does not record its decompressed size and needs more than this reader's {maxPayloadBytes}-byte metadata cap"
-                else
-                    grow (min maxPayloadBytes (cap * 2))
-            let start = int (min (int64 maxPayloadBytes) (max 65536L (int64 bytes.Length * 8L)))
-            grow start
+            Ok ((dec.Unwrap(ReadOnlySpan<byte>(bytes), maxPayloadBytes)).ToArray())
     with ex ->
         Error $"icechunk: zstd decompression of a {bytes.Length}-byte payload failed: {ex.Message}"
 
@@ -584,11 +629,49 @@ let private oid8 (id: Nullable<generated.ObjectId8>) (what: string) : byte[] =
         let v = id.Value
         Array.init 8 (fun j -> v.Bytes j)
 
+/// A payload's FlatBuffers root table, VERIFIED first. The generated
+/// `*Verify.Verify` walkers check the whole buffer -- vtable bounds, offset
+/// targets, vector extents, required fields, union arms -- before any accessor
+/// dereferences it. Without that pass, a corrupt or foreign file reaches
+/// `GetRootAs*`, which simply reads whatever offset the first four bytes name;
+/// the failure then surfaces (if at all) far from its cause, or not at all.
+/// A refusal here is an `iceErr`, so it comes out of `decodePayload` as an
+/// ordinary Error like every other decode refusal.
+///
+/// NOT through the generated one-call helpers (`Repo.VerifyRepo` and friends).
+/// flatc emits those as `VerifyBuffer("", false, ...)`, and Google.FlatBuffers'
+/// `Verifier` treats a non-null identifier of any length but 4 as an error --
+/// it THROWS `ArgumentException: file identifier must be length 4`. The
+/// icechunk schemas declare no `file_identifier` (the 39-byte Icechunk header
+/// in front of the payload is what names the file type), so those helpers
+/// cannot succeed on any input, valid or not. Passing `null` is what "this
+/// buffer has no identifier" is spelled as, and it verifies the same table.
+///
+/// The verifier's stock budget (1,000,000 tables, depth 64) sits at
+/// `CppIcechunk.maxBakedChunks`: a manifest large enough to exhaust it is one
+/// the codegen already refuses to bake.
+let private verifiedRoot (kind: string)
+                         (verifyTable: Google.FlatBuffers.Verifier -> uint32 -> bool)
+                         (get: Google.FlatBuffers.ByteBuffer -> 'a)
+                         (bytes: byte[]) : 'a =
+    let ok =
+        try
+            let v = Google.FlatBuffers.Verifier(Google.FlatBuffers.ByteBuffer(bytes))
+            v.VerifyBuffer(null, false, (fun vf pos -> verifyTable vf pos))
+        with _ -> false
+    if not ok then
+        iceErr $"icechunk: the {bytes.Length}-byte payload is not a valid {kind} FlatBuffer -- the FlatBuffers verifier rejected it (truncated, corrupt, or a file of some other format), so none of its fields may be read"
+    get (Google.FlatBuffers.ByteBuffer(bytes))
+
 /// `Repo` root table -> RepoInfo. Branches and tags stay SEPARATE lists (they
 /// are separate namespaces), deleted tags come across as tombstones, and the
 /// availability enum is mapped by name rather than by a numeric fallthrough.
 let private decodeRepoInfo (bytes: byte[]) : RepoInfo =
-    let r = generated.Repo.GetRootAsRepo(Google.FlatBuffers.ByteBuffer(bytes))
+    let r =
+        verifiedRoot "Repo"
+            (fun v pos -> generated.RepoVerify.Verify(v, pos))
+            (fun bb -> generated.Repo.GetRootAsRepo bb)
+            bytes
     // The table repeats the header's spec byte. 0 means the field was left at
     // its flatbuffers default (absent); a genuine disagreement means the repo
     // file contradicts its own header.
@@ -631,7 +714,11 @@ let private decodeRepoInfo (bytes: byte[]) : RepoInfo =
 /// VERBATIM (it is the node's zarr.json); the structural shape and dimension
 /// names come across so `arrayMetaOfNode` can cross-check them against it.
 let private decodeSnapshot (bytes: byte[]) : Snapshot =
-    let s = generated.Snapshot.GetRootAsSnapshot(Google.FlatBuffers.ByteBuffer(bytes))
+    let s =
+        verifiedRoot "Snapshot"
+            (fun v pos -> generated.SnapshotVerify.Verify(v, pos))
+            (fun bb -> generated.Snapshot.GetRootAsSnapshot bb)
+            bytes
     let nodes =
         [ for i in 0 .. s.NodesLength - 1 ->
             let nOpt = s.Nodes(i)
@@ -727,7 +814,11 @@ let private decodeChunkRef (owner: string) (cr: generated.ChunkRef) : ChunkRef =
 
 /// `Manifest` root table -> the per-array chunk tables it holds.
 let private decodeManifest (bytes: byte[]) : ArrayManifest list =
-    let m = generated.Manifest.GetRootAsManifest(Google.FlatBuffers.ByteBuffer(bytes))
+    let m =
+        verifiedRoot "Manifest"
+            (fun v pos -> generated.ManifestVerify.Verify(v, pos))
+            (fun bb -> generated.Manifest.GetRootAsManifest bb)
+            bytes
     [ for i in 0 .. m.ArraysLength - 1 ->
         let amOpt = m.Arrays(i)
         if not amOpt.HasValue then iceErr $"icechunk manifest: array entry {i} is absent"
@@ -768,8 +859,19 @@ let decodePayload (fileType: FileType) (bytes: byte[]) : Result<Payload, string>
 // Ref resolution (pure: RepoInfo in, snapshot id out)
 // ---------------------------------------------------------------------------
 
+/// How many refs a "no such branch/tag" diagnostic lists before it stops. A
+/// repo with thousands of branches (one per experiment, per CI run, per user)
+/// is ordinary, and the listing is a HINT -- "did you mean one of these" --
+/// not an inventory. Unbounded, one typo printed the whole ref namespace into
+/// a terminal, an editor's diagnostic popup and every pinned message.
+let private refListCap = 10
+
 let private refNames (rs: (string * int) list) : string =
-    if List.isEmpty rs then "(none)" else rs |> List.map fst |> String.concat ", "
+    if List.isEmpty rs then "(none)"
+    else
+        let shown = rs |> List.truncate refListCap |> List.map fst |> String.concat ", "
+        if rs.Length > refListCap then $"{shown}, and {rs.Length - refListCap} more"
+        else shown
 
 let private tombstoneMessage (name: string) : string =
     $"icechunk: '{name}' is a DELETED TAG -- it is listed in the repo's deleted_tags tombstones, and a deleted tag name is never recreated, so it names nothing; pick another ref"
@@ -854,28 +956,91 @@ let resolveRef (info: RepoInfo) (kind: RefKind) (name: string) : Result<byte[], 
 // Memoized resolution (plan §3.1)
 // ---------------------------------------------------------------------------
 
-/// mtime ticks of `$ROOT/repo`. The repo file is the ONLY mutable object in a
-/// repo, so this one O(1) stat is a complete change stamp for the whole store
-/// -- which is what makes it a sound memo key, and what `VersionStamp` reports.
-let private repoStamp (repoPath: string) : int64 =
-    try
-        let f = repoFilePath repoPath
-        if File.Exists f then File.GetLastWriteTimeUtc(f).Ticks else 0L
-    with _ -> 0L
-
-/// The memo key's stamp: mtime ticks AND byte length. The length is there for
-/// the fixture case -- a generated repo REWRITTEN AT THE SAME PATH within one
-/// filesystem timestamp tick would otherwise hit a stale entry. Test code that
-/// regenerates a repo in place should still call `resetCaches` rather than
-/// rely on this; `VersionStamp` deliberately stays plain mtime ticks (§8).
-let private repoMemoStamp (repoPath: string) : int64 * int64 =
+/// One repo's change stamp: mtime ticks, byte length, AND a content hash of
+/// `$ROOT/repo`. The repo file is the ONLY mutable object in a repo, so one
+/// stamp of it is a complete change stamp for the whole store.
+///
+/// WHY THE CONTENT HASH IS NOT BELT-AND-BRACES. mtime + length looks like a
+/// complete discriminator and is not, for the one rewrite this provider must
+/// notice: a BRANCH RESET. Moving a branch swaps a `snapshot_index` inside a
+/// fixed-width FlatBuffer field, so the new repo file has EXACTLY the length
+/// of the old one; and Windows' filesystem timestamp granularity is ~15.6 ms,
+/// so a reset that lands in the same tick as the write before it carries
+/// exactly the same mtime too. The stamp is the memo key AND the pin, so an
+/// undetected rewrite is not a stale read but a SPLIT one: a later phase would
+/// keep answering from the old snapshot's decode.
+///
+/// The file is tiny (a few hundred bytes to a few kilobytes -- refs, snapshot
+/// ids and a status block, nothing per-chunk), and it is read once per repo
+/// per compilation because the pin is taken once (`RepoPinTable`), so hashing
+/// it costs one small read that the very next step (`readRepoHandle`) makes
+/// anyway. First 8 bytes of SHA-256, as an int64: 2^-64 per pair against an
+/// accidental collision, and nothing here is adversarial.
+let private statRepo (repoPath: string) : int64 * int64 * int64 =
     try
         let f = repoFilePath repoPath
         if File.Exists f then
             let fi = FileInfo f
-            (fi.LastWriteTimeUtc.Ticks, fi.Length)
-        else (0L, 0L)
-    with _ -> (0L, 0L)
+            let content =
+                try
+                    use sha = System.Security.Cryptography.SHA256.Create()
+                    BitConverter.ToInt64(sha.ComputeHash(File.ReadAllBytes f), 0)
+                with _ -> 0L
+            (fi.LastWriteTimeUtc.Ticks, fi.Length, content)
+        else (0L, 0L, 0L)
+    with _ -> (0L, 0L, 0L)
+
+/// THE SNAPSHOT PIN (plan §3.1's consistency point, made real).
+///
+/// Memoizing on a stamp that is RE-STATTED per call is not a pin: a writer that
+/// commits mid-compilation moves the mtime, every later lookup misses, and
+/// lowering and codegen then resolve a DIFFERENT snapshot than typecheck did --
+/// silently, because each phase's answer is internally consistent. The stamp
+/// therefore has to be TAKEN ONCE per repo per compilation and remembered.
+///
+/// That is this table: canonical repo path -> the stamp first observed for it.
+/// Every stamp consumer (`repoStamp` for `VersionStamp` and ProviderStatics'
+/// fold cache, `repoMemoStamp` for the read memos) reads it, so all of them
+/// pin to the same instant. Per-compilation via `AsyncLocal`, exactly like
+/// `AxisMintTable` -- the harness compiles programs in parallel, each in its
+/// own async context -- and cleared by the same `resetAxisMint` / `resetCaches`
+/// the mint table is, since a pin outliving its compilation would answer for a
+/// repo that has since moved on.
+module RepoPinTable =
+    open System.Threading
+
+    let private table = new AsyncLocal<Map<string, int64 * int64 * int64>>()
+    let private current () = match box table.Value with null -> Map.empty | _ -> table.Value
+
+    let reset () = table.Value <- Map.empty
+
+    /// The pinned stamp for a repo, taking (and recording) it on first touch.
+    let pin (canonical: string) (stat: unit -> int64 * int64 * int64) : int64 * int64 * int64 =
+        let cur = current ()
+        match Map.tryFind canonical cur with
+        | Some s -> s
+        | None ->
+            let s = stat ()
+            table.Value <- Map.add canonical s cur
+            s
+
+    /// What this compilation has pinned, for tests and diagnostics.
+    let tryPinned (canonical: string) : (int64 * int64 * int64) option = Map.tryFind canonical (current ())
+
+/// The memo key's stamp: the PINNED (mtime ticks, byte length, content hash)
+/// of `$ROOT/repo` -- see `RepoPinTable` and `statRepo`. Test code that
+/// regenerates a fixture repo in place must call `resetCaches`, which drops
+/// the pin along with the memos.
+let private repoMemoStamp (repoPath: string) : int64 * int64 * int64 =
+    let canonical = canonicalRepoPath repoPath
+    RepoPinTable.pin canonical (fun () -> statRepo repoPath)
+
+/// mtime ticks of `$ROOT/repo`, from the SAME pin the read memos use, so
+/// `VersionStamp` (and through it ProviderStatics' fold cache, :122) cannot
+/// name a different instant than the resolution it stamps (§8).
+let private repoStamp (repoPath: string) : int64 =
+    let (ticks, _, _) = repoMemoStamp repoPath
+    ticks
 
 /// Bound on each memo, so a long-lived process (the REPL, the test harness)
 /// cannot grow one without limit. Correctness never depends on a hit: a miss
@@ -910,10 +1075,13 @@ let private newMemo<'k, 'v when 'k: equality> () : ConcurrentDictionary<'k, 'v> 
 // identity, and cross-checkout arithmetic refuses as an index-type mismatch.
 //
 // The table is per COMPILATION (AsyncLocal, mirroring
-// `ProviderRegistry.IdeStores`) and repo-scoped: `repoPath` is in the key, so
-// two repos never share. The path is the one the SOURCE wrote -- two spellings
-// of one directory are two repos here, exactly as they are to the read memos
-// above.
+// `ProviderRegistry.IdeStores`) and repo-scoped: the repo path is in the key,
+// so two repos never share. The key is the CANONICAL path
+// (`canonicalRepoPath`), not the source's spelling, so two spellings of one
+// directory are one repo -- `ck1.vars.temp - ck2.vars.temp` must not refuse
+// because one `ic.load` wrote "data/wx" and the other "./data/wx". The
+// as-written spelling still rides everywhere it is user-visible (baked chunk
+// paths, diagnostics); only identity is canonicalized.
 
 /// One identity an axis has carried in this compilation.
 type AxisIdentity = {
@@ -967,11 +1135,24 @@ module AxisMintTable =
     /// into `resetCaches`.
     let reset () = table.Value <- Map.empty
 
+    /// Keyed on the CANONICAL repo path (see `canonicalRepoPath`), so the same
+    /// directory under two spellings is one axis universe. Callers pass the
+    /// path as the source wrote it; canonicalization happens here, once, so no
+    /// caller can forget it.
     let tryFind (repoPath: string) (dimName: string) : AxisMint option =
-        Map.tryFind (repoPath, dimName) (current ())
+        Map.tryFind (canonicalRepoPath repoPath, dimName) (current ())
 
     let put (repoPath: string) (dimName: string) (mint: AxisMint) : unit =
-        table.Value <- Map.add (repoPath, dimName) mint (current ())
+        table.Value <- Map.add (canonicalRepoPath repoPath, dimName) mint (current ())
+
+    /// Every identity this compilation has minted, in no particular order --
+    /// the REVERSE direction (`tag -> the identity carrying it`) that the
+    /// diagnostics decoder needs, since a refusal has the two Tags and not the
+    /// (repo, dim) keys they came from. A linear scan on purpose: the table
+    /// holds one entry per axis per repo per compilation, and this runs only
+    /// while a refusal message is being rendered.
+    let allIdentities () : AxisIdentity list =
+        current () |> Map.toList |> List.collect (fun (_, m) -> m.Identities)
 
     let private idLock = obj ()
     let mutable private nextId = axisIdBase
@@ -980,22 +1161,43 @@ module AxisMintTable =
     /// PURPOSE: `reset` drops the table but never rewinds this, so an id from
     /// an earlier compilation can never be minted again and mistaken for a
     /// live identity.
+    ///
+    /// THE CEILING. Monotonic-and-never-rewound is what makes the range
+    /// EXHAUSTIBLE: this counter climbs from `axisIdBase` (0x30000000) for the
+    /// life of the process, and 0x40000000 upward belongs to CodeGen
+    /// (CodeGen.fs:2701). Walking past that boundary would hand a provider axis
+    /// an id CodeGen also mints, and equal ids are exactly what makes two index
+    /// types unify -- so the failure would be two unrelated axes silently
+    /// agreeing, not a crash. 0x10000000 ids is ~268 million axes; a daemon
+    /// would have to mint one every millisecond for eight days to get there, so
+    /// this is a tripwire on an impossible path, and it says so rather than
+    /// letting the range wrap into someone else's.
     let freshId () : int =
         lock idLock (fun () ->
             let id = nextId
+            if id >= 0x40000000 then
+                failwith "icechunk axis mint exhausted its reserved id range (0x30000000..0x3fffffff): the next id would collide with CodeGen's reserved range and make two unrelated index types unify. This is a long-lived-process leak, not a program error -- restart the compiler/daemon."
             nextId <- nextId + 1
             id)
 
-/// Drop the axis mint table (§5.3). A compilation must not inherit another
-/// one's axis identities -- and in a process that never exits (the REPL, the
-/// IDE daemon, the test harness) the table would otherwise grow without bound.
-let resetAxisMint () : unit = AxisMintTable.reset ()
+/// Drop the axis mint table (§5.3) AND the snapshot pin. A compilation must not
+/// inherit another one's axis identities -- and in a process that never exits
+/// (the REPL, the IDE daemon, the test harness) both tables would otherwise
+/// grow without bound. The two go together on purpose: an inherited pin would
+/// hold the next compilation to a stamp taken before it started, and the mint
+/// table's identities were decided from reads keyed on exactly that stamp. The
+/// pin rides along here rather than in a function of its own so that every
+/// existing "fresh compilation" call site (Ide.fs, IdeServe.fs) clears it
+/// without knowing it exists.
+let resetAxisMint () : unit =
+    AxisMintTable.reset ()
+    RepoPinTable.reset ()
 
-/// Drop every memoized read. Compilation never needs this -- the stamps handle
-/// it -- but a test that regenerates a fixture repo AT THE SAME PATH does. The
-/// axis mint table goes with them: its identities were decided FROM those
-/// reads, so keeping them across a regenerated fixture would answer from a repo
-/// that no longer exists.
+/// Drop every memoized read. Compilation never needs this -- the pinned stamp
+/// handles it -- but a test that regenerates a fixture repo AT THE SAME PATH
+/// does. The snapshot pin and the axis mint table go with them: the pin would
+/// otherwise hold the stamp of the repo that was there BEFORE the regeneration,
+/// and the mint table's identities were decided from reads under it.
 let resetCaches () : unit =
     for clear in memoClearers do clear ()
     resetAxisMint ()
@@ -1100,13 +1302,28 @@ let readRepoHandle (root: string) : Result<RepoHandle, string> =
             | other ->
                 Error $"icechunk repo file '{repoFilePath root}' decoded as a {payloadKindName other} table, not a RepoInfo"))
 
-let private snapshotMemo = newMemo<string * string * (int64 * int64), Result<Snapshot, string>> ()
-let private manifestMemo = newMemo<string * string * (int64 * int64), Result<ArrayManifest list, string>> ()
+// Snapshots and manifests decode to values that hold NO path (only ids and
+// byte ranges), so their memos key on the CANONICAL repo path alone: two
+// spellings of one repo share the decode, and -- the part that is not an
+// optimization -- the same relative path under two working directories (the
+// IDE daemon chdirs per request, IdeServe.fs) can no longer collide.
+//
+// AND ON NO REPO STAMP. Both of these files are CONTENT-ADDRESSED and
+// immutable: `$ROOT/snapshots/<id>` and `$ROOT/manifests/<id>` are named by a
+// hash of the bytes they hold, so the (repo path, id) pair already IS the
+// content identity and a mutable-repo-file stamp in the key can only ever
+// force a re-decode of bytes that are known not to have changed. The stamp
+// stays in `loadMemo` and `arrayMemo`, whose answers DO depend on the mutable
+// repo file (ref resolution picks the snapshot; the array memo is keyed
+// through it). `resetCaches` still clears these, which is what a test that
+// regenerates a fixture repo at the same path relies on.
+let private snapshotMemo = newMemo<string * string, Result<Snapshot, string>> ()
+let private manifestMemo = newMemo<string * string, Result<ArrayManifest list, string>> ()
 
 /// Read and decode `$ROOT/snapshots/<id>`. Snapshots are immutable, so the
 /// memo only ever re-reads after the repo file itself changed.
 let readSnapshot (root: string) (snapshotId: byte[]) : Result<Snapshot, string> =
-    memoize snapshotMemo (root, base32Encode snapshotId, repoMemoStamp root) (fun () ->
+    memoize snapshotMemo (canonicalRepoPath root, base32Encode snapshotId) (fun () ->
         let file = snapshotPath root snapshotId
         let where_ = $"icechunk snapshot '{base32Encode snapshotId}'"
         if not (File.Exists file) then
@@ -1124,7 +1341,7 @@ let readSnapshot (root: string) (snapshotId: byte[]) : Result<Snapshot, string> 
 /// several arrays, so this memo is what keeps a multi-variable program from
 /// re-decompressing the same file per variable.
 let readManifest (root: string) (manifestId: byte[]) : Result<ArrayManifest list, string> =
-    memoize manifestMemo (root, base32Encode manifestId, repoMemoStamp root) (fun () ->
+    memoize manifestMemo (canonicalRepoPath root, base32Encode manifestId) (fun () ->
         let file = manifestPath root manifestId
         let where_ = $"icechunk manifest '{base32Encode manifestId}'"
         if not (File.Exists file) then
@@ -1138,7 +1355,17 @@ let readManifest (root: string) (manifestId: byte[]) : Result<ArrayManifest list
                     | PManifest arrays -> Ok arrays
                     | other -> Error $"{where_} decoded as a {payloadKindName other} table, not a Manifest")))
 
-let private loadMemo = newMemo<string * (int64 * int64), Result<Loaded, string>> ()
+// Keyed on BOTH the canonical key and the key as written. The canonical half
+// is the identity: without it the same relative path under two working
+// directories is one entry (the IDE daemon chdirs per request), and the stamp
+// is not a discriminator -- two different repos can share an mtime and a size.
+// The as-written half stays because the VALUE carries the path: a
+// `RepoHandle.Root` is the spelling the source used, and it reaches the chunk
+// paths baked into generated C++, which must stay relative when the source was
+// relative. Two spellings of one repo therefore keep separate entries here (a
+// re-decode, not a wrong answer) while sharing one AXIS universe, which is the
+// only place the split was ever observable.
+let private loadMemo = newMemo<string * string * (int64 * int64 * int64), Result<Loaded, string>> ()
 
 let private loadUncached (key: RepoKey) : Result<Loaded, string> =
     readRepoHandle key.RepoPath
@@ -1163,14 +1390,16 @@ let private loadUncached (key: RepoKey) : Result<Loaded, string> =
 /// Open a canonical key: parse it, read the repo file, and (when the key
 /// carries a refspec) resolve the ref and read its snapshot.
 ///
-/// MEMOIZED per (key, repo-file mtime), which is the plan's §3.1 consistency
-/// point: typecheck, static folds, lowering and codegen all resolve through
-/// here, and while the repo file is unchanged they all get the SAME snapshot,
-/// even if a writer commits mid-compilation.
+/// MEMOIZED per (canonical key, key as written, PINNED repo-file stamp) --
+/// plan §3.1's consistency point (see `RepoPinTable`): typecheck, static
+/// folds, lowering and codegen all resolve through here and see the same
+/// snapshot even when a writer commits mid-compilation.
 let load (path: string) : Result<Loaded, string> =
     match parseKey path with
     | Error e -> Error e
-    | Ok key -> memoize loadMemo (path, repoMemoStamp key.RepoPath) (fun () -> loadUncached key)
+    | Ok key ->
+        memoize loadMemo (canonicalKeyOf key, path, repoMemoStamp key.RepoPath)
+            (fun () -> loadUncached key)
 
 // ---------------------------------------------------------------------------
 // Arrays inside a checkout
@@ -1203,6 +1432,46 @@ let arrayNames (ck: CheckoutHandle) : string list =
     |> List.filter (fun n -> n.Kind = NodeArray)
     |> List.choose (fun n -> match nodeVarName n.Path with Ok nm -> Some nm | Error _ -> None)
 
+/// Cap on a variable's CHUNK-GRID SIZE, shared by every path that turns the
+/// grid into an array index -- the fold path's chunk table, the axis
+/// fingerprint, and the emitter's baked tables. Past it the baked table stops
+/// being a good idea (compile time, object size) and the answer is a
+/// differently chunked store, not a bigger literal.
+///
+/// It is also the OVERFLOW guard, which is why it is a shared constant and not
+/// a number in the emitter. Every one of those sites computed the grid as
+/// `gridDims ... |> List.map int` and multiplied in `int`, so a chunk grid
+/// whose product exceeds Int32.MaxValue either TRUNCATED -- a table of the
+/// wrong length, silently, with the manifest scattered into it at wrapped
+/// indices -- or threw a bare `ArgumentException` out of `Array.create`,
+/// which is not a refusal anybody can act on. The product is now computed in
+/// int64 and capped BEFORE anything narrows to `int`.
+///
+/// Lowered from 1_000_000 with the inline-bytes cap (`CppIcechunk`): a million
+/// baked entries was never a size anyone wanted to compile, and the two caps
+/// together are what bound the generated source.
+let maxBakedChunks = 100_000
+
+/// The chunk-grid extents as `int`s, or a named refusal. See `maxBakedChunks`.
+///
+/// The product is folded with SATURATION rather than computed and then tested:
+/// `gridDims` returns ceil-divisions of int64 extents, so the honest product
+/// can overflow int64 itself, and nothing above the cap is interesting enough
+/// to be worth representing. Every intermediate stays at or below `cap + 1`,
+/// and `cap` is small enough that `acc * d` inside the guard cannot overflow.
+let gridLens (where_: string) (shape: int64 list) (chunks: int64 list) : Result<int list, string> =
+    let dims = ZarrProvider.gridDims shape chunks
+    let cap = int64 maxBakedChunks
+    let total =
+        dims |> List.fold (fun acc d ->
+            if acc = 0L || d <= 0L then 0L
+            elif acc > cap || d > cap then cap + 1L
+            else min (acc * d) (cap + 1L)) 1L
+    if total > cap then
+        let gridText = dims |> List.map string |> String.concat " x "
+        Error $"{where_}: its chunk grid is {gridText}, more than the {maxBakedChunks} chunks this provider resolves into a baked chunk table -- re-chunk the array with larger chunks, or read a subset of it"
+    else Ok (dims |> List.map int)
+
 /// Parse one node's `zarr.json` user data with the ZARR provider's v3 parser
 /// -- the JSON is verbatim `zarr.json` (§2), so every Zarr v1 gate applies
 /// unchanged -- and then CROSS-CHECK the snapshot's own structural record
@@ -1213,14 +1482,34 @@ let arrayNames (ck: CheckoutHandle) : string list =
 /// `arrayDir` is empty on purpose: chunks live under $ROOT/chunks by object
 /// id, never beside the metadata, and this provider never takes the chunk-key
 /// path, so there is no directory to name.
-let private arrayMetaOfNode (varName: string) (node: NodeMeta) : Result<ZarrProvider.ZarrArrayMeta, string> =
+/// (Public so its gates are unit-testable against a hand-built `NodeMeta`, the
+/// way `buildChunkTable` and `resolveRef` are: this is the metadata seam every
+/// checkout reads every node through, so its refusals want testing WITHOUT a
+/// repo that can express them on disk.)
+let arrayMetaOfNode (varName: string) (node: NodeMeta) : Result<ZarrProvider.ZarrArrayMeta, string> =
     ZarrProvider.parseArrayMetaV3 varName "" node.UserDataJson
     |> Result.mapError (fun e -> $"icechunk array '{node.Path}': {e}")
     |> Result.bind (fun meta ->
         let where_ = $"icechunk array '{node.Path}'"
-        if node.Shape.Length <> meta.Shape.Length then
+        // RANK 0 FIRST, because every gate below it is written over at least
+        // one dimension and a rank-0 array slips through all of them: the
+        // rank cross-check compares 0 to 0, the per-dimension zip is empty,
+        // the chunk grid is the single scalar chunk. What it does NOT survive
+        // is anything downstream -- the module builder has no dimension to
+        // build an index type from, and the dense emitter's flat index opens
+        // with the FIRST loop variable of a loop nest that has none. Refused
+        // by name here, where the reason is still legible.
+        if meta.Shape.IsEmpty then
+            Error $"{where_}: rank-0 arrays are not supported by the icechunk provider -- a Blade array needs at least one index type, and a scalar has none. Store the value as a length-1 rank-1 array, or keep it in the group's attributes"
+        elif node.Shape.Length <> meta.Shape.Length then
             Error $"{where_}: the snapshot records {node.Shape.Length} structural dimension(s), but the zarr.json it carries declares rank {meta.Shape.Length} -- the snapshot disagrees with its own metadata"
         else
+        // The chunk-grid cap, at the metadata gate: this is the CHECK-phase
+        // seam (`checkoutToModule` reads every node through here), so a store
+        // whose grid cannot be baked says so before a manifest is decoded.
+        match gridLens where_ meta.Shape meta.Chunks with
+        | Error e -> Error e
+        | Ok _ ->
             let grid = ZarrProvider.gridDims meta.Shape meta.Chunks
             let dimErr =
                 List.zip node.Shape (List.zip meta.Shape grid)
@@ -1270,7 +1559,12 @@ let findArray (ck: CheckoutHandle) (varName: string) : Result<NodeMeta * ZarrPro
 /// wrong-rank index vector, a coordinate outside the grid, or two manifests
 /// covering the same chunk (§2 requires non-overlapping ChunkIndexRanges).
 let buildChunkTable (meta: ZarrProvider.ZarrArrayMeta) (manifests: ArrayManifest list) : Result<ChunkLoc[], string> =
-    let lens = ZarrProvider.gridDims meta.Shape meta.Chunks |> List.map int
+    // `Array.create total` is the site the int64 grid product protects (see
+    // `gridLens`): a truncated product allocates a table of the wrong length
+    // and a negative one throws out of here uncaught.
+    match gridLens $"icechunk array '{meta.Name}'" meta.Shape meta.Chunks with
+    | Error e -> Error e
+    | Ok lens ->
     let strides = ZarrProvider.rowMajorStrides lens
     let total = lens |> List.fold (*) 1
     let rank = lens.Length
@@ -1353,17 +1647,22 @@ let private collectManifests (root: string) (node: NodeMeta) (meta: ZarrProvider
                         | None -> go (am :: acc) rest
     go [] node.ManifestRefs
 
-let private arrayMemo = newMemo<string * string * (int64 * int64), Result<ResolvedArray, string>> ()
+/// Keyed like `loadMemo`, and for the same two reasons: the canonical key is
+/// the identity, the as-written key is kept because `ResolvedArray.Root` is
+/// what the emitter bakes.
+let private arrayMemo = newMemo<string * string * string * (int64 * int64 * int64), Result<ResolvedArray, string>> ()
 
 /// Resolve one variable of one checkout all the way to its chunk table.
-/// Memoized per (key, variable, repo-file mtime) alongside `load`, so the
-/// typecheck, fold, lowering and codegen passes that each ask for the same
-/// variable pay the manifest decode ONCE and see one answer.
+/// Memoized per (canonical key, key as written, variable, PINNED repo-file
+/// stamp) alongside `load`, so the typecheck, fold, lowering and codegen passes
+/// that each ask for the same variable pay the manifest decode ONCE and see one
+/// answer -- one answer even across a mid-compilation commit, since the stamp
+/// is pinned rather than re-statted.
 let resolveArray (path: string) (varName: string) : Result<ResolvedArray, string> =
     match parseKey path with
     | Error e -> Error e
     | Ok key ->
-        memoize arrayMemo (path, varName, repoMemoStamp key.RepoPath) (fun () ->
+        memoize arrayMemo (canonicalKeyOf key, path, varName, repoMemoStamp key.RepoPath) (fun () ->
             match load path with
             | Error e -> Error e
             | Ok (LoadedRepo _) -> Error (repoHandleRefusal path)
@@ -1416,7 +1715,13 @@ let private readNativeChunk (ra: ResolvedArray) (coords: int64 list) (nc: Native
 /// above this seam is icechunk-specific, so fill handling, edge intersection,
 /// packed-pool reassembly and wreath pools cannot drift from Zarr's.
 let private icechunkChunkSource (ra: ResolvedArray) : ZarrProvider.ChunkSource =
-    let lens = ZarrProvider.gridDims ra.Meta.Shape ra.Meta.Chunks |> List.map int
+    // Already guaranteed by `buildChunkTable` for anything that came through
+    // `resolveArray`; restated because a `ResolvedArray` is a plain record and
+    // this is the other place the grid narrows to `int`.
+    let lens =
+        match gridLens $"icechunk array '{ra.VarName}'" ra.Meta.Shape ra.Meta.Chunks with
+        | Ok l -> l
+        | Error e -> failwith e
     let strides = ZarrProvider.rowMajorStrides lens
     let flatOf (coords: int64 list) =
         List.fold2 (fun acc (c: int64) (s: int) -> acc + int c * s) 0 coords strides
@@ -1512,6 +1817,29 @@ let private chunkLocText (loc: ChunkLoc) : string =
 /// Reading the coordinate array's manifests is the only file access this adds
 /// over a P2 checkout load, and `resolveArray` memoizes it alongside every
 /// other read of the same checkout.
+///
+/// The three METADATA components of one variable's content identity, named
+/// rather than collapsed into one hash so the divergence diagnostic can
+/// eventually say WHICH of them moved. Shared by the coordinate fingerprint
+/// (below) and the packed-pool fingerprint (§5.3's residual, closed by
+/// `resolvePool`): a pool axis's identity is its own variable's content, since
+/// a pool is not a dimension and has no coordinate of its own.
+let private varFingerprint (key: string) (ck: CheckoutHandle) (varName: string) : string =
+    match resolveArray key varName with
+    | Error _ ->
+        // The variable is there but its manifests would not read. Equal to
+        // ITSELF (the same snapshot re-checked out shares) and to nothing else:
+        // the snapshot id is what makes it so.
+        $"unreadable@{base32Encode ck.SnapshotId}"
+    | Ok ra ->
+        let grid =
+            ZarrProvider.gridDims ra.Meta.Shape ra.Meta.Chunks
+            |> List.map string |> String.concat "x"
+        let refs = ra.Table |> Array.map chunkLocText |> String.concat ","
+        let chunksHash = sha256Hex (Text.Encoding.UTF8.GetBytes $"{grid}|{refs}")
+        let userHash = sha256Hex (Text.Encoding.UTF8.GetBytes ra.Node.UserDataJson)
+        $"node={base32Encode ra.Node.Id};user={userHash};chunks={chunksHash}"
+
 let private coordFingerprint (key: string) (ck: CheckoutHandle)
                              (arrays: ZarrProvider.ZarrArrayMeta list)
                              (dimName: string) : string option =
@@ -1522,26 +1850,18 @@ let private coordFingerprint (key: string) (ck: CheckoutHandle)
     let isCoord (a: ZarrProvider.ZarrArrayMeta) =
         a.Name = dimName && a.Blade.IsNone && a.Shape.Length = 1 && a.DimNames = Some [dimName]
     if not (arrays |> List.exists isCoord) then None
-    else
-        match resolveArray key dimName with
-        | Error _ ->
-            // The coordinate variable is there but its manifests would not
-            // read. Equal to ITSELF (the same snapshot re-checked out shares)
-            // and to nothing else: the snapshot id is what makes it so.
-            Some $"unreadable@{base32Encode ck.SnapshotId}"
-        | Ok ra ->
-            let grid =
-                ZarrProvider.gridDims ra.Meta.Shape ra.Meta.Chunks
-                |> List.map string |> String.concat "x"
-            let refs = ra.Table |> Array.map chunkLocText |> String.concat ","
-            let chunksHash = sha256Hex (Text.Encoding.UTF8.GetBytes $"{grid}|{refs}")
-            let userHash = sha256Hex (Text.Encoding.UTF8.GetBytes ra.Node.UserDataJson)
-            Some $"node={base32Encode ra.Node.Id};user={userHash};chunks={chunksHash}"
+    else Some (varFingerprint key ck dimName)
 
 /// Prefix of the axis tag. `__`-prefixed on purpose -- see `axisTag`.
-let axisTagPrefix = "__icaxis|"
+///
+/// The literal itself lives in `Types.providerAxisTagPrefix`, beside the two
+/// pool prefixes and the `isProviderAxisTag` family predicate: the typecheck
+/// seams that must read this tag NOMINATIVELY compile before this file does,
+/// and one spelling in one place is what keeps them from drifting apart.
+let axisTagPrefix = providerAxisTagPrefix
 
-/// The DIM NAME inside an axis tag, for display only: `__icaxis|lat@ic_wx:9f3a`
+/// The DIM NAME inside an axis tag, for display only:
+/// `__icaxis|lat@ic_wx:9f3a1c...`
 /// -> `lat`, and `...#2` -> `lat#2`. The tag is `__`-prefixed so every seam that
 /// reads a tag as a user-written NAME leaves it alone (see `axisTag`), and the
 /// type printer's nominal-name map drops it for exactly that reason -- so a
@@ -1550,27 +1870,74 @@ let axisTagPrefix = "__icaxis|"
 /// back the one part of the tag that IS a name. The split ordinal rides along on
 /// purpose: two identities of one dim that no longer unify must not print
 /// identically.
-let tryAxisTagName (tag: string) : string option =
-    if not (tag.StartsWith axisTagPrefix) then None
+///
+/// PARSED FROM THE RIGHT, both separators, because BOTH are legal inside the
+/// fields to their left and neither is validated out. `@` separates the dim
+/// name from the repo label, and the repo label is the one field minted HERE
+/// (`taggedIdentity`), so the LAST `@` is ours and any earlier one belongs to a
+/// dim genuinely named `a@b`. `#` marks the split ordinal, and the repo label
+/// is a directory name as written -- `wx#2/` is a perfectly ordinary directory
+/// -- so a `#` counts only in the trailing position and only ahead of digits.
+/// Reading either from the left decoded `lat` out of `a@b@wx:...` and `lat#ird`
+/// out of a repo called `we#ird`, in a string this function now hands straight
+/// to the user in refusal messages.
+///
+/// The parse itself is `splitIdentityTag`, shared with the pool decoder below,
+/// because all three tag spellings are one shape under three prefixes.
+let private splitIdentityTag (prefix: string) (tag: string) : (string * string) option =
+    if not (tag.StartsWith prefix) then None
     else
-        let rest = tag.Substring axisTagPrefix.Length
-        match rest.IndexOf '@' with
-        | i when i > 0 ->
-            let dim = rest.Substring(0, i)
-            match rest.IndexOf '#' with
-            | h when h > i -> Some (dim + rest.Substring h)
-            | _ -> Some dim
+        let rest = tag.Substring prefix.Length
+        let (body, ordinal) =
+            match rest.LastIndexOf '#' with
+            | h when h > 0 && h < rest.Length - 1
+                     && rest.Substring(h + 1) |> Seq.forall Char.IsDigit ->
+                (rest.Substring(0, h), rest.Substring h)
+            | _ -> (rest, "")
+        match body.LastIndexOf '@' with
+        | i when i > 0 -> Some (body.Substring(0, i), ordinal)
         | _ -> None
+
+let tryAxisTagName (tag: string) : string option =
+    splitIdentityTag axisTagPrefix tag |> Option.map (fun (name, ordinal) -> name + ordinal)
+
+/// The display name of ANY provider provenance tag -- what a refusal message
+/// prints where the raw tag used to appear. Registered into Types' decoder hook
+/// by `ProviderStatics.install`; every refusal site reads it through there.
+///
+/// Deliberately WIDER than `tryAxisTagName`, which stays dense-only. That one
+/// feeds `Ide.indexNamesOf`, where the string is rendered as an index-type NAME
+/// inside `Array<Float64 like Idx<lat>>` -- and a packed pool has no such
+/// spelling, which is exactly what section 15's `IsNone` pins. A DIAGNOSTIC has
+/// no such constraint: there the only failure mode is printing forty characters
+/// of internal identity at a user, which is what
+/// `'__icpool|cov@ic_pool_twin:ce36e95a9686e348'` did in the cross-repo pool
+/// refusal.
+///
+/// A pool is not a dimension -- its cells ARE the variable -- so it decodes to
+/// `pool(cov)` / `orbit_pool(w)` rather than to a bare name a dim could
+/// collide with. The split ordinal rides along for the same reason it does on a
+/// dense axis: two identities that no longer unify must not print identically.
+let tryProviderTagName (tag: string) : string option =
+    let wrap (kind: string) (prefix: string) =
+        splitIdentityTag prefix tag |> Option.map (fun (v, ordinal) -> $"{kind}({v}){ordinal}")
+    match tryAxisTagName tag with
+    | Some n -> Some n
+    | None ->
+        match wrap "orbit_pool" providerOrbPoolTagPrefix with
+        | Some n -> Some n
+        | None -> wrap "pool" providerPoolTagPrefix
 
 /// The identity an axis carries in the TYPE, beyond its Id. Shape:
 ///
-///     __icaxis|lat@ic_wx:9f3a       the axis as this repo first presented it
-///     __icaxis|lat@ic_wx:9f3a#2     the SECOND identity that (repo, dim) took on
+///     __icaxis|lat@ic_wx:9f3a1c...  the axis as this repo first presented it
+///     __icaxis|lat@ic_wx:9f3a1c...#2  the SECOND identity that (repo, dim) took on
 ///
-/// The repo label is the directory name plus four hex of the path's digest, so
-/// two repos that happen to share a directory name are still distinct axes --
-/// §5.3's "different repos never share", stated where the type system can read
-/// it.
+/// The repo label is the directory name as written, plus 16 hex of the
+/// CANONICAL path's digest, so two repos that happen to share a directory name
+/// are still distinct axes -- §5.3's "different repos never share", stated
+/// where the type system can read it -- while two spellings of ONE repo are one
+/// axis.
 ///
 /// WHY A TAG AND NOT JUST THE ID. §5.3 expects the shared `IRIndexType.Id` to
 /// carry the whole story ("unify then succeeds by the ordinary Id rule"). It
@@ -1586,35 +1953,112 @@ let tryAxisTagName (tag: string) : string option =
 ///
 /// WHY `__`. A tag is also a user-facing NAME, and three seams key on that:
 /// `checkArrayIndexTags` skips `__` slots, `elemTypeForIterationIndex` hands
-/// `Nat<tag>` to iteration params only for non-`__` tags, and `unify`'s
-/// `isSyntheticTag` exempts `__` tags from its incompatibility rule.
+/// `Nat<tag>` to iteration params only for non-`__` tags, and
+/// `Ide.indexNamesOf` builds its display map from non-`__` tags (it makes its
+/// own exception here, decoding the dim name back out with `tryAxisTagName`).
 /// A plain name (`lat@ic_wx:9f3a`) therefore turns every ordinary `A(2, 1)`
 /// into a BL4003 "indexed with untagged integer" warning advising a cast to a
-/// name the user never wrote, and makes `type Lat = ck.index.lat` (which
-/// re-tags with the ALIAS name, TypeCheckInfer.fs:13059) refuse an ascription
-/// that works for every other provider. `__` keeps all three quiet while
-/// leaving the two co-iteration predicates -- which have no `__` exemption --
-/// free to refuse. The cost is that a function BOUNDARY (plain `unify`) still
-/// accepts a diverged axis; arithmetic, which is where a difference is
-/// actually written, does not.
-let private axisTag (repoPath: string) (dimName: string) (ordinal: int) : string =
+/// name the user never wrote. `__` keeps all three quiet while leaving the two
+/// co-iteration predicates -- which have no `__` exemption -- free to refuse.
+///
+/// A FOURTH seam used to key on `__` and no longer does: `unify`'s
+/// `indexPairIncompatible` exempted synthetic tags outright, which let an
+/// ASCRIPTION relabel a diverged axis and walk around the arithmetic refusal
+/// entirely (plan §5, *Alias laundering*). It now asks `gatesNominally`, and
+/// the provider family (`Types.isProviderAxisTag`) gates like a user name --
+/// provenance is an identity, not a kind sentinel. Other `__` tags keep the
+/// exemption. Residual: a function BOUNDARY still accepts a diverged axis when
+/// the parameter's index type is spelled ANONYMOUSLY, which is not a provider
+/// fact -- an argument position accepts a differently-named index type of equal
+/// extent for two plain `Idx<5>` aliases too (IcechunkTests §18 (g), (h)).
+let private taggedIdentity (prefix: string) (repoPath: string) (dimName: string) (ordinal: int) : string =
     let baseName =
+        // The directory name AS WRITTEN: this half of the tag is a display
+        // name, and it is printed back at the user in every mismatch.
         let trimmed = repoPath.TrimEnd([| '/'; '\\' |])
         let n = try Path.GetFileName trimmed with _ -> ""
         if String.IsNullOrEmpty n then "repo" else n
-    let digest = (sha256Hex (Text.Encoding.UTF8.GetBytes repoPath)).Substring(0, 4)
+    // The digest is the DISCRIMINATING half, so it hashes the canonical path
+    // (two spellings of one repo are one axis universe, matching the mint
+    // table's key) and keeps 16 hex characters, not 4. Four hex is 2^-16 per
+    // pair: a collision would hand two DIFFERENT repos the same axis tag, and
+    // an axis tag is a LICENSE -- co-iteration reads agreement off the tag
+    // alone -- so the failure direction is silently permitting cross-repo
+    // arithmetic, not refusing sound arithmetic.
+    let digest = (sha256Hex (Text.Encoding.UTF8.GetBytes (canonicalRepoPath repoPath))).Substring(0, 16)
     let suffix = if ordinal <= 1 then "" else $"#{ordinal}"
-    $"{axisTagPrefix}{dimName}@{baseName}:{digest}{suffix}"
+    $"{prefix}{dimName}@{baseName}:{digest}{suffix}"
+
+/// A DENSE dimension's identity tag (the shape documented above).
+let private axisTag (repoPath: string) (dimName: string) (ordinal: int) : string =
+    taggedIdentity axisTagPrefix repoPath dimName ordinal
+
+/// A PACKED variable's POOL-axis identity tag -- the same shape over the
+/// variable's name instead of a dim name, under one of the two pool prefixes
+/// (`Types.providerPoolTagPrefix` / `providerOrbPoolTagPrefix`).
+///
+/// WHY THE POOL NEEDED ONE. A pool axis is not a store dimension: its extent is
+/// a derived cardinality (C(n+r-1, r) and friends), which is why
+/// `zarrStoreToModule`'s `sharedDims` deliberately drops it and why
+/// `externalDimMap` -- the channel P3's dense identities ride -- can never reach
+/// it. It was therefore minted `Tag = None`, and the refusal machinery is
+/// PERMISSIVE on None in both directions (`indexNamesCoIterable`'s `| _ -> true`,
+/// `indexPairIncompatible` falling through to its symmetry arm), so
+/// `ca.vars.cov - cb.vars.cov` across two DIFFERENT repos typechecked -- the
+/// exact pre-P3 defect, surviving for every packed variable.
+///
+/// WHY TWO PREFIXES. The Tag doubles as the record's KIND sentinel and a pool
+/// comes in two kinds (depth-1 simplex: `IxKPlain`; iterated wreath: `IxKOrbit`,
+/// whose record would otherwise carry "__orbidx"). `ixKindOfTag` maps the
+/// wreath spelling back to `IxKOrbit` and lets the depth-1 spelling fall through
+/// to `IxKPlain`, which is what `IRValidate`'s Tag/IxKind agreement check needs.
+/// `indexNamesCoIterable` recognises the family (`isProviderPoolTag`) and
+/// compares pool tags whatever the kind says, so the wreath pool refuses too --
+/// its `IxKOrbit` would otherwise take that predicate's permissive non-plain arm.
+let private poolTag (repoPath: string) (varName: string) (isWreath: bool) (ordinal: int) : string =
+    let prefix = if isWreath then providerOrbPoolTagPrefix else providerPoolTagPrefix
+    taggedIdentity prefix repoPath varName ordinal
+
+/// The mint-table key for a packed variable's pool. `AxisMintTable` is keyed on
+/// `(canonical repo path, dim name)`; a pool is not a dim, so it takes a key no
+/// dim name can collide with -- dim names are validated Blade identifiers
+/// (`isValidIdent`) and this one carries a ':'.
+let private poolMintKey (varName: string) : string = $"__pool:{varName}"
 
 /// Why one identity of an axis differs from an older one, for the split
-/// history (and, later, for the divergence diagnostic).
-let private splitReason (older: AxisIdentity) (extent: int64) (fp: string option) : string =
+/// history (and, later, for the divergence diagnostic). The two nouns name what
+/// the fingerprint was taken OVER -- the dim's coordinate variable for a dense
+/// axis, the packed variable itself for a pool -- so the recorded reason reads
+/// truthfully for both flavours.
+let private splitReason (carrier: string) (content: string)
+                        (older: AxisIdentity) (extent: int64) (fp: string option) : string =
     if older.Extent <> extent then $"extent {older.Extent} -> {extent}"
     else
         match older.CoordFP, fp with
-        | None, Some _ -> "a coordinate variable appeared"
-        | Some _, None -> "the coordinate variable was removed"
-        | _ -> "coordinate content differs"
+        | None, Some _ -> $"a {carrier} appeared"
+        | Some _, None -> $"the {carrier} was removed"
+        | _ -> $"{content} content differs"
+
+/// WHICH prior identity a new one's `splitReason` is told against.
+///
+/// Not the newest. The identities of one axis are a SET this compilation has
+/// met, in checkout order, not a chain -- so "the previous one" is an accident
+/// of which checkouts a program happens to name and in which order. Checkouts
+/// A (extent 10, coordinate X), B (extent 8) and C (extent 10, coordinate Y)
+/// recorded C's reason against B and printed "extent 8 -> 10", which is true of
+/// B and says nothing about why C does not co-iterate with A -- the pairing a
+/// user actually hit, and the one whose real story is a coordinate divergence.
+///
+/// So: prefer an identity of the SAME EXTENT (the newest of them), because that
+/// is the pairing whose difference is the interesting one and the one a plain
+/// extent sentence cannot explain; otherwise the OLDEST, the axis as this
+/// compilation first met it. This text is printed at the user by
+/// `trySplitReasonOfTag` at every co-iteration refusal, so it is a claim, not
+/// bookkeeping.
+let private closestPrior (extent: int64) (identities: AxisIdentity list) : AxisIdentity =
+    match identities |> List.filter (fun i -> i.Extent = extent) with
+    | sameExtent :: _ -> sameExtent
+    | [] -> List.last identities
 
 /// Look one axis up in the mint table and return the index type this
 /// checkout's arrays must be built over: the RECORDED identity when the axis
@@ -1625,20 +2069,29 @@ let private splitReason (older: AxisIdentity) (extent: int64) (fp: string option
 /// everything but its Id and Tag is kept, so the shape of a provider axis type
 /// is stated in exactly one place (ZarrProvider's `zarrDimToNamedIndexType`).
 /// The Id comes from the reserved range (`axisIdBase`) and the Tag from
-/// `axisTag`, which is the half that actually refuses.
-let private resolveAxis (repoPath: string) (refText: string) (dimName: string)
-                        (extent: int64) (fp: string option) (fresh: IRIndexType) : IRIndexType =
+/// `mkTag`, which is the half that actually refuses.
+///
+/// `mintKey` is the table key (a dim name for a dense axis, `poolMintKey` for a
+/// packed pool) and `mkTag ordinal` the tag builder for that flavour. Both
+/// flavours share this body ON PURPOSE: the split history, the reserved-range
+/// Id, the refs bookkeeping and the "an axis this compilation already saw
+/// UNCHANGED comes back with the identity it had" rule are the same facts about
+/// a pool as about a dimension.
+let private resolveIdentity (mintKey: string) (mkTag: int -> string)
+                            (carrier: string) (content: string)
+                            (repoPath: string) (refText: string)
+                            (extent: int64) (fp: string option) (fresh: IRIndexType) : IRIndexType =
     let matches (i: AxisIdentity) = i.Extent = extent && i.CoordFP = fp
     let born (reason: string option) (ordinal: int) = {
         Extent = extent
         CoordFP = fp
         IndexType = { fresh with
                         Id = AxisMintTable.freshId ()
-                        Tag = Some (axisTag repoPath dimName ordinal) }
+                        Tag = Some (mkTag ordinal) }
         Refs = [refText]
         SplitReason = reason
     }
-    match AxisMintTable.tryFind repoPath dimName with
+    match AxisMintTable.tryFind repoPath mintKey with
     | Some mint ->
         match mint.Identities |> List.tryFind matches with
         | Some hit ->
@@ -1646,19 +2099,53 @@ let private resolveAxis (repoPath: string) (refText: string) (dimName: string)
             // two modules' arrays are over one index space and co-iterate.
             if not (List.contains refText hit.Refs) then
                 let updated = { hit with Refs = hit.Refs @ [refText] }
-                AxisMintTable.put repoPath dimName
+                AxisMintTable.put repoPath mintKey
                     { Identities = mint.Identities |> List.map (fun i -> if matches i then updated else i) }
             hit.IndexType
         | None ->
             let split =
-                born (Some (splitReason (List.head mint.Identities) extent fp))
+                born (Some (splitReason carrier content
+                                        (closestPrior extent mint.Identities) extent fp))
                      (mint.Identities.Length + 1)
-            AxisMintTable.put repoPath dimName { Identities = split :: mint.Identities }
+            AxisMintTable.put repoPath mintKey { Identities = split :: mint.Identities }
             split.IndexType
     | None ->
         let first = born None 1
-        AxisMintTable.put repoPath dimName { Identities = [first] }
+        AxisMintTable.put repoPath mintKey { Identities = [first] }
         first.IndexType
+
+let private resolveAxis (repoPath: string) (refText: string) (dimName: string)
+                        (extent: int64) (fp: string option) (fresh: IRIndexType) : IRIndexType =
+    resolveIdentity dimName (axisTag repoPath dimName) "coordinate variable" "coordinate"
+                    repoPath refText extent fp fresh
+
+/// The POOL twin of `resolveAxis` (§5.3's "packed pool axes untagged" residual).
+/// Same table, same sharing rule, one flavour down: the identity's content half
+/// is the packed variable's OWN fingerprint (`varFingerprint` -- node id,
+/// user_data bytes, chunk-ref table), because a pool has no coordinate variable
+/// and its cells ARE the variable. So an UNCHANGED packed variable shares one
+/// pool identity across two checkouts of a repo exactly as an unchanged dim
+/// does, a packed variable a commit rewrote splits, and two repos never meet
+/// (the repo path is half the key AND inside the tag's digest).
+///
+/// `extent` is the pool's BASE extent (`n` in `SymIdx<r, n>`), which is what
+/// both record shapes carry -- flat in `IRLit` for a simplex head, one level
+/// down inside the `IROrbitClass` marker for a wreath. It is belt-and-braces
+/// beside the fingerprint, which already covers the layout: `user_data` is
+/// verbatim `zarr.json` and the blade layout block lives in it.
+let private resolvePool (repoPath: string) (refText: string) (varName: string)
+                        (fp: string) (fresh: IRIndexType) : IRIndexType =
+    let extent =
+        match orbitBaseExtent fresh with
+        | IRLit (IRLitInt v) -> v
+        | _ -> -1L
+    let isWreath = (fresh.Symmetry = SymWreath)
+    // The carrier noun can never fire for a pool (`fp` is always `Some`, since
+    // a pool's cells ARE the variable and there is nothing for the fingerprint
+    // to be absent for); it is supplied for completeness, not for a live path.
+    resolveIdentity (poolMintKey varName) (poolTag repoPath varName isWreath)
+                    "packed variable" "packed variable"
+                    repoPath refText extent (Some fp) fresh
 
 /// The identities one `(repoPath, dimName)` has carried in this compilation,
 /// newest first -- empty when the axis has not been seen. The divergence
@@ -1667,6 +2154,25 @@ let axisIdentities (repoPath: string) (dimName: string) : AxisIdentity list =
     match AxisMintTable.tryFind repoPath dimName with
     | Some mint -> mint.Identities
     | None -> []
+
+/// The same, for a PACKED variable's pool axis -- the key `poolMintKey` builds.
+/// One identity means the pool is shared by every checkout that has presented
+/// it; two means a commit changed the variable and the two no longer co-iterate.
+let poolIdentities (repoPath: string) (varName: string) : AxisIdentity list =
+    axisIdentities repoPath (poolMintKey varName)
+
+/// WHY the identity carrying `tag` differs from the one it split from
+/// ("coordinate content differs", "extent 5 -> 10", "the coordinate variable
+/// was removed"), or `None` for a first identity, an unknown tag, or a tag from
+/// some other compilation. Registered into `Types.registerProviderAxisSplitReason`
+/// by `ProviderStatics.install`; the refusal sites read it through there.
+///
+/// `SplitReason` has been recorded at every mint since section 5.3 landed and
+/// was printed by nothing, which is why a diverged-checkout refusal could say
+/// two axes disagree and never say what about the STORE made them disagree.
+let trySplitReasonOfTag (tag: string) : string option =
+    AxisMintTable.allIdentities ()
+    |> List.tryPick (fun i -> if i.IndexType.Tag = Some tag then i.SplitReason else None)
 
 // ---------------------------------------------------------------------------
 // Mapping to Blade IR modules
@@ -1704,6 +2210,14 @@ let emptyRepoModule (moduleName: string) : IRModule = {
 /// the identity it had there, and a diverged one gets a fresh identity that
 /// refuses to unify with it.
 ///
+/// A PACKED variable's pool axis is not a dimension and cannot ride
+/// `externalDimMap` (see `poolTag`); it rides the second hook,
+/// `zarrStoreToModuleWith`'s `poolAxis`, against the same table under a
+/// `poolMintKey`. Both hooks are supplied on PASS 2 only, so each identity is
+/// resolved exactly once per call -- pass 1 exists to read back the dim
+/// universe and the record shapes, and its throwaway records are never minted
+/// into the table.
+///
 /// Hierarchy (§9): root-level arrays only. Nested arrays are simply not
 /// fields (the Zarr provider's one-level rule, where a subgroup directory is
 /// never scanned); a root-level array whose name is not a Blade identifier
@@ -1735,13 +2249,36 @@ let checkoutToModule (builder: IRBuilder) (moduleName: string) (ck: CheckoutHand
     let minted = ZarrProvider.zarrStoreToModule builder moduleName store None
     let mintedDims =
         minted.Types |> List.choose (function IRTDIndexType (n, it) -> Some (n, it) | _ -> None)
-    if List.isEmpty mintedDims then minted
+    // A store of nothing but packed variables has NO shared dims at all (a pool
+    // dim never joins the universe), so the dim list alone cannot decide whether
+    // pass 2 is needed -- and that store is exactly the one whose pool axes were
+    // the surviving hole. Either kind of identity to resolve earns pass 2.
+    let hasPacked = arrays |> List.exists (fun a -> a.Blade.IsSome)
+    if List.isEmpty mintedDims && not hasPacked then minted
     else
         let dims =
             mintedDims |> List.map (fun (dimName, fresh) ->
-                let extent = match fresh.Extent with IRLit (IRLitInt v) -> v | _ -> -1L
+                // NOT a fallback. A dense axis's identity is (extent, coordinate
+                // fingerprint), and the fingerprint is `None` for every dim
+                // without a coordinate variable -- so a sentinel extent shared by
+                // every symbolic axis would make all of them ONE identity, which
+                // is a LICENSE to co-iterate arrays that have nothing to do with
+                // each other. Unreachable by construction (a provider dim is
+                // minted from a store extent, which is a literal), and it says so
+                // loudly rather than defaulting into the unsound direction.
+                let extent =
+                    match fresh.Extent with
+                    | IRLit (IRLitInt v) -> v
+                    | other ->
+                        failwith $"icechunk: internal -- dimension '{dimName}' of '{key}' was minted with a non-literal extent ({other}); a provider axis identity cannot be decided without one"
                 let fp = coordFingerprint key ck arrays dimName
                 (dimName, resolveAxis ck.Repo.Root refText dimName extent fp fresh))
+        // The pool hook. `fresh` is the record ZarrProvider just minted for this
+        // variable's pool (simplex or wreath); everything but its Id and Tag
+        // survives, so the pool record's SHAPE is still stated in exactly one
+        // place. Called once per packed variable, on pass 2 only.
+        let poolAxis (varName: string) (fresh: IRIndexType) : IRIndexType =
+            resolvePool ck.Repo.Root refText varName (varFingerprint key ck varName) fresh
         // Pass 2 rebuilds over the resolved identities. `externalDimMap` is
         // ALL-OR-NOTHING at the Zarr end: a supplied map REPLACES the dim map
         // entirely and suppresses the index-type defs, so it has to cover every
@@ -1750,32 +2287,61 @@ let checkoutToModule (builder: IRBuilder) (moduleName: string) (ck: CheckoutHand
         // `registerProviderModule`'s `<binding>.index.<dim>` registration,
         // ProviderStatics' axis-extent read and the IDE hovers all read those
         // defs back.
-        let m = ZarrProvider.zarrStoreToModule builder moduleName store (Some (Map.ofList dims))
+        let m =
+            ZarrProvider.zarrStoreToModuleWith builder moduleName store
+                (Some (Map.ofList dims)) (Some poolAxis)
         { m with Types = (dims |> List.map IRTDIndexType) @ m.Types }
 
 /// Provider contract entry point. A BARE path binds the repo handle (an empty
 /// module) after header-level validation; a canonical key with a refspec
 /// resolves the ref and builds the full dims/vars module.
+///
+/// THE RESOLUTION FUNNEL. Every way this provider can decline to produce a
+/// module leaves through here, and every one of them now leaves as a
+/// `Types.ProviderResolutionError` rather than a bare `failwith`: the key does
+/// not parse, the repo is missing or is not spec 2 or is Offline, the ref is
+/// typo'd or ambiguous or a deleted-tag tombstone, and -- through the
+/// `IcechunkDecodeError` arm -- every structural refusal `checkoutToModule`
+/// raises under it (virtual chunk refs, nested groups, the verifier's and the
+/// offset checks' named rejections).
+///
+/// The point is the CHECK phase. `TypeCheck.checkDecl` calls this at the
+/// binding site and used to swallow anything that was not a dead native
+/// library, falling back to opaque types; the refusal then appeared only when
+/// lowering re-opened the store under `emit`/`run`, so `blade check` and the
+/// editor reported nothing at all for the entire refusal set that is this
+/// provider's product claim. A NAMED exception is what lets that arm re-raise
+/// this as a spanned BL2008 while leaving the other providers' fallback alone.
+/// `.Message` is preserved verbatim, so the lowering-phase text every existing
+/// pin matches is unchanged for the paths that still reach lowering.
 let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRModule =
-    match parseKey path with
-    | Error e -> failwith e
-    | Ok key ->
-        match key.Ref with
-        | None ->
-            // Route through `load`, not a bare `validateRepoFile`, so a
-            // structurally fine but Offline repo still refuses here (plan
-            // §3: the repo file is parsed, and its status gated, AT LOAD).
-            match load path with
-            | Error e -> failwith e
-            | Ok (LoadedRepo _) -> emptyRepoModule moduleName
-            | Ok (LoadedCheckout _) ->
-                failwith $"icechunk: internal -- canonical key '{path}' carries no refspec but resolved to a checkout"
-        | Some _ ->
-            match load path with
-            | Ok (LoadedCheckout ck) -> checkoutToModule builder moduleName ck
-            | Ok (LoadedRepo _) ->
-                failwith $"icechunk: internal -- canonical key '{path}' carries a refspec but resolved to a bare repo handle"
-            | Error e -> failwith $"icechunk checkout '{path}': {e}"
+    let refuse (message: string) : 'a = raise (ProviderResolutionError message)
+    try
+        match parseKey path with
+        | Error e -> refuse e
+        | Ok key ->
+            match key.Ref with
+            | None ->
+                // Route through `load`, not a bare `validateRepoFile`, so a
+                // structurally fine but Offline repo still refuses here (plan
+                // §3: the repo file is parsed, and its status gated, AT LOAD).
+                match load path with
+                | Error e -> refuse e
+                | Ok (LoadedRepo _) -> emptyRepoModule moduleName
+                | Ok (LoadedCheckout _) ->
+                    refuse $"icechunk: internal -- canonical key '{path}' carries no refspec but resolved to a checkout"
+            | Some _ ->
+                match load path with
+                | Ok (LoadedCheckout ck) -> checkoutToModule builder moduleName ck
+                | Ok (LoadedRepo _) ->
+                    refuse $"icechunk: internal -- canonical key '{path}' carries a refspec but resolved to a bare repo handle"
+                | Error e -> refuse $"icechunk checkout '{path}': {e}"
+    with
+    // The named decode refusals `checkoutToModule` raises are resolution
+    // failures too -- the module does not exist because the snapshot says
+    // something this reader refuses -- so they join the family rather than
+    // escaping as a bare exception the checker cannot classify.
+    | IcechunkDecodeError m -> raise (ProviderResolutionError m)
 
 // ---------------------------------------------------------------------------
 // Fingerprint / version stamp
@@ -1860,13 +2426,23 @@ module CppIcechunk =
     /// A C++ string literal for a baked path: separators normalized (the
     /// emitted program is not necessarily built on the compiling host), then
     /// escaped.
+    ///
+    /// Only the quote is escaped: `normPath` has just replaced every `\` with
+    /// `/`, so a backslash-escaping pass over its result can never match.
     let private cppPathLit (p: string) : string =
-        "\"" + (normPath p).Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        "\"" + (normPath p).Replace("\"", "\\\"") + "\""
 
-    /// Emission cap on a baked chunk table. Beyond this the tables stop being
-    /// a good idea (compile time, object size) and the answer is a differently
-    /// chunked store, not a bigger literal.
-    let private maxBakedChunks = 1_000_000
+    /// Emission cap on the TOTAL INLINE PAYLOAD of one variable.
+    ///
+    /// The chunk-count cap (`maxBakedChunks`) bounds how many table ENTRIES
+    /// are emitted and says nothing about how big they are. An inline chunk is
+    /// baked as a `static const unsigned char[]` of `0x..` literals -- about
+    /// five characters of C++ per byte -- so a single 64 MB inline chunk is one
+    /// table entry and ~320 MB of generated source, which is a hung g++ and a
+    /// disk full, reported as neither. Icechunk inlines only SMALL chunks by
+    /// convention, so 4 MB (about 20 MB of hex) is far above anything a
+    /// conventionally written store produces and far below anything that hurts.
+    let private maxInlineBytes = 4L * 1024L * 1024L
 
     /// `static const T name[n] = { ... };`, wrapped so a big table is still a
     /// readable diff. A trailing comma before `}` is well-formed C++.
@@ -1885,8 +2461,12 @@ module CppIcechunk =
     /// ill-formed C++):
     ///
     ///     static const long long v_icoff[N]            byte offset; -1 marks FILL
-    ///     static const char* const v_icfile[N]         chunk-file path, "" if not native
-    ///                                                  -- emitted only if some chunk is native
+    ///     static const char* const v_icpath            the ONE chunk file, when every
+    ///                                                  native chunk shares it
+    ///     static const char* const v_icpath[K]         the K DISTINCT chunk files, plus
+    ///     static const int v_icfile[N]                 a per-chunk index into them
+    ///                                                  -- either shape, only if some chunk
+    ///                                                  is native
     ///     static const unsigned char v_icb<k>[L]       one array per INLINE chunk, in
     ///                                                  ascending flat-index order
     ///     static const unsigned char* const v_icinl[N] inline pointer or nullptr
@@ -1909,15 +2489,34 @@ module CppIcechunk =
             let meta = ra.Meta
             let varName = meta.Name
             let rank = meta.Shape.Length
-            let lens = ZarrProvider.gridDims meta.Shape meta.Chunks |> List.map int
+            let lens =
+                match gridLens $"icechunk codegen: variable '{varName}'" meta.Shape meta.Chunks with
+                | Ok l -> l
+                | Error e -> failwith e
             let strides = ZarrProvider.rowMajorStrides lens
             let n = ra.Table.Length
             if n > maxBakedChunks then
                 failwith $"icechunk codegen: variable '{varName}' has {n} chunks, past the {maxBakedChunks}-entry baked-table cap -- store it with larger chunks"
+            // The OTHER dimension of the same budget: entry count above, total
+            // baked bytes here. See `maxInlineBytes`.
+            let inlineTotal =
+                ra.Table |> Array.sumBy (function Inline b -> int64 b.Length | _ -> 0L)
+            if inlineTotal > maxInlineBytes then
+                failwith $"icechunk codegen: variable '{varName}' of repo '{normPath ra.Root}' bakes {inlineTotal} bytes of INLINE chunk data, past the {maxInlineBytes}-byte inline cap -- inline chunks emit as ~5 characters of C++ hex per byte, so this variable alone would be roughly {inlineTotal * 5L / 1_048_576L} MB of generated source. Re-chunk the array so its chunks are written as native chunk files (icechunk inlines only small chunks), or store the variable natively"
             ra.Table
             |> Array.iteri (fun i loc ->
                 match loc with
                 | Fill -> ()
+                // A manifest's offset is a uint64 on the wire and an int64 in
+                // here, so an offset at or past 2^63 arrives NEGATIVE. It would
+                // then be baked verbatim into `v_icoff`, where the emitted
+                // reader's presence test is `v_icoff[i] >= 0` and -1 is the FILL
+                // sentinel: a corrupt offset would read as fill, silently, and
+                // the program would print zeros for real data. The fold path
+                // already refuses this (`readNativeChunk` checks
+                // offset + length against the file); this is the codegen twin.
+                | Native nc when nc.Offset < 0L ->
+                    failwith $"icechunk codegen: variable '{varName}': corrupt manifest: chunk offset out of range at flat index {i} -- the manifest declares a byte offset at or past 2^63, which is not a position in any file (and would bake as the table's fill sentinel)"
                 | Inline bytes when bytes.Length <> chunkBytes ->
                     failwith $"icechunk codegen: variable '{varName}': the inline chunk at flat index {i} holds {bytes.Length} bytes, but a padded chunk of this array is {chunkBytes} -- a compressed or corrupt store?"
                 | Native nc when nc.Length <> int64 chunkBytes ->
@@ -1953,13 +2552,39 @@ module CppIcechunk =
                             | Fill -> "-1"
                             | Inline _ -> "0"
                             | Native nc -> string nc.Offset) "-1")
+            // DEDUPED chunk-file paths. A repo written with packed native
+            // chunks (`PackNativeChunks`) puts EVERY chunk of a variable in one
+            // file at different offsets, and the per-chunk path table then
+            // baked that one absolute path N times -- N string literals and N
+            // pointers for one distinct value. The distinct paths go in their
+            // own table and the per-chunk table holds indices; the one-file
+            // case drops the per-chunk table entirely and bakes a single
+            // pointer that the reader names directly.
+            let pathOf (loc: ChunkLoc) =
+                match loc with
+                | Native nc -> Some (nativeChunkFile ra.Root nc)
+                | _ -> None
+            let distinctPaths =
+                ra.Table |> Array.toList |> List.choose pathOf |> List.distinct
+            let pathIndex =
+                distinctPaths |> List.mapi (fun k p -> (p, k)) |> Map.ofList
             let fileTable =
-                if not anyNative then []
-                else
-                    bakedTable $"static const char* const {v}_icfile[{tn}] =" 4
-                        (entry (function
-                                | Native nc -> cppPathLit (nativeChunkFile ra.Root nc)
-                                | _ -> "\"\"") "\"\"")
+                match distinctPaths with
+                | [] -> []
+                | [ only ] -> [ $"static const char* const {v}_icpath = {cppPathLit only};" ]
+                | many ->
+                    bakedTable $"static const char* const {v}_icpath[{many.Length}] =" 4
+                        (many |> List.map cppPathLit)
+                    // Index 0 for a chunk that has no file: it is never
+                    // dereferenced (the read is guarded by `Present`, and by
+                    // the inline pointer in the mixed case), and an in-range
+                    // index cannot become an out-of-bounds read if some future
+                    // caller evaluates it anyway.
+                    @ bakedTable $"static const int {v}_icfile[{tn}] =" 12
+                        (entry (fun loc ->
+                            match pathOf loc with
+                            | Some p -> string (Map.find p pathIndex)
+                            | None -> "0") "0")
             let inlineTable =
                 if not anyInline then []
                 else
@@ -1971,7 +2596,11 @@ module CppIcechunk =
 
             let (refKind, refName) = ra.Ref
             let idx = $"{v}_cidx"
-            let fileExpr = $"{v}_icfile[{idx}]"
+            let fileExpr =
+                match distinctPaths with
+                | [] -> "\"\""                    // no native chunk: never emitted
+                | [ _ ] -> $"{v}_icpath"
+                | _ -> $"{v}_icpath[{v}_icfile[{idx}]]"
             let offExpr = $"{v}_icoff[{idx}]"
             let inlExpr = $"{v}_icinl[{idx}]"
 
@@ -2030,6 +2659,12 @@ module CppIcechunk =
         let ra = resolveOrFail "read" path varName
         if ra.Meta.Blade.IsSome then
             failwith $"icechunk codegen: variable '{varName}' is blade-packed; the dense reader cannot materialize it (this indicates a typing inconsistency)"
+        // Rank 0 is refused at the metadata gate (`arrayMetaOfNode`), so this
+        // is a restatement, not a live path -- but the loop nest below opens
+        // with `idxVars.[0]`, which on an empty list is an IndexOutOfRange
+        // escaping codegen rather than anything a user can read.
+        if ra.Meta.Shape.IsEmpty then
+            failwith $"icechunk codegen: variable '{varName}' is rank 0 -- rank-0 arrays are not supported by the icechunk provider (this indicates a typing inconsistency)"
         let v = cppVarName
         let elemCpp = elemCppOf arrType.ElemType
         let assemble = ZarrProvider.CppZarr.genAssembleFlatVia (icechunkChunkFetch ra) ra.Meta v elemCpp

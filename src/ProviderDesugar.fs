@@ -31,9 +31,11 @@
 ///     `ExprLit` nodes wear the ORIGINAL checkout call's spans, so every
 ///     later diagnostic underlines the text the user actually wrote and not
 ///     a synthesized key that appears in no source file.
-///   * IDEMPOTENCE. A rewritten binding loads a path containing `@`, which
-///     the repo-binding scan declines, so a second application is a no-op.
-///     (It is applied at more than one funnel -- see the wiring note below.)
+///   * IDEMPOTENCE. A rewritten binding loads a path ending in
+///     `@<kind>:<name>`, which the repo-binding scan declines (see
+///     `isCheckoutKey`), so a second application is a no-op. (It is applied at
+///     more than one funnel -- see the wiring note below.) The test is that
+///     suffix and not a bare `@`, because repo PATHS contain '@' too.
 ///   * A NO-OP FAST PATH. A module with no `import icechunk` is returned
 ///     unchanged and reference-equal, so the pass costs one decl scan on
 ///     every program that does not use the provider.
@@ -84,10 +86,33 @@ let private bareKind = "?"
 let canonicalKey (repoPath: string) (kind: string) (refName: string) : string =
     repoPath + "@" + kind + ":" + refName
 
+/// The kind tokens a canonical key's suffix may name -- exactly the tokens
+/// this pass itself writes, since `rewriteValue` passes a marker name through
+/// as the kind. Stated from the two sets above rather than re-listed, so a
+/// namespace added there cannot be forgotten here.
+let private refKindTokens = Set.add bareKind refMarkers
+
 /// Does this path already carry a ref suffix? A load whose path names a
 /// checkout is not a repo handle, so `ck.checkout(...)` on it is left alone
 /// (and this is what makes the pass idempotent).
-let private isCheckoutKey (path: string) = path.Contains("@")
+///
+/// The test is the LAST '@' followed by `<known-kind>:`, not merely "contains
+/// an '@'" -- a repo path may legitimately contain one (a Windows profile
+/// directory, `C:/Users/o@corp/data/w.icechunk`), and treating that as a
+/// checkout key left the user's `repo.checkout("main")` unrewritten, dying
+/// downstream as a missing-member error about a `checkout` field.
+///
+/// MIRRORS `IcechunkProvider.hasRefSuffix` (src/providers/IcechunkProvider.fs):
+/// this decides whether a load is a repo handle, that decides whether the key
+/// the rewrite produced splits back into path + refspec. Change both together.
+let private isCheckoutKey (path: string) =
+    let at = path.LastIndexOf '@'
+    if at < 0 then false
+    else
+        let refspec = path.Substring(at + 1)
+        match refspec.IndexOf ':' with
+        | colon when colon > 0 -> Set.contains (refspec.Substring(0, colon)) refKindTokens
+        | _ -> false
 
 // Diagnostics
 
@@ -122,6 +147,26 @@ let private checkoutShapeError (span: Span) (repo: string) (alias: string)
         + "compile time, so a computed ref name cannot be served."
     Blade.Diagnostics.mkError "BL3007" (Blade.Diagnostics.Codes.phaseOfCode "BL3007") span msg
 
+/// A well-shaped `checkout` on a recognized repo handle sitting somewhere the
+/// rewrite cannot reach -- a function body, a block, an argument of another
+/// call. Same code as the shape refusal (BL3007 already covers "the provider
+/// read/write forms"), different complaint: the CALL is fine, the POSITION is
+/// not.
+///
+/// Detection only. `rewriteValue` deliberately serves exactly one position --
+/// the only one the three binding -> path carriers look at (see its own
+/// comment) -- so everywhere else the checkout used to be left standing and
+/// die downstream as a missing-member error about a `checkout` field the
+/// provider never had.
+let private checkoutPositionError (span: Span) (repo: string) : Blade.Diagnostics.Diagnostic =
+    let msg =
+        $"`{repo}.checkout(...)` is not in a position a checkout can be resolved from. "
+        + "A checkout must be a module-level binding: the store's metadata is resolved at "
+        + "compile time, so the compiler has to see it at the top level of the module -- not "
+        + "inside a function body, a block, or another expression. Bind it once at module "
+        + $"level (`let ck = {repo}.checkout(\"main\")`) and use that binding here."
+    Blade.Diagnostics.mkError "BL3007" (Blade.Diagnostics.Codes.phaseOfCode "BL3007") span msg
+
 // Node construction
 
 /// Build `alias.load("<key>")` wearing the checkout call's own spans:
@@ -151,6 +196,80 @@ let rec private patternBoundNames (p: Pattern) : string list =
     | PatternKind.PatVariant (_, Some inner)
     | PatternKind.PatGuarded (inner, _)
     | PatternKind.PatTyped (inner, _) -> patternBoundNames inner
+    | _ -> []
+
+/// Drop from a repo-handle name set every name a pattern rebinds. The
+/// position scan's shadowing rule, and the same claim `recordRepo` makes at
+/// module level: a name that has been rebound is not the repo handle any more.
+let private shadow (handles: Set<string>) (p: Pattern) : Set<string> =
+    patternBoundNames p |> List.fold (fun (s: Set<string>) n -> Set.remove n s) handles
+
+/// Every sub-expression a node holds, for the detection walk below. NOT
+/// exhaustive by type -- the trailing arm covers the leaves and anything a
+/// later grammar addition introduces -- and the binder-carrying nodes (lambda,
+/// let, match, block, recursive array) are deliberately absent, because
+/// `scanExpr` has to remove the names they bind before descending.
+///
+/// A catch-all is admissible here and would not be in `rewriteValue`: this
+/// walk only ever ADDS a diagnostic, so a node it fails to reach costs a
+/// message the user would not have got before this pass existed -- never a
+/// rewrite that should not have happened.
+let private childrenOf (e: Expr) : Expr list =
+    match e.Kind with
+    | ExprKind.ExprBinOp (_, _, a, b) -> [ a; b ]
+    | ExprKind.ExprUnaryOp (_, a) -> [ a ]
+    | ExprKind.ExprApp (f, args) -> f :: args
+    | ExprKind.ExprTupleIndex (t, i) -> [ t; i ]
+    | ExprKind.ExprField (r, _) -> [ r ]
+    | ExprKind.ExprIf (c, t, f) -> [ c; t; f ]
+    | ExprKind.ExprTuple es
+    | ExprKind.ExprArrayLit es
+    | ExprKind.ExprMethodFor es
+    | ExprKind.ExprZip es
+    | ExprKind.ExprStack es
+    | ExprKind.ExprSequence es
+    | ExprKind.ExprGroupKeys es -> es
+    | ExprKind.ExprAlign (es, _) -> es
+    | ExprKind.ExprJoin (es, _) -> es
+    | ExprKind.ExprDotDot (a, b) -> [ a; b ]
+    | ExprKind.ExprBlocked (_, a) -> [ a ]
+    | ExprKind.ExprHalo (_, a) -> [ a ]
+    | ExprKind.ExprObjectFor a
+    | ExprKind.ExprPure a
+    | ExprKind.ExprCompute a
+    | ExprKind.ExprRead a
+    | ExprKind.ExprRank a
+    | ExprKind.ExprUnique a
+    | ExprKind.ExprGroupBucket a
+    | ExprKind.ExprExtents a
+    | ExprKind.ExprStatic a -> [ a ]
+    | ExprKind.ExprReynolds (a, _) -> [ a ]
+    | ExprKind.ExprTyped (a, _) -> [ a ]
+    | ExprKind.ExprPartialApp (_, a, _) -> [ a ]
+    | ExprKind.ExprTranspose (a, _, _) -> [ a ]
+    | ExprKind.ExprDecompact (a, _) -> [ a ]
+    | ExprKind.ExprGuard (a, b)
+    | ExprKind.ExprReplicate (a, b)
+    | ExprKind.ExprMask (a, b)
+    | ExprKind.ExprCompound (a, b)
+    | ExprKind.ExprSparse (a, b)
+    | ExprKind.ExprIntersect (a, b)
+    | ExprKind.ExprUnion (a, b)
+    | ExprKind.ExprContains (a, b)
+    | ExprKind.ExprGroupBy (a, b)
+    | ExprKind.ExprSort (a, b)
+    | ExprKind.ExprGram (a, b)
+    | ExprKind.ExprAssign (a, b) -> [ a; b ]
+    | ExprKind.ExprReduce (a, k, init, axes) ->
+        [ a; k ] @ Option.toList init @ Option.toList axes
+    | ExprKind.ExprStruct (_, flds, spread) ->
+        (flds |> List.map snd) @ Option.toList spread
+    | ExprKind.ExprFor (src, _, kernel) ->
+        let sourceKids =
+            match src with
+            | ForArrays (arrays, inClause) -> arrays @ Option.toList inClause
+            | ForKernel k -> [ k ]
+        sourceKids @ Option.toList kernel
     | _ -> []
 
 /// `import icechunk` / `import icechunk as ic` aliases declared in a module.
@@ -199,9 +318,18 @@ let private desugarModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>)
             | [ ({ Kind = ExprKind.ExprLit (LitString refName) } as nameE) ] ->
                 rewritten nameE bareKind refName
             // `repo.checkout("v1.0", ic.tag)` -- the marker names the namespace.
+            //
+            // The marker may come off ANY icechunk alias in scope, not only the
+            // one whose `load` produced this handle: `import icechunk as ic`
+            // and `import icechunk as ice` name one module twice, so `ice.tag`
+            // is literally the same marker constant as `ic.tag`. Testing
+            // `markerAlias = alias` made the second spelling fall through to
+            // the not-a-marker refusal below. A marker off a NON-icechunk
+            // alias (`z.tag`) is still no marker, which the set test still
+            // catches.
             | [ ({ Kind = ExprKind.ExprLit (LitString refName) } as nameE)
                 { Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar markerAlias }, marker) } ]
-                when markerAlias = alias && Set.contains marker refMarkers ->
+                when Set.contains markerAlias aliases && Set.contains marker refMarkers ->
                 rewritten nameE marker refName
             // Anything else on a RECOGNIZED repo handle is loud: silently
             // leaving it would surface as a baffling missing-member error
@@ -243,14 +371,112 @@ let private desugarModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>)
                 repos.Value <- Map.remove fd.Name repos.Value
                 d
             | _ -> d)
+
+    // -----------------------------------------------------------------
+    // Detection-only second walk: a checkout OUTSIDE the blessed position.
+    // -----------------------------------------------------------------
+    // Finds a syntactically perfect `repo.checkout("main")` sitting somewhere
+    // the rewrite cannot reach, and names the problem at the checkout's own
+    // span. It NEVER rewrites -- a load synthesized in a function body would
+    // be recognized by none of the three binding -> path carriers.
+    let rec scanExpr (handles: Set<string>) (e: Expr) : unit =
+        match e.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar recv }, "checkout") }, args)
+            when Set.contains recv handles ->
+            diags.Add(checkoutPositionError e.Span recv)
+            // Still descend: `f(a.checkout("x"), b.checkout("y"))` is two
+            // misplaced checkouts and one run should name both.
+            args |> List.iter (scanExpr handles)
+        | ExprKind.ExprLambda (parms, _, body) ->
+            for p in parms do p.Default |> Option.iter (scanExpr handles)
+            let inner =
+                parms |> List.fold (fun (s: Set<string>) (p: LambdaParam) -> Set.remove p.Name s) handles
+            scanExpr inner body
+        | ExprKind.ExprLet (b, body) ->
+            scanExpr handles b.Value
+            scanExpr (shadow handles b.Pattern) body
+        | ExprKind.ExprMatch (scrutinee, cases) ->
+            scanExpr handles scrutinee
+            for c in cases do
+                let inner = shadow handles c.Pattern
+                c.Guard |> Option.iter (scanExpr inner)
+                scanExpr inner c.Body
+        | ExprKind.ExprBlock (stmts, tail) ->
+            let final = stmts |> List.fold scanStmt handles
+            tail |> Option.iter (scanExpr final)
+        | ExprKind.ExprRecArray def ->
+            let inner =
+                handles |> Set.remove def.Name |> Set.remove def.PrefixVar |> Set.remove def.StepVar
+            def.SeedArm |> Option.iter (fun (seedVar, seedE) -> scanExpr (Set.remove seedVar inner) seedE)
+            scanExpr inner def.SliceExpr
+        | _ -> childrenOf e |> List.iter (scanExpr handles)
+
+    and scanStmt (handles: Set<string>) (s: Stmt) : Set<string> =
+        match s with
+        | StmtSpanned (inner, _) -> scanStmt handles inner
+        | StmtLet b ->
+            scanExpr handles b.Value
+            shadow handles b.Pattern
+        | StmtAssign (lhs, _, rhs) ->
+            scanExpr handles lhs
+            scanExpr handles rhs
+            handles
+        | StmtExpr e ->
+            scanExpr handles e
+            handles
+        | StmtForIn (v, rangeE, body) ->
+            scanExpr handles rangeE
+            body |> List.fold scanStmt (Set.remove v handles) |> ignore
+            handles
+
+    /// A binding's RHS at module level. A checkout AT the root here is the
+    /// blessed position: `rewriteValue` has already dealt with it (rewrote it,
+    /// or refused its shape), so flagging it again would double-report. Its
+    /// arguments are ordinary expressions and still get walked.
+    let scanBindingValue (handles: Set<string>) (v: Expr) : unit =
+        match v.Kind with
+        | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar recv }, "checkout") }, args)
+            when Set.contains recv handles ->
+            args |> List.iter (scanExpr handles)
+        | _ -> scanExpr handles v
+
+    // Replay the handle map over the REWRITTEN decls, left to right, so each
+    // position sees exactly the handles bound above it. `recordRepo` records
+    // the same set it did the first time: a blessed checkout is an `ic.load`
+    // by now, and the key it carries declines `isCheckoutKey`.
+    let scanFuncBody (outer: Set<string>) (fd: FunctionDecl) =
+        // Defaults are evaluated in the ENCLOSING scope, the body inside the
+        // parameter scope -- so a parameter named after a repo handle shadows it.
+        for p in fd.Params do p.Default |> Option.iter (scanExpr outer)
+        let inner =
+            fd.Params |> List.fold (fun (s: Set<string>) (p: ParamDecl) -> Set.remove p.Name s) outer
+        scanExpr inner fd.Body
+    repos.Value <- Map.empty
+    let handleNames () = repos.Value |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+    for d in decls' do
+        match d.Value with
+        | DeclLet b
+        | DeclStatic b ->
+            scanBindingValue (handleNames ()) b.Value
+            recordRepo b
+        | DeclFunction fd ->
+            scanFuncBody (handleNames ()) fd
+            // Same shadowing rule the rewrite walk applies.
+            repos.Value <- Map.remove fd.Name repos.Value
+        | DeclImpl impl ->
+            let outer = handleNames ()
+            for fd in impl.Methods do scanFuncBody outer fd
+        | _ -> ()
+
     if changed.Value then { m with Decls = decls' } else m
 
 // Entry points
 
 /// The pass entry point -- same shape as the other AST->AST expansions
 /// (`Unfold.expand`, `Grad.expand`). Programs with no icechunk import come
-/// back reference-equal. Every wrong-shaped checkout on a recognized repo is
-/// collected, so one run reports them all.
+/// back reference-equal. Every wrong-shaped checkout on a recognized repo, and
+/// every well-shaped one in an unrewritable position, is collected, so one run
+/// reports them all.
 let expand (program: Program) : Result<Program, Blade.Diagnostics.Diagnostic list> =
     let diags = ResizeArray<Blade.Diagnostics.Diagnostic>()
     let changed = ref false

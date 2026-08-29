@@ -614,7 +614,13 @@ let parseArrayMetaV2 (name: string) (arrayDir: string) (zarrayJson: string) (zat
                         match tryProp c "id" with
                         | Some idEl when idEl.ValueKind = JsonValueKind.String -> idEl.GetString()
                         | _ -> "<unknown>"
-                    Some $"{where_} uses compressor '{cid}' -- compressed Zarr stores are not supported (uncompressed only); see the ZarrCodec extension point"
+                    // NAME THE CODEC AND THE USER-SIDE REMEDY. zarr-python and
+                    // icechunk-python both compress BY DEFAULT, so this is the
+                    // first wall a real store hits, and "see the ZarrCodec
+                    // extension point" pointed at a seam inside this compiler
+                    // -- a thing to implement, not a thing to do. The action is
+                    // in the writer.
+                    Some $"{where_} uses compressor '{cid}' -- compressed Zarr stores are not supported (uncompressed only). Rewrite the array with compression off (zarr-python v2: `compressor=None, filters=None`; v3: `compressors=None, filters=None`), or convert the store once with a copy that does. The compiler-side seam for adding a codec is ZarrProvider's ZarrCodec type"
                 | None -> None
             match compressorErr with
             | Some e -> Error e
@@ -729,7 +735,12 @@ let parseArrayMetaV3 (name: string) (arrayDir: string) (zarrJson: string) : Resu
                         else Some $"{where_}: big-endian bytes codec is not supported (little-endian stores only)"
                     | _ ->
                         let bad = names |> List.filter (fun n -> n <> "bytes")
-                        Some (sprintf "%s uses codec(s) %s -- compressed/transformed Zarr stores are not supported (a single little-endian 'bytes' codec only); see the ZarrCodec extension point"
+                        // Same remedy as the v2 `compressor` arm above, and for
+                        // the same reason: zarr-python v3 and icechunk-python
+                        // write `[bytes, zstd]` (or blosc) unless told not to,
+                        // so this fires on the first real store anyone points
+                        // at Blade -- and it has to say what to DO.
+                        Some (sprintf "%s uses codec(s) %s -- compressed/transformed Zarr stores are not supported (a single little-endian 'bytes' codec only). Rewrite the array with compression off (zarr-python v3: `compressors=None, filters=None`; icechunk: the same, on the array you commit), or convert the store once with a copy that does. The compiler-side seam for adding a codec is ZarrProvider's ZarrCodec type"
                                   where_ (bad @ (if List.isEmpty bad then names else []) |> List.map (sprintf "'%s'") |> String.concat ", "))
                 | Some _ -> Some $"{where_}: malformed codecs"
             match codecErr with
@@ -1084,11 +1095,22 @@ let private resolvedDimNames (a: ZarrArrayMeta) : string list =
 /// ACTUAL element type is used when it exists. Dimension names come from
 /// xarray's _ARRAY_DIMENSIONS (v2) / dimension_names (v3); unnamed arrays
 /// get synthesized dimensions. Same-named dimensions must agree on extent.
-let zarrStoreToModule
+///
+/// `poolAxis` is the PACKED-POOL twin of `externalDimMap` (icechunk plan §5.3).
+/// A packed variable's pool dimension is deliberately NOT in `sharedDims` -- its
+/// extent is a derived cardinality, not a store dimension -- so `externalDimMap`
+/// can never reach it, and the pool record below is minted fresh and untagged.
+/// A caller that has provenance for the pool (the icechunk provider, which
+/// knows the repo and the variable's content fingerprint) supplies a hook
+/// `varName -> mintedRecord -> resolvedRecord`; `None` (every plain Zarr call
+/// site) leaves the record exactly as it was, so a Zarr store's emitted module
+/// and types are byte-for-byte what they have always been.
+let zarrStoreToModuleWith
     (builder: IRBuilder)
     (moduleName: string)
     (store: ZarrStore)
     (externalDimMap: Map<string, IRIndexType> option)
+    (poolAxis: (string -> IRIndexType -> IRIndexType) option)
     : IRModule =
 
     // Dimension universe (first-seen order), extent-consistent. A blade-packed
@@ -1179,6 +1201,14 @@ let zarrStoreToModule
                               Tag = None; IxKind = IxKPlain
                               Kind = SDimension
                               Dependencies = [] }
+                    // The pool's PROVENANCE hook. Absent for a plain Zarr store
+                    // (the record stays exactly as minted above); the icechunk
+                    // provider uses it to stamp a repo-scoped identity so two
+                    // repos' pools do not co-iterate.
+                    let packedIdx =
+                        match poolAxis with
+                        | Some resolve -> resolve a.Name packedIdx
+                        | None -> packedIdx
                     packedIdx :: trailingIdx
                 | None -> trailingIdx
             let arrType = {
@@ -1204,6 +1234,18 @@ let zarrStoreToModule
         MutableArrayLets = Set.empty
         DerivedFuncOrigins = Map.empty
     }
+
+/// The historical four-argument spelling: no pool-provenance hook, which is
+/// what every plain Zarr call site wants. Kept as the name rather than adding a
+/// default argument so no existing caller changes and no emitted Zarr module or
+/// type moves.
+let zarrStoreToModule
+    (builder: IRBuilder)
+    (moduleName: string)
+    (store: ZarrStore)
+    (externalDimMap: Map<string, IRIndexType> option)
+    : IRModule =
+    zarrStoreToModuleWith builder moduleName store externalDimMap None
 
 /// Convenience: load a store and produce a module in one step (contract).
 let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRModule =
