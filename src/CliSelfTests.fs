@@ -510,28 +510,40 @@ let private runIdeServeTests () : TH.BlockResult =
                       ((Path.Combine(tmpDir, "prov_out.csv")).Replace('\\', '/'))
         let (provJson, provReadCode) =
             Blade.Ide.ideCheckSource (Path.Combine(tmpDir, "provread.blade")) provReadSource
-        // The literal `"providerRead":{...}` object inside `bname`'s binding
+        // The literal `"<field>":{...}` object inside `bname`'s binding
         // (bounded by the next `"name":` key), or a marker when absent.
-        let provOf (bname: string) =
+        let fieldOf (field: string) (bname: string) =
             let key = sprintf "\"name\":\"%s\"" bname
             let start = provJson.IndexOf key
             if start < 0 then "no-binding" else
             let next = provJson.IndexOf("\"name\":\"", start + key.Length)
             let seg = if next < 0 then provJson.Substring start else provJson.Substring(start, next - start)
-            let pk = "\"providerRead\":"
+            let pk = sprintf "\"%s\":" field
             let ps = seg.IndexOf pk
             if ps < 0 then "none" else
             let pe = seg.IndexOf('}', ps)
             seg.Substring(ps + pk.Length, pe - ps - pk.Length + 1)
+        let provOf = fieldOf "providerRead"
+        let writeOf = fieldOf "providerWrite"
         let expectedProv = "{\"store\":\"store\",\"member\":\"vars.data\"}"
-        let name = "check payload: providerRead covers read/stream/load_compound, write chases its source"
+        let name = "check payload: providerRead covers read/stream/load_compound"
         if provReadCode = 0 && provOf "obs" = expectedProv && provOf "strm" = expectedProv
-           && provOf "cmp" = expectedProv && provOf "saved" = expectedProv then
+           && provOf "cmp" = expectedProv then
             record name TH.Pass ""
         else
             record name TH.Fail
-                   (sprintf "exit %d, obs=%s strm=%s cmp=%s saved=%s" provReadCode
-                            (provOf "obs") (provOf "strm") (provOf "cmp") (provOf "saved"))
+                   (sprintf "exit %d, obs=%s strm=%s cmp=%s" provReadCode
+                            (provOf "obs") (provOf "strm") (provOf "cmp"))
+        // A write faces the OPPOSITE direction: `saved` PERSISTS `obs`, so it
+        // names where that array came from under `providerWrite` and carries
+        // no `providerRead` at all.
+        let name = "check payload: a write binding carries providerWrite, never providerRead"
+        if provReadCode = 0 && writeOf "saved" = expectedProv && provOf "saved" = "none" then
+            record name TH.Pass ""
+        else
+            record name TH.Fail
+                   (sprintf "exit %d, saved providerWrite=%s providerRead=%s" provReadCode
+                            (writeOf "saved") (provOf "saved"))
         let name = "check payload: providers[] describes the loaded csv store"
         if provJson.Contains "\"store\":\"store\",\"alias\":\"c\",\"provider\":\"csv\"" then
             record name TH.Pass ""
@@ -2291,6 +2303,8 @@ let rec internal dispatchTest (rest: string list) : int =
     | [ "provider-desugar" ] | [ "providerdesugar" ] ->
         // The icechunk checkout desugar (src/ProviderDesugar.fs). Pure
         // in-process AST rewrite; no toolchain, no fixtures, never skips.
+        // Also in the default suite (RunAll.fs yields `providerDesugar`),
+        // unlike the store-backed provider lanes.
         Blade.Tests.ProviderDesugarTests.runProviderDesugarTests ()
     | [ "hybrid" ] ->
         // Mixed-parallelism tests: order-table parse + gate-off degradation

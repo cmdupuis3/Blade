@@ -304,11 +304,23 @@ let runIcechunkTests () =
     check "key: the desugar's bare-form kind token is the provider's '?'"
         (roundTrips (Blade.ProviderDesugar.canonicalKey "r" "?" "main")) ""
 
-    (let r = parseKey "repo@main"
-     check "key: a refspec with no ':' is refused loudly"
-         (isError r "malformed store key" && isError r "branch, tag, snapshot") (errorText r))
-    (let r = parseKey "repo@bogus:x"
-     check "key: an unknown ref kind is refused loudly" (isError r "unknown ref kind 'bogus'") (errorText r))
+    // The last '@' separates a refspec ONLY when what follows is
+    // "<known-kind>:<name>". Anything else is an ordinary character of a repo
+    // PATH -- because paths really do contain '@' -- so these two parse as bare
+    // paths rather than as malformed keys. (They used to be loud errors, which
+    // is what made `C:/Users/o@corp/data/w.icechunk` unloadable.)
+    (match parseKey "repo@main" with
+     | Ok k ->
+         check "key: an '@' with no \"<kind>:\" after it is part of the PATH"
+             (k.RepoPath = "repo@main" && k.Ref = None) $"%A{k}"
+     | Error e -> check "key: an '@' with no \"<kind>:\" after it is part of the PATH" false e)
+    (match parseKey "repo@bogus:x" with
+     | Ok k ->
+         check "key: an unknown kind token leaves the '@' in the path"
+             (k.RepoPath = "repo@bogus:x" && k.Ref = None) $"%A{k}"
+     | Error e -> check "key: an unknown kind token leaves the '@' in the path" false e)
+    // A KNOWN kind token, though, is a refspec attempt: completing it wrongly
+    // stays loud, so `repo.checkout("")` cannot degrade into a repo-handle load.
     (let r = parseKey "repo@branch:"
      check "key: an empty ref name is refused loudly" (isError r "ref name after ':' is empty") (errorText r))
     (let r = parseKey "@branch:main"
@@ -316,11 +328,47 @@ let runIcechunkTests () =
     (let r = parseKey "   "
      check "key: an empty key is refused loudly" (isError r "empty store path") (errorText r))
 
+    // '@' IN A REPO PATH. A corporate Windows profile directory, an
+    // email-named share, a credentialed URL: all of them carry an '@' that is
+    // not a refspec separator, and all of them used to be refused as
+    // "malformed store key" -- the path never reached the repo reader at all.
+    (match parseKey "C:\\Users\\o@corp\\data\\w.icechunk" with
+     | Ok k ->
+         check "key: an '@' inside a directory name is a bare repo path"
+             (k.RepoPath = "C:\\Users\\o@corp\\data\\w.icechunk" && k.Ref = None) $"%A{k}"
+     | Error e -> check "key: an '@' inside a directory name is a bare repo path" false e)
+    // ... and the SAME path still takes a refspec: the split is at the LAST
+    // '@', and only that one is examined.
+    (match parseKey "C:\\Users\\o@corp\\data\\w.icechunk@branch:main" with
+     | Ok k ->
+         check "key: an '@'-carrying path still checks a ref out"
+             (k.RepoPath = "C:\\Users\\o@corp\\data\\w.icechunk"
+              && k.Ref = Some (RefBranch, "main")) $"%A{k}"
+     | Error e -> check "key: an '@'-carrying path still checks a ref out" false e)
+    check "key: an '@'-carrying checkout key round-trips"
+        (roundTrips "C:\\Users\\o@corp\\data\\w.icechunk@branch:main") ""
+    check "key: an '@'-carrying bare path round-trips"
+        (roundTrips "C:\\Users\\o@corp\\data\\w.icechunk") ""
+    check "key: hasRefSuffix separates the two"
+        (hasRefSuffix "data/w.icechunk@branch:main"
+         && not (hasRefSuffix "C:\\Users\\o@corp\\data\\w.icechunk")
+         && not (hasRefSuffix "repo@main")
+         && not (hasRefSuffix "data/w.icechunk")) ""
+
     (let r = checkLocalPath "s3://bucket/weather.icechunk"
      check "key: object-store URLs are refused BY NAME"
          (isError r "object-store URLs" && isError r "s3://") (errorText r))
     check "key: a local path passes the object-store gate"
         (match checkLocalPath "data/weather.icechunk" with Ok () -> true | Error _ -> false) ""
+    // A credentialed URL has an '@' too. It must reach the object-store
+    // refusal, which says what is actually wrong, instead of dying earlier as
+    // a "malformed store key" about a refspec the user never wrote.
+    (match parseKey "https://user@host/repo.icechunk" with
+     | Ok k ->
+         let r = checkLocalPath k.RepoPath
+         check "key: a credentialed URL reaches the object-store refusal"
+             (k.Ref = None && isError r "object-store URLs" && isError r "https://") (errorText r)
+     | Error e -> check "key: a credentialed URL reaches the object-store refusal" false e)
 
     // ---------------------------------------------------------------
     // 4. Ref resolution (pure, over synthetic repo files)
@@ -456,15 +504,25 @@ let runIcechunkTests () =
          | Ok bs -> bs <> [| 1uy; 2uy; 3uy; 4uy |]) "compressed bytes passed through unchanged"
 
     // A FlatBuffer that is not one: refused, and never as a successful decode
-    // of an empty table.
-    check "codec: garbage payload bytes do not decode as a RepoInfo"
-        (match decodePayload FtRepoInfo [| 1uy; 2uy; 3uy; 4uy |] with
-         | Error _ -> true
-         | Ok _ -> false) "garbage decoded as a repo"
-    check "codec: a truncated payload does not decode as a Snapshot"
-        (match decodePayload FtSnapshot [| 0uy |] with
-         | Error _ -> true
-         | Ok _ -> false) "one byte decoded as a snapshot"
+    // of an empty table. The refusal must come from the VERIFIER -- a walk of
+    // vtables, offset targets, vector extents and required fields BEFORE any
+    // accessor dereferences the buffer -- and not from whatever exception an
+    // accessor happens to raise while reading an arbitrary offset. Pinning the
+    // verifier's own wording is what makes that pass un-deletable: remove the
+    // verify call and these go red, even though the decode still fails.
+    let decodeErr (ft: FileType) (bs: byte[]) =
+        match decodePayload ft bs with
+        | Error e -> e
+        | Ok _ -> "<decoded>"
+    check "codec: garbage payload bytes are refused by the VERIFIER, before any field is read"
+        ((decodeErr FtRepoInfo [| 1uy; 2uy; 3uy; 4uy |]).Contains "not a valid Repo FlatBuffer")
+        (decodeErr FtRepoInfo [| 1uy; 2uy; 3uy; 4uy |])
+    check "codec: a truncated payload is refused as an invalid Snapshot FlatBuffer"
+        ((decodeErr FtSnapshot [| 0uy |]).Contains "not a valid Snapshot FlatBuffer")
+        (decodeErr FtSnapshot [| 0uy |])
+    check "codec: an empty payload is refused as an invalid Manifest FlatBuffer"
+        ((decodeErr FtManifest [||]).Contains "not a valid Manifest FlatBuffer")
+        (decodeErr FtManifest [||])
 
     // ---------------------------------------------------------------
     // 6. Node paths and chunk tables (pure)
@@ -517,6 +575,35 @@ let runIcechunkTests () =
     check "chunks: virtual refs have a NAMED refusal (no ChunkLoc case exists for them)"
         ((virtualChunkRefused "temp" "s3://other/f.nc").Contains "VIRTUAL chunk refs are not supported")
         (virtualChunkRefused "temp" "s3://other/f.nc")
+
+    // A manifest's chunk offset is a uint64 on the wire and an int64 in here,
+    // so an offset at or past 2^63 arrives NEGATIVE. The baked table declares
+    // presence as `v_icoff[i] >= 0` with -1 as the FILL sentinel, so baking one
+    // verbatim would make a corrupt offset read as fill -- silently, printing
+    // zeros where real data was asked for. 0xFFFF...FF is the sharp case: it
+    // lands exactly ON the sentinel. Driven at the emitter, because the fixture
+    // writer computes offsets from the file it is writing and cannot produce
+    // one this large.
+    (match ZarrProvider.parseArrayMetaV3 "temp" "" v3json with
+     | Error e -> check "codegen: a negative baked offset is refused" false e
+     | Ok meta ->
+         let node : NodeMeta =
+             { Id = Array.create 8 0x01uy; Path = "/temp"; Kind = NodeArray
+               UserDataJson = v3json; Shape = []; DimensionNames = None; ManifestRefs = [] }
+         let resolved (off: int64) : ResolvedArray =
+             { Root = "repo"; Ref = (RefBranch, "main"); SnapshotId = Array.create 12 0x02uy
+               VarName = "temp"; Node = node; Meta = meta
+               Table = [| Fill
+                          Native { ChunkId = Array.create 12 0xABuy; Offset = off; Length = 48L } |] }
+         // 48 = a padded chunk of this array (3 x 4 float32), so the LENGTH
+         // check cannot be what fires.
+         let emit (off: int64) = caught (fun () -> CppIcechunk.icechunkChunkFetch (resolved off) "v" 48)
+         check "codegen: an offset that wrapped to -1 (the fill sentinel) is refused"
+             ((emit (-1L)).Contains "corrupt manifest: chunk offset out of range") (emit (-1L))
+         check "codegen: an offset of exactly 2^63 is refused"
+             ((emit Int64.MinValue).Contains "chunk offset out of range") (emit Int64.MinValue)
+         check "codegen: a legal offset still emits (the guard does not over-fire)"
+             ((emit 4096L) = "<no exception>") (emit 4096L))
 
     // ---------------------------------------------------------------
     // 7. Repo-file gates (hand-assembled headers -- no real repo)
@@ -576,9 +663,14 @@ let runIcechunkTests () =
     (let r = load (junkRepo + "@branch:main")
      check "load: a canonical key over a junk payload fails the same way"
          (match r with Error e -> not (e.Contains "pending") | Ok _ -> false) (errorText r))
-    (let r = load (junkRepo + "@bogus:main")
+    // NOTE: an UNKNOWN kind token (e.g. "@bogus:main") is deliberately NOT a
+    // malformed key -- refSuffixOf (IcechunkProvider.fs) treats it as literal
+    // repo-PATH text (see "key: 'repo@bogus:x' is not a refspec" below and the
+    // '@'-in-a-directory-name coverage in ProviderDesugarTests.fs). A malformed
+    // key is a RECOGNIZED kind with an empty repo path or empty ref name.
+    (let r = load (junkRepo + "@branch:")
      check "load: a malformed key refuses before any file IO"
-         (isError r "unknown ref kind") (errorText r))
+         (isError r "the ref name after ':' is empty") (errorText r))
 
     // STALE-PENDING-P1: `loadAsModule` on a checkout key used to be pinned by
     // the pending payload message; the live behavior it must have is section
@@ -588,7 +680,7 @@ let runIcechunkTests () =
     (let msg = caught (fun () -> loadAsModule (IRBuilder()) "wx" spec1Repo)
      check "module: a spec-1 repo fails at the load site, by name"
          (msg.Contains "spec version 1") msg)
-    (let msg = caught (fun () -> loadAsModule (IRBuilder()) "ck" (junkRepo + "@bogus:v1"))
+    (let msg = caught (fun () -> loadAsModule (IRBuilder()) "ck" (junkRepo + "@branch:"))
      check "module: a malformed key fails loudly" (msg.Contains "malformed store key") msg)
     (let msg = caught (fun () -> loadAsModule (IRBuilder()) "ck" (junkRepo + "@tag:v1.0"))
      check "module: a checkout of an undecodable repo fails loudly, not with a stub message"
@@ -1312,6 +1404,14 @@ let total = reduce(A, (+), axes = 2)
                     check "e2e: a repo missing at run time fails loudly (nonzero exit)"
                         (code <> 0) ($"exit {code}: " + headOfOut)
                 | Error e -> check "e2e: a repo missing at run time fails loudly" false e
+            else
+                // No exe means the baseline compile above SKIPped (no g++) or
+                // failed -- either way `baselineFailed` has already said so.
+                // Without this arm the whole assertion VANISHED from the
+                // output on a toolchain-less machine: no PASS, no FAIL, no
+                // SKIP, nothing to notice was missing. Same failure mode the
+                // file's header warns about for baselines, one level down.
+                printfn "  SKIP e2e: a repo missing at run time fails loudly: '%s' was not built" exeName
          finally
             try Directory.Delete(missingDir, true) with _ -> ())
      with ex -> check "e2e: icechunk read" false ex.Message)
@@ -1359,9 +1459,21 @@ let total = reduce(A, (+), axes = 2)
     /// ("same axis tags and extents") for a 2-D variable, BL3999's rank-1
     /// co-iteration message for a 1-D one. Both are the same fact: two index
     /// types with different names are not one index space.
+    ///
+    /// AND NO RAW PROVENANCE TAG, anywhere in the text. An axis tag is an
+    /// internal identity ("__icaxis|lat@ic_launder:9f3a1c2b4d5e6f70#2") and the
+    /// rank-1 message used to print it verbatim where the store says `lat`;
+    /// it now decodes through `Types.displayTagName`. Pinned HERE, on the
+    /// predicate every axis-refusal assertion in this file already runs
+    /// through, so the leak cannot come back through any of them -- section 20
+    /// pins the decoded NAMES for the two shapes whose fixtures it knows.
     let refusesOnAxes (r: Result<'a, string>) : bool =
         match r with
-        | Error e -> e.Contains "same axis tags and extents" || e.Contains "DIFFERENT index types"
+        | Error e ->
+            (e.Contains "same axis tags and extents" || e.Contains "DIFFERENT index types")
+            && not (e.Contains axisTagPrefix)
+            && not (e.Contains providerPoolTagPrefix)
+            && not (e.Contains providerOrbPoolTagPrefix)
         | Ok _ -> false
 
     /// A cross-checkout differencing program over one repo: the §5 headline.
@@ -1670,6 +1782,1900 @@ let total = reduce(d, (+), axes = 2)
                   | Error e -> check "axis e2e: runs (exit 0)" false e)
              | Error e -> baselineFailed "icechunk axis-difference e2e" e)
      with ex -> check "axis e2e: cross-checkout difference" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 13. The snapshot pin, and repo-path identity
+    // ---------------------------------------------------------------
+    printfn "\n--- snapshot pin and path identity ---"
+
+    // §3.1 claims typecheck, static folds, lowering and codegen all see ONE
+    // snapshot even when a writer commits mid-compilation. A memo keyed on a
+    // stamp that is RE-STATTED per call does not deliver that: the commit is
+    // simply a memo MISS, and the later phases then resolve the newer snapshot
+    // while typecheck's types still describe the older one -- each phase
+    // internally consistent, the compilation as a whole not. The stamp is
+    // therefore taken ONCE per repo per compilation and pinned, and this drives
+    // the hazard exactly as it would arise: resolve, commit underneath, resolve
+    // again.
+    (try
+        let pinRoot = fixRepo "ic_pin"
+        let cells (k: int) = Array.init 12 (fun i -> float (k * 100 + i))
+        let temp (d: float[]) =
+            { IW.mkArray "temp" ["row"; "col"] [4L; 3L] [2L; 3L] (IW.IceF64 d) with
+                InlineThreshold = 0 }
+        /// The same two snapshots throughout; only where `main` POINTS moves,
+        /// so the difference between the two repo states is one commit.
+        let spec (mainAt: string) : IW.RepoSpec =
+            { IW.emptyRepo with
+                Seed = 71
+                Snapshots =
+                    [ IW.mkSnapshot "s1" [ temp (cells 1) ]; IW.mkSnapshot "s2" [ temp (cells 2) ] ]
+                Branches = [ ("main", mainAt) ] }
+        IW.writeRepo pinRoot (spec "s1")
+        resetCaches ()
+
+        let pinKey = pinRoot + "@branch:main"
+        let resolvedSnapshot () =
+            match load pinKey with
+            | Ok (LoadedCheckout ck) -> base32Encode ck.SnapshotId
+            | Ok (LoadedRepo _) -> "<repo handle>"
+            | Error e -> "<error: " + e + ">"
+
+        let firstResolve = resolvedSnapshot ()
+        check "pin: the first resolution names a snapshot"
+            (firstResolve.Length = objectIdChars) firstResolve
+        check "pin: the first touch of a repo records a pinned stamp"
+            ((RepoPinTable.tryPinned (canonicalRepoPath pinRoot)).IsSome) ""
+
+        // The writer commits: `main` now names s2, and the repo file's mtime
+        // moves forward -- which is exactly what a re-statted stamp notices,
+        // and exactly what must NOT change an answer already given.
+        IW.writeRepo pinRoot (spec "s2")
+        File.SetLastWriteTimeUtc(repoFilePath pinRoot, DateTime.UtcNow.AddMinutes 10.0)
+
+        let duringCompilation = resolvedSnapshot ()
+        check "pin: a commit MID-COMPILATION does not move the resolved snapshot"
+            (duringCompilation = firstResolve) $"{firstResolve} -> {duringCompilation}"
+
+        // ... and the next compilation is not stuck on it: the pin dies with
+        // the memos that were keyed on it.
+        resetCaches ()
+        check "pin: resetCaches drops the pin"
+            ((RepoPinTable.tryPinned (canonicalRepoPath pinRoot)).IsNone) ""
+        let afterReset = resolvedSnapshot ()
+        check "pin: the NEXT compilation resolves the new commit"
+            (afterReset <> firstResolve && afterReset.Length = objectIdChars)
+            $"{firstResolve} -> {afterReset}"
+     with ex -> check "pin: mid-compilation commit" false ex.Message)
+
+    // Two spellings of ONE directory are ONE repo. Identity -- the read memos,
+    // the axis mint table, the axis-tag digest -- keys on the canonical path,
+    // so `ic.load("d/wx")` and `ic.load("./d/wx")` share axes; before this they
+    // minted two universes and differencing across them refused, over the same
+    // bytes of the same repo. Only IDENTITY canonicalizes: what gets baked into
+    // C++ and printed in diagnostics is still the spelling the source wrote.
+    (try
+        let spellRoot = fixRepo "ic_spelling"
+        IW.writeRepo spellRoot wxFull
+        resetCaches ()
+        let plainKey = spellRoot + "@branch:main"
+        let dottedKey = "./" + spellRoot + "@branch:main"
+        let plainM = axisModule "ck1" plainKey
+        let dottedM = axisModule "ck2" dottedKey
+        check "path: two spellings of one repo share every axis identity"
+            (axisIdsOf plainM = axisIdsOf dottedM && (axisIdsOf plainM).Count = 2)
+            (sprintf "%A vs %A" (axisIdsOf plainM) (axisIdsOf dottedM))
+        check "path: and it is ONE mint-table entry, reachable under both spellings"
+            ((axisIdentities spellRoot "lat").Length = 1
+             && axisIdentities ("./" + spellRoot) "lat" = axisIdentities spellRoot "lat")
+            (sprintf "%d identities" (axisIdentities spellRoot "lat").Length)
+        check "path: canonicalization folds the two spellings together"
+            (canonicalRepoPath spellRoot = canonicalRepoPath ("./" + spellRoot)
+             && canonicalRepoPath spellRoot <> canonicalRepoPath (fixRepo "ic_wx"))
+            (canonicalRepoPath spellRoot + " vs " + canonicalRepoPath ("./" + spellRoot))
+        // The tag's discriminating half is 16 hex of the CANONICAL path's
+        // digest, not 4: a 4-hex collision is 2^-16 per pair and would hand two
+        // different repos one axis tag -- and an axis tag is a LICENSE, since
+        // co-iteration reads axis agreement off the tag alone.
+        check "path: the axis tag carries a 16-hex repo digest"
+            (match axisIdentities spellRoot "lat" with
+             | [ one ] ->
+                 let tag = defaultArg one.IndexType.Tag ""
+                 match tag.LastIndexOf ':' with
+                 | i when i > 0 ->
+                     let digest = tag.Substring(i + 1)
+                     digest.Length = 16
+                     && digest |> Seq.forall (fun c -> Char.IsDigit c || (c >= 'a' && c <= 'f'))
+                 | _ -> false
+             | _ -> false)
+            (sprintf "%A" (axisIdentities spellRoot "lat" |> List.map (fun i -> i.IndexType.Tag)))
+     with ex -> check "path: two spellings of one repo" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 14. Interpreter parity (the back end the notebook actually runs on)
+    // ---------------------------------------------------------------
+    // The sections above drive the COMPILED half exclusively: `lower`, then
+    // genSelfContainedProgramFromIR, then g++. `blade repl` and the notebook
+    // lane walk `Blade.Interp` instead, and the interpreter and codegen are
+    // differential twins -- so the shipped demo had no automated evidence at
+    // all that its own back end can read a checkout. Two programs: the plain
+    // arc against a hand-computed value, and the §5 cross-checkout headline
+    // against the compiled binary's stdout, byte for byte.
+    printfn "\n--- interpreter parity ---"
+
+    /// Normalized stdout (CRLF -> LF, timing lines out, trimmed) -- the
+    /// InterpDiff comparison, mirrored from ZarrTests' `normOut`.
+    let icNormOut (s: string) =
+        s.Replace("\r\n", "\n").Split('\n')
+        |> Array.filter (fun l -> not (l.Contains "completed in") && not (l.Contains "input allocation took"))
+        |> Array.map (_.TrimEnd())
+        |> String.concat "\n" |> fun t -> t.Trim()
+
+    /// The interpreter's stdout for a source, or the reason it produced none.
+    let icInterpStdout (label: string) (src: string) : Result<string, string> =
+        match lower src with
+        | Error e -> Error $"lower: {e}"
+        | Ok ir ->
+            let r = Blade.Interp.Run.runProgram ir label Blade.Interp.Value.defaultLimits
+            if r.ExitCode = Blade.Interp.Run.ExitOk then Ok r.Stdout
+            else Error $"interp exit {r.ExitCode}: {r.Stderr.Trim()}"
+
+    /// The compiled binary's stdout for the same source (the reference half of
+    /// the differential). The same emit -> deploy -> compile -> run chain the
+    /// read-e2e section spells out inline.
+    let icCompiledStdout (label: string) (src: string) : Result<string, string> =
+        match lower src with
+        | Error e -> Error $"lower: {e}"
+        | Ok ir ->
+            let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir label
+            CodeGen.deployRuntimeHeaders e2eDir
+            let cppFile = Path.Combine(e2eDir, label + ".cpp")
+            File.WriteAllText(cppFile, cpp)
+            match compileCpp cppFile e2eDir with
+            | Error e -> Error e
+            | Ok exePath ->
+                match runExecutable exePath with
+                | Ok (0, out) -> Ok out
+                | Ok (code, out) -> Error $"exit {code}: {out}"
+                | Error e -> Error e
+
+    (try
+        // Its OWN repo root, written to BOTH working directories: the
+        // interpreter reads chunks at the compiler cwd, the compiled binary at
+        // the exe cwd. A fresh root also keeps this section's mint entries and
+        // mtime-keyed memos from answering (or being answered by) any other
+        // section's.
+        let interpRoot = fixRepo "ic_interp"
+        IW.writeRepoAt [ interpRoot; Path.Combine(e2eDir, interpRoot) ] wxFull
+        resetCaches ()
+
+        // (i) The plain arc: load -> checkout -> read -> reduce. `main` is s2,
+        // whose temp is tempV2 (10 .. 200), summing to 2100 -- the same
+        // hand-computed number the read-e2e block pins on the compiled side.
+        let interpBasicSrc =
+            sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+let A = ck.vars.temp |> ic.read
+let total = reduce(A, (+), axes = 2)
+"""
+                    interpRoot
+        (match icInterpStdout "icechunk_interp_basic" interpBasicSrc with
+         | Error e -> check "interp: a checkout read runs on the interpreter" false e
+         | Ok out ->
+             check "interp: a checkout read runs on the interpreter" true ""
+             check "interp: total = sum over the checked-out snapshot = 2100"
+                 (match printedScalar "total" out with
+                  | Some v -> abs (v - 2100.0) <= 1e-9
+                  | None -> false)
+                 out)
+
+        // (ii) The §5 headline on BOTH back ends. tempV2 sums to 2100 and
+        // tempV1 to 210, so the difference sums to 1890 -- and the two back
+        // ends have to say so identically, which is a claim a single-value
+        // assertion on one of them cannot make.
+        let interpDiffSrc = crossCheckoutSrc interpRoot
+        (match icInterpStdout "icechunk_interp_diff" interpDiffSrc with
+         | Error e -> check "interp: the cross-checkout difference runs on the interpreter" false e
+         | Ok interpOut ->
+             check "interp: the cross-checkout difference runs on the interpreter" true ""
+             check "interp: cross-checkout total = sum(tempV2 - tempV1) = 1890"
+                 (match printedScalar "total" interpOut with
+                  | Some v -> abs (v - 1890.0) <= 1e-9
+                  | None -> false)
+                 interpOut
+             // The compiled half is the reference. A missing toolchain SKIPS
+             // this one comparison only -- the value assertions above stand on
+             // their own, so nothing is silently deleted by the skip.
+             (match icCompiledStdout "icechunk_interp_diff_cpp" interpDiffSrc with
+              | Error e -> baselineFailed "icechunk interpreter/compiled differential" e
+              | Ok compiledOut ->
+                  check "interp: interpreter stdout == compiled stdout (both back ends agree)"
+                      (icNormOut interpOut = icNormOut compiledOut)
+                      $"interp:\n{icNormOut interpOut}\ncompiled:\n{icNormOut compiledOut}"))
+     with ex -> check "interp: icechunk parity" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 15. The IDE payload (plan §13's P2 gate, and axis dim names)
+    // ---------------------------------------------------------------
+    // `ide check` is what the editor and the notebook client read, and it is
+    // the one surface where a checkout has to describe itself: which store the
+    // read came from, and what the array's axes are CALLED. The axis tag is
+    // `__`-prefixed on purpose (IcechunkProvider.axisTag), which is exactly
+    // why the type printer dropped it and rendered `Idx<5>, Idx<4>` where the
+    // store says lat and lon; `Ide.indexNamesOf` decodes it back.
+    printfn "\n--- ide payload ---"
+
+    // The registry install the ide path assumes (CliSelfTests does the same
+    // before its own provider-payload block). Idempotent.
+    Blade.ProviderStatics.install ()
+
+    /// A named binding's rendered `type` from an `ide check` payload.
+    let bindingTypeOf (json: string) (name: string) : string option =
+        use doc = Text.Json.JsonDocument.Parse json
+        match doc.RootElement.TryGetProperty "bindings" with
+        | true, bs ->
+            bs.EnumerateArray()
+            |> Seq.tryPick (fun b ->
+                match b.TryGetProperty "name" with
+                | true, n when n.GetString() = name ->
+                    (match b.TryGetProperty "type" with
+                     | true, t -> Some (t.GetString())
+                     | _ -> None)
+                | _ -> None)
+        | _ -> None
+
+    (try
+        let ideRoot = fixRepo "ic_ide"
+        IW.writeRepo ideRoot wxFull
+        resetCaches ()
+        let ideSrc =
+            "import icechunk as ic\n"
+            + sprintf "let repo = ic.load(\"%s\")\n" (ideRoot.Replace('\\', '/'))
+            + "let ck = repo.checkout(\"main\")\n"
+            + "let A = ck.vars.temp |> ic.read\n"
+        let (ideJson, ideCode) = Blade.Ide.ideCheckSource "icechunk_ide.blade" ideSrc
+        let ideHead = if ideJson.Length > 800 then ideJson.Substring(0, 800) else ideJson
+        check "ide: the checkout program checks clean" (ideCode = 0) ideHead
+        // providers[] describes the store the DESUGARED program loads -- the
+        // checkout binding, since `repo.checkout("main")` IS an `ic.load` by
+        // the time Ide.collectProviderStores walks the tree.
+        check "ide: providers[] names the icechunk checkout store"
+            (ideJson.Contains "\"store\":\"ck\",\"alias\":\"ic\",\"provider\":\"icechunk\"") ideHead
+        // The read binding's provenance, the same {store, member} shape the
+        // csv and zarr payload blocks pin.
+        check "ide: the read binding's providerRead = {store ck, member vars.temp}"
+            (ideJson.Contains "\"providerRead\":{\"store\":\"ck\",\"member\":\"vars.temp\"}") ideHead
+        // Pinned on the NAMES only: the digest inside the tag is an
+        // implementation detail (its width has already changed once) and
+        // nothing here depends on it.
+        let aType = bindingTypeOf ideJson "A"
+        check "ide: the checkout array's type renders the store's own dim names"
+            (aType = Some "Array<Float64 like Idx<lat>, Idx<lon>>") $"%A{aType}"
+        check "ide: no raw axis tag leaks into the payload"
+            (not (ideJson.Contains axisTagPrefix)) ideHead
+     with ex -> check "ide: icechunk payload" false ex.Message)
+
+    // The decoder itself, on synthetic input -- the half `ideCheckSource`
+    // cannot isolate. Names and the PREFIX only: the repo label's digest is
+    // deliberately not part of any claim here, so it stays free to change
+    // width or canonicalization without touching a single assertion.
+    let sharedTag = axisTagPrefix + "lat@ic_wx:0f3a"
+    let splitTag = axisTagPrefix + "lat@ic_wx:0f3a#2"
+    let longTag = axisTagPrefix + "time@ic_wx:0123456789abcdef"
+    check "axis tag: a shared axis decodes to its bare dim name"
+        (tryAxisTagName sharedTag = Some "lat") $"%A{tryAxisTagName sharedTag}"
+    check "axis tag: a SPLIT axis keeps its ordinal (two identities must not print alike)"
+        (tryAxisTagName splitTag = Some "lat#2") $"%A{tryAxisTagName splitTag}"
+    check "axis tag: a longer digest decodes the same (nothing here reads the digest)"
+        (tryAxisTagName longTag = Some "time") $"%A{tryAxisTagName longTag}"
+    check "axis tag: a FOREIGN `__` tag is not an axis tag"
+        ((tryAxisTagName "__orbidx|x").IsNone && (tryAxisTagName "__raggedidx").IsNone) ""
+    check "axis tag: a plain user-written tag is not an axis tag"
+        ((tryAxisTagName "lat").IsNone) ""
+    check "axis tag: malformed input decodes to None, never to a partial name"
+        ([ ""; axisTagPrefix; axisTagPrefix + "lat"; axisTagPrefix + "@ic_wx:0f3a" ]
+         |> List.forall (fun t -> (tryAxisTagName t).IsNone)) ""
+
+    // And the LIVE tag: whatever the mint stamped on a real checkout's axis
+    // has to decode back to the dim name the store uses. Synthetic inputs
+    // alone would keep passing if the minted SHAPE drifted.
+    (try
+        let tagRoot = fixRepo "ic_ide_tag"
+        IW.writeRepo tagRoot wxFull
+        resetCaches ()
+        axisModule "ck" (tagRoot + "@branch:main") |> ignore
+        check "axis tag: the tag a real checkout mints decodes to the store's dim name"
+            (match axisIdentities tagRoot "lat" with
+             | [ one ] -> tryAxisTagName (defaultArg one.IndexType.Tag "") = Some "lat"
+             | _ -> false)
+            (sprintf "%A" (axisIdentities tagRoot "lat" |> List.map (fun i -> i.IndexType.Tag)))
+     with ex -> check "axis tag: live decode" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 16. The committed demo notebook (examples/station_temps.bladenb)
+    // ---------------------------------------------------------------
+    // The notebook is a shipped artifact reading a COMMITTED store, and it had
+    // no automated evidence anywhere: a provider change could rot it silently
+    // and only a human opening the file would find out. Cheap by construction
+    // -- the cells are split, assembled and LOWERED, never compiled and never
+    // run.
+    //
+    // LOWERING, not `check`, and the reason has changed. It used to be that
+    // `check` proved LESS: provider resolution failures were swallowed there
+    // and lowering was the only level at which the store had to answer. Since
+    // BL2008 (section 20) that is no longer true -- the ambiguous-ref cell
+    // refuses at typecheck now, with the same words. Lowering stays because it
+    // is strictly the wider gate: it re-opens the store AND runs everything
+    // after the checker, so a cell that breaks in either half is caught here.
+    printfn "\n--- demo notebook ---"
+
+    /// The nearest ancestor of the current directory containing `rel`. The
+    /// scratch dir is cwd-relative and running two suites from private working
+    /// directories is supported, so the repo root is FOUND, not assumed --
+    /// and a genuine absence is a SKIP, not a red.
+    let rec findUpFrom (dir: DirectoryInfo option) (rel: string) : string option =
+        match dir with
+        | None -> None
+        | Some d ->
+            let cand = Path.Combine(d.FullName, rel)
+            if File.Exists cand || Directory.Exists cand then Some cand
+            else findUpFrom (Option.ofObj d.Parent) rel
+
+    let hereDir = Some (DirectoryInfo (Directory.GetCurrentDirectory()))
+    let nbPathOpt = findUpFrom hereDir (Path.Combine("examples", "station_temps.bladenb"))
+    let nbStoreOpt = findUpFrom hereDir (Path.Combine("examples", "data", "station_temps.icechunk"))
+    (match nbPathOpt, nbStoreOpt with
+     | None, _ ->
+         printfn "  SKIP notebook: examples/station_temps.bladenb not found above the working directory"
+     | _, None ->
+         printfn "  SKIP notebook: the committed store examples/data/station_temps.icechunk is not present"
+     | Some nbPath, Some nbStore ->
+         try
+            // The store this block reads is a different repo path from every
+            // fixture above, so nothing can answer across -- but the axis mint
+            // is per COMPILATION, and the three `lower` calls below want to
+            // start from an empty one (the regrid cell's refusal is a SPLIT
+            // against the identity the success cells mint).
+            resetCaches ()
+            // The .bladenb cell grammar, read off the file itself: a line whose
+            // trimmed text opens with `// %%` starts a cell, and `[markdown]`
+            // on that line makes the cell prose. Everything after it, up to the
+            // next such line, is the cell body.
+            let cells =
+                let acc = ResizeArray<bool * ResizeArray<string>>()
+                for line in File.ReadAllLines nbPath do
+                    let t = line.TrimStart()
+                    if t.StartsWith "// %%" then acc.Add((t.Contains "[markdown]", ResizeArray<string>()))
+                    elif acc.Count > 0 then (snd acc.[acc.Count - 1]).Add line
+                acc
+                |> Seq.map (fun (isMd, body) -> (isMd, String.concat "\n" (List.ofSeq body)))
+                |> List.ofSeq
+            let codeCells =
+                cells |> List.filter (fun (isMd, body) -> not isMd && body.Trim() <> "") |> List.map snd
+
+            // The notebook's store path is relative to the NOTEBOOK's own
+            // directory (a cell evaluates there). Rewriting it to the absolute
+            // path just located is the same move the e2e section makes with its
+            // mirrored fixtures, and it makes this block cwd-independent.
+            let atRoot (s: string) =
+                s.Replace("\"data/station_temps.icechunk\"",
+                          "\"" + nbStore.Replace('\\', '/') + "\"")
+
+            // The two cells the narration says fail: the regrid difference and
+            // the ambiguous bare `release`. Identified by their TEXT, so the
+            // block cannot silently re-point at a different cell when the
+            // notebook is edited.
+            let isRefusal (c: string) =
+                c.Contains "checkout(\"regrid\")"
+                || (c.Contains "checkout(\"release\")" && not (c.Contains "ic.tag"))
+            let refusals = codeCells |> List.indexed |> List.filter (fun (_, c) -> isRefusal c)
+
+            check "notebook: the cell split finds the code cells and exactly two refusals"
+                (codeCells.Length >= 7 && refusals.Length = 2)
+                (sprintf "%d code cells, %d refusals" codeCells.Length refusals.Length)
+            check "notebook: a code cell loads the committed store by the documented relative path"
+                (codeCells |> List.exists (fun c -> c.Contains "ic.load(\"data/station_temps.icechunk\")"))
+                (match codeCells with c :: _ -> c | [] -> "<no code cells>")
+
+            // (a) Every SUCCESS cell, concatenated in order -- which is what
+            // the notebook lane itself assembles per evaluation.
+            let successSrc =
+                codeCells |> List.filter (isRefusal >> not) |> String.concat "\n" |> atRoot
+            (match lower successSrc with
+             | Ok _ -> check "notebook: the success cells lower against the committed store" true ""
+             | Error e -> check "notebook: the success cells lower against the committed store" false e)
+
+            // (b) Each refusal cell, on the prefix of success cells that
+            // precedes it -- the state a reader has when they reach it.
+            for (idx, cell) in refusals do
+                let prefix =
+                    codeCells |> List.take idx |> List.filter (isRefusal >> not) |> String.concat "\n"
+                let src = atRoot (prefix + "\n" + cell)
+                let label = if cell.Contains "regrid" then "regrid" else "ambiguous ref"
+                match lower src with
+                | Ok _ ->
+                    check $"notebook: the '{label}' cell REFUSES" false
+                        "the cell lowered, so the notebook's narrated failure no longer happens"
+                | Error e ->
+                    check $"notebook: the '{label}' cell REFUSES" true ""
+                    if label = "regrid" then
+                        // The narration promises an index-type mismatch naming
+                        // the two axes, not some unrelated error.
+                        check "notebook: the regrid cell refuses ON THE AXES"
+                            (refusesOnAxes (Error e : Result<unit, string>)) e
+                    else
+                        // ... and the ambiguous one names both namespaces and
+                        // the markers that resolve them.
+                        check "notebook: the ambiguous-ref cell names both namespaces and the markers"
+                            (e.Contains "ambiguous" && e.Contains "ic.branch" && e.Contains "ic.tag") e
+         with ex -> check "notebook: examples/station_temps.bladenb" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 17. PACKED-POOL axis identity (plan §5.3's remaining residual)
+    // ---------------------------------------------------------------
+    // Section 12 gave every DENSE dimension a repo-scoped identity, which is
+    // what makes cross-repo and diverged-axis arithmetic refuse. A PACKED
+    // variable's pool axis was not covered by it and could not be: a pool is
+    // not a store dimension (its extent is a derived cardinality), so
+    // `zarrStoreToModule`'s `sharedDims` deliberately drops it and the
+    // `externalDimMap` channel the dense identities ride never reaches it. It
+    // was minted `Tag = None`, and BOTH refusal predicates are permissive on
+    // None (`indexNamesCoIterable`'s `| _ -> true`; `indexPairIncompatible`
+    // falling through to its symmetry arm), so `ca.vars.cov - cb.vars.cov`
+    // across two DIFFERENT repos silently typechecked -- the pre-P3 defect,
+    // still live for every packed variable.
+    //
+    // The pool now rides a SECOND hook (`zarrStoreToModuleWith`'s `poolAxis`)
+    // into the same mint table, keyed on `__pool:<var>` and fingerprinted over
+    // the packed variable's OWN metadata. So it gets the whole §5 story, not
+    // just the refusal half: an UNCHANGED packed variable SHARES one identity
+    // across two checkouts of a repo exactly as an unchanged dim does.
+    printfn "\n--- packed-pool axis identity ---"
+
+    let poolSharedRoot = fixRepo "ic_pool_shared"     // cov UNCHANGED across the two commits
+    let poolChangedRoot = fixRepo "ic_pool_changed"   // cov REWRITTEN between them
+    let poolTwinRoot = fixRepo "ic_pool_twin"         // a byte-identical SECOND repo
+
+    /// A depth-1 SymIdx<2,4> pool: cardinality C(5,2) = 10, one flat axis, no
+    /// trailing dense dims -- the shape whose whole index list is the pool, and
+    /// therefore the one the untagged pool made unsound.
+    let poolAttrs =
+        Some "\"blade\": {\"spec_version\": 1, \"layout\": \"packed\", \"order\": \"ascending-lex\", \"index_types\": [{\"kind\": \"sym\", \"rank\": 2, \"extent\": 4}], \"decomposition\": {\"scheme\": \"flat-ranges\"}}"
+    /// An iterated-wreath pool (spec_version 2 'orbit'): levels [(2,+),(2,+)]
+    /// at base extent 3, cardinality 21. Elementwise arithmetic over a wreath
+    /// operand is refused on its own grounds today (the pool has no traversal
+    /// nest outside its own loop), so this fixture exists to pin the TAG -- the
+    /// wreath spelling, and its `IxKind` agreement -- not an arithmetic result.
+    let orbAttrs =
+        Some "\"blade\": {\"spec_version\": 2, \"layout\": \"packed\", \"order\": \"ascending-lex\", \"index_types\": [{\"kind\": \"orbit\", \"levels\": [[2, \"+\"], [2, \"+\"]], \"extent\": 3}]}"
+
+    let covArr (d: float[]) =
+        { IW.mkArray "cov" [] [10L] [10L] (IW.IceF64 d) with AttributesJson = poolAttrs }
+    let orbArr (d: float[]) =
+        { IW.mkArray "w" [] [21L] [21L] (IW.IceF64 d) with AttributesJson = orbAttrs }
+    let covV1 = Array.init 10 (fun i -> float (i + 1))
+    let covV2 = Array.init 10 (fun i -> float (i + 1) * 2.0)
+    let orbV1 = Array.init 21 (fun i -> float (i + 1))
+    // A DENSE companion over a named dim with no coordinate array: it is what
+    // makes the "cov changed, the dense dim did not" split observable, and it
+    // proves the pool's mint-table entry does not collide with a dim's.
+    let obsArr (d: float[]) = IW.mkArray "obs" ["r"] [4L] [2L] (IW.IceF64 d)
+    let obsV1 = [| 1.0; 2.0; 3.0; 4.0 |]
+    let obsV2 = [| 5.0; 6.0; 7.0; 8.0 |]
+
+    /// `cov` and `w` identical in both commits (the same `ArraySpec` value, so
+    /// the manifests are shared verbatim); only `obs` moves. The data-only
+    /// commit of §5.2, one flavour down.
+    let poolSharedSpec (seed: int) : IW.RepoSpec =
+        { IW.emptyRepo with
+            Seed = seed
+            Snapshots = [ IW.mkSnapshot "s1" [ covArr covV1; orbArr orbV1; obsArr obsV1 ]
+                          IW.mkSnapshot "s2" [ covArr covV1; orbArr orbV1; obsArr obsV2 ] ]
+            Branches = [ ("main", "s2") ]
+            Tags = [ ("v1.0", "s1") ] }
+
+    /// The packed variable ITSELF was rewritten: same layout, same cardinality,
+    /// different cells. Nothing in the type says so -- only the fingerprint.
+    let poolChangedSpec : IW.RepoSpec =
+        { IW.emptyRepo with
+            Seed = 52
+            Snapshots = [ IW.mkSnapshot "s1" [ covArr covV1; obsArr obsV1 ]
+                          IW.mkSnapshot "s2" [ covArr covV2; obsArr obsV1 ] ]
+            Branches = [ ("main", "s2") ]
+            Tags = [ ("v1.0", "s1") ] }
+
+    /// Two checkouts of ONE repo, differencing a PACKED variable.
+    let poolCrossCheckoutSrc (root: string) =
+        sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck1 = repo.checkout("v1.0", ic.tag)
+let ck2 = repo.checkout("main")
+let A = ck1.vars.cov |> ic.read
+let B = ck2.vars.cov |> ic.read
+let d = B - A
+"""
+                (root.Replace('\\', '/'))
+
+    (try
+        IW.writeRepo poolSharedRoot (poolSharedSpec 51)
+        IW.writeRepo poolChangedRoot poolChangedSpec
+        // The SAME spec at a different path: identical bytes, and still not the
+        // same pool -- there is no identity between two repos to anchor one.
+        IW.writeRepo poolTwinRoot (poolSharedSpec 51)
+        resetCaches ()
+
+        // (a) THE POSITIVE CONTROL, first: a packed variable used with ITSELF
+        // inside one checkout still works. A tag that refused here would be a
+        // regression dressed up as soundness.
+        (let selfSrc =
+            sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+let A = ck.vars.cov |> ic.read
+let d = A - A
+let e = A * 2.0
+let cell = A(1, 2)
+"""
+                    (poolSharedRoot.Replace('\\', '/'))
+         let (r, warns) = Blade.Lowering.lowerCaptured selfSrc
+         check "pool: same-checkout packed self-arithmetic still TYPECHECKS"
+             (match r with Ok _ -> true | Error _ -> false)
+             (match r with Error e -> e | Ok _ -> "")
+         // The pool tag is `__`-prefixed for the same three seams the dense
+         // axis tag is (`checkArrayIndexTags`, `elemTypeForIterationIndex`,
+         // `Ide.indexNamesOf`), so a plain packed subscript stays quiet.
+         check "pool: a tagged pool does not make packed subscripting noisy (no BL4003)"
+             (not (warns |> List.exists (fun (d: Blade.Diagnostics.Diagnostic) -> d.Code = "BL4003")))
+             (warns |> List.map (fun d -> d.Code + ": " + d.Message) |> String.concat "; "))
+
+        // (b) THE HOLE, closed. Two DIFFERENT repos, byte-identical stores,
+        // same layout, same cardinality -- and no shared pool. Before the pool
+        // carried a tag this program typechecked.
+        (let crossRepoSrc =
+            sprintf """
+import icechunk as ic
+
+let r1 = ic.load("%s")
+let r2 = ic.load("%s")
+let ck1 = r1.checkout("main")
+let ck2 = r2.checkout("main")
+let A = ck1.vars.cov |> ic.read
+let B = ck2.vars.cov |> ic.read
+let d = B - A
+"""
+                    (poolSharedRoot.Replace('\\', '/')) (poolTwinRoot.Replace('\\', '/'))
+         let r = lower crossRepoSrc
+         check "pool: differencing a PACKED variable ACROSS REPOS is REFUSED"
+             (refusesOnAxes r)
+             (match r with
+              | Error e -> e
+              | Ok _ -> "the program typechecked, so two repos' pools co-iterated"))
+
+        // (c) One repo, a commit that rewrote the packed variable: a diverged
+        // pool, refused exactly as a diverged dense axis is.
+        (let r = lower (poolCrossCheckoutSrc poolChangedRoot)
+         check "pool: differencing across a REWRITTEN packed variable is REFUSED"
+             (refusesOnAxes r)
+             (match r with
+              | Error e -> e
+              | Ok _ -> "the program typechecked, so a rewritten pool co-iterated with its older self"))
+        check "pool: the rewrite records a SPLIT, and says what moved"
+            (match poolIdentities poolChangedRoot "cov" with
+             | newest :: _ :: [] -> newest.SplitReason = Some "packed variable content differs"
+             | _ -> false)
+            (sprintf "%A" (poolIdentities poolChangedRoot "cov" |> List.map (fun i -> i.SplitReason)))
+        check "pool: the split is PER-VARIABLE -- the untouched dense dim still shares"
+            ((axisIdentities poolChangedRoot "r").Length = 1)
+            (sprintf "%A" (axisIdentities poolChangedRoot "r" |> List.map (fun i -> i.IndexType.Tag)))
+
+        // (d) THE SHARING HALF. An UNCHANGED packed variable is one identity
+        // across both checkouts -- the §5.2 rule, with the variable's own
+        // content standing in for a coordinate it does not have.
+        (match lower (poolCrossCheckoutSrc poolSharedRoot) with
+         | Ok _ ->
+             check "pool: differencing an UNCHANGED packed variable across checkouts TYPECHECKS" true ""
+         | Error e ->
+             check "pool: differencing an UNCHANGED packed variable across checkouts TYPECHECKS" false e)
+        // ONE identity, and BOTH refs presented it. The ref spellings are left
+        // out of the claim: these programs write bare `checkout("main")`, whose
+        // refText is the unresolved-marker form, and the point here is the
+        // count -- one identity, two presenters -- not how a ref was spelled.
+        check "pool: an unchanged pool records ONE identity, presented by both refs"
+            (match poolIdentities poolSharedRoot "cov" with
+             | [ one ] ->
+                 one.Refs.Length = 2 && List.contains "tag:v1.0" one.Refs && one.SplitReason.IsNone
+             | _ -> false)
+            (sprintf "%A" (poolIdentities poolSharedRoot "cov" |> List.map (fun i -> (i.Refs, i.SplitReason))))
+
+        // (e) The tag SHAPE. Two spellings, because the Tag doubles as the
+        // record's kind sentinel: a depth-1 simplex pool is IxKPlain and takes
+        // `__icpool|`, an iterated-wreath pool is IxKOrbit (it would otherwise
+        // carry "__orbidx") and takes `__icpoolorb|`. `ixKindOfTag` maps each
+        // back, which is what IRValidate's Tag/IxKind agreement requires.
+        check "pool: a simplex pool is tagged `__icpool|<var>@<repo>:<digest>`"
+            (match poolIdentities poolSharedRoot "cov" with
+             | [ one ] ->
+                 (defaultArg one.IndexType.Tag "").StartsWith (providerPoolTagPrefix + "cov@")
+                 && one.IndexType.Id >= axisIdBase
+             | _ -> false)
+            (sprintf "%A" (poolIdentities poolSharedRoot "cov" |> List.map (fun i -> i.IndexType.Tag)))
+        check "pool: a WREATH pool takes the orbit spelling, and its kind agrees"
+            (match poolIdentities poolSharedRoot "w" with
+             | [ one ] ->
+                 (defaultArg one.IndexType.Tag "").StartsWith (providerOrbPoolTagPrefix + "w@")
+                 && one.IndexType.IxKind = IxKOrbit
+                 && ixKindOfTag one.IndexType.Tag = one.IndexType.IxKind
+             | _ -> false)
+            (sprintf "%A" (poolIdentities poolSharedRoot "w"
+                           |> List.map (fun i -> (i.IndexType.Tag, i.IndexType.IxKind))))
+        check "pool: both spellings are recognised as pool provenance, and `__orbidx` is not"
+            (isProviderPoolTag providerPoolTagPrefix
+             && isProviderPoolTag providerOrbPoolTagPrefix
+             && not (isProviderPoolTag "__orbidx")
+             && not (isProviderPoolTag axisTagPrefix)) ""
+        // A pool tag is provenance, not a display name: `tryAxisTagName` leaves
+        // it alone ON PURPOSE, so `Ide.indexNamesOf` never picks it up and
+        // `ppIndexTypeIn` keeps printing the class (`SymIdx<2, 4>`) rather than
+        // substituting a bare name for the whole compact spelling.
+        check "pool: a pool tag is not an AXIS tag, and decodes to no display name"
+            ((tryAxisTagName (providerPoolTagPrefix + "cov@ic_pool:0f3a")).IsNone
+             && (tryAxisTagName (providerOrbPoolTagPrefix + "w@ic_pool:0f3a")).IsNone) ""
+
+        // (f) The pool's mint-table entry is its own: a variable named after a
+        // dimension must not answer for that dimension, and vice versa.
+        check "pool: a pool identity lives under its own key, beside the dims"
+            ((axisIdentities poolSharedRoot "cov").IsEmpty
+             && (poolIdentities poolSharedRoot "r").IsEmpty
+             && (axisIdentities poolSharedRoot "r").Length = 1
+             && (poolIdentities poolSharedRoot "cov").Length = 1) ""
+        check "pool: two DIFFERENT repos mint separate pool identities"
+            ((poolIdentities poolTwinRoot "cov").Length = 1
+             && (poolIdentities poolSharedRoot "cov").Length = 1
+             && (poolIdentities poolTwinRoot "cov" |> List.map (fun i -> i.IndexType.Id))
+                <> (poolIdentities poolSharedRoot "cov" |> List.map (fun i -> i.IndexType.Id)))
+            (sprintf "%A vs %A"
+                 (poolIdentities poolTwinRoot "cov" |> List.map (fun i -> i.IndexType.Tag))
+                 (poolIdentities poolSharedRoot "cov" |> List.map (fun i -> i.IndexType.Tag)))
+     with ex -> check "pool: packed-pool axis identity" false ex.Message)
+
+    // ZARR DID NOT MOVE. The pool hook is an OPTION threaded exactly the way
+    // `externalDimMap` is, and the four-argument `zarrStoreToModule` -- every
+    // plain Zarr call site -- passes it absent. A plain store's pool record must
+    // still come out with `Tag = None`, or the zarr lane's packed tests are
+    // asserting a type this change invented.
+    (let zarrPacked : Blade.ZarrProvider.ZarrStore =
+        { Path = "/tmp/zpool"; Version = 3
+          Arrays =
+            [ { Name = "tri"; ArrayDir = "/tmp/zpool/tri"; Shape = [10L]; Chunks = [10L]
+                Dtype = { Code = "f8"; Elem = ETFloat64; ByteSize = 8; IsFloat = true }
+                DimNames = None; FillValue = Blade.ZarrProvider.FillFloat 0.0
+                Codec = Blade.ZarrProvider.CodecIdentity
+                Blade = Some { Group = { Sym = SymSymmetric; Rank = 2; Extent = 4L; Levels = [] }
+                               DenseDims = []; Blocks = None }
+                Version = 3; ChunkKeySep = "/"; ChunkKeyPrefix = "c" } ] }
+     let zm = Blade.ZarrProvider.zarrStoreToModule (IRBuilder()) "z" zarrPacked None
+     let poolRec =
+        zm.Types |> List.tryPick (function
+            | IRTDStruct ("z__vars", fs) ->
+                fs |> List.tryPick (fun (n, t) ->
+                    match n, t with
+                    | "tri", ArrayElem at -> List.tryHead at.IndexTypes
+                    | _ -> None)
+            | _ -> None)
+     check "pool: a PLAIN Zarr store's pool axis is still untagged (the hook defaults absent)"
+         (match poolRec with
+          | Some ix -> ix.Tag = None && ix.IxKind = IxKPlain && ix.Symmetry = SymSymmetric
+          | None -> false)
+         (sprintf "%A" poolRec))
+
+    // ---------------------------------------------------------------
+    // 18. Axis provenance survives a TYPE ALIAS (plan §5)
+    // ---------------------------------------------------------------
+    // Sections 12 and 17 make a diverged axis refuse where the difference is
+    // WRITTEN -- `ck2.vars.temp - ck1.vars.temp`. That refusal was reachable
+    // around: an ANNOTATION re-tagged the operands before the arithmetic
+    // ever saw them.
+    //
+    //     type Lat = ck1.index.lat
+    //     let A: Array<Float64 like Lat, Lon> = ck1.vars.temp |> ic.read
+    //     let B: Array<Float64 like Lat, Lon> = ck2.vars.temp |> ic.read
+    //     let d = B - A                       // typechecked. It should not.
+    //
+    // TWO independent seams let that through, and both are pinned below.
+    //
+    //   (1) `registerTypeDecl`'s alias arm rebuilt the record by re-lowering
+    //       the referenced SURFACE body, and for `<binding>.index.<dim>` that
+    //       body is a synthesized `TyIdx <extent>` (`registerProviderModule`
+    //       stores the real record beside it because there IS no surface
+    //       syntax for "the axis this store minted"). So the alias came out an
+    //       anonymous `Idx<5>` re-tagged with the alias name, and the
+    //       `__icaxis|` identity was gone before unify was asked anything.
+    //       Now the alias ADOPTS the provider record, tag included -- the
+    //       fifth carve-out beside the irreps/wreath/multi-rank ones.
+    //
+    //   (2) `unify`'s `indexPairIncompatible` exempted every `__` tag as
+    //       "synthetic, structural, never gates". Provider tags are `__`
+    //       ONLY so the four seams that read a Tag as a user-facing name leave
+    //       them alone; they are IDENTITIES, and `gatesNominally` now says so.
+    //       Without this the ascription still passed even with (1) fixed --
+    //       it would simply have relabelled the operands one layer later.
+    //
+    // The same pair FIXES a refusal that should never have fired: inside ONE
+    // checkout, an aliased array beside the raw one carried 'Lat' against
+    // '__icaxis|lat@...' and earned a BL3999 that the identical Zarr program
+    // (untagged axes) never sees. Same axis, same tag, co-iterates.
+    printfn "\n--- axis provenance through a type alias ---"
+
+    // Section 12's discipline: this section's fixtures are its own repo roots,
+    // so no earlier section's minted identities can answer for them.
+    let launderRoot = fixRepo "ic_launder"          // lat rewritten, SAME extent
+    let launderTwinRoot = fixRepo "ic_launder_twin" // a byte-identical SECOND repo
+
+    /// The refusal a laundered axis earns. Which seam fires first depends on
+    /// the shape: an ASCRIPTION refuses in `unify` (BL3001 "Type mismatch"),
+    /// a bare difference refuses in co-iteration (BL3999). Both are the same
+    /// fact and either one is a pass here -- what is pinned is that the
+    /// program does not compile, and that it failed on the index types.
+    let refusesOnAxesOrAscription (r: Result<'a, string>) : bool =
+        match r with
+        | Error e ->
+            refusesOnAxes (Error e : Result<unit, string>) || e.Contains "Type mismatch"
+        | Ok _ -> false
+
+    /// Two checkouts' rank-2 `temp`, both ascribed to ONE axis alias spelled
+    /// through ck1. The alias is the whole trick: without it this is section
+    /// 12's `crossCheckoutSrc`, which already refused.
+    let launderRank2Src (root: string) =
+        sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck1 = repo.checkout("v1.0", ic.tag)
+let ck2 = repo.checkout("main")
+type Lat = ck1.index.lat
+type Lon = ck1.index.lon
+let A: Array<Float64 like Lat, Lon> = ck1.vars.temp |> ic.read
+let B: Array<Float64 like Lat, Lon> = ck2.vars.temp |> ic.read
+let d = B - A
+let total = reduce(d, (+), axes = 2)
+"""
+                root
+
+    (try
+        IW.writeRepo launderRoot coordRewriteSpec
+        IW.writeRepo launderTwinRoot coordRewriteSpec
+        resetCaches ()
+
+        // (a) THE HOLE, closed, at rank 2.
+        (let r = lower (launderRank2Src launderRoot)
+         check "launder: ascribing two DIVERGED checkouts to ONE axis alias is REFUSED"
+             (refusesOnAxesOrAscription r)
+             (match r with
+              | Error e -> e
+              | Ok _ -> "the program typechecked, so an annotation relabelled two diverged axes into one"))
+
+        // (b) ... and at rank 1, over the coordinate array itself. Rank 1 has
+        // its own agreement predicate (`indexNamesCoIterable`, not the rank->=2
+        // `indexRecordsAgree` product rule), so it is a separate obligation and
+        // not a corollary of (a).
+        (let src =
+            sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck1 = repo.checkout("v1.0", ic.tag)
+let ck2 = repo.checkout("main")
+type Lat = ck1.index.lat
+let a: Array<Float64 like Lat> = ck1.dims.lat |> ic.read
+let b: Array<Float64 like Lat> = ck2.dims.lat |> ic.read
+let d = b - a
+let total = reduce(d, (+))
+"""
+                    launderRoot
+         let r = lower src
+         check "launder: the rank-1 (coordinate) shape is refused too"
+             (refusesOnAxesOrAscription r)
+             (match r with
+              | Error e -> e
+              | Ok _ -> "the program typechecked at rank 1"))
+
+        // (c) Two DIFFERENT repos, byte-identical stores, one alias. The
+        // cross-repo refusal section 12 pins, walked around the same way.
+        (let src =
+            sprintf """
+import icechunk as ic
+
+let r1 = ic.load("%s")
+let r2 = ic.load("%s")
+let ck1 = r1.checkout("main")
+let ck2 = r2.checkout("main")
+type Lat = ck1.index.lat
+type Lon = ck1.index.lon
+let A: Array<Float64 like Lat, Lon> = ck1.vars.temp |> ic.read
+let B: Array<Float64 like Lat, Lon> = ck2.vars.temp |> ic.read
+let d = B - A
+"""
+                    launderRoot launderTwinRoot
+         let r = lower src
+         check "launder: two REPOS' arrays through one alias are REFUSED"
+             (refusesOnAxesOrAscription r)
+             (match r with
+              | Error e -> e
+              | Ok _ -> "the program typechecked across two repos"))
+
+        // (d) The alias need not come from the store at all -- a USER-DECLARED
+        // index type of the right extent was the shortest laundering route,
+        // and it is now refused at the FIRST ascription. This is the rule the
+        // language already applies between two user-named types (`type A =
+        // Idx<5>` does not adopt a `B`-tagged array); a store-minted axis is a
+        // name too, so it joins that rule rather than sitting outside it. The
+        // ways to name a checkout axis are `ck.index.<dim>` -- pinned in (f) --
+        // or, if two axes really ARE one, to drop the annotation.
+        (let src =
+            sprintf """
+import icechunk as ic
+
+type Lat = Idx<5>
+type Lon = Idx<4>
+
+let repo = ic.load("%s")
+let ck1 = repo.checkout("v1.0", ic.tag)
+let ck2 = repo.checkout("main")
+let A: Array<Float64 like Lat, Lon> = ck1.vars.temp |> ic.read
+let B: Array<Float64 like Lat, Lon> = ck2.vars.temp |> ic.read
+let d = B - A
+"""
+                    launderRoot
+         let r = lower src
+         check "launder: a USER-DECLARED index type cannot adopt a store axis either"
+             (refusesOnAxesOrAscription r)
+             (match r with
+              | Error e -> e
+              | Ok _ -> "a hand-written Idx<5> adopted two diverged store axes"))
+
+        // (e) THE FALSE REFUSAL, fixed. One checkout, one axis: the aliased
+        // array and the raw one are the same axis and must co-iterate. This is
+        // the shape that made icechunk STRICTER than Zarr for a sound program
+        // -- a Zarr axis is untagged, so `Some "Lat"` vs `None` was permissive
+        // there while `Some "Lat"` vs `Some "__icaxis|lat@..."` refused here.
+        (let src =
+            sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+type Lat = ck.index.lat
+let lats = ck.dims.lat |> ic.read
+let w: Array<Float64 like Lat> = lats
+let z = w * lats
+let total = reduce(z, (+))
+"""
+                    launderRoot
+         let r = lower src
+         check "alias: an aliased axis co-iterates with the RAW one in the same checkout"
+             (match r with Ok _ -> true | Error _ -> false)
+             (match r with
+              | Error e -> e
+              | Ok _ -> ""))
+
+        // (f) POSITIVE CONTROL, restated so this section stands alone: the
+        // rank-2 same-checkout ascription section 12 pins is still accepted,
+        // and still quiet. Same checkout means one identity, so the alias
+        // carries the tag the array carries.
+        (let src =
+            sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+let A = ck.vars.temp |> ic.read
+type Lat = ck.index.lat
+type Lon = ck.index.lon
+let cell = A(2, 1)
+let B: Array<Float64 like Lat, Lon> = A
+let total = reduce(B, (+), axes = 2)
+"""
+                    launderRoot
+         let (r, warns) = Blade.Lowering.lowerCaptured src
+         check "alias: the same-checkout rank-2 ascription still typechecks, still quiet"
+             ((match r with Ok _ -> true | Error _ -> false)
+              && not (warns |> List.exists (fun (d: Blade.Diagnostics.Diagnostic) -> d.Code = "BL4003")))
+             (match r with
+              | Error e -> e
+              | Ok _ -> warns |> List.map (fun d -> d.Code + ": " + d.Message) |> String.concat "; "))
+
+        // (g) KNOWN HOLE, pinned rather than fixed: a plain-`unify` FUNCTION
+        // BOUNDARY still accepts a diverged axis. The plan's P3 outcome names
+        // this residual already; what (h) adds is the measurement that it is
+        // NOT a provider defect. Closing it means
+        // changing how EVERY named index type is matched at an argument
+        // position, which is a language-wide change to the direct-application
+        // seam, not a fix to axis provenance. If this ever starts REFUSING,
+        // that is good news: delete this pin and keep the one in (h).
+        (let src =
+            sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck1 = repo.checkout("v1.0", ic.tag)
+let ck2 = repo.checkout("main")
+type Lat = ck1.index.lat
+type Lon = ck1.index.lon
+
+function total_of(x: Array<Float64 like Lat, Lon>) -> Float64 = reduce(x, (+), axes = 2)
+
+let t = total_of(ck2.vars.temp |> ic.read)
+"""
+                    launderRoot
+         let r = lower src
+         check "hole: a function BOUNDARY still accepts a diverged axis (known, pinned)"
+             (match r with Ok _ -> true | Error _ -> false)
+             (match r with Error e -> "now refuses -- see the comment: " + e | Ok _ -> ""))
+
+        // (h) ... and the same laxity with NO provider in the program at all.
+        // This is the evidence for (g)'s claim: an argument position accepts a
+        // differently-named index type of equal extent, while the identical
+        // LET ascription refuses. Two seams, two answers -- the pre-existing
+        // unify-strictness split, which axis provenance rides along with
+        // rather than causes.
+        (let boundarySrc = """
+type A = Idx<5>
+type B = Idx<5>
+
+function total_of(x: Array<Float64 like A>) -> Float64 = reduce(x, (+))
+
+let b: Array<Float64 like B> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let r = total_of(b)
+"""
+         let ascribeSrc = """
+type A = Idx<5>
+type B = Idx<5>
+
+let b: Array<Float64 like B> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let a: Array<Float64 like A> = b
+"""
+         check "hole: the boundary laxity is NOT provider-specific (two plain named axes do it too)"
+             ((match lower boundarySrc with Ok _ -> true | Error _ -> false)
+              && (match lower ascribeSrc with Error _ -> true | Ok _ -> false))
+             (sprintf "boundary %A / ascription %A"
+                  (match lower boundarySrc with Ok _ -> "Ok" | Error e -> e)
+                  (match lower ascribeSrc with Ok _ -> "Ok" | Error e -> e)))
+     with ex -> check "launder: axis provenance through a type alias" false ex.Message)
+
+    // The two predicates, driven directly. The source programs above pin the
+    // CONSEQUENCE; these pin the RULE, including the arms that must stay
+    // permissive -- a tightening here is the failure mode with real blast
+    // radius, since `indexPairIncompatible` is every array unification in the
+    // language.
+    (let mkIx (tag: string option) (extent: int64) : IRIndexType =
+        { Id = 0; Rank = 1; Extent = IRLit (IRLitInt extent); Symmetry = SymNone
+          Tag = tag; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+     let icA = Some (axisTagPrefix + "lat@ic_a:0f3a1c2b4d5e6f70")
+     let icB = Some (axisTagPrefix + "lat@ic_a:0f3a1c2b4d5e6f70#2")
+     let incompat a b = Blade.Unify.indexPairIncompatible (mkIx a 5L) (mkIx b 5L)
+     check "predicate: two DIFFERENT provider axis tags are incompatible at unify"
+         (incompat icA icB) ""
+     check "predicate: the SAME provider axis tag is compatible"
+         (not (incompat icA icA)) ""
+     check "predicate: a provider tag against a USER name is incompatible"
+         (incompat icA (Some "Lat") && incompat (Some "Lat") icA) ""
+     // The escape hatch BL3999's own message advertises, and the one route by
+     // which a user can still assert that two diverged axes are one axis.
+     check "predicate: a provider tag against an UNTAGGED record stays compatible"
+         (not (incompat icA None) && not (incompat None icA)) ""
+     // Other `__` tags are KIND SENTINELS, not identities. Gating them would
+     // refuse sound code across the whole language, so they keep the exemption.
+     check "predicate: other `__` sentinels keep the synthetic exemption"
+         (not (incompat icA (Some "__orbidx"))
+          && not (incompat (Some "__orbidx") (Some "__sparseidx"))) ""
+     check "predicate: two user names still gate (unchanged)"
+         (incompat (Some "Lat") (Some "Lon")) ""
+     // The family predicate itself: all three provider spellings, and nothing
+     // that merely starts with `__`.
+     check "predicate: isProviderAxisTag covers the dense axis and both pool spellings"
+         (isProviderAxisTag (axisTagPrefix + "lat@r:00")
+          && isProviderAxisTag (providerPoolTagPrefix + "cov@r:00")
+          && isProviderAxisTag (providerOrbPoolTagPrefix + "w@r:00")
+          && not (isProviderAxisTag "__orbidx")
+          && not (isProviderAxisTag "__sparseidx")
+          && not (isProviderAxisTag "Lat")) ""
+     // One spelling, one place: `IcechunkProvider.axisTagPrefix` re-exports
+     // `Types.providerAxisTagPrefix` so the minting site and the two typecheck
+     // predicates cannot drift onto different literals.
+     check "predicate: the provider re-exports the shared axis-tag prefix"
+         (axisTagPrefix = providerAxisTagPrefix && axisTagPrefix = "__icaxis|") axisTagPrefix
+     // Rank 1's own predicate, previously refusing an alias of the SAME axis.
+     // Same tag co-iterates, different tags do not, untagged is permissive
+     // on either side.
+     let coIter a b = Blade.TypeLower.indexNamesCoIterable (mkIx a 5L) (mkIx b 5L)
+     check "predicate: rank-1 co-iteration agrees on one provider tag and refuses two"
+         (coIter icA icA && not (coIter icA icB) && coIter icA None && coIter None icA) "")
+
+    // ---------------------------------------------------------------
+    // 19. The GOLDEN repo -- bytes icechunk-python wrote, not bytes we did
+    // ---------------------------------------------------------------
+    // Every section above reads a repo `IcechunkWrite` produced. That is a real
+    // cross-check of Blade's two halves against EACH OTHER -- the writer and the
+    // reader spell out the magic bytes, the 39-byte header layout and the
+    // Crockford encoder independently -- but it is not a check against the
+    // FORMAT. Both halves were transcribed from the same spec by the same
+    // author, so a header belief that is wrong but CONSISTENT passes all of
+    // sections 1-18 and fails on the first real repo anyone points at Blade.
+    //
+    // `tests/fixtures/icechunk_repos/golden_py/` closes that. It is the one
+    // repo in the tree that is COMMITTED rather than generated, because Blade
+    // cannot generate it: icechunk-python 2.1.2 wrote it (spec v2, local FS,
+    // two commits on `main`, tag `v1.0`, uncompressed `bytes` chunk codec,
+    // native chunk files). `make_golden_py.py` beside it is its provenance and
+    // is run BY HAND -- nothing in the build or this suite invokes Python.
+    //
+    // NO OBJECT ID IS PINNED HERE. icechunk mints snapshot ids randomly, so the
+    // fixture is a capture, not a reproducible build; every snapshot is reached
+    // through `main` or the `v1.0` tag instead. What IS pinned is the array
+    // values, chosen in the generator to be checkable by eye (see its
+    // docstring, and the transcription below).
+    printfn "\n--- golden repo (icechunk-python 2.1.2) ---"
+
+    let goldenOpt =
+        findUpFrom hereDir (Path.Combine("tests", "fixtures", "icechunk_repos", "golden_py"))
+    (match goldenOpt with
+     | None ->
+         printfn "  SKIP golden: tests/fixtures/icechunk_repos/golden_py is not present"
+     | Some golden ->
+     try
+        // The generator's constants, transcribed from make_golden_py.py. They
+        // are literals there and literals here ON PURPOSE: if the script is
+        // edited and the fixture is not regenerated (or the other way round),
+        // the two disagree and this section says so.
+        //     lat  = [10, 20, 30, 40]                      sum  100.0
+        //     lon  = [100, 101, 102, 103, 104]             sum  510.0
+        //     temp(i, j) = 100*i + j       (tag v1.0)      sum 3040.0
+        //     temp(i, j) = 100*i + j + 1   (branch main)   sum 3060.0
+        let gLat = [| 10.0; 20.0; 30.0; 40.0 |]
+        let gLon = [| 100.0; 101.0; 102.0; 103.0; 104.0 |]
+        let gTempV1 = Array.init 20 (fun k -> 100.0 * float (k / 5) + float (k % 5))
+        let gTempMain = gTempV1 |> Array.map ((+) 1.0)
+
+        // (a) THE HEADER, WITH NO DECODER IN THE LOOP -------------------------
+        // The narrowest and most valuable claim in this section: the 39 bytes
+        // the reference stamps on a metadata file are the 39 bytes BOTH Blade
+        // halves believe in. Section 1 pins writer-constants against
+        // reader-constants; this pins that agreed pair against the reference.
+        // It reads raw bytes, so it stands whatever the payload decoder does.
+        let firstFileIn (sub: string) =
+            Directory.GetFiles (Path.Combine(golden, sub)) |> Array.sort |> Array.last
+        let headerOf (path: string) = Array.sub (File.ReadAllBytes path) 0 IW.headerSize
+        let repoHdr = headerOf (Path.Combine(golden, "repo"))
+        let snapHdr = headerOf (firstFileIn "snapshots")
+        let manHdr = headerOf (firstFileIn "manifests")
+
+        check "golden: the reference's magic bytes are the ones BOTH Blade halves write and read"
+            (Array.sub repoHdr 0 IW.magicBytes.Length = IW.magicBytes
+             && Array.sub repoHdr 0 magicBytes.Length = magicBytes)
+            (Array.sub repoHdr 0 12 |> Array.map (sprintf "%02x") |> String.concat " ")
+        check "golden: the implementation-name field is 24 space-padded bytes"
+            (IW.implNameSize = implNameSize
+             && Text.Encoding.UTF8.GetString(repoHdr, 12, implNameSize).TrimEnd(' ') = "ic-2.1.2")
+            (Text.Encoding.UTF8.GetString(repoHdr, 12, 24))
+        // The FILE-TYPE bytes. Blade's are hand-transcribed enum values that
+        // nothing outside Blade had ever confirmed.
+        check "golden: the file-type bytes are RepoInfo=6, Snapshot=1, Manifest=2"
+            (repoHdr.[37] = IW.ftRepoInfo && snapHdr.[37] = IW.ftSnapshot
+             && manHdr.[37] = IW.ftManifest)
+            (sprintf "repo %d, snapshot %d, manifest %d" repoHdr.[37] snapHdr.[37] manHdr.[37])
+        check "golden: the spec byte is 2, the version this reader accepts"
+            (repoHdr.[36] = 2uy && snapHdr.[36] = 2uy && manHdr.[36] = 2uy)
+            (sprintf "%d / %d / %d" repoHdr.[36] snapHdr.[36] manHdr.[36])
+        check "golden: metadata is zstd-framed (compression byte 1), as real writers do"
+            (repoHdr.[38] = IW.compZstd) (sprintf "%d" repoHdr.[38])
+        // ... and the reader's own header parser, over reference bytes.
+        (match parseHeader "golden repo file" (File.ReadAllBytes (Path.Combine(golden, "repo"))) with
+         | Error e -> check "golden: the reader's parseHeader accepts the reference header" false e
+         | Ok h ->
+             check "golden: the reader's parseHeader accepts the reference header"
+                 (h.SpecVersion = 2 && h.FileType = FtRepoInfo && h.Compression = CompZstd
+                  && h.Implementation = "ic-2.1.2")
+                 (sprintf "%s spec %d %A %A" h.Implementation h.SpecVersion h.FileType h.Compression))
+        // File NAMES: 20-character Crockford base32, same alphabet as ours.
+        check "golden: object files are named in the same 20-char Crockford base32"
+            (Directory.GetFiles (Path.Combine(golden, "snapshots"))
+             |> Array.forall (fun p ->
+                 let n = Path.GetFileName p
+                 n.Length = 20 && n |> Seq.forall (fun c -> IW.base32Alphabet.IndexOf c >= 0)))
+            (Directory.GetFiles (Path.Combine(golden, "snapshots"))
+             |> Array.map Path.GetFileName |> Array.sort |> sprintf "%A")
+
+        // (b) THE READ-THROUGH ------------------------------------------------
+        // Everything from here needs the payload decoder. It is guarded on the
+        // load so that ONE root cause reports ONCE: a decode refusal here is a
+        // single loud failure plus skipped downstream assertions, not thirty
+        // reds all restating the same byte.
+        match load golden with
+        | Ok (LoadedCheckout _) ->
+            check "golden: the reference repo LOADS as a repo handle" false
+                "a bare path returned a checkout"
+        | Error e ->
+            check "golden: the reference repo LOADS as a repo handle" false e
+            printfn "  SKIP golden (b): the remaining %s assertions need a decoded payload" "read-through"
+        | Ok (LoadedRepo h) ->
+            check "golden: the reference repo LOADS as a repo handle" true ""
+            check "golden: the header names the REFERENCE writer, not ours"
+                (h.Header.Implementation = "ic-2.1.2" && h.Header.SpecVersion = 2)
+                h.Header.Implementation
+            check "golden: the refs enumerate -- branch 'main' and tag 'v1.0', separate namespaces"
+                (List.map fst h.Info.Branches = ["main"] && List.map fst h.Info.Tags = ["v1.0"]
+                 && h.Info.DeletedTags = [])
+                (sprintf "branches %A tags %A" (List.map fst h.Info.Branches) (List.map fst h.Info.Tags))
+            // THREE, not two: the reference mints an initial "Repository
+            // initialized" commit when the repo is created, and its id is the
+            // well-known 1CECHNKREP0F1RSTCMT0 that sections 2-3 use as their
+            // base32 example. A reader that assumed a repo's snapshots are
+            // exactly its user's commits would be wrong here.
+            check "golden: all three snapshots are listed, the init commit included"
+                (h.Info.Snapshots.Length = 3
+                 && h.Info.Snapshots |> List.exists (fun s -> base32Encode s.Id = "1CECHNKREP0F1RSTCMT0"))
+                (sprintf "%A" (h.Info.Snapshots |> List.map (fun s -> (base32Encode s.Id, s.Message))))
+            check "golden: the status decodes as Online" (h.Info.Status = StatusOnline)
+                (statusName h.Info.Status)
+            let mainId = resolveRef h.Info RefBranch "main"
+            let tagId = resolveRef h.Info RefTag "v1.0"
+            check "golden: both refs resolve, to DIFFERENT snapshots"
+                (match mainId, tagId with
+                 | Ok a, Ok b -> a <> b
+                 | _ -> false)
+                (sprintf "main %s / v1.0 %s" (errorText mainId) (errorText tagId))
+            check "golden: the bare form resolves 'main' uniquely (no branch/tag collision here)"
+                (resolveRef h.Info RefBare "main" = mainId) (errorText (resolveRef h.Info RefBare "main"))
+
+            // --- the two checkouts ------------------------------------------
+            let mainKeyG = golden + "@branch:main"
+            let tagKeyG = golden + "@tag:v1.0"
+            let checkoutOf (key: string) =
+                match load key with
+                | Ok (LoadedCheckout ck) -> Some ck
+                | _ -> None
+            (match checkoutOf mainKeyG, checkoutOf tagKeyG with
+             | Some ckMain, Some ckV1 ->
+                 check "golden: both refs check out" true ""
+                 check "golden: the checkout's root-level arrays are lat, lon, temp"
+                     (List.sort (arrayNames ckMain) = ["lat"; "lon"; "temp"])
+                     (sprintf "%A" (arrayNames ckMain))
+                 check "golden: the reference writes a root GROUP node, and it is not a variable"
+                     (ckMain.Snapshot.Nodes |> List.exists (fun n -> n.Path = "/" && n.Kind = NodeGroup))
+                     (sprintf "%A" (ckMain.Snapshot.Nodes |> List.map (fun n -> (n.Path, n.Kind))))
+
+                 // Array METADATA, against what the generator asked zarr for.
+                 // The reference's zarr.json is pretty-printed, orders its keys
+                 // differently from ours and carries a `storage_transformers`
+                 // field IcechunkWrite never writes -- none of which should
+                 // matter to a real JSON parser, and this is where that stops
+                 // being an assumption.
+                 let metaCheck (label: string) (v: string) (shape: int64 list)
+                               (chunks: int64 list) (dims: string list) =
+                     match findArray ckMain v with
+                     | Error e -> check $"golden: {label} metadata decodes" false e
+                     | Ok (node, meta) ->
+                         check $"golden: {label} metadata decodes" true ""
+                         check $"golden: {label} shape and chunk grid"
+                             (meta.Shape = shape && meta.Chunks = chunks)
+                             (sprintf "%A / %A" meta.Shape meta.Chunks)
+                         check $"golden: {label} is float64"
+                             (meta.Dtype.Elem = ETFloat64) meta.Dtype.Code
+                         // Both spellings, and they must agree: the JSON's
+                         // `dimension_names` and the structural copy icechunk
+                         // records in ArrayNodeData.
+                         check $"golden: {label} dimension names agree in the JSON and the structure"
+                             (meta.DimNames = Some dims && node.DimensionNames = Some dims)
+                             (sprintf "json %A / struct %A" meta.DimNames node.DimensionNames)
+                 metaCheck "temp" "temp" [4L; 5L] [2L; 5L] ["lat"; "lon"]
+                 metaCheck "lat" "lat" [4L] [4L] ["lat"]
+                 metaCheck "lon" "lon" [5L] [5L] ["lon"]
+
+                 // THE §5.2 PREMISE, OBSERVED IN THE REFERENCE. Blade's axis
+                 // identity rests on two claims about how a real writer behaves
+                 // across a data-only commit: node ids stay put, and an
+                 // untouched array's manifest is REUSED rather than rewritten.
+                 // Until this fixture existed, both were only ever demonstrated
+                 // by the fixture writer that was built to demonstrate them.
+                 let nodeOf (c: CheckoutHandle) (n: string) =
+                     match findArray c n with Ok (node, _) -> Some node | Error _ -> None
+                 let idOf c n = nodeOf c n |> Option.map (fun x -> base32Encode x.Id)
+                 let manOf c n =
+                     nodeOf c n |> Option.map (fun x -> x.ManifestRefs |> List.map (fst >> base32Encode))
+                 check "golden: the reference keeps a node's id across snapshots (the spec's own rule)"
+                     ([ "lat"; "lon"; "temp" ] |> List.forall (fun n -> idOf ckMain n = idOf ckV1 n))
+                     (sprintf "%A vs %A"
+                          ([ "lat"; "lon"; "temp" ] |> List.map (idOf ckMain))
+                          ([ "lat"; "lon"; "temp" ] |> List.map (idOf ckV1)))
+                 check "golden: a data-only commit REUSES the untouched arrays' manifests"
+                     (manOf ckMain "lat" = manOf ckV1 "lat" && manOf ckMain "lon" = manOf ckV1 "lon")
+                     (sprintf "lat %A vs %A" (manOf ckMain "lat") (manOf ckV1 "lat"))
+                 check "golden: ... and mints a fresh manifest for the array that was rewritten"
+                     (manOf ckMain "temp" <> manOf ckV1 "temp" && (manOf ckMain "temp").IsSome)
+                     (sprintf "temp %A vs %A" (manOf ckMain "temp") (manOf ckV1 "temp"))
+             | _ ->
+                 check "golden: both refs check out" false
+                     "one of @branch:main / @tag:v1.0 did not load as a checkout")
+
+            // --- the VALUES -------------------------------------------------
+            // The whole point: numbers that came off disk through a chunk table
+            // no Blade code wrote. Chunks are native files here (the generator
+            // sets inline_chunk_threshold_bytes=0), so this exercises the
+            // chunk-id + offset + length path end to end.
+            let readsGolden (key: string) (v: string) (expected: float[]) (dims: int list)
+                            (total: float) (label: string) =
+                match spec.ReadVarData key v with
+                | Error e -> check $"golden read: {label}" false e
+                | Ok data ->
+                    check $"golden read: {label} -- dim lengths" (data.DimLengths = dims)
+                        (sprintf "%A" data.DimLengths)
+                    match data.Payload with
+                    | Blade.ProviderRegistry.PFloats got ->
+                        check $"golden read: {label} -- every cell"
+                            (got.Length = expected.Length
+                             && Array.forall2 (fun (a: float) (b: float) -> a = b) got expected)
+                            (if got.Length <> expected.Length then $"{got.Length} vs {expected.Length} values"
+                             else sprintf "%A" (Array.truncate 8 got))
+                        // The sum is pinned SEPARATELY and as a round literal:
+                        // it is the number a human can check against the
+                        // generator's docstring without reading an array dump.
+                        check $"golden read: {label} -- whole-array sum is {total}"
+                            (Array.sum got = total) (sprintf "%f" (Array.sum got))
+                    | Blade.ProviderRegistry.PInts _ ->
+                        check $"golden read: {label}" false "payload came back as int64, not float"
+            readsGolden mainKeyG "temp" gTempMain [4; 5] 3060.0 "branch main -> the corrected field"
+            readsGolden tagKeyG "temp" gTempV1 [4; 5] 3040.0 "tag v1.0 -> the raw field"
+            readsGolden mainKeyG "lat" gLat [4] 100.0 "the lat coordinate array"
+            readsGolden mainKeyG "lon" gLon [5] 510.0 "the lon coordinate array"
+            // Three spot cells, spelled out, so a failure says WHICH cell moved
+            // rather than only that a sum did. Flat indices 0, 13 and 19 are
+            // temp(0,0), temp(2,3) and temp(3,4).
+            (match spec.ReadVarData tagKeyG "temp", spec.ReadVarData mainKeyG "temp" with
+             | Ok a, Ok b ->
+                 (match a.Payload, b.Payload with
+                  | Blade.ProviderRegistry.PFloats v1, Blade.ProviderRegistry.PFloats mn ->
+                      check "golden read: spot cells -- v1.0 (0,0)=0, (2,3)=203, (3,4)=304"
+                          (v1.[0] = 0.0 && v1.[13] = 203.0 && v1.[19] = 304.0)
+                          (sprintf "%g / %g / %g" v1.[0] v1.[13] v1.[19])
+                      check "golden read: spot cells -- main is v1.0 plus exactly 1.0 everywhere"
+                          (mn.[0] = 1.0 && mn.[13] = 204.0 && mn.[19] = 305.0
+                           && Array.forall2 (fun (x: float) (y: float) -> y - x = 1.0) v1 mn)
+                          (sprintf "%g / %g / %g" mn.[0] mn.[13] mn.[19])
+                  | _ -> check "golden read: spot cells" false "a payload came back as int64")
+             | a, b -> check "golden read: spot cells" false (errorText a + " | " + errorText b))
+            // The compile-time dim-name lookup, over reference bytes.
+            check "golden: VarDimNames reports the reference's dimension names"
+                (spec.VarDimNames mainKeyG "temp" = Some ["lat"; "lon"])
+                (sprintf "%A" (spec.VarDimNames mainKeyG "temp"))
+     with ex -> check "golden: the committed icechunk-python repo" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 20. Refusals a USER can act on: at `check`, and BY NAME
+    // ---------------------------------------------------------------
+    // Two fixes here, both about what a refusal SAYS and WHEN -- not about
+    // which programs are refused. Every verdict below was already the
+    // verdict; none of this section changes an accept into a reject.
+    //
+    //   (1) NOTHING reached `blade check`. TypeCheck resolves the store at the
+    //       binding site (it must: the dims' and variables' types come from the
+    //       metadata), but its catch parked only a dead NATIVE LIBRARY as
+    //       BL2007 and swallowed everything else -- so a typo'd ref, an
+    //       ambiguous bare ref, a missing or corrupt repo, a spec byte, an
+    //       Offline status, a deleted-tag tombstone, virtual chunk refs, nested
+    //       groups and every verifier/offset refusal produced NO diagnostic
+    //       under `check` and none in the editor, appearing only once
+    //       `emit`/`run` re-opened the store at lowering. That refusal set is
+    //       this provider's product claim, so hiding all of it from the phase
+    //       people actually run was the feature's largest UX hole. It is now
+    //       BL2008, at the load/checkout site's own span.
+    //
+    //   (2) The refusals that DID arrive named nothing a user recognises. The
+    //       rank-1 co-iteration message printed the raw provenance tag; the
+    //       rank->=2 one named no axis at all; the mint table's recorded
+    //       SplitReason -- the one fact saying WHY two checkouts' axes diverged
+    //       -- was printed by nothing; and the laundering-shaped BL3001
+    //       rendered both sides identically ("expected Array<Float64 like
+    //       Idx<5>, Idx<4>>, got Array<Float64 like Idx<5>, Idx<4>>"), which
+    //       reads as a compiler bug rather than a diagnosis.
+    printfn "\n--- check-time refusals, named axes ---"
+
+    /// The in-process `ide check` seam section 15 drives: typecheck only, no
+    /// lowering, no spawn -- which is exactly the phase under test here. Using
+    /// `lower` instead would prove nothing, since lowering re-opens the store
+    /// and has always reported these.
+    let checkPayload (name: string) (src: string) : string * int =
+        Blade.Ide.ideCheckSource name src
+
+    (try
+        // Section 18's repos, reused rather than re-minted: `coordRewriteSpec`
+        // is exactly the fixture these messages need (lat rewritten, SAME
+        // extent, so the two identities are indistinguishable by extent and the
+        // recorded reason is the only explanation there is). Written only if a
+        // reordering ever leaves this section standing alone.
+        if not (Directory.Exists launderRoot) then IW.writeRepo launderRoot coordRewriteSpec
+        let root = launderRoot.Replace('\\', '/')
+
+        /// One check-phase refusal: the code, at the phase, with the provider's
+        /// own words intact. `resetCaches` per case for section 12's reason --
+        /// a compilation must not inherit another's identities or memos.
+        let refusesAtCheck (label: string) (src: string) (needles: string list) =
+            resetCaches ()
+            let (json, code) = checkPayload "ic_check_refusal.blade" src
+            let head = if json.Length > 900 then json.Substring(0, 900) else json
+            check $"check: a {label} refuses AT TYPECHECK, as BL2008"
+                (code <> 0 && json.Contains "\"code\":\"BL2008\"") head
+            check $"check: ... and keeps the provider's own words ({label})"
+                (needles |> List.forall (fun (n: string) -> json.Contains n)) head
+
+        // (a) A typo'd ref. The provider lists what the repo DOES have, which
+        // is the whole value of surfacing this at check rather than at run.
+        refusesAtCheck "typo'd ref"
+            (sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("mian")
+let A = ck.vars.temp |> ic.read
+"""
+                     root)
+            [ "no branch, tag or snapshot named"; "mian"; "main" ]
+
+        // (b) An ambiguous BARE ref -- section 12's `ic_ambiguous` fixture,
+        // where "x" is a branch and a tag.
+        refusesAtCheck "bare ref naming both a branch and a tag"
+            (sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("x")
+"""
+                     (ambRoot.Replace('\\', '/')))
+            [ "ambiguous"; "ic.branch"; "ic.tag" ]
+
+        // (c) A repo that is not there at all -- the plainest case, and the one
+        // a reader hits first when a relative path is resolved from the wrong
+        // working directory.
+        refusesAtCheck "missing repo"
+            (sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+"""
+                     (root + "_definitely_absent"))
+            [ "does not exist" ]
+
+        // (d) ADDITIVE, and this is the pin that says so: zarr raises no
+        // store-resolution type, so its missing store still falls through to
+        // the historical opaque-type fallback and lowering keeps ownership of
+        // the diagnostic. A change that made BL2008 fire for every provider
+        // would be a behaviour change to three features, not one.
+        (let (zjson, _) =
+            checkPayload "zarr_absent.blade"
+                "import zarr as z\n\nlet s = z.load(\"tests/fixtures/zarr_stores/definitely_absent\")\nlet a = 1\n"
+         check "check: a MISSING ZARR store still defers silently (other providers untouched)"
+             (not (zjson.Contains "BL2008"))
+             (if zjson.Length > 400 then zjson.Substring(0, 400) else zjson))
+
+        // (e) The POSITIVE control: surfacing refusals must not make a GOOD
+        // store refuse. Section 15 checks a clean program too; this one runs
+        // against the same fixture the refusals above use, so a fixture fault
+        // cannot masquerade as the feature working.
+        (resetCaches ()
+         let (json, code) =
+            checkPayload "ic_check_ok.blade"
+                (sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+let A = ck.vars.temp |> ic.read
+"""
+                         root)
+         check "check: a RESOLVABLE checkout still checks clean" (code = 0)
+             (if json.Length > 600 then json.Substring(0, 600) else json))
+     with ex -> check "check: store-resolution refusals reach `blade check`" false ex.Message)
+
+    // The MESSAGES. Same fixture, same verdicts as section 12/18 -- what is
+    // pinned here is the text, which is the half no other assertion reads.
+    (try
+        if not (Directory.Exists launderRoot) then IW.writeRepo launderRoot coordRewriteSpec
+        let root = launderRoot.Replace('\\', '/')
+
+        /// A refusal's text, with the mint table cleared first so the two
+        /// checkouts below mint their identities from scratch.
+        let refusalText (src: string) : string =
+            resetCaches ()
+            errorText (lower src)
+
+        // (a) RANK 1, over the coordinate array itself. Two identities of one
+        // dim, decoded ('lat' and 'lat#2'), plus the recorded reason -- which
+        // is the only thing distinguishing two axes of equal extent, and which
+        // nothing printed until now.
+        (let e =
+            refusalText
+                (sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck1 = repo.checkout("v1.0", ic.tag)
+let ck2 = repo.checkout("main")
+let a = ck1.dims.lat |> ic.read
+let b = ck2.dims.lat |> ic.read
+let d = b - a
+let total = reduce(d, (+))
+"""
+                         root)
+         check "message: the rank-1 refusal names both identities by their DECODED names"
+             (e.Contains "'lat'" && e.Contains "'lat#2'") e
+         check "message: the rank-1 refusal leaks no raw provenance tag"
+             (not (e.Contains axisTagPrefix)) e
+         check "message: the rank-1 refusal says WHY they diverged (the recorded SplitReason)"
+             (e.Contains "two identities of axis 'lat'" && e.Contains "coordinate content differs") e)
+
+        // (b) RANK 2, the §5 headline program. The bare sentence named no
+        // operand, no record and no axis; a five-axis store would have left the
+        // reader to guess which dimension moved.
+        (let e = refusalText (crossCheckoutSrc launderRoot)
+         check "message: the rank->=2 refusal names the FIRST disagreeing index record"
+             (e.Contains "they first differ at index record") e
+         check "message: ... and names that record's axis on each side"
+             (e.Contains "'lat'" && e.Contains "'lat#2'") e
+         check "message: the rank->=2 refusal leaks no raw provenance tag"
+             (not (e.Contains axisTagPrefix)) e)
+
+        // (c) The IDENTICAL-RENDER mismatch. The type printer reads no Tag, so
+        // two provider identities of one axis print alike and BL3001 said
+        // "expected X, got X". One appended line, so every ERROR-CONTAINS pin
+        // on the sentence above it still matches.
+        (let e = refusalText (launderRank2Src launderRoot)
+         // Pinned in two halves so the note's assertion can never pass
+         // VACUOUSLY. If the ascription seam stops being the one that fires
+         // first, this line goes red and says so, rather than the note silently
+         // becoming untested.
+         check "message: the laundering ascription is refused by UNIFY (the identical-render shape)"
+             (e.Contains "Type mismatch"
+              && e.Contains "expected Array<Float64 like Idx<5>, Idx<4>>, got Array<Float64 like Idx<5>, Idx<4>>")
+             e
+         check "message: ... and that identically-RENDERING mismatch now names the two identities"
+             (e.Contains "note: the index types differ by identity"
+              && e.Contains "'lat'" && e.Contains "'lat#2'"
+              && e.Contains "coordinate content differs")
+             e
+         check "message: the laundering ascription still refuses (section 18's verdict, unchanged)"
+             (refusesOnAxesOrAscription (Error e : Result<unit, string>)) e)
+     with ex -> check "message: named axes in co-iteration refusals" false ex.Message)
+
+    // The decoder's hardened cases. Section 15 pins the SHAPES the mint
+    // produces today; these pin the shapes it produces for inputs nobody had
+    // tried, now that the decoded name is user-facing in every refusal above.
+    // Both separators are legal INSIDE the field to their left, so both are
+    // read from the RIGHT.
+    let decodesTo (label: string) (payload: string) (expected: string option) =
+        let tag = axisTagPrefix + payload
+        check label (tryAxisTagName tag = expected) (sprintf "%s -> %A" tag (tryAxisTagName tag))
+
+    decodesTo "axis tag: a dim genuinely named `a@b` keeps its `@` (the LAST one separates the repo)"
+        "a@b@ic_wx:0f3a" (Some "a@b")
+    decodesTo "axis tag: a `#` inside the repo label is not a split ordinal"
+        "lat@we#ird:0f3a" (Some "lat")
+    decodesTo "axis tag: ... and a REAL ordinal on such a repo still decodes"
+        "lat@we#ird:0f3a#2" (Some "lat#2")
+    decodesTo "axis tag: a trailing `#` with nothing after it is not an ordinal"
+        "lat@ic_wx:0f3a#" (Some "lat")
+    decodesTo "axis tag: a trailing `#word` is not an ordinal either (digits only)"
+        "lat@ic_wx:0f3a#beta" (Some "lat")
+    decodesTo "axis tag: the conventional `<name>.icechunk` repo directory decodes normally"
+        "lat@wx.icechunk:0f3a" (Some "lat")
+
+    // The DIAGNOSTIC decoder is wider than the IDE one: a packed pool has no
+    // index-type spelling (`tryAxisTagName` returns None, pinned in section 15
+    // and unchanged), but a refusal message still has to call it something
+    // other than forty characters of internal identity -- which is what the
+    // two cross-repo/rewritten POOL refusals printed until now.
+    let poolDecodesTo (label: string) (tag: string) (expected: string option) =
+        check label (tryProviderTagName tag = expected)
+            (sprintf "%s -> %A" tag (tryProviderTagName tag))
+
+    poolDecodesTo "pool tag: a simplex pool decodes to a spelling no dim name can collide with"
+        (providerPoolTagPrefix + "cov@ic_pool:0f3a") (Some "pool(cov)")
+    poolDecodesTo "pool tag: ... and a SPLIT pool keeps its ordinal"
+        (providerPoolTagPrefix + "cov@ic_pool:0f3a#2") (Some "pool(cov)#2")
+    poolDecodesTo "pool tag: an iterated-wreath pool decodes to its own spelling"
+        (providerOrbPoolTagPrefix + "w@ic_pool:0f3a") (Some "orbit_pool(w)")
+    poolDecodesTo "pool tag: a DENSE axis still decodes to its bare dim name here too"
+        (axisTagPrefix + "lat@ic_wx:0f3a") (Some "lat")
+    poolDecodesTo "pool tag: a foreign `__` sentinel is decoded by neither"
+        "__orbidx" None
+
+    // ... and the LIVE consequence of that last one. A resolved provider axis
+    // carries a `__icaxis|` tag whose repo-label half is a DIRECTORY NAME, and
+    // `<name>.icechunk` is the conventional spelling -- so the tag contains a
+    // dot for entirely ordinary reasons. TypeCheck's unresolved-qualified-path
+    // heuristic ("a dotted Tag can only be an unregistered name") read that as
+    // a typo'd dimension and refused `type L = ck.index.lat` on every
+    // conventionally-named repo, printing the raw tag while doing it. Every
+    // fixture above is named WITHOUT a dot, which is why nothing caught it.
+    (try
+        let dotRoot = fixRepo "ic_dotted.icechunk"
+        IW.writeRepo dotRoot coordRewriteSpec
+        resetCaches ()
+        let r =
+            lower
+                (sprintf """
+import icechunk as ic
+
+let repo = ic.load("%s")
+let ck = repo.checkout("main")
+type Lat = ck.index.lat
+let lats = ck.dims.lat |> ic.read
+let w: Array<Float64 like Lat> = lats
+let total = reduce(w, (+))
+"""
+                         (dotRoot.Replace('\\', '/')))
+        check "dotted repo: `ck.index.lat` resolves when the repo DIRECTORY contains a dot"
+            (match r with Ok _ -> true | Error _ -> false) (errorText r)
+     with ex -> check "dotted repo: `ck.index.lat`" false ex.Message)
+
+    // ---------------------------------------------------------------
+    // 21. Tier-2 hardening
+    // ---------------------------------------------------------------
+    // Each item pinned at the seam it moved: a cap that only counted entries
+    // and never their size, a change stamp a same-tick same-length rewrite
+    // walked straight past, a chunk grid that narrowed to `int` before it was
+    // bounded, a split story told against the wrong prior, unbounded ref
+    // listings in diagnostics -- and a regeneration guard for the one fixture
+    // in this repository that is BOTH committed and generated.
+    printfn "\n--- tier-2 hardening ---"
+
+    // -- (a) The INLINE-BYTES cap ------------------------------------------
+    // `maxBakedChunks` bounds how many table ENTRIES the emitter writes and
+    // says nothing about how big they are. An inline chunk bakes as a
+    // `static const unsigned char[]` of `0x..` literals -- about five
+    // characters of C++ per byte -- so ONE 64 MB inline chunk is one table
+    // entry and ~320 MB of generated source, reported as neither a refusal nor
+    // an error but as a g++ that never returns. Driven at the emitter over a
+    // synthetic ResolvedArray, exactly like the negative-offset guard in
+    // section 6: the fixture writer inlines only chunks under its own
+    // threshold and cannot produce one this large.
+    let oneChunkJson (cells: int) =
+        sprintf """{"zarr_format": 3, "node_type": "array", "shape": [%d], "data_type": "float64",
+                    "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [%d]}},
+                    "fill_value": 0, "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                    "dimension_names": ["x"]}""" cells cells
+
+    check "inline cap: the chunk-COUNT cap came down to 100_000 alongside it"
+        (maxBakedChunks = 100_000) $"{maxBakedChunks}"
+
+    /// Emit one all-inline variable of `cells` float64s in a single chunk, and
+    /// report what the emitter said (or "<no exception>").
+    let emitInline (cells: int) : string =
+        let json = oneChunkJson cells
+        match ZarrProvider.parseArrayMetaV3 "big" "" json with
+        | Error e -> "metadata did not parse: " + e
+        | Ok meta ->
+            let node : NodeMeta =
+                { Id = Array.create 8 0x07uy; Path = "/big"; Kind = NodeArray
+                  UserDataJson = json; Shape = []; DimensionNames = None; ManifestRefs = [] }
+            let ra : ResolvedArray =
+                { Root = "wx.icechunk"; Ref = (RefBranch, "main"); SnapshotId = Array.create 12 0x03uy
+                  VarName = "big"; Node = node; Meta = meta
+                  Table = [| Inline (Array.zeroCreate (cells * 8)) |] }
+            caught (fun () -> CppIcechunk.icechunkChunkFetch ra "v" (cells * 8))
+
+    // 655360 float64 = 5 MiB in ONE chunk: one table entry, past the 4 MiB cap.
+    (let msg = emitInline 655360
+     check "inline cap: 5 MiB of inline chunk data in a single chunk is refused"
+         (msg.Contains "INLINE chunk data" && msg.Contains "inline cap") msg
+     check "inline cap: ... and the refusal names the variable and the store"
+         (msg.Contains "'big'" && msg.Contains "wx.icechunk") msg
+     check "inline cap: ... and gives a remedy in the STORE, not in the compiler"
+         (msg.Contains "Re-chunk" && msg.Contains "natively") msg)
+    check "inline cap: an ordinary small inline chunk still emits (the cap does not over-fire)"
+        (emitInline 8 = "<no exception>") (emitInline 8)
+
+    // -- (b) rank-0 and the int64 chunk-grid product -----------------------
+    // Both are gates at `arrayMetaOfNode`, the seam every checkout reads every
+    // node through, so a store that cannot be read says so at CHECK rather
+    // than at the first index expression that has no index to build.
+    let mkNode (path: string) (json: string) (dims: int64 list) : NodeMeta =
+        { Id = Array.create 8 0x09uy; Path = path; Kind = NodeArray
+          UserDataJson = json
+          Shape = dims |> List.map (fun n -> { ArrayLength = n; NumChunks = None })
+          DimensionNames = None; ManifestRefs = [] }
+
+    let rank0Json = """{"zarr_format": 3, "node_type": "array", "shape": [], "data_type": "float64",
+                        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": []}},
+                        "fill_value": 0, "codecs": [{"name": "bytes"}]}"""
+    check "rank-0: the Zarr v3 parser itself accepts a scalar array (so something downstream must refuse it)"
+        (match ZarrProvider.parseArrayMetaV3 "scalar" "" rank0Json with
+         | Ok m -> m.Shape.IsEmpty
+         | Error _ -> false)
+        (errorText (ZarrProvider.parseArrayMetaV3 "scalar" "" rank0Json))
+    (let r = arrayMetaOfNode "scalar" (mkNode "/scalar" rank0Json [])
+     check "rank-0: a rank-0 array is refused BY NAME at the icechunk metadata gate"
+         (isError r "rank-0 arrays are not supported by the icechunk provider") (errorText r)
+     check "rank-0: ... and the refusal says what to do with the value instead"
+         (isError r "length-1 rank-1 array") (errorText r))
+
+    // 3_000_000 x 3_000_000 chunks = 9e12, well past Int32.MaxValue: the old
+    // `gridDims ... |> List.map int` truncated the product into a table of the
+    // wrong length, or threw a bare ArgumentException out of `Array.create`.
+    let hugeGridJson =
+        """{"zarr_format": 3, "node_type": "array", "shape": [3000000, 3000000], "data_type": "float64",
+            "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1, 1]}},
+            "fill_value": 0, "codecs": [{"name": "bytes"}], "dimension_names": ["a", "b"]}"""
+    (let r = arrayMetaOfNode "huge" (mkNode "/huge" hugeGridJson [3000000L; 3000000L])
+     check "grid cap: a chunk grid past Int32 range is refused at the metadata gate"
+         (isError r "chunk grid" && isError r "re-chunk") (errorText r))
+    (match ZarrProvider.parseArrayMetaV3 "huge" "" hugeGridJson with
+     | Error e -> check "grid cap: the huge-grid metadata parses" false e
+     | Ok meta ->
+         let r = caught (fun () -> buildChunkTable meta [] |> ignore)
+         check "grid cap: buildChunkTable REFUSES rather than throwing out of Array.create"
+             (r = "<no exception>") r
+         check "grid cap: ... and the refusal names the array and the grid"
+             (isError (buildChunkTable meta []) "chunk grid") (errorText (buildChunkTable meta [])))
+    // The cap does not over-fire: section 6's 2-chunk grid still builds.
+    (match ZarrProvider.parseArrayMetaV3 "temp" "/repo" v3json with
+     | Error e -> check "grid cap: an ordinary grid still builds" false e
+     | Ok meta ->
+         check "grid cap: an ordinary 2-chunk grid still builds a table"
+             (match buildChunkTable meta [] with Ok t -> t.Length = 2 | Error _ -> false)
+             (errorText (buildChunkTable meta [])))
+
+    // -- (c) The change stamp's content hash --------------------------------
+    // mtime + byte length LOOKS like a complete stamp for `$ROOT/repo` and is
+    // not, for the one rewrite that matters: a BRANCH RESET swaps a
+    // fixed-width `snapshot_index` inside the FlatBuffer, so the file keeps
+    // its length exactly, and Windows' ~15.6 ms timestamp granularity lets a
+    // reset share an mtime with the write before it. The stamp is the read
+    // memos' key, so an undetected rewrite is not a stale read but a SPLIT
+    // one: whichever phase asks next keeps getting the old snapshot.
+    //
+    // Reproduced literally -- write, capture mtime, reset the branch, force
+    // the mtime back -- and driven through `resetAxisMint`, the per-request
+    // reset the IDE daemon does, which drops the pin and KEEPS the memos. That
+    // is the only path on which the stamp is load-bearing.
+    (try
+        let stampRoot = fixRepo "ic_stamp"
+        let stampKey = stampRoot + "@branch:main"
+        let latN (vals: float[]) = IW.mkArray "lat" ["lat"] [int64 vals.Length] [int64 vals.Length] (IW.IceF64 vals)
+        let stampBase : IW.RepoSpec =
+            { IW.emptyRepo with
+                Seed = 31
+                // UNCOMPRESSED, so "same length" is a property of the FORMAT
+                // and not of zstd's luck: two payloads differing in one
+                // fixed-width field compress to different lengths, which would
+                // hand this test a discriminator the real hazard does not
+                // have. Both reader paths are live (section 7), so an
+                // uncompressed repo is an ordinary one.
+                Compress = false
+                Snapshots = [ IW.mkSnapshot "s1" [ latN [| 1.0; 2.0; 3.0; 4.0 |] ]
+                              IW.mkSnapshot "s2" [ latN [| 5.0; 6.0; 7.0; 8.0 |] ]
+                              IW.mkSnapshot "s3" [ latN [| 9.0; 10.0; 11.0; 12.0 |] ] ]
+                Branches = [ ("main", "s1") ] }
+        // `Repo.snapshots` is sorted by id BYTES and `Ref.snapshot_index`
+        // indexes into that order; FlatBuffers OMIT a field at its default, so
+        // an index of 0 would serialize SHORTER than a nonzero one and the
+        // "same length" premise would be the test's own doing. Both targets
+        // are therefore picked away from position 0. Crockford base32 is
+        // order-preserving, so sorting the spellings sorts the ids.
+        let sorted = [ "s1"; "s2"; "s3" ] |> List.sortBy (IW.snapshotId stampBase)
+        let firstTarget = sorted.[1]
+        let secondTarget = sorted.[2]
+        let specOf (t: string) = { stampBase with Branches = [ ("main", t) ] }
+        let snapNow () =
+            match load stampKey with
+            | Ok (LoadedCheckout ck) -> base32Encode ck.SnapshotId
+            | Ok (LoadedRepo _) -> "<repo handle>"
+            | Error e -> "ERR: " + e
+
+        IW.writeRepo stampRoot (specOf firstTarget)
+        resetCaches ()
+        let before = snapNow ()
+        check "stamp: the first checkout resolves the branch's first target"
+            (before = IW.snapshotId stampBase firstTarget)
+            (sprintf "%s, expected %s" before (IW.snapshotId stampBase firstTarget))
+
+        let stampFile = repoFilePath stampRoot
+        let mtime = File.GetLastWriteTimeUtc stampFile
+        let lenBefore = (FileInfo stampFile).Length
+        IW.writeRepo stampRoot (specOf secondTarget)
+        let lenAfter = (FileInfo stampFile).Length
+        File.SetLastWriteTimeUtc(stampFile, mtime)
+        check "stamp: a branch RESET rewrites `repo` at EXACTLY the same byte length"
+            (lenAfter = lenBefore) (sprintf "%d -> %d bytes" lenBefore lenAfter)
+        check "stamp: ... and the mtime is forced back, so (ticks, length) is unchanged"
+            (File.GetLastWriteTimeUtc stampFile = mtime)
+            (sprintf "%A vs %A" (File.GetLastWriteTimeUtc stampFile) mtime)
+
+        // The per-request reset: pin dropped, memos kept. Under a (ticks,
+        // length) stamp the key is identical and `load` answers from the memo
+        // with the OLD snapshot.
+        resetAxisMint ()
+        let after = snapNow ()
+        check "stamp: the content hash still invalidates the read memo across the reset"
+            (after = IW.snapshotId stampBase secondTarget && after <> before)
+            (sprintf "before %s, after %s, expected %s"
+                 before after (IW.snapshotId stampBase secondTarget))
+        resetCaches ()
+     with ex -> check "stamp: a same-mtime same-length branch reset" false ex.Message)
+
+    // -- (d) `splitReason` against the CLOSEST prior ------------------------
+    // The identities of one axis are a SET this compilation has met, in
+    // checkout order -- not a chain -- so "the previous one" is an accident of
+    // which checkouts a program names. A (extent 10, coord X) -> B (extent 8)
+    // -> C (extent 10, coord Y) recorded C's reason against B and printed
+    // "extent 8 -> 10", which is true of B and says nothing about the pairing
+    // a user actually hits: C against A, whose real story is a coordinate
+    // divergence. This text is PRINTED at every co-iteration refusal
+    // (`trySplitReasonOfTag`, section 20), so it is a claim.
+    (try
+        let splitRoot = fixRepo "ic_split_prior"
+        let latN (vals: float[]) = IW.mkArray "lat" ["lat"] [int64 vals.Length] [int64 vals.Length] (IW.IceF64 vals)
+        let lat10a = Array.init 10 (fun i -> float i)
+        let lat8 = Array.init 8 (fun i -> float i)
+        let lat10b = Array.init 10 (fun i -> 100.0 + float i)
+        IW.writeRepo splitRoot
+            { IW.emptyRepo with
+                Seed = 33
+                Snapshots = [ IW.mkSnapshot "sa" [ latN lat10a ]
+                              IW.mkSnapshot "sb" [ latN lat8 ]
+                              IW.mkSnapshot "sc" [ latN lat10b ] ]
+                Branches = [ ("a", "sa"); ("b", "sb"); ("c", "sc") ] }
+        resetCaches ()
+        axisModule "ka" (splitRoot + "@branch:a") |> ignore
+        axisModule "kb" (splitRoot + "@branch:b") |> ignore
+        axisModule "kc" (splitRoot + "@branch:c") |> ignore
+        let ids = axisIdentities splitRoot "lat"
+        let story = sprintf "%A" (ids |> List.map (fun i -> (i.Extent, i.SplitReason)))
+        check "split prior: three checkouts of one dim mint three identities" (ids.Length = 3) story
+        check "split prior: the newest reason is told against the SAME-EXTENT prior, not the newest one"
+            (match ids with
+             | newest :: _ -> newest.SplitReason = Some "coordinate content differs"
+             | [] -> false)
+            story
+        check "split prior: ... and the middle identity still reports its own extent change"
+            (match ids with
+             | _ :: middle :: _ -> middle.SplitReason = Some "extent 10 -> 8"
+             | _ -> false)
+            story
+     with ex -> check "split prior: closest-prior split reason" false ex.Message)
+
+    // The other half of the rule: with NO same-extent prior, the reason is told
+    // against the OLDEST identity -- the axis as this compilation first met it
+    // -- rather than against whichever checkout happened to come last.
+    (try
+        let oldestRoot = fixRepo "ic_split_oldest"
+        let latN (vals: float[]) = IW.mkArray "lat" ["lat"] [int64 vals.Length] [int64 vals.Length] (IW.IceF64 vals)
+        IW.writeRepo oldestRoot
+            { IW.emptyRepo with
+                Seed = 34
+                Snapshots = [ IW.mkSnapshot "sa" [ latN (Array.init 10 float) ]
+                              IW.mkSnapshot "sb" [ latN (Array.init 8 float) ]
+                              IW.mkSnapshot "sd" [ latN (Array.init 12 float) ] ]
+                Branches = [ ("a", "sa"); ("b", "sb"); ("d", "sd") ] }
+        resetCaches ()
+        axisModule "oa" (oldestRoot + "@branch:a") |> ignore
+        axisModule "ob" (oldestRoot + "@branch:b") |> ignore
+        axisModule "od" (oldestRoot + "@branch:d") |> ignore
+        let ids = axisIdentities oldestRoot "lat"
+        check "split prior: no same-extent prior falls back to the OLDEST identity (10 -> 12, not 8 -> 12)"
+            (match ids with
+             | newest :: _ -> newest.SplitReason = Some "extent 10 -> 12"
+             | [] -> false)
+            (sprintf "%A" (ids |> List.map (fun i -> (i.Extent, i.SplitReason))))
+     with ex -> check "split prior: oldest-identity fallback" false ex.Message)
+
+    // -- (e) Bounded ref listings ------------------------------------------
+    // "no branch named X -- branches in this repo: ..." printed the WHOLE ref
+    // namespace. One branch per experiment (or per CI run, or per user) is an
+    // ordinary repo, and the listing is a hint, not an inventory -- it reaches
+    // a terminal, an editor popup and every pinned message.
+    let manyInfo : RepoInfo =
+        { Branches = [ for i in 1 .. 15 -> (sprintf "b%02d" i, 0) ]
+          Tags = [ for i in 1 .. 12 -> (sprintf "t%02d" i, 0) ]
+          DeletedTags = []
+          Snapshots = [ snap1 ]
+          Status = StatusOnline }
+    (let e = errorText (resolveRef manyInfo RefBranch "nope")
+     check "ref listing: a not-found branch lists at most ten names"
+         (e.Contains "b01" && e.Contains "b10" && not (e.Contains "b11")) e
+     check "ref listing: ... and says how many it did not list"
+         (e.Contains "and 5 more") e)
+    (let e = errorText (resolveRef manyInfo RefTag "nope")
+     check "ref listing: the tag listing is bounded by the same rule"
+         (e.Contains "t10" && not (e.Contains "t11") && e.Contains "and 2 more") e)
+    (let e = errorText (resolveRef manyInfo RefBare "nope")
+     check "ref listing: the bare-name refusal bounds BOTH namespaces independently"
+         (e.Contains "and 5 more" && e.Contains "and 2 more") e)
+    (let e = errorText (resolveRef info RefBranch "nope")
+     check "ref listing: a small repo still lists every branch, with no truncation note"
+         (e.Contains "main" && e.Contains "dev" && not (e.Contains "more")) e)
+
+    // -- (f) Deduped chunk-file paths --------------------------------------
+    // A repo written with packed native chunks puts EVERY chunk of a variable
+    // in one file at different offsets; the per-chunk path table then baked
+    // that one absolute path N times. One distinct path collapses to a single
+    // pointer; several go in their own table behind an index.
+    (match ZarrProvider.parseArrayMetaV3 "temp" "" v3json with
+     | Error e -> check "path dedupe: the synthetic metadata parses" false e
+     | Ok meta ->
+         let node : NodeMeta =
+             { Id = Array.create 8 0x11uy; Path = "/temp"; Kind = NodeArray
+               UserDataJson = v3json; Shape = []; DimensionNames = None; ManifestRefs = [] }
+         let withTable (t: ChunkLoc[]) : ResolvedArray =
+             { Root = "wx.icechunk"; Ref = (RefBranch, "main"); SnapshotId = Array.create 12 0x04uy
+               VarName = "temp"; Node = node; Meta = meta; Table = t }
+         let nat (id: byte) (off: int64) = Native { ChunkId = Array.create 12 id; Offset = off; Length = 48L }
+         let prologueOf (t: ChunkLoc[]) =
+             String.concat "\n" (CppIcechunk.icechunkChunkFetch (withTable t) "v" 48).Prologue
+         (let p = prologueOf [| nat 0xABuy 0L; nat 0xABuy 48L |]
+          check "path dedupe: two chunks packed in ONE file bake a single path pointer"
+              (p.Contains "static const char* const v_icpath =" && not (p.Contains "v_icfile")) p)
+         (let p = prologueOf [| nat 0xABuy 0L; nat 0xCDuy 0L |]
+          check "path dedupe: two DISTINCT files bake a 2-entry path table plus an index"
+              (p.Contains "static const char* const v_icpath[2]" && p.Contains "static const int v_icfile[2]") p)
+         (let p = prologueOf [| Fill; Fill |]
+          check "path dedupe: an all-fill variable bakes no path table at all"
+              (not (p.Contains "v_icpath") && not (p.Contains "v_icfile")) p))
+
+    // -- (g) The committed demo store vs its generator ----------------------
+    // examples/data/station_temps.icechunk is COMMITTED (the notebook reads it
+    // and pins numbers computed from it) and GENERATED
+    // (examples/tools/make_station_icechunk.fsx). Nothing connected the two: a
+    // generator edit nobody ran, or a store edit nobody generated, left a
+    // fixture and a recipe that disagree -- surfacing, eventually, as notebook
+    // pins that are quietly wrong.
+    //
+    // The spec now lives in ONE value (examples/tools/StationSpec.fs) that the
+    // script `#load`s and this test compiles against, so the comparison is
+    // real: IcechunkWrite's ids are content-derived and the spec is analytic,
+    // so the same value writes the same bytes in any directory.
+    (match findUpFrom hereDir (Path.Combine("examples", "data", "station_temps.icechunk")) with
+     | None ->
+         printfn "  SKIP regen: the committed store examples/data/station_temps.icechunk is not present"
+     | Some committed ->
+         let scratch = Path.Combine(Path.GetTempPath(), "blade_ic_regen_" + Guid.NewGuid().ToString("N"))
+         try
+            try
+                IW.writeRepoAt [ scratch ] Blade.Examples.StationSpec.spec
+                /// Every FILE under a root, as repo-relative forward-slash names.
+                /// Chunk and manifest files are content-addressed, so their NAMES
+                /// are already a content claim -- which is why the name-set half
+                /// covers them and the byte half does not need to.
+                let namesUnder (root: string) =
+                    Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+                    |> Array.map (fun f -> (Path.GetRelativePath(root, f)).Replace('\\', '/'))
+                    |> Set.ofArray
+                let committedNames = namesUnder committed
+                let rebuiltNames = namesUnder scratch
+                check "regen: the committed store holds EXACTLY the files the spec writes"
+                    (committedNames = rebuiltNames)
+                    (sprintf "only committed: %A; only rebuilt: %A"
+                         (Set.difference committedNames rebuiltNames)
+                         (Set.difference rebuiltNames committedNames))
+                let sameBytes (name: string) =
+                    let a = Path.Combine(committed, name.Replace('/', Path.DirectorySeparatorChar))
+                    let b = Path.Combine(scratch, name.Replace('/', Path.DirectorySeparatorChar))
+                    File.Exists a && File.Exists b && File.ReadAllBytes a = File.ReadAllBytes b
+                check "regen: the mutable `repo` file is byte-identical to the spec's"
+                    (sameBytes "repo") "examples/data/station_temps.icechunk/repo differs from StationSpec.spec"
+                let snapNames = rebuiltNames |> Set.filter (fun n -> n.StartsWith "snapshots/")
+                check "regen: every snapshot is byte-identical to the spec's"
+                    (not (Set.isEmpty snapNames) && snapNames |> Set.forall sameBytes)
+                    (sprintf "differing: %A" (snapNames |> Set.filter (sameBytes >> not)))
+            with ex -> check "regen: the committed store matches StationSpec.spec" false ex.Message
+         finally
+            try Directory.Delete(scratch, true) with _ -> ())
 
     // ---------------------------------------------------------------
     // Summary
