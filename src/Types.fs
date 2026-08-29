@@ -303,6 +303,169 @@ let haloShrinkOfTag (tag: string) : int64 option =
         Some (int64 ((- (min 0 (List.min offs))) + (max 0 (List.max offs))))
     | _ -> None
 
+// Provider PACKED-POOL provenance tags (icechunk plan section 5.3).
+//
+// A dense provider axis carries its provenance in a "__icaxis|" Tag, which is
+// what makes cross-repo/diverged-axis arithmetic refuse: co-iteration decides
+// axis agreement from the Tag alone. A PACKED variable's pool axis is not a
+// dimension -- its extent is a derived cardinality, so it never joins the
+// module's shared dim universe and never reached that tag -- and an untagged
+// axis is "some axis of this cardinality", which two different repos' pools
+// silently share. These prefixes give a pool axis the same provenance the
+// dense axes have.
+//
+// TWO prefixes because the Tag doubles as the KIND sentinel and a pool comes
+// in two kinds: a depth-1 simplex pool (SymIdx/AntisymIdx storage) is IxKPlain,
+// an iterated-wreath pool (OrbIdx) is IxKOrbit and would otherwise carry the
+// "__orbidx" sentinel. `ixKindOfTag` below maps each spelling back, which is
+// what IRValidate's Tag/IxKind agreement check requires. Both start with
+// `providerPoolTagStem`, so one predicate recognises the family, and both start
+// with `__` so the seams that read a Tag as a user-written NAME
+// (`checkArrayIndexTags`, `elemTypeForIterationIndex`, `Ide.indexNamesOf`)
+// leave them alone -- exactly as for "__icaxis|". `unify` is the one seam that
+// USED to be on that list and is not: see `isProviderAxisTag` below.
+let providerPoolTagStem = "__icpool"
+/// Depth-1 simplex pool (SymIdx/AntisymIdx/Hermitian storage): IxKPlain.
+let providerPoolTagPrefix = "__icpool|"
+/// Iterated-wreath pool (OrbIdx, depth >= 2): IxKOrbit.
+let providerOrbPoolTagPrefix = "__icpoolorb|"
+
+/// Does this Tag carry packed-pool provenance (either kind)?
+let isProviderPoolTag (tag: string) : bool = tag.StartsWith providerPoolTagStem
+
+/// A DENSE provider dimension's provenance prefix. The tag's SHAPE and the
+/// reasoning behind it live at `IcechunkProvider.axisTag`, which re-exports
+/// this binding as `axisTagPrefix`; the literal sits here because the two
+/// predicates that read it (`Unify.indexPairIncompatible`,
+/// `TypeLower.indexNamesCoIterable`) compile before the provider does.
+let providerAxisTagPrefix = "__icaxis|"
+
+/// Does this Tag carry PROVIDER provenance of any flavour -- a dense axis, a
+/// simplex pool, or a wreath pool?
+///
+/// The family exists because these three tags are `__`-prefixed for one
+/// narrow reason (the four seams above must not read them as user-written
+/// names) and are otherwise NOT synthetic at all: a synthetic tag is a KIND
+/// sentinel, structural and shared by every record of that kind, while a
+/// provider tag is an IDENTITY -- which repo, which version of the dim -- and
+/// two different ones are two different axes. Every seam that decides axis
+/// AGREEMENT therefore has to treat them nominatively, which is what this
+/// predicate marks. `__orbidx`, `__sparseidx`, `__anon` and friends stay
+/// exempt; they are sentinels, and comparing them would refuse sound code.
+let isProviderAxisTag (tag: string) : bool =
+    tag.StartsWith providerAxisTagPrefix || isProviderPoolTag tag
+
+// ---------------------------------------------------------------------------
+// Provider seams that the DIAGNOSTIC layer needs (icechunk review pass)
+// ---------------------------------------------------------------------------
+
+/// Raised by a provider whose STORE RESOLUTION failed: the repo does not
+/// exist, the ref does not resolve (typo'd, ambiguous, a deleted-tag
+/// tombstone), the header is not spec 2, the status is Offline, the snapshot
+/// carries a virtual chunk ref or a nested group -- every refusal that makes
+/// the store's dims and variables untypeable.
+///
+/// WHY A TYPE AND NOT `failwith`. `TypeCheck.checkDecl`'s catch-all used to
+/// swallow every icechunk store-resolution refusal and fall back to opaque
+/// types, so `blade check` and the editor reported NOTHING and the error only
+/// surfaced under `emit`/`run` once lowering re-opened the store. A named
+/// type lets that arm re-raise as a spanned diagnostic while leaving every
+/// other provider's silent fallback untouched: zarr/netcdf/csv do not raise
+/// this.
+///
+/// WHY A CLASS AND NOT `exception ProviderResolutionError of string`. The
+/// message has to survive as `.Message` -- `Lowering.lower` and
+/// `lowerCheckedProgram` surface an escaping provider failure through exactly
+/// that property, and an F# exception DECLARATION leaves `Message` at the
+/// default "Exception of type ... was thrown", blanking every lowering-phase
+/// refusal text in one stroke.
+type ProviderResolutionError(message: string) =
+    inherit System.Exception(message)
+
+/// Extension point: the provider layer registers the decoder that turns one of
+/// its axis Tags into the DISPLAY NAME a user would recognise
+/// (`__icaxis|lat@wx:9f3a1c...` -> `lat`, and a split identity -> `lat#2`);
+/// see `ProviderStatics.install`.
+///
+/// Behind a hook because the refusal sites that print tags -- `TypeLower`'s two
+/// co-iteration messages and `TypeEnv.formatTypeError` -- must not depend on a
+/// provider module, and because leaving it UNREGISTERED has to reproduce
+/// today's behaviour exactly (the raw tag, verbatim). That is what keeps a
+/// standalone `#load` of the front-end files honest, and what makes the
+/// decoder's absence a display regression rather than a crash.
+let mutable private providerAxisTagDecoder : (string -> string option) option = None
+
+let registerProviderAxisTagDecoder (f: string -> string option) : unit =
+    providerAxisTagDecoder <- Some f
+
+/// The decoded display name of a Tag: `None` when no decoder is installed, or
+/// when the tag is not one the installed decoder recognises. Never throws --
+/// a diagnostic must not die while rendering itself.
+let tryDecodeAxisTag (tag: string) : string option =
+    match providerAxisTagDecoder with
+    | Some f -> (try f tag with _ -> None)
+    | None -> None
+
+/// A Tag as it should APPEAR in a diagnostic: the decoded provider name when
+/// there is one, the raw tag otherwise. The raw case covers every user-written
+/// name (which is already its own display form), every kind sentinel, and every
+/// tag at all before `ProviderStatics.install` has run.
+let displayTagName (tag: string) : string =
+    match tryDecodeAxisTag tag with
+    | Some n -> n
+    | None -> tag
+
+/// Extension point: WHY a provider axis identity differs from the one it split
+/// from ("coordinate content differs", "extent 5 -> 10", ...), keyed on the
+/// tag that identity carries. The provider records this at mint time and,
+/// until now, nothing ever printed it -- so a diverged-checkout refusal told
+/// the user THAT two axes disagree and never WHICH FACT about the store made
+/// them disagree, which is the one thing they cannot recover by reading the
+/// program.
+let mutable private providerAxisSplitReason : (string -> string option) option = None
+
+let registerProviderAxisSplitReason (f: string -> string option) : unit =
+    providerAxisSplitReason <- Some f
+
+let tryAxisSplitReason (tag: string) : string option =
+    match providerAxisSplitReason with
+    | Some f -> (try f tag with _ -> None)
+    | None -> None
+
+/// The ONE clause a refusal between two DIFFERENT provider identities of the
+/// SAME axis earns, or `None` when the pair is not that.
+///
+/// The case exists because the display name deliberately drops everything that
+/// discriminates two identities except the split ordinal: two checkouts of one
+/// repo print as 'lat' and 'lat#2' (informative but unexplained), and two
+/// REPOS' `lat` print identically (uninformative). Both read as "these are the
+/// same axis, why the refusal?" -- so the clause says which of the two it is,
+/// and, when the mint table remembers, the store fact behind it.
+///
+/// One line, appended: every existing pin on the sentence in front of it keeps
+/// matching.
+let providerSplitClause (tagA: string) (tagB: string) : string option =
+    if tagA = tagB || not (isProviderAxisTag tagA) || not (isProviderAxisTag tagB) then None
+    else
+        match tryDecodeAxisTag tagA, tryDecodeAxisTag tagB with
+        | Some a, Some b when a = b ->
+            // Same DISPLAY name and different tags: nothing on the line above
+            // distinguishes them, so this clause is the whole diagnosis.
+            match tryAxisSplitReason tagB |> Option.orElse (tryAxisSplitReason tagA) with
+            | Some reason -> Some $"(these are two identities of axis '{a}': {reason})"
+            | None ->
+                Some $"(two different axes both print as '{a}' here: they carry different store provenance -- a diverged checkout, or a different repo)"
+        | Some a, Some b ->
+            // Different display names. When they share a base dim name the
+            // ordinal already says "two identities"; the reason says why.
+            let baseOf (n: string) = match n.IndexOf '#' with | i when i > 0 -> n.Substring(0, i) | _ -> n
+            if baseOf a = baseOf b then
+                match tryAxisSplitReason tagB |> Option.orElse (tryAxisSplitReason tagA) with
+                | Some reason -> Some $"(these are two identities of axis '{(baseOf a)}': {reason})"
+                | None -> None
+            else None
+        | _ -> None
+
 /// Derive the kind from a (possibly user-supplied) Tag value: sentinel strings
 /// map to their kind, anything else (user names, "__anon", None) is IxKPlain.
 /// For dynamic-tag sites; a literal sentinel should state IxKind directly.
@@ -326,6 +489,12 @@ let ixKindOfTag (tag: string option) : IxKind =
     | Some "__error_pgirreps_bad_spec" -> IxKErrorPgIrrepsBadSpec
     | Some t when t.StartsWith irrepsTagPrefix -> IxKIrreps
     | Some t when t.StartsWith pgIrrepsTagPrefix -> IxKPgIrreps
+    // A provider pool tag REPLACES the record's kind sentinel, so it has to
+    // decode back to the kind the record actually carries. The wreath spelling
+    // stands in for "__orbidx"; the depth-1 spelling falls through to IxKPlain
+    // below, which is what a simplex pool record carries (its symmetry, not its
+    // IxKind, is what makes it compact).
+    | Some t when t.StartsWith providerOrbPoolTagPrefix -> IxKOrbit
     // A compound-inner halo slot keeps IxKCompound: the compound machinery
     // (cidx materialization, cardinality bound) must still engage. Dense
     // halo slots fall through to IxKPlain like any other "__" placeholder.

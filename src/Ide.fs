@@ -126,9 +126,14 @@ type private BindingInfo = {
     /// Stage-3 DEDUCED symmetry as canonical pin-clause strings ("comm(a,
     /// b)"), declared or not -- always emitted for functions ([] = "None").
     DeducedComm: string list
-    /// Provenance for a top-level provider read (`let x = store.vars.v |>
+    /// Provenance for a top-level provider READ (`let x = store.vars.v |>
     /// alias.read`): (store binding name, "vars.v" / "dims.v"). None otherwise.
     ProviderRead: (string * string) option
+    /// Provenance for a top-level provider WRITE (`let saved = alias.write(
+    /// "out.csv", obs)`): the store member the array it persists came from,
+    /// chased through `obs`. Its own channel, not `ProviderRead` -- a write
+    /// binding reads nothing from the store.
+    ProviderWrite: (string * string) option
     /// Full-tier upgrade: the type MONOMORPHIZATION resolved, when it is
     /// strictly more concrete than `TypeStr`. None on the fast tier and on
     /// bindings lowering left unchanged.
@@ -342,6 +347,13 @@ let private renderJson (env: Envelope) (diags: Diag list) (bindings: BindingInfo
         | Some (store, memberPath) ->
             sb.AppendFormat(
                 ",\"providerRead\":{{\"store\":\"{0}\",\"member\":\"{1}\"}}",
+                jsonEscape store, jsonEscape memberPath) |> ignore
+        | None -> ()
+        // Same shape, opposite direction, and never both on one binding.
+        match b.ProviderWrite with
+        | Some (store, memberPath) ->
+            sb.AppendFormat(
+                ",\"providerWrite\":{{\"store\":\"{0}\",\"member\":\"{1}\"}}",
                 jsonEscape store, jsonEscape memberPath) |> ignore
         | None -> ()
         match b.Ret with
@@ -1351,15 +1363,24 @@ let private providerAliases (prog: Ast.Program) : Map<string, string> =
             | _ -> ()
     acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
 
+/// Which direction a provider-verb binding faces. A `write` binding does not
+/// read the store member it names -- it PERSISTS an array that came from there
+/// -- so the two travel in separate payload fields and must not be conflated.
+type private ProvDirection =
+    | ProvRead
+    | ProvWrite
+
 /// The `store.vars.v` / `store.dims.v` receiver of a provider-verb call (the
 /// pipe desugars to `alias.read(store.vars.v)`), recovered from the untyped
 /// RHS so a top-level provider-read binding names its source. `read`/`stream`
 /// take the view alone; `read_window` adds window bounds and `load_compound`
 /// a mask, view first in both. `write` takes a prior named binding, never a
 /// view, so its provenance is that binding's own, when one was recorded
-/// (`priorOf` -- the caller accumulates in declaration order).
+/// (`priorOf` -- the caller accumulates in declaration order) -- and comes back
+/// tagged `ProvWrite`, because what it names is where the array CAME FROM, not
+/// something this binding reads.
 let private readOperandProvenance (aliases: Map<string, string>) (priorOf: string -> (string * string) option)
-                                  (v: Expr) : (string * string) option =
+                                  (v: Expr) : (ProvDirection * (string * string)) option =
     let storeMember (operand: Expr) =
         match operand.Kind with
         | ExprKind.ExprField ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar store }, section) }, field)
@@ -1373,33 +1394,56 @@ let private readOperandProvenance (aliases: Map<string, string>) (priorOf: strin
          | ("read" | "stream"), [operand]                    // alias.read(v) / alias.stream(v)
          | "read_window", [operand; _; _]                    // alias.read_window(v, lo, hi)
          | "load_compound", [operand; _] ->                  // alias.load_compound(v, mask)
-             storeMember operand
+             storeMember operand |> Option.map (fun pr -> ProvRead, pr)
          | "write", [_; { Kind = ExprKind.ExprVar src }] ->  // alias.write("path", v)
-             priorOf src
+             priorOf src |> Option.map (fun pr -> ProvWrite, pr)
          | _ -> None)
     | _ -> None
 
-/// bindingName -> (store, "vars.v") for module-level provider reads (and
-/// writes, chased to the source binding they persist).
-let private readProvenance (prog: Ast.Program) (aliases: Map<string, string>) : Map<string, string * string> =
-    let acc = Dictionary<string, string * string>()
-    let priorOf name =
-        match acc.TryGetValue name with
-        | true, pr -> Some pr
-        | _ -> None
+/// bindingName -> (store, "vars.v"), as two maps: READS (`alias.read` and its
+/// siblings) and WRITES (`alias.write`, chased to the source binding it
+/// persists).
+///
+/// The write chase is scoped to ONE MODULE: `alias.write("p", obs)` resolves
+/// `obs` against its own module's bindings, so `priorOf`'s accumulator is
+/// effectively keyed by (module, name) -- a program-wide name-keyed
+/// accumulator would let a `let obs` in module A hand its provenance to an
+/// unrelated same-named write in module B.
+///
+/// The RETURNED maps stay name-keyed: `joinBindings` pairs them against typed
+/// binding entries, which carry a scope but no module identity, so
+/// cross-module duplicates of a top-level name still collide there (last
+/// module wins) -- only the CHASE above is module-scoped.
+let private readProvenance (prog: Ast.Program) (aliases: Map<string, string>)
+    : Map<string, string * string> * Map<string, string * string> =
+    let reads = Dictionary<string, string * string>()
+    let writes = Dictionary<string, string * string>()
     if not aliases.IsEmpty then
         for m in prog.Modules do
+            let prior = Dictionary<string, string * string>()
+            let priorOf name =
+                match prior.TryGetValue name with
+                | true, pr -> Some pr
+                | _ -> None
             for ld in m.Decls do
                 match ld.Value with
                 | DeclLet b | DeclStatic b ->
                     match b.Pattern.Kind with
                     | PatternKind.PatVar name ->
                         match readOperandProvenance aliases priorOf b.Value with
-                        | Some pr -> acc.[name] <- pr
+                        | Some (dir, pr) ->
+                            // Both directions feed the chase (a write of a
+                            // write still names the array's origin); only the
+                            // OUTPUT channel splits.
+                            prior.[name] <- pr
+                            (match dir with
+                             | ProvRead -> reads.[name] <- pr
+                             | ProvWrite -> writes.[name] <- pr)
                         | None -> ()
                     | _ -> ()
                 | _ -> ()
-    acc |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq
+    (reads |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq,
+     writes |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq)
 
 /// Provided structure for every `let store = alias.load("path")`, rendered
 /// from the module TypeCheck already stashed in IdeStores -- so this NEVER
@@ -1485,8 +1529,9 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
             docCache.[line] <- d
             d
     // Provenance for top-level provider reads (`let x = store.vars.v |>
-    // alias.read`), attached to the matching module-level binding.
-    let provRead = readProvenance prog (providerAliases prog)
+    // alias.read`) and writes (`let saved = alias.write("out", x)`), attached
+    // to the matching module-level binding in their own fields.
+    let (provRead, provWrite) = readProvenance prog (providerAliases prog)
     [ for e in collectTypedBindings srcFuncs tp do
         let key = e.Scope + " " + e.EName
         match spans.TryGetValue key with
@@ -1515,11 +1560,13 @@ let private joinBindings (prog: Ast.Program) (tp: TypedProgram) (sourceLines: st
                 |> List.map (fun (n, t, mr, dflt) ->
                     { PName = n; PType = t; PDoc = paramDocIn block n; PMinRank = mr; PDefault = dflt })
             let providerRead = if e.Scope = "" then Map.tryFind e.EName provRead else None
+            let providerWrite = if e.Scope = "" then Map.tryFind e.EName provWrite else None
             yield { Name = e.EName; Kind = kind; Line = line; Col = col
                     EndLine = endLine; EndCol = endCol
                     TypeStr = e.ETypeStr; Doc = doc; Params = ps; Ret = e.ERet
                     Where = e.EWhere; DeducedComm = e.EDeducedComm
                     ProviderRead = providerRead
+                    ProviderWrite = providerWrite
                     ConcreteType = None
                     // Params and function-body locals carry their function's
                     // scope; functions themselves carry a return type. What

@@ -54,6 +54,24 @@ type TypeError =
     /// element-type mismatch (the defaulted Float64 vs the store's real
     /// element type) at some downstream ascription instead of the cause.
     | ProviderNativeLoadFailure of provider: string * path: string * detail: string
+    /// BL2008. A provider REFUSED to resolve the store named at a
+    /// `let store = alias.load(path)` site (which is also every
+    /// `repo.checkout(...)`, after ProviderDesugar rewrites it into one): the
+    /// repo is missing, the ref is typo'd/ambiguous/a deleted tag, the header
+    /// is not spec 2, the status is Offline, or the snapshot carries
+    /// something this reader refuses by name.
+    ///
+    /// Sibling of ProviderNativeLoadFailure, one condition over: there the
+    /// LIBRARY is unusable, here the STORE is. Both park at the load site
+    /// because with no metadata every dim/variable the store binds is
+    /// untypeable and the opaque fallback dies far downstream as a baffling
+    /// element-type mismatch -- but here the fallback was worse: the refusal
+    /// set IS the feature, and `blade check` reported none of it.
+    ///
+    /// Providers signal this by raising `Types.ProviderResolutionError`;
+    /// zarr/netcdf/csv do not, so their missing-store diagnostics stay in
+    /// Lowering.tryInvokeProvider, untouched.
+    | ProviderStoreUnresolvable of provider: string * path: string * detail: string
     // FIELDS = sprintf args; formatTypeError (TypeEnv.fs) renders each verbatim.
     // Index-type violations (BL4003)
     | IndexTagMismatchNamed of expected: string * actual: string
@@ -711,11 +729,37 @@ let indexRankDiffers (i1: IRIndexType) (i2: IRIndexType) : bool =
 ///     equal total_dim; aliases nominative; anon-vs-named compatible;
 ///     irreps never pg-irreps. Tag = None on one side is COMPATIBLE.
 ///   - User-named tags are nominative (lat != lon even if both Idx<180>);
-///     synthetic ("__") tags are structural, never gate.
+///     synthetic ("__") tags are structural, never gate -- EXCEPT the
+///     provider provenance family (`isProviderAxisTag`), which is a name the
+///     STORE wrote and gates like any other (see `gatesNominally`).
 ///   - Extents are NOT compared; Symmetry must be compatible (SymNone
 ///     wildcard); WREATH LEVEL LISTS ARE compared (see the arm below).
 let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     let isSyntheticTag (t: string) = t.StartsWith("__")
+    /// Does this tag GATE -- i.e. is it an identity two records must share,
+    /// rather than a structural sentinel every record of a kind carries?
+    ///
+    /// User-written names always gate. `__` tags normally do not, and that
+    /// exemption LAUNDERED provider provenance: `__icaxis|`/`__icpool|` are
+    /// `__`-prefixed only so the four seams that read a Tag as a user-facing
+    /// name (`checkArrayIndexTags`, `elemTypeForIterationIndex`,
+    /// `Ide.indexNamesOf`, and this predicate's own exemption) leave them
+    /// alone -- but they are IDENTITIES, and this arm is the one place that
+    /// distinction decides the answer. Before this, ascribing two DIVERGED
+    /// checkouts' arrays to one `type L = ck1.index.lat` alias (or to any
+    /// user-written `type L = Idx<5>`) passed here, so the arithmetic that
+    /// followed saw a single tag and co-iterated happily -- the refusal the
+    /// axis tag exists to produce, walked around by an annotation. It also
+    /// closes the function BOUNDARY: a param typed through a checkout's own
+    /// axis alias now refuses the other checkout's array.
+    ///
+    /// Provider-vs-untagged stays COMPATIBLE (this arm needs `Some` on both
+    /// sides): an unnamed index is "some axis of this extent" and co-iterates
+    /// with either -- the escape hatch BL3999's own message advertises, and
+    /// the route by which a user can still assert two diverged axes are one.
+    /// Provider-vs-other-`__` stays compatible too: those are kind sentinels,
+    /// and gating them would refuse sound code.
+    let gatesNominally (t: string) = not (isSyntheticTag t) || isProviderAxisTag t
     // The wreath arm, ahead of everything but the rank check. Rank +
     // Symmetry alone are NOT sufficient: OrbIdx<[(2,+),(2,+)], n> and
     // OrbIdx<[(2,-),(2,-)], n> are both Rank 4, SymWreath, share the
@@ -744,8 +788,8 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
                      | Some a, Some b -> a <> b
                      | _ -> false)
     | Some t1, Some t2 when t1 <> t2
-                            && not (isSyntheticTag t1)
-                            && not (isSyntheticTag t2) -> true
+                            && gatesNominally t1
+                            && gatesNominally t2 -> true
     | _ ->
         i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone
 

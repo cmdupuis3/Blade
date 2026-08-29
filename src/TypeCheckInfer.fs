@@ -4986,7 +4986,18 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         let synth = mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply, kzip, klam))))
                         inferExpr env synth |> Result.map (stampElemUnits env resUnits)
                 else
-                    Error (Other "elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able")
+                    // Name which axis disagrees and how: the bare sentence left
+                    // the user to guess which of the store's dimensions moved
+                    // on a diverged-checkout program. Empty for a non-shape
+                    // cause (mixed dense/packed), where the sentence already
+                    // says it.
+                    let detail =
+                        match lRes, rRes with
+                        | ArrayElem aL, ArrayElem aR ->
+                            Blade.TypeLower.indexShapeClashDetail
+                                "the left operand" "the right operand" aL.IndexTypes aR.IndexTypes
+                        | _ -> ""
+                    Error (Other ("elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able" + detail))
             else
             // Elementwise op on ARRAY <-> SCALAR (`A + a`, `2.0 / A`,
             // `A > t`): re-synthesize as a 1-param kernel map over the array
@@ -9576,15 +9587,26 @@ and irTypeWreathLevels (t: IRType) : string option =
 
 /// Detect an unresolved QUALIFIED index-type path (`store.index.y`). Same
 /// consumption-site pattern as the checks above, and self-marking: a path that
-/// resolves yields the registered record verbatim (the provider builds its
-/// axes with Tag = None), so a dotted Tag can only be lowerIndexType's
-/// fall-through for a name that was never registered. Without this a typo'd or
-/// renamed dimension would silently become a free dependent extent -- the
-/// annotation would look bound to the store while constraining nothing.
+/// RESOLVES yields the registered record, so a dotted Tag can only be
+/// lowerIndexType's fall-through for a name that was never registered. Without
+/// this a typo'd or renamed dimension would silently become a free dependent
+/// extent -- the annotation would look bound to the store while constraining
+/// nothing.
+///
+/// PROVIDER TAGS ARE EXEMPT, and the exemption is load-bearing. A resolved
+/// provider axis carries an IDENTITY tag,
+/// `__icaxis|time@station_temps.icechunk:7d414d69...`, whose repo-label half
+/// is a DIRECTORY NAME -- and `<name>.icechunk` is the conventional spelling,
+/// so it contains a dot for entirely ordinary reasons. Without this clause the
+/// heuristic read a perfectly resolved axis as an unresolved path and refused
+/// `type T = ck.index.time` on every conventionally-named repo. (No fixture
+/// repo is named with a dot, which is why the corpus never caught it.)
 and irTypeUnknownAxisPath (t: IRType) : string option =
     let pathOf (ix: IRIndexType) =
         match ix.Tag with
-        | Some tag when tag.Contains "." && not (tag.StartsWith irrepsTagPrefix) -> Some tag
+        | Some tag when tag.Contains "."
+                        && not (tag.StartsWith irrepsTagPrefix)
+                        && not (isProviderAxisTag tag) -> Some tag
         | _ -> None
     match t with
     | ArrayElem at ->
@@ -11781,12 +11803,32 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         // defaults (Float64), dying far downstream as a baffling
                         // type mismatch. Park BL2007 for the load site instead
                         // (surfaced right below; same idiom as patternError).
-                        // Everything ELSE (missing file, unreadable store) keeps
-                        // the silent fallback: Lowering.tryInvokeProvider owns
-                        // those diagnostics.
+                        // A provider that raises no store-resolution type keeps
+                        // the silent fallback for everything else (missing
+                        // file, unreadable store): Lowering.tryInvokeProvider
+                        // owns those diagnostics.
                         let parkNativeFailure (detail: string) =
                             setCurrentExprSpan binding.Value.Span
                             providerLoadError <- Some (ProviderNativeLoadFailure (pname, path, detail))
+                            (env, tValue)
+                        // The STORE's own refusal, for a provider that names
+                        // one (`Types.ProviderResolutionError`). Same parking,
+                        // one condition over: the catch-all below used to
+                        // swallow every icechunk refusal (typo'd/ambiguous ref,
+                        // missing/corrupt repo, bad spec byte, Offline,
+                        // deleted-tag tombstone, virtual chunk refs, nested
+                        // groups, verifier/offset rejections), so `blade check`
+                        // and the editor reported NOTHING and the error only
+                        // surfaced under `emit`/`run` when lowering re-opened
+                        // the store.
+                        //
+                        // ADDITIVE. zarr/netcdf/csv raise no such type, so the
+                        // catch-all still swallows theirs and their
+                        // missing-store diagnostics stay in
+                        // Lowering.tryInvokeProvider exactly as before.
+                        let parkStoreFailure (detail: string) =
+                            setCurrentExprSpan binding.Value.Span
+                            providerLoadError <- Some (ProviderStoreUnresolvable (pname, path, detail))
                             (env, tValue)
                         try
                             // Read the store metadata at compile time (the same read
@@ -11803,6 +11845,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | :? System.DllNotFoundException as dex -> parkNativeFailure dex.Message
                         | :? System.TypeInitializationException as tix when (tix.InnerException :? System.DllNotFoundException) ->
                             parkNativeFailure tix.InnerException.Message
+                        | :? Blade.Types.ProviderResolutionError as pex -> parkStoreFailure pex.Message
                         | _ -> (env, tValue)
                 | _ -> (env, tValue)
             if providerLoadError.IsSome then Error providerLoadError.Value else
@@ -12998,10 +13041,39 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                 | Some (TDIEnumIdx (_, _, _, refBody)) -> refBody
                 | _ -> body
             | _ -> body
+        /// The referenced definition's own index RECORD, when this alias
+        /// chased one. `chasedBody` keeps the referenced SURFACE body, and for
+        /// a PROVIDER-registered axis (`<binding>.index.<dim>`) that body is a
+        /// synthesized `TyIdx <extent>` -- `registerProviderModule` stores the
+        /// real record beside it and a bare extent expression as the body,
+        /// because there is no surface syntax for "the axis this store minted".
+        /// Re-lowering that body therefore produced an anonymous `Idx<n>` and
+        /// dropped the `__icaxis|`/`__icpool|` identity on the floor, which is
+        /// how `type L = ck.index.lat` came to LAUNDER a diverged axis. Kept
+        /// here so the index arm below can adopt the record instead of
+        /// rebuilding it from a body that never described it.
+        let chasedRecord =
+            match body with
+            | TyNamed (referencedName, _) ->
+                match Map.tryFind referencedName env.TypeDefs with
+                | Some (TDIIndexType (_, refIdx, _)) -> Some refIdx
+                | _ -> None
+            | _ -> None
+        /// Adopt the chased record for a PROVIDER axis only. Every other
+        /// alias keeps re-lowering its body: that is what makes
+        /// `type S = SymIdx<2, n>` and its chains behave identically whether
+        /// they were written inline or chased, and narrowing the change to
+        /// records the provider minted keeps it to the defect it fixes.
+        let indexRecordFor (env: TypeEnv) (bodyTy: TypeExpr) : IRIndexType =
+            match chasedRecord with
+            | Some r when (match r.Tag with
+                           | Some t -> isProviderAxisTag t
+                           | None -> false) -> r
+            | _ -> lowerIndexType env 0 bodyTy
         let defInfoResult =
             match chasedBody with
             | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ | TyBoundedIdx _ ->
-                let idx = lowerIndexType env 0 chasedBody
+                let idx = indexRecordFor env chasedBody
                 // Nominative-alias rule: the alias name BECOMES the identity
                 // tag. Two exceptions, both reachable only from stage 3's
                 // `type S = SymIdx<k, IrrepsIdx<spec>>` (no legacy form of
@@ -13056,6 +13128,34 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
                     // record to carry group identity and component identity
                     // apart, which is a type-system change, not a fix.
                     | _ when idx.Rank >= 2 -> idx
+                    // A PROVIDER-MINTED axis keeps its provenance tag. Fifth
+                    // carve-out of the same species as the four above: on a
+                    // `__icaxis|`/`__icpool|` record the Tag is not a spare
+                    // name field, it is the axis's IDENTITY -- which repo,
+                    // which snapshot's version of the dim -- and the alias is
+                    // a local SPELLING of that identity, not a second one.
+                    //
+                    // Overwriting it broke the rule both ways. Laundering:
+                    // ascribing two DIVERGED checkouts' arrays to one
+                    // `type L = ck1.index.lat` re-tagged both `L`, so
+                    // arithmetic the axis tag exists to refuse co-iterated
+                    // clean. False refusal: within ONE checkout, an aliased
+                    // array beside the raw one carried `L` against
+                    // `__icaxis|lat@...` and earned a BL3999 the identical
+                    // Zarr program (untagged axes) never sees. Keeping the tag
+                    // settles both -- same axis, same tag; different axis,
+                    // different tag -- and `Ide.indexNamesOf` already decodes
+                    // the dim name out of it, so the alias still prints as a
+                    // name.
+                    //
+                    // Same trade as the wreath and multi-rank arms: the alias
+                    // names the axis for readability and mints no distinct
+                    // nominal identity. For a provider axis that costs
+                    // nothing -- an identity minted from a Blade alias could
+                    // not answer to the store that owns the axis.
+                    | _ when (match idx.Tag with
+                              | Some t -> isProviderAxisTag t
+                              | None -> false) -> idx
                     | _ -> { idx with Tag = Some name; IxKind = ixKindOfTag (Some name) }
                 Ok (TDIIndexType (name, named, chasedBody))
             | TyDepIdx _ | TyRaggedIdx _ | TyRaggedIdxOpaque ->

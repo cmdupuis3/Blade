@@ -17,6 +17,16 @@ let private dispatchInner (args: string[]) : int =
     // its g++ fallback; hand it over once, here, so every front end that
     // reaches an unsupported node from this process gets the same lane.
     Blade.ReplSession.installCompiledLane compiledReplLane
+    // Reset per-invocation provider state ahead of every verb: without it, the
+    // icechunk axis mint table and the IDE stores side-channel carry over
+    // whatever a previous compilation in this process minted, so a checkout's
+    // axis could print `lat#2` for no reason in the source. Must land here,
+    // not between typecheck and lowering, or it orphans identities typecheck
+    // just minted. `test` and `repl` compile many programs per process, so
+    // they re-arm this at their own boundaries (`Interp.Repl.lowerSessionDiag`,
+    // and where the icechunk block regenerates a fixture in place).
+    Blade.ProviderRegistry.IdeStores.reset ()
+    Blade.IcechunkProvider.resetAxisMint ()
     // `--strict-pins` is a build MODE, not a positional argument, and only
     // means anything for the four verbs that own a typecheck. Strip it from
     // the argv the verb patterns match on so every arm shape accepts it in
