@@ -384,7 +384,40 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
         // process serves every open notebook; requests are handled strictly one
         // at a time (see the loop's doc comment), so this cannot interleave.
         Blade.Display.Frame.SessionTag <- Blade.Display.Frame.tagForSession key
-        respond (evalResponse id (session.EvalOnce source))
+        // STREAMED FRAMES (docs/display-frames.md section 3). A submission that
+        // runs for minutes -- a training loop -- wants its plot refreshed while
+        // it runs, not once at the end. The interpreter hands every
+        // stream-mime frame to this sink AS IT IS PRODUCED (Frame.sink), and
+        // each one goes out immediately as the out-of-band event line the
+        // client already parses:
+        //
+        //   {"event":"display","id":<this request's id>,"frame":{...}}
+        //
+        // The composed line still carries its sentinel prefix (it is the same
+        // bytes the buffered path would have put on stdout); the remainder IS
+        // the frame object, spliced in raw for the same reason `display[]`
+        // splices raw -- escaping it would hand the reader a string.
+        //
+        // A sunk frame is NOT buffered, so it never reaches stdout and never
+        // appears in this response's `display` array: section 3 forbids
+        // delivering one frame twice. The exception is a fall-back to the g++
+        // lane, which re-runs the whole submission in a process with no sink
+        // and therefore re-emits every frame into `display[]`; the panel merges
+        // on `meta.id`, which for a stream frame is the stable channel name.
+        //
+        // Installed per request and cleared in a `finally`: serveLoop handles
+        // one request at a time (see its doc comment), and EvalOnce is
+        // synchronous, so a single mutable sink cannot interleave. Every other
+        // lane -- `blade run`, `blade repl`, the corpus, the interp/g++
+        // differential gate -- installs no sink and is untouched.
+        let sentinel = Blade.Display.Frame.Sentinel
+        Blade.Display.Frame.setSink (fun line ->
+            let frame = if line.StartsWith sentinel then line.Substring sentinel.Length else line
+            respond $"{{\"event\":\"display\",\"id\":{id},\"frame\":{frame}}}")
+        let result =
+            try session.EvalOnce source
+            finally Blade.Display.Frame.clearSink ()
+        respond (evalResponse id result)
     /// Handle one line; false means "stop the loop".
     let handle (line: string) : bool =
         use doc = JsonDocument.Parse line

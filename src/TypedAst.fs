@@ -264,7 +264,14 @@ and TypedExprKind =
     /// including `"data":`, `quoted` says whether the payload goes out as a
     /// quoted JSON string or an inline JSON value, `metaTail` is the user
     /// `meta` object minus its braces. Byte format: Blade.Display.Frame.
-    | TExprDisplayEmit of head: string * quoted: bool * data: TypedExpr * metaTail: string
+    ///
+    /// `id` is `None` for `display.emit` -- the frame's `meta.id` is then the
+    /// run's `<SessionTag><ordinal>` -- and `Some e` for `display.emit_id`,
+    /// whose id is that runtime String instead. One node rather than two
+    /// because the two spellings differ in exactly this operand: everything
+    /// downstream (typing, lowering, both back ends) would otherwise be
+    /// duplicated verbatim.
+    | TExprDisplayEmit of head: string * quoted: bool * data: TypedExpr * metaTail: string * id: TypedExpr option
     /// `display.json_array(A)`: render a rank-1 or rank-2 numeric array as
     /// JSON text (String). `rank` is pinned at typecheck so both back ends
     /// pick the 1-D/2-D serializer without re-resolving the type. Number

@@ -1355,6 +1355,126 @@ let private runIdeEvalTests () : TH.BlockResult =
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
+        // 27. STREAMED DISPLAY FRAMES (display-frames.md section 3). A cell
+        // that runs for minutes wants its plot moving while it runs, so a
+        // frame carrying the live-plot stream mime is forwarded the instant it
+        // is produced as an out-of-band event line -- which the client parses
+        // BEFORE the pending-id lookup, so it never settles the request.
+        //
+        // Three things are pinned, and the third is the one that costs if it
+        // is wrong: the event line's exact shape, that a NON-stream frame is
+        // untouched and still arrives in the response's `display` array, and
+        // that a streamed frame is NOT also in that array. Section 3 forbids
+        // delivering one frame twice, and the panel would draw it twice.
+        let streamCell =
+            "import display as d\nlet ok = d.emit_id(\"application/vnd.blade.plotstream.v1+json\", \"chan\", "
+            + "\"{\\\"channel\\\":\\\"chan\\\",\\\"epoch\\\":-1,\\\"x\\\":[0],\\\"y\\\":[1]}\", "
+            + "\"{\\\"stream\\\":true,\\\"backend\\\":\\\"plotly\\\"}\")"
+        let plainCell =
+            "import display as d\nlet png = d.emit(\"image/png\", \"AA==\")"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" streamCell; evalReq 2 "nb" plainCell; shutdownReq ]
+        let name = "a stream frame is forwarded live as an event line, not in display[]"
+        let expectedEvent =
+            "{\"event\":\"display\",\"id\":1,\"frame\":"
+            + "{\"v\":1,\"mime\":\"application/vnd.blade.plotstream.v1+json\",\"encoding\":\"json\","
+            + "\"data\":{\"channel\":\"chan\",\"epoch\":-1,\"x\":[0],\"y\":[1]},"
+            + "\"meta\":{\"id\":\"chan\",\"stream\":true,\"backend\":\"plotly\"}}}"
+        match responses with
+        // The event precedes the response it belongs to: it is written as the
+        // program runs, and the response only exists once the run is over.
+        | [ev; streamed; replayEv; plain] when code = 0
+                                               && ev = expectedEvent
+                                               && streamed.Contains "\"id\":1" && streamed.Contains "\"kept\":true"
+                                               && not (streamed.Contains "display")
+                                               // A session re-runs every kept
+                                               // cell, so eval 2 re-emits cell
+                                               // 1's frame -- forwarded again
+                                               // under ITS id. The id is
+                                               // stable, so the panel merges
+                                               // rather than appending.
+                                               && replayEv.StartsWith "{\"event\":\"display\",\"id\":2,"
+                                               && replayEv.Contains "\"id\":\"chan\""
+                                               && plain.Contains "\"display\":[{\"v\":1,\"mime\":\"image/png\""
+                                               && not (plain.Contains "plotstream") ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 28. THE SESSION MEMO across fresh domain elaboration. A cell whose
+        // only novelty is a new `ml.*` op config makes MLElaborate splice its
+        // generated function at the FRONT of the module, which shifts every
+        // later declaration's lowering-pass SSA ids -- including the index-type
+        // `Id`s inside an earlier ARRAY binding's type. The memo's type guard
+        // compared those ids, so the whole session's arrays re-ran: measured at
+        // 17 s/cell in a real notebook, and invisible from the outside, since a
+        // memo hit and a recompute print the same value. `ad.grad` never showed
+        // it because Grad splices each derivative beside its ROOT declaration
+        // rather than at the front.
+        //
+        // Pinned on the adoption counts, because there is no other observable.
+        // The last eval's tally is the one that survives to be read.
+        let mlCell = "let static s2 = [(0, 0, 2)]\nlet lout = ml.linear(s2, s2, [2.0, 1.0, 0.0, 3.0], [5.0, 7.0])"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "import ml as ml"
+                    evalReq 2 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 3 "nb" mlCell
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let evaluated = Blade.Interp.Run.lastMemoEvaluated
+        let name = "a new ml.* op in a later cell keeps the earlier binding's memo"
+        match responses with
+        | [_; _; ml] when code = 0 && ml.Contains "\"kept\":true" && ml.Contains "\"exitCode\":0"
+                          // base_a adopted (initializer skipped); the ml cell's
+                          // own two bindings are the only ones evaluated.
+                          && adopted = 1 && evaluated = 2 ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, evaluated %d, responses: %A"
+                                        code adopted evaluated responses)
+
+        // ...and the value it kept is still the right one. Adoption is only
+        // worth anything if the skipped initializer would have produced this.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "import ml as ml"
+                    evalReq 2 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 3 "nb" mlCell
+                    evalReq 4 "nb" "base_a"
+                    shutdownReq ]
+        let name = "a binding adopted across ml elaboration still reads back correctly"
+        match responses with
+        | [_; _; _; readback] when code = 0
+                                   && readback.Contains "\"value\":\"[1.0, 2.0, 3.0]\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 29. The negative control for 28, and the line the fix must not
+        // cross: a REBIND splices in place, so the cached snippet range no
+        // longer matches and the whole memo goes. Shape agreement is not
+        // permission to reuse a value whose defining text changed.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" "let derived = reduce(base_a, (+))"
+                    evalReq 3 "nb" "let base_a = [4.0, 5.0, 6.0]"
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let name = "editing an earlier binding still drops the memo"
+        match responses with
+        | [_; _; rebind] when code = 0 && rebind.Contains "\"kept\":true" && adopted = 0 ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, responses: %A" code adopted responses)
+
+        // ...and the dependent recomputes off the NEW value, not the cached one.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let base_a = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" "let derived = reduce(base_a, (+))"
+                    evalReq 3 "nb" "let base_a = [4.0, 5.0, 6.0]"
+                    evalReq 4 "nb" "derived"
+                    shutdownReq ]
+        let name = "a dependent of an edited binding recomputes from the new value"
+        match responses with
+        | [_; _; _; readback] when code = 0 && readback.Contains "\"value\":\"15.0\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally
         Directory.SetCurrentDirectory entryDir

@@ -139,6 +139,11 @@ Unit zmin: 1
 /// activation test is `zmax >= 0`, so an all-negative fixed range is not
 /// expressible in v1 (rain rates, spectra and moduli do not miss it).
 Unit zmax: 1
+/// Epoch (or any outer-loop) index a `plot.stream` frame belongs to. -1 is
+/// "unmarked" -- the default, and what a stream with no outer loop sends. A
+/// non-negative value lets the renderer draw the boundary between one epoch's
+/// batches and the next without the program having to say where they are.
+Unit epoch: 1
 /// Renderer the program would PREFER the viewer paint this figure with:
 /// 0 = plotly (the default), 1 = GR. Out-of-table indices fall back to the
 /// default rather than erroring, like `cmap`. This is a HINT carried in the
@@ -340,4 +345,66 @@ function scatter(x: X^1, y: Y^1,
                  b: Int64<backend> = 0) -> Bool = {
     let trace = "{\"type\":\"scatter\",\"mode\":\"markers\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
     __emit_fig(trace, __layout(t, xl, yl), b)
+}
+
+// ---- Live plot streaming --------------------------------------------------
+//
+// `plot.stream(name, x, y)` is the OTHER kind of frame this module emits: not
+// a finished figure but one INSTALMENT of a chart that a long-running cell
+// keeps extending. Three things separate it from the five factories above.
+//
+//   * ITS OWN MIME, `application/vnd.blade.plotstream.v1+json`, carrying a
+//     backend-neutral `{channel, epoch, x, y, labels}` object rather than a
+//     plotly figure. The renderer assembles the figure; the program ships
+//     data. That is what lets the panel APPEND to a trace it already has
+//     instead of repainting a whole new one per batch.
+//   * ITS OWN IDENTITY. `display.emit_id` puts the CHANNEL NAME in the
+//     frame's `meta.id`, so every frame of one channel merges into one chart
+//     -- stable across calls, across a REPL session replay, and independent
+//     of how many other plots ran first (an ordinal id would drift the moment
+//     an earlier cell gained a plot). The channel name is also carried inside
+//     the payload, so a consumer that never looks at `meta` still knows which
+//     series it has.
+//   * NO DECIMATION. The grid factories resample because a figure is a
+//     one-shot payload sized by the source data; a stream frame is sized by
+//     the program's own batch, and the RENDERER owns thinning the assembled
+//     series. Decimating here would throw away samples the renderer is about
+//     to need.
+//
+// During an `ide serve` evaluation each stream frame is forwarded the instant
+// it is produced (Blade.Display.Frame's sink -> the `{"event":"display"}`
+// line), which is what makes a training curve move while the cell is still
+// running. Everywhere else -- `blade run`, `blade repl`, the corpus -- it is
+// an ordinary sentinel line on stdout, byte-identical in both lanes.
+
+/// The optional-label tail of a stream payload. An empty label is OMITTED
+/// rather than sent empty, exactly as `__layout` omits an empty axis title:
+/// "not given" and "given as blank" are the same request, and the shorter
+/// frame is the one that repeats thousands of times in a training loop. Each
+/// fragment leads with its own comma because the payload's required fields
+/// always precede it.
+function __stream_labels(t: String<title>, xl: String<xlabel>, yl: String<ylabel>) -> String = {
+    let tt = if t == "" then "" else ",\"title\":" + d.json_string(t)
+    let xt = if xl == "" then "" else ",\"xlabel\":" + d.json_string(xl)
+    let yt = if yl == "" then "" else ",\"ylabel\":" + d.json_string(yl)
+    tt + xt + yt
+}
+
+/// One frame of the live chart named `name`, carrying the samples `y` against
+/// `x`. Frames sharing a `name` are instalments of ONE chart.
+///
+/// The `backend` slot is the same preference hint the factories carry, and it
+/// moves the meta and nothing else -- see the PREFERRED BACKEND note in the
+/// module header. Two whole literals picked by a runtime `if`, because
+/// `display.emit_id`'s meta argument is an elaboration-time literal (BL5700)
+/// exactly like `display.emit`'s.
+function stream(name: String, x: X^1, y: Y^1,
+                e: Int64<epoch> = -1,
+                t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                b: Int64<backend> = 0) -> Bool = {
+    let payload = "{\"channel\":" + d.json_string(name) + ",\"epoch\":" + d.json_num(e) + ",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + __stream_labels(t, xl, yl) + "}"
+    if b == 1 then
+        d.emit_id("application/vnd.blade.plotstream.v1+json", name, payload, "{\"stream\":true,\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}")
+    else
+        d.emit_id("application/vnd.blade.plotstream.v1+json", name, payload, "{\"stream\":true,\"backend\":\"plotly\"}")
 }

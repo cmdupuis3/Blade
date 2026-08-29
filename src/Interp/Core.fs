@@ -695,9 +695,17 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     //      flushes the buffer ahead of the binding prints, which is exactly
     //      where the compiled binary's std::cout writes land (inside main()'s
     //      body, before the timing line). Same bytes, same order, both lanes.
-    | IRDisplayEmit (head, quoted, dataExpr, metaTail) ->
-        (match evalExpr st env dataExpr with
-         | VString s -> VBool (Blade.Display.Frame.emit head quoted s metaTail)
+    | IRDisplayEmit (head, quoted, dataExpr, metaTail, idOpt) ->
+        (match evalExpr st env dataExpr, idOpt with
+         | VString s, None -> VBool (Blade.Display.Frame.emit head quoted s metaTail)
+         // display.emit_id: the frame's meta.id is this second runtime String.
+         // A live sink (ide serve) may intercept a STREAM-mime frame here
+         // instead of buffering it; with no sink -- every other lane -- the
+         // line is buffered exactly like emit's.
+         | VString s, Some idExpr ->
+             (match evalExpr st env idExpr with
+              | VString idText -> VBool (Blade.Display.Frame.emitId head quoted s metaTail idText)
+              | _ -> raise (InterpUnsupported "display.emit_id: id did not evaluate to a String"))
          | _ -> raise (InterpUnsupported "display.emit: payload did not evaluate to a String"))
 
     // ---- display.json_array / display.json_num: JSON text of a numeric

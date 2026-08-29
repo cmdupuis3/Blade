@@ -268,6 +268,27 @@ let rec internal collectAppRankErrors (subst: Subst) (expr: TypedExpr) : Compile
                         Span = arg.Span
                         Context = []
                         Code = None } ]
+                | None ->
+                // The ABSTRACT-PARAMETER twin, and the reason this sweep has
+                // to carry it: a `T^k` parameter is STILL an open variable
+                // after zonking -- polymorphic ids are deliberately preserved
+                // for IR-phase monomorphization -- so the rank clash above
+                // cannot see these, and neither could the eager seam when the
+                // arguments were not yet determined there. What IS determined
+                // by now is every ARGUMENT type, which is all this predicate
+                // reads. See firstAbstractVarConflict.
+                match firstAbstractVarConflict subst paramTys (tArgs |> List.map (_.Type)) with
+                | Some (firstPos, conflictPos, firstTy, conflictTy) ->
+                    let arg = List.item conflictPos tArgs
+                    let calleeDesc =
+                        match tFunc.Kind with
+                        | TExprVar (name, _, _) -> $"'{name}'"
+                        | _ -> "this function"
+                    [ { Error = Other (abstractVarConflictMessage subst calleeDesc
+                                                                  firstPos conflictPos firstTy conflictTy)
+                        Span = arg.Span
+                        Context = []
+                        Code = None } ]
                 | None -> []
             | _ -> []
         | _ -> []

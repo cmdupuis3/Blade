@@ -77,6 +77,47 @@ type SessionMemo =
 let emptyMemo : SessionMemo =
     { Values = Map.empty; MutationFree = false; FrameEmitters = Set.empty }
 
+/// INSTRUMENT (session-memo tests only; the compiler never reads them). How
+/// many top-level bindings the most recent `runProgramMemo` ADOPTED from its
+/// incoming memo -- initializer skipped -- and how many it had to evaluate.
+/// "The cache survived" has no other observable: a memo hit and a recompute
+/// print the same value, and wall clock is not a pin. Overwritten per run;
+/// single-threaded by construction, since the REPL/notebook lanes evaluate one
+/// candidate at a time in one process.
+let mutable lastMemoAdopted = 0
+let mutable lastMemoEvaluated = 0
+
+/// Does a cached type still describe the same value SHAPE as the binding's
+/// freshly lowered type? Deliberately NOT structural equality, and that is the
+/// whole point of this function existing.
+///
+/// An `IRIndexTypeG.Id` is an SSA ordinal minted by the lowering pass that
+/// produced it (`IRBuilder.FreshId`, counting up from 0 in declaration order).
+/// Two passes over the SAME session therefore hand one array type DIFFERENT
+/// ids as soon as anything ahead of it consumes a different number of ids --
+/// and a later cell that triggers fresh domain elaboration does exactly that,
+/// because `Blade.ML.Elaborate.expand` splices its generated functions at the
+/// FRONT of the module (so every user declaration shifts). `Blade.Grad.expand`
+/// splices each synthesized derivative BESIDE ITS ROOT declaration instead,
+/// which is why `ad.grad` in a later cell never showed this and `ml.*` always
+/// did. Comparing ids rejected every array binding in the session over a
+/// difference the memo's own doc calls unpreservable -- it is precisely why
+/// the cache is keyed on NAMES and not on ids.
+///
+/// What the guard is actually FOR is the inference hazard: Blade infers across
+/// the whole session, so a later cell can pin an earlier binding's element
+/// type or its rank, and a value cached under the old type would be the wrong
+/// shape. `canonTypeKey` (IRMono, written for HM specialization dedup) is
+/// already the occurrence-id-INDEPENDENT structural key -- same element type,
+/// rank, extent and symmetry => same key -- so it decides exactly that
+/// question and nothing else. Its opaque catch-all ("T", for the type forms it
+/// does not describe) is excluded: such a type can still be adopted, but only
+/// on exact equality, never on a key match.
+let private memoTypeAgrees (cachedTy: IRType) (nowTy: IRType) : bool =
+    cachedTy = nowTy
+    || (let k = canonTypeKey cachedTy
+        k <> "T" && k = canonTypeKey nowTy)
+
 /// Is this value safe to carry across a lowering boundary?
 ///
 /// Only self-contained MATERIALIZED data is. `VDeferred` and `VLoopObj` close
@@ -392,6 +433,11 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // binding produces no frame, and a plot that stopped re-emitting would
     // vanish from the panel.
     let frameEmitters = System.Collections.Generic.HashSet<string>(memoIn.FrameEmitters)
+    // The run's own memo tally. Zeroed HERE rather than published at the end,
+    // so a run that raises partway leaves a truthful partial count instead of
+    // the previous run's total.
+    lastMemoAdopted <- 0
+    lastMemoEvaluated <- 0
     // Function bodies may reference module-level bindings (emitted as
     // main-local capturing lambdas in C++) -- expose the root scope to call
     // frames before any binding evaluates.
@@ -402,14 +448,17 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
           // the whole point of the cache. The type guard is load-bearing:
           // Blade infers across the whole session, so a later cell can pin an
           // earlier binding's element type (or its rank), and a value cached
-          // under the old type would then be the wrong shape. Types differ ->
-          // fall through and recompute.
+          // under the old type would then be the wrong shape. Shapes differ ->
+          // fall through and recompute (`memoTypeAgrees` says what "differ"
+          // means, and why it is not `=`).
           let framesBefore = Blade.Display.Frame.emitted ()
           match Map.tryFind b.Name memoIn.Values with
-          | Some (cachedTy, cachedV) when cachedTy = b.Type
+          | Some (cachedTy, cachedV) when memoTypeAgrees cachedTy b.Type
                                           && not (Set.contains b.Name memoIn.FrameEmitters) ->
+              lastMemoAdopted <- lastMemoAdopted + 1
               envBind root b.Id cachedV |> ignore
           | _ ->
+            lastMemoEvaluated <- lastMemoEvaluated + 1
             // Defer-aware: a deferred combinator binding stores VDeferred (no
             // eager force); a method_for/object_for binding stores VLoopObj;
             // everything else evaluates eagerly, mirroring CodeGen.genBinding.

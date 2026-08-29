@@ -306,7 +306,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 @ laneStmts
                 @ [ $"return {resultLane};" ]
             $$"""[&]() { {{(String.concat " " body)}} }()"""
-    | IRDisplayEmit (head, quoted, dataExpr, metaTail) ->
+    | IRDisplayEmit (head, quoted, dataExpr, metaTail, None) ->
         // One display-frame line on stdout (docs/display-frames.md), answering
         // bool. The head / quoting flag / meta tail are elaboration-time
         // constants; only the payload is computed here. The helper is
@@ -318,6 +318,18 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             (exprToCppCore subst names dataExpr)
             (escapeStringLit metaTail)
             (escapeStringLit Blade.Display.Frame.SessionTag)
+    | IRDisplayEmit (head, quoted, dataExpr, metaTail, Some idExpr) ->
+        // display.emit_id: same line, with the runtime id where the
+        // `<tag><ordinal>` goes. No session tag argument -- the id IS the
+        // identity -- and the helper leaves the ordinal counter alone, exactly
+        // as Frame.emitId does. There is no sink in this lane and none is
+        // needed: a compiled program's frames already reach stdout as it runs.
+        sprintf "blade_display::emit_id(%s, %s, %s, %s, %s)"
+            (escapeStringLit head)
+            (if quoted then "true" else "false")
+            (exprToCppCore subst names dataExpr)
+            (escapeStringLit metaTail)
+            (exprToCppCore subst names idExpr)
     | IRDisplayJson (rank, dataExpr) ->
         // JSON text of a rank-1/rank-2 numeric array. The helper streams with
         // setprecision(15) -- the print block's own rule -- so the
