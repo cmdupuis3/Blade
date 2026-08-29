@@ -560,7 +560,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     // display.emit's payload is a plain String scalar -- nothing to lift, but
     // the child still recurses so an inline form INSIDE the payload
     // expression is handled like anywhere else.
-    | IRDisplayEmit (h, q, data, m) -> IRDisplayEmit (h, q, liftExpr builder data, m)
+    | IRDisplayEmit (h, q, data, m, idOpt) ->
+        IRDisplayEmit (h, q, liftExpr builder data, m, Option.map (liftExpr builder) idOpt)
 
     // display.json_array consumes an ARRAY: recurse, then hoist an inline
     // form in the data slot into a let, exactly like IRReduce's array slot.
@@ -758,16 +759,31 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         | _ -> wrapLets binds (IRComplex (re', im'))  // unreachable; defensive
     | IRArrayLit (es, ty) ->
         // Peel any IRLet chains from element results
-        // (descendant lifts) and re-wrap them at THIS level. Don't lift the
-        // peeled inner expressions further -- IRArrayLit elements must
-        // remain as the genArrayLiteral walker expects (nested IRArrayLit
-        // for multi-dim, scalar leaves at the bottom). Replacing an inner
-        // IRArrayLit with an IRVar would shorten computeArrayDims to just
-        // this level and break extents/print/walker.
+        // (descendant lifts) and re-wrap them at THIS level. Don't lift an
+        // ARRAY-TYPED peeled element further -- those are the structure the
+        // genArrayLiteral walker measures (nested IRArrayLit for multi-dim,
+        // row values for the rank-raising row map). Replacing one with an
+        // IRVar would shorten computeArrayDims to just this level and break
+        // extents/print/walker.
+        //
+        // A SCALAR LEAF that is an inline form is the opposite case, and must
+        // be lifted. `[reduce(A * B, (+)), reduce(C * D, (+))]` puts an
+        // IRReduceCompute -- accumulators plus a fused loop nest, with no
+        // expression rendering anywhere -- in a leaf slot, where exprToCppCore
+        // answers it with the BL7004 "must be bound to a let" refusal while the
+        // interpreter evaluates it happily: a silent lane divergence that an
+        // interp-first notebook only meets when it finally compiles. Hoisting
+        // it is exactly what writing the intermediate `let` by hand does, and
+        // exactly what CodeGen's own IRReduceCompute arms already do for the
+        // body-let and RETURN positions.
         let es' = es |> List.map (liftExpr builder)
         let (binds, esPeeled) = es' |> List.fold (fun (accB, accE) e ->
             let (b, e') = peelLetChain e
-            (accB @ b, accE @ [e'])) ([], [])
+            if isInlineForm e' && (match typeOf e' with ArrayElem _ -> false | _ -> true) then
+                let id = builder.FreshId()
+                let ty = typeOf e'
+                (accB @ b @ [(id, ty, e')], accE @ [IRVar (id, ty)])
+            else (accB @ b, accE @ [e'])) ([], [])
         wrapLets binds (IRArrayLit (esPeeled, ty))
 
     // BinOps: array-typed binops can have inline forms on either side.
@@ -803,7 +819,19 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
                 let (b, fe') = liftChildIncludingArrayLit builder fe
                 (accBinds @ b, accFlds @ [(fn, fe')])) ([], [])
         wrapLets binds (IRStructLit (n, fldsLifted))
-    | IRIf (c, t, e) -> IRIf (liftExpr builder c, liftExpr builder t, liftExpr builder e)
+    | IRIf (c, t, e) ->
+        // The CONDITION's lifts hoist ABOVE the select; the BRANCHES' stay put.
+        // A condition is evaluated exactly once whatever the select does, so a
+        // statement-shaped operand inside it (`if reduce(A * B, (+)) > 0.0 ...`,
+        // whose IRBinOp arm mints the let that then had nowhere to live but the
+        // condition slot, where codegen renders it inline and hits the BL7004
+        // reduce refusal) belongs at the enclosing drain point. A BRANCH is
+        // not: hoisting out of an untaken arm would compute it unconditionally
+        // -- a cost change at best, and a panic the interpreter never raises at
+        // worst. Statement-shaped values in conditional arms stay refused (the
+        // whole family: an IRArrayLit there is the same BL7001 today).
+        let (binds, cFinal) = peelLetChain (liftExpr builder c)
+        wrapLets binds (IRIf (cFinal, liftExpr builder t, liftExpr builder e))
     | IRMatch (scr, cases) ->
         IRMatch (liftExpr builder scr, cases |> List.map (fun c ->
             { c with Guard = c.Guard |> Option.map (liftExpr builder)

@@ -354,6 +354,46 @@ let internal noLoopResolve : string -> Expr option = fun _ -> None
 
 let internal (|MapApply|_|) (e: Expr) : MapApplyView option = (|MapApplyWith|_|) noLoopResolve e
 
+/// The head every subset refusal shares -- what differentiated code DOES
+/// support, said once.
+let internal subsetHead =
+    "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1)"
+
+/// The refusal for ONE combinator operator met in differentiated code.
+///
+/// One message per operator instead of one message listing eleven of them.
+/// That list was the right shape while reverse mode refused the whole family
+/// uniformly; after the C2-reverse map lowering
+/// (`plan-equivariant-nn-notebooks.md` 5.2) the survivors are genuinely
+/// different problems with different fixes -- a `<@>` outside `let`
+/// initializer position wants a `let`, `<|>` is DISCONTINUOUS and wants
+/// `guard`, `<&!>` wants separate folds -- and naming the family named none
+/// of them. Each message says what was met and the nearest spelling that
+/// works.
+let internal combinatorOpMsg (op: BinOp) : string =
+    let grad = (errMode.Value = "grad")
+    match op with
+    | OpApply ->
+        if grad then
+            $"{subsetHead}; reverse mode differentiates an eager map by lowering it to a construction loop, and it can only expand one that is the WHOLE initializer of a `let` whose loop side resolves to a `method_for`/`object_for` -- bind it first (`let m = method_for(...) <@> <kernel> |> compute`) and read `m` by index"
+        else
+            $"{subsetHead}; the `<@>` map rule needs a loop side that is a `method_for`/`object_for` (or a name bound to one) -- this application's left operand is neither"
+    | OpChoice ->
+        $"{subsetHead}; `<|>` (value-keyed choice) is not differentiable in ANY mode and will not become so: it selects the first NON-ZERO cell, so the output JUMPS by the size of the right operand across the switching set -- a discontinuity, not merely a kink, and its failover idiom is engineered to sit on it. Use `guard(p, c)`, whose predicate is explicit and whose false branch is a genuine zero, or a smooth blend. (`<|:>`, the storage-keyed sibling, IS differentiable -- allocation is not a value.)"
+    | OpFusion | OpParallel ->
+        let nm = if op = OpFusion then "`<&!>` (full fusion)" else "`<&>` (prefix fusion)"
+        $"{subsetHead}; {nm} joins several computations into one traversal, and its result is a TUPLE that neither sweep can bind -- write each leg as its own `let` and fold it with its own `reduce`, which computes the same numbers in as many traversals as there are legs"
+    | OpArrayProd ->
+        $"{subsetHead}; `<*>` concatenates two loops' operand lists -- spell the combined list directly instead (`method_for(A, B) <@> <kernel>`), which is the same loop and is differentiable"
+    | OpBind ->
+        $"{subsetHead}; `>>=` is a `let` in disguise (materialize, bind, continue) -- write the bind as a `let` and the continuation as ordinary statements"
+    | OpFunctor | OpComposeObj | OpComposeMeth | OpCompose ->
+        $"{subsetHead}; this pipeline operator survived the fuse-then-differentiate pre-pass, which means fusion DECLINED it -- compose the stages by hand into a single kernel (`lambda(x) -> g(f(x))`), which is the same value by the Compose-Apply identity"
+    | OpCons ->
+        $"{subsetHead}; `::` builds a recursive-array slice and is differentiable only inside a top-level `let rec` binding in the body"
+    | _ ->
+        $"{subsetHead}; loop-object combinator operators are not differentiable"
+
 /// Walk an expression, validating it stays inside the differentiable
 /// fragment, and call `onVar` for every variable REFERENCE (not index
 /// positions, which are int-typed and non-differentiable, but we still
@@ -474,8 +514,8 @@ let rec internal walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (in
     // `<|:>` (OpFallback) is deliberately ABSENT: LinearForm admits it above
     // (storage branching is linear in both legs), so listing it here would be
     // both unreachable and a lie in the message.
-    | { Kind = ExprKind.ExprBinOp (_, (OpApply | OpBind | OpParallel | OpFusion | OpArrayProd | OpFunctor | OpChoice | OpComposeObj | OpComposeMeth | OpCompose | OpCons), _, _) } ->
-        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); loop-object combinator operators (`<@>`, `>>=`, `<&>`, `<&!>`, `<*>`, `<$>`, `<|>`, `>>@`, `@>>`, `>>`, `::`) are not differentiable"
+    | { Kind = ExprKind.ExprBinOp (_, ((OpApply | OpBind | OpParallel | OpFusion | OpArrayProd | OpFunctor | OpChoice | OpComposeObj | OpComposeMeth | OpCompose | OpCons) as op), _, _) } ->
+        err fname (combinatorOpMsg op)
     | { Kind = ExprKind.ExprBinOp (_, _, l, r) } ->
         walkExpr fname ctx onVar inKernel l |> Result.bind (fun () -> walkExpr fname ctx onVar inKernel r)
     | { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar name }, args) } ->
@@ -514,8 +554,18 @@ let rec internal walkExpr (fname: string) (ctx: Ctx) (onVar: string -> unit) (in
         err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); this reduce could not be normalized (only `reduce(A, (+)[, init])` over an array variable or inline literal is differentiable)"
     | { Kind = ExprKind.ExprRecArray _ } ->
         err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); a recursive array is differentiable only as a top-level `let rec` binding in the body"
-    | { Kind = ExprKind.ExprLambda _ } | { Kind = ExprKind.ExprMethodFor _ } | { Kind = ExprKind.ExprObjectFor _ } | { Kind = ExprKind.ExprCompute _ } | { Kind = ExprKind.ExprPure _ } ->
-        err fname "differentiable code supports straight-line arithmetic, additive `reduce`, and rank-1 recursive arrays (v1); loop-object combinators (lambda/method_for/object_for/compute/pure) are not differentiable"
+    // A bare loop object or kernel that never reached an APPLICATION the
+    // rules could expand. (`compute`/`pure` never arrive here -- they are
+    // LinearForms, admitted above -- and are listed only so a future grammar
+    // change trips the exhaustiveness check rather than falling through.)
+    | { Kind = ExprKind.ExprLambda _ } ->
+        err fname (if errMode.Value = "grad"
+                   then $"{subsetHead}; this kernel lambda is never applied to a loop object in a position reverse mode can lower, so there is nothing to differentiate it AGAINST -- apply it (`let m = <loop> <@> <kernel> |> compute`) where its result is used"
+                   else $"{subsetHead}; a kernel lambda is differentiable only as the kernel of a `<@>` application, not as a value in its own right")
+    | { Kind = ExprKind.ExprMethodFor _ } | { Kind = ExprKind.ExprObjectFor _ } ->
+        err fname $"{subsetHead}; a bare loop object computes nothing until it is APPLIED -- bind it and apply it (`let L = method_for(...)` then `let m = L <@> <kernel> |> compute`), which is the shape both sweeps expand"
+    | { Kind = ExprKind.ExprCompute _ } | { Kind = ExprKind.ExprPure _ } ->
+        err fname $"{subsetHead}; loop-object combinators (compute/pure) are not differentiable here"
     | { Kind = ExprKind.ExprTuple _ } -> err fname "tuple values are not supported in differentiated code"
     | { Kind = ExprKind.ExprField _ } -> err fname "struct field access is not supported in differentiated code"
     | _ -> err fname "unsupported expression form in differentiated code"

@@ -757,8 +757,9 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprContains (a, v) ->
         IRContains (lowerTypedExpr env a, lowerTypedExpr env v)
 
-    | TExprDisplayEmit (head, quoted, data, metaTail) ->
-        IRDisplayEmit (head, quoted, lowerTypedExpr env data, metaTail)
+    | TExprDisplayEmit (head, quoted, data, metaTail, idOpt) ->
+        IRDisplayEmit (head, quoted, lowerTypedExpr env data, metaTail,
+                       idOpt |> Option.map (lowerTypedExpr env))
 
     | TExprDisplayJson (rank, data) ->
         IRDisplayJson (rank, lowerTypedExpr env data)
