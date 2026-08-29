@@ -43,7 +43,9 @@
 //
 //   * a NODE id is derived from the array's NAME alone, so an array keeps its
 //     id across every snapshot of a repo (the spec's own "stable across
-//     snapshots" rule), and
+//     snapshots" rule). This one is deliberately NOT content-derived: a node
+//     id is the thing that says "same array, later commit", so it has to
+//     survive a rewrite of the data it names.
 //   * a MANIFEST id is derived from the array name plus the canonical text of
 //     its chunk-ref table, and a CHUNK id from the array name plus the chunk's
 //     own bytes -- so a snapshot that leaves an array untouched REUSES that
@@ -51,6 +53,11 @@
 //     data changed mints fresh ones. "Coordinate arrays unchanged, data array
 //     rewritten" therefore falls out of the spec rather than being staged by
 //     hand.
+//   * a SNAPSHOT id is derived from the snapshot's own SERIALIZED CONTENT --
+//     built once with a zeroed id, hashed, then rebuilt with the resulting id
+//     stamped in (see `snapshotIdBytes`) -- rather than from the spec's
+//     snapshot NAME, so two commits are never mistaken for one just because a
+//     fixture reused a name like "s1".
 //
 // This module deliberately does NOT reference `Blade.IcechunkProvider`: the
 // base32 encoder, the magic bytes and the header layout are written out again
@@ -484,14 +491,9 @@ let nodeIdBytes (spec: RepoSpec) (arrayName: string) : byte[] =
 let nodeId (spec: RepoSpec) (arrayName: string) : string =
     base32Encode (nodeIdBytes spec arrayName)
 
-/// A snapshot's 12-byte object id, from its spec name.
-let snapshotIdBytes (spec: RepoSpec) (snapshotName: string) : byte[] =
-    idFromText spec.Seed "snapshot" snapshotName 12
-
-/// The base32 spelling of `snapshotIdBytes` (20 characters) -- the
-/// `snapshots/` file name, and the string a `@snapshot:<id>` key carries.
-let snapshotId (spec: RepoSpec) (snapshotName: string) : string =
-    base32Encode (snapshotIdBytes spec snapshotName)
+// SNAPSHOT ids are further down, at `snapshotIdBytes`: they hash the
+// snapshot's serialized bytes, so they cannot be defined until the machinery
+// that produces those bytes has been.
 
 // ---------------------------------------------------------------------------
 // zstd
@@ -537,11 +539,22 @@ let private refText (coords: int64 list) (p: Placement) : string =
         $"[{coordText}]=native:{base32Encode id}:{off}:{len}"
     | RefVirtual (loc, off, len) -> $"[{coordText}]=virtual:{loc}:{off}:{len}"
 
-/// Place every chunk of one array and write whatever chunk FILES that
-/// implies. Returns the placements in row-major grid order, paired with their
-/// coordinates. Chunk files are content-addressed, so writing the same bytes
-/// twice (two snapshots, two arrays) writes one file.
-let private placeChunks (spec: RepoSpec) (root: string) (a: ArraySpec) : (int64 list * Placement) list =
+/// Where every chunk of one array goes, and the chunk FILES that implies.
+///
+/// PURE -- nothing is written here. The snapshot that names these files is
+/// itself named by a hash of its own serialized bytes, so the whole plan has
+/// to be computable before a single byte lands on disk.
+type private ChunkPlan = {
+    /// Placements in row-major grid order, paired with their coordinates.
+    Placements: (int64 list * Placement) list
+    /// `chunks/` files as (base32 file name, bytes). Chunk files are
+    /// content-addressed, so the same name always carries the same bytes and
+    /// a repeated entry (two snapshots, two arrays) is a no-op on write.
+    Files: (string * byte[]) list
+}
+
+/// Plan every chunk of one array. See `ChunkPlan`.
+let private planChunks (spec: RepoSpec) (a: ArraySpec) : ChunkPlan =
     let dims = gridDims a.Shape a.Chunks
     let omit =
         a.OmitChunks |> List.map (List.map string >> String.concat ",") |> Set.ofList
@@ -564,47 +577,45 @@ let private placeChunks (spec: RepoSpec) (root: string) (a: ArraySpec) : (int64 
     let nativeCoords =
         coords |> List.filter (fun c -> isPresent c && not (isVirtual c) && not (goesInline c))
 
-    Directory.CreateDirectory (chunksDir root) |> ignore
-
     // Packed: one file per array holding every native chunk end to end, so
     // the refs carry NONZERO offsets. Unpacked: one file per chunk at
     // offset 0, which is what the reference writer emits.
-    let packedTable : Map<string, byte[] * int64 * int64> =
+    let (packedTable : Map<string, byte[] * int64 * int64>), (chunkFiles : (string * byte[]) list) =
         if a.PackNativeChunks && not (List.isEmpty nativeCoords) then
             let blobs = nativeCoords |> List.map bytesOf
             let all = Array.concat blobs
             let fileId = digest spec.Seed ("chunkpack/" + a.Name) all 12
-            let file = Path.Combine(chunksDir root, base32Encode fileId)
-            if not (File.Exists file) then File.WriteAllBytes(file, all)
             let mutable off = 0L
             let mutable acc = Map.empty
             for (c, b) in List.zip nativeCoords blobs do
                 acc <- Map.add (key c) (fileId, off, int64 b.Length) acc
                 off <- off + int64 b.Length
-            acc
+            (acc, [ (base32Encode fileId, all) ])
         else
             let mutable acc = Map.empty
+            let mutable fs = []
             for c in nativeCoords do
                 let b = bytesOf c
                 let fileId = digest spec.Seed ("chunk/" + a.Name) b 12
-                let file = Path.Combine(chunksDir root, base32Encode fileId)
-                if not (File.Exists file) then File.WriteAllBytes(file, b)
+                fs <- (base32Encode fileId, b) :: fs
                 acc <- Map.add (key c) (fileId, 0L, int64 b.Length) acc
-            acc
+            (acc, List.rev fs)
 
-    coords
-    |> List.map (fun c ->
-        let p =
-            if not (isPresent c) then RefAbsent
-            elif isVirtual c then
-                let loc = match virtualAt with Some (_, l) -> l | None -> ""
-                RefVirtual (loc, 0L, int64 (bytesOf c).Length)
-            elif goesInline c then RefInline (bytesOf c)
-            else
-                match Map.tryFind (key c) packedTable with
-                | Some (id, off, len) -> RefNative (id, off, len)
-                | None -> failwithf "IcechunkWrite '%s': chunk %A was neither placed nor absent" a.Name c
-        (c, p))
+    let placements =
+        coords
+        |> List.map (fun c ->
+            let p =
+                if not (isPresent c) then RefAbsent
+                elif isVirtual c then
+                    let loc = match virtualAt with Some (_, l) -> l | None -> ""
+                    RefVirtual (loc, 0L, int64 (bytesOf c).Length)
+                elif goesInline c then RefInline (bytesOf c)
+                else
+                    match Map.tryFind (key c) packedTable with
+                    | Some (id, off, len) -> RefNative (id, off, len)
+                    | None -> failwithf "IcechunkWrite '%s': chunk %A was neither placed nor absent" a.Name c
+            (c, p))
+    { Placements = placements; Files = chunkFiles }
 
 /// A `ChunkRefT` for one placed chunk. The object API's default constructor
 /// pre-populates `ChunkId` with a ZEROED ObjectId12, so an inline or virtual
@@ -707,15 +718,18 @@ let private buildManifests (spec: RepoSpec) (a: ArraySpec)
                    Refs = refs |> List.map (fun (c, _, r) -> (c, r)) })
     |> List.choose id
 
-/// Serialize and write the manifest files for one snapshot. `Manifest.arrays`
-/// must be sorted by node id, so a manifest holding several arrays is built
-/// only after every array's refs are known. This writer keeps ONE array per
-/// manifest (the split above is a split of one array's grid), so each file
-/// carries a single-entry `arrays` vector -- legal, and it is what makes
-/// per-array id reuse across snapshots exact.
-let private writeManifestFile (spec: RepoSpec) (root: string) (arrayNodeId: byte[])
-                              (m: PendingManifest) : int64 * uint32 =
-    let file = Path.Combine(manifestsDir root, base32Encode m.Id)
+/// Serialize one manifest file. `Manifest.arrays` must be sorted by node id,
+/// so a manifest holding several arrays is built only after every array's refs
+/// are known. This writer keeps ONE array per manifest (the split above is a
+/// split of one array's grid), so each file carries a single-entry `arrays`
+/// vector -- legal, and it is what makes per-array id reuse across snapshots
+/// exact.
+///
+/// PURE, like `planChunks`: the snapshot that points at this file records its
+/// SIZE, so the bytes have to exist before the snapshot id that will name the
+/// directory they live in.
+let private manifestFileBytes (spec: RepoSpec) (arrayNodeId: byte[])
+                              (m: PendingManifest) : byte[] =
     let am = generated.ArrayManifestT()
     let nid = generated.ObjectId8T()
     nid.Bytes <- Array.copy arrayNodeId
@@ -730,9 +744,181 @@ let private writeManifestFile (spec: RepoSpec) (root: string) (arrayNodeId: byte
     // says "none". (The schema's own default is 1; stating 0 describes what
     // is actually in the file.)
     mt.CompressionAlgorithm <- 0uy
-    let bytes = frameFile spec ftManifest (mt.SerializeToBinary())
-    if not (File.Exists file) then File.WriteAllBytes(file, bytes)
-    (int64 bytes.Length, uint32 m.Refs.Length)
+    frameFile spec ftManifest (mt.SerializeToBinary())
+
+// ---------------------------------------------------------------------------
+// Planning a snapshot (pure), and the content-derived snapshot id
+// ---------------------------------------------------------------------------
+
+/// Everything one snapshot implies, computed WITHOUT touching the disk.
+///
+/// The plan has to be pure because the snapshot's ID IS A HASH OF IT: the
+/// bytes exist before the name they are filed under does.
+type private SnapshotPlan = {
+    /// The chunk and manifest files this snapshot needs, as
+    /// (subdirectory under the repo root, file name, bytes). Every one is
+    /// content-addressed, so a repeated entry carries identical bytes.
+    Files: (string * string * byte[]) list
+    /// Builds the FlatBuffer object with the given 12 bytes stamped into
+    /// `Snapshot.id`. EVERY OTHER FIELD IS ID-INDEPENDENT -- which is what
+    /// makes hashing the zero-id form a hash of the snapshot's real content.
+    Build: byte[] -> generated.SnapshotT
+}
+
+/// Plan one snapshot: its nodes, its manifests, and the files both imply.
+let private planSnapshot (spec: RepoSpec) (s: SnapshotSpec) : SnapshotPlan =
+    let nodes = ResizeArray<generated.NodeSnapshotT>()
+    let manifestFiles = ResizeArray<generated.ManifestFileInfoV2T>()
+    let files = ResizeArray<string * string * byte[]>()
+
+    // The root group. Sorted first by path bytes ("/" < "/anything").
+    let rootNode = generated.NodeSnapshotT()
+    let rootId = generated.ObjectId8T()
+    rootId.Bytes <- Array.copy (idFromText spec.Seed "node" "/" 8)
+    rootNode.Id <- rootId
+    rootNode.Path <- "/"
+    rootNode.UserData <- ResizeArray<byte>(Encoding.UTF8.GetBytes rootGroupJson)
+    rootNode.NodeData <- generated.NodeDataUnion.FromGroup(generated.GroupNodeDataT())
+    nodes.Add rootNode
+
+    for a in s.Arrays |> List.sortWith (fun x y -> utf8Compare ("/" + x.Name) ("/" + y.Name)) do
+        let nid = nodeIdBytes spec a.Name
+        let plan = planChunks spec a
+        for (name, bytes) in plan.Files do
+            files.Add ("chunks", name, bytes)
+        let manifests = buildManifests spec a plan.Placements
+        let manifestRefs = ResizeArray<generated.ManifestRefT>()
+        for m in manifests do
+            let mBytes = manifestFileBytes spec nid m
+            files.Add ("manifests", base32Encode m.Id, mBytes)
+            let mr = generated.ManifestRefT()
+            let oid = generated.ObjectId12T()
+            oid.Bytes <- Array.copy m.Id
+            mr.ObjectId <- oid
+            mr.Extents <-
+                ResizeArray<generated.ChunkIndexRangeT>(
+                    m.Extents |> List.map (fun (lo, hi) ->
+                        let r = generated.ChunkIndexRangeT()
+                        r.From <- lo
+                        r.To <- hi
+                        r))
+            manifestRefs.Add mr
+            let info = generated.ManifestFileInfoV2T()
+            let iid = generated.ObjectId12T()
+            iid.Bytes <- Array.copy m.Id
+            info.Id <- iid
+            info.SizeBytes <- uint64 mBytes.Length
+            info.NumChunkRefs <- uint32 m.Refs.Length
+            manifestFiles.Add info
+
+        let arrNode = generated.ArrayNodeDataT()
+        // V1's `shape` MUST be empty in a V2 snapshot; `shape_v2` carries
+        // (array length, chunk COUNT) -- note that second field is a
+        // count, not a chunk length.
+        arrNode.Shape <- ResizeArray<generated.DimensionShapeT>()
+        arrNode.ShapeV2 <-
+            ResizeArray<generated.DimensionShapeV2T>(
+                List.map2 (fun (len: int64) (nchunks: int64) ->
+                    let d = generated.DimensionShapeV2T()
+                    d.ArrayLength <- uint64 len
+                    d.NumChunks <- uint32 nchunks
+                    d) a.Shape (gridDims a.Shape a.Chunks))
+        arrNode.DimensionNames <-
+            match a.DimNames with
+            | Some ds ->
+                ResizeArray<generated.DimensionNameT>(
+                    ds |> List.map (fun n ->
+                        let d = generated.DimensionNameT()
+                        d.Name <- n
+                        d))
+            | None -> null
+        arrNode.Manifests <- manifestRefs
+
+        let node = generated.NodeSnapshotT()
+        let nidT = generated.ObjectId8T()
+        nidT.Bytes <- Array.copy nid
+        node.Id <- nidT
+        node.Path <- "/" + a.Name
+        node.UserData <- ResizeArray<byte>(Encoding.UTF8.GetBytes (arrayJson a))
+        node.NodeData <- generated.NodeDataUnion.FromArray(arrNode)
+        nodes.Add node
+
+    // Sorted ONCE: `Build` may run twice (zero-id probe, then the real one)
+    // and both passes must lay the vector out identically.
+    let sortedManifestFiles =
+        manifestFiles |> Seq.sortWith (fun x y -> byteCompare x.Id.Bytes y.Id.Bytes) |> List.ofSeq
+    let nodeList = List.ofSeq nodes
+
+    let build (idBytes: byte[]) =
+        let snap = generated.SnapshotT()
+        let sid = generated.ObjectId12T()
+        sid.Bytes <- Array.copy idBytes
+        snap.Id <- sid
+        // V2 snapshots carry NO parent id (parent tracking moved to the repo
+        // file). The object API's default constructor supplies a zeroed one,
+        // so it has to be nulled explicitly.
+        snap.ParentId <- null
+        snap.Nodes <- ResizeArray<generated.NodeSnapshotT>(nodeList)
+        snap.FlushedAt <- s.FlushedAtMicros
+        snap.Message <- s.Message
+        snap.Metadata <- ResizeArray<generated.MetadataItemT>()
+        // Required, and MUST be empty in V2 (superseded by manifest_files_v2).
+        snap.ManifestFiles <- ResizeArray<generated.ManifestFileInfoT>()
+        snap.ManifestFilesV2 <- ResizeArray<generated.ManifestFileInfoV2T>(sortedManifestFiles)
+        snap
+
+    { Files = List.ofSeq files; Build = build }
+
+/// The 12 zero bytes a snapshot wears while it is being hashed. Never reaches
+/// disk: `writeRepo` always re-builds with the derived id before writing.
+let private placeholderSnapshotId : byte[] = Array.zeroCreate 12
+
+/// Hash a planned snapshot into its id. See `snapshotIdBytes`.
+let private idOfPlan (spec: RepoSpec) (plan: SnapshotPlan) : byte[] =
+    digest spec.Seed "snapshot" ((plan.Build placeholderSnapshotId).SerializeToBinary()) 12
+
+/// A snapshot's 12-byte object id: a truncated SHA-256 over the snapshot's own
+/// SERIALIZED CONTENT.
+///
+/// TWO PASSES, because a snapshot's id lives inside the snapshot. The object is
+/// built once with a ZEROED id and serialized; that payload is hashed; the
+/// object is then built again with the resulting id stamped in, and THAT is
+/// what lands in `snapshots/`. The hashed form is the id-independent portion of
+/// the file, and every other byte of it is covered -- node ids and paths, the
+/// verbatim `zarr.json` of each array, shapes, dimension names, the manifest
+/// ids and sizes each array points at (and manifest ids are themselves derived
+/// from the chunk table, whose chunk ids are derived from the chunk bytes), the
+/// commit message and the timestamp. Change any of them and the id moves;
+/// change none of them and it does not.
+///
+/// This closes the loop the rest of the module already had: chunk and manifest
+/// ids were content-derived from the start, and a snapshot id was not -- it
+/// hashed the spec author's NAME for the snapshot, so "s1" named whatever "s1"
+/// currently held and the same twenty characters could name two different
+/// datasets across two commits of this repository. A pinned `@snapshot:<id>`
+/// key claims bit-exact reproducibility; that claim is only true of an id that
+/// is a function of the bits.
+///
+/// Contrast `nodeIdBytes`, which stays NAME-derived on purpose: a node id is
+/// identity ACROSS snapshots, so it has to survive a rewrite of its own data.
+///
+/// Still a pure function of the `RepoSpec` -- nothing is read from disk, and
+/// the same spec yields the same id in any directory, process or machine.
+let snapshotIdBytes (spec: RepoSpec) (snapshotName: string) : byte[] =
+    match spec.Snapshots |> List.tryFind (fun s -> s.Name = snapshotName) with
+    | Some s -> idOfPlan spec (planSnapshot spec s)
+    | None ->
+        failwithf "IcechunkWrite: no snapshot named '%s' in this spec (have: %A)"
+                  snapshotName (spec.Snapshots |> List.map (fun s -> s.Name))
+
+/// The base32 spelling of `snapshotIdBytes` (20 characters) -- the
+/// `snapshots/` file name, and the string a `@snapshot:<id>` key carries.
+let snapshotId (spec: RepoSpec) (snapshotName: string) : string =
+    base32Encode (snapshotIdBytes spec snapshotName)
+
+// ---------------------------------------------------------------------------
+// writeRepo
+// ---------------------------------------------------------------------------
 
 /// Write a complete Icechunk repo under `root`.
 ///
@@ -768,98 +954,38 @@ let writeRepo (root: string) (spec: RepoSpec) : unit =
     Directory.CreateDirectory (Path.Combine(root, "overwritten")) |> ignore
 
     // --- snapshots ----------------------------------------------------------
-    for s in spec.Snapshots do
-        let nodes = ResizeArray<generated.NodeSnapshotT>()
-        let manifestFiles = ResizeArray<generated.ManifestFileInfoV2T>()
+    // PLAN EVERY SNAPSHOT FIRST. Snapshot ids are content-derived, so a
+    // snapshot's bytes have to exist before the name it is filed under does --
+    // and the ids are then computed ONCE here rather than re-derived at each of
+    // the four places below that needs one (the file name, the `Snapshot.id`
+    // field, the sort, and the repo file's `SnapshotInfo`).
+    let plans =
+        spec.Snapshots
+        |> List.map (fun s ->
+            let plan = planSnapshot spec s
+            (s, plan, idOfPlan spec plan))
+    let idBytesOf (name: string) =
+        plans |> List.pick (fun (s, _, id) -> if s.Name = name then Some id else None)
 
-        // The root group. Sorted first by path bytes ("/" < "/anything").
-        let rootNode = generated.NodeSnapshotT()
-        let rootId = generated.ObjectId8T()
-        rootId.Bytes <- Array.copy (idFromText spec.Seed "node" "/" 8)
-        rootNode.Id <- rootId
-        rootNode.Path <- "/"
-        rootNode.UserData <- ResizeArray<byte>(Encoding.UTF8.GetBytes rootGroupJson)
-        rootNode.NodeData <- generated.NodeDataUnion.FromGroup(generated.GroupNodeDataT())
-        nodes.Add rootNode
+    // Content-derived ids mean two snapshots that serialize identically ARE
+    // one snapshot. `mkSnapshot` puts the spec name in the commit message, so
+    // this cannot fire for a spec built the usual way -- but a hand-built spec
+    // that repeats a whole commit would otherwise write ONE file while the
+    // repo file claims two, which is a repo no reader can make sense of.
+    let planIds = plans |> List.map (fun (_, _, id) -> base32Encode id)
+    if (planIds |> List.distinct |> List.length) <> planIds.Length then
+        failwithf "IcechunkWrite: two snapshots serialize identically and so share the content-derived id (%A for %A). Snapshots are told apart by their CONTENT -- message and timestamp included -- not by their spec names."
+                  planIds (spec.Snapshots |> List.map (fun s -> s.Name))
 
-        for a in s.Arrays |> List.sortWith (fun x y -> utf8Compare ("/" + x.Name) ("/" + y.Name)) do
-            let nid = nodeIdBytes spec a.Name
-            let placed = placeChunks spec root a
-            let manifests = buildManifests spec a placed
-            let manifestRefs = ResizeArray<generated.ManifestRefT>()
-            for m in manifests do
-                let (sizeBytes, numRefs) = writeManifestFile spec root nid m
-                let mr = generated.ManifestRefT()
-                let oid = generated.ObjectId12T()
-                oid.Bytes <- Array.copy m.Id
-                mr.ObjectId <- oid
-                mr.Extents <-
-                    ResizeArray<generated.ChunkIndexRangeT>(
-                        m.Extents |> List.map (fun (lo, hi) ->
-                            let r = generated.ChunkIndexRangeT()
-                            r.From <- lo
-                            r.To <- hi
-                            r))
-                manifestRefs.Add mr
-                let info = generated.ManifestFileInfoV2T()
-                let iid = generated.ObjectId12T()
-                iid.Bytes <- Array.copy m.Id
-                info.Id <- iid
-                info.SizeBytes <- uint64 sizeBytes
-                info.NumChunkRefs <- numRefs
-                manifestFiles.Add info
-
-            let arrNode = generated.ArrayNodeDataT()
-            // V1's `shape` MUST be empty in a V2 snapshot; `shape_v2` carries
-            // (array length, chunk COUNT) -- note that second field is a
-            // count, not a chunk length.
-            arrNode.Shape <- ResizeArray<generated.DimensionShapeT>()
-            arrNode.ShapeV2 <-
-                ResizeArray<generated.DimensionShapeV2T>(
-                    List.map2 (fun (len: int64) (nchunks: int64) ->
-                        let d = generated.DimensionShapeV2T()
-                        d.ArrayLength <- uint64 len
-                        d.NumChunks <- uint32 nchunks
-                        d) a.Shape (gridDims a.Shape a.Chunks))
-            arrNode.DimensionNames <-
-                match a.DimNames with
-                | Some ds ->
-                    ResizeArray<generated.DimensionNameT>(
-                        ds |> List.map (fun n ->
-                            let d = generated.DimensionNameT()
-                            d.Name <- n
-                            d))
-                | None -> null
-            arrNode.Manifests <- manifestRefs
-
-            let node = generated.NodeSnapshotT()
-            let nidT = generated.ObjectId8T()
-            nidT.Bytes <- Array.copy nid
-            node.Id <- nidT
-            node.Path <- "/" + a.Name
-            node.UserData <- ResizeArray<byte>(Encoding.UTF8.GetBytes (arrayJson a))
-            node.NodeData <- generated.NodeDataUnion.FromArray(arrNode)
-            nodes.Add node
-
-        let snap = generated.SnapshotT()
-        let sid = generated.ObjectId12T()
-        sid.Bytes <- Array.copy (snapshotIdBytes spec s.Name)
-        snap.Id <- sid
-        // V2 snapshots carry NO parent id (parent tracking moved to the repo
-        // file). The object API's default constructor supplies a zeroed one,
-        // so it has to be nulled explicitly.
-        snap.ParentId <- null
-        snap.Nodes <- nodes
-        snap.FlushedAt <- s.FlushedAtMicros
-        snap.Message <- s.Message
-        snap.Metadata <- ResizeArray<generated.MetadataItemT>()
-        // Required, and MUST be empty in V2 (superseded by manifest_files_v2).
-        snap.ManifestFiles <- ResizeArray<generated.ManifestFileInfoT>()
-        snap.ManifestFilesV2 <-
-            ResizeArray<generated.ManifestFileInfoV2T>(
-                manifestFiles |> Seq.sortWith (fun x y -> byteCompare x.Id.Bytes y.Id.Bytes))
-        let file = Path.Combine(snapshotsDir root, snapshotId spec s.Name)
-        File.WriteAllBytes(file, frameFile spec ftSnapshot (snap.SerializeToBinary()))
+    for (_, plan, idBytes) in plans do
+        // Chunk and manifest files are content-addressed: the same name always
+        // carries the same bytes, so writing only what is missing is not an
+        // optimization but the statement that two snapshots SHARE a file.
+        for (sub, name, bytes) in plan.Files do
+            let path = Path.Combine(root, sub, name)
+            if not (File.Exists path) then File.WriteAllBytes(path, bytes)
+        let file = Path.Combine(snapshotsDir root, base32Encode idBytes)
+        File.WriteAllBytes(file, frameFile spec ftSnapshot ((plan.Build idBytes).SerializeToBinary()))
 
     // --- the repo file ------------------------------------------------------
     // `Repo.snapshots` is sorted by id bytes, and `Ref.snapshot_index` indexes
@@ -868,7 +994,7 @@ let writeRepo (root: string) (spec: RepoSpec) : unit =
     let commitOrder = spec.Snapshots |> List.map (fun s -> s.Name)
     let sortedNames =
         commitOrder
-        |> List.sortWith (fun x y -> byteCompare (snapshotIdBytes spec x) (snapshotIdBytes spec y))
+        |> List.sortWith (fun x y -> byteCompare (idBytesOf x) (idBytesOf y))
     let indexOf (name: string) = List.findIndex ((=) name) sortedNames
 
     let snapshotInfos =
@@ -877,7 +1003,7 @@ let writeRepo (root: string) (spec: RepoSpec) : unit =
             let s = spec.Snapshots |> List.find (fun s -> s.Name = name)
             let info = generated.SnapshotInfoT()
             let sid = generated.ObjectId12T()
-            sid.Bytes <- Array.copy (snapshotIdBytes spec name)
+            sid.Bytes <- Array.copy (idBytesOf name)
             info.Id <- sid
             // Each snapshot's parent is its predecessor in COMMIT order; the
             // offset is that parent's position in the SORTED list. -1 for the

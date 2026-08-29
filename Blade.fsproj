@@ -123,11 +123,13 @@
     <Compile Include="src/providers/NetcdfProvider.fs" />
     <Compile Include="src/providers/ZarrProvider.fs" />
     <Compile Include="src/providers/CsvProvider.fs" />
-    <!-- Icechunk (versioned Zarr) provider: repo/ref resolution and the
-         39-byte header parser are live; payload decode is stubbed behind a
-         named seam pending the plan's section 6.2 dependency decision. Reuses
-         ZarrProvider's metadata parsers, so it must follow ZarrProvider.fs;
-         registered by ProviderStatics.fs, which it must precede. -->
+    <!-- Icechunk (versioned Zarr) provider: repo/ref resolution, the 39-byte
+         header parser and the payload decode are all live. The plan's section
+         6.2 dependency decision landed on the vendored flatc accessors (root
+         tables verified before they are read) plus the managed ZstdSharp.Port,
+         both compile-time only. Reuses ZarrProvider's metadata parsers, so it
+         must follow ZarrProvider.fs; registered by ProviderStatics.fs, which it
+         must precede. -->
     <Compile Include="src/providers/IcechunkProvider.fs" />
     <!-- F#-side Icechunk fixture WRITER (tests only): builds real spec-2 repos
          on local disk through the vendored FlatBuffers object API + ZstdSharp,
@@ -136,6 +138,14 @@
          header layout and Crockford encoder are deliberate independent twins),
          so its position only has to follow the ProjectReference. -->
     <Compile Include="src/providers/IcechunkWrite.fs" />
+    <!-- The RepoSpec for the committed demo store
+         (examples/data/station_temps.icechunk), shared by its generator script
+         (examples/tools/make_station_icechunk.fsx, which `#load`s this same
+         file) and by IcechunkTests' regeneration guard, which rebuilds it into
+         a scratch directory and diffs it against the committed bytes. It is a
+         plain value over IcechunkWrite's spec types, so it must follow
+         IcechunkWrite.fs and nothing else constrains it. -->
+    <Compile Include="examples/tools/StationSpec.fs" />
     <Compile Include="src/TypedAst.fs" />
     <Compile Include="src/Deduce.fs" />
     <!-- The generic half of an equivariance-family judgment (C3 stage 0,

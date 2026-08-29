@@ -29,6 +29,10 @@
 // %%
 import icechunk as ic
 
+// The path is relative to THIS FILE: a notebook cell evaluates with the
+// notebook's own directory as its working directory.
+// Running the same code as a plain .blade from the repo root instead wants
+// `examples/data/station_temps.icechunk`.
 let repo = ic.load("data/station_temps.icechunk")
 
 // %% [markdown]
@@ -92,11 +96,13 @@ mean_drift
 
 // %% [markdown]
 // A tag can move only by deliberate re-tagging; a snapshot id can never
-// move. Pinning one makes a program bit-exactly reproducible — the compiled
+// move — the id *is* a truncated hash of the snapshot's own contents, so
+// the same twenty characters can never be handed to a different dataset.
+// Pinning one makes a program bit-exactly reproducible — the compiled
 // binary reads those chunks or fails loudly, forever.
 //
 // %%
-let pinned = repo.checkout("TFWGY8Y38WKVN9HJX450", ic.snapshot)
+let pinned = repo.checkout("9ZDMT4JXK0A92JRXYXRG", ic.snapshot)
 let temp_pin = pinned.vars.temp |> ic.read
 reduce(temp_pin - temp_v1, (+), axes = 3)
 // EXPECT: 0 exactly -- the tag v1.0 points at this very snapshot
