@@ -290,6 +290,15 @@ is one refusal + BL4011 with a pointer to NB1a.
 
 ## 3. NB2 — cell plan
 
+**NOTEBOOK REMOVED 2026-08-28 (condensing pass).** The experiment campaign
+below ended decisively negative — nothing promoted — so
+`examples/aspirin_moment_jet.bladenb` was deleted; only examples and
+successful models stay in `examples/`. This section is now the surviving
+record of what was built and measured (the AS BUILT tables, the windowed
+arm, the E1–E4 campaign). The verdict itself lives on in the arc:
+NB3 (`matched_moments.bladenb`) opens from it and NB4
+(`cod_crystals.bladenb`) is the real-data answer to it.
+
 **FLESHED OUT 2026-08-26** after NB1b's measured lesson (conformational
 energy lives in pair-distance structure, not centroid multipoles) and three
 further probes (P8/P9, this session). Same store as NB1b —
@@ -995,6 +1004,7 @@ constants compiler-owned.
    interp — inside the gap-#30 cliff).
 5. ✅ **NB2 built + verified 2026-08-26** (see §3 AS BUILT; outcome (c) with
    the correlation diagnostic making the loss clean; census grown to 46).
+   **Removed 2026-08-28** in the condensing pass — §3 keeps the record.
 6. ✅ **Reverse-mode combinator AD (§5) — core LANDED 2026-08-26**: the
    eager-map lowering (item 2) with exact identity-pretransform equality;
    items 1/3 turned out already landed 2026-08-17; walls filed as census

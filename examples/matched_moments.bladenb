@@ -1,9 +1,11 @@
 // %% [markdown]
 // # The matched-moment discriminator: a dataset where K >= 1 is the only signal
 //
-// The moment-jet notebook (`examples/aspirin_moment_jet.bladenb`) ended on a
-// loss, honestly reported: on MD17 aspirin the K = 0 windowed occupancies
-// carry the energy and the K >= 1 jet blocks add nothing measurable. This
+// Moment jets were tried first on real MD17-aspirin energies, and lost,
+// honestly: the K = 0 windowed occupancies carry the energy and the K >= 1
+// jet blocks add nothing measurable — a verdict that survived an 8–64×
+// step budget, learnable windows, and atom-centered variants (the campaign
+// record lives in `docs/plans/plan-equivariant-nn-notebooks.md` §3). This
 // notebook is the dataset that verdict asks for — one where the situation is
 // **inverted by construction**. Four classes of 3-D point clouds are
 // engineered so that everything up to and including second moments is not
@@ -1118,7 +1120,8 @@ moment_pins_bad
 // %% [markdown]
 // ## The pre-training diagnostic: what a LINEAR probe could ever find
 //
-// Before any training, the moment-jet notebook's calibrated ceiling: for
+// Before any training, the calibrated linear ceiling (the diagnostic the
+// MD17 moment-jet campaign ended on): for
 // each rung's feature set, the sum over (feature, class) of squared
 // correlations with the one-hot labels — on the real labels and on two
 // shuffled-label nulls (the store's own permutation table). The predictions
@@ -2055,8 +2058,7 @@ rotation_total_dev
 // working code above never read one — `ml.norms` is the sanctioned exit.
 // `examples/tetris_shapes.bladenb` runs the full deduction suite (six
 // refusals, a compiler-written clause, a chirality theorem as a compile
-// error); `examples/aspirin_moment_jet.bladenb` has this same cell for its
-// pair jet.
+// error).
 //
 // **This cell fails on purpose.** A failing cell never joins the notebook
 // session, so nothing downstream is disturbed.
@@ -2103,8 +2105,9 @@ function leak(x: Array<Float like IrrepsIdx<ISPEC4>>) where ml.equiv(O3) -> Floa
 // rung (48/50) — its l = 4 class signal is ~6x the per-sample noise, and
 // two test clouds drew unlucky orientations of that noise.
 //
-// The NB4 door: the same ladder on data where matched-moment structure
-// occurs naturally rather than by construction — dMRI crossings (l = 4 at
+// The door onward (`examples/cod_crystals.bladenb`): the same ladder on
+// data where matched-moment structure occurs naturally rather than by
+// construction — dMRI crossings (l = 4 at
 // fixed tensor), EBSD/texture orientation distributions, Steinhardt-order
 // analysis of supercooled liquids, water tetrahedrality (l = 3). This
 // notebook is the control experiment those would cite.

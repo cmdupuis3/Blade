@@ -781,8 +781,8 @@ scores
 // permutation internally, which is exactly why the surface of this notebook
 // never has to. Positions, forces and the stored rotation matrices are all
 // plain Cartesian, and they compose plainly. (The store also ships
-// `pos_train_yzx` / `pos_test_yzx`, the permuted copies, for the moment-jet
-// notebook, which feeds `ml.derive_poly` directly and does need them.)
+// `pos_train_yzx` / `pos_test_yzx`, the permuted copies, for anything that
+// feeds `ml.derive_poly` directly and so does need the raw basis order.)
 
 // %%
 function rot_slot(k: Int, p: Array<Float like Idx<NP3>>, m: Int) -> Float = {
@@ -850,11 +850,9 @@ inv_report
 // `ad.grad` is CALLED here, not entered, so everything after the call is
 // ordinary array code: negating the gradient is whole-array arithmetic and
 // the deviations below are folds over elementwise products. The products
-// are bound before being reduced as a historical note: gap #44 (codegen
-// refusing `reduce(A * B, (+))` in expression position while the
-// interpreter accepted it) forced this spelling, and was FIXED 2026-08-26
-// -- both lanes now accept the inline form, as the test-MSE cell above
-// already uses. The named intermediates read fine either way, so they stay.
+// are bound before being reduced -- no longer required (gap #44, the
+// codegen refusal of `reduce(A * B, (+))` in expression position, is fixed;
+// both lanes now accept the inline form) but kept since it reads fine either way.
 function force_of(p: Array<Float like Idx<NP3>>) -> Array<Float like Idx<NP3>> = {
     let mut dp = replicate(NP3, pure(0.0)) |> compute
     let __e = ad.grad(energy)(p, dp)

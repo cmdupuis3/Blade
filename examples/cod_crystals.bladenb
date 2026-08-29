@@ -494,7 +494,7 @@ function chansC(x: Array<Float like IrrepsIdx<ISPEC34>>) where ml.equiv(O3) -> A
      n2(0), n2(1), n2(2), n2(3), n2(4), n2(5)]
 }
 // Elaboration probe: run each stack once here, so every ml.* kernel this
-// notebook needs exists before the expensive cells (census #40 discipline).
+// notebook needs exists before the expensive cells.
 let __exA: Array<Float like IrrepsIdx<ISPEC2>> = [1.0, 0.1, 0.2, 0.3, 0.1, 0.2, 0.3, 0.4, 0.5]
 let __exB: Array<Float like IrrepsIdx<ISPEC24>> = [1.0, 2.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.1, 0.2, 0.3, 0.4, 0.5, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 let __exC: Array<Float like IrrepsIdx<ISPEC34>> = [1.0, 2.0, 0.1, 0.2, 0.3, 0.1, 0.2, 0.3, 0.4, 0.5, 0.1, 0.2, 0.3, 0.4, 0.5, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -611,13 +611,13 @@ feat_probe
 //
 // Every sample's K = 2 l = 2 power — recomputed here through `ml.derive_poly`
 // from the stored experimental shells — sits at the floating-point floor,
-// across all 1104 refinements. This is NB3's whitening theorem with the
-// generator deleted: **no preprocessing manufactured these moments**. The
-// only declared steps are geometric (take the first shell, normalize to unit
-// vectors), and then the site group does the rest — a cubic site admits no
-// invariant vector (K1 = 0) and no invariant rank-2 traceless tensor
-// (the l = 2 block of ANY moment vanishes), for any refined lattice
-// parameter, by Neumann's principle. Nature runs the exactness device.
+// across all 1104 refinements. This is `matched_moments.bladenb`'s whitening
+// theorem with the generator deleted: **no preprocessing manufactured these
+// moments**. The only declared steps are geometric (take the first shell,
+// normalize to unit vectors), and then the site group does the rest — a
+// cubic site admits no invariant vector (K1 = 0) and no invariant rank-2
+// traceless tensor (the l = 2 block of ANY moment vanishes), for any refined
+// lattice parameter, by Neumann's principle. Nature runs the exactness device.
 //
 // The consequence is pinned in the same breath: the K <= 2 feature vector —
 // K1, K2 l0 (which unit normalization fixes at -1/sqrt(3) exactly), K2 l2 —
@@ -916,7 +916,7 @@ neumann_ok
 // theorem 5 could pin invariance through the whole pipeline.
 // `examples/tetris_shapes.bladenb` runs the full deduction suite (six
 // refusals, a compiler-written clause); `examples/matched_moments.bladenb`
-// and `examples/aspirin_moment_jet.bladenb` carry this same cell.
+// carries this same cell.
 //
 // **This cell fails on purpose.** A failing cell never joins the notebook
 // session, so nothing downstream is disturbed.
@@ -940,8 +940,9 @@ function leak(x: Array<Float like IrrepsIdx<ISPEC34>>) where ml.equiv(O3) -> Flo
 // | + K3 | 46 | 44 | 100 | 85 | the odd moment splits the degenerate pair; the ladder completes |
 //
 // The K <= 2 row is worth a second look because its mechanism is BETTER than
-// the sibling notebook's. In NB3 the K <= 2 rung was constant because a
-// generator whitened every sample by hand. Here nothing was whitened:
+// the sibling notebook's: in `matched_moments.bladenb` the K <= 2 rung was
+// constant because a generator whitened every sample by hand. Here nothing
+// was whitened:
 // normalizing neighbours to unit vectors fixes the radial moment (K2 l0 =
 // -1/sqrt(3), every sample), and the site group kills K1 and the l = 2 block
 // outright — theorem 1. The constant model is a THEOREM ABOUT CRYSTALS, not
@@ -1504,7 +1505,7 @@ tet_predicted_bcc
 // %% [markdown]
 // ## What this notebook adds — and what it does not claim
 //
-// Added, on top of the matched-moment control experiment (NB3):
+// Added, on top of the matched-moment control experiment (`matched_moments.bladenb`):
 //
 // - **The theorem survives contact with experiment.** K <= 2 blindness at
 //   the 1e-31 floor on 1104 real refinements, with no exactness device in

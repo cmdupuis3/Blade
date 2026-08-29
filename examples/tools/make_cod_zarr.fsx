@@ -1,6 +1,6 @@
 // make_cod_zarr.fsx — real crystal structures from the Crystallography Open
 // Database (COD, CC0) turned into neighbour-direction point clouds for the
-// bond-orientational-order notebook (NB4).
+// bond-orientational-order notebook (examples/cod_crystals.bladenb).
 //
 // Input: a local mirror of individual COD CIF files under
 //   C:\Users\cdupu\Data\cod\cifs\<codid>.cif
@@ -43,7 +43,7 @@
 // the power of the l-block of the K-th derive_poly jet of the same vectors is
 //   power_l = c_l * Ql^2,   c_l = 2^l (l!)^2 / (2l)!   (c2=2/3, c3=2/5, c4=8/35)
 // — verified below by an assertion gate that reproduces, to 1e-6, the probe
-// table (scratch probe shells2.blade, plan §3c):
+// table:
 //   shell            CN   K3 power        K4 l=4 power
 //   simple cubic      6   0               2/15    = 0.133333
 //   fcc               12  0               1/120   = 0.008333
@@ -366,8 +366,8 @@ let powers (vs: float[][]) =
     c2 * ql2 y2 2 vs, c3 * ql2 y3 3 vs, c4 * ql2 y4 4 vs
 
 // ---------------------------------------------------------------------------
-// Calibration gate: the canonical shells must reproduce the probe table
-// (plan §3c / scratch probe shells2.blade) before any real data is touched.
+// Calibration gate: the canonical shells must reproduce the target table
+// above before any real data is touched.
 // ---------------------------------------------------------------------------
 let canonSc =
     [| [| 1.;0.;0. |]; [| -1.;0.;0. |]; [| 0.;1.;0. |]; [| 0.;-1.;0. |]; [| 0.;0.;1. |]; [| 0.;0.;-1. |] |]

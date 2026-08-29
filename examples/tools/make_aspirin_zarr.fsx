@@ -329,7 +329,8 @@ let fTrain = gather3 trF trainIdx
 /// this permutation internally, but the raw l = 1 basis order in the irreps
 /// machinery IS (y, z, x) (src/ml/compiler/MLElaborate.fs:217-219), so anything
 /// fed to `ml.derive_poly` or compared against an l = 1 block directly wants
-/// this copy. NB2 consumes it; NB1b prints one row of it and moves on.
+/// this copy. `aspirin_energy.bladenb` prints one row of it and moves on;
+/// anything feeding `ml.derive_poly` raw consumes it wholesale.
 let yzx (src: float[]) (nSamp: int) =
     let out = Array.zeroCreate<float> (nSamp * nAtom * 3)
     for i in 0 .. nSamp * nAtom - 1 do

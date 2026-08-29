@@ -1,4 +1,4 @@
-// check_cod_shells.blade — S6 acceptance gate for examples/data/cod_shells.zarr.
+// check_cod_shells.blade — acceptance gate for examples/data/cod_shells.zarr.
 //
 // Reads the store written by make_cod_zarr.fsx and, per sample, recomputes the
 // K=2 l=2 power, the K=3 power, and the K=4 l=4 power of the REAL extracted
@@ -16,7 +16,7 @@
 // exactly zero to every K>=1 moment (derive_poly is homogeneous), so shells
 // with CN < 12 are handled by dividing by the true CN (cnf_*).
 //
-// Run compiled (census #57: `blade run` hard-kills at 120 s):
+// Run compiled — `blade run` hard-kills at 120 s:
 //   blade compile examples/tools/check_cod_shells.blade
 //   ./examples/tools/check_cod_shells.exe        (ucrt64 on PATH, from repo root)
 import ml as ml
