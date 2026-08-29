@@ -270,6 +270,15 @@ type TypeError =
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | CommContradictsBody of param1: string * param2: string
     | AntisymmContradictsBody of param1: string * param2: string
+    // The Hermitian third of the pair-swap contradiction family: the body
+    // provably CONJUGATES under the swap (f(y,x) = conj(f(x,y)), deduced
+    // PConj) over complex elements, so both the identity mirror comm
+    // licenses and the sign mirror anticomm licenses answer mirrored
+    // reads wrong. Only minted when the pair's element type is provably
+    // complex -- over reals conj is the identity and the same body is
+    // genuinely symmetric.
+    | CommContradictsConjBody of param1: string * param2: string
+    | AntisymmContradictsConjBody of param1: string * param2: string
     | AntisymMapNotOdd of param: string * proved: string
     | HermitianMapNotReal of param: string
     // The wreath-tie analog of AntisymMapNotOdd (IRLoopStructure.deduceWreathTie

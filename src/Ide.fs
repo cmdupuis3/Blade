@@ -1179,7 +1179,10 @@ let private parityClauses (names: string list) (parities: Blade.Deduce.Parity li
             match parArr.[i] with
             | Blade.Deduce.PInv -> Some "comm"
             | Blade.Deduce.PNeg -> Some "anticomm"
-            | Blade.Deduce.PBottom -> None
+            // PConj (Hermitian, f(y,x) = conj(f(x,y))) has no writable
+            // clause yet -- it exists to refute comm/anticomm, so it
+            // renders like PBottom rather than proposing a pin.
+            | Blade.Deduce.PConj | Blade.Deduce.PBottom -> None
         match kw with
         | None -> i <- i + 1
         | Some kw ->

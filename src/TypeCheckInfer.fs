@@ -7569,24 +7569,48 @@ and buildApplyInfo (env: TypeEnv)
     // the signs exchanged: strict-simplex storage would drop the diagonal and
     // return the negation for half the reads. (Both stand down under
     // reynolds, where stage3Pairs is empty by construction.)
+    // The Hermitian third of the family (needsComplexPair rows below): a
+    // CONJUGATING body (deduced PConj, f(y,x) = conj(f(x,y))) contradicts
+    // comm AND anticomm -- the identity mirror returns mirrored cells
+    // un-conjugated, the sign mirror returns them negated -- but ONLY over
+    // complex elements: conj is the identity on reals, where the same body
+    // is genuinely invariant. Kernel param types are still unresolved
+    // inference vars at this seam (unification with the operands comes
+    // later), so the OPERAND ARRAYS' element types are the judges; an
+    // unresolved element stays trusted, the same shape as PBottom's escape hatch.
+    let pairElemIsComplex (i: int) =
+        let rec complexElem (t: IRType) =
+            match IR.stripUnits (env.Subst.Resolve t) with
+            | IRTScalar (ETComplex64 | ETComplex128) -> true
+            | ArrayElem arr -> complexElem arr.ElemType
+            | _ -> false
+        if lambdaInfo.Params.Length = arrayTypes.Length then
+            // One param per operand: the pair's own operands decide.
+            [i; i + 1] |> List.exists (fun k ->
+                k >= 0 && k < arrayTypes.Length && complexElem arrayTypes.[k].ElemType)
+        else
+            // Rows and params are not 1:1 (virtual expansion, index-param
+            // co-iteration, defaults): any complex operand keeps the refusal armed.
+            arrayTypes |> List.exists (fun at -> complexElem at.ElemType)
     let contradictsIn (groups: int list list) (wanted: Blade.Deduce.Parity)
-                      (mk: string -> string -> TypeError) =
+                      (needsComplexPair: bool) (mk: string -> string -> TypeError) =
         if List.isEmpty stage3Pairs || List.isEmpty groups then None
         else
             List.indexed stage3Pairs
             |> List.tryPick (fun (i, par) ->
                 if par = wanted
+                   && (not needsComplexPair || pairElemIsComplex i)
                    && groups |> List.exists (fun g ->
                           List.contains i g && List.contains (i + 1) g) then
                     Some (mk stage3Names.[i] stage3Names.[i + 1])
                 else None)
     let stage3Err =
-        match contradictsIn commGroups Blade.Deduce.PNeg
-                            (fun a b -> CommContradictsBody (a, b)) with
-        | Some e -> Some e
-        | None ->
-            contradictsIn lambdaInfo.AntisymGroups Blade.Deduce.PInv
-                          (fun a b -> AntisymmContradictsBody (a, b))
+        [ commGroups, Blade.Deduce.PNeg, false, (fun a b -> CommContradictsBody (a, b))
+          lambdaInfo.AntisymGroups, Blade.Deduce.PInv, false, (fun a b -> AntisymmContradictsBody (a, b))
+          commGroups, Blade.Deduce.PConj, true, (fun a b -> CommContradictsConjBody (a, b))
+          lambdaInfo.AntisymGroups, Blade.Deduce.PConj, true, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
+        |> List.tryPick (fun (g, wanted, needsComplexPair, mk) ->
+               contradictsIn g wanted needsComplexPair mk)
     match stage3Err with
     | Some e -> Error e
     | None ->
@@ -13014,13 +13038,28 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                                   List.contains i g && List.contains (i + 1) g) then
                             Some (mk typedParams.[i].Name typedParams.[i + 1].Name)
                         else None)
+            // The Hermitian third (see the lambda-kernel twin): declared
+            // comm OR anticomm on a body that provably CONJUGATES under the
+            // swap (PConj) is the same silent-corruption refusal, gated on
+            // the body's element type being provably complex AT THE DECL --
+            // conj is the identity on reals, and a generic/unresolved
+            // element stays trusted (a generic decl applied to complex
+            // arrays is a known gap: the eta-wrapper carries no clause groups).
+            let bodyElemIsComplex =
+                let rec complexElem (t: IRType) =
+                    match IR.stripUnits (env.Subst.Resolve t) with
+                    | IRTScalar (ETComplex64 | ETComplex128) -> true
+                    | ArrayElem arr -> complexElem arr.ElemType
+                    | _ -> false
+                complexElem tBody.Type
             let commContradiction =
-                match declContradiction commGroups Blade.Deduce.PNeg
-                                        (fun a b -> CommContradictsBody (a, b)) with
-                | Some e -> Some e
-                | None ->
-                    declContradiction antisymGroups Blade.Deduce.PInv
-                                      (fun a b -> AntisymmContradictsBody (a, b))
+                [ commGroups, Blade.Deduce.PNeg, (fun a b -> CommContradictsBody (a, b))
+                  antisymGroups, Blade.Deduce.PInv, (fun a b -> AntisymmContradictsBody (a, b)) ]
+                @ (if bodyElemIsComplex then
+                       [ commGroups, Blade.Deduce.PConj, (fun a b -> CommContradictsConjBody (a, b))
+                         antisymGroups, Blade.Deduce.PConj, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
+                   else [])
+                |> List.tryPick (fun (g, wanted, mk) -> declContradiction g wanted mk)
             match commContradiction with
             | Some e -> Error e
             | None ->
