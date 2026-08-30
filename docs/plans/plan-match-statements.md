@@ -289,6 +289,51 @@ research, it is off the roadmap: the value-structure induction is the
 supported spelling, and rank induction stays a way to CONSUME an array
 (fold/peel), never to define one.
 
+**Does rank imply symmetry and equivariance? (author, 2026-08-30).** The
+worry: admitting `match rank(x)` invites `match sym(x)` and `match equiv(x)`,
+and those are harder — arity matching "already borrows semantics from tuples"
+(the author's sketch matches the PACK structurally, `| A, B ->` for arity 2,
+even `| bool ->` for an element type), while an equivariance match has no
+structural spelling and degenerates to nominal predicates
+(`| not equivariant -> .. | ml.some_kind_of_equiv -> ..`).
+
+The resolution is a criterion, not a slope. A type component earns match
+arms iff it is a **well-founded induction index** — a natural the body can
+recurse down with a base arm to cascade to, whose patterns have (or borrow)
+a structural spelling, and whose specializations the worklist keys. Arity
+and rank both qualify: naturals, strictly decreasing under peeling
+(`head :: tail`, `reduce`), tuple-borrowed or literal patterns, one
+specialization per value. Symmetry and equivariance qualify on NO axis:
+they are small unordered lattices (SymNone/Sym/Antisym/Hermitian; a group
+menagerie), nothing peels, there is no base case, and their only possible
+patterns are names.
+
+They are also already spoken for. Symmetry and equivariance are structure
+LICENSES: the user declares them (`where comm(..)`, `ml.equiv(G)`, the
+index kinds) and the compiler derives every behavioral difference they
+justify — triangular storage, syrk routing, sym-aware printing, block
+structure. Letting user code branch on them (`match sym(A) with
+| symmetric -> packed_path | _ -> dense_path`) would hand-author exactly
+the dispatch the deduction machinery exists to derive, which is the
+invariant. And where different MATHEMATICS per structure is genuinely
+wanted (an ML layer routing equivariant inputs differently), the dispatch
+mechanism already exists as index-KIND identity: `IrrepsIdx` and plain
+`Idx` do not unify, so the branch is two function signatures, resolved
+statically, refused loudly on mismatch — better than a match arm in every
+way that matters. So: match arms for induction indices (arity, rank);
+where-clauses and signature dispatch for licenses (symmetry, equivariance,
+units). The slope has a fence, and the fence is "can you recurse on it".
+
+**The pack-pattern surface (the author's first sketch) is the v2 target
+for arity spelling.** `| A, B -> ...` beats `match arity(A) with | 2 ->`
+because the pattern matches the arity AND binds the slots in one gesture —
+tuple patterns already exist, and packs are tuple-shaped (Design C). Mixing
+element-type arms into the same match (`| bool -> ..`) is blocked on P5's
+type-name-in-pattern refusal: today `| bool ->` silently binds a VARIABLE
+named bool and kills every later arm. Order of work: P5's refusal first,
+then tuple patterns on pack scrutinees as sugar for the arity match, then
+(maybe) type-test arms.
+
 Consequences for the phases below: P3's worklist should be keyed on a general
 "specialization index" that arity and rank both instantiate, sharing
 `foldConstIntMatch` and the cascade; P4's arm-unification relaxation is
@@ -352,7 +397,19 @@ steering text, since that is where users will meet the feature first.
   (no output, exit 0) when it is a bare unused top-level `let`. The silent
   prune is the part that needs a refusal even before P3 lands. Ascribing
   the intermediate works and is what `arity/048` pins.
-- **P3 — the specialization-index worklist** (the bulk): GENERALIZE the
+- **P3a — rank resolves per specialization. LANDED 2026-08-30.** The first
+  concrete generalization step, and it fixed a silent wrong answer found by
+  probe: `rank(x)` in a `T^r`-generic body lowered against the unresolved
+  inference var, hit lowering's blanket rank-0 fallback, and baked `IRLit 0`
+  into the body every HM specialization shared — `match rank(x)` answered
+  the rank-0 arm at EVERY rank. Lowering now defers an unresolved operand to
+  the symbolic `IRRank` (all lanes already had arms for it), and
+  `foldConstIntMatch` gained an `IRRank` resolution arm reading
+  `exprTypeIfKnown` post-monomorphization — bottom-up traversal hands the
+  enclosing match its folded scrutinee in the same pass. One `T^r` function,
+  call sites at ranks 0/1/2, three specializations each taking their own arm
+  (arity/051, including the unit-annotated-scalar walk).
+- **P3b — the specialization-index worklist** (the bulk): GENERALIZE the
   arity monomorphizer over its index (arity today, rank next) rather than
   standing a rank-keyed pass beside it — see the direction note above — seed from concrete call sites,
   specialize per input rank, rescan spec bodies, cascade to the base arm

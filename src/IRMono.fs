@@ -1329,6 +1329,24 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModul
 // scrutinee also bail rather than guess.
 let foldConstIntMatch (e: IRExpr) : IRExpr =
     match e with
+    // A SYMBOLIC rank surviving from a generic body (Lowering defers
+    // `rank(x)` when the operand's type is still an inference var there)
+    // resolves here, after the monomorphizers have made the clone's types
+    // concrete. Bottom-up traversal then hands the enclosing
+    // `IRMatch(IRLit ..)` its folded scrutinee in the same pass -- this arm
+    // is what makes `match rank(x)` dispatch per HM specialization instead
+    // of sharing one baked answer. Rank stays symbolic (the emitters'
+    // existing IRRank arms) only when the type is genuinely unknown.
+    | IRRank operand ->
+        let rec rankOfType (t: IRType) : int option =
+            match t with
+            | ArrayElem at -> Some (at.IndexTypes |> List.sumBy _.Rank)
+            | IRTInfer _ -> None
+            | IRTUnitAnnotated (inner, _) -> rankOfType inner
+            | _ -> Some 0
+        (match exprTypeIfKnown operand |> Option.bind rankOfType with
+         | Some r -> IRLit (IRLitInt (int64 r))
+         | None -> e)
     | IRMatch (IRLit (IRLitInt n), cases) ->
         let rec pick (cs: IRMatchCase list) =
             match cs with

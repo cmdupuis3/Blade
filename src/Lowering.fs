@@ -867,11 +867,24 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRArity (None, paramName)
     
     | TExprRank e ->
-        // Resolve rank statically from the typed expression's type
-        let rank = match e.Type with
-                   | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank
-                   | _ -> 0
-        IRLit (IRLitInt (int64 rank))
+        // Resolve rank statically from the typed expression's type -- but
+        // ONLY when the type is actually resolved. Inside a generic body an
+        // abstract parameter's type is still an inference var here, and the
+        // old blanket `| _ -> 0` fallback baked `IRLit 0` into the body that
+        // every HM specialization then shared: `match rank(x)` answered the
+        // rank-0 arm at every rank, silently. An unresolved operand now
+        // lowers to the SYMBOLIC IRRank (every lane already handles it), and
+        // the constant-match fold resolves it per specialization, once the
+        // clone's types are concrete (IRMono.foldConstIntMatch).
+        let rec rankOfType (t: IRType) : int option =
+            match t with
+            | ArrayElem at -> Some (at.IndexTypes |> List.sumBy _.Rank)
+            | IRTInfer _ -> None
+            | IRTUnitAnnotated (inner, _) -> rankOfType inner
+            | _ -> Some 0
+        (match rankOfType e.Type with
+         | Some rank -> IRLit (IRLitInt (int64 rank))
+         | None -> IRRank (lowerTypedExpr env e))
     
     | TExprStruct (typeName, fields) ->
         IRStructLit (typeName, fields |> List.map (fun (fname, e) -> fname, lowerTypedExpr env e))
