@@ -527,3 +527,87 @@ clause is documented there.
 type-name-in-pattern refusal (census first); (4) clause-dispatch design
 note + the specialization worklist as clause selection (subsumes P3b/P4);
 (5) pack patterns only if clauses prove insufficient for packs.
+
+
+### R7-R9: second refinement round (author + review, 2026-08-30)
+
+**R7 — `while` vs the `if`/`else` freeze idiom: the principle is "analyses
+may change COST, never CONTRACT", and the decision is a contract question.**
+The author's objection stands: with `while` required, the freeze idiom
+(`| prefix :: n -> prefix :: if G(prefix(n-1)) then S else prefix(n-1)`) is
+valid-but-slow -- a same-emit violation -- and silently rewriting it INTO
+the `while` construct would smuggle in the abort contract the user never
+wrote. But deriving the EARLY EXIT from it is not magic, it is the
+doctrine: when the else-arm is exactly the previous slice and the guard
+reads only lag 1, falseness is ABSORBING (the frozen slice reproduces the
+guard's inputs, so the guard stays false; sound by induction), and a break
+is a cost-only derivation, exactly like `comm` deriving a triangle. Deeper
+lags are NOT absorbing in general (a frozen slice changes a lag-2 guard's
+inputs, which can flip it back true) -- the recognizer must be lag-1-only,
+and it must be censused (recognized / declined-with-reason), never silent.
+
+Three coherent designs:
+- **(A) Drop `while`; the idiom is the only spelling.** One construct;
+  recognizer derives exit+freeze. The compiler-enforced non-convergence
+  abort DIES (an if/else that never takes its else branch is not an error
+  in any language -- aborting would be the contract-changing magic again);
+  the contract moves to user space as `converged_at(u)` + a constraint
+  check. Cost: the audit's most quotable claim ("a solve that did not
+  converge cannot silently pretend it did") weakens from structural to
+  one-line-if-you-remember. Also: recognition is structural (else-arm must
+  be spelled `prefix(n-1)`) and so brittle to aliasing/arithmetic --
+  recognition-dependent SEMANTICS would be bad, but under A it stays
+  recognition-dependent COST, which the census line makes honest.
+- **(B) Both spellings, two CONTRACTS.** `while G ->` = "must converge
+  within budget": exit + freeze + BL8010. The recognized idiom = best-
+  effort: exit + freeze, no abort -- which is exactly R3's missing
+  spelling, filled for free. The same-emit violation dissolves because the
+  spellings now differ in MEANING (abort or not), which is when two
+  spellings are justified; both ride one analysis/emission path
+  internally. Cost: two documented forms, corpus for both.
+- **(D) Keep `while` canonical; the idiom gets a BL4010-class steer**
+  ("this is the freeze idiom; spell it `while` for early exit and the
+  convergence contract"). Cheapest, never-silent, but leaves the idiom
+  slow and R3 unfilled.
+
+Recommendation: **B**, with the recognizer landing as a separate change
+after `while` has soaked. If the author still prefers one spelling after
+weighing the abort trade-off, A is coherent and cheap to reach from here
+(the guard landed yesterday; nothing depends on it). PENDING AUTHOR
+DECISION. R2's fold-trap warning applies identically under every option.
+
+**R8 — Symmetry/equivariance matching: refused, with the precise fence.**
+The author's spaghetti instinct, sharpened: **dispatch reads DECLARATIONS,
+never DEDUCTIONS.** Declared index-type identity already dispatches today
+(a `SymIdx<2,N>` parameter demands packed input; `IrrepsIdx` identity is
+nominal and refuses across specs) and will do so more conveniently under
+R1's clause dispatch -- that is symmetry/equivariance "matching" to
+exactly the degree it is safe, and it scratches the orthogonality itch:
+declared types dispatch like any types. What must never exist is a
+PREDICATE on deduced structure (`is_symmetric?(x)`, `equiv?(x)`, match
+arms over it): the deduced lattice is the compiler's private optimization
+fact, and the moment user meaning can branch on it, (i) every
+deduction-coverage gap turns from a missed speedup into a WRONG ANSWER,
+(ii) `A` and `decompact(A)` stop being substitutable through generic code,
+breaking the mirror-completeness discipline the compact-fold refusals
+exist to protect, and (iii) users hand-write the sym-vs-dense dispatch the
+compiler derives. Symmetry access without the predicate is not a gap; it
+is the load-bearing wall.
+
+**R9 — Mixing arity matching with value matching: VERIFIED broken, refuse
+it at typecheck.** A guarded arm on a specialization-index match
+(`match arity(A) with | 1 if threshold > 0.0 -> ...` in a recursive pack)
+passes `check`, bails the order-sound fold, and the specializer shrinks
+past the base arm -- dying as a raw g++ error naming `packsum_arity_0`.
+(The guard grammar's inability to index packs blocks `A[0]`-style guards
+by ACCIDENT, not design.) The rule the author asked to express: when the
+scrutinee is a specialization index (`arity(p)` / `rank(p)` over a
+pack/abstract param), arm selection must be STATICALLY DECIDABLE --
+unguarded integer literals plus at most one catch-all; anything else is a
+typecheck refusal naming the reason ("arm selection happens at
+specialization; a guard reads runtime values"). Enforced at `inferMatch`
+on a syntactic specialization-index scrutinee, with the specializer's bail
+as the backstop. Under R1's endgame the rule becomes structural: a clause
+SIGNATURE cannot express a value condition at all. The inverse mixing is
+fine and stays: `arity(A)` in ordinary value positions is just a static
+Int64.
