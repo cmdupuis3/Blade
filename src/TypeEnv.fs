@@ -237,6 +237,30 @@ type TypeEnv = {
     /// FuncConstraints/FuncDefaults, and shares their known shadowing
     /// weakness. Shared by reference.
     MutParamPositions: System.Collections.Generic.Dictionary<string, int list>
+    /// Callee name -> the co-iterations its body performs over its own
+    /// PARAMETERS: each entry is (parameter positions walked, literal leading
+    /// extents of that co-iteration's other operands), all of which must agree.
+    ///
+    /// The agreement obligation a zip carries is discharged AT the zip
+    /// (`TypeLower.zipHeadClash`, BL3016) only when both extents are literals
+    /// there. Through abstract `T^1` parameters they are not -- the body sees
+    /// two rank-1 arrays with nothing to compare -- so the obligation has to
+    /// travel to the call, which is where the extents become concrete. This
+    /// records it; `CoIterArgExtentMismatch` on the call-site ladder discharges
+    /// it. Without it, a body that zips its two parameters accepted a 6-cell
+    /// and a 3-cell argument and read three doubles past the shorter one, in
+    /// both lanes, with no diagnostic.
+    ///
+    /// Two populating sources, both in checkFunctionDecl: a zip DIRECTLY over
+    /// parameters, and a call to an already-obligated callee passing this
+    /// body's own parameters into its obligated positions (so the obligation
+    /// travels up a forwarding chain). Declaration order makes one forward pass
+    /// enough -- a body sees only names bound before it, and mutual recursion
+    /// is rejected (BL2001).
+    ///
+    /// Name-keyed like MutParamPositions, and shares its shadowing weakness.
+    /// Shared by reference.
+    FuncCoIterObligations: System.Collections.Generic.Dictionary<string, (int list * int64 list) list>
     /// Callee name -> how its return's UNIT is built from its arguments':
     /// `(exponents, residual)` means the result measures
     /// `residual * PROD_i (unit of argument i) ^ exponents[i]`.
@@ -386,6 +410,7 @@ let emptyEnv () = {
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
+    FuncCoIterObligations = System.Collections.Generic.Dictionary<string, (int list * int64 list) list>()
     FuncUnitTransform = System.Collections.Generic.Dictionary<string, int list * UnitSig>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
@@ -664,6 +689,10 @@ class IS implemented, and the dense result folds like any other array." op level
         $"argument {pos}: extent mismatch on index slot {dim} -- the parameter declares Idx<{expected}> but the argument has Idx<{actual}>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent."
     | ZipExtentMismatch (pos, expected, actual) ->
         $"elementwise co-iteration: operand {pos} has extent {actual} on the shared axis, but operand 1 has extent {expected}. A zip walks ONE index space, taken from the first operand, so the longer walk reads past the shorter operand's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Bring the operands to a common extent, or index/slice the longer one first."
+    | CoIterArgExtentMismatch (callee, posA, posB, extA, extB) ->
+        $"arguments {posA} and {posB} of '{callee}': the body of '{callee}' CO-ITERATES these two parameters (an elementwise zip walks them as one index space), but argument {posA} has extent {extA} on the shared axis and argument {posB} has extent {extB}. The walk takes its bound from the first operand, so the longer one runs off the end of the shorter one's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Because '{callee}' declares those parameters abstractly (`T^1`), the body has no extents to compare and this call is the first place the disagreement is visible. Pass arrays of equal extent, or slice the longer one to the shorter one's index space first."
+    | CoIterBodyExtentMismatch (callee, pos, argExt, bodyExt) ->
+        $"argument {pos} of '{callee}': the body of '{callee}' CO-ITERATES this parameter with an array of extent {bodyExt} (an elementwise zip walks them as one index space), but this argument has extent {argExt} on the shared axis. The walk takes its bound from the first operand, so whichever is longer runs off the end of the shorter one's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). The zip has one concrete side and one abstract (`T^1`) side, so the body could not compare them and this call is the first place both are known. Pass an array of extent {bodyExt}, or slice this one to that index space first."
     | HaloExtentMismatch (declared, dim, targetName, actual) ->
         $"halo extent mismatch: the halo declares an inner extent of {declared}, but '{targetName}' (read through the window at index slot {dim}) has extent {actual}. The window walk is bounded by the DECLARED extent, so an oversized halo reads past '{targetName}''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over."
     | QuantityTerminal (quantity, declName) ->
@@ -863,7 +892,8 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"
             | QuantityArgMismatch _ -> "BL3010"
-            | ExtentArgMismatch _ | HaloExtentMismatch _ | ZipExtentMismatch _ -> "BL3016"
+            | ExtentArgMismatch _ | HaloExtentMismatch _ | ZipExtentMismatch _
+            | CoIterArgExtentMismatch _ | CoIterBodyExtentMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"

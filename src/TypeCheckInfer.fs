@@ -12901,6 +12901,17 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                     funcDecl.WhereClause
             if not (List.isEmpty antisymGroups) then
                 env.FuncAntisymGroups.[funcDecl.Name] <- antisymGroups
+            // Which parameter positions this body CO-ITERATES. Registered for
+            // the same reason as the tables above -- the callee's BODY is
+            // invisible at the call site -- but for a soundness obligation
+            // rather than a codegen license: a zip over two `T^1` parameters
+            // has no extents to compare in the body, so the agreement it
+            // needs can only be checked where the arguments are concrete.
+            // Consumed by the call-site ladder's coIterClash.
+            let coIterObs =
+                coIterObligations env (funcDecl.Params |> List.map (_.Name)) tBody
+            if not (List.isEmpty coIterObs) then
+                env.FuncCoIterObligations.[funcDecl.Name] <- coIterObs
             // Register the function's parallel strategies for the same reason,
             // paired with its param NAMES: an `omp(a: n)` var is resolved by
             // name against the callable's params (Lowering.extractParallelism),
