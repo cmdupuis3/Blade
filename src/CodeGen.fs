@@ -427,6 +427,22 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             currentTupleChildren <- ctxAfter.TupleChildren
             currentNames <- Map.add id varName currentNames
             code
+        | IRRange _ | IRCompute (IRRange _) ->
+            // A BARE range as a function-body let -- written (`let xs = 0..n`,
+            // with or without `|> compute`) or minted by the lift pass's
+            // reduce-operand hoist. Statement-shaped (extents table + allocate
+            // + fill), so route through genBinding's IRRange arm exactly as at
+            // module level; the default arm's exprToCpp has no inline
+            // rendering for a standalone range.
+            let bodyCtx = { ctx with VarNames = currentNames; Indent = bodyIndent; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren }
+            let tempBinding = {
+                Id = id; Name = varName; Type = inferExprType value
+                Value = value; IsConst = false; IsMutable = true
+            }
+            let (code, ctxAfter) = genBinding bodyCtx tempBinding builder
+            currentTupleChildren <- ctxAfter.TupleChildren
+            currentNames <- Map.add id varName currentNames
+            code
         | IRVar _ when Set.contains id ctx.MutableArrayLets ->
             // Function-body `let mut a = Z` over an array: route through
             // genBinding so genVarAliasBinding's mut-copy path runs (fresh

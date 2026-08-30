@@ -390,6 +390,20 @@ let liftChildIncludingLoopApp (builder: IRBuilder) (child: IRExpr) : (IRId * IRT
         let id = builder.FreshId()
         let ty = typeOf inner
         (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    // A BARE range in a by-name operand slot (`reduce(0..n, (+))`, prodsum,
+    // whole-array negate): hoist it to its own let-RHS so the consumer
+    // subscripts a materialized binding (genRangeBinding) -- exactly what
+    // writing the intermediate `let` by hand does. Ranges are deliberately
+    // NOT `isInlineForm`: a method_for/nest operand slot must keep them
+    // virtual so the nest peels them as induction values, and those slots
+    // never route through this helper. The type is spelled here rather than
+    // taken from `typeOf` -- IRRange sits in typeOf's IntValued tier (its
+    // ELEMENT under peeling), which would type the hoisted binding as a
+    // scalar and starve the fold of its extents.
+    | IRRange (ixs, _) ->
+        let id = builder.FreshId()
+        let ty = mkArrayLike { ElemType = IRTScalar ETInt64; IndexTypes = ixs; IsVirtual = false; Identity = None }
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
     | _ ->
         let (b, e) = liftChild builder inner
         (peeled @ b, e)

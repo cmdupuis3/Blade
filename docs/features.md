@@ -122,7 +122,7 @@ in [formalism.md](formalism.md) and the per-module feature docs.
 | S-dimensions |  | Core | S-dimensions derived from rank gap at kernel call. Rank gap = arg rank - parameter rank |
 | T-dimensions |  | Core | Derived from kernel output dimensions |
 | Virtual arrays | `range<I>`, `reverse<I>`, etc. | Core | Index type maps to yield or reorder indices. Behaves as an array with no content. |
-| Anonymous ranges | `m..n` | Core | Shorthand equivalent to `range<Idx<n-m>> + m` |
+| Anonymous ranges | `m..n` | Core | Half-open, equivalent to `range<Idx<n-m>> + m`; a first-class rank-1 array value: lifts elementwise (`x0 + dx * Float64(0..n)`), folds (`reduce(0..n, (+))`), materializes when bound bare or `\|> compute`d |
 | Multi-dimensional for-loops | `for (A, B) <@> ...` | Core | Shorthand for `object_for` and `method_for`; allows co-iterations with `in` |
 | Co-iteration | `for (A, B) in range<I> <@> ...` | Core | Iterate elementwise over a shared index space. |
 

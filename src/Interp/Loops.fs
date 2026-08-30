@@ -371,6 +371,32 @@ and private forceExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         match envTryFind renv id with
         | Some cell -> applyWrappersToValue st renv wrappers (force st renv cell.V)
         | None -> raise (InterpUnsupported "force of unbound var")
+    // A BARE range forced as a value (`let xs = 0..n` via evalBinding's eager
+    // force, `reduce(0..n, (+))`, `0..n |> compute`): materialize the iota,
+    // x[i] = offset + i -- the differential twin of genRangeBinding /
+    // materializeRangeForm. Nest inputs never come here (resolveArraySource
+    // keeps ranges SVirtual). Without this arm the fallback below re-defers
+    // (Core.evalExpr's IRRange arm answers VDeferred) and the force is a
+    // no-op. Same single-slot plain dense scope as the compiled side;
+    // everything else stays a gate SKIP.
+    | IRRange (ixs, offset) ->
+        (match ixs with
+         | [ ix ] when ix.IxKind = IxKPlain && ix.Rank = 1
+                       && (match ix.Tag with
+                           | Some t -> not (t.StartsWith haloWinTagPrefix)
+                           | None -> true) ->
+             let evalInt (e: IRExpr) (what: string) =
+                 match Core.evalExpr st renv e with
+                 | VInt n -> n
+                 | VInt32 n -> int64 n
+                 | _ -> raise (InterpUnsupported $"range {what} did not evaluate to an integer")
+             let n = evalInt ix.Extent "extent"
+             let off = match offset with Some o -> evalInt o "offset" | None -> 0L
+             let arrType : IRArrayType =
+                 { ElemType = IRTScalar ETInt64; IndexTypes = [ix]; IsVirtual = false; Identity = None }
+             let vals = [ for i in 0L .. n - 1L -> VInt (off + i) ]
+             applyWrappersToValue st renv wrappers (VArray (A.arrayLitFromValues arrType vals))
+         | _ -> raise (InterpUnsupported "force of a compound/sparse/halo or multi-slot range"))
     | other -> applyWrappersToValue st renv wrappers (Core.evalExpr st renv other)
 
 // ----------------------------------------------------------------------------

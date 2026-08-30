@@ -223,11 +223,22 @@ first-class construct:
 | several statistics in ONE pass | `reduce((L <@> k1) <&!> (L <@> k2) <&!> (L <@> k3), (+))` then tuple-destructure | separate passes |
 | filter / WHERE | `mask(xs, pred)` + `compound(data, mask)`; compose masks with `&&`/`\|\|` | a filter loop |
 | stencil / lags / rolling window | `method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1))` | index arithmetic with edge guards |
-| index generation | `range<Idx<8>>` virtual array | materialized iota |
+| index generation | `0..8` anonymous range (a first-class rank-1 array), or `range<I>` when the named tag should flow | materialized iota; `method_for(range) <@> lambda(i) -> i \|> compute` |
+| coordinate axis / linspace | `x0 + dx * Float64(0..n)` — implicit lifting over the range | `method_for(range<I>) <@> lambda(j) -> x0 + dx * Float64(j)` for a body that is just affine in the index |
+| sum/product of an index range | `reduce(0..n, (+))` | wrapping the range in a map first |
 | numeric width/class conversion | `Float64(n)`, `Float32(x)`, `Int64(floor(x))` — scalar type name in call position; arrays lift elementwise | `* 1.0` fudges; implicit int→float mixes (warn BL3020); bare `Int64(x)` on a float (BL3019 — the rounding must be visible at the cast site) |
 | pipeline of stages | compose values: `object_for(f) >>@ object_for(g)`, apply with `<@>`, materialize with `\|> compute` | eager temporaries per stage |
 | recurrence / time-stepping / running state | `let rec` recursive array (see below) | `let mut` + a loop |
 | symmetric pairwise stats (covariance, comoments) | `where comm(a, b)` kernels, `reynolds(...)`, `gram(R, R)` | hand-written triangular loops |
+
+Pick the highest idiom rung the body admits: implicit lifting over a range
+(`x0 + dx * Float64(0..n)`) beats `method_for(range<...>) <@> lambda`, which in
+turn beats `let rec` — but only when the body really is arithmetic in the
+index. `method_for(range<...>)` stays the right spelling when the kernel is a
+block or a gather/conditional, when the loop composes with combinators
+(`>>@`, `<&!>`, multi-operand `method_for(range<I>, A, B)`), when the range is
+multi-slot (`range<Y, X>`) or non-plain (`SymIdx`/`CompoundIdx`/`halo`), or
+when you want the named index tag to flow into the result.
 
 Real code (from `examples/` and `tests/corpus/` — these compile):
 
