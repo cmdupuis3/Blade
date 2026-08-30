@@ -1050,8 +1050,26 @@ and parseIf (tokens: Token list) : ParseResult<Expr> =
 and parseMatch (tokens: Token list) : ParseResult<Expr> =
     parseExprImpl tokens >>= fun scrutinee afterScrutinee ->
     expect (TokKeyword KwWith) afterScrutinee >>= fun _ afterWith ->
-    many parseMatchCase (skipNL afterWith) >>= fun cases remaining ->
+    manyMatchCases (skipNL afterWith) >>= fun cases remaining ->
     success (mkE tokens remaining (ExprMatch (scrutinee, cases))) remaining
+
+/// `many parseMatchCase`, except that an `isHardParseError` code PROPAGATES
+/// instead of ending the arm list. Plain `many` treats every failure as "the
+/// list stops here", so a curated steer raised inside an arm (the `while`-on-
+/// an-ordinary-arm message, the removed-`for` steer in an arm body) was
+/// discarded and the caller re-reported the far-away, useless "Expected
+/// declaration but got '|'" at the NEXT arm -- which is why every
+/// pattern-level parse failure in a match looked identical. Same rule and
+/// same justification `sepBy` and `parseLetAnnotation` already apply: a hard
+/// code is raised only after the parse has committed, so propagating it cuts
+/// off no legitimate backtrack.
+and manyMatchCases (tokens: Token list) : ParseResult<MatchCase list> =
+    let rec loop acc toks =
+        match parseMatchCase toks with
+        | Ok (v, rest) -> loop (v :: acc) rest
+        | Error e when isHardParseError e -> Error e
+        | Error _ -> Ok (List.rev acc, toks)
+    loop [] tokens
 
 // Guard-parse errors propagate rather than being swallowed.
 and parseMatchCase (tokens: Token list) : ParseResult<MatchCase> =
@@ -1067,6 +1085,19 @@ and parseMatchCase (tokens: Token list) : ParseResult<MatchCase> =
             // bodies (e.g. nested match) require braces.
             parseBody afterArrow >>= fun body remaining ->
             success { Pattern = pat; Guard = Some guard; Body = body } remaining
+        // `while` belongs to the RECURSIVE-ARRAY arm and only there: it
+        // declares when the induction stops (and freezes), which is a
+        // statement about the recursion, not about this cell. An ordinary
+        // match arm has nothing to stop -- its guard falls through to the
+        // next arm -- so the two are not interchangeable in either
+        // direction, and `parseConsArm` steers the mirror case (`if` on a
+        // rec-array arm) back here. Without this the misuse died as a bare
+        // "Expected '->'".
+        | Some (TokIdent "while") ->
+            let line, col = currentPos afterPat
+            errorC "BL1003"
+                "`while` guards a RECURSIVE-ARRAY arm (`let rec x = match x with | prefix :: n while <cond> -> ...`), where it declares when the induction stops and the array freezes. An ordinary match arm has no induction to stop: its guard is `if`, and a failing `if` falls through to the next arm."
+                line col
         | _ ->
             expect (TokOp "->") afterPat >>= fun _ afterArrow ->
             parseBody afterArrow >>= fun body remaining ->

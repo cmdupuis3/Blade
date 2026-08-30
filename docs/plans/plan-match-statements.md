@@ -126,6 +126,37 @@ the interp twin is an `InterpBreak` exception caught per IRForRange level.
 (Newton freeze, budget abort, seed-arm reject, non-Bool reject, rank-2
 freeze) + ad/023; interp lane byte-identical.
 
+**Why `while` and not `if`, and why not an `if`/`else` in the body.** Three
+spellings were on the table and they are not interchangeable:
+
+- `| prefix :: n if <cond> ->` — rejected, and refused with a steer (BL1003).
+  An ordinary match guard means "this arm applies, else FALL THROUGH to the
+  next arm". A recursive array's next arms are `zero` and the seed, so
+  falling through mid-induction is meaningless. Same keyword, two unrelated
+  meanings, three lines apart in one `match` block.
+- `| prefix :: n -> prefix :: (if cond then step else prefix(n - 1))` — legal
+  today and always was (the hand-written freeze idiom). It produces the same
+  VALUES, which is exactly why the guard is not sugar for it: the compiler
+  cannot recover "this is a fixed point" from an `if` buried in a step
+  expression, so it must run the whole budget, cannot diagnose
+  non-convergence, and cannot bound the storage. `while` DECLARES the
+  stopping condition as a property of the induction, and the early exit,
+  the freeze, the BL8010 abort and (later) the ring buffer are derived from
+  it. That is the same relationship `where comm(...)` has to a hand-written
+  triangular loop.
+- `while` as a general construct — never. It is recognized POSITIONALLY, only
+  on a recursive-array inductive arm; it is not a keyword (a program may
+  still bind the name, pinned by basic/060), it is refused on an ordinary
+  match arm (BL1003, diagnostics/079), and as a statement it is an unbound
+  variable carrying the declarative-iteration steer (diagnostics/078).
+
+For reference, F# has no analogue: its match guards are `when` (Blade spells
+that `if`), and its `while cond do body` is the imperative loop Blade
+removed. Nothing in the ML family attaches a termination condition to a
+recursive definition's inductive case, because nothing in the ML family
+bounds the recursion by a static budget in the first place — the guard is
+Blade-specific and it is the budget that earns it.
+
 Design refined from plan-fortran-killer.md §2. Surface:
 
 ```blade
@@ -235,6 +266,36 @@ arms flex), specialized by a worklist (`monomorphizeModule`,
 site and cascades to the base arm via constant-match folding. Rank dispatch
 is the same shape with rank in place of arity.
 
+### Direction (author, 2026-08-30): packs first, recursive arrays never
+
+> "The matching on types makes more sense for arity polymorphism and other
+> pack iterations than for recursive arrays."
+
+This settles what the audit left as a two-way question, and it points at the
+machinery that already works. Pack recursion is where a static type match is
+ALREADY the shipped idiom (`match arity(A) with | 1 -> A[0] | _ -> head +
+packsum(tail)`), where the specialization worklist already cascades to a base
+arm, and where the decidability fence is already a strictly-decreasing
+natural. Rank dispatch is that same construct with rank in place of arity, so
+the work is to GENERALIZE the pack machinery over its index, not to build a
+second mechanism beside it.
+
+Recursive arrays are explicitly NOT a target. They induct on VALUE structure
+along the leading axis, they have their own grammar (§1), their extent is a
+runtime budget rather than a type-level natural, and §3's `while` guard
+already gives them their termination story. Defining an array by type
+induction — the third question below — is therefore not merely deferred
+research, it is off the roadmap: the value-structure induction is the
+supported spelling, and rank induction stays a way to CONSUME an array
+(fold/peel), never to define one.
+
+Consequences for the phases below: P3's worklist should be keyed on a general
+"specialization index" that arity and rank both instantiate, sharing
+`foldConstIntMatch` and the cascade; P4's arm-unification relaxation is
+scoped to a static specialization scrutinee (`arity(..)`/`rank(..)`), which
+is the same predicate; and the P5 refusals should name packs in their
+steering text, since that is where users will meet the feature first.
+
 ### Phases
 
 - **P1 — hoist the constant-match fold. LANDED 2026-08-30.** The only
@@ -291,8 +352,9 @@ is the same shape with rank in place of arity.
   (no output, exit 0) when it is a bare unused top-level `let`. The silent
   prune is the part that needs a refusal even before P3 lands. Ascribing
   the intermediate works and is what `arity/048` pins.
-- **P3 — the rank worklist** (the bulk): a rank-keyed specialization pass
-  modeled on the arity monomorphizer — seed from concrete call sites,
+- **P3 — the specialization-index worklist** (the bulk): GENERALIZE the
+  arity monomorphizer over its index (arity today, rank next) rather than
+  standing a rank-keyed pass beside it — see the direction note above — seed from concrete call sites,
   specialize per input rank, rescan spec bodies, cascade to the base arm
   via the P1 fold. NOT shape mono: `shapeCallForwardsExtents`
   (`IRMono.fs:2287-2300`) explicitly refuses non-uniform recursion, and a
