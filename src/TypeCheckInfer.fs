@@ -2179,6 +2179,27 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr opti
             let rankOfOut (ty: IRType) =
                 match env.Subst.Resolve ty with
                 | ArrayElem at -> Some at.IndexTypes.Length
+                // A `T^k` PARAMETER is rank-pinned but shapeless: the caret
+                // records `k` in the substitution's arityConstraints, and the
+                // type stays a bare inference var until some demand mints the
+                // array. Reading only the resolved type left `rk = None` for
+                // every abstract operand, so `reduce(x, (+))` on a `T^2` param
+                // skipped BOTH rank-aware routes (leading-axis and partial
+                // fold) and fell to the tail synthesis, which minted a rank-1
+                // array, failed to unify against the `^2` pin, dropped that
+                // failure on the floor (`|> ignore`) and reported "reduce()
+                // requires an array as first argument" -- the rank-peeling
+                // body of a rank-recursive function could not be written at
+                // all. The pin is exactly the static rank the routing wants.
+                //
+                // The declared pin only, never `GetRankLowerBound`: a deduced
+                // lower bound is evidence for `unify` to CHECK a synthesis
+                // against, not a shape to route on. See the long note at
+                // `requireArrayArgMinRank`.
+                | IRTInfer vid ->
+                    (match env.Subst.GetArityConstraint vid with
+                     | Some k when k > 0 -> Some k
+                     | _ -> None)
                 | _ -> None
             match rankOfOut t.Type with
             | Some r -> Some r
@@ -2715,7 +2736,21 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr opti
             // operand whose rank is not yet pinned says the operand carries at
             // least n axes, and minting only one would silently fold an
             // n-axis request as a rank-1 one.
-            let nSlots = max 1 (defaultArg axisCountOpt 1)
+            // ...or one per PINNED axis, when the operand is a caret-pinned
+            // `T^k` var: minting fewer slots than the pin makes the unify
+            // below fail, and its failure is discarded, so the operand stays
+            // unresolved and the tail arm blames the caller for not passing an
+            // array. (`operandRank` reads the same pin, so a partial fold has
+            // already been rewritten away by here; this is the full fold and
+            // the paths that decline one.)
+            let pinnedRank =
+                match env.Subst.Resolve(tArr.Type) with
+                | IRTInfer vid ->
+                    (match env.Subst.GetArityConstraint vid with
+                     | Some k when k > 0 -> k
+                     | _ -> 0)
+                | _ -> 0
+            let nSlots = max (max 1 (defaultArg axisCountOpt 1)) pinnedRank
             let freshIdxs =
                 [ for _ in 1 .. nSlots ->
                     { Id = env.Builder.FreshId()

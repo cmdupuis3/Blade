@@ -928,7 +928,38 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
     match resolved with
     | ArrayElem arrTy -> Ok arrTy
     | IRTInfer vid ->
-        let k = max 1 minRank
+        // RANK PIN. The caret on a `T^k` parameter is an EXACT rank claim,
+        // but it lives in the SUBSTITUTION (`Subst.LookupOrCreateTypeVar`
+        // records it in `arityConstraints`), not in the type: the var itself
+        // is a bare `IRTInfer` that says nothing about rank. Synthesizing
+        // rank-1 for every var therefore refused every abstract parameter of
+        // rank >= 2 at the unify below -- `extents(x)` on a `T^2` param died
+        // with "a `^2` type variable is a rank-2 array, but this position
+        // supplies Array<..>" (rank 1): the checker refusing a shape it had
+        // itself just minted. Read the pin.
+        //
+        // The ARITY PIN ONLY, deliberately -- NOT `GetRankLowerBound`, the
+        // stage-2 deduced bound sitting right beside it. The two are different
+        // kinds of fact and this seam is where the difference is enforced: the
+        // caret is a DECLARATION, so synthesizing its rank is honouring what
+        // the author wrote, while a rank lower bound is accumulated EVIDENCE
+        // from other call sites, and `unify`'s rankBoundViolation exists to
+        // CHECK the synthesis against it. Synthesizing from the bound instead
+        // makes that check vacuous: functions/037 (`z` collects rank 1 from
+        // `total(z)`, rank 2 from `tot2(z)`, then meets `extents(z)`) is a
+        // genuine contradiction reported as BL3009, the dedicated
+        // rank-deduction code, and reading the bound here demoted it to a
+        // BL3001 rank mismatch pointing at an unrelated call.
+        //
+        // MAX rather than the pin outright: an op demanding rank >= minRank
+        // over a var pinned BELOW it (gram on a `T^1`) keeps synthesizing
+        // minRank and keeps failing at unify -- that refusal is correct, and
+        // its message already names both ranks.
+        let pinnedRank =
+            match env.Subst.GetArityConstraint vid with
+            | Some k when k > 0 -> k
+            | _ -> 0
+        let k = max (max 1 minRank) pinnedRank
         let freshIdx i =
             // The minted extent name carries the index record's own fresh id.
             // These names are IDENTITY, not just display: shape
