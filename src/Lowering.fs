@@ -2326,6 +2326,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // var), so it gets the same elementwise-loop lowering top-level
         // `x + y` does.
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
+        // Elementwise-chain fusion: collapse a deferred elementwise
+        // computation nested directly in another's operand slot (the shape
+        // TypeCheck's binop desugar produces, one combinator per operator)
+        // into a single flat co-iteration, so `a + b * c - d` emits one loop
+        // and no intermediate pools. Runs after lowerArrayBinOpsModule (so
+        // late-minted pack-element combinators are candidates too), before
+        // liftInlineFormsModule (so lifted forms inherit the fused shape),
+        // and in Lowering rather than a back end so codegen and the
+        // interpreter consume one tree. BLADE_FUSION=0|off disables.
+        let irModule = IRMono.fuseElementwiseChainsModule irModule env.Builder
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
