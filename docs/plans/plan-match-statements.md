@@ -447,3 +447,83 @@ Corpus sketch: `tests/corpus/typematch/` — rank dispatch scalar/array,
 flatten_sum (flagship, P3), pruned-emission pin (FlatPathTests-style, since
 the corpus can't see emitted text), rejects for the P5 refusals; plus interp
 and diff-oracle entries — the twins must agree on every fold.
+
+
+## 5. Refinement after adversarial review (2026-08-30)
+
+A step-back pass over everything this plan put on the table, attacking it
+with Blade's own identity. Three probe-backed findings and one reversal.
+
+**R1 — Type-VARYING dispatch moves from match arms to FUNCTION CLAUSES; the
+P4 arm-unification relaxation is withdrawn.** The planned relaxation ("arms
+may disagree when the scrutinee is a static rank/arity literal") gives one
+syntactic construct two typing disciplines keyed on the scrutinee's
+SPELLING -- `match rank(x)` would be refinement-typed while `match
+(rank(x) + 0)` is strictly unified. That is spooky action in a language
+whose whole pitch is that structure is declared, not inferred from
+incantations. The Blade-shaped mechanism already argued for licenses
+(index-kind identity = signature dispatch) is the right one for induction
+indices too:
+
+```blade
+function total(x: T^0) -> Float64 = x
+function total(x: T^r) -> Float64 = total(reduce(x, (+)))
+```
+
+Each clause is independently typed at its own signature (no relaxation, no
+dead-arm typing question), selection happens at specialization (the same
+worklist P3b was already going to build -- it keys on (function, index) and
+picks a CLAUSE instead of pruning an ARM), the recursive call lands on the
+base clause at rank 0, and termination is the same strictly-decreasing
+fence. This also collapses yesterday's criterion into something simpler:
+NOTHING type-level earns match arms. `match` is a value construct; the
+constant fold (P1/P3a) is an optimization of it, not a semantics; every
+type-directed behavioral difference -- rank, arity, symmetry, equivariance,
+index kind -- lives in signatures. One principle instead of a fence.
+
+Probe-discovered prerequisite: a duplicate `function` name today SILENTLY
+SHADOWS the earlier declaration (no diagnostic; the call resolves against
+the shadower and its error blames the caller). Before clause dispatch
+exists this must be a refusal; when clause dispatch lands, same-name
+declarations at compatible-but-distinct signatures become a clause set and
+anything else stays refused.
+
+**R2 — The freeze semantics has a verified fold trap.** `reduce(xs, (+))`
+over a `while`-guarded Newton trajectory answers 42.1: the fixed point,
+counted once per frozen slot. Freeze is the RIGHT semantics for the primary
+consumer (the last-slice read is total and correct, and downstream slicing
+stays bounds-safe), so the semantics stands -- but a whole-recursion-axis
+fold over a guarded array should carry a BL4010-class warning ("the fold
+counts the frozen tail; read the last slice, or slice to `converged_at(u)`
+first"), landing together with P1's `converged_at` so the steer can name
+the remedy. The warning is strict-both-ways corpus-pinnable.
+
+**R3 — Known gap, accepted: best-effort iteration.** The guard couples
+early exit to the non-convergence abort. "Run to budget, take what you got,
+exit early if lucky" has no spelling with early exit (the hand freeze idiom
+covers it without one). Blade's refusal philosophy says non-convergence
+should be loud, so this stays a documented gap until a real program demands
+it; a `while .. else freeze` arm is the candidate spelling if one does.
+
+**R4 — The pack-pattern surface (`| A, B ->`) is demoted** from v2 target
+to at-most-sugar. With clauses on the table, a per-arity clause set IS the
+arity match, binds the slots in the signature, and never meets the
+type-name-in-pattern hazard that `| bool ->` arms resurrect. P5's refusal
+(a known type name in pattern position) survives R4 untouched -- it fixes
+silent wrongness regardless of any feature.
+
+**R5 — What survives review unchanged:** the landed `match rank(x)`
+value-dispatch (same-typed arms, strict unification already fences it; the
+fold makes it free -- but docs should present it as a value expression the
+compiler decides early, not as "type matching"); the `while` guard's core
+(positional spelling, budget abort, both steers); all of §2's fixes; P3a.
+Long-term notes: the BLADE_FUSION escape hatch is a same-emit liability to
+retire once the pass has soaked, and `repro` quietly widened the
+where-clause from licenses to demands -- worth a line in formalism when the
+clause is documented there.
+
+**Revised order of work:** (1) refuse silent function-name shadowing;
+(2) R2's fold warning + `converged_at` as one change; (3) P5's
+type-name-in-pattern refusal (census first); (4) clause-dispatch design
+note + the specialization worklist as clause selection (subsumes P3b/P4);
+(5) pack patterns only if clauses prove insufficient for packs.
