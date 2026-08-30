@@ -1040,8 +1040,13 @@ and lowerTypedPattern (pat: TypedPattern) : IRPattern =
     | TPatCons (h, t) -> IRPatCons (lowerTypedPattern h, lowerTypedPattern t)
     | TPatVariant (tag, payload, isEnum) -> 
         IRPatVariant (tag, hash tag, payload |> Option.map lowerTypedPattern, isEnum)
-    | TPatStruct (_, fields) ->
-        IRPatTuple (fields |> List.map (fun (_, p) -> lowerTypedPattern p))
+    | TPatStruct (typeName, fields) ->
+        // Field names are KEPT (they used to be dropped here, collapsing the
+        // pattern to a positional tuple): the C++ lane needs them to emit
+        // `.x` rather than `std::get<0>` on a real struct, and BOTH lanes
+        // need them for a pattern whose field order differs from the
+        // declaration's.
+        IRPatStruct (typeName, fields |> List.map (fun (n, p) -> (n, lowerTypedPattern p)))
     | TPatGuarded (p, _) -> lowerTypedPattern p
 
 /// Lower a typed block into nested IRLet

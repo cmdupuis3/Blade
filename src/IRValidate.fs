@@ -73,6 +73,8 @@ and collectPatternIds (pat: IRPattern) : Set<IRId> =
     | IRPatTuple pats -> pats |> List.map collectPatternIds |> Set.unionMany
     | IRPatCons (h, t) -> Set.union (collectPatternIds h) (collectPatternIds t)
     | IRPatVariant (_, _, Some inner, _) -> collectPatternIds inner
+    | IRPatStruct (_, flds) ->
+        flds |> List.fold (fun acc (_, p) -> Set.union acc (collectPatternIds p)) Set.empty
     | _ -> Set.empty
 
 // Dead-polymorph elimination (whole program, post-monomorphization)

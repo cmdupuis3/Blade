@@ -1042,18 +1042,37 @@ and tryMatch (env: Env) (scrut: Value) (pat: IRPattern) : bool =
         match scrut with
         | VTuple els when els.Length = List.length pats ->
             List.forall2 (fun p v -> tryMatch env v p) pats (List.ofArray els)
-        // Struct destructuring patterns lower to IRPatTuple with field NAMES
-        // dropped (Lowering.fs:656-657), so a VStruct scrutinee is matched
-        // POSITIONALLY -- the same shape the compiled side sees. Without this
-        // arm a VStruct silently fails every IRPatTuple, wrongly falling
-        // through to the next case / the non-exhaustive panic.
+        // A struct pattern keeps its field names (IRPatStruct) and is
+        // handled below; this arm is what a genuinely POSITIONAL pattern over
+        // a struct scrutinee means, and it stays because the compiled lane
+        // decodes the same shape the same way (by declaration order).
         | VStruct (_, fields) when fields.Length = List.length pats ->
             List.forall2 (fun p (_, v) -> tryMatch env v p) pats (List.ofArray fields)
         | _ -> false
+    | IRPatStruct (_, fieldPats) ->
+        // BY NAME, not by position: `Point { y, x }` binds y to the y field
+        // however the struct declared its order. The type name is not
+        // re-checked -- typecheck already fixed the scrutinee's type, and a
+        // struct value carries no sum-type tag to discriminate on.
+        match scrut with
+        | VStruct (_, fields) ->
+            fieldPats |> List.forall (fun (fname, fpat) ->
+                match fields |> Array.tryFind (fun (n, _) -> n = fname) with
+                | Some (_, v) -> tryMatch env v fpat
+                | None -> false)
+        | _ -> false
     | IRPatCons (hp, tp) ->
         match scrut with
-        | VTuple els when els.Length >= 1 ->
-            tryMatch env els.[0] hp && tryMatch env (VTuple els.[1..]) tp
+        | VTuple els when els.Length >= 2 ->
+            // Blade has no 1-tuple -- `(x)` IS `x` -- so a pair's remainder is
+            // the BARE element, not a one-element tuple. That is the rule
+            // Lowering's `subBindingValue` applies to `let h :: t` and the one
+            // TypeCheck types the leaf by; handing back `VTuple [|x|]` here
+            // made `h :: t` on a pair a type-lie no compiled lane could
+            // reproduce. A 1-element scrutinee has no remainder at all, so
+            // cons does not match it.
+            let tail = if els.Length = 2 then els.[1] else VTuple els.[1..]
+            tryMatch env els.[0] hp && tryMatch env tail tp
         | _ -> false
     | IRPatVariant (_, tag, innerOpt, _) ->
         // Dispatch by tag (= hash constructorName), matching construction above.

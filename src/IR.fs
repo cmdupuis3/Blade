@@ -447,6 +447,14 @@ and IRPattern =
     | IRPatTuple of IRPattern list
     | IRPatCons of IRPattern * IRPattern
     | IRPatVariant of name: string * tag: int * IRPattern option * isEnum: bool
+    /// Struct destructuring with its field NAMES kept. Lowering used to
+    /// collapse this to `IRPatTuple` in pattern order, which lost two
+    /// different things: the C++ lane then read a real struct with
+    /// `std::get<i>` (which does not compile), and a pattern listing fields
+    /// out of DECLARATION order -- `Point { y, x }` -- bound every field to
+    /// the wrong slot, silently, in both evaluators. The name is the only
+    /// thing that makes either decodable, so it rides the node.
+    | IRPatStruct of typeName: string * fields: (string * IRPattern) list
 
 and BoundaryMode =
     | BndShrink
@@ -2017,6 +2025,8 @@ let rec patternBoundIds (pat: IRPattern) : Set<IRId> =
     | IRPatCons (h, t) -> Set.union (patternBoundIds h) (patternBoundIds t)
     | IRPatVariant (_, _, Some p, _) -> patternBoundIds p
     | IRPatVariant (_, _, None, _) -> Set.empty
+    | IRPatStruct (_, flds) ->
+        flds |> List.fold (fun acc (_, p) -> Set.union acc (patternBoundIds p)) Set.empty
 
 /// The variants that introduce variable scopes, factored out for
 /// binder-aware dispatchers (exprAttrs today; any future capture or escape
@@ -2284,6 +2294,22 @@ let declSpanOf (name: string) : Blade.Ast.Span =
     match Map.tryFind name (declSpansCell ()).Value with
     | Some s -> s
     | None -> Blade.Ast.noSpan
+
+/// A named struct's fields in DECLARATION order, out of the same per-module
+/// cache `tryLookupFieldType` reads. The order is what lets a name-erased
+/// POSITIONAL struct pattern be decoded at all; a named one (`IRPatStruct`)
+/// does not need to ask.
+let tryLookupStructFieldsByName (structName: string) : (string * IRType) list option =
+    let cache = getStructFieldsCache ()
+    match cache.TryGetValue(structName) with
+    | true, fields -> Some fields
+    | false, _ -> None
+
+/// The same lookup keyed by a scrutinee's type rather than a bare name.
+let tryLookupStructFields (objType: IRType) : (string * IRType) list option =
+    match objType with
+    | IRTNamed structName -> tryLookupStructFieldsByName structName
+    | _ -> None
 
 let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
     match objType with
