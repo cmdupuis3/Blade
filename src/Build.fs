@@ -44,6 +44,16 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 //   unset  -> `fast` (default: FMA on)
 //   other  -> `-ffp-contract=<value>` verbatim (`fast` | `on` | `off`)
 //
+// `-fno-math-errno` is unconditional and is a VECTORIZATION flag, not a
+// fast-math one. Without it GCC must treat `sqrt` (and fabs/floor/ceil/trunc/
+// round) as a call that may write the global `errno`, which is a side effect no
+// vector form can reproduce -- so a `sqrt(a)` map over an array does not
+// vectorize at all under `-O3 -march=native`. With it the same loop reports
+// "loop vectorized using 32 byte vectors". The dropped side effect is
+// unobservable here: `src/cpp/` never reads `errno`, and the VALUES are
+// untouched (IEEE-754 sqrt is correctly rounded either way), so this is
+// bit-exact and safe for the byte-identity differential gates.
+//
 // These are FUNCTIONS, not module-level values, so a harness may set the
 // env var mid-process and have it honored by the next compile -- a
 // module-level `let` would freeze the default at first touch.
@@ -65,9 +75,10 @@ let private fpContractFlag () =
     | v -> $" -ffp-contract={v.Trim()}"
 
 /// Host-compiler optimization flags shared by every g++ invocation.
-/// Currently `-O3 -march=native -ffp-contract=fast` by default (see the two
-/// env vars above). Re-evaluated per call so harness env pins take effect.
-let optFlags () = "-O3" + marchFlag () + fpContractFlag ()
+/// Currently `-O3 -march=native -ffp-contract=fast -fno-math-errno` by default
+/// (see the env vars above; the errno flag is unconditional).
+/// Re-evaluated per call so harness env pins take effect.
+let optFlags () = "-O3" + marchFlag () + fpContractFlag () + " -fno-math-errno"
 
 // ---------------------------------------------------------------------------
 // The BLADE_LLVM lane's gates (docs/plans/plan-llvm-backend.md section 5).
@@ -90,7 +101,16 @@ let llvmEnabled () : bool =
 /// like with like. No `-ffp-contract`: LLVM IR contracts only where the
 /// `contract` fast-math flag is present, and EmitLlvm emits none -- the
 /// default emission is already byte-identity-shaped.
-let llvmOptFlags () = "-O3" + marchFlag ()
+///
+/// `-fno-math-errno` is carried for flag PARITY with `optFlags`, but measure
+/// before crediting it: on this lane clang's input is a `.ll`, and the flag
+/// only changes what the C FRONT END emits. It cannot retroactively annotate
+/// declarations that are already in the IR, and `EmitLlvm.libmUnary` declares
+/// `@sqrt` with `nofree nounwind willreturn` -- no `memory(none)` -- so LLVM
+/// must still assume the call writes errno. A/B measured on a 1023-cell
+/// `sqrt` map: the loop vectorizes with the flag NEITHER on nor off. Closing
+/// the gap means emitting the attribute in EmitLlvm, not adding a flag here.
+let llvmOptFlags () = "-O3" + marchFlag () + " -fno-math-errno"
 
 type HostPlatform = PWindows | PLinux | PMacOS
 

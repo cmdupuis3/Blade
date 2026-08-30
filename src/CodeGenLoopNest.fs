@@ -2081,8 +2081,9 @@ type internal FlatGroup = { GRank: int; GSym: SymmetryClass; GExtent: int64 }
 ///
 /// Refused outright: virtual arrays; any non-plain index KIND (compound,
 /// sparse, ragged, dep, group, irreps, orbit -- none of which is a plain
-/// contiguous skeleton the loop bounds describe); reserved `__`-prefixed tags
-/// (halo windows ride one); dependent extents; non-literal extents (only a
+/// contiguous skeleton the loop bounds describe); `__halowin`-prefixed tags
+/// (a halo window's reads are offset from the loop index, so the flat index is
+/// NOT the operand's pool offset); dependent extents; non-literal extents (only a
 /// compile-time constant cell count is emitted); Hermitian and wreath classes
 /// (Hermitian shares symmetric STORAGE but its mirror conjugates, and the
 /// wreath pool is the section 4 iterated-binomial fold, not this product) -- both are
@@ -2092,7 +2093,17 @@ let internal flatShapeSignature (arr: IRArrayType) : FlatGroup list option =
     let groups =
         arr.IndexTypes
         |> List.map (fun ix ->
-            let tagOk = match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true
+            // `__halowin`, not a blanket `__`: every OTHER reserved tag
+            // (__orbidx / __compoundidx / __seq / __group_* / __sparseidx /
+            // __raggedidx*) carries a non-plain IxKind and is already refused by
+            // the `IxKind <> IxKPlain` test beside this one. The blanket form
+            // therefore refused exactly one thing on tag grounds alone: the
+            // anonymous range's `__anon` (Lowering.fs, TypeCheckInfer.fs), which
+            // IS a plain contiguous skeleton -- so `x0 + dx * Float64(0..n)`,
+            // the documented top-rung idiom, missed the flat path that the
+            // identical `Float64(range<I>)` took. Same predicate shape as the
+            // lane-parallel gate in CodeGenBinding.fs.
+            let tagOk = match ix.Tag with Some t -> not (t.StartsWith "__halowin") | None -> true
             if ix.IxKind <> IxKPlain || not tagOk || not ix.Dependencies.IsEmpty then None
             else
                 match ix.Extent with
@@ -2240,12 +2251,13 @@ let tryGenFlatElementwiseNest
                             && e.RankComponent = b.Level
                             && e.ArrayRank = depth
                             && e.ArrayName = (codeGen.InputArrayNames |> List.item e.ArrayPosition)
-                            // A reserved `__`-prefixed slot tag marks a halo
-                            // window / kind sentinel; flatShapeSignature has
-                            // already refused those on the array types, so this
+                            // A `__halowin` slot tag marks a halo window, whose
+                            // reads are OFFSET from the loop index; flatShapeSignature
+                            // has already refused those on the array types, so this
                             // is a belt-and-braces read of the SAME tag through
-                            // the element record.
-                            && (match e.SlotTag with Some t -> not (t.StartsWith "__") | None -> true)))
+                            // the element record -- and it must stay the same
+                            // predicate, or the pair disagrees about `__anon`.
+                            && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)))
             let cells = flatCellCount sg
             // OpenMP licensing. The flat loop FUSES every level, so threading
             // it threads every dimension -- which only the full licence grants.

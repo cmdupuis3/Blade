@@ -2308,6 +2308,11 @@ let rec internal dispatchTest (rest: string list) : int =
         // Pure lowering + codegen, no toolchain.
         let failed = (Blade.Tests.ShapeSpecTests.runShapeSpecTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "flatpath" ] | [ "flat-path" ] ->
+        // Which index tags reach the flat elementwise path and which decline.
+        // Pure lowering + codegen, no toolchain.
+        let failed = (Blade.Tests.FlatPathTests.runFlatPathTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "lapack" ] ->
         // math.eigh routes to blade_lapack::blade_eigh_{packed,dense}_{s,d,c,z}
         // when the LAPACK gate is on with no explicit sweeps budget, else the
