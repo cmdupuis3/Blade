@@ -51,12 +51,27 @@ let private flatLoopCount (cpp: string) =
 // of the index range it uses, so any difference in the decision is the tag's.
 // ---------------------------------------------------------------------------
 
-/// Affine chain over an index range: `dx * i` then `x0 + that`, two nests.
-let private affineAnon = "let axis = 1.5 + 0.25 * Float64(0..7)\n"
+/// Affine chain over a BOUND (pool-backed) cast of an index range. The chain
+/// `x0 + dx * t` is one fused nest (fuseElementwiseChainsModule collapses the
+/// two binops), and it must take the flat path -- this is the parity claim's
+/// home now that fusion exists: same program, two range spellings, one flat
+/// decision.
+let private affineAnon =
+    "let t = Float64(0..7)\n"
+    + "let axis = 1.5 + 0.25 * t\n"
 
 let private affineNamed =
     "type I = Idx<7>\n"
-    + "let axis = 1.5 + 0.25 * Float64(range<I>)\n"
+    + "let t = Float64(range<I>)\n"
+    + "let axis = 1.5 + 0.25 * t\n"
+
+/// The bare-range spelling of the same axis. Fusion folds the cast map INTO
+/// the chain, so the whole idiom emits ONE index-driven loop
+/// (`axis[i] = 1.5 + 0.25 * (double)i`) with no array operand left to
+/// flatten -- the flat census line is correctly ABSENT, and the win shows as
+/// the allocation count instead: exactly one pool (the output). If this pin
+/// starts seeing flat lines or extra pools, fusion stopped firing here.
+let private affineBareRange = "let axis = 1.5 + 0.25 * Float64(0..7)\n"
 
 /// The same chain, plus a `sqrt` map -- the shape `-fno-math-errno` exists to
 /// let g++ vectorize, and the one that most wants the flat form.
@@ -113,14 +128,32 @@ let private runParityCase (name: string) (anonSrc: string) (namedSrc: string) =
             resultLine Fail name ($"anon flattened {a}, named flattened {n}")
             false
 
+/// The bare-range fusion pin: no flat census line (nothing pool-backed left
+/// to flatten) AND exactly one `allocate<` (the output). Together these say
+/// "the chain became one index-driven loop with zero temporaries".
+let private runBareRangeFusionCase (name: string) (src: string) =
+    match cppOfSource name src with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let flats = flatLoopCount cpp
+        let allocs =
+            cpp.Split('\n') |> Array.filter (fun l -> l.Contains "allocate<") |> Array.length
+        if flats = 0 && allocs = 1 then
+            resultLine Pass name "fused to one index-driven loop, 1 pool"
+            true
+        else
+            resultLine Fail name ($"expected 0 flat lines / 1 pool, got {flats} / {allocs}")
+            false
+
 let runFlatPathTests () =
     printHeader "Blade-DSL: Flat Elementwise Path Tests"
     let results =
-        [ // `dx * i` and `x0 + _` are two nests; the range materialization
-          // itself is not one (it has no array operand to read).
-          runCountCase "affine_anon_range_flattens" affineAnon 2
-          runCountCase "affine_named_range_flattens" affineNamed 2
+        [ // The fused chain over the bound pool is ONE nest.
+          runCountCase "affine_anon_range_flattens" affineAnon 1
+          runCountCase "affine_named_range_flattens" affineNamed 1
           runParityCase "affine_anon_matches_named" affineAnon affineNamed
+          // Bare range: fusion folds the cast in; the win is the pool count.
+          runBareRangeFusionCase "affine_bare_range_fuses" affineBareRange
           // `t * t`, then `sqrt` -- plus the cast map, which has a real array
           // operand here because `t` is bound.
           runParityCase "sqrt_chain_anon_matches_named" sqrtAnon sqrtNamed
