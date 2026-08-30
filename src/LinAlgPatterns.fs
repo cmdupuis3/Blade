@@ -103,8 +103,19 @@ let resolveBlasTier () : BlasTier =
 /// Default-off is deliberate: BLAS may differ in the last ULP, and the
 /// interpreter/oracle differentials demand byte-identical output, so Blade's
 /// own emitted loops remain the verification truth.
+/// `where repro` emission scope. While codegen emits the body of a repro
+/// function this depth is nonzero and every routing gate below reads OFF: a
+/// repro body's arithmetic must be Blade's own emitted loops (the
+/// interpreter's operation sequence), never a library's -- BLAS differs in
+/// the last ULP, LAPACK's eigenbasis is not even unique. A ref bumped and
+/// restored by genFuncDef/genFuncDefAsLambda, not an env gate: it is
+/// program-position state, and codegen is single-threaded. Lives HERE (not
+/// CodeGenState) because this module compiles first and owns the gates.
+let reproScopeDepth = ref 0
+let reproScopeActive () = reproScopeDepth.Value > 0
+
 let blasAvailable () : bool =
-    resolveBlasTier () <> TierOff
+    not (reproScopeActive ()) && resolveBlasTier () <> TierOff
 
 /// The LAPACK availability gate: a SEPARATE FUNCTION with its own C++ define
 /// (`-DBLADE_HAS_LAPACK`) and Build.fs include-sniff arm. On the OpenBLAS
@@ -121,6 +132,7 @@ let blasAvailable () : bool =
 /// bit-reproducible against the native Jacobi path -- `interp` /
 /// `diff-oracle` must never run with this gate set.
 let lapackAvailable () : bool =
+    if reproScopeActive () then false else
     match resolveBlasTier () with
     | TierOff -> false
     | TierExplicit -> (Toolchain.get "BLADE_LAPACK_LINK").IsSome
@@ -206,9 +218,10 @@ let blasBuildFlags (wantsBlas: bool) (wantsLapack: bool) : string * string =
 /// cuda` KERNELS for the device, this one offloads recognised L3
 /// CONTRACTIONS. A program can want either without the other.
 let cublasAvailable () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_CUBLAS") with
-    | "1" | "on" -> true
-    | _ -> false
+    not (reproScopeActive ())
+    && (match System.Environment.GetEnvironmentVariable("BLADE_CUBLAS") with
+        | "1" | "on" -> true
+        | _ -> false)
 
 // Backend mode
 

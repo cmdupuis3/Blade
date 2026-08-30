@@ -436,6 +436,7 @@ let private crossProcCallee : IRCallable =
       IsStatic = false
       IsCommutative = false; CommGroups = []; AntisymGroups = []
       Parallelism = []; IsOmpParallel = false; IsCudaKernel = false; CudaBlockSize = 256; IsMpiParallel = false; IsArityPoly = false; ArityParam = None
+      IsRepro = false
       Captures = []; SignParities = [] }
 
 /// The call site both tests evaluate: `f(B_1, x_2)`.

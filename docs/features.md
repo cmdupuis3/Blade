@@ -350,6 +350,26 @@ region; hoist it to its own `let`), multi-leaf `<&!>` fused fold trees, and
 reduce over compact symmetric/antisymmetric/Hermitian storage (rejected at
 typecheck for all folds — `decompact` first).
 
+**`where repro` — the reproducibility demand (named functions only).** The
+inverse of the reorder licence: the function's emitted body must keep the
+interpreter's operation sequence. Discharged as (a) `BLADE_REPRO_FN` on the
+emitted definition — `noinline` + `-ffp-contract=off` on GCC, so the body
+neither contracts to FMA nor gets re-inlined into a contraction-licensed
+caller; (b) call form everywhere a named function already has it (direct
+calls, kernel positions via the eta wrapper — loops call the function rather
+than inlining its arithmetic); (c) a veto inside `foldReorderLicensed`, which
+covers the OpenMP fold paths, every `BLADE_FP_REASSOC` lane, and the LLVM
+lane's fast-math flags at once — `where comm(a, b), omp, repro` on a fold
+kernel emits serial with a `// [omp] requested but emitted serial: fold
+kernel is `where repro`` marker; and (d) BLAS/LAPACK/cuBLAS routing declined
+while the body emits (BLAS differs in the last ULP; an eigenbasis is not even
+unique). Refusals: on a lambda (the annotation cannot travel into textual
+inlining — name the kernel), on a `static function` (compile-time evaluation
+has no emitted body), and combined with `cuda` (device contraction/rounding
+cannot discharge the demand). A main-local emission (function forced into
+`main()` as a `std::function`) keeps the routing veto but cannot carry the
+attribute; the emitted text says so rather than staying silent.
+
 ## 17. Equivariance and ML (shipped module)
 
 Module doc: [features/equivariant-nn.md](features/equivariant-nn.md), canonical.

@@ -9042,6 +9042,14 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
 
 and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     let scopeEnv = enterCallableBody env
+    // `repro` rides the emitted function boundary (noinline + contraction-off
+    // attribute; call form everywhere) -- a lambda kernel is textually inlined
+    // into its call sites, where none of that can travel, so accepting the
+    // clause here would promise reproducibility the emission cannot keep.
+    match whereClause with
+    | Some wc when wc.Repro ->
+        Error (Other "`where repro` is carried by named function declarations only (`function f(...) where repro = ...`): a lambda kernel inlines into its call sites, where the reproducibility attribute cannot travel. Name the kernel and call it.")
+    | _ ->
     let commGroups = extractCommGroups parms whereClause
     let antisymGroups = extractAntisymGroups parms whereClause
 
@@ -12912,6 +12920,14 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         Blade.Constraints.lookupConstraint cname |> Option.iter (fun h -> h.EnterBody funcDecl.Name cargs)
 
     let result =
+        // `repro` is a runtime-emission property; a static function evaluates
+        // at compile time in the compiler's own arithmetic, where there is no
+        // emitted body for the attribute to govern. Refuse rather than let the
+        // clause silently mean nothing.
+        if funcDecl.IsStatic
+           && (funcDecl.WhereClause |> Option.map (_.Repro) |> Option.defaultValue false) then
+            Error (Other $"function '{funcDecl.Name}': `where repro` cannot apply to a `static function` -- a static function evaluates at compile time (in the compiler's own arithmetic), so there is no emitted body for the reproducibility attribute to govern")
+        else
         // When a return type is annotated, drive the body bidirectionally
         // via checkExpr. This pushes the expected type into literal and
         // tuple-constructor positions so that e.g. `(4, 1)` retypes its

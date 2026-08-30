@@ -1472,9 +1472,17 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
           IsArityPoly  = isArityPoly
           ArityParam   = polyParamNames |> List.tryHead }
     let funcDef =
-        mkCallable env.Builder funcOpts irParams body decl.ReturnType []
-                   (not decl.CommGroups.IsEmpty) decl.CommGroups
-                   parallelism isOmpParallel isCudaKernel cudaBlockSize isMpiParallel
+        { mkCallable env.Builder funcOpts irParams body decl.ReturnType []
+                     (not decl.CommGroups.IsEmpty) decl.CommGroups
+                     parallelism isOmpParallel isCudaKernel cudaBlockSize isMpiParallel
+            with
+                // `where repro`, grafted here exactly as lowerTypedLambda
+                // grafts AntisymGroups: this is the one construction site
+                // that still sees the clause.
+                IsRepro =
+                    (match decl.WhereClause with
+                     | Some wc -> wc.Repro
+                     | None -> false) }
 
     let env' = bindTypedVar decl.Name decl.FuncId env
     (funcDef, env')

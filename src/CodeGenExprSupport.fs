@@ -1133,13 +1133,33 @@ let foldKernelBuiltinOp (callable: IRCallable) : IRBinOp option =
          | _ -> None)
     | _ -> None
 
+/// Does this fold kernel demand REPRODUCIBLE evaluation? True when the
+/// callable itself is a `where repro` function, or when it is the
+/// eta-expanded wrapper around one (`lambda(a, b) -> f(a, b)` -- the shape a
+/// named function takes in kernel position; the wrapper carries no clause of
+/// its own, so the demand is read off the callee). A repro demand VETOES the
+/// reorder licence below even when `comm` grants it: comm says reordering is
+/// mathematically sound, repro says the operation sequence is the contract.
+let foldKernelReproVetoed (callable: IRCallable) : bool =
+    callable.IsRepro
+    || (match callable.Body with
+        | IRApp ((IRVar _) as f, _, _) ->
+            (match resolveCallable f with
+             | Some callee -> callee.IsRepro
+             | None -> false)
+        | _ -> false)
+
 /// May a fold through `callable` be reordered/reassociated across threads?
 /// Answers only the LICENCE question -- whether omp was requested is separate
 /// (callable.IsOmpParallel), so the two can be reported independently.
+/// `where repro` vetoes unconditionally: this one predicate gates the OpenMP
+/// fold paths, every BLADE_FP_REASSOC lane, and the LLVM lane's fast-math
+/// flags, so the veto lands on all of them at once.
 let foldReorderLicensed (callable: IRCallable) : bool =
-    callable.IsCommutative
-    || not (List.isEmpty callable.CommGroups)
-    || (foldKernelBuiltinOp callable).IsSome
+    not (foldKernelReproVetoed callable)
+    && (callable.IsCommutative
+        || not (List.isEmpty callable.CommGroups)
+        || (foldKernelBuiltinOp callable).IsSome)
 
 /// An operand's extent along `dim`, as a C++ expression: the LITERAL when the
 /// operand's own index record carries one, else the runtime `.extents[dim]`

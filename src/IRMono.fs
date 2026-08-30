@@ -1761,6 +1761,9 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           IsMpiParallel = func.IsMpiParallel
           IsArityPoly = false
           ArityParam = None
+          // The reproducibility demand survives specialization: the clone is
+          // the same declared function at a concrete arity.
+          IsRepro = func.IsRepro
           // Specialized clones inherit the original's captures verbatim;
           // arity specialization doesn't introduce new free vars.
           Captures = func.Captures

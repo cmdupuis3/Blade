@@ -2527,7 +2527,18 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
     let pathBSuppressedNote =
         if parallelFold.IsSome && not ompThreadsOn
         then [ $"{ind}// [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}" ]
-        else []
+        else
+        // The `where repro` veto: the kernel (or the named function its eta
+        // wrapper calls) demands the serial operation sequence, so
+        // foldReorderLicensed said no and the fold lands on the serial arms
+        // below -- which say nothing about omp on their own. Same
+        // silence-prevention as the knob note above; without it a
+        // comm-licensed `omp, repro` fold would drop its omp request with no
+        // trace in the emitted text.
+        match resolveCallable kernelExpr with
+        | Some c when c.Params.Length = 2 && c.IsOmpParallel && foldKernelReproVetoed c ->
+            [ $"{ind}// [omp] requested but emitted serial: fold kernel is `where repro` (the operation order is the contract; reorder licence vetoed)" ]
+        | _ -> []
     let code =
         match resolveCallable kernelExpr with
         | Some callable when callable.Params.Length = 2 ->
