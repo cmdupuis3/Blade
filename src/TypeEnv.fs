@@ -588,7 +588,18 @@ let private indexIdentityNote (exp: IRType) (act: IRType) : string =
 /// Format a TypeError as a human-readable string
 let formatTypeError (err: TypeError) : string =
     match err with
-    | UnboundVariable name -> $"Unbound variable: {name}"
+    | UnboundVariable name ->
+        // The steer for imperative-loop refugees. `while`/`do` are not
+        // keywords (deliberately: programs may bind them), so a Fortran/C
+        // programmer's first `while cond { ... }` dies HERE as a bare
+        // unbound-variable error -- the language's whole thesis, with no
+        // pointer to it. Same rationale as the removed-`for` BL1003 steer,
+        // fired at the one place we know the name is genuinely unbound, so
+        // a real variable named `while` never trips it.
+        match name with
+        | "while" | "do" ->
+            $"Unbound variable: {name}. Blade has no imperative loops -- iteration is declarative. A converge/accumulate loop is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`), a fold is `reduce(...)`, and a parallel map is `method_for(range<...>) <@> lambda(...)` or plain array arithmetic. See formalism 7.5."
+        | _ -> $"Unbound variable: {name}"
     | TypeMismatch (exp, act) ->
         let rendered = $"Type mismatch: expected {ppIRType exp}, got {ppIRType act}"
         if ppIRType exp = ppIRType act then rendered + indexIdentityNote exp act else rendered

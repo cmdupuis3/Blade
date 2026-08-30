@@ -801,13 +801,29 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
 and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases : string =
     // Generate nested ternary for match expressions
     let scrut = exprToCppCore subst names scrutinee
+    // The non-exhaustive panic IIFE, typed as the MATCH RESULT rather than a
+    // hardcoded double: as a ternary operand it participates in the chain's
+    // common type, so a double-typed abort on an Int64-valued match poisoned
+    // the whole chain to double and died as a g++ -Werror=float-conversion --
+    // making BL8002 unreachable for every non-double element type. `return
+    // {};` value-initializes whatever the type is (the panic never returns;
+    // C++ just needs the statement).
+    let abortExpr =
+        let retTyStr =
+            match cases |> List.tryHead with
+            | Some c ->
+                (match inferExprType c.Body with
+                 | ArrayElem arr -> cppArrayTypeStr arr
+                 | IRTInfer _ -> "double"
+                 | t -> irTypeToCpp t)
+            | None -> "double"
+        $$"""([&]() -> {{retTyStr}} { blade_rt::panic("BL8002", "Blade: non-exhaustive match", nullptr, 0); return {}; }())"""
     let rec genCase (cases: IRMatchCase list) : string =
         match cases with
-        | [] -> "([&]() -> double { blade_rt::panic(\"BL8002\", \"Blade: non-exhaustive match\", nullptr, 0); return 0; }())"
+        | [] -> abortExpr
         | [case] ->
             // Last case - assume it matches (wildcard or variable)
             // But if there's a guard, we must still check it.
-            let abortExpr = "([&]() -> double { blade_rt::panic(\"BL8002\", \"Blade: non-exhaustive match\", nullptr, 0); return 0; }())"
             let wrapGuard (bodyStr: string) (names': Map<IRId, string>) : string =
                 match case.Guard with
                 | Some guard ->
@@ -910,21 +926,27 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
                     // Wildcard without guard - always matches
                     exprToCppCore subst names case.Body
             | IRPatTuple innerPats ->
-                // Tuple pattern - bind each element
-                let rec collectVarBindings (pats: IRPattern list) (idx: int) : (IRId * string) list =
+                // Tuple pattern - bind each element AT ITS OWN SLOT. The index
+                // must ride the binding: re-deriving it by position over the
+                // FILTERED binding list (as this arm once did with List.mapi)
+                // skews every binder that follows a non-var pattern --
+                // `(_, b, _)` read std::get<0> and returned the wrong element,
+                // silently. The last-case arm below always carried the slot;
+                // this arm now matches it.
+                let rec collectVarBindings (pats: IRPattern list) (idx: int) : (IRId * string * int) list =
                     match pats with
                     | [] -> []
                     | IRPatVar varId :: rest ->
                         let varName = $"__match_{varId}"
-                        (varId, varName) :: collectVarBindings rest (idx + 1)
+                        (varId, varName, idx) :: collectVarBindings rest (idx + 1)
                     | _ :: rest -> collectVarBindings rest (idx + 1)
-                
+
                 let bindings = collectVarBindings innerPats 0
-                let bindingDecls = bindings |> List.mapi (fun idx (_, name) ->
+                let bindingDecls = bindings |> List.map (fun (_, name, idx) ->
                     $"auto {name} = std::get<{idx}>({scrut})") |> String.concat "; "
-                
+
                 // Extend names map with bindings
-                let names' = bindings |> List.fold (fun acc (id, name) -> Map.add id name acc) names
+                let names' = bindings |> List.fold (fun acc (id, name, _) -> Map.add id name acc) names
                 
                 match case.Guard with
                 | Some guard ->

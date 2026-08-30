@@ -785,10 +785,15 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             // This is a no-payload variant constructor -- treat as PatVariant
             checkPattern env expected (inheritPatSpan pat (PatVariant (name, None)))
         | Some (parentName, Some _) ->
-            // Variant with payload but used without -- treat as variable (may shadow)
-            let varId = env.Builder.FreshId()
-            Ok { Kind = TPatVar (name, varId); Type = expected
-                 Bindings = [(name, varId, expected)] }
+            // Variant with payload, used WITHOUT it. Treating this as a
+            // variable binding (which it used to be) is a trap, not a
+            // feature: `| Some -> ...` silently became an irrefutable
+            // binder named Some, matched EVERYTHING, and killed every arm
+            // after it -- `| None -> ...` below it was dead code with no
+            // diagnostic. A payload-carrying constructor in pattern
+            // position can only sensibly mean the variant test, so demand
+            // the payload be spelled.
+            Error (Other $"pattern '{name}': this constructor of '{parentName}' carries a payload, so a bare '{name}' here would not test the variant -- it would bind a fresh VARIABLE named {name} that matches everything (making every later arm dead). Match it as {name}(p) (or {name}(_) to ignore the payload); rename the binder if a variable is what you meant.")
         | None ->
             let varId = env.Builder.FreshId()
             Ok { Kind = TPatVar (name, varId); Type = expected

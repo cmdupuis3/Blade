@@ -10715,24 +10715,41 @@ and letValueOnlyChain (env: TypeEnv) (tValue: TypedExpr) (body: Expr) : TypeResu
 and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
     inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
         let resultTy = env.Subst.Fresh()
-        cases |> List.map (fun case ->
+        // SHORT-CIRCUITING fold, not List.map + sequenceResults: a later
+        // SUCCESSFUL arm re-stamps the ambient error span, so the first
+        // arm's error used to point its caret at whichever arm inferred
+        // last (the compact-literal walker fixed the identical bug class --
+        // see its `go` fold). And the arm/result unify is BINDING now: it
+        // was `let _ = unify ...`, which let an array arm and a scalar arm
+        // coexist and shipped the mismatch to g++ as an ill-typed ternary.
+        let inferCase (case: MatchCase) : TypeResult<TypedMatchCase> =
             checkPattern env tScrutinee.Type case.Pattern |> Result.bind (fun tPat ->
                 // Extend env with pattern bindings
                 let mutable caseEnv = env
                 for (name, varId, ty) in tPat.Bindings do
                     caseEnv <- bindVarSimple name varId ty caseEnv
 
-                // Type-check guard
+                // A guard is a predicate: it must be Bool, not merely
+                // truthy (C truthiness was what the emitted C++ applied to
+                // whatever type arrived here, arrays included).
                 let tGuard =
                     case.Guard |> Option.map (fun g ->
-                        inferExpr caseEnv g |> Result.map Some)
+                        inferExpr caseEnv g |> Result.bind (fun tg ->
+                            unify env.Subst tg.Type (IRTScalar ETBool)
+                            |> Result.mapError (fun _ ->
+                                Other "a match-arm guard must be Bool: the `if` condition after a pattern is a predicate (comparisons and boolean operators), not a value")
+                            |> Result.map (fun () -> Some tg)))
                     |> Option.defaultValue (Ok None)
 
                 tGuard |> Result.bind (fun guardOpt ->
                 inferExpr caseEnv case.Body |> Result.bind (fun tBody ->
-                    let _ = unify env.Subst tBody.Type resultTy
-                    Ok ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase)))))
-        |> sequenceResults |> Result.map (fun tCases ->
+                    unify env.Subst tBody.Type resultTy |> Result.map (fun () ->
+                        ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase)))))
+        let rec go acc cs =
+            match cs with
+            | [] -> Ok (List.rev acc)
+            | case :: rest -> inferCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
+        go [] cases |> Result.map (fun tCases ->
             let resolvedTy = env.Subst.Resolve resultTy
             mkTyped (TExprMatch (tScrutinee, tCases)) resolvedTy))
 
@@ -10744,25 +10761,39 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
 /// cross-unify (which ignored arm/result mismatches).
 and checkMatch env (expected: IRType) scrutinee cases : TypeResult<TypedExpr> =
     inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
-        cases |> List.map (fun case ->
+        // Same short-circuiting fold + binding unify + Bool guard as
+        // inferMatch (see its comment). The checkExpr-first path is
+        // untouched -- that is the literal-flex leniency `comoment_prod`'s
+        // `| 0 -> 1` arm rides -- but the FALLBACK's unify is binding now:
+        // an arm that neither checks against the expected type nor unifies
+        // with it is an error here, not a g++ error later.
+        let checkCase (case: MatchCase) : TypeResult<TypedMatchCase> =
             checkPattern env tScrutinee.Type case.Pattern |> Result.bind (fun tPat ->
                 let mutable caseEnv = env
                 for (name, varId, ty) in tPat.Bindings do
                     caseEnv <- bindVarSimple name varId ty caseEnv
                 let tGuard =
-                    case.Guard |> Option.map (fun g -> inferExpr caseEnv g |> Result.map Some)
+                    case.Guard |> Option.map (fun g ->
+                        inferExpr caseEnv g |> Result.bind (fun tg ->
+                            unify env.Subst tg.Type (IRTScalar ETBool)
+                            |> Result.mapError (fun _ ->
+                                Other "a match-arm guard must be Bool: the `if` condition after a pattern is a predicate (comparisons and boolean operators), not a value")
+                            |> Result.map (fun () -> Some tg)))
                     |> Option.defaultValue (Ok None)
                 tGuard |> Result.bind (fun guardOpt ->
                     let tBodyR =
                         match checkExpr caseEnv expected case.Body with
                         | Ok tb -> Ok tb
                         | Error _ ->
-                            inferExpr caseEnv case.Body |> Result.map (fun tb ->
-                                unify env.Subst tb.Type expected |> ignore
-                                tb)
+                            inferExpr caseEnv case.Body |> Result.bind (fun tb ->
+                                unify env.Subst tb.Type expected |> Result.map (fun () -> tb))
                     tBodyR |> Result.map (fun tBody ->
-                        ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase)))))
-        |> sequenceResults |> Result.map (fun tCases ->
+                        ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase))))
+        let rec go acc cs =
+            match cs with
+            | [] -> Ok (List.rev acc)
+            | case :: rest -> checkCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
+        go [] cases |> Result.map (fun tCases ->
             mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve expected)))
 
 /// Mechanism 2 -- scalar -> concretely-shaped-array broadcast fill. When a scalar

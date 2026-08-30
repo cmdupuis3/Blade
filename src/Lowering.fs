@@ -2369,6 +2369,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // an array op at lowering time (its element type was an unresolved
         // var), so it gets the same elementwise-loop lowering top-level
         // `x + y` does.
+        // Constant-scrutinee match folding: `match rank(x) with | 0 -> ..`
+        // in a concrete context lowered its scrutinee to a literal, but the
+        // only fold lived inside the arity specializer -- so the decided
+        // match survived as a runtime ternary (with ill-typed dead arms
+        // reaching g++). Fold module-wide, after the monomorphizers put
+        // specialized literals in place, before both back ends read the tree.
+        let irModule = IRMono.foldConstMatchesModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
         // Elementwise-chain fusion: collapse a deferred elementwise
         // computation nested directly in another's operand slot (the shape

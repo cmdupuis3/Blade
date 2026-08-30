@@ -1306,6 +1306,64 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModul
         Functions = newFunctions @ survivingLambdas
         Bindings = newBindings }
 
+// Constant-scrutinee match folding (docs/plans/plan-match-statements.md).
+//
+// `match <int literal> with ...` selects its arm at compile time. Two
+// producers reach this shape: `arity(A)` inside a specializing Poly kernel
+// (rewritten to a literal by specializeFunction, which folds DURING
+// specialization so the recursion cascade terminates at the base arm), and
+// `rank(x)` in a concrete context (lowered to IRLit straight from the typed
+// expression's type). Before this pass the fold existed only inside the
+// arity specializer, so `match rank(x) with | 0 -> .. | _ -> ..` on a
+// concrete array survived to codegen as `(0L == 0L ? .. : ..)` -- a runtime
+// ternary over a decided question, and (worse) a ternary whose dead arm
+// could carry a type the live arm doesn't, handing g++ an ill-typed
+// expression the fold would have removed.
+//
+// Arm selection is ORDER-SOUND, which the specializer's original local copy
+// was not: walk arms in source order; a literal arm that cannot match the
+// scrutinee is skipped; the first arm whose pattern matches is chosen ONLY
+// if it is guard-free -- a GUARDED arm whose pattern matches bails the
+// whole fold (the guard is a runtime question, and folding past it would
+// answer it statically as `false`). Non-int patterns against an int
+// scrutinee also bail rather than guess.
+let foldConstIntMatch (e: IRExpr) : IRExpr =
+    match e with
+    | IRMatch (IRLit (IRLitInt n), cases) ->
+        let rec pick (cs: IRMatchCase list) =
+            match cs with
+            | [] -> None
+            | c :: rest ->
+                let patMatches =
+                    match c.Pattern with
+                    | IRPatLit (IRLitInt m) -> Some (m = n)
+                    | IRPatWild | IRPatVar _ -> Some true
+                    | _ -> None
+                match patMatches with
+                | None -> None                    // foreign pattern shape: bail
+                | Some false -> pick rest
+                | Some true -> if c.Guard.IsSome then None else Some c
+        match pick cases with
+        | Some c ->
+            (match c.Pattern with
+             | IRPatVar vid -> IRLet (vid, IRLit (IRLitInt n), c.Body)
+             | _ -> c.Body)
+        | None -> e
+    | _ -> e
+
+/// Bottom-up over one expression: inner constant matches fold first, so a
+/// chosen arm that itself contains one arrives here already reduced.
+let foldConstMatchesExpr (expr: IRExpr) : IRExpr =
+    mapIRExpr foldConstIntMatch expr
+
+/// The pipeline pass: every function body and binding value. Runs after the
+/// monomorphizers (so specialized bodies' literals are in place) and before
+/// codegen/interp split -- one fold serves both back ends.
+let foldConstMatchesModule (modul: IRModule) : IRModule =
+    { modul with
+        Functions = modul.Functions |> List.map (fun f -> { f with Body = foldConstMatchesExpr f.Body })
+        Bindings = modul.Bindings |> List.map (fun b -> { b with Value = foldConstMatchesExpr b.Value }) }
+
 // Arity Monomorphization
 
 /// Locate every Poly param's index in a function, in declaration order.
@@ -1548,25 +1606,9 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         // base arm must be selected (and the recursive arm, which
         // destructures the pack and calls f(tail), discarded) at the base
         // arity, or specialization would shrink past 0 and destructure an
-        // empty pack. Only guard-free arms are reduced.
-        let rec reduceArityMatch expr =
-            match expr with
-            | IRMatch (IRLit (IRLitInt n), cases) ->
-                let chosen =
-                    cases |> List.tryFind (fun c ->
-                        c.Guard.IsNone &&
-                        (match c.Pattern with
-                         | IRPatLit (IRLitInt m) -> m = n
-                         | IRPatWild | IRPatVar _ -> true
-                         | _ -> false))
-                match chosen with
-                | Some c ->
-                    match c.Pattern with
-                    | IRPatVar vid -> reduceArityMatch (IRLet (vid, IRLit (IRLitInt n), c.Body))
-                    | _ -> reduceArityMatch c.Body
-                | None -> expr  // no guard-free arm matches; leave for runtime
-            | ExprShape (children, rebuild) -> rebuild (children |> List.map reduceArityMatch)
-        let newBody = reduceArityMatch newBody
+        // empty pack. Shares `foldConstIntMatch` with the pipeline-level
+        // pass, so the arm-selection semantics cannot drift between the two.
+        let newBody = foldConstMatchesExpr newBody
 
         // Drop the now-dead pack-alias let bindings (`let _ = A`, `let tail = A[1..]`).
         // Every use of them was rewritten to expanded params above; the bindings

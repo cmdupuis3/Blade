@@ -992,7 +992,12 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
 /// is false) leaves no bindings visible to later cases.
 and evalMatch (st: InterpState) (env: Env) (sv: Value) (cases: IRMatchCase list) : Value =
     match cases with
-    | [] -> raise (InterpPanic ("BL8006", "no matching case in match expression", None, 0))
+    // BL8002 to match codegen and the LLVM lane byte-for-byte: all three
+    // evaluators panic the SAME code and message on a non-exhaustive match,
+    // so the differential gates can pin the event once. (This site used to
+    // say BL8006 -- the out-of-bounds family -- and the interp-diff harness
+    // caught the drift the day a corpus test pinned the abort.)
+    | [] -> raise (InterpPanic ("BL8002", "Blade: non-exhaustive match", None, 0))
     | c :: rest ->
         let caseEnv = envChild env
         if tryMatch caseEnv sv c.Pattern then
