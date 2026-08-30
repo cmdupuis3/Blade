@@ -788,8 +788,23 @@ blocked<I, K>  // K-sized cache blocks (spec level)
 `range<CompoundIdx<...>>` emits mask-true tuples. Virtual and real arrays
 compose in one loop:
 `method_for(range<I>, A, B) <@> lambda(i.., a, b) -> ...` — this is how
-kernels receive indices without breaking index anonymity. Anonymous range
-forms (zero-based, offset, literal extents) are supported.
+kernels receive indices without breaking index anonymity.
+
+**Anonymous ranges.** `m..n` (half-open, Int64 elements) is a virtual array
+equivalent to `range<Idx<n-m>> + m`: `0..5` enumerates `0,1,2,3,4`. Bounds
+must be static (a `let static` name folds). The index type is anonymous, so
+its elements index any plain-`Idx` slot without a tag cast — which makes it
+the natural spelling for index generation feeding *arithmetic*, where
+`range<I>` would tag the result and demand `(k : I)` casts downstream.
+
+A plain dense range — `m..n` or single-slot `range<I>` — is an ordinary
+rank-1 array value: it lifts elementwise (`(0..5) + 10`,
+`x0 + dx * Float64(0..n)` — the coordinate-axis idiom), folds
+(`reduce(0..n, (+))`), and materializes when bound bare or forced
+(`let xs = 0..n`, `|> compute`). Inside a loop nest it never materializes —
+the nest peels it as induction values. Compound/sparse/halo ranges and
+multi-slot `range<I, J>` enumerate coordinate *sets*, not element values, and
+exist only as nest inputs.
 
 **`range<SymIdx<r,N>>` / `range<AntisymIdx<r,N>>` hand the kernel PREFIX
 OFFSETS, not canonical indices.** A multi-rank slot contributes one param per
@@ -1551,6 +1566,8 @@ for (A, B) in range<I> <@> lambda(i, j, a, b) -> ...
 c₁ <&> c₂    (M<@>f) <&!> (M<@>g)    L₁ <*> L₂    o₁ >>@ o₂    c₁ @>> c₂
 c >>= k      pure v     f <$> c      guard(p, c)  sequence [..]  replicate n c
 c |> compute
+0..n         // anonymous range (§7.3): a rank-1 Int64 array value —
+             // method_for(0..n), reduce(0..n, (+)), x0 + dx * Float64(0..n)
 ```
 
 ### 15.6 Pseudo-native mathematics
@@ -1604,7 +1621,7 @@ application; sectioned operators `(+)`, `(/) x`.
 | `mask` `compound` `intersect` `union` `unique` `contains` `group_keys` `group_by` `sort` `reduce` `extents` | relational forms |
 | `gram` `hermitian` `conj` | linear-algebra value operators |
 | `reynolds(g[, Antisymmetric])` | symmetrizing kernel wrapper |
-| `range<I>` `reverse<I>` `blocked<I,K>` | virtual arrays |
+| `range<I>` `reverse<I>` `blocked<I,K>` `m..n` | virtual arrays (`m..n` anonymous, half-open) |
 | `Nat<I>` | unit-tagged index value |
 
 ## Appendix B: Glossary
