@@ -1830,7 +1830,19 @@ let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: T
                   // Dimension names, best source first: (a) the source is
                   // itself a provider read, ask its provider for the store's
                   // names; (b) a module-level named index type with a
-                  // matching Id; (c) synthesized dim<i>.
+                  // matching Id; (c) the slot's own index TAG; (d) dim<i>.
+                  //
+                  // (c) exists because (b) misses the case it was written for.
+                  // A named index type reaches an array through
+                  // `lowerIndexType`, which "stamps a fresh Id per use"
+                  // (TypeEnv's own note at the provider-axis registration), so
+                  // `it.Id = idx.Id` does not hold for a user-declared alias
+                  // and never did: `type LatIdx = Idx<2>` written out as
+                  // `nc.write("out.nc", A)` produced "dim0", discarding the
+                  // one name the program actually stated. The Tag survives
+                  // that re-stamping -- it is the axis's NOMINAL identity, the
+                  // same field `unify` refuses to co-iterate across -- so it is
+                  // the reliable carrier of the declared name.
                   let fromSourceStore =
                       match Map.tryFind srcId env.ProviderReads with
                       | Some rspec ->
@@ -1838,6 +1850,29 @@ let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: T
                            | Some p -> p.VarDimNames rspec.FilePath rspec.VarName
                            | None -> None)
                       | None -> None
+                  // A tag only names a dimension if it names it UNIQUELY.
+                  // `Array<T like LatIdx, LatIdx>` is one dimension used
+                  // twice, but the writers emit one dimension DEFINITION per
+                  // slot (netcdf's `nc_def_dim` would fail NC_ENAMEINUSE on
+                  // the repeat), so a repeated tag names no slot and every
+                  // slot carrying it falls through to dim<i> -- exactly
+                  // today's behaviour for that shape. Reusing one dimid
+                  // across slots is the writers' question, not this one's.
+                  let repeatedTags =
+                      arrTy.IndexTypes
+                      |> List.choose (fun idx -> idx.Tag)
+                      |> List.countBy id
+                      |> List.choose (fun (t, n) -> if n > 1 then Some t else None)
+                      |> Set.ofList
+                  // `__`-prefixed tags are the compiler's own sentinels and
+                  // provenance keys (`__anon`, `__orbidx`, `__icaxis|lat@...`)
+                  // -- not names a user wrote, and not names a store should
+                  // carry. An icechunk axis still gets its real name from
+                  // (a), which asks the provider.
+                  let nominalTag (idx: IRIndexType) =
+                      match idx.Tag with
+                      | Some t when not (t.StartsWith "__") && not (Set.contains t repeatedTags) -> Some t
+                      | _ -> None
                   let dimNames =
                       match fromSourceStore with
                       | Some names when names.Length = arrTy.IndexTypes.Length -> names
@@ -1847,6 +1882,7 @@ let tryProviderWrite (env: TypedLowerEnv) (typeDefs: IRTypeDef list) (binding: T
                               |> List.tryPick (function
                                   | IRTDIndexType (n, it) when it.Id = idx.Id -> Some n
                                   | _ -> None)
+                              |> Option.orElseWith (fun () -> nominalTag idx)
                               |> Option.defaultValue $"dim{i}")
                   Some { Provider = pname
                          FilePath = path

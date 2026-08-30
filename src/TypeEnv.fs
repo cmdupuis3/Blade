@@ -693,6 +693,8 @@ class IS implemented, and the dense result folds like any other array." op level
         $"arguments {posA} and {posB} of '{callee}': the body of '{callee}' CO-ITERATES these two parameters (an elementwise zip walks them as one index space), but argument {posA} has extent {extA} on the shared axis and argument {posB} has extent {extB}. The walk takes its bound from the first operand, so the longer one runs off the end of the shorter one's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Because '{callee}' declares those parameters abstractly (`T^1`), the body has no extents to compare and this call is the first place the disagreement is visible. Pass arrays of equal extent, or slice the longer one to the shorter one's index space first."
     | CoIterBodyExtentMismatch (callee, pos, argExt, bodyExt) ->
         $"argument {pos} of '{callee}': the body of '{callee}' CO-ITERATES this parameter with an array of extent {bodyExt} (an elementwise zip walks them as one index space), but this argument has extent {argExt} on the shared axis. The walk takes its bound from the first operand, so whichever is longer runs off the end of the shorter one's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). The zip has one concrete side and one abstract (`T^1`) side, so the body could not compare them and this call is the first place both are known. Pass an array of extent {bodyExt}, or slice this one to that index space first."
+    | ProviderReadExtentMismatch (provider, dim, annotated, actual) ->
+        $"provider read: the annotation declares extent {annotated} on index slot {dim}, but the read's own type has extent {actual}. A provider read is typed BY THE STORE -- the annotation cannot reshape it -- while codegen allocates the store's true shape and compiles every later subscript against the ANNOTATED one, so a disagreement here is an out-of-bounds read with no runtime symptom, not a naming quarrel. Correct the annotation to the {provider} store's shape, or drop it and let the read supply the type (slice or reshape the value afterwards if a different shape is what you want)."
     | HaloExtentMismatch (declared, dim, targetName, actual) ->
         $"halo extent mismatch: the halo declares an inner extent of {declared}, but '{targetName}' (read through the window at index slot {dim}) has extent {actual}. The window walk is bounded by the DECLARED extent, so an oversized halo reads past '{targetName}''s allocation and an undersized one silently emits fewer windows. Make the halo's inner index match the array it windows over."
     | QuantityTerminal (quantity, declName) ->
@@ -894,6 +896,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | QuantityArgMismatch _ -> "BL3010"
             | ExtentArgMismatch _ | HaloExtentMismatch _ | ZipExtentMismatch _
             | CoIterArgExtentMismatch _ | CoIterBodyExtentMismatch _ -> "BL3016"
+            | ProviderReadExtentMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"

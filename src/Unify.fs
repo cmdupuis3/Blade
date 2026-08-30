@@ -208,6 +208,19 @@ type TypeError =
     /// body's literal rides `FuncCoIterObligations` alongside the parameter
     /// positions; `pos` is the 1-based ARGUMENT position in this call.
     | CoIterBodyExtentMismatch of callee: string * pos: int * argExt: int64 * bodyExt: int64
+    /// BL3016 (same family, the provider-ascription twin): a `let` annotation
+    /// or `:` ascription on a PROVIDER READ names a compile-time-literal
+    /// extent on some index slot and the read's own type names a different
+    /// one. Wherever two extents can come from DIFFERENT places, this compiler
+    /// already has a check saying so -- param vs argument, operand vs operand,
+    /// halo vs target, literal vs annotation. The provider read is the one
+    /// such seam that had none. The store fixes the ALLOCATION (codegen bakes
+    /// the file's real shape into the buffer and the reader loop) while the
+    /// annotation fixes the TYPE every later index expression compiles
+    /// against -- and the read arm passes the operand's type through
+    /// unchanged, so nothing reconciled them. `dim` is 1-based over the
+    /// array's index slots; `provider` is the registry name for the message.
+    | ProviderReadExtentMismatch of provider: string * dim: int * annotated: int64 * actual: int64
     /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.

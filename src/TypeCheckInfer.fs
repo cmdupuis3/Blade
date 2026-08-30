@@ -9582,6 +9582,15 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // function calls, complex expressions, and any case the special-cases miss.
     | _ ->
         inferExpr env expr |> Result.bind (fun tE ->
+            // A PROVIDER READ reaching a checking position is the one synthesis
+            // whose shape unify is not allowed to judge but must (see
+            // providerReadExtentClash). Ahead of unify so the specific
+            // extent complaint wins over the generic mismatch it would
+            // otherwise be flattened into -- and ahead of tryScalarFill, which
+            // cannot apply to an array-typed read anyway.
+            match providerReadExtentClash env expr tE.Type expected with
+            | Some clash -> Error clash
+            | None ->
             match unify env.Subst tE.Type expected with
             | Ok () -> Ok tE
             | Error e ->
@@ -9822,6 +9831,82 @@ and internal boundedAggregateNoun (env: TypeEnv) (baseTy: TypeExpr) : string opt
         | Some (TDIVariant _) -> Some "a sum type"
         | _ -> None
     | _ -> None
+
+/// The provider-access forms, for the shape gate below. All five spellings
+/// (`alias.read` / `alias.stream` / `alias.read_window` / `alias.load_compound`
+/// as applications, and the bare `|> read`) reach a checking position through
+/// checkExprInner's default arm, and all five are typed from the STORE rather
+/// than from their annotation. Returns the provider's registry name, for the
+/// message; the bare form has no alias in hand and answers generically.
+and internal providerReadFormName (env: TypeEnv) (expr: Expr) : string option =
+    let isReadField (name: string) =
+        name = "read" || name = "stream" || name = "read_window" || name = "load_compound"
+    match expr.Kind with
+    | ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, fld) }, _)
+            when isReadField fld ->
+        providerAliasName env alias
+    | ExprKind.ExprRead _ -> Some "provider"
+    | _ -> None
+
+/// THE PROVIDER-ASCRIPTION SHAPE GATE (BL3016).
+///
+/// `unify` deliberately does not compare extents (Unify.fs,
+/// `indexPairIncompatible`: "Extents are NOT compared"). Extents are out of
+/// type identity on purpose, and a blanket extent rule would refuse sound code
+/// all over the language. That policy is not what this arm relaxes.
+///
+/// Extent agreement is instead enforced, seam by seam, wherever the two
+/// extents can come from DIFFERENT places and disagreeing is an out-of-bounds
+/// read rather than a naming quarrel: param vs argument (`ExtentArgMismatch`),
+/// operand vs operand (`ZipExtentMismatch`), halo vs target
+/// (`HaloExtentMismatch`), array literal vs annotation (`ArrayLitLength`).
+/// This is the fourth member of that family, not an exception to unify's rule.
+///
+/// The seam it covers: at a provider read the STORE fixes the allocation
+/// (codegen bakes the file's real shape into the buffer and the reader loop)
+/// while the ANNOTATION fixes the type every later subscript compiles against,
+/// and the read arm returns the operand's type unchanged, so nothing ever
+/// reconciled them. Concretely, on a 3x2 CSV,
+///     let bad: Array<Float64 like Idx<5>, Idx<9>> = t.vars.data |> c.read
+///     let x = bad((4: Wrong), 8)
+/// typechecked clean (in `check` and in the IDE), allocated 6 doubles, emitted
+/// `bad[4][8]`, and segfaulted.
+///
+/// The array-literal precedent is the exact one: there too the value's shape
+/// is fixed by something the annotation does not control, and there too the
+/// answer is a dedicated check rather than a change to unify. A provider read
+/// is the other such value; it just never got its check.
+///
+/// LITERAL-vs-literal only. A symbolic or parametric extent on either side is
+/// left alone, the same convention the array-literal check uses ("dynamic /
+/// parametric extent: no static check") -- which is also what keeps
+/// `load_compound` (whose compacted extent is a runtime count) out of the way.
+/// Equal SLOT COUNT only: a rank clash is unify's, and it reports it with both
+/// full types in the message, which reads better than a per-slot complaint.
+/// Index-type IDENTITY is likewise already unify's -- `indexPairIncompatible`
+/// gates component rank, symmetry, wreath levels, and nominal tags (a named
+/// `type R = Idx<3>` against the store's own axis tag is refused there today);
+/// extent is the single axis of the shape it lets through.
+and internal providerReadExtentClash (env: TypeEnv) (expr: Expr)
+                                     (actual: IRType) (expected: IRType) : TypeError option =
+    match providerReadFormName env expr with
+    | None -> None
+    | Some provider ->
+        match env.Subst.Resolve actual, env.Subst.Resolve expected with
+        | ArrayElem actualArr, ArrayElem expectedArr
+                when actualArr.IndexTypes.Length = expectedArr.IndexTypes.Length ->
+            let literalExtent (ix: IRIndexType) =
+                match ix.Extent with
+                | IRLit (IRLitInt n) -> Some n
+                | _ -> None
+            List.zip expectedArr.IndexTypes actualArr.IndexTypes
+            |> List.indexed
+            |> List.tryPick (fun (i, (annotIx, actualIx)) ->
+                match literalExtent annotIx, literalExtent actualIx with
+                | Some a, Some s when a <> s ->
+                    Some (ProviderReadExtentMismatch (provider, i + 1, a, s))
+                | _ -> None)
+        | _ -> None
 
 /// The consumption-site check: find a bound applied to an aggregate anywhere
 /// in a surface annotation. Reads off the SURFACE TypeExpr, not the lowered
