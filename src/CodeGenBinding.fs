@@ -46,6 +46,8 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         genUnionBinding ctx binding builder aExpr bExpr
     | IRUnique arrExpr ->
         genUniqueBinding ctx binding builder arrExpr
+    | IRRange _ ->
+        genRangeBinding ctx binding
     | IRGroupKeys keys ->
         genGroupKeysBinding ctx binding builder keys
     | IRGroupBy (vals, gk) ->
@@ -155,6 +157,13 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     // genComputeBinding's scalar fall-through and dies on the unsupported-node
     // sentinel -- exactly the BL7001 this arm was added to stop). Both
     // subtrahends are predicates in IR.fs beside `isStatementShaped` itself.
+    | IRCompute (IRRange _ as inner) ->
+        // `0..n |> compute`: compute IS the forcing request, and the range's
+        // own binding arm is the materializer -- re-dispatch on the unwrapped
+        // range. (Not statement-shaped, so the subtraction arm below never
+        // catches it, and genComputeBinding's fall-through would treat it as
+        // a scalar and die on the unsupported-node sentinel.)
+        genBinding ctx { binding with Value = inner } builder
     | IRCompute eager when
         isStatementShaped eager && not (isDeferringForm eager) && not (isGroupTableForm eager) ->
         genBinding ctx { binding with Value = eager } builder
@@ -1978,6 +1987,27 @@ and genUniqueBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
         | Some (s, allocs) -> registerMaterializedAllocs allocs; s
         | None -> []
     let code = forceCode @ elemErrCode @ [$"{ind}// unique: dedup via unordered_set, first-occurrence order"] @ (matStmts |> List.map (fun s -> ind + s))
+    let ctx' = addVarName binding.Id name ctx
+    (code, ctx')
+
+
+
+and genRangeBinding (ctx: CodeGenContext) (binding: IRBinding) : string list * CodeGenContext =
+    let ind = indentStr ctx
+    let name = bindingCppName binding
+    // A BARE range in binding position (`let xs = 0..n`, `let r = range<I>`,
+    // or either behind `|> compute`) materializes the iota it denotes. Inside
+    // a combinator a range never reaches this arm -- the nest peels it as
+    // induction values, which is the whole point of a virtual array. Only the
+    // single-slot plain dense form has a standalone value meaning; compound/
+    // sparse/halo slots enumerate coordinate sets and a multi-slot range only
+    // means anything to a loop nest, so those keep a refusal.
+    let matStmts =
+        match materializeInlineForm emptySubst ctx.VarNames name (lazy "int64_t") binding.Value with
+        | Some (s, allocs) -> registerMaterializedAllocs allocs; s
+        | None ->
+            codegenError ctx ind "a compound/sparse/halo or multi-slot range has no standalone value form; iterate it via method_for(range<...>)"
+    let code = [$"{ind}// range: materialized iota"] @ (matStmts |> List.map (fun s -> ind + s))
     let ctx' = addVarName binding.Id name ctx
     (code, ctx')
 

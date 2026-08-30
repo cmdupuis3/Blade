@@ -990,6 +990,32 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
     // `reduce(A, <omp-licensed kernel>, init)` written without `axes = rank`
     // arrives here, and the marker is what tells its author that the clause
     // bought nothing and `axes = rank` is the spelling that would.
+    // A BARE range operand (`reduce(0..n, (+))` in expression position --
+    // kernel bodies / function-body returns, where the lift pass's operand
+    // hoist does not reach): materialize the iota into an IIFE-local, then
+    // re-render the fold over a synthetic named operand carrying the range's
+    // array type (IRParam renders as its bare name and typeOf answers the
+    // carried type, so every bound/elem decision below just works). Binding
+    // and module-scope reduces take the lift road to genRangeBinding instead.
+    // Non-plain ranges (compound/sparse/halo/multi-slot) answer None from the
+    // materializer and fall through to the ordinary refusal.
+    let rangeInline =
+        match arrExpr with
+        | IRRange ([ ix ], _) ->
+            let rname = $"__rng{ix.Id}"
+            materializeInlineForm subst names rname (lazy "int64_t") arrExpr
+            |> Option.map (fun (stmts, _) -> (rname, ix, stmts))
+        | _ -> None
+    match rangeInline with
+    | Some (rname, ix, stmts) ->
+        let arrTy = mkArrayLike { ElemType = IRTScalar ETInt64; IndexTypes = [ix]; IsVirtual = false; Identity = None }
+        let inner = renderReduceExpr subst names (IRParam (rname, 0, arrTy)) kernelExpr initExpr
+        // Expression position: the materialization is spliced into an IIFE,
+        // so there is no statement scope whose exit could carry a free -- the
+        // descriptors are dropped (same unchanged pre-existing leak as
+        // renderLetExpr's inline-form site).
+        $$"""([&]() { {{(stmts |> String.concat " ")}} return {{inner}}; }())"""
+    | None ->
     let arrStr = exprToCppCore subst names arrExpr
     let elemType =
         match inferExprType arrExpr with
@@ -1413,6 +1439,49 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         materializeEighForm subst names varName operand
     | IRSolve (mExpr, rExpr) ->
         materializeSolveForm subst names varName elemTypeStr.Value mExpr rExpr
+    // `elemTypeStr` not forwarded: a range's element is always Int64, and the
+    // caller-side inference has no arm for a bare range (same Lazy discipline
+    // as IREigh above -- this arm must not force it).
+    | IRRange (ixs, offset) ->
+        materializeRangeForm subst names varName ixs offset
+    | _ -> None
+
+
+and materializeRangeForm (subst: SubstMap) (names: Map<IRId, string>) (varName: string) (ixs: IRIndexType list) (offset: IRExpr option) : (string list * MaterializedAlloc list) option =
+    // A BARE range in value position (`let xs = 0..n` / `let r = range<I>`,
+    // `reduce(0..n, (+))` via the lift pass, either behind `|> compute`):
+    // materialize the iota it denotes, x[i] = offset + i. Inside a combinator
+    // a range never becomes a value -- the nest peels it as induction values,
+    // which is the whole point of a virtual array; this arm is only for the
+    // positions that consume a materialized array by name.
+    //
+    // Only the single-slot plain dense form has a standalone value meaning:
+    // compound/sparse/halo slots enumerate coordinate SETS (their "element"
+    // is not a storable position), and a multi-slot range only means anything
+    // to a loop nest -- those answer None and keep their refusal.
+    match ixs with
+    | [ ix ] when ix.IxKind = IxKPlain && ix.Rank = 1
+                  && (match ix.Tag with
+                      | Some t -> not (t.StartsWith haloWinTagPrefix)
+                      | None -> true) ->
+        let boundDim =
+            match tryEvalIntIR ix.Extent with
+            | Some n -> (string n, true)
+            | None -> ($"(size_t)({exprToCppCore subst names ix.Extent})", false)
+        let (extentsDecl, ownedExtents) =
+            emitExtentsTable "" ($"{varName}_extents") 1 [boundDim]
+        let bound = fst boundDim
+        let offStr =
+            match offset with
+            | Some o -> exprToCppCore subst names o
+            | None -> "0"
+        Some (
+            extentsDecl @ [
+                $$"""Array<int64_t, 1> {{varName}} = { new int64_t[{{bound}}], {{varName}}_extents };"""
+                $"for (size_t __ri = 0; __ri < {bound}; __ri++) {varName}[__ri] = (int64_t)__ri + (int64_t)({offStr});"
+            ],
+            [MatRawData (varName, ownedExtents)]
+        )
     | _ -> None
 
 
