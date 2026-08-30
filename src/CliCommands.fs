@@ -512,6 +512,16 @@ module ReplTypes = Blade.ReplSession.ReplTypes
 /// top of Build.fs and is unreachable from a file that compiles this early.
 /// The two failure messages are composed exactly as the REPL has always
 /// printed them, so the caller only has to add `[snippet not kept]`.
+/// The RENDER lane's two halves (IdeServe's `render` command): build a source
+/// into an executable and hand back its PATH, and run an executable already
+/// built. Split apart because the whole point of that lane is to do the second
+/// WITHOUT the first -- a camera change re-runs a binary it compiled once.
+let internal renderCompileLane (srcPath: string) : Result<string, string> =
+    compileToExe srcPath None false false
+
+let internal renderRunLane (cwd: string) (exeFile: string) : Result<int * string * string, string> =
+    runExeIn cwd exeFile
+
 let internal compiledReplLane (srcPath: string) (cwd: string) : Result<int * string * string, string> =
     match compileToExe srcPath None false false with
     | Error e -> Error e

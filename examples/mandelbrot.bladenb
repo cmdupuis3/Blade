@@ -1,0 +1,506 @@
+// %% [markdown]
+// # The Mandelbrot set, and the notebook as a zoom lens
+//
+// The Mandelbrot set is the set of complex numbers $c$ for which the orbit
+// $z_{k+1} = z_k^2 + c$, started at $z_0 = 0$, stays bounded. The picture
+// everyone knows is the *escape-time* rendering: color each pixel by how many
+// iterations its orbit takes to leave the radius-2 disc.
+//
+// Every renderer ever written does this with two nested loops over pixels and
+// one `while` inside. Blade has none of those, on purpose, so this notebook is
+// three demonstrations in one:
+//
+// - the per-pixel iteration is a **self-recursive function** over `Complex128`
+//   — the recurrence written as math, not as mutation;
+// - the image is **one loop object** — `method_for` over a typed index space —
+//   and the axes are ordinary arrays, so the window is *data*;
+// - the plot panel is fed by `stdlib/plot.blade`, whose decimation ladder
+//   guarantees a bounded frame whatever we compute.
+//
+// Then the bonus arc: a plotly panel zoom only stretches pixels that already
+// exist. Here the **camera is a cell** — edit the center and radius and
+// re-evaluate, and every deeper frame is *recomputed*, not enlarged. We ride
+// that all the way down to the two real frontiers: the interpreter's step
+// budget, and the floor of Float64 itself — and we pin the exact moment each
+// one bites.
+//
+// %%
+import plot
+
+// %%
+
+type Wx = Idx<450>
+type Wy = Idx<300>
+type Zx = Idx<256>
+type Zy = Idx<256>
+
+// %%
+
+/// Escape count of c under z -> z^2 + c: iterations until |z| leaves the
+/// radius-2 disc, capped at kmax (an in-set orbit never leaves).
+function esc(z: Complex128, c: Complex128, k: Int64, kmax: Int64) -> Int64 =
+    if k >= kmax then kmax else (
+    if abs(z) > 2.0 then k else
+    esc(z * z + c, c, k + 1, kmax))
+
+/// c provably in-set without iterating: the main cardioid (the sqrt-free
+/// membership test) or the period-2 bulb, both known in closed form. The
+/// interior is exactly where escape iteration is most expensive -- every
+/// such pixel rides to kmax -- so two multiplications here replace the
+/// whole orbit. (The classic further steps -- periodicity checking, border
+/// tracing -- are deliberately not taken: the first taxes every iteration
+/// of the common escaping path, the second wants a mutable image and a
+/// work queue, and this notebook's language removed that on purpose.)
+function in_body(cr: Float64, ci: Float64) -> Bool = {
+    let xq = cr - 0.25
+    let q = xq * xq + ci * ci
+    let bulb = (cr + 1.0) * (cr + 1.0) + ci * ci
+    q * (q + xq) <= 0.25 * ci * ci || bulb <= 0.0625
+}
+
+/// Escape count with the interior short-circuit.
+function mandel_count(cr: Float64, ci: Float64, kmax: Int64) -> Int64 =
+    if in_body(cr, ci) then kmax else esc(complex(0.0, 0.0), complex(cr, ci), 0, kmax)
+
+// c = 1 escapes at the third step (0, 1, 2, 5); c = -1 is the period-2 orbit
+// 0, -1, 0, -1, ... and rides out any cap we set -- and sits in the bulb,
+// so the short-circuit answers it without a single orbit step.
+let probe_out = esc(complex(0.0, 0.0), complex(1.0, 0.0), 0, 64)
+let probe_in = esc(complex(0.0, 0.0), complex(-1.0, 0.0), 0, 64)
+let probes = [probe_out, probe_in]
+probes
+// EXPECT: probes = [3, 64]
+
+// %% [markdown]
+// ## The loop that isn't there
+//
+// The reflex is to write the orbit as a `for` with two mutable accumulators.
+// Blade removed the imperative loop from the language — not "discourages",
+// removed — and the next cell shows the diagnostic doing its job. A failing
+// cell never joins the session, so nothing downstream is disturbed.
+//
+// The recursion above is not a workaround; it is the recurrence itself,
+// $z_{k+1} = z_k^2 + c$, with the escape test as its base case. The compiler
+// emits it as a self-calling closure — no loop syntax required, and nothing
+// about it is slower.
+//
+// %%
+function esc_loop(c: Complex128, kmax: Int64) -> Int64 = {
+    let mut k = 0
+    for i in 0..kmax { k += 1 }   // BL1003: the imperative loop was removed
+    k
+}
+
+// %% [markdown]
+// ## The window is data
+//
+// A rendering window is a center, a half-width, and a grid. In Blade the grid
+// is a *type* — `Wy` × `Wx`, 300 × 450 — and the pixel sweep is one
+// `method_for` over it. The axes are arrays computed the same way, so the
+// heatmap's coordinate labels and the escape grid can never disagree about
+// where a pixel sits.
+//
+// 450 and 300 are both under `plot.heatmap`'s decimation cap (512), so every
+// sample we compute reaches the panel unresampled.
+//
+// %%
+let wide_x0 = -2.25
+let wide_y0 = -1.0
+let wide_dx = 3.0 / 450.0
+let wide_dy = 2.0 / 300.0
+let wide_kmax = 96
+
+let wide_xs = (method_for(range<Wx>) <@> lambda(j) -> wide_x0 + wide_dx * Float64(j)) |> compute
+let wide_ys = (method_for(range<Wy>) <@> lambda(i) -> wide_y0 + wide_dy * Float64(i)) |> compute
+
+let wide_counts = (method_for(range<Wy, Wx>) <@> lambda(i, j) where omp(i: 1) ->
+    mandel_count(wide_x0 + wide_dx * Float64(j), wide_y0 + wide_dy * Float64(i), wide_kmax)) |> compute
+
+// One full fold and two spot reads pin the whole 135,000-pixel computation:
+// the fold, a cardioid-interior pixel (rides the cap), an exterior pixel.
+let wide_total = reduce(wide_counts, (+), axes = 2)
+let spot_cardioid = wide_counts((150 : Wy), (262 : Wx))
+let spot_exterior = wide_counts((20 : Wy), (20 : Wx))
+let wide_pins = [wide_total, spot_cardioid, spot_exterior]
+wide_pins
+// EXPECT: wide_pins = [3941495, 96, 1]
+
+// %%
+let p_wide = plot.heatmap(wide_xs, wide_ys, wide_counts, 5: cmap, 1: smoothing,
+    "The Mandelbrot set (zoom to aim the lens)": title, "Re(c)": xlabel, "Im(c)": ylabel,
+    "cam_cx,cam_cy,cam_r": camera)
+p_wide
+// EXPECT: p_wide = true
+
+// %% [markdown]
+// ## The camera is a cell
+//
+// Zooming the plotly panel stretches the 450×300 samples that already exist:
+// past about 4× the picture is mush, because no new information is there to
+// show. The fix is to *re-evaluate*: point the camera somewhere, recompute the
+// grid at the new bounds, and every zoom level is a fresh full-resolution
+// image. In a notebook, "point the camera" means "edit one cell".
+//
+// Three upgrades for the zoomed frames. First, integer escape counts
+// posterize under magnification, so the zoom lens uses the standard *smooth*
+// coloring: at escape, $k + 1 - \log_2 \log_2 |z|$ — a fractional escape time
+// that is continuous across the count boundaries (in-set pixels report 0).
+// Second, the square 256×256 canvas and the machinery become functions of the
+// camera, so every frame below is one call. Third, the iteration cap becomes
+// a function of *depth*: boundary detail needs more iterations per octave of
+// magnification, so `view_kmax` grows with $\log_{10}(1.5/r)$ — zooming
+// automatically buys the iterations the new depth needs, capped where the
+// interpreter's step budget lives.
+//
+// Every grid kernel below also carries `where omp(i: 1)` — the parallelism
+// license. The pixel sweep is already a parallel loop object; the clause is
+// the declaration that lets the compiled lane place the pragmas (measured:
+// 3.9× on a 1500² frame under `blade run`), and the interpreter evaluates
+// it serially, unchanged. The classic shader kernel — cached squares, three
+// multiplications per orbit step, the square root strength-reduced out of
+// the escape test — was measured against this `Complex128` recurrence, and
+// the verdict is a tale of two lanes. Interpreted (this notebook's lane) it
+// is ~1.8× SLOWER: the tree-walker charges per node, `z² + c` is one
+// native-arithmetic node, and the scalar juggle is a dozen plus eight
+// recursion arguments — Complex128 is the interpreter's SIMD. Compiled it
+// is ~3× FASTER (0.8 s vs 2.5 s on a 1500² frame, single-threaded): a
+// panic-free self-recursive kernel compiles to a plain function whose tail
+// call g++ turns into a register loop — a fact this very measurement
+// uncovered was being defeated by a spurious shadow-stack frame on every
+// `let`-containing function, since fixed. The notebook keeps the recurrence
+// written as math because its cells run interpreted; a `blade run` port
+// chasing throughput should write the shader body.
+//
+// %%
+/// Smooth (fractional) escape time; 0.0 for orbits that never escape.
+function esc_smooth(z: Complex128, c: Complex128, k: Float64, kmax: Float64) -> Float64 =
+    if k >= kmax then 0.0 else (
+    if abs(z) > 2.0 then
+        k + 1.0 - log(log(abs(z)) / log(2.0)) / log(2.0) else
+    esc_smooth(z * z + c, c, k + 1.0, kmax))
+
+/// Smooth escape with the interior short-circuit (in_body pixels are in-set:
+/// 0.0 by the same convention the recursion uses at kmax).
+function mandel_smooth(cr: Float64, ci: Float64, kmax: Float64) -> Float64 =
+    if in_body(cr, ci) then 0.0 else esc_smooth(complex(0.0, 0.0), complex(cr, ci), 0.0, kmax)
+
+/// The zoom lens: smooth escape grid for the square window at (cx, cy),
+/// half-width r, on the 256x256 canvas.
+function zoom_view(cx: Float64, cy: Float64, r: Float64, kmax: Float64) -> Array<Float64 like Zy, Zx> = {
+    let x0 = cx - r
+    let y0 = cy - r
+    let h = 2.0 * r / 256.0
+    (method_for(range<Zy, Zx>) <@> lambda(i, j) where omp(i: 1) ->
+        mandel_smooth(x0 + h * Float64(j), y0 + h * Float64(i), kmax)) |> compute
+}
+
+function zoom_xs(cx: Float64, r: Float64) -> Array<Float64 like Zx> =
+    (method_for(range<Zx>) <@> lambda(j) -> cx - r + (2.0 * r / 256.0) * Float64(j)) |> compute
+function zoom_ys(cy: Float64, r: Float64) -> Array<Float64 like Zy> =
+    (method_for(range<Zy>) <@> lambda(i) -> cy - r + (2.0 * r / 256.0) * Float64(i)) |> compute
+
+/// Iterations the depth r deserves: ~45 more per decade of magnification,
+/// capped where a 256x256 frame still fits one interpreter cell's step
+/// budget (see the frontiers section).
+function view_kmax(r: Float64) -> Float64 = {
+    let wanted = 116.0 + 45.0 * log(1.5 / r) / log(10.0)
+    if wanted > 560.0 then 560.0 else wanted
+}
+
+// Min/max fold kernels: no min/max intrinsic fold exists, and a custom
+// kernel over a rank-2 array takes the 3-arg reduce (explicit init) --
+// which is also what makes the fold total: the init is the answer for an
+// empty band.
+function fmin(a: Float64, b: Float64) -> Float64 = if a < b then a else b
+function fmax(a: Float64, b: Float64) -> Float64 = if a > b then a else b
+
+/// Color range of the ESCAPED band. The in-set sentinel 0.0 must not set the
+/// floor: it would anchor every colorbar at zero however deep the dive, and
+/// past a few octaves the escaped values all live in a narrow high band --
+/// the picture washes out exactly when it gets interesting. So the floor is
+/// the smallest ESCAPED value (interior pixels are lifted to kmax before the
+/// min), the ceiling is the largest, and an all-interior window hands back
+/// (0, -1) -- the zmax slot's "automatic" -- rather than an inverted range.
+function field_range(g: Array<Float64 like Idx<nr>, Idx<nc>>, kmax: Float64) -> (Float64, Float64) = {
+    let masked = (method_for(g) <@> lambda(v) -> if v == 0.0 then kmax else v) |> compute
+    let lo = reduce(reduce(masked, fmin, 1.0e300), fmin, 1.0e300)
+    let hi = reduce(reduce(g, fmax, 0.0), fmax, 0.0)
+    // The floor sits a HAIR below the escaped band: the Heat scale reserves
+    // exact position 0 for black with a jump to dark blue just above, so
+    // in-set pixels (0.0, clipped to zmin) render black while the slowest
+    // ESCAPED pixel lands above the jump and renders dark blue -- no black
+    // patches where the orbit merely escaped slowly.
+    let pad = (hi - lo) * 0.002 + 1.0e-12
+    if hi > 0.0 then (lo - pad, hi) else (0.0, -1.0)
+}
+
+// The RESOLUTION ladder. A canvas extent is a TYPE, so "render at the
+// resolution the camera asks for" is spelled the way stdlib/plot.blade
+// spells its decimation budgets: one helper per rung, a runtime if picking
+// the call. Each rung computes the smooth field for the camera's window,
+// emits it as FILLED CONTOURS under the one stable id, and returns the
+// field's sum -- the pinnable scalar. 320 is the interactive ceiling: one
+// rung further would not fit a deep window inside the interpreter's step
+// budget (the frontiers section).
+
+type V192 = Idx<192>
+type V256 = Idx<256>
+type V320 = Idx<320>
+
+function __render192(cx: Float64, cy: Float64, r: Float64, kmax: Float64) -> Float64 = {
+    let x0 = cx - r
+    let y0 = cy - r
+    let h = 2.0 * r / 192.0
+    let g = (method_for(range<V192, V192>) <@> lambda(i, j) where omp(i: 1) ->
+        mandel_smooth(x0 + h * Float64(j), y0 + h * Float64(i), kmax)) |> compute
+    let xs = (method_for(range<V192>) <@> lambda(j) -> x0 + h * Float64(j)) |> compute
+    let ys = (method_for(range<V192>) <@> lambda(i) -> y0 + h * Float64(i)) |> compute
+    let (lo, hi) = field_range(g, kmax)
+    let shown = plot.heatmap(xs, ys, g, 5: cmap, 1: smoothing, lo: zmin, hi: zmax,
+        "Seahorse valley (scroll to dive)": title, "Re(c)": xlabel, "Im(c)": ylabel,
+        "mandelbrot-view": plotid, "cam_cx,cam_cy,cam_r": camera)
+    reduce(g, (+), axes = 2)
+}
+
+function __render256(cx: Float64, cy: Float64, r: Float64, kmax: Float64) -> Float64 = {
+    let x0 = cx - r
+    let y0 = cy - r
+    let h = 2.0 * r / 256.0
+    let g = (method_for(range<V256, V256>) <@> lambda(i, j) where omp(i: 1) ->
+        mandel_smooth(x0 + h * Float64(j), y0 + h * Float64(i), kmax)) |> compute
+    let xs = (method_for(range<V256>) <@> lambda(j) -> x0 + h * Float64(j)) |> compute
+    let ys = (method_for(range<V256>) <@> lambda(i) -> y0 + h * Float64(i)) |> compute
+    let (lo, hi) = field_range(g, kmax)
+    let shown = plot.heatmap(xs, ys, g, 5: cmap, 1: smoothing, lo: zmin, hi: zmax,
+        "Seahorse valley (scroll to dive)": title, "Re(c)": xlabel, "Im(c)": ylabel,
+        "mandelbrot-view": plotid, "cam_cx,cam_cy,cam_r": camera)
+    reduce(g, (+), axes = 2)
+}
+
+function __render320(cx: Float64, cy: Float64, r: Float64, kmax: Float64) -> Float64 = {
+    let x0 = cx - r
+    let y0 = cy - r
+    let h = 2.0 * r / 320.0
+    let g = (method_for(range<V320, V320>) <@> lambda(i, j) where omp(i: 1) ->
+        mandel_smooth(x0 + h * Float64(j), y0 + h * Float64(i), kmax)) |> compute
+    let xs = (method_for(range<V320>) <@> lambda(j) -> x0 + h * Float64(j)) |> compute
+    let ys = (method_for(range<V320>) <@> lambda(i) -> y0 + h * Float64(i)) |> compute
+    let (lo, hi) = field_range(g, kmax)
+    let shown = plot.heatmap(xs, ys, g, 5: cmap, 1: smoothing, lo: zmin, hi: zmax,
+        "Seahorse valley (scroll to dive)": title, "Re(c)": xlabel, "Im(c)": ylabel,
+        "mandelbrot-view": plotid, "cam_cx,cam_cy,cam_r": camera)
+    reduce(g, (+), axes = 2)
+}
+
+/// One camera, one call: iterations from depth, canvas from the px knob.
+function render_view(cx: Float64, cy: Float64, r: Float64, px: Int64) -> Float64 = {
+    let kmax = view_kmax(r)
+    if px >= 320 then __render320(cx, cy, r, kmax) else (
+    if px >= 256 then __render256(cx, cy, r, kmax) else
+    __render192(cx, cy, r, kmax))
+}
+
+
+let smooth_probe = esc_smooth(complex(0.0, 0.0), complex(0.5, 0.5), 0.0, 64.0)
+smooth_probe
+// EXPECT: smooth_probe = 5.13008393153735
+
+// %% [markdown]
+// ## The dive
+//
+// Re-evaluation composes: a recursive function that renders a frame, shrinks
+// the radius 32%, and calls itself is a *continuous dive* — one cell,
+// eighteen frames descending from the full set (r = 1.2) to r ≈ 0.0017,
+// which is where the camera cell starts.
+//
+// The frames do not stack up as stills. Each one is emitted under the single
+// stable id `mandelbrot-dive`, and a stable-id frame is forwarded the moment
+// it is produced — the same live channel a training loop's `plot.stream`
+// rides — so the panel *plays* the dive while the cell runs, each frame
+// replacing the last. The 96² canvas is the budget doing the directing:
+// eighteen frames of one recursion must fit the same one-cell step budget a
+// single 320² view lives in.
+//
+// %%
+type Dx = Idx<96>
+type Dy = Idx<96>
+
+/// One dive frame: compute the field, range it, emit it under the dive's id.
+function __dive_frame(cx: Float64, cy: Float64, r: Float64) -> Bool = {
+    let x0 = cx - r
+    let y0 = cy - r
+    let h = 2.0 * r / 96.0
+    let kmax = view_kmax(r)
+    let g = (method_for(range<Dy, Dx>) <@> lambda(i, j) where omp(i: 1) ->
+        mandel_smooth(x0 + h * Float64(j), y0 + h * Float64(i), kmax)) |> compute
+    let xs = (method_for(range<Dx>) <@> lambda(j) -> x0 + h * Float64(j)) |> compute
+    let ys = (method_for(range<Dy>) <@> lambda(i) -> y0 + h * Float64(i)) |> compute
+    let (lo, hi) = field_range(g, kmax)
+    plot.heatmap(xs, ys, g, 5: cmap, 1: smoothing, lo: zmin, hi: zmax,
+        "The dive (plays live)": title, "mandelbrot-dive": plotid, "cam_cx,cam_cy,cam_r": camera)
+}
+
+/// Descend: each frame 32% deeper. Returns the number of frames flown.
+function dive(cx: Float64, cy: Float64, r: Float64, k: Int64, n: Int64) -> Int64 =
+    if k >= n then k else {
+        let shown = __dive_frame(cx, cy, r)
+        dive(cx, cy, r * 0.68, k + 1, n)
+    }
+
+/// The classic seahorse-valley coordinates, named here rather than read from
+/// the camera cell. The tour is a FIXED illustration: reading the live camera
+/// would make every zoom gesture re-fly all 18 frames to show the same
+/// pictures, since a changed camera cell invalidates everything downstream of
+/// it. Decoupling costs no pixel and saves that flight on every gesture.
+let tour_cx = -0.743643887037151
+let tour_cy = 0.131825904205330
+
+let dove = dive(tour_cx, tour_cy, 1.2, 0, 18)
+dove
+// EXPECT: dove = 18
+
+// %% [markdown]
+// ## The money frame, and the two frontiers
+//
+// One more dive before the physics bill arrives: seahorse valley at
+// r = 10⁻⁴ — a 12,000× magnification, kmax = 350, every pixel recomputed.
+// At this depth 95% of the canvas escapes, so the spiral structure is fully
+// resolved; a panel zoom from the overview would show six blurry pixels.
+//
+// %%
+let deep = zoom_view(tour_cx, tour_cy, 1.0e-4, 350.0)
+let (deep_lo, deep_hi) = field_range(deep, 350.0)
+let p_deep = plot.heatmap(zoom_xs(tour_cx, 1.0e-4), zoom_ys(tour_cy, 1.0e-4), deep,
+    5: cmap, 1: smoothing, deep_lo: zmin, deep_hi: zmax,
+    "Seahorse valley, r = 0.0001 (12,000x)": title, "Re(c)": xlabel, "Im(c)": ylabel,
+    "cam_cx,cam_cy,cam_r": camera)
+// EXPECT: p_deep = true
+let deep_sum = reduce(deep, (+), axes = 2)
+deep_sum
+// EXPECT: deep_sum = 7741103.45124997
+
+// %% [markdown]
+// **The camera.** Seahorse valley — the crevice between the cardioid and the
+// period-2 disc, at $-0.7436 + 0.1318i$. This cell is the entire zoom UI:
+// change `cam_r` to dive (each ÷10 is a 10× magnification), nudge `cam_cx` /
+// `cam_cy` to pan, re-run this cell and the next, and the iteration cap
+// follows the depth on its own. Nothing else in the notebook knows where the
+// camera points.
+//
+// The next cell's plot also *declares* that: it emits under the stable id
+// `mandelbrot-view` (so every re-render replaces the same panel entry) and
+// carries the camera contract `"cam_cx,cam_cy,cam_r"` in its layout. An
+// editor that understands the contract — the Blade extension's zoom branch —
+// turns a drag-zoom on the plot into exactly the edit you would have made
+// here by hand: it rewrites these three bindings, re-runs this cell and the
+// frame cell, and the recomputed frame replaces the old one in place. The
+// gesture and the hand edit are the *same operation*, so the notebook stays
+// truthful: what the cells say is always what the picture shows.
+//
+// One practical note for interactive diving: a session re-runs every
+// accumulated cell on each evaluation, but a plot whose inputs have not
+// changed now REPLAYS its cached frame rather than recomputing it, so the
+// cells above cost nothing on the next gesture. What still costs is
+// everything BELOW an edited cell, which is why this one sits last.
+//
+// **The fast path.** An editor that speaks the camera contract need not
+// re-run the session at all. `ide serve` answers a `render` request by
+// compiling the notebook ONCE with these three bindings erased into a
+// run-time read, then re-running that executable per gesture with only the
+// three numbers changed — about 400ms a frame against 5.5s for a session
+// evaluation, which puts a full-resolution recompute inside the pause the
+// panel already waits for your scroll to settle. The camera stays HERE,
+// in the cell, and the gesture still rewrites it; the compiled program
+// simply never sees a literal, so moving the lens recompiles nothing.
+//
+//
+// **Why this cell is last.** A session re-runs from the top, and an edited
+// cell invalidates everything after it -- by POSITION, not by what it
+// actually feeds. So the interactive cell goes at the end, with the fixed
+// tour above it: a zoom gesture then recomputes this frame and nothing
+// else. Moved back up among the plots, the same gesture re-flies all 18
+// dive frames and the deep render to redraw pictures that never changed.
+// Measured on this notebook, that is the difference between 26s a gesture
+// and 5.8s -- which is why the tour names its own coordinates (`tour_cx`)
+// instead of reading the camera: a cell that reads the camera cannot sit
+// above it.
+
+// %%
+let cam_cx = -0.743643887037151
+let cam_cy = 0.131825904205330
+let cam_r = 0.004
+let cam_px = 256
+
+// %%
+let frame_sum = render_view(cam_cx, cam_cy, cam_r, cam_px)
+frame_sum
+// EXPECT: frame_sum = 4082366.30354865
+
+// %% [markdown]
+// So how deep does the elevator go? Three frontiers, all measurable from here.
+//
+// **Arithmetic identity.** Escape-time iteration is a chaos amplifier: any
+// last-ulp difference in one step doubles its way up the orbit, and near the
+// boundary it flips whole escape counts. This notebook's cells run in Blade's
+// interpreter, whose complex arithmetic is strict (bit-exact `__muldc3`); the
+// compiled lane defaults to `-ffp-contract=fast`, whose fused
+// multiply-adds are *differently rounded* — and on the 135,000-pixel overview
+// the two lanes disagree on exactly 956 pixels' counts (measure it:
+// `wide_total` above is the strict value; `blade run` with
+// `BLADE_FP_CONTRACT=off` reproduces it bit-for-bit, and the default lane
+// reads 3940539). Neither is wrong; the boundary is where "faster" and
+// "identical" part ways, and the knob that chooses is an environment
+// variable, not a rewrite. Every numeric pin in this file is the strict
+// value.
+//
+// **The step budget.** Notebook cells evaluate in Blade's interpreter, which
+// charges one step per IR reduction and refuses runaway cells at 10⁹ steps
+// (`BL8005`). That is why the zoom view is 256² with `view_kmax` capped at
+// 560: near the Float64 floor the cap is ~9M pixel-iterations, and one frame
+// stays a single in-budget cell (a boundary-hugging window can still
+// occasionally trip the refusal — the panel simply keeps the previous frame,
+// and the failing cell disturbs nothing). The *language* doesn't care:
+// `blade run` compiles these same cells and renders frames at any kmax in
+// well under a second. Depth is a compute question, and the compiled lane
+// answers it.
+//
+// **The Float64 floor.** The camera cannot outrun its own coordinates. Near
+// Re(c) ≈ −0.74 a double's unit of last place is ~1.1 × 10⁻¹⁶. Ask the 256-pixel
+// axis for a window of half-width 10⁻¹⁴ and the requested pixel step is
+// 7.8 × 10⁻¹⁷ — *smaller than the ulp*. The next cell pins what Float64
+// actually delivers: adjacent axis samples that either jump a whole ulp or
+// collide exactly. Below r ≈ 10⁻¹⁴ (a 10¹⁴× magnification), re-evaluation
+// returns columns of duplicates — not because the set ran out of structure,
+// but because the coordinates ran out of numbers. The classic unlock is
+// perturbation theory: iterate one orbit at high precision and every other
+// pixel as a Float64 *delta* off it. The delta grid is exactly the kind of
+// structure this language likes; that notebook is future work.
+//
+// %%
+let deep_r = 1.0e-14
+let deep_xs = zoom_xs(cam_cx, deep_r)
+let asked_step = 2.0 * deep_r / 256.0
+let got_step_01 = deep_xs((1 : Zx)) - deep_xs((0 : Zx))
+let got_step_12 = deep_xs((2 : Zx)) - deep_xs((1 : Zx))
+let floor_pins = [asked_step, got_step_01]
+floor_pins
+// EXPECT: floor_pins = [7.8125e-17, 1.11022302462516e-16]
+let collided = got_step_12 == 0.0
+collided
+// EXPECT: collided = true
+
+// %% [markdown]
+// ## What the compiler knew
+//
+// A Mandelbrot renderer with no loops: the orbit is a recursion, the image is
+// a loop object over a typed index space, the axes are data, and the plot
+// module's budget ladder keeps every frame bounded. The camera is a cell, so
+// zooming is re-evaluation — full resolution at every depth until Float64
+// itself quantizes, at a pinned, predictable radius.
+//
+// To keep diving: drag-zoom the seahorse plot (with the extension's zoom
+// branch, the gesture rewrites the camera cell and re-runs it), or make that
+// edit by hand — same operation, same result. For frames past the
+// interactive step budget, `blade run` on this file's cells renders them
+// compiled, in milliseconds. Past the Float64 floor, the perturbation
+// notebook is waiting to be written.

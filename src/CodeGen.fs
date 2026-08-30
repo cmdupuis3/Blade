@@ -1082,10 +1082,20 @@ let private panicFreeNamespaces =
 /// Call-shaped tokens in emitted C++: an optionally-qualified `ns::name(`,
 /// plus the three spellings that name no identifier before the paren --
 /// `f<T>(x)` (template call), `(*fp)(x)` / `g()(x)` (functor call through a
-/// value), and `[&](...)` (lambda).
+/// value). A LAMBDA HEADER `[&](` is deliberately NOT call-shaped: it
+/// defines, it does not call. Its body text is inline in this same scanned
+/// body, so a panic inside it is caught by the direct substring check and
+/// its calls are collected as this body's callees by this same scan; the
+/// escaping-lambda case is covered on the RECEIVING side, where a
+/// function-typed parameter forces the frame (shadowFrameOpen). Before the
+/// lookbehind, every let-block's IIFE marked its function Unknown, keeping
+/// a shadow frame on every block-bodied function -- and the frame's RAII
+/// destructor takes a recursive call out of tail position: measured 3.2x on
+/// a self-recursive escape-time kernel g++ otherwise turns into a register
+/// loop. `table[i](x)` (call through an indexed slot) stays call-shaped.
 let private callShapedRe =
     System.Text.RegularExpressions.Regex(
-        @"(?<qual>(?:[A-Za-z_][A-Za-z0-9_]*::)+)?(?<id>[A-Za-z_][A-Za-z0-9_]*)\s*\(|(?<ind>[>)\]]\s*\()",
+        @"(?<qual>(?:[A-Za-z_][A-Za-z0-9_]*::)+)?(?<id>[A-Za-z_][A-Za-z0-9_]*)\s*\(|(?<ind>(?:[>)]|(?<!\[&)\])\s*\()",
         System.Text.RegularExpressions.RegexOptions.Compiled)
 
 /// What one emitted body does that bears on whether its frame is observable.

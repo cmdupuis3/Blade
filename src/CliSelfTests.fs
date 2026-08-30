@@ -383,6 +383,11 @@ let private runIdeServeTests () : TH.BlockResult =
     let checkReq (id: int) (tier: string) (file: string) (source: string) =
         $"{{\"id\":{id},\"cmd\":\"check\",\"tier\":\"{tier}\",\"file\":\"{(esc file)}\",\"source\":\"{(esc source)}\"}}"
     let pingReq (id: int) = $"{{\"id\":{id},\"cmd\":\"ping\"}}"
+    let renderReq (id: int) (session: string) (bindings: string list) (values: float list) =
+        let bs = bindings |> List.map (fun b -> "\"" + b + "\"") |> String.concat ","
+        let vs = values |> List.map (sprintf "%g") |> String.concat ","
+        $"{{\"id\":{id},\"cmd\":\"render\",\"session\":\"{session}\","
+        + $"\"bindings\":[{bs}],\"values\":[{vs}]}}"
     let shutdownReq = "{\"cmd\":\"shutdown\"}"
     /// Feed a whole conversation and split the transcript on the framing
     /// newline. The trailing "" is the proof that the LAST response was
@@ -638,6 +643,83 @@ let private runIdeServeTests () : TH.BlockResult =
             record name TH.Pass ""
         else
             record name TH.Fail $"exit {code}, json: {out.Trim()}"
+
+        // THE RENDER FAST PATH. The camera stays in the CELL -- the notebook
+        // keeps saying where the lens points -- and what the lane COMPILES is
+        // that program with the camera erased into a run-time CSV read. The
+        // erased source is the same bytes for every camera, which is the whole
+        // mechanism: build once, re-run per gesture.
+        //
+        // Pinned on the erasure rather than end to end, because e2e costs a
+        // g++ build and the risk lives here: a slot mapped to the wrong
+        // binding renders a plausible picture of the wrong place.
+        let camSrc =
+            "import plot\n\nlet a = 1\n\nlet cam_cx = -0.5\n"
+            + "let cam_cy = 0.25\nlet cam_r = 0.004\nlet cam_px = 256\n"
+            + "\nlet z = cam_cx + cam_r\n"
+        let name = "the camera erasure rewrites each binding to its own CSV slot"
+        match Blade.IdeServe.cameraErasedSource camSrc ["cam_cx"; "cam_cy"; "cam_r"]
+                                                @"C:\tmp\camera.csv" with
+        | Ok out when out.StartsWith "import csv as __blade_cam_csv"
+                      && out.Contains "let cam_cx = __blade_cam_slots(0, 0)"
+                      && out.Contains "let cam_cy = __blade_cam_slots(0, 1)"
+                      && out.Contains "let cam_r = __blade_cam_slots(0, 2)"
+                      // Not named, so not erased: the resolution stays literal.
+                      && out.Contains "let cam_px = 256"
+                      // Forward slashes -- a Windows separator inside a Blade
+                      // string literal would read as an escape.
+                      && out.Contains "__blade_cam_csv.load(\"C:/tmp/camera.csv\")"
+                      // The reader precedes the EARLIEST camera binding, and so
+                      // precedes every use of the camera.
+                      && out.IndexOf "__blade_cam_slots = " < out.IndexOf "let cam_cx =" ->
+            record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        // ...and the refusals, which are the safety property. A camera name the
+        // erasure cannot pin down exactly once would leave a literal standing
+        // and render from a camera the caller never set -- silently, and to a
+        // picture that looks entirely reasonable.
+        let name = "the camera erasure refuses a name bound more than once"
+        let dupSrc = "let cam_r = 0.1\n\nlet cam_r = 0.2\n"
+        match Blade.IdeServe.cameraErasedSource dupSrc ["cam_r"] "c.csv" with
+        | Error e when e.Contains "cam_r" && e.Contains "2 times" -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        let name = "the camera erasure refuses a name that is not bound at all"
+        match Blade.IdeServe.cameraErasedSource ("let q = 1\n") ["cam_r"] "c.csv" with
+        | Error e when e.Contains "cam_r" && e.Contains "0 times" -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%A" other)
+
+        // The camera crosses as text, so it has to cross EXACTLY: a lens moved
+        // by one ulp at a 1e-13 half-span is a different picture.
+        let name = "a camera row round-trips its Float64s exactly"
+        let camVals = [ -0.743643887037151; 0.131825904205330; 0.004 ]
+        let camBack =
+            (Blade.IdeServe.cameraCsvText camVals).Trim().Split(',')
+            |> Array.map float |> List.ofArray
+        if camBack = camVals then record name TH.Pass ""
+        else record name TH.Fail (sprintf "%A" camBack)
+
+        // Protocol refusals, and that the loop SURVIVES them: a bad render
+        // request must not take the notebook's language server down with it.
+        let (code, responses, _) =
+            drive [ renderReq 1 "nb" ["cam_r"] [1.0; 2.0]; pingReq 2; shutdownReq ]
+        let name = "render refuses a bindings/values mismatch and keeps serving"
+        match responses with
+        | [err; pong] when code = 0 && err.Contains "\"error\""
+                           && err.Contains "1 bindings and 2 values"
+                           && pong.Contains "\"ok\":true" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        let (code, responses, _) =
+            drive [ renderReq 1 "ghost" ["cam_r"] [0.1]; pingReq 2; shutdownReq ]
+        let name = "render on a session that has evaluated nothing says so"
+        match responses with
+        | [err; pong] when code = 0 && err.Contains "evaluated nothing to render"
+                           && pong.Contains "\"ok\":true" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
     finally
         Directory.SetCurrentDirectory entryDir
         try Directory.Delete(tmpDir, true) with _ -> ()
@@ -983,6 +1065,31 @@ let private runIdeEvalTests () : TH.BlockResult =
                                      && rebind.Contains "\"kept\":true"
                                      && rebind.Contains "\"bindings\":[]"
                                      && after.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"50\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 3b. The same rebind, but the cell OPENS WITH A COMMENT -- a prose
+        // banner above the bindings, which is how a notebook cell is normally
+        // written. `bindingName` used to read the raw snippet with a `^\s*`
+        // anchor: `\s` spans newlines, so a BLANK-led declaration matched and a
+        // COMMENT-led one did not. spliceDeclaration reads None as "no earlier
+        // definition to supersede" and APPENDS, so the stale binding stayed put
+        // and the rebind landed AFTER the dependent that had spliced in place --
+        // which then read the old value. Nothing failed; the answer was wrong.
+        //
+        // Multi-binding, because that is the shape that shows the whole bug: `b`
+        // (no comment above it) spliced correctly while `a` did not, so the
+        // cell half-applied. 456 is the fixed answer; 756 was the bug.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let a = 1.0\nlet b = 2.0\nlet c = 3.0"
+                    evalReq 2 "nb" "let s = a * 100.0 + b * 10.0 + c"
+                    evalReq 3 "nb" "// the camera\nlet a = 4.0\nlet b = 5.0\nlet c = 6.0"
+                    evalReq 4 "nb" "s"; shutdownReq ]
+        let name = "a comment-led rebind still supersedes (every binding in the cell)"
+        match responses with
+        | [_; _; rebind; after] when code = 0
+                                     && rebind.Contains "\"kept\":true"
+                                     && after.Contains "\"value\":\"456.0\"" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1534,6 +1641,85 @@ let private runIdeEvalTests () : TH.BlockResult =
         | [_; _; _; readback] when code = 0 && readback.Contains "\"value\":\"15.0\"" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 30. FRAME REPLAY. A binding that emits a display frame used to be
+        // barred from the memo outright: it had to re-run so it could re-emit,
+        // which made every plot in a session a fixed tax on EVERY later cell's
+        // evaluation -- on a notebook that renders, most of the wall clock.
+        // Now the frames travel in the memo beside the value and are replayed
+        // in the binding's own position, so the plot costs nothing and the
+        // run's frame sequence is the one it would have computed.
+        //
+        // Pinned on the adoption tally, because a memo hit and a recompute
+        // produce the same frame -- which is the point, and the reason this
+        // needs a counter to observe at all.
+        let plotCell = "import display as d
+let pic = d.emit(\"image/png\", \"AA==\")"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" plotCell
+                    evalReq 3 "nb" "let tail_v = reduce(seed, (+))"
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let name = "a plot binding is adopted from the memo and its frame replayed"
+        match responses with
+        // seed and pic both adopted -- the emitter no longer forces a re-run --
+        // and the replayed frame still reaches the response's display array.
+        | [_; _; last] when code = 0 && last.Contains "\"kept\":true"
+                           && adopted = 2
+                           && last.Contains "\"display\":[{\"v\":1,\"mime\":\"image/png\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, responses: %A"
+                                        code adopted responses)
+
+        // ...and the line the replay must not cross. A cached PICTURE is as
+        // stale as a cached value the moment the text above it changes: edit
+        // the cell the plot reads and the memo must go, frames included, or
+        // the panel shows a render of data no longer in the session. Pinned on
+        // the tally rather than the frame, because `adopted = 0` says the
+        // stronger thing -- nothing was reused, so nothing COULD be stale.
+        let readingPlot =
+            "import display as d
+let total = reduce(seed, (+))
+let shown = d.emit(\"image/png\", \"AA==\")"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" readingPlot
+                    evalReq 3 "nb" "let seed = [10.0, 20.0, 30.0]"
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let name = "editing the data under a plot drops its cached frame too"
+        match responses with
+        | [_; _; rebind] when code = 0 && rebind.Contains "\"kept\":true" && adopted = 0 ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, responses: %A"
+                                        code adopted responses)
+
+        // ...and the replayed frame is the one the run would have computed,
+        // not merely A frame: same id, same bytes, in the same position.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" plotCell; shutdownReq ]
+        let firstRun = responses |> List.tryHead |> Option.defaultValue ""
+        let (code2, responses2, _) =
+            drive [ evalReq 1 "nb" plotCell
+                    evalReq 2 "nb" "let unrelated = 1"
+                    shutdownReq ]
+        let name = "a replayed frame is byte-identical to the computed one"
+        // Just the display array: the rest of the response legitimately
+        // differs between the two evals (the second binds `unrelated`), and
+        // the frame payload here carries no `]` of its own to confuse this.
+        let frameOf (r: string) =
+            let i = r.IndexOf "\"display\":["
+            if i < 0 then "" else
+            let j = r.IndexOf("]", i)
+            if j < 0 then "" else r.Substring(i, j - i + 1)
+        match responses2 with
+        | [_; second] when code = 0 && code2 = 0
+                           && frameOf firstRun <> ""
+                           && frameOf second = frameOf firstRun ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d/%d, first %s, second %A"
+                                        code code2 (frameOf firstRun) responses2)
 
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally

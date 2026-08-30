@@ -75,6 +75,13 @@ let private buffer = ResizeArray<string>()
 let mutable private ordinal = 0
 let mutable private sunk = 0
 
+/// Every frame this run has delivered, in order: the line, whether it went to
+/// the live sink rather than the buffer, and whether it consumed a run
+/// ordinal. Interp/Run.fs brackets each top-level binding with `producedCount`
+/// to learn which frames that binding emitted, so a session memo can REPLAY
+/// them instead of re-running the binding that computed them.
+let private produced = ResizeArray<string * bool * bool>()
+
 /// The LIVE FRAME SINK, installed by `IdeServe`'s eval handler for the length
 /// of one evaluation and by nothing else. When it is set, a frame whose mime is
 /// exactly `StreamMime` is handed to it AS IT IS PRODUCED and is NOT buffered
@@ -104,6 +111,7 @@ let clearSink () = sink <- None
 /// drive more than one run), and only that caller clears it.
 let resetRun () =
     buffer.Clear()
+    produced.Clear()
     ordinal <- 0
     sunk <- 0
 
@@ -121,6 +129,35 @@ let drain () : string list =
     let xs = List.ofSeq buffer
     buffer.Clear()
     xs
+
+/// How many frames this run has delivered. The bracket Interp/Run.fs takes
+/// around each top-level binding; `producedSince` reads the window back.
+let producedCount () = produced.Count
+
+/// The frames delivered since `n`, in emission order.
+let producedSince (n: int) : (string * bool * bool) list =
+    [ for i in n .. produced.Count - 1 -> produced.[i] ]
+
+/// Re-deliver frames a binding produced on an EARLIER run of the same session,
+/// without re-running the binding that computed them.
+///
+/// Sound for the same reason caching the binding's value is: the session memo
+/// may only be offered to a run whose prefix is unchanged (see SessionMemo in
+/// Interp/Run.fs), so a binding eligible for adoption had the same inputs, and
+/// the frames it would emit now are the frames it emitted then. Each frame
+/// goes back to the channel it originally took, and one that consumed a run
+/// ordinal consumes one again -- so the ids of the frames AROUND it are
+/// unchanged, and a replayed run is indistinguishable, frame for frame, from
+/// the run that computed it.
+let replay (frames: (string * bool * bool) list) : unit =
+    for (line, sank, usedOrdinal) in frames do
+        if usedOrdinal then ordinal <- ordinal + 1
+        match sink with
+        | Some f when sank ->
+            sunk <- sunk + 1
+            f line
+        | _ -> buffer.Add line
+        produced.Add(line, sank, usedOrdinal)
 
 /// `encoding` implied by a mime type (spec section 1): JSON-shaped mimes carry
 /// an inline JSON value, `text/*` carries a string, everything else is binary
@@ -224,16 +261,30 @@ let composeLineId (head: string) (quoted: bool) (data: string) (metaTail: string
 /// "this frame's mime is `StreamMime`" without re-parsing the head.
 let private streamHead = headFor StreamMime
 
-/// Route one composed line: to the live sink when one is installed AND this is
-/// a stream frame, otherwise to the run buffer. The no-sink path is the ONLY
-/// path a `blade run` / corpus / differential-gate program can take, and it is
-/// the pre-sink code verbatim.
-let private deliver (head: string) (line: string) : bool =
-    match sink with
-    | Some f when head = streamHead ->
-        sunk <- sunk + 1
-        f line
-    | _ -> buffer.Add line
+/// Route one composed line: to the live sink when one is installed AND this
+/// frame is LIVE, otherwise to the run buffer. Live means the frame carries a
+/// stable identity: a stream chunk, or any `display.emit_id` frame (`hasId`,
+/// set by emitId below) -- a stable-id figure is re-emittable and a viewer
+/// merges it by `meta.id`, so forwarding it the moment it is produced is what
+/// lets a long cell ANIMATE a plot (a continuous zoom dive, a per-step field)
+/// and lets a recomputed view repaint before its eval settles. Ordinal
+/// (`blade-N`) frames stay buffered: their ids are per-run bookkeeping, and
+/// they are results, not installments. The no-sink path is the ONLY path a
+/// `blade run` / corpus / differential-gate program can take, and it is the
+/// pre-sink code verbatim.
+let private deliver (hasId: bool) (head: string) (line: string) : bool =
+    let sank =
+        match sink with
+        | Some f when hasId || head = streamHead ->
+            sunk <- sunk + 1
+            f line
+            true
+        | _ ->
+            buffer.Add line
+            false
+    // `emit` consumes an ordinal and `emitId` does not, which is exactly
+    // `hasId` -- recorded so a replay reproduces the same id sequence.
+    produced.Add(line, sank, not hasId)
     true
 
 /// Interpreter-lane emission: buffer one frame and answer `true` (the value
@@ -244,7 +295,7 @@ let private deliver (head: string) (line: string) : bool =
 /// body, before the timing line and the print block).
 let emit (head: string) (quoted: bool) (data: string) (metaTail: string) : bool =
     ordinal <- ordinal + 1
-    deliver head (composeLine head quoted data metaTail ordinal)
+    deliver false head (composeLine head quoted data metaTail ordinal)
 
 /// Interpreter-lane emission with a CALLER-CHOSEN `meta.id` (`display.emit_id`).
 ///
@@ -255,7 +306,7 @@ let emit (head: string) (quoted: bool) (data: string) (metaTail: string) : bool 
 /// C++ (`blade_display::emit_id`) leaves its own counter alone for the same
 /// reason, which is what keeps the two lanes byte-identical.
 let emitId (head: string) (quoted: bool) (data: string) (metaTail: string) (id: string) : bool =
-    deliver head (composeLineId head quoted data metaTail id)
+    deliver true head (composeLineId head quoted data metaTail id)
 
 /// Split a program's raw stdout into the text a terminal should show and the
 /// frame JSON strings it carried. Frame lines are always whole lines at column

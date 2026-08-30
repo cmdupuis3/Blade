@@ -27,8 +27,13 @@
 // makes the decimation ladder shareable across the three of them.
 //
 // COLORMAPS, v1: an Int index into a fixed table (0 = Viridis default,
-// 1 = Plasma, 2 = Cividis, 3 = Greys, 4 = RdBu). An EnumIdx<["Viridis",...]>
-// upgrade would make the selection nominal AND checked; deferred.
+// 1 = Plasma, 2 = Cividis, 3 = Greys, 4 = RdBu, 5 = Heat). 0-4 are plotly
+// NAMED scales; 5 is an inline colorscale ARRAY (black -> blue -> red ->
+// yellow -> white), which is why __cmap_json exists: the trace needs a JSON
+// VALUE either way, and for 0-4 that value is the quoted name -- byte-
+// identical to what the module emitted when only names existed. An
+// EnumIdx<["Viridis",...]> upgrade would make the selection nominal AND
+// checked; deferred.
 //
 // PREFERRED BACKEND (the `backend` slot, all five factories). A program can
 // say which renderer it would LIKE the viewer to use -- `1: backend` for GR
@@ -144,12 +149,43 @@ Unit zmax: 1
 /// non-negative value lets the renderer draw the boundary between one epoch's
 /// batches and the next without the program having to say where they are.
 Unit epoch: 1
+/// Smooth-rendering mode (contourf and heatmap, v1): 0 (default) fills discrete
+/// bands between contour levels -- the classic filled-contour look, and a
+/// STEPPED colorbar; 1 colors the field as a CONTINUOUS gradient with the
+/// contour lines drawn on top, and the colorbar renders as a smooth ramp
+/// (plotly "contours.coloring":"heatmap"), with the contour LINES omitted
+/// entirely -- plotly strokes them across the full axis range, which leaks
+/// lines outside the data rectangle whenever the view is zoomed out past
+/// the data. Out-of-table values take the
+/// default, like cmap; at the default the trace is byte-identical to the
+/// pre-slot module.
+Unit smoothing: 1
 /// Renderer the program would PREFER the viewer paint this figure with:
 /// 0 = plotly (the default), 1 = GR. Out-of-table indices fall back to the
 /// default rather than erroring, like `cmap`. This is a HINT carried in the
 /// frame's `meta.preferredBackend`, never a change to the frame's CONTENT --
 /// see the PREFERRED BACKEND note in the module header.
 Unit backend: 1
+/// Stable identity for a figure that a later evaluation will REPLACE rather
+/// than sit beside (heatmap and contourf, v1). Non-empty routes the frame through
+/// `display.emit_id` -- the same primitive `stream` uses -- so every frame
+/// sharing the id merges into ONE panel entry, exactly as stream instalments
+/// do. Left empty (the default), the frame takes the ordinary per-emit
+/// ordinal id and the emitted bytes are IDENTICAL to the pre-slot module;
+/// like `stream`, an id'd emit consumes NO ordinal, so the plots around it
+/// keep the ids they always had.
+Unit plotid: 1
+/// Camera contract for a RE-EVALUATABLE view (heatmap and contourf, v1): the names
+/// of the session bindings that position this figure, comma-separated --
+/// e.g. "cam_cx,cam_cy,cam_r" for center-x, center-y, half-width, in that
+/// order. Carried in the figure's LAYOUT (`"blade_camera":{"bindings":...}`),
+/// never in the frame meta: `display.emit`'s meta must be a string literal
+/// (BL5700), while the layout is runtime-built JSON, which is exactly what a
+/// runtime contract needs. A viewer that understands the key can map a zoom
+/// gesture back onto those bindings and re-evaluate; a viewer that does not
+/// simply ignores an extra layout entry. Empty (the default) emits no entry,
+/// keeping the layout byte-identical to the pre-slot module.
+Unit camera: 1
 
 // ---- Decimation budgets ----
 //
@@ -169,10 +205,21 @@ type __B512 = Idx<512>
 
 // ---- Internal helpers (exported like everything else; the __ prefix says "not API") ----
 
-/// Colormap index -> plotly colorscale name. Out-of-table indices fall back
-/// to Viridis rather than erroring: a colormap is presentation, not data.
+/// Colormap index -> plotly colorscale name (the NAMED half of the table).
+/// Out-of-table indices fall back to Viridis rather than erroring: a
+/// colormap is presentation, not data.
 function __cmap_name(c: Int64<cmap>) -> String =
     if c == 1 then "Plasma" else if c == 2 then "Cividis" else if c == 3 then "Greys" else if c == 4 then "RdBu" else "Viridis"
+
+/// Colormap index -> the trace's `"colorscale":` JSON VALUE: a quoted name
+/// for the named half of the table, an inline stop array for 5 (Heat).
+/// Heat's bottom stop is DISCONTINUOUS by design: position 0 is pure black
+/// and position 0.001 jumps to dark blue, so black is reserved for values
+/// AT (or clipped to) the scale floor -- with a fixed [zmin, zmax] range,
+/// that is the in-set / never-escaped pixels -- while the slowest ESCAPED
+/// values start visibly dark blue instead of vanishing into black.
+function __cmap_json(c: Int64<cmap>) -> String =
+    if c == 5 then "[[0,\"#000000\"],[0.001,\"#000099\"],[0.28,\"#2040ee\"],[0.52,\"#cc0000\"],[0.76,\"#ffdd00\"],[1,\"#ffffff\"]]" else "\"" + __cmap_name(c) + "\""
 
 // Rank-1 axis resamplers, one per budget. `na` is the SOURCE length; sample
 // k reads source index (k * na) / B. The sample keeps the SOURCE's element
@@ -257,12 +304,15 @@ function __zrange_json(lo: Float64<zmin>, hi: Float64<zmax>) -> String =
 /// `"autosize":true` tail keeps the object valid JSON whatever is omitted.
 /// `d.json_string` renders each label WITH its quotes, escaping whatever the
 /// user put in it -- a title reading `he said "hi"` or a Windows path is an
-/// ordinary label here, not a broken frame.
-function __layout(t: String<title>, xl: String<xlabel>, yl: String<ylabel>) -> String = {
+/// ordinary label here, not a broken frame. `cam` is the camera contract
+/// (see the marker above); every factory but heatmap passes "" and emits the
+/// byte-identical layout it always did.
+function __layout(t: String<title>, xl: String<xlabel>, yl: String<ylabel>, cam: String<camera>) -> String = {
     let tt = if t == "" then "" else "\"title\":{\"text\":" + d.json_string(t) + "},"
     let xt = if xl == "" then "" else "\"xaxis\":{\"title\":{\"text\":" + d.json_string(xl) + "}},"
     let yt = if yl == "" then "" else "\"yaxis\":{\"title\":{\"text\":" + d.json_string(yl) + "}},"
-    "{" + tt + xt + yt + "\"autosize\":true}"
+    let cf = if cam == "" then "" else "\"blade_camera\":{\"bindings\":" + d.json_string(cam) + "},"
+    "{" + tt + xt + yt + cf + "\"autosize\":true}"
 }
 
 /// Wrap one trace + layout into a figure and emit the frame. The meta is a
@@ -287,20 +337,45 @@ function __emit_fig(trace: String, layout: String, b: Int64<backend>) -> Bool = 
         d.emit("application/vnd.plotly.v1+json", fig, "{\"backend\":\"plotly\"}")
 }
 
+/// `__emit_fig` under a STABLE id: same figure, same two meta literals, but
+/// routed through `display.emit_id` so every frame sharing `pid` merges into
+/// one panel entry (the plotid marker above). The id is a runtime String,
+/// exactly as `stream`'s channel name is; the meta stays a literal picked by
+/// a runtime `if` (BL5700), the same shape `__emit_fig` uses.
+function __emit_fig_id(trace: String, layout: String, pid: String<plotid>, b: Int64<backend>) -> Bool = {
+    let fig = "{\"data\":[" + trace + "],\"layout\":" + layout + "}"
+    if b == 1 then
+        d.emit_id("application/vnd.plotly.v1+json", pid, fig, "{\"backend\":\"plotly\",\"preferredBackend\":\"gr\"}")
+    else
+        d.emit_id("application/vnd.plotly.v1+json", pid, fig, "{\"backend\":\"plotly\"}")
+}
+
 // ---- Factories ----
 
-/// Filled contour plot of z over the x/y grid.
+/// Filled contour plot of z over the x/y grid. Carries the same pid/cam
+/// pair as heatmap (see the plotid and camera markers): a stable id merges
+/// re-emissions into one panel entry, and the camera contract makes the
+/// figure a re-evaluatable view.
 function contourf(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                   n: Int64<levels> = 10, c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
                   lo: Float64<zmin> = 0.0, hi: Float64<zmax> = -1.0,
                   t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                  pid: String<plotid> = "", cam: String<camera> = "",
+                  sm: Int64<smoothing> = 0,
                   b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
+    // The smooth fragment carries a SIBLING trace key through the splice
+    // (the __zrange_json trick): plotly 3.7.0 keeps stroking contour lines
+    // under coloring:"heatmap" despite showlines:false -- line.width 0 is
+    // the knob that actually silences them (verified against the vendored
+    // renderer).
+    let contours = if sm == 1 then "{\"coloring\":\"heatmap\",\"showlines\":false},\"line\":{\"width\":0}" else "{\"coloring\":\"fill\"}"
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
-    let trace = "{\"type\":\"contour\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"fill\"},\"ncontours\":" + d.json_num(n) + "}"
-    __emit_fig(trace, __layout(t, xl, yl), b)
+    let trace = "{\"type\":\"contour\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":" + __cmap_json(c) + ",\"contours\":" + contours + ",\"ncontours\":" + d.json_num(n) + "}"
+    let lay = __layout(t, xl, yl, cam)
+    if pid == "" then __emit_fig(trace, lay, b) else __emit_fig_id(trace, lay, pid, b)
 }
 
 /// Line contour plot of z over the x/y grid.
@@ -313,22 +388,35 @@ function contour(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z 
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
-    let trace = "{\"type\":\"contour\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\",\"contours\":{\"coloring\":\"lines\"},\"ncontours\":" + d.json_num(n) + "}"
-    __emit_fig(trace, __layout(t, xl, yl), b)
+    let trace = "{\"type\":\"contour\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":" + __cmap_json(c) + ",\"contours\":{\"coloring\":\"lines\"},\"ncontours\":" + d.json_num(n) + "}"
+    __emit_fig(trace, __layout(t, xl, yl, ("" : camera)), b)
 }
 
-/// Heatmap of z over the x/y grid.
+/// Heatmap of z over the x/y grid. The `pid`/`cam` pair (see the plotid and
+/// camera markers) makes a heatmap RE-EVALUATABLE: a stable id merges every
+/// re-emission into one panel entry, and the camera contract tells a viewer
+/// which session bindings position the view. Both default off, and off is
+/// byte-identical to the pre-slot module.
 function heatmap(x: Array<X like Idx<nx>>, y: Array<Y like Idx<ny>>, z: Array<Z like Idx<nzr>, Idx<nzc>>,
                  c: Int64<cmap> = 0, m: Int64<maxdim> = 512,
                  lo: Float64<zmin> = 0.0, hi: Float64<zmax> = -1.0,
                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                 pid: String<plotid> = "", cam: String<camera> = "",
+                 sm: Int64<smoothing> = 0,
                  b: Int64<backend> = 0) -> Bool = {
     let cx = extents(x)
     let cy = extents(y)
     let big = cx > m || cy > m
     let xy = "\"x\":" + __axis_json(x, cx, big, m) + ",\"y\":" + __axis_json(y, cy, big, m) + ",\"z\":" + __grid_json(z, cy, cx, big, m)
-    let trace = "{\"type\":\"heatmap\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":\"" + __cmap_name(c) + "\"}"
-    __emit_fig(trace, __layout(t, xl, yl), b)
+    // Smooth mode renders the raster with bilinear interpolation (plotly
+    // zsmooth "best") -- the continuous look without contour GEOMETRY: a
+    // contour pass over a fractal field generates polygon soup (measured
+    // ~700x the raster's render time in the panel), which is why the
+    // re-evaluatable views ride heatmap.
+    let zs = if sm == 1 then ",\"zsmooth\":\"best\"" else ""
+    let trace = "{\"type\":\"heatmap\"," + __zrange_json(lo, hi) + xy + ",\"colorscale\":" + __cmap_json(c) + zs + "}"
+    let lay = __layout(t, xl, yl, cam)
+    if pid == "" then __emit_fig(trace, lay, b) else __emit_fig_id(trace, lay, pid, b)
 }
 
 /// Line plot of y against x.
@@ -336,7 +424,7 @@ function line(x: X^1, y: Y^1,
               t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
               b: Int64<backend> = 0) -> Bool = {
     let trace = "{\"type\":\"scatter\",\"mode\":\"lines\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
-    __emit_fig(trace, __layout(t, xl, yl), b)
+    __emit_fig(trace, __layout(t, xl, yl, ("" : camera)), b)
 }
 
 /// Scatter plot of y against x.
@@ -344,7 +432,7 @@ function scatter(x: X^1, y: Y^1,
                  t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
                  b: Int64<backend> = 0) -> Bool = {
     let trace = "{\"type\":\"scatter\",\"mode\":\"markers\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
-    __emit_fig(trace, __layout(t, xl, yl), b)
+    __emit_fig(trace, __layout(t, xl, yl, ("" : camera)), b)
 }
 
 // ---- Live plot streaming --------------------------------------------------

@@ -17,6 +17,11 @@ let private dispatchInner (args: string[]) : int =
     // its g++ fallback; hand it over once, here, so every front end that
     // reaches an unsupported node from this process gets the same lane.
     Blade.ReplSession.installCompiledLane compiledReplLane
+    // ...and the RENDER FAST PATH its own, for the same reason and by the same
+    // route: IdeServe.fs is compiled before Build.fs, so it cannot name
+    // compileToExe. It needs the EXE PATH back, not just the run's output, so
+    // that a camera change can re-run a binary it already built.
+    Blade.IdeServe.installRenderLane renderCompileLane renderRunLane
     // Reset per-invocation provider state ahead of every verb: without it, the
     // icechunk axis mint table and the IDE stores side-channel carry over
     // whatever a previous compilation in this process minted, so a checkout's

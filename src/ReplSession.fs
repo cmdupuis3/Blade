@@ -263,8 +263,29 @@ module ReplTypes =
 let private bindingNameRe =
     Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+|rec\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+)([A-Za-z_][A-Za-z0-9_]*)")
 
+/// The first line that is neither blank nor a `//` comment: the line a
+/// snippet's SHAPE is read from. Every textual probe in this module has to
+/// look past a leading comment, because a declaration routinely sits under
+/// one -- a `///` doc comment in a file, a prose banner in a notebook cell.
+/// `classifyTarget` (below) is the same question asked for classification.
+let firstSignificantLine (s: string) =
+    s.Replace("\r\n", "\n").Split('\n')
+    |> Array.tryFind (fun l ->
+        let t = l.TrimStart()
+        t <> "" && not (t.StartsWith "//"))
+    |> Option.defaultValue ""
+
+/// The name a snippet declares, read from its first significant line.
+///
+/// Reading it from the RAW snippet was a silent-wrong-answer bug: the regex is
+/// anchored `^\s*`, and `\s` spans newlines, so a BLANK-led declaration matched
+/// but a COMMENT-led one returned None. `spliceDeclaration` takes None to mean
+/// "no name to supersede" and APPENDS -- so re-running a commented declaration
+/// left the old binding standing and added the new one after any consumer that
+/// had spliced in place, which then read the stale value. Nothing failed; the
+/// answer was just wrong.
 let bindingName (snippet: string) : string option =
-    let m = bindingNameRe.Match snippet
+    let m = bindingNameRe.Match (firstSignificantLine snippet)
     if m.Success then Some m.Groups.[1].Value else None
 
 /// The names a MULTI-LINE submission declares at top level.
@@ -424,13 +445,10 @@ let private referencedNames (snippet: string) : Set<string> =
     identTokensRe.Matches snippet |> Seq.map _.Value |> Set.ofSeq
 
 /// Classification looks at the first non-comment, non-blank line so a
-/// doc-commented declaration isn't mistaken for a bare expression.
-let classifyTarget (s: string) =
-    s.Replace("\r\n", "\n").Split('\n')
-    |> Array.tryFind (fun l ->
-        let t = l.TrimStart()
-        t <> "" && not (t.StartsWith "//"))
-    |> Option.defaultValue ""
+/// doc-commented declaration isn't mistaken for a bare expression -- the same
+/// line `bindingName` reads the declared name from, so the two can never
+/// disagree about which line a snippet's shape lives on.
+let classifyTarget (s: string) = firstSignificantLine s
 
 // Splitting a submission into its top-level statements.
 //
@@ -1078,8 +1096,12 @@ type ReplSession(runCwd: string) =
                 let reassigns = dropped |> List.exists (fun s -> assignRe.IsMatch(s.Trim()))
                 if memo.MutationFree && allNamed && not reassigns then
                     let gone = names |> List.concat |> Set.ofList
+                    // Frames travel with their value: a name whose value is
+                    // dropped must not keep a cached picture behind, or the
+                    // map outlives every session that could replay from it.
                     { memo with
-                        Values = memo.Values |> Map.filter (fun nm _ -> not (Set.contains nm gone)) }
+                        Values = memo.Values |> Map.filter (fun nm _ -> not (Set.contains nm gone))
+                        Frames = memo.Frames |> Map.filter (fun nm _ -> not (Set.contains nm gone)) }
                 else Blade.Interp.Run.emptyMemo
         let watch = System.Diagnostics.Stopwatch.StartNew()
         match Blade.Interp.Repl.lowerSessionDiag (Some srcPath) src with

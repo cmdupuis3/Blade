@@ -69,13 +69,26 @@ type SessionMemo =
       /// scratch space and no hazard at all. Using it made every recursive-
       /// array session opt out of the prefix reuse for no reason.
       MutationFree: bool
-      /// Names that must never be adopted, because running them is what
-      /// produces this session's display frames (see `emitted` bracketing in
-      /// execProgram). Recorded so the exclusion survives into later runs.
-      FrameEmitters: Set<string> }
+      /// Names whose evaluation is what produces this session's display frames
+      /// (see the `emitted` bracketing in execProgram). Recorded so the fact
+      /// survives into later runs: such a binding may only be adopted when
+      /// `Frames` also carries what it emitted, since a binding that does not
+      /// re-run cannot re-emit, and a plot that stopped re-emitting would
+      /// vanish from the editor's panel.
+      FrameEmitters: Set<string>
+      /// For each frame emitter, the frames it emitted, ready to REPLAY.
+      /// Cached beside the value and sound for the same reason: under the
+      /// prefix rule a binding eligible for adoption had the same inputs, so
+      /// the frames it would emit now are the frames it emitted then.
+      /// Replaying them is what lets an unchanged plot cost nothing on the
+      /// next cell's evaluation instead of recomputing its whole field --
+      /// which, for a notebook whose cells render, is the difference between
+      /// a fixed per-evaluation tax the size of every plot in the session and
+      /// no tax at all.
+      Frames: Map<string, (string * bool * bool) list> }
 
 let emptyMemo : SessionMemo =
-    { Values = Map.empty; MutationFree = false; FrameEmitters = Set.empty }
+    { Values = Map.empty; MutationFree = false; FrameEmitters = Set.empty; Frames = Map.empty }
 
 /// INSTRUMENT (session-memo tests only; the compiler never reads them). How
 /// many top-level bindings the most recent `runProgramMemo` ADOPTED from its
@@ -433,6 +446,10 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     // binding produces no frame, and a plot that stopped re-emitting would
     // vanish from the panel.
     let frameEmitters = System.Collections.Generic.HashSet<string>(memoIn.FrameEmitters)
+    // What each emitter emitted THIS run -- whether it recomputed them or
+    // replayed them from the incoming memo. Published so the next run can
+    // replay in turn, which is what keeps a warm session warm.
+    let outFrames = System.Collections.Generic.Dictionary<string, (string * bool * bool) list>()
     // The run's own memo tally. Zeroed HERE rather than published at the end,
     // so a run that raises partway leaves a truthful partial count instead of
     // the previous run's total.
@@ -452,9 +469,20 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
           // fall through and recompute (`memoTypeAgrees` says what "differ"
           // means, and why it is not `=`).
           let framesBefore = Blade.Display.Frame.emitted ()
+          let producedBefore = Blade.Display.Frame.producedCount ()
           match Map.tryFind b.Name memoIn.Values with
           | Some (cachedTy, cachedV) when memoTypeAgrees cachedTy b.Type
-                                          && not (Set.contains b.Name memoIn.FrameEmitters) ->
+                                          && (not (Set.contains b.Name memoIn.FrameEmitters)
+                                              || Map.containsKey b.Name memoIn.Frames) ->
+              // An emitter is adopted only WITH its frames, which are replayed
+              // here, in the binding's own position -- so the run's frame
+              // sequence, ids included, is the one it would have computed.
+              match Map.tryFind b.Name memoIn.Frames with
+              | Some fs when not (List.isEmpty fs) ->
+                  Blade.Display.Frame.replay fs
+                  frameEmitters.Add b.Name |> ignore
+                  outFrames.[b.Name] <- fs
+              | _ -> ()
               lastMemoAdopted <- lastMemoAdopted + 1
               envBind root b.Id cachedV |> ignore
           | _ ->
@@ -509,6 +537,7 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
             envBind root b.Id v |> ignore
             if Blade.Display.Frame.emitted () > framesBefore then
                 frameEmitters.Add b.Name |> ignore
+                outFrames.[b.Name] <- Blade.Display.Frame.producedSince producedBefore
 
     // Resolve a binding id to its computed value for the printer. Print decides
     // which bindings render and in what order/format (iostream parity), and
@@ -536,7 +565,9 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
         |> List.collect _.Bindings
         |> List.fold (fun acc b ->
             match envTryFind root b.Id with
-            | Some cell when memoizableValue cell.V && not (frameEmitters.Contains b.Name) ->
+            | Some cell when memoizableValue cell.V
+                             && (not (frameEmitters.Contains b.Name)
+                                 || outFrames.ContainsKey b.Name) ->
                 Map.add b.Name (b.Type, cell.V) acc
             | _ -> acc) Map.empty
 
@@ -545,7 +576,8 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
      { Values = outValues
        // Filled in by the caller, which can see the session's declarations.
        MutationFree = memoIn.MutationFree
-       FrameEmitters = Set.ofSeq frameEmitters })
+       FrameEmitters = Set.ofSeq frameEmitters
+       Frames = outFrames |> Seq.map (fun kv -> kv.Key, kv.Value) |> Map.ofSeq })
 
 /// Run a lowered program under the tree-walking interpreter, mapping each
 /// outcome onto the exit-code protocol above. The whole run executes on the
