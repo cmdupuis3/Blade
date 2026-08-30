@@ -385,6 +385,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // reserved tag was already refused by on IxKind grounds. Pure codegen
     // string checks, no toolchain. (Also `blade test flat-path`.)
     let flatPath = Blade.Tests.FlatPathTests.runFlatPathTests ()
+    // The optimization layer's emission pins (src/Optimize.fs): every pass
+    // there is value-preserving by charter, so the corpus cannot see one
+    // that silently stops firing -- or one that fires and smuggles in a
+    // contract (the freeze idiom must derive the break WITHOUT acquiring
+    // the `while` spelling's budget abort). Pure codegen string checks, no
+    // toolchain. (Also `blade test optimize`.)
+    let optimizeLayer = Blade.Tests.OptimizeTests.runOptimizeTests ()
     // File-based module resolution (src/ModuleResolve.fs) + stdlib/units/SI.blade:
     // the search path, the transitive walk, cycle/duplicate/missing refusals,
     // and the two claims the corpus cannot make — that a file with NO imports
@@ -486,7 +493,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield flatPath; yield moduleResolve; yield providerDesugar
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield moduleResolve; yield providerDesugar
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

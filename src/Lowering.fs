@@ -2390,24 +2390,19 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // an array op at lowering time (its element type was an unresolved
         // var), so it gets the same elementwise-loop lowering top-level
         // `x + y` does.
-        // Constant-scrutinee match folding: `match rank(x) with | 0 -> ..`
-        // in a concrete context lowered its scrutinee to a literal, but the
-        // only fold lived inside the arity specializer -- so the decided
-        // match survived as a runtime ternary (with ill-typed dead arms
-        // reaching g++). Fold module-wide, after the monomorphizers put
-        // specialized literals in place, before both back ends read the tree.
-        let irModule = IRMono.foldConstMatchesModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
-        // Elementwise-chain fusion: collapse a deferred elementwise
-        // computation nested directly in another's operand slot (the shape
-        // TypeCheck's binop desugar produces, one combinator per operator)
-        // into a single flat co-iteration, so `a + b * c - d` emits one loop
-        // and no intermediate pools. Runs after lowerArrayBinOpsModule (so
-        // late-minted pack-element combinators are candidates too), before
-        // liftInlineFormsModule (so lifted forms inherit the fused shape),
-        // and in Lowering rather than a back end so codegen and the
-        // interpreter consume one tree. BLADE_FUSION=0|off disables.
-        let irModule = IRMono.fuseElementwiseChainsModule irModule env.Builder
+        // The semantic-equivalence optimization stage (Blade.Optimize --
+        // see its charter): constant-scrutinee match folding (which also
+        // resolves symbolic ranks per specialization) and elementwise-chain
+        // fusion, in that order. Runs after the monomorphizers and the
+        // binop rewrite (so specialized literals and late-minted
+        // pack-element combinators are candidates), before
+        // liftInlineFormsModule (so lifted forms inherit the optimized
+        // shape), and in Lowering rather than a back end so codegen and the
+        // interpreter consume one tree. Per-pass gates: BLADE_FUSION,
+        // BLADE_FREEZE_IDIOM (the latter's recognition runs pre-lowering at
+        // inferRecArray, where the idiom's shape is still declarative).
+        let irModule = Optimize.optimizeModule env.Builder irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.

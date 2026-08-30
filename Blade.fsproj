@@ -114,6 +114,7 @@
     <Compile Include="src/IRStorage.fs" />
     <Compile Include="src/IRLift.fs" />
     <Compile Include="src/IRMono.fs" />
+    <Compile Include="src/Optimize.fs" />
     <Compile Include="src/IRPrint.fs" />
     <Compile Include="src/IRValidate.fs" />
     <!-- Provider registry: the core<->provider seam (ProviderSpec records
@@ -542,6 +543,7 @@
          above — the rewrite is value-preserving, so the corpus cannot see it.
          Parity pins: the anonymous range must decide as `range<I>` does. -->
     <Compile Include="tests/FlatPathTests.fs" />
+    <Compile Include="tests/OptimizeTests.fs" />
     <!-- Eigensolver dispatch emission + the inferEigh rejections (Phase 6 /
          Round B2). Separate block from LinAlgTests because the two gates,
          headers and defines are separate by design — and because this one must

@@ -570,11 +570,26 @@ Three coherent designs:
   convergence contract"). Cheapest, never-silent, but leaves the idiom
   slow and R3 unfilled.
 
-Recommendation: **B**, with the recognizer landing as a separate change
-after `while` has soaked. If the author still prefers one spelling after
-weighing the abort trade-off, A is coherent and cheap to reach from here
-(the guard landed yesterday; nothing depends on it). PENDING AUTHOR
-DECISION. R2's fold-trap warning applies identically under every option.
+**DECIDED: B, and BUILT 2026-08-30.** The author chose two contracts, and
+directed the recognizer into a named OPTIMIZATION LAYER -- `src/Optimize.fs`
+now exists as the home for semantic-equivalence rewrites (charter in its
+header: cost only never contract, twin-safe, per-pass escape hatch,
+decidable at its own seam). `recognizeFreezeIdiom` lives there
+(BLADE_FREEZE_IDIOM gate) and runs at inferRecArray -- the last seam where
+the idiom's declarative shape exists -- repartitioning
+`if G then STEP else prefix(n-1)` (lag-1-only guard, conservative walker
+that declines any unrecognized node, any guard reading the step ordinal
+outside a lag read, and any bare prefix reference) into the guarded
+best-effort form: the existing break + freeze machinery WITHOUT the BL8010
+injection. `Optimize.optimizeModule` is also now the pipeline entry over
+the const-match fold and fusion (implementations predating the layer stay
+in IRMono; new passes land in Optimize.fs). Emission-pinned by the new
+`blade test optimize` gate (tests/OptimizeTests.fs: idiom = break + 0
+aborts; `while` = break + 1 abort; ordinal-reading guard declines), and
+value-pinned by recursive-arrays/017 (recognized Newton) and /018 (a
+never-freezing idiom runs the budget out with NO abort -- the contract
+half). R2's fold-trap warning still applies to both spellings and remains
+open.
 
 **R8 — Symmetry/equivariance matching: refused, with the precise fence.**
 The author's spaghetti instinct, sharpened: **dispatch reads DECLARATIONS,

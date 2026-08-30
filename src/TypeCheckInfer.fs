@@ -10193,6 +10193,20 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
 ///     (the structural form guarantees the sweep order; lag validity
 ///     inside a step is the user's assertion, as it was imperatively).
 and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecArrayDef) (span: Span) : TypeResult<TypedExpr> =
+    // Freeze-idiom recognition (Blade.Optimize, plan-match-statements.md
+    // section 5 R7/B): an unguarded inductive arm whose slice is
+    // `if G then STEP else prefix(n - 1)` with a lag-1-only guard is
+    // repartitioned into the guarded form and rides the whole `while`
+    // machinery below -- EXCEPT the budget abort, which is the `while`
+    // spelling's contract and not this idiom's. Cost-only: the derived
+    // early exit plus the freeze epilogue write byte-identical values to
+    // running the budget out. Recognition happens here, not at IR level,
+    // because this is the last seam where the idiom's declarative shape
+    // still exists.
+    let def, guardIsBestEffort =
+        match Blade.Optimize.recognizeFreezeIdiom def with
+        | Some recognized -> recognized, true
+        | None -> def, false
     let synAt k = mkExpr span k
     match annotTy with
     | ArrayElem at when not at.IndexTypes.IsEmpty ->
@@ -10515,6 +10529,15 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                                 | st -> st)
                         if not inserted then
                             Error (Other $"recursive array '{def.Name}': internal error -- the while-guard early exit could not be placed in the recursion loop")
+                        else
+                        // The budget abort is the `while` spelling's CONTRACT.
+                        // A recognized freeze idiom gets the same break and
+                        // freeze but keeps if/else's best-effort meaning:
+                        // running out of budget is not an error there --
+                        // aborting would change what the user's program
+                        // means, which an optimization may never do.
+                        if guardIsBestEffort then
+                            Ok { tv with Kind = TExprBlock (tstmts', fin) }
                         else
                         let stopVarT = mkTypedSpan (TExprVar (stopName, stopId, None)) (IRTScalar ETInt64) span
                         let budgetT = mkTypedSpan (TExprLit (LitInt n)) (IRTScalar ETInt64) span
