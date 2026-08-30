@@ -334,6 +334,7 @@ let rec internal mentionsDeep (names: Set<string>) (e: Expr) : bool =
         || opt k
     | ExprKind.ExprRecArray d ->
         m d.SliceExpr || (match d.SeedArm with Some (_, se) -> m se | None -> false)
+        || (match d.Guard with Some g -> m g | None -> false)
     | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprQualified _
     | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprArity _
     | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _ -> false
@@ -400,8 +401,10 @@ let rec internal allVarsDeep (e: Expr) : Set<string> =
              | ForKernel k2 -> allVarsDeep k2)
             (opt k)
     | ExprKind.ExprRecArray d ->
-        Set.union (allVarsDeep d.SliceExpr)
-                  (match d.SeedArm with Some (_, se) -> allVarsDeep se | None -> Set.empty)
+        Set.unionMany
+            [ allVarsDeep d.SliceExpr
+              (match d.SeedArm with Some (_, se) -> allVarsDeep se | None -> Set.empty)
+              (match d.Guard with Some g -> allVarsDeep g | None -> Set.empty) ]
     | ExprKind.ExprLit _ | ExprKind.ExprWildcard | ExprKind.ExprQualified _
     | ExprKind.ExprRange _ | ExprKind.ExprReverse _ | ExprKind.ExprArity _
     | ExprKind.ExprNth | ExprKind.ExprZero | ExprKind.ExprSection _ -> Set.empty

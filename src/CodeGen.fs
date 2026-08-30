@@ -256,10 +256,10 @@ let private genFuncBodyScoped
                 [$"{indent}std::copy_n(pool_base({rhsStr}.data), {n}, pool_base({targetStr}.data));"]
             | None ->
                 [$"{indent}{targetStr} = {(exprToCpp currentNames v)};"]
-        | IRConstraintCheck (cond, message, span) ->
+        | IRConstraintCheck (cond, blCode, message, span) ->
             currentNames <- Map.add id varName currentNames
             [ $$"""{{indent}}if (!({{(exprToCpp currentNames cond)}})) {"""
-              $"{indent}    blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)});"
+              $"{indent}    blade_rt::panic(\"{blCode}\", \"{message}\", {(panicSpanArgs span)});"
               $"{indent}}}" ]
         | IRLit IRLitUnit ->
             // Skip unit literals (side effects already emitted)

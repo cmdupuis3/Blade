@@ -3081,7 +3081,8 @@ let private elabMh (ctx: Ctx) (span: Span) (chainName: string) (binding: Binding
                                     SeedArm = Some ("__s", v x0N)
                                     PrefixVar = "__p"
                                     StepVar = tN
-                                    SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN] }) }
+                                    SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN]
+                                    Guard = None }) }
                 [ bind x0N x0E
                   bind scN scaleE
                   bind keyN keyE
@@ -3162,7 +3163,8 @@ let private elabHmc (ctx: Ctx) (span: Span) (chainName: string) (binding: Bindin
                                 SeedArm = Some ("__s", v x0N)
                                 PrefixVar = "__p"
                                 StepVar = tN
-                                SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN] }) }
+                                SliceExpr = appE (v stepN) [appE (v "__p") [subE (v tN) (iLit 1)]; v tN]
+                                Guard = None }) }
             Ok ([ bind x0N x0E
                   bind epsN epsE
                   bind eps2N (divE (v epsN) (fLit 2.0))
@@ -3983,7 +3985,8 @@ let rec private stripQualified (aliases: Set<string>) (e: Expr) : Expr =
     | ExprKind.ExprRecArray def ->
         inheritSpan e (ExprRecArray { def with
                                         SeedArm = def.SeedArm |> Option.map (fun (sv, se) -> (sv, r se))
-                                        SliceExpr = r def.SliceExpr })
+                                        SliceExpr = r def.SliceExpr
+                                        Guard = def.Guard |> Option.map r })
     // The rest of the expression algebra. The wildcard is deliberately gone so FS0025 flags AST growth here rather than leaving
     // a qualified name to fail downstream as an unbound variable.
     | ExprKind.ExprCompute a -> inheritSpan e (ExprCompute (r a))

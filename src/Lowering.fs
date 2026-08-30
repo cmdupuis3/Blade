@@ -882,10 +882,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprAssign (lhs, rhs) ->
         IRAssign (lowerTypedExpr env lhs, lowerTypedExpr env rhs)
 
-    | TExprConstraintCheck (cond, message) ->
+    | TExprConstraintCheck (cond, code, message) ->
         // Carry the constraint's source span into IR so the runtime panic
-        // (BL8001) can report file:line. texpr is the whole node in hand.
-        IRConstraintCheck (lowerTypedExpr env cond, message, texpr.Span)
+        // can report file:line. texpr is the whole node in hand.
+        IRConstraintCheck (lowerTypedExpr env cond, code, message, texpr.Span)
+
+    | TExprBreakIf cond ->
+        IRBreakIf (lowerTypedExpr env cond)
     
     | TExprSequence exprs ->
         // sequence(c1, c2, ..., cn) -> IRSequence (flat n-ary parallel)
@@ -1037,8 +1040,13 @@ and lowerTypedPattern (pat: TypedPattern) : IRPattern =
     | TPatCons (h, t) -> IRPatCons (lowerTypedPattern h, lowerTypedPattern t)
     | TPatVariant (tag, payload, isEnum) -> 
         IRPatVariant (tag, hash tag, payload |> Option.map lowerTypedPattern, isEnum)
-    | TPatStruct (_, fields) ->
-        IRPatTuple (fields |> List.map (fun (_, p) -> lowerTypedPattern p))
+    | TPatStruct (typeName, fields) ->
+        // Field names are KEPT (they used to be dropped here, collapsing the
+        // pattern to a positional tuple): the C++ lane needs them to emit
+        // `.x` rather than `std::get<0>` on a real struct, and BOTH lanes
+        // need them for a pattern whose field order differs from the
+        // declaration's.
+        IRPatStruct (typeName, fields |> List.map (fun (n, p) -> (n, lowerTypedPattern p)))
     | TPatGuarded (p, _) -> lowerTypedPattern p
 
 /// Lower a typed block into nested IRLet
@@ -2369,6 +2377,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // an array op at lowering time (its element type was an unresolved
         // var), so it gets the same elementwise-loop lowering top-level
         // `x + y` does.
+        // Constant-scrutinee match folding: `match rank(x) with | 0 -> ..`
+        // in a concrete context lowered its scrutinee to a literal, but the
+        // only fold lived inside the arity specializer -- so the decided
+        // match survived as a runtime ternary (with ill-typed dead arms
+        // reaching g++). Fold module-wide, after the monomorphizers put
+        // specialized literals in place, before both back ends read the tree.
+        let irModule = IRMono.foldConstMatchesModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
         // Elementwise-chain fusion: collapse a deferred elementwise
         // computation nested directly in another's operand slot (the shape

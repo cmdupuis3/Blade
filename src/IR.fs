@@ -269,13 +269,24 @@ type IRExpr =
     | IRAssign of target: IRExpr * value: IRExpr
     | IRForRange of varId: IRId * lo: IRExpr * hi: IRExpr * body: IRExpr
     /// Runtime constraint guard, statement-positioned:
-    /// `if (!(cond)) { blade_rt::panic("BL8001", message, file, line); }`.
-    /// Synthesized (mutual-group joint checks, struct constraint checks);
-    /// value type is unit. The span carries source provenance for runtime
-    /// traces; noSpan degrades the panic to a nullptr file / 0 line. Safe to
-    /// add here: IRConstraintCheck is statement-positioned and never hits
-    /// the structural `=` fast paths other IRExpr cases flow through.
-    | IRConstraintCheck of cond: IRExpr * message: string * span: Blade.Ast.Span
+    /// `if (!(cond)) { blade_rt::panic(code, message, file, line); }`.
+    /// Synthesized (mutual-group joint checks, struct constraint checks,
+    /// the rec-array while-guard budget abort); value type is unit. `code`
+    /// is the BLxxxx the panic renders (BL8001 for value-constraint guards,
+    /// BL8010 for the budget abort). The span carries source provenance for
+    /// runtime traces; noSpan degrades the panic to a nullptr file / 0 line.
+    /// Safe to add here: IRConstraintCheck is statement-positioned and never
+    /// hits the structural `=` fast paths other IRExpr cases flow through.
+    | IRConstraintCheck of cond: IRExpr * code: string * message: string * span: Blade.Ast.Span
+    /// Early exit from the ENCLOSING IRForRange when cond is true -- the
+    /// `while` guard on a recursive array's inductive arm (a C++ `break`).
+    /// Statement-positioned and unit-valued like IRConstraintCheck, and only
+    /// synthesized into rec-array recursion loops by inferRecArray; the
+    /// emitters refuse it anywhere a `break` could not stand. The C++ break
+    /// path must run the per-iteration frees accumulated so far FIRST
+    /// (genForRangeBinding's alloc scope) or each guarded loop leaks its
+    /// breaking iteration's slice materializations.
+    | IRBreakIf of cond: IRExpr
 
 /// Abstract callable in IR: the merged form of source-level functions and
 /// lambdas. Lives in the IRExpr mutual-recursion group because
@@ -436,6 +447,14 @@ and IRPattern =
     | IRPatTuple of IRPattern list
     | IRPatCons of IRPattern * IRPattern
     | IRPatVariant of name: string * tag: int * IRPattern option * isEnum: bool
+    /// Struct destructuring with its field NAMES kept. Lowering used to
+    /// collapse this to `IRPatTuple` in pattern order, which lost two
+    /// different things: the C++ lane then read a real struct with
+    /// `std::get<i>` (which does not compile), and a pattern listing fields
+    /// out of DECLARATION order -- `Point { y, x }` -- bound every field to
+    /// the wrong slot, silently, in both evaluators. The name is the only
+    /// thing that makes either decodable, so it rides the node.
+    | IRPatStruct of typeName: string * fields: (string * IRPattern) list
 
 and BoundaryMode =
     | BndShrink
@@ -1874,7 +1893,8 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRPolyIndex (p, i) -> [p; i], (function [p'; i'] -> IRPolyIndex (p', i') | _ -> badChildren "IRPolyIndex")
     | IRPolyTail (p, drop) -> [p], (function [p'] -> IRPolyTail (p', drop) | _ -> badChildren "IRPolyTail")
     | IRAssign (t, v) -> [t; v], (function [t'; v'] -> IRAssign (t', v') | _ -> badChildren "IRAssign")
-    | IRConstraintCheck (c, msg, sp) -> [c], (function [c'] -> IRConstraintCheck (c', msg, sp) | _ -> badChildren "IRConstraintCheck")
+    | IRConstraintCheck (c, code, msg, sp) -> [c], (function [c'] -> IRConstraintCheck (c', code, msg, sp) | _ -> badChildren "IRConstraintCheck")
+    | IRBreakIf c -> [c], (function [c'] -> IRBreakIf c' | _ -> badChildren "IRBreakIf")
     | IRCurry (arr, idx, r) -> [arr; idx], (function [arr'; idx'] -> IRCurry (arr', idx', r) | _ -> badChildren "IRCurry")
     | IRGram (l, r, same) -> [l; r], (function [l'; r'] -> IRGram (l', r', same) | _ -> badChildren "IRGram")
     | IRMatmul (l, r) -> [l; r], (function [l'; r'] -> IRMatmul (l', r') | _ -> badChildren "IRMatmul")
@@ -2005,6 +2025,8 @@ let rec patternBoundIds (pat: IRPattern) : Set<IRId> =
     | IRPatCons (h, t) -> Set.union (patternBoundIds h) (patternBoundIds t)
     | IRPatVariant (_, _, Some p, _) -> patternBoundIds p
     | IRPatVariant (_, _, None, _) -> Set.empty
+    | IRPatStruct (_, flds) ->
+        flds |> List.fold (fun acc (_, p) -> Set.union acc (patternBoundIds p)) Set.empty
 
 /// The variants that introduce variable scopes, factored out for
 /// binder-aware dispatchers (exprAttrs today; any future capture or escape
@@ -2272,6 +2294,22 @@ let declSpanOf (name: string) : Blade.Ast.Span =
     match Map.tryFind name (declSpansCell ()).Value with
     | Some s -> s
     | None -> Blade.Ast.noSpan
+
+/// A named struct's fields in DECLARATION order, out of the same per-module
+/// cache `tryLookupFieldType` reads. The order is what lets a name-erased
+/// POSITIONAL struct pattern be decoded at all; a named one (`IRPatStruct`)
+/// does not need to ask.
+let tryLookupStructFieldsByName (structName: string) : (string * IRType) list option =
+    let cache = getStructFieldsCache ()
+    match cache.TryGetValue(structName) with
+    | true, fields -> Some fields
+    | false, _ -> None
+
+/// The same lookup keyed by a scrutinee's type rather than a bare name.
+let tryLookupStructFields (objType: IRType) : (string * IRType) list option =
+    match objType with
+    | IRTNamed structName -> tryLookupStructFieldsByName structName
+    | _ -> None
 
 let tryLookupFieldType (objType: IRType) (fieldName: string) : IRType option =
     match objType with
@@ -2567,6 +2605,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     | IRAssign _ -> IRTUnit
     | IRForRange _ -> IRTUnit
     | IRConstraintCheck _ -> IRTUnit
+    | IRBreakIf _ -> IRTUnit
     | IRFieldAccess (obj, field) ->
         // Resolved via the ONE struct-fields cache (structFieldsCacheStorage
         // above), populated both at liftInlineFormsModule entry and at

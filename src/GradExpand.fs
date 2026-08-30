@@ -699,7 +699,7 @@ let rec internal occursFree (name: string) (e: Expr) : bool =
         // outer map; the prefix/step vars shadow the slice, the seed var its
         // own arm.
         d.Name = name
-        || under [d.PrefixVar; d.StepVar] [d.SliceExpr]
+        || under [d.PrefixVar; d.StepVar] ([d.SliceExpr] @ Option.toList d.Guard)
         || (match d.SeedArm with
             | Some (sv, se) -> under [sv] [se]
             | None -> false)
@@ -903,8 +903,14 @@ let rec internal renameExpr (ren: Map<string, string>) (e: Expr) : Result<Expr, 
         // the slice/seed scopes).
         let sliceNames = [def.PrefixVar; def.StepVar]
         let renSlice = shadowNames sliceNames ren
-        captureCheck renSlice sliceNames [def.SliceExpr] |> Result.bind (fun () ->
+        // The guard scopes exactly like the slice (reads prefix/step under
+        // the same binders), so it renames under the same shadowed map.
+        captureCheck renSlice sliceNames ([def.SliceExpr] @ Option.toList def.Guard) |> Result.bind (fun () ->
         renameExpr renSlice def.SliceExpr |> Result.bind (fun slice' ->
+        (match def.Guard with
+         | None -> Ok None
+         | Some g -> renameExpr renSlice g |> Result.map Some)
+        |> Result.bind (fun guard' ->
         (match def.SeedArm with
          | None -> Ok None
          | Some (sv, se) ->
@@ -912,7 +918,7 @@ let rec internal renameExpr (ren: Map<string, string>) (e: Expr) : Result<Expr, 
              captureCheck renSeed [sv] [se] |> Result.bind (fun () ->
              renameExpr renSeed se |> Result.map (fun se' -> Some (sv, se'))))
         |> Result.map (fun seed' ->
-            re (ExprRecArray { def with Name = rn def.Name; SeedArm = seed'; SliceExpr = slice' }))))
+            re (ExprRecArray { def with Name = rn def.Name; SeedArm = seed'; SliceExpr = slice'; Guard = guard' })))))
 
 /// A shadowed scope captures a renamed reference only when a SURVIVING
 /// mapping's target equals a binder name AND its source occurs FREE in the
@@ -1085,6 +1091,14 @@ let internal mentionsVar (name: string) (e: Expr) : bool =
 let internal expandRecArray (fname: string) (ctx: Ctx)
                            (name: string) (annot: TypeExpr) (def: RecArrayDef)
     : Result<Stmt list * int, string> =
+    // A `while` guard makes the stopping ordinal DATA-DEPENDENT: the adjoint
+    // loop's trip count would depend on primal values, which the fixed-extent
+    // sweep below cannot express. Refused in v1. (v2: the guard declares a
+    // fixed point -- exactly the structure an implicit-function-theorem
+    // adjoint wants; see plan-fortran-killer.md arc 6.)
+    if def.Guard.IsSome then
+        err fname $"recursive array '{name}': a `while`-guarded recursive array is not differentiable (v1) -- the stopping ordinal is data-dependent"
+    else
     match arrayLiteralExtents (resolveArrayTy ctx annot) with
     | None ->
         err fname $"recursive array '{name}': a differentiable recursive array needs an `Array<Float like Idx<n>>` annotation with a literal extent (v1)"

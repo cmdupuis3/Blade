@@ -186,9 +186,10 @@ let rec private rewriteExpr (aliases: Set<string>) (e: Expr) : Result<Expr, stri
             |> Result.map (fun cs' -> inheritSpan e (ExprMatch (s', cs'))))
     | ExprKind.ExprRecArray def ->
         rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
+        rOpt def.Guard |> Result.bind (fun guardE ->
         r def.SliceExpr |> Result.map (fun slice' ->
             let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
-            inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
+            inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice'; Guard = guardE }))))
     | ExprKind.ExprCompute inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprCompute i))
     | ExprKind.ExprRead inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprRead i))
     | ExprKind.ExprPure inner -> r inner |> Result.map (fun i -> inheritSpan e (ExprPure i))

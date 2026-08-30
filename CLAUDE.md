@@ -229,6 +229,7 @@ first-class construct:
 | numeric width/class conversion | `Float64(n)`, `Float32(x)`, `Int64(floor(x))` — scalar type name in call position; arrays lift elementwise | `* 1.0` fudges; implicit int→float mixes (warn BL3020); bare `Int64(x)` on a float (BL3019 — the rounding must be visible at the cast site) |
 | pipeline of stages | compose values: `object_for(f) >>@ object_for(g)`, apply with `<@>`, materialize with `\|> compute` | eager temporaries per stage |
 | recurrence / time-stepping / running state | `let rec` recursive array (see below) | `let mut` + a loop |
+| iterate to convergence (trip count not known up front) | the inductive arm's `while` guard over a BUDGET extent: `\| prefix :: n while <cond> -> prefix :: <step>` — frozen once the guard goes false, runtime BL8010 if the budget runs out with it still true | a `while` loop; running the full budget unconditionally and hoping |
 | symmetric pairwise stats (covariance, comoments) | `where comm(a, b)` kernels, `reynolds(...)`, `gram(R, R)` | hand-written triangular loops |
 
 Pick the highest idiom rung the body admits: implicit lifting over a range

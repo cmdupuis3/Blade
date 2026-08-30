@@ -557,6 +557,13 @@ and RecArrayDef = {
     PrefixVar: Ident
     StepVar: Ident
     SliceExpr: Expr
+    /// `| prefix :: n while GUARD -> prefix :: SLICE` -- the convergence
+    /// guard on the inductive arm (plan-match-statements.md 3). The array is
+    /// defined up to the first n where the guard is false, FROZEN (last
+    /// written slice repeats) after it, and a guard still true at the end of
+    /// the budget is a runtime abort (BL8010). Scopes like SliceExpr: reads
+    /// prefix/StepVar under the same binders. Illegal on the seed arm.
+    Guard: Expr option
 }
 
 /// Every pattern carries its source span. Construct via mkPat.

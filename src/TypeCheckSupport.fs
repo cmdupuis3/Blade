@@ -194,7 +194,14 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                 collectFreeVars (Set.add seedStep selfBound) seedExpr
             | None -> Set.empty
         let sliceBound = selfBound |> Set.add def.PrefixVar |> Set.add def.StepVar
-        Set.union seedFree (collectFreeVars sliceBound def.SliceExpr)
+        // The `while` guard scopes like the slice -- prefix/step are its
+        // binders; anything else it reads is a genuine capture. Missing this
+        // walk would silently drop guard captures from closure conversion.
+        let guardFree =
+            match def.Guard with
+            | Some g -> collectFreeVars sliceBound g
+            | None -> Set.empty
+        Set.unionMany [ seedFree; guardFree; collectFreeVars sliceBound def.SliceExpr ]
     // ---- Leaves: nothing to walk, for a stated reason ----
     | ExprKind.ExprWildcard
     | ExprKind.ExprNth
@@ -785,10 +792,15 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             // This is a no-payload variant constructor -- treat as PatVariant
             checkPattern env expected (inheritPatSpan pat (PatVariant (name, None)))
         | Some (parentName, Some _) ->
-            // Variant with payload but used without -- treat as variable (may shadow)
-            let varId = env.Builder.FreshId()
-            Ok { Kind = TPatVar (name, varId); Type = expected
-                 Bindings = [(name, varId, expected)] }
+            // Variant with payload, used WITHOUT it. Treating this as a
+            // variable binding (which it used to be) is a trap, not a
+            // feature: `| Some -> ...` silently became an irrefutable
+            // binder named Some, matched EVERYTHING, and killed every arm
+            // after it -- `| None -> ...` below it was dead code with no
+            // diagnostic. A payload-carrying constructor in pattern
+            // position can only sensibly mean the variant test, so demand
+            // the payload be spelled.
+            Error (Other $"pattern '{name}': this constructor of '{parentName}' carries a payload, so a bare '{name}' here would not test the variant -- it would bind a fresh VARIABLE named {name} that matches everything (making every later arm dead). Match it as {name}(p) (or {name}(_) to ignore the payload); rename the binder if a variable is what you meant.")
         | None ->
             let varId = env.Builder.FreshId()
             Ok { Kind = TPatVar (name, varId); Type = expected
@@ -923,7 +935,38 @@ let requireArrayArgMinRank (env: TypeEnv) (tArr: TypedExpr) (opName: string) (mi
     match resolved with
     | ArrayElem arrTy -> Ok arrTy
     | IRTInfer vid ->
-        let k = max 1 minRank
+        // RANK PIN. The caret on a `T^k` parameter is an EXACT rank claim,
+        // but it lives in the SUBSTITUTION (`Subst.LookupOrCreateTypeVar`
+        // records it in `arityConstraints`), not in the type: the var itself
+        // is a bare `IRTInfer` that says nothing about rank. Synthesizing
+        // rank-1 for every var therefore refused every abstract parameter of
+        // rank >= 2 at the unify below -- `extents(x)` on a `T^2` param died
+        // with "a `^2` type variable is a rank-2 array, but this position
+        // supplies Array<..>" (rank 1): the checker refusing a shape it had
+        // itself just minted. Read the pin.
+        //
+        // The ARITY PIN ONLY, deliberately -- NOT `GetRankLowerBound`, the
+        // stage-2 deduced bound sitting right beside it. The two are different
+        // kinds of fact and this seam is where the difference is enforced: the
+        // caret is a DECLARATION, so synthesizing its rank is honouring what
+        // the author wrote, while a rank lower bound is accumulated EVIDENCE
+        // from other call sites, and `unify`'s rankBoundViolation exists to
+        // CHECK the synthesis against it. Synthesizing from the bound instead
+        // makes that check vacuous: functions/037 (`z` collects rank 1 from
+        // `total(z)`, rank 2 from `tot2(z)`, then meets `extents(z)`) is a
+        // genuine contradiction reported as BL3009, the dedicated
+        // rank-deduction code, and reading the bound here demoted it to a
+        // BL3001 rank mismatch pointing at an unrelated call.
+        //
+        // MAX rather than the pin outright: an op demanding rank >= minRank
+        // over a var pinned BELOW it (gram on a `T^1`) keeps synthesizing
+        // minRank and keeps failing at unify -- that refusal is correct, and
+        // its message already names both ranks.
+        let pinnedRank =
+            match env.Subst.GetArityConstraint vid with
+            | Some k when k > 0 -> k
+            | _ -> 0
+        let k = max (max 1 minRank) pinnedRank
         let freshIdx i =
             // The minted extent name carries the index record's own fresh id.
             // These names are IDENTITY, not just display: shape
@@ -2537,7 +2580,8 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
                     lo :: hi :: (body |> List.collect stmtExprsOf)
             (stmts |> List.collect stmtExprsOf) @ Option.toList final
         | TExprAssign (l, r) -> [l; r]
-        | TExprConstraintCheck (c, _) -> [c]
+        | TExprConstraintCheck (c, _, _) -> [c]
+        | TExprBreakIf c -> [c]
         | TExprReplicate (c, b) -> [c; b]
         | TExprAlign (es, _) -> es
         | TExprPartialApp (_, a, _) -> [a]

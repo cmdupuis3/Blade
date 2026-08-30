@@ -50,6 +50,13 @@ module N = Blade.Interp.Numerics
 /// caller can report precisely which construct is not yet interpreted.
 exception InterpUnsupported of feature: string
 
+/// Control-flow signal for IRBreakIf (the rec-array `while` guard): thrown by
+/// the break-if arm, caught ONLY by the enclosing IRForRange arm, which stops
+/// iterating -- the twin of the C++ `break` genForRangeBinding emits. Escaping
+/// a loop entirely (an IRBreakIf outside any for-range) is a compiler bug and
+/// surfaces as an unhandled exception rather than being silently swallowed.
+exception InterpBreak
+
 /// Runtime bridge from the scalar Core evaluator down to the M2 loop/array
 /// layer (Interp/Loops.fs). Core must stay free of a *compile-time* dependency
 /// on Loops, because Loops calls back into Core.evalExpr for kernel bodies --
@@ -596,21 +603,33 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let hiV = toI64 (evalExpr st env hi)
         let cell = envBind env vid (VInt loV)
         let mutable i = loV
-        while i < hiV do
-            cell.V <- VInt i
-            evalExpr st env body |> ignore
-            i <- i + 1L
+        // InterpBreak = the C++ `break` genForRangeBinding emits for IRBreakIf
+        // (the rec-array while guard): it unwinds to HERE, ending this loop and
+        // resuming after it. The handler wraps the whole loop rather than each
+        // trip -- one guarded region per loop execution instead of one per
+        // iteration -- and being per loop LEVEL it still stops only the
+        // innermost enclosing loop when they nest.
+        (try
+            while i < hiV do
+                cell.V <- VInt i
+                evalExpr st env body |> ignore
+                i <- i + 1L
+         with InterpBreak -> ())
         VUnit
 
-    | IRConstraintCheck (cond, message, span) ->
-        // `if (!(cond)) blade_rt::panic("BL8001", message, file, line)`
+    | IRBreakIf cond ->
+        if toBoolV (evalExpr st env cond) then raise InterpBreak
+        else VUnit
+
+    | IRConstraintCheck (cond, code, message, span) ->
+        // `if (!(cond)) blade_rt::panic(code, message, file, line)`
         // (CodeGen.fs:7166). File is nullptr when empty, line 0 when unset --
         // reproduced here so Run.fs can render the identical stderr line.
         if toBoolV (evalExpr st env cond) then VUnit
         else
             let fileOpt = match span.File with Some f when f <> "" -> Some f | _ -> None
             let line = if span.StartLine > 0 then span.StartLine else 0
-            raise (InterpPanic ("BL8001", message, fileOpt, line))
+            raise (InterpPanic (code, message, fileOpt, line))
 
     | IRRank arr ->
         // Rank is static in CodeGen (from the type). Scalars are rank 0; a
@@ -992,7 +1011,12 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
 /// is false) leaves no bindings visible to later cases.
 and evalMatch (st: InterpState) (env: Env) (sv: Value) (cases: IRMatchCase list) : Value =
     match cases with
-    | [] -> raise (InterpPanic ("BL8006", "no matching case in match expression", None, 0))
+    // BL8002 to match codegen and the LLVM lane byte-for-byte: all three
+    // evaluators panic the SAME code and message on a non-exhaustive match,
+    // so the differential gates can pin the event once. (This site used to
+    // say BL8006 -- the out-of-bounds family -- and the interp-diff harness
+    // caught the drift the day a corpus test pinned the abort.)
+    | [] -> raise (InterpPanic ("BL8002", "Blade: non-exhaustive match", None, 0))
     | c :: rest ->
         let caseEnv = envChild env
         if tryMatch caseEnv sv c.Pattern then
@@ -1018,18 +1042,37 @@ and tryMatch (env: Env) (scrut: Value) (pat: IRPattern) : bool =
         match scrut with
         | VTuple els when els.Length = List.length pats ->
             List.forall2 (fun p v -> tryMatch env v p) pats (List.ofArray els)
-        // Struct destructuring patterns lower to IRPatTuple with field NAMES
-        // dropped (Lowering.fs:656-657), so a VStruct scrutinee is matched
-        // POSITIONALLY -- the same shape the compiled side sees. Without this
-        // arm a VStruct silently fails every IRPatTuple, wrongly falling
-        // through to the next case / the non-exhaustive panic.
+        // A struct pattern keeps its field names (IRPatStruct) and is
+        // handled below; this arm is what a genuinely POSITIONAL pattern over
+        // a struct scrutinee means, and it stays because the compiled lane
+        // decodes the same shape the same way (by declaration order).
         | VStruct (_, fields) when fields.Length = List.length pats ->
             List.forall2 (fun p (_, v) -> tryMatch env v p) pats (List.ofArray fields)
         | _ -> false
+    | IRPatStruct (_, fieldPats) ->
+        // BY NAME, not by position: `Point { y, x }` binds y to the y field
+        // however the struct declared its order. The type name is not
+        // re-checked -- typecheck already fixed the scrutinee's type, and a
+        // struct value carries no sum-type tag to discriminate on.
+        match scrut with
+        | VStruct (_, fields) ->
+            fieldPats |> List.forall (fun (fname, fpat) ->
+                match fields |> Array.tryFind (fun (n, _) -> n = fname) with
+                | Some (_, v) -> tryMatch env v fpat
+                | None -> false)
+        | _ -> false
     | IRPatCons (hp, tp) ->
         match scrut with
-        | VTuple els when els.Length >= 1 ->
-            tryMatch env els.[0] hp && tryMatch env (VTuple els.[1..]) tp
+        | VTuple els when els.Length >= 2 ->
+            // Blade has no 1-tuple -- `(x)` IS `x` -- so a pair's remainder is
+            // the BARE element, not a one-element tuple. That is the rule
+            // Lowering's `subBindingValue` applies to `let h :: t` and the one
+            // TypeCheck types the leaf by; handing back `VTuple [|x|]` here
+            // made `h :: t` on a pair a type-lie no compiled lane could
+            // reproduce. A 1-element scrutinee has no remainder at all, so
+            // cons does not match it.
+            let tail = if els.Length = 2 then els.[1] else VTuple els.[1..]
+            tryMatch env els.[0] hp && tryMatch env tail tp
         | _ -> false
     | IRPatVariant (_, tag, innerOpt, _) ->
         // Dispatch by tag (= hash constructorName), matching construction above.

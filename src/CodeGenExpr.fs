@@ -434,10 +434,14 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         exprError "array_product in expression position"
     | IRFunctorMap (f, c) ->
         exprError "functor_map in expression position"
-    | IRConstraintCheck (cond, message, span) ->
+    | IRConstraintCheck (cond, blCode, message, span) ->
         // Expression-position fallback: a portable IIFE so the guard still
         // fires if it lands somewhere other than a statement slot.
-        $"([&](){{ if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)}); }} return 0; }})()"
+        $"([&](){{ if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"{blCode}\", \"{message}\", {(panicSpanArgs span)}); }} return 0; }})()"
+    | IRBreakIf _ ->
+        // A C++ `break` cannot live inside an expression (the IIFE fallback
+        // would bind it to no loop) -- statement position only, by refusal.
+        exprError "break_if (a rec-array while guard) in expression position"
     | IRAssign (target, value) ->
         let targetStr =
             match target with
@@ -799,166 +803,196 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
 
 
 and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases : string =
-    // Generate nested ternary for match expressions
+    // A match compiles to a chain of ternaries, one arm each --
+    // `(test ? bound : rest)` -- bottoming out in the non-exhaustive abort.
+    // What each arm contributes comes from ONE recursive pattern compiler
+    // (`patCompile`) rather than a per-constructor emitter, which is exactly
+    // what makes NESTED patterns work: the emitter this replaced only ever
+    // looked one level down, so `((a, b), c)` bound nothing and rendered its
+    // body against dangling names, `head :: tail` fell into a catch-all that
+    // did the same, and a struct pattern read a real C++ struct with
+    // `std::get<i>`. All three typechecked cleanly and died at g++ -- and the
+    // interpreter handled all three correctly, so each was also a live twin
+    // divergence.
     let scrut = exprToCppCore subst names scrutinee
-    let rec genCase (cases: IRMatchCase list) : string =
-        match cases with
-        | [] -> "([&]() -> double { blade_rt::panic(\"BL8002\", \"Blade: non-exhaustive match\", nullptr, 0); return 0; }())"
-        | [case] ->
-            // Last case - assume it matches (wildcard or variable)
-            // But if there's a guard, we must still check it.
-            let abortExpr = "([&]() -> double { blade_rt::panic(\"BL8002\", \"Blade: non-exhaustive match\", nullptr, 0); return 0; }())"
-            let wrapGuard (bodyStr: string) (names': Map<IRId, string>) : string =
-                match case.Guard with
-                | Some guard ->
-                    let guardStr = exprToCppCore subst names' guard
-                    $"({guardStr} ? {bodyStr} : {abortExpr})"
-                | None -> bodyStr
-            match case.Pattern with
-            | IRPatVar varId ->
-                // Bind variable and evaluate body (only if variable is used)
-                let varUsed =
-                    (collectVarRefsIR case.Body).Contains varId ||
-                    (case.Guard |> Option.map (fun g -> (collectVarRefsIR g).Contains varId) |> Option.defaultValue false)
-                if varUsed then
-                    let varName = $"__match_{varId}"
-                    let names' = Map.add varId varName names
-                    let bodyStr = exprToCppCore subst names' case.Body
-                    let guardedBody = wrapGuard bodyStr names'
-                    $$"""[&]() { auto {{varName}} = {{scrut}}; return {{guardedBody}}; }()"""
-                else
-                    wrapGuard (exprToCppCore subst names case.Body) names
-            | IRPatWild ->
-                wrapGuard (exprToCppCore subst names case.Body) names
-            | IRPatLit lit ->
-                let litStr = litToCpp lit
-                let bodyStr = wrapGuard (exprToCppCore subst names case.Body) names
-                $"({scrut} == {litStr} ? {bodyStr} : {abortExpr})"
-            | IRPatVariant (ctorName, tag, innerOpt, isEnum) ->
-                // Last variant case -- extract payload and evaluate body
-                match innerOpt with
-                | Some (IRPatVar varId) ->
-                    let varName = $"__match_{varId}"
-                    let names' = Map.add varId varName names
-                    let extractExpr = $"std::get<{ctorName}_T>({scrut}).value"
-                    let bodyStr = exprToCppCore subst names' case.Body
-                    let guardedBody = wrapGuard bodyStr names'
-                    $$"""[&]() { auto {{varName}} = {{extractExpr}}; return {{guardedBody}}; }()"""
-                | _ ->
-                    wrapGuard (exprToCppCore subst names case.Body) names
-            | IRPatTuple innerPats ->
-                // Last tuple case -- bind each element
-                let bindings =
-                    innerPats |> List.mapi (fun idx pat ->
-                        match pat with
-                        | IRPatVar varId -> Some (varId, $"__match_{varId}", idx)
-                        | _ -> None)
-                    |> List.choose id
-                let bindingDecls = bindings |> List.map (fun (_, name, idx) ->
-                    $"auto {name} = std::get<{idx}>({scrut})") |> String.concat "; "
-                let names' = bindings |> List.fold (fun acc (id, name, _) -> Map.add id name acc) names
-                let bodyStr = exprToCppCore subst names' case.Body
-                let guardedBody = wrapGuard bodyStr names'
-                $$"""[&]() { {{bindingDecls}}; return {{guardedBody}}; }()"""
+    let scrutTy = inferExprType scrutinee
+    // The non-exhaustive panic IIFE, typed as the MATCH RESULT rather than a
+    // hardcoded double: as a ternary operand it participates in the chain's
+    // common type, so a double-typed abort on an Int64-valued match poisoned
+    // the whole chain to double and died as a g++ -Werror=float-conversion --
+    // making BL8002 unreachable for every non-double element type. `return
+    // {};` value-initializes whatever the type is (the panic never returns;
+    // C++ just needs the statement).
+    let abortExpr =
+        let retTyStr =
+            match cases |> List.tryHead with
+            | Some c ->
+                (match inferExprType c.Body with
+                 | ArrayElem arr -> cppArrayTypeStr arr
+                 | IRTInfer _ -> "double"
+                 | t -> irTypeToCpp t)
+            | None -> "double"
+        $$"""([&]() -> {{retTyStr}} { blade_rt::panic("BL8002", "Blade: non-exhaustive match", nullptr, 0); return {}; }())"""
+
+    let mergeParts (parts: (string list * (IRId * string * string) list) list) =
+        (parts |> List.collect fst, parts |> List.collect snd)
+
+    /// The `n` slot accesses of one access, each with its own type where one
+    /// is recoverable. A struct is read by declared field NAME -- `std::get<i>`
+    /// on a real C++ struct is not valid C++, which is how a struct pattern
+    /// used to reach g++.
+    let slotsOf (access: string) (ty: IRType option) (n: int) : (string * IRType option) list =
+        match ty |> Option.bind IR.tryLookupStructFields with
+        | Some flds when flds.Length = n ->
+            flds |> List.map (fun (fn, t) -> ($"{access}.{fn}", Some t))
+        | _ ->
+            match ty with
+            | Some (IRTTuple ts) when ts.Length = n ->
+                ts |> List.mapi (fun i t -> ($"std::get<{i}>({access})", Some t))
+            | _ -> [ for i in 0 .. n - 1 -> ($"std::get<{i}>({access})", None) ]
+
+    /// Compile ONE pattern against a C++ access expression whose IR type is
+    /// `ty` (`None` where the type is not recoverable at that depth) into
+    ///
+    ///   - `tests` -- boolean conjuncts, all of which must hold, in
+    ///     short-circuit order: a variant's tag test is emitted BEFORE any
+    ///     conjunct that reads its payload, so `&&` keeps the payload read on
+    ///     the alternative that actually holds it;
+    ///   - `binds` -- `(id, name, initializer)` declarations, in order, run
+    ///     only once every test has passed.
+    ///
+    /// Composition over sub-patterns is the whole point; the three shapes
+    /// this file used to get wrong are just its three recursive cases. Only
+    /// three decisions consult `ty` at all -- tuple-vs-struct slot access, a
+    /// cons tail's arity, and the type handed to the next level down -- and a
+    /// struct PATTERN carries its own type name, so it needs none of them.
+    let rec patCompile (access: string) (ty: IRType option) (pat: IRPattern)
+            : string list * (IRId * string * string) list =
+        match pat with
+        | IRPatWild -> ([], [])
+        | IRPatVar id -> ([], [ (id, $"__match_{id}", access) ])
+        | IRPatLit lit -> ([ $"{access} == {(litToCpp lit)}" ], [])
+        | IRPatStruct (typeName, fieldPats) ->
+            // BY NAME. The declared field list is consulted only to TYPE the
+            // sub-pattern; the access itself is `.field`, so a pattern that
+            // lists fields out of declaration order still reads the right
+            // ones -- positional lowering used to bind every one of them to
+            // the wrong slot.
+            let declared = IR.tryLookupStructFieldsByName typeName
+            fieldPats
+            |> List.map (fun (fname, fpat) ->
+                let fty =
+                    declared
+                    |> Option.bind (List.tryFind (fun (n, _) -> n = fname))
+                    |> Option.map snd
+                patCompile $"{access}.{fname}" fty fpat)
+            |> mergeParts
+        | IRPatTuple pats -> patCompileSlots (slotsOf access ty pats.Length) pat
+        | IRPatCons _ ->
+            // TUPLES ONLY, deliberately -- the interpreter's cons arm matches
+            // `VTuple` and nothing else, so a struct scrutinee here must fall
+            // through to the next arm rather than get decomposed by declared
+            // field order. `slotsOf` would happily hand back those fields.
+            match ty with
+            | Some (IRTTuple ts) when ts.Length >= 2 ->
+                patCompileSlots (slotsOf access ty ts.Length) pat
             | _ ->
-                wrapGuard (exprToCppCore subst names case.Body) names
-        | case :: rest ->
-            let restStr = genCase rest
-            match case.Pattern with
-            | IRPatLit lit ->
-                let litStr = litToCpp lit
-                let bodyStr = 
-                    match case.Guard with
-                    | Some guard -> 
-                        let guardStr = exprToCppCore subst names guard
-                        $"({guardStr} ? {(exprToCppCore subst names case.Body)} : {restStr})"
-                    | None -> exprToCppCore subst names case.Body
-                $"({scrut} == {litStr} ? {bodyStr} : {restStr})"
-            | IRPatVar varId ->
-                let varUsed =
-                    (collectVarRefsIR case.Body).Contains varId ||
-                    (case.Guard |> Option.map (fun g -> (collectVarRefsIR g).Contains varId) |> Option.defaultValue false)
-                if varUsed then
-                    let varName = $"__match_{varId}"
-                    match case.Guard with
-                    | Some guard ->
-                        // Variable pattern with guard, variable used
-                        let guardStr = exprToCppWithVarCore subst names varId varName guard
-                        let bodyStr = exprToCppWithVarCore subst names varId varName case.Body
-                        $$"""[&]() { auto {{varName}} = {{scrut}}; return {{guardStr}} ? {{bodyStr}} : {{restStr}}; }()"""
-                    | None ->
-                        // Variable pattern without guard - always matches, variable used
-                        let bodyStr = exprToCppWithVarCore subst names varId varName case.Body
-                        $$"""[&]() { auto {{varName}} = {{scrut}}; return {{bodyStr}}; }()"""
-                else
-                    match case.Guard with
-                    | Some guard ->
-                        // Variable unused, but has guard
-                        let guardStr = exprToCppCore subst names guard
-                        let bodyStr = exprToCppCore subst names case.Body
-                        $"({guardStr} ? {bodyStr} : {restStr})"
-                    | None ->
-                        // Variable unused, no guard - always matches (like wildcard)
-                        exprToCppCore subst names case.Body
-            | IRPatWild ->
-                match case.Guard with
-                | Some guard ->
-                    let guardStr = exprToCppCore subst names guard
-                    let bodyStr = exprToCppCore subst names case.Body
-                    $"({guardStr} ? {bodyStr} : {restStr})"
-                | None ->
-                    // Wildcard without guard - always matches
-                    exprToCppCore subst names case.Body
-            | IRPatTuple innerPats ->
-                // Tuple pattern - bind each element
-                let rec collectVarBindings (pats: IRPattern list) (idx: int) : (IRId * string) list =
-                    match pats with
-                    | [] -> []
-                    | IRPatVar varId :: rest ->
-                        let varName = $"__match_{varId}"
-                        (varId, varName) :: collectVarBindings rest (idx + 1)
-                    | _ :: rest -> collectVarBindings rest (idx + 1)
-                
-                let bindings = collectVarBindings innerPats 0
-                let bindingDecls = bindings |> List.mapi (fun idx (_, name) ->
-                    $"auto {name} = std::get<{idx}>({scrut})") |> String.concat "; "
-                
-                // Extend names map with bindings
-                let names' = bindings |> List.fold (fun acc (id, name) -> Map.add id name acc) names
-                
-                match case.Guard with
-                | Some guard ->
-                    let guardStr = exprToCppCore subst names' guard
-                    let bodyStr = exprToCppCore subst names' case.Body
-                    $$"""[&]() { {{bindingDecls}}; return {{guardStr}} ? {{bodyStr}} : {{restStr}}; }()"""
-                | None ->
-                    let bodyStr = exprToCppCore subst names' case.Body
-                    $$"""[&]() { {{bindingDecls}}; return {{bodyStr}}; }()"""
-            | IRPatVariant (ctorName, tag, innerOpt, isEnum) ->
-                // Variant pattern - check variant type and optionally bind inner value
-                let checkExpr =
-                    if isEnum then $"{scrut} == {ctorName}"
-                    else $"std::holds_alternative<{ctorName}_T>({scrut})"
-                
-                match innerOpt with
-                | Some (IRPatVar varId) ->
-                    // Variant with inner value binding
-                    let varName = $"__match_{varId}"
-                    let names' = Map.add varId varName names
-                    let extractExpr = $"std::get<{ctorName}_T>({scrut}).value"
-                    let bodyStr = exprToCppCore subst names' case.Body
-                    $$"""({{checkExpr}} ? [&]() { auto {{varName}} = {{extractExpr}}; return {{bodyStr}}; }() : {{restStr}})"""
-                | Some _ ->
-                    // Other inner patterns - fallback
-                    let bodyStr = exprToCppCore subst names case.Body
-                    $"({checkExpr} ? {bodyStr} : {restStr})"
-                | None ->
-                    // Variant without inner value
-                    let bodyStr = exprToCppCore subst names case.Body
-                    $"({checkExpr} ? {bodyStr} : {restStr})"
+                // A parameter pack still spelled as one at codegen was never
+                // specialized (`let head :: tail = A` is the shape the
+                // monomorphizer knows), and a one-slot or non-tuple scrutinee
+                // has no remainder to bind. Refuse by name rather than emit a
+                // body over dangling identifiers, which is what the
+                // pre-rewrite catch-all did.
+                ([ exprError "cons pattern (head :: tail) in a match needs a tuple scrutinee with at least two slots; destructure a parameter pack with a let binding instead" ], [])
+        | IRPatVariant (ctorName, _, innerOpt, isEnum) ->
+            let test =
+                if isEnum then $"{access} == {ctorName}"
+                else $"std::holds_alternative<{ctorName}_T>({access})"
+            match innerOpt with
+            | None -> ([ test ], [])
+            | Some inner ->
+                // The tag test leads, so the payload read below it is
+                // short-circuited away on every other alternative.
+                let (ts, bs) = patCompile $"std::get<{ctorName}_T>({access}).value" None inner
+                (test :: ts, bs)
+
+    /// Compile a pattern against a RUN of slots rather than a single access.
+    /// Both the tuple arm and a cons TAIL land here, which is what keeps
+    /// `h :: (a, b)` reading `std::get<1>` and `std::get<2>` of the original
+    /// instead of rebuilding an intermediate tuple and immediately taking it
+    /// apart again (once per leaf, nested -- an exponential in cons depth).
+    and patCompileSlots (slots: (string * IRType option) list) (pat: IRPattern)
+            : string list * (IRId * string * string) list =
+        match pat with
+        | IRPatWild -> ([], [])
+        | IRPatTuple pats when pats.Length = slots.Length ->
+            List.zip slots pats
+            |> List.map (fun ((a, t), p) -> patCompile a t p)
+            |> mergeParts
+        | IRPatCons (headPat, tailPat) when slots.Length >= 2 ->
+            let (headAcc, headTy) = slots.Head
+            mergeParts [ patCompile headAcc headTy headPat
+                         patCompileSlots slots.Tail tailPat ]
+        | _ ->
+            // The pattern wants the run as ONE value (a binder, a literal, a
+            // variant). Blade has no 1-tuple -- `(x)` IS `x` -- so a
+            // single-slot run is its bare element; that is the same rule
+            // `let head :: tail` applies (Lowering's `subBindingValue`) and
+            // the one TypeCheck types the leaf by.
+            match slots with
+            | [ (a, t) ] -> patCompile a t pat
             | _ ->
-                // Unsupported pattern - fallback
-                $"(true ? {(exprToCppCore subst names case.Body)} : {restStr})"
+                let acc =
+                    $"""std::make_tuple({(slots |> List.map fst |> String.concat ", ")})"""
+                let ty =
+                    if slots |> List.forall (fun (_, t) -> Option.isSome t)
+                    then Some (IRTTuple (slots |> List.map (snd >> Option.get)))
+                    else None
+                patCompile acc ty pat
+
+    /// One arm, given the code for everything after it. `rest` appears twice
+    /// when an arm has BOTH a refutable pattern and a guard (either failure
+    /// falls through to the same place); the emitter this replaced had the
+    /// same shape, and match chains are short.
+    let renderArm (case: IRMatchCase) (restStr: string) : string =
+        let (tests, allBinds) = patCompile scrut (Some scrutTy) case.Pattern
+        let binds =
+            match case.Pattern with
+            | IRPatVar id ->
+                // Economy preserved byte-for-byte from the emitter this
+                // replaced: a TOP-LEVEL binder nobody reads emits neither a
+                // declaration nor the IIFE that would carry it, so `| x -> 1`
+                // stays the bare body it has always been.
+                let used =
+                    (collectVarRefsIR case.Body).Contains id
+                    || (case.Guard
+                        |> Option.map (fun g -> (collectVarRefsIR g).Contains id)
+                        |> Option.defaultValue false)
+                if used then allBinds else []
+            | _ -> allBinds
+        let names' = binds |> List.fold (fun acc (id, name, _) -> Map.add id name acc) names
+        let bodyStr = exprToCppCore subst names' case.Body
+        // The guard runs AFTER the binders (it may read them) and falls
+        // through to the next arm when false -- on the last arm that is the
+        // abort. A guard on a variant arm used to be dropped on the floor
+        // here, taking the arm unconditionally.
+        let guarded =
+            match case.Guard with
+            | Some g -> $"({(exprToCppCore subst names' g)} ? {bodyStr} : {restStr})"
+            | None -> bodyStr
+        let bound =
+            if List.isEmpty binds then guarded
+            else
+                let decls =
+                    binds |> List.map (fun (_, n, init) -> $"auto {n} = {init}") |> String.concat "; "
+                $$"""[&]() { {{decls}}; return {{guarded}}; }()"""
+        if List.isEmpty tests then bound
+        else $"""({(String.concat " && " tests)} ? {bound} : {restStr})"""
+
+    let rec genCase (cs: IRMatchCase list) : string =
+        match cs with
+        | [] -> abortExpr
+        | case :: rest -> renderArm case (genCase rest)
     genCase cases
 
 
@@ -1235,8 +1269,14 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
     | IRLit IRLitUnit -> ""
     | IRAssign _ ->
         $"{(exprToCppCore subst names expr)};"
-    | IRConstraintCheck (cond, message, span) ->
-        $"if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)}); }}"
+    | IRConstraintCheck (cond, blCode, message, span) ->
+        $"if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"{blCode}\", \"{message}\", {(panicSpanArgs span)}); }}"
+    | IRBreakIf cond ->
+        // Inside an expression-context loop render the break still binds to
+        // the innermost emitted `for` (renderUnitStmts' own IRForRange arm),
+        // which is the rec-array recursion loop that synthesized it. No
+        // alloc-scope frees here: this flat-text path never pushes one.
+        $"if ({(exprToCppCore subst names cond)}) {{ break; }}"
     | IRForRange (vid, lo, hi, body) ->
         // Same loop-var naming (__k<id>) and int64_t convention as
         // genForRangeBinding / EmitCpp.forLoopFrom, so inlined kernel

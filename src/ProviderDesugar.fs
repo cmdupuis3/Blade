@@ -408,6 +408,7 @@ let private desugarModule (diags: ResizeArray<Blade.Diagnostics.Diagnostic>)
             let inner =
                 handles |> Set.remove def.Name |> Set.remove def.PrefixVar |> Set.remove def.StepVar
             def.SeedArm |> Option.iter (fun (seedVar, seedE) -> scanExpr (Set.remove seedVar inner) seedE)
+            def.Guard |> Option.iter (scanExpr inner)
             scanExpr inner def.SliceExpr
         | _ -> childrenOf e |> List.iter (scanExpr handles)
 
