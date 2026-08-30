@@ -2726,6 +2726,17 @@ and private classifyValue (c: Ctx) (e: IRExpr) : ValKind =
     | IRParallel _ | IRFusion _ -> VTuple (emitTupleParts c e)
     | IRCompute (IRParallel _ | IRFusion _ | IRTuple _) -> VTuple (emitTupleParts c e)
     | IRTuple _ -> VTuple (emitTupleParts c e)
+    // A BARE range in value position (`let xs = 0..n`, its `|> compute`
+    // form, the lift pass's hoisted reduce operand): an ARRAY value, though
+    // `typeOf` answers the IntValued tier's Int64 scalar (the element under
+    // nest peeling), so the type fall-through below would misroute it to the
+    // scalar lane's refusal. emitArr already carries the descriptor;
+    // materialize it (rather than leave it AVirt) to mirror the C++ lane's
+    // genRangeBinding -- every Blade binding except `static` is assignable,
+    // and a write needs a pool. Non-plain/multi-slot ranges still refuse
+    // inside emitArr/staticExtentOf, keeping the lane's clean-skip contract.
+    | IRRange _ -> VArray (materialize c (emitArr c e))
+    | IRCompute (IRRange _ as inner) -> VArray (materialize c (emitArr c inner))
     | _ ->
         match Blade.IR.stripUnits (typeOf e) with
         | ArrayElem _ -> VArray (emitArr c e)
