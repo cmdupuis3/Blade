@@ -10888,8 +10888,71 @@ and inferLetBinding env binding body : TypeResult<TypedExpr> =
 and letValueOnlyChain (env: TypeEnv) (tValue: TypedExpr) (body: Expr) : TypeResult<TypedExpr> =
     destructureLetChain env tValue [] body
 
+/// BL3021: a `match` whose scrutinee is a SPECIALIZATION INDEX -- `arity(p)`
+/// over a pack param, or `rank(p)` over an abstract/caret param (the operand's
+/// type is still an inference var here, so the rank is answered per HM clone)
+/// -- selects its arm when the specialization is cloned. The constant-match
+/// fold (IRMono.foldConstIntMatch) is deliberately order-sound: a GUARDED
+/// matching arm bails it, and for a recursive pack the arity specializer then
+/// cannot pick the base arm, specialization shrinks past arity 0, and the
+/// program dies as a raw g++ error naming the missing clone. Refuse here
+/// instead: arms must be statically decidable -- unguarded integer literals
+/// plus at most one unguarded catch-all (`_` or a name).
+///
+/// Scope: fires only when the scrutinee IS the intrinsic syntactically.
+/// `match (arity(A) + 0)` and ordinary int matches keep today's behavior, and
+/// `rank(x)` over a CONCRETE operand stays a plain static int match (its rank
+/// folds at lowering; a guard there is an ordinary runtime branch). The
+/// specializer's bail remains the backstop for anything that slips past.
+and validateSpecIndexMatchArms (env: TypeEnv) (tScrutinee: TypedExpr) (cases: MatchCase list) : TypeResult<unit> =
+    let scrutName =
+        match tScrutinee.Kind with
+        | TExprArity name -> Some $"arity({name})"
+        | TExprRank inner ->
+            let rec isAbstract (t: IRType) =
+                match t with
+                | IRTInfer _ -> true
+                | IRTUnitAnnotated (i, _) -> isAbstract i
+                | _ -> false
+            if isAbstract (env.Subst.Resolve inner.Type) then
+                match inner.Kind with
+                | TExprVar (n, _, _) -> Some $"rank({n})"
+                | _ -> Some "rank(...)"
+            else None
+        | _ -> None
+    match scrutName with
+    | None -> Ok ()
+    | Some scrut ->
+        let rec stripTyped (p: Pattern) =
+            match p.Kind with
+            | PatternKind.PatTyped (inner, _) -> stripTyped inner
+            | _ -> p
+        let mutable catchAlls = 0
+        let mutable offender : string option = None
+        for case in cases do
+            if offender.IsNone then
+                let p = stripTyped case.Pattern
+                let guarded =
+                    case.Guard.IsSome
+                    || (match p.Kind with PatternKind.PatGuarded _ -> true | _ -> false)
+                if guarded then
+                    offender <- Some "a guarded arm (`if` after the pattern) reads runtime values"
+                else
+                    match p.Kind with
+                    | PatternKind.PatLit (LitInt _) -> ()
+                    | PatternKind.PatWildcard | PatternKind.PatVar _ ->
+                        catchAlls <- catchAlls + 1
+                        if catchAlls > 1 then
+                            offender <- Some "a second catch-all arm can never be selected"
+                    | _ ->
+                        offender <- Some "a non-integer pattern cannot be decided against a static arity/rank"
+        match offender with
+        | Some off -> Error (SpecIndexMatchNotStatic (scrut, off))
+        | None -> Ok ()
+
 and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
     inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
+        validateSpecIndexMatchArms env tScrutinee cases |> Result.bind (fun () ->
         let resultTy = env.Subst.Fresh()
         // SHORT-CIRCUITING fold, not List.map + sequenceResults: a later
         // SUCCESSFUL arm re-stamps the ambient error span, so the first
@@ -10927,7 +10990,7 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
             | case :: rest -> inferCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
         go [] cases |> Result.map (fun tCases ->
             let resolvedTy = env.Subst.Resolve resultTy
-            mkTyped (TExprMatch (tScrutinee, tCases)) resolvedTy))
+            mkTyped (TExprMatch (tScrutinee, tCases)) resolvedTy)))
 
 /// Bidirectional match: push the `expected` type into each arm body via
 /// `checkExpr`, so a literal (or scalar) arm can flex to the expected
@@ -10937,6 +11000,7 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
 /// cross-unify (which ignored arm/result mismatches).
 and checkMatch env (expected: IRType) scrutinee cases : TypeResult<TypedExpr> =
     inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
+        validateSpecIndexMatchArms env tScrutinee cases |> Result.bind (fun () ->
         // Same short-circuiting fold + binding unify + Bool guard as
         // inferMatch (see its comment). The checkExpr-first path is
         // untouched -- that is the literal-flex leniency `comoment_prod`'s
@@ -10970,7 +11034,7 @@ and checkMatch env (expected: IRType) scrutinee cases : TypeResult<TypedExpr> =
             | [] -> Ok (List.rev acc)
             | case :: rest -> checkCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
         go [] cases |> Result.map (fun tCases ->
-            mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve expected)))
+            mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve expected))))
 
 /// Mechanism 2 -- scalar -> concretely-shaped-array broadcast fill. When a scalar
 /// value is checked against a concrete array type whose extents are statically

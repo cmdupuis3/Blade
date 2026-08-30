@@ -282,6 +282,13 @@ type TypeError =
     /// an operand whose type is not yet known, or a wrong arity. Payload is
     /// the complete message.
     | InvalidCast of message: string
+    /// BL3021. A `match` whose scrutinee is a SPECIALIZATION INDEX --
+    /// `arity(p)` over a pack param, or `rank(p)` over an abstract/caret
+    /// param -- selects its arm when the specialization is cloned, not at
+    /// runtime, so every arm must be statically decidable: unguarded integer
+    /// literals plus at most one catch-all. `scrutinee` is the intrinsic as
+    /// written; `offender` is a clause naming the arm that cannot be decided.
+    | SpecIndexMatchNotStatic of scrutinee: string * offender: string
     | ReduceEmptyArray of extent: int64
     | ProdsumExtentMismatch of a: int64 * b: int64
     | GramNeedsRank2 of leftRank: int * rightRank: int

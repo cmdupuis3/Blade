@@ -366,6 +366,18 @@
       ],
       "docs": []
     },
+    "BL3021": {
+      "title": "undecidable specialization-index match arm",
+      "explanation": "A `match` whose scrutinee is a specialization index -- `arity(p)` over a Poly pack parameter, or `rank(p)` over an abstract (caret) parameter -- selects its arm when the specialization is CLONED, not at runtime: the constant-match fold picks exactly one arm per arity/rank clone. A guarded arm reads runtime values, so it cannot be chosen there; the fold is order-sound and correctly bails on it, and for a recursive pack the arity specializer then cannot select the base arm, specialization shrinks past arity 0, and the program used to die as a raw g++ error naming the missing clone. The same holds for a non-integer pattern, or a second catch-all (which can never be selected). Only fires when the scrutinee IS the intrinsic syntactically; ordinary integer matches -- including `rank(a)` over a concrete array, which folds to a plain static int -- keep accepting guards.",
+      "fix": "Keep the arms statically decidable -- unguarded integer literals plus at most one catch-all (`_` or a name) -- and move the runtime condition INSIDE the chosen arm's body: `| 1 -> if threshold > 0.0 then ... else ...` instead of `| 1 if threshold > 0.0 -> ...`.",
+      "examples": [
+        "tests/corpus/arity/052_arity_match_guarded_arm_rejected.blade",
+        "tests/corpus/arity/053_rank_match_guarded_arm_rejected.blade"
+      ],
+      "docs": [
+        "docs/plans/plan-match-statements.md"
+      ]
+    },
     "BL3999": {
       "title": "type error",
       "explanation": "The type band's catch-all, carried by every checker error that has no more specific code of its own. A large and deliberately heterogeneous set: the message is the diagnosis, not the code.",

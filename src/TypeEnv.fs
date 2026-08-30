@@ -735,6 +735,8 @@ class IS implemented, and the dense result folds like any other array." op level
     | IntrinsicNotComplex name -> $"{name} is not defined for complex operands."
     | IntrinsicNeedsNumeric name -> $"{name} expects a numeric operand."
     | InvalidCast msg -> msg
+    | SpecIndexMatchNotStatic (scrutinee, offender) ->
+        $"match on {scrutinee}: arm selection happens at specialization (each arity/rank clone keeps exactly one arm), but {offender}. Arms of a specialization-index match must be unguarded integer literals plus at most one catch-all (`_` or a name); move the runtime condition inside the chosen arm's body instead: `| 1 -> if threshold > 0.0 then ... else ...`."
     | AbsNeedsNumericScalar got -> $"abs expects a numeric scalar operand, got {got}"
     | IntrinsicComplexScalarOnly name -> $"{name} applies to complex scalars; map it over the array elementwise (e.g. method_for(A) <@> lambda(z) -> {name}(z) |> compute)."
     | IntrinsicNeedsComplex (name, got) -> $"{name} expects a complex operand, got {got}"
@@ -944,6 +946,12 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // "invalid builtin argument" bucket would bury the one message
             // users need (how to license the conversion they meant).
             | InvalidCast _ -> "BL3019"
+            // A guard (or non-int pattern) on a `match arity(p)` /
+            // `match rank(p)` scrutinee: arm selection happens at
+            // specialization, where a runtime guard has no answer. Its own
+            // code, because the fix (move the condition into the arm's
+            // body) is nothing like BL3004's pattern-type story.
+            | SpecIndexMatchNotStatic _ -> "BL3021"
             | StructFieldDuplicate _ | StructNoField _ | StructMissingField _
             | StructFieldType _ | UnknownStructType _ | StructBoundScope _
             | StaticStructField _

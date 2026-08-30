@@ -632,3 +632,16 @@ as the backstop. Under R1's endgame the rule becomes structural: a clause
 SIGNATURE cannot express a value condition at all. The inverse mixing is
 fine and stays: `arity(A)` in ordinary value positions is just a static
 Int64.
+
+STATUS: EXECUTED (2026-08-30) as **BL3021** ("undecidable
+specialization-index match arm"), enforced in `validateSpecIndexMatchArms`
+(TypeCheckInfer.fs), called from both `inferMatch` and `checkMatch`. Scope
+exactly as specified: fires only on a syntactic `arity(p)` scrutinee, or a
+`rank(p)` scrutinee whose operand type is still an inference var (abstract/
+caret param) -- `rank(a)` over a concrete array and `match (arity(A) + 0)`
+keep today's behavior, and the specializer's bail stays as the backstop.
+Refused arm shapes: any guard, any non-integer pattern, a second catch-all.
+Corpus: arity/052 (the R9 repro, rejects), arity/053 (rank twin, rejects),
+arity/054 (green: the condition-in-arm-body steer; the condition reads the
+pack itself because a module-level binding in a pack base arm trips the
+unrelated main-local-capture emission gap).

@@ -274,6 +274,16 @@ module Codes =
             // NON-literal operand is converted, and names the explicit cast
             // that says it out loud.
             "BL3020", "implicit numeric conversion"
+            // BL3021: a `match` on a specialization index (`arity(p)` over a
+            // pack param, `rank(p)` over an abstract/caret param) carries an
+            // arm the specializer cannot decide statically -- a guarded arm,
+            // a non-integer pattern, or a second catch-all. Arm selection
+            // happens when the specialization is cloned; a guard reads
+            // runtime values, so a guarded matching arm would bail the
+            // constant-match fold and (for a recursive pack) let
+            // specialization shrink past the base arm. The condition belongs
+            // INSIDE the chosen arm's body.
+            "BL3021", "undecidable specialization-index match arm"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
