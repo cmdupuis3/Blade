@@ -486,7 +486,13 @@ SHADOWS the earlier declaration (no diagnostic; the call resolves against
 the shadower and its error blames the caller). Before clause dispatch
 exists this must be a refusal; when clause dispatch lands, same-name
 declarations at compatible-but-distinct signatures become a clause set and
-anything else stays refused.
+anything else stays refused. DONE (2026-08-30): BL2009 refuses same-scope
+duplicates in `checkModule`'s decl loop, naming both declaration sites and
+forward-pointing at clause dispatch; the duplicate decl is skipped so
+references keep resolving against the FIRST declaration. Nested `function`s
+(block-let desugar) and imports (`DeclImport`) never reach the check, so
+inner shadowing of an outer name stays legal
+(corpus functions/126 rejects, functions/127 green).
 
 **R2 — The freeze semantics has a verified fold trap.** `reduce(xs, (+))`
 over a `while`-guarded Newton trajectory answers 42.1: the fixed point,

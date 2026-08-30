@@ -126,6 +126,17 @@
         "docs/plans/plan-icechunk-provider.md"
       ]
     },
+    "BL2009": {
+      "title": "duplicate function declaration",
+      "explanation": "A second top-level `function` declaration reuses a name the same module scope already declares; the refusal names both sites. Before this code existed the later declaration silently SHADOWED the earlier one: the name rebound to the last declaration, and a call matching the FIRST signature died with a rank or type mismatch (BL3001) blaming the call site instead of the real cause. Same-scope only: a nested `function` desugars to a block-scoped binding and may still shadow an outer function of the same name, and an imported name (`from X import f`) is not a declaration, so neither trips this. Dispatching one name across several signatures -- function clauses, where same-name declarations at compatible-but-distinct signatures form a clause set selected at specialization -- is a planned feature (docs/plans/plan-match-statements.md, refinement R1); until it lands, every same-scope duplicate is refused.",
+      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. If the two bodies were meant to be rank-dispatched alternatives of one function (a scalar base case and an array case), that is the planned function-clause feature -- today, write one function whose body dispatches, or give the variants distinct names.",
+      "examples": [
+        "tests/corpus/functions/126_duplicate_function_rejects.blade"
+      ],
+      "docs": [
+        "docs/plans/plan-match-statements.md"
+      ]
+    },
     "BL3001": {
       "title": "type mismatch",
       "explanation": "Unification failed: a value's type cannot be reconciled with the type its position requires. Covers plain mismatches as well as an argument whose RANK or element type disagrees with the parameter, with the expected and actual types printed.",

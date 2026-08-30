@@ -16,6 +16,18 @@ open Blade.Types
 
 type TypeError =
     | UnboundVariable of string
+    /// BL2009. A second top-level `function` declaration reusing a name its
+    /// module scope already declared. Without this refusal the later
+    /// declaration silently SHADOWED the earlier one, and a call matching the
+    /// first signature died with a rank/type mismatch blaming the CALLER.
+    /// Same-scope only: a nested `function` desugars to a block-scoped
+    /// `let const name = lambda` and never reaches this check, so inner
+    /// shadowing of an outer function name stays legal. `firstSite` is
+    /// preformatted ("line L, column C"). When clause dispatch lands
+    /// (plan-match-statements.md §5 R1), same-name declarations at
+    /// compatible-but-distinct signatures become a clause set; everything
+    /// else stays refused here.
+    | DuplicateFunctionDecl of name: string * firstSite: string
     | TypeMismatch of expected: IRType * actual: IRType
     | ArityMismatch of expected: int * actual: int
     /// BL3002, kernel-apply seam. The WIDTH SCHEMA did not cover the pack

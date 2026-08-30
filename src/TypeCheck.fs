@@ -92,8 +92,46 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutable currentEnv = preEnv
     let mutable decls = []
     let mutable errors = []
-    
+    // Module-scope `function` names already declared, first span each (BL2009).
+    let mutable declaredFunctions : Map<string, Span> = Map.empty
+
     for d in modul.Decls do
+        // BL2009 -- duplicate top-level `function` name. Without this the
+        // later declaration silently rebinds the name (checkFunctionDecl's
+        // bindVarSimple), and a call matching the FIRST signature dies with a
+        // rank/type mismatch blaming the caller. Refuse here, at module decl
+        // level, so nested `function`s (desugared to block lets, checked in
+        // inferBlock) keep their legal shadowing of outer names, and imports
+        // (DeclImport, not DeclFunction) cannot trip it. The duplicate decl is
+        // NOT checked: references keep resolving against the first declaration,
+        // so the refusal is the only diagnostic instead of the root cause plus
+        // downstream mismatch noise. Prerequisite for same-name clause
+        // dispatch (plan-match-statements.md §5 R1).
+        let duplicateOf =
+            match d.Value with
+            | DeclFunction f ->
+                match Map.tryFind f.Name declaredFunctions with
+                | Some firstSpan -> Some (f.Name, firstSpan)
+                | None ->
+                    declaredFunctions <- Map.add f.Name d.Span declaredFunctions
+                    None
+            | _ -> None
+        match duplicateOf with
+        | Some (name, firstSpan) ->
+            // The duplicate decl skips checkDecl, whose per-decl reset would
+            // otherwise clear the PREVIOUS decl's expression span -- without
+            // this, locateError's precision order picks that stale span and
+            // the refusal points into the FIRST declaration's body.
+            resetCurrentStmtSpan ()
+            let firstSite =
+                let where = $"line {firstSpan.StartLine}, column {firstSpan.StartCol}"
+                match firstSpan.File, d.Span.File with
+                | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
+                | _ -> where
+            let ce = locateError d.Span currentEnv (DuplicateFunctionDecl (name, firstSite))
+            errors <- ce :: errors
+        | None ->
+
         // Pre-validation: inline TyEnumIdx<[mixed values]> occurrences. The
         // alias-site check in registerTypeDecl catches `type X = EnumIdx<[...]>`
         // declarations but not inline embeddings like `let x: Array<EnumIdx<[1,

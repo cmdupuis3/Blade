@@ -186,6 +186,14 @@ module Codes =
             // that doesn't keeps the historical silent fallback at check and
             // its own diagnostics at lowering.
             "BL2008", "provider cannot resolve the store"
+            // BL2009: a second top-level `function` declaration reusing a name
+            // the same module scope already declared. Previously the later
+            // declaration silently shadowed the earlier one and calls matching
+            // the first signature died blaming the caller. Same-scope only --
+            // nested `function`s desugar to block lets and may still shadow an
+            // outer name. Refused until same-name clause dispatch exists
+            // (plan-match-statements.md §5 R1).
+            "BL2009", "duplicate function declaration"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"
