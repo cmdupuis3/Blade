@@ -383,6 +383,13 @@ module Codes =
             // before the nest by genApplyCombinator's haloExtentGuards, and
             // mirrored by the interpreter's halo loop.
             "BL8009", "halo extent mismatch"
+            // A recursive array's `while` guard was still true at the end of
+            // the recursion budget (the declared leading extent): the
+            // recurrence did not converge, and freezing the last slice would
+            // silently pretend it did. Emitted by inferRecArray's budget
+            // check (an IRConstraintCheck after the recursion loop) and
+            // mirrored by the interpreter through the same node.
+            "BL8010", "recursion budget exhausted"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

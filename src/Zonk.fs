@@ -208,7 +208,8 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprZero -> TExprZero
         | TExprReplicate (c, b) -> TExprReplicate (z c, z b)
         | TExprAssign (l, r) -> TExprAssign (z l, z r)
-        | TExprConstraintCheck (c, msg) -> TExprConstraintCheck (z c, msg)
+        | TExprConstraintCheck (c, code, msg) -> TExprConstraintCheck (z c, code, msg)
+        | TExprBreakIf c -> TExprBreakIf (z c)
         | TExprPartialApp (op, arg, isL) -> TExprPartialApp (op, z arg, isL)
         // Ternary
         | TExprIf (c, t, e) -> TExprIf (z c, z t, z e)

@@ -252,6 +252,7 @@ let rec internal containsPipelineOp (e: Expr) : bool =
     | ExprKind.ExprRecArray d ->
         containsPipelineOp d.SliceExpr
         || (match d.SeedArm with Some (_, se) -> containsPipelineOp se | None -> false)
+        || (match d.Guard with Some g -> containsPipelineOp g | None -> false)
     | ExprKind.ExprVar _ | ExprKind.ExprLit _ | ExprKind.ExprWildcard
     | ExprKind.ExprQualified _ | ExprKind.ExprRange _ | ExprKind.ExprReverse _
     | ExprKind.ExprArity _ | ExprKind.ExprNth | ExprKind.ExprZero

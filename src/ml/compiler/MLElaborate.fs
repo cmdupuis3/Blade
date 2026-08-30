@@ -1790,9 +1790,10 @@ let rec private rewriteExpr (st: ElabState) (statics: StaticEnv) (aliases: Set<s
     // checker as an unbound variable.
     | ExprKind.ExprRecArray def ->
         rOpt (def.SeedArm |> Option.map snd) |> Result.bind (fun seedE ->
+        rOpt def.Guard |> Result.bind (fun guardE ->
         r def.SliceExpr |> Result.map (fun slice' ->
             let seed' = Option.map2 (fun (sv, _) se -> (sv, se)) def.SeedArm seedE
-            inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice' })))
+            inheritSpan e (ExprRecArray { def with SeedArm = seed'; SliceExpr = slice'; Guard = guardE }))))
     // The rest of the expression algebra. Every constructor holding a
     // sub-expression is walked, and the catch-all wildcard is deliberately
     // GONE: an unhandled case is an FS0025 incomplete-match warning at build

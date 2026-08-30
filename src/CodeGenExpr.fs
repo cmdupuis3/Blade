@@ -434,10 +434,14 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         exprError "array_product in expression position"
     | IRFunctorMap (f, c) ->
         exprError "functor_map in expression position"
-    | IRConstraintCheck (cond, message, span) ->
+    | IRConstraintCheck (cond, blCode, message, span) ->
         // Expression-position fallback: a portable IIFE so the guard still
         // fires if it lands somewhere other than a statement slot.
-        $"([&](){{ if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)}); }} return 0; }})()"
+        $"([&](){{ if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"{blCode}\", \"{message}\", {(panicSpanArgs span)}); }} return 0; }})()"
+    | IRBreakIf _ ->
+        // A C++ `break` cannot live inside an expression (the IIFE fallback
+        // would bind it to no loop) -- statement position only, by refusal.
+        exprError "break_if (a rec-array while guard) in expression position"
     | IRAssign (target, value) ->
         let targetStr =
             match target with
@@ -1257,8 +1261,14 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
     | IRLit IRLitUnit -> ""
     | IRAssign _ ->
         $"{(exprToCppCore subst names expr)};"
-    | IRConstraintCheck (cond, message, span) ->
-        $"if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)}); }}"
+    | IRConstraintCheck (cond, blCode, message, span) ->
+        $"if (!({(exprToCppCore subst names cond)})) {{ blade_rt::panic(\"{blCode}\", \"{message}\", {(panicSpanArgs span)}); }}"
+    | IRBreakIf cond ->
+        // Inside an expression-context loop render the break still binds to
+        // the innermost emitted `for` (renderUnitStmts' own IRForRange arm),
+        // which is the rec-array recursion loop that synthesized it. No
+        // alloc-scope frees here: this flat-text path never pushes one.
+        $"if ({(exprToCppCore subst names cond)}) {{ break; }}"
     | IRForRange (vid, lo, hi, body) ->
         // Same loop-var naming (__k<id>) and int64_t convention as
         // genForRangeBinding / EmitCpp.forLoopFrom, so inlined kernel

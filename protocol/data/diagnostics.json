@@ -809,6 +809,17 @@
       "examples": [],
       "docs": []
     },
+    "BL8010": {
+      "title": "recursion budget exhausted",
+      "explanation": "A recursive array's `while` guard was still true when the recursion reached the end of its declared leading extent (the budget). The recurrence did not converge, and freezing the last slice would silently pretend it did, so the runtime aborts naming the array and the budget.",
+      "fix": "Raise the budget (the leading `Idx<N>` extent), loosen the convergence tolerance in the guard, or fix the recurrence so it actually contracts. If running the full budget is the intended behavior, drop the `while` guard -- an unguarded `let rec` runs every step unconditionally.",
+      "examples": [
+        "tests/corpus/recursive-arrays/013_while_guard_budget_aborts.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
     "BL9001": {
       "title": "internal compiler error",
       "explanation": "An invariant inside the compiler broke, or an unexpected exception escaped to the CLI boundary. This is a bug in Blade, not in the program being compiled.",

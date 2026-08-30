@@ -1,9 +1,12 @@
 # Match statements: census, the `while` guard, and matching on types
 
 Status: AUTHORED 2026-08-30 from a two-agent probe audit. §2's bug cluster and
-§4's phase 1 LANDED the same day (feat/match-arc); §4's phase 2 LANDED
-2026-08-30 (`claude/dreamy-northcutt-26b1ba`); §3 (while guard) and §4 phases
-3-5 are planned, nothing built; §2's remaining ledger is open.
+§4's phase 1 LANDED the same day (feat/match-arc); §4's phase 2 (abstract
+rank peeling) and §3's P0 (the `while` guard itself: parse/typecheck/
+IRBreakIf/freeze/BL8010 abort, C++ + interp lanes, llvm refuse, AD refusal,
+unroll decline) both LANDED 2026-08-30; §2's open item 1 (the recursive
+match emitter) LANDED 2026-08-30. Open: §3's P1 (`converged_at`) and P2
+(window riding), §4 phases 3-5, and §2's remaining ledger.
 
 Sources: docs/formalism.md §7.5 (rec arrays), plan-fortran-killer.md §2 (the
 while-guard sketch this refines). Claims marked VERIFIED were probe-confirmed.
@@ -104,7 +107,24 @@ and is caught only at IRValidate as BL6001.
    rec-array snoc stays confined to `let rec`, and TYPE-level dispatch is
    §4's job).
 
-## 3. The `while` guard on recursive arrays (planned, P0 ≈ 1 week)
+## 3. The `while` guard on recursive arrays (P0 LANDED 2026-08-30; P1/P2 open)
+
+P0 notes (as built): the guard is a bare `TokIdent "while"` in `parseConsArm`
+(seed arm rejects, `if` steers to `while`); `RecArrayDef.Guard` walked by the
+six elaborators + collectFreeVars + the Grad walkers; `inferRecArray` runs the
+guard through the SHARED lag-hoist table with the slice (bounds/zero-history
+free), desugars the stop ordinal + freeze epilogue in surface AST, and injects
+the TExpr-only nodes (`TExprBreakIf` after the stop record; the BL8010
+`TExprConstraintCheck` after the freeze) into the CHECKED block -- guard
+unified with Bool post-check with a predicate-steer message.
+`IRConstraintCheck` gained a `code` field (BL8001 stays the default) so the
+abort renders `error[BL8010]` naming the array and budget in both lanes.
+The C++ break peeks (not pops) the live alloc frame's frees before `break`;
+the interp twin is an `InterpBreak` exception caught per IRForRange level.
+`unrollForRanges` declines IRBreakIf bodies; EmitLlvm refuses loudly;
+`expandRecArray` refuses guards (BL5500). Corpus: recursive-arrays/012-016
+(Newton freeze, budget abort, seed-arm reject, non-Bool reject, rank-2
+freeze) + ad/023; interp lane byte-identical.
 
 Design refined from plan-fortran-killer.md §2. Surface:
 

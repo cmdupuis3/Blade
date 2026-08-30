@@ -341,10 +341,19 @@ and TypedExprKind =
     // Partial application of operator (e.g., (+ 3) or (3 +))
     | TExprPartialApp of op: BinOp * arg: TypedExpr * isLeft: bool
 
-    // Runtime constraint guard: emits `if (!(cond)) { cerr << message; abort(); }`.
-    // Synthesized by the checker for mutual-group joint bindings (and, in later
-    // phases, struct constraint checks); not expressible in surface syntax.
-    | TExprConstraintCheck of cond: TypedExpr * message: string
+    // Runtime constraint guard: emits `if (!(cond)) { panic(code, message); }`.
+    // Synthesized by the checker for mutual-group joint bindings, struct
+    // constraint checks, and the rec-array budget abort; not expressible in
+    // surface syntax. `code` is the BLxxxx the panic renders (BL8001 for
+    // value-constraint guards, BL8010 for the while-guard budget abort).
+    | TExprConstraintCheck of cond: TypedExpr * code: string * message: string
+
+    // Early exit from the ENCLOSING for-in loop when cond is true. Synthesized
+    // ONLY by inferRecArray for the `while` guard on a recursive array's
+    // inductive arm -- never parser-reachable, and only legal in for-in
+    // statement position (the emitters refuse it anywhere a C++ `break`
+    // could not stand).
+    | TExprBreakIf of cond: TypedExpr
 
 and TypedMatchCase = {
     Pattern: TypedPattern

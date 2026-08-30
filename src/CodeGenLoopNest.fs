@@ -3860,10 +3860,35 @@ let containsIdentToken (text: string) (name: string) : bool =
         text,
         "(?<![A-Za-z0-9_])" + System.Text.RegularExpressions.Regex.Escape(name) + "(?![A-Za-z0-9_])")
 
-/// Pop the innermost scope and render its frees at `ind`. Iteration is over the
-/// newest-first list, i.e. registration-reverse order. An allocation is skipped
-/// when its owning let escapes or its name was suppressed. An empty survivor list
+/// Render one frame's frees at `ind`. Iteration is over the newest-first
+/// list, i.e. registration-reverse order. An allocation is skipped when its
+/// owning let escapes or its name was suppressed. An empty survivor list
 /// emits no lines at all, so unaffected programs are byte-identical.
+let internal renderFrameFrees (ind: string) (frame: AllocScope) : string list =
+    frame.Allocs
+    |> List.collect (fun a ->
+        let ownerEscapes =
+            match trackedAllocOwner a with
+            | Some oid -> Set.contains oid frame.Escapes
+            | None -> false
+        if ownerEscapes || Set.contains (trackedAllocName a) frame.SuppressNames then []
+        else
+            match a with
+            | PoolAlloc (n, routine, args, ownedExtents, _) ->
+                [ $"{ind}{routine}<{args}>({n}.data, {n}.extents);" ]
+                @ (match ownedExtents with
+                   | Some ex -> [$"{ind}delete[] {ex};"]
+                   | None -> [])
+            | RawAlloc (n, _) -> [$"{ind}delete[] {n};"]
+            | RawArrayData (n, ownedExtents, _) ->
+                [ $"{ind}delete[] {n}.data;" ]
+                @ (match ownedExtents with
+                   | Some ex -> [$"{ind}delete[] {ex};"]
+                   | None -> [])
+            | ShapedAlloc (_, routine, args, _) ->
+                [ $"{ind}nested_array_utilities::{routine}({args});" ])
+
+/// Pop the innermost scope and render its frees at `ind`.
 let popAllocScopeFrees (ind: string) : string list =
     match popAllocScope () with
     | None -> []
@@ -3873,28 +3898,18 @@ let popAllocScopeFrees (ind: string) : string list =
         // brace, so a later nest must re-declare its own buffer.
         let sc = streamBufDeclsCell ()
         sc.Value <- Set.difference sc.Value frame.StreamBufNames
-        frame.Allocs
-        |> List.collect (fun a ->
-            let ownerEscapes =
-                match trackedAllocOwner a with
-                | Some oid -> Set.contains oid frame.Escapes
-                | None -> false
-            if ownerEscapes || Set.contains (trackedAllocName a) frame.SuppressNames then []
-            else
-                match a with
-                | PoolAlloc (n, routine, args, ownedExtents, _) ->
-                    [ $"{ind}{routine}<{args}>({n}.data, {n}.extents);" ]
-                    @ (match ownedExtents with
-                       | Some ex -> [$"{ind}delete[] {ex};"]
-                       | None -> [])
-                | RawAlloc (n, _) -> [$"{ind}delete[] {n};"]
-                | RawArrayData (n, ownedExtents, _) ->
-                    [ $"{ind}delete[] {n}.data;" ]
-                    @ (match ownedExtents with
-                       | Some ex -> [$"{ind}delete[] {ex};"]
-                       | None -> [])
-                | ShapedAlloc (_, routine, args, _) ->
-                    [ $"{ind}nested_array_utilities::{routine}({args});" ])
+        renderFrameFrees ind frame
+
+/// Render the innermost frame's frees at `ind` WITHOUT popping -- the early-exit
+/// path of a `while`-guarded rec-array loop (IRBreakIf) leaves the loop before
+/// the bottom-of-body frees run, so the break emits the frees accumulated SO FAR
+/// this iteration and then breaks. The frame stays live (the non-breaking path
+/// still frees at the bottom), and streamed fiber-buffer declarations are NOT
+/// retired (their C++ names remain in scope past the break).
+let peekAllocScopeFrees (ind: string) : string list =
+    match currentAllocScope () with
+    | None -> []
+    | Some frame -> renderFrameFrees ind frame
 
 /// Generate code to allocate and initialize an array from literal values
 let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr list) (arrType: IRArrayType) : string list =

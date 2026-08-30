@@ -81,8 +81,11 @@ let rec freeVars (bound: Set<string>) (e: Expr) : Set<string> =
             match d.SeedArm with
             | Some (stepVar, se) -> freeVars (Set.union bound (Set.ofList [ d.Name; stepVar ])) se
             | None -> Set.empty
-        Set.union seed
-            (freeVars (Set.union bound (Set.ofList [ d.Name; d.PrefixVar; d.StepVar ])) d.SliceExpr)
+        let inductiveBound = Set.union bound (Set.ofList [ d.Name; d.PrefixVar; d.StepVar ])
+        Set.unionMany
+            [ seed
+              freeVars inductiveBound d.SliceExpr
+              (match d.Guard with Some g -> freeVars inductiveBound g | None -> Set.empty) ]
     // co-iteration formers: a former hands its kernel the ELEMENTS of these
     // expressions, so every name here is live even though the kernel never
     // spells it.

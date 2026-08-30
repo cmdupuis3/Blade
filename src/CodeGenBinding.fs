@@ -250,12 +250,27 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
 
-    | IRConstraintCheck (cond, message, span) ->
+    | IRConstraintCheck (cond, blCode, message, span) ->
         // Runtime constraint guard -- the loud-failure idiom (cerr + abort).
         let code =
             [ $$"""{{ind}}if (!({{(exprToCppCtx ctx cond)}})) {"""
-              $"{ind}    blade_rt::panic(\"BL8001\", \"{message}\", {(panicSpanArgs span)});"
+              $"{ind}    blade_rt::panic(\"{blCode}\", \"{message}\", {(panicSpanArgs span)});"
               $"{ind}}}" ]
+        let ctx' = addVarName binding.Id name ctx
+        (code, ctx')
+
+    | IRBreakIf cond ->
+        // Early exit from the enclosing for-range (the rec-array `while`
+        // guard). The per-iteration frees accumulated SO FAR must run before
+        // the break -- a naive `break` skips the bottom-of-body frees and
+        // leaks whatever this iteration already materialized. Peek, don't
+        // pop: the frame stays live for the non-breaking path.
+        let frees = peekAllocScopeFrees (ind + "    ")
+        let code =
+            [ $$"""{{ind}}if ({{(exprToCppCtx ctx cond)}}) {""" ]
+            @ frees
+            @ [ $"{ind}    break;"
+                $"{ind}}}" ]
         let ctx' = addVarName binding.Id name ctx
         (code, ctx')
 

@@ -324,8 +324,10 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         $"({pp f} >>@ {pp g})"
     | IRComposeMeth (f, g) ->
         $"({pp f} @>> {pp g})"
-    | IRConstraintCheck (c, msg, _) ->
-        $"check({pp c}, \"{msg}\")"
+    | IRConstraintCheck (c, code, msg, _) ->
+        $"check[{code}]({pp c}, \"{msg}\")"
+    | IRBreakIf c ->
+        $"break_if({pp c})"
     | IRAssign (target, v) ->
         let targetStr =
             match target with

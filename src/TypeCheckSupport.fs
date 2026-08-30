@@ -194,7 +194,14 @@ let rec collectFreeVars (bound: Set<string>) (expr: Expr) : Set<string> =
                 collectFreeVars (Set.add seedStep selfBound) seedExpr
             | None -> Set.empty
         let sliceBound = selfBound |> Set.add def.PrefixVar |> Set.add def.StepVar
-        Set.union seedFree (collectFreeVars sliceBound def.SliceExpr)
+        // The `while` guard scopes like the slice -- prefix/step are its
+        // binders; anything else it reads is a genuine capture. Missing this
+        // walk would silently drop guard captures from closure conversion.
+        let guardFree =
+            match def.Guard with
+            | Some g -> collectFreeVars sliceBound g
+            | None -> Set.empty
+        Set.unionMany [ seedFree; guardFree; collectFreeVars sliceBound def.SliceExpr ]
     // ---- Leaves: nothing to walk, for a stated reason ----
     | ExprKind.ExprWildcard
     | ExprKind.ExprNth
@@ -2573,7 +2580,8 @@ let typedExprChildren (expr: TypedExpr) : TypedExpr list =
                     lo :: hi :: (body |> List.collect stmtExprsOf)
             (stmts |> List.collect stmtExprsOf) @ Option.toList final
         | TExprAssign (l, r) -> [l; r]
-        | TExprConstraintCheck (c, _) -> [c]
+        | TExprConstraintCheck (c, _, _) -> [c]
+        | TExprBreakIf c -> [c]
         | TExprReplicate (c, b) -> [c; b]
         | TExprAlign (es, _) -> es
         | TExprPartialApp (_, a, _) -> [a]

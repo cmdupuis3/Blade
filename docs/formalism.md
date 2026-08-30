@@ -996,6 +996,43 @@ array (a CFL max, a loss trace) folds in enumeration order without a second
 pass. State continuation is a second definition seeded from the first's
 final slice.
 
+#### 7.5.1 The `while` guard: iterate to convergence
+
+The inductive arm may carry a **convergence guard**, which turns the declared
+extent from a trip count into a **budget**:
+
+```blade
+type It = Idx<200>                       // a BUDGET, not a trip count
+let rec u: Array<Float like It, Y, X> =
+    match u with
+    | zero -> zero
+    | zero :: s -> zero :: u0
+    | prefix :: n while residual(prefix(n - 1)) > tol -> prefix :: sweep(prefix(n - 1))
+```
+
+Semantics, in three parts:
+
+- **Defined** up to the first `n` at which the guard is false. The guard is
+  a predicate (it unifies with `Bool`) and reads the prefix under exactly the
+  rules the slice does — same legal index shapes, same implicit zero history,
+  so a guard reading `prefix(n - 1)` at `n = 0` reads zero rather than
+  garbage.
+- **Frozen** afterwards: the last written slice repeats to the end of the
+  extent. The family therefore stays total at its declared type — every
+  consumer, fold, and interior read sees a full trajectory, and the
+  hand-written idempotent-freeze idiom this replaces agrees with it bitwise.
+- **Aborts** (BL8010, naming the array and the budget) if the guard is still
+  true when the budget is exhausted. This is the point of the construct: a
+  solve that did not converge cannot silently pretend it did, which is
+  precisely what a fixed-trip-count loop offers no way to distinguish.
+
+The guard can only stop the sweep EARLY, so the extent stays static and the
+decidability fence above is untouched. What it buys is cost (the emitted
+sweep exits instead of running the full budget) and diagnosis, not
+expressiveness. A `while`-guarded array is not differentiable in v1: the
+stopping ordinal is data-dependent, so `grad` refuses it rather than
+linearizing a trip count that depends on primal values.
+
 ## 8. Arity Polymorphism
 
 ### 8.1 The concept
@@ -1542,7 +1579,12 @@ library concern.
 - Sequential recurrences: there is no imperative `for x in RANGE { body }`
   statement — it is expressed as a recursive array (structural induction on
   extent; see §7.5), with folds as `reduce(...)` and parallel maps as
-  `method_for(range<...>) <@> lambda(...)`.
+  `method_for(range<...>) <@> lambda(...)`. Iterate-to-convergence is the
+  inductive arm's `while` guard, `| prefix :: n while COND -> prefix :: e`
+  (§7.5.1): defined until the guard goes false, frozen after, BL8010 if the
+  budget runs out with the guard still true. `while` is not a keyword — it is
+  recognized positionally between the step variable and `->`, so a program
+  may still bind the name.
 - Tuples: `(a, b)` literals; destructuring exact / wildcard / `head :: tail`;
   `()` unit; `(e)` is grouping, not a 1-tuple.
 - Sum types: `type Option<T> = Some : T | None`; construction `Some(42)`;

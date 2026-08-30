@@ -885,7 +885,8 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     // Only the base extent can hold a liftable inline form; the level list is data.
     | IROrbitClass (levels, n) -> IROrbitClass (levels, liftExpr builder n)
     | IRAssign (t, v) -> IRAssign (t, liftExpr builder v)
-    | IRConstraintCheck (c, msg, sp) -> IRConstraintCheck (liftExpr builder c, msg, sp)
+    | IRConstraintCheck (c, code, msg, sp) -> IRConstraintCheck (liftExpr builder c, code, msg, sp)
+    | IRBreakIf c -> IRBreakIf (liftExpr builder c)
     | IRForRange (vid, lo, hi, body) ->
         IRForRange (vid, liftExpr builder lo, liftExpr builder hi, liftExpr builder body)
     | IRBlocked (it, bs) -> IRBlocked (it, liftExpr builder bs)

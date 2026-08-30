@@ -2019,6 +2019,14 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
     // guarded reads -- and the rank-k dense fold `reduce(A, op, axes = k)`.
     | IRForRange (vid, lo, hi, body) -> emitForRange c vid lo hi body
 
+    // The rec-array `while` guard's early exit (and the budget abort that
+    // rides with it as IRConstraintCheck) would need a conditional-branch
+    // loop shape this emitter's single-block for-range does not have yet.
+    // Refuse LOUDLY: a silently dropped break would run the full budget and
+    // overwrite the frozen slices.
+    | IRBreakIf _ ->
+        refuse "a `while`-guarded recursive array (early exit / IRBreakIf) -- not supported by the llvm lane yet"
+
     // ---- array-derived scalars -------------------------------------------
     // A read CONSUMES its base where it can: one cell of a producer costs one
     // kernel application, and materializing a whole pool to fetch it was the

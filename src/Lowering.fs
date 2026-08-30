@@ -882,10 +882,13 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprAssign (lhs, rhs) ->
         IRAssign (lowerTypedExpr env lhs, lowerTypedExpr env rhs)
 
-    | TExprConstraintCheck (cond, message) ->
+    | TExprConstraintCheck (cond, code, message) ->
         // Carry the constraint's source span into IR so the runtime panic
-        // (BL8001) can report file:line. texpr is the whole node in hand.
-        IRConstraintCheck (lowerTypedExpr env cond, message, texpr.Span)
+        // can report file:line. texpr is the whole node in hand.
+        IRConstraintCheck (lowerTypedExpr env cond, code, message, texpr.Span)
+
+    | TExprBreakIf cond ->
+        IRBreakIf (lowerTypedExpr env cond)
     
     | TExprSequence exprs ->
         // sequence(c1, c2, ..., cn) -> IRSequence (flat n-ary parallel)

@@ -348,7 +348,8 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         | IRSequence es -> es |> List.iter (checkScope scope ctx)
         | IRPure e -> checkScope scope ctx e
         | IRAssign (t, v) -> checkScope scope ctx t; checkScope scope ctx v
-        | IRConstraintCheck (c, _, _) -> checkScope scope ctx c
+        | IRConstraintCheck (c, _, _, _) -> checkScope scope ctx c
+        | IRBreakIf c -> checkScope scope ctx c
         | _ -> ()  // Literals, params, etc. -- no var refs
     
     let mutable cumulativeScope = moduleIds

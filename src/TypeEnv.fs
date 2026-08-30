@@ -598,7 +598,7 @@ let formatTypeError (err: TypeError) : string =
         // a real variable named `while` never trips it.
         match name with
         | "while" | "do" ->
-            $"Unbound variable: {name}. Blade has no imperative loops -- iteration is declarative. A converge/accumulate loop is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`), a fold is `reduce(...)`, and a parallel map is `method_for(range<...>) <@> lambda(...)` or plain array arithmetic. See formalism 7.5."
+            $"Unbound variable: {name}. Blade has no imperative loops -- iteration is declarative. A converge/accumulate loop is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`), and iterate-until-converged is that array's inductive arm carrying a `while` guard over a BUDGET extent (`| prefix :: n while <cond> -> prefix :: <step>` -- frozen once the guard goes false, BL8010 if it never does). A fold is `reduce(...)`, and a parallel map is `method_for(range<...>) <@> lambda(...)` or plain array arithmetic. See formalism 7.5."
         | _ -> $"Unbound variable: {name}"
     | TypeMismatch (exp, act) ->
         let rendered = $"Type mismatch: expected {ppIRType exp}, got {ppIRType act}"

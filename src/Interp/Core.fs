@@ -50,6 +50,13 @@ module N = Blade.Interp.Numerics
 /// caller can report precisely which construct is not yet interpreted.
 exception InterpUnsupported of feature: string
 
+/// Control-flow signal for IRBreakIf (the rec-array `while` guard): thrown by
+/// the break-if arm, caught ONLY by the enclosing IRForRange arm, which stops
+/// iterating -- the twin of the C++ `break` genForRangeBinding emits. Escaping
+/// a loop entirely (an IRBreakIf outside any for-range) is a compiler bug and
+/// surfaces as an unhandled exception rather than being silently swallowed.
+exception InterpBreak
+
 /// Runtime bridge from the scalar Core evaluator down to the M2 loop/array
 /// layer (Interp/Loops.fs). Core must stay free of a *compile-time* dependency
 /// on Loops, because Loops calls back into Core.evalExpr for kernel bodies --
@@ -596,21 +603,33 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let hiV = toI64 (evalExpr st env hi)
         let cell = envBind env vid (VInt loV)
         let mutable i = loV
-        while i < hiV do
-            cell.V <- VInt i
-            evalExpr st env body |> ignore
-            i <- i + 1L
+        // InterpBreak = the C++ `break` genForRangeBinding emits for IRBreakIf
+        // (the rec-array while guard): it unwinds to HERE, ending this loop and
+        // resuming after it. The handler wraps the whole loop rather than each
+        // trip -- one guarded region per loop execution instead of one per
+        // iteration -- and being per loop LEVEL it still stops only the
+        // innermost enclosing loop when they nest.
+        (try
+            while i < hiV do
+                cell.V <- VInt i
+                evalExpr st env body |> ignore
+                i <- i + 1L
+         with InterpBreak -> ())
         VUnit
 
-    | IRConstraintCheck (cond, message, span) ->
-        // `if (!(cond)) blade_rt::panic("BL8001", message, file, line)`
+    | IRBreakIf cond ->
+        if toBoolV (evalExpr st env cond) then raise InterpBreak
+        else VUnit
+
+    | IRConstraintCheck (cond, code, message, span) ->
+        // `if (!(cond)) blade_rt::panic(code, message, file, line)`
         // (CodeGen.fs:7166). File is nullptr when empty, line 0 when unset --
         // reproduced here so Run.fs can render the identical stderr line.
         if toBoolV (evalExpr st env cond) then VUnit
         else
             let fileOpt = match span.File with Some f when f <> "" -> Some f | _ -> None
             let line = if span.StartLine > 0 then span.StartLine else 0
-            raise (InterpPanic ("BL8001", message, fileOpt, line))
+            raise (InterpPanic (code, message, fileOpt, line))
 
     | IRRank arr ->
         // Rank is static in CodeGen (from the type). Scalars are rank 0; a

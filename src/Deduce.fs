@@ -262,7 +262,8 @@ let rec private countVar (v: IRId) (e: TypedExpr) : int =
     | TExprUnaryOp (_, i) -> c i
     | TExprExtents a | TExprArrayNegate a | TExprArrayConjugate a -> c a
     | TExprField (o, _, _) -> c o
-    | TExprConstraintCheck (cond, _) -> c cond
+    | TExprConstraintCheck (cond, _, _) -> c cond
+    | TExprBreakIf cond -> c cond
     | TExprApp (f, args) -> c f + sum args
     | TExprTupleIndex (t, i) -> c t + c i
     | TExprIndex (a, idxs, _) -> c a + sum idxs
@@ -306,8 +307,10 @@ let rec private substVar (v: IRId) (repl: TypedExpr) (e: TypedExpr) : TypedExpr 
     | TExprArrayNegate a -> sub a |> Option.bind (fun x -> ok (TExprArrayNegate x))
     | TExprArrayConjugate a -> sub a |> Option.bind (fun x -> ok (TExprArrayConjugate x))
     | TExprField (o, f, i) -> sub o |> Option.bind (fun x -> ok (TExprField (x, f, i)))
-    | TExprConstraintCheck (cond, msg) ->
-        sub cond |> Option.bind (fun x -> ok (TExprConstraintCheck (x, msg)))
+    | TExprConstraintCheck (cond, code, msg) ->
+        sub cond |> Option.bind (fun x -> ok (TExprConstraintCheck (x, code, msg)))
+    | TExprBreakIf cond ->
+        sub cond |> Option.bind (fun x -> ok (TExprBreakIf x))
     | TExprApp (f, args) ->
         (match sub f, subs args with
          | Some g, Some a -> ok (TExprApp (g, a))
@@ -461,7 +464,8 @@ let rec private flattenBindings (e: TypedExpr) : TypedExpr =
         | TExprArrayNegate a -> k (TExprArrayNegate (f a))
         | TExprArrayConjugate a -> k (TExprArrayConjugate (f a))
         | TExprField (o, fl, i) -> k (TExprField (f o, fl, i))
-        | TExprConstraintCheck (c, msg) -> k (TExprConstraintCheck (f c, msg))
+        | TExprConstraintCheck (c, code, msg) -> k (TExprConstraintCheck (f c, code, msg))
+        | TExprBreakIf c -> k (TExprBreakIf (f c))
         | TExprApp (fn, args) -> k (TExprApp (f fn, fs args))
         | TExprTupleIndex (t, i) -> k (TExprTupleIndex (f t, f i))
         | TExprIndex (a, idxs, ident) -> k (TExprIndex (f a, fs idxs, ident))

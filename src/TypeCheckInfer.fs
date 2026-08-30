@@ -10336,15 +10336,19 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
         // argument position renders as a raw row pointer. Hoist each
         // distinct partial application into a loop-body let; scalar reads
         // (full applications) stay in place.
-        let rewritePrefixReads (slice: Expr) : (string * Expr) list * Expr =
-            let hoisted = ResizeArray<string * string * Expr>()  // key, name, value
-            let emit (key: string) (value: unit -> Expr) =
-                match hoisted |> Seq.tryFind (fun (k2, _, _) -> k2 = key) with
-                | Some (_, nm, _) -> nm
-                | None ->
-                    let nm = $"__lag{hoisted.Count}_{def.Name}"
-                    hoisted.Add (key, nm, value ())
-                    nm
+        // The lag-hoist table is SHARED between the slice and the `while`
+        // guard: both read the prefix through the same rewrite, so a lag row
+        // they both touch hoists once, and the guard rides the identical
+        // bounds discipline and zero-history clamps for free.
+        let hoisted = ResizeArray<string * string * Expr>()  // key, name, value
+        let emit (key: string) (value: unit -> Expr) =
+            match hoisted |> Seq.tryFind (fun (k2, _, _) -> k2 = key) with
+            | Some (_, nm, _) -> nm
+            | None ->
+                let nm = $"__lag{hoisted.Count}_{def.Name}"
+                hoisted.Add (key, nm, value ())
+                nm
+        let rewritePrefixReads (slice: Expr) : Expr =
             let slice' =
                 Blade.Unfold.mapExprPre (fun x ->
                     match x.Kind with
@@ -10381,18 +10385,38 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                                 Some (guardWrap needsLo needsHi idx (synAt (ExprVar raw)) (zeroSliceFor rest.Length))
                             else Some (guardWrap needsLo needsHi idx read zed)
                     | _ -> None) slice
-            (hoisted |> Seq.map (fun (_, nm, v) -> (nm, v)) |> List.ofSeq), slice'
+            slice'
         // Inductive arm: for n in start..N, prefix reads become buffer reads
         // (partials via hoisted row-view lets, scalars in place).
-        let lagLets, sliceHoisted = rewritePrefixReads def.SliceExpr
-        let slice' = Blade.Unfold.substFree (Map.ofList [def.PrefixVar, bufVar]) sliceHoisted
+        let sliceHoisted = rewritePrefixReads def.SliceExpr
+        let guardHoisted = def.Guard |> Option.map rewritePrefixReads
+        let substBuf = Blade.Unfold.substFree (Map.ofList [def.PrefixVar, bufVar])
+        let slice' = substBuf sliceHoisted
+        let guard' = guardHoisted |> Option.map substBuf
         let lagStmts =
-            lagLets |> List.map (fun (nm, rd) ->
+            hoisted |> Seq.map (fun (_, nm, rd) ->
                 StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar nm); Type = None; Value = rd })
+            |> List.ofSeq
+        // `while` guard scaffolding (plan-match-statements.md 3). Everything
+        // surface-expressible is desugared HERE; the break itself and the
+        // budget abort are TExpr-only nodes injected into the checked block
+        // below. Loop-body order: lag lets -> guard value -> stop-ordinal
+        // record -> [injected break] -> slice write.
+        let grdName = $"__grd_{def.Name}"
+        let stopName = $"__stop_{def.Name}"
+        let guardStmts =
+            match guard' with
+            | None -> []
+            | Some g ->
+                [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar grdName); Type = None; Value = g }
+                  // The stopping ordinal: n on the breaking iteration, the
+                  // "never stopped" sentinel N re-written on every other.
+                  StmtExpr (synAt (ExprAssign (synAt (ExprVar stopName),
+                              synAt (ExprIf (synAt (ExprVar grdName), iLit n, stepVarE))))) ]
         let loop =
             StmtForIn (def.StepVar,
                        synAt (ExprKind.ExprDotDot (iLit loopStart, iLit n)),
-                       lagStmts @ sliceCopyStmts (synAt (ExprVar def.StepVar)) $"__slice_{def.Name}" slice')
+                       lagStmts @ guardStmts @ sliceCopyStmts (synAt (ExprVar def.StepVar)) $"__slice_{def.Name}" slice')
         // Zero slices consumed by out-of-prefix lag reads. Annotated from the
         // declared slot list so their index tags match the row views they
         // alternate with.
@@ -10409,8 +10433,102 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
                 StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar nm); Type = tyOpt
                           Value = zerosOver "zs" slotsOpt (List.skip dropped trailing) })
             |> List.ofSeq
-        let block = synAt (ExprBlock ((bufLet :: zeroSliceStmts) @ seedStmts @ [loop], Some bufVar))
-        checkExpr env annotTy block |> Result.map (fun tv -> { tv with Type = annotTy }))
+        // Guard prologue (the mut stop ordinal, sentinel N = "never stopped")
+        // and epilogue (the FREEZE loop: the last written slice repeats over
+        // [stop, N)). Freeze source row = max(stop - 1, 0): at stop = 0
+        // nothing was ever written, the buffer is zero everywhere, and the
+        // copy is zero-onto-zero -- still correct, still in bounds.
+        let guardPre, guardPost =
+            match guard' with
+            | None -> [], []
+            | Some _ ->
+                let stopE = synAt (ExprVar stopName)
+                let frzName = $"__frz_{def.Name}"
+                let fkName = $"__fk_{def.Name}"
+                let pre =
+                    [ StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar stopName); Type = None; Value = iLit n } ]
+                let post =
+                    [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar frzName); Type = None
+                                Value = synAt (ExprIf (synAt (ExprBinOp (Elementwise, OpGt, stopE, iLit 0L)),
+                                                       synAt (ExprBinOp (Elementwise, OpSub, stopE, iLit 1L)),
+                                                       iLit 0L)) }
+                      StmtForIn (fkName,
+                                 synAt (ExprKind.ExprDotDot (stopE, iLit n)),
+                                 sliceCopyStmts (synAt (ExprVar fkName)) $"__frzslice_{def.Name}"
+                                                (synAt (ExprApp (bufVar, [synAt (ExprVar frzName)])))) ]
+                pre, post
+        let block = synAt (ExprBlock ((bufLet :: zeroSliceStmts) @ seedStmts @ guardPre @ [loop] @ guardPost, Some bufVar))
+        // Post-check injection for the `while` guard: the break (TExprBreakIf,
+        // not surface-expressible) after the stop-ordinal record inside the
+        // recursion loop, and the budget abort (BL8010) after the freeze
+        // epilogue. Both reference bindings by the IRIds the check just
+        // minted, so this must run on the TYPED tree.
+        let injectGuardControl (tv: TypedExpr) : TypeResult<TypedExpr> =
+            match tv.Kind with
+            | TExprBlock (tstmts, fin) ->
+                let stopId =
+                    tstmts |> List.tryPick (fun st ->
+                        match st with
+                        | TStmtLet tb when tb.Name = stopName -> Some tb.VarId
+                        | _ -> None)
+                let grdBinding =
+                    tstmts |> List.tryPick (fun st ->
+                        match st with
+                        | TStmtForIn (vn, _, _, _, body) when vn = def.StepVar ->
+                            body |> List.tryPick (fun bs ->
+                                match bs with
+                                | TStmtLet tb when tb.Name = grdName -> Some tb
+                                | _ -> None)
+                        | _ -> None)
+                match stopId, grdBinding with
+                | Some stopId, Some grdB ->
+                    // A guard is a predicate: it must be Bool, not merely
+                    // truthy (mirrors the match-arm guard rule).
+                    unify env.Subst grdB.Type (IRTScalar ETBool)
+                    |> Result.mapError (fun _ ->
+                        Other $"recursive array '{def.Name}': a `while` guard must be Bool -- the condition after `while` is a predicate (comparisons and boolean operators), not a value")
+                    |> Result.bind (fun () ->
+                        let boolT = IRTScalar ETBool
+                        let grdVarT = mkTypedSpan (TExprVar (grdName, grdB.VarId, None)) boolT span
+                        let breakT =
+                            TStmtExpr (mkTypedSpan (TExprBreakIf (mkTypedSpan (TExprUnaryOp (OpNot, grdVarT)) boolT span)) IRTUnit span)
+                        // Insert the break AFTER the guard let and the
+                        // stop-ordinal assignment that immediately follows it.
+                        // A MISS must not be silent: without the break the
+                        // guard would be computed, the loop would run the full
+                        // budget, and the stop ordinal would end up recording
+                        // the last iteration rather than the stopping one --
+                        // a wrong answer with no diagnostic.
+                        let mutable inserted = false
+                        let tstmts' =
+                            tstmts |> List.map (fun st ->
+                                match st with
+                                | TStmtForIn (vn, vid, lo, hi, body) when vn = def.StepVar ->
+                                    let rec ins acc rest =
+                                        match rest with
+                                        | (TStmtLet (tb: TypedBinding)) :: assignStmt :: tail when tb.Name = grdName ->
+                                            inserted <- true
+                                            List.rev acc @ [TStmtLet tb; assignStmt; breakT] @ tail
+                                        | s :: tail -> ins (s :: acc) tail
+                                        | [] -> List.rev acc
+                                    TStmtForIn (vn, vid, lo, hi, ins [] body)
+                                | st -> st)
+                        if not inserted then
+                            Error (Other $"recursive array '{def.Name}': internal error -- the while-guard early exit could not be placed in the recursion loop")
+                        else
+                        let stopVarT = mkTypedSpan (TExprVar (stopName, stopId, None)) (IRTScalar ETInt64) span
+                        let budgetT = mkTypedSpan (TExprLit (LitInt n)) (IRTScalar ETInt64) span
+                        let convT = mkTypedSpan (TExprBinOp (Elementwise, OpNeq, stopVarT, budgetT)) boolT span
+                        let abortMsg = $"recursive array '{def.Name}': the while guard is still true after the full budget of {n} steps -- the recurrence did not converge within its declared extent"
+                        let abortT = TStmtExpr (mkTypedSpan (TExprConstraintCheck (convT, "BL8010", abortMsg)) IRTUnit span)
+                        Ok { tv with Kind = TExprBlock (tstmts' @ [abortT], fin) })
+                | _ ->
+                    Error (Other $"recursive array '{def.Name}': internal error -- while-guard scaffolding missing from the checked block")
+            | _ -> Error (Other $"recursive array '{def.Name}': internal error -- checked recursive-array value is not a block")
+        checkExpr env annotTy block |> Result.bind (fun tv ->
+            match guard' with
+            | None -> Ok { tv with Type = annotTy }
+            | Some _ -> injectGuardControl tv |> Result.map (fun tv2 -> { tv2 with Type = annotTy })))
     | _ ->
         Error (Other $"recursive array '{def.Name}': the annotation must be an Array type (`let rec {def.Name}: Array<T like Step, ...> = ...`)")
 
@@ -11611,7 +11729,7 @@ and synthesizeMutualChecks (env: TypeEnv) (group: MutualGroupInfo) (memberToLeaf
         inferExpr env renamed |> Result.map (fun tCond ->
             let checkId = env.Builder.FreshId()
             let msg = $"Mutual constraint violation ({group.GroupId})"
-            (checkId, mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span)))
+            (checkId, mkTypedSpan (TExprConstraintCheck (tCond, "BL8001", msg)) IRTUnit tCond.Span)))
     |> sequenceResults
 
 /// Binding side of the check-point rule for an annotated let. Ok None -- no
@@ -11684,7 +11802,7 @@ and synthesizeStructChecks (env: TypeEnv) (targetTy: IRType) (targetSurface: Exp
                     let msg =
                         if constraints.Length = 1 then $"Constraint violation in {sname}"
                         else $"Constraint violation in {sname} (conjunct {i + 1})"
-                    mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span))
+                    mkTypedSpan (TExprConstraintCheck (tCond, "BL8001", msg)) IRTUnit tCond.Span))
             |> sequenceResults
         | _ -> Ok []
     | _ -> Ok []
@@ -11731,7 +11849,7 @@ and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: 
             |> List.map (fun (side, c) ->
                 inferExpr env c |> Result.map (fun tCond ->
                     let msg = $"Bound violation in '{subjectName}' ({side})"
-                    mkTypedSpan (TExprConstraintCheck (tCond, msg)) IRTUnit tCond.Span))
+                    mkTypedSpan (TExprConstraintCheck (tCond, "BL8001", msg)) IRTUnit tCond.Span))
             |> sequenceResults
 
 /// Resolve a surface type through ORDINARY alias chains. Distinct from
@@ -11834,7 +11952,7 @@ and internal synthesizeElementBoundChecks (env: TypeEnv) (annot: TypeExpr) (subj
                         if isLo then mkT (TExprBinOp (Elementwise, OpLe, tB, elemRead)) (IRTScalar ETBool)
                         else mkT (TExprBinOp (Elementwise, OpLe, elemRead, tB)) (IRTScalar ETBool)
                     let msg = $"Bound violation in an element of '{subjectName}' ({side})"
-                    TStmtExpr (mkT (TExprConstraintCheck (cond, msg)) IRTUnit)))
+                    TStmtExpr (mkT (TExprConstraintCheck (cond, "BL8001", msg)) IRTUnit)))
             |> sequenceResults
             |> Result.map (fun checkStmts ->
                 let zero = mkT (TExprLit (LitInt 0L)) int64Ty

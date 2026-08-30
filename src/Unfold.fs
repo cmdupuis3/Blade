@@ -124,7 +124,8 @@ let rec mapExprPre (f: Expr -> Expr option) (e: Expr) : Expr =
         | ExprKind.ExprRecArray def ->
             re (ExprRecArray { def with
                                 SeedArm = def.SeedArm |> Option.map (fun (v, s) -> (v, g s))
-                                SliceExpr = g def.SliceExpr })
+                                SliceExpr = g def.SliceExpr
+                                Guard = def.Guard |> Option.map g })
 
 and mapStmtPre (f: Expr -> Expr option) (s: Stmt) : Stmt =
     let g = mapExprPre f

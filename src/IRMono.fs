@@ -1621,10 +1621,19 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         let newBody = dropAliasLets newBody
 
         // Second pass: unroll IRForRange with literal bounds. This handles
-        // `for k in 0..arity(args)` after arity is resolved.
+        // `for k in 0..arity(args)` after arity is resolved. A body carrying
+        // IRBreakIf (a `while`-guarded rec array inside an arity-poly
+        // function) must NOT unroll: the unrolled copies have no loop to
+        // break out of, so the early exit would silently vanish and every
+        // iteration would run.
+        let rec containsBreakIf e =
+            match e with
+            | IRBreakIf _ -> true
+            | ExprShape (children, _) -> children |> List.exists containsBreakIf
         let rec unrollForRanges expr =
             match expr with
-            | IRLet (id, IRForRange (vid, IRLit (IRLitInt lo), IRLit (IRLitInt hi), body), rest) ->
+            | IRLet (id, IRForRange (vid, IRLit (IRLitInt lo), IRLit (IRLitInt hi), body), rest)
+                    when not (containsBreakIf body) ->
                 let restUnrolled = unrollForRanges rest
                 let indices = [ int lo .. int hi - 1 ] |> List.rev
                 indices |> List.fold (fun acc k ->
