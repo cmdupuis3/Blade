@@ -184,6 +184,43 @@ type TypeError =
     /// one is read past its allocation, silently, with no broadcast anywhere
     /// in the language to justify it. `pos` is the offending operand, 1-based.
     | ZipExtentMismatch of pos: int * expected: int64 * actual: int64
+    /// BL3016 (same family, the ABSTRACT-PARAMETER twin of ZipExtentMismatch):
+    /// a callee's body co-iterates two of its parameters, and this call passes
+    /// them arrays whose shared-axis extents are different compile-time
+    /// literals.
+    ///
+    /// ZipExtentMismatch catches the disagreement AT the zip, but only when
+    /// both extents are literals there. Through abstract `T^1` parameters they
+    /// are not: the body sees two rank-1 arrays with no extents to compare, so
+    /// nothing was checked, and the extents only become concrete here, at the
+    /// call. That is the whole hole -- `addup(q6, p3)` on a body that zips its
+    /// two parameters typechecked clean and walked q's 6 cells over p's 3-cell
+    /// allocation, in both lanes. The obligation rides
+    /// `TypeEnv.FuncCoIterObligations`, derived from the callee's body.
+    /// `posA`/`posB` are 1-based ARGUMENT positions in this call.
+    | CoIterArgExtentMismatch of callee: string * posA: int * posB: int * extA: int64 * extB: int64
+    /// BL3016 (the one-sided twin of CoIterArgExtentMismatch): a callee's body
+    /// co-iterates one of its abstract parameters with an array whose extent is
+    /// already CONCRETE there -- `wsum(a: T^1) = reduce(zip(a, weights3) ..)`.
+    /// The zip has one literal and one abstract side, so `zipHeadClash`'s
+    /// literal-vs-literal rule does not fire, and the walk (bounded by operand
+    /// 1) ran the argument's extent over the concrete array's storage. The
+    /// body's literal rides `FuncCoIterObligations` alongside the parameter
+    /// positions; `pos` is the 1-based ARGUMENT position in this call.
+    | CoIterBodyExtentMismatch of callee: string * pos: int * argExt: int64 * bodyExt: int64
+    /// BL3016 (same family, the provider-ascription twin): a `let` annotation
+    /// or `:` ascription on a PROVIDER READ names a compile-time-literal
+    /// extent on some index slot and the read's own type names a different
+    /// one. Wherever two extents can come from DIFFERENT places, this compiler
+    /// already has a check saying so -- param vs argument, operand vs operand,
+    /// halo vs target, literal vs annotation. The provider read is the one
+    /// such seam that had none. The store fixes the ALLOCATION (codegen bakes
+    /// the file's real shape into the buffer and the reader loop) while the
+    /// annotation fixes the TYPE every later index expression compiles
+    /// against -- and the read arm passes the operand's type through
+    /// unchanged, so nothing reconciled them. `dim` is 1-based over the
+    /// array's index slots; `provider` is the registry name for the message.
+    | ProviderReadExtentMismatch of provider: string * dim: int * annotated: int64 * actual: int64
     /// BL3011: a quantity name used inside unit algebra (`Unit x = speed * m`)
     /// or as the RHS of another quantity (`Unit q: speed`). Quantities are
     /// TERMINAL: the nominal layer is exactly one level deep.

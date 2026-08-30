@@ -858,6 +858,55 @@ let runNetcdfTests () =
              && writeCode |> List.exists (fun s -> s.Contains "\"time\"")) ""
     | _ -> ()
 
+    // Dimension NAMES as `tryProviderWrite` derives them (the other half of
+    // the genWriteVar check above, which is handed its names ready-made).
+    // A named index type used to arrive here as "dim0": the derivation looked
+    // the slot up by `IRIndexType.Id` against the module's IRTDIndexType
+    // defs, and `lowerIndexType` stamps a FRESH Id per use, so the match never
+    // fired and every user-declared axis name was dropped on the floor.
+    // Lowering-level (not codegen): no libnetcdf, no sample.nc.
+    printfn "\n--- write dimension names (lowering) ---"
+    let writeSpecDimNames (source: string) : Result<string list, string> =
+        lower source
+        |> Result.bind (fun ir ->
+            match ir.Modules.[0].ProviderWrites |> Map.toList with
+            | [ (_, spec) ] -> Ok spec.DimNames
+            | specs -> Error $"expected exactly one write spec, got {specs.Length}")
+    let namedAxisWrite = """
+import netcdf as nc
+type LatIdx = Idx<2>
+type LonIdx = Idx<3>
+let A: Array<Float64 like LatIdx, LonIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let _ = nc.write("out.nc", A)
+"""
+    (let name = "write dims: named index types reach the store's dimension names"
+     match writeSpecDimNames namedAxisWrite with
+     | Ok names -> check name (names = ["LatIdx"; "LonIdx"]) (sprintf "got %A" names)
+     | Error e -> check name false e)
+    // Anonymous axes have no name to carry: dim<i> stands, as before.
+    let anonAxisWrite = """
+import netcdf as nc
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let _ = nc.write("out.nc", A)
+"""
+    (let name = "write dims: anonymous axes still synthesize dim<i>"
+     match writeSpecDimNames anonAxisWrite with
+     | Ok names -> check name (names = ["dim0"; "dim1"]) (sprintf "got %A" names)
+     | Error e -> check name false e)
+    // One index type in TWO slots is one dimension used twice, but the writers
+    // emit one definition per slot -- `nc_def_dim` would fail NC_ENAMEINUSE on
+    // the repeat. A repeated tag therefore names no slot.
+    let repeatedAxisWrite = """
+import netcdf as nc
+type SqIdx = Idx<2>
+let A: Array<Float64 like SqIdx, SqIdx> = [[1.0, 2.0], [3.0, 4.0]]
+let _ = nc.write("out.nc", A)
+"""
+    (let name = "write dims: a repeated index type falls back rather than colliding"
+     match writeSpecDimNames repeatedAxisWrite with
+     | Ok names -> check name (names = ["dim0"; "dim1"]) (sprintf "got %A" names)
+     | Error e -> check name false e)
+
     // genReadCompoundVar: load_compound's materializer. Reads the dense var and
     // the integer mask, converts nonzero -> bool, builds compound_index_t, and
     // scatters into a compact buffer (verified against the real cpp/ runtime).

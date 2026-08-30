@@ -1018,6 +1018,294 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         Functions = newFunctions @ (newLambdas |> List.ofSeq)
         Bindings = newBindings }
 
+// Elementwise-chain fusion (docs/plans/plan-fortran-killer.md, arc 1).
+//
+// TypeCheck desugars every elementwise array binop into its own
+// `method_for(zip(l, r)) <@> lambda |> compute` pipeline -- one deferred
+// combinator per operator -- so `a + b * c - d` reaches codegen as three
+// nested computations and materializes two intermediate pools. The identical
+// hand-written `method_for(zip(a, b, c, d)) <@> lambda(w, x, y, z) ->
+// w + x*y - z` emits one flat loop and zero temporaries. Same computation,
+// two spellings, ~3x the memory traffic apart: a SAME-EMIT violation.
+//
+// This pass flattens the nest. An IRApplyCombinator whose operand slot holds
+// a directly nested `IRCompute (IRApplyCombinator ..)` splices the inner
+// combinator's operand arrays into its own list and substitutes the inner
+// kernel body for the corresponding outer kernel parameter -- producing
+// exactly the flat co-iteration shape the emitters already handle best.
+// Cell-independent maps compose without reordering any cell's arithmetic, so
+// the rewrite is bitwise and carries no licence; `BLADE_FUSION=0|off` is the
+// A/B escape hatch (read per call, like every other environment gate).
+//
+// It fires only on the plainest shapes and declines everything else
+// unchanged: dense IxKPlain/SymNone records only, kernels with no
+// comm/anticomm groups and no omp/cuda/mpi strategy, no Reynolds, rank-0
+// scalar kernels, pure bodies, co-iterations only (an outer product would
+// change meaning if its operand list grew -- refused by construction via
+// IsCoIteration). Nested computes reached through a LET binding (the
+// materialized-operand shape `lowerArrayBinOpsModule` produces for pack
+// elements) are deliberately out of scope for v1: fusing those needs a
+// use-count census; the direct nest is where the user-facing chains live.
+let private fusionEnabled () =
+    match System.Environment.GetEnvironmentVariable "BLADE_FUSION" with
+    | null -> true
+    | v ->
+        match v.Trim().ToLowerInvariant() with
+        | "0" | "off" | "false" -> false
+        | _ -> true
+
+let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+    if not (fusionEnabled ()) then modul else
+    let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in modul.Functions do callables.[f.Id] <- f
+    let newLambdas = System.Collections.Generic.List<IRCallable>()
+
+    // Fan-in cap: register pressure grows with fused operand count; beyond
+    // this the remaining operands simply stay unfused (still correct).
+    let maxFusedOperands = 8
+    // Each substitution copies the inner body once per occurrence of the
+    // replaced parameter. Binop-minted kernels reference each parameter
+    // exactly once; 2 bounds body growth while covering everything this
+    // pass targets.
+    let maxParamOccurrences = 2
+
+    let substVar (vid: IRId) (replacement: IRExpr) (body: IRExpr) : IRExpr =
+        mapIRExpr (fun e ->
+            match e with
+            | IRVar (id, _) when id = vid -> replacement
+            | _ -> e) body
+
+    let occurrences (vid: IRId) (body: IRExpr) : int =
+        let mutable n = 0
+        iterIRExpr (fun e ->
+            match e with
+            | IRVar (id, _) when id = vid -> n <- n + 1
+            | _ -> ()) body
+        n
+
+    // Purity with module-local resolution. The AsyncLocal CallablesTable is
+    // not installed yet at this point in the pipeline (it is built at
+    // liftInlineFormsModule entry), so IRPrint.exprAttrs' cross-procedural
+    // IRApp arm cannot be used here. Anything unresolvable declines.
+    let rec pureBody (visited: Set<IRId>) (e: IRExpr) : bool =
+        let mutable ok = true
+        iterIRExpr (fun n ->
+            if ok then
+                match n with
+                | IRDisplayEmit _ -> ok <- false
+                | IRAssign _ -> ok <- false
+                | IRApp (IRVar (fid, _), _, _) ->
+                    if not (Set.contains fid visited) then
+                        match callables.TryGetValue fid with
+                        | true, callee ->
+                            if callee.IsStatic
+                               || not (pureBody (Set.add fid visited) callee.Body) then
+                                ok <- false
+                        | _ -> ok <- false
+                | IRApp _ -> ok <- false
+                | _ -> ()) e
+        ok
+
+    let plainIx (ix: IRIndexType) =
+        ix.IxKind = IxKPlain && ix.Symmetry = SymNone
+    let plainArrayTypes (ats: IRArrayType list) =
+        ats |> List.forall (fun at -> at.IndexTypes |> List.forall plainIx)
+
+    // A combinator this pass may touch (as host or inner): a plain dense
+    // elementwise map/co-iteration with a scalar kernel and none of the
+    // structure-exploiting metadata populated.
+    let plainInfo (info: ApplyInfo) =
+        not info.HasReynolds
+        && info.SpeedupFactor = 1L && info.ReynoldsSpeedup = 1L
+        && info.KernelTDims.IsEmpty && info.KernelOutputRank = 0
+        && info.KernelInputRanks |> List.forall ((=) 0)
+        && info.SymcomStates |> List.forall (fun s -> s = SCNeither)
+        && info.TriangularLevels |> List.forall not
+        && plainArrayTypes info.ArrayTypes
+        && (match info.Loop with IRMethodFor _ | IRObjectFor _ -> true | _ -> false)
+        // Arity >= 2 must be a genuine co-iteration: splicing operands into
+        // an OUTER PRODUCT would change its meaning, not its cost.
+        && (info.Arrays.Length = 1
+            || (info.IsCoIteration && not info.SharedIndexTypes.IsEmpty))
+        // Defensive: every per-array list rides in lockstep with Arrays.
+        && info.Identities.Length = info.Arrays.Length
+        && info.ArrayTypes.Length = info.Arrays.Length
+        && info.SDimsPerArray.Length = info.Arrays.Length
+        && info.SymcomStates.Length = info.Arrays.Length
+        && info.TriangularLevels.Length = info.Arrays.Length
+        && info.KernelInputRanks.Length = info.Arrays.Length
+
+    let plainKernel (k: IRCallable) (arity: int) =
+        not k.IsCommutative && k.CommGroups.IsEmpty && k.AntisymGroups.IsEmpty
+        && k.Parallelism.IsEmpty && not k.IsOmpParallel && not k.IsCudaKernel
+        && not k.IsMpiParallel && not k.IsArityPoly && not k.IsStatic
+        && k.Params.Length = arity
+
+    let kernelOf (info: ApplyInfo) : IRCallable option =
+        match info.Kernel with
+        | IRVar (kid, _) ->
+            match callables.TryGetValue kid with
+            | true, k -> Some k
+            | _ -> None
+        | _ -> None
+
+    // Clone an inner kernel's parameters with fresh ids (the same callable
+    // can be spliced at more than one site; ids must stay unique), renaming
+    // for hygiene, and rewrite its body onto the fresh ids.
+    let freshen (ik: IRCallable) : IRParam list * IRExpr =
+        let mapping = ik.Params |> List.map (fun p -> p.VarId, builder.FreshId())
+        let mapped = Map.ofList mapping
+        let params' =
+            ik.Params |> List.map (fun p ->
+                let nid = mapped.[p.VarId]
+                { p with VarId = nid; Name = $"__fz{nid}" })
+        let body' =
+            mapIRExpr (fun e ->
+                match e with
+                | IRVar (id, t) ->
+                    (match Map.tryFind id mapped with
+                     | Some nid -> IRVar (nid, t)
+                     | None -> e)
+                | _ -> e) ik.Body
+        params', body'
+
+    let tryFuse (host: ApplyInfo) : ApplyInfo option =
+        if not (plainInfo host) then None else
+        match kernelOf host with
+        | None -> None
+        | Some hk when not (plainKernel hk host.Arrays.Length
+                            && pureBody Set.empty hk.Body) -> None
+        | Some hk ->
+        let innerEligible (inner: ApplyInfo) : IRCallable option =
+            if not (plainInfo inner) then None else
+            match kernelOf inner with
+            | Some ik when plainKernel ik inner.Arrays.Length
+                           && pureBody Set.empty ik.Body -> Some ik
+            | _ -> None
+        let mutable total = host.Arrays.Length
+        let mutable fusedAny = false
+        let mutable body = hk.Body
+        let mutable sharedFromInner : IRIndexType list = []
+        let capts = System.Collections.Generic.List<CaptureInfo>()
+        // Per-slot splice, left to right. Each per-array metadata list is
+        // rebuilt in lockstep with Arrays.
+        let spliced =
+            List.mapi (fun i (a: IRExpr) ->
+                let keep () =
+                    ([a], [host.Identities.[i]], [host.ArrayTypes.[i]],
+                     [host.SDimsPerArray.[i]], [host.SymcomStates.[i]],
+                     [host.TriangularLevels.[i]], [host.KernelInputRanks.[i]],
+                     [hk.Params.[i]])
+                match a with
+                | IRCompute (IRApplyCombinator inner) when
+                        total + inner.Arrays.Length - 1 <= maxFusedOperands
+                        && occurrences hk.Params.[i].VarId hk.Body <= maxParamOccurrences ->
+                    (match innerEligible inner with
+                     | Some ik ->
+                         let ps', innerBody = freshen ik
+                         body <- substVar hk.Params.[i].VarId innerBody body
+                         total <- total + inner.Arrays.Length - 1
+                         fusedAny <- true
+                         if sharedFromInner.IsEmpty then
+                             sharedFromInner <- inner.SharedIndexTypes
+                         capts.AddRange ik.Captures
+                         (inner.Arrays, inner.Identities, inner.ArrayTypes,
+                          inner.SDimsPerArray, inner.SymcomStates,
+                          inner.TriangularLevels, inner.KernelInputRanks, ps')
+                     | None -> keep ())
+                | _ -> keep ()) host.Arrays
+        if not fusedAny then None else
+        let newArrays     = spliced |> List.collect (fun (x, _, _, _, _, _, _, _) -> x)
+        let newIdentities = spliced |> List.collect (fun (_, x, _, _, _, _, _, _) -> x)
+        let newArrayTypes = spliced |> List.collect (fun (_, _, x, _, _, _, _, _) -> x)
+        let newSDims      = spliced |> List.collect (fun (_, _, _, x, _, _, _, _) -> x)
+        let newSymcom     = spliced |> List.collect (fun (_, _, _, _, x, _, _, _) -> x)
+        let newTri        = spliced |> List.collect (fun (_, _, _, _, _, x, _, _) -> x)
+        let newKIR        = spliced |> List.collect (fun (_, _, _, _, _, _, x, _) -> x)
+        let newParams =
+            spliced |> List.collect (fun (_, _, _, _, _, _, _, x) -> x)
+            |> List.mapi (fun idx p -> { p with Index = idx })
+        // Shared iteration records for the fused node: the host's when it was
+        // already a co-iteration; otherwise inherited from the first fused
+        // inner (a single-array map fusing a zip becomes that zip's
+        // co-iteration). An arity > 1 result with no shared records would
+        // read as an outer product downstream -- decline rather than emit it.
+        let sharedIdx =
+            if not host.SharedIndexTypes.IsEmpty then host.SharedIndexTypes
+            elif newArrays.Length > 1 then sharedFromInner
+            else []
+        if newArrays.Length > 1 && sharedIdx.IsEmpty then None else
+        let captures =
+            (hk.Captures @ List.ofSeq capts)
+            |> List.fold (fun (seen, acc) (c: CaptureInfo) ->
+                if Set.contains c.Id seen then (seen, acc)
+                else (Set.add c.Id seen, c :: acc)) (Set.empty, [])
+            |> snd |> List.rev
+        let lam =
+            mkLambdaCallable builder newParams body hk.RetType captures
+                             false [] [] false false 256 false
+        newLambdas.Add lam
+        callables.[lam.Id] <- lam
+        let funcTy =
+            IRTArrow (newParams |> List.map (fun p -> SVal p.Type), hk.RetType, None)
+        let kernelVar = IRVar (lam.Id, funcTy)
+        let totalS = List.sum newSDims
+        let newLoop =
+            match host.Loop with
+            | IRMethodFor mf ->
+                IRMethodFor
+                    { mf with
+                        Arrays = newArrays; Identities = newIdentities
+                        ArrayTypes = newArrayTypes; SDimsPerArray = newSDims
+                        TotalSDims = totalS; SharedIndexTypes = sharedIdx }
+            | IRObjectFor _ ->
+                IRObjectFor
+                    { Kernel = kernelVar; CommGroups = []
+                      InputRanks = newKIR; OutputRank = 0 }
+            | other -> other  // unreachable: plainInfo admits only the two above
+        Some { host with
+                 Loop = newLoop; Kernel = kernelVar
+                 Arrays = newArrays; Identities = newIdentities
+                 ArrayTypes = newArrayTypes; SharedIndexTypes = sharedIdx
+                 SymcomStates = newSymcom; TriangularLevels = newTri
+                 SDimsPerArray = newSDims; KernelInputRanks = newKIR
+                 IsCoIteration = newArrays.Length > 1 }
+
+    let rewrite (e: IRExpr) : IRExpr =
+        match e with
+        | IRApplyCombinator info ->
+            (match tryFuse info with
+             | Some fused -> IRApplyCombinator fused
+             | None -> e)
+        | _ -> e
+    let rewriteExpr expr = mapIRExpr rewrite expr
+    let newFunctions =
+        modul.Functions |> List.map (fun f -> { f with Body = rewriteExpr f.Body })
+    let newBindings =
+        modul.Bindings |> List.map (fun b -> { b with Value = rewriteExpr b.Value })
+    // Sweep this pass's OWN dead mints. The operand tree is duplicated
+    // between info.Arrays and the Loop-provenance MethodForInfo.Arrays, so
+    // the bottom-up traversal fuses both copies; the Loop copy's composed
+    // lambda is then overwritten by the host rewrite and never referenced.
+    // Intermediate compositions of a longer chain go dead the same way.
+    // Only lambdas minted HERE are candidates -- pre-existing kernels that
+    // fusion orphaned stay (exports and DerivedFuncOrigins may name them).
+    let survivingLambdas =
+        if newLambdas.Count = 0 then []
+        else
+            let referenced = System.Collections.Generic.HashSet<IRId>()
+            let scan (b: IRExpr) =
+                iterIRExpr (fun e ->
+                    match e with
+                    | IRVar (id, _) -> referenced.Add id |> ignore
+                    | _ -> ()) b
+            newFunctions |> List.iter (fun f -> scan f.Body)
+            newBindings |> List.iter (fun b -> scan b.Value)
+            newLambdas |> Seq.filter (fun l -> referenced.Contains l.Id) |> List.ofSeq
+    { modul with
+        Functions = newFunctions @ survivingLambdas
+        Bindings = newBindings }
+
 // Arity Monomorphization
 
 /// Locate every Poly param's index in a function, in declaration order.
@@ -1473,6 +1761,9 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
           IsMpiParallel = func.IsMpiParallel
           IsArityPoly = false
           ArityParam = None
+          // The reproducibility demand survives specialization: the clone is
+          // the same declared function at a concrete arity.
+          IsRepro = func.IsRepro
           // Specialized clones inherit the original's captures verbatim;
           // arity specialization doesn't introduce new free vars.
           Captures = func.Captures

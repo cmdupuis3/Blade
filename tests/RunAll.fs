@@ -377,6 +377,14 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // out-of-bounds loop bound. Pure codegen string checks, no toolchain.
     // (Also `blade test shapespec`.)
     let shapeSpec = Blade.Tests.ShapeSpecTests.runShapeSpecTests ()
+    // Flat-elementwise REACH: which index tags reach the flat path. Same
+    // silent-in-both-directions shape as the block above, and the same remedy —
+    // emission text, since the flat rewrite preserves values exactly. Chiefly
+    // PARITY pins between the anonymous range and `range<I>`: the `__anon` tag
+    // was refused for years by a blanket `__` prefix test that every other
+    // reserved tag was already refused by on IxKind grounds. Pure codegen
+    // string checks, no toolchain. (Also `blade test flat-path`.)
+    let flatPath = Blade.Tests.FlatPathTests.runFlatPathTests ()
     // File-based module resolution (src/ModuleResolve.fs) + stdlib/units/SI.blade:
     // the search path, the transitive walk, cycle/duplicate/missing refusals,
     // and the two claims the corpus cannot make — that a file with NO imports
@@ -478,7 +486,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield moduleResolve; yield providerDesugar
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield flatPath; yield moduleResolve; yield providerDesugar
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

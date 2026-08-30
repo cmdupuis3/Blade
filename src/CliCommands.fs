@@ -71,6 +71,7 @@ let printUsage () =
     printfn "  test multifile                    Run the cross-module (multi-file) corpus standalone"
     printfn "  test module-resolve               Run the file-based module resolver + units.SI block"
     printfn "  test shapespec                    Run the shape-specialization reach block standalone"
+    printfn "  test flat-path                    Run the flat-elementwise reach block standalone"
     printfn "  test cuda                         Run the CUDA kernel block standalone"
     printfn "  test mpi                          Run the MPI decomposition block standalone"
     printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"

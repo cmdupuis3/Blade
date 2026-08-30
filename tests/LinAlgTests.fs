@@ -104,6 +104,16 @@ let private emissionCases : (string * bool * string * string list * string list)
         "let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n"
     let realMatB =
         "let B: Array<Float64 like Idx<4>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]\n"
+    // The unit-carrying twins of the two above, element for element: same
+    // extents, same literals, same storage, one `Unit` annotation apart. The
+    // pair is what makes the units cases an A/B rather than an assertion about
+    // one program.
+    let unitMat =
+        "Unit meter\n"
+        + "let A: Array<Float64<meter> like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n"
+    let unitMatB =
+        "Unit second\n"
+        + "let B: Array<Float64<second> like Idx<4>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]\n"
     // ---- Phase 5b fixtures ----
     let vecX = "let x: Array<Float64 like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
     let vecY = "let y: Array<Float64 like Idx<5>> = [2.0, 3.0, 4.0, 5.0, 6.0]\n"
@@ -570,7 +580,37 @@ let private emissionCases : (string * bool * string * string list * string list)
        covMat
        + "let o2 = method_for(CA, CA) <@> " + covKernel "comm(x, y), omp" "prodsum(x, y)",
        [ "#pragma omp parallel for schedule(dynamic)"; "CA____i0" ],
-       [ shimInclude; "blade_linalg::" ]) ]
+       [ shimInclude; "blade_linalg::" ])
+
+      // ============ UNITS ARE NOT A PRECISION ============
+      // A unit annotation must not cost the route. `Float64<meter>` STORES as a
+      // bare `double` -- the wrapper erases entirely at codegen, so the emitted
+      // pool is `Array<double, 2>` with or without it -- and the output's units
+      // are computed by the type system from the operand units, never read back
+      // off the precision letter. So the dispatch is the unit-free one, letter
+      // and all.
+      //
+      // `precisionOf` used to match bare `IRTScalar` only, which silently
+      // declined EVERY route for EVERY unit-annotated array: dimensioned
+      // physics code got scalar loops while its dimensionless twin got `dsyrk`,
+      // with no diagnostic and no value difference to notice it by. These are
+      // the positives that would have failed; `unit_gram_emits_the_unit_free_
+      // text` below is the same claim stated as byte equality.
+      ("gram_same_routes_through_a_unit_annotation", true,
+       unitMat + "let G = gram(A, A)\n",
+       [ shimInclude; "blade_linalg::blade_gram_same_d("; "linalg dispatch: gram(A, A)"
+         "A.data, (A.extents[0] * A.extents[1])" ],
+       [ "cblas_"; "__gacc" ])
+      // DISAGREEING units on the two operands still route. `agreedPrecision`
+      // asks for one PRECISION, not one type: meter and second are both `d`,
+      // and `gram` multiplies the stored doubles either way. What the units
+      // change is the RESULT type (meter * second), which the type system
+      // derives on its own.
+      ("gram_distinct_routes_with_disagreeing_units", true,
+       unitMat + unitMatB + "let G = gram(A, B)\n",
+       [ shimInclude; "blade_linalg::blade_gram_distinct_d("; "linalg dispatch: gram(A, B)"
+         "G.data, (3 * 4)" ],
+       [ "cblas_"; "blade_gram_same_"; "__gacc" ]) ]
 
 let runLinAlgEmissionTests () : BlockResult =
     printHeader "LinAlg Dispatch Emission"
@@ -602,6 +642,46 @@ let runLinAlgEmissionTests () : BlockResult =
                 passed <- passed + 1
                 resultLine Pass name (if blasOn then "routing as expected (gate on)"
                                       else "native emission as expected (gate off)")
+
+    // ---- a unit annotation changes NO emitted byte ----
+    //
+    // The strongest form of the units claim, and the one that needs no pinned
+    // substrings: compile `gram(A, A)` with and without `Unit meter` on the
+    // element type and the two C++ programs must be IDENTICAL. That is the
+    // whole soundness argument for stripping units in `precisionOf` stated as
+    // a test -- units erase at codegen, so there is nothing left for the
+    // precision letter to be wrong about -- and it is what a substring pin
+    // cannot say: an equality catches a divergence ANYWHERE in the program,
+    // including places no one thought to assert.
+    //
+    // Both sides are emitted under the same program NAME, since that string is
+    // stamped into the timing line and is the one difference that is expected.
+    let unitAbName = "unit_gram_emits_the_unit_free_text"
+    let plainSrc =
+        "let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n"
+        + "let G = gram(A, A)\n"
+    let unitSrc =
+        "Unit meter\n"
+        + "let A: Array<Float64<meter> like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\n"
+        + "let G = gram(A, A)\n"
+    match cppOf true unitAbName plainSrc, cppOf true unitAbName unitSrc with
+    | Error e, _ | _, Error e -> fail unitAbName e
+    | Ok plainCpp, Ok unitCpp ->
+        if plainCpp <> unitCpp then
+            // Report the first differing line rather than two whole programs.
+            let firstDiff =
+                Seq.zip (plainCpp.Split '\n') (unitCpp.Split '\n')
+                |> Seq.tryFind (fun (p, u) -> p <> u)
+                |> Option.map (fun (p, u) -> $"plain: {p.Trim()} || unit: {u.Trim()}")
+                |> Option.defaultValue "(programs differ only in length)"
+            fail unitAbName $"unit-annotated emission diverged -- {firstDiff}"
+        elif not (unitCpp.Contains "blade_linalg::blade_gram_same_d(") then
+            // Guard against the pair agreeing because NEITHER routes, which
+            // would make the equality vacuous.
+            fail unitAbName "both sides declined the route -- equality is vacuous"
+        else
+            passed <- passed + 1
+            resultLine Pass unitAbName "byte-identical to the unit-free twin, both routed"
 
     // ---- matmul: a non-f64 operand is REJECTED, not silently routed ----
     //
@@ -839,6 +919,13 @@ let runLinAlgEmissionTests () : BlockResult =
     // `isRealDouble`; the letter it yields is appended to every shim entry
     // point, so a wrong answer here is a mis-dispatch by construction. Integers
     // (and everything else with no BLAS routine family) must answer None.
+    /// `T<meter>`: the element type a `Unit meter` declaration puts on an
+    /// array, built directly so the classifier is tested without a parse.
+    let unitOf (et: ElemType) =
+        IRTUnitAnnotated (IRTScalar et,
+                          { Nominal = Some "meter"
+                            Dims = Map.ofList [ "meter", 1 ]
+                            Scale = scaleOne })
     let precisionCases =
         [ "prec_f32_is_s",        IRTScalar ETFloat32,    Some LinAlgPatterns.PrecS
           "prec_f64_is_d",        IRTScalar ETFloat64,    Some LinAlgPatterns.PrecD
@@ -846,7 +933,20 @@ let runLinAlgEmissionTests () : BlockResult =
           "prec_complex128_is_z", IRTScalar ETComplex128, Some LinAlgPatterns.PrecZ
           "prec_int64_is_none",   IRTScalar ETInt64,      None
           "prec_int32_is_none",   IRTScalar ETInt32,      None
-          "prec_bool_is_none",    IRTScalar ETBool,       None ]
+          "prec_bool_is_none",    IRTScalar ETBool,       None
+          // A UNIT annotation is stripped: `Float64<meter>` is `d`, because it
+          // stores as a bare `double` and the wrapper erases at codegen. This
+          // used to answer None, which declined every route for every
+          // dimensioned array -- silently, since the scalar loops compute the
+          // same values. All four letters are pinned, not just `d`, so the
+          // stripping cannot be re-narrowed to one width.
+          "prec_unit_f64_is_d",   unitOf ETFloat64,       Some LinAlgPatterns.PrecD
+          "prec_unit_f32_is_s",   unitOf ETFloat32,       Some LinAlgPatterns.PrecS
+          "prec_unit_c64_is_c",   unitOf ETComplex64,     Some LinAlgPatterns.PrecC
+          "prec_unit_c128_is_z",  unitOf ETComplex128,    Some LinAlgPatterns.PrecZ
+          // Stripping the unit does NOT promote an element type that had no
+          // routine family to begin with: a dimensioned integer is still None.
+          "prec_unit_int64_is_none", unitOf ETInt64,      None ]
     for (name, ty, expected) in precisionCases do
         let actual = LinAlgPatterns.precisionOf ty
         if actual = expected then

@@ -103,8 +103,19 @@ let resolveBlasTier () : BlasTier =
 /// Default-off is deliberate: BLAS may differ in the last ULP, and the
 /// interpreter/oracle differentials demand byte-identical output, so Blade's
 /// own emitted loops remain the verification truth.
+/// `where repro` emission scope. While codegen emits the body of a repro
+/// function this depth is nonzero and every routing gate below reads OFF: a
+/// repro body's arithmetic must be Blade's own emitted loops (the
+/// interpreter's operation sequence), never a library's -- BLAS differs in
+/// the last ULP, LAPACK's eigenbasis is not even unique. A ref bumped and
+/// restored by genFuncDef/genFuncDefAsLambda, not an env gate: it is
+/// program-position state, and codegen is single-threaded. Lives HERE (not
+/// CodeGenState) because this module compiles first and owns the gates.
+let reproScopeDepth = ref 0
+let reproScopeActive () = reproScopeDepth.Value > 0
+
 let blasAvailable () : bool =
-    resolveBlasTier () <> TierOff
+    not (reproScopeActive ()) && resolveBlasTier () <> TierOff
 
 /// The LAPACK availability gate: a SEPARATE FUNCTION with its own C++ define
 /// (`-DBLADE_HAS_LAPACK`) and Build.fs include-sniff arm. On the OpenBLAS
@@ -121,6 +132,7 @@ let blasAvailable () : bool =
 /// bit-reproducible against the native Jacobi path -- `interp` /
 /// `diff-oracle` must never run with this gate set.
 let lapackAvailable () : bool =
+    if reproScopeActive () then false else
     match resolveBlasTier () with
     | TierOff -> false
     | TierExplicit -> (Toolchain.get "BLADE_LAPACK_LINK").IsSome
@@ -206,9 +218,10 @@ let blasBuildFlags (wantsBlas: bool) (wantsLapack: bool) : string * string =
 /// cuda` KERNELS for the device, this one offloads recognised L3
 /// CONTRACTIONS. A program can want either without the other.
 let cublasAvailable () : bool =
-    match System.Environment.GetEnvironmentVariable("BLADE_CUBLAS") with
-    | "1" | "on" -> true
-    | _ -> false
+    not (reproScopeActive ())
+    && (match System.Environment.GetEnvironmentVariable("BLADE_CUBLAS") with
+        | "1" | "on" -> true
+        | _ -> false)
 
 // Backend mode
 
@@ -249,9 +262,8 @@ type LinAlgBackend =
 /// of the (routine x precision x symmetry) matrix, the routine FAMILY chosen
 /// by symmetry (see `LinAlgRoute`), the letter by this.
 ///
-/// Everything not listed -- integers, booleans, structs, unit-annotated
-/// scalars -- has no BLAS analogue and answers None, a decline at every
-/// classifier.
+/// Everything not listed -- integers, booleans, structs -- has no BLAS
+/// analogue and answers None, a decline at every classifier.
 type Precision =
     /// float32 -- `s` routines.
     | PrecS
@@ -264,8 +276,23 @@ type Precision =
 
 /// The BLAS precision of an element type, or None when the type has no
 /// routine family.
+///
+/// A UNIT annotation is stripped first: `Float64<meter>` stores as a bare
+/// `double` -- the wrapper erases entirely at codegen, so the emitted pool is
+/// `Array<double, 2>` either way -- and its precision letter is therefore `d`,
+/// routing exactly like its unit-free twin. Sound because an array's elements
+/// are uniform in unit as well as in width, so one letter still describes the
+/// whole pool, and because the OUTPUT's units are computed by the type system
+/// from the operand units, never read back off this answer. Two operands with
+/// DIFFERENT units still agree here, which is the point: `gram` multiplies the
+/// stored doubles, and meter x second is the result TYPE's business.
+///
+/// Matching bare `IRTScalar` only -- which is what this did before -- declined
+/// EVERY route for every unit-annotated array, handing dimensioned physics
+/// code scalar loops while the dimensionless twin got `dsyrk`. Silently: the
+/// two paths agree to a ULP, so nothing but the emitted text showed it.
 let precisionOf (t: IRType) : Precision option =
-    match t with
+    match stripUnits t with
     | IRTScalar ETFloat32 -> Some PrecS
     | IRTScalar ETFloat64 -> Some PrecD
     | IRTScalar ETComplex64 -> Some PrecC

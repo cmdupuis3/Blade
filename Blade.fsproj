@@ -537,6 +537,11 @@
          (cross-module, self-recursive) and which must still decline. Emission
          text only — the decision is invisible in the values. -->
     <Compile Include="tests/ShapeSpecTests.fs" />
+    <!-- Flat-elementwise reach: which index tags reach the flat path and which
+         still decline. Emission text only, for the same reason as the block
+         above — the rewrite is value-preserving, so the corpus cannot see it.
+         Parity pins: the anonymous range must decide as `range<I>` does. -->
+    <Compile Include="tests/FlatPathTests.fs" />
     <!-- Eigensolver dispatch emission + the inferEigh rejections (Phase 6 /
          Round B2). Separate block from LinAlgTests because the two gates,
          headers and defines are separate by design — and because this one must

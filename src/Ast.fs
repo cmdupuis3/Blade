@@ -376,6 +376,17 @@ and WhereClause = {
     // different dims) would relax that rule rather than change this type,
     // since the list already represents multiple per-dim assignments.
     Parallel: ParallelStrategy list       // [] => serial; today 0 or 1 element
+    // `where repro`: the function demands REPRODUCIBLE floating-point
+    // evaluation -- the same operation sequence the interpreter performs.
+    // Codegen discharges it as: no FMA contraction in the emitted body
+    // (BLADE_REPRO_FN), never re-inlined into a contraction-licensed caller
+    // (noinline), no BLAS/LAPACK routing inside the body, and a veto on
+    // every fold-reorder licence (comm-licensed omp folds and
+    // BLADE_FP_REASSOC lanes run serial with a marker). Functions only:
+    // a lambda kernel is textually inlined into its call sites, where the
+    // annotation cannot travel, so the parser accepts it anywhere but the
+    // checker refuses it off a named function declaration.
+    Repro: bool
     TDims: TDimSpec list
     // Open constraint conjuncts: `where <name>(<idents>)` for any name the
     // parser doesn't recognize as a built-in clause keyword. The parser

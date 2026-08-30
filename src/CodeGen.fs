@@ -1310,7 +1310,19 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
             | Some gkId ->
                 { c with GroupedArrays = Map.add cap.Name (gkSidecarStem ctx.VarNames gkId) c.GroupedArrays }
             | None -> c) ctx
-    let bodyStmts = genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+    // `where repro`: the body emits inside the routing veto scope (no
+    // BLAS/LAPACK/cuBLAS classification while depth > 0), and the definition
+    // carries BLADE_REPRO_FN (noinline + fp-contract off on GCC). try/finally
+    // so a codegen exception cannot leave the scope stuck on.
+    let bodyStmts =
+        if funcDef.IsRepro then
+            Blade.LinAlgPatterns.reproScopeDepth.Value <-
+                Blade.LinAlgPatterns.reproScopeDepth.Value + 1
+            try genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+            finally
+                Blade.LinAlgPatterns.reproScopeDepth.Value <-
+                    Blade.LinAlgPatterns.reproScopeDepth.Value - 1
+        else genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
     // Shadow-stack frame: named as the Blade function so a runtime
     // panic prints a Blade call stack. file/line are nullptr/0 because
     // IRCallable carries no span (adding one touches TypeCheck.fs's IRCallable
@@ -1318,8 +1330,14 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     // BLADE_FRAME macro's CUDA guard.
     // Emitted as a MARKER, not the statement: whether this body can reach a
     // panic depends on what its callees do. resolveShadowFrames settles it.
+    let reproAttr = if funcDef.IsRepro then "BLADE_REPRO_FN " else ""
+    let reproNote =
+        if funcDef.IsRepro
+        then [$"{bodyInd}// [repro] contraction off, noinline; library routing and reorder licences vetoed in this body"]
+        else []
     let code =
-        [$$"""{{ind}}{{retType}} {{safeName}}({{paramList}}) {"""]
+        [$$"""{{ind}}{{reproAttr}}{{retType}} {{safeName}}({{paramList}}) {"""]
+        @ reproNote
         @ shadowFrameOpen funcDef bodyInd
         @ bodyStmts
         @ shadowFrameClose bodyInd
@@ -1381,12 +1399,30 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
             | Some gkId ->
                 { c with GroupedArrays = Map.add cap.Name (gkSidecarStem ctx.VarNames gkId) c.GroupedArrays }
             | None -> c) bodyCtx
-    let bodyStmts = genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+    // `where repro` on a MAIN-LOCAL function: the routing veto scope still
+    // applies (no library dispatch in this body), but a std::function lambda
+    // cannot carry the GCC `optimize` attribute, so the contraction half of
+    // the demand is NOT dischargeable here. Say so in the emitted text --
+    // never silently -- rather than refuse the whole program.
+    let bodyStmts =
+        if funcDef.IsRepro then
+            Blade.LinAlgPatterns.reproScopeDepth.Value <-
+                Blade.LinAlgPatterns.reproScopeDepth.Value + 1
+            try genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+            finally
+                Blade.LinAlgPatterns.reproScopeDepth.Value <-
+                    Blade.LinAlgPatterns.reproScopeDepth.Value - 1
+        else genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
+    let reproNote =
+        if funcDef.IsRepro
+        then [$"{bodyInd}// [repro] main-local emission: routing vetoed, but the contraction attribute cannot attach to a lambda -- bind this function's inputs at module level to restore the full guarantee"]
+        else []
     // Shadow-stack frame; see genFuncDef. Name-only (nullptr/0),
     // and marker-form so resolveShadowFrames can drop it if no panic is
     // reachable from this body.
     let code =
         [$$"""{{ind}}{{funcType}} {{safeName}} = [&]({{paramList}}) -> {{retType}} {"""]
+        @ reproNote
         @ shadowFrameOpen funcDef bodyInd
         @ bodyStmts
         @ shadowFrameClose bodyInd
@@ -1427,7 +1463,10 @@ let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
                 | ArrayElem arr -> cppArrayTypeStr arr
                 | t -> irTypeToCpp t
             let safeName = sanitizeCppName funcDef.Name
-            $"{retType} {safeName}({allParams});")
+            // Attribute on the declaration too: GCC wants function
+            // attributes visible at the first declaration.
+            let reproAttr = if funcDef.IsRepro then "BLADE_REPRO_FN " else ""
+            $"{reproAttr}{retType} {safeName}({allParams});")
     if decls.IsEmpty then [] else decls @ [""]
 
 /// Classify a binding as a "computation" (forced combinator / compute) vs

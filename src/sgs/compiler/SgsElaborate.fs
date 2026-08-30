@@ -197,7 +197,7 @@ let private galileanStamp (boostParams: string list) (fd: FunctionDecl) : Functi
         | Some w -> { w with Custom = w.Custom @ [ conj ] }
         | None ->
             { Commutativity = []; Antisymmetry = []; Parallel = []
-              TDims = []; Custom = [ conj ] }
+              Repro = false; TDims = []; Custom = [ conj ] }
     { fd with WhereClause = Some wc }
 
 let private opList = "grad, box_filter, stress"

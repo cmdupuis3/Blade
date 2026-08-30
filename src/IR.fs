@@ -326,6 +326,15 @@ and IRCallable = {
     IsMpiParallel: bool
     IsArityPoly: bool
     ArityParam: string option
+    // `where repro` (functions only): the emitted body must keep the
+    // interpreter's operation sequence. Codegen discharges it as the
+    // BLADE_REPRO_FN attribute (noinline + fp-contract off) on the emitted
+    // definition, a veto inside `foldReorderLicensed` (which also covers the
+    // BLADE_FP_REASSOC lanes and the LLVM lane's fast-math flags), and
+    // BLAS/LAPACK routing declined while this body emits. Grafted like
+    // AntisymGroups by the ONE construction site that has the clause
+    // (Lowering.lowerTypedFuncDecl); every other site leaves it false.
+    IsRepro: bool
     Captures: CaptureInfo list
     // Per-parameter SIGN parity of the body (KspOdd/KspEven/KspUnknown, in
     // declaration order), consumed by `deduceWreathTie`'s soundness gate.
@@ -1553,6 +1562,9 @@ let mkCallable
         IsMpiParallel = isMpiParallel
         IsArityPoly = opts.IsArityPoly
         ArityParam = opts.ArityParam
+        // Grafted by Lowering.lowerTypedFuncDecl (the one site with the
+        // clause), like AntisymGroups below.
+        IsRepro = false
         Captures = captures
         // Like AntisymGroups: grafted on by the one construction site that has
         // it (Lowering.lowerTypedLambda, from the typechecked kernel's

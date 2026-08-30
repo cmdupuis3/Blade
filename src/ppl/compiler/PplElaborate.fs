@@ -50,7 +50,7 @@ let private forIn (var: string) (lo: Expr) (hi: Expr) (body: Stmt list) =
 let private meanE arr n = divE (syn (ExprReduce (arr, syn (ExprSection OpAdd), None, None))) (fLit n)
 let private prodsumE args = syn (ExprApp (v "prodsum", args))
 let private commWhere (names: string list) =
-    Some { Commutativity = [names]; Antisymmetry = []; Parallel = []; TDims = []; Custom = [] }
+    Some { Commutativity = [names]; Antisymmetry = []; Parallel = []; Repro = false; TDims = []; Custom = [] }
 // Full-span construction wrappers (stamp the ambient synthSpan); structural combinators only, scalar helpers above already wrap.
 let private appE f args = syn (ExprApp (f, args))
 let private arrLitE (cells: Expr list) = syn (ExprArrayLit cells)
@@ -1047,7 +1047,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                     let commGroups = [ xParams; yParams ] |> List.filter (fun g -> g.Length >= 2)
                     let whereC =
                         if commGroups.IsEmpty then None
-                        else Some { Commutativity = commGroups; Antisymmetry = []; Parallel = []; TDims = []; Custom = [] }
+                        else Some { Commutativity = commGroups; Antisymmetry = []; Parallel = []; Repro = false; TDims = []; Custom = [] }
                     let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
                     Ok [ mkDecl lName (methodForE ((List.replicate p (v xName)) @ (List.replicate q (v yName))))
                          mkDecl kName (lambdaE ps whereC (cumulantKernelBody r (float nX)))

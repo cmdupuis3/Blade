@@ -165,7 +165,7 @@ let private equivStamp (group: string) (fd: FunctionDecl) : FunctionDecl =
         | Some w -> { w with Custom = w.Custom @ [ conj ] }
         | None ->
             { Commutativity = []; Antisymmetry = []; Parallel = []
-              TDims = []; Custom = [ conj ] }
+              Repro = false; TDims = []; Custom = [ conj ] }
     { fd with WhereClause = Some wc }
 
 /// The strongest group admitted by a spec's l = 0 content, for the two
