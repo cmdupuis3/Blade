@@ -249,9 +249,8 @@ type LinAlgBackend =
 /// of the (routine x precision x symmetry) matrix, the routine FAMILY chosen
 /// by symmetry (see `LinAlgRoute`), the letter by this.
 ///
-/// Everything not listed -- integers, booleans, structs, unit-annotated
-/// scalars -- has no BLAS analogue and answers None, a decline at every
-/// classifier.
+/// Everything not listed -- integers, booleans, structs -- has no BLAS
+/// analogue and answers None, a decline at every classifier.
 type Precision =
     /// float32 -- `s` routines.
     | PrecS
@@ -264,8 +263,23 @@ type Precision =
 
 /// The BLAS precision of an element type, or None when the type has no
 /// routine family.
+///
+/// A UNIT annotation is stripped first: `Float64<meter>` stores as a bare
+/// `double` -- the wrapper erases entirely at codegen, so the emitted pool is
+/// `Array<double, 2>` either way -- and its precision letter is therefore `d`,
+/// routing exactly like its unit-free twin. Sound because an array's elements
+/// are uniform in unit as well as in width, so one letter still describes the
+/// whole pool, and because the OUTPUT's units are computed by the type system
+/// from the operand units, never read back off this answer. Two operands with
+/// DIFFERENT units still agree here, which is the point: `gram` multiplies the
+/// stored doubles, and meter x second is the result TYPE's business.
+///
+/// Matching bare `IRTScalar` only -- which is what this did before -- declined
+/// EVERY route for every unit-annotated array, handing dimensioned physics
+/// code scalar loops while the dimensionless twin got `dsyrk`. Silently: the
+/// two paths agree to a ULP, so nothing but the emitted text showed it.
 let precisionOf (t: IRType) : Precision option =
-    match t with
+    match stripUnits t with
     | IRTScalar ETFloat32 -> Some PrecS
     | IRTScalar ETFloat64 -> Some PrecD
     | IRTScalar ETComplex64 -> Some PrecC
