@@ -1173,8 +1173,8 @@ let runLinAlgProbeTests () : BlockResult =
         psi.CreateNoWindow <- true
         psi.WorkingDirectory <- cppDir
         use cproc = Process.Start(psi)
-        let cOut = cproc.StandardOutput.ReadToEndAsync()
-        let cErr = cproc.StandardError.ReadToEndAsync()
+        let cOut = Blade.Runtime.readToEndOffPool cproc.StandardOutput
+        let cErr = Blade.Runtime.readToEndOffPool cproc.StandardError
         let cExited = cproc.WaitForExit(60000)
         if not cExited then
             (try cproc.Kill(true) with _ -> ())
@@ -1194,8 +1194,8 @@ let runLinAlgProbeTests () : BlockResult =
             rpsi.CreateNoWindow <- true
             rpsi.WorkingDirectory <- cppDir
             use rproc = Process.Start(rpsi)
-            let rOut = rproc.StandardOutput.ReadToEndAsync()
-            let rErr = rproc.StandardError.ReadToEndAsync()
+            let rOut = Blade.Runtime.readToEndOffPool rproc.StandardOutput
+            let rErr = Blade.Runtime.readToEndOffPool rproc.StandardError
             let rExited = rproc.WaitForExit(30000)
             if not rExited then
                 (try rproc.Kill(true) with _ -> ())

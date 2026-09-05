@@ -491,8 +491,8 @@ let private runExeIn (cwd: string) (exeFile: string) : Result<int * string * str
         psi.CreateNoWindow <- true
         psi.WorkingDirectory <- cwd
         use proc = System.Diagnostics.Process.Start(psi)
-        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
-        let stderrTask = proc.StandardError.ReadToEndAsync()
+        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
         if proc.WaitForExit(60000) then
             Ok (proc.ExitCode, stdoutTask.Result, stderrTask.Result)
         else

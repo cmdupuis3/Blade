@@ -300,8 +300,8 @@ let runProc (exe: string) (args: string) (timeoutMs: int) : Result<unit, string>
         psi.UseShellExecute <- false
         psi.CreateNoWindow <- true
         use proc = Process.Start(psi)
-        let outT = proc.StandardOutput.ReadToEndAsync()
-        let errT = proc.StandardError.ReadToEndAsync()
+        let outT = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let errT = Blade.Runtime.readToEndOffPool proc.StandardError
         if not (proc.WaitForExit(timeoutMs)) then
             (try proc.Kill() with _ -> ())
             Error $"{exe} timed out"
@@ -582,8 +582,8 @@ let private gppIdentity : Lazy<string> =
                 psi.UseShellExecute <- false
                 psi.CreateNoWindow <- true
                 use proc = Process.Start(psi)
-                let out = proc.StandardOutput.ReadToEndAsync()
-                proc.StandardError.ReadToEndAsync() |> ignore
+                let out = Blade.Runtime.readToEndOffPool proc.StandardOutput
+                Blade.Runtime.readToEndOffPool proc.StandardError |> ignore
                 proc.WaitForExit(10000) |> ignore
                 let text = out.Result
                 match text.Split('\n') |> Array.tryHead with
@@ -618,8 +618,8 @@ let private nativeTargetIdentity : Lazy<string> =
             psi.UseShellExecute <- false
             psi.CreateNoWindow <- true
             use proc = Process.Start(psi)
-            let out = proc.StandardOutput.ReadToEndAsync()
-            proc.StandardError.ReadToEndAsync() |> ignore
+            let out = Blade.Runtime.readToEndOffPool proc.StandardOutput
+            Blade.Runtime.readToEndOffPool proc.StandardError |> ignore
             proc.WaitForExit(10000) |> ignore
             use sha = System.Security.Cryptography.SHA256.Create()
             sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes out.Result)
@@ -910,9 +910,9 @@ let compileCppWithExtraSource (srcText: string option) (extraLinkInputs: string 
         psi.CreateNoWindow <- true
 
         use proc = Process.Start(psi)
-        // Read both streams asynchronously to prevent pipe deadlocks
-        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
-        let stderrTask = proc.StandardError.ReadToEndAsync()
+        // Drain both streams on dedicated threads -- never the thread pool (Runtime.readToEndOffPool)
+        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
         
         // 300s: spectra-scale generated programs (rank-2 transforms, capped
         // at 65536 cells) can legitimately push g++ this long under -O3.
@@ -989,8 +989,8 @@ let compileCuda (cuFile: string) (outputDir: string) : Result<string, string> =
         psi.CreateNoWindow <- true
 
         use proc = Process.Start(psi)
-        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
-        let stderrTask = proc.StandardError.ReadToEndAsync()
+        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
 
         if not (proc.WaitForExit(120000)) then
             try proc.Kill() with _ -> ()
@@ -1242,9 +1242,9 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         prependNetcdfBin psi
         
         use proc = Process.Start(psi)
-        // Read both streams asynchronously to avoid deadlocks
-        let stdoutTask = proc.StandardOutput.ReadToEndAsync()
-        let stderrTask = proc.StandardError.ReadToEndAsync()
+        // Drain both streams on dedicated threads -- never the thread pool (Runtime.readToEndOffPool)
+        let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+        let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
         
         // 120s: simulation-scale examples (thousands of spectral steps) can
         // legitimately run long; corpus tests still finish well under a second.
@@ -1359,8 +1359,8 @@ let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, strin
             psi.WorkingDirectory <- Path.GetDirectoryName(exeFullPath)
             prependNetcdfBin psi
             use proc = Process.Start(psi)
-            let stdoutTask = proc.StandardOutput.ReadToEndAsync()
-            let stderrTask = proc.StandardError.ReadToEndAsync()
+            let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
+            let stderrTask = Blade.Runtime.readToEndOffPool proc.StandardError
             if proc.WaitForExit(60000) then
                 let stdout = stdoutTask.Result
                 let stderr = stderrTask.Result
