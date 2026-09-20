@@ -2,13 +2,15 @@
 
 **Status 2026-09-19: PAPER PROOF DRAFTS, PARTLY MACHINE-CHECKED the same day
 (section 15: P1-P3, P4, P5a, P9 in full; P4a, P6, P7 and P10 in full in their
-POLYNOMIAL forms; P7a and P7b over Z by Descartes' rule; P8's refusal for pure
-powers at every degree; 218 axiom-free theorems in `proofs/BladeSummary.v`,
-`BladeMomentClosure.v`, `BladeRankBound.v`, `BladeDescartes.v` and
-`BladeRankDomain.v`. P6, P4a and P7 against DIFFERENTIABLE summaries are
-proved too, but OUTSIDE the axiom-free tower: 22 theorems in
-`proofs/reals/BladeSmoothRank.v`, conditional on two axioms of Coq's real
-numbers). No compiler implementation. No claim of mathematical priority.**
+POLYNOMIAL forms; P7a and P7b over Z by Descartes' rule; P8's refusal against
+EVERY update function at every degree and order, from extent 2^(dr-1) on with
+no axioms (15.9); Newton's identities; 277 axiom-free theorems in
+`proofs/BladeSummary.v`, `BladeMomentClosure.v`, `BladeRankBound.v`,
+`BladeDescartes.v`, `BladeRankDomain.v`, `BladeProuhet.v` and `BladeNewton.v`.
+OUTSIDE the axiom-free tower, conditional on the axioms of Coq's real numbers,
+54 theorems in `proofs/reals/`: P6, P4a and P7 against DIFFERENTIABLE
+summaries, and P8's refusal at the draft's own threshold N >= d r (15.10)).
+No compiler implementation. No claim of mathematical priority.**
 
 Requested as a handoff for Claude. The proofs below are intended to be audited,
 tightened, and then selectively mechanized. Sections 1-14 are the draft as
@@ -781,16 +783,18 @@ Checks run for this draft using Python's standard-library rational arithmetic:
 
 ## 15. Review and mechanization record (Claude, 2026-09-19)
 
-Audit of sections 1-13, then four mechanization rounds. Five files were added
+Audit of sections 1-13, then six mechanization rounds. Seven files were added
 to the proof tower: `proofs/BladeSummary.v` (41 theorems),
 `proofs/BladeMomentClosure.v` (86), `proofs/BladeRankBound.v` (49, second
-round), `proofs/BladeDescartes.v` (28, third round) and
-`proofs/BladeRankDomain.v` (14, fourth round) -- all `coqc` + `coqchk` clean on
-Rocq 9.0.1, `Print Assumptions` closed (no axioms), stdlib only; the tower
-total is 1165 and `count-theorems.ps1 -Check` passes. One further file,
-`proofs/reals/BladeSmoothRank.v` (22), is deliberately OUTSIDE the tower and
-its count: it depends on two axioms of Coq's real numbers (15.8). Sections
-15.6-15.8 are the later rounds. `docs/proofs.md` carries the prose
+round), `proofs/BladeDescartes.v` (28, third round),
+`proofs/BladeRankDomain.v` (14, fourth round), `proofs/BladeProuhet.v` (37,
+fifth round) and `proofs/BladeNewton.v` (22, sixth round) -- all `coqc` +
+`coqchk` clean on Rocq 9.0.1, `Print Assumptions` closed (no axioms), stdlib
+only; the tower total is 1224 and `count-theorems.ps1 -Check` passes. Two
+further files, `proofs/reals/BladeSmoothRank.v` (24) and
+`proofs/reals/BladeRealCollision.v` (30), are deliberately OUTSIDE the tower
+and its count: they depend on the axioms of Coq's real numbers (15.8, 15.10).
+Sections 15.6-15.10 are the later rounds. `docs/proofs.md` carries the prose
 mirror. Nothing in `src/` changed; this still backs no compiler feature.
 
 ### 15.1 Audit verdict
@@ -857,7 +861,7 @@ Corrections and sharpenings, none of which changes a theorem:
 | P7 | FULL against POLYNOMIAL encodings at every N and horizon (15.6); the RANK statement at every integer point with distinct positive coordinates (15.7) | `squaring_needs_min_N_H_coordinates`, `squaring_jacobian_full_rank`, `many_roots`; N = H = 3: `squaring_minor_N3` (= 96), `squaring_three_steps_need_three_coordinates`; `squaring_observes_dyadic_moments` |
 | P7a, P7b | FULL over Z (15.7), by Descartes' rule -- NOT by the draft's Rolle argument, which has no axiom-free reading | `mulxc_adds_a_variation`, `descartes_bound`, `sparse_roots`, `generalized_vandermonde`, `generalized_vandermonde_transpose`, `square_kernel_transpose` |
 | P8 positive half | FULL (it is P4) | as P4 |
-| P8 negative half | PURE POWERS x^d: every d >= 2, r >= 1, N >= d r against polynomial G (15.6); r = 2 every d against EVERY G; squaring vs (S, Q) with exact threshold; x^d vs S | `power_not_poly_closed`, `power_not_closed_SQ`, `square_not_closed_SQ`, `square_SQ_threshold`, `two_point_newton`, `power_not_closed_S`, `same_SQ_674_1250` |
+| P8 negative half | FULL over R at the draft's threshold N >= d r, against EVERY G, at any array of distinct positive reals where a_d is nonzero; pure powers unconditionally (15.10, OUTSIDE the tower, Reals axioms). Axiom-free over any characteristic-0 integral domain at N >= 2^(dr-1) (15.9). Against polynomial G: pure powers at N >= d r, axiom-free (15.6). OPEN: that a nonzero coefficient POLYNOMIAL a_d is nonzero at some such array. | `closure_refused_R_at_point`, `power_never_closes_R_at_threshold`, `ideal_partner`; `newton_identities`, `ideal_pair_from_bump`; `closure_refused_at_collision`, `closure_refused_prouhet`, `power_never_closes`, `pte_spec`, `closure_refused_orthogonal_array`; `power_not_poly_closed`, `power_not_closed_SQ`, `square_SQ_threshold`, `power_not_closed_S`, `same_SQ_674_1250` |
 | P9 | FULL (generators suffice; supplied expressions are a certificate), one worked `ring` check | `generators_closed_algebra_closed`, `poly_certificate_sound`, `poly_certificate_affine_N3` |
 | P10 | FULL (15.6): given any finite list of elements of A_obs, some observable is not a polynomial in them | `p10_not_finitely_generated`, `p10_next_observable_is_new`, `p10_trajectory`, `p10_needs_two_coordinates`, `p10_no_identification` |
 | Units (11.3) | the grading, as scaling covariance (15.6) | `affine_update_unit_covariant`, `psum_scale` |
@@ -1070,3 +1074,114 @@ update function. The draft's argument varies p_m while holding p_1..p_(m-1)
 fixed, which is the inverse (or implicit) function theorem in several
 variables; Coq's standard library has one-variable calculus only. That is the
 remaining analytic debt, and it is the P8 thread.
+
+### 15.9 Fifth round: P8 (2026-09-20)
+
+`proofs/BladeProuhet.v` (36 theorems, axiom-free, in the tower), plus a
+two-theorem instance over R in `proofs/reals/`.
+
+**What section 9 actually needs.** The negative half of P8 expands p_r(F(x)) as
+sum_k c_k(q_r) p_k(x) with top coefficient a_d^r (equation (P2)), then moves
+p_m, m = d r, while p_1 .. p_(m-1) stand still. The second step is where the
+inverse function theorem enters -- but all it has to deliver is ONE PAIR OF
+ARRAYS that agree on p_0 .. p_(m-1) and disagree on p_m. Given such a pair, the
+rest is algebra and refutes every update function G, continuous or not:
+`closure_refused_at_collision`. The coefficient functions a_j may be ARBITRARY
+functions of the summary, not only polynomials; the one requirement is that
+a_d does not vanish at the collision point.
+
+**Such pairs are classical.** Prouhet (1851): if A and B agree on
+p_0 .. p_(m-1) and disagree on p_m, then (A ++ (B+1), B ++ (A+1)) agrees on
+p_0 .. p_m, and its disagreement on p_(m+1) is -(m+1) times the old one
+(`pte_spec`). The shift identity this needs is exactly P4 -- the binomial
+moment theorem -- read twice (`aff_low`, `aff_top`). Starting from ([0], []),
+m steps give arrays of extent 2^(m-1); at m = 3, ([0;2;2;2], [1;1;1;3]).
+Hence `closure_refused_prouhet` and, unconditionally, `power_never_closes`:
+x -> x^d admits no update of (p_1 .. p_r) of any kind, every d >= 2, every
+r >= 1, every extent N >= 2^(dr-1). Everything is over an abstract integral
+domain of characteristic zero, so it holds at Z, Q, R and C alike
+(`power_never_closes_Z`; `power_never_closes_R` in `proofs/reals/`).
+
+**The threshold, and why it is not the draft's.** The draft says N >= d r.
+This round reaches N >= 2^(dr-1), and the gap is not slack in the proof. A pair
+of extent m that agrees on p_1 .. p_(m-1) is an IDEAL Prouhet-Tarry-Escott
+solution. Over Z those are known only for small m (m <= 10 and m = 12, to our
+knowledge) and their existence in general is an open problem of number
+theory -- so NO axiom-free integer argument can currently reach N = d r for
+all d and r. Over R ideal solutions exist for every m, but only by analysis:
+the draft's inverse-function argument, or explicitly as the roots of
+T_m(X) = c for two values of c in (-1, 1), whose power sums agree below m by
+Newton's identities. Over C they are the m-th roots of unity and their
+multiples, which is `closure_refused_orthogonal_array`: the draft's own
+threshold, attained wherever the ring has an array whose first m - 1 power
+sums vanish and whose m-th does not (`square_vs_sum_at_threshold` is the case
+m = 2 over Z, the array (1, -1)). So the threshold d r in section 9 is a
+statement about the reals, and it remains a paper proof.
+
+**Still open in P8 (as of this round; item (i) is closed in 15.10).** (i) The
+draft's threshold over R -- needs Newton's
+identities (algebra, not yet in the tower) plus either the intermediate value
+theorem for a perturbed polynomial or the Chebyshev roots. (ii) For coefficient
+POLYNOMIALS a_j, the claim that "a_d not identically zero" yields a collision
+point where a_d is nonzero: the draft argues by an open image and the identity
+theorem; here the hypothesis is pointwise. Affine images and common padding of
+a Prouhet pair are again Prouhet pairs, which gives a large supply of candidate
+points, but no theorem that one of them works.
+
+### 15.10 Sixth round: P8 at the draft's threshold (2026-09-20)
+
+`proofs/BladeNewton.v` (22 theorems, axiom-free, in the tower) and
+`proofs/reals/BladeRealCollision.v` (30, OUTSIDE the tower: three axioms of
+Coq's reals -- the two of 15.8 plus `sig_not_dec`, because the intermediate
+value theorem is used).
+
+**The inverse function theorem is not needed.** Section 9 moves p_m, m = d r,
+while p_1 .. p_(m-1) stand still, by local coordinates in several variables.
+Coq's standard library has no multivariate calculus. But 15.9 showed that all
+the argument must deliver is ONE array x' agreeing with x on p_0 .. p_(m-1) and
+differing on p_m, and that can be had from ONE-variable calculus:
+
+1. Encode the array x (distinct positive reals) as the polynomial
+   E(Y) = prod (1 - x_i Y), whose roots are the reciprocals 1/x_i.
+2. Bump the coefficient of Y^m by a small t. E changes sign between consecutive
+   midpoints of its roots (`EN_sign_change`); a small enough bump preserves
+   every one of those signs (`sign_stable`); the intermediate value theorem
+   then returns N real roots, one per interval (`perturbed_roots`).
+3. The bumped polynomial has N distinct real roots and the value 1 at 0, so it
+   IS prod (1 - Y / rho_j): two coefficient lists that agree as functions at
+   N + 1 distinct points agree coefficient by coefficient
+   (`coefficients_from_values`, axiom-free).
+4. NEWTON'S IDENTITIES (`newton_identities`, axiom-free, over any commutative
+   ring, by induction on the roots with a telescoping cross term) say that the
+   first m - 1 coefficients determine p_1 .. p_(m-1) and that p_m moves with
+   the m-th coefficient at rate -m (`newton_difference`). So x' = (1 / rho_j)
+   agrees with x on p_0 .. p_(m-1) and differs on p_m by m t
+   (`ideal_pair_from_bump`, `ideal_partner`).
+
+Steps 3 and 4 are algebra and live in the tower; only step 2 needs the reals.
+
+**What is proved.** `ideal_partner`: every array of distinct positive reals has
+such a partner, for every m <= N. `closure_refused_R_at_point`: section 9's
+theorem in section 9's own form -- for the general fragment, N >= d r, at ANY
+array of distinct positive reals where the leading coefficient a_d is nonzero,
+no function G of the first r power sums, continuous or not, closes the update;
+the a_j may be arbitrary functions of the summary.
+`power_never_closes_R_at_threshold`: x -> x^d, unconditionally.
+`closure_refused_R_at_threshold`: any a_d that vanishes nowhere.
+
+**What remains of P8.** One sentence of section 9: "Choose such a point with
+a_d(q_r(x)) != 0. It exists ... a nonzero real polynomial cannot vanish on that
+entire open subset." That existence claim -- a nonzero coefficient POLYNOMIAL
+is nonzero at some array of distinct positive reals -- is not mechanized. For a
+concrete a_d it is one evaluation, which is how a checker would use the theorem;
+in general it needs the image of q_r to be Zariski dense (algebraic
+independence of p_1 .. p_r) and the identity theorem for polynomials in several
+variables.
+
+**A remark on thresholds.** With 15.9 this gives the full picture. Against
+every G: N >= d r over R (analysis, three axioms); N >= 2^(dr-1) over any
+characteristic-0 integral domain with no axioms; N = d r over any ring holding
+the (dr)-th roots of unity. Whether N = d r can be reached over Z for all d, r
+is the ideal Prouhet-Tarry-Escott problem and is open. And 15.1(3) still
+stands in the other direction: d r is sufficient, not sharp -- squaring against
+(S, Q) already fails at N = 3.

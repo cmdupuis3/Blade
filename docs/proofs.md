@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**1165 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**1224 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -10,10 +10,11 @@ Rules of this document:
 
 - The `.v` files are canonical; this document is the map. Every claim here
   names its Coq artifact. Nothing is `Admitted`; there are no axioms.
-- **One file sits outside the tower**: `proofs/reals/BladeSmoothRank.v` (22
-  theorems) uses Coq's axiomatic real numbers. It has its own `_CoqProject`,
-  is excluded from the count above and from the "no axioms" claim, and is
-  described under its own heading near the end, with the two axioms named.
+- **Two files sit outside the tower**: `proofs/reals/BladeSmoothRank.v` (24
+  theorems) and `proofs/reals/BladeRealCollision.v` (30) use Coq's axiomatic
+  real numbers. They have their own `_CoqProject`, are excluded from the count
+  above and from the "no axioms" claim, and are described under their own
+  headings near the end, with the axioms named.
 - Scope caveats are stated where the files state them (rank-2 only,
   materialized fragment, do-not-cite, etc.).
 - Remaining open items are collected under "What remains unproved" at the end
@@ -38,7 +39,7 @@ Rules of this document:
 | Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
 | Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
-| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`) |
+| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain, BladeProuhet, BladeNewton | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`); and the closure refusal against EVERY update function at every degree and order, by Prouhet–Tarry–Escott collisions; Newton's identities over any commutative ring, and the theorem that turns one bumped coefficient into an ideal pair |
 | Optimality | BladeOptimal, BladeOrbitWork | the orbit bound on kernel work and storage against ANY program (oracle adversary), attained by canonical enumeration at H = S_R for every binding and at the sign character r = 2; the pipeline form — one question per subterm class modulo the laws, attained by the memoized evaluator, with the orbit work formula checked on a two-node pipeline |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
@@ -1515,7 +1516,82 @@ divisors and *decidable equality*, all as hypotheses; nothing about order or
 completeness. Over ℝ, decidable equality is itself a consequence of the
 axioms — that is where they enter, not here.
 
-## Outside the tower: `proofs/reals/BladeSmoothRank.v` (22 theorems, conditional)
+## BladeProuhet.v (37 theorems) — exact recurrence reduction: P8's refusal against every update function
+
+The draft refuses closure of q_r = (p₁ … p_r) under a degree-d update by moving
+p_(dr) while p₁ … p_(dr−1) stand still — local coordinates, hence the inverse
+function theorem. The algebra in that argument needs no analysis at all, only a
+**pair of arrays** that agree on p₀ … p_(dr−1) and disagree on p_(dr). Such
+pairs have been known since Prouhet (1851).
+
+- `aff_low`, `aff_top`: how power-sum differences move under an affine map —
+  BladeMomentClosure's P4 theorem read twice.
+- `pte`, `pte_spec` — **Prouhet's construction**: from a pair agreeing on
+  p₀ … p_(m−1) and disagreeing on p_m, the pair (A ++ (B+1), B ++ (A+1)) agrees
+  one power further, and its first disagreement is −(m+1) times the old one.
+  Sizes 2^(m−1) (`pte_length`); `prouhet_pair_3` pins ([0;2;2;2], [1;1;1;3]).
+- `psum_Fgen`, `plpow_top`: the draft's expansion (P2). For the update
+  xᵢ' = Σⱼ aⱼ(q_r x)·xᵢʲ, p_r of the image is Σ_k c_k p_k with c the
+  coefficients of φʳ — functions of the summary alone — and top one a_dʳ.
+- `closure_refused_at_collision` — **the refusal**: any such pair of arrays,
+  where a_d does not vanish, refutes *every* update function G, continuous or
+  not. The aⱼ are **arbitrary** functions of the summary, not just polynomials.
+- `power_refused_at_collision`: the pure-power refusal from *any* collision
+  pair — what a pair found by other means (`proofs/reals/`) plugs into.
+- `closure_refused_prouhet`: with Prouhet's pair — every d ≥ 2, r ≥ 1, every
+  extent N ≥ 2^(dr−1). `power_never_closes` (and `power_never_closes_Z`): in
+  particular x ↦ xᵈ, unconditionally.
+- `closure_refused_orthogonal_array`: the draft's **own** threshold N = d·r,
+  wherever the ring has an array whose first dr − 1 power sums vanish and whose
+  (dr)-th does not — the (dr)-th roots of unity, where they exist
+  (`square_vs_sum_at_threshold`: (1, −1) over ℤ).
+
+Everything is over an abstract integral domain of characteristic zero
+(hypotheses), so it reads at ℤ, ℚ, ℝ and ℂ alike.
+
+Honest scope (stated in-file): **the threshold is 2^(dr−1), not the draft's
+d·r, and that gap is not slack in the proof.** A pair of extent m agreeing on
+p₁ … p_(m−1) is an *ideal* Prouhet–Tarry–Escott solution; over ℤ these are
+known only for small m (m ≤ 10 and m = 12, to our knowledge) and their
+existence in general is an open problem. Over ℝ they exist for every m, but
+only by analysis (the draft's route, or the roots of T_m(X) = c); over ℂ they
+are the roots of unity. So the draft's threshold is a statement about the
+reals and is **not** reached; what is reached is the same refusal at a larger
+extent, with no axioms. For coefficient *polynomials* whose leading one
+vanishes at the Prouhet point another collision point is needed, and "a_d not
+identically zero gives one" is not proved.
+
+## BladeNewton.v (22 theorems) — exact recurrence reduction: Newton's identities, and what they buy
+
+The axiom-free half of the draft's P8 threshold N ≥ d·r. BladeProuhet builds
+collision pairs over ℤ at extent 2^(m−1); at extent m they are *ideal*
+solutions and none is known over ℤ in general. Over ℝ they come from a
+polynomial, not from a list: take ∏(1 − xᵢY), bump **one** coefficient, and
+ask for the roots again. Everything in that sentence except "ask for the roots
+again" is algebra, and is here.
+
+- `elist`, `cf`: E(Y) = ∏ᵢ (1 − xᵢY) as a coefficient list; cⱼ its
+  coefficients, the signed elementary symmetric functions.
+- `newton_identities` — **Newton**: Σ_(j<k) cⱼ p_(k−j) + k·c_k = 0 for every
+  k, over **any commutative ring**. By induction on the roots: adding a root x
+  sends N(k) to N(k) − x·N(k−1) (`newton_cons`), the cross terms telescoping
+  to nothing.
+- `newton_difference`: so the top m coefficients determine p₁ … p_(m−1), and
+  p_m moves with c_m at rate −m.
+- `many_roots_dom`, `coefficients_from_values`: a polynomial with more distinct
+  roots than coefficients is zero, over any integral domain — hence two
+  coefficient lists that agree as *functions* at enough points agree
+  coefficient by coefficient.
+- `ideal_pair_from_bump`: if E(xs) with its m-th coefficient bumped by t ≠ 0 is
+  again some E(ys), then xs and ys agree on p₀ … p_(m−1) and differ on p_m
+  (by m·t): an ideal pair of their common extent.
+
+Honest scope (stated in-file): nothing here *produces* the second array — that
+a bumped polynomial still splits into real linear factors is analysis.
+Characteristic zero and "no zero divisors" are hypotheses used only from the
+root-counting part on; Newton's identities themselves need neither.
+
+## Outside the tower: `proofs/reals/BladeSmoothRank.v` (24 theorems, conditional)
 
 **Not counted above. Not in `_CoqProject`. Not covered by "no axioms".** It
 uses Coq's standard-library real numbers; `Print Assumptions` on its theorems
@@ -1552,8 +1628,44 @@ It closes the draft's P6, and P4a and P7 **against differentiable summaries**:
 
 The ranks are not recomputed over ℝ: BladeDescartes and BladeRankBound
 establish them exactly over ℤ, and `left_kernel_transfer` carries them along
-`IZR`. Not here: the draft's P8 refusal, which needs the inverse function
-theorem; anything about floating point.
+`IZR`. `power_never_closes_R` is BladeProuhet's axiom-free P8 theorem read at
+K = ℝ — no analysis, and here only because ℝ itself is axiomatic. Not here:
+the draft's P8 at *its* threshold N ≥ d·r, which needs real arrays agreeing
+on p₁ … p_(dr−1) at extent d·r (analysis); anything about floating point.
+
+## Outside the tower: `proofs/reals/BladeRealCollision.v` (30 theorems, conditional)
+
+**Not counted above. Not in `_CoqProject`. Not covered by "no axioms".** Three
+axioms — the two named above plus `ClassicalDedekindReals.sig_not_dec`,
+because the intermediate value theorem is used. `coqc` and `coqchk` clean.
+
+It closes the draft's **P8, negative half, at its own threshold N ≥ d·r**. The
+draft moves p_(dr) while p₁ … p_(dr−1) stand still by the inverse function
+theorem in several variables, which Coq's standard library does not have.
+**One-variable calculus is enough**:
+
+- `EN_sign_change`: E(Y) = ∏(1 − Y/rtᵢ), for any increasing positive roots,
+  changes sign between consecutive midpoints.
+- `perturbed_roots`: bump the coefficient of Yᵐ by a small t; every one of
+  those signs survives (`sign_stable`), so the intermediate value theorem
+  returns N real roots, one in each interval.
+- `ideal_partner`: the bumped polynomial has N distinct real roots and the
+  value 1 at 0, so it *is* ∏(1 − Y/ρⱼ)
+  (`BladeNewton.coefficients_from_values`), and Newton's identities read off
+  the power sums of the reciprocals. **Every array of distinct positive reals
+  has a partner of the same extent agreeing on p₀ … p_(m−1) and differing on
+  p_m, for every m ≤ N.**
+- `closure_refused_R_at_point` — P8 as §9 argues it: at *any* such array where
+  the leading coefficient a_d is nonzero, no function G of the first r power
+  sums, continuous or not, closes the update, for N ≥ d·r. The aⱼ are
+  arbitrary functions of the summary.
+  `power_never_closes_R_at_threshold`: x ↦ xᵈ, unconditionally.
+  `closure_refused_R_at_threshold`: any a_d that vanishes nowhere.
+
+Not proved: the draft's *existence* claim for coefficient polynomials — that
+"a_d not identically zero" yields an array of distinct positive reals where
+a_d(q_r(x)) ≠ 0. For a concrete a_d that is one evaluation; in general it
+needs the image of q_r to be Zariski dense.
 
 ## What remains unproved
 
@@ -1571,12 +1683,12 @@ prove H = S_R at any binding, the sign character at r = 2, and the term form
 with one two-node instance); and completeness of the SIGNED deduction rules
 (PNeg, PConj, call summaries — BladeDeduceExact is exact for the unsigned
 fragment only). For exact recurrence reduction (a research draft, no shipped
-feature): P8's refusal against arbitrary update functions, which needs the
-inverse function theorem (P6, P4a and P7 against differentiable summaries are
-closed, but OUTSIDE the tower, conditional on two axioms of Coq's reals — see
-above), the closure refusal for the general fragment with coefficient
-polynomials, reverse-mode AD as emitted, and the whole source-to-summary
-compiler theorem.
+feature): for coefficient polynomials in P8, that "a_d not identically zero"
+yields a collision point where it is nonzero; reverse-mode AD as emitted; and
+the whole source-to-summary compiler theorem. (P8's refusal is axiom-free at
+N ≥ 2^(dr−1) and, at the draft's threshold N ≥ d·r, proved over ℝ OUTSIDE
+the tower; P6, P4a and P7 against differentiable summaries likewise — all
+conditional on the axioms of Coq's reals, see above.)
 
 ---
 

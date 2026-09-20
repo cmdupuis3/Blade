@@ -13,7 +13,8 @@ or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 numbers, has its own `_CoqProject`, and is excluded from every count below
 (see "Outside the tower" at the end). Build it after the tower:
 
-    cd reals && coqc -Q .. Blade -Q . BladeReals BladeSmoothRank.v
+    cd reals && coqc -Q .. Blade -Q . BladeReals BladeSmoothRank.v \
+             && coqc -Q .. Blade -Q . BladeReals BladeRealCollision.v
 
 ## Counting convention
 
@@ -25,7 +26,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (1165 theorems total)
+## Contents (1224 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -658,12 +659,58 @@ run it with `-Check` to verify the numbers below and the headline in
   HYPOTHESES on K; nothing about order or completeness.  Written so that
   the file which needs axioms contains nothing but analysis.
 
+- BladeProuhet.v (37): NEW -- EXACT RECURRENCE REDUCTION, P8's refusal
+  against EVERY update function, by Prouhet-Tarry-Escott collisions.  The
+  draft refuses closure of q_r = (p_1 .. p_r) under a degree-d update by
+  moving p_(dr) while p_1 .. p_(dr-1) stand still -- local coordinates,
+  hence the inverse function theorem.  The algebra in that argument needs
+  only a PAIR OF ARRAYS agreeing on p_0 .. p_(dr-1) and disagreeing on
+  p_(dr), and such pairs have been known since 1851.  aff_low / aff_top
+  (how power-sum differences move under an affine map: the P4 theorem
+  read twice); pte, pte_spec (PROUHET'S CONSTRUCTION: (A ++ (B+1),
+  B ++ (A+1)) agrees one power further, and its first disagreement is
+  -(m+1) times the old one; sizes 2^(m-1)); psum_Fgen / plpow_top (the
+  draft's expansion P2: p_r of the image is sum_k c_k p_k with top
+  coefficient a_d^r); closure_refused_at_collision (any such pair, where
+  a_d does not vanish, refutes every G -- continuous or not; the a_j are
+  ARBITRARY functions of the summary); closure_refused_prouhet (every
+  d >= 2, r >= 1, N >= 2^(dr-1)); power_never_closes and
+  power_never_closes_Z (x -> x^d, unconditionally);
+  closure_refused_orthogonal_array (the draft's OWN threshold N = d r
+  wherever the ring has an array whose first dr-1 power sums vanish and
+  whose (dr)-th does not -- the roots of unity).  Over an abstract
+  integral domain of characteristic zero, so it reads at Z, Q, R, C.
+  THE THRESHOLD IS 2^(dr-1), NOT THE DRAFT'S d r, and that gap is not
+  slack: a pair of extent m agreeing on p_1 .. p_(m-1) is an IDEAL
+  Prouhet-Tarry-Escott solution, known over Z only for small m, open in
+  general; over R they exist for every m but only by analysis.  For
+  coefficient POLYNOMIALS whose leading one vanishes at the Prouhet
+  point another collision point is needed, and "a_d not identically zero
+  gives one" is not proved.
+
+- BladeNewton.v (22): NEW -- EXACT RECURRENCE REDUCTION, Newton's
+  identities and what they buy: the axiom-free half of the draft's P8
+  threshold N >= d r.  elist / cf (E(Y) = prod (1 - x_i Y) as a
+  coefficient list); newton_identities (sum_(j<k) c_j p_(k-j) + k c_k = 0
+  for every k, over ANY commutative ring, by induction on the roots:
+  adding a root x sends N(k) to N(k) - x N(k-1), newton_cons, the cross
+  terms telescoping); newton_difference (the top m coefficients determine
+  p_1 .. p_(m-1), and p_m moves with c_m at rate -m); many_roots_dom and
+  coefficients_from_values (root counting over any integral domain, so
+  two coefficient lists that agree as FUNCTIONS at enough points agree
+  coefficient by coefficient); ideal_pair_from_bump (if E(xs) with its
+  m-th coefficient bumped by t <> 0 is again some E(ys), then xs and ys
+  agree on p_0 .. p_(m-1) and differ on p_m by m t -- an ideal pair of
+  their common extent).  Nothing here PRODUCES the second array; that a
+  bumped polynomial still splits into real linear factors is analysis
+  and lives in reals/.
+
 ## Outside the tower: conditional on Coq's Reals axioms
 
 NOT counted above, NOT in `_CoqProject`, NOT covered by the "no axioms"
 claim.
 
-- reals/BladeSmoothRank.v (22): the draft's P6, and P4a and P7 against
+- reals/BladeSmoothRank.v (24): the draft's P6, and P4a and P7 against
   DIFFERENTIABLE summaries, over Coq's standard-library real numbers.
   `Print Assumptions` reports exactly two axioms:
   ClassicalDedekindReals.sig_forall_dec and
@@ -681,4 +728,28 @@ claim.
   differentiable summary serves every horizon as N grows).  The ranks are
   not recomputed: BladeDescartes and BladeRankBound establish them exactly
   over Z and BladeRankDomain.left_kernel_transfer carries them along IZR.
-  The draft's P8 refusal (inverse function theorem) is not here.
+  power_never_closes_R is BladeProuhet's axiom-free P8 theorem read at
+  K = R (no analysis; here only because R is axiomatic).  The draft's P8
+  at ITS threshold N >= d r is not here: it needs real arrays agreeing on
+  p_1 .. p_(dr-1) at extent d r, which is analysis.
+- reals/BladeRealCollision.v (30): the draft's P8, negative half, AT ITS
+  OWN THRESHOLD N >= d r over the reals.  Three axioms (the two above
+  plus ClassicalDedekindReals.sig_not_dec, because the intermediate value
+  theorem is used).  The draft moves p_(dr) with p_1 .. p_(dr-1) fixed by
+  the inverse function theorem in several variables, which Coq's stdlib
+  does not have; ONE-variable calculus is enough.  EN_sign_change
+  (prod (1 - Y / rt_i), for any increasing positive roots, changes sign
+  between consecutive midpoints); perturbed_roots (bump the coefficient
+  of Y^m by a small t: every sign survives, so the IVT returns N real
+  roots); ideal_partner (the bumped polynomial IS prod (1 - Y / rho_j),
+  by BladeNewton.coefficients_from_values, and Newton's identities read
+  off the power sums: EVERY array of distinct positive reals has a
+  partner of the same extent agreeing on p_0 .. p_(m-1) and differing on
+  p_m, for every m <= N).  Hence closure_refused_R_at_point (P8 as
+  section 9 argues it: at ANY such array where a_d is nonzero, no G of
+  any kind, N >= d r; the a_j arbitrary functions of the summary),
+  power_never_closes_R_at_threshold (x -> x^d, unconditionally) and
+  closure_refused_R_at_threshold (a_d nowhere zero).  NOT proved: the
+  draft's existence claim that "a_d not identically zero" (a polynomial)
+  yields such an array -- one evaluation for a concrete a_d, Zariski
+  density of the image of q_r in general.

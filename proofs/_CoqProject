@@ -38,3 +38,5 @@ BladeMomentClosure.v
 BladeRankBound.v
 BladeDescartes.v
 BladeRankDomain.v
+BladeProuhet.v
+BladeNewton.v

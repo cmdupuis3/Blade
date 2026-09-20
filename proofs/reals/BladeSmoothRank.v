@@ -45,7 +45,12 @@
 (*                             observed over Hor steps of squaring need  *)
 (*                             min(N, Hor) summary coordinates, so no    *)
 (*                             bounded differentiable summary serves     *)
-(*                             every horizon as N grows.                 *)
+(*                             every horizon as N grows;                 *)
+(*   power_never_closes_R      P8 over R against EVERY update function,  *)
+(*                             continuous or not, for x -> x^d from      *)
+(*                             extent 2^(dr-1) on.  No analysis:         *)
+(*                             BladeProuhet's axiom-free theorem read at *)
+(*                             K = R.                                    *)
 (*                                                                       *)
 (* The ranks are not recomputed here: BladeDescartes and BladeRankBound  *)
 (* establish them exactly over Z, and                                    *)
@@ -54,15 +59,18 @@
 (* Scope, stated once.  "Differentiable at the point" means Frechet      *)
 (* differentiable in the l1 norm on the first n coordinates.  The two    *)
 (* applications are proved at the integer points (0, 1, 2, ...) and      *)
-(* (1, 2, 3, ...); a lower bound needs one point.  The draft's P8, whose *)
-(* refusal needs the inverse function theorem, is not here.  Exact real  *)
-(* arithmetic; nothing about floating point.                             *)
+(* (1, 2, 3, ...); a lower bound needs one point.  The draft's P8 at ITS *)
+(* threshold N >= d r needs real arrays agreeing on p_1 .. p_(dr-1) and  *)
+(* differing on p_(dr) at extent d r -- the inverse function theorem, or *)
+(* the roots of T_m(X) = c -- and is not here.  Exact real arithmetic;   *)
+(* nothing about floating point.                                         *)
 (*                                                                       *)
-(* Imports the Blade tower (BladeRankDomain and below) and Coq's Reals.  *)
+(* Imports the Blade tower (BladeRankDomain, BladeProuhet and below) and *)
+(* Coq's Reals.                                                          *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
-  BladeRankBound BladeDescartes BladeRankDomain.
+  BladeRankBound BladeDescartes BladeRankDomain BladeProuhet.
 Require Import Reals Lra List Arith Lia ZArith.
 Import ListNotations.
 
@@ -596,4 +604,31 @@ Proof.
     + intros l Hl. etransitivity; [|apply (Hdep l); unfold s in Hl; lia].
       apply Rsumf_ext. intros t _.
       rewrite mult_IZR, IZR_zpow, <- !INR_IZR_INZ. reflexivity.
+Qed.
+
+(* ===================================================================== *)
+(* Part G.  P8 over the reals, against EVERY update function.  No        *)
+(* analysis: this is BladeProuhet's axiom-free theorem read at K = R,    *)
+(* and it is here only because R itself is axiomatic.                    *)
+(* ===================================================================== *)
+
+Lemma ofnat_R : forall n, ofnat R 0 1 Rplus n = INR n.
+Proof.
+  induction n as [|n IH]; [reflexivity|].
+  cbn [ofnat]. rewrite IH, S_INR. lra.
+Qed.
+
+(* The draft's P8, negative half, for the pure power x -> x^d on real    *)
+(* arrays: no function G of the first r power sums, continuous or not,   *)
+(* from extent 2^(dr-1) on.                                              *)
+Theorem power_never_closes_R : forall d r N,
+  (2 <= d)%nat -> (1 <= r)%nat -> (2 ^ (d * r - 1) <= N)%nat ->
+  forall G : unit -> list R -> list R,
+    ~ (forall u y, length y = N ->
+         qr R 0 1 Rplus Rmult r (map (fun t => rpow R 1 Rmult t d) y)
+         = G u (qr R 0 1 Rplus Rmult r y)).
+Proof.
+  apply (power_never_closes R 0 1 Rplus Rmult Rminus Ropp RTheory
+           Rmult_integral R1_neq_R0).
+  intros n. rewrite ofnat_R. apply not_0_INR. discriminate.
 Qed.

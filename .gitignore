@@ -21,6 +21,7 @@ obj/
 .*.aux
 .lia.cache
 .nia.cache
+.nra.cache
 CoqMakefile*
 !CoqMakefile.local
 
