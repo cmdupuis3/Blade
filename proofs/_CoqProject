@@ -36,3 +36,5 @@ BladeDeduceExact.v
 BladeSummary.v
 BladeMomentClosure.v
 BladeRankBound.v
+BladeDescartes.v
+BladeRankDomain.v

@@ -2,10 +2,13 @@
 
 **Status 2026-09-19: PAPER PROOF DRAFTS, PARTLY MACHINE-CHECKED the same day
 (section 15: P1-P3, P4, P5a, P9 in full; P4a, P6, P7 and P10 in full in their
-POLYNOMIAL forms; P8's refusal for pure powers at every degree; NOTHING against
-C^1 encodings; 176 theorems in `proofs/BladeSummary.v`,
-`proofs/BladeMomentClosure.v` and `proofs/BladeRankBound.v`). No compiler
-implementation. No claim of mathematical priority.**
+POLYNOMIAL forms; P7a and P7b over Z by Descartes' rule; P8's refusal for pure
+powers at every degree; 218 axiom-free theorems in `proofs/BladeSummary.v`,
+`BladeMomentClosure.v`, `BladeRankBound.v`, `BladeDescartes.v` and
+`BladeRankDomain.v`. P6, P4a and P7 against DIFFERENTIABLE summaries are
+proved too, but OUTSIDE the axiom-free tower: 22 theorems in
+`proofs/reals/BladeSmoothRank.v`, conditional on two axioms of Coq's real
+numbers). No compiler implementation. No claim of mathematical priority.**
 
 Requested as a handoff for Claude. The proofs below are intended to be audited,
 tightened, and then selectively mechanized. Sections 1-14 are the draft as
@@ -778,12 +781,16 @@ Checks run for this draft using Python's standard-library rational arithmetic:
 
 ## 15. Review and mechanization record (Claude, 2026-09-19)
 
-Audit of sections 1-13, then two mechanization rounds the same day. Three files
-were added to the proof tower: `proofs/BladeSummary.v` (41 theorems),
-`proofs/BladeMomentClosure.v` (86) and, in the second round,
-`proofs/BladeRankBound.v` (49) -- all `coqc` + `coqchk` clean on Rocq 9.0.1,
-`Print Assumptions` closed (no axioms), stdlib only; the tower total is 1123
-and `count-theorems.ps1 -Check` passes. Section 15.6 is the second round. `docs/proofs.md` carries the prose
+Audit of sections 1-13, then four mechanization rounds. Five files were added
+to the proof tower: `proofs/BladeSummary.v` (41 theorems),
+`proofs/BladeMomentClosure.v` (86), `proofs/BladeRankBound.v` (49, second
+round), `proofs/BladeDescartes.v` (28, third round) and
+`proofs/BladeRankDomain.v` (14, fourth round) -- all `coqc` + `coqchk` clean on
+Rocq 9.0.1, `Print Assumptions` closed (no axioms), stdlib only; the tower
+total is 1165 and `count-theorems.ps1 -Check` passes. One further file,
+`proofs/reals/BladeSmoothRank.v` (22), is deliberately OUTSIDE the tower and
+its count: it depends on two axioms of Coq's real numbers (15.8). Sections
+15.6-15.8 are the later rounds. `docs/proofs.md` carries the prose
 mirror. Nothing in `src/` changed; this still backs no compiler feature.
 
 ### 15.1 Audit verdict
@@ -847,8 +854,8 @@ Corrections and sharpenings, none of which changes a theorem:
 | P5b | the q_2 pullback formula only | `pullback_SQ` |
 | P5c | covered by P5a's generality (parameters enter through the tangent parts of a, b and x_0) -- prose on that anchor | -- |
 | P6 | FULL at every (m, s), against POLYNOMIAL encodings, no determinants (15.6) | `homogeneous_has_solution`, `poly_rank_bound_rows`, `poly_rank_bound_cols`, `poly_rank_certificate`; fixed sizes: `poly_rank_bound_1_2`, `poly_rank_bound_2_3` |
-| P7 | FULL at every N and horizon, against POLYNOMIAL encodings, at ONE point (15.6) | `squaring_needs_min_N_H_coordinates`, `many_roots`; N = H = 3: `squaring_minor_N3` (= 96), `squaring_three_steps_need_three_coordinates`; `squaring_observes_dyadic_moments` |
-| P7a, P7b | NOT mechanized, and no longer needed for P7's polynomial form (15.6); still needed for "at every point" | -- |
+| P7 | FULL against POLYNOMIAL encodings at every N and horizon (15.6); the RANK statement at every integer point with distinct positive coordinates (15.7) | `squaring_needs_min_N_H_coordinates`, `squaring_jacobian_full_rank`, `many_roots`; N = H = 3: `squaring_minor_N3` (= 96), `squaring_three_steps_need_three_coordinates`; `squaring_observes_dyadic_moments` |
+| P7a, P7b | FULL over Z (15.7), by Descartes' rule -- NOT by the draft's Rolle argument, which has no axiom-free reading | `mulxc_adds_a_variation`, `descartes_bound`, `sparse_roots`, `generalized_vandermonde`, `generalized_vandermonde_transpose`, `square_kernel_transpose` |
 | P8 positive half | FULL (it is P4) | as P4 |
 | P8 negative half | PURE POWERS x^d: every d >= 2, r >= 1, N >= d r against polynomial G (15.6); r = 2 every d against EVERY G; squaring vs (S, Q) with exact threshold; x^d vs S | `power_not_poly_closed`, `power_not_closed_SQ`, `square_not_closed_SQ`, `square_SQ_threshold`, `two_point_newton`, `power_not_closed_S`, `same_SQ_674_1250` |
 | P9 | FULL (generators suffice; supplied expressions are a certificate), one worked `ring` check | `generators_closed_algebra_closed`, `poly_certificate_sound`, `poly_certificate_affine_N3` |
@@ -897,15 +904,14 @@ an equation between functions on Z is weaker and is not what they assume.
 
 ### 15.4 Not reached, and why
 
-- **Anything against C^1 encodings** (P4a, P6, P7, and P8's negative half AS
-  STATED): Rolle and the inverse function theorem. Coq's stdlib Reals are
-  axiomatic, and this tower is axiom-free by policy. The polynomial forms are
-  now closed at every size (15.6); they are narrower and are not a substitute:
-  a continuous non-polynomial encoding is untouched by them. Either accept a
-  separately-labelled conditional file, or stay with the polynomial versions.
-- **P7a / P7b** (generalized Vandermonde), hence P7's "rank = min(N, H) at EVERY
-  point with distinct positive coordinates". The lower bound needs the rank at
-  one point only, and 15.6 picks a point where no such lemma is needed.
+- ~~**Anything against C^1 encodings** (P4a, P6, P7).~~ Closed in 15.8, in a
+  separately labelled file outside the axiom-free tower. What remains of this
+  item is **P8's negative half as stated** (against an arbitrary update
+  function, by local coordinates): it needs the inverse function theorem,
+  which Coq's standard library does not provide in several variables.
+- ~~**P7a / P7b** (generalized Vandermonde), hence P7's "rank = min(N, H) at
+  EVERY point with distinct positive coordinates".~~ Closed in 15.7, over Z.
+  Real points are part of the C^1 item above.
 - **P8's refusal for the general fragment** (coefficient polynomials
   a_j(q_r)): the pure-power case is closed at every d and r; the general case
   needs a formal-derivative computation through the coefficient polynomials
@@ -979,3 +985,88 @@ polynomial in them.
 dimensionless, and p_k rescales by c^k. That is 11.3's "heterogeneous product"
 as a theorem: the summary is graded and the reduced update respects the
 grading. It is a covariance statement, not a link to Blade's unit checker.
+
+### 15.7 Third round: the P7 thread (2026-09-20)
+
+`proofs/BladeDescartes.v` (28 theorems): P7a, P7b, and the rank statements of
+P7 and P4a at every integer point.
+
+**A correction to the draft's proof, not to its statement.** Section 8 proves
+P7a by induction with Rolle's theorem. Over the reals that is fine. But the
+tower is axiom-free, its numbers are Z and Q, and **Rolle's theorem is false
+over Q**: the root of the derivative between two rational roots need not be
+rational (x^3 - x vanishes at -1, 0, 1; its derivative 3x^2 - 1 has no rational
+root). So the draft's argument cannot be transcribed; any mechanization that
+"follows section 8" over an ordered field is unsound unless the field is real
+closed. The statement survives, because it has a purely algebraic proof:
+Descartes' rule of signs. Multiplying by (X - a), a > 0, adds at least one sign
+variation to the coefficient sequence (`mulxc_adds_a_variation`); the factor
+theorem is exact over an integral domain; so a nonzero polynomial has at most V
+distinct positive roots (`descartes_bound`), and s monomials give V <= s - 1
+(`sparse_roots`). No root of a derivative is ever requested.
+
+**P7b in both forms.** `generalized_vandermonde`: distinct positive nodes and
+distinct exponents (no ordering needed) give a trivial kernel -- the row form,
+which is what Descartes proves directly. The column form
+(`generalized_vandermonde_transpose`) follows from `square_kernel_transpose`:
+a square integer matrix with a nonzero left kernel vector has a nonzero right
+one. That is "row rank = column rank" for square matrices, again with no
+determinants: drop a row the left vector weights, solve the remaining s - 1
+equations in s unknowns (`homogeneous_has_solution`), and the dropped row
+follows because its weight is a nonzero integer.
+
+**P7 at every point.** `squaring_jacobian_full_rank`: wherever the coordinates
+are pairwise distinct and positive, the differentials of the sums observed over
+min(N, H) steps of squaring are linearly independent. This is the draft's
+"rank D O_(N,H)(x) = min(N,H)", for integer x; a rational x reduces to it by
+homogeneity of the p_k, a real x does not. `moment_jacobian_full_rank` is the
+companion for p_1..p_r (ordinary Vandermonde, positivity not needed).
+
+What this round does NOT change: a rank at a point forbids only what
+BladeRankBound's theorem says it forbids -- polynomial encodings. Turning the
+same ranks into a bound against C^1 encodings is P6 as stated, and is the next
+thread.
+
+### 15.8 Fourth round: the C^1 thread (2026-09-20)
+
+Decision taken by the author: a file that depends on Coq's axiomatic real
+numbers is admitted, provided it is separately labelled and stays out of the
+axiom-free count. The work was split so that the axiom-dependent file contains
+nothing but analysis.
+
+**Axiom-free half: `proofs/BladeRankDomain.v` (14 theorems, in the tower).**
+P6 is two facts. One is the chain rule. The other -- "a matrix that factors
+through m columns has rank at most m" -- is algebra, proved over ANY integral
+domain with decidable equality (`homogeneous_has_solution_dom`,
+`factor_rows_dependent`). Also algebra is the step that lets an exact integer
+computation speak about a field one cannot compute in:
+`integer_right_inverse_col` (a square integer matrix with trivial left kernel
+has a right inverse up to a nonzero scalar) and `left_kernel_transfer` (along
+any ring map Z -> K killing no nonzero integer, trivial left kernel over Z gives
+trivial left kernel over K).
+
+**Analysis half: `proofs/reals/BladeSmoothRank.v` (22 theorems, OUTSIDE the
+tower).** `Print Assumptions` reports exactly two axioms,
+`ClassicalDedekindReals.sig_forall_dec` and
+`FunctionalExtensionality.functional_extensionality_dep`; `coqc` + `coqchk`
+clean; own `_CoqProject`; not counted.
+
+- The notion of smoothness is `diff_at`: Frechet differentiability AT THE POINT,
+  in two-point form. This is weaker than the draft's C^1-near-the-point, so the
+  theorems are stronger than the draft's statements. A pleasant consequence: no
+  mean value theorem is needed anywhere. `chain_rule` is the plain epsilon-delta
+  argument; `diff_at_unique` moves along one coordinate.
+- `smooth_rank_bound` is P6 as stated in section 7, in that stronger form: the
+  factorization need only hold NEAR x_*, and summary and reconstructions need
+  only be differentiable AT x_* and q(x_*).
+- `moment_summary_needs_r_smooth_coordinates` (P4a) and
+  `squaring_needs_min_N_H_smooth_coordinates` (P7). The ranks are not recomputed
+  over R: they are 15.6 / 15.7's exact integer ranks, carried along IZR. For P7
+  this is where 15.7 pays off -- the rank at the point (1, 2, 3, ...) is
+  `generalized_vandermonde`, a fact about integers.
+
+**What the C^1 thread did NOT reach.** P8's negative half against an arbitrary
+update function. The draft's argument varies p_m while holding p_1..p_(m-1)
+fixed, which is the inverse (or implicit) function theorem in several
+variables; Coq's standard library has one-variable calculus only. That is the
+remaining analytic debt, and it is the P8 thread.

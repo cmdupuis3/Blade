@@ -9,6 +9,12 @@ Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
+`reals/` is NOT part of this tower: it depends on the axioms of Coq's real
+numbers, has its own `_CoqProject`, and is excluded from every count below
+(see "Outside the tower" at the end). Build it after the tower:
+
+    cd reals && coqc -Q .. Blade -Q . BladeReals BladeSmoothRank.v
+
 ## Counting convention
 
 One item per `Lemma`, `Theorem`, `Corollary`, or `Example` that begins a
@@ -19,7 +25,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (1123 theorems total)
+## Contents (1165 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -607,6 +613,72 @@ run it with `-Check` to verify the numbers below and the headline in
   to the end: given any finite list of elements of the least observable
   algebra, some observable is not a polynomial in them).  Scope:
   polynomial summaries only -- narrower than the draft's C^1 statements
-  and not a substitute for them; P7 is proved at one point, not "at every
-  point with distinct positive coordinates" (that is P7a / P7b, NOT
-  proved); P8 for pure powers only.
+  and not a substitute for them; P7 is proved here at one point, which is
+  all a lower bound needs (the rank at EVERY point is BladeDescartes);
+  P8 for pure powers only.
+- BladeDescartes.v (28): NEW -- EXACT RECURRENCE REDUCTION, the P7 thread
+  (same draft: P7a, P7b, and the rank statements of P7 and P4a AT EVERY
+  POINT).  The draft proves P7a by Rolle's theorem, and Rolle's theorem
+  is FALSE over Q, so that proof has no axiom-free reading; the statement
+  does, by Descartes' rule of signs, whose algebraic proof never asks for
+  a root of anything but the polynomial itself.  Multiplying by (X - a),
+  a > 0, adds at least one sign variation (mulxc_adds_a_variation;
+  descartes_step scans W and (X - a) W together with a two-state
+  invariant, AHEAD or TIED); hence a nonzero integer polynomial has at
+  most V distinct positive roots (descartes_bound, with BladeRankBound's
+  Horner division as the exact factor theorem, mulxc_quot), and at most s
+  nonzero monomials with s distinct positive roots force zero
+  (sparse_roots = P7a).  P7b in both forms: generalized_vandermonde
+  (distinct positive nodes, DISTINCT exponents, trivial kernel) and
+  generalized_vandermonde_transpose, by square_kernel_transpose -- a
+  square integer matrix with a nonzero left kernel vector has a nonzero
+  right one, "row rank = column rank" without determinants.  Hence
+  squaring_jacobian_full_rank: at EVERY point with pairwise distinct
+  positive coordinates the differentials of the sums observed over
+  min(N, Hor) steps of squaring are linearly independent; and
+  moment_jacobian_full_rank, the same for p_1 .. p_r at every point with
+  distinct coordinates.  Scope: INTEGER points (rational ones reduce by
+  homogeneity; real ones do not); independence over Z, equivalently Q;
+  what a rank forbids is still BladeRankBound's theorem, against
+  polynomial encodings only.
+- BladeRankDomain.v (14): NEW -- EXACT RECURRENCE REDUCTION, the algebra of
+  the draft's P6 over any integral domain, and the transfer of an integer
+  rank -- the axiom-free half of the C^1 thread.  P6 is two facts: the
+  chain rule, and "a matrix that factors through m columns has rank at
+  most m".  The second is algebra: homogeneous_has_solution_dom
+  (BladeRankBound's elimination over ANY integral domain with decidable
+  equality) and factor_rows_dependent (if A = C . B with fewer columns in
+  C than rows, the rows of A are dependent).  So is the step that carries
+  a rank computed exactly over Z to a field one cannot compute in:
+  integer_right_inverse_col (a square integer matrix with trivial left
+  kernel has a right inverse up to a nonzero scalar, column by column)
+  and left_kernel_transfer (along any ring map Z -> K that kills no
+  nonzero integer, trivial left kernel over Z gives trivial left kernel
+  over K).  Decidable equality, no zero divisors and 1 <> 0 are
+  HYPOTHESES on K; nothing about order or completeness.  Written so that
+  the file which needs axioms contains nothing but analysis.
+
+## Outside the tower: conditional on Coq's Reals axioms
+
+NOT counted above, NOT in `_CoqProject`, NOT covered by the "no axioms"
+claim.
+
+- reals/BladeSmoothRank.v (22): the draft's P6, and P4a and P7 against
+  DIFFERENTIABLE summaries, over Coq's standard-library real numbers.
+  `Print Assumptions` reports exactly two axioms:
+  ClassicalDedekindReals.sig_forall_dec and
+  FunctionalExtensionality.functional_extensionality_dep.  diff_at is
+  differentiability AT A POINT in two-point form -- weaker than C^1 on a
+  neighbourhood, so each theorem is stronger than its C^1 reading.
+  diff_at_unique; chain_rule (the epsilon-delta argument for Frechet
+  derivatives, no mean value theorem); smooth_rank_bound (P6: if s
+  observations equal reconstructions of m < s summary coordinates near x,
+  all differentiable at the point, the gradients of the observations at x
+  are linearly dependent); Ppow_diff (power sums are differentiable; the
+  one import from one-variable calculus is the derivative of t -> t^n).
+  Hence moment_summary_needs_r_smooth_coordinates (P4a over R) and
+  squaring_needs_min_N_H_smooth_coordinates (P7 over R: no bounded
+  differentiable summary serves every horizon as N grows).  The ranks are
+  not recomputed: BladeDescartes and BladeRankBound establish them exactly
+  over Z and BladeRankDomain.left_kernel_transfer carries them along IZR.
+  The draft's P8 refusal (inverse function theorem) is not here.
