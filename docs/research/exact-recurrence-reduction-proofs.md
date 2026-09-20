@@ -1,10 +1,11 @@
 # Exact recurrence reduction: proof drafts and research handoff
 
 **Status 2026-09-19: PAPER PROOF DRAFTS, PARTLY MACHINE-CHECKED the same day
-(section 15: P1-P3, P4, P5a, P9 in full; P4a, P6, P7, P8's refusal and P10 as
-instances or polynomial forms; 118 theorems in `proofs/BladeSummary.v` and
-`proofs/BladeMomentClosure.v`). No compiler implementation. No claim of
-mathematical priority.**
+(section 15: P1-P3, P4, P5a, P9 in full; P4a, P6, P7 and P10 in full in their
+POLYNOMIAL forms; P8's refusal for pure powers at every degree; NOTHING against
+C^1 encodings; 176 theorems in `proofs/BladeSummary.v`,
+`proofs/BladeMomentClosure.v` and `proofs/BladeRankBound.v`). No compiler
+implementation. No claim of mathematical priority.**
 
 Requested as a handoff for Claude. The proofs below are intended to be audited,
 tightened, and then selectively mechanized. Sections 1-14 are the draft as
@@ -777,11 +778,12 @@ Checks run for this draft using Python's standard-library rational arithmetic:
 
 ## 15. Review and mechanization record (Claude, 2026-09-19)
 
-Audit of sections 1-13, then a first mechanization round. Two files were added
-to the proof tower: `proofs/BladeSummary.v` (41 theorems) and
-`proofs/BladeMomentClosure.v` (77), both `coqc` + `coqchk` clean on Rocq 9.0.1,
-`Print Assumptions` closed (no axioms), stdlib only; the tower total is 1065
-and `count-theorems.ps1 -Check` passes. `docs/proofs.md` carries the prose
+Audit of sections 1-13, then two mechanization rounds the same day. Three files
+were added to the proof tower: `proofs/BladeSummary.v` (41 theorems),
+`proofs/BladeMomentClosure.v` (86) and, in the second round,
+`proofs/BladeRankBound.v` (49) -- all `coqc` + `coqchk` clean on Rocq 9.0.1,
+`Print Assumptions` closed (no axioms), stdlib only; the tower total is 1123
+and `count-theorems.ps1 -Check` passes. Section 15.6 is the second round. `docs/proofs.md` carries the prose
 mirror. Nothing in `src/` changed; this still backs no compiler feature.
 
 ### 15.1 Audit verdict
@@ -840,17 +842,18 @@ Corrections and sharpenings, none of which changes a theorem:
 | Bounded lag | FULL, zero-history window | `lag_window_sound`, `lag_window_is_first_order`, `lag_slice_from_window` |
 | P3a / P3b | FULL, plus the refutation P3b's prose asks for | `summary_compose_sound`, `summary_product_sound`, `isolated_certificates_do_not_compose` |
 | P4 (M1), (M2) | FULL, every k, every N, any commutative ring, a and b arbitrary functions of (u, summary) | `affine_moment_tower_closed`, `bcl_binomial`, `affine_sum_closed`, `affine_square_sum_closed`, `moment_certificate`, `moment_reduction_sound` |
-| P4a | INSTANCE r = 2, against POLYNOMIAL encodings | `SQ_needs_two_coordinates` |
+| P4a | FULL at every r, against POLYNOMIAL encodings (15.6) | `moment_summary_needs_r_coordinates`; r = 2: `SQ_needs_two_coordinates` |
 | P5a | FULL for the P4 fragment, forward mode as dual numbers, every finite execution | `dual_ring_theory`, `moment_tangent_sound`, `dual_psum` |
 | P5b | the q_2 pullback formula only | `pullback_SQ` |
 | P5c | covered by P5a's generality (parameters enter through the tangent parts of a, b and x_0) -- prose on that anchor | -- |
-| P6 | POLYNOMIAL encodings, sizes (m, s) = (1, 2) and (2, 3) | `poly_rank_bound_1_2`, `poly_rank_bound_2_3` |
-| P7 | INSTANCE N = H = 3 against two polynomial coordinates | `squaring_minor_N3` (= 96), `squaring_three_steps_need_three_coordinates`, `squaring_observes_dyadic_moments` |
-| P7a, P7b | NOT mechanized | -- |
+| P6 | FULL at every (m, s), against POLYNOMIAL encodings, no determinants (15.6) | `homogeneous_has_solution`, `poly_rank_bound_rows`, `poly_rank_bound_cols`, `poly_rank_certificate`; fixed sizes: `poly_rank_bound_1_2`, `poly_rank_bound_2_3` |
+| P7 | FULL at every N and horizon, against POLYNOMIAL encodings, at ONE point (15.6) | `squaring_needs_min_N_H_coordinates`, `many_roots`; N = H = 3: `squaring_minor_N3` (= 96), `squaring_three_steps_need_three_coordinates`; `squaring_observes_dyadic_moments` |
+| P7a, P7b | NOT mechanized, and no longer needed for P7's polynomial form (15.6); still needed for "at every point" | -- |
 | P8 positive half | FULL (it is P4) | as P4 |
-| P8 negative half | TWO INSTANCES, against EVERY G: squaring vs (S, Q) with exact threshold; x^d vs S for all d >= 2 | `square_not_closed_SQ`, `square_SQ_threshold`, `two_point_newton`, `power_not_closed_S`, `same_SQ_674_1250` |
+| P8 negative half | PURE POWERS x^d: every d >= 2, r >= 1, N >= d r against polynomial G (15.6); r = 2 every d against EVERY G; squaring vs (S, Q) with exact threshold; x^d vs S | `power_not_poly_closed`, `power_not_closed_SQ`, `square_not_closed_SQ`, `square_SQ_threshold`, `two_point_newton`, `power_not_closed_S`, `same_SQ_674_1250` |
 | P9 | FULL (generators suffice; supplied expressions are a certificate), one worked `ring` check | `generators_closed_algebra_closed`, `poly_certificate_sound`, `poly_certificate_affine_N3` |
-| P10 | CORE: the chain R[g_0..g_T] never stabilizes; the step to "not finitely generated" is prose | `p10_trajectory`, `p10_next_observable_is_new`, `p10_needs_two_coordinates`, `p10_no_identification` |
+| P10 | FULL (15.6): given any finite list of elements of A_obs, some observable is not a polynomial in them | `p10_not_finitely_generated`, `p10_next_observable_is_new`, `p10_trajectory`, `p10_needs_two_coordinates`, `p10_no_identification` |
+| Units (11.3) | the grading, as scaling covariance (15.6) | `affine_update_unit_covariant`, `psum_scale` |
 
 ### 15.3 Three things the mechanization found
 
@@ -886,28 +889,32 @@ computes its formal directional derivative, the chain rule is evaluation, and
 "three observations through two polynomial coordinates have a vanishing
 3 x 3 Jacobian minor" is a `ring` identity (`poly_rank_bound_2_3`). This is
 mechanization step 4's "polynomial-encoding version" -- narrower than C^1, but
-axiom-free. It stops at fixed size because the tower has no determinant
-theory; general (m, s) needs Cauchy-Binet or an exterior-power argument.
+axiom-free. In the first round it stopped at fixed size for want of determinant
+theory; 15.6 removes that limit without determinants.
 A hypothesis to keep honest: the rank bounds assume the factorization holds
 as an identity over the dual numbers, which a symbolic certificate provides;
 an equation between functions on Z is weaker and is not what they assume.
 
 ### 15.4 Not reached, and why
 
-- **Anything against C^1 encodings** (P4a, P6, P7 as stated; P8's negative
-  half as stated): Rolle and the inverse function theorem. Coq's stdlib Reals
-  are axiomatic, and this tower is axiom-free by policy. Either accept a
+- **Anything against C^1 encodings** (P4a, P6, P7, and P8's negative half AS
+  STATED): Rolle and the inverse function theorem. Coq's stdlib Reals are
+  axiomatic, and this tower is axiom-free by policy. The polynomial forms are
+  now closed at every size (15.6); they are narrower and are not a substitute:
+  a continuous non-polynomial encoding is untouched by them. Either accept a
   separately-labelled conditional file, or stay with the polynomial versions.
-- **P7a / P7b** (generalized Vandermonde): provable over an ordered field via
-  Descartes' rule without Rolle, but that is a development of its own.
-- **P8's refusal in general** (arbitrary d, r, coefficient polynomials): needs
-  algebraic independence of power sums, or explicit collision families
-  (Prouhet-Tarry-Escott pairs give equal p_1..p_r, but not control of p_(2k)).
-- **P10's last step** and any statement quantifying over all finite generating
-  sets; **units** on the heterogeneous summary (11.3); **reverse-mode AD as
-  `Grad*.fs` emits it** (11.4) -- the dual-number semantics here is not tied
-  to BladeJacobian's symbolic `d`; **IEEE behaviour** (11.2), untouched by
-  construction; the **source fragment and the compiler theorem** (section 12),
+- **P7a / P7b** (generalized Vandermonde), hence P7's "rank = min(N, H) at EVERY
+  point with distinct positive coordinates". The lower bound needs the rank at
+  one point only, and 15.6 picks a point where no such lemma is needed.
+- **P8's refusal for the general fragment** (coefficient polynomials
+  a_j(q_r)): the pure-power case is closed at every d and r; the general case
+  needs a formal-derivative computation through the coefficient polynomials
+  and a point where the leading coefficient is nonzero.
+- **Reverse-mode AD as `Grad*.fs` emits it** (11.4) -- the dual-number
+  semantics here is not tied to BladeJacobian's symbolic `d`; P5b in paired
+  form is a one-line corollary of P5a (apply the cotangent to both sides) and
+  was not separately stated. **IEEE behaviour** (11.2), untouched by
+  construction. The **source fragment and the compiler theorem** (section 12),
   which remains the research target.
 
 ### 15.5 Suggested next round
@@ -918,5 +925,57 @@ an equation between functions on Z is weaker and is not what they assume.
 2. Make `collision_refutes_update` the refusal format and P9-style polynomial
    identities the acceptance format; both are checkable by exact evaluation,
    and 15.3(b) makes the second carry forward-mode AD.
-3. If a dimension lower bound is wanted in the tower, do determinants once
-   (Cauchy-Binet at general size) rather than importing Reals.
+3. ~~If a dimension lower bound is wanted in the tower, do determinants once
+   (Cauchy-Binet at general size) rather than importing Reals.~~ Done in
+   15.6, and it did not take determinants.
+
+### 15.6 Second round: the gaps (same day)
+
+`proofs/BladeRankBound.v` (49 theorems), plus nine in BladeMomentClosure.
+
+**The rank bound at every size, without determinants.** Section 15.5 proposed
+doing determinants once. A weaker fact is enough: an integer homogeneous system
+with more unknowns than equations has a NONZERO solution
+(`homogeneous_has_solution`; fraction-free elimination by induction on the
+number of equations). If s observations factor through m < s polynomial
+coordinates, the s x m matrix of reconstruction coefficients has a nonzero
+left-kernel vector, and that vector annihilates the observations' differentials
+at every point along every direction (`poly_rank_bound_rows`); dually, along
+any s directions some nonzero combination of the DIRECTIONS is invisible to
+every observation (`poly_rank_bound_cols`). `poly_rank_certificate` is what a
+checker would rely on: exhibit a point and s directions whose s x s integer
+matrix of differentials has trivial kernel -- for a concrete matrix that is
+linear integer arithmetic -- and every m < s is refuted.
+
+**P4a and P7 at every size from one lemma.** `many_roots`: a polynomial with
+more distinct roots than coefficients is zero. P4a takes the row form at
+x_i = i: the dependency is a polynomial with coefficients lam_k (k+1) and r
+distinct roots. P7 takes the column form, and the choice of point does the
+work the draft assigns to P7a/P7b: at x_i = 2^i, along directions 2^l e_l, the
+entries 2^t x_i^(2^t - 1) 2^i become 2^t (2^(2^t))^i -- the draft's GENERALIZED
+Vandermonde matrix is an ORDINARY one in the nodes 2^(2^t). So
+`squaring_needs_min_N_H_coordinates` holds at every N and horizon with neither
+Descartes' rule nor Rolle. What this does not give is the draft's stronger
+sentence that the rank is min(N, H) at EVERY point with distinct positive
+coordinates; a lower bound only ever needed one point.
+
+**P8's refusal at every d and r, with the draft's threshold.** If p_r of the
+image under x -> x^d were a polynomial in p_1..p_r, then r + 1 observations
+would factor through r coordinates; the row form makes
+sum_(k<r) lam_k (k+1) X^k + mu (d r) X^(d r - 1) vanish at every node of every
+point, and N >= d r distinct nodes force it to zero (`power_not_poly_closed`).
+This is section 9's "algebraic mechanization alternative", and N >= d r is
+exactly where it bites -- so the threshold that 15.1(3) showed is not sharp
+against arbitrary G is the natural one against polynomial G. Against EVERY G,
+`power_not_closed_SQ` covers r = 2 uniformly in d with one collision
+((1,5,6) / (2,3,7): 7^k outgrows 1 + 5^k + 6^k from k = 3 on).
+
+**P10 to the end** (`p10_not_finitely_generated`): given any finite list of
+elements of A_obs -- each a polynomial expression in the observables
+g_k = x y^k -- take M past every variable they mention; x y^M is not a
+polynomial in them.
+
+**Units** (`affine_update_unit_covariant`): rescale x and b by c with a
+dimensionless, and p_k rescales by c^k. That is 11.3's "heterogeneous product"
+as a theorem: the summary is graded and the reduced update respects the
+grading. It is a covariance statement, not a link to Blade's unit checker.

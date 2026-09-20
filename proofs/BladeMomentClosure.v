@@ -25,6 +25,11 @@
 (*   tree_summary_sound        P2's non-time example: singleton, concat  *)
 (*                             and affine trees summarized by (n, S, Q). *)
 (*   squaring_observes_dyadic_moments  t squarings observe p_(2^t).      *)
+(*   affine_update_unit_covariant  units (the draft's 11.3): rescale x   *)
+(*                             and b by c, keep a dimensionless, and p_k *)
+(*                             rescales by c^k -- the summary is a       *)
+(*                             GRADED product and the update respects    *)
+(*                             it.                                       *)
 (*                                                                       *)
 (*   generators_closed_algebra_closed  P9: F* maps R[q_1, q_2, ...] into *)
 (*                             itself as soon as it does on generators;  *)
@@ -90,20 +95,20 @@
 (*                             certified summary of any kind identifies  *)
 (*                             two states with x, y nonzero.             *)
 (*                                                                       *)
-(* Scope, stated once.  NOT REACHED: P6 / P7 / P4a against C^1 encodings *)
-(* (Rolle, inverse function theorem -- Coq's Reals are axiomatic and     *)
-(* this tower is axiom-free); the rank bound at general (m, s), which    *)
-(* needs determinants; P8's refusal for general d, r and coefficient     *)
-(* polynomials (proved here: squaring vs (S, Q) with the exact           *)
-(* threshold, and pure powers vs S); P5 for reverse mode as Blade emits  *)
-(* it, and any link to Grad*.fs; units on the heterogeneous summary      *)
-(* (sect. 11.3); the last step from p10_next_observable_is_new to "not   *)
-(* finitely generated" (every finite set of observables lies in some     *)
-(* R[g_0 .. g_T]) is prose.  A polynomial identity is read as valid in   *)
-(* the dual numbers over the base ring, which is what a symbolic         *)
-(* certificate provides; an equation between FUNCTIONS on Z is a weaker  *)
-(* hypothesis and is not what the rank bounds assume.  Exact arithmetic  *)
-(* throughout; no source fragment, no recognition, no code generation.   *)
+(* Scope, stated once.  The rank bound here stops at sizes (1,2) and     *)
+(* (2,3), where `ring` expands the minor; BladeRankBound takes it to     *)
+(* every size (D_factor and lift_basis below are its interface), and     *)
+(* with it P4a at every r, P7 at every N and horizon, P8's refusal for   *)
+(* pure powers at every d and r, and P10 to "not finitely generated".    *)
+(* NOT REACHED in either file: anything against C^1 encodings (Rolle,    *)
+(* inverse function theorem -- Coq's Reals are axiomatic and this tower  *)
+(* is axiom-free); P8 for the general fragment with coefficient          *)
+(* polynomials; P5 for reverse mode as Blade emits it, and any link to   *)
+(* Grad*.fs.  A polynomial identity is read as valid in the dual numbers *)
+(* over the base ring, which is what a symbolic certificate provides; an *)
+(* equation between FUNCTIONS on Z is a weaker hypothesis and is not     *)
+(* what the rank bounds assume. Exact arithmetic throughout; no source   *)
+(* fragment, no recognition, no code generation.                         *)
 (*                                                                       *)
 (* Imports BladeBinomial, BladeSummary.  Coq 8.18, stdlib only.          *)
 (* ===================================================================== *)
@@ -334,6 +339,44 @@ Section Moments.
       simpl. ring. }
     rewrite rsum_peval, mdot_seq, bcl_length.
     f_equal. apply map_ext. intro j. rewrite bcl_binomial. reflexivity.
+  Qed.
+
+  (* Units (the draft's 11.3).  Rescale the unit of x by c, with a       *)
+  (* dimensionless and b carrying x's unit: p_k rescales by c^k.  The    *)
+  (* summary is a GRADED product -- S carries the unit, Q its square --  *)
+  (* and the reduced update respects the grading.                        *)
+  Lemma rpow_mul : forall c x k, rpow (c *! x) k = rpow c k *! rpow x k.
+  Proof.
+    intros c x. induction k as [|k IH]; simpl; [ring|]. rewrite IH. ring.
+  Qed.
+
+  Lemma rpow_add : forall x n m, rpow x (n + m) = rpow x n *! rpow x m.
+  Proof.
+    intros x n m. induction n as [|n IH]; simpl; [ring|]. rewrite IH. ring.
+  Qed.
+
+  Lemma rpow_rpow : forall x n m, rpow (rpow x n) m = rpow x (n * m).
+  Proof.
+    intros x n m. induction m as [|m IH].
+    - rewrite Nat.mul_0_r. reflexivity.
+    - replace (n * S m) with (n + n * m) by ring. rewrite rpow_add, <- IH.
+      reflexivity.
+  Qed.
+
+  Lemma psum_scale : forall c k xs,
+    psum k (map (fun x => c *! x) xs) = rpow c k *! psum k xs.
+  Proof.
+    intros c k xs. unfold psum. rewrite map_map.
+    induction xs as [|x xs IH]; cbn [map rsum]; [ring|].
+    rewrite IH, rpow_mul. ring.
+  Qed.
+
+  Theorem affine_update_unit_covariant : forall c a b k xs,
+    psum k (map (aff a (c *! b)) (map (fun x => c *! x) xs))
+    = rpow c k *! psum k (map (aff a b) xs).
+  Proof.
+    intros c a b k xs. rewrite <- psum_scale. f_equal.
+    rewrite !map_map. apply map_ext. intro x. unfold aff. ring.
   Qed.
 
   (* Squaring every particle doubles the index of every power sum, so    *)
@@ -884,6 +927,82 @@ Section Dual.
     f_equal. apply pevD_ext. intro k. unfold genv, zlift, truncm.
     destruct (Nat.ltb k (S T)); [|reflexivity].
     rewrite Dpow_const. unfold dmul. simpl. f_equal; ring.
+  Qed.
+
+  (* ------------------------------------------------------------------- *)
+  (* The tangent of an expression is LINEAR in the incoming tangents at  *)
+  (* any base point, so it decomposes over the unit directions.  This is *)
+  (* what BladeRankBound's general bound rests on.                       *)
+  (* ------------------------------------------------------------------- *)
+
+  Lemma lift_linear : forall e x a s b t,
+    snd (pevD e (lift x (fun k => a *! s k +! b *! t k)))
+    = a *! snd (pevD e (lift x s)) +! b *! snd (pevD e (lift x t)).
+  Proof.
+    induction e as [i|c|e1 IH1 e2 IH2|e1 IH1 e2 IH2]; intros x a s b t;
+      simpl.
+    - reflexivity.
+    - ring.
+    - rewrite (IH1 x a s b t), (IH2 x a s b t). ring.
+    - rewrite (IH1 x a s b t), (IH2 x a s b t), !pevD_fst_lift. ring.
+  Qed.
+
+  Lemma lift_zero : forall e x, snd (pevD e (lift x (fun _ => r0))) = r0.
+  Proof.
+    induction e as [i|c|e1 IH1 e2 IH2|e1 IH1 e2 IH2]; intros x; simpl;
+      try reflexivity.
+    - rewrite IH1, IH2. ring.
+    - rewrite IH1, IH2. ring.
+  Qed.
+
+  Lemma lift_basis : forall e x t m,
+    snd (pevD e (lift x (truncm m t)))
+    = Bsum (map (fun k => t k *! snd (pevD e (lift x (unitR k))))
+                (seq 0 m)).
+  Proof.
+    intros e x t. induction m as [|m IH].
+    - transitivity (snd (pevD e (lift x (fun _ => r0)))).
+      + reflexivity.
+      + apply lift_zero.
+    - rewrite seq_S, map_app,
+        (rsum_app R r0 r1 radd rmul rsub ropp Rth), <- IH.
+      rewrite (pevD_ext e (lift x (truncm (S m) t))
+                 (lift x (fun k => r1 *! truncm m t k +! t m *! unitR m k))).
+      + rewrite (lift_linear e x r1 (truncm m t) (t m) (unitR m)).
+        cbn [map rsum Nat.add]. ring.
+      + intro i. unfold lift. f_equal. unfold truncm, unitR.
+        destruct (Nat.ltb_spec i m), (Nat.ltb_spec i (S m)),
+                 (Nat.eqb_spec i m); try lia; subst; ring.
+  Qed.
+
+  (* m summary coordinates q_0 .. q_(m-1); a reconstruction may name     *)
+  (* other variables, which read zero -- it sees m coordinates only.     *)
+  Definition qenvD (m : nat) (q : nat -> pexp R) (rho : nat -> dual)
+    : nat -> dual :=
+    fun j => if Nat.ltb j m then pevD (q j) rho else d0.
+  Definition qval (m : nat) (q : nat -> pexp R) (x : nat -> R) : nat -> R :=
+    fun j => if Nat.ltb j m then Bpev (q j) x else r0.
+
+  (* If O = Rr(q_0 .. q_(m-1)) over the dual numbers, then DO is a       *)
+  (* combination of the Dq_j with direction-independent coefficients.    *)
+  Theorem D_factor : forall m q O Rr,
+    (forall rho, pevD O rho = pevD Rr (qenvD m q rho)) ->
+    forall x v,
+      D O x v
+      = Bsum (map (fun j => D (q j) x v
+                            *! snd (pevD Rr (lift (qval m q x) (unitR j))))
+                  (seq 0 m)).
+  Proof.
+    intros m q O Rr H x v. unfold D at 1. rewrite H.
+    rewrite (pevD_ext Rr (qenvD m q (lift x v))
+               (lift (qval m q x) (truncm m (fun j => D (q j) x v)))).
+    - apply lift_basis.
+    - intro j.
+      change (lift (qval m q x) (truncm m (fun j0 => D (q j0) x v)) j)
+        with (qval m q x j, truncm m (fun j0 => D (q j0) x v) j).
+      unfold qenvD, qval, truncm. destruct (Nat.ltb j m); [|reflexivity].
+      rewrite <- (pevD_fst_lift (q j) x v). unfold D.
+      apply surjective_pairing.
   Qed.
 
 End Dual.

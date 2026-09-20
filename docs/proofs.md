@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**1065 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**1123 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -34,7 +34,7 @@ Rules of this document:
 | Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
 | Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
-| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes |
+| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated" |
 | Optimality | BladeOptimal, BladeOrbitWork | the orbit bound on kernel work and storage against ANY program (oracle adversary), attained by canonical enumeration at H = S_R for every binding and at the sign character r = 2; the pipeline form — one question per subterm class modulo the laws, attained by the memoized evaluator, with the orbit work formula checked on a two-node pipeline |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
@@ -1329,7 +1329,7 @@ draft's two demand-side adversarial cases. A cardinality bound says nothing
 about dimension — ℤᴺ injects into ℤ — which is why the draft's smoothness
 hypotheses are load-bearing.
 
-## BladeMomentClosure.v (77 theorems) — exact recurrence reduction: the algebra
+## BladeMomentClosure.v (86 theorems) — exact recurrence reduction: the algebra
 
 Same draft, P4, P5, P8–P10 and polynomial forms of P4a, P6, P7, over an
 **abstract commutative ring** (`ring_theory`; ℤ, ℚ, the dual numbers — never
@@ -1380,14 +1380,71 @@ stabilizes and "adjoin future observations until done" does not terminate —
 although (x, y) is an exact two-coordinate state, which cannot be shrunk
 (`p10_needs_two_coordinates`, `p10_no_identification`).
 
+**Units** (the draft's §11.3): `affine_update_unit_covariant` — rescale x and
+b by c, keep a dimensionless, and p_k rescales by cᵏ. The summary is a graded
+product (S carries the unit, Q its square) and the reduced update respects
+the grading.
+
 Honest scope (stated in-file): nothing against C¹ encodings (Rolle, inverse
 function theorem — Coq's Reals are axiomatic and this tower is axiom-free);
-the rank bound only at (1,2) and (2,3), since general (m, s) needs
-determinants; P8's refusal only for squaring vs (S, Q) and pure powers vs S;
-P5 for forward mode as dual numbers, not reverse mode as `Grad*.fs` emits it;
-no units on the heterogeneous summary. A polynomial identity is read as valid
-in the dual numbers over the base ring — what a symbolic certificate provides;
-an equation between *functions* on ℤ is a weaker hypothesis.
+the rank bound here only at (1,2) and (2,3), where `ring` expands the minor —
+BladeRankBound takes it to every size, on `D_factor` and `lift_basis`; P5
+for forward mode as dual numbers, not reverse mode as `Grad*.fs` emits it. A
+polynomial identity is read as valid in the dual numbers over the base ring —
+what a symbolic certificate provides; an equation between *functions* on ℤ is
+a weaker hypothesis.
+
+## BladeRankBound.v (49 theorems) — exact recurrence reduction: the lower bounds at every size
+
+Same draft: P6, P4a, P7, P8's refusal and P10 in their **polynomial** forms —
+with no determinants and no analysis. The draft's §15 suggested "do
+determinants once"; one weaker fact turned out to be enough.
+
+- `homogeneous_has_solution`: an integer homogeneous system with more unknowns
+  than equations has a **nonzero** solution. Fraction-free elimination by
+  induction on the number of equations; `elimination_identity` is the whole
+  step.
+- `poly_rank_bound_rows`, `poly_rank_bound_cols`: if s observations factor, as
+  identities over the dual numbers, through m < s polynomial summary
+  coordinates, then at **every** point one nonzero integer combination of their
+  differentials vanishes along every direction — and along any s directions one
+  nonzero combination of the *directions* is invisible to every observation.
+- `poly_rank_certificate`: the soundness theorem of a certificate checker. A
+  point and s directions whose s×s integer matrix of differentials has trivial
+  kernel refute every m < s; for a concrete matrix that premise is `lia`.
+- `many_roots` (`many_roots_fn`): a polynomial with more distinct roots than
+  coefficients is zero. Horner division whose quotient coefficients are the
+  tail evaluations, so "quotient zero ⇒ dividend zero" is one line. The only
+  place ℤ being an integral domain is used.
+
+From those two:
+
+- `moment_summary_needs_r_coordinates` — **P4a at every r**: the first r power
+  sums of N ≥ r particles need r polynomial coordinates (row form at xᵢ = i).
+- `squaring_needs_min_N_H_coordinates` — **P7 at every N and horizon**: the
+  sums observed over H steps of squaring need min(N, H) polynomial coordinates,
+  so no bounded polynomial summary serves every horizon as N grows. The column
+  form at the point xᵢ = 2ⁱ along directions 2ˡ·e_l turns the draft's
+  *generalized* Vandermonde matrix into an ordinary one in the nodes 2^(2ᵗ):
+  neither Descartes' rule nor Rolle is needed.
+- `power_not_poly_closed` — **P8's refusal for x ↦ xᵈ at every d ≥ 2 and
+  r ≥ 1**, with the draft's own threshold N ≥ d·r, against polynomial G (its
+  "algebraic mechanization alternative"): p_r of the image would make r + 1
+  observations factor through r coordinates, and N ≥ d·r distinct nodes leave
+  the resulting polynomial no room. `power_not_closed_SQ` is the r = 2 case
+  against **every** G, uniformly in d, by one collision (7ᵏ outgrows
+  1 + 5ᵏ + 6ᵏ from k = 3 on).
+- `p10_not_finitely_generated` — **P10 to the end**: given any finite list of
+  elements of the least observable algebra, some observable x·y^M is not a
+  polynomial in them.
+
+Honest scope (stated in-file): polynomial summaries with polynomial
+reconstructions only — narrower than the draft's C¹ statements and not a
+substitute for them; a continuous non-polynomial encoding is untouched. P7 is
+proved at *one* point; the draft's claim that the rank is min(N, H) at every
+point with distinct positive coordinates needs its generalized-Vandermonde
+lemma (P7a, P7b), which is **not** proved. P8 is proved for pure powers, not
+for the general fragment with coefficient polynomials a_j(q_r).
 
 ## What remains unproved
 
@@ -1405,9 +1462,11 @@ prove H = S_R at any binding, the sign character at r = 2, and the term form
 with one two-node instance); and completeness of the SIGNED deduction rules
 (PNeg, PConj, call summaries — BladeDeduceExact is exact for the unsigned
 fragment only). For exact recurrence reduction (a research draft, no shipped
-feature): every lower bound against C¹ encodings, the polynomial rank bound
-at general size, the closure refusal beyond two instances, reverse-mode AD
-as emitted, and the whole source-to-summary compiler theorem.
+feature): every lower bound against C¹ encodings (the polynomial forms are
+closed at every size by BladeRankBound), the generalized-Vandermonde lemma
+P7a/P7b, the closure refusal for the general fragment with coefficient
+polynomials, reverse-mode AD as emitted, and the whole source-to-summary
+compiler theorem.
 
 ---
 

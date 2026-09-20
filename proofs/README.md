@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (1065 theorems total)
+## Contents (1123 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -540,7 +540,7 @@ run it with `-Check` to verify the numbers below and the headline in
   that reads the whole state admits no compression
   (identity_observation_forces_injective).  Abstract types, induction and
   equality only.
-- BladeMomentClosure.v (77): NEW -- EXACT RECURRENCE REDUCTION, the
+- BladeMomentClosure.v (86): NEW -- EXACT RECURRENCE REDUCTION, the
   algebra (same draft, P4, P5, P8-P10 and polynomial forms of P4a, P6,
   P7), over an ABSTRACT commutative ring.  Under the shared-coefficient
   update x_i' = a x_i + b the power sums close at every k and every
@@ -571,7 +571,42 @@ run it with `-Check` to verify the numbers below and the headline in
   (p10_next_observable_is_new) -- the chain of observable subalgebras
   never stabilizes although (x, y) is an exact state, which no certified
   summary can shrink (p10_needs_two_coordinates, p10_no_identification).
-  NOT REACHED: anything against C^1 encodings (Rolle / inverse function
-  theorem; Coq's Reals are axiomatic), the rank bound at general (m, s),
-  P8's refusal in general, reverse-mode AD as emitted, units.  Exact
-  arithmetic only -- floating point is not a ring.
+  Units (the draft's 11.3): rescaling x and b by c rescales p_k by c^k
+  (affine_update_unit_covariant) -- the summary is a graded product.
+  D_factor / lift_basis are the interface BladeRankBound builds the
+  general-size bound on.  NOT REACHED: anything against C^1 encodings
+  (Rolle / inverse function theorem; Coq's Reals are axiomatic), P8 for
+  the general fragment with coefficient polynomials, reverse-mode AD as
+  emitted.  Exact arithmetic only -- floating point is not a ring.
+- BladeRankBound.v (49): NEW -- EXACT RECURRENCE REDUCTION, the lower
+  bounds at EVERY size (same draft: P6, P4a, P7, P8's refusal and P10 in
+  their polynomial forms), with no determinants and no analysis.  The
+  one fact of linear algebra needed is that an integer homogeneous system
+  with more unknowns than equations has a nonzero solution
+  (homogeneous_has_solution, fraction-free elimination;
+  elimination_identity is the whole step).  Hence: if s observations
+  factor, as identities over the dual numbers, through m < s polynomial
+  summary coordinates, then at every point one nonzero combination of
+  their differentials vanishes along every direction
+  (poly_rank_bound_rows), and along any s directions one nonzero
+  combination of the directions is invisible to every observation
+  (poly_rank_bound_cols).  poly_rank_certificate is the soundness theorem
+  of a certificate checker: a point and s directions whose integer matrix
+  of differentials has trivial kernel refute every m < s, and for a
+  concrete matrix that premise is `lia`.  With many_roots (a polynomial
+  with more distinct roots than coefficients is zero; Horner division
+  whose quotient coefficients are tail evaluations):
+  moment_summary_needs_r_coordinates (P4a at every r),
+  squaring_needs_min_N_H_coordinates (P7 at every N and horizon -- at the
+  point x_i = 2^i, along directions 2^l e_l, the draft's GENERALIZED
+  Vandermonde matrix is an ordinary one in the nodes 2^(2^t), so neither
+  Descartes nor Rolle is needed), power_not_poly_closed (P8's refusal for
+  x -> x^d at every d >= 2, r >= 1, with the draft's threshold N >= d r,
+  against polynomial G), power_not_closed_SQ (at r = 2 against EVERY G,
+  uniformly in d, by one collision), and p10_not_finitely_generated (P10
+  to the end: given any finite list of elements of the least observable
+  algebra, some observable is not a polynomial in them).  Scope:
+  polynomial summaries only -- narrower than the draft's C^1 statements
+  and not a substitute for them; P7 is proved at one point, not "at every
+  point with distinct positive coordinates" (that is P7a / P7b, NOT
+  proved); P8 for pure powers only.
