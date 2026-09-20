@@ -8,8 +8,10 @@ no axioms (15.9); Newton's identities; 277 axiom-free theorems in
 `proofs/BladeSummary.v`, `BladeMomentClosure.v`, `BladeRankBound.v`,
 `BladeDescartes.v`, `BladeRankDomain.v`, `BladeProuhet.v` and `BladeNewton.v`.
 OUTSIDE the axiom-free tower, conditional on the axioms of Coq's real numbers,
-54 theorems in `proofs/reals/`: P6, P4a and P7 against DIFFERENTIABLE
-summaries, and P8's refusal at the draft's own threshold N >= d r (15.10)).
+86 theorems in `proofs/reals/`: P6, P4a and P7 against DIFFERENTIABLE
+summaries, and P8's negative half AS STATED in section 9 (15.10, 15.11). Every
+P-item of this draft is now machine-checked in some form; section 15.2 says
+which form).
 No compiler implementation. No claim of mathematical priority.**
 
 Requested as a handoff for Claude. The proofs below are intended to be audited,
@@ -783,7 +785,7 @@ Checks run for this draft using Python's standard-library rational arithmetic:
 
 ## 15. Review and mechanization record (Claude, 2026-09-19)
 
-Audit of sections 1-13, then six mechanization rounds. Seven files were added
+Audit of sections 1-13, then seven mechanization rounds. Seven files were added
 to the proof tower: `proofs/BladeSummary.v` (41 theorems),
 `proofs/BladeMomentClosure.v` (86), `proofs/BladeRankBound.v` (49, second
 round), `proofs/BladeDescartes.v` (28, third round),
@@ -791,10 +793,11 @@ round), `proofs/BladeDescartes.v` (28, third round),
 fifth round) and `proofs/BladeNewton.v` (22, sixth round) -- all `coqc` +
 `coqchk` clean on Rocq 9.0.1, `Print Assumptions` closed (no axioms), stdlib
 only; the tower total is 1224 and `count-theorems.ps1 -Check` passes. Two
-further files, `proofs/reals/BladeSmoothRank.v` (24) and
-`proofs/reals/BladeRealCollision.v` (30), are deliberately OUTSIDE the tower
-and its count: they depend on the axioms of Coq's real numbers (15.8, 15.10).
-Sections 15.6-15.10 are the later rounds. `docs/proofs.md` carries the prose
+further files, `proofs/reals/BladeSmoothRank.v` (24),
+`proofs/reals/BladeRealCollision.v` (30) and `proofs/reals/BladeRealDensity.v`
+(32), are deliberately OUTSIDE the tower and its count: they depend on the
+axioms of Coq's real numbers (15.8, 15.10, 15.11). Sections 15.6-15.11 are the
+later rounds. `docs/proofs.md` carries the prose
 mirror. Nothing in `src/` changed; this still backs no compiler feature.
 
 ### 15.1 Audit verdict
@@ -861,7 +864,7 @@ Corrections and sharpenings, none of which changes a theorem:
 | P7 | FULL against POLYNOMIAL encodings at every N and horizon (15.6); the RANK statement at every integer point with distinct positive coordinates (15.7) | `squaring_needs_min_N_H_coordinates`, `squaring_jacobian_full_rank`, `many_roots`; N = H = 3: `squaring_minor_N3` (= 96), `squaring_three_steps_need_three_coordinates`; `squaring_observes_dyadic_moments` |
 | P7a, P7b | FULL over Z (15.7), by Descartes' rule -- NOT by the draft's Rolle argument, which has no axiom-free reading | `mulxc_adds_a_variation`, `descartes_bound`, `sparse_roots`, `generalized_vandermonde`, `generalized_vandermonde_transpose`, `square_kernel_transpose` |
 | P8 positive half | FULL (it is P4) | as P4 |
-| P8 negative half | FULL over R at the draft's threshold N >= d r, against EVERY G, at any array of distinct positive reals where a_d is nonzero; pure powers unconditionally (15.10, OUTSIDE the tower, Reals axioms). Axiom-free over any characteristic-0 integral domain at N >= 2^(dr-1) (15.9). Against polynomial G: pure powers at N >= d r, axiom-free (15.6). OPEN: that a nonzero coefficient POLYNOMIAL a_d is nonzero at some such array. | `closure_refused_R_at_point`, `power_never_closes_R_at_threshold`, `ideal_partner`; `newton_identities`, `ideal_pair_from_bump`; `closure_refused_at_collision`, `closure_refused_prouhet`, `power_never_closes`, `pte_spec`, `closure_refused_orthogonal_array`; `power_not_poly_closed`, `power_not_closed_SQ`, `square_SQ_threshold`, `power_not_closed_S`, `same_SQ_674_1250` |
+| P8 negative half | FULL AS STATED in section 9, over R: leading coefficient a polynomial in the summary that is not identically zero, N >= d r, against EVERY G (15.11; OUTSIDE the tower, Reals axioms). Also: at any admissible array where a_d is nonzero, a_j arbitrary functions (15.10); axiom-free over any characteristic-0 integral domain at N >= 2^(dr-1) (15.9); against polynomial G for pure powers at N >= d r, axiom-free (15.6). | `closure_refused_R_polynomial`, `nonzero_at_admissible_array`, `SP_box`, `phi_onto`, `chamber_family`; `closure_refused_R_at_point`, `power_never_closes_R_at_threshold`, `ideal_partner`; `newton_identities`, `ideal_pair_from_bump`; `closure_refused_at_collision`, `closure_refused_prouhet`, `power_never_closes`, `pte_spec`, `closure_refused_orthogonal_array`; `power_not_poly_closed`, `power_not_closed_SQ`, `square_SQ_threshold`, `power_not_closed_S`, `same_SQ_674_1250` |
 | P9 | FULL (generators suffice; supplied expressions are a certificate), one worked `ring` check | `generators_closed_algebra_closed`, `poly_certificate_sound`, `poly_certificate_affine_N3` |
 | P10 | FULL (15.6): given any finite list of elements of A_obs, some observable is not a polynomial in them | `p10_not_finitely_generated`, `p10_next_observable_is_new`, `p10_trajectory`, `p10_needs_two_coordinates`, `p10_no_identification` |
 | Units (11.3) | the grading, as scaling covariance (15.6) | `affine_update_unit_covariant`, `psum_scale` |
@@ -1169,7 +1172,7 @@ the a_j may be arbitrary functions of the summary.
 `power_never_closes_R_at_threshold`: x -> x^d, unconditionally.
 `closure_refused_R_at_threshold`: any a_d that vanishes nowhere.
 
-**What remains of P8.** One sentence of section 9: "Choose such a point with
+**What remains of P8 (closed in 15.11).** One sentence of section 9: "Choose such a point with
 a_d(q_r(x)) != 0. It exists ... a nonzero real polynomial cannot vanish on that
 entire open subset." That existence claim -- a nonzero coefficient POLYNOMIAL
 is nonzero at some array of distinct positive reals -- is not mechanized. For a
@@ -1185,3 +1188,53 @@ the (dr)-th roots of unity. Whether N = d r can be reached over Z for all d, r
 is the ideal Prouhet-Tarry-Escott problem and is open. And 15.1(3) still
 stands in the other direction: d r is sufficient, not sharp -- squaring against
 (S, Q) already fails at N = 3.
+
+### 15.11 Seventh round: the last sentence of P8 (2026-09-20)
+
+`proofs/reals/BladeRealDensity.v` (32 theorems, OUTSIDE the tower, the same
+three axioms as 15.10).
+
+Section 9 says: "Choose such a point with a_d(q_r(x)) != 0. It exists even in a
+positive, strictly ordered chamber: the same rank argument for P_r makes its
+image contain an open subset of R^r, and a nonzero real polynomial cannot
+vanish on that entire open subset." Two facts are being used -- an open image,
+and the identity theorem for polynomials in several variables -- and neither
+is in Coq's standard library. Both were replaced by one-variable arguments.
+
+**The identity theorem, one coordinate at a time.** Call a function of an
+environment SEPARATELY POLYNOMIAL if, with all coordinates but one held fixed,
+it is a polynomial in the remaining one (`SP`). Such functions are closed under
+sums, products and substitution into a polynomial expression. If one is nonzero
+somewhere, move the last coordinate into its interval -- a nonzero polynomial in
+one variable has a non-root there, by root counting (`univariate_nonroot`) --
+then the next, and so on: `SP_box`. No normal form for multivariate
+polynomials is ever built.
+
+**The open image, by perturbing a polynomial.** 15.10 bumped one coefficient of
+E(Y) = prod (1 - x_i Y). Bump the coefficients of Y^1 .. Y^r all at once, each
+by at most one small eps: every sign between consecutive roots still survives,
+so the intermediate value theorem still returns N real roots
+(`perturbed_roots_multi`). Hence the coefficient vectors (c_1 .. c_r) of
+admissible arrays fill a box around the base ones (`chamber_family`).
+
+**The Newton map joins them.** Newton's identities, read as a recursion, give
+the power sums as a function phi of the coefficients (`phi_psum`). phi is
+separately polynomial (`SP_phi`) and ONTO (`phi_onto`: solve for c_k one index
+at a time; this is the one place division by k is used). So if the coefficient
+polynomial A is nonzero at some r-vector z, pick coefficients c* with
+phi(c*) = z; then c -> A(phi(c)) is separately polynomial and nonzero at c*,
+hence nonzero somewhere in the box, hence at the coefficients of an admissible
+array: `nonzero_at_admissible_array`.
+
+**Result.** `closure_refused_R_polynomial` is P8's negative half as section 9
+states it: leading coefficient a polynomial in the summary that is not
+identically zero; N >= d r; no function G of the first r power sums, continuous
+or not, closes the update. The lower coefficients a_j remain arbitrary
+functions of the summary, which is more than the draft asks.
+
+With this, every P-item of the draft is machine-checked in some form (15.2).
+What is still paper only is outside the P-items: the numerical contract (11.2),
+the link from the dual-number semantics of 15.3(b) to Blade's emitted AD
+(11.4), and the research target of section 12 -- the typed source fragment and
+the theorem that recognition, certificate construction and execution implement
+this classification.

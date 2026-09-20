@@ -10,9 +10,9 @@ Rules of this document:
 
 - The `.v` files are canonical; this document is the map. Every claim here
   names its Coq artifact. Nothing is `Admitted`; there are no axioms.
-- **Two files sit outside the tower**: `proofs/reals/BladeSmoothRank.v` (24
-  theorems) and `proofs/reals/BladeRealCollision.v` (30) use Coq's axiomatic
-  real numbers. They have their own `_CoqProject`, are excluded from the count
+- **Three files sit outside the tower**: `proofs/reals/BladeSmoothRank.v` (24
+  theorems), `BladeRealCollision.v` (30) and `BladeRealDensity.v` (32) use Coq's
+  axiomatic real numbers. They have their own `_CoqProject`, are excluded from the count
   above and from the "no axioms" claim, and are described under their own
   headings near the end, with the axioms named.
 - Scope caveats are stated where the files state them (rank-2 only,
@@ -1662,10 +1662,42 @@ theorem in several variables, which Coq's standard library does not have.
   `power_never_closes_R_at_threshold`: x ↦ xᵈ, unconditionally.
   `closure_refused_R_at_threshold`: any a_d that vanishes nowhere.
 
-Not proved: the draft's *existence* claim for coefficient polynomials — that
-"a_d not identically zero" yields an array of distinct positive reals where
-a_d(q_r(x)) ≠ 0. For a concrete a_d that is one evaluation; in general it
-needs the image of q_r to be Zariski dense.
+The draft's *existence* claim for coefficient polynomials — that "a_d not
+identically zero" yields such an array — is the next file.
+
+## Outside the tower: `proofs/reals/BladeRealDensity.v` (32 theorems, conditional)
+
+**Not counted above. Not in `_CoqProject`. Not covered by "no axioms".** The
+same three axioms. `coqc` and `coqchk` clean.
+
+It proves the last sentence of the draft's P8 — *"Choose such a point with
+a_d(q_r(x)) ≠ 0. It exists"* — and with it **P8's negative half as the draft
+states it**. The draft argues by an open image and the identity theorem for
+polynomials in several variables. Here:
+
+- `SP`, `SP_box`: a function of an environment that is a polynomial in each
+  variable *separately* and nonzero somewhere is nonzero somewhere with its
+  first r coordinates in any box — one coordinate at a time, by root counting
+  in one variable (`univariate_nonroot`). No multivariate normal form.
+- `ptab`, `phi`, `phi_psum` — **the Newton map**: the power sums of an array
+  are φ of the coefficients of ∏(1 − xᵢY); BladeNewton's identities read as
+  a recursion. `SP_phi`: it is separately polynomial. `phi_onto`: it is
+  **onto** — every (z₁ … z_r) is φ of some coefficients, solving for c_k one
+  index at a time, which is where division by k enters.
+- `perturbed_roots_multi`, `chamber_family`: bump the coefficients of
+  Y¹ … Yʳ all at once, each by at most ε; the real roots persist, so the
+  coefficient vectors of admissible arrays **fill a box** around the base
+  ones.
+- `nonzero_at_admissible_array`: hence a polynomial in the summary that is
+  nonzero somewhere is nonzero at the summary of an admissible array of any
+  extent N ≥ r.
+- `closure_refused_R_polynomial` — **P8, negative half**: leading coefficient a
+  polynomial in the summary, not identically zero; N ≥ d·r; no function G of
+  the first r power sums, continuous or not. The lower coefficients stay
+  arbitrary functions of the summary.
+
+"Not identically zero" is semantic (nonzero at some r-vector of reals); the
+polynomial is a `pexp` read on its first r variables.
 
 ## What remains unproved
 
@@ -1683,12 +1715,12 @@ prove H = S_R at any binding, the sign character at r = 2, and the term form
 with one two-node instance); and completeness of the SIGNED deduction rules
 (PNeg, PConj, call summaries — BladeDeduceExact is exact for the unsigned
 fragment only). For exact recurrence reduction (a research draft, no shipped
-feature): for coefficient polynomials in P8, that "a_d not identically zero"
-yields a collision point where it is nonzero; reverse-mode AD as emitted; and
-the whole source-to-summary compiler theorem. (P8's refusal is axiom-free at
-N ≥ 2^(dr−1) and, at the draft's threshold N ≥ d·r, proved over ℝ OUTSIDE
-the tower; P6, P4a and P7 against differentiable summaries likewise — all
-conditional on the axioms of Coq's reals, see above.)
+feature): reverse-mode AD as emitted, and the whole source-to-summary compiler
+theorem. (Every P-item of the draft is now machine-checked. P8's refusal is
+axiom-free at N ≥ 2^(dr−1) and, at the draft's threshold N ≥ d·r and in the
+draft's full generality, proved over ℝ OUTSIDE the tower; P6, P4a and P7
+against differentiable summaries likewise — all conditional on the axioms of
+Coq's reals, see above.)
 
 ---
 

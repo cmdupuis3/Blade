@@ -14,7 +14,8 @@ numbers, has its own `_CoqProject`, and is excluded from every count below
 (see "Outside the tower" at the end). Build it after the tower:
 
     cd reals && coqc -Q .. Blade -Q . BladeReals BladeSmoothRank.v \
-             && coqc -Q .. Blade -Q . BladeReals BladeRealCollision.v
+             && coqc -Q .. Blade -Q . BladeReals BladeRealCollision.v \
+             && coqc -Q .. Blade -Q . BladeReals BladeRealDensity.v
 
 ## Counting convention
 
@@ -749,7 +750,23 @@ claim.
   section 9 argues it: at ANY such array where a_d is nonzero, no G of
   any kind, N >= d r; the a_j arbitrary functions of the summary),
   power_never_closes_R_at_threshold (x -> x^d, unconditionally) and
-  closure_refused_R_at_threshold (a_d nowhere zero).  NOT proved: the
-  draft's existence claim that "a_d not identically zero" (a polynomial)
-  yields such an array -- one evaluation for a concrete a_d, Zariski
-  density of the image of q_r in general.
+  closure_refused_R_at_threshold (a_d nowhere zero).  The draft's
+  existence claim -- "a_d not identically zero" (a polynomial) yields
+  such an array -- is the next file.
+- reals/BladeRealDensity.v (32): the LAST sentence of the draft's P8 --
+  "Choose such a point with a_d(q_r(x)) <> 0.  It exists."  Same three
+  axioms.  SP / SP_box (a function of an environment that is a polynomial
+  in each variable SEPARATELY and nonzero somewhere is nonzero somewhere
+  with its first r coordinates in any box -- one coordinate at a time, by
+  root counting in one variable, no multivariate normal form); ptab / phi
+  / phi_psum (THE NEWTON MAP: the power sums of an array are phi of the
+  coefficients of prod (1 - x_i Y), BladeNewton's identities read as a
+  recursion); SP_phi, phi_onto (it is separately polynomial and ONTO --
+  solving for c_k one index at a time is where division by k enters);
+  perturbed_roots_multi / chamber_family (bump the coefficients of
+  Y^1 .. Y^r all at once, each by at most eps: the real roots persist, so
+  the coefficient vectors of admissible arrays FILL A BOX);
+  nonzero_at_admissible_array; and closure_refused_R_polynomial -- P8,
+  NEGATIVE HALF, AS THE DRAFT STATES IT: leading coefficient a polynomial
+  in the summary, not identically zero; N >= d r; no function G of the
+  first r power sums, continuous or not; lower coefficients arbitrary.
