@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**947 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**1065 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -34,6 +34,7 @@ Rules of this document:
 | Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
 | Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
+| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes |
 | Optimality | BladeOptimal, BladeOrbitWork | the orbit bound on kernel work and storage against ANY program (oracle adversary), attained by canonical enumeration at H = S_R for every binding and at the sign character r = 2; the pipeline form — one question per subterm class modulo the laws, attained by the memoized evaluator, with the orbit work formula checked on a two-node pipeline |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
@@ -1279,6 +1280,115 @@ modelled; BladeDeduce covers their soundness and nothing here speaks to their
 completeness. Associativity is deliberately not a law: it is not licensed for
 floating point, and the free model agrees.
 
+## BladeSummary.v (41 theorems) — exact recurrence reduction: the certificate calculus
+
+Mechanizes the abstract half of the research draft
+[exact-recurrence-reduction-proofs.md](research/exact-recurrence-reduction-proofs.md)
+(P1–P3, and a discrete form of its lower-bound half). **It backs no shipped
+compiler feature**: there is no source fragment, no recognition and no code
+generation behind it. Abstract types, induction and equality only.
+
+A recurrence `F : U → X → X` observed through `h` may be replaced by `G` on
+summaries `q : X → Z` observed through `hb` when `q (F u x) = G u (q x)` and
+`h x = hb (q x)` hold on an invariant set (`certificate`; preservation of the
+set is a field, initialization is the caller's premise).
+
+- `summary_run_sound`, `summary_obs_sound`, `summary_trace_sound` — P1: every
+  finite execution, and every *prefix* observation of it.
+- `summary_feedback_sound` — P1a: a policy choosing inputs from the observation
+  history chooses the same inputs in both systems.
+- `summary_guard_sound` — P1b: a guard that factors through the summary stops
+  both at the same step, and budget exhaustion (BL8010) is preserved *as an
+  outcome*. `summary_guard_certificate` certifies the frozen-after-stop
+  recurrence, so P1 covers the whole budget-extent array; `guarded_state` ties
+  the two readings together.
+- `summary_compose_sound`, `summary_product_sound` — P3. The product rule
+  carries the other component's state in its premise, and
+  `isolated_certificates_do_not_compose` is the closed witness that it must:
+  each subsystem reduces alone, the coupling reads a discarded coordinate, and
+  no update of the paired summary exists.
+- `summary_dag_sound`, `summary_tree_sound`, `lag_window_sound` — P2: a finite
+  dependency graph in topological order with per-node summaries and shared
+  predecessors; terms; and a k-lag recurrence under Blade's zero-history
+  convention as a first-order recurrence on its window
+  (`lag_window_is_first_order`).
+
+**The lower-bound half without analysis.** The draft's P6 bounds the
+*dimension* of a C¹ summary and needs real analysis. What needs none:
+`summary_refines_future` (a certified summary never identifies two states some
+input word tells apart), `future_equiv_coarsest` (future-equivalence is the
+coarsest congruence preserving the observation — the Myhill–Nerode quotient,
+relationally), and therefore `collision_refutes_update` /
+`collision_refutes_reduction`: **one pair of states** with equal summaries and
+different next summaries refutes a candidate summary against *every* update
+function, not just polynomial or continuous ones. That is the checkable
+"certified obstruction". `summary_card_lower_bound` counts values
+(`countdown_needs_n_values` is the non-vacuity instance);
+`identity_observation_forces_injective` and `guard_collision_refutes` are the
+draft's two demand-side adversarial cases. A cardinality bound says nothing
+about dimension — ℤᴺ injects into ℤ — which is why the draft's smoothness
+hypotheses are load-bearing.
+
+## BladeMomentClosure.v (77 theorems) — exact recurrence reduction: the algebra
+
+Same draft, P4, P5, P8–P10 and polynomial forms of P4a, P6, P7, over an
+**abstract commutative ring** (`ring_theory`; ℤ, ℚ, the dual numbers — never
+floating point, which is not a ring).
+
+- `affine_moment_tower_closed` — P4, the draft's (M1), at every order and every
+  extent: under `xᵢ' = a xᵢ + b`, `p_k' = Σⱼ C(k,j) aʲ b^(k−j) pⱼ`, with the
+  tower's own Pascal `C` (`bcl_binomial`). `affine_sum_closed` and
+  `affine_square_sum_closed` are (M2).
+- `moment_certificate`, `moment_reduction_sound` — with `a` and `b` *arbitrary*
+  functions of the input and the current summary, shared across the array,
+  this is a BladeSummary certificate: r coordinates carry every prefix
+  observation of every finite execution at every extent.
+- `tree_summary_sound` — P2's non-time example, (n, S, Q) over singleton /
+  concatenate / affine trees.
+- `generators_closed_algebra_closed`, `poly_certificate_sound` — P9. The worked
+  `poly_certificate_affine_N3` is checked by `ring` at a *fixed* extent: a P9
+  certificate is a finite identity and does not scale in N; the tower theorem
+  is the uniform statement.
+
+**Derivatives without analysis.** The dual numbers R[ε]/(ε²) are a commutative
+ring (`dual_ring_theory`), so every theorem above holds *at* them and the
+tangent part of an identity is its derivative. `moment_tangent_sound` is P5a
+for the fragment over every finite execution — push (x, v) through the
+particle system then summarize = summarize then push through the reduced
+system — and no chain rule was invoked: it is the closure theorem at another
+ring. `dual_psum` is Dq; `pullback_SQ` is the draft's cotangent formula
+∂loss/∂xᵢ = λ_S + 2 xᵢ λ_Q.
+
+**Refusals.** By one collision, against every update function:
+`same_SQ_674_1250` pins the draft's counterexample; `square_not_closed_SQ`
+shows squaring admits no update of (S, Q) at any extent N ≥ 3 even on strictly
+positive arrays ((1,5,6)/(2,3,7), padded); and `square_SQ_threshold` makes the
+threshold **exact** — the relation holds iff N ≤ 2 (`two_point_newton`). The
+draft's P8 threshold N ≥ d·r = 4 is sufficient, not sharp.
+`power_not_closed_S`: x ↦ xᵈ never closes the sum alone, every d ≥ 2, N ≥ 2.
+By formal Jacobian rank, against every *polynomial* encoding — the chain rule
+is evaluation in the dual numbers and the rank bound is `ring` at a fixed
+size: `poly_rank_bound_1_2`, `poly_rank_bound_2_3`, hence
+`SQ_needs_two_coordinates` (P4a at r = 2) and
+`squaring_three_steps_need_three_coordinates` (P7 at N = H = 3; minor 96 at
+(1,2,3), `squaring_minor_N3`; `squaring_observes_dyadic_moments` says the
+observed sums are p₁, p₂, p₄).
+
+**P10.** `p10_next_observable_is_new`: x·y^(T+1) is not a polynomial in
+x, xy, …, x·y^T, so the ascending chain of observable subalgebras never
+stabilizes and "adjoin future observations until done" does not terminate —
+although (x, y) is an exact two-coordinate state, which cannot be shrunk
+(`p10_needs_two_coordinates`, `p10_no_identification`).
+
+Honest scope (stated in-file): nothing against C¹ encodings (Rolle, inverse
+function theorem — Coq's Reals are axiomatic and this tower is axiom-free);
+the rank bound only at (1,2) and (2,3), since general (m, s) needs
+determinants; P8's refusal only for squaring vs (S, Q) and pure powers vs S;
+P5 for forward mode as dual numbers, not reverse mode as `Grad*.fs` emits it;
+no units on the heterogeneous summary. A polynomial identity is read as valid
+in the dual numbers over the base ring — what a symbolic certificate provides;
+an equation between *functions* on ℤ is a weaker hypothesis.
+
 ## What remains unproved
 
 Still open: surface-calculus progress/preservation (the one missing species —
@@ -1294,7 +1404,10 @@ orbit work formula over an arbitrary schema (BladeOptimal / BladeOrbitWork
 prove H = S_R at any binding, the sign character at r = 2, and the term form
 with one two-node instance); and completeness of the SIGNED deduction rules
 (PNeg, PConj, call summaries — BladeDeduceExact is exact for the unsigned
-fragment only).
+fragment only). For exact recurrence reduction (a research draft, no shipped
+feature): every lower bound against C¹ encodings, the polynomial rank bound
+at general size, the closure refusal beyond two instances, reverse-mode AD
+as emitted, and the whole source-to-summary compiler theorem.
 
 ---
 

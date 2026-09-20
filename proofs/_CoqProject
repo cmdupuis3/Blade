@@ -33,3 +33,5 @@ BladeLayout.v
 BladeOptimal.v
 BladeOrbitWork.v
 BladeDeduceExact.v
+BladeSummary.v
+BladeMomentClosure.v

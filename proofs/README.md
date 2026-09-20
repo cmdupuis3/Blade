@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (947 theorems total)
+## Contents (1065 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -508,3 +508,70 @@ run it with `-Check` to verify the numbers below and the headline in
   wreath product present).  Scope: the UNSIGNED fragment -- PNeg, PConj,
   call summaries, reduce, if/match and let-flattening are not modelled;
   associativity is deliberately not a law.
+- BladeSummary.v (41): NEW -- EXACT RECURRENCE REDUCTION, the certificate
+  calculus (research draft
+  docs/research/exact-recurrence-reduction-proofs.md, P1-P3; backs NO
+  shipped compiler feature).  A recurrence F observed through h may be
+  replaced by a recurrence G on summaries q when q (F u x) = G u (q x)
+  and h x = hb (q x) hold on an invariant set.  Then every prefix
+  observation of every finite execution agrees (summary_run_sound,
+  summary_trace_sound); a policy choosing inputs from the observation
+  history chooses the same inputs (summary_feedback_sound); a guard that
+  factors through the summary stops both at the same step, with budget
+  exhaustion (BL8010) preserved as an outcome (summary_guard_sound), and
+  the frozen-after-stop recurrence is itself certified
+  (summary_guard_certificate, guarded_state).  Certificates compose
+  (summary_compose_sound) and pair (summary_product_sound) -- the pairing
+  only with the shared arguments in its premise, and
+  isolated_certificates_do_not_compose is the closed witness.  Beyond a
+  time-shaped chain: a finite dependency graph in topological order with
+  per-node summaries and shared predecessors (summary_dag_sound), terms
+  (summary_tree_sound), and a k-lag recurrence under the zero-history
+  convention as a first-order recurrence on its window
+  (lag_window_sound).  THE LOWER-BOUND HALF WITHOUT ANALYSIS: a certified
+  summary never identifies two states some input word tells apart
+  (summary_refines_future); future-equivalence is the coarsest congruence
+  preserving the observation (future_equiv_coarsest); so ONE pair of
+  states with equal summaries and different next summaries refutes a
+  candidate summary against EVERY update function
+  (collision_refutes_update, collision_refutes_reduction), n pairwise
+  distinguishable states force n summary values
+  (summary_card_lower_bound, countdown_needs_n_values), and a consumer
+  that reads the whole state admits no compression
+  (identity_observation_forces_injective).  Abstract types, induction and
+  equality only.
+- BladeMomentClosure.v (77): NEW -- EXACT RECURRENCE REDUCTION, the
+  algebra (same draft, P4, P5, P8-P10 and polynomial forms of P4a, P6,
+  P7), over an ABSTRACT commutative ring.  Under the shared-coefficient
+  update x_i' = a x_i + b the power sums close at every k and every
+  extent, p_k' = sum_j C(k,j) a^j b^(k-j) p_j with the tower's own Pascal
+  C (affine_moment_tower_closed, bcl_binomial; r = 2:
+  affine_sum_closed, affine_square_sum_closed); with a and b ARBITRARY
+  functions of the input and the current summary this is a BladeSummary
+  certificate, so r coordinates carry every finite execution at every
+  extent (moment_certificate, moment_reduction_sound).  Polynomial
+  summaries: closure of the generated algebra is decided on generators
+  and supplied expressions are a certificate
+  (generators_closed_algebra_closed, poly_certificate_sound).
+  DERIVATIVES WITHOUT ANALYSIS: the dual numbers are a commutative ring
+  (dual_ring_theory), so the closure theorem holds AT them and its
+  tangent part is forward-mode compatibility, with no chain rule invoked
+  (moment_tangent_sound; dual_psum is Dq; pullback_SQ is the draft's
+  cotangent formula).  REFUSALS: squaring admits no update of (S, Q) of
+  any kind at any extent N >= 3, even on strictly positive arrays, and
+  the threshold is exact -- the relation holds iff N <= 2
+  (square_not_closed_SQ, square_SQ_threshold; the draft's 674/1250 pair
+  is pinned, and its P8 threshold N >= d r turns out sufficient, not
+  sharp); x -> x^d never closes the sum alone (power_not_closed_S).
+  Against POLYNOMIAL encodings, by formal Jacobian rank with the chain
+  rule read as dual-number evaluation: poly_rank_bound_1_2 and _2_3,
+  hence SQ_needs_two_coordinates and
+  squaring_three_steps_need_three_coordinates (minor 96 at (1,2,3)).
+  P10: x y^(T+1) is not a polynomial in x, xy, ..., x y^T
+  (p10_next_observable_is_new) -- the chain of observable subalgebras
+  never stabilizes although (x, y) is an exact state, which no certified
+  summary can shrink (p10_needs_two_coordinates, p10_no_identification).
+  NOT REACHED: anything against C^1 encodings (Rolle / inverse function
+  theorem; Coq's Reals are axiomatic), the rank bound at general (m, s),
+  P8's refusal in general, reverse-mode AD as emitted, units.  Exact
+  arithmetic only -- floating point is not a ring.
