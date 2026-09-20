@@ -1,0 +1,9 @@
+// TEST: Mirror operands under a non-commuting op, pinned comm
+// The pinned twin of symmetry/049: same kernel, `where comm(x, y)` opts into
+// compact symmetric storage. The pin was always ACCEPTED (a PBottom deduction
+// makes no claim, so the annotation was trusted); what changed is that the
+// deduction now agrees with it instead of standing silent.
+let A = [1.0, 2.0, 3.0]
+let result = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> (x + y) ^ (y + x) |> compute
+// Triangular storage, i <= j: (0,0) (0,1) (0,2) (1,1) (1,2) (2,2).
+// EXPECT: result = [4.0, 27.0, 256.0, 256.0, 3125.0, 46656.0]

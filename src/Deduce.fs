@@ -709,7 +709,14 @@ let rec private parityOf (resolver: IRId -> SignParity list option)
     | TExprLit _ | TExprSection _ -> PInv
     | TExprVar (_, id, _) -> if id = pi || id = pj then PBottom else PInv
     | TExprBinOp (_, op, l, r) ->
-        if mirrorEq pi pj l r then opSwapClass op
+        // The mirror rule answers only when the op HAS a swap class. A mirror
+        // hit under a non-commuting op (`(x + y) / (y + x)`) certifies nothing
+        // by itself, but the operands may each be invariant on their own --
+        // so it must fall through to the chain rule, not stop at PBottom.
+        // Answering PBottom here was sound but INCOMPLETE, and it let a wrong
+        // `anticomm` pin on such a body through unrefuted
+        // (proofs/BladeDeduceExact.v: shipped_rule_incomplete, parfix_exact).
+        if mirrorEq pi pj l r && opSwapClass op <> PBottom then opSwapClass op
         else
             // A SIGN law proved from the children outranks the conjugate
             // mirror below. The two can hold at once -- `x*y + conj(x)*conj(y)`

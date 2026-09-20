@@ -1,0 +1,10 @@
+// TEST: Wrong anticomm pin on a mirror-under-non-commuting-op body (rejects)
+// The refusal symmetry/049's deduction powers. `(x + y) ^ (y + x)` is
+// SYMMETRIC, so `where anticomm(x, y)` is a false declaration: sign-mirror
+// storage would answer every mirrored read negated -- silent corruption.
+// While the mirror rule stopped at PBottom the compiler had nothing to refute
+// it with and accepted the pin. With the fall-through it deduces PInv, and a
+// proven sign law contradicting the annotation is BL4013.
+let A = [1.0, 2.0, 3.0]
+let bad = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x + y) ^ (y + x) |> compute
+// ERROR: BL4013

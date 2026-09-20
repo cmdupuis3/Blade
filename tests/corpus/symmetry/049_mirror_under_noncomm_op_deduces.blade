@@ -1,0 +1,19 @@
+// TEST: Mirror operands under a non-commuting op still deduce commutative
+// WARN: BL4010
+// `(x + y) ^ (y + x)`: the two operands ARE each other's image under the swap,
+// so the mirror rule fires -- but `^` has no swap class, and a mirror hit under
+// such an op certifies nothing by itself. The shipped rule stopped there and
+// answered PBottom. It must instead fall through to the chain rule, because
+// each operand is invariant on its own (x + y by the mirror rule one level
+// down), and invariant ^ invariant = invariant.
+//
+// Found by proofs/BladeDeduceExact.v: `par` models the old order, `parfix` the
+// new one, `shipped_rule_incomplete` is this body's shape, and `parfix_exact`
+// proves the new rule answers PInv on EXACTLY the uniform symmetries.
+//
+// Storage stays DENSE -- a deduction only proposes. 050 is the pinned twin and
+// 051 the refusal this deduction now powers.
+let A = [1.0, 2.0, 3.0]
+let result = method_for(A, A) <@> lambda(x, y) -> (x + y) ^ (y + x) |> compute
+// (A[i] + A[j]) ^ (A[j] + A[i]) for every (i, j): symmetric about the diagonal.
+// EXPECT: result = [4.0, 27.0, 256.0, 27.0, 256.0, 3125.0, 256.0, 3125.0, 46656.0]
