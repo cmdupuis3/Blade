@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**798 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**947 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -33,6 +33,8 @@ Rules of this document:
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
 | Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
 | Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
+| Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
+| Optimality | BladeOptimal, BladeOrbitWork | the orbit bound on kernel work and storage against ANY program (oracle adversary), attained by canonical enumeration at H = S_R for every binding and at the sign character r = 2; the pipeline form — one question per subterm class modulo the laws, attained by the memoized evaluator, with the orbit work formula checked on a two-node pipeline |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
 
@@ -1122,6 +1124,161 @@ Honest scope (stated in-file): total cost 0 is NECESSARY but not
 SUFFICIENT for fastest — the metric ranks stride coherence, not reuse or
 vectorization — and no claim about cache hardware is made anywhere.
 
+## BladeOptimal.v (73 theorems) — uniform optimality, one nest
+
+Soundness (BladeLowering) and exactness (BladeCompleteness) compare the
+compiler's choice against other **grants**. This file compares it against
+every **program** ([plan-uniform-optimality.md](plans/plan-uniform-optimality.md),
+T1/T1′/T2). The kernel is an oracle known only to lie in the declared law
+class; a program (`prog`: adaptive, any order, any structure) owes the right
+output for every kernel in the class.
+
+**The abstract bound.** `orbit_lower_bound`: cells whose argument tuples lie
+in pairwise distinct classes, each class *perturbable* inside the law class,
+cost one query each. The adversary moves the kernel on the one class the
+program never asked about; `run_agree` says the program cannot tell. No
+group theory and no counting — those live in the instances.
+`orbit_storage_bound`: an opaque-cell store read through a fixed access map
+*is* the non-adaptive program that asks every cell, so the cell count obeys
+the same bound.
+
+**H = S_r, one array.** C(n+r−1, r) questions are forced
+(`sym_nest_lower_bound`) and as many cells (`sym_nest_storage_bound`);
+BladeDMWF's `enum` attains both and serves every cell of the *dense* index
+space by sorting the index tuple (`sym_nest_attained`). Headline
+`uniform_optimality_sym`: no correct program asks fewer questions than the
+canonical enumeration, against any kernel in the class. The class is the
+tower's own — local, and `invariant_under` every `perm_pair` — proved equal
+to "constant on sorted tabulations" (`Kcls_Ksym`, `Ksym_Kcls`; the converse
+turns a list `Permutation` into a position permutation with a two-sided
+inverse via `Permutation_nth` and `FinFun`).
+
+**H ∩ Stab proper.** H = S_R over *several* arrays, block j of r_j positions
+reading array j, so G is the Young subgroup and the forced count is
+BladeMixedRadix's `shapeCard` = ∏ⱼ C(nⱼ+rⱼ−1, rⱼ)
+(`young_nest_lower_bound`, `young_nest_attained`,
+`uniform_optimality_young`). The new content is `svals_separate`: generic
+data remembers which array it came from, so a permutation of the whole value
+tuple restricts to one per block. `shargs_is_Out` ties the shape to
+BladeLowering's `Out` at binding `sgrp`; `uniform_optimality_young_nat`
+discharges the genericity hypotheses by Cantor pairing, so the statement is
+closed.
+
+**Signed, r = 2** (BladeLowering's `antiinvariant_under`, neg = `Z.opp`). A
+class is *free* when it can be coherently oriented (`sigma`). The strict
+pairs are, and cost C(n, 2) questions (`antisym_lower_bound`,
+`antisym_attained`). The diagonal is not: every kernel in the class vanishes
+there (`antisym_diagonal_forced_zero`) and the attaining program spends
+nothing on it — AntisymIdx storing no diagonal is forced, not chosen.
+
+**Refutation.** `nongeneric_data_beats_bound`: on a constant array one query
+answers every cell. The bound is about generic data, hence about every
+data-oblivious schedule, which must be right on it.
+
+Honest scope (stated in-file): the kernel law is the full symmetric group on
+the argument positions, at any binding, plus the sign character at r = 2. A
+proper subgroup H < S_R, the signed case at general r, and non-opaque storage
+(finite-U counting, linear encodings — BladeDichotomy's setting) are prose.
+Cost is kernel evaluations and cells, **not time**: with BladeLayout's
+`canonical_is_cost_minimal` the tower now holds two necessary conditions for
+fastest and still no sufficient one.
+
+## BladeOrbitWork.v (42 theorems) — uniform optimality, pipelines
+
+The composed case (plan T3). Output cells are terms over data leaves and
+several kernel symbols — unary or binary, some declared commutative — and
+every symbol is an oracle. Perturbing one kernel changes the arguments every
+downstream kernel sees, so the one-nest adversary does not transfer; the
+proof runs in a **free model**: `kfree` is a perfect hash of its canonical
+query, so a value *is* the name of a subterm class.
+
+- `min_bad`: a class the program never asked about has a minimal unasked
+  subterm beneath it.
+- `below_same`, `root_fresh`: moving the oracle on that one class leaves
+  everything below unchanged and sends the subterm itself to a spare value.
+- `taint_up`, `clean_not_taint`: injectivity carries the change to the root —
+  a tainted argument taints the result, and no free-model value is tainted.
+- `orbit_work_lower_bound`: a program correct for every oracle in the law
+  class asks at least one question per distinct subterm class modulo the
+  laws — the size of the maximally shared term DAG.
+- `memo_prog` (evaluate bottom-up, look the *canonical* query up before
+  asking) is correct for every oracle in the class and never asks a class
+  twice (`memo_prog_correct`, `memo_prog_cost`); in the free model it asks
+  exactly one question per class (`orbit_work_attained`), so no correct
+  program beats it (`uniform_optimality_pipeline`).
+
+**The orbit work formula** W = Σᵥ ω(G_v, X_v) — each node counted over its own
+support, modulo its own group; the attaining program is dimensional currying
+read as a cost statement. Checked on Out(i, j) = g(h(A i), h(A j)) with g
+declared commutative: `two_node_orbit_work` gives W = n + C(n+1, 2) (node h
+over {i} with no symmetry, node g over {i, j} modulo S₂) against
+`two_node_fused_work`'s 3n² class occurrences in the fused dense nest — the
+support gap and the group gap in one number; `two_node_optimal` is forced and
+attained. `orbit_work_nat` / `two_node_orbit_work_nat` close every hypothesis
+over nat (leaves 3i, spare value 2, hash 3·code+1 by Cantor pairing);
+`two_node_computed` pins n = 3 by `vm_compute` (9 questions, 27 occurrences).
+
+Honest scope (stated in-file): arity ≤ 2 and commutativity only — arity r and
+general H are BladeOptimal's subject, one nest at a time. **Folds are not
+modelled**: sharing partial sums across overlapping fibers is Ensemble
+Computation, NP-complete, outside any theorem of this shape. The bound is on
+queries in the free model; the general schema formula is prose, this file
+proves the term form and one instance.
+
+## BladeDeduceExact.v (34 theorems) — what symmetry deduction is exact for
+
+BladeDeduce proves every rule that *answers* sound. This file asks the
+converse (plan T4): when the deduction says nothing, was there really nothing
+to say? It answers in BladeOrbitWork's term model — a kernel body is a term
+over its parameters, operator symbols uninterpreted up to a declared
+commutativity.
+
+- `uniform_equality_exact`: two bodies agree under **every** interpretation
+  respecting the declared laws, on all data, iff they are equal modulo those
+  laws (`teq`). Soundness is an induction; completeness is the free model,
+  which is faithful (`free_faithful`). Transitivity of `teq` comes for free —
+  it is transitivity of equality in the models (`teq_trans`).
+- `uniform_symmetry_is_automorphism`: so the uniform symmetry group of a body
+  is its syntactic automorphism group modulo the laws, and membership is
+  decidable by a structural walk (`teqb`, `teqb_spec`).
+- `mirror_spec`: `src/Deduce.fs`'s `mirrorEq`, modelled node for node, **is**
+  that walk composed with the swap — `mirror i j l r = teqb (swap l) r`.
+- `parfix_exact`: the deduction rule answers PInv on a transposition
+  **exactly** when that transposition is a uniform symmetry.
+- `deduced_group_sound`, `deduced_is_maximal`, `deduced_group_largest`: the
+  group the compiler grants is the one *generated* by the adjacent
+  transpositions it certifies; it is sound, and it contains every group
+  generated by adjacent transpositions inside the symmetry group — the largest
+  contiguous-block Young subgroup. `young_generated` closes the loop in the
+  tower's list semantics: such a subgroup is generated by its interior adjacent
+  transpositions (BladeDeduce's `adjacent_transpositions_generate`, from one
+  block to a shape).
+
+**The finding.** `par` models the rule in the order it shipped until
+2026-09-19: mirror first, a mirror hit answering from the op's swap class
+alone. That was sound (`par_sound`, `par_le_parfix`) but incomplete —
+`shipped_rule_incomplete`: under a non-commuting op the mirror hit answered
+"no claim" without looking at the operands, so `(x + y) / (y + x)` deduced
+nothing. The compiler confirmed it: no BL4010 on that body, and a *false*
+`where anticomm(x, y)` pin on it accepted where BL4013 should refuse.
+`parityOf` now falls through to the chain rule, and
+`tests/corpus/symmetry/049`–`051` pin the deduction, the pinned twin, and the
+refusal. `parfix` is the rule as it now stands.
+
+**Out of reach by design**, each a closed witness: `nonadjacent_symmetry_missed`
+(g(h(a, c), b) — the transposition (0 2) is a symmetry, no adjacent one is) and
+`wreath_symmetry_missed` (g(h(a, b), h(c, d)) — S₂ × S₂ deduced, BladeWreath's
+order-8 wreath product present). n − 1 adjacent checks buy exactly the
+contiguous-block Young subgroups, and the theorems above say the deduction
+gets all of those.
+
+Honest scope (stated in-file): the **unsigned** fragment — variables, unary and
+binary operator symbols, commutativity as the only law. PNeg (the sign chain
+rule), PConj, call summaries, reduce, if/match and let-flattening are not
+modelled; BladeDeduce covers their soundness and nothing here speaks to their
+completeness. Associativity is deliberately not a law: it is not licensed for
+floating point, and the free model agrees.
+
 ## What remains unproved
 
 Still open: surface-calculus progress/preservation (the one missing species —
@@ -1129,8 +1286,15 @@ deliberately sequenced after the rewrite settles surface syntax), general-r
 verified offsets, the storage dichotomy at general r (r = 3 closed in both
 directions by BladeDichotomy; the general minimal-width-r! statement and its
 (3,2,2) tie-breaking exception are prose), k-slot structure, typed-path
-combinator laws, the adjunction proper, and the general-r Jacobian transfer /
-accumulation multiplicities (rank-2 forms: BladeJacobian).
+combinator laws, the adjunction proper, the general-r Jacobian transfer /
+accumulation multiplicities (rank-2 forms: BladeJacobian), and — for uniform
+optimality — a proper subgroup H < S_R, the signed bound at general r,
+non-opaque storage, kernels of arity > 2 and folds inside a pipeline, and the
+orbit work formula over an arbitrary schema (BladeOptimal / BladeOrbitWork
+prove H = S_R at any binding, the sign character at r = 2, and the term form
+with one two-node instance); and completeness of the SIGNED deduction rules
+(PNeg, PConj, call summaries — BladeDeduceExact is exact for the unsigned
+fragment only).
 
 ---
 
@@ -1153,7 +1317,7 @@ itself unmechanized · **CORRECTED** = v10 claim refuted/amended by the tower.
 | 9.13/9.14 input symmetry consumed | `input_symmetry_not_sufficient` | FULL |
 | 9.16/9.18 raising | `raise_1_2`, `raise_compose` | FULL |
 | 9.17 shared units insufficient | `shared_units_insufficient` | FULL |
-| 9.19/9.20 deduced commutativity | `deduced_commutativity` | FULL |
+| 9.19/9.20 deduced commutativity | `deduced_commutativity`; exactness of the deduction: `uniform_equality_exact`, `parfix_exact`, `deduced_group_largest` | FULL (soundness); exactness at the unsigned fragment |
 | 9.23/9.24/9.26 two maximal curryings | `identity_needs_every_position`, `comm_needs_kernel`, `two_maximal_curryings(_general)` | FULL (information-theoretic form) |
 | 9.29 uniqueness / duality derivation | `fusion_duality`, `detections_jointly_license` | FULL (fused-primitive form) |
 | 10.9 step 3 per-dimension SymIdx output | `per_dim_swap_not_symmetry` | **CORRECTED** (refuted) |
@@ -1167,6 +1331,7 @@ itself unmechanized · **CORRECTED** = v10 claim refuted/amended by the tower.
 | 14.4 cardinality | `storage_cardinality` (C(n+r−1, r)) | FULL |
 | 14.5 product symmetry (r!)^d | `diagonal_group_law` (joint r! sound), `per_dim_swap_not_symmetry` + `counting_general(_C)` (per-dim refuted); `reynolds_full_product_symmetry` (Reynolds route genuine); `cauchy_split_access` (+`cauchy_cell_count`) (r = 2 structural recovery) | **CORRECTED** — see formalism §12.4 |
 | 14.6 partial product symmetry via shared spaces | `shared_units_insufficient` | **CORRECTED** (identity required) |
+| "The fastest way is the only way" (work and storage halves) | `uniform_optimality_sym`, `uniform_optimality_young(_nat)`, `antisym_lower_bound` + `antisym_attained`, `sym_nest_storage_bound`; pipelines: `uniform_optimality_pipeline`, `two_node_optimal` | CORE — kernel evaluations and cells against any uniform program, H = S_R at any binding; time is NOT claimed (BladeLayout's scope line stands) |
 | Bounds safety | `typed_access_safe`, `bidx_access_safe`, `offset_in_range/injective`, `roff_closed` | FULL at r = 2 (`indexing_total` do-not-cite) |
 | Enumeration/order guarantees | `enum_sound/complete/NoDup`, `enumShape_NoDup`, `enumA_lex_sorted` + instances, `enum_offset_respects_lex` | FULL |
 | CompoundIdx denotation | `compoundk_denotation`, `compound_arrow_denotes_mask`, `compoundk_lex_sorted` | FULL (every rank) |

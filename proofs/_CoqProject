@@ -30,3 +30,6 @@ BladeWordClosure.v
 BladeRepStatus.v
 BladeWreath.v
 BladeLayout.v
+BladeOptimal.v
+BladeOrbitWork.v
+BladeDeduceExact.v

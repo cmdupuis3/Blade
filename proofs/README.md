@@ -19,7 +19,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (798 theorems total)
+## Contents (947 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -408,3 +408,103 @@ run it with `-Check` to verify the numbers below and the headline in
   NECESSARY but not SUFFICIENT for fastest -- the metric ranks stride
   coherence, not reuse or vectorization -- and no claim about cache
   hardware is made anywhere.
+- BladeOptimal.v (73): NEW -- UNIFORM OPTIMALITY, one nest
+  (docs/plans/plan-uniform-optimality.md T1/T1'/T2).  Soundness and
+  exactness compare the compiler's choice against other GRANTS; this file
+  compares it against every PROGRAM.  The kernel is an oracle known only
+  to lie in the declared law class; a program (prog: adaptive, any order)
+  owes the right output for every kernel in the class.  ABSTRACT BOUND:
+  cells whose argument tuples lie in pairwise distinct classes, each
+  class perturbable inside the law class, cost one query each
+  (orbit_lower_bound -- the adversary moves the kernel on the one class
+  never asked about, and run_agree says the program cannot tell); an
+  opaque-cell store is the non-adaptive program that asks every cell, so
+  the cell count obeys the same bound (orbit_storage_bound).  INSTANCES,
+  each closed by an attaining program: H = S_r over one array --
+  C(n+r-1, r) forced and attained by BladeDMWF's enum, which also serves
+  every cell of the dense index space by sorting the index tuple
+  (sym_nest_lower_bound, sym_nest_storage_bound, sym_nest_attained,
+  uniform_optimality_sym); the law class is the tower's own
+  (invariant_under every perm_pair), proved equal to constant-on-sorted-
+  tabulations (Kcls_Ksym, Ksym_Kcls -- the converse turns a list
+  Permutation into a position permutation with an inverse).  H-AND-STAB
+  PROPER: H = S_R over several arrays, so G is the Young subgroup and the
+  forced count is BladeMixedRadix's shapeCard = prod_j C(n_j+r_j-1, r_j)
+  (young_nest_lower_bound, young_nest_attained, uniform_optimality_young);
+  new content svals_separate (generic data remembers its array, so a
+  permutation of the whole value tuple restricts to one per block);
+  shargs_is_Out ties the shape to BladeLowering's Out at binding sgrp;
+  uniform_optimality_young_nat discharges genericity by Cantor pairing.
+  SIGNED, r = 2 (antiinvariant_under, neg = Z.opp): the strict pairs are
+  free -- coherently orientable -- and cost C(n, 2) queries
+  (antisym_lower_bound, antisym_attained); the diagonal is not, every
+  kernel in the class vanishes there (antisym_diagonal_forced_zero), and
+  the attaining program spends nothing on it: AntisymIdx storing no
+  diagonal is forced, not chosen.  REFUTATION: on a constant array one
+  query answers every cell (nongeneric_data_beats_bound) -- the bound is
+  about generic data, hence about every data-oblivious schedule.  Scope:
+  H = S_R at any binding, plus the sign character at r = 2; a proper
+  subgroup H, the signed case at general r, and non-opaque storage are
+  prose.  Cost is evaluations and cells, NOT time -- with BladeLayout a
+  second necessary condition for fastest, still no sufficient one.
+- BladeOrbitWork.v (42): NEW -- UNIFORM OPTIMALITY, pipelines (plan T3).
+  Output cells are terms over data leaves and several kernel symbols
+  (unary/binary, some declared commutative), every symbol an oracle.
+  Perturbing one kernel changes what every downstream kernel sees, so the
+  proof runs in a FREE MODEL: kfree is a perfect hash of its canonical
+  query, so a value is the name of a subterm class.  An unasked class has
+  a minimal unasked subterm (min_bad); moving the oracle there leaves
+  everything below unchanged and sends the subterm to a spare value
+  (below_same, root_fresh); injectivity carries the change to the root
+  (taint_up, clean_not_taint).  Hence orbit_work_lower_bound: at least
+  one question per distinct subterm class modulo the laws -- the size of
+  the maximally shared term DAG.  ATTAINED by the memoized evaluator
+  (memo_prog: look the CANONICAL query up before asking), correct for
+  every oracle in the class and never more than one question per class
+  (memo_prog_correct, memo_prog_cost), exactly one in the free model
+  (orbit_work_attained, uniform_optimality_pipeline).  THE ORBIT WORK
+  FORMULA W = sum_v omega(G_v, X_v), each node over its own support modulo
+  its own group, checked on Out(i,j) = g(h(A i), h(A j)) with g comm:
+  W = n + C(n+1, 2) (two_node_orbit_work) against 3 n^2 class occurrences
+  in the fused dense nest (two_node_fused_work) -- the support gap and the
+  group gap in one number; forced and attained (two_node_optimal).  Every
+  hypothesis closed over nat by Cantor pairing (orbit_work_nat,
+  two_node_orbit_work_nat); two_node_computed pins n = 3 by vm_compute
+  (9 questions, 27 occurrences).  Scope: arity <= 2, commutativity only;
+  FOLDS NOT MODELLED (sharing across overlapping fibers is Ensemble
+  Computation, NP-complete); the general schema formula is prose.
+- BladeDeduceExact.v (34): NEW -- WHAT SYMMETRY DEDUCTION IS EXACT FOR
+  (plan T4; implementation src/Deduce.fs).  BladeDeduce proves every rule
+  that ANSWERS sound; this file asks whether silence was warranted.  In
+  BladeOrbitWork's term model (a kernel body is a term over its
+  parameters, operator symbols uninterpreted up to a declared
+  commutativity): two bodies agree under EVERY interpretation respecting
+  the laws, on all data, iff they are equal modulo the laws
+  (uniform_equality_exact -- soundness by induction, completeness because
+  the free model is faithful, free_faithful); so the uniform symmetry
+  group of a body is its syntactic automorphism group modulo the laws,
+  decidable by a structural walk (uniform_symmetry_is_automorphism, teqb).
+  src/Deduce.fs's mirrorEq, modelled node for node, IS that walk composed
+  with the swap (mirror_spec), and the deduction rule answers PInv on a
+  transposition EXACTLY when it is a uniform symmetry (parfix_exact).  The
+  granted group is the one generated by the certified adjacent
+  transpositions: sound (deduced_group_sound), and containing every group
+  generated by adjacent transpositions inside the symmetry group
+  (deduced_is_maximal, deduced_group_largest) -- the largest
+  contiguous-block Young subgroup, which young_generated shows is
+  generated by its interior adjacent transpositions (BladeDeduce's
+  adjacent_transpositions_generate, from one block to a shape).  THE
+  FINDING: par models the rule in the order it shipped until 2026-09-19 --
+  mirror first, a mirror hit answering from the op's swap class alone --
+  which was sound (par_sound, par_le_parfix) but missed (x + y) / (y + x)
+  (shipped_rule_incomplete): under a non-commuting op the mirror hit
+  answered "no claim" without looking at the operands.  The compiler
+  confirmed it (no BL4010, and a false `anticomm` pin accepted where
+  BL4013 should refuse); parityOf now falls through to the chain rule and
+  tests/corpus/symmetry/049-051 pin it.  OUT OF REACH BY DESIGN, each a
+  closed witness: a symmetry that is no product of adjacent ones
+  (nonadjacent_symmetry_missed, g(h(a,c), b)) and a non-Young group
+  (wreath_symmetry_missed, g(h(a,b), h(c,d)): S_2 x S_2 deduced, order-8
+  wreath product present).  Scope: the UNSIGNED fragment -- PNeg, PConj,
+  call summaries, reduce, if/match and let-flattening are not modelled;
+  associativity is deliberately not a law.
