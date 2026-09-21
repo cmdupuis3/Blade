@@ -9,13 +9,14 @@ Machine-checked kernel of the Blade formalism. Coq 8.18.0, stdlib only.
 
 or manually with `coqc -Q . Blade <file>` in _CoqProject order.
 
-`reals/` is NOT part of this tower: it depends on the axioms of Coq's real
-numbers, has its own `_CoqProject`, and is excluded from every count below
-(see "Outside the tower" at the end). Build it after the tower:
+`reals/` and `floats/` are NOT part of this tower.  `reals/` depends on the
+axioms of Coq's real numbers; `floats/` trusts the kernel's primitive
+binary64 evaluation.  Each has its own `_CoqProject` and is excluded from
+every count below (see "Outside the tower" at the end). Build them after
+the tower, in their `_CoqProject` order:
 
-    cd reals && coqc -Q .. Blade -Q . BladeReals BladeSmoothRank.v \
-             && coqc -Q .. Blade -Q . BladeReals BladeRealCollision.v \
-             && coqc -Q .. Blade -Q . BladeReals BladeRealDensity.v
+    cd reals  && coqc -Q .. Blade -Q . BladeReals <file>.v
+    cd floats && coqc -Q . BladeFloats BladeBinary64Witness.v
 
 ## Counting convention
 
@@ -27,7 +28,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (1224 theorems total)
+## Contents (1341 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -585,7 +586,8 @@ run it with `-Check` to verify the numbers below and the headline in
   general-size bound on.  NOT REACHED: anything against C^1 encodings
   (Rolle / inverse function theorem; Coq's Reals are axiomatic), P8 for
   the general fragment with coefficient polynomials, reverse-mode AD as
-  emitted.  Exact arithmetic only -- floating point is not a ring.
+  emitted -- each since reached: reals/, and BladeReductionAD.  Exact
+  arithmetic only -- floating point is not a ring (BladeNumericContract).
 - BladeRankBound.v (49): NEW -- EXACT RECURRENCE REDUCTION, the lower
   bounds at EVERY size (same draft: P6, P4a, P7, P8's refusal and P10 in
   their polynomial forms), with no determinants and no analysis.  The
@@ -705,6 +707,68 @@ run it with `-Check` to verify the numbers below and the headline in
   their common extent).  Nothing here PRODUCES the second array; that a
   bumped polynomial still splits into real linear factors is analysis
   and lives in reals/.
+- BladeNumericContract.v (39): NEW -- EXACT RECURRENCE REDUCTION, the
+  numerical contract (the draft's 11.2): which arithmetic the certificate
+  theorems may be run in.  Zm / Zm_ring_theory (integers modulo m as a
+  ring with LEIBNIZ equality -- proofs of a boolean equation are unique,
+  Eqdep_dec, no axiom); wrapped_moment_reduction_sound (the reduction
+  theorem read in it: exact in wrapping arithmetic, overflow included);
+  wrapped_observation_exact / int64_observation_exact (the wrapped
+  REDUCED run carries the residues of the true ORIGINAL moments, so a
+  representable moment is returned exactly whatever overflowed on the
+  way); rational_moment_reduction_sound (Qc).  rne (round to nearest,
+  ties to even, precision p, on integer data):
+  rounding_breaks_update_original_inexact and ..._reduced_inexact (at
+  EVERY precision p >= 2 the S' formula and the particle-wise fold
+  disagree -- once each way round, so neither is the accurate one);
+  no_ordering_recovers_the_reduced_value (three particles, p in
+  {24, 53, 64, 113}: every ordering and parenthesization of the original
+  fold gives one value, every ordering of the reduced form another -- a
+  reassociation license is not a distributivity license).  FINDING:
+  Blade emits int64_t without -fwrapv, so signed overflow is undefined in
+  the emitted C++ and the wrapping theorems describe it only where
+  nothing overflows.
+- BladeReduceCompiler.v (54): NEW -- EXACT RECURRENCE REDUCTION, the
+  draft's section-12 research target on P8's fragment: a source fragment
+  (particles updated by x' = sum_j a_j x^j, the a_j integer-coefficient
+  polynomial expressions in the moments and in run-constant parameters),
+  a classifier, a GENERATED reduced program, and the theorem that they
+  agree.  grid_complete / nonroot / nonroot_none / nonroot_some_K (THE
+  ZERO TEST: a computable grid search, sound and COMPLETE over integral
+  domains of characteristic zero -- one coordinate at a time, by root
+  counting); strip; classify with classify_total (three outcomes as the
+  draft asks; on this fragment Unknown never occurs) and classify_refused
+  (a refusal carries the effective degree, the leading coefficient and an
+  integer point where it is nonzero); Gk / rprog_of / compile (r
+  expressions over the summary, the parameters and ONE variable for the
+  extent -- built once, uniformly in N); compile_certificate /
+  compile_sound (THE COMPILER THEOREM: every prefix observation of every
+  finite execution, every extent, every parameter vector);
+  compile_sound_unstripped (ANY commutative ring when the zero test
+  stripped nothing -- wrapping integers, dual numbers); compiler_runs /
+  compiled_affine_runs (the classifier and the generated program run by
+  the kernel, including an identically-zero quadratic term and the
+  draft's "special parameter value" case).  A MODEL fragment: nothing in
+  src/ implements or is checked against it.  That a refusal means no
+  reduced program exists is reals/BladeReduceClassification.v.
+- BladeReductionAD.v (24): NEW -- EXACT RECURRENCE REDUCTION, the AD
+  contract (the draft's 11.4): the rules src/Grad*.fs applies, modelled on
+  polynomial expressions.  tan / tan_is_dual (the forward rules compute
+  exactly the dual-number tangent of P5); adj / adj_pairing (the reverse
+  rules -- add: both sides get the cotangent; mul: c r left, c l right;
+  accumulate at a variable -- are the TRANSPOSE of the forward rules);
+  sweep_pairing (the reverse sweep over a straight-line block, reading
+  the forward values left behind); carry_pairing (a recurrence: the
+  descending sweep over the STORED trajectory is the transpose of the
+  T-step tangent run -- the executed algorithm, never an implicit fixed
+  point); reduction_commutes_forward / reduction_commutes_reverse (jvp on
+  the reduced program carries the pushed tangent at every horizon;
+  sweeping the reduced program then pulling back through q at the initial
+  state equals pulling back at the final state then sweeping the
+  original); compile_sound_dual; ex_affine_reverse_commutes (both modes
+  with the ACTUAL compiler output as the reduced side).  A model written
+  from a reading of Grad*.fs, + and * only; the link to the F# is by
+  inspection.
 
 ## Outside the tower: conditional on Coq's Reals axioms
 
@@ -770,3 +834,38 @@ claim.
   NEGATIVE HALF, AS THE DRAFT STATES IT: leading coefficient a polynomial
   in the summary, not identically zero; N >= d r; no function G of the
   first r power sums, continuous or not; lower coefficients arbitrary.
+- reals/BladeRoundingBound.v (20): the THIRD numerical contract of the
+  draft's 11.2, a finite-precision error theorem.  Two axioms.  The
+  standard model (every operation exact up to relative error u, no
+  underflow or overflow) is a HYPOTHESIS of the section.  fsum_error
+  (recursive summation); original_error / reduced_error (the
+  particle-wise fold of a x_i + b and the reduced form a S + N b each lie
+  within ((1+u)^(N+2) - 1) * sum (|a| |x_i| + |b|) of the exact value --
+  the SAME radius against the SAME condition number);
+  reduction_rounded_distance; g_le_gamma (the radius is at most
+  n u / (1 - n u)).  Rank one only.
+- reals/BladeReduceClassification.v (6): BladeReduceCompiler's classifier
+  is EXACT over the reals.  Three axioms.  real_compile_sound;
+  refused_no_reduction (at the witness parameters there is NO update
+  function of the summary, continuous or not, at any extent N >= d r --
+  BladeRealDensity's theorem applied to the leading coefficient with its
+  parameters frozen); classification_exact (on every well-formed program
+  the classifier answers, and is right both ways);
+  special_value_program_refused (x' = x + theta x^2 is affine at
+  theta = 0 and still refused).
+
+## Outside the tower: trusting the kernel's primitive floats
+
+NOT counted above, NOT in `_CoqProject`.  `Print Assumptions` lists the
+primitive float type and operations; nothing else.
+
+- floats/BladeBinary64Witness.v (6): IEEE binary64 does not preserve the
+  reduction, checked by kernel evaluation.  binary64_original_inexact
+  (a = b = 1, x = (2^53, -2^53): exact answer 2, original fold 1, reduced
+  form 2) and binary64_reduced_inexact (the other way round);
+  binary64_no_ordering_recovers_the_reduced_value (three particles: all
+  twelve orderings of the original give 2^53 + 6, all orderings of the
+  reduced form 2^53 + 8); binary64_reduced_overflows /
+  binary64_reduced_nan (infinity, or NaN, where the original is finite).
+  With a = 1 the product is exact, so these do not depend on
+  -ffp-contract.

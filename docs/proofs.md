@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**1224 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**1341 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -10,11 +10,15 @@ Rules of this document:
 
 - The `.v` files are canonical; this document is the map. Every claim here
   names its Coq artifact. Nothing is `Admitted`; there are no axioms.
-- **Three files sit outside the tower**: `proofs/reals/BladeSmoothRank.v` (24
-  theorems), `BladeRealCollision.v` (30) and `BladeRealDensity.v` (32) use Coq's
-  axiomatic real numbers. They have their own `_CoqProject`, are excluded from the count
-  above and from the "no axioms" claim, and are described under their own
-  headings near the end, with the axioms named.
+- **Six files sit outside the tower.** Five in `proofs/reals/` use Coq's
+  axiomatic real numbers: `BladeSmoothRank.v` (24 theorems),
+  `BladeRealCollision.v` (30), `BladeRealDensity.v` (32),
+  `BladeRoundingBound.v` (20) and `BladeReduceClassification.v` (6). One in
+  `proofs/floats/`, `BladeBinary64Witness.v` (6), trusts the kernel's
+  primitive binary64 evaluation. Each directory has its own `_CoqProject`;
+  all six are excluded from the count above and from the "no axioms" claim,
+  and are described under their own headings near the end, with the axioms
+  named.
 - Scope caveats are stated where the files state them (rank-2 only,
   materialized fragment, do-not-cite, etc.).
 - Remaining open items are collected under "What remains unproved" at the end
@@ -39,7 +43,7 @@ Rules of this document:
 | Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
 | Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
-| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain, BladeProuhet, BladeNewton | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`); and the closure refusal against EVERY update function at every degree and order, by Prouhet–Tarry–Escott collisions; Newton's identities over any commutative ring, and the theorem that turns one bumped coefficient into an ideal pair |
+| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain, BladeProuhet, BladeNewton, BladeNumericContract, BladeReduceCompiler, BladeReductionAD | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`); and the closure refusal against EVERY update function at every degree and order, by Prouhet–Tarry–Escott collisions; Newton's identities over any commutative ring, and the theorem that turns one bumped coefficient into an ideal pair; the numerical contract (wrapping integers and rationals are exact fragments, rounded arithmetic is not one at any precision, and a reassociation license is not a distributivity license); a model source fragment with a complete zero test, a classifier that never answers Unknown, a generated reduced program and the compiler theorem at every extent; and the forward and reverse rules of `Grad*.fs` modelled, the reverse sweep over a stored trajectory as the transpose of the tangent run, and reduction commuting with both modes |
 | Optimality | BladeOptimal, BladeOrbitWork | the orbit bound on kernel work and storage against ANY program (oracle adversary), attained by canonical enumeration at H = S_R for every binding and at the sign character r = 2; the pipeline form — one question per subterm class modulo the laws, attained by the memoized evaluator, with the orbit work formula checked on a two-node pipeline |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
@@ -1394,7 +1398,8 @@ Honest scope (stated in-file): nothing against C¹ encodings (Rolle, inverse
 function theorem — Coq's Reals are axiomatic and this tower is axiom-free);
 the rank bound here only at (1,2) and (2,3), where `ring` expands the minor —
 BladeRankBound takes it to every size, on `D_factor` and `lift_basis`; P5
-for forward mode as dual numbers, not reverse mode as `Grad*.fs` emits it. A
+for forward mode as dual numbers — the rules `Grad*.fs` applies, reverse mode
+included, are modelled and tied to it in BladeReductionAD. A
 polynomial identity is read as valid in the dual numbers over the base ring —
 what a symbolic certificate provides; an equation between *functions* on ℤ is
 a weaker hypothesis.
@@ -1591,6 +1596,116 @@ a bumped polynomial still splits into real linear factors is analysis.
 Characteristic zero and "no zero divisors" are hypotheses used only from the
 root-counting part on; Newton's identities themselves need neither.
 
+## BladeNumericContract.v (39 theorems) — exact recurrence reduction: the numerical contract
+
+Section 11.2 of the draft asks which arithmetic the certificate theorems may be
+run in, and names three possible contracts. The certificates are ring
+identities, so the question is which machine arithmetics are rings.
+
+- **Wrapping integers are an exact fragment.** `Zm` is the integers modulo m as
+  a ring with *Leibniz* equality — a sigma type over a boolean equation, whose
+  proofs are unique (`Eqdep_dec`; no axiom). `Zm_ring_theory`, and then
+  `wrapped_moment_reduction_sound` is BladeMomentClosure's theorem instantiated:
+  reduction is exact in wrapping arithmetic, every overflow included.
+- `wrapped_reduced_run_is_residue`, `wrapped_observation_exact`,
+  `int64_observation_exact` — the wrapped *reduced* run carries the residues of
+  the true *original* moments; whenever a true moment is representable, the
+  signed reading returns it exactly, whatever overflowed on the way (m = 2⁶⁴).
+- `rational_moment_reduction_sound` — the same over canonical rationals (`Qc`).
+- **Rounded arithmetic is not a fragment, at any precision.** `rne` is round to
+  nearest, ties to even, precision p, unbounded exponent, on integer data.
+  `rounding_breaks_update_original_inexact`: a = b = 1, x = (2ᵖ, −2ᵖ), exact
+  answer 2 — the particle-wise fold returns 1, the reduced form 2.
+  `rounding_breaks_update_reduced_inexact`: x = (−2ᵖ, −1) — now the original is
+  exact and the reduced form is off by one. Both for every p ≥ 2, so neither
+  program is the accurate one.
+- `no_ordering_recovers_the_reduced_value` — three particles, p ∈ {24, 53, 64,
+  113}: every ordering and parenthesization of the original fold gives one
+  value, every ordering of the reduced form another. **A reassociation license
+  (`where omp`, `BLADE_FP_REASSOC`) is not a distributivity license.**
+
+Finding: `Build.fs` does not pass `-fwrapv`, so signed `int64_t` overflow is
+undefined behaviour in the emitted C++. The wrapping theorems describe the
+emitted code only where nothing overflows, or under a wrapping build. The
+real binary64 check and the rounding-error bound are outside the tower (below).
+
+## BladeReduceCompiler.v (54 theorems) — exact recurrence reduction: a source fragment and its compiler theorem
+
+The draft's section 12 names the research target: a typed fragment whose local
+rules construct the summary and the reduced update *uniformly in the extent*,
+with a simulation theorem, and a classification that source recognition,
+certificate construction and execution all implement. This file does that for
+the fragment the draft proposes first — P8's.
+
+- **Source.** `prog`: r moments read, m run-constant parameters, a coefficient
+  list a₀ … a_d and an observation, all integer-coefficient polynomial
+  expressions (`pexp Z`) in the moments and parameters. `sstep` runs it on all N
+  particles, in any commutative ring (`phi`, `zmap`, `zev` read integer syntax
+  there). The extent is not part of the source program.
+- **The zero test.** `nonroot e n` searches the integer grid {0..deg e}ⁿ.
+  `nonroot_some_K`: a found point is a nonroot in K. `nonroot_none`: no point
+  found means e is zero *as a function on K*, for any integral domain of
+  characteristic zero — `grid_complete`, one coordinate at a time through
+  `uni_rep` and BladeNewton's `many_roots_dom`. Sound and complete, so
+  identically-zero top coefficients are stripped (`strip`) rather than refused.
+- **The classifier.** `classify` returns `Reduced a₁ a₀`, `Refused d A z` or
+  `Unknown`; `classify_total` — on this fragment `Unknown` never occurs;
+  `classify_refused` — a refusal carries the effective degree d ≥ 2, the leading
+  coefficient A = a_d, and an integer point z with A(z) ≠ 0.
+- **The generated program.** `Gk` / `rprog_of` / `compile`: r expressions
+  p_k′ = Σⱼ C(k,j) a₁ʲ a₀^(k−j) p_j over the summary, the parameters and one
+  variable for the extent — built once, not per N.
+- **The compiler theorem.** `compile_certificate`, `compile_sound_gen`,
+  `compile_sound`: for every extent, parameter vector and input word, every
+  prefix observation of the source execution equals that of the generated
+  program on r numbers. Unconditional over characteristic-zero domains;
+  `compile_sound_unstripped` over *any* commutative ring when nothing was
+  stripped (wrapping integers, dual numbers).
+- `sstep_truncated` — a refused program *is* the degree-d update the negative
+  theorems speak about. `compiler_runs`, `compiled_affine_runs` — the kernel
+  runs the classifier on four programs (one with an identically-zero quadratic
+  term, one the draft's "special parameter value" case) and the generated
+  program on a concrete state.
+
+Honest scope (stated in-file): a *model* fragment in Coq, not Blade's surface
+syntax or F# compiler — nothing in `src/` implements or is checked against it.
+The zero test is exponential in r + m. That a refusal means no reduced program
+exists is proved over ℝ, outside the tower (below).
+
+## BladeReductionAD.v (24 theorems) — exact recurrence reduction: the AD contract
+
+P5 is proved in BladeMomentClosure for forward mode *as dual numbers*. Blade's
+AD is a source transformation: `synthesizeJvp` emits a tangent statement beside
+every primal one (`tangentOfExpr`); `synthesizeRev` sweeps the normalized
+statements in reverse accumulating cotangents (`adjointOf`); a `let rec`
+recurrence is replayed backwards over its stored trajectory; the `while`-guard
+arm is refused (BL5500). This file models those rules on polynomial expressions.
+
+- `tan_is_dual` — the forward rules (sum; d(l·r) = dl·r + l·dr) compute exactly
+  the dual-number tangent.
+- `adj_pairing` — the reverse rules (add: both sides get the cotangent; mul:
+  c·r to the left, c·l to the right; accumulate at a variable) are the
+  **transpose** of the forward rules: ⟨adj e c g, v⟩ = ⟨g, v⟩ + c·tan e v.
+- `sweep_pairing` — for a straight-line block, the reverse sweep reading the
+  forward values left behind is the transpose of the tangent block.
+- `carry_pairing` — for a recurrence, the descending sweep over the *stored*
+  trajectory is the transpose of the T-step tangent run: the executed
+  algorithm, as section 11.4 requires, never an implicit fixed point.
+- `reduction_commutes_forward`, `reduction_commutes_reverse` — a certificate
+  q∘F = G∘q read in the dual numbers yields the chain-rule instance with no
+  chain rule. Hence jvp on the reduced program carries the pushed tangent at
+  every horizon; and sweeping the reduced program then pulling back through q
+  at the *initial* state equals pulling back at the *final* state then sweeping
+  the original — parameters and initial state included, as variables.
+- `compile_sound_dual` — the compiler theorem in the dual numbers, every N.
+  `ex_affine_reverse_commutes` — both modes on a concrete program with the
+  actual output of `compile` as the reduced side.
+
+Honest scope (stated in-file): a model written from a reading of `Grad*.fs`,
+over + and × only — no intrinsics, units or packed reconstruction; a map over N
+particles is N expression instances, not an `NFor`. The link to the F# is by
+inspection, like the rest of this document.
+
 ## Outside the tower: `proofs/reals/BladeSmoothRank.v` (24 theorems, conditional)
 
 **Not counted above. Not in `_CoqProject`. Not covered by "no axioms".** It
@@ -1699,6 +1814,56 @@ polynomials in several variables. Here:
 "Not identically zero" is semantic (nonzero at some r-vector of reals); the
 polynomial is a `pexp` read on its first r variables.
 
+## Outside the tower: `proofs/reals/BladeRoundingBound.v` (20 theorems, conditional)
+
+**Not counted above.** Two axioms (`sig_forall_dec`,
+`functional_extensionality_dep`). The third contract of section 11.2: a
+finite-precision error theorem. The standard model of rounded arithmetic — every
+operation exact up to relative error u, no underflow or overflow — is a
+*hypothesis* of the section, not an axiom.
+
+- `fsum_error` — recursive summation is within ((1+u)ⁿ − 1)·Σ|xᵢ| of the sum.
+- `original_error`, `reduced_error` — the particle-wise fold of a·xᵢ + b and the
+  reduced form a·S + N·b each lie within ((1+u)^(N+2) − 1)·Σ(|a||xᵢ| + |b|) of
+  the exact value: the same radius, against the same condition number.
+- `reduction_rounded_distance` — so they differ by at most twice that;
+  `g_le_gamma` — the radius is at most n·u/(1 − n·u).
+
+Rank one only (the S update). The bound says the reformulation is no worse
+conditioned than the original; it does not make them bitwise equal.
+
+## Outside the tower: `proofs/reals/BladeReduceClassification.v` (6 theorems, conditional)
+
+**Not counted above.** Three axioms (those of BladeRealDensity).
+BladeReduceCompiler's classifier is *exact* over ℝ.
+
+- `real_compile_sound` — accepted programs: the compiler theorem at K = ℝ.
+- `refused_no_reduction` — refused programs: at the parameter values of the
+  witness there is **no** update function of the summary, continuous or not, at
+  any extent N ≥ d·r. `closure_refused_R_polynomial` applied to the leading
+  coefficient with its parameters frozen; a reduced program must serve every
+  parameter value, so none exists.
+- `classification_exact` — on every well-formed program the classifier answers,
+  and the answer is right in both directions.
+- `special_value_program_refused` — x′ = x + θx² is affine at θ = 0 and is still
+  refused: at θ = 1 no update function of S exists for N ≥ 2.
+
+## Outside the tower: `proofs/floats/BladeBinary64Witness.v` (6 theorems, primitive floats)
+
+**Not counted above.** No axiom, but `Print Assumptions` lists the primitive
+float type and operations: the values are computed by the kernel's binary64
+evaluation and are trusted to that extent.
+
+- `binary64_original_inexact`, `binary64_reduced_inexact` — the two witnesses of
+  BladeNumericContract at p = 53, on real binary64.
+- `binary64_no_ordering_recovers_the_reduced_value` — all twelve orderings of
+  the original give 2⁵³ + 6; all orderings of the reduced form give 2⁵³ + 8.
+- `binary64_reduced_overflows`, `binary64_reduced_nan` — the reduced form
+  returns ∞, or NaN, where the original is finite.
+
+With a = 1 the product a·x is exact, so a fused multiply-add computes the same
+values: these do not depend on `-ffp-contract`.
+
 ## What remains unproved
 
 Still open: surface-calculus progress/preservation (the one missing species —
@@ -1715,8 +1880,13 @@ prove H = S_R at any binding, the sign character at r = 2, and the term form
 with one two-node instance); and completeness of the SIGNED deduction rules
 (PNeg, PConj, call summaries — BladeDeduceExact is exact for the unsigned
 fragment only). For exact recurrence reduction (a research draft, no shipped
-feature): reverse-mode AD as emitted, and the whole source-to-summary compiler
-theorem. (Every P-item of the draft is now machine-checked. P8's refusal is
+feature): everything that would make it a Blade feature. BladeReduceCompiler is
+a model fragment and BladeReductionAD a model of the AD rules — neither is
+checked against `src/`; the AD model has no intrinsics, units or packed
+reconstruction, and restates the compiled fragment through the emitted rules
+for one concrete program only; the rounding-error bound is rank one; which of
+the three numerical contracts Blade adopts is a design decision, not a theorem.
+(Every P-item of the draft is machine-checked. P8's refusal is
 axiom-free at N ≥ 2^(dr−1) and, at the draft's threshold N ≥ d·r and in the
 draft's full generality, proved over ℝ OUTSIDE the tower; P6, P4a and P7
 against differentiable summaries likewise — all conditional on the axioms of

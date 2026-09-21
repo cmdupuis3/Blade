@@ -4,15 +4,20 @@
 (section 15: P1-P3, P4, P5a, P9 in full; P4a, P6, P7 and P10 in full in their
 POLYNOMIAL forms; P7a and P7b over Z by Descartes' rule; P8's refusal against
 EVERY update function at every degree and order, from extent 2^(dr-1) on with
-no axioms (15.9); Newton's identities; 277 axiom-free theorems in
+no axioms (15.9); Newton's identities; and, beyond the P-items, the numerical
+contract of 11.2, the AD contract of 11.4 and the section-12 compiler theorem
+for a MODEL fragment (15.12); 394 axiom-free theorems in
 `proofs/BladeSummary.v`, `BladeMomentClosure.v`, `BladeRankBound.v`,
-`BladeDescartes.v`, `BladeRankDomain.v`, `BladeProuhet.v` and `BladeNewton.v`.
-OUTSIDE the axiom-free tower, conditional on the axioms of Coq's real numbers,
-86 theorems in `proofs/reals/`: P6, P4a and P7 against DIFFERENTIABLE
-summaries, and P8's negative half AS STATED in section 9 (15.10, 15.11). Every
-P-item of this draft is now machine-checked in some form; section 15.2 says
-which form).
-No compiler implementation. No claim of mathematical priority.**
+`BladeDescartes.v`, `BladeRankDomain.v`, `BladeProuhet.v`, `BladeNewton.v`,
+`BladeNumericContract.v`, `BladeReduceCompiler.v` and `BladeReductionAD.v`.
+OUTSIDE the axiom-free tower: 112 theorems in `proofs/reals/`, conditional on
+the axioms of Coq's real numbers -- P6, P4a and P7 against DIFFERENTIABLE
+summaries, P8's negative half AS STATED in section 9 (15.10, 15.11), the
+exactness of the model compiler's classifier, a rounding-error bound -- and 6
+in `proofs/floats/`, binary64 witnesses by kernel evaluation. Every P-item of
+this draft is machine-checked in some form; section 15.2 says which form).
+No compiler implementation: nothing in `src/` implements or is checked against
+the model fragment. No claim of mathematical priority.**
 
 Requested as a handoff for Claude. The proofs below are intended to be audited,
 tightened, and then selectively mechanized. Sections 1-14 are the draft as
@@ -785,7 +790,10 @@ Checks run for this draft using Python's standard-library rational arithmetic:
 
 ## 15. Review and mechanization record (Claude, 2026-09-19)
 
-Audit of sections 1-13, then seven mechanization rounds. Seven files were added
+Audit of sections 1-13, then eight mechanization rounds (the eighth, 15.12,
+added three more tower files, two more in `proofs/reals/` and one in
+`proofs/floats/`; the tower total is then 1341). Through round seven, seven
+files were added
 to the proof tower: `proofs/BladeSummary.v` (41 theorems),
 `proofs/BladeMomentClosure.v` (86), `proofs/BladeRankBound.v` (49, second
 round), `proofs/BladeDescartes.v` (28, third round),
@@ -1238,3 +1246,93 @@ the link from the dual-number semantics of 15.3(b) to Blade's emitted AD
 (11.4), and the research target of section 12 -- the typed source fragment and
 the theorem that recognition, certificate construction and execution implement
 this classification.
+
+### 15.12 Eighth round: what section 11 and section 12 asked for (2026-09-20)
+
+Three things were left on paper after round seven, none of them a P-item:
+the numerical contract (11.2), the link to the AD Blade emits (11.4), and
+the research target of section 12. Six files; three in the tower, three
+outside it. The tower is 1341 theorems, still with no axiom.
+
+**11.2, the numerical contract.** The draft offers three contracts and says
+"choose one". That choice is a design decision; what can be proved is what
+each contract is worth.
+
+- *An exact arithmetic fragment* — `proofs/BladeNumericContract.v`.
+  Integers modulo m form a ring with Leibniz equality (a sigma type over a
+  boolean equation; its proofs are unique without an axiom), so every
+  theorem of BladeMomentClosure holds in wrapping arithmetic with every
+  overflow included (`wrapped_moment_reduction_sound`). More usefully,
+  `int64_observation_exact`: the wrapped *reduced* run carries the
+  residues of the true *original* moments, so a moment that is
+  representable is returned exactly whatever overflowed on the way.
+  Rationals likewise. **Finding:** `src/Build.fs` does not pass `-fwrapv`,
+  so signed overflow is undefined in the emitted C++; the theorem describes
+  the emitted code only where nothing overflows, or under a wrapping build.
+- *No contract at all for rounded arithmetic, at any precision.* A
+  round-to-nearest-even model on integers, for every precision p ≥ 2:
+  a = b = 1, x = (2ᵖ, −2ᵖ) has exact answer 2; the particle-wise fold
+  returns 1 and the reduced form 2. At x = (−2ᵖ, −1) it is the other way
+  round. So neither program is "the accurate one". With three particles, at
+  p ∈ {24, 53, 64, 113}, *every* ordering and parenthesization of the
+  original fold gives one value and every ordering of the reduced form
+  another (`no_ordering_recovers_the_reduced_value`) — the draft's sentence
+  "an OMP license is not blanket permission for distributivity-based
+  recurrence reduction", as a theorem. The same witnesses on real binary64,
+  by kernel evaluation of primitive floats, plus an overflow and a NaN
+  witness, are `proofs/floats/BladeBinary64Witness.v` (outside the tower:
+  `Print Assumptions` lists the float primitives). All use a = 1, so the
+  product is exact and `-ffp-contract` cannot change them.
+- *A finite-precision error theorem* — `proofs/reals/BladeRoundingBound.v`
+  (outside the tower; the standard model is a section hypothesis). The
+  particle-wise fold and the reduced form of the S update each lie within
+  ((1+u)^(N+2) − 1)·Σ(|a||xᵢ| + |b|) of the exact value: the same radius,
+  against the same condition number. Rank one only.
+
+**11.4, the AD contract** — `proofs/BladeReductionAD.v`. Read from
+`src/Grad*.fs`: forward mode emits a tangent statement beside every primal
+one; reverse mode sweeps the normalized statements backwards accumulating
+cotangents; a `let rec` recurrence is replayed over its stored trajectory;
+the `while`-guard arm is refused (BL5500), so P1b's guards and the AD
+contract never meet. The file models the rules on polynomial expressions.
+The forward rules compute the dual-number tangent of P5 (`tan_is_dual`);
+the reverse rules are their transpose (`adj_pairing`), block by block
+(`sweep_pairing`) and across a stored trajectory (`carry_pairing`) — the
+executed algorithm, as 11.4 requires. Then a certificate read in the dual
+numbers gives the chain-rule instance with no chain rule, and reduction
+commutes with both modes (`reduction_commutes_forward`,
+`reduction_commutes_reverse`): sweeping the reduced program and pulling
+back through q at the initial state equals pulling back at the final state
+and sweeping the original. Parameters and initial state are variables like
+any other, which covers "parameter-dependent summaries" and
+"initialization". Not covered: intrinsics, units, packed reconstruction;
+and the link to the F# is by inspection.
+
+**Section 12, the research target** — `proofs/BladeReduceCompiler.v` and
+`proofs/reals/BladeReduceClassification.v`, on the fragment the draft
+proposes first. A source program is r moments, m run-constant parameters,
+a coefficient list and an observation, all integer-coefficient polynomial
+expressions; the extent is not part of it. The compiler has a zero test
+that is sound *and complete* (a grid search, justified one coordinate at a
+time by root counting), so an identically-zero top coefficient is stripped
+rather than refused. `classify` has the draft's three outcomes, and on this
+fragment `Unknown` never occurs (`classify_total`). `compile` emits r
+expressions over the summary, the parameters and one variable for the
+extent — once, not per N. `compile_sound`: every prefix observation of
+every finite execution agrees, at every extent and parameter vector. Over
+ℝ, `classification_exact`: a refusal means that at the witness parameters
+no update function of the summary exists at any N ≥ d·r. The kernel runs
+the compiler on four programs, including the draft's adversarial "special
+parameter value" case (x′ = x + θx² — affine at θ = 0, refused anyway, and
+rightly: `special_value_program_refused`).
+
+What this is not: Blade's surface syntax, or anything in `src/`. It is the
+section-12 theorem for a model fragment. Products and compositions of such
+programs are covered by BladeSummary's P3 theorems but are not part of the
+syntax here; units are `affine_update_unit_covariant`, not a typing
+judgment; the zero test is exponential in r + m.
+
+**What is left** is no longer proof work on this draft. It is the design
+decision of 11.1–11.2 (an explicit user-requested summary, or an optimizer
+rewrite under a stated numerical contract), and then an implementation
+that the model fragment can be checked against.

@@ -3,3 +3,5 @@
 BladeSmoothRank.v
 BladeRealCollision.v
 BladeRealDensity.v
+BladeRoundingBound.v
+BladeReduceClassification.v

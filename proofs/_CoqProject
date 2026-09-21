@@ -40,3 +40,6 @@ BladeDescartes.v
 BladeRankDomain.v
 BladeProuhet.v
 BladeNewton.v
+BladeNumericContract.v
+BladeReduceCompiler.v
+BladeReductionAD.v
