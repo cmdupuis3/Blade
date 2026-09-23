@@ -106,6 +106,14 @@ spelled (a rounded value bound to a name and cast later refuses on
 purpose). Array operands lift elementwise like `cos(A)`; `Int64(floor(A))`
 fuses the rounding and the cast into one kernel.
 
+Integer `+`, `-` and `*` wrap: Int32 and Int64 arithmetic is two's
+complement modulo 2³² / 2⁶⁴ in every lane (the interpreter's .NET integers
+are unchecked; the C++ build passes `-fwrapv`; the LLVM lane emits no
+`nsw`). So `x + 1 > x` is `false` at the maximum, and a wrapped sum still
+carries the true value modulo 2⁶⁴ (`proofs/BladeNumericContract.v`,
+`int64_observation_exact`). Integer `/` and `%` truncate toward zero; a zero
+divisor is a runtime fault (BL8007 in the interpreter), not a wrapped value.
+
 Mixed-type arithmetic still promotes — float beats int, wider beats
 narrower within a category, complex promotes componentwise, and a mixed
 int/float op computes at the float operand's width (`Int64 × Float32 →

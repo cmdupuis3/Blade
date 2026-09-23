@@ -458,8 +458,10 @@ let private convertTo (target: ElemType) (v: Value) : Value =
     | _ -> v
 
 /// Compute a real (non-complex, non-pow) binop in the C++ evaluation type,
-/// producing a value of THAT type. Integer +,-,* wrap (two's complement); / and
-/// % truncate toward zero (matching C++ and F#'s int operators).
+/// producing a value of THAT type. Integer +,-,* wrap (two's complement) --
+/// the C++ lane matches only because Build.optFlags passes `-fwrapv`; do not
+/// switch this file to Checked arithmetic without changing both. / and %
+/// truncate toward zero (matching C++ and F#'s int operators).
 let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : Value =
     match comp with
     | ETInt32 ->

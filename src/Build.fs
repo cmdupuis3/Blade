@@ -58,6 +58,23 @@ type ProcessStartInfo = System.Diagnostics.ProcessStartInfo
 // untouched (IEEE-754 sqrt is correctly rounded either way), so this is
 // bit-exact and safe for the byte-identity differential gates.
 //
+// `-fwrapv` is unconditional and is a SEMANTICS flag: Blade's Int32/Int64
+// arithmetic wraps (two's complement), in every lane. The interpreter wraps
+// because .NET integer arithmetic is unchecked (src/Interp/Numerics.fs
+// computeReal); the LLVM lane wraps because EmitLlvm puts no `nsw`/`nuw` on
+// integer instructions. Without the flag, signed overflow is undefined in
+// C++ and g++ -O3 uses that: it folds `x + 1 > x` to `true`, so the compiled
+// program disagreed with the interpreter at the maximum
+// (tests/corpus/functions/133). The cost is the loop optimizations that
+// assume a signed counter cannot overflow, and Blade's generated loops count
+// with unsigned `size_t`, which wraps anyway. Measured 2026-09-22 (g++, -O3
+// -march=native, 7 interleaved runs, medians): an Int64 polynomial reduce over
+// 6e7 cells, a 3e7-step Int64 LCG recurrence and a 4001 x 3999 Int64 outer
+// product with partial folds ran 0.98-1.00x the old time; examples/03
+// assembles byte-identically and examples/01 differs only in instruction
+// order. Division is NOT covered: `x / 0` and `MIN / -1` stay faults in both
+// lanes, not wrapped values.
+//
 // These are FUNCTIONS, not module-level values, so a harness may set the
 // env var mid-process and have it honored by the next compile -- a
 // module-level `let` would freeze the default at first touch.
@@ -79,10 +96,10 @@ let private fpContractFlag () =
     | v -> $" -ffp-contract={v.Trim()}"
 
 /// Host-compiler optimization flags shared by every g++ invocation.
-/// Currently `-O3 -march=native -ffp-contract=fast -fno-math-errno` by default
-/// (see the env vars above; the errno flag is unconditional).
-/// Re-evaluated per call so harness env pins take effect.
-let optFlags () = "-O3" + marchFlag () + fpContractFlag () + " -fno-math-errno"
+/// Currently `-O3 -march=native -ffp-contract=fast -fno-math-errno -fwrapv` by
+/// default (see the env vars above; the errno and wrapv flags are
+/// unconditional). Re-evaluated per call so harness env pins take effect.
+let optFlags () = "-O3" + marchFlag () + fpContractFlag () + " -fno-math-errno -fwrapv"
 
 // ---------------------------------------------------------------------------
 // The BLADE_LLVM lane's gates (docs/plans/plan-llvm-backend.md section 5).
@@ -114,7 +131,11 @@ let llvmEnabled () : bool =
 /// must still assume the call writes errno. A/B measured on a 1023-cell
 /// `sqrt` map: the loop vectorizes with the flag NEITHER on nor off. Closing
 /// the gap means emitting the attribute in EmitLlvm, not adding a flag here.
-let llvmOptFlags () = "-O3" + marchFlag () + " -fno-math-errno"
+///
+/// `-fwrapv` is carried for the same parity. The `.ll` half already wraps by
+/// construction (EmitLlvm emits no `nsw`/`nuw`); the flag governs whatever C++
+/// the clang driver still compiles on this lane.
+let llvmOptFlags () = "-O3" + marchFlag () + " -fno-math-errno -fwrapv"
 
 type HostPlatform = PWindows | PLinux | PMacOS
 
@@ -463,7 +484,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
                 // a memcheck build is a measurement run, not the enforcement
                 // gate the release compile already provides.
                 let args =
-                    $"-std=c++17 -O0 -g -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"{exeFullPath}\" \"{cppFullPath}\""
+                    $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -fbracket-depth=1024 -Wno-c++20-extensions -o \"{exeFullPath}\" \"{cppFullPath}\""
                 match runProc cxx args 300000 with
                 | Error e -> Error e
                 | Ok () ->
@@ -502,7 +523,7 @@ let compileCppMemcheck (srcText: string option) (extraLinkInputs: string list) (
             // the /Od /Zi profile. LeakSanitizer (where the platform has it)
             // comes for free on top of the BLADE-MEMCHECK report line.
             let args =
-                $"-std=c++17 -O0 -g -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"{exeFullPath}\" \"{cppFullPath}\""
+                $"-std=c++17 -O0 -g -fwrapv -fopenmp -fsanitize=address -Werror=float-conversion -Werror=narrowing -o \"{exeFullPath}\" \"{cppFullPath}\""
             match runProc "g++" args 300000 with
             | Error e -> Error e
             | Ok () -> Ok exeFullPath

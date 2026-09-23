@@ -801,8 +801,10 @@ let private paramAttr () : string =
 ///     both before it will split the chain into lanes.
 ///   * `contract` -- `BLADE_FP_CONTRACT` (opt-in here; see `contractLicensed`).
 /// Integer instructions get nothing: `nsw`/`nuw` would be a WRAPAROUND claim
-/// this lane has not proved (Blade's Int64 arithmetic wraps like C++'s
-/// `int64_t`, and no overflow analysis exists to say otherwise).
+/// this lane has not proved (Blade's Int64 arithmetic wraps -- in the C++
+/// lane because Build.optFlags passes `-fwrapv`, in the interpreter because
+/// .NET integer arithmetic is unchecked -- and no overflow analysis exists to
+/// say otherwise).
 let private fmfFor (c: Ctx) (ty: Sc) : string =
     if ty <> ScF64 || not (factEnabled factFmf) then ""
     else

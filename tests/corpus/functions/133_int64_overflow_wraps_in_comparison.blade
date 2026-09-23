@@ -1,0 +1,17 @@
+// TEST: int64 overflow wraps before a comparison
+// ============================================================================
+// Signed Int64 arithmetic wraps (two's complement) in BOTH lanes. The
+// interpreter wraps because .NET int64 arithmetic is unchecked; the C++ lane
+// wraps because the build passes -fwrapv. Without that flag, signed overflow
+// is undefined in C++ and g++ -O3 folds `x + 1 > x` to `true` -- this file
+// printed `a = true` next to `b = -9223372036854775808` before the fix.
+// ============================================================================
+function succ_gt(x: Int64) -> Bool = x + 1 > x
+let big: Int64 = 4611686018427387903 + 4611686018427387904
+let a = succ_gt(big)
+let b = big + 1
+let c = succ_gt(5)
+// EXPECT: big = 9223372036854775807
+// EXPECT: a = false
+// EXPECT: b = -9223372036854775808
+// EXPECT: c = true
