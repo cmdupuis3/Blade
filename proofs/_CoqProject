@@ -43,3 +43,4 @@ BladeNewton.v
 BladeNumericContract.v
 BladeReduceCompiler.v
 BladeReductionAD.v
+BladeShiftedMoments.v

@@ -18,11 +18,19 @@
 (*                             2^53 + 6, all orderings of the reduced    *)
 (*                             form 2^53 + 8;                            *)
 (*   binary64_reduced_overflows,      the reduced form returns infinity, *)
-(*   binary64_reduced_nan      or NaN, where the original is finite.     *)
+(*   binary64_reduced_nan      or NaN, where the original is finite;     *)
+(*   binary64_raw_moments_lose_the_variance   why a float summary must   *)
+(*                             be SHIFTED: at 1e8, 1e8 + 1, 1e8 + 2 the  *)
+(*                             raw formula Q / N - (S / N)^2 returns 2;  *)
+(*                             the central form returns 2/3, correctly   *)
+(*                             rounded (BladeShiftedMoments,             *)
+(*                             reals/BladeShiftedRounding.v).            *)
 (*                                                                       *)
 (* Scope, stated once.  With a = 1 the product a x is exact, so a fused  *)
 (* multiply-add computes the same values: the first three witnesses do   *)
-(* not depend on -ffp-contract.                                          *)
+(* not depend on -ffp-contract.  Part D evaluates without contraction;   *)
+(* compiled by g++ -O3 -ffp-contract=fast the raw formula gives 1,       *)
+(* the central one still 2/3.                                            *)
 (* ===================================================================== *)
 
 Require Import Floats List Bool.
@@ -100,4 +108,28 @@ Proof. split; reflexivity. Qed.
 Theorem binary64_reduced_nan :
   orig2 0 1 big big = 2 /\
   PrimFloat.is_nan (red2 0 1 big big) = true.
+Proof. split; reflexivity. Qed.
+
+(* ===================================================================== *)
+(* Part D.  WHY THE FLOAT SUMMARY IS SHIFTED.  Three particles at 1e8,   *)
+(* 1e8 + 1, 1e8 + 2; exact variance 2/3.  From raw power sums,           *)
+(* Q / N - (S / N)^2 returns 2.  From the shifted sum about the mean,    *)
+(* M2 / N returns 2/3 correctly rounded.                                 *)
+(* ===================================================================== *)
+
+Definition p1 : float := 100000000.
+Definition p2 : float := 100000001.
+Definition p3 : float := 100000002.
+
+Definition raw_var : float :=
+  let S := (p1 + p2) + p3 in
+  let Q := (p1 * p1 + p2 * p2) + p3 * p3 in
+  Q / 3 - (S / 3) * (S / 3).
+
+Definition central_var : float :=
+  let m := ((p1 + p2) + p3) / 3 in
+  (((p1 - m) * (p1 - m) + (p2 - m) * (p2 - m)) + (p3 - m) * (p3 - m)) / 3.
+
+Theorem binary64_raw_moments_lose_the_variance :
+  raw_var = 2 /\ central_var = 0x1.5555555555555p-1.
 Proof. split; reflexivity. Qed.

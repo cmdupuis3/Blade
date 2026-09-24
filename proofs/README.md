@@ -28,7 +28,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (1341 theorems total)
+## Contents (1362 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -769,6 +769,23 @@ run it with `-Check` to verify the numbers below and the headline in
   with the ACTUAL compiler output as the reduced side).  A model written
   from a reading of Grad*.fs, + and * only; the link to the F# is by
   inspection.
+- BladeShiftedMoments.v (21): NEW -- EXACT RECURRENCE REDUCTION in the
+  coordinates a floating-point implementation needs.  Raw power sums
+  cancel catastrophically in floats (floats/BladeBinary64Witness.v Part D:
+  variance 2 instead of 2/3); shifted sums M_k(c) = sum (x_i - c)^k do not.
+  smom_aff (THE UPDATE: move the shift like a particle, c' = a c + b, and
+  M_k' = a^k M_k -- a pure rescaling, over any commutative ring, no
+  division); raw_from_shifted / shifted_from_raw (the same information as
+  the raw sums, both directions, so every refusal and lower bound
+  carries over); central_preserved / mean_tracked (started at the mean,
+  the shift stays the mean); variance_numerator_shift_free /
+  variance_numerator_aff / rho_invariant (N M_2 - M_1^2 = N Q - S^2 for
+  every shift and scales by a^2, so rho = M_1^2/(N M_2) is invariant);
+  shifted_certificate /
+  shifted_reduction_sound (the ORIGINAL moment-fragment program,
+  unchanged, with the shift as a GHOST beside it -- ANY starting shift,
+  e.g. a rounded mean); shifted_run_is_shifted_sums (what the rounding
+  analysis compares against).
 
 ## Outside the tower: conditional on Coq's Reals axioms
 
@@ -853,13 +870,50 @@ claim.
   the classifier answers, and is right both ways);
   special_value_program_refused (x' = x + theta x^2 is affine at
   theta = 0 and still refused).
+- reals/BladeShiftedRounding.v (16): THE FLOAT CONTRACT for the shifted
+  reduction.  Two axioms; the standard model of rounded arithmetic is a
+  section HYPOTHESIS.  mex_is_shifted_sum (the exact reduced run is the
+  shifted sums of the true array about the propagated shift);
+  crun_is_mean; mfl (the float reduced run, M <- fl(fl(a^k) M));
+  shifted_moment_float_bound (after |w| steps the float M_k is within
+  relative error (1 + e0)(1 + u)^(k |w|) - 1 of the true shifted sum --
+  independent of N, of the spread, of any condition number);
+  central_moment_float_bound (the same against the TRUE central moment
+  when started at the mean); shifted_moment_gamma_bound (radius
+  n u / (1 - n u), n = k |w|).  Coefficients from the input.
+- reals/BladeShiftedFeedback.v (36): the float contract when the
+  coefficient READS the summary -- computed by the float program from its
+  own rounded moments.  Four axioms (the reals' three plus
+  Classical_Prop.classic, through the stdlib's exp lemmas).  The moments
+  are a closed loop because b never enters them (M_k' = a^k M_k).  rcl
+  (LOG-RELATIVE error: products add; rcl_pow, rcl_inv, rcl_sqrt,
+  rcl_add_pos give the stability constant L of the coefficients people
+  write); alpha_stable (the one new hypothesis: moments to log-error l give
+  the coefficient to L l + eps); feedback_bound / rad_closed (log-error
+  after T steps <= (1 + r L)^T l0 + r (eps + lu) ((1 + r L)^T - 1)/(r L),
+  lu = -ln(1 - u); rad_no_feedback: LINEAR in T when L = 0);
+  feedback_particles (against the TRUE particle system, coefficient from
+  the TRUE moments, b arbitrary); normalizing_coefficient_stable /
+  normalized_ensemble_bound (x' = (g / sqrt M_2) x + b: L = 1/2,
+  eps = 2 lu).  Coefficients reading the mean (the shift) are not
+  covered.
+- reals/BladeShiftedVariance.v (14): the VARIANCE in a float coefficient.
+  The same four axioms.  rcl_diff_dominant (SUBTRACTION WITH A DOMINANT
+  MINUEND: 0 <= z <= rho y, rho < 1, operands at log-errors ly, lz give
+  y - z to log-error -ln Lo, Lo = (exp(-ly) - exp(lz) rho)/(1 - rho),
+  while Lo > 0); variance_rcl (the float variance from moments at
+  log-error l); feedback_bound_inv (the feedback theorem for a general,
+  non-linear error rule and an invariant of the true run -- rho, by
+  BladeShiftedMoments.rho_invariant); renormalized_by_stddev_bound
+  (x' = (g / sd) x + b, sd the float standard deviation, against the TRUE
+  particle system).
 
 ## Outside the tower: trusting the kernel's primitive floats
 
 NOT counted above, NOT in `_CoqProject`.  `Print Assumptions` lists the
 primitive float type and operations; nothing else.
 
-- floats/BladeBinary64Witness.v (6): IEEE binary64 does not preserve the
+- floats/BladeBinary64Witness.v (7): IEEE binary64 does not preserve the
   reduction, checked by kernel evaluation.  binary64_original_inexact
   (a = b = 1, x = (2^53, -2^53): exact answer 2, original fold 1, reduced
   form 2) and binary64_reduced_inexact (the other way round);
@@ -868,4 +922,6 @@ primitive float type and operations; nothing else.
   reduced form 2^53 + 8); binary64_reduced_overflows /
   binary64_reduced_nan (infinity, or NaN, where the original is finite).
   With a = 1 the product is exact, so these do not depend on
-  -ffp-contract.
+  -ffp-contract.  binary64_raw_moments_lose_the_variance: at 1e8, 1e8 + 1,
+  1e8 + 2 the raw formula Q / N - (S / N)^2 returns 2 (1 when g++ contracts
+  to FMA); the central form returns 2/3 correctly rounded.

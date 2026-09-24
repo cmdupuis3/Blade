@@ -5,3 +5,6 @@ BladeRealCollision.v
 BladeRealDensity.v
 BladeRoundingBound.v
 BladeReduceClassification.v
+BladeShiftedRounding.v
+BladeShiftedFeedback.v
+BladeShiftedVariance.v

@@ -6,14 +6,16 @@ POLYNOMIAL forms; P7a and P7b over Z by Descartes' rule; P8's refusal against
 EVERY update function at every degree and order, from extent 2^(dr-1) on with
 no axioms (15.9); Newton's identities; and, beyond the P-items, the numerical
 contract of 11.2, the AD contract of 11.4 and the section-12 compiler theorem
-for a MODEL fragment (15.12); 394 axiom-free theorems in
+for a MODEL fragment (15.12), and the floating-point reduction in shifted
+coordinates (15.13); 415 axiom-free theorems in
 `proofs/BladeSummary.v`, `BladeMomentClosure.v`, `BladeRankBound.v`,
 `BladeDescartes.v`, `BladeRankDomain.v`, `BladeProuhet.v`, `BladeNewton.v`,
-`BladeNumericContract.v`, `BladeReduceCompiler.v` and `BladeReductionAD.v`.
-OUTSIDE the axiom-free tower: 112 theorems in `proofs/reals/`, conditional on
+`BladeNumericContract.v`, `BladeReduceCompiler.v`, `BladeReductionAD.v` and
+`BladeShiftedMoments.v`.
+OUTSIDE the axiom-free tower: 178 theorems in `proofs/reals/`, conditional on
 the axioms of Coq's real numbers -- P6, P4a and P7 against DIFFERENTIABLE
 summaries, P8's negative half AS STATED in section 9 (15.10, 15.11), the
-exactness of the model compiler's classifier, a rounding-error bound -- and 6
+exactness of the model compiler's classifier, rounding-error bounds -- and 7
 in `proofs/floats/`, binary64 witnesses by kernel evaluation. Every P-item of
 this draft is machine-checked in some form; section 15.2 says which form).
 No compiler implementation: nothing in `src/` implements or is checked against
@@ -1336,3 +1338,52 @@ judgment; the zero test is exponential in r + m.
 decision of 11.1–11.2 (an explicit user-requested summary, or an optimizer
 rewrite under a stated numerical contract), and then an implementation
 that the model fragment can be checked against.
+
+### 15.13 Ninth round: the floating-point version (2026-09-23)
+
+The float reading of section 11.2's third contract. One finding and two proofs.
+
+**Finding: raw power sums are the wrong coordinates.** The reduced program of
+section 5 and of `BladeReduceCompiler` carries raw sums (S, Q, ...). In binary64
+they cancel catastrophically: at 10⁸, 10⁸+1, 10⁸+2 the variance read back as
+Q/N − (S/N)² is 2, not 2/3 (1 under FMA contraction), and a 1000-particle,
+50-step run of x′ = 0.999x + 10⁵ around 10⁸ gave a relative error of 19 — while
+the original particle program gave 8·10⁻¹⁰.
+
+**Exact half, `proofs/BladeShiftedMoments.v` (17, tower, no axioms).** Carry
+shifted sums Mₖ = Σ(xᵢ − c)ᵏ about a shift c that moves like a particle.
+Then Mₖ′ = aᵏMₖ: the update is a pure rescaling, over any commutative ring, no
+division. The shift is a ghost beside the unchanged original program and may
+start anywhere, including a rounded mean; started at the mean it stays the mean.
+The summary is information-equivalent to the raw one, so the refusals and lower
+bounds of rounds 1-7 carry over unchanged.
+
+**Float half, `proofs/reals/BladeShiftedRounding.v` (16, outside the tower).**
+Under the standard model, after T steps the float Mₖ is within relative error
+(1 + e₀)(1 + u)^(kT) − 1 of the true shifted (or, from the mean, central)
+moment. No N, no spread, no condition number: the bound is relative to the
+quantity itself. The same experiment's shifted run had relative error 2·10⁻¹⁵,
+better than the original program, which rounds every particle at magnitude 10⁸
+every step.
+
+**Coefficients that read the summary, `proofs/reals/BladeShiftedFeedback.v`
+(36, outside the tower).** Since b never enters the moments, they form a
+closed loop. With log-relative errors and one stability hypothesis on the
+coefficient (log-error L·ℓ + ε from moments at log-error ℓ; discharged for
+g/√M₂ with L = ½), the float moments stay within log-error
+(1 + rL)^T·ℓ₀ + r(ε + λ)((1 + rL)^T − 1)/(rL) of the true particle system's.
+The radius is geometric in T: feedback amplifies, which is the true cost, not
+slack in the proof.
+
+**The variance in a coefficient, `proofs/reals/BladeShiftedVariance.v`
+(14).** M₂/N − (M₁/N)² contains a subtraction, but a dominated one:
+ρ = M₁²/(N·M₂) is exactly invariant under affine steps (`rho_invariant`, in
+the tower), and a subtraction with a dominant minuend has log-error
+−ln[(e^(−ℓ_y) − e^(ℓ_z)ρ)/(1 − ρ)]. With a feedback theorem for non-linear
+error rules and an invariant, renormalizing by the float standard deviation
+is covered end to end.
+
+**Not covered.** Coefficients reading the mean (the shift); reverse-mode AD
+through the rewritten recurrence
+(Blade's reverse mode does not yet take scalar×array broadcasts or rank-2
+carries). The implementation plan is `docs/plans/plan-float-summary-reduction.md`.

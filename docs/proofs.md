@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**1341 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**1362 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -10,15 +10,17 @@ Rules of this document:
 
 - The `.v` files are canonical; this document is the map. Every claim here
   names its Coq artifact. Nothing is `Admitted`; there are no axioms.
-- **Six files sit outside the tower.** Five in `proofs/reals/` use Coq's
+- **Nine files sit outside the tower.** Eight in `proofs/reals/` use Coq's
   axiomatic real numbers: `BladeSmoothRank.v` (24 theorems),
   `BladeRealCollision.v` (30), `BladeRealDensity.v` (32),
-  `BladeRoundingBound.v` (20) and `BladeReduceClassification.v` (6). One in
-  `proofs/floats/`, `BladeBinary64Witness.v` (6), trusts the kernel's
+  `BladeRoundingBound.v` (20), `BladeReduceClassification.v` (6),
+  `BladeShiftedRounding.v` (16), `BladeShiftedFeedback.v` (36) and
+  `BladeShiftedVariance.v` (14). One in
+  `proofs/floats/`, `BladeBinary64Witness.v` (7), trusts the kernel's
   primitive binary64 evaluation. Each directory has its own `_CoqProject`;
-  all six are excluded from the count above and from the "no axioms" claim,
-  and are described under their own headings near the end, with the axioms
-  named.
+  all nine are
+  excluded from the count above and from the "no axioms" claim, and are
+  described under their own headings near the end, with the axioms named.
 - Scope caveats are stated where the files state them (rank-2 only,
   materialized fragment, do-not-cite, etc.).
 - Remaining open items are collected under "What remains unproved" at the end
@@ -43,7 +45,7 @@ Rules of this document:
 | Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
 | Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
-| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain, BladeProuhet, BladeNewton, BladeNumericContract, BladeReduceCompiler, BladeReductionAD | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`); and the closure refusal against EVERY update function at every degree and order, by Prouhet–Tarry–Escott collisions; Newton's identities over any commutative ring, and the theorem that turns one bumped coefficient into an ideal pair; the numerical contract (wrapping integers and rationals are exact fragments, rounded arithmetic is not one at any precision, and a reassociation license is not a distributivity license); a model source fragment with a complete zero test, a classifier that never answers Unknown, a generated reduced program and the compiler theorem at every extent; and the forward and reverse rules of `Grad*.fs` modelled, the reverse sweep over a stored trajectory as the transpose of the tangent run, and reduction commuting with both modes |
+| Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain, BladeProuhet, BladeNewton, BladeNumericContract, BladeReduceCompiler, BladeReductionAD, BladeShiftedMoments | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`); and the closure refusal against EVERY update function at every degree and order, by Prouhet–Tarry–Escott collisions; Newton's identities over any commutative ring, and the theorem that turns one bumped coefficient into an ideal pair; the numerical contract (wrapping integers and rationals are exact fragments, rounded arithmetic is not one at any precision, and a reassociation license is not a distributivity license); a model source fragment with a complete zero test, a classifier that never answers Unknown, a generated reduced program and the compiler theorem at every extent; and the forward and reverse rules of `Grad*.fs` modelled, the reverse sweep over a stored trajectory as the transpose of the tangent run, and reduction commuting with both modes; and the same reduction in shifted coordinates, where the update is a pure rescaling |
 | Optimality | BladeOptimal, BladeOrbitWork | the orbit bound on kernel work and storage against ANY program (oracle adversary), attained by canonical enumeration at H = S_R for every binding and at the sign character r = 2; the pipeline form — one question per subterm class modulo the laws, attained by the memoized evaluator, with the orbit work formula checked on a two-node pipeline |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
@@ -1706,6 +1708,36 @@ over + and × only — no intrinsics, units or packed reconstruction; a map over
 particles is N expression instances, not an `NFor`. The link to the F# is by
 inspection, like the rest of this document.
 
+## BladeShiftedMoments.v (21 theorems) — exact recurrence reduction: the coordinates floating point needs
+
+The reduction to raw power sums is exact over any ring and useless in floating
+point: raw moments cancel catastrophically — at 10⁸, 10⁸+1, 10⁸+2 in binary64
+the raw variance formula returns 2 instead of 2/3
+(`floats/BladeBinary64Witness.v`, Part D). Shifted sums
+Mₖ(c) = Σ(xᵢ − c)ᵏ about a tracked shift c carry the same information and make
+the update a pure rescaling.
+
+- `smom_aff` — move the shift like a particle, c′ = a·c + b, and
+  Mₖ′ = aᵏ·Mₖ: no b, no c, no N, nothing to cancel. Over any commutative ring;
+  no division, so no field is needed.
+- `raw_from_shifted`, `shifted_from_raw` — the binomial expansions both ways:
+  the same information as the raw sums, so every refusal and lower bound of
+  the raw summary applies unchanged.
+- `central_preserved`, `mean_tracked` — started at the mean (M₁ = 0), the shift
+  stays the mean: central moments are an invariant of the reduced run.
+- `variance_numerator_shift_free`, `variance_numerator_aff`, `rho_invariant` —
+  N·M₂ − M₁² equals N·Q − S² for every shift and scales by a² under an affine
+  step, as M₁² does: ρ = M₁²/(N·M₂) is invariant. The variance is therefore
+  M₂/N − (M₁/N)² with a subtraction that stays as small as the seed made it.
+- `shifted_certificate`, `shifted_reduction_sound` — the certificate for the
+  *original* moment-fragment program of BladeMomentClosure, unchanged
+  (coefficients read the raw power sums), with the shift as a ghost beside it.
+  Any starting shift works — a rounded mean included: the rounding of c affects
+  conditioning, never exactness.
+- `shifted_run_is_shifted_sums` — the reduced state after a word is the shifted
+  sums of the true array about the propagated shift: the quantity the rounding
+  analysis below compares against.
+
 ## Outside the tower: `proofs/reals/BladeSmoothRank.v` (24 theorems, conditional)
 
 **Not counted above. Not in `_CoqProject`. Not covered by "no axioms".** It
@@ -1848,7 +1880,85 @@ BladeReduceCompiler's classifier is *exact* over ℝ.
 - `special_value_program_refused` — x′ = x + θx² is affine at θ = 0 and is still
   refused: at θ = 1 no update function of S exists for N ≥ 2.
 
-## Outside the tower: `proofs/floats/BladeBinary64Witness.v` (6 theorems, primitive floats)
+## Outside the tower: `proofs/reals/BladeShiftedRounding.v` (16 theorems, conditional)
+
+**Not counted above.** Two axioms (`sig_forall_dec`,
+`functional_extensionality_dep`). The float contract for the shifted reduction.
+The standard model of rounded arithmetic — every operation exact up to relative
+error u, no underflow or overflow — is a *hypothesis* of the section.
+
+- `mex_is_shifted_sum` — the exact reduced run, driven by the coefficient pairs
+  (a_t, b_t), is the shifted sums of the true particle array about the
+  propagated shift; `crun_is_mean` — started at the mean, that shift is the true
+  mean at every step.
+- `mfl` is the float reduced run, M ← fl(fl(aᵏ)·M), with aᵏ by repeated
+  multiplication: k roundings a step.
+- `shifted_moment_float_bound` — from a start known to relative error e₀, after
+  T steps the float Mₖ is within relative error (1 + e₀)(1 + u)^(kT) − 1 of the
+  true shifted sum. Independent of N, of the spread, of any condition number:
+  the bound is relative to the quantity itself.
+- `central_moment_float_bound` — the same against the true *central* moment
+  when started at the mean; `shifted_moment_gamma_bound` — the radius in its
+  familiar form n·u/(1 − n·u), n = kT.
+
+Scope (stated in-file): coefficients come from the input and are shared by the
+float and the exact run. Coefficients computed from the rounded summary feed
+its error back and need a Lipschitz hypothesis on the coefficient functions —
+not done. The shift itself is computed like one particle of the original
+program, and its error is that particle's.
+
+## Outside the tower: `proofs/reals/BladeShiftedFeedback.v` (36 theorems, conditional)
+
+**Not counted above.** Four axioms: the reals' `sig_forall_dec`, `sig_not_dec`,
+`functional_extensionality_dep`, and `Classical_Prop.classic`, which the
+standard library's lemmas about `exp` use. The float contract when the
+multiplier a is computed **from the summary itself** — by the float program,
+from its own rounded moments. Because b never enters the moments
+(Mₖ′ = aᵏMₖ), the moments form a closed feedback loop.
+
+- `rcl` — log-relative error: x̂ = θx with e^(−ℓ) ≤ θ ≤ e^ℓ. Products add
+  (`rcl_mul`), powers scale (`rcl_pow`), reciprocals keep (`rcl_inv`), square
+  roots halve (`rcl_sqrt`), sums of non-negative terms keep the worst
+  (`rcl_add_pos`); `rcl_rel` turns ℓ into an ordinary relative error e^ℓ − 1;
+  one rounding costs λ = −ln(1 − u) (`rnd_rcl`).
+- `alpha_stable` — the one new hypothesis: moments known to log-error ℓ give
+  the coefficient to L·ℓ + ε. `normalizing_coefficient_stable` discharges it
+  for a = fl(g / fl(√M₂)) with L = ½, ε = 2λ.
+- `feedback_bound`, `rad_closed` — after T steps the float moments are within
+  log-error (1 + rL)^T·ℓ₀ + r(ε + λ)·((1 + rL)^T − 1)/(rL); `rad_no_feedback` —
+  linear in T when L = 0.
+- `feedback_particles`, `feedback_particles_rel` — against the true particle
+  system, whose coefficient is computed from the true moments, b arbitrary;
+  `normalized_ensemble_bound` — the instance x′ = (g/√M₂)·x + b.
+
+The radius grows geometrically at rate 1 + rL: the price of a coefficient that
+reads rounded data. Not covered: a coefficient that reads the mean (the shift),
+or subtracts moment-dependent terms.
+
+## Outside the tower: `proofs/reals/BladeShiftedVariance.v` (14 theorems, conditional)
+
+**Not counted above.** The four axioms of BladeShiftedFeedback. The variance in
+a floating-point coefficient.
+
+- `rcl_diff_dominant` — **subtraction with a dominant minuend**: for
+  0 ≤ z ≤ ρ·y with ρ < 1, operands at log-errors ℓ_y, ℓ_z give y − z to
+  log-error −ln Lo with Lo = (e^(−ℓ_y) − e^(ℓ_z)·ρ)/(1 − ρ), whenever Lo > 0.
+  The upper side reduces to A + 1/A ≥ 2.
+- `variance_rcl` — the float variance fl(fl(M₂/N) − fl(q·q)), q = fl(M₁/N),
+  from moments at log-error ℓ: log-error λ − ln Lo(λ+ℓ, 3λ+2ℓ, ρ).
+- `feedback_bound_inv` — the feedback theorem for a general, non-linear error
+  rule φ and an invariant of the true run, valid while the iterated radius
+  stays where φ holds. The invariant here is ρ ≤ ρ̄, which the true run
+  preserves exactly (`BladeShiftedMoments.rho_invariant`).
+- `renormalized_by_stddev_bound` — x′ = (g/sd)·x + b, sd the float standard
+  deviation of the float moments, against the true particle system
+  renormalized by its true standard deviation.
+
+The radius is iterated, not closed-form, and depends on ρ, a property of the
+data: small after a two-pass seed unless the spread is below the float
+resolution of the mean.
+
+## Outside the tower: `proofs/floats/BladeBinary64Witness.v` (7 theorems, primitive floats)
 
 **Not counted above.** No axiom, but `Print Assumptions` lists the primitive
 float type and operations: the values are computed by the kernel's binary64
@@ -1863,6 +1973,10 @@ evaluation and are trusted to that extent.
 
 With a = 1 the product a·x is exact, so a fused multiply-add computes the same
 values: these do not depend on `-ffp-contract`.
+
+- `binary64_raw_moments_lose_the_variance` — why a float summary must be
+  shifted: at 10⁸, 10⁸+1, 10⁸+2 the raw formula Q/N − (S/N)² returns 2 (and 1
+  when g++ contracts to FMA); the central form returns 2/3, correctly rounded.
 
 ## What remains unproved
 
@@ -1884,8 +1998,12 @@ feature): everything that would make it a Blade feature. BladeReduceCompiler is
 a model fragment and BladeReductionAD a model of the AD rules — neither is
 checked against `src/`; the AD model has no intrinsics, units or packed
 reconstruction, and restates the compiled fragment through the emitted rules
-for one concrete program only; the rounding-error bound is rank one; which of
-the three numerical contracts Blade adopts is a design decision, not a theorem.
+for one concrete program only; the rounding-error bound for the raw form is rank
+one; the shifted form's bounds cover coefficients from the input and, with a
+stability hypothesis, coefficients computed from the tracked moments and the
+variance, but not from the mean; which numerical contract Blade
+adopts is a design decision — `docs/plans/plan-float-summary-reduction.md`
+proposes one.
 (Every P-item of the draft is machine-checked. P8's refusal is
 axiom-free at N ≥ 2^(dr−1) and, at the draft's threshold N ≥ d·r and in the
 draft's full generality, proved over ℝ OUTSIDE the tower; P6, P4a and P7
