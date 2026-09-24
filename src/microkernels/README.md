@@ -13,6 +13,12 @@ branchless `compound` compaction (4eed8a4), and the heap-free small solve
 row folds / row-map `prodsum` (`tryGenRowFoldJamNest`), both bitwise against
 the text they replace; and dense halo sources now read directly instead of
 through the carousel ring (1.3-1.4x per stencil, bitwise) (2026-09-23).
+The native matmul arm now calls a packed 6x8-tile kernel
+(`cpp/blade_packed_gemm.hpp`): bitwise against the i-t-j loop under both
+`-ffp-contract` modes because the tile is vector extensions, not FMA
+intrinsics; 2-3.9x single-threaded, 1.4-2.4x at 8 threads, from ~30^3 up
+(2026-09-24). Allocation was again the mid-size cost: reusing the pack
+buffers moved 65^3 from 0.60x to 1.68x.
 
 This document has survived **two rounds of contact**: kernels built to test the
 design, then a second pass built to attack the kernels. Corrections overturned in

@@ -3032,6 +3032,10 @@ let runtimeHeaderNames : string list =
       // probe/load/store. INCLUDED only by a program with a tiled binding
       // (tilesUsedCell); deployed unconditionally like the rest.
       "blade_tilecache.hpp"
+      // The native (BLAS-off) matmul kernel, packed: blade_pgemm::dgemm_nn.
+      // INCLUDED only by a program whose matmul arm called it
+      // (packedGemmUsedCell); deployed unconditionally like the rest.
+      "blade_packed_gemm.hpp"
       // Dense linear-algebra dispatch: blade_gemm / blade_syrk plus the
       // gram/matmul adapters, resolving to cblas under -DBLADE_HAS_BLAS and to
       // native fallbacks otherwise. INCLUDED only by programs that actually

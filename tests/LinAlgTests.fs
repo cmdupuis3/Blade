@@ -577,7 +577,21 @@ let y = gram_apply(A, A, v)
        [ "for (size_t __mi"; "for (size_t __mj"; "for (size_t __mt"
          "const double __ma = A[__mi][__mt];"
          "__mcrow[__mj] += __ma * __mbrow[__mj];" ],
-       [ shimInclude; "blade_linalg::"; "cblas_"; "__math_matmul" ])
+       [ shimInclude; "blade_linalg::"; "cblas_"; "__math_matmul"; "blade_pgemm"
+         "blade_packed_gemm.hpp" ])
+      // matmul at or above the packed kernel's crossover (M >= 18, K >= 16,
+      // M*N*K >= 32768; here 18 x 16 x 114 = 32832): one call into
+      // cpp/blade_packed_gemm.hpp, its include, and no i-t-j loop. Same
+      // per-cell ascending-t arithmetic -- see the header.
+      ("gate_off_matmul_large_emits_packed_kernel", false,
+       "import math as m\nimport rand as r\n" +
+       "let ua = r.uniform(3, [18, 16])\nlet ub = r.uniform(4, [16, 114])\n" +
+       "let A: Array<Float64 like Idx<18>, Idx<16>> = method_for(range<Idx<18>, Idx<16>>) <@> lambda(i, t) -> ua(i, t) |> compute\n" +
+       "let B: Array<Float64 like Idx<16>, Idx<114>> = method_for(range<Idx<16>, Idx<114>>) <@> lambda(t, j) -> ub(t, j) |> compute\n" +
+       "let C = m.matmul(A, B)\n",
+       [ "blade_pgemm::dgemm_nn((size_t)(18), (size_t)(16), (size_t)(114), (A).data, (B).data, C.data,"
+         "#include \"blade_packed_gemm.hpp\"" ],
+       [ shimInclude; "blade_linalg::"; "cblas_"; "__mcrow" ])
       // dot: the fused fold nest, unchanged from before any dispatch existed.
       ("gate_off_dot_emits_the_fold_nest", false,
        vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",

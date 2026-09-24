@@ -793,6 +793,20 @@ let tilesUsedCell () : bool ref =
         fresh
     else v
 
+/// Set when the native matmul arm emitted a `blade_pgemm::` call (the packed
+/// kernel in blade_packed_gemm.hpp); the assembly appends that include only
+/// then. Same AsyncLocal collect-then-append shape as tilesUsedCell.
+let internal packedGemmUsedStorage =
+    System.Threading.AsyncLocal<bool ref>()
+
+let packedGemmUsedCell () : bool ref =
+    let v = packedGemmUsedStorage.Value
+    if isNull (box v) then
+        let fresh = ref false
+        packedGemmUsedStorage.Value <- fresh
+        fresh
+    else v
+
 /// The probe emitted at the FIRST input read of a hoisted tile plan: every
 /// input's need/done masks, the tile hit table, and the need of each unhit
 /// tile's chunks. Emitted before the phase-1 read of that input (unindented).

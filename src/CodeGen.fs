@@ -2902,6 +2902,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (linalgUsedCell ()).Value <- false
     (tilesUsedCell ()).Value <- false
+    (packedGemmUsedCell ()).Value <- false
     (cudaLinalgUsedCell ()).Value <- false
     (lapackUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
@@ -2938,6 +2939,8 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     // reuse, docs/plans/structural/04); Build.fs keys -DBLADE_TOOLCHAIN_ID
     // off this include line.
     let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
+    // blade_packed_gemm.hpp only when the native matmul arm called it.
+    let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and
@@ -3101,6 +3104,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     (forcedDeferredIdsCell ()).Value <- Set.empty
     (linalgUsedCell ()).Value <- false
     (tilesUsedCell ()).Value <- false
+    (packedGemmUsedCell ()).Value <- false
     (cudaLinalgUsedCell ()).Value <- false
     (lapackUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
@@ -3160,6 +3164,8 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // reuse, docs/plans/structural/04); Build.fs keys -DBLADE_TOOLCHAIN_ID
     // off this include line.
     let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
+    // blade_packed_gemm.hpp only when the native matmul arm called it.
+    let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and
@@ -3225,6 +3231,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     (moduleGlobalDeclsCell ()).Value <- []
     (linalgUsedCell ()).Value <- false
     (tilesUsedCell ()).Value <- false
+    (packedGemmUsedCell ()).Value <- false
     (cudaLinalgUsedCell ()).Value <- false
     (lapackUsedCell ()).Value <- false
     (ompApiUsedCell ()).Value <- false
@@ -3242,6 +3249,8 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // reuse, docs/plans/structural/04); Build.fs keys -DBLADE_TOOLCHAIN_ID
     // off this include line.
     let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
+    // blade_packed_gemm.hpp only when the native matmul arm called it.
+    let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
     // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
     // shape, its OWN cell and its own build consequence -- Build.fs
     // sniffs THIS line to write the companion `.cu`, build it with nvcc and

@@ -3079,20 +3079,45 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                 // is UNTOUCHED -- it is a vectorization assertion, not a thread
                 // construct, and the knob is about teams. See
                 // `ompThreadEmissionEnabled`.
-                [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
-                   else ompThreadsSuppressedBlockMarker ())
-                  $$"""for (size_t __mi = 0; __mi < {{mExtent}}; __mi++) {"""
-                  $"    {outElemStr}* BLADE_RESTRICT __mcrow = &{varName}[__mi][0];"
-                  $$"""    for (size_t __mj = 0; __mj < {{nExtent}}; __mj++) { __mcrow[__mj] = {{outElemStr}}(); }"""
-                  $$"""    for (size_t __mt = 0; __mt < {{kExtent}}; __mt++) {"""
-                  $"        const {outElemStr} __ma = {lName}[__mi][__mt];"
-                  $"        const {(irTypeToCpp ra.ElemType)}* BLADE_RESTRICT __mbrow = &{rName}[__mt][0];"
-                  "        BLADE_IVDEP"
-                  $$"""        for (size_t __mj = 0; __mj < {{nExtent}}; __mj++) {"""
-                  "            __mcrow[__mj] += __ma * __mbrow[__mj];"
-                  "        }"
-                  "    }"
-                  "}" ]
+                let itjLoop =
+                    [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
+                       else ompThreadsSuppressedBlockMarker ())
+                      $$"""for (size_t __mi = 0; __mi < {{mExtent}}; __mi++) {"""
+                      $"    {outElemStr}* BLADE_RESTRICT __mcrow = &{varName}[__mi][0];"
+                      $$"""    for (size_t __mj = 0; __mj < {{nExtent}}; __mj++) { __mcrow[__mj] = {{outElemStr}}(); }"""
+                      $$"""    for (size_t __mt = 0; __mt < {{kExtent}}; __mt++) {"""
+                      $"        const {outElemStr} __ma = {lName}[__mi][__mt];"
+                      $"        const {(irTypeToCpp ra.ElemType)}* BLADE_RESTRICT __mbrow = &{rName}[__mt][0];"
+                      "        BLADE_IVDEP"
+                      $$"""        for (size_t __mj = 0; __mj < {{nExtent}}; __mj++) {"""
+                      "            __mcrow[__mj] += __ma * __mbrow[__mj];"
+                      "        }"
+                      "    }"
+                      "}" ]
+                // PACKED KERNEL (cpp/blade_packed_gemm.hpp): B packed into
+                // 8-wide column panels, A into 6-tall row panels, a 6 x 8
+                // register tile, K blocked by 256. Byte-identical to the loop
+                // above -- every cell still starts at `T()` and adds its
+                // products in ascending t, and the tile is written in vector
+                // extensions so contraction follows the SAME flag -- measured
+                // bitwise under both -ffp-contract=off and =fast. 2-3.9x
+                // single-threaded from ~30^3 up; below the header's
+                // `worth()` crossover (M >= 18, K >= 16, >= 32768 MACs) the
+                // loop wins and runs instead. The decision is made HERE, on
+                // literal extents: inferMatmul refuses operands whose extents
+                // are not static (BL5200), so a non-literal one cannot reach
+                // this arm today, and if one ever does it keeps the loop. The
+                // thread knob rides in as the last argument (the header opens
+                // its own capped team), since the macro above is not the call's.
+                let threadedArg = if ompThreadEmissionEnabled () then "true" else "false"
+                let pgemmCall =
+                    $"blade_pgemm::dgemm_nn((size_t)({mExtent}), (size_t)({kExtent}), (size_t)({nExtent}), ({lName}).data, ({rName}).data, {varName}.data, {threadedArg});"
+                let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
+                match lit mExtent, lit kExtent, lit nExtent with
+                | Some m, Some k, Some n when m >= 18L && k >= 16L && m * n * k >= 32768L ->
+                    (packedGemmUsedCell ()).Value <- true
+                    [ "/* matmul: packed native kernel (blade_packed_gemm.hpp) */ " + pgemmCall ]
+                | _ -> itjLoop
         Some (extentDecl @ [allocDecl] @ loop,
               [MatPool (varName, outElemStr, 2, "nullptr", None, ownedExtents)])
      | _ -> None)
