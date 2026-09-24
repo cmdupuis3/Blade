@@ -38,6 +38,11 @@ runs:
     # `msystem: UCRT64` only picks the default environment for the `msys2 {0}`
     # shell; pacman installs the clang64 packages just the same. `cache: true`
     # caches the downloaded package tarballs.
+    #
+    # libgomp is listed EXPLICITLY. From gcc 16.2.0-4 it is only an optional
+    # dependency of the gcc package, so installing gcc alone leaves out omp.h
+    # and libgomp. Blade passes -fopenmp on every g++ build, so the doctor's
+    # OpenMP probe fails and every g++ lane goes red.
     # ----------------------------------------------------------------------
     - name: MSYS2 toolchains and libraries
       uses: msys2/setup-msys2@v2
@@ -48,6 +53,7 @@ runs:
         cache: true
         install: >-
           mingw-w64-ucrt-x86_64-gcc
+          mingw-w64-ucrt-x86_64-libgomp
           mingw-w64-ucrt-x86_64-netcdf
           mingw-w64-ucrt-x86_64-msmpi
           mingw-w64-clang-x86_64-clang

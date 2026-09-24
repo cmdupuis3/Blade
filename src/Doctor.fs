@@ -139,8 +139,17 @@ let private checkGpp () : CheckResult * bool =
         { Key = "gpp"; Title = "g++ / OpenMP"; Status = StatusError; Detail = detail + gppHint; Origin = "" }, false
     match Build.compileCpp src dir with
     | Error e ->
-        let firstLine = e.Split('\n') |> Array.tryFind (fun l -> l.Trim() <> "") |> Option.defaultValue e
-        fail $"compile FAILED: {firstLine.Trim()}"
+        // compileCpp's error opens with a "Compilation failed (exit N):" header,
+        // and g++'s output comes on the lines after it. Keep the first
+        // diagnostic line as well, or the row says only that the compile failed.
+        let lines = e.Split('\n') |> Array.map _.Trim() |> Array.filter (fun l -> l <> "")
+        let shown =
+            match lines with
+            | [||] -> e.Trim()
+            | [| only |] -> only
+            | _ when lines.[0].EndsWith ":" -> $"{lines.[0]} {lines.[1]}"
+            | _ -> lines.[0]
+        fail $"compile FAILED: {shown}"
     | Ok exe ->
         match Build.runExecutable exe with
         | Ok (0, out) when out.Contains "blade-doctor-ok" ->
