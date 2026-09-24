@@ -221,10 +221,12 @@ let private scopedCases
        [ ("Main", rowdotFn
                   + "let W: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
                   + mat43 + "let r = rowdot(M, W)\n") ],
-       [ ("Array<double, 1> rowdot_shape_n3_p4(", [ "__i0 < 4"; "__pt < 3" ], [ ".extents[" ])
+       // The row map is emitted as the row-fold jam (tryGenRowFoldJamNest),
+       // whose row count and fold length are `__jm` / `__jn`.
+       [ ("Array<double, 1> rowdot_shape_n3_p4(", [ "__jm = 4;"; "__jn = 3;" ], [ ".extents[" ])
          // The generic copy is untouched: it still serves any call site that
          // pins nothing, and every one of its bounds is a runtime read.
-         ("Array<double, 1> rowdot(", [ "A.extents[0]"; "A____i0.extents[0]" ], [])
+         ("Array<double, 1> rowdot(", [ "__jm = A.extents[0];"; "__jn = A.extents[1];" ], [])
          // …as does the generic kernel. The clone is PRIVATE to the spec.
          ("double __lambda_", [ "row.extents[0]" ], []) ])
 
@@ -236,8 +238,8 @@ let private scopedCases
          ("Main", "module Main\nimport Fibers\n"
                   + "let W: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
                   + mat43 + "let r = Fibers.rowdot(M, W)\n") ],
-       [ ("Array<double, 1> rowdot_shape_n3_p4(", [ "__i0 < 4"; "__pt < 3" ], [ ".extents[" ])
-         ("Array<double, 1> rowdot(", [ "A____i0.extents[0]" ], []) ])
+       [ ("Array<double, 1> rowdot_shape_n3_p4(", [ "__jm = 4;"; "__jn = 3;" ], [ ".extents[" ])
+         ("Array<double, 1> rowdot(", [ "__jn = A.extents[1];" ], []) ])
 
       // PROVENANCE NEGATIVE. A source-level function used as a kernel declares
       // its OWN `Idx<n>` -- identically spelled, unrelated axis -- so its names

@@ -3329,6 +3329,13 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                        else tryGenLinAlgNest streamedMap info.ArrayTypes codeGen tempCtx.VarNames tempCtx.Indent) with
                 | Some la -> la
                 | None ->
+                // Row folds / row-map contractions: after the BLAS matcher (a
+                // routed gemv is the stronger rewrite), and disjoint from the
+                // flat path (a row peel is `ArrayRank > depth`).
+                match (if segmentRun.IsSome || tilePlan.IsSome then None
+                       else tryGenRowFoldJamNest streamedMap info.ArrayTypes codeGen tempCtx.VarNames tempCtx.Indent) with
+                | Some jam -> jam
+                | None ->
                 match (if segmentRun.IsSome || tilePlan.IsSome then None
                        else tryGenFlatElementwiseNest streamedMap info.ArrayTypes codeGen tempCtx.VarNames tempCtx.Indent) with
                 | Some flat -> flat

@@ -541,11 +541,14 @@ let y = gram_apply(A, A, v)
       // here would produce a program that does not compile.
       //
       // gram(A, A): the packed upper-triangular write, row-shortened, one
-      // accumulator per canonical cell.
+      // accumulator per canonical cell. The row span is jammed R = 6 cells at
+      // a time; at this fixture's m = 3 only the scalar remainder runs, but
+      // both bodies are emitted.
       ("gate_off_gram_same_emits_packed_triangular_loops", false,
        realMat + "let G = gram(A, A)\n",
        // The triangular bound is baked from the fixture's literal Idx<3>.
-       [ "for (size_t __gi"; "__gjr < 3 - __gi"; "G[__gi][__gjr] = __gacc;" ],
+       [ "for (size_t __gi"; "__gspan = 3 - __gi;"; "__gjr + 6 <= __gspan"
+         "G[__gi][__gjr + 0] = __gacc0;"; "G[__gi][__gjr] = __gacc;" ],
        [ shimInclude; "blade_linalg::"; "cblas_" ])
       // gram(A, B): the dense scatter over all (i, j).
       // The `__gj` axis is UNROLL-AND-JAMMED (R = 4), so its induction variable
@@ -580,11 +583,12 @@ let y = gram_apply(A, A, v)
        vecX + vecY + deferredProd + "let s = reduce(P, (+))\n",
        [ "for (size_t __i0"; "(x____i0 * y____i0)" ],
        [ shimInclude; "blade_linalg::" ])
-      // gemv: the per-row peel plus the prodsum IIFE, likewise unchanged.
+      // gemv: the per-row prodsum, emitted as the row-fold jam (all 3 rows in
+      // one tile, one accumulator each) plus its scalar remainder.
       ("gate_off_gemv_emits_the_per_row_nest", false,
        matA + vecXv
        + "let yv = method_for(A) <@> lambda(row: Array<Float64 like N>) -> prodsum(row, xv) |> compute\n",
-       [ "A____i0"; "yv[__i0]"; "__ps = 0" ],
+       [ "row-fold jam: prodsum"; "yv[__i0 + 0] = __ja0;"; "yv[__i0] = __ja0;" ],
        [ shimInclude; "blade_linalg::" ])
       // syrk: the comm-licensed triangular nest, row peels and prodsum IIFE
       // and all — the emission an ordinary (BLAS-free) build gets, which is

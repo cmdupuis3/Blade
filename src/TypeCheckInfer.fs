@@ -3066,9 +3066,15 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr opti
                     | None -> Some (Error (Other "reduce over a rank >= 2 array needs an explicit init (3-arg reduce) unless the kernel is a (+) or (*) section"))
                     | Some seed ->
                         let uid = env.Builder.FreshId()
+                        // A NAMED operand is read in place: `let __rksrc = A`
+                        // is a whole-array COPY in the C++ lane (a full read +
+                        // write pass before the fold reads it again), and the
+                        // nest below only reads. Same rule as the leading-axis
+                        // and partial-fold desugars' `srcIsNamed`.
+                        let srcIsNamed = array.Kind.IsExprVar
                         let srcName = $"__rksrc{uid}"
                         let accName = $"__rkacc{uid}"
-                        let srcVar = synAt (ExprVar srcName)
+                        let srcVar = if srcIsNamed then array else synAt (ExprVar srcName)
                         let accVar = synAt (ExprVar accName)
                         let ivars = ns |> List.mapi (fun k _ -> $"__rk{uid}_{k}")
                         let elemRead = synAt (ExprApp (srcVar, ivars |> List.map (fun v -> synAt (ExprVar v))))
@@ -3083,8 +3089,9 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr opti
                                 ivars ns [assign]
                         let block =
                             synAt (ExprBlock (
-                                [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar srcName); Type = None; Value = array }
-                                  StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar accName); Type = None; Value = seed } ]
+                                (if srcIsNamed then []
+                                 else [ StmtLet { Mutability = BindLet; Pattern = mkPat span (PatVar srcName); Type = None; Value = array } ])
+                                @ [ StmtLet { Mutability = BindMut; Pattern = mkPat span (PatVar accName); Type = None; Value = seed } ]
                                 @ nest, Some accVar))
                         Some (inferExpr env block)
             | _ -> None

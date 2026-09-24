@@ -2605,20 +2605,54 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // themselves are unchanged and already correct serially),
                     // so nothing else about this arm moves. See
                     // `ompThreadEmissionEnabled`.
-                    [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
-                       else ompThreadsSuppressedBlockMarker ())
-                      $$"""for (size_t __gi = 0; __gi < {{mExtent}}; __gi++) {"""
-                      $"""    {(lRowDecl "__growi" "__gi")}"""
-                      $$"""    for (size_t __gjr = 0; __gjr < {{mExtent}} - __gi; __gjr++) {"""
-                      "        size_t __gj = __gi + __gjr;"
-                      $"""        {(rRowDecl "__growj" "__gj")}"""
-                      $"        {outElemStr} __gacc = {outElemStr}();"
-                      $$"""        for (size_t __gk = 0; __gk < {{nExtent}}; __gk++) {"""
-                      $"""            __gacc += {(mulTerm "__growi" "__growj")};"""
-                      "        }"
-                      $"        {varName}[__gi][__gjr] = __gacc;"
-                      "    }"
-                      "}" ]
+                    //
+                    // UNROLL-AND-JAM over `__gjr`, the dense arm's transform
+                    // (see its comment below for the bitwise argument and the
+                    // named-locals rule) applied to the triangle: each cell
+                    // keeps its own accumulator and ascending `__gk` order, so
+                    // the jam reinterleaves independent cells and nothing else.
+                    // The row span `m - __gi` shrinks every row, so no width
+                    // divides it and the extent-derived rule has nothing to
+                    // derive: R = 6 is that rule's no-divisor width, and the
+                    // measured best here (2.5-3.6x over the un-jammed nest at
+                    // 301x257, 61x2003 and 1003x61, byte-identical output).
+                    // Rows with span < R run only the remainder, which is the
+                    // pre-jam body verbatim. Complex keeps the plain nest for
+                    // the dense arm's reason (a 1.13x ceiling, non-bitwise at
+                    // R = 2).
+                    let triR = 6
+                    let jam =
+                        if isComplexElem outElem then []
+                        else
+                            [ yield $$"""    for (; __gjr + {{triR}} <= __gspan; __gjr += {{triR}}) {"""
+                              yield! [ for k in 0 .. triR - 1 ->
+                                         $"""        {(rRowDecl $"__growj{k}" $"__gi + __gjr + {k}")}""" ]
+                              yield! [ for k in 0 .. triR - 1 ->
+                                         $"        {outElemStr} __gacc{k} = {outElemStr}();" ]
+                              yield $$"""        for (size_t __gk = 0; __gk < {{nExtent}}; __gk++) {"""
+                              yield! [ for k in 0 .. triR - 1 ->
+                                         $"""            __gacc{k} += {(mulTerm "__growi" $"__growj{k}")};""" ]
+                              yield "        }"
+                              yield! [ for k in 0 .. triR - 1 ->
+                                         $"        {varName}[__gi][__gjr + {k}] = __gacc{k};" ]
+                              yield "    }" ]
+                    [ yield (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
+                             else ompThreadsSuppressedBlockMarker ())
+                      yield $$"""for (size_t __gi = 0; __gi < {{mExtent}}; __gi++) {"""
+                      yield $"""    {(lRowDecl "__growi" "__gi")}"""
+                      yield $"    const size_t __gspan = {mExtent} - __gi;"
+                      yield "    size_t __gjr = 0;"
+                      yield! jam
+                      yield $$"""    for (; __gjr < __gspan; __gjr++) {"""
+                      yield "        size_t __gj = __gi + __gjr;"
+                      yield $"""        {(rRowDecl "__growj" "__gj")}"""
+                      yield $"        {outElemStr} __gacc = {outElemStr}();"
+                      yield $$"""        for (size_t __gk = 0; __gk < {{nExtent}}; __gk++) {"""
+                      yield $"""            __gacc += {(mulTerm "__growi" "__growj")};"""
+                      yield "        }"
+                      yield $"        {varName}[__gi][__gjr] = __gacc;"
+                      yield "    }"
+                      yield "}" ]
             // NOTE: `outElemStr`, not `elemTypeStr` -- gram promotes to complex
             // when either operand is complex, and the free must name the type
             // the allocation actually used. (The BLAS staging buffers above are

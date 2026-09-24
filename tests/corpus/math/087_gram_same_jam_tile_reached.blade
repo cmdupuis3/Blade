@@ -1,0 +1,23 @@
+// TEST: gram(A, A) at an extent the triangular arm's jammed tile reaches
+// The same-array (packed upper triangle) native arm jams R = 6 cells of each
+// row's span (CodeGenExpr.fs, materializeGramForm, `triR`). Row `i` spans
+// 13 - i cells, so rows 0..7 run the tile and every row runs the remainder,
+// and rows 8..12 (span < 6) run ONLY the remainder -- both bodies execute.
+// Dyadic values: the interpreter differential compares them byte for byte.
+// NOTE: with OPENBLAS_DIR set and BLADE_BLAS unset, gram routes to the BLAS
+// shim and none of this runs; `blade test` clears both (see 063).
+type M135 = Array<Float64 like Idx<13>, Idx<5>>
+let D: M135 = [[-1.0, 2.5, -0.5, 3.0, 0.0], [0.5, 4.0, 1.0, 4.5, 1.5], [2.0, -1.0, 2.5, -0.5, 3.0], [3.5, 0.5, 4.0, 1.0, 4.5], [5.0, 2.0, -1.0, 2.5, -0.5], [0.0, 3.5, 0.5, 4.0, 1.0], [1.5, 5.0, 2.0, -1.0, 2.5], [3.0, 0.0, 3.5, 0.5, 4.0], [4.5, 1.5, 5.0, 2.0, -1.0], [-0.5, 3.0, 0.0, 3.5, 0.5], [1.0, 4.5, 1.5, 5.0, 2.0], [2.5, -0.5, 3.0, 0.0, 3.5], [4.0, 1.0, 4.5, 1.5, 5.0]]
+let G = gram(D, D)
+let g00 = G(0, 0)
+let g05 = G(0, 5)
+let g0c = G(0, 12)
+let g76 = G(7, 6)
+let gcc = G(12, 12)
+let g93 = G(9, 3)
+// EXPECT: g00 = 16.5
+// EXPECT: g05 = 20.5
+// EXPECT: g0c = 0.75
+// EXPECT: g76 = 21
+// EXPECT: gcc = 64.5
+// EXPECT: g93 = 5.5

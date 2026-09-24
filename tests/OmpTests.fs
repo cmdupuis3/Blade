@@ -415,7 +415,7 @@ let private emissionShapeCases : (string * string * string list * string list) l
       ("gram_native_arms_threaded_and_hoisted", gramSrc,
        [ // same-array arm is triangular (inner span `3 - __gi`), so dynamic
          "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
-         "for (size_t __gjr = 0; __gjr < 3 - __gi; __gjr++) {"
+         "const size_t __gspan = 3 - __gi;"
          // distinct arm is rectangular, so the static schedule
          "BLADE_OMP_PARALLEL_FOR\nfor (size_t __gi = 0; __gi < 3; __gi++) {"
          // both operand rows hoisted out of the contraction loop

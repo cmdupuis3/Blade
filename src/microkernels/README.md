@@ -9,7 +9,10 @@ emitter has a *measured* target, not a design sketch.
 **Four findings have graduated into the compiler**: the output-axis jam (ae951eb
 → 272e9be → extent-derived in a3837e6), `group_by`'s single CSR pool (e83f5d8),
 branchless `compound` compaction (4eed8a4), and the heap-free small solve
-(d99195f).
+(d99195f). The jam has since spread to the triangular `gram(A, A)` arm and to
+row folds / row-map `prodsum` (`tryGenRowFoldJamNest`), both bitwise against
+the text they replace; and dense halo sources now read directly instead of
+through the carousel ring (1.3-1.4x per stencil, bitwise) (2026-09-23).
 
 This document has survived **two rounds of contact**: kernels built to test the
 design, then a second pass built to attack the kernels. Corrections overturned in

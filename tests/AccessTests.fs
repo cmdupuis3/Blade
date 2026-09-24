@@ -9,7 +9,7 @@
 // other, or the gather drifting from the scatter by an accumulation-order
 // change that only shows in the last bit. So these pins (a) read the
 // emitted C++ for the ROUTE (the gather's guarded loops exist only with
-// the gate on, and the kept map adds one carousel), and (b) run BOTH
+// the gate on, and the kept map adds one halo nest), and (b) run BOTH
 // routes' executables on the same programs and compare their printed
 // output byte-for-byte, the timing line excepted (it is the one line that
 // is not a value). The emission and record pins need no toolchain; the
@@ -45,8 +45,10 @@ let private cppOf (name: string) (gate: string option) (src: string) : Result<st
 let private gatherGuardCount (cpp: string) =
     System.Text.RegularExpressions.Regex.Matches(cpp, @"\(\(0L <= __v\d+\) && \(__v\d+ < \d+L\)\)").Count
 
-let private carouselCount (cpp: string) =
-    cpp.Split('\n') |> Array.filter (fun l -> l.Contains "// halo carousel:") |> Array.length
+/// Halo nests, counted by their window-centre binding `int64_t w = (__iN + kL);`
+/// (a dense window reads its source directly, so no carousel marks it).
+let private haloNestCount (cpp: string) =
+    System.Text.RegularExpressions.Regex.Matches(cpp, @"int64_t \w+ = \(__i\d+ \+ \d+L\);").Count
 
 let private corpusSource (file: string) : Result<string, string> =
     let path = Path.Combine("tests", "corpus", "ad", file)
@@ -87,7 +89,7 @@ let private recordPins () =
 // Route emission.
 // ---------------------------------------------------------------------------
 
-/// Gate on: the map is kept (one more carousel than the scatter route --
+/// Gate on: the map is kept (one more halo nest than the scatter route --
 /// the differentiated function replays it) and the adjoint is gather loops
 /// with the window guard, one per offset the kernel reads. Gate off: no
 /// guard anywhere; the map has lowered into a construction loop.
@@ -101,13 +103,13 @@ let private routeEmission () =
         | Ok on, Ok off ->
             let guardsOn = gatherGuardCount on
             let guardsOff = gatherGuardCount off
-            let carOn = carouselCount on
-            let carOff = carouselCount off
-            if guardsOn = 2 && guardsOff = 0 && carOn = carOff + 1 then
-                resultLine Pass name $"gather: 2 guarded loops, {carOn} carousels; scatter: no guard, {carOff} carousels"
+            let nestsOn = haloNestCount on
+            let nestsOff = haloNestCount off
+            if guardsOn = 2 && guardsOff = 0 && nestsOn = nestsOff + 1 then
+                resultLine Pass name $"gather: 2 guarded loops, {nestsOn} halo nests; scatter: no guard, {nestsOff} halo nests"
                 true
             else
-                resultLine Fail name $"expected gather 2 guards / scatter 0, carousels on = off + 1; got guards {guardsOn}/{guardsOff}, carousels {carOn}/{carOff}"
+                resultLine Fail name $"expected gather 2 guards / scatter 0, halo nests on = off + 1; got guards {guardsOn}/{guardsOff}, halo nests {nestsOn}/{nestsOff}"
                 false
 
 /// A computed offset is outside the gather's read discipline: with the gate

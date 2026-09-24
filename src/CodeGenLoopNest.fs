@@ -1299,8 +1299,34 @@ let internal planHaloCarousel
                         let vs = varIdsOf p
                         not (Set.contains wid vs)
                         && vs |> Set.forall (fun v -> Map.containsKey v prefixMap)))
+            // A PLAIN DENSE source is never worth a ring. Its window read is one
+            // L1-resident load, and the ring does not remove it -- the buffer
+            // is indexed by the loop variable, so it lives in memory, and every
+            // window read stays a load (from the ring) PLUS one ring store and
+            // one source load per step. The ring's write-then-read-next-step is
+            // also a real loop-carried dependence, which withholds BLADE_IVDEP
+            // and with it vectorization. Measured per stencil against the ring
+            // (whole nest incl. the output's first touch, 400k cells): 1.30x at
+            // [0,1], 1.38x [-1,0,1], 1.31x [-2,-4], 1.40x [-3..3], 1.32x 2-D
+            // [-1,0,1]^2, 1.35x at 8M cells, 1.06x with an `exp` body that
+            // cannot vectorize either way -- output byte-identical at all.
+            // Such groups are left to the ordinary renderer, which reads
+            // `A[.., w + k]` for ANY offset list -- the path parallel nests
+            // already take. The ring stays for sources whose read is not a
+            // plain load.
+            let isPlainDenseSource (node: IRExpr) =
+                match node with
+                | IRIndex (IRVar (_, ty), _, _) ->
+                    (match ty with
+                     | ArrayElem at ->
+                        not (isCompoundArrayType at) && not (isSparseArrayType at)
+                        && at.IndexTypes |> List.forall (fun ix ->
+                               ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty)
+                     | _ -> false)
+                | _ -> false
             let groups =
                 found
+                |> List.filter (fun (node, _, _, _) -> not (isPlainDenseSource node))
                 |> List.filter (fun (_, aid, prefix, _) -> renderable aid prefix)
                 |> List.groupBy (fun (_, aid, prefix, _) ->
                     (aid, prefix |> List.map (exprToCppCore emptySubst prefixMap) |> String.concat "|"))
@@ -2360,6 +2386,218 @@ let tryGenFlatElementwiseNest
                     ind (indent + 2) + $"{(poolOf codeGen.OutputName)}[__fk] = {body.CppExpr};"
                     ind indent + "}" ])
         | Some _ -> None
+    | _ -> None
+
+/// --- Row-fold jam (unroll-and-jam over the row axis) ------------------------
+/// The partial fold `reduce(A, op[, init])` (TypeCheck's partialFold desugars it
+/// to `method_for(A) <@> lambda(row) -> reduce(row, op[, init])`) and the row-map
+/// contraction `method_for(A) <@> lambda(row) -> prodsum(row, x)` both reach the
+/// nest emitter as ONE row level whose kernel is a fold IIFE -- one dependent
+/// accumulator chain per row, while the row axis outside it is independent and
+/// contributes nothing to instruction-level parallelism.
+///
+/// This emits R rows per tile with one NAMED accumulator each (never an array;
+/// see the dense gram arm's measurement), all walking the fold axis together.
+/// BITWISE by construction: every row keeps its own accumulator, its own seed
+/// and its own ascending fold order -- the tile reinterleaves INDEPENDENT rows
+/// and reassociates nothing, which is why it needs no licence (the dense gram
+/// arm's argument, CodeGenExpr.fs `materializeGramForm`). Measured against the
+/// emitted IIFE text at full mantissa, byte-identical output throughout:
+///   row fold  1003x517 4.7x, 4001x2003 3.3x, 20011x61 1.5x
+///   matvec    1003x517 4.2x, 4001x2003 3.2x, 20011x61 2.3x
+///
+/// Gate (None = the ordinary nest, which is always correct): a single serial,
+/// unlicensed, non-streamed, non-Reynolds row level over rank-2 plain dense
+/// real-scalar operands, a rank-1 dense output, and a kernel that is EXACTLY
+/// `reduce(row, <builtin op>[, init])` or `prodsum(...)` over row params and
+/// invariant NAMED rank-1 arrays. A recognised builtin op keeps the jam from
+/// interleaving any user code (whose panics' order would become observable);
+/// BLADE_FP_REASSOC leaves both shapes to their licensed lane forms; an omp
+/// request leaves the nest to the path that places (or marks) its pragma.
+let tryGenRowFoldJamNest
+        (streamed: Map<string, ProviderReadSpec>)
+        (operandTypes: IRArrayType list)
+        (codeGen: LoopNestCodeGen)
+        (outerNames: Map<int, string>)
+        (indent: int) : string list option =
+    let ind n = String.replicate n "    "
+    let isRealScalar (t: IRType) =
+        match stripUnits t with
+        | IRTScalar (ETFloat64 | ETFloat32 | ETInt64 | ETInt32) -> true
+        | _ -> false
+    let isPlainDense (ix: IRIndexType) =
+        ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1 && ix.Dependencies.IsEmpty
+    if codeGen.FoldWrapper.IsSome || codeGen.FoldChunk.IsSome || codeGen.ShareDecl.IsSome then None
+    elif codeGen.MpiSlab || codeGen.HasReynolds || codeGen.IsAntisymmetric then None
+    elif not (Map.isEmpty streamed) || ompTestModeEnabled () || fpReassocEnabled () then None
+    elif codeGen.OmpRequested then None
+    elif List.length operandTypes <> List.length codeGen.InputArrayNames then None
+    else
+    match codeGen.Bindings, codeGen.OutputType with
+    | [ lvl ], ArrayElem outTy
+        when not lvl.IsParallel && lvl.FusedRank.IsNone && lvl.BoundDependencies.IsEmpty
+             && lvl.StrictOffset = 0
+             && (match lvl.Extent with IRCompoundMask _ | IRSparseKeys _ -> false | _ -> true)
+             && arrayRank outTy = 1 && outTy.IndexTypes.Length = 1
+             && isPlainDense outTy.IndexTypes.Head
+             && not (isCompoundArrayType outTy) && not (isSparseArrayType outTy)
+             && isRealScalar outTy.ElemType ->
+        // Every element is a whole-row peel of a rank-2 plain dense operand.
+        let rowOperand (e: ElementBinding) : (ElementBinding * IRArrayType) option =
+            match List.tryItem e.ArrayPosition operandTypes with
+            | Some at when e.Virtual.IsRealArray && e.RankComponent = 0 && e.ArrayRank = 2
+                           && (match e.SlotTag with Some t -> not (t.StartsWith "__halowin") | None -> true)
+                           && at.IndexTypes.Length = 2
+                           && at.IndexTypes |> List.forall isPlainDense
+                           && isRealScalar at.ElemType
+                           && e.ArrayName = (codeGen.InputArrayNames |> List.item e.ArrayPosition) ->
+                Some (e, at)
+            | _ -> None
+        let rows = lvl.Elements |> List.map rowOperand
+        if rows.IsEmpty || rows |> List.exists Option.isNone then None
+        else
+        let rows = rows |> List.map Option.get
+        let rowOf (id: IRId) = rows |> List.tryFind (fun (e, _) -> e.ParamVarId = id)
+        let rec mentionsRow (e: IRExpr) =
+            (match e with IRVar (id, _) -> (rowOf id).IsSome | _ -> false)
+            || (childrenOf e |> List.exists mentionsRow)
+        // Kernel-scope names for the INVARIANT pieces (init, prodsum operands),
+        // with the precedence rule every nest emitter uses: the enclosing
+        // scope's emitted names first, captures only fill gaps.
+        let nameMap =
+            codeGen.Captures
+            |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) outerNames
+        // A fold operand is either a row param or an invariant NAMED rank-1
+        // plain dense array (hoisted once to a restrict pointer; a computed
+        // operand could be a temporary, which a hoisted `&x[0]` would outlive).
+        let operandOf (a: IRExpr) : Choice<ElementBinding * IRArrayType, string * IRArrayType> option =
+            match a with
+            | IRVar (id, _) when (rowOf id).IsSome -> Some (Choice1Of2 (rowOf id).Value)
+            | (IRVar _ | IRParam _) when not (mentionsRow a) ->
+                (match inferExprType a with
+                 | ArrayElem at when at.IndexTypes.Length = 1 && isPlainDense at.IndexTypes.Head
+                                     && not (isRaggedRowType at) && isRealScalar at.ElemType ->
+                    Some (Choice2Of2 (exprToCppCore emptySubst nameMap a, at))
+                 | _ -> None)
+            | _ -> None
+        // (elem type, seed per row, first fold index, per-row fold statement,
+        //  prelude, needs the empty-row panic, head operand)
+        let fold : (IRType * (int -> string) * string * (int -> string -> string) * string list * bool * Choice<ElementBinding * IRArrayType, string * IRArrayType>) option =
+            match codeGen.KernelExpr with
+            | IRReduce (IRVar (rid, _), kernelExpr, initOpt) when (rowOf rid).IsSome ->
+                let (re, rat) = (rowOf rid).Value
+                (match resolveCallable kernelExpr with
+                 | Some callable when callable.Params.Length = 2 && (foldKernelBuiltinOp callable).IsSome ->
+                    if (match initOpt with Some ie -> mentionsRow ie | None -> false) then None
+                    else
+                    let (wrapperCode, wname) = genCallableWrapper nameMap "" callable
+                    let seed, start =
+                        match initOpt with
+                        | Some ie -> (fun (_: int) -> exprToCppCore emptySubst nameMap ie), "0"
+                        | None -> (fun k -> $"__jr{re.ArrayPosition}_{k}[0]"), "1"
+                    let step k (acc: string) = $"{acc} = {wname}({acc}, __jr{re.ArrayPosition}_{k}[__jk]);"
+                    Some (rat.ElemType, seed, start, step, [ String.concat " " wrapperCode ],
+                          initOpt.IsNone, Choice1Of2 (re, rat))
+                 | _ -> None)
+            | IRProdSum args when not args.IsEmpty ->
+                let ops = args |> List.map operandOf
+                if ops |> List.exists Option.isNone then None
+                elif not (ops |> List.exists (function Some (Choice1Of2 _) -> true | _ -> false)) then None
+                else
+                let ops = ops |> List.map Option.get
+                let head = List.head ops
+                let elemTy = match head with Choice1Of2 (_, at) -> at.ElemType | Choice2Of2 (_, at) -> at.ElemType
+                let invIdx = ops |> List.choose (function Choice2Of2 (n, _) -> Some n | _ -> None) |> List.distinct
+                let spell k (o: Choice<ElementBinding * IRArrayType, string * IRArrayType>) =
+                    match o with
+                    | Choice1Of2 (e, _) -> $"__jr{e.ArrayPosition}_{k}[__jk]"
+                    | Choice2Of2 (n, _) -> $"__jx{(List.findIndex ((=) n) invIdx)}[__jk]"
+                // Same operand order as the IIFE's product (left-associated
+                // `a * b * c` rounds in that order), same `+=` into a zero seed.
+                let step k (acc: string) = $"""{acc} += {(ops |> List.map (spell k) |> String.concat " * ")};"""
+                let prelude =
+                    invIdx |> List.mapi (fun i n ->
+                        let at = ops |> List.pick (function Choice2Of2 (m, at) when m = n -> Some at | _ -> None)
+                        $"const {(elemTypeToCpp at.ElemType)}* BLADE_RESTRICT __jx{i} = &{n}[0];")
+                Some (elemTy, (fun _ -> "0"), "0", step, prelude, false, head)
+            | _ -> None
+        match fold with
+        | None -> None
+        | Some (elemTy, seed, start, step, prelude, needsEmptyGuard, head) ->
+        let elemStr = elemTypeToCpp elemTy
+        // The fold length: the head operand's extent, the rule the IIFE uses
+        // (a row's extent is its operand's trailing axis, literal when known).
+        let foldLen =
+            match head with
+            | Choice1Of2 (e, at) -> literalOrRuntimeExtentOfArray at e.ArrayName 1
+            | Choice2Of2 (n, at) -> literalOrRuntimeExtentOfArray at n 0
+        let rowBound = genLoopBoundExpr (compoundArrayNamesOf codeGen.Bindings) lvl
+        let usedPositions =
+            let rec collect (e: IRExpr) =
+                (match e with
+                 | IRVar (id, _) -> (match rowOf id with Some (r, _) -> [ r.ArrayPosition ] | None -> [])
+                 | _ -> [])
+                @ (childrenOf e |> List.collect collect)
+            collect codeGen.KernelExpr |> List.distinct |> List.sort
+        let rowArrayName pos = rows |> List.pick (fun (e, _) -> if e.ArrayPosition = pos then Some e.ArrayName else None)
+        // Tile width. Registers hold R accumulators plus R row pointers per
+        // row stream, so a second row stream (`zip(A, B)` rows) halves the
+        // ceiling. A static row count takes the gram jam's divisor rule so no
+        // remainder runs at base speed: R = rows when it fits, else the
+        // largest divisor in [4..maxR]; otherwise a fixed width.
+        let maxR = if List.length usedPositions <= 1 then 8 else 4
+        let fixedR = if List.length usedPositions <= 1 then 6 else 4
+        let jamR =
+            match lvl.Extent with
+            | IRLit (IRLitInt m) when m < 2L -> 1
+            | IRLit (IRLitInt m) when m <= int64 maxR -> int m
+            | IRLit (IRLitInt m) ->
+                (match [ maxR .. -1 .. 4 ] |> List.tryFind (fun d -> m % int64 d = 0L) with
+                 | Some d -> d
+                 | None -> fixedR)
+            | _ -> fixedR
+        if jamR < 2 then None
+        else
+        let iv = lvl.IndexName
+        let out = codeGen.OutputName
+        let rowDecls (k: int) (rowExpr: string) =
+            usedPositions |> List.map (fun p ->
+                let at = rows |> List.pick (fun (e, at) -> if e.ArrayPosition = p then Some at else None)
+                $"const {(elemTypeToCpp at.ElemType)}* BLADE_RESTRICT __jr{p}_{k} = &{(rowArrayName p)}[{rowExpr}][0];")
+        let guard =
+            match needsEmptyGuard, head with
+            | false, _ -> []
+            | _, Choice1Of2 (_, at) when (match at.IndexTypes.[1].Extent with IRLit (IRLitInt n) -> n > 0L | _ -> false) -> []
+            | _ ->
+                // The IIFE's empty-row panic, raised where it would have been:
+                // at the first row, before any row is folded.
+                [ $$"""if (__jm > 0 && __jn == 0) { blade_rt::panic("BL8003", "reduce: empty array, no reduction possible", nullptr, 0); }""" ]
+        let tile =
+            [ $$"""for (; {{iv}} + {{jamR}} <= __jm; {{iv}} += {{jamR}}) {""" ]
+            @ ([ 0 .. jamR - 1 ] |> List.collect (fun k -> rowDecls k $"{iv} + {k}") |> List.map (fun s -> "    " + s))
+            @ ([ 0 .. jamR - 1 ] |> List.map (fun k -> $"    {elemStr} __ja{k} = {seed k};"))
+            @ [ $$"""    for (size_t __jk = {{start}}; __jk < __jn; __jk++) {""" ]
+            @ ([ 0 .. jamR - 1 ] |> List.map (fun k -> "        " + step k $"__ja{k}"))
+            @ [ "    }" ]
+            @ ([ 0 .. jamR - 1 ] |> List.map (fun k -> $"    {out}[{iv} + {k}] = __ja{k};"))
+            @ [ "}" ]
+        let remainder =
+            [ $$"""for (; {{iv}} < __jm; {{iv}}++) {""" ]
+            @ (rowDecls 0 iv |> List.map (fun s -> "    " + s))
+            @ [ $"    {elemStr} __ja0 = {seed 0};"
+                $$"""    for (size_t __jk = {{start}}; __jk < __jn; __jk++) {"""
+                "        " + step 0 "__ja0"
+                "    }"
+                $"    {out}[{iv}] = __ja0;"
+                "}" ]
+        let kind = match codeGen.KernelExpr with IRReduce _ -> "reduce" | _ -> "prodsum"
+        Some (
+            [ ind indent + $"// row-fold jam: {kind} over rows, {jamR} rows per tile, one accumulator per row (bitwise: each row keeps its own ascending fold)"
+              ind indent + "{" ]
+            @ ([ $"const size_t __jm = {rowBound};"; $"const size_t __jn = {foldLen};" ]
+               @ guard @ prelude @ [ $"size_t {iv} = 0;" ] @ tile @ remainder
+               |> List.map (fun s -> ind (indent + 1) + s))
+            @ [ ind indent + "}" ])
     | _ -> None
 
 

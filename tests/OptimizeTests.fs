@@ -275,11 +275,16 @@ let private recarrayGradNonlinearEmission () =
             resultLine Fail name ($"expected 3 counted loops, no __rk/__rm, a descending index; got {loops} loop(s), triangular={triangular}, descending={descending}")
             false
 
-/// The dense-halo carousel's tail prefetch must be guarded: on the last
-/// step it read one cell past the array (docs/plans/structural/02, 1.5).
-/// The guard compares the ordinal against the windowed array's extent.
-let private haloCarouselTailGuarded () =
-    let name = "halo_carousel_tail_guarded"
+/// A halo window over a PLAIN DENSE source reads the source directly --
+/// `a[w + k]` over the shrunk interior, in bounds by construction -- and no
+/// carousel ring is built (planHaloCarousel's dense-source gate: the ring is
+/// memory-resident, so it only adds a store and a load per step, and its
+/// loop-carried dependence withholds vectorization). This test used to pin
+/// the ring's guarded tail prefetch (docs/plans/structural/02, 1.5), which
+/// no dense source reaches any more; the guard stays in the planner for the
+/// sources that still take the ring.
+let private haloDenseSourceReadsDirect () =
+    let name = "halo_dense_source_reads_direct"
     let src =
         "type H = Idx<9>\n"
         + "let a: Array<Float like H> = [1.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0, 29.0, 37.0]\n"
@@ -288,12 +293,13 @@ let private haloCarouselTailGuarded () =
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let carousel = cpp.Contains "halo carousel"
-        let guarded = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"if \(\(size_t\)\([^)]*\) < a\.extents\[0\]\) __car_")
-        if carousel && guarded then
-            resultLine Pass name "carousel emitted; tail prefetch guarded by a.extents[0]"
+        let direct = cpp.Contains "a[(w + 1L)]" && cpp.Contains "a[(w + -(1L))]"
+        let interior = cpp.Contains "for (size_t __i0 = 0; __i0 < 7; __i0++)"
+        if not carousel && direct && interior then
+            resultLine Pass name "no carousel; direct a[w + k] reads over the 7-cell interior"
             true
         else
-            resultLine Fail name ($"carousel={carousel}, guarded={guarded}")
+            resultLine Fail name ($"carousel={carousel}, direct={direct}, interior={interior}")
             false
 
 /// A reduction join's share is read by a DIRECT-FOLD leg (docs/plans/
@@ -530,8 +536,8 @@ let runOptimizeTests () =
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()
-          // The halo carousel's last-step prefetch stays inside the pool.
-          haloCarouselTailGuarded ()
+          // A dense halo source is read directly, with no carousel ring.
+          haloDenseSourceReadsDirect ()
           // Streaming reductions (structural/03): the join share read by a
           // direct-fold leg, and the deferred outer product's partial fold.
           joinShareReadByDirectFold ()
