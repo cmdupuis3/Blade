@@ -1,0 +1,15 @@
+// TEST: Misspelled Bare Constructor (rejects)
+// ERROR: BL3004 @ 13:7-13:12
+// ERROR-CONTAINS: Did you mean South?
+// `Suoth` is not a constructor of Direction. As a pattern it used to bind a
+// fresh catch-all VARIABLE named Suoth, so every value matched it and the
+// `| East -> 3` arm below was dead -- d = East printed 2, with no warning.
+// A Capitalized name in a match over a variant type is now read as a
+// constructor, and an unknown one is refused with the real constructors.
+type Direction = North | South | East | West
+let d = East
+let v = match d with
+    | North -> 1
+    | Suoth -> 2
+    | East -> 3
+    | _ -> 9

@@ -1,4 +1,5 @@
 // TEST: Variant Arm Guard Falls Through
+// WARN: BL3023  (deliberately non-exhaustive; the static gap report)
 // ============================================================================
 // A guard on a NON-LAST variant arm was read by the typechecker and then
 // dropped on the floor by the emitter, which rendered the arm as an

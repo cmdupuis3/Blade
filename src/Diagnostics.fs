@@ -284,6 +284,14 @@ module Codes =
             // specialization shrink past the base arm. The condition belongs
             // INSIDE the chosen arm's body.
             "BL3021", "undecidable specialization-index match arm"
+            // BL3022 / BL3023: WARNINGS, static coverage facts about a match's
+            // arm list (TypeCheckSupport.matchCoverageWarnings). An arm after
+            // an unguarded catch-all (or after every constructor) can never
+            // be selected; a match over a variant/enum type that names
+            // neither every constructor nor a catch-all aborts at run time
+            // (BL8002) on the missing ones.
+            "BL3022", "unreachable match arm"
+            "BL3023", "non-exhaustive match over a variant type"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"

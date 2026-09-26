@@ -1,0 +1,12 @@
+// TEST: Misspelled Payload Constructor (rejects)
+// ERROR: BL3004 @ 11:7-11:16
+// ERROR-CONTAINS: Did you mean Square?
+// An unknown constructor WITH a payload used to be accepted ("unknown variant
+// tag: allow it") and reached g++ as an undeclared name. Refused here,
+// listing the scrutinee type's constructors.
+type Shape = Circle : Float | Square : Float
+let s = Square(2.0)
+let area = match s with
+    | Circle(r) -> r
+    | Sqaure(w) -> w * w
+    | _ -> 0.0

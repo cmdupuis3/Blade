@@ -12041,6 +12041,7 @@ and matchWith env scrutinee cases (resultTy: IRType)
             | [] -> Ok (List.rev acc)
             | case :: rest -> judgeCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
         go [] cases |> Result.map (fun tCases ->
+            matchCoverageWarnings env tScrutinee.Type scrutinee.Span cases tCases
             mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve resultTy))))
 
 /// Inferred match: each arm is INFERRED and unified with one result type --
