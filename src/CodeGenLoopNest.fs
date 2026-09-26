@@ -3417,48 +3417,12 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
 
 /// Does this let's value OWN a freshly allocated pool that nothing else in the
 /// scope can reach? Only such a value STOPS escape propagation: when the binding
-/// escapes, its inputs need not also be pinned.
-///
-/// Deliberately non-barrier, against a naive reading of "fresh-pool producer":
-///   * IRChoice / IRFallback / IRGuard / IRComposeMeth -- their results BORROW an
-///     operand's `.extents` pointer, so an escaping result must pin its operands.
-///   * IRSequence / IRReplicate -- the emitter DOES now give the result its own
-///     dense pool (a per-child copy nest, like stack), so these could become
-///     barriers; they are held out because the emitter still does not register
-///     that pool for freeing, and a barrier here would stop propagation to
-///     children the frees do reach. Flip both together, never just this one.
-///   * IRParallel / IRFusion / IRFunctorMap / IRZip -- deferred forms whose
-///     forcing shape depends on whether the leaf is a computation or a concrete
-///     array; not worth proving.
-///   * every view/projection form (IRVar, IRIndex, IRSlice, IRCurry, IRSubset,
-///     IRShift, IRReverse, IRDiag, IRAlign, IRTuple, IRTupleProj, IRFieldAccess,
-///     IRIf, IRMatch, IRApp on a NotFresh callee).
-/// The trailing `| _ ->` is intentional and must stay: "unknown => propagates"
-/// is the safe default, and a new IR variant should not become a build break here
-/// (a wrong barrier frees too early; a wrong non-barrier only leaks).
-let rec isFreshPoolForm (e: IRExpr) : bool =
-    match e with
-    | IRCompute inner -> isFreshPoolForm inner
-    | IRApplyCombinator _ | IRComposeApply _ -> true
-    | IRArrayLit _ -> true
-    | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
-    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
-    // eigh: BOTH pools it produces are fresh (`allocate<>` under derived names)
-    // and neither borrows the operand's `.extents` pointer -- each gets its own
-    // table. So an escaping (Q, LAM) need not pin S, and propagation stops here.
-    | IREigh _ -> true
-    // lu: (LU, piv) are two fresh pools with their own tables, like eigh's.
-    | IRLu _ -> true
-    // lu_solve: x is a fresh pool, like solve's.
-    | IRLuSolve _ -> true
-    // solve: x is a fresh `allocate<>` pool with its own extents table -- it
-    // borrows nothing from A or b (b's values are COPIED in, not aliased), so
-    // an escaping x need pin neither operand and propagation stops here.
-    | IRSolve _ -> true
-    | IRArrayNegate _ | IRArrayConjugate _ -> true
-    | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
-    | IRApp (f, _, _) -> freshReturnOf f = FreshPool
-    | _ -> false
+/// escapes, its inputs need not also be pinned. The classification is the ONE
+/// exhaustive definition in IR.fs (`isFreshPoolFormWith`, shared with the
+/// optimizer's pool-reuse planner); a call is fresh when its callee's fresh-
+/// return fact says so.
+let isFreshPoolForm (e: IRExpr) : bool =
+    isFreshPoolFormWith (fun f -> freshReturnOf f = FreshPool) e
 
 /// May a binding whose value is a bare reference to a scope-local STAGING let be
 /// emitted as a plain ALIAS, instead of genVarAliasBinding's defensive deep copy?

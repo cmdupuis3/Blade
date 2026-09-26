@@ -172,6 +172,24 @@ let private fusionChain =
     + "let y = a + b * c - d\n"
     + "let total = reduce(y, (+))\n"
 
+/// A may-abort inner map (lgamma) read only under the host's branch: fusing
+/// would skip the inner evaluation on the untaken cells, so the pass declines
+/// (Optimize charter rule 1). The same inner read on every cell still fuses.
+let private fusionMayAbortConditional =
+    "let x = [1.0, 3.0, 2.0]
+"
+    + "let c = [1.0, 0.0, 1.0]
+"
+    + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> if k > 0.5 then g else 0.0) |> compute
+"
+let private fusionMayAbortUnconditional =
+    "let x = [1.0, 3.0, 2.0]
+"
+    + "let c = [1.0, 0.0, 1.0]
+"
+    + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k + g) |> compute
+"
+
 // ---------------------------------------------------------------------------
 
 /// The decision record for a source: install a collector, lower, drain.
@@ -700,6 +718,10 @@ let runOptimizeTests () =
               (declinedMentioning "step ordinal") "declined for the step ordinal"
           decisionCase "decision_fusion_applied" fusionChain "elementwise-fusion" applied
               "elementwise-fusion applied"
+          decisionCase "decision_fusion_declined_conditional_abort" fusionMayAbortConditional "elementwise-fusion"
+              (declinedMentioning "may abort") "declined: the inner kernel may abort under a branch"
+          decisionCase "decision_fusion_applied_unconditional_abort" fusionMayAbortUnconditional "elementwise-fusion" applied
+              "elementwise-fusion applied (inner read on every cell)"
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()
