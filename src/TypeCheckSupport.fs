@@ -1892,8 +1892,21 @@ let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: 
 /// (`double twice(double)`, static/011). Those stay uninstantiated and
 /// unbound, exactly as before.
 let internal calleeQuantifier (env: TypeEnv) (tFunc: TypedExpr) : (int -> bool) * bool =
+    // A `let` ALIAS of a declared function (`let g = total`) shares the
+    // declaration's type, variables included, so it quantifies the same
+    // variables -- or calls through the alias would escape the judgment.
+    let rec declId (fuel: int) (name: string) (vid: IRId) : IRId =
+        if env.FuncSigVarRange.ContainsKey vid || fuel <= 0 then vid
+        else
+            match lookupVar name env with
+            | Some info ->
+                (match info.TypedValue with
+                 | Some { Kind = TExprVar (n2, vid2, _) } when vid2 <> vid -> declId (fuel - 1) n2 vid2
+                 | _ -> vid)
+            | None -> vid
     match tFunc.Kind with
-    | TExprVar (_, vid, _) ->
+    | TExprVar (name, vid0, _) ->
+        let vid = declId 8 name vid0
         (match env.FuncSigVarRange.TryGetValue vid with
          | true, (lo, hi) ->
              (fun v -> v >= lo && v < hi && env.Subst.IsPolymorphicId v), hi <> System.Int32.MaxValue
@@ -1974,13 +1987,19 @@ let internal headKindOf (t: IRType) : string option =
 /// fallback unify is attempted only on a closed argument.
 let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (litKind: ElemType option)
                               (p: IRType) (a: IRType) : TypeError option =
-    // A copy an EARLIER argument already taught: agreement between two
-    // teachings of one signature variable is `firstAbstractVarConflict`'s
-    // judgment (it ran first, on the declaration's variable, with the
-    // monomorph's compatibility rule -- widening, tags and extents not
-    // compared), so it is not judged a second, stricter way here.
+    // A copy an EARLIER argument already taught: this argument must meet
+    // what the first one taught, by the same judgment -- tags, element types
+    // (no widening inside an array) and, via the extent pass over the
+    // resolved copies in the caller, static extents. The monomorph is built
+    // from the FIRST teaching, so a later argument that disagrees on any of
+    // them is handed to a specialization of the wrong shape: `second(B5, A3)`
+    // over `(a: T^1, b: T^1) -> T^1 = b` typed a 3-cell value Idx<5>, and
+    // `second0((1 : Lat), (4 : Lon))` made a Lat index of 4.
+    // (`firstAbstractVarConflict` still runs first and keeps its wording for
+    // the rank / narrowing conflicts it models.)
     match p with
-    | IRTInfer pid when copies.Contains pid && (subst.TryFind pid).IsSome -> None
+    | IRTInfer pid when copies.Contains pid && (subst.TryFind pid).IsSome ->
+        argPairClash subst copies widen litKind (subst.Resolve p) a
     | _ ->
     // Resolve the parameter's HEAD only, so its children still show which
     // positions are copies (the check above, one level down).
@@ -2930,8 +2949,8 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 match appRootAndOffset tFunc with
                 | Some (fname, _) -> fname.StartsWith "__"
                 | None -> false
-            let judged : (int * TypeError) option * IRType option =
-                if isVariadic || tArgs.Length < paramTys.Length || synthesizedCallee then (None, None)
+            let judged : (int * TypeError) option * IRType option * IRType list =
+                if isVariadic || tArgs.Length < paramTys.Length || synthesizedCallee then (None, None, [])
                 else
                     let quantified, closedDecl = calleeQuantifier env tFunc
                     let copied, copyIds = instantiateOpenVars env.Subst quantified (paramTys @ [retTy])
@@ -2943,6 +2962,17 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             let arg = List.item i tArgs
                             argPairClash env.Subst copyIds true (numericLiteralKind arg) pTy aTy
                             |> Option.map (fun e -> (i, e)))
+                    // Extents are NOT part of type identity, and a `T^1` shared
+                    // by two parameters admits arrays of different lengths
+                    // (the monomorph reads a `T^k` parameter's extents at run
+                    // time; loops/150 passes a 9- and a 4-cell array). But a
+                    // copy taught by the FIRST argument carries that
+                    // argument's LITERAL extents, so a later argument of a
+                    // different length means the instance cannot say what
+                    // length the result has.
+                    let extentsDisagree =
+                        appArgPairs pCopies (tArgs |> List.map (_.Type))
+                        |> List.exists (fun (_, pTy, aTy) -> (staticExtentClash env.Subst pTy aTy).IsSome)
                     // The call's RESULT is the instantiated return when the
                     // arguments determined it completely (no copy left open);
                     // otherwise the declared return, as before -- a return the
@@ -2956,23 +2986,45 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         match clash with
                         | Some _ -> None
                         | None when not closedDecl && not (Set.isEmpty copyIds) -> None
+                        // ...so the result keeps the declared (symbolic)
+                        // return rather than claim the first argument's
+                        // length over a value that may have another's.
+                        | None when extentsDisagree -> None
                         | None ->
                             let r = env.Subst.Resolve retCopy
                             if Set.isEmpty (Set.intersect (freeInferVars env.Subst r) copyIds) then Some r
                             else None
-                    (clash, instRet)
-            match fst judged with
-            | Some (i, e) ->
+                    (clash, instRet, pCopies)
+            let (judgedClash, judgedRet, judgedCopies) = judged
+            match judgedClash, coIterClash with
+            // A co-iteration extent disagreement is the more specific story
+            // when both fire (two arguments over different named axes walked
+            // as one index space): report it, as before the judgment existed.
+            | Some _, Some (i, fname, posA, Some posB, eA, eB) ->
+                atArg i
+                Error (CoIterArgExtentMismatch (fname, posA, posB, eA, eB))
+            | Some _, Some (i, fname, posA, None, eA, bodyExt) ->
+                atArg i
+                Error (CoIterBodyExtentMismatch (fname, posA, eA, bodyExt))
+            | Some (i, e), None ->
                 atArg i
                 (match e with
                  | IndexRankMismatch (site, pTy, pr, aTy, ar) ->
                      Error (IndexRankMismatch ($"argument {i + 1}, {site}", pTy, pr, aTy, ar))
+                 | ExtentArgMismatch _ -> Error e
                  | _ ->
-                     let pTy = env.Subst.Resolve (List.item i paramTys)
+                     // An open declared parameter (`T^1`) reads as a
+                     // variable id; show what THIS call's instance of it was
+                     // taught by the earlier argument instead.
+                     let pTy =
+                         match env.Subst.Resolve (List.item i paramTys), e with
+                         | IRTInfer _, _ when i < judgedCopies.Length -> env.Subst.Resolve (List.item i judgedCopies)
+                         | declared, _ -> declared
                      let aTy = env.Subst.Resolve (List.item i tArgs).Type
-                     // Two types that differ only by an index NAME render
-                     // identically (`Idx<3>` both); name the axes then, or the
-                     // message reads "declared X but got X".
+                     // An index NAME is part of the type but not of its
+                     // rendering (`Idx<3>` for any `type Lat = Idx<3>`); when
+                     // either side names an axis, spell the names, or the
+                     // message hides the reason (or reads "declared X but got X").
                      let ppNominal (t: IRType) =
                          let named (ix: IRIndexType) =
                              match ix.Tag with
@@ -2983,11 +3035,20 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                              let slots = at.IndexTypes |> List.map named |> String.concat ", "
                              $"Array<{ppIRType at.ElemType} like {slots}>"
                          | _ -> ppIRType t
+                     let namesAxis (t: IRType) =
+                         match t with
+                         | ArrayElem at ->
+                             at.IndexTypes |> List.exists (fun ix ->
+                                 match ix.Tag with
+                                 | Some tg -> not (tg.StartsWith "__")
+                                 | None -> false)
+                         | _ -> false
                      let pp1, pp2 =
-                         if ppIRType pTy = ppIRType aTy then ppNominal pTy, ppNominal aTy
+                         if ppIRType pTy = ppIRType aTy || namesAxis pTy || namesAxis aTy then
+                             ppNominal pTy, ppNominal aTy
                          else ppIRType pTy, ppIRType aTy
                      Error (ArgTypeMismatch (i + 1, calleeDesc, pp1, pp2)))
-            | None ->
+            | None, _ ->
             // The SEVENTH check, after element class because a wrong-class
             // argument that is also the wrong length should be reported as
             // the class error. See `extentClash` above for why this one is a
@@ -3036,7 +3097,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             let retTy =
                 unitStampedReturnOnto env
                     (match tFunc.Kind with TExprVar (n, _, _) -> Some n | _ -> None)
-                    tArgs retTy (snd judged |> Option.defaultValue retTy)
+                    tArgs retTy (judgedRet |> Option.defaultValue retTy)
             if isVariadic then
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
             elif tArgs.Length > paramTys.Length then

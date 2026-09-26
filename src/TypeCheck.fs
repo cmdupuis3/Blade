@@ -34,6 +34,22 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // `typeCheck` resets on entry too; this covers module-to-module inside one
     // compilation, and callers that reach checkProgram by another route.
     resetCurrentStmtSpan ()
+    // Fresh module: the NAME-KEYED callee-fact tables are shared by reference
+    // across every module of the program (one emptyEnv), and a declaration only
+    // ever SETS its entry. So a previous module's `f` (with a `mut` parameter,
+    // defaults, a unit transform...) used to stay under the bare key `f` and
+    // judge -- and be exported as -- THIS module's same-named `f`, which has
+    // none of them: a false BL4005 on `B.f(arr)` because `A.f` wrote through
+    // its first argument. This module's own declarations re-populate the bare
+    // keys; imports re-register theirs from the per-module snapshot
+    // (TypeModuleExport.Callees / Defaults) under `alias.name` or the selected
+    // name. Nothing outside the checker reads these tables.
+    env.MutParamPositions.Clear()
+    env.FuncCoIterObligations.Clear()
+    env.FuncUnitTransform.Clear()
+    env.FuncConstraints.Clear()
+    env.FuncDefaults.Clear()
+    env.FuncDefaultCaptures.Clear()
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs), so type-checking
     // can consult them (e.g. a `replicate` count written as `let static`).

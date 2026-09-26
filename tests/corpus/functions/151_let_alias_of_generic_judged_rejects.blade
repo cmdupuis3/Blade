@@ -1,0 +1,10 @@
+// TEST: Call through a let alias of a generic function is judged (rejects)
+// ERROR: BL3001
+// ============================================================================
+// `let g = total` shares `total`'s type, variables included; a call through
+// `g` used to skip the call judgment, so `g([1, 2])` kept `total`'s open
+// return and the String ascription bound it (dying in g++). The alias now
+// quantifies the declaration's variables: `g([1, 2])` is an Int64.
+function total(row: T^1) -> T^0 = reduce(row, (+))
+let g = total
+let s: String = g([1, 2])
