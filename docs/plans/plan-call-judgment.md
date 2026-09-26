@@ -46,8 +46,14 @@ every application seam. Steps, in order; the first failure is the verdict.
 4. **Instantiate → unify** — for a DECLARED function (callee `TExprVar` whose
    binder id has a `FuncSigVarRange`), copy exactly the open variables its
    declaration minted: `checkFunctionDecl` brackets them with `Subst.NextId`
-   (ids are monotonic), which is what HM would quantify. A variable shared
-   with the environment is never copied. A lambda, a function-typed parameter
+   (ids are monotonic), which is what HM would quantify -- and of those only
+   the POLYMORPHIC-marked ones, the variables zonk keeps open and IRMono
+   specializes per call. An unannotated parameter's plain variable is not
+   generic (zonk defaults it and one body is emitted), so instantiating it
+   typed calls differently from the callable they invoke (static/011, found
+   by the first full suite). A variable shared
+   with the environment is never copied. A `__`-named (elaborator-synthesized)
+   callee is not judged at all. A lambda, a function-typed parameter
    or a curried head quantifies NOTHING: its open variables belong to its
    environment, and binding them would pin a lambda to its first call's
    types while its emitted body keeps the zonk default (fable review #1).
@@ -212,3 +218,6 @@ unchanged; three corpus pins changed verdict, each the old laxity --
 functions/128 and /131 (curried extent mismatch, now BL3016 at compile time
 instead of the BL8011 runtime abort) and func-arrays/012 (computed-row extent
 vs the annotation, now BL3016 instead of the runtime row guard).
+
+Full suite (`blade test --interp`, runner job 20260926-031234-call):
+7549 passed, 0 failed, 23 skipped, against baseline 7515 / 0 / 23.
