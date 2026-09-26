@@ -1,0 +1,14 @@
+// TEST: Shared signature variable taught two index tags (rejects)
+// ERROR: BL3001
+// ============================================================================
+// `second0((1 : Lat), (4 : Lon))` against `(a: T^0, b: T^0) -> T^0 = b`: the
+// first argument teaches `T = Nat<Lat>`, so the result was a Lat index holding
+// 4 -- and `A(k)` read past a 3-cell Lat array. A later teaching of a shared
+// variable is judged against the first by the same nominal rule as any
+// argument.
+type Lat = Idx<3>
+type Lon = Idx<5>
+let A: Array<Float64 like Lat> = [1.0, 2.0, 3.0]
+function second0(a: T^0, b: T^0) -> T^0 = b
+let k = second0((1 : Lat), (4 : Lon))
+let v = A(k)

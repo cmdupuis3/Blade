@@ -206,10 +206,55 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
    instantiated call result inside the lambda that pin bound the declaration
    itself, so both now pin against an instantiated copy. A recursive call's
    result is not instantiated (the declaration is still being inferred).
-7. A copy an earlier argument already taught defers to
-   `firstAbstractVarConflict` (the monomorph's compatibility rule), so the two
-   judgments of one shared variable cannot disagree; tree-tag mismatches defer
-   to the post-zonk tree sweep's more precise BL4003.
+7. Tree-tag mismatches defer to the post-zonk tree sweep's more precise
+   BL4003. (A copy an earlier argument already taught originally deferred to
+   `firstAbstractVarConflict`; the final-diff review showed that predicate
+   peels tags, never compares extents and admits `Array<Int64>` after
+   `Array<Float64>` -- see §9 F1.)
+
+## 9. Final-diff review (fable, MERGE-WITH-FOLLOWUPS) and the follow-ups
+
+- **F1 (fixed)** A shared signature variable's SECOND teaching was not judged.
+  Now an already-taught copy judges the argument against what the first one
+  taught (`argPairClash` on the resolved copy: tags, element types, scalar
+  widening only at the top): `second0((1 : Lat), (4 : Lon))`, a Lon array then
+  a Lat array, and a Float-then-Int array pair are BL3001.
+  `firstAbstractVarConflict` still runs first and keeps its wording for the
+  rank / scalar-narrowing conflicts; when a co-iteration extent clash also
+  fires it is reported instead (diagnostics/075-076 keep their BL3016).
+  EXTENTS are deliberately NOT compared across teachings -- they are not type
+  identity, and a `T^k` parameter reads its extents at run time (loops/150
+  passes a 9- and a 4-cell array to two `T^1` parameters; refusing that was
+  the first attempt, caught by the census). The actual defect in the review's
+  `second(B5, A3)` probe was the RESULT: the instantiated return claimed the
+  first argument's literal Idx<5> over a 3-cell value. When the teachings'
+  literal extents disagree, the call now keeps the declared (symbolic)
+  return (functions/148). The downstream `need5(r)` in that probe is the
+  pre-existing param-extent-baking runtime hole, not this seam.
+- **F2 (fixed)** Name-keyed callee facts leaked across modules: a declaration
+  only SET its entry and the tables are shared by every module, so A's `f`
+  (`mut` first parameter) judged B's same-named `f` (false BL4005) and A's
+  unit transform rode out under B's `g`. `checkModule` now clears the six
+  tables (mut positions, co-iteration, unit transforms, where-conjuncts,
+  defaults, default captures) per module -- imports re-register from the
+  per-module snapshots -- and `checkFunctionDecl` removes its own name's
+  entries before setting them.
+- **F7 (follow-up, NOT fixed)** `f >> g` unifies with the declarations'
+  variables, pinning a generic `g` to its first composition (`idg("s")` after
+  `sq >> idg` is refused). Instantiating each side (tried) is right at the
+  type level but REGRESSES the plain `let h = sq >> idg; h(3.0)`: IR-phase
+  monomorphization does not treat a composition as a call site, so `idg`
+  reaches validation unspecialized (BL6001; master emits `double idg`). Needs
+  IRMono to mint specs from composition sites first.
+- **F3 (fixed, check side)** A `let` alias of a declared function (`let g = total`)
+  escaped the judgment; `calleeQuantifier` follows let-alias chains to the
+  declaration, so calls through the alias are instantiated and judged
+  (functions/151). EMITTING a call through a generic alias is a separate,
+  pre-existing IR-monomorphization gap (BL6001 on master too) -- follow-up.
+- **F5 (follow-up)** Literal adaptivity stops at the top level: a tuple of
+  literals `(1.5, 2.0)` into `(Float32, Float32)` is refused BL3001
+  (component literals are typed Float64 and narrowing is not widening). Fix
+  would thread per-component literal kinds into `argPairClash`'s tuple arm.
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 

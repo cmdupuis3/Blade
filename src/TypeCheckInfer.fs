@@ -5790,6 +5790,13 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
             // f >> g : (A -> B) >> (B -> C) = (A -> C)
+            // NOTE: this binds a declared generic's OWN variables (`sq >> idg`
+            // pins `idg` to Float64 for every later caller). Instantiating
+            // here instead is right at the type level, but IR-phase
+            // monomorphization does not treat a composition as a call site,
+            // so the generic `idg` then reached validation unspecialized
+            // (BL6001) -- left as is until IRMono learns compositions
+            // (docs/plans/plan-call-judgment.md §9, F7).
             match env.Subst.Resolve(tL.Type), env.Subst.Resolve(tR.Type) with
             | FuncElem (fArgs, fRet), FuncElem (gArgs, gRet) ->
                 // f's return is g's argument: they must agree (the unify
@@ -14088,6 +14095,17 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // Every inference variable minted from here on is THIS declaration's
     // (see TypeEnv.FuncSigVarRange; the call judgment instantiates them).
     let sigVarLo = env.Subst.NextId
+    // This declaration OWNS its name's entries in the name-keyed callee-fact
+    // tables, and each is only SET below when the declaration has the fact --
+    // so an earlier same-named binding's entry must not survive into this
+    // one (checkModule clears them per module; this covers a same-module
+    // `let f = lambda ...` shadowed by a later `function f`).
+    env.MutParamPositions.Remove funcDecl.Name |> ignore
+    env.FuncCoIterObligations.Remove funcDecl.Name |> ignore
+    env.FuncUnitTransform.Remove funcDecl.Name |> ignore
+    env.FuncConstraints.Remove funcDecl.Name |> ignore
+    env.FuncDefaults.Remove funcDecl.Name |> ignore
+    env.FuncDefaultCaptures.Remove funcDecl.Name |> ignore
 
     // Pre-scan all parameter + return type annotations to register type variable names.
     let allAnnotations =

@@ -1,0 +1,24 @@
+// TEST: Same-named functions in two modules keep their own callee facts
+// MODULE: Main
+// ============================================================================
+// The name-keyed callee-fact tables (mut positions, unit transforms, defaults,
+// co-iteration, where-conjuncts) are shared by every module of a program, and
+// a declaration only ever SET its entry. So A's `f` (whose first parameter is
+// `mut`) left `f -> [0]` behind, B's `f` inherited it -- B's own
+// `f(arrB, 1.0)` and `B.f(arr, 1.0)` were refused BL4005 over a plain `let`
+// -- and A's `g` (a*a: the result squares the unit) handed its transform to
+// B's `g`, which has none, so `B.g(x)` came back in meters^2. Each module now
+// starts with empty tables, and imports re-register their own module's
+// facts.
+module Main
+import A
+import B
+from B import f
+let arr = [1.0, 2.0]
+let v = B.f(arr, 1.0)
+// EXPECT: v = 2
+let w = f(arr, 2.0)
+// EXPECT: w = 3
+let x: Float<meters> = 3.0
+let y: Float<meters> = B.g(x)
+// EXPECT: y = 3

@@ -1,0 +1,7 @@
+// TEST: Same-named functions: the importing module still gets each one's facts (rejects)
+// MODULE: B
+module B
+function f(a: Array<Float64 like Idx<2>>, v: Float64) -> Float64 = a(0) + v
+function g(a: T^0) -> T^0 = if a > a then a else a
+let arrB = [1.0, 2.0]
+let selfcall = f(arrB, 1.0)

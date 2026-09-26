@@ -1,0 +1,17 @@
+// TEST: Shared signature variable across different extents keeps a symbolic result
+// ============================================================================
+// `second(a: T^1, b: T^1) -> T^1 = b` spells ONE variable in both positions,
+// but extents are not part of type identity: a `T^k` parameter reads its
+// extents at run time, so a 5-cell and a 3-cell argument are both legal (the
+// grouped folds in loops/150 do exactly this). What was wrong is the call's
+// RESULT: the instantiated signature took its literal extent from the FIRST
+// argument and typed a 3-cell value Idx<5>, so an ascription or an Idx<5>
+// parameter downstream baked a length the value does not have. When the
+// arguments teach one variable different literal extents, the result keeps
+// the declared (symbolic) return, and the value is read at its real length.
+let A = [1.0, 2.0, 3.0]
+let B = [1.0, 2.0, 3.0, 4.0, 5.0]
+function second(a: T^1, b: T^1) -> T^1 = b
+let r = second(B, A)
+let r3: Array<Float64 like Idx<3>> = r
+// EXPECT: r3 = [1, 2, 3]
