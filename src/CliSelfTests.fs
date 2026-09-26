@@ -1415,9 +1415,9 @@ let (a, b) = pair(7.0)
         | [panic; after; probe] when code = 0
                                      && panic.Contains "\"kept\":false" && panic.Contains "\"exitCode\":1"
                                      && panic.Contains "\"lane\":\"interp\"" && panic.Contains "\"bindings\":[]"
-                                     && panic.Contains "\"stderr\":\"error[BL8007]"
+                                     && panic.Contains "\"stderr\":\"error[BL8013]"
                                      && panic.Contains "\"severity\":\"error\",\"line\":1,\"col\":1"
-                                     && panic.Contains "integer division or modulo by zero"
+                                     && panic.Contains "integer division by zero"
                                      && after.Contains "\"kept\":true"
                                      && probe.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
             record name TH.Pass ""

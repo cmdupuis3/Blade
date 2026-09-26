@@ -1,0 +1,20 @@
+// TEST: Float32 Pow And Math
+// ============================================================================
+// A Float32 operand to `^` or to a libm intrinsic is evaluated in double and
+// rounded ONCE to float, in every lane (docs/formalism.md section 2.4).
+// `s ^ 2` is s * s; `s ^ 0.5` is pow in double rounded to float -- it used to
+// emit `float p = pow(s, 2L)`, a double silently narrowed. sin of a Float32
+// scalar is the double sin rounded to float (C++'s sinf is a different
+// function, and the interpreter used to keep the full double).
+
+let xs: Array<Float32 like Idx<2>> = [Float32(1.5), Float32(2.5)]
+let s = reduce(xs, (+))
+let p = s ^ 2
+let q = s ^ Float32(0.5)
+let ys = xs ^ 3
+let a = sin(s)
+let zs = exp(xs)
+let r = sqrt(s)
+// EXPECT: p = 16
+// EXPECT: q = 2
+// EXPECT: ys = [3.375, 15.625]

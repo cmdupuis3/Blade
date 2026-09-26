@@ -297,6 +297,19 @@ let runDiagnosticsCoreTests () : BlockResult =
              else
                 sprintf "panic now reachable from %s. This BREAKS SHADOW-FRAME ELISION: codegen omits BLADE_FRAME from emitted bodies it proves cannot reach a panic, and that proof only looks at the calls the body makes — inline/template runtime code is invisible to it. Those kernels would now panic with no frame pushed, so every BL-panic trace through one drops a link in its Blade call stack (values unchanged, diagnostics silently degraded). Fix: keep the panic in blade_runtime.hpp behind a call the generated body makes textually, or teach codegen to stop eliding the frame."
                     (String.concat "; " offenders))
+        // The same invariant INSIDE blade_runtime.hpp: codegen lists
+        // `blade_arith::` and `blade_libm::` in panicFreeNamespaces, so a
+        // kernel calling only those keeps its frame elided. Both namespaces
+        // sit ahead of `namespace blade_rt {` (where panic is defined), so
+        // that prefix of the header must name no panic at all.
+        let rt = File.ReadAllText(Path.Combine(root, "blade_runtime.hpp"))
+        let cut = rt.IndexOf "namespace blade_rt {"
+        let prefix = if cut < 0 then "" else rt.Substring(0, cut)
+        check "blade_arith / blade_libm (panic-free namespaces) precede blade_rt and name no panic"
+            (cut >= 0 && prefix.Contains "namespace blade_arith {" && prefix.Contains "namespace blade_libm {"
+             && not (prefix.Contains "panic("))
+            (if cut < 0 then "no `namespace blade_rt {` in blade_runtime.hpp"
+             else "the namespaces codegen treats as panic-free must stay above blade_rt and panic-free (CodeGen.panicFreeNamespaces)")
 
     // -- `blade run` names an OS-level crash (Build.describeCrashExit) -------
     // A panic exits 1 with its own error line and is NOT a crash; an ordinary

@@ -338,14 +338,14 @@ let private joinShareReadByDirectFold () =
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         // One in the lifted kernel body, one in the share's per-iteration const.
-        let exps = System.Text.RegularExpressions.Regex.Matches(cpp, @"std::exp\(").Count
+        let exps = System.Text.RegularExpressions.Regex.Matches(cpp, @"blade_libm::exp\(").Count
         let shared = cpp.Contains "sharing e per iteration"
         let legReadsShare = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"_j0\(\w+_0, e\);")
         if exps = 2 && shared && legReadsShare then
-            resultLine Pass name "2 std::exp sites (kernel body + share const); the fold leg reads `e`"
+            resultLine Pass name "2 blade_libm::exp sites (kernel body + share const); the fold leg reads `e`"
             true
         else
-            resultLine Fail name ($"expected 2 std::exp sites, the share note and `_j0(.., e)`; got exps={exps}, shared={shared}, legReadsShare={legReadsShare}")
+            resultLine Fail name ($"expected 2 blade_libm::exp sites, the share note and `_j0(.., e)`; got exps={exps}, shared={shared}, legReadsShare={legReadsShare}")
             false
 
 /// `reduce(method_for(q, k) <@> lambda(a, b) -> f(a, b), (+))` under the
@@ -368,7 +368,7 @@ let private outerProductPartialFoldStreams () =
     | Ok cpp ->
         let pools = System.Text.RegularExpressions.Regex.Matches(cpp, @"Array<double, 2>").Count
         let rowMode = cpp.Contains "__pfrow" || cpp.Contains "__pfsrc"
-        let fusedFold = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"= __wrap_\d+_\w+\(\w+, std::exp\(")
+        let fusedFold = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"= __wrap_\d+_\w+\(\w+, blade_libm::exp\(")
         if pools = 0 && not rowMode && fusedFold then
             resultLine Pass name "no rank-2 pool, no row-mode scaffolding; exp folded inside the wrapper"
             true

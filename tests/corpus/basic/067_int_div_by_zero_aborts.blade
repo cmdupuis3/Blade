@@ -1,0 +1,12 @@
+// TEST: Int Div By Zero Aborts (aborts)
+// ============================================================================
+// The arithmetic contract (docs/formalism.md section 2.4): integer `/` by
+// zero panics BL8013 in EVERY lane. The compiled program used to die with a
+// silent STATUS_INTEGER_DIVIDE_BY_ZERO (`blade run` printed nothing at all)
+// while the interpreter reported BL8007, the singular-matrix code. The zero is
+// computed, so no compile-time fold can see it.
+
+let d: Array<Int64 like Idx<3>> = [2, 0, 1]
+let z = reduce(d, (+)) - 3
+let q = 10 / z
+// ABORT: error[BL8013]: integer division by zero

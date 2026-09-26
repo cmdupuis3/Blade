@@ -1,0 +1,11 @@
+// TEST: Float To Int NaN Aborts (aborts)
+// ============================================================================
+// A float -> integer cast of NaN panics BL8014 in every lane
+// (docs/formalism.md section 2.4). A bare static_cast is UB there -- x86
+// answered INT64_MIN -- while the interpreter saturated NaN to 0: two lanes,
+// two silent wrong answers. The NaN is computed (0/0 of a reduction).
+
+let xs: Array<Float64 like Idx<2>> = [1.0, -1.0]
+let z = reduce(xs, (+))
+let n = Int64(floor(z / z))
+// ABORT: error[BL8014]: float-to-integer conversion of NaN or an out-of-range value
