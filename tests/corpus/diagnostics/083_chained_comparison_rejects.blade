@@ -1,0 +1,7 @@
+// TEST: Chained Comparison (rejects)
+// ERROR: BL1999 @ 7:15
+// ERROR-CONTAINS: Comparisons do not chain
+// `0 < x < 3` is not a range test in Blade: comparisons are non-associative.
+// This used to die as a baffling "Expected declaration but got '<'".
+let x = 1
+let c = 0 < x < 3

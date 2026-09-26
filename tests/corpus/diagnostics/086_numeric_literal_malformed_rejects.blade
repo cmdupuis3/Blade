@@ -1,0 +1,5 @@
+// TEST: Malformed Numeric Literal (rejects)
+// ERROR: BL0003 @ 5:9-5:13
+// ERROR-CONTAINS: must sit between two digits
+// A `_` digit separator must sit BETWEEN two digits.
+let a = 1__0

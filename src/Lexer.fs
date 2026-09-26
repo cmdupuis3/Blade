@@ -385,35 +385,81 @@ let scanNumber (state: LexerState) =
     let startCol = state.Col
     let sb = StringBuilder()
     let mutable isFloat = false
-    
-    // Integer part
-    while (match peek state with Some c -> isDigit c | None -> false) do
-        sb.Append(advance state |> Option.get) |> ignore
-    
-    // Decimal part
-    match peek state, peekN state 1 with
-    | Some '.', Some c when isDigit c ->
-        isFloat <- true
-        sb.Append(advance state |> Option.get) |> ignore  // .
-        while (match peek state with Some c -> isDigit c | None -> false) do
-            sb.Append(advance state |> Option.get) |> ignore
-    | _ -> ()
-    
-    // Exponent
-    match peek state with
-    | Some 'e' | Some 'E' ->
-        isFloat <- true
-        sb.Append(advance state |> Option.get) |> ignore
-        match peek state with
-        | Some '+' | Some '-' ->
-            sb.Append(advance state |> Option.get) |> ignore
-        | _ -> ()
-        while (match peek state with Some c -> isDigit c | None -> false) do
-            sb.Append(advance state |> Option.get) |> ignore
-    | _ -> ()
-    
-    let text = sb.ToString()
+    let startPos = state.Pos
+
+    // A digit run with `_` separators (`1_000_000`, `0xFF_FF`). A separator
+    // is only ever taken BETWEEN two digits, so `1_` / `1__0` leave the stray
+    // `_` for the adjacency check below to report. Separators are dropped
+    // from the text that is parsed; the literal's VALUE is all that reaches
+    // the AST, so codegen and the interpreter see the same number.
+    let scanDigits (isD: char -> bool) =
+        while (match peek state, peekN state 1 with
+               | Some c, _ when isD c -> true
+               | Some '_', Some d when isD d -> true
+               | _ -> false) do
+            match advance state with
+            | Some '_' -> ()
+            | Some c -> sb.Append c |> ignore
+            | None -> ()
+
+    let isHexDigit c = isDigit c || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+    let isBinDigit c = c = '0' || c = '1'
+
+    let radix =
+        match peek state, peekN state 1 with
+        | Some '0', Some ('x' | 'X') -> 16
+        | Some '0', Some ('b' | 'B') -> 2
+        | _ -> 10
+
     let kind =
+        if radix <> 10 then
+            // Hex / binary integer literal: a 64-bit BIT PATTERN, as in Java's
+            // `0x...L` -- anything up to 2^64 - 1 is accepted and reinterpreted
+            // two's-complement, so hashing / RNG constants like
+            // 0x9E3779B97F4A7C15 are writable as themselves.
+            advance state |> ignore
+            advance state |> ignore
+            scanDigits (if radix = 16 then isHexDigit else isBinDigit)
+            let digits = sb.ToString()
+            if digits = "" then
+                TokError (sprintf "Invalid numeric literal: `%s` needs at least one %s digit"
+                              (state.Source.Substring(startPos, state.Pos - startPos))
+                              (if radix = 16 then "hex" else "binary"))
+            else
+                try TokInt (int64 (Convert.ToUInt64(digits, radix)))
+                with _ ->
+                    TokError (sprintf "Invalid numeric literal: `%s` does not fit in 64 bits"
+                                  (state.Source.Substring(startPos, state.Pos - startPos)))
+        else
+        // Integer part
+        scanDigits isDigit
+
+        // Decimal part
+        match peek state, peekN state 1 with
+        | Some '.', Some c when isDigit c ->
+            isFloat <- true
+            sb.Append(advance state |> Option.get) |> ignore  // .
+            scanDigits isDigit
+        | _ -> ()
+
+        // Exponent: only when a digit (optionally signed) follows, so `2e`
+        // glued to a name falls to the adjacency check instead of lexing a
+        // malformed float.
+        let expFollows =
+            match peek state, peekN state 1, peekN state 2 with
+            | Some ('e' | 'E'), Some d, _ when isDigit d -> true
+            | Some ('e' | 'E'), Some ('+' | '-'), Some d when isDigit d -> true
+            | _ -> false
+        if expFollows then
+            isFloat <- true
+            sb.Append(advance state |> Option.get) |> ignore
+            match peek state with
+            | Some '+' | Some '-' ->
+                sb.Append(advance state |> Option.get) |> ignore
+            | _ -> ()
+            scanDigits isDigit
+
+        let text = sb.ToString()
         if isFloat then
             match Double.TryParse(text) with
             | true, v -> TokFloat v
@@ -422,7 +468,29 @@ let scanNumber (state: LexerState) =
             match Int64.TryParse(text) with
             | true, v -> TokInt v
             | false, _ -> TokError $"Invalid integer: {text}"
-    
+
+    // A number glued to a name or a stray `_` (`2x`, `1_`, `0x1G`, `3i`) is one
+    // malformed literal, not two tokens: split, `let b = 2x` used to lex as
+    // `2` then `x` and quietly become two statements. The whole run is
+    // swallowed into ONE error token so the diagnostic spans what was written.
+    let kind =
+        match peek state with
+        | Some c when isIdentChar c ->
+            let restStart = state.Pos
+            while (match peek state with Some c -> isIdentChar c | None -> false) do
+                advance state |> ignore
+            let lit = state.Source.Substring(startPos, state.Pos - startPos)
+            let tail = state.Source.Substring(restStart, state.Pos - restStart)
+            let numPart = state.Source.Substring(startPos, restStart - startPos)
+            if tail.StartsWith "_" then
+                TokError $"Invalid numeric literal: `{lit}` -- a `_` digit separator must sit between two digits (`1_000`)"
+            elif radix <> 10 then
+                let radixName = if radix = 16 then "hex" else "binary"
+                TokError $"Invalid numeric literal: `{lit}` -- `{tail.[0]}` is not a {radixName} digit"
+            else
+                TokError $"Invalid numeric literal: `{lit}` -- a number cannot be followed directly by a name; Blade has no implicit multiplication, so write `{numPart} * {tail}`"
+        | _ -> kind
+
     emit state startLine startCol kind
 
 let scanString (state: LexerState) =

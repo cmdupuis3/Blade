@@ -1,13 +1,13 @@
 // TEST: Mask Forces Deferred Input
-// mask over an array input that is still an UNFORCED computation (the
-// if/then/else kernel body swallows the trailing `|> compute` into the else
-// branch, leaving `w` deferred). mask's presence-array loop reads the input
+// mask over an array input that is still an UNFORCED computation (no
+// `|> compute`, so `w` stays deferred; it once got there via a parser bug that
+// swallowed a trailing `|> compute` into the kernel's else branch). mask's presence-array loop reads the input
 // by name, so its codegen forces the deferred binding in place first (shared
 // forceDeferredArrayInput helper). The named index type V keeps w in vals'
 // index space so compound(vals, m) typechecks.
 type V = Idx<3>
 let vals: Array<Float64 like V> = [3.0, 1.0, 2.0]
-let w = method_for(vals) <@> lambda(q) -> if q > 1.0 then 1.0 else 0.0 |> compute
+let w = method_for(vals) <@> lambda(q) -> if q > 1.0 then 1.0 else 0.0
 let m = mask(w, lambda(x) -> x > 0.5)
 let f = compound(vals, m)
 let n = extents(f)

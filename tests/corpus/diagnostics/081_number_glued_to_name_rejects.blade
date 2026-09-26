@@ -1,0 +1,8 @@
+// TEST: Number Glued To Name (rejects)
+// ERROR: BL0003 @ 8:9-8:11
+// ERROR-CONTAINS: no implicit multiplication, so write `2 * x`
+// `2x` used to lex as the literal 2 followed by the name x, which the parser
+// then split into `let b = 2` plus a printed bare `x`. A number glued to a
+// name is now one malformed literal, reported over its whole span.
+let x = 3.0
+let b = 2x

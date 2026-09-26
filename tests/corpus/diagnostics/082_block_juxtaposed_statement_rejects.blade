@@ -1,0 +1,12 @@
+// TEST: Block Juxtaposed Statement (rejects)
+// ERROR: BL1001 @ 9:21
+// Inside braces the lexer drops newlines, so the terminator rule is decided
+// from token LINES: `x` sits on the same line as the end of `let a = 2.0`, so
+// it is juxtaposed, not a new statement. This body used to parse as
+// `let a = 2.0; x; a` -- the stray `x` silently discarded.
+function f(x: Float64) -> Float64 = {
+    let b = 1.0
+    let a = 2.0 * b x
+    a
+}
+let r = f(1.0)

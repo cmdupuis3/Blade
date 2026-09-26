@@ -87,6 +87,21 @@ type internal ParseState() =
     /// rest of this state: concurrent parses would otherwise interleave their
     /// numbering and hand two files the same `__exprN`.
     member val TopExprCounter : int = 0 with get, set
+    /// DepthAt.[i]: how many (, [, { are open before the token with index i
+    /// (a closer counts at its opener's depth). Rebuilt by `setEofFrom`.
+    member val DepthAt : int[] = [||] with get, set
+    /// The delimiter depth of the inline lambda body being parsed, or -1.
+    /// An inline body extends through Apply-level operators only; the looser
+    /// ones (`|>`, `<&>`, `>>=`, ...) at THIS depth end it even when reached
+    /// through a nested if/else, match arm or let inside the body. See
+    /// `bodyCapped` and formalism §15.1.
+    member val BodyCapDepth : int = -1 with get, set
+    /// Column and delimiter depth of the first token of the statement being
+    /// parsed (0 / -1 outside any statement loop). An operator-led line at
+    /// that depth continues the statement only when indented PAST this column
+    /// (`continuationAllowed`, formalism §15.1).
+    member val StmtCol : int = 0 with get, set
+    member val StmtDepth : int = -1 with get, set
 
 /// This thread's `ParseState`, created on first touch. A thread that never
 /// parses never allocates one.
@@ -119,6 +134,22 @@ let internal setEofFrom (tokens: Token list) =
         last.[i + 1] <- (if meaningful.[i] then i else last.[i])
     st.EndAt <- ends
     st.LastMeaning <- last
+    let depthAt : int[] = Array.zeroCreate n
+    let mutable d = 0
+    for t in tokens do
+        if t.Index >= 0 && t.Index < n then
+            match t.Kind with
+            | TokLParen | TokLBracket | TokLBrace ->
+                depthAt.[t.Index] <- d
+                d <- d + 1
+            | TokRParen | TokRBracket | TokRBrace ->
+                d <- max 0 (d - 1)
+                depthAt.[t.Index] <- d
+            | _ -> depthAt.[t.Index] <- d
+    st.DepthAt <- depthAt
+    st.BodyCapDepth <- -1
+    st.StmtCol <- 0
+    st.StmtDepth <- -1
 
 // Basic Combinators
 
@@ -189,6 +220,12 @@ let describeToken (kind: TokenKind) : string =
     | TokNewline -> "end of line"
     | TokEOF -> "end of file"
     | TokError s -> $"invalid token ({s})"
+
+/// Is this lexer error message one of `scanNumber`'s? Those are reported as
+/// BL0003 (invalid numeric literal) with the lexer's own wording.
+let isNumericLexError (msg: string) : bool =
+    msg.StartsWith "Invalid numeric literal" || msg.StartsWith "Invalid integer"
+    || msg.StartsWith "Invalid float"
 
 let currentPos (tokens: Token list) =
     match tokens with
@@ -322,11 +359,127 @@ let rec parseDottedTypeName (name: string) (tokens: Token list) : string * Token
         | _ -> (name, tokens)
     | _ -> (name, tokens)
 
+/// A binary operator of the arithmetic / comparison / logical ladders. Like
+/// the combinators, a line that OPENS with one continues the expression on the
+/// line above (formalism §15.1). Inside (), [] and {} the lexer drops newlines,
+/// so there this was always the reading; this makes top level and braceless
+/// bodies agree with it (and with the notebook splitter, which already treats
+/// every operator-led line as a continuation). `-` is included: a line that
+/// begins `- b` subtracts, so a statement cannot open with a unary minus right
+/// after another statement -- write `(-b)`. `!` is prefix-only and excluded.
+let private infixContinuationOps =
+    set [ "+"; "-"; "*"; "/"; "%"; "^"; "=="; "!="; "<"; "<="; ">"; ">="; "&&"; "||"
+          "[+]"; "[-]"; "[*]"; "[/]"; "[%]"; "[^]"
+          "[==]"; "[!=]"; "[<]"; "[<=]"; "[>]"; "[>=]"; "[&&]"; "[||]" ]
+
+let isInfixContinuationOp (kind: TokenKind) : bool =
+    match kind with
+    | TokOp op -> infixContinuationOps.Contains op
+    | TokColonColon | TokDotDot -> true
+    | _ -> false
+
+/// Is `t` the first token on its source line? Answered from the span tables,
+/// because inside (), [] and {} the lexer has dropped the newline tokens.
+let startsLine (t: Token) : bool =
+    let st = PS.Cur
+    if t.Index <= 0 || t.Index >= st.IndexCount then true
+    else
+        let j = st.LastMeaning.[t.Index]
+        if j < 0 then true
+        else
+            let struct (endLine, _) = st.EndAt.[j]
+            endLine < t.Line
+
+/// May the operator token `t` continue the expression before it? Always,
+/// unless it OPENS a line at the depth of the enclosing statement at or left
+/// of the statement's first column: `let y = x` over a column-1 `- 3` is not
+/// a continuation (and `statementLeadingOperatorError` refuses the line),
+/// while an indented `    - 3` is. Inside parentheses/brackets opened within
+/// the statement a line break is always just whitespace.
+let continuationAllowed (t: Token) : bool =
+    let st = PS.Cur
+    if st.StmtCol <= 0 || t.Index < 0 || t.Index >= st.DepthAt.Length then true
+    elif st.DepthAt.[t.Index] <> st.StmtDepth then true
+    elif not (startsLine t) then true
+    else t.Col > st.StmtCol
+
 let peekContinuation (tokens: Token list) : TokenKind option * Token list =
     let skipped = skipNL tokens
     match skipped with
     | t :: _ when isCombinatorOp t.Kind -> (Some t.Kind, skipped)
+    | t :: _ when isInfixContinuationOp t.Kind ->
+        if continuationAllowed t then (Some t.Kind, skipped) else (None, tokens)
     | _ -> (peek tokens, tokens)
+
+/// Run `parse` as one statement starting at `tokens`' head: records its column
+/// and depth for `continuationAllowed`, restoring the enclosing statement's
+/// on the way out (error path included).
+let asStatement (tokens: Token list) (parse: unit -> ParseResult<'a>) : ParseResult<'a> =
+    let st = PS.Cur
+    let savedCol, savedDepth = st.StmtCol, st.StmtDepth
+    (match tokens with
+     | t :: _ when t.Index >= 0 && t.Index < st.DepthAt.Length ->
+         st.StmtCol <- t.Col
+         st.StmtDepth <- st.DepthAt.[t.Index]
+     | _ ->
+         st.StmtCol <- 0
+         st.StmtDepth <- -1)
+    try parse ()
+    finally
+        st.StmtCol <- savedCol
+        st.StmtDepth <- savedDepth
+
+/// A statement that OPENS with a binary operator, after another statement:
+/// the line sat at the statement column, so `continuationAllowed` declined to
+/// join it to the line above. Refused rather than read as a new statement --
+/// for `-` that reading (a printed / discarded negation) is almost never what
+/// was meant, and for the other operators there is no reading at all.
+let statementLeadingOperatorError (tokens: Token list) : ParseResult<'a> option =
+    match tokens with
+    | t :: _ when isInfixContinuationOp t.Kind && startsLine t ->
+        let op = match t.Kind with TokOp o -> o | TokColonColon -> "::" | _ -> ".."
+        let hint =
+            if op = "-" then " To start a new statement with a negation, parenthesize it: `(-x)`."
+            else ""
+        Some (errorFull "BL1001"
+                ($"A line starting with `{op}` continues the expression above only when it is indented past the start of that statement; "
+                 + $"this one is not, so it would begin a new statement with a binary operator. Indent the line to continue the expression.{hint}")
+                t.Line t.Col t.EndLine t.EndCol)
+    | _ -> None
+
+/// Does the head token sit at the depth of the inline lambda body being
+/// parsed? If so, an operator looser than `<@>` there ENDS the body: it
+/// belongs to the expression the lambda is part of (formalism §15.1).
+let bodyCapped (tokens: Token list) : bool =
+    let st = PS.Cur
+    st.BodyCapDepth >= 0
+    && (match tokens with
+        | t :: _ when t.Index >= 0 && t.Index < st.DepthAt.Length ->
+            st.DepthAt.[t.Index] = st.BodyCapDepth
+        | _ -> false)
+
+/// Parse an inline lambda body under the cap (see `bodyCapped`), restoring
+/// the enclosing cap afterwards -- on the error path too.
+let withBodyCap (tokens: Token list) (parse: unit -> ParseResult<'a>) : ParseResult<'a> =
+    let st = PS.Cur
+    let saved = st.BodyCapDepth
+    st.BodyCapDepth <-
+        (match tokens with
+         | t :: _ when t.Index >= 0 && t.Index < st.DepthAt.Length -> st.DepthAt.[t.Index]
+         | _ -> -1)
+    try parse ()
+    finally st.BodyCapDepth <- saved
+
+/// Lift the cap for a sub-expression that a KEYWORD bounds -- an `if`'s
+/// condition (ends at `then`) and then-branch (ends at `else`), a `match`
+/// scrutinee (ends at `with`), a non-final match arm (ends at the next `|`).
+/// A loose operator there cannot be the lambda's own.
+let withoutBodyCap (parse: unit -> ParseResult<'a>) : ParseResult<'a> =
+    let st = PS.Cur
+    let saved = st.BodyCapDepth
+    st.BodyCapDepth <- -1
+    try parse ()
+    finally st.BodyCapDepth <- saved
 
 let expect kind (tokens: Token list) : ParseResult<Token> =
     match tokens with
