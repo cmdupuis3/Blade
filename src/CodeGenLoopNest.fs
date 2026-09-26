@@ -979,104 +979,132 @@ let rec flattenAssocOp (mode: IRBinOpMode) (op: IRBinOp) (expr: IRExpr) : IRExpr
         flattenAssocOp mode op l @ flattenAssocOp mode op r
     | _ -> [expr]
 
-/// Generate a canonical string key for an IR expression under a given name mapping.
-/// Commutative binary operations have their children sorted by canonical key,
-/// and associative+commutative chains are flattened and sorted, so that e.g.
-/// (a * b) * c and c * (b * a) produce the same key.
-/// Used for Reynolds permutation deduplication.
-let rec canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : string =
-    match expr with
-    | IRVar (id, _) ->
-        Map.tryFind id nameMap |> Option.defaultValue ($"v{id}")
-    | IRParam (name, _, _) ->
-        $"p:{name}"
-    | IRLit lit ->
-        match lit with
-        | IRLitInt n -> string n
-        // Round-trip spelling: %g's 6-digit key would COLLIDE distinct
-        // constants and wrongly deduplicate structurally-different
-        // Reynolds terms (multiplicity miscount).
-        | IRLitFloat f -> floatToCppLiteral f
-        | IRLitFloat32 f -> float32ToCppLiteral f
-        | IRLitBool b -> if b then "true" else "false"
-        | IRLitString s -> $"\"{s}\""
-        | IRLitUnit -> "()"
-    | IRBinOp (mode, op, l, r) when isCommutativeOp op && isAssociativeOp op ->
-        let operands = flattenAssocOp mode op expr
-        let keys = operands |> List.map (canonicalKey nameMap) |> List.sort
-        sprintf "(%A/%A %s)" mode op (keys |> String.concat " ")
-    | IRBinOp (mode, op, l, r) when isCommutativeOp op ->
-        let lk = canonicalKey nameMap l
-        let rk = canonicalKey nameMap r
-        let children = [lk; rk] |> List.sort
-        sprintf "(%A/%A %s %s)" mode op children.[0] children.[1]
-    | IRBinOp (mode, op, l, r) ->
-        sprintf "(%A/%A %s %s)" mode op (canonicalKey nameMap l) (canonicalKey nameMap r)
-    | IRUnaryOp (op, inner) ->
-        sprintf "(u%A %s)" op (canonicalKey nameMap inner)
-    | IRApp (func, args, _) ->
-        let fk = canonicalKey nameMap func
-        let ak = args |> List.map (canonicalKey nameMap) |> String.concat ","
-        $"(call {fk} [{ak}])"
-    | IRIf (cond, thn, els) ->
-        $"(if {(canonicalKey nameMap cond)} {(canonicalKey nameMap thn)} {(canonicalKey nameMap els)})"
-    | IRLet (id, value, body) ->
-        $"(let v{id}={(canonicalKey nameMap value)} in {(canonicalKey nameMap body)})"
-    | IRTupleProj (tup, idx, _) ->
-        $"(proj {idx} {(canonicalKey nameMap tup)})"
-    | IRTuple elems ->
-        let ek = elems |> List.map (canonicalKey nameMap) |> String.concat ","
-        $"(tuple {ek})"
-    | IRComplex (re, im) ->
-        $"(complex {(canonicalKey nameMap re)} {(canonicalKey nameMap im)})"
-    | IRFma (a, b, c) ->
-        $"(fma {(canonicalKey nameMap a)} {(canonicalKey nameMap b)} {(canonicalKey nameMap c)})"
-    | IRFieldAccess (obj, field) ->
-        $"(field {(canonicalKey nameMap obj)} {field})"
-    | IRStructLit (name, fields) ->
-        let fk = fields |> List.map (fun (f, e) -> $"{f}={(canonicalKey nameMap e)}") |> String.concat ","
-        $"(struct {name} {{{fk}}})"
-    | IRMatch (scrutinee, cases) ->
-        let sk = canonicalKey nameMap scrutinee
-        let ck = cases |> List.map (fun c -> sprintf "%A->%s" c.Pattern (canonicalKey nameMap c.Body)) |> String.concat "|"
-        $"(match {sk} [{ck}])"
-    | IRIndex (arr, indices, _) ->
-        let ak = canonicalKey nameMap arr
-        let ik = indices |> List.map (canonicalKey nameMap) |> String.concat ","
-        $"(idx {ak} [{ik}])"
-    | IRArrayLit (elems, _) ->
-        let ek = elems |> List.map (canonicalKey nameMap) |> String.concat ","
-        $"(arrlit [{ek}])"
-    | IRExtent (arr, dim) ->
-        $"(extent {(canonicalKey nameMap arr)} {dim})"
-    | IRRank arr ->
-        $"(rank {(canonicalKey nameMap arr)})"
-    | IRPolyIndex (pack, idx) ->
-        $"(polyidx {(canonicalKey nameMap pack)} {(canonicalKey nameMap idx)})"
-    | IRPolyTail (pack, n) ->
-        $"(polytail {(canonicalKey nameMap pack)} {n})"
-    | IRNth -> "nth"
-    | IRZero -> "zero"
-    | IRSlice (arr, dim, start, stop) ->
-        $"(slice {(canonicalKey nameMap arr)} {dim} {(canonicalKey nameMap start)} {(canonicalKey nameMap stop)})"
-    | IRCurry (arr, idx, rank) ->
-        $"(curry {(canonicalKey nameMap arr)} {(canonicalKey nameMap idx)} {rank})"
-    | IRTranspose (arr, d1, d2) ->
-        $"(transpose {(canonicalKey nameMap arr)} {d1} {d2})"
-    | IRDecompact (arr, d) ->
-        $"(decompact {(canonicalKey nameMap arr)} {d})"
-    | IRArrayNegate arr ->
-        $"(array_negate {(canonicalKey nameMap arr)})"
-    | IRArrayConjugate arr ->
-        $"(array_conjugate {(canonicalKey nameMap arr)})"
-    | IRAssign (lhs, rhs) ->
-        $"(assign {(canonicalKey nameMap lhs)} {(canonicalKey nameMap rhs)})"
-    | IRForRange (vid, lo, hi, body) ->
-        $"(for v{vid} {(canonicalKey nameMap lo)} {(canonicalKey nameMap hi)} {(canonicalKey nameMap body)})"
-    | _ ->
-        // Combinators, compute, reynolds, etc. -- won't appear in kernel bodies.
-        // Use unique repr to prevent false dedup.
-        sprintf "(opaque %d %A)" (expr.GetHashCode()) (expr.GetType().Name)
+/// Reynolds term identity: the canonical form of a kernel body under one
+/// parameter permutation. Two permutations merge into one coefficient-
+/// weighted term EXACTLY when their canonical forms are structurally equal,
+/// so the form must be injective up to the normalizations that are
+/// bit-exact:
+///
+///   * a variable the name map names becomes a marker carrying that NAME
+///     (the permutation's renaming); every other node keeps its full
+///     structure, payload included -- the recursion is `mapIRExpr`, the
+///     ExprShape fold, so no variant is keyed by anything less than itself.
+///     (The old string key ended in a catch-all keyed by the node's hash,
+///     which ignored the name map: every permutation of a `contains`,
+///     `reduce`, `prodsum`, ... body got the same key and distinct terms
+///     merged -- `reynolds(lambda(x, y) -> if contains(S, x) ...)` summed
+///     2*g(x,y) instead of g(x,y) + g(y,x).)
+///   * float literals by BIT PATTERN (structural `=` calls 0.0 and -0.0 equal);
+///     string literals escaped so no literal can spell a marker;
+///   * the two operands of an ELEMENTWISE `+`, `*`, `==`, `!=` sorted: IEEE
+///     `a+b` and `b+a` are the same bits, so this is exact (likewise fma's two
+///     factors, and a two-operand prodsum over same-typed operands -- see the
+///     arms below). Not an OUTER op (`x [+] y` is the transpose of `y [+] x`)
+///     and not a complex product (its two cross products round differently
+///     under FP contraction). `&&` / `||` are NOT sorted: they
+///     short-circuit, and `p(y) && p(x)` evaluates a different operand first
+///     than `p(x) && p(y)` -- merging them would drop an evaluation (and any
+///     abort it raises);
+///   * an associative `+` / `*` chain is FLATTENED (operands sorted across the
+///     whole chain) only where reassociation is exact or licensed: integer and
+///     Bool chains (two's-complement wrap is associative) always, float chains
+///     only under BLADE_FP_REASSOC. `(x + y) + z` and `x + (y + z)` are
+///     different float values, so merging them unlicensed would be exactly the
+///     reassociation that gate exists to withhold.
+///
+/// Shared by codegen, the interpreter (Interp/Loops.fs) and the LLVM emitter,
+/// so every lane computes the same term plan by construction.
+let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
+    let reassoc = fpReassocEnabled ()
+    let rec exactScalar (t: IRType) =
+        match t with
+        | IRTScalar (ETInt32 | ETInt64 | ETBool) -> true
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> exactScalar inner
+        | _ -> false
+    let chainExact (e: IRExpr) =
+        reassoc
+        || (try exactScalar (typeOf e) with _ -> false)
+    // A complex product is NOT bit-symmetric: `(a+bi)(c+di)` rounds ad+bc and
+    // cb+da as different fused products under -ffp-contract=fast.
+    let complexOperand (e: IRExpr) =
+        let rec isComplex (t: IRType) =
+            match t with
+            | IRTScalar (ETComplex64 | ETComplex128) -> true
+            | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> isComplex inner
+            | ArrayElem at -> isComplex at.ElemType
+            | _ -> false
+        match e with
+        | IRBinOp (_, _, l, r) -> (try isComplex (typeOf l) || isComplex (typeOf r) with _ -> true)
+        | _ -> true
+    // Two array operands with the same element type and structurally equal,
+    // non-opaque extents at every axis (identity records may differ: two
+    // kernel parameters over the same index space carry distinct ids).
+    let sameExtents (a: IRExpr) (b: IRExpr) =
+        try
+            match typeOf a, typeOf b with
+            | ArrayElem at, ArrayElem bt ->
+                at.ElemType = bt.ElemType
+                && at.IndexTypes.Length = bt.IndexTypes.Length
+                && List.forall2 (fun (ia: IRIndexType) (ib: IRIndexType) ->
+                        ia.Extent = ib.Extent
+                        && (match ia.Extent with IROpaqueExtent -> false | _ -> true))
+                       at.IndexTypes bt.IndexTypes
+            | _ -> false
+        with _ -> false
+    let marker (tag: string) (s: string) = IRLit (IRLitString ("\u0001" + tag + ":" + s))
+    let sortOperands (xs: IRExpr list) = List.sortWith compare xs
+    let rebuildChain mode op (xs: IRExpr list) =
+        xs |> List.reduce (fun l r -> IRBinOp (mode, op, l, r))
+    // The name map is consulted on the ORIGINAL ids, before any rewrite, so
+    // chain typing (typeOf) sees the real operands.
+    let keyed =
+        expr |> mapIRExpr (fun n ->
+            match n with
+            | IRVar (id, _) ->
+                (match Map.tryFind id nameMap with
+                 | Some name -> marker "var" name
+                 | None -> n)
+            | IRLit (IRLitFloat f) -> marker "f64" (string (System.BitConverter.DoubleToInt64Bits f))
+            | IRLit (IRLitFloat32 f) -> marker "f32" (string (System.BitConverter.SingleToInt32Bits f))
+            | IRLit (IRLitString s) -> IRLit (IRLitString ("\u0002" + s))
+            | _ -> n)
+    // Commutative normalization runs over the keyed tree, bottom-up, so a
+    // parent sorts children that are already canonical. Chain exactness is
+    // judged on the matching ORIGINAL node (same shape, walked in lockstep).
+    let rec norm (orig: IRExpr) (k: IRExpr) : IRExpr =
+        let (ExprShape (oKids, _)) = orig
+        let (ExprShape (kKids, rebuild)) = k
+        let k' =
+            match kKids with
+            | [] -> k
+            | _ -> rebuild (List.map2 norm oKids kKids)
+        match k' with
+        | IRBinOp (IRElementwise as mode, op, l, r) when (op = IRAdd || op = IRMul) && chainExact orig ->
+            flattenAssocOp mode op k' |> sortOperands |> rebuildChain mode op
+        | IRBinOp (IRElementwise as mode, op, l, r)
+            when (op = IRAdd || op = IREq || op = IRNeq || (op = IRMul && not (complexOperand orig))) ->
+            (match sortOperands [l; r] with
+             | [a; b] -> IRBinOp (mode, op, a, b)
+             | _ -> k')
+        // fma(a, b, c) = a*b + c with ONE rounding: a*b is b*a exactly.
+        | IRFma (a, b, c) ->
+            (match sortOperands [a; b] with
+             | [a'; b'] -> IRFma (a', b', c)
+             | _ -> k')
+        // prodsum(x, y) = sum_t x(t)*y(t): each product commutes exactly and
+        // the summation order is the same, so the two-operand form is
+        // symmetric bit for bit. Only when both operands provably have the
+        // SAME extents: the emitter takes the trip count from the FIRST
+        // operand, so swapping operands of different extents would change
+        // the loop. (Three or more operands multiply left to right -- not
+        // sorted.)
+        | IRProdSum [x; y] ->
+            (match orig with
+             | IRProdSum [ox; oy] when sameExtents ox oy ->
+                 IRProdSum (sortOperands [x; y])
+             | _ -> k')
+        | _ -> k'
+    norm expr keyed
 
 // RANK-RAISING MAP: a kernel body that IS an array literal of scalars.
 //
@@ -3389,48 +3417,12 @@ let computeFreshReturnFacts (modul: IRModule) : Map<IRId, FreshReturn> =
 
 /// Does this let's value OWN a freshly allocated pool that nothing else in the
 /// scope can reach? Only such a value STOPS escape propagation: when the binding
-/// escapes, its inputs need not also be pinned.
-///
-/// Deliberately non-barrier, against a naive reading of "fresh-pool producer":
-///   * IRChoice / IRFallback / IRGuard / IRComposeMeth -- their results BORROW an
-///     operand's `.extents` pointer, so an escaping result must pin its operands.
-///   * IRSequence / IRReplicate -- the emitter DOES now give the result its own
-///     dense pool (a per-child copy nest, like stack), so these could become
-///     barriers; they are held out because the emitter still does not register
-///     that pool for freeing, and a barrier here would stop propagation to
-///     children the frees do reach. Flip both together, never just this one.
-///   * IRParallel / IRFusion / IRFunctorMap / IRZip -- deferred forms whose
-///     forcing shape depends on whether the leaf is a computation or a concrete
-///     array; not worth proving.
-///   * every view/projection form (IRVar, IRIndex, IRSlice, IRCurry, IRSubset,
-///     IRShift, IRReverse, IRDiag, IRAlign, IRTuple, IRTupleProj, IRFieldAccess,
-///     IRIf, IRMatch, IRApp on a NotFresh callee).
-/// The trailing `| _ ->` is intentional and must stay: "unknown => propagates"
-/// is the safe default, and a new IR variant should not become a build break here
-/// (a wrong barrier frees too early; a wrong non-barrier only leaks).
-let rec isFreshPoolForm (e: IRExpr) : bool =
-    match e with
-    | IRCompute inner -> isFreshPoolForm inner
-    | IRApplyCombinator _ | IRComposeApply _ -> true
-    | IRArrayLit _ -> true
-    | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
-    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
-    // eigh: BOTH pools it produces are fresh (`allocate<>` under derived names)
-    // and neither borrows the operand's `.extents` pointer -- each gets its own
-    // table. So an escaping (Q, LAM) need not pin S, and propagation stops here.
-    | IREigh _ -> true
-    // lu: (LU, piv) are two fresh pools with their own tables, like eigh's.
-    | IRLu _ -> true
-    // lu_solve: x is a fresh pool, like solve's.
-    | IRLuSolve _ -> true
-    // solve: x is a fresh `allocate<>` pool with its own extents table -- it
-    // borrows nothing from A or b (b's values are COPIED in, not aliased), so
-    // an escaping x need pin neither operand and propagation stops here.
-    | IRSolve _ -> true
-    | IRArrayNegate _ | IRArrayConjugate _ -> true
-    | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
-    | IRApp (f, _, _) -> freshReturnOf f = FreshPool
-    | _ -> false
+/// escapes, its inputs need not also be pinned. The classification is the ONE
+/// exhaustive definition in IR.fs (`isFreshPoolFormWith`, shared with the
+/// optimizer's pool-reuse planner); a call is fresh when its callee's fresh-
+/// return fact says so.
+let isFreshPoolForm (e: IRExpr) : bool =
+    isFreshPoolFormWith (fun f -> freshReturnOf f = FreshPool) e
 
 /// May a binding whose value is a bare reference to a scope-local STAGING let be
 /// emitted as a plain ALIAS, instead of genVarAliasBinding's defensive deep copy?

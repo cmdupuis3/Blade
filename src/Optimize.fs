@@ -414,17 +414,10 @@ let private densePoolShape (ty: IRType) : (IRType * int64 list) option =
         if exts |> List.forall Option.isSome then Some (stripUnits at.ElemType, exts |> List.map Option.get) else None
     | _ -> None
 
-let private isFreshForm (e: IRExpr) : bool =
-    let rec go e =
-        match e with
-        | IRCompute inner -> go inner
-        | IRApplyCombinator _ | IRComposeApply _ | IRArrayLit _ -> true
-        | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
-        | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
-        | IREigh _ | IRSolve _ | IRLu _ | IRLuSolve _ | IRArrayNegate _ | IRArrayConjugate _ -> true
-        | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
-        | _ -> false
-    go e
+/// The shared fresh-pool classification (IR.isFreshPoolFormWith -- the same
+/// definition codegen's escape analysis uses). A CALL is never fresh here: the
+/// planner cannot see what a callee hands back.
+let private isFreshForm (e: IRExpr) : bool = isFreshPoolFormWith (fun _ -> false) e
 
 let planPoolReuse (modul: IRModule) : unit =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList

@@ -2151,6 +2151,121 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
                   (patternBoundIds c.Pattern, Option.toList c.Guard @ [c.Body])))
     | _ -> None
 
+// Node classification predicates -- EXHAUSTIVE (no `| _ ->` arm)
+//
+// Each answers a question about ONE node's own behaviour (children are the
+// caller's business, via ExprShape). A new IRExpr variant fails to compile
+// here until someone decides its answer: the catch-all these replace
+// silently answered for variants nobody had thought about.
+
+/// May evaluating this node, by ITSELF, abort the program? (Children and
+/// callees are the caller's to walk.) The IR twin of the MayFail arm of
+/// TypeCheckSupport.effectsOfBody -- indexing (BL8006), reduction (BL8003),
+/// solve/eigh/lu (BL8007), match (BL8002), constraint checks and guards
+/// (BL8001), lgamma/digamma (BL8008) -- widened CONSERVATIVELY to every
+/// array-level form whose emitter carries a runtime extent / bounds / domain
+/// check, or whose check story nobody has audited: an array form answering
+/// `true` only costs an optimization that needed it to be `false`.
+/// Scalar arithmetic, literals, references, tuple/struct plumbing, and the
+/// loop-object / combinator VALUES (building a loop object runs nothing)
+/// answer `false`. Calls (IRApp) answer `false` here: the callee's summary
+/// is the caller's to consult, since only the caller can resolve it.
+let irNodeMayAbort (e: IRExpr) : bool =
+    match e with
+    // -- cannot abort on their own ------------------------------------------
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero | IROpaqueExtent
+    | IRArity _ | IRRange _ | IRVirtualReverse _ -> false
+    // Integer `/` and `%` by zero abort (the interpreter's BL8007; SIGFPE in
+    // the binary). The node is judged without its operand types, so every
+    // division / modulo answers yes -- a float one only costs a fusion.
+    | IRBinOp (_, (IRDiv | IRMod), _, _) -> true
+    | IRBinOp _ | IRComplex _ | IRFma _ -> false
+    | IRUnaryOp (IRMath ("lgamma" | "digamma"), _) -> true
+    | IRUnaryOp _ -> false
+    | IRTuple _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _
+    | IRFieldAccess _ | IRStructLit _ -> false
+    | IRIf _ | IRLet _ | IRSequence _ -> false
+    | IRApp _ -> false
+    | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _
+    | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRPure _ | IRReynolds _ -> false
+    | IRRank _ | IRExtent _ -> false
+    | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
+    | IROrbitClass _ | IRSegments _ | IRSegmentsGrid _ -> false
+    | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ -> false
+    | IRAssign _ | IRForRange _ | IRBreakIf _ -> false
+    | IRArrayLit _ | IRArrayNegate _ | IRArrayConjugate _ | IRContains _ -> false
+    // -- may abort (checked reads, folds, factorizations, refusals) ---------
+    | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ -> true
+    | IRMatch _ | IRGuard _ | IRConstraintCheck _ -> true
+    | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
+    | IRSolve _ | IREigh _ | IRLu _ | IRLuSolve _ -> true
+    // -- array-level forms: runtime extent agreement / unaudited ------------
+    | IRCompute _ | IRApplyCombinator _ | IRComposeApply _ -> true
+    | IRZip _ | IRAlign _ | IRStack _ | IRJoin _ | IRShift _ | IRReverse _ | IRDiag _
+    | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
+    | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRSort _ -> true
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _
+    | IRUngroup _ | IRUngroupGrid _ | IRUngroupRows _ -> true
+    | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRFunctorMap _ | IRReplicate _ -> true
+
+/// Does this value OWN a freshly allocated pool that nothing else can reach?
+/// THE one definition, shared by codegen's escape analysis
+/// (CodeGenLoopNest.isFreshPoolForm) and the optimizer's pool-reuse planner
+/// (Optimize.planPoolReuse) -- pool-reuse soundness depends on the two
+/// agreeing, and they used to be hand copies. `appFresh` answers for a CALL:
+/// codegen consults its fresh-return facts, the planner (which cannot see
+/// what a callee hands back) says no.
+///
+/// Deliberately NOT fresh, against a naive reading of "fresh-pool producer":
+///   * IRChoice / IRFallback / IRGuard / IRComposeMeth -- their results BORROW an
+///     operand's `.extents` pointer, so an escaping result must pin its operands.
+///   * IRSequence / IRReplicate -- the emitter DOES now give the result its own
+///     dense pool (a per-child copy nest, like stack), so these could become
+///     fresh; they are held out because the emitter still does not register
+///     that pool for freeing, and a barrier here would stop propagation to
+///     children the frees do reach. Flip both together, never just this one.
+///   * IRParallel / IRFusion / IRFunctorMap / IRZip -- deferred forms whose
+///     forcing shape depends on whether the leaf is a computation or a concrete
+///     array; not worth proving.
+///   * every view/projection form (IRVar, IRIndex, IRSlice, IRCurry, IRSubset,
+///     IRShift, IRReverse, IRDiag, IRAlign, IRTuple, IRTupleProj, IRFieldAccess,
+///     IRIf, IRMatch, IRApp on a callee `appFresh` rejects).
+/// Exhaustive on purpose: "not fresh" is the safe answer for escape
+/// propagation (a wrong fresh frees too early; a wrong not-fresh only leaks),
+/// but a new variant must still be CLASSIFIED, not defaulted.
+let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
+    match e with
+    | IRCompute inner -> isFreshPoolFormWith appFresh inner
+    | IRApplyCombinator _ | IRComposeApply _ -> true
+    | IRArrayLit _ -> true
+    | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
+    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
+    // eigh / lu: BOTH pools each produces are fresh (`allocate<>` under derived
+    // names) with their own extents tables; lu_solve / solve: x is a fresh pool
+    // (b's values are COPIED in, not aliased). None borrows an operand.
+    | IREigh _ | IRLu _ | IRLuSolve _ | IRSolve _ -> true
+    | IRArrayNegate _ | IRArrayConjugate _ -> true
+    | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
+    | IRApp (f, _, _) -> appFresh f
+    // -- not fresh (see above) ----------------------------------------------
+    | IRChoice _ | IRFallback _ | IRGuard _ | IRComposeMeth _ -> false
+    | IRSequence _ | IRReplicate _ -> false
+    | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRZip _ -> false
+    | IRVar _ | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _
+    | IRDiag _ | IRAlign _ | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRIf _ | IRMatch _ -> false
+    | IRLit _ | IRParam _ | IRNth | IRZero | IROpaqueExtent | IRArity _ | IRRange _
+    | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _
+    | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRLet _
+    | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRComposeObj _ | IRCompose _ | IRPure _
+    | IRReynolds _ | IRArrayProduct _ | IRContains _
+    | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _
+    | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _
+    | IRPolyIndex _ | IRPolyTail _ | IRHaloUnhash _ | IRRank _ | IRExtent _
+    | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
+    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+
 // Expression Mapping (bottom-up rewriter)
 
 /// Apply f to every sub-expression bottom-up, then to the root.

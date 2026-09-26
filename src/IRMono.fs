@@ -1082,6 +1082,69 @@ let rec internal tilePureBody (callables: System.Collections.Generic.Dictionary<
             | _ -> ()) e
     ok
 
+/// May evaluating `e` abort? Every node's own answer is IR.irNodeMayAbort
+/// (exhaustive); a callable reached from the body -- called, or named as a
+/// per-cell kernel -- contributes its typed summary's MayFail, or, when it
+/// carries none (lambdas, fused kernels: `Unknown`), its body walked the same
+/// way. A call head nothing resolves may do anything and answers yes.
+/// Recursion through `visited` reads as no-abort (assume-guarantee; the
+/// callee's own nodes are still walked once).
+let rec internal tileMayAbort (callables: System.Collections.Generic.Dictionary<IRId, IRCallable>) (visited: Set<IRId>) (e: IRExpr) : bool =
+    let mutable fails = false
+    iterIRExpr (fun n ->
+        if not fails then
+            if irNodeMayAbort n then fails <- true
+            else
+                match n with
+                | IRVar (fid, _) when not (Set.contains fid visited) ->
+                    (match callables.TryGetValue fid with
+                     | true, callee ->
+                         if not callee.Effects.Unknown then
+                             (if callee.Effects.MayFail then fails <- true)
+                         elif tileMayAbort callables (Set.add fid visited) callee.Body then
+                             fails <- true
+                     | _ -> ())
+                | IRApp (IRVar (fid, _), _, _) when callables.ContainsKey fid || Set.contains fid visited -> ()
+                | IRApp _ -> fails <- true
+                | _ -> ()) e
+    fails
+
+/// Is EVERY occurrence of `vid` in `body` evaluated on every evaluation of
+/// `body` -- and is there at least one? Fusion substitutes an inner kernel's
+/// body for the host's parameter, moving the inner evaluation from "every
+/// cell, before the host runs" to "wherever the host reads the parameter". An
+/// inner kernel that may abort keeps its abort only when that read is
+/// unconditional: under a branch, a short-circuit operand, a match arm, or a
+/// loop body the abort would be skipped, and a host that never reads the
+/// parameter would drop the inner evaluation outright (Optimize charter rule
+/// 1: never add or remove an abort). Strict positions are listed; every other
+/// node's children count as conditional -- the conservative answer.
+/// RESIDUAL (accepted): an unconditional read keeps THAT the program aborts,
+/// not always WHICH abort fires first -- unfused, the inner map fails before
+/// any host cell runs; fused, a host that may itself abort on an earlier cell
+/// reports its own code instead. Both runs exit non-zero.
+let internal occursOnlyUnconditionally (vid: IRId) (body: IRExpr) : bool =
+    let mutable total = 0
+    let mutable strict = 0
+    let rec walk (isStrict: bool) (e: IRExpr) =
+        match e with
+        | IRVar (id, _) when id = vid ->
+            total <- total + 1
+            if isStrict then strict <- strict + 1
+        | IRBinOp (_, (IRAnd | IROr), l, r) -> walk isStrict l; walk false r
+        | IRIf (c, t, f) -> walk isStrict c; walk false t; walk false f
+        | IRMatch (scrut, cases) ->
+            walk isStrict scrut
+            for c in cases do
+                c.Guard |> Option.iter (walk false)
+                walk false c.Body
+        | IRBinOp _ | IRUnaryOp _ | IRFma _ | IRComplex _ | IRTuple _ | IRTupleProj _
+        | IRLet _ | IRApp _ | IRIndex _ | IRFieldAccess _ | IRStructLit _ ->
+            childrenOf e |> List.iter (walk isStrict)
+        | _ -> childrenOf e |> List.iter (walk false)
+    walk true body
+    total >= 1 && strict = total
+
 let private tilePlainIx (ix: IRIndexType) =
     ix.IxKind = IxKPlain && ix.Symmetry = SymNone
 let private tilePlainArrayTypes (ats: IRArrayType list) =
@@ -1246,6 +1309,14 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModul
                     keep ()
                 | IRCompute (IRApplyCombinator inner) ->
                     (match innerEligible inner with
+                     | Some ik when tileMayAbort callables Set.empty ik.Body
+                                    && not (occursOnlyUnconditionally hk.Params.[i].VarId body) ->
+                         // Repeatable is not enough to MOVE an evaluation:
+                         // an inner kernel that may abort (a checked read,
+                         // lgamma, a fold) must stay evaluated for every
+                         // cell unless the host reads it unconditionally.
+                         declineWhy <- "an inner kernel may abort and the host does not read its value unconditionally (fusing would skip or drop that evaluation)"
+                         keep ()
                      | Some ik ->
                          let ps', innerBody = freshen ik
                          body <- substVar hk.Params.[i].VarId innerBody body

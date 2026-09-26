@@ -172,6 +172,24 @@ let private fusionChain =
     + "let y = a + b * c - d\n"
     + "let total = reduce(y, (+))\n"
 
+/// A may-abort inner map (lgamma) read only under the host's branch: fusing
+/// would skip the inner evaluation on the untaken cells, so the pass declines
+/// (Optimize charter rule 1). The same inner read on every cell still fuses.
+let private fusionMayAbortConditional =
+    "let x = [1.0, 3.0, 2.0]
+"
+    + "let c = [1.0, 0.0, 1.0]
+"
+    + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> if k > 0.5 then g else 0.0) |> compute
+"
+let private fusionMayAbortUnconditional =
+    "let x = [1.0, 3.0, 2.0]
+"
+    + "let c = [1.0, 0.0, 1.0]
+"
+    + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k + g) |> compute
+"
+
 // ---------------------------------------------------------------------------
 
 /// The decision record for a source: install a collector, lower, drain.
@@ -672,6 +690,70 @@ let private runCase (name: string) (src: string) (wantBreaks: int) (wantAborts: 
             resultLine Fail name ($"expected {wantBreaks} guard break(s) / {wantAborts} abort(s), got {breaks} / {aborts}")
             false
 
+// ---------------------------------------------------------------------------
+// IR validator reach (IRValidate.validateModule). Its walkers are folds over
+// ExprShape / BinderShape, so a defect below ANY node is seen; these pins
+// corrupt a lowered program in the three places the old hand-listed walkers
+// were blind: a dangling reference under an unlisted node (IRGram), a
+// module binding that reads a LATER binding (the scope used to hold every
+// binding id), and an empty match in a FUNCTION body (checked for bindings
+// only). The untouched program must still validate.
+// ---------------------------------------------------------------------------
+
+let private validatorSrc =
+    "function f(x: Float64) -> Float64 = x + 1.0\n"
+    + "let a: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]\n"
+    + "let b = f(2.0)\n"
+
+let private validatorCase (name: string) (corrupt: Blade.IR.IRProgram -> Blade.IR.IRProgram) (needle: string option) =
+    match lower validatorSrc with
+    | Error e -> resultLine Fail name ($"lower: {e}"); false
+    | Ok ir ->
+        match needle, Blade.IRValidate.validateIR (corrupt ir) with
+        | None, Ok _ -> resultLine Pass name "the program validates"; true
+        | None, Error es -> resultLine Fail name (String.concat " | " es); false
+        | Some n, Error es when es |> List.exists (fun m -> m.Contains n) ->
+            resultLine Pass name ($"refused: {n}"); true
+        | Some n, Error es -> resultLine Fail name ("wanted `" + n + "`, saw: " + String.concat " | " es); false
+        | Some n, Ok _ -> resultLine Fail name ($"wanted `{n}`, but the corrupted program validated"); false
+
+let private mapMain (f: Blade.IR.IRModule -> Blade.IR.IRModule) (p: Blade.IR.IRProgram) : Blade.IR.IRProgram =
+    { p with Modules = p.Modules |> List.map f }
+
+let private validatorPins () =
+    let var (id, ty) = Blade.IR.IRVar (id, ty)
+    [ validatorCase "validate_clean_program" id None
+      // `a` rebuilt as gram(dangling, a): only a walker that descends IRGram sees v999999.
+      validatorCase "validate_dangling_under_gram"
+          (mapMain (fun m ->
+              { m with
+                  Bindings =
+                      m.Bindings |> List.map (fun b ->
+                          if b.Name = "b" then
+                              let aB = m.Bindings |> List.find (fun x -> x.Name = "a")
+                              { b with Value = Blade.IR.IRGram (var (999999, aB.Type), var (aB.Id, aB.Type), false) }
+                          else b) }))
+          (Some "dangling VarId reference: v999999")
+      // `b` moved ahead of `a` and made to read it: a use before definition.
+      validatorCase "validate_forward_binding_reference"
+          (mapMain (fun m ->
+              match m.Bindings |> List.tryFind (fun x -> x.Name = "a"), m.Bindings |> List.tryFind (fun x -> x.Name = "b") with
+              | Some aB, Some bB ->
+                  let bB' = { bB with Value = Blade.IR.IRExtent (var (aB.Id, aB.Type), 0) }
+                  let rest = m.Bindings |> List.filter (fun x -> x.Name <> "b")
+                  { m with Bindings = bB' :: rest }
+              | _ -> m))
+          (Some "dangling VarId reference")
+      // f's body replaced by a zero-case match.
+      validatorCase "validate_empty_match_in_function"
+          (mapMain (fun m ->
+              { m with
+                  Functions =
+                      m.Functions |> List.map (fun fn ->
+                          if fn.Name = "f" then { fn with Body = Blade.IR.IRMatch (Blade.IR.IRLit (Blade.IR.IRLitFloat 0.0), []) }
+                          else fn) }))
+          (Some "empty match expression") ]
+
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
     let results =
@@ -700,6 +782,10 @@ let runOptimizeTests () =
               (declinedMentioning "step ordinal") "declined for the step ordinal"
           decisionCase "decision_fusion_applied" fusionChain "elementwise-fusion" applied
               "elementwise-fusion applied"
+          decisionCase "decision_fusion_declined_conditional_abort" fusionMayAbortConditional "elementwise-fusion"
+              (declinedMentioning "may abort") "declined: the inner kernel may abort under a branch"
+          decisionCase "decision_fusion_applied_unconditional_abort" fusionMayAbortUnconditional "elementwise-fusion" applied
+              "elementwise-fusion applied (inner read on every cell)"
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()
@@ -751,6 +837,7 @@ let runOptimizeTests () =
           // The gram_apply advisory: left as written, spelled in the evidence.
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]
+        @ validatorPins ()
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed
     printFooter "Optimization Layer" [$"{passed} passed"; $"{failed} failed"]

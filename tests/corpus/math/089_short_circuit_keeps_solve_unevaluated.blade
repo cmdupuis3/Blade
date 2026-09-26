@@ -1,0 +1,16 @@
+// TEST: Short-circuit keeps a solve unevaluated
+// `&&` and `||` short-circuit (formalism.md): the right operand runs only
+// when the left does not decide the result. A statement-shaped right operand
+// (a solve, which lowering lifts into a let) used to be hoisted ABOVE the
+// operator, so the singular solve below ran unconditionally and aborted
+// BL8007 though `ok` is false. Its lets now drain inside the arm that
+// evaluates it -- in both lanes.
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [2.0, 4.0]]
+let b: Array<Float64 like Idx<2>> = [1.0, 1.0]
+let ok = false
+let yes = true
+let r_and = ok && (m.solve(A, b)(0) > 0.0)
+let r_or = yes || (m.solve(A, b)(0) > 0.0)
+// EXPECT: r_and = false
+// EXPECT: r_or = true

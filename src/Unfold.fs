@@ -155,82 +155,219 @@ let private containsStatic (e: Expr) : bool =
     found
 
 // Capture-avoiding substitution and per-instance binder freshening
+//
+// ONE scoped traversal serves both jobs. It knows every binder form of the
+// surface AST -- lambda parameters (and the where-clause / default
+// expressions that name them), let and block-let patterns (sequential
+// scope), match-case patterns (guard + body), `for ... in` statement
+// variables, and a recursive array's prefix / step / seed-step names -- and
+// every pattern kind (PatCons and PatStruct bind too; a guarded pattern's
+// guard sits in its own pattern's scope). At each binder it either
+//   * renames EVERY bound name (freshening an inlined static-function body:
+//     one fresh `__unf_<fn>_<inst>_` name per binder per unfold instance), or
+//   * renames only the bound names that would CAPTURE a free variable of a
+//     substituted expression (capture-avoiding substitution).
+// A rename is itself a substitution (old -> ExprVar new) applied inside the
+// binder's scope, simultaneously with the caller's map. The two used to be
+// separate walkers that each knew only lambdas and `ExprLet`, so a block
+// `let m = k` or a match binder `| m -> ...` in a static function captured
+// the caller's `m` at the inlining site (`first(m, B)` with body
+// `{ let m = k; x }` became `{ let m = B; m }` -- B, not m).
 
-/// Substitute free variables by expressions, stopping at shadowing binders.
-// (public: also reused by TypeCheck.inferRecArray to substitute the prefix /
-// step-ordinal names into the slice expression during the recursive-array
-// desugar.)
-let rec substFree (m: Map<string, Expr>) (e: Expr) : Expr =
-    if Map.isEmpty m then e else
-    let without (names: Set<string>) (mm: Map<string, Expr>) =
-        names |> Set.fold (fun acc n -> Map.remove n acc) mm
+/// Every name a pattern binds -- ALL pattern kinds (StaticEval's
+/// collectPatternBindings omits PatCons, which is a real binder here).
+let rec private patternBinders (pat: Pattern) : Set<string> =
+    match pat.Kind with
+    | PatternKind.PatWildcard | PatternKind.PatLit _ -> Set.empty
+    | PatternKind.PatVar n -> Set.singleton n
+    | PatternKind.PatTuple ps -> ps |> List.map patternBinders |> Set.unionMany
+    | PatternKind.PatCons (h, t) -> Set.union (patternBinders h) (patternBinders t)
+    | PatternKind.PatStruct (_, fields) -> fields |> List.map (snd >> patternBinders) |> Set.unionMany
+    | PatternKind.PatVariant (_, Some p) -> patternBinders p
+    | PatternKind.PatVariant (_, None) -> Set.empty
+    | PatternKind.PatGuarded (p, _) -> patternBinders p
+    | PatternKind.PatTyped (p, _) -> patternBinders p
+
+/// The guard expressions nested in a pattern (`p if g`): they see the
+/// pattern's binders, so they belong to its scope.
+let rec private patternGuards (pat: Pattern) : Expr list =
+    match pat.Kind with
+    | PatternKind.PatWildcard | PatternKind.PatLit _ | PatternKind.PatVar _ -> []
+    | PatternKind.PatTuple ps -> ps |> List.collect patternGuards
+    | PatternKind.PatCons (h, t) -> patternGuards h @ patternGuards t
+    | PatternKind.PatStruct (_, fields) -> fields |> List.collect (snd >> patternGuards)
+    | PatternKind.PatVariant (_, p) -> p |> Option.map patternGuards |> Option.defaultValue []
+    | PatternKind.PatGuarded (p, g) -> g :: patternGuards p
+    | PatternKind.PatTyped (p, _) -> patternGuards p
+
+/// Rename a pattern's binders by `ren`; `inScope` rewrites a guarded
+/// pattern's guard (which sees the pattern's own binders).
+let rec private renamePattern (ren: Map<string, string>) (inScope: Expr -> Expr) (pat: Pattern) : Pattern =
+    let go = renamePattern ren inScope
+    match pat.Kind with
+    | PatternKind.PatWildcard | PatternKind.PatLit _ -> pat
+    | PatternKind.PatVar n ->
+        (match Map.tryFind n ren with
+         | Some nn -> inheritPatSpan pat (PatVar nn)
+         | None -> pat)
+    | PatternKind.PatTuple ps -> inheritPatSpan pat (PatTuple (List.map go ps))
+    | PatternKind.PatCons (h, t) -> inheritPatSpan pat (PatCons (go h, go t))
+    | PatternKind.PatStruct (n, fields) -> inheritPatSpan pat (PatStruct (n, fields |> List.map (fun (f, p) -> (f, go p))))
+    | PatternKind.PatVariant (n, p) -> inheritPatSpan pat (PatVariant (n, Option.map go p))
+    | PatternKind.PatGuarded (p, g) -> inheritPatSpan pat (PatGuarded (go p, inScope g))
+    | PatternKind.PatTyped (p, ty) -> inheritPatSpan pat (PatTyped (go p, ty))
+
+/// Rename parameter names inside a where clause (comm / anticomm groups,
+/// omp dimension counts and custom conjuncts all name parameters).
+let private renameWhere (ren: Map<string, string>) (wc: WhereClause) : WhereClause =
+    if Map.isEmpty ren then wc else
+    let r (n: string) = Map.tryFind n ren |> Option.defaultValue n
+    { wc with
+        Commutativity = wc.Commutativity |> List.map (List.map r)
+        Antisymmetry = wc.Antisymmetry |> List.map (List.map r)
+        Parallel =
+            wc.Parallel |> List.map (fun p ->
+                match p with
+                | Omp o -> Omp { o with Vars = o.Vars |> List.map (fun (v, k) -> (r v, k)) }
+                | Cuda _ | Mpi -> p)
+        Custom = wc.Custom |> List.map (fun (n, args) -> (n, List.map r args)) }
+
+/// Enter a scope binding `bound` over the expressions `scope`: drop the
+/// shadowed entries of `m`, then pick renames -- every bound name when
+/// freshening; otherwise exactly the bound names that are free in a
+/// substituted value the scope actually uses (they would capture it). A
+/// capture rename is `<name>__<k>` with the least k clashing with nothing in
+/// sight, so it is deterministic.
+let private enterScope (fresh: (string -> string) option) (m: Map<string, Expr>)
+                       (bound: Set<string>) (scope: Expr list) : Map<string, Expr> * Map<string, string> =
+    let m1 = bound |> Set.fold (fun acc n -> Map.remove n acc) m
+    let renames =
+        match fresh with
+        | Some f -> bound |> Set.toList |> List.map (fun n -> (n, f n)) |> Map.ofList
+        | None when Map.isEmpty m1 || Set.isEmpty bound -> Map.empty
+        | None ->
+            let scopeVars = scope |> List.map collectAllVars |> Set.unionMany
+            let live = m1 |> Map.filter (fun k _ -> Set.contains k scopeVars)
+            let rangeFv = live |> Map.toList |> List.map (snd >> collectAllVars) |> Set.unionMany
+            let clash = Set.intersect bound rangeFv
+            if Set.isEmpty clash then Map.empty
+            else
+                let avoid = Set.unionMany [ rangeFv; scopeVars; bound; (m |> Map.keys |> Set.ofSeq) ]
+                clash |> Set.toList |> List.map (fun n ->
+                    let rec pick k =
+                        let cand = $"{n}__{k}"
+                        if Set.contains cand avoid then pick (k + 1) else cand
+                    (n, pick 1)) |> Map.ofList
+    let m2 = renames |> Map.fold (fun acc o nn -> Map.add o (mkExpr noSpan (ExprVar nn)) acc) m1
+    (m2, renames)
+
+/// The scoped traversal. `fresh = Some f` renames every binder to `f name`
+/// (freshening); None renames only capturing binders (substitution).
+let rec private substScoped (fresh: (string -> string) option) (m: Map<string, Expr>) (e: Expr) : Expr =
+    if Map.isEmpty m && Option.isNone fresh then e else
+    let enter = enterScope fresh
+    let recur mm x = substScoped fresh mm x
+    // A let whose value is a recursive-array definition names its own binder
+    // (`let rec q = match q with ...`): keep the def's Name in step.
+    let renameRecName (ren: Map<string, string>) (v: Expr) =
+        match v.Kind with
+        | ExprKind.ExprRecArray def when Map.containsKey def.Name ren ->
+            inheritSpan v (ExprRecArray { def with Name = ren.[def.Name] })
+        | _ -> v
+    let rec stmtExprs (s: Stmt) : Expr list =
+        match s with
+        | StmtSpanned (inner, _) -> stmtExprs inner
+        | StmtLet b -> [b.Value]
+        | StmtAssign (l, _, r) -> [l; r]
+        | StmtExpr x -> [x]
+        | StmtForIn (_, range, body) -> range :: List.collect stmtExprs body
+    // Statements bind sequentially: a binder's scope is the REST of its
+    // block, so the map (shrunk and renamed) threads forward.
+    let rec goStmts (mm: Map<string, Expr>) (ss: Stmt list) (finOpt: Expr option) : Stmt list * Expr option =
+        match ss with
+        | [] -> ([], Option.map (recur mm) finOpt)
+        | s :: rest ->
+            let restScope = (rest |> List.collect stmtExprs) @ Option.toList finOpt
+            let rec goOne (s: Stmt) : Stmt * Map<string, Expr> =
+                match s with
+                | StmtSpanned (inner, sp) ->
+                    let (s', mm') = goOne inner
+                    (StmtSpanned (s', sp), mm')
+                | StmtLet b ->
+                    let (mm', ren) = enter mm (patternBinders b.Pattern) (restScope @ patternGuards b.Pattern)
+                    let b' = { b with Pattern = renamePattern ren (recur mm') b.Pattern
+                                      Value = recur mm b.Value |> renameRecName ren }
+                    (StmtLet b', mm')
+                | StmtAssign (l, op, r) -> (StmtAssign (recur mm l, op, recur mm r), mm)
+                | StmtExpr x -> (StmtExpr (recur mm x), mm)
+                | StmtForIn (v, range, body) ->
+                    let (mmBody, ren) = enter mm (Set.singleton v) (List.collect stmtExprs body)
+                    let (body', _) = goStmts mmBody body None
+                    (StmtForIn (Map.tryFind v ren |> Option.defaultValue v, recur mm range, body'), mm)
+            let (s', mm') = goOne s
+            let (rest', fin') = goStmts mm' rest finOpt
+            (s' :: rest', fin')
     mapExprPre (fun x ->
         match x.Kind with
         | ExprKind.ExprVar n -> Map.tryFind n m
         | ExprKind.ExprLambda (ps, wc, body) ->
-            let m' = without (ps |> List.map (_.Name) |> Set.ofList) m
-            Some (inheritSpan x (ExprLambda (ps, wc, substFree m' body)))
+            let bound = ps |> List.map (_.Name) |> Set.ofList
+            let (m', ren) = enter m bound (body :: (ps |> List.choose (_.Default)))
+            let ps' =
+                ps |> List.map (fun p ->
+                    { p with Name = Map.tryFind p.Name ren |> Option.defaultValue p.Name
+                             Default = p.Default |> Option.map (recur m') })
+            Some (inheritSpan x (ExprLambda (ps', wc |> Option.map (renameWhere ren), recur m' body)))
         | ExprKind.ExprLet (b, body) ->
-            let m' = without (collectPatternBindings b.Pattern) m
-            Some (inheritSpan x (ExprLet ({ b with Value = substFree m b.Value }, substFree m' body)))
+            let (m', ren) = enter m (patternBinders b.Pattern) (body :: patternGuards b.Pattern)
+            let b' = { b with Pattern = renamePattern ren (recur m') b.Pattern
+                              Value = recur m b.Value |> renameRecName ren }
+            Some (inheritSpan x (ExprLet (b', recur m' body)))
         | ExprKind.ExprMatch (scrut, cases) ->
-            Some (inheritSpan x (ExprMatch (substFree m scrut, cases |> List.map (fun c ->
-                let m' = without (collectPatternBindings c.Pattern) m
-                { c with Guard = Option.map (substFree m') c.Guard; Body = substFree m' c.Body }))))
+            Some (inheritSpan x (ExprMatch (recur m scrut, cases |> List.map (fun c ->
+                let (m', ren) = enter m (patternBinders c.Pattern) (c.Body :: Option.toList c.Guard @ patternGuards c.Pattern)
+                { c with Pattern = renamePattern ren (recur m') c.Pattern
+                         Guard = Option.map (recur m') c.Guard
+                         Body = recur m' c.Body }))))
         | ExprKind.ExprBlock (stmts, fin) ->
-            // statements bind sequentially -- thread the shrinking map
-            let rec goStmt mm s =
-                match s with
-                | StmtSpanned (inner, sp) ->
-                    let (s', mm') = goStmt mm inner
-                    (StmtSpanned (s', sp), mm')
-                | StmtLet b ->
-                    let b' = { b with Value = substFree mm b.Value }
-                    (StmtLet b', without (collectPatternBindings b.Pattern) mm)
-                | StmtAssign (l, op, r) -> (StmtAssign (substFree mm l, op, substFree mm r), mm)
-                | StmtExpr x -> (StmtExpr (substFree mm x), mm)
-                | StmtForIn (v, range, body) ->
-                    let mmBody = Map.remove v mm
-                    let body' = body |> List.fold (fun (acc, mcur) st ->
-                                    let (st', m') = goStmt mcur st in (st' :: acc, m')) ([], mmBody)
-                                |> fst |> List.rev
-                    (StmtForIn (v, substFree mm range, body'), mm)
-            let (stmtsRev, mFin) =
-                stmts |> List.fold (fun (acc, mcur) st ->
-                    let (st', m') = goStmt mcur st in (st' :: acc, m')) ([], m)
-            Some (inheritSpan x (ExprBlock (List.rev stmtsRev, Option.map (substFree mFin) fin)))
+            let (stmts', fin') = goStmts m stmts fin
+            Some (inheritSpan x (ExprBlock (stmts', fin')))
+        | ExprKind.ExprRecArray def ->
+            // `| zero :: s -> zero :: SEED` binds s in SEED; `| prefix :: n
+            // [while G] -> prefix :: SLICE` binds prefix and n in SLICE and G.
+            let seed' =
+                def.SeedArm |> Option.map (fun (v, sd) ->
+                    let (ms, ren) = enter m (Set.singleton v) [sd]
+                    (Map.tryFind v ren |> Option.defaultValue v, recur ms sd))
+            let (mi, ren) = enter m (set [def.PrefixVar; def.StepVar]) (def.SliceExpr :: Option.toList def.Guard)
+            let r n = Map.tryFind n ren |> Option.defaultValue n
+            Some (inheritSpan x (ExprRecArray { def with
+                                                  SeedArm = seed'
+                                                  PrefixVar = r def.PrefixVar
+                                                  StepVar = r def.StepVar
+                                                  SliceExpr = recur mi def.SliceExpr
+                                                  Guard = def.Guard |> Option.map (recur mi) }))
         | _ -> None) e
+
+/// Substitute free variables by expressions -- capture-avoiding: a binder
+/// that would capture a free variable of a substituted value is renamed in
+/// its scope; shadowing binders stop the substitution.
+// (public: also reused by TypeCheck.inferRecArray to substitute the prefix /
+// step-ordinal names into the slice expression during the recursive-array
+// desugar.)
+let substFree (m: Map<string, Expr>) (e: Expr) : Expr = substScoped None m e
 
 /// Alpha-rename every binder introduced inside an inlined static-function
 /// body ("fresh names per unfold instance") so opaque argument expressions
-/// cannot be captured. Parameters are free in the body and are untouched.
-let rec private freshenBinders (prefix: string) (counter: int ref) (e: Expr) : Expr =
+/// cannot be captured, and so a staged `let` inside the body cannot shadow a
+/// caller name in ueval's staged environment. Parameters are free in the
+/// body and are untouched.
+let private freshenBinders (prefix: string) (counter: int ref) (e: Expr) : Expr =
     let fresh (orig: string) =
         let n = counter.Value
         counter.Value <- n + 1
         $"{prefix}{orig}_{n}"
-    let renamePat (pat: Pattern) : Pattern * Map<string, Expr> =
-        let rec go (pat: Pattern) (acc: Map<string, Expr>) =
-            match pat.Kind with
-            | PatternKind.PatVar n -> let nn = fresh n in (inheritPatSpan pat (PatVar nn), Map.add n (mkExpr pat.Span (ExprVar nn)) acc)
-            | PatternKind.PatTuple ps ->
-                let (ps', acc') = ps |> List.fold (fun (rs, a) p -> let (p', a') = go p a in (p' :: rs, a')) ([], acc)
-                (inheritPatSpan pat (PatTuple (List.rev ps')), acc')
-            | PatternKind.PatTyped (p, ty) -> let (p', a') = go p acc in (inheritPatSpan pat (PatTyped (p', ty)), a')
-            | _ -> (pat, acc)
-        go pat Map.empty
-    mapExprPre (fun x ->
-        match x.Kind with
-        | ExprKind.ExprLambda (ps, wc, body) ->
-            let renames = ps |> List.map (fun p -> (p.Name, fresh p.Name))
-            let ps' = (ps, renames) ||> List.zip |> List.map (fun (p, (_, nn)) -> { p with Name = nn })
-            let m = renames |> List.map (fun (o, nn) -> (o, inheritSpan x (ExprVar nn))) |> Map.ofList
-            Some (inheritSpan x (ExprLambda (ps', wc, freshenBinders prefix counter (substFree m body))))
-        | ExprKind.ExprLet (b, body) ->
-            let (pat', m) = renamePat b.Pattern
-            let b' = { b with Pattern = pat'; Value = freshenBinders prefix counter b.Value }
-            Some (inheritSpan x (ExprLet (b', freshenBinders prefix counter (substFree m body))))
-        | _ -> None) e
+    substScoped (Some fresh) Map.empty e
 
 // The staged value domain
 

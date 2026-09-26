@@ -1,0 +1,12 @@
+// TEST: Unfold block let does not capture a caller name
+// Inlining a static function substitutes its arguments into its body. A
+// block `let m = k` in the body used to keep its name (only lambda params and
+// expression lets were freshened, and the substitution was not capture-
+// avoiding), so the caller's `m` passed as `x` was captured:
+// `first(m, B)` became `{ let m = B; m }` -- B, not m -- and s printed
+// [20, 40, 60].
+static function first(x, k) = { let m = k; x }
+let m = [1.0, 2.0, 3.0]
+let B = [10.0, 20.0, 30.0]
+let s = static method_for(first(m, B)) <@> lambda(a) -> a * 2.0 |> compute
+// EXPECT: s = [2.0, 4.0, 6.0]
