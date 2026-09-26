@@ -1122,7 +1122,12 @@ let private cppNonCallKeywords =
 let private panicFreeNamespaces =
     [ "std::"; "thrust::"; "nested_array_utilities::"; "orbit_wreath_utilities::"
       "blade_linalg::"; "blade_lapack::"; "blade_rand::"; "linearized_storage::"
-      "symmetric::"; "antisymmetric::" ]
+      "symmetric::"; "antisymmetric::"
+      // The panic-free half of the arithmetic contract (exact integer powers,
+      // real `^`, the run-time libm); its faulting forms live in blade_rt.
+      // Both are in blade_runtime.hpp, whose tripwire (tests/Test_Diagnostics.fs)
+      // checks that neither namespace names a panic.
+      "blade_arith::"; "blade_libm::" ]
 
 /// Call-shaped tokens in emitted C++: an optionally-qualified `ns::name(`,
 /// plus the three spellings that name no identifier before the paren --

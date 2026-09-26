@@ -1397,6 +1397,51 @@ let private prependNetcdfBin (psi: ProcessStartInfo) =
                 psi.Environment.["PATH"] <- bin + ";" + cur
         | _ -> ()
 
+/// Name the way a compiled program DIED, from its exit code, or None for an
+/// ordinary exit. A Blade program exits 0, or 1 through blade_rt::panic after
+/// printing its own `error[BLxxxx]` line; anything else came from the OS
+/// killing it, and before this `blade run` printed nothing at all -- the
+/// program's stdout (often empty) and a bare nonzero status.
+///
+/// Windows reports an unhandled SEH exception as its NTSTATUS, which .NET
+/// surfaces as a NEGATIVE int32. POSIX shells and .NET report a signal death
+/// as 128 + signo. STATUS_ILLEGAL_INSTRUCTION is worth its hint: the usual
+/// cause is an executable built with -march=native (the default) running on a
+/// different CPU, e.g. a stale exe-cache entry or a copied binary.
+let describeCrashExit (exitCode: int) : string option =
+    let nt (name: string) (hint: string) =
+        let hex = (uint32 exitCode).ToString("X8")
+        Some ($"program crashed: {name} (0x{hex}){hint}")
+    if Platforms.os = Platforms.Windows then
+        match uint32 exitCode with
+        | 0xC0000005u -> nt "STATUS_ACCESS_VIOLATION" ""
+        | 0xC0000094u -> nt "STATUS_INTEGER_DIVIDE_BY_ZERO" ""
+        | 0xC0000095u -> nt "STATUS_INTEGER_OVERFLOW" ""
+        | 0xC00000FDu -> nt "STATUS_STACK_OVERFLOW" ""
+        | 0xC000001Du ->
+            nt "STATUS_ILLEGAL_INSTRUCTION"
+                " -- usually an executable built for another CPU (-march=native; set BLADE_MARCH or clear the exe cache)"
+        | 0xC0000096u -> nt "STATUS_PRIVILEGED_INSTRUCTION" ""
+        | 0xC000008Cu -> nt "STATUS_ARRAY_BOUNDS_EXCEEDED" ""
+        | 0xC000008Eu -> nt "STATUS_FLOAT_DIVIDE_BY_ZERO" ""
+        | 0xC0000409u -> nt "STATUS_STACK_BUFFER_OVERRUN" " (a fail-fast abort)"
+        | 0xC0000374u -> nt "STATUS_HEAP_CORRUPTION" ""
+        | 0xC0000135u -> nt "STATUS_DLL_NOT_FOUND" " (a runtime DLL is missing from PATH)"
+        | 0xC0000139u -> nt "STATUS_ENTRYPOINT_NOT_FOUND" " (a runtime DLL on PATH is the wrong version)"
+        | 0xC000013Au -> nt "STATUS_CONTROL_C_EXIT" ""
+        | code when code >= 0xC0000000u -> nt "unhandled exception" ""
+        | _ -> None
+    else
+        let sg (name: string) = Some ($"program crashed: {name} (exit {exitCode})")
+        match exitCode with
+        | 132 -> sg "SIGILL (illegal instruction -- an executable built for another CPU?)"
+        | 134 -> sg "SIGABRT"
+        | 135 -> sg "SIGBUS"
+        | 136 -> sg "SIGFPE"
+        | 137 -> sg "SIGKILL"
+        | 139 -> sg "SIGSEGV"
+        | _ -> None
+
 /// Run a compiled executable
 let runExecutable (exeFile: string) : Result<int * string, string> =
     try

@@ -17,8 +17,12 @@
 //     scale / real-part-only add), not full complex arithmetic -- CodeGen leaves
 //     a real operand un-promoted (coerceComplexOperand), so C++ resolves the
 //     mixed overload. Diverges from full complex on signed-zero / non-finite.
-//   * Scalar libm intrinsics: on this platform g++'s std::<fn> and .NET Math.*
-//     both bottom out in ucrtbase, so they are bit-identical. The lone exception
+//   * Scalar libm intrinsics: the compiled side calls the platform libm AT RUN
+//     TIME through blade_libm:: (src/cpp/blade_runtime.hpp) -- a non-builtin
+//     name g++ cannot constant-fold through MPFR, which it used to do for
+//     literal arguments (docs/formalism.md section 2.4) -- and here both
+//     g++'s libm and .NET Math.* bottom out in ucrtbase, so they are
+//     bit-identical. The lone exception
 //     is hypot (no .NET managed equivalent; naive sqrt(x*x+y*y) diverges) --
 //     routed through the platform libm, which the `Ucrt` module below binds by
 //     a logical name so the OS decides the file. Backend choice is a data table (mathBackend),
@@ -439,11 +443,59 @@ let private numRank (et: ElemType) =
 let cppArithElem (le: ElemType) (re: ElemType) : ElemType =
     if numRank le >= numRank re then le else re
 
-// Runtime faults for arithmetic. Integer division/modulo by zero is UB in
-// C++ (a SIGFPE trap, no output); the interpreter fails loudly instead, since
-// there is no matching printed output to reproduce.
-let private divByZero () : 'a =
-    raise (InterpPanic("BL8007", "integer division or modulo by zero", None, 0))
+// The arithmetic contract's FAULTS (docs/formalism.md section 2.4,
+// "Arithmetic semantics"), twins of blade_rt::idiv / imod / ipow / f2i in
+// src/cpp/blade_runtime.hpp and blade_idiv / blade_imod / blade_ipow /
+// blade_f2i64 in src/cpp/blade_llvm_shim.c: same code, same message, so the
+// three lanes fail IDENTICALLY. (Integer division by zero used to be BL8007
+// here -- the singular-matrix code -- while the compiled program died with
+// STATUS_INTEGER_DIVIDE_BY_ZERO and printed nothing.)
+let private intFault (msg: string) : 'a =
+    raise (InterpPanic("BL8013", msg, None, 0))
+
+/// b ^ e over integers: exact modulo 2^64 (two's-complement wrap, the residue
+/// blade_arith::ipow_nn computes; any multiplication order gives the same
+/// residue). 0 ^ 0 = 1; a negative exponent panics BL8013.
+let intPow64 (b: int64) (e: int64) : int64 =
+    if e < 0L then intFault "integer power with a negative exponent"
+    let mutable r = 1UL
+    let mutable x = uint64 b
+    let mutable n = uint64 e
+    while n <> 0UL do
+        if n &&& 1UL <> 0UL then r <- r * x
+        x <- x * x
+        n <- n >>> 1
+    int64 r
+
+/// The Int32 twin (exact modulo 2^32).
+let intPow32 (b: int32) (e: int32) : int32 =
+    if e < 0 then intFault "integer power with a negative exponent"
+    let mutable r = 1u
+    let mutable x = uint32 b
+    let mutable n = uint32 e
+    while n <> 0u do
+        if n &&& 1u <> 0u then r <- r * x
+        x <- x * x
+        n <- n >>> 1
+    int32 r
+
+/// Real `^`: x * x at an exponent of exactly 2, else the platform libm pow
+/// (blade_arith::fpow). The test is on the VALUE, so a computed 2 agrees with
+/// the literal one codegen constant-propagates.
+let realPow (b: float) (e: float) : float =
+    if e = 2.0 then b * b else mathPow b e
+
+/// Float -> integer conversion: truncation toward zero of a value the target
+/// can hold; NaN / +-inf / out of [-2^(w-1), 2^(w-1)) panics BL8014
+/// (blade_rt::f2i). Both bounds are powers of two, so the tests are exact.
+let private f2iFault () : 'a =
+    raise (InterpPanic("BL8014", "float-to-integer conversion of NaN or an out-of-range value", None, 0))
+let floatToInt64 (x: float) : int64 =
+    if not (x >= -9223372036854775808.0 && x < 9223372036854775808.0) then f2iFault ()
+    else int64 x
+let floatToInt32 (x: float) : int32 =
+    if not (x >= -2147483648.0 && x < 2147483648.0) then f2iFault ()
+    else int32 x
 
 /// Convert a computed value to a target scalar ElemType (the Blade node type).
 /// Post-arithmetic this is either identity or a Float32->Float64 widening (exact)
@@ -471,8 +523,14 @@ let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : V
         | IRAdd -> VInt32 (a + b)
         | IRSub -> VInt32 (a - b)
         | IRMul -> VInt32 (a * b)
-        | IRDiv -> if b = 0 then divByZero () else VInt32 (a / b)
-        | IRMod -> if b = 0 then divByZero () else VInt32 (a % b)
+        | IRDiv ->
+            if b = 0 then intFault "integer division by zero"
+            elif b = -1 then VInt32 (0 - a)   // MIN / -1 wraps to MIN (.NET would throw)
+            else VInt32 (a / b)
+        | IRMod ->
+            if b = 0 then intFault "integer modulo by zero"
+            elif b = -1 then VInt32 0
+            else VInt32 (a % b)
         | _ -> VInt32 0
     | ETInt64 ->
         let a = asI64 l
@@ -481,8 +539,14 @@ let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : V
         | IRAdd -> VInt (a + b)
         | IRSub -> VInt (a - b)
         | IRMul -> VInt (a * b)
-        | IRDiv -> if b = 0L then divByZero () else VInt (a / b)
-        | IRMod -> if b = 0L then divByZero () else VInt (a % b)
+        | IRDiv ->
+            if b = 0L then intFault "integer division by zero"
+            elif b = -1L then VInt (0L - a)
+            else VInt (a / b)
+        | IRMod ->
+            if b = 0L then intFault "integer modulo by zero"
+            elif b = -1L then VInt 0L
+            else VInt (a % b)
         | _ -> VInt 0L
     | ETFloat32 ->
         let a = asF32 l
@@ -623,9 +687,20 @@ let private evalArith (op: IRBinOp) (l: Value) (r: Value) : Value =
         else
             match op with
             | IRCaret ->
-                // `^` emits pow(l, r): compute in double, then to the node type
-                // (e.g. Int64^Int64 truncates the double result to int64).
-                convertTo resElem (VFloat (mathPow (asF64 l) (asF64 r)))
+                // The arithmetic contract (CodeGenExprSupport.renderContractBinOp):
+                // integer ^ integer is EXACT in the C++ evaluation type (it used
+                // to go through a double, so 3^35 printed ...704 for ...707);
+                // anything real is realPow in double, then rounded once to the
+                // node type (Float32 for a Float32 base).
+                (match cppArithElem le re with
+                 | ETInt64 -> VInt (intPow64 (asI64 l) (asI64 r))
+                 | ETInt32 -> VInt32 (intPow32 (asI32 l) (asI32 r))
+                 | ETFloat32 ->
+                     // Evaluated in float, like `s * 2` (blade_arith::fpowf):
+                     // the double pow rounded ONCE to float, then widened to
+                     // the node type if that is Float64.
+                     convertTo resElem (VFloat32 (float32 (realPow (asF64 l) (asF64 r))))
+                 | _ -> convertTo resElem (VFloat (realPow (asF64 l) (asF64 r))))
             | _ ->
                 let comp = cppArithElem le re
                 convertTo resElem (computeReal op comp l r)
@@ -634,7 +709,7 @@ let private evalArith (op: IRBinOp) (l: Value) (r: Value) : Value =
         // lowers here (`(l + r)` on std::string).
         match op, l, r with
         | IRAdd, VString a, VString b -> VString (a + b)
-        | _ -> raise (InterpPanic("BL8010", "unsupported operand types for binary operator", None, 0))
+        | _ -> raise (InterpPanic("BL9001", "unsupported operand types for binary operator", None, 0))
 
 // IEEE-exact per-type comparisons. Direct-typed float operators compile to the
 // IEEE ordered/unordered comparisons (NaN => false for </<=/>/>=/=, true for <>),
@@ -668,7 +743,7 @@ let rec private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
     // input, so it panics rather than quietly answering `false`.
     | VTuple ls, VTuple rs ->
         if ls.Length <> rs.Length then
-            raise (InterpPanic("BL8010", "comparison of tuples of different widths", None, 0))
+            raise (InterpPanic("BL9001", "comparison of tuples of different widths", None, 0))
         else
             let compEq (a: Value) (b: Value) =
                 match evalCompare IREq a b with VBool t -> t | _ -> false
@@ -705,7 +780,7 @@ let rec private evalCompare (op: IRBinOp) (l: Value) (r: Value) : Value =
             | ETInt64 -> VBool (cmpI64 op (asI64 l) (asI64 r))
             | ETFloat32 -> VBool (cmpF32 op (asF32 l) (asF32 r))
             | _ -> VBool (cmpF64 op (asF64 l) (asF64 r))
-        | _ -> raise (InterpPanic("BL8010", "unsupported operand types for comparison", None, 0))
+        | _ -> raise (InterpPanic("BL9001", "unsupported operand types for comparison", None, 0))
 
 let private toBool (v: Value) : bool =
     match v with VBool b -> b | VInt n -> n <> 0L | VInt32 n -> n <> 0 | _ -> false
@@ -736,10 +811,28 @@ let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
     // and complex machinery entirely and mirror CodeGen.renderMath2 directly:
     // `std::atan2(l, r)` and `(std::log(l) / std::log(r))`. The quotient is a
     // plain IEEE double division in both lanes.
-    | IRMath2 "atan2" -> VFloat (mathAtan2 (asF64 l) (asF64 r))
-    | IRMath2 "log_base" -> VFloat (math1 "log" (asF64 l) / math1 "log" (asF64 r))
+    //
+    // Float32 operands follow blade_libm's overloads (the arithmetic contract,
+    // docs/formalism.md section 2.4): atan2 of TWO Float32s is the double
+    // function rounded once to float; log_base rounds each Float32 operand's
+    // log to float, and the quotient of two floats is float's (a double
+    // quotient of two floats, rounded once to float, IS the float quotient).
+    | IRMath2 "atan2" ->
+        let v = mathAtan2 (asF64 l) (asF64 r)
+        (match l, r with
+         | VFloat32 _, VFloat32 _ -> VFloat (float (float32 v))
+         | _ -> VFloat v)
+    | IRMath2 "log_base" ->
+        let lg (v: Value) =
+            match v with
+            | VFloat32 f -> float (float32 (math1 "log" (float f)))
+            | _ -> math1 "log" (asF64 v)
+        let q = lg l / lg r
+        (match l, r with
+         | VFloat32 _, VFloat32 _ -> VFloat (float (float32 q))
+         | _ -> VFloat q)
     | IRMath2 name ->
-        raise (InterpPanic("BL8010", $"unknown binary math intrinsic '{name}'", None, 0))
+        raise (InterpPanic("BL9001", $"unknown binary math intrinsic '{name}'", None, 0))
     | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
 
 /// abs(x): std::abs, whose C++ overload preserves the operand's numeric type
@@ -761,20 +854,26 @@ let evalMath (name: string) (v: Value) : Value =
     else
         match v with
         | VComplex (r, i) -> let (xr, xi) = complexMath name r i in VComplex (xr, xi)
-        // NOTE: a Float32 operand would use C++'s float overload (expf, ...);
-        // that rare path is computed through double here, a documented minor divergence.
+        // A Float32 operand: the double function at the widened operand,
+        // rounded ONCE to float -- blade_libm's float overload for the
+        // transcendentals, and exactly std::sqrt/floor/ceil(float) for the
+        // correctly rounded ones (the arithmetic contract, docs/formalism.md
+        // section 2.4). The node type stays Float64; the VALUE is float's.
+        // lgamma/digamma take double on both sides (blade_rt::lgamma(double)).
+        | VFloat32 f when name <> "lgamma" && name <> "digamma" ->
+            VFloat (float (float32 (math1 name (float f))))
         | other -> VFloat (math1 name (asF64 other))
 
 /// Explicit numeric cast, matching CodeGen's static_cast / complex-constructor
-/// emission bit for bit: float->int truncates toward zero (C++ static_cast;
+/// emission bit for bit: float->int truncates toward zero (blade_rt::f2i;
 /// TypeCheck only licenses it through floor/ceil, so the value is already
-/// integral), int64->int32 wraps two's-complement, and a Complex64 target
+/// integral -- or NaN / out of range, which panics BL8014 in every lane), int64->int32 wraps two's-complement, and a Complex64 target
 /// squeezes both components through float32 -- VComplex stores doubles (the
 /// Value DU has no width-tagged complex case), so the narrowing is applied to
 /// the components exactly where C++ stores complex<float>.
 let private evalCast (target: ElemType) (v: Value) : Value =
     let bad () =
-        raise (InterpPanic("BL8010", $"numeric cast to {castNameOf target} on an unsupported operand (typecheck licenses casts, so this is an interpreter bug)", None, 0))
+        raise (InterpPanic("BL9001", $"numeric cast to {castNameOf target} on an unsupported operand (typecheck licenses casts, so this is an interpreter bug)", None, 0))
     let asRealF64 () =
         match v with
         | VInt n -> float n
@@ -797,15 +896,15 @@ let private evalCast (target: ElemType) (v: Value) : Value =
         (match v with
          | VInt n -> VInt n
          | VInt32 n -> VInt (int64 n)
-         | VFloat f -> VInt (int64 f)
-         | VFloat32 f -> VInt (int64 f)
+         | VFloat f -> VInt (floatToInt64 f)
+         | VFloat32 f -> VInt (floatToInt64 (float f))
          | _ -> bad ())
     | ETInt32 ->
         (match v with
          | VInt n -> VInt32 (int32 n)
          | VInt32 n -> VInt32 n
-         | VFloat f -> VInt32 (int32 f)
-         | VFloat32 f -> VInt32 (int32 f)
+         | VFloat f -> VInt32 (floatToInt32 f)
+         | VFloat32 f -> VInt32 (floatToInt32 (float f))
          | _ -> bad ())
     | ETComplex128 ->
         (match v with

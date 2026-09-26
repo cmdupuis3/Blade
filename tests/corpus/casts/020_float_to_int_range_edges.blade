@@ -1,0 +1,18 @@
+// TEST: Float To Int Range Edges
+// ============================================================================
+// The in-range edges of the checked float -> integer conversion
+// (docs/formalism.md section 2.4): the range is [-2^(w-1), 2^(w-1)), so the
+// most negative value converts and the positive bound's predecessor does.
+// Lifted over an array too, where the check runs per element.
+
+let lo = Int64(floor(-9223372036854775808.0))
+let hi = Int64(floor(9223372036854774784.0))
+let lo32 = Int32(ceil(-2147483648.5))
+let hi32 = Int32(floor(2147483647.75))
+let xs: Array<Float64 like Idx<3>> = [1.5, -1.5, 1.0e15]
+let ks = Int64(floor(xs))
+// EXPECT: lo = -9223372036854775808
+// EXPECT: hi = 9223372036854774784
+// EXPECT: lo32 = -2147483648
+// EXPECT: hi32 = 2147483647
+// EXPECT: ks = [1, -2, 1000000000000000]

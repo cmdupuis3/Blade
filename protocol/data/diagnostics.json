@@ -884,6 +884,29 @@
       ],
       "docs": []
     },
+    "BL8013": {
+      "title": "integer arithmetic fault",
+      "explanation": "An integer operation had no integer answer: `/` or `%` with a zero divisor, or `^` with a negative exponent. Blade's arithmetic contract (docs/formalism.md section 2.4) makes this a panic in every lane -- the compiled program, the LLVM lane and the interpreter fail with the same code and message. `MIN / -1` is NOT a fault: it wraps to MIN, like every other overflowing integer operation, and `MIN % -1` is 0.",
+      "fix": "Guard the divisor (`if d != 0 then n / d else ...`) or the exponent before the operation. For a negative exponent convert to Float64 first (`Float64(b) ^ Float64(e)`) if a real result is what is wanted.",
+      "examples": [
+        "tests/corpus/basic/067_int_div_by_zero_aborts.blade",
+        "tests/corpus/basic/071_int_pow_negative_exponent_aborts.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL8014": {
+      "title": "float-to-integer conversion out of range",
+      "explanation": "A float -> integer cast (`Int64(floor(x))`, `Int32(ceil(x))`) received NaN, an infinity, or a value outside the target type's range. A float-to-int conversion truncates a value the target can hold; anything else panics identically in every lane rather than producing a platform sentinel or a saturated value the program would silently compute on.",
+      "fix": "Check the operand before casting -- a NaN usually means an upstream 0/0 or an empty mean -- or clamp it explicitly to the range the integer is meant to cover.",
+      "examples": [
+        "tests/corpus/casts/017_float_to_int_nan_aborts.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
     "BL9001": {
       "title": "internal compiler error",
       "explanation": "An invariant inside the compiler broke, or an unexpected exception escaped to the CLI boundary. This is a bug in Blade, not in the program being compiled.",

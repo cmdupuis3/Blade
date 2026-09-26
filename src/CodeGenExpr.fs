@@ -77,10 +77,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppCore subst names l
         let rStr = exprToCppCore subst names r
-        match op with
-        | IRCaret -> $"pow({lStr}, {rStr})"
-        | IRMath2 name -> renderMath2 name lStr rStr
-        | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        match renderContractBinOp op l r lStr rStr inferExprType, op with
+        | Some s, _ -> s
+        | None, IRCaret -> $"pow({lStr}, {rStr})"
+        | None, IRMath2 name -> renderMath2 name lStr rStr
+        | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRUnaryOp (IRConj, e) ->
         // conj is std::conj/thrust::conj on complex operands; the identity on
         // reals (mathematically conj(x)=x for real x, and std::conj(double)

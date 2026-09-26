@@ -106,13 +106,43 @@ spelled (a rounded value bound to a name and cast later refuses on
 purpose). Array operands lift elementwise like `cos(A)`; `Int64(floor(A))`
 fuses the rounding and the cast into one kernel.
 
-Integer `+`, `-` and `*` wrap: Int32 and Int64 arithmetic is two's
-complement modulo 2³² / 2⁶⁴ in every lane (the interpreter's .NET integers
-are unchecked; the C++ build passes `-fwrapv`; the LLVM lane emits no
-`nsw`). So `x + 1 > x` is `false` at the maximum, and a wrapped sum still
-carries the true value modulo 2⁶⁴ (`proofs/BladeNumericContract.v`,
-`int64_observation_exact`). Integer `/` and `%` truncate toward zero; a zero
-divisor is a runtime fault (BL8007 in the interpreter), not a wrapped value.
+**Arithmetic semantics — one contract, every lane.** The compiled program
+(g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane
+(`src/EmitLlvm.fs` + `src/cpp/blade_llvm_shim.c`) and compile-time static
+evaluation compute the same value, or fail with the same code (a `let static`
+fold refuses at compile time instead):
+
+| Operation | Result |
+|---|---|
+| Int `+` `-` `*` | two's complement modulo 2³² / 2⁶⁴ — WRAPS (interpreter: unchecked .NET integers; C++: `-fwrapv`; LLVM: no `nsw`). `x + 1 > x` is `false` at the maximum, and a wrapped sum still carries the true value modulo 2⁶⁴ (`proofs/BladeNumericContract.v`, `int64_observation_exact`) |
+| Int `/` `%` | truncate toward zero. A zero divisor PANICS **BL8013** (`integer division by zero` / `integer modulo by zero`). `MIN / -1` wraps to `MIN` and `MIN % -1` is `0` (C++ UB, an x86 trap, a .NET exception — defined here) |
+| Int `^` Int | EXACT, wrapping like `*` (square-and-multiply modulo 2ʷ); `0 ^ 0 = 1`; a negative exponent PANICS **BL8013** (`integer power with a negative exponent`) — convert to Float64 first for a real power |
+| Real `^` | `x * x` when the exponent is exactly 2, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double |
+| float → int cast (`Int64(floor(x))`) | truncation of a value the target can hold; NaN, ±∞, or anything outside `[-2ʷ⁻¹, 2ʷ⁻¹)` PANICS **BL8014** — never a saturated value or a platform sentinel |
+| Int64 → Int32 cast | wraps (two's complement) |
+| transcendental intrinsics (`exp log log10 sin cos tan sinh cosh tanh asin acos atan atan2`, and `pow`) | the PLATFORM libm's value, computed AT RUN TIME — never folded at compile time, so a literal argument and the same value read from an array agree. A Float32 operand is evaluated by the double function and rounded once to Float32; an integer operand widens to double |
+| `sqrt` `floor` `ceil` `abs` `fma` | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
+| integer literals | exact, including array-literal leaves (never routed through a double) |
+
+A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) with
+the call stack; nothing in the table is undefined behavior in any lane. The
+fast paths are kept by construction: a nonzero literal divisor other than
+`-1` compiles to a plain `/`, a literal nonnegative exponent to a multiply
+chain (`x ^ 2` is one multiply in both the integer and the real case), and
+the libm functions are declared `const` under a non-builtin name
+(`blade_libm::`, `src/cpp/blade_runtime.hpp`), so a loop-invariant call is
+still hoisted — only the fold is gone.
+
+"The platform libm" is a per-platform claim: the interpreter P/Invokes the
+same library the compiled program links (ucrtbase on Windows), so the
+differential gates are byte-exact on one machine; two operating systems may
+legitimately differ in a transcendental's last ulp. Outside the contract,
+documented rather than hidden: complex transcendentals and complex `^`
+(libstdc++'s own algorithms; the interpreter declines what it cannot
+reproduce), CUDA device bodies (device libm, plain integer `/`), a host
+compiler without asm labels (MSVC, the nvcc host pass: `blade_libm::`
+forwards to `std::` there), and `lgamma`/`digamma`, which are Blade's own
+series on both sides (BL8008 outside `x > 0`).
 
 Mixed-type arithmetic still promotes — float beats int, wider beats
 narrower within a category, complex promotes componentwise, and a mixed

@@ -432,6 +432,13 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
                     try File.Delete(h) with _ -> ()
             Ok finalPath
 
+/// One stderr line naming an OS-level crash of the compiled program
+/// (Build.describeCrashExit); the exit code itself is passed through unchanged.
+let private reportCrash (exitCode: int) : unit =
+    match describeCrashExit exitCode with
+    | Some line -> eprintfn "%s" line
+    | None -> ()
+
 /// Run a .edgi file: compile and execute. `mpiRanks = Some n` switches on the
 /// MPI emit gate (decomposed kernels + Init/Finalize + rank-0 printing),
 /// links -lmsmpi, launches under `mpiexec -n n`. None = serial path.
@@ -447,6 +454,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
                 1
             | Ok (exitCode, output) ->
                 printf "%s" output
+                reportCrash exitCode
                 exitCode
     | Some ranks ->
         CodeGen.setMpiEmitMode true
@@ -460,6 +468,7 @@ let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPin
                     1
                 | Ok (exitCode, output) ->
                     printf "%s" output
+                    reportCrash exitCode
                     exitCode
         finally
             CodeGen.setMpiEmitMode false

@@ -1,0 +1,28 @@
+// TEST: Int Div Wraps And Truncates
+// ============================================================================
+// Integer `/` and `%` truncate toward zero, and the one overflowing case
+// WRAPS like every other integer op: MIN / -1 = MIN and MIN % -1 = 0 (in C++
+// both are UB and x86's idiv traps; .NET throws). The -1 arrives computed
+// (`neg`) and as a literal: the emitters take different paths for the two
+// (a nonzero literal divisor other than -1 stays a plain `/`), so both are
+// pinned. docs/formalism.md section 2.4.
+
+let d: Array<Int64 like Idx<2>> = [1, -2]
+let neg = reduce(d, (+))
+let m = -9223372036854775807 - 1
+let q = m / neg
+let r = m % neg
+let ql = m / -1
+let t1 = -7 / 2
+let t2 = -7 % 3
+let t3 = 7 % -3
+let t4 = (neg - 6) / 2
+let t5 = 17 / (neg + 4)
+// EXPECT: q = -9223372036854775808
+// EXPECT: r = 0
+// EXPECT: ql = -9223372036854775808
+// EXPECT: t1 = -3
+// EXPECT: t2 = -1
+// EXPECT: t3 = 1
+// EXPECT: t4 = -3
+// EXPECT: t5 = 5
