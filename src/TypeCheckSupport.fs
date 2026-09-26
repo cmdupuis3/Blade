@@ -1394,37 +1394,6 @@ let concreteRankOf (subst: Subst) (ty: IRType) : int option =
         | _ -> None
     go ty
 
-/// Coarse VALUE CLASS of a type -- "what kind of thing this is at runtime"
-/// -- when the type is concrete enough to know. `None` means "unknown,
-/// stand down"; callers compare two `Some` classes only, so an unresolved
-/// type never manufactures a mismatch. That is what keeps HM alive here: a
-/// `T^k` parameter resolves to an open IRTInfer at the call site and simply
-/// declines to be classified, so no call site ever binds it.
-///
-/// Deliberately COARSE. The numeric tower is ONE class (an Int64 literal
-/// legitimately reaches a Float64 parameter, and Float-into-Int is the
-/// annotation seam's business, not this one); units and index tags are
-/// transparent, so bare-literal unit LIFTING (`f(2.0)` into a `Float64<day>`
-/// parameter, f1ba7b2) still works and BL3010 keeps its own, earlier say;
-/// arrays decline because rank is `concreteRankOf`'s job; tuples decline
-/// because tuple WIDTH belongs to the pack/tuple schema
-/// (docs/plan-tuples-vs-arg-packs.md), not to an element-class test.
-let concreteClassOf (subst: Subst) (ty: IRType) : string option =
-    let rec go t =
-        match subst.Resolve t with
-        | IRTUnitAnnotated (inner, _) -> go inner
-        | IRTIdxTagged (inner, _) -> go inner
-        | IRTScalar ETString -> Some "text"
-        | IRTScalar ETBool -> Some "boolean"
-        | IRTScalar ETUnit -> Some "unit"
-        | IRTUnit -> Some "unit"
-        | IRTScalar _ -> Some "number"
-        | IRTDist _ -> Some "distribution"
-        | IRTNamed _ -> Some "named type"
-        | FuncElem _ -> Some "function"
-        | _ -> None
-    go ty
-
 /// Pair each argument with the parameter it binds, 1:1 and positional,
 /// truncated to the shorter list: (0-based parameter position, param type,
 /// arg type).
@@ -1575,11 +1544,14 @@ let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
 ///
 /// `function add0(a: T^0, b: T^0)` declares ONE variable in two positions, so
 /// `add0(A, s)` asks `T` to be both `Array<Float64 like Idx<3>>` and
-/// `Float64`. Nothing refused it. Direct application does not unify
-/// parameters against arguments (see `dispatchAppOrIndex`'s FuncElem arm),
-/// which is exactly what keeps HM alive at this seam -- so `T` stays an open
-/// `IRTInfer` and every check here stands down by design: `concreteRankOf`
-/// and `concreteClassOf` both DECLINE an open variable. IR-phase
+/// `Float64`. Nothing refused it. The DECLARATION's `T` is never bound by a
+/// call (the call judgment unifies an instantiated COPY -- see
+/// `instantiateOpenVars`), so on the declaration `T` stays an open `IRTInfer`
+/// and a rank check stands down on it: `concreteRankOf` DECLINES an open
+/// variable. The eager seam's judgment also refuses these (its copy of `T`
+/// is taught by the first argument); this predicate keeps the wording and
+/// is what the post-zonk sweep runs on arguments still open at the seam.
+/// IR-phase
 /// monomorphization then took the FIRST teaching and silently discarded the
 /// rest (`IRMono.unifyParamWithArg`'s "inconsistent" arm, whose comment said
 /// the IR validator would catch it -- it does not), emitting a specialization
@@ -1698,33 +1670,6 @@ let abstractVarConflictMessage (subst: Subst) (callee: string)
     + $"{firstPos + 1} makes it {(ppIRType (subst.Resolve firstTy))} while argument {conflictPos + 1} "
     + $"makes it {(ppIRType (subst.Resolve conflictTy))}. " + tail
 
-/// The element-CLASS comparison, the twin of `firstArgRankClash` over the
-/// same pairs: the first position whose two classes are both known and
-/// disagree, as (0-based position, param type, arg type). Same two
-/// stand-downs, for the same reasons -- a variadic `Poly<T^r>` pack makes
-/// positional pairing meaningless, and under-application is an arity error
-/// whose own message must not be buried.
-///
-/// This is the CHECK-time half of a hole that used to reach g++: a direct
-/// application does NOT unify arguments against parameters (see the comment
-/// in dispatchAppOrIndex's FuncElem arm), so nothing else at this seam
-/// noticed `f("hello")` against a `Float64` parameter. Unifying here is not
-/// an option: a `function` declaration's type is created ONCE with SHARED
-/// type variables across every call site (checkFunctionDecl binds it with
-/// bindVarSimple, no scheme), so unifying at one site would over-constrain
-/// the next. Comparing resolved CLASSES binds nothing.
-let firstArgTypeClash (subst: Subst) (paramTys: IRType list) (argTys: IRType list)
-                      : (int * IRType * IRType) option =
-    let isVariadic =
-        paramTys |> List.exists (fun t -> (subst.Resolve t).IsIRTPoly)
-    if isVariadic || argTys.Length < paramTys.Length then None
-    else
-        appArgPairs paramTys argTys
-        |> List.tryPick (fun (i, pTy, aTy) ->
-            match concreteClassOf subst pTy, concreteClassOf subst aTy with
-            | Some pc, Some ac when pc <> ac -> Some (i, pTy, aTy)
-            | _ -> None)
-
 /// The synthetic base dimension standing for parameter `i`'s unit while
 /// `funcUnitTransform` probes a function body. `Unit` declarations are ordinary
 /// identifiers and a `UnitSig`'s dims are keyed by plain strings, so a name no
@@ -1766,22 +1711,15 @@ let applyUnitTransform (exponents: int list) (residual: UnitSig)
                 argAt i |> Option.map (fun au -> unitMul u (unitPow au e))))
             (Some residual)
 
-/// A callee's recorded transform, by the name the call site writes. Tries the
-/// name as written, then its unqualified tail: `checkFunctionDecl` registers
-/// under the DECLARED name, so a module-qualified call (`stats.mean(x)`) has to
-/// drop the alias to find its own callee, or the qualified and unqualified
-/// spellings of one call stop agreeing.
+/// A callee's recorded transform, by the name the call site writes. A
+/// module-qualified call (`stats.mean(x)`) finds its own callee under the
+/// `alias.name` key the import registers (TypeModuleExport.Callees) -- NOT by
+/// dropping the alias, which used to hand a callee with no recorded transform
+/// the transform of whichever same-named function another module declared.
 let lookupUnitTransform (env: TypeEnv) (n: string) : (int list * UnitSig) option =
-    let direct (k: string) =
-        match env.FuncUnitTransform.TryGetValue k with
-        | true, t -> Some t
-        | _ -> None
-    match direct n with
-    | Some t -> Some t
-    | None ->
-        match n.LastIndexOf '.' with
-        | i when i >= 0 -> direct (n.Substring(i + 1))
-        | _ -> None
+    match env.FuncUnitTransform.TryGetValue n with
+    | true, t -> Some t
+    | _ -> None
 
 /// Carry a generic call's DEDUCED return unit, derived from its ARGUMENTS.
 ///
@@ -1789,11 +1727,11 @@ let lookupUnitTransform (env: TypeEnv) (n: string) : (int list * UnitSig) option
 /// parameter's ELEMENT and the return -- measured, both are the same `IRTInfer`
 /// id: `lowerTypeExpr` mints `T^1` and `T^0` under separate typeVarScope keys,
 /// and checking the BODY against the declared return is what ties them. Direct
-/// application then deliberately does NOT unify parameters against arguments --
-/// see the FuncElem arm below, and `firstArgTypeClash` above for why unifying
-/// here is not an option -- so the caller's element type never reaches that
-/// variable, and every unit rule (`unitRulesForOpWith`, `unitRulesForUnaryOp`,
-/// ascription) read `IR.getUnits` off a bare variable carrying no signature.
+/// application never binds that DECLARATION variable (the call judgment below
+/// unifies an instantiated copy, with units stripped), so the caller's unit
+/// never reaches it, and every unit rule (`unitRulesForOpWith`,
+/// `unitRulesForUnaryOp`, ascription) read `IR.getUnits` off a result carrying
+/// no signature.
 /// Measured: over a `Float<meters>` row and a `Float<seconds>` scalar,
 /// `mean(x) + t` was ACCEPTED, while the same clash on a direct element read
 /// `x((0 : Idx<3>)) + t` correctly gave BL3006. The ascription and arithmetic
@@ -1829,36 +1767,339 @@ let lookupUnitTransform (env: TypeEnv) (n: string) : (int list * UnitSig) option
 /// same place `stampElemUnits` writes for synthesized kernel pipelines. A return
 /// that already carries a signature (a written `-> Float<meters>`, or `T<u>^0`)
 /// is left alone, so an explicit annotation still wins.
-let internal unitStampedReturn (env: TypeEnv) (callee: string option)
-                              (tArgs: TypedExpr list) (retTy: IRType) : IRType =
+/// The call judgment unifies an INSTANTIATED copy of the signature with units
+/// stripped, so a call whose result the arguments determine gets a concrete
+/// result type (`resultRet`) -- still carrying no unit, since units are judged
+/// by their own rule. `unitStampedReturnOnto` therefore decides "deduced" on
+/// the DECLARED return (`declRet`) and stamps the transform's unit onto the
+/// result the judgment chose. `unitStampedReturn` is the one-type spelling.
+let internal unitStampedReturnOnto (env: TypeEnv) (callee: string option)
+                                  (tArgs: TypedExpr list) (declRet: IRType) (resultRet: IRType) : IRType =
     // The element UNIT of a type, at the depth the unit lives: the type itself
     // for a scalar position, its `ElemType` for an array.
     let elemUnits (t: IRType) : UnitSig option =
         match env.Subst.Resolve t with
         | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
         | r -> IR.getUnits r
-    let resolvedRet = env.Subst.Resolve retTy
+    let resolvedDecl = env.Subst.Resolve declRet
     let deduced =
         // Only a DEDUCED return is in scope: one whose element is still an open
         // variable. A concrete return type either carries its own signature or
         // legitimately has none.
-        match resolvedRet with
+        match resolvedDecl with
         | ArrayElem at -> (env.Subst.Resolve at.ElemType).IsIRTInfer
         | IRTInfer _ -> true
         | _ -> false
-    if not deduced || (elemUnits resolvedRet).IsSome then retTy
+    let resolvedRet = env.Subst.Resolve resultRet
+    if not deduced || (elemUnits resolvedDecl).IsSome || (elemUnits resolvedRet).IsSome then resultRet
     else
         match callee |> Option.bind (lookupUnitTransform env) with
-        | None -> retTy
+        | None -> resultRet
         | Some (exponents, residual) ->
             match applyUnitTransform exponents residual
                       (tArgs |> List.map (fun a -> elemUnits a.Type)) with
-            | None -> retTy
+            | None -> resultRet
             | Some u ->
                 match resolvedRet with
                 | ArrayElem at ->
                     mkArrayLike { at with ElemType = IRTUnitAnnotated (env.Subst.Resolve at.ElemType, u) }
                 | r -> IRTUnitAnnotated (r, u)
+
+let internal unitStampedReturn (env: TypeEnv) (callee: string option)
+                              (tArgs: TypedExpr list) (retTy: IRType) : IRType =
+    unitStampedReturnOnto env callee tArgs retTy retTy
+
+// ---------------------------------------------------------------------------
+// THE CALL JUDGMENT (docs/plans/plan-call-judgment.md)
+//
+// One judgment for "these arguments meet these parameters", shared by the
+// unqualified and the module-qualified application seams (the qualified
+// spelling is rewritten onto the unqualified path, so there is ONE caller).
+// Its core is ordinary HM application: INSTANTIATE the callee's signature
+// (fresh copies of every open variable in it), then UNIFY the copy against
+// the arguments. A `function` declaration's type is bound once
+// (`bindVarSimple`, no scheme), so its variables are shared by every call
+// site -- which is exactly why the copy, and never the declaration, is what
+// a call binds: the declaration stays open for IR-phase monomorphization,
+// and each call learns its own instance.
+// ---------------------------------------------------------------------------
+
+/// Replace inference variables per `mapping`, through EVERY wrapper -- unlike
+/// `TypeEnv.instantiate`'s walk, units and index tags are descended too, since
+/// a `T<u>^0` parameter is a unit-annotated variable.
+let rec internal substInferVars (mapping: Map<int, IRType>) (ty: IRType) : IRType =
+    let go = substInferVars mapping
+    match ty with
+    | IRTInfer id -> Map.tryFind id mapping |> Option.defaultValue ty
+    | IRTTuple ts -> IRTTuple (ts |> List.map go)
+    | IRTArrow (slots, ret, identity) ->
+        let slot = function
+            | SVal t -> SVal (go t)
+            | s -> s
+        IRTArrow (slots |> List.map slot, go ret, identity)
+    | IRTComputation t -> IRTComputation (go t)
+    | IRTPoly (t, v) -> IRTPoly (go t, v)
+    | IRTDist (order, elem, axes) -> IRTDist (order, go elem, axes)
+    | IRTLoop lt ->
+        IRTLoop { lt with
+                    ArrayTypes = lt.ArrayTypes |> List.map go
+                    KernelType = lt.KernelType |> Option.map go }
+    | IRTUnitAnnotated (inner, u) -> IRTUnitAnnotated (go inner, u)
+    | IRTIdxTagged (inner, r) -> IRTIdxTagged (go inner, r)
+    | _ -> ty
+
+/// INSTANTIATE: copy the open variables of `tys` (resolved) that `quantified`
+/// admits to fresh ones -- for a declared function, the ones its declaration
+/// minted (TypeEnv.FuncSigVarRange), which is exactly what HM would
+/// quantify; a variable shared with the environment is left alone.
+/// The per-variable invariants that give a signature variable its meaning
+/// travel with the copy -- the `T^k` exact-rank pin, a deduced rank lower
+/// bound, a literal's value class -- so the copy refuses what the original
+/// would. The polymorphic MARK does not travel: it tells zonk to keep a
+/// DECLARATION's variable open for monomorphization, and a copy is never one.
+/// Returns the copied types and the set of fresh ids.
+let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: IRType list)
+                                 : IRType list * Set<int> =
+    let resolved = tys |> List.map subst.Resolve
+    let free =
+        resolved |> List.map (freeInferVars subst) |> Set.unionMany |> Set.filter quantified
+    if free.IsEmpty then (resolved, Set.empty)
+    else
+        let pairs =
+            free |> Set.toList |> List.map (fun v ->
+                match subst.Fresh() with
+                | IRTInfer fid ->
+                    subst.CopyArityConstraint(v, fid)
+                    subst.CopyRankLowerBound(v, fid)
+                    subst.CopyLiteralDefault(v, fid)
+                    (v, fid)
+                | _ -> failwith "unreachable: Subst.Fresh returns IRTInfer")
+        let mapping = pairs |> List.map (fun (v, fid) -> (v, IRTInfer fid)) |> Map.ofList
+        (resolved |> List.map (substInferVars mapping), pairs |> List.map snd |> Set.ofList)
+
+/// Which open variables a call through `tFunc` may instantiate, and whether
+/// the callee's declaration is FINISHED. Only a declared function quantifies
+/// anything (the ids its declaration minted, TypeEnv.FuncSigVarRange); a
+/// lambda, a function-typed parameter or a curried head quantifies nothing.
+/// `closed` is false for a recursive call inside the declaration's own body,
+/// whose signature is still being inferred.
+let internal calleeQuantifier (env: TypeEnv) (tFunc: TypedExpr) : (int -> bool) * bool =
+    match tFunc.Kind with
+    | TExprVar (_, vid, _) ->
+        (match env.FuncSigVarRange.TryGetValue vid with
+         | true, (lo, hi) -> (fun v -> v >= lo && v < hi), hi <> System.Int32.MaxValue
+         | _ -> (fun _ -> false), false)
+    | _ -> (fun _ -> false), false
+
+/// Strip unit annotations at every depth (array elements, tuple components,
+/// function slots). The call judgment compares SHAPES with units removed --
+/// units are judged by their own rule (`unitClash`), and letting unify's
+/// unit arm see them would bind a generic `T` to `Float<m>`, giving
+/// `variance` an `m` result where its recorded transform says `m^2`.
+let rec internal stripUnitsDeep (subst: Subst) (ty: IRType) : IRType =
+    let go = stripUnitsDeep subst
+    match subst.Resolve ty with
+    | IRTUnitAnnotated (inner, _) -> go inner
+    | IRTTuple ts -> IRTTuple (ts |> List.map go)
+    | IRTArrow (slots, ret, identity) ->
+        let slot = function
+            | SVal t -> SVal (go t)
+            | s -> s
+        IRTArrow (slots |> List.map slot, go ret, identity)
+    | IRTIdxTagged (inner, r) -> IRTIdxTagged (go inner, r)
+    | IRTComputation t -> IRTComputation (go t)
+    | IRTDist (order, elem, axes) -> IRTDist (order, go elem, axes)
+    | t -> t
+
+/// A numeric LITERAL argument (optionally negated). A literal synthesizes its
+/// natural type (`3` is Int64) but, like at every other checking seam, adapts
+/// to the scalar it is written against -- `f(3)` into an `Int32` or a
+/// `Float32` parameter is the literal meaning that type, not a narrowing.
+let internal numericLiteralKind (a: TypedExpr) : ElemType option =
+    let rec go (e: TypedExpr) =
+        match e.Kind with
+        | TExprLit (LitInt _) -> Some ETInt64
+        | TExprLit (LitFloat _) -> Some ETFloat64
+        | TExprUnaryOp (_, inner) -> go inner
+        | _ -> None
+    go a
+
+/// Coarse head kind of a RESOLVED type, for the judgment's fallback: two
+/// different known kinds never agree; `None` (an open, deferred or otherwise
+/// unmodelled head) stands down.
+let internal headKindOf (t: IRType) : string option =
+    match t with
+    | IRTScalar _ -> Some "scalar"
+    | ArrayElem _ -> Some "array"
+    | FuncElem _ -> Some "function"
+    | IRTTuple _ -> Some "tuple"
+    | IRTNamed _ -> Some "named"
+    | IRTDist _ -> Some "dist"
+    | _ -> None
+
+/// THE PER-ARGUMENT JUDGMENT: does an argument of type `a` meet a parameter
+/// of (instantiated) type `p`? `None` = agrees; `Some e` = refused, with the
+/// most specific error unify produced (the caller wraps it).
+///
+/// Unification with exactly the coercions the emitted C++ call performs and
+/// the language licenses at a call:
+///   * UNITS are transparent (stripped; `unitClash` owns them);
+///   * a concrete SCALAR argument WIDENS into a concrete scalar parameter it
+///     promotes to (`Int64` -> `Float64`; never narrowing, and never inside
+///     an array or a function type, where no element conversion exists) --
+///     and a numeric literal adapts to any numeric parameter of its kind;
+///   * an UNTAGGED integer meets a `Nat<I>` parameter (the cast / bounds
+///     story belongs to the index seam, not here); a DIFFERENT tag refuses --
+///     `Nat<Lon>` into `Nat<Lat>` is the nominal rule kernel application
+///     already enforces;
+///   * the virtual/stored character of an array is not compared (a range
+///     passed to an array parameter is materialized by the call).
+///
+/// ONLY THE COPIES BIND. `copies` is the set of instantiated variables; the
+/// judgment binds nothing else -- not the declaration (never instantiated
+/// into this call), not a variable the callee shares with its environment
+/// (a lambda's or a function-typed parameter's), and not the CALLER's: an
+/// argument that is still OPEN at a position is not judged there (binding a
+/// caller's variable from a callee's signature is inference this seam has
+/// never done; the post-zonk sweep judges it once it is closed), and a
+/// fallback unify is attempted only on a closed argument.
+let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (litKind: ElemType option)
+                              (p: IRType) (a: IRType) : TypeError option =
+    // A copy an EARLIER argument already taught: agreement between two
+    // teachings of one signature variable is `firstAbstractVarConflict`'s
+    // judgment (it ran first, on the declaration's variable, with the
+    // monomorph's compatibility rule -- widening, tags and extents not
+    // compared), so it is not judged a second, stricter way here.
+    match p with
+    | IRTInfer pid when copies.Contains pid && (subst.TryFind pid).IsSome -> None
+    | _ ->
+    // Resolve the parameter's HEAD only, so its children still show which
+    // positions are copies (the check above, one level down).
+    let rec headResolve (t: IRType) =
+        match t with
+        | IRTInfer id ->
+            (match subst.TryFind id with
+             | Some t' -> headResolve t'
+             | None -> t)
+        | _ -> t
+    let p = headResolve p
+    let a = subst.Resolve a
+    let recur = argPairClash subst copies
+    let mismatch () = Some (TypeMismatch (p, a))
+    let viaUnify (x: IRType) (y: IRType) =
+        match unify subst x y with
+        | Ok () -> None
+        | Error e -> Some e
+    match p, a with
+    | IRTUnitAnnotated (pi, _), _ -> recur widen litKind pi a
+    | _, IRTUnitAnnotated (ai, _) -> recur widen litKind p ai
+    // Deferred / variadic forms have their own seams (a loop object reaching
+    // an array parameter is materialized at the call; a pack is
+    // monomorphization's).
+    | _, (IRTLoop _ | IRTPoly _) | IRTPoly _, _ -> None
+    | _, IRTComputation ai -> recur widen litKind p ai
+    | IRTComputation pi, _ -> recur widen litKind pi a
+    | _, IRTInfer _ -> None
+    // An instantiated signature variable binds to the argument's shape --
+    // which is what makes two positions sharing one variable agree. Any other
+    // open parameter variable is not this call's to bind.
+    | IRTInfer pid, _ when copies.Contains pid ->
+        match subst.GetArityConstraint pid, a with
+        // A caret claims RANK; unify's pin counts index SLOTS. A compact
+        // group (`SymIdx<2, n>`) is one slot of rank 2, so a packed array
+        // meets a `T^2` parameter by rank -- what the direct seam always
+        // accepted (`concreteRankOf`). Accepted without binding.
+        | Some k, ArrayElem aa when aa.IndexTypes.Length <> k && concreteRankOf subst a = Some k -> None
+        | _ -> viaUnify p (stripUnitsDeep subst a)
+    | IRTInfer _, _ -> None
+    | IRTIdxTagged (pi, IRefAny), _ -> recur widen litKind pi (stripTagAnnotation a)
+    | IRTIdxTagged (pi, r1), IRTIdxTagged (ai, r2) ->
+        let same =
+            match r1, r2 with
+            | IRefNamed n1, IRefNamed n2 -> n1 = n2
+            | IRefAnon (i1, _), IRefAnon (i2, _) -> i1 = i2
+            | _ -> false
+        if same then recur widen litKind pi ai else mismatch ()
+    | IRTIdxTagged (pi, _), _ -> recur widen litKind pi a
+    | _, IRTIdxTagged (ai, _) -> recur widen litKind p ai
+    | IRTScalar pe, IRTScalar ae ->
+        let isInt e = (e = ETInt32 || e = ETInt64)
+        if pe = ae then None
+        elif widen && promoteElemType ae pe = Some pe then None
+        // Integer to integer in either width: the emitted call converts
+        // implicitly (no -Werror covers it), and a recurrence index (Int64)
+        // handed to an `i: Int` (Int32) parameter is an established idiom.
+        // What stays refused is the float -> integer narrowing g++ rejects.
+        elif widen && isInt pe && isInt ae then None
+        else
+            match litKind, pe with
+            | Some ETInt64, (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
+            | Some ETFloat64, (ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
+            | _ -> mismatch ()
+    | ArrayElem pa, ArrayElem aa ->
+        if pa.IndexTypes.Length <> aa.IndexTypes.Length then mismatch ()
+        else
+            let bad =
+                List.zip pa.IndexTypes aa.IndexTypes
+                |> List.indexed
+                |> List.tryFind (fun (_, (pi, ai)) -> indexPairIncompatible pi ai)
+            match bad with
+            // Tree identity has its own, more precise refusal (BL4003, the
+            // post-zonk `collectAppTreeErrors` sweep names both tree types
+            // and why equal leaf counts do not make them one space).
+            | Some (_, (pi, ai)) when (match pi.Tag, ai.Tag with
+                                      | Some (TreeTag _), _ | _, Some (TreeTag _) -> true
+                                      | _ -> false) -> None
+            | Some (slot, (pi, ai)) when indexRankDiffers pi ai ->
+                Some (IndexRankMismatch ($"index slot {slot}",
+                                         ppIndexType pi, max 1 pi.Rank,
+                                         ppIndexType ai, max 1 ai.Rank))
+            | Some _ -> mismatch ()
+            | None -> recur false None pa.ElemType aa.ElemType
+    | IRTTuple ps, IRTTuple args ->
+        if ps.Length <> args.Length then mismatch ()
+        else List.zip ps args |> List.tryPick (fun (x, y) -> recur widen None x y)
+    | FuncElem (pps, pr), FuncElem (aps, ar) ->
+        if pps.Length <> aps.Length then mismatch ()
+        else
+            (List.zip pps aps |> List.tryPick (fun (x, y) -> recur false None x y))
+            |> Option.orElseWith (fun () -> recur false None pr ar)
+    | IRTNamed n1, IRTNamed n2 -> if n1 = n2 then None else mismatch ()
+    | _ ->
+        match headKindOf p, headKindOf a with
+        | Some k1, Some k2 when k1 <> k2 -> mismatch ()
+        // Two Dists: order and axes have their own seams (the ppl formers);
+        // the call keeps the class-only judgment it always had.
+        | Some "dist", Some "dist" -> None
+        | Some _, Some _ when Set.isEmpty (freeInferVars subst a) -> viaUnify p a
+        | _ -> None
+
+/// SHARED STATIC-EXTENT REFINEMENT. Extents are deliberately NOT part of type
+/// identity (unify never compares them -- extents are shape-monomorphized at
+/// codegen instead), so agreement is a refinement checked AFTER a successful
+/// unify, and it is checked by this one predicate at every seam where a value
+/// meets a declared shape: call arguments (BL3016 `ExtentArgMismatch`) and
+/// ascriptions -- `let`, annotated returns, match arms and block finals --
+/// plus `if`/`match` branches against each other (BL3016
+/// `ExtentAscribeMismatch`).
+///
+/// Codegen treats a LITERAL extent as ground truth: it bakes it into
+/// subscripts, loop bounds and allocations (`copy_n` of the declared count),
+/// so a disagreement is a memory error, not a naming quarrel. Literal vs
+/// literal only (through `tryEvalIntIR`), equal slot counts only (a rank clash
+/// is unify's); a symbolic, ragged or runtime extent reads `.extents[d]` and
+/// stands down. Returns (0-based slot, expected extent, actual extent).
+let internal staticExtentClash (subst: Subst) (expected: IRType) (actual: IRType)
+                               : (int * int64 * int64) option =
+    match subst.Resolve expected, subst.Resolve actual with
+    | ArrayElem ea, ArrayElem aa when ea.IndexTypes.Length = aa.IndexTypes.Length ->
+        List.zip ea.IndexTypes aa.IndexTypes
+        |> List.indexed
+        |> List.tryPick (fun (d, (ei, ai)) ->
+            match tryEvalIntIR ei.Extent, tryEvalIntIR ai.Extent with
+            | Some e, Some a when e <> a -> Some (d, e, a)
+            | _ -> None)
+    | _ -> None
 
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
@@ -2231,10 +2472,14 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // declares a tuple parameter AND the flat pairing does not fit, so the
         // ordinary call path is untouched.
         let tArgs = regroupArgsByWidth env paramTys tArgs
-        // Checks direct-application would otherwise skip (params are NOT
-        // unified against args here, unlike kernel application); each catches
-        // a mismatch g++ rejects that Blade would typecheck clean -- except
-        // extentClash, which g++ accepts and which faults at RUNTIME:
+        // THE CALL JUDGMENT's ladder (docs/plans/plan-call-judgment.md). The
+        // core step -- instantiate the signature, unify the copy against the
+        // arguments -- is the SIXTH check below; the checks ahead of it exist
+        // because each names its defect more precisely than a unify failure
+        // would, and the ones after it are refinements unify does not model
+        // (extents, co-iteration). Each catches a mismatch g++ rejects that
+        // Blade would otherwise typecheck clean -- except the extent checks,
+        // which g++ accepts and which fault at RUNTIME:
         //   irrepsClash  - BLOCK-SPEC (irreps/point-group) pairs must match
         //                  identity, not just extent.
         //   rankClash    - a rank-k compact slot is k emitted dims but ONE
@@ -2476,20 +2721,15 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // ragged/compound/opaque) emits a runtime `.extents[d]` read and is
         // already correct, so it keeps the historical looseness -- as does an
         // argument still unresolved here.
+        // The comparison itself is the SHARED refinement `staticExtentClash`,
+        // the same predicate every ascription seam calls.
         let extentClash =
             let n = min paramTys.Length tArgs.Length
             List.zip (List.truncate n paramTys) (List.truncate n tArgs)
             |> List.mapi (fun i pair -> (i, pair))
             |> List.tryPick (fun (i, (pTy, arg)) ->
-                match env.Subst.Resolve pTy, env.Subst.Resolve arg.Type with
-                | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
-                    List.zip pa.IndexTypes aa.IndexTypes
-                    |> List.mapi (fun d pair -> (d, pair))
-                    |> List.tryPick (fun (d, (pi, ai)) ->
-                        match tryEvalIntIR pi.Extent, tryEvalIntIR ai.Extent with
-                        | Some pe, Some ae when pe <> ae -> Some (i, d, pe, ae)
-                        | _ -> None)
-                | _ -> None)
+                staticExtentClash env.Subst pTy arg.Type
+                |> Option.map (fun (d, pe, ae) -> (i, d, pe, ae)))
         // coIterClash (BL3016) - the CALL-SITE half of the zip agreement
         // obligation, and the second memory error on this ladder.
         //
@@ -2565,10 +2805,52 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // about the caller's BINDING FORM, so it stands whatever the types do,
         // and reporting it first keeps a `let` that also needs a cast from
         // being told about the cast instead of the real problem.
+        // mutAliasClash (BL4005) - the Fortran no-alias rule, the second half
+        // of write permission. A binding passed to a `mut` parameter must not
+        // ALSO reach the callee through another parameter as an array (the
+        // same name, or a view of it): the callee's writes through the `mut`
+        // alias are then visible mid-call through the other, so the result
+        // depends on the order the body happens to read and write in --
+        // `f(x, x)` with `b(0) = a(0) + 1` after `a(0) = 5` read 5 through `b`.
+        // A scalar read of the binding (`x(0)`) is evaluated before the call
+        // and is not an alias. `__` names are synthesized and exempt, like
+        // mutClash.
+        let mutAliasClash =
+            match appRootAndOffset tFunc with
+            | Some (fname, offset) when not (fname.StartsWith "__") ->
+                (match env.MutParamPositions.TryGetValue fname with
+                 | true, positions ->
+                     let rec root (t: TypedExpr) =
+                         match t.Kind with
+                         | TExprVar (n, _, _) -> Some n
+                         | TExprIndex (b, _, _) -> root b
+                         | _ -> None
+                     let isArray (t: TypedExpr) =
+                         match env.Subst.Resolve t.Type with
+                         | ArrayElem _ -> true
+                         | _ -> false
+                     positions |> List.tryPick (fun declPos ->
+                         let i = declPos - offset
+                         if i < 0 || i >= tArgs.Length then None
+                         else
+                             match (List.item i tArgs).Kind with
+                             | TExprVar (aname, _, _) when not (aname.StartsWith "__") ->
+                                 tArgs |> List.indexed |> List.tryPick (fun (j, other) ->
+                                     if j <> i && isArray other && root other = Some aname then
+                                         Some (j, fname, i, aname)
+                                     else None)
+                             | _ -> None)
+                 | _ -> None)
+            | _ -> None
         match mutClash with
         | Some (i, fname, declPos, got) ->
             atArg i
             Error (MutArgNotPassable (fname, declPos + 1, got))
+        | None ->
+        match mutAliasClash with
+        | Some (j, fname, i, aname) ->
+            atArg j
+            Error (MutArgAliased (fname, i + 1, j + 1, aname))
         | None ->
         match irrepsClash, rankClash, unitClash, argRankClash with
         | Some (i, pi, ai), _, _, _ ->
@@ -2610,13 +2892,83 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                                          firstPos conflictPos firstTy conflictTy))
             | None ->
             // The SIXTH check, last because every one above it names the
-            // defect more precisely: element CLASS. See firstArgTypeClash.
-            match firstArgTypeClash env.Subst paramTys (tArgs |> List.map (_.Type)) with
-            | Some (i, pTy, aTy) ->
+            // defect more precisely: THE CALL JUDGMENT proper -- instantiate
+            // the signature, unify the copy against each argument
+            // (`argPairClash`, with the call's licensed coercions). This is
+            // what refuses a dense array into a `SymIdx` parameter, `Nat<Lon>`
+            // into `Nat<Lat>`, `Float64` into `Int64`, struct `Q` into `P`, a
+            // tuple into a scalar, `Array<Int64>` into `Array<Float64>` --
+            // every shape the hand-added checks above never modelled.
+            //
+            // Same two stand-downs as every positional check (see
+            // `firstArgRankClash`): a variadic `Poly` pack, and
+            // under-application. Over-application judges the prefix this
+            // arrow consumes.
+            //
+            // WHAT is instantiated: for a DECLARED function, the variables its
+            // declaration minted (FuncSigVarRange) -- what HM quantifies. A
+            // lambda, a function-typed parameter or a curried head quantifies
+            // nothing: its open variables belong to its environment, so the
+            // judgment compares only what is already concrete there (binding
+            // them would pin a lambda to its first call's types while its
+            // emitted body kept the zonk default).
+            let judged : (int * TypeError) option * IRType option =
+                if isVariadic || tArgs.Length < paramTys.Length then (None, None)
+                else
+                    let quantified, closedDecl = calleeQuantifier env tFunc
+                    let copied, copyIds = instantiateOpenVars env.Subst quantified (paramTys @ [retTy])
+                    let pCopies = List.truncate paramTys.Length copied
+                    let retCopy = List.last copied
+                    let clash =
+                        appArgPairs pCopies (tArgs |> List.map (_.Type))
+                        |> List.tryPick (fun (i, pTy, aTy) ->
+                            let arg = List.item i tArgs
+                            argPairClash env.Subst copyIds true (numericLiteralKind arg) pTy aTy
+                            |> Option.map (fun e -> (i, e)))
+                    // The call's RESULT is the instantiated return when the
+                    // arguments determined it completely (no copy left open);
+                    // otherwise the declared return, as before -- a return the
+                    // arguments do not reach (a deduced return still being
+                    // inferred inside its own body) must not be decoupled.
+                    // Nor is a RECURSIVE call's result instantiated: inside the
+                    // body the declaration is still being inferred, and a
+                    // concrete result there would flow back into its own
+                    // signature through the body/return unify.
+                    let instRet =
+                        match clash with
+                        | Some _ -> None
+                        | None when not closedDecl && not (Set.isEmpty copyIds) -> None
+                        | None ->
+                            let r = env.Subst.Resolve retCopy
+                            if Set.isEmpty (Set.intersect (freeInferVars env.Subst r) copyIds) then Some r
+                            else None
+                    (clash, instRet)
+            match fst judged with
+            | Some (i, e) ->
                 atArg i
-                Error (ArgTypeMismatch (i + 1, calleeDesc,
-                                        ppIRType (env.Subst.Resolve pTy),
-                                        ppIRType (env.Subst.Resolve aTy)))
+                (match e with
+                 | IndexRankMismatch (site, pTy, pr, aTy, ar) ->
+                     Error (IndexRankMismatch ($"argument {i + 1}, {site}", pTy, pr, aTy, ar))
+                 | _ ->
+                     let pTy = env.Subst.Resolve (List.item i paramTys)
+                     let aTy = env.Subst.Resolve (List.item i tArgs).Type
+                     // Two types that differ only by an index NAME render
+                     // identically (`Idx<3>` both); name the axes then, or the
+                     // message reads "declared X but got X".
+                     let ppNominal (t: IRType) =
+                         let named (ix: IRIndexType) =
+                             match ix.Tag with
+                             | Some tg when not (tg.StartsWith "__") -> tg
+                             | _ -> ppIndexType ix
+                         match t with
+                         | ArrayElem at ->
+                             let slots = at.IndexTypes |> List.map named |> String.concat ", "
+                             $"Array<{ppIRType at.ElemType} like {slots}>"
+                         | _ -> ppIRType t
+                     let pp1, pp2 =
+                         if ppIRType pTy = ppIRType aTy then ppNominal pTy, ppNominal aTy
+                         else ppIRType pTy, ppIRType aTy
+                     Error (ArgTypeMismatch (i + 1, calleeDesc, pp1, pp2)))
             | None ->
             // The SEVENTH check, after element class because a wrong-class
             // argument that is also the wrong length should be reported as
@@ -2659,13 +3011,14 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                      | IRTInfer aid -> env.Subst.AddRankLowerBound(aid, calleeRank)
                      | _ -> ()))
             // The DEDUCED return's unit, built from the arguments'. See
-            // `unitStampedReturn`: the substitution never learns it, because
-            // this seam deliberately does not unify parameters against
-            // arguments.
+            // `unitStampedReturn`: the judgment unifies with units STRIPPED
+            // (they are `unitClash`'s), so the unit a generic body derives is
+            // applied from the callee's recorded transform, onto whichever
+            // result the judgment chose.
             let retTy =
-                unitStampedReturn env
+                unitStampedReturnOnto env
                     (match tFunc.Kind with TExprVar (n, _, _) -> Some n | _ -> None)
-                    tArgs retTy
+                    tArgs retTy (snd judged |> Option.defaultValue retTy)
             if isVariadic then
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
             elif tArgs.Length > paramTys.Length then

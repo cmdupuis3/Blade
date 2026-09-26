@@ -204,6 +204,21 @@ type TypeError =
     /// (buildApplyInfo), which is why `pos` says "argument"/"parameter"
     /// rather than naming a call form.
     | ExtentArgMismatch of pos: int * dim: int * expected: int64 * actual: int64
+    /// BL3016 (same family): the ASCRIPTION twin of ExtentArgMismatch -- a
+    /// value whose literal extent disagrees with the literal extent of the
+    /// type it is ascribed to (`let`, an annotated return, a match arm or
+    /// block final checked against an expected type), or two `if`/`match`
+    /// branches disagreeing with each other. `site` names which. The shared
+    /// predicate is TypeCheckSupport.staticExtentClash.
+    | ExtentAscribeMismatch of site: string * dim: int * expected: int64 * actual: int64
+    /// BL2001. `from M import x` where module M exports no `x`. `exported`
+    /// is a short list of names M does export, for the message.
+    | ImportNameMissing of modul: string * name: string * exported: string
+    /// BL4005 (the aliasing twin of MutArgNotPassable): one root binding is
+    /// passed to a `mut` parameter AND to another parameter of the same call,
+    /// so the callee's writes through one alias are visible through the other
+    /// mid-call -- the Fortran no-alias rule.
+    | MutArgAliased of func: string * mutPos: int * otherPos: int * name: string
     /// BL3016 (same family as ExtentArgMismatch, the halo twin): a kernel body
     /// reads an array through a halo window (`A(w(o))`), the halo's declared
     /// inner extent and the array's extent on that slot are BOTH compile-time
@@ -562,6 +577,12 @@ type Subst() =
         let id = nextId
         nextId <- nextId + 1
         IRTInfer id
+
+    /// The id the next `Fresh()` will mint. Ids are monotonic, so a pair of
+    /// reads brackets exactly the variables minted in between -- which is how
+    /// a `function` declaration's own signature variables are told apart from
+    /// variables it shares with its environment (TypeEnv.FuncSigVarRange).
+    member _.NextId = nextId
 
     member _.Bind(id, ty) =
         // POLYMORPHIC MARK PROPAGATION (var-to-var only). The mark says "zonk

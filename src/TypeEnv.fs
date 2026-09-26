@@ -197,6 +197,20 @@ type TypeModuleExport = {
     Defaults: Map<string, (string * TypeExpr option * Expr option) list>
     /// The matching FuncDefaultCaptures entries (see TypeEnv.FuncDefaultCaptures).
     DefaultCaptures: Map<string, Map<string, IRId>>
+    /// The rest of the callee DECLARATION facts the call judgment reads by
+    /// name -- `mut` positions, co-iteration obligations, the return-unit
+    /// transform, custom where-conjuncts -- snapshotted the same way and for
+    /// the same reason as `Defaults`, and re-registered under the same keys, so
+    /// `M.f(x)` and `f(x)` are judged against the same declaration.
+    Callees: CalleeFacts
+}
+
+/// Name-keyed callee declaration facts (see TypeModuleExport.Callees).
+and CalleeFacts = {
+    MutParams: Map<string, int list>
+    CoIterObligations: Map<string, (int list * int64 list) list>
+    UnitTransforms: Map<string, int list * UnitSig>
+    Constraints: Map<string, string list * (string * string list) list>
 }
 
 /// Type checking environment
@@ -428,6 +442,15 @@ type TypeEnv = {
     /// Keyed by BINDER ID, not name, so a local that SHADOWS a function name
     /// still captures (its VarId is a different binder).
     DeclaredFuncIds: System.Collections.Generic.HashSet<IRId>
+    /// Function BINDER ID -> the half-open range [lo, hi) of inference-variable
+    /// ids its declaration minted (signature and body), bracketed with
+    /// `Subst.NextId` by checkFunctionDecl; `hi` is Int32.MaxValue while the
+    /// body is still being checked. The call judgment INSTANTIATES exactly the
+    /// open variables of the callee's type that fall in this range -- the
+    /// declaration's own, the ones HM would quantify -- and never a variable
+    /// the function shares with its environment. Keyed by id like
+    /// DeclaredFuncIds. Shared by reference.
+    FuncSigVarRange: System.Collections.Generic.Dictionary<IRId, int * int>
     /// Function BINDER ID -> the conservative effect summary of its typed
     /// body (Blade.Effects.EffectSummary; TypeCheckSupport.effectsOfBody).
     /// Populated by checkFunctionDecl after the body is checked, so a body
@@ -540,6 +563,7 @@ let emptyEnv () = {
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
     FuncSignParities = System.Collections.Generic.Dictionary<IRId, Blade.Deduce.SignParity list>()
     DeclaredFuncIds = System.Collections.Generic.HashSet<IRId>()
+    FuncSigVarRange = System.Collections.Generic.Dictionary<IRId, int * int>()
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
@@ -826,6 +850,13 @@ class IS implemented, and the dense result folds like any other array." op level
         $"argument {pos}: the parameter's declared type carries the quantity '{quantity}', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is {got}. Ascribe it at the call site (e.g. `x : {quantity}`); matching dimensions alone do not imply the quantity."
     | ExtentArgMismatch (pos, dim, expected, actual) ->
         $"argument {pos}: extent mismatch on index slot {dim} -- the parameter declares Idx<{expected}> but the argument has Idx<{actual}>. A LITERAL parameter extent is baked into the emitted loop bounds and result allocations (a symbolic extent like Idx<n> reads the argument's extent at runtime instead), so this reads past the argument's allocation rather than merely disagreeing. Make the extents match, or declare the parameter over a symbolic extent."
+    | ExtentAscribeMismatch (site, dim, expected, actual) ->
+        $"{site}: extent mismatch on index slot {dim} -- {expected} expected, {actual} found. A LITERAL extent is baked into the emitted copies, loop bounds and subscripts, so the value would be read at the wrong length (past its allocation, or short of it) rather than merely disagreeing. Make the extents match, or annotate over a symbolic extent."
+    | ImportNameMissing (modul, name, exported) ->
+        let known = if System.String.IsNullOrEmpty exported then "" else $" It exports: {exported}."
+        $"module '{modul}' has no export named '{name}', so `from {modul} import {name}` binds nothing.{known}"
+    | MutArgAliased (func, mutPos, otherPos, name) ->
+        $"function '{func}': argument {mutPos} is passed to a `mut` parameter, and argument {otherPos} is the same binding '{name}' -- the callee's writes through one would be visible through the other mid-call. Pass a separate array (a copy) to one of them."
     | ZipExtentMismatch (pos, expected, actual) ->
         $"elementwise co-iteration: operand {pos} has extent {actual} on the shared axis, but operand 1 has extent {expected}. A zip walks ONE index space, taken from the first operand, so the longer walk reads past the shorter operand's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Bring the operands to a common extent, or index/slice the longer one first."
     | CoIterArgExtentMismatch (callee, posA, posB, extA, extB) ->
@@ -1049,7 +1080,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
         | Some c -> c
         | None ->
             match e.Error with
-            | UnboundVariable _ -> "BL2001"
+            | UnboundVariable _ | ImportNameMissing _ -> "BL2001"
             // Same-scope duplicate `function` name: a name-binding refusal,
             // so it lives in the BL2xxx resolution band, not BL3xxx.
             | DuplicateFunctionDecl _ -> "BL2009"
@@ -1071,7 +1102,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | QuantityArgMismatch _ -> "BL3010"
             | ExtentArgMismatch _ | HaloExtentMismatch _ | ZipExtentMismatch _
             | CoIterArgExtentMismatch _ | CoIterBodyExtentMismatch _ -> "BL3016"
-            | ProviderReadExtentMismatch _ -> "BL3016"
+            | ProviderReadExtentMismatch _ | ExtentAscribeMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ | DefaultParamShadowed _ -> "BL3012"
             | FactoryDupQuantityDecl _ -> "BL3013"
@@ -1173,7 +1204,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
             | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
             | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
-            | MutArgNotPassable _ -> "BL4005"
+            | MutArgNotPassable _ | MutArgAliased _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _
             | MutualParamMemberType _ | MutualBindTuple _ | MutualReturnTupleElements _
