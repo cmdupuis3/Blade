@@ -23,7 +23,12 @@ open Blade.Math.Decls
 /// Generated decls never shadow the name, so the intrinsic always resolves.
 let cplx (re: Expr) (im: Expr) = syn (ExprApp (v "complex", [re; im]))
 let cplxLit (re: float) (im: float) = cplx (fLit re) (fLit im)
-let cplxZerosLit (n: int) = syn (ExprArrayLit (List.replicate n (cplxLit 0.0 0.0)))
+/// A zero-initialized flat complex work array in O(1) text: the complex twin of MathDecls.zerosLit.
+let cplxZerosLit (n: int) =
+    let ps : LambdaParam list = [ { Name = "__zi"; Type = None; Default = None; NameSpan = noSpan } ]
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                      syn (ExprMethodFor [ syn (ExprRange [ TyIdx (iLit n) ]) ]),
+                                      syn (ExprLambda (ps, None, cplxLit 0.0 0.0))))))
 let cplxArrLit (pairs: (float * float) list) =
     syn (ExprArrayLit (pairs |> List.map (fun (re, im) -> cplxLit re im)))
 let intArrLit (xs: int list) = syn (ExprArrayLit (xs |> List.map iLit))
@@ -57,11 +62,43 @@ let bitrev (bits: int) (x: int) =
         xx <- xx >>> 1
     r
 
+/// The bit reversal of the low `bits` bits of the Int expression `iE`, as INDEX ARITHMETIC in the generated code:
+/// Sum_b ((i / 2^b) % 2) * 2^(bits-1-b) (Blade's Int `/` and `%` truncate; i >= 0). It replaces an n-entry baked
+/// permutation literal -- O(bits) terms of text instead of O(n), the same integers, so no value can change. `bitrev`
+/// above stays the oracle-side statement of the same map.
+let bitrevE (bits: int) (iE: Expr) : Expr =
+    [ for b in 0 .. bits - 1 ->
+        mul (modE (divE iE (iLit (1 <<< b))) (iLit 2)) (iLit (1 <<< (bits - 1 - b))) ]
+    |> List.reduce add
+
 /// Forward twiddle table entries j = 0 .. m-1: e^(-2*pi*i*j/n).
 let fwdTwiddles (n: int) (m: int) : (float * float) list =
     [ for j in 0 .. m - 1 ->
         (cos (-2.0 * System.Math.PI * float j / float n),
          sin (-2.0 * System.Math.PI * float j / float n)) ]
+
+/// cos(2*pi*k/n) for k = 0 .. n/4 (n divisible by 4): the QUARTER-WAVE table every radix-2 twiddle is read from.
+/// The k = n/4 entry is cos(pi/2) = 0 EXACTLY (System.Math.Cos gives 6.1e-17 there), so tw(0) = 1 and tw(n/4) = -/+i
+/// come out exact rather than carrying a spurious 1e-16 component into every stage's j = 0 butterfly.
+let quarterCos (n: int) : float list =
+    [ for k in 0 .. n / 4 -> if k = n / 4 then 0.0 else cos (2.0 * System.Math.PI * float k / float n) ]
+
+/// The half-period radix-2 twiddle table e^(sgn*2*pi*i*j/n), j = 0 .. n/2-1, BUILT IN THE GENERATED CODE from the
+/// n/4+1-entry quarter-wave cosine table `qn` (bound once, baked like every other trig value) by the exact
+/// symmetries cos(2pi j/n) = -cos(2pi (n/2-j)/n), sin(2pi j/n) = cos(2pi (n/4-j)/n) = cos(2pi (j-n/4)/n) -- reads and
+/// negations only, so no runtime trig and no rounding. It replaces an n/2-entry complex literal (the bulk of a large
+/// fft's emitted C++). `sgn` = -1.0 forward, +1.0 inverse. The oracle's `pow2Twiddles` performs the same selection.
+/// Needs n >= 4 (n/4 >= 1); n = 2 keeps the literal table.
+let pow2TwiddleStmts (tabName: string) (qName: string) (n: int) (sgn: float) : Stmt list =
+    let q4 = n / 4
+    let jv = v "j"
+    let le = cmp OpLe jv (iLit q4)
+    let neg e = syn (ExprUnaryOp (OpNeg, e))
+    let re = ifE (le, idx qName jv, neg (idx qName (sub (iLit (n / 2)) jv)))
+    let s0 = ifE (le, idx qName (sub (iLit q4) jv), idx qName (sub jv (iLit q4)))
+    [ sLet qName (syn (ExprArrayLit (quarterCos n |> List.map fLit)))
+      sLetMut tabName (cplxZerosLit (n / 2))
+      sFor "j" 0 (n / 2) [ sAssign (idx tabName jv) (cplx re (if sgn < 0.0 then neg s0 else s0)) ] ]
 
 /// Inverse-synthesis twiddle table entries j = 0 .. m-1: e^(+2*pi*i*j/n).
 let invTwiddles (n: int) (m: int) : (float * float) list =
@@ -78,14 +115,15 @@ let fftDecl (name: string) (n: int) : FunctionDecl =
     let body =
         if isPow2 n && n >= 2 then
             let stages = fftStages n
-            let perm = [ for i in 0 .. n - 1 -> bitrev stages i ]
+            let twStmts =
+                if n >= 4 then pow2TwiddleStmts "tw" "qc" n (-1.0)
+                else [ sLet "tw" (cplxArrLit (fwdTwiddles n (n / 2))) ]
             let stmts =
-                [ sLet "brp" (intArrLit perm)
-                  sLet "tw" (cplxArrLit (fwdTwiddles n (n / 2)))
-                  sLetMut "sx" (cplxZerosLit n)
-                  // Gather copy-in through the bit-reversal permutation (gather, not scatter -- the oracle mirrors this).
-                  sFor "i" 0 n
-                    [ sAssign (idx "sx" (v "i")) (cplx (idx "x" (idx "brp" (v "i"))) (fLit 0.0)) ] ]
+                twStmts
+                @ [ sLetMut "sx" (cplxZerosLit n)
+                    // Gather copy-in through the bit-reversal permutation (gather, not scatter -- the oracle mirrors this).
+                    sFor "i" 0 n
+                      [ sAssign (idx "sx" (v "i")) (cplx (idx "x" (bitrevE stages (v "i"))) (fLit 0.0)) ] ]
                 @ [ for st in 1 .. stages do
                       let len = 1 <<< st
                       let half = len / 2
@@ -113,16 +151,43 @@ let fftDecl (name: string) (n: int) : FunctionDecl =
     mkFunc name [ ("x", tyFloatArr n) ] (tyCplxArr n) body
 
 // ifft -- real inverse synthesis (carries the 1/n), any n
+//
+// Power-of-2 n (>= 2) runs the SAME radix-2 butterfly as `fft` on the complex spectrum with the inverse twiddles
+// (e^(+2*pi*i*j/n)), then keeps the real part and scales by 1/n: O(n log n), where it used to take the naive O(n^2)
+// synthesis at every n. Other n keep the naive table-driven synthesis.
 let ifftDecl (name: string) (n: int) : FunctionDecl =
     let stmts =
-        [ sLet "tw" (cplxArrLit (invTwiddles n n))
-          sLetMut "xo" (zerosLit n)
-          sFor "i" 0 n
-            [ sFor "k" 0 n
-                [ sLet "t" (modE (mul (v "k") (v "i")) (iLit n))
-                  sAccum (idx "xo" (v "i")) (realE (mul (idx "xs" (v "k")) (idx "tw" (v "t")))) ]
-              // Post-loop rescale: non-additive ARRAY-cell write (Grad-legal; only scalars carry the additive restriction).
-              sAssign (idx "xo" (v "i")) (divE (idx "xo" (v "i")) (fLit (float n))) ] ]
+        if isPow2 n && n >= 2 then
+            let stages = fftStages n
+            (if n >= 4 then pow2TwiddleStmts "tw" "qc" n 1.0
+             else [ sLet "tw" (cplxArrLit (invTwiddles n (n / 2))) ])
+            @ [ sLetMut "sx" (cplxZerosLit n)
+                sFor "i" 0 n
+                  [ sAssign (idx "sx" (v "i")) (idx "xs" (bitrevE stages (v "i"))) ] ]
+            @ [ for st in 1 .. stages do
+                  let len = 1 <<< st
+                  let half = len / 2
+                  let tstr = n / len
+                  yield sFor "b" 0 (n / len)
+                    [ sFor "j" 0 half
+                        [ sLet "p" (add (mul (v "b") (iLit len)) (v "j"))
+                          sLet "q" (add (v "p") (iLit half))
+                          sLet "t" (mul (idx "tw" (mul (v "j") (iLit tstr))) (idx "sx" (v "q")))
+                          sLet "p0" (idx "sx" (v "p"))
+                          sAssign (idx "sx" (v "p")) (add (v "p0") (v "t"))
+                          sAssign (idx "sx" (v "q")) (sub (v "p0") (v "t")) ] ] ]
+            @ [ sLetMut "xo" (zerosLit n)
+                sFor "i" 0 n
+                  [ sAssign (idx "xo" (v "i")) (divE (realE (idx "sx" (v "i"))) (fLit (float n))) ] ]
+        else
+            [ sLet "tw" (cplxArrLit (invTwiddles n n))
+              sLetMut "xo" (zerosLit n)
+              sFor "i" 0 n
+                [ sFor "k" 0 n
+                    [ sLet "t" (modE (mul (v "k") (v "i")) (iLit n))
+                      sAccum (idx "xo" (v "i")) (realE (mul (idx "xs" (v "k")) (idx "tw" (v "t")))) ]
+                  // Post-loop rescale: non-additive ARRAY-cell write (Grad-legal; only scalars carry the additive restriction).
+                  sAssign (idx "xo" (v "i")) (divE (idx "xo" (v "i")) (fLit (float n))) ] ]
     mkFunc name [ ("xs", tyCplxArr n) ] (tyFloatArr n) (blockE (stmts, Some (v "xo")))
 
 // power -- |FFT(x)|^2 per bin (real)
@@ -183,20 +248,19 @@ let polyspecDecl (name: string) (n: int) (k: int) (fftName: string) : FunctionDe
 
 /// Row pass: DFT along axis 1 of an r x c field into the flat complex work array `sa`. `readIn i j` builds the complex
 /// read of input cell (i, j); `mkTw` is fwdTwiddles or invTwiddles.
-let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list)
+let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list) (sgn: float)
                      (readIn: Expr -> Expr -> Expr) : Stmt list =
     let flatIJ i j = add (mul i (iLit c)) j
     if isPow2 c && c >= 2 then
         let stages = fftStages c
-        let perm = [ for j in 0 .. c - 1 -> bitrev stages j ]
-        [ sLet "brc" (intArrLit perm)
-          sLet "twc" (cplxArrLit (mkTw c (c / 2)))
-          sLetMut "sa" (cplxZerosLit (r * c))
-          // Gather copy-in through the per-row bit-reversal permutation.
-          sFor "i" 0 r
-            [ sFor "j" 0 c
-                [ sAssign (idx "sa" (flatIJ (v "i") (v "j")))
-                          (readIn (v "i") (idx "brc" (v "j"))) ] ] ]
+        (if c >= 4 then pow2TwiddleStmts "twc" "qcc" c sgn
+         else [ sLet "twc" (cplxArrLit (mkTw c (c / 2))) ])
+        @ [ sLetMut "sa" (cplxZerosLit (r * c))
+            // Gather copy-in through the per-row bit-reversal permutation.
+            sFor "i" 0 r
+              [ sFor "j" 0 c
+                  [ sAssign (idx "sa" (flatIJ (v "i") (v "j")))
+                            (readIn (v "i") (bitrevE stages (v "j"))) ] ] ]
         @ [ for st in 1 .. stages do
               let len = 1 <<< st
               let half = len / 2
@@ -221,19 +285,18 @@ let private rowPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list
                              (mul (readIn (v "i") (v "j")) (idx "twc" (v "t"))) ] ] ] ]
 
 /// Column pass: DFT along axis 0, `sa` -> `sb` (both flat row-major r x c).
-let private colPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list) : Stmt list =
+let private colPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list) (sgn: float) : Stmt list =
     let flatIJ i j = add (mul i (iLit c)) j
     if isPow2 r && r >= 2 then
         let stages = fftStages r
-        let perm = [ for i in 0 .. r - 1 -> bitrev stages i ]
-        [ sLet "brr" (intArrLit perm)
-          sLet "twr" (cplxArrLit (mkTw r (r / 2)))
-          sLetMut "sb" (cplxZerosLit (r * c))
-          // Gather copy-in through the per-column bit-reversal permutation.
-          sFor "i" 0 r
-            [ sFor "j" 0 c
-                [ sAssign (idx "sb" (flatIJ (v "i") (v "j")))
-                          (idx "sa" (flatIJ (idx "brr" (v "i")) (v "j"))) ] ] ]
+        (if r >= 4 then pow2TwiddleStmts "twr" "qcr" r sgn
+         else [ sLet "twr" (cplxArrLit (mkTw r (r / 2))) ])
+        @ [ sLetMut "sb" (cplxZerosLit (r * c))
+            // Gather copy-in through the per-column bit-reversal permutation.
+            sFor "i" 0 r
+              [ sFor "j" 0 c
+                  [ sAssign (idx "sb" (flatIJ (v "i") (v "j")))
+                            (idx "sa" (flatIJ (bitrevE stages (v "i")) (v "j"))) ] ] ]
         @ [ for st in 1 .. stages do
               let len = 1 <<< st
               let half = len / 2
@@ -260,8 +323,8 @@ let private colPass2 (r: int) (c: int) (mkTw: int -> int -> (float * float) list
 /// fft2 -- unnormalized forward 2-D DFT of a real r x c field, complex output.
 let fft2Decl (name: string) (r: int) (c: int) : FunctionDecl =
     let stmts =
-        rowPass2 r c fwdTwiddles (fun i j -> cplx (idx2 "x" i j) (fLit 0.0))
-        @ colPass2 r c fwdTwiddles
+        rowPass2 r c fwdTwiddles (-1.0) (fun i j -> cplx (idx2 "x" i j) (fLit 0.0))
+        @ colPass2 r c fwdTwiddles (-1.0)
         @ [ sLet "po" (nestedFromFlatN "sb" [ r; c ] 0) ]
     mkFunc name [ ("x", tyFloatTensor [ r; c ]) ] (tyCplxTensor [ r; c ]) (blockE (stmts, Some (v "po")))
 
@@ -269,8 +332,8 @@ let fft2Decl (name: string) (r: int) (c: int) : FunctionDecl =
 let ifft2Decl (name: string) (r: int) (c: int) : FunctionDecl =
     let flatIJ i j = add (mul i (iLit c)) j
     let stmts =
-        rowPass2 r c invTwiddles (fun i j -> idx2 "xs" i j)
-        @ colPass2 r c invTwiddles
+        rowPass2 r c invTwiddles 1.0 (fun i j -> idx2 "xs" i j)
+        @ colPass2 r c invTwiddles 1.0
         @ [ sLetMut "xo" (zerosLit (r * c))
             sFor "i" 0 r
               [ sFor "j" 0 c
