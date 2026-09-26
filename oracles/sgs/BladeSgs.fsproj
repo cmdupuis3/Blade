@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Exact.fs" />
     <Compile Include="Oracle.fs" />
     <Compile Include="TrainingOracle.fs" />
     <Compile Include="Burgers.fs" />

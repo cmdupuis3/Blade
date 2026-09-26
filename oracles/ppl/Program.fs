@@ -137,8 +137,33 @@ let private computeMoments (data: float[][]) (rmax: int) : SymTensor.T[] =
              SymTensor.set t labels (acc / float n)
          t |]
 
+/// Joint cumulants, computed EXACTLY and independently of the compiler's
+/// formula: exact means, exact central moments of the centered data, then the
+/// partition lattice restricted to singleton-free partitions (a centered first
+/// moment is exactly 0); kappa_1 is the mean. Each cell is rounded once. The
+/// previous raw-moments-then-Mobius route mirrored the elaborator's old raw
+/// power-sum formula, cancellation included, so it could not catch it.
 let private computeCumulants (data: float[][]) (rmax: int) : SymTensor.T[] =
-    computeMoments data rmax |> MomentCumulant.cumulantsFromMoments
+    let d = data.Length
+    let mean = Exact.means data
+    [| for k in 1 .. rmax ->
+         let t = SymTensor.create d k
+         for labels in SymTensor.enumerate d k do
+             let value =
+                 if k = 1 then mean.[labels.[0]]
+                 else
+                     Combinatorics.setPartitions k
+                     |> Array.filter (fun p -> p |> Array.forall (fun blk -> blk.Length >= 2))
+                     |> Array.fold (fun acc p ->
+                         let b = p.Length
+                         let w = (if b % 2 = 1 then 1 else -1) * int (Combinatorics.factorial (b - 1))
+                         let prod =
+                             p |> Array.fold (fun pr blk ->
+                                 Exact.mul pr (Exact.centralMoment data mean (blk |> Array.map (fun pos -> labels.[pos]))))
+                                 Exact.one
+                         Exact.add acc (Exact.mul (Exact.ofInt w) prod)) Exact.zero
+             SymTensor.set t labels (Exact.toFloat value)
+         t |]
 
 /// Univariate jet: vals.[k-1] = g^(k)(mu), packed as dim-1 rank-k tensors.
 let univJet (vals: float[]) : SymTensor.T[] =

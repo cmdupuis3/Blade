@@ -3,9 +3,11 @@ import sgs as sgs
 import ppl as ppl
 // ============================================================================
 // THE full-circle identity pin: the elaborated former `sgs.stress` computes
-// EXACTLY the second central comoment the ppl former (and, via sgs/005, the
-// raw comm-licensed combinator machinery) computes — same formula, same
-// accumulation order, equal to the last bit. One quantity, three subsystems:
+// the second central comoment the ppl former (and, via sgs/005, the raw
+// comm-licensed combinator machinery) computes. Both formers center by the
+// tile mean BEFORE multiplying (two passes), so they agree to rounding (the
+// pin below allows 1e-14); the c2 pin is the EXACT value (oracles/sgs,
+// rational arithmetic). One quantity, three subsystems:
 //   sgs.stress(U, 2) cell (0,0,0)  ==  ppl.comoments(A, 2)  ==  sgs/005 tau
 // where A is the origin tile of U flattened to (3 components, 8 samples).
 // ============================================================================
@@ -15,7 +17,7 @@ let A: Array<Float64 like Idx<3>, TimeIdx> = [[0.4502502767118629, -0.2542796605
 
 let S = sgs.stress(U, 2)
 let c2 = ppl.comoments(A, 2)
-// EXPECT: c2 = [0.25325184801754563, 0.023596559909789594, -0.08610568558444831, 0.8664234203346481, -0.7664919700416585, 1.0160853438383561]
+// EXPECT: c2 = [0.2532518480175457, 0.023596559909789594, -0.08610568558444831, 0.8664234203346483, -0.7664919700416587, 1.0160853438383561]
 
 let mut dd = [0.0]
 let dd_done = {
