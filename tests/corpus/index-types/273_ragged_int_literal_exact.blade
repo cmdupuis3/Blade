@@ -1,0 +1,13 @@
+// TEST: Ragged Int Literal Exact
+// ============================================================================
+// A ragged (and DepIdx) literal's flat initializer spelled integer leaves
+// with `%g`: 1234567 became `1.23457e+06`, a -Werror=narrowing refusal in the
+// braced initializer (and a silently rounded value had it compiled). Integer
+// leaves are now spelled verbatim.
+
+let lens: Array<Int64 like Idx<2>> = [2, 1]
+let r: Array<Int64 like Idx<2>, RaggedIdx<lens>> = [[1234567, 9007199254740993], [3]]
+let s0 = reduce(r(0), (+))
+let s1 = reduce(r(1), (+))
+// EXPECT: s0 = 9007199255975560
+// EXPECT: s1 = 3
