@@ -1883,11 +1883,20 @@ let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: 
 /// lambda, a function-typed parameter or a curried head quantifies nothing.
 /// `closed` is false for a recursive call inside the declaration's own body,
 /// whose signature is still being inferred.
+///
+/// Only POLYMORPHIC-marked variables are quantified: they are the ones zonk
+/// keeps open and IR-phase monomorphization specializes per call site. An
+/// unannotated parameter's plain variable is not generic at all -- zonk
+/// defaults it (Float64) and ONE body is emitted -- so a per-call instance of
+/// it would type the call (`Int64`) differently from the callable it invokes
+/// (`double twice(double)`, static/011). Those stay uninstantiated and
+/// unbound, exactly as before.
 let internal calleeQuantifier (env: TypeEnv) (tFunc: TypedExpr) : (int -> bool) * bool =
     match tFunc.Kind with
     | TExprVar (_, vid, _) ->
         (match env.FuncSigVarRange.TryGetValue vid with
-         | true, (lo, hi) -> (fun v -> v >= lo && v < hi), hi <> System.Int32.MaxValue
+         | true, (lo, hi) ->
+             (fun v -> v >= lo && v < hi && env.Subst.IsPolymorphicId v), hi <> System.Int32.MaxValue
          | _ -> (fun _ -> false), false)
     | _ -> (fun _ -> false), false
 
@@ -2912,8 +2921,17 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             // judgment compares only what is already concrete there (binding
             // them would pin a lambda to its first call's types while its
             // emitted body kept the zonk default).
+            // A `__`-named callee is SYNTHESIZED by an elaborator (math, ppl,
+            // grad) whose calls are the elaborator's contract, not the user's
+            // -- e.g. the eigh gate-off path hands a complex matrix to a
+            // helper spelled over Float64 and relies on C++ templating. Same
+            // `__` exemption as mutClash.
+            let synthesizedCallee =
+                match appRootAndOffset tFunc with
+                | Some (fname, _) -> fname.StartsWith "__"
+                | None -> false
             let judged : (int * TypeError) option * IRType option =
-                if isVariadic || tArgs.Length < paramTys.Length then (None, None)
+                if isVariadic || tArgs.Length < paramTys.Length || synthesizedCallee then (None, None)
                 else
                     let quantified, closedDecl = calleeQuantifier env tFunc
                     let copied, copyIds = instantiateOpenVars env.Subst quantified (paramTys @ [retTy])
