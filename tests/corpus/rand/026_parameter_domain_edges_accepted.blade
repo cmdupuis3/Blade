@@ -1,0 +1,11 @@
+// TEST: Rand: parameter-domain edges stay legal
+// The guards refuse only what has no distribution: lam = 0 (the point mass
+// at 0) and p = 0 / p = 1 (degenerate Bernoulli) are inside the domain and
+// draw exactly what they always did.
+import rand as r
+let p0 = r.poisson(11, 0.0, 3)
+// EXPECT: p0 = [0.0, 0.0, 0.0]
+let b0 = r.bernoulli(11, 0.0, 3)
+// EXPECT: b0 = [0.0, 0.0, 0.0]
+let b1 = r.bernoulli_at(11, 0, 0, 1.0, 3)
+// EXPECT: b1 = [1.0, 1.0, 1.0]
