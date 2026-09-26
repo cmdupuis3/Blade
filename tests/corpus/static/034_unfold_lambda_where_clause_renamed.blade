@@ -1,0 +1,10 @@
+// TEST: Unfold renames a lambda's where clause with its parameters
+// Freshening an inlined static function's lambda renames its parameters;
+// the where clause names them too and used to keep the OLD names, so the
+// `comm(a, b)` licence silently pointed at nothing (no symmetric storage).
+// The clause is renamed with the parameters, so s(i, j) = A_i * A_j + 1
+// gets symmetric storage again: the rows print as the upper triangle.
+static function kern(c) = lambda(a, b) where comm(a, b) -> a * b + c
+let A = [1.0, 2.0, 3.0]
+let s = (static object_for(kern(1.0))) <@> (A, A) |> compute
+// EXPECT: s = [[2.0, 3.0, 4.0], [5.0, 7.0], [10.0]]
