@@ -1,0 +1,19 @@
+// TEST: Reynolds Float Chain Not Reassociated
+// Dedup may merge two permutation terms only when they are the SAME float
+// value. g(x, y, z) = x + y + z parses as (x + y) + z; its permutations are
+// (x + y) + z, (x + z) + y, (y + z) + x (each twice, by commutativity of the
+// inner +) -- three different roundings. The old key flattened the chain and
+// merged all six into 6 * ((x + y) + z), an unlicensed reassociation
+// (BLADE_FP_REASSOC is the licence, and it is off here).
+// x = 1e16, y = 1, z = -1e16:
+//   (x + y) + z = 0   (1e16 + 1 rounds to 1e16)
+//   (x + z) + y = 1
+//   (y + z) + x = 0   (1 - 1e16 rounds to -1e16)
+// Exact permutation sum: 2*0 + 2*1 + 2*0 = 2 (the merged form gave 0).
+let A = [10000000000000000.0]
+let B = [1.0]
+let C = [-10000000000000000.0]
+let L = method_for(A, B, C)
+let g = lambda(x, y, z) -> x + y + z
+let result = L <@> reynolds(g) |> compute
+// EXPECT: result = [2.0]

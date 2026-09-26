@@ -9,9 +9,10 @@
 // instead evaluate the kernel under each surviving permutation.
 //
 // The canonical key (commutative-op normalization) is supplied by the caller
-// as `buildKey`, because that key is built from CodeGen's C++-rendering helper
-// (floatToCppLiteral) and so stays where the rendering logic lives. Everything
-// here is pure integer/list/string logic and depends on no IR/Types module.
+// as `buildKey` -- any type with structural equality; CodeGenLoopNest's
+// canonicalKey answers a canonical IRExpr, so two permutations merge exactly
+// when their canonical bodies are equal. Everything here is pure integer/list
+// logic and depends on no IR/Types module.
 module Blade.ReynoldsCore
 
 /// Generate all permutations of a list of integers
@@ -48,7 +49,7 @@ type ReynoldsTermPlan = {
 /// into integer-coefficient terms in first-occurrence order. This is exactly the
 /// enumeration/dedup/ordering that genKernelExprWithReynolds used to perform
 /// inline; the caller renders each surviving (coeff, perm) term.
-let reynoldsTermPlan (n: int) (isAntisymmetric: bool) (buildKey: int list -> string) : ReynoldsTermPlan =
+let reynoldsTermPlan<'K when 'K : equality> (n: int) (isAntisymmetric: bool) (buildKey: int list -> 'K) : ReynoldsTermPlan =
     let allPerms = permutations [0 .. n - 1]
     let totalPerms = allPerms.Length
     // For each permutation, generate:
