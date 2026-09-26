@@ -1,0 +1,15 @@
+// TEST: Qualified calls judged like unqualified ones
+// MODULE: Phys
+module Phys
+Unit seconds
+type Cell = Idx<3>
+let w: Array<Float64 like Cell> = [1.0, 2.0, 3.0]
+function per_sec(t: Float<seconds>) -> Float<seconds> = t * 2.0
+function bump(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    a(0) = 99.0
+    a(0)
+}
+function need5(a: Array<Float64 like Idx<5>>) -> Float64 = a(4)
+function total(row: T^1) -> T^0 = reduce(row, (+))
+function scaled(x: Float64, k: Float64 = 10.0) -> Float64 = x * k
+function add3(a: Float64, b: Float64, c: Float64) -> Float64 = a + b + c

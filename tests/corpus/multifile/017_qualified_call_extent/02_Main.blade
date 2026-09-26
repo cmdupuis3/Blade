@@ -1,0 +1,11 @@
+// TEST: Qualified call with a static extent mismatch (rejects)
+// MODULE: Main
+// ERROR: BL3016
+// ============================================================================
+// A 3-element array into a parameter whose literal extent is 5: the callee
+// reads a(4) two doubles past the allocation. Refused unqualified (BL3016),
+// silently accepted qualified -- until the qualified call took the same path.
+module Main
+import Phys
+let arr = [1.0, 2.0, 3.0]
+let x = Phys.need5(arr)

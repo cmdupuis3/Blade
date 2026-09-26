@@ -1,0 +1,6 @@
+// TEST: Qualified call with a unit clash (rejects)
+// MODULE: Phys
+module Phys
+Unit meters
+Unit seconds
+function per_sec(t: Float<seconds>) -> Float<seconds> = t * 2.0

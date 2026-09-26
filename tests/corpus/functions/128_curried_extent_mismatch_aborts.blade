@@ -1,15 +1,21 @@
-// TEST: Curried Extent Mismatch Aborts (aborts)
+// TEST: Curried Extent Mismatch (rejects)
+// ERROR: BL3016
 // ============================================================================
 // `f(a: T^1, b: T^1) = a + b` co-iterates its two parameters. The call-site
-// extent check (BL3016) sees `f(a, b)`; a LET-BOUND partial application
-// `let h = f(a); h(b)` never reaches it -- `h` is just a function-typed
-// name -- and shape monomorphization then types `b` at `a`'s extent. The
-// walk is bounded by the first operand, so the 2-vector was read past its
-// end: `[5, 7, <garbage>]`. The runtime guard (BL8011) inside the body
-// compares the parameters' RUNTIME extents and aborts instead.
+// extent check (BL3016) used to see only `f(a, b)`: a LET-BOUND partial
+// application `let h = f(a); h(b)` left `h`'s parameter an open variable, and
+// shape monomorphization then typed `b` at `a`'s extent -- the walk read the
+// 2-vector past its end (`[5, 7, <garbage>]`), caught only by the runtime
+// guard (BL8011) inside the body.
+//
+// The call judgment instantiates `f`'s signature per call, so `f(a)` teaches
+// its OWN copy of `T` from `a`, and the partial application's residual
+// parameter is pinned to that instance: `h` takes an `Array<Float64 like
+// Idx<3>>`, and `h(b)` is refused at compile time by the same extent rule as
+// the direct call. (The runtime guard stays pinned by functions/129 and
+// index-types/258, for extents only known at run time.)
 function f(a: T^1, b: T^1) = a + b
 let a = [1.0, 2.0, 3.0]
 let b = [4.0, 5.0]
 let h = f(a)
 let out = h(b)
-// ABORT: BL8011

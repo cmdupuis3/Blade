@@ -1,0 +1,10 @@
+// TEST: Float argument into an Int64 parameter (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: argument 1
+// ============================================================================
+// A call performs no narrowing conversion: `f(2.7)` against `x: Int64` used to
+// type-check (the old element-CLASS check put the whole numeric tower in one
+// class) and died in g++ as a narrowing error. The call judgment widens only
+// (Int64 into Float64), never narrows.
+function f(x: Int64) -> Int64 = x * 2
+let v = f(2.7)

@@ -1,0 +1,13 @@
+// TEST: Impl method body against its declared return (rejects)
+// ERROR: BL3001
+// ============================================================================
+// An impl method's body must meet the return type it declares. The unify was
+// run and its result discarded, so `-> Float = "nope"` type-checked and died in
+// g++.
+struct P { x: Float }
+interface Show { function show(self) -> Float }
+impl Show for P {
+    function show(self) -> Float = "nope"
+}
+let p = P { x = 1.0 }
+let s = p.show()

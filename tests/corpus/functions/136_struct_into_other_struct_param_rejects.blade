@@ -1,0 +1,10 @@
+// TEST: Struct of another type into a struct parameter (rejects)
+// ERROR: BL3001
+// ============================================================================
+// Two structs with the same fields are still different types. `f(Q {...})`
+// against `p: P` used to pass the direct-call seam (both are "named types" to
+// the old class check) and died in g++.
+struct P { x: Float }
+struct Q { x: Float }
+function f(p: P) -> Float = p.x
+let v = f(Q { x = 1.0 })

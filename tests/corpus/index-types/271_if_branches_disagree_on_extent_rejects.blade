@@ -1,0 +1,11 @@
+// TEST: If branches with different static extents (rejects)
+// ERROR: BL3016
+// ============================================================================
+// The two branches of an `if` are one value, typed from the then-branch. With
+// a 2-element then-branch and a 3-element else-branch the node claimed Idx<2>
+// (or, ascribed Idx<3>, read x(2) past the short buffer and printed nan).
+let n = 0
+let a2 = [1.0, 2.0]
+let a3 = [1.0, 2.0, 3.0]
+let x: Array<Float64 like Idx<3>> = if n == 0 then a2 else a3
+let v = x(2)
