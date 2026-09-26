@@ -1,0 +1,39 @@
+// TEST: Qualified calls judged like unqualified ones
+// MODULE: Main
+// ============================================================================
+// The positive half of 015-019: a qualified call is now rewritten onto the
+// unqualified application path, so everything that path does -- default
+// fill, partial application, write permission, the call judgment's
+// instantiate-then-unify (a generic used at two element types), array
+// indexing for a qualified ARRAY -- must keep working through `Phys.`.
+module Main
+import Phys
+
+let t: Float<seconds> = 1.5
+let ps = Phys.per_sec(t)
+// EXPECT: ps = 3
+
+let mut arr = [1.0, 2.0, 3.0]
+let b = Phys.bump(arr)
+// EXPECT: b = 99
+
+let five = [1.0, 2.0, 3.0, 4.0, 5.0]
+let n5 = Phys.need5(five)
+// EXPECT: n5 = 5
+
+let tf = Phys.total([1.5, 2.5])
+// EXPECT: tf = 4
+let ti = Phys.total([1, 2, 3])
+// EXPECT: ti = 6
+
+let sd = Phys.scaled(2.0)
+// EXPECT: sd = 20
+let sk = Phys.scaled(2.0, 3.0)
+// EXPECT: sk = 6
+
+let part = Phys.add3(1.0)
+let pv = part(2.0, 3.0)
+// EXPECT: pv = 6
+
+let wr = Phys.w((2 : Cell))
+// EXPECT: wr = 3

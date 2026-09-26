@@ -1,0 +1,12 @@
+// TEST: Qualified call into a mut parameter without write permission (rejects)
+// MODULE: Main
+// ERROR: BL4005
+// ============================================================================
+// A plain `let` handed to a `mut` parameter through the QUALIFIED spelling.
+// The write-permission check reads the callee's `mut` positions by name, and
+// the qualified arm never consulted them; the import now registers them under
+// `Phys.bump` (TypeModuleExport.Callees) and the call takes the one path.
+module Main
+import Phys
+let arr = [1.0, 2.0, 3.0]
+let x = Phys.bump(arr)

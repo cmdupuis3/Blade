@@ -1,0 +1,4 @@
+// TEST: Qualified call with a static extent mismatch (rejects)
+// MODULE: Phys
+module Phys
+function need5(a: Array<Float64 like Idx<5>>) -> Float64 = a(4)

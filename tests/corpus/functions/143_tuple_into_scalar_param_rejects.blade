@@ -1,0 +1,7 @@
+// TEST: Tuple argument into a scalar parameter (rejects)
+// ERROR: BL3001
+// ============================================================================
+// A tuple is not a Float64. The old element-class check declined tuples (their
+// width belongs to the pack schema), so `f((1.0, 2.0))` reached g++.
+function f(x: Float64) -> Float64 = x * 2.0
+let v = f((1.0, 2.0))

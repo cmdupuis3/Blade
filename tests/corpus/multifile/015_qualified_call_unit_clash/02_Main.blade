@@ -1,0 +1,12 @@
+// TEST: Qualified call with a unit clash (rejects)
+// MODULE: Main
+// ERROR: BL3006
+// ============================================================================
+// `Phys.per_sec(d)` with `d` in meters. The unqualified spelling was refused
+// (BL3006) while the qualified one type-checked: the qualified-application arm
+// built its node by hand and repeated only the element-class check. It is now
+// rewritten onto the unqualified path, so both spellings are one judgment.
+module Main
+import Phys
+let d: Float<meters> = 3.0
+let x = Phys.per_sec(d)

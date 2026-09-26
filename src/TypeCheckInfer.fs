@@ -335,60 +335,20 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     | ExprKind.ExprApp (({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar n }, field) } as qualFuncE), args)
         when (lookupVar $"{n}.{field}" env).IsSome ->
-        // DEFAULT PARAMETER FILL + by-nominal routing for module-QUALIFIED
-        // callees (`plot.contourf(x, y, z, 3: cmap)`): this arm short-circuits
-        // the general ExprApp arm below, so the fill must run here too --
-        // without it an omitted-slot call reaches codegen under-applied.
-        // The rewritten full-arity call re-enters this arm and passes through.
-        match tryFillDefaultArgs env expr.Span qualFuncE args with
-        | Some (Ok rewritten) -> inferExpr env rewritten
-        | Some (Error e) -> Error e
-        | None ->
+        // ONE CALL PATH. A module-qualified callee (`M.f(x)`, `plot.contourf`,
+        // a qualified ARRAY read `Geo.w(i)`) is the unqualified application
+        // of the name the import registered (`alias.name`, DeclImport), so it
+        // is rewritten to exactly that and re-enters the general ExprApp arm:
+        // default fill, factory flattening, partial application, the arity
+        // lift, where-conjunct discharge, dispatchAppOrIndex and the call
+        // judgment are then the SAME code for both spellings. (This arm used
+        // to build the node itself and inherited none of that seam's checks:
+        // units, `mut`, extents, co-iteration, arity and array indexing were
+        // all skipped, and every fix was a second copy here.) The declaration
+        // facts those checks read by name ride the import under the same
+        // `alias.name` key (TypeModuleExport.Callees).
         let qualName = $"{n}.{field}"
-        let info = (lookupVar qualName env).Value
-        let useTy =
-            match info.Scheme with
-            | Some scheme -> instantiate env.Subst scheme
-            | None -> info.Type
-        let tFunc = mkTyped (TExprVar (qualName, info.VarId, info.Identity)) useTy
-        args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
-            let retTy =
-                match useTy with
-                | FuncElem (_, ret) -> ret
-                | _ -> env.Subst.Fresh()
-            // This arm builds the node itself instead of going through
-            // dispatchAppOrIndex, so it inherits NONE of that seam's
-            // argument checks -- `MathLib.double("nope")` type-checked clean
-            // and died in g++. The element-class check is repeated here
-            // rather than the arm being rerouted: dispatchAppOrIndex would
-            // also impose arity/rank accounting on every qualified callee
-            // (providers, `plot.*`, stdlib arrays), which is a larger change
-            // than an argument-type hole warrants. If this arm is ever
-            // rerouted, DELETE this block -- do not leave two copies.
-            //
-            // Same reason the WIDTH SCHEMA regrouping is repeated here
-            // (docs/plan-tuples-vs-arg-packs.md 6c): a qualified callee with a
-            // `Tuple<k>` parameter must slice the flat argument list exactly
-            // like an unqualified one, or `M.addPair(b, c)` and `addPair(b, c)`
-            // stop being the same call. Same delete-if-rerouted note applies.
-            let tArgs =
-                regroupArgsByWidth env
-                    (match useTy with FuncElem (ps, _) -> ps | _ -> []) tArgs
-            match firstArgTypeClash env.Subst
-                      (match useTy with FuncElem (ps, _) -> ps | _ -> [])
-                      (tArgs |> List.map (_.Type)) with
-            | Some (i, pTy, aTy) ->
-                Error (ArgTypeMismatch (i + 1, $"'{qualName}'",
-                                        ppIRType (env.Subst.Resolve pTy),
-                                        ppIRType (env.Subst.Resolve aTy)))
-            | None ->
-            // Same delete-if-rerouted note as the two checks above: a generic
-            // callee's DEDUCED return needs its unit built from the arguments
-            // here too, or `stats.mean(x)` and the imported `mean(x)` stop
-            // being the same call -- accepting a meters-vs-seconds addition in
-            // the qualified spelling that the unqualified one refuses.
-            Ok (mkTyped (TExprApp (tFunc, tArgs))
-                        (unitStampedReturn env (Some qualName) tArgs retTy)))
+        inferExpr env { expr with Kind = ExprKind.ExprApp ({ qualFuncE with Kind = ExprKind.ExprVar qualName }, args) }
 
     // ---- Method call: obj.method(args) -> impl resolution ----
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprField (obj, method) }, args) ->
@@ -1325,7 +1285,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let newArgs = args |> List.mapi (fun i a -> if i = wildPos then inheritSpan a (ExprVar name) else a)
                 inferLambda env [{ Name = name; Type = None; Default = None; NameSpan = noSpan }] None (inheritSpan func (ExprApp (func, newArgs)))
                 |> Result.bind (fun tLam ->
-                    unify env.Subst tLam.Type (mkFuncArrow [paramTys.[wildPos]] retTy)
+                    // Pinned against an INSTANTIATED copy of the callee's
+                    // signature, like every call: the lambda's body call now
+                    // returns the call's own instance, and unifying that with
+                    // the declaration's shared return would bind the
+                    // declaration itself to this one use.
+                    let quantified, _ = calleeQuantifier env tFunc
+                    let pinTys, _ = instantiateOpenVars env.Subst quantified [paramTys.[wildPos]; retTy]
+                    unify env.Subst tLam.Type (mkFuncArrow [pinTys.[0]] pinTys.[1])
                     |> Result.map (fun () -> tLam))
         | FuncElem (paramTys, retTy) when not (hasPolyParam paramTys) && not args.IsEmpty && args.Length < paramTys.Length ->
             // A `mut` parameter left UNSUPPLIED by a partial application would
@@ -1358,10 +1325,15 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             inferLambda env lamParams None bodyApp
             |> Result.bind (fun tLam ->
                 // Pin the residual param types to the callee's declared
-                // ones: direct application keeps its looseness
-                // (no param-vs-arg unification), so nothing else would
-                // resolve the lambda's fresh param inference vars.
-                unify env.Subst tLam.Type (mkFuncArrow residual retTy)
+                // ones -- an INSTANTIATED copy of them, as at every call (the
+                // body's call returns its own instance; unifying that with
+                // the declaration's shared return would bind the declaration
+                // to this one use). The call judgment never binds an argument
+                // that is still open (the residual `__pa` params are), so
+                // nothing else would resolve the lambda's fresh param vars.
+                let quantified, _ = calleeQuantifier env tFunc
+                let pinTys, _ = instantiateOpenVars env.Subst quantified (residual @ [retTy])
+                unify env.Subst tLam.Type (mkFuncArrow (List.truncate residual.Length pinTys) (List.last pinTys))
                 |> Result.map (fun () -> tLam))
         | _ ->
             args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
@@ -1489,8 +1461,18 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             // `if` has no such expected type to push down -- inventing one
             // from whichever branch was written first is the order-dependence
             // above.
-            unify env.Subst tThen.Type tElse.Type |> Result.map (fun () ->
-                mkTyped (TExprIf (tCond, tThen, tElse)) tThen.Type)))))
+            //
+            // And the branches must share their STATIC EXTENTS, which unify
+            // does not compare: the node is typed from the then-branch, so an
+            // else-branch of a different literal length would be read at the
+            // then-branch's length -- `nan`s past a short buffer. Same shared
+            // refinement as every ascription seam (`staticExtentClash`).
+            unify env.Subst tThen.Type tElse.Type |> Result.bind (fun () ->
+                match staticExtentClash env.Subst tThen.Type tElse.Type with
+                | Some (d, e, a) ->
+                    if elseBr.Span.StartLine > 0 then setCurrentExprSpan elseBr.Span
+                    Error (ExtentAscribeMismatch ("the else-branch of this `if` (against the then-branch)", d + 1, e, a))
+                | None -> Ok (mkTyped (TExprIf (tCond, tThen, tElse)) tThen.Type))))))
 
     // ---- Tuple ----
     | ExprKind.ExprTuple exprs ->
@@ -5714,8 +5696,11 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
     | OpChoice ->
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
-            let _ = unify env.Subst tL.Type tR.Type
-            Ok (mkTyped (TExprChoice (tL, tR)) tL.Type)))
+            // The two alternatives are one value's two sources, so they must
+            // agree (the result was discarded, and the node typed from the
+            // left alone).
+            unify env.Subst tL.Type tR.Type |> Result.map (fun () ->
+                mkTyped (TExprChoice (tL, tR)) tL.Type)))
 
     // <|:> allocated-fallback (formalism 2.6): read A where its STORAGE holds
     // the cell, else B. Storage-keyed, unlike <|>'s value-keyed zero test --
@@ -5807,15 +5792,13 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // f >> g : (A -> B) >> (B -> C) = (A -> C)
             match env.Subst.Resolve(tL.Type), env.Subst.Resolve(tR.Type) with
             | FuncElem (fArgs, fRet), FuncElem (gArgs, gRet) ->
-                // Unify f's return type with g's parameter type(s)
-                match gArgs with
-                | [gArg] -> 
-                    let _ = unify env.Subst fRet gArg
-                    Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
-                | _ ->
-                    // Multi-arg g: unify f's return (should be tuple) with g's args as tuple
-                    let _ = unify env.Subst fRet (IRTTuple gArgs)
-                    Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
+                // f's return is g's argument: they must agree (the unify
+                // result used to be discarded, so `(Float -> Float) >>
+                // (String -> String)` type-checked and died in g++).
+                let gIn = match gArgs with [gArg] -> gArg | _ -> IRTTuple gArgs
+                match unify env.Subst fRet gIn with
+                | Ok () -> Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
+                | Error _ -> Error (TypeMismatch (env.Subst.Resolve gIn, env.Subst.Resolve fRet))
             | FuncElem _, _ ->
                 eprintfn "Warning: right side of >> should be a function"
                 Ok (mkTyped (TExprCompose (op, tL, tR)) tR.Type)
@@ -10523,7 +10506,18 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
             | Some clash -> Error clash
             | None ->
             match unify env.Subst tE.Type expected with
-            | Ok () -> Ok tE
+            | Ok () ->
+                // The ASCRIPTION half of the shared static-extent refinement
+                // (`staticExtentClash`; the call judgment is the other half):
+                // unify never compares extents, so `let x: Array<F like
+                // Idx<5>> = a3` unified clean and emitted a copy of 5 out of a
+                // 3-element buffer. This one site covers `let`, annotated
+                // returns, block finals and match arms checked against an
+                // expected type.
+                (match staticExtentClash env.Subst expected tE.Type with
+                 | Some (d, e, a) ->
+                     Error (ExtentAscribeMismatch ("this value, against its declared type", d + 1, e, a))
+                 | None -> Ok tE)
             | Error e ->
                 // Mechanism 2: a scalar in a concretely-shaped array position
                 // broadcasts to a fill; otherwise the normal mismatch stands.
@@ -12008,24 +12002,26 @@ and validateSpecIndexMatchArms (env: TypeEnv) (tScrutinee: TypedExpr) (cases: Ma
         | Some off -> Error (SpecIndexMatchNotStatic (scrut, off))
         | None -> Ok ()
 
-and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
+/// ONE match judgment, parameterized by how an arm BODY is judged -- the two
+/// entry points below differ only in that, so everything else (the
+/// spec-index gate, pattern checking, the Bool guard, the short-circuiting
+/// fold) exists once. `judgeBody caseEnv body` returns the typed body; the
+/// match node is typed `resultTy` resolved after every arm.
+///
+/// SHORT-CIRCUITING fold, not List.map + sequenceResults: a later SUCCESSFUL
+/// arm re-stamps the ambient error span, so the first arm's error used to
+/// point its caret at whichever arm inferred last (the compact-literal walker
+/// fixed the identical bug class -- see its `go` fold).
+and matchWith env scrutinee cases (resultTy: IRType)
+              (judgeBody: TypeEnv -> Expr -> TypeResult<TypedExpr>) : TypeResult<TypedExpr> =
     inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
         validateSpecIndexMatchArms env tScrutinee cases |> Result.bind (fun () ->
-        let resultTy = env.Subst.Fresh()
-        // SHORT-CIRCUITING fold, not List.map + sequenceResults: a later
-        // SUCCESSFUL arm re-stamps the ambient error span, so the first
-        // arm's error used to point its caret at whichever arm inferred
-        // last (the compact-literal walker fixed the identical bug class --
-        // see its `go` fold). And the arm/result unify is BINDING now: it
-        // was `let _ = unify ...`, which let an array arm and a scalar arm
-        // coexist and shipped the mismatch to g++ as an ill-typed ternary.
-        let inferCase (case: MatchCase) : TypeResult<TypedMatchCase> =
+        let judgeCase (case: MatchCase) : TypeResult<TypedMatchCase> =
             checkPattern env tScrutinee.Type case.Pattern |> Result.bind (fun tPat ->
                 // Extend env with pattern bindings
                 let mutable caseEnv = env
                 for (name, varId, ty) in tPat.Bindings do
                     caseEnv <- bindVarSimple name varId ty caseEnv
-
                 // A guard is a predicate: it must be Bool, not merely
                 // truthy (C truthiness was what the emitted C++ applied to
                 // whatever type arrived here, arrays included).
@@ -12037,62 +12033,44 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
                                 Other "a match-arm guard must be Bool: the `if` condition after a pattern is a predicate (comparisons and boolean operators), not a value")
                             |> Result.map (fun () -> Some tg)))
                     |> Option.defaultValue (Ok None)
-
                 tGuard |> Result.bind (fun guardOpt ->
-                inferExpr caseEnv case.Body |> Result.bind (fun tBody ->
-                    unify env.Subst tBody.Type resultTy |> Result.map (fun () ->
-                        ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase)))))
+                judgeBody caseEnv case.Body |> Result.map (fun tBody ->
+                    ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase))))
         let rec go acc cs =
             match cs with
             | [] -> Ok (List.rev acc)
-            | case :: rest -> inferCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
+            | case :: rest -> judgeCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
         go [] cases |> Result.map (fun tCases ->
-            let resolvedTy = env.Subst.Resolve resultTy
-            mkTyped (TExprMatch (tScrutinee, tCases)) resolvedTy)))
+            mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve resultTy))))
+
+/// Inferred match: each arm is INFERRED and unified with one result type --
+/// binding, so an array arm and a scalar arm cannot coexist (it was `let _ =
+/// unify`, which shipped the mismatch to g++ as an ill-typed ternary) -- and
+/// then held to the SAME static extents as the arms before it
+/// (`staticExtentClash`): the node's type is the first arm's, so an arm of a
+/// different literal length would be read at the wrong length.
+and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
+    let resultTy = env.Subst.Fresh()
+    matchWith env scrutinee cases resultTy (fun caseEnv body ->
+        inferExpr caseEnv body |> Result.bind (fun tBody ->
+            unify env.Subst tBody.Type resultTy |> Result.bind (fun () ->
+                match staticExtentClash env.Subst resultTy tBody.Type with
+                | Some (d, e, a) ->
+                    if body.Span.StartLine > 0 then setCurrentExprSpan body.Span
+                    Error (ExtentAscribeMismatch ("this match arm (against the arms before it)", d + 1, e, a))
+                | None -> Ok tBody)))
 
 /// Bidirectional match: push the `expected` type into each arm body via
 /// `checkExpr`, so a literal (or scalar) arm can flex to the expected
 /// `T`/`T^k` instead of pinning the result to its concrete type -- this is what
-/// lets `comoment_prod`'s `| 0 -> 1` defer into the `-> T^1` return. Falls back
-/// to plain inference on a body-check failure, preserving `inferMatch`'s lenient
-/// cross-unify (which ignored arm/result mismatches).
+/// lets `comoment_prod`'s `| 0 -> 1` defer into the `-> T^1` return.
+///
+/// checkExpr's verdict STANDS. This used to fall back to inference plus a
+/// lenient unify when the body check failed, which swallowed the specific
+/// error: a 2-element literal arm checked against `Idx<3>` passed here (and
+/// died later as BL7001) while the same literal outside a match is BL3007.
 and checkMatch env (expected: IRType) scrutinee cases : TypeResult<TypedExpr> =
-    inferExpr env scrutinee |> Result.bind (fun tScrutinee ->
-        validateSpecIndexMatchArms env tScrutinee cases |> Result.bind (fun () ->
-        // Same short-circuiting fold + binding unify + Bool guard as
-        // inferMatch (see its comment). The checkExpr-first path is
-        // untouched -- that is the literal-flex leniency `comoment_prod`'s
-        // `| 0 -> 1` arm rides -- but the FALLBACK's unify is binding now:
-        // an arm that neither checks against the expected type nor unifies
-        // with it is an error here, not a g++ error later.
-        let checkCase (case: MatchCase) : TypeResult<TypedMatchCase> =
-            checkPattern env tScrutinee.Type case.Pattern |> Result.bind (fun tPat ->
-                let mutable caseEnv = env
-                for (name, varId, ty) in tPat.Bindings do
-                    caseEnv <- bindVarSimple name varId ty caseEnv
-                let tGuard =
-                    case.Guard |> Option.map (fun g ->
-                        inferExpr caseEnv g |> Result.bind (fun tg ->
-                            unify env.Subst tg.Type (IRTScalar ETBool)
-                            |> Result.mapError (fun _ ->
-                                Other "a match-arm guard must be Bool: the `if` condition after a pattern is a predicate (comparisons and boolean operators), not a value")
-                            |> Result.map (fun () -> Some tg)))
-                    |> Option.defaultValue (Ok None)
-                tGuard |> Result.bind (fun guardOpt ->
-                    let tBodyR =
-                        match checkExpr caseEnv expected case.Body with
-                        | Ok tb -> Ok tb
-                        | Error _ ->
-                            inferExpr caseEnv case.Body |> Result.bind (fun tb ->
-                                unify env.Subst tb.Type expected |> Result.map (fun () -> tb))
-                    tBodyR |> Result.map (fun tBody ->
-                        ({ Pattern = tPat; Guard = guardOpt; Body = tBody } : TypedMatchCase))))
-        let rec go acc cs =
-            match cs with
-            | [] -> Ok (List.rev acc)
-            | case :: rest -> checkCase case |> Result.bind (fun tc -> go (tc :: acc) rest)
-        go [] cases |> Result.map (fun tCases ->
-            mkTyped (TExprMatch (tScrutinee, tCases)) (env.Subst.Resolve expected))))
+    matchWith env scrutinee cases expected (fun caseEnv body -> checkExpr caseEnv expected body)
 
 /// Mechanism 2 -- scalar -> concretely-shaped-array broadcast fill. When a scalar
 /// value is checked against a concrete array type whose extents are statically
@@ -13906,9 +13884,17 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 else paramTypes.[i]
                             bodyEnv <- bindVarSimple p.Name varId ty bodyEnv
                             { Name = p.Name; Type = ty; Index = i; VarId = varId; Default = None; NameSpan = p.NameSpan } : TypedParam)
-                        match inferExpr bodyEnv method.Body with
+                        // The body must MEET the declared return: this unify's
+                        // result used to be discarded, so `-> Float = "nope"`
+                        // type-checked and died in g++.
+                        let bodyAgainstRet =
+                            inferExpr bodyEnv method.Body |> Result.bind (fun tBody ->
+                                match unify env'.Subst tBody.Type retType with
+                                | Ok () -> Ok tBody
+                                | Error _ ->
+                                    Error (TypeMismatch (env'.Subst.Resolve retType, env'.Subst.Resolve tBody.Type)))
+                        match bodyAgainstRet with
                         | Ok tBody ->
-                            let _ = unify env'.Subst tBody.Type retType
                             let commGroups =
                                 extractCommGroups
                                     (method.Params |> List.map (fun p -> { Name = p.Name; Type = p.Type; Default = None; NameSpan = p.NameSpan } : LambdaParam))
@@ -13965,6 +13951,30 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         Error (ProviderNoSelectiveImport pname)
     | DeclImport (qname, style) ->
         let fullName = String.concat "." qname
+        // `from M import x` naming nothing M exports used to bind nothing and
+        // say nothing, so the program failed later as an unrelated unbound
+        // name -- or silently resolved `x` to a same-named later binding.
+        let missingSelective =
+            match Map.tryFind fullName env.ModuleExports, style with
+            | Some exports, ImportSelective names ->
+                names |> List.tryFind (fun name ->
+                    not (Map.containsKey name exports.Variables
+                         || Map.containsKey name exports.TypeDefs
+                         || Map.containsKey name exports.StaticFunctions
+                         || Map.containsKey name exports.StaticValues
+                         || Map.containsKey name exports.Units
+                         || Map.containsKey name exports.VariantTags))
+                |> Option.map (fun name ->
+                    let exported =
+                        Seq.append (Map.keys exports.Variables) (Map.keys exports.TypeDefs)
+                        |> Seq.filter (fun k -> not (k.StartsWith "__"))
+                        |> Seq.distinct |> Seq.sort |> Seq.truncate 12
+                        |> String.concat ", "
+                    (name, exported))
+            | _ -> None
+        match missingSelective with
+        | Some (name, exported) -> Error (ImportNameMissing (fullName, name, exported))
+        | None ->
         let env' =
             match Map.tryFind fullName env.ModuleExports with
             | Some exports ->
@@ -14000,6 +14010,16 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         match Map.tryFind kv.Key exports.DefaultCaptures with
                         | Some caps -> e.FuncDefaultCaptures.[qualName] <- caps
                         | None -> ()
+                    // The rest of the declaration facts the call judgment
+                    // reads by name, under the same `alias.name` key -- so the
+                    // qualified call is judged against the declaration it
+                    // names (mut write permission, co-iteration extents, the
+                    // return-unit transform, where-conjunct discharge).
+                    let c = exports.Callees
+                    for kv in c.MutParams do e.MutParamPositions.[$"{alias}.{kv.Key}"] <- kv.Value
+                    for kv in c.CoIterObligations do e.FuncCoIterObligations.[$"{alias}.{kv.Key}"] <- kv.Value
+                    for kv in c.UnitTransforms do e.FuncUnitTransform.[$"{alias}.{kv.Key}"] <- kv.Value
+                    for kv in c.Constraints do e.FuncConstraints.[$"{alias}.{kv.Key}"] <- kv.Value
                     e
                 | ImportSelective names ->
                     let mutable e = env
@@ -14035,6 +14055,21 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         match Map.tryFind name exports.Units with
                         | Some us -> e <- { e with Units = Map.add name us e.Units }
                         | None -> ()
+                        // The call judgment's declaration facts, the same way
+                        // as Defaults above: the bare name is now THIS
+                        // module's, so its entry wins -- and its ABSENCE wins
+                        // too, or a later-checked module's `mut` positions
+                        // would judge a call to this module's function.
+                        if Map.containsKey name exports.Variables then
+                            let c = exports.Callees
+                            let put (d: System.Collections.Generic.Dictionary<string, 'v>) (m: Map<string, 'v>) =
+                                match Map.tryFind name m with
+                                | Some v -> d.[name] <- v
+                                | None -> d.Remove name |> ignore
+                            put e.MutParamPositions c.MutParams
+                            put e.FuncCoIterObligations c.CoIterObligations
+                            put e.FuncUnitTransform c.UnitTransforms
+                            put e.FuncConstraints c.Constraints
                     e
             | None ->
                 // Provider or unknown module -- bind alias as opaque so references type-check
@@ -14050,6 +14085,9 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
 and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
     // Fresh type variable scope for this function's type annotations.
     let savedScope = env.Subst.PushTypeVarScope()
+    // Every inference variable minted from here on is THIS declaration's
+    // (see TypeEnv.FuncSigVarRange; the call judgment instantiates them).
+    let sigVarLo = env.Subst.NextId
 
     // Pre-scan all parameter + return type annotations to register type variable names.
     let allAnnotations =
@@ -14143,6 +14181,9 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         | None -> env.Builder.FreshId()
     // Register function BEFORE body (enables recursion)
     let envWithFunc = bindVarSimple funcDecl.Name funcVarId funcType env
+    // Open-ended while the body is checked (a recursive call instantiates
+    // whatever the declaration has minted so far); closed below.
+    env.FuncSigVarRange.[funcVarId] <- (sigVarLo, System.Int32.MaxValue)
     // ...and record the binder as a named function, so a lambda that calls it
     // does not drag it onto its capture list (see DeclaredFuncIds).
     env.DeclaredFuncIds.Add funcVarId |> ignore
@@ -14702,6 +14743,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // for later declarations and grafted onto the IR callable.
             let effects = effectsOfBody env (Some funcVarId) tBody
             env.FuncEffects.[funcVarId] <- effects
+            env.FuncSigVarRange.[funcVarId] <- (sigVarLo, env.Subst.NextId)
             let tf : TypedFunctionDecl = {
                 Name = funcDecl.Name; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams

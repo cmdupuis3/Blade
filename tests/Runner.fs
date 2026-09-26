@@ -1073,6 +1073,14 @@ let runMultiFileTests (name: string) (tests: (string * (string * string) list) l
         // reasoning as testLower: an inspection lane, not part of the suite.
         let (lowered, warnings) = lowerMultiSourceCaptured sources
         match lowered with
+        // A "(rejects)" probe inverts the verdict (the full-pipeline runner
+        // below also checks its ERROR pins).
+        | Error e when testName.EndsWith "(rejects)" ->
+            printfn "Rejected (as expected): %s" e
+            passed <- passed + 1
+        | Ok _ when testName.EndsWith "(rejects)" ->
+            printfn "FAILED: reject-probe compiled"
+            failed <- failed + 1
         | Ok ir ->
             printfn "Lower: OK (%d modules)" ir.Modules.Length
             for w in warnings do
@@ -1137,6 +1145,48 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
             let pairs = sources |> List.map (snd >> parseWarnPins)
             (pairs |> List.collect fst, pairs |> List.collect snd)
         let (lowered, capturedWarnings) = lowerMultiSourceCaptured sources
+        // A "(rejects)" probe, the single-file runner's rule on multi-file
+        // terms: the PROGRAM must be refused, and the refusal must carry every
+        // `// ERROR: BLxxxx` code and `// ERROR-CONTAINS:` substring pinned in
+        // any member (pins union across members, like warning pins). Codes are
+        // read from the checker's diagnostics; spans are not compared here.
+        if testName.EndsWith "(rejects)" then
+            let (codePins, containsPins) =
+                let ps = sources |> List.map (snd >> parseDiagPins)
+                (ps |> List.collect fst |> List.map (_.PinCode), ps |> List.collect snd)
+            let refusal : (string list * string) option =
+                match Blade.Parser.parseMultiSource sources with
+                | Error e -> Some ([], e.Message)
+                | Ok program ->
+                    match Blade.TypeCheck.typeCheck program with
+                    | Error errors ->
+                        let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
+                        Some (ds |> List.map (_.Code), ds |> List.map (_.Message) |> String.concat "\n")
+                    | Ok _ ->
+                        match lowered with
+                        | Error e -> Some ([], e)
+                        | Ok _ -> None
+            match refusal with
+            | None ->
+                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName
+                    "reject-probe compiled: the program was expected to be refused"
+                failed <- failed + 1
+                failedNames <- failedNames @ [testName]
+            | Some (codes, text) ->
+                let missing =
+                    (codePins |> List.filter (fun c -> not (List.contains c codes))
+                              |> List.map (fun c -> $"""expected {c}, got [{String.concat ", " codes}]"""))
+                    @ (containsPins |> List.filter (fun s -> not (text.Contains s))
+                                    |> List.map (fun s -> $"message lacks '{s}'"))
+                if missing.IsEmpty then
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass testName "rejected"
+                    passed <- passed + 1
+                else
+                    Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName
+                        (String.concat " ; " missing)
+                    failed <- failed + 1
+                    failedNames <- failedNames @ [testName]
+        else
         match lowered with
         | Error e ->
             Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName ($"lower: {e}")

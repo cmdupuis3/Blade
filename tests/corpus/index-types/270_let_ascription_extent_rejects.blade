@@ -1,0 +1,11 @@
+// TEST: Let ascription over a different static extent (rejects)
+// ERROR: BL3016
+// ============================================================================
+// Extents are not part of type identity (unify never compares them), but a
+// LITERAL extent is baked into the emitted copy: `let x: Array<F like Idx<5>>
+// = a` with a 3-element `a` copied 5 doubles out of a 3-double buffer. The
+// shared static-extent refinement -- the one the call seam applies to
+// arguments -- now runs at every ascription.
+let a = [1.0, 2.0, 3.0]
+let x: Array<Float64 like Idx<5>> = a
+let v = x(4)

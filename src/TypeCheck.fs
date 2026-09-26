@@ -254,6 +254,18 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
                 |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
                 |> Seq.map (fun kv -> (kv.Key, kv.Value))
                 |> Map.ofSeq
+            // Same snapshot, same reason, for the declaration facts the call
+            // judgment reads by name (TypeModuleExport.Callees).
+            Callees =
+                let snap (d: System.Collections.Generic.Dictionary<string, 'v>) : Map<string, 'v> =
+                    d
+                    |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
+                    |> Seq.map (fun kv -> (kv.Key, kv.Value))
+                    |> Map.ofSeq
+                { MutParams = snap finalEnv.MutParamPositions
+                  CoIterObligations = snap finalEnv.FuncCoIterObligations
+                  UnitTransforms = snap finalEnv.FuncUnitTransform
+                  Constraints = snap finalEnv.FuncConstraints }
         }
         moduleExports <- Map.add moduleName export moduleExports
     // env.Warnings is shared by reference across all envWithExports updates

@@ -1,0 +1,10 @@
+// TEST: Int64 array into a Float64 array parameter (rejects)
+// ERROR: BL3001
+// ============================================================================
+// Scalar arguments WIDEN at a call (the emitted C++ promotes an int64 into a
+// double parameter), but no element conversion exists for arrays: an
+// `Array<int64>` is not an `Array<double>`. The old seam declined arrays in its
+// class check and this died in g++.
+function total(x: Array<Float64 like Idx<3>>) -> Float64 = reduce(x, (+))
+let ints = [1, 2, 3]
+let v = total(ints)

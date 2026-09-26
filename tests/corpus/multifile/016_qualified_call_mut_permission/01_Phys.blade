@@ -1,0 +1,7 @@
+// TEST: Qualified call into a mut parameter without write permission (rejects)
+// MODULE: Phys
+module Phys
+function bump(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    a(0) = 99.0
+    a(0)
+}

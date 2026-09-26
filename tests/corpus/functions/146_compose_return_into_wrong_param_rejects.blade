@@ -1,0 +1,10 @@
+// TEST: Composition whose return meets the wrong parameter (rejects)
+// ERROR: BL3001
+// ============================================================================
+// `f >> g` feeds f's return to g's parameter -- a call seam. Its unify result
+// was discarded, so a Float64 -> Float64 composed with a String -> String
+// type-checked and died in g++.
+let f = lambda(x: Float64) -> x * 2.0
+let g = lambda(s: String) -> s
+let h = f >> g
+let v = h(1.0)

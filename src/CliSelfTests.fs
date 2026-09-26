@@ -538,22 +538,27 @@ let private runIdeServeTests () : TH.BlockResult =
         else
             record name TH.Fail $"{raw.Split('\n').Length} newline-separated parts"
 
-        // 4. Full tier: monomorphization upgrades both HM values, and only
-        // where it actually knows more than the typed AST did.
+        // 4. Full tier: monomorphization adds `concreteType` only where it
+        // actually knows more than the typed AST did. For an HM call it no
+        // longer does: the call judgment instantiates the callee's signature
+        // per call (docs/plans/plan-call-judgment.md), so the typed AST
+        // already says `r: Int64` / `s: Float64` -- these used to read `T`,
+        // the CALLEE's type variable leaking into the caller's binding, and
+        // were upgraded here.
         let (code, responses, _) = drive [checkReq 12 "full" hmPath hmSource; shutdownReq]
         let fullBody = match responses with [r] -> r | _ -> ""
-        let name = "check tier=full: HM value bindings gain concreteType"
+        let name = "check tier=full: HM value bindings are already concrete"
         if code = 0 && fullBody.Contains "\"tier\":\"full\""
-           && fullBody.Contains "\"concreteType\":\"Int64\""
-           && fullBody.Contains "\"concreteType\":\"Float64\"" then
+           && fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"Int64\""
+           && fullBody.Contains "\"name\":\"s\",\"kind\":\"let\",\"line\":3,\"col\":1,\"type\":\"Float64\"" then
             record name TH.Pass ""
         else
             record name TH.Fail $"exit {code}, response: {fullBody}"
 
-        // 5. `type` is never rewritten in place: the client wants both, and
-        // decides which to show.
-        let name = "full tier keeps the fast `type` beside the upgrade"
-        if fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"T\",\"concreteType\":\"Int64\"" then
+        // 5. `concreteType` is emitted only as a genuinely different spelling:
+        // a binding the typed AST already typed concretely gets none.
+        let name = "full tier adds no concreteType where the type is already concrete"
+        if not (fullBody.Contains "\"concreteType\"") then
             record name TH.Pass ""
         else
             record name TH.Fail $"response: {fullBody}"
@@ -2042,8 +2047,13 @@ let private runIdeCellsTests () : TH.BlockResult =
         let (code, responses, _) =
             drive [ cellsReq 4 "full" nbPath [ "function id(x: T) -> T = x"; "let r = id(42)" ]; shutdownReq ]
         let fullBody = match responses with [r] -> r | _ -> ""
-        let name = "checkCells tier=full upgrades HM bindings with concreteType"
-        if code = 0 && fullBody.Contains "\"tier\":\"full\"" && fullBody.Contains "\"concreteType\":\"Int64\"" then
+        // The HM binding is concrete in the typed AST itself now (the call
+        // judgment instantiates `id` per call), so the full tier has nothing
+        // to upgrade; what this pins is that the full tier still runs and
+        // reports the concrete type.
+        let name = "checkCells tier=full reports HM bindings concretely"
+        if code = 0 && fullBody.Contains "\"tier\":\"full\""
+           && fullBody.Contains "\"name\":\"r\"" && fullBody.Contains "\"type\":\"Int64\"" then
             record name TH.Pass ""
         else record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
