@@ -215,7 +215,9 @@ let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ displaySlice @ m4aS
 ///   * mask heap pointers 0x... -> 0xPTR (the struct printer still renders an
 ///     array-typed field as its raw address, different every run);
 ///   * CRLF -> LF; trim trailing whitespace per line and the whole text.
-let private normalize (s: string) : string =
+/// Public: the optimizer differential (tests/OptDiff.fs) compares compiled
+/// outputs through this same normalizer.
+let normalize (s: string) : string =
     s.Replace("\r\n", "\n").Split('\n')
     |> Array.filter (fun l ->
         not (l.Contains "completed in") && not (l.Contains "input allocation took"))

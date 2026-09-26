@@ -1,0 +1,21 @@
+// TEST: Functions CSE Twin Of Mutated Array
+// Two lets with the same value (the same pure call), one of which is later
+// written through a `mut` argument. They are two arrays: merging the plain
+// twin into the `let mut` one lets bump's write reach `y2`, which the
+// program never passed (t = 154 instead of 56). A let named by a writing
+// evaluation takes no part in a merge, in either role.
+type I = Idx<7>
+function dbl(v: Array<Float like I>) -> Array<Float like I> = v * 2.0
+function bump(a: mut Array<Float like I>) -> Float = {
+    a((0 : I)) = 100.0
+    0.0
+}
+function g(x: Array<Float like I>) -> Float = {
+    let mut y1 = dbl(x)
+    let y2 = dbl(x)
+    let z = bump(y1)
+    reduce(y2, (+)) + z
+}
+let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let t = g(a)
+// EXPECT: t = 56

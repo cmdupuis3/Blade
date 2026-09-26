@@ -2540,6 +2540,19 @@ let rec internal dispatchTest (rest: string list) : int =
         // Single corpus category against the pinned oracle.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed
         if failed = 0 then 0 else 1
+    | [ "opt-diff" ] | [ "optdiff" ] ->
+        // Optimizer differential: every corpus program (single-file
+        // categories + multifile) with every Blade.Optimize gate OFF vs ON.
+        // Emission-only for programs the optimizer leaves untouched; the
+        // rest are compiled and run both ways (needs g++). Standalone only.
+        let failed = (Blade.Tests.OptDiff.runOptDiffTests (Blade.Tests.Corpus.singleFileCategories ()) true).Failed
+        if failed = 0 then 0 else 1
+    | [ ("opt-diff" | "optdiff"); cat ] ->
+        // One corpus category (the LITERAL tests/corpus/<dir> name).
+        let failed =
+            if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTests [] true).Failed
+            else (Blade.Tests.OptDiff.runOptDiffTests [ cat ] false).Failed
+        if failed = 0 then 0 else 1
     | [ "interp" ] ->
         // Interpreter differential gate: tree-walking IR interpreter vs the
         // compiled binary over the supported corpus slice -- byte-identical normalized stdout required.

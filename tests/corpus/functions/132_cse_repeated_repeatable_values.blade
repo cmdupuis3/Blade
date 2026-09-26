@@ -1,12 +1,18 @@
 // TEST: Functions CSE Of Repeated Repeatable Values
 // Let-level common-subexpression elimination (Blade.Optimize.cseModule): in
 // one function body a let whose value is identical to an earlier let's is
-// dropped and its reads go to the earlier one -- for a scalar fold computed
-// twice and for an array map spelled twice -- when the value is REPEATABLE
-// (no assignment, no output, no unknown call) and nothing in the body could
-// change an input between the two. tests/OptimizeTests.fs pins the emission
-// (one fold per body, the decision record); this file is the value side in
-// both lanes (the interpreter runs every let as written).
+// dropped and its reads go to the earlier one -- here the scalar fold
+// computed twice in `twice` -- when the value is REPEATABLE (no assignment,
+// no output, no unknown call) and nothing in the body could change an input
+// between the two. The array map spelled twice in `doubled` is NOT merged:
+// each map's result mints its own anonymous index type (a fresh index id in
+// the apply's output type), so the two values are not structurally identical,
+// and treating them as one would make two arrays the SAME array for the
+// identity-keyed symmetry and co-iteration decisions downstream, which is
+// not provably a cost-only change. `doubled` stays as the value pin of it.
+// tests/OptimizeTests.fs pins the emission (one fold per body, the decision
+// record); this file is the value side in both lanes (the interpreter runs
+// every let as written).
 type I = Idx<7>
 function twice(x: Array<Float like I>) -> Float = {
     let y = x * 2.0

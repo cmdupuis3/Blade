@@ -604,6 +604,7 @@
     <Compile Include="tests/MpiTests.fs" />
     <Compile Include="tests/HybridTests.fs" />
     <Compile Include="tests/DiffOracle.fs" />
+    <Compile Include="tests/OptDiff.fs" />
     <Compile Include="tests/RunAll.fs" />
     <!-- The CLI, three layers in dependency order: CliCommands.fs (compile/run/
          check/emit + the REPL loop), CliSelfTests.fs (the `blade test` blocks

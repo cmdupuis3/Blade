@@ -37,15 +37,38 @@ open Blade.Ast
 open Blade.IR
 open Blade.IRMono
 
-/// BLADE_FREEZE_IDIOM=0|off disables freeze-idiom recognition (the A/B
-/// escape hatch, read per call like every other gate).
-let freezeIdiomEnabled () =
-    match System.Environment.GetEnvironmentVariable "BLADE_FREEZE_IDIOM" with
+/// A default-ON pass gate: `0` / `off` / `false` disable it, anything else
+/// (or unset) leaves it on. Read per call.
+let private gateOn (var: string) =
+    match System.Environment.GetEnvironmentVariable var with
     | null -> true
     | v ->
         match v.Trim().ToLowerInvariant() with
         | "0" | "off" | "false" -> false
         | _ -> true
+
+/// BLADE_FREEZE_IDIOM=0|off disables freeze-idiom recognition (the A/B
+/// escape hatch, read per call like every other gate).
+let freezeIdiomEnabled () = gateOn "BLADE_FREEZE_IDIOM"
+
+/// BLADE_CSE=0|off disables let-level CSE (`cseModule`): the analysis still
+/// runs, and a body it would have rewritten records `cse` DECLINED ("disabled
+/// by BLADE_CSE") with the pairs it would have merged, so `blade plan` shows
+/// the A/B.
+let cseEnabled () = gateOn "BLADE_CSE"
+
+/// BLADE_POOL_REUSE=0|off disables scratch reuse across barriers
+/// (`planPoolReuse`): nothing is written to Types.PoolReuseTable, and a body
+/// the plan would have applied to records `pool-reuse` DECLINED ("disabled
+/// by BLADE_POOL_REUSE") with the pairs as evidence.
+let poolReuseEnabled () = gateOn "BLADE_POOL_REUSE"
+
+/// Every gate of this layer (charter rule 3), in one place: the optimizer
+/// differential (`blade test opt-diff`, tests/OptDiff.fs) turns ALL of them
+/// off for its reference lane, so a new pass's gate belongs in this list the
+/// day the pass lands -- a gate missing here is a pass the differential
+/// cannot see.
+let optimizerGates = [ "BLADE_FUSION"; "BLADE_FREEZE_IDIOM"; "BLADE_CSE"; "BLADE_POOL_REUSE" ]
 
 // --- Freeze-idiom recognition (plan-match-statements.md section 5, R7/B) ---
 //
@@ -552,7 +575,12 @@ let planPoolReuse (modul: IRModule) : unit =
                 [ 0 .. n ] |> List.map (fun pos -> intervals |> List.sumBy (fun (lo, hi, b) -> if lo <= pos && pos <= hi then b else 0L)) |> List.fold max 0L
             let before = peakOf (candidates |> List.map (fun (k, _) -> (k, [ k ])))
             let after = peakOf (pools |> Seq.map (fun kv -> (kv.Key, kv.Value)) |> List.ofSeq)
-            if pairs.Count > 0 then
+            if pairs.Count > 0 && not (poolReuseEnabled ()) then
+                // The escape hatch: the plan is computed (so the A/B names
+                // what it would have done) and not one pair reaches codegen.
+                decide f.Name (Blade.Effects.Declined "disabled by BLADE_POOL_REUSE")
+                    (pairs |> List.ofSeq |> List.map (fun (k, r) -> $"{nameOf k} would take {nameOf r}'s dead pool ({bytesOf k} B)"))
+            elif pairs.Count > 0 then
                 for (k, r) in pairs do
                     match idAt k with
                     | Some id -> Blade.Types.PoolReuseTable.record id (idAt r).Value
@@ -577,63 +605,181 @@ let private resolveCallableIn (funcs: Map<IRId, IRCallable>) (k: IRExpr) : IRCal
 /// ... later CSE") and did not build. Straight-line only: inside one
 /// function body, a let whose value is structurally identical to an EARLIER
 /// let's value is dropped and every later reference reads the earlier one.
-/// Equality of values is equality of results only when the value is
-/// REPEATABLE (no assignment, no display, no unknown call -- a called
-/// callable's `Blade.Effects` summary is the fact, exactly as the fusion
-/// pass reads it) and nothing between the two evaluations changed an input:
-/// a body containing any assignment or loop declines wholesale, which is
-/// cheap and sound. A MayFail value is fine: the first evaluation already
-/// ran, so the second could not newly fail. Deferred lets (a bare apply left
-/// for a join) are never touched -- their identity is the join's sharing
-/// declaration, and dropping one would change what the join emits. Trivial
-/// values (a literal, a variable) are not worth a record. Every body with a
-/// hit records `cse` (applied, the pairs); nothing otherwise.
-let private cseValueRepeatable (funcs: Map<IRId, IRCallable>) (v: IRExpr) : bool =
-    let mutable ok = true
-    iterIRExpr (fun e ->
-        if ok then
-            match e with
-            | IRDisplayEmit _ | IRAssign _ | IRForRange _ -> ok <- false
-            | IRApp (IRVar (fid, _), _, _) ->
+/// Equality of values is equality of results only when
+///
+///   * the value is REPEATABLE: no assignment, no display, no call whose
+///     callee is unknown or not repeatable. A callee is judged by its
+///     `Blade.Effects` summary (exactly as the fusion pass reads it) and,
+///     for a lifted lambda (which carries no summary -- `Unknown`), by its
+///     own body under the same rules; a kernel REFERENCE (the callable an
+///     apply or reduce runs per cell) is judged like a call, and a
+///     function-typed name the module cannot resolve (a let alias of a
+///     lambda, a function parameter, another module's function) is the
+///     worst case. A read of a DEFERRED let inherits its producer's facts:
+///     the producer runs at the read;
+///   * NOTHING BETWEEN THE TWO EVALUATIONS CAN WRITE what the value reads.
+///     A body containing an assignment or a loop declines wholesale (cheap
+///     and sound). Every other write reaches a body through a CALL -- a
+///     callee assigning through a `mut` parameter, or to a module-level
+///     `let mut` it names -- so a let whose value may write (a callee whose
+///     summary says Mutates, or whose effects are unknown) is a BARRIER:
+///     nothing computed before it is reused after it;
+///   * neither let is NAMED by a writing evaluation anywhere in the body
+///     (directly, or through a callable or deferred let it names): that is
+///     the storage a `mut` argument writes, and merging it with its twin
+///     would let the write reach a name the program never passed. (Not
+///     IRModule.MutableArrayLets: in a function body a plain array `let`
+///     arrives there too -- it is reassignable in its own scope, so the
+///     checker marks it mutable -- and the table cannot tell a `let mut`
+///     apart (observed: both plain lets of a two-map body are listed). An
+///     assignment in the body already declines the whole body.)
+///
+/// A MayFail value is fine: the first evaluation already ran, so the second
+/// could not newly fail. Deferred lets (a bare apply left for a join) are
+/// never touched -- their identity is the join's sharing declaration, and
+/// dropping one would change what the join emits. Trivial values (a
+/// literal, a variable) are not worth a record.
+///
+/// Identity is STRUCTURAL equality of the IR, never a rendering of it (a
+/// `%A` key printed floats at ~10 significant digits and truncated deep
+/// trees, so `b * 0.1` and `b * 0.10000000001` compared equal). Float
+/// literals compare by their BIT PATTERN (so `0.0` and `-0.0` stay apart),
+/// and two callables are the same value when their whole records agree once
+/// their own ids, names and parameter ids are erased -- computed lazily, for
+/// the callables a candidate value actually names.
+///
+/// Every body with a hit records `cse` (applied, the pairs); with BLADE_CSE
+/// off the same body records `cse` declined, naming the pairs it would have
+/// merged; nothing otherwise.
+type private CseFacts = {
+    /// Evaluating it may change a value another evaluation reads.
+    MayWrite: bool
+    /// Evaluating it again, with the same inputs, gives the same value and
+    /// no other observable effect.
+    Repeatable: bool
+}
+
+/// The CSE judge over one module: facts of an expression, callees resolved
+/// through the module's own function table and memoized per callable. A
+/// callable met again while its own facts are being computed (recursion)
+/// reads as the worst case -- pessimistic, so a cycle can only decline.
+let private isFunctionTyped (t: IRType) : bool =
+    match stripUnits t with
+    | IRTArrow (slots, _, _) -> slots |> List.exists (function SVal _ -> true | _ -> false)
+    | _ -> false
+
+let private cseFactsOf (funcs: Map<IRId, IRCallable>) : IRExpr -> CseFacts =
+    let worst = { MayWrite = true; Repeatable = false }
+    let memo = System.Collections.Generic.Dictionary<IRId, CseFacts>()
+    let rec ofCallable (c: IRCallable) : CseFacts =
+        match memo.TryGetValue c.Id with
+        | true, r -> r
+        | _ ->
+            memo.[c.Id] <- worst
+            let r =
+                if not c.Effects.Unknown then
+                    { MayWrite = c.Effects.Mutates; Repeatable = Blade.Effects.isRepeatable c.Effects }
+                else ofExpr c.Body
+            // A static function's call is not a runtime value this pass
+            // reasons about (the old rule, kept).
+            let r = if c.IsStatic then { r with Repeatable = false } else r
+            memo.[c.Id] <- r
+            r
+    and ofExpr (e: IRExpr) : CseFacts =
+        let mutable mayWrite = false
+        let mutable repeatable = true
+        iterIRExpr (fun n ->
+            match n with
+            | IRAssign _ | IRForRange _ ->
+                mayWrite <- true
+                repeatable <- false
+            | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ ->
+                repeatable <- false
+            // A callable named anywhere -- a call head, a kernel, a callable
+            // passed as an argument -- may run: judge it. (The IRApp arm
+            // below leaves a resolvable head to this visit.)
+            | IRVar (fid, t) ->
                 (match Map.tryFind fid funcs with
-                 | Some callee -> if callee.IsStatic || not (Blade.Effects.isRepeatable callee.Effects) then ok <- false
-                 | None -> ok <- false)
-            | IRApp _ -> ok <- false
-            | _ -> ()) v
-    ok
+                 | Some c ->
+                    let cf = ofCallable c
+                    if cf.MayWrite then mayWrite <- true
+                    if not cf.Repeatable then repeatable <- false
+                 | None ->
+                    // A FUNCTION-typed name this module cannot resolve -- a
+                    // let alias of a lifted lambda (`let k = lambda ..`), a
+                    // function-typed parameter, another module's function
+                    // used as a kernel -- may run and may do anything.
+                    if isFunctionTyped t then
+                        mayWrite <- true
+                        repeatable <- false)
+            | IRParam (_, _, t) when isFunctionTyped t ->
+                mayWrite <- true
+                repeatable <- false
+            | IRApp (IRVar (fid, _), _, _) when Map.containsKey fid funcs -> ()
+            // A head this module cannot resolve -- a lambda-valued variable,
+            // a higher-order parameter, another module's function -- may do
+            // anything.
+            | IRApp _ ->
+                mayWrite <- true
+                repeatable <- false
+            | _ -> ()) e
+        { MayWrite = mayWrite; Repeatable = repeatable }
+    ofExpr
+
+/// A float literal as its bit pattern, for identity only: structural `=` on
+/// floats is IEEE equality, which calls `0.0` and `-0.0` the same value.
+let private floatBitsLit (n: IRExpr) : IRExpr =
+    match n with
+    | IRLit (IRLitFloat f) -> IRLit (IRLitString ("\u0001f64:" + string (System.BitConverter.DoubleToInt64Bits f)))
+    | IRLit (IRLitFloat32 f) -> IRLit (IRLitString ("\u0001f32:" + string (System.BitConverter.SingleToInt32Bits f)))
+    | _ -> n
 
 let cseModule (modul: IRModule) : IRModule =
     let funcs = modul.Functions |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    let facts = cseFactsOf funcs
+    let enabled = cseEnabled ()
     // Two references to callables are the SAME value when the callables are
-    // structurally identical: same parameter types, same captures, and the
-    // same body once each one's own parameter ids are replaced by their
-    // positions. Every `(+)` section and every inline lambda is lifted to
-    // its own callable, so two identical folds name different ids; this is
-    // the identity the comparison needs. `canonId` maps a callable to the
-    // first structurally identical one (by id order).
-    let canonKey (f: IRCallable) : string =
+    // structurally identical: the whole record once its own id and name and
+    // its parameters' names and ids are erased (a parameter becomes its
+    // position), float literals by bit pattern. Every `(+)` section and
+    // every inline lambda is lifted to its own callable, so two identical
+    // folds name different ids; this is the identity the comparison needs.
+    // `representative` maps a callable to the first structurally identical
+    // one ASKED ABOUT -- a consistent partition by key, computed only for
+    // callables a candidate value names.
+    let callableKey (f: IRCallable) : IRCallable =
         let subst = f.Params |> List.mapi (fun i p -> (p.VarId, -(i + 1))) |> Map.ofList
         let body =
             mapIRExpr (fun e ->
                 match e with
                 | IRVar (id, t) when Map.containsKey id subst -> IRVar (subst.[id], t)
-                | _ -> e) f.Body
-        sprintf "%A|%A|%A" (f.Params |> List.map (fun p -> p.Type)) (f.Captures |> List.map (fun c -> c.Id)) body
-    let canonId : Map<IRId, IRId> =
-        let byKey = System.Collections.Generic.Dictionary<string, IRId>()
-        modul.Functions
-        |> List.sortBy (fun f -> f.Id)
-        |> List.map (fun f ->
-            let k = canonKey f
-            match byKey.TryGetValue k with
-            | true, first -> (f.Id, first)
-            | _ -> byKey.[k] <- f.Id; (f.Id, f.Id))
-        |> Map.ofList
+                | _ -> floatBitsLit e) f.Body
+        { f with
+            Id = 0
+            Name = ""
+            Params = f.Params |> List.mapi (fun i p -> { p with Name = ""; VarId = -(i + 1) })
+            Body = body }
+    let repOf = System.Collections.Generic.Dictionary<IRId, IRId>()
+    let byKey = System.Collections.Generic.Dictionary<IRCallable, IRId>(HashIdentity.Structural)
+    let representative (f: IRCallable) : IRId =
+        match repOf.TryGetValue f.Id with
+        | true, r -> r
+        | _ ->
+            let k = callableKey f
+            let r =
+                match byKey.TryGetValue k with
+                | true, first -> first
+                | _ -> byKey.[k] <- f.Id; f.Id
+            repOf.[f.Id] <- r
+            r
     let canon (e: IRExpr) : IRExpr =
         mapIRExpr (fun n ->
             match n with
-            | IRVar (id, t) when Map.containsKey id canonId && canonId.[id] <> id -> IRVar (canonId.[id], t)
-            | _ -> n) e
+            | IRVar (id, t) ->
+                (match Map.tryFind id funcs with
+                 | Some f -> IRVar (representative f, t)
+                 | None -> n)
+            | _ -> floatBitsLit n) e
     let rec unroll (e: IRExpr) : (IRId * IRExpr) list * IRExpr =
         match e with
         | IRLet (id, v, body) ->
@@ -667,19 +813,84 @@ let cseModule (modul: IRModule) : IRModule =
                         | _ -> n) e
             let kept = ResizeArray<IRId * IRExpr>()
             let pairs = ResizeArray<IRId * IRId>()
+            // The values available for reuse, by canonical form. Cleared at
+            // every let that may write: nothing before a barrier is reused
+            // after it.
+            let available = System.Collections.Generic.Dictionary<IRExpr, IRId>(HashIdentity.Structural)
+            // A DEFERRED let (a bare apply left for a join) runs its kernel
+            // where it is READ, not where it is bound (codegen forces the
+            // producer at the consumer), so an expression naming one
+            // inherits its facts -- transitively, since a deferred producer
+            // may read another.
+            let deferredVals =
+                lets |> List.filter (fun (_, v) -> match v with IRApplyCombinator _ | IRComposeApply _ -> true | _ -> false)
+                |> Map.ofList
+            let deferredFacts = System.Collections.Generic.Dictionary<IRId, CseFacts>()
+            let rec factsIn (visiting: Set<IRId>) (v: IRExpr) : CseFacts =
+                let mutable r = facts v
+                for x in collectVarRefsIR v do
+                    match Map.tryFind x deferredVals with
+                    | Some dv when not (Set.contains x visiting) ->
+                        let d =
+                            match deferredFacts.TryGetValue x with
+                            | true, d -> d
+                            | _ ->
+                                let d = factsIn (Set.add x visiting) dv
+                                deferredFacts.[x] <- d
+                                d
+                        r <- { MayWrite = r.MayWrite || d.MayWrite; Repeatable = r.Repeatable && d.Repeatable }
+                    | _ -> ()
+                r
+            let factsOfValue = factsIn Set.empty
+            // Lets a writing evaluation NAMES -- directly, through the
+            // captures or body of a callable it names, or through a deferred
+            // let it reads -- anywhere in the body (the return included).
+            // Such a let's storage is what a `mut` argument writes, so it
+            // takes no part in a merge, in either role: merged, the write
+            // would reach the other name too (a later read of the untouched
+            // twin would see it).
+            let exposed =
+                let acc = System.Collections.Generic.HashSet<IRId>()
+                let work = System.Collections.Generic.Stack<IRId>()
+                for v in (lets |> List.map snd) @ [ ret ] do
+                    if (factsOfValue v).MayWrite then
+                        for r in collectVarRefsIR v do work.Push r
+                while work.Count > 0 do
+                    let r = work.Pop()
+                    if acc.Add r then
+                        (match Map.tryFind r funcs with
+                         | Some g ->
+                            for c in g.Captures do work.Push c.Id
+                            for b in collectVarRefsIR g.Body do work.Push b
+                         | None -> ())
+                        (match Map.tryFind r deferredVals with
+                         | Some dv -> for b in collectVarRefsIR dv do work.Push b
+                         | None -> ())
+                acc
             for (id, v0) in lets do
                 let v = applySubst v0
+                let vf = factsOfValue v
                 let dup =
-                    if trivial v || not (cseValueRepeatable funcs v) then None
+                    if trivial v || not vf.Repeatable || exposed.Contains id then None
                     else
                         let cv = canon v
-                        kept |> Seq.tryFind (fun (_, kv) -> canon kv = cv) |> Option.map fst
+                        match available.TryGetValue cv with
+                        | true, earlier -> Some earlier
+                        | _ -> available.[cv] <- id; None
                 match dup with
                 | Some earlier ->
                     subst.[id] <- earlier
                     pairs.Add((id, earlier))
                 | None -> kept.Add((id, v))
+                if vf.MayWrite then available.Clear()
             if pairs.Count = 0 then f
+            elif not enabled then
+                Blade.Effects.Decisions.record
+                    { Blade.Effects.Rule = "cse"; Version = 2
+                      Span = Blade.Ast.noSpan; Subject = f.Name
+                      Outcome = Blade.Effects.Declined "disabled by BLADE_CSE"
+                      Evidence = pairs |> Seq.map (fun (j, i) -> $"__v{j} is the same repeatable value as __v{i}: left as written") |> List.ofSeq }
+                f
             else
                 let ret' = applySubst ret
                 let body' = Seq.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) kept ret'
@@ -689,7 +900,7 @@ let cseModule (modul: IRModule) : IRModule =
                 // are rewritten too (ids are program-global, so this is exact).
                 for (j, i) in pairs do moduleSubst.[j] <- i
                 Blade.Effects.Decisions.record
-                    { Blade.Effects.Rule = "cse"; Version = 1
+                    { Blade.Effects.Rule = "cse"; Version = 2
                       Span = Blade.Ast.noSpan; Subject = f.Name
                       Outcome = Blade.Effects.Applied
                       Evidence = pairs |> Seq.map (fun (j, i) -> $"__v{j} is the same repeatable value as __v{i}: dropped, its reads go to __v{i}") |> List.ofSeq }

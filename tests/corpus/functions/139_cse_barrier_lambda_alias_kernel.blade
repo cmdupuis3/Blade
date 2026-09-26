@@ -1,0 +1,23 @@
+// TEST: Functions CSE Barrier Lambda Alias Kernel
+// A fold kernel bound to a local name (`let k = lambda ..`) reaches the fold
+// as a plain variable, not as the lifted callable, so the CSE judge cannot
+// read its body -- and this one writes a module-level `let mut`. Two
+// `reduce(x, k)` are therefore two evaluations: each runs the kernel twice
+// (3 cells), so G(0) ends at 1 + 4 = 5. CSE once merged them (G(0) = 3).
+// A function-typed name the judge cannot resolve is now the worst case.
+type I = Idx<3>
+let mut G: Array<Float like I> = [1.0, 2.0, 3.0]
+function g(x: Array<Float like I>) -> Float = {
+    let k = lambda(a, b) -> {
+        G((0 : I)) = G((0 : I)) + 1.0
+        a + b
+    }
+    let s1 = reduce(x, k)
+    let s2 = reduce(x, k)
+    s1 + s2
+}
+let a = [1.0, 2.0, 3.0]
+let m = g(a)
+let h = G
+// EXPECT: m = 12
+// EXPECT: h = [5, 2, 3]

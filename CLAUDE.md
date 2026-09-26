@@ -110,8 +110,13 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
 - Two different category namespaces:
   - `blade test <key>` uses alias keys from `src/CliSelfTests.fs` (dispatchTest's key
     map); multiword categories accept both spellings (`index-types` / `indextypes`).
-  - `blade test interp <dir>` / `blade test diff-oracle <dir>` take the **literal**
-    `tests/corpus/<dir>` name: `blade test interp index-types`.
+  - `blade test interp <dir>` / `blade test diff-oracle <dir>` / `blade test opt-diff <dir>`
+    take the **literal** `tests/corpus/<dir>` name: `blade test interp index-types`.
+- The optimizer (`src/Optimize.fs`) runs in Lowering, BEFORE the codegen/interpreter split, so
+  `test interp` cannot see an optimizer miscompile (both lanes print the same wrong value).
+  `blade test opt-diff` (standalone, whole corpus; `tests/OptDiff.fs`) emits every program with
+  all optimizer gates OFF and ON and compiles + runs only the pairs whose C++ differs, comparing
+  normalized output. Run it after touching any pass; a new pass's gate goes in `optimizerGates`.
 - Every corpus category has a standalone `blade test <key>`; `blade test sql` runs the
   same sql-* union the full suite does.
 - To iterate on a single corpus test, `blade run tests/corpus/<cat>/<file>.blade` (fast, but
@@ -146,6 +151,7 @@ final-newline fixing — these are byte-pinned assets; never auto-reformat them.
 | `BLADE_OMP_THREADS` | `1`/`0`/`off` **suppresses OMP pragma emission**; runtime thread count is plain `OMP_NUM_THREADS` |
 | `BLADE_FP_REASSOC` | `1`/`on` licenses reassociated (lane-parallel) fold codegen |
 | `BLADE_AD_HALO_GATHER` | reverse-mode rule for a `halo` stencil map: unset/`1` keeps the map and emits the GATHER adjoint (default); `0`/`off` lowers it into the construction loop and scatters. Same function either way; `blade test access` compares the two byte-for-byte |
+| `BLADE_FUSION` / `BLADE_FREEZE_IDIOM` / `BLADE_CSE` / `BLADE_POOL_REUSE` | the optimizer's per-pass escape hatches (`src/Optimize.fs`, `optimizerGates`): `0`/`off` disables elementwise-chain fusion / freeze-idiom recognition / let-level CSE / scratch pool reuse; unset = on. A disabled CSE or pool-reuse pass still records its decision as `declined -- disabled by ...` in `blade plan`. They change the EMISSION, so the exe cache keys on them for free. `blade test opt-diff` compares every program with all of them off vs on |
 | `BLADE_MARCH` / `BLADE_FP_CONTRACT` | g++ `-march=` (default `native`) / `-ffp-contract=` (default `fast`) |
 | `BLADE_STDLIB` | extra stdlib search root |
 | `BLADE_PRINT` | which top-level bindings the program prints (comma/space separated); unset = all of them, the default every corpus pin reads. Set by `--print a,b` on any verb. Read by BOTH lanes (codegen's print pass and the interpreter's), so a differential run compares like with like; a name that is no binding refuses BL7004. It changes the EMISSION, so the exe cache keys on it for free |

@@ -1,0 +1,24 @@
+// TEST: Functions CSE Barrier Mut Param Call
+// A call that writes the array through a `mut` parameter sits between two
+// identical folds of it. Let-level CSE (Blade.Optimize.cseModule) once merged
+// the second fold into the first -- it judged only the value being merged,
+// never what ran between the two evaluations -- so both lanes printed m = 0.
+// A let whose value may write (a callee whose effect summary says Mutates)
+// is now a barrier: nothing computed before it is reused after it. The
+// interpreter consumes the same optimized tree, so only the pinned value
+// (and `blade test opt-diff`) can see this class of bug.
+type I = Idx<7>
+function bump(a: mut Array<Float like I>) -> Float = {
+    a((0 : I)) = 100.0
+    0.0
+}
+function g(x: Array<Float like I>) -> Float = {
+    let mut y = x * 2.0
+    let s1 = reduce(y, (+))
+    let z = bump(y)
+    let s2 = reduce(y, (+))
+    s2 - s1 + z
+}
+let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let m = g(a)
+// EXPECT: m = 98

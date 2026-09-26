@@ -2440,7 +2440,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // shape), and in Lowering rather than a back end so codegen and the
         // interpreter consume one tree. Per-pass gates: BLADE_FUSION,
         // BLADE_FREEZE_IDIOM (the latter's recognition runs pre-lowering at
-        // inferRecArray, where the idiom's shape is still declarative).
+        // inferRecArray, where the idiom's shape is still declarative), and
+        // BLADE_CSE / BLADE_POOL_REUSE for the two passes below. Because
+        // both lanes consume the optimized tree, the interpreter differential
+        // CANNOT see an optimizer bug (both print the same wrong answer); the
+        // lane that can is `blade test opt-diff` (tests/OptDiff.fs), which
+        // compares every gate OFF against every gate ON.
         let irModule = Optimize.optimizeModule env.Builder irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
@@ -2475,7 +2480,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // bare ones left behind are exactly the deferred join operands it
         // must see through. Records into Types.PoolReuseTable for codegen.
         // Let-level CSE over repeatable values first (fewer lets, fewer
-        // pools), then the scratch-reuse plan over what remains.
+        // pools), then the scratch-reuse plan over what remains. Gates:
+        // BLADE_CSE, BLADE_POOL_REUSE (Optimize.cseEnabled/poolReuseEnabled).
         let irModule = Optimize.cseModule irModule
         Optimize.planPoolReuse irModule
         // mask+contains fusion always runs a linear scan; the semijoin

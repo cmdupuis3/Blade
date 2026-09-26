@@ -483,6 +483,173 @@ let private cseDropsRepeatedFold () =
             resultLine Fail name ($"expected 2 scalar folds in the program (one per body), got {folds}")
             false
 
+/// Run `f` with the environment variable `var` set to `value`, restoring it.
+/// The optimizer gates are read per call, which is what makes this work.
+let private withGate (var: string) (value: string) (f: unit -> 'a) : 'a =
+    let prior = System.Environment.GetEnvironmentVariable var
+    System.Environment.SetEnvironmentVariable(var, value)
+    try f () finally System.Environment.SetEnvironmentVariable(var, prior)
+
+/// BLADE_CSE=0: the same program keeps both folds in each body (4 in all),
+/// and the decision says why.
+let private cseGateOffKeepsFolds () =
+    let name = "cse_gate_off_keeps_both_folds"
+    match withGate "BLADE_CSE" "0" (fun () -> cppOfSource name cseSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let folds = System.Text.RegularExpressions.Regex.Matches(cpp, @"double __r = ").Count
+        if folds = 4 then
+            resultLine Pass name "two scalar folds per body with BLADE_CSE=0"
+            true
+        else
+            resultLine Fail name ($"expected 4 scalar folds with CSE off, got {folds}")
+            false
+
+/// BLADE_POOL_REUSE=0: no alias declaration reaches the emission.
+let private poolReuseGateOffEmitsNoAlias () =
+    let name = "pool_reuse_gate_off_emits_no_alias"
+    match withGate "BLADE_POOL_REUSE" "0" (fun () -> cppOfSource name poolReuseChainSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if cpp.Contains "pool reuse:" then
+            resultLine Fail name "a `pool reuse:` alias was emitted with BLADE_POOL_REUSE=0"
+            false
+        else
+            resultLine Pass name "no pool alias with BLADE_POOL_REUSE=0"
+            true
+
+/// No `rule` decision may be APPLIED for this source (the barrier cases).
+let private notAppliedCase (name: string) (src: string) (rule: string) (why: string) =
+    match decisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        match ds |> List.filter (fun d -> d.Rule = rule && applied d) with
+        | [] -> resultLine Pass name why; true
+        | hits ->
+            let seen = hits |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"`{rule}` must not apply ({why}); saw: {seen}")
+            false
+
+/// CSE across a call that mutates the array through a `mut` parameter: the
+/// second fold must see the write (tests/corpus/functions/134 pins 98).
+let private cseMutParamCallSrc =
+    "type I = Idx<7>\n"
+    + "function bump(a: mut Array<Float like I>) -> Float = {\n"
+    + "    a((0 : I)) = 100.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let mut y = x * 2.0\n"
+    + "    let s1 = reduce(y, (+))\n"
+    + "    let z = bump(y)\n"
+    + "    let s2 = reduce(y, (+))\n"
+    + "    s2 - s1 + z\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let m = g(a)\n"
+
+/// CSE across a call that writes a module-level `let mut`.
+let private cseGlobalWriteCallSrc =
+    "type I = Idx<3>\n"
+    + "let mut G: Array<Float like I> = [1.0, 2.0, 3.0]\n"
+    + "function poke() -> Float = {\n"
+    + "    G((0 : I)) = 100.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function g() -> Float = {\n"
+    + "    let s1 = reduce(G, (+))\n"
+    + "    let z = poke()\n"
+    + "    let s2 = reduce(G, (+))\n"
+    + "    s2 - s1 + z\n"
+    + "}\n"
+    + "let m = g()\n"
+
+/// Two folds whose kernels differ only in the 11th significant digit of a
+/// float literal: NOT the same value (the old `%A` key merged them).
+let private cseFloatLiteralSrc =
+    "type I = Idx<7>\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
+    + "    let s2 = reduce(x, lambda(a, b) -> a + b * 0.10000000001)\n"
+    + "    (s2 - s1) * 1.0e12\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let m = g(a)\n"
+
+/// ... nor do `0.0` and `-0.0` (IEEE-equal, bitwise different).
+let private cseSignedZeroSrc =
+    "type I = Idx<3>\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.0)\n"
+    + "    let s2 = reduce(x, lambda(a, b) -> a + b * -0.0)\n"
+    + "    1.0 / s1 - 1.0 / s2\n"
+    + "}\n"
+    + "let a = [-1.0, -2.0, -3.0]\n"
+    + "let m = g(a)\n"
+
+/// Two folds with identical inline lambda kernels ARE the same value: the
+/// pass must still fire on a kernel-carrying pair (a lifted lambda carries
+/// no effect summary of its own, so it is judged by its body).
+let private cseIdenticalLambdasSrc =
+    "type I = Idx<7>\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
+    + "    let s2 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
+    + "    s2 - s1\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let m = g(a)\n"
+
+/// A call that writes NOTHING is not a barrier (tests/corpus/functions/137).
+let private cseAcrossPureCallSrc =
+    "type I = Idx<7>\n"
+    + "function sumsq(v: Array<Float like I>) -> Float = reduce(v * v, (+))\n"
+    + "function scaled(x: Array<Float like I>) -> Float = {\n"
+    + "    let y = x * 2.0\n"
+    + "    let s1 = reduce(y, (+))\n"
+    + "    let q = sumsq(y)\n"
+    + "    let s2 = reduce(y, (+))\n"
+    + "    s1 * 0.5 + s2 * 0.25 + q\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let r = scaled(a)\n"
+
+/// Twins, one written through a `mut` argument: never merged, in either
+/// role (tests/corpus/functions/138).
+let private cseTwinOfMutatedSrc =
+    "type I = Idx<7>\n"
+    + "function dbl(v: Array<Float like I>) -> Array<Float like I> = v * 2.0\n"
+    + "function bump(a: mut Array<Float like I>) -> Float = {\n"
+    + "    a((0 : I)) = 100.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let mut y1 = dbl(x)\n"
+    + "    let y2 = dbl(x)\n"
+    + "    let z = bump(y1)\n"
+    + "    reduce(y2, (+)) + z\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let t = g(a)\n"
+
+/// A kernel reached through a local alias (`let k = lambda ..`) that writes a
+/// module-level `let mut`: the judge cannot see its body through the alias,
+/// so the name is the worst case (tests/corpus/functions/139).
+let private cseLambdaAliasKernelSrc =
+    "type I = Idx<3>\n"
+    + "let mut G: Array<Float like I> = [1.0, 2.0, 3.0]\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let k = lambda(a, b) -> {\n"
+    + "        G((0 : I)) = G((0 : I)) + 1.0\n"
+    + "        a + b\n"
+    + "    }\n"
+    + "    let s1 = reduce(x, k)\n"
+    + "    let s2 = reduce(x, k)\n"
+    + "    s1 + s2\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let m = g(a)\n"
+
 /// The structural/05 D7 advisory: gram, decompact, a row prodsum -- recorded
 /// as left-as-written with the `gram_apply` spelling in the evidence.
 let private gramAdvisorySrc =
@@ -553,6 +720,34 @@ let runOptimizeTests () =
           // Let-level CSE over repeatable values, and its decision.
           cseDropsRepeatedFold ()
           decisionCase "decision_cse_applied" cseSrc "cse" applied "cse applied"
+          decisionCase "decision_cse_identical_lambdas_applied" cseIdenticalLambdasSrc "cse" applied
+              "cse applied to two folds with identical lambda kernels"
+          decisionCase "decision_cse_across_pure_call_applied" cseAcrossPureCallSrc "cse" applied
+              "cse applied across a call that writes nothing"
+          // Legality: a write between the two evaluations is a barrier, a
+          // let the write names is never merged, and callable identity is
+          // structural (never a `%A` rendering).
+          notAppliedCase "cse_twin_of_mutated_array" cseTwinOfMutatedSrc "cse"
+              "the let mut twin is written through a mut argument"
+          notAppliedCase "cse_barrier_lambda_alias_kernel" cseLambdaAliasKernelSrc "cse"
+              "the kernel is a local alias the judge cannot see through"
+          notAppliedCase "cse_barrier_mut_param_call" cseMutParamCallSrc "cse"
+              "a call writing the array through a mut parameter sits between the folds"
+          notAppliedCase "cse_barrier_global_write_call" cseGlobalWriteCallSrc "cse"
+              "a call writing a module-level let mut sits between the folds"
+          notAppliedCase "cse_float_literal_identity" cseFloatLiteralSrc "cse"
+              "0.1 and 0.10000000001 are different kernels"
+          notAppliedCase "cse_signed_zero_identity" cseSignedZeroSrc "cse"
+              "0.0 and -0.0 are different kernels"
+          // The escape hatches (charter rule 3): emission and decision.
+          cseGateOffKeepsFolds ()
+          withGate "BLADE_CSE" "0" (fun () ->
+              decisionCase "decision_cse_disabled" cseSrc "cse" (declinedMentioning "disabled by BLADE_CSE")
+                  "cse declined, disabled by BLADE_CSE")
+          poolReuseGateOffEmitsNoAlias ()
+          withGate "BLADE_POOL_REUSE" "0" (fun () ->
+              decisionCase "decision_pool_reuse_disabled" poolReuseChainSrc "pool-reuse"
+                  (declinedMentioning "disabled by BLADE_POOL_REUSE") "pool-reuse declined, disabled by BLADE_POOL_REUSE")
           // The gram_apply advisory: left as written, spelled in the evidence.
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]

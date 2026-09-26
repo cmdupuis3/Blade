@@ -1,0 +1,16 @@
+// TEST: Functions CSE Float Literal Identity
+// Two folds whose kernels differ only in a float literal's 11th significant
+// digit are different values. CSE once keyed callables by their `%A`
+// rendering, which prints floats at ~10 significant digits, so the two
+// kernels compared equal and the second fold was dropped (m = 0). Identity
+// is now structural, float literals by bit pattern. Every value here is an
+// integer below 2^53, so the pin is exact under any FP policy.
+type I = Idx<7>
+function g(x: Array<Float like I>) -> Float = {
+    let s1 = reduce(x, lambda(a, b) -> a + b + 10000000000.0)
+    let s2 = reduce(x, lambda(a, b) -> a + b + 10000000001.0)
+    s2 - s1
+}
+let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let m = g(a)
+// EXPECT: m = 6

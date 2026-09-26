@@ -92,6 +92,7 @@ let printUsage () =
     printfn "                                    worker protocol; the live-GR case skips without one)"
     printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
     printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
+    printfn "  test opt-diff [category]          Diff every program with all optimizer gates OFF vs ON"
     printfn ""
     printfn "Options:"
     printfn "  -o <path>      Output file path"
