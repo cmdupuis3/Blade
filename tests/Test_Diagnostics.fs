@@ -298,5 +298,23 @@ let runDiagnosticsCoreTests () : BlockResult =
                 sprintf "panic now reachable from %s. This BREAKS SHADOW-FRAME ELISION: codegen omits BLADE_FRAME from emitted bodies it proves cannot reach a panic, and that proof only looks at the calls the body makes — inline/template runtime code is invisible to it. Those kernels would now panic with no frame pushed, so every BL-panic trace through one drops a link in its Blade call stack (values unchanged, diagnostics silently degraded). Fix: keep the panic in blade_runtime.hpp behind a call the generated body makes textually, or teach codegen to stop eliding the frame."
                     (String.concat "; " offenders))
 
+    // -- `blade run` names an OS-level crash (Build.describeCrashExit) -------
+    // A panic exits 1 with its own error line and is NOT a crash; an ordinary
+    // exit is silent; the NTSTATUS / signal codes are named.
+    let crashLine = Blade.Build.describeCrashExit
+    let isWin = Blade.Platforms.os = Blade.Platforms.Windows
+    check "describeCrashExit: exit 0 and a panic's exit 1 are not crashes"
+        (crashLine 0 = None && crashLine 1 = None) ""
+    if isWin then
+        check "describeCrashExit: STATUS_INTEGER_DIVIDE_BY_ZERO is named with its hex"
+            (crashLine (int 0xC0000094u) = Some "program crashed: STATUS_INTEGER_DIVIDE_BY_ZERO (0xC0000094)")
+            (sprintf "%A" (crashLine (int 0xC0000094u)))
+        check "describeCrashExit: STATUS_ILLEGAL_INSTRUCTION carries the -march hint"
+            (crashLine (int 0xC000001Du) |> Option.exists (fun s -> s.Contains "STATUS_ILLEGAL_INSTRUCTION" && s.Contains "-march"))
+            (sprintf "%A" (crashLine (int 0xC000001Du)))
+    else
+        check "describeCrashExit: SIGSEGV (128 + 11) is named"
+            (crashLine 139 |> Option.exists (fun s -> s.Contains "SIGSEGV")) ""
+
     printFooter "Diagnostics Core" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "Diagnostics Core"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }
