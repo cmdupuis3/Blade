@@ -140,6 +140,40 @@ let private formatScalar (name: string) (et: ElemType) (v: Value) : string =
     // ETUnit is never a printable scalar (skipped before reaching here).
     | ETUnit -> bad ()
 
+/// The interpreter twin of genPrintStatements' `--print` refusal: an AMBIENT
+/// selection (BLADE_PRINT) naming something that is not a top-level binding,
+/// or a binding that never prints (a deferred loop value, a streamed read),
+/// would print nothing -- which reads as "computed nothing". Codegen splices a
+/// BL7004 refusal; here it is raised as PrintUnsupported, so the notebook
+/// lane falls through to the compiled lane, which reports that BL7004.
+/// Same printability gate `printBindingsOnly` applies below.
+let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) (irModule: IRModule) (names: Set<string>) : unit =
+    let deferredIds = Blade.CodeGen.computeDeferredIds irModule.Bindings
+    let rec printableValue (v: IRExpr) =
+        match v with
+        | IRCompute (IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRVar _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _) -> true
+        | IRCompute inner -> printableValue inner
+        | IRMethodFor _ | IRObjectFor _ -> false
+        | _ -> true
+    let isPrintable (b: IRBinding) =
+        if Set.contains b.Id deferredIds && not (forcedIds.Contains b.Id) then false
+        elif (match Map.tryFind b.Id irModule.ProviderReads with
+              | Some spec -> spec.Streamed
+              | None -> false) then false
+        else printableValue b.Value
+    let declared = irModule.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+    let unknown = Set.difference names declared
+    if not unknown.IsEmpty then
+        let ns = String.concat ", " unknown
+        raise (PrintUnsupported $"--print: {ns} not a top-level binding")
+    let silent =
+        irModule.Bindings
+        |> List.filter (fun b -> Set.contains b.Name names && not (isPrintable b))
+        |> List.map (fun b -> b.Name)
+    if not silent.IsEmpty then
+        let ns = String.concat ", " silent
+        raise (PrintUnsupported $"--print: {ns} never materialized (deferred loop value)")
+
 /// Append to `sb` exactly what the compiled binary's main() prints -- the timing
 /// line followed by the module's top-level binding prints, in declaration order.
 ///

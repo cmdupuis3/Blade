@@ -595,7 +595,12 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     let printOnly =
         match printOnly with
         | Some _ -> printOnly
-        | None -> Blade.CodeGenState.printSelection ()
+        | None ->
+            let ambient = Blade.CodeGenState.printSelection ()
+            // The ambient pin is the user's `--print`: a name that would
+            // print nothing is refused, as codegen refuses it (BL7004).
+            ambient |> Option.iter (Print.checkAmbientSelection state.ForcedDeferred merged)
+            ambient
     Print.printBindingsOnly testName lookup state.ForcedDeferred merged printOnly sb
 
     // The memo this run hands to its successor: every top-level binding that
