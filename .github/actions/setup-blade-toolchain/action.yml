@@ -38,11 +38,6 @@ runs:
     # `msystem: UCRT64` only picks the default environment for the `msys2 {0}`
     # shell; pacman installs the clang64 packages just the same. `cache: true`
     # caches the downloaded package tarballs.
-    #
-    # libgomp is listed EXPLICITLY. From gcc 16.2.0-4 it is only an optional
-    # dependency of the gcc package, so installing gcc alone leaves out omp.h
-    # and libgomp. Blade passes -fopenmp on every g++ build, so the doctor's
-    # OpenMP probe fails and every g++ lane goes red.
     # ----------------------------------------------------------------------
     - name: MSYS2 toolchains and libraries
       uses: msys2/setup-msys2@v2
@@ -53,12 +48,35 @@ runs:
         cache: true
         install: >-
           mingw-w64-ucrt-x86_64-gcc
-          mingw-w64-ucrt-x86_64-libgomp
           mingw-w64-ucrt-x86_64-netcdf
           mingw-w64-ucrt-x86_64-msmpi
           mingw-w64-clang-x86_64-clang
           mingw-w64-clang-x86_64-lld
           mingw-w64-clang-x86_64-compiler-rt
+
+    # ----------------------------------------------------------------------
+    # OpenMP for g++, installed ONLY where it is a separate package.
+    #
+    # From gcc 16.2.0-4, MSYS2 ships omp.h and libgomp in their own package,
+    # and the gcc package lists it as merely optional. Blade passes -fopenmp on
+    # every g++ build, so gcc without it fails the doctor's OpenMP probe and
+    # takes every g++ lane down with it.
+    #
+    # It cannot simply go in the `install:` list above. `update: false` means
+    # pacman resolves names against the package database baked into the runner
+    # image, and images older than the gcc 16 split have no package by that
+    # name: pacman refuses the WHOLE install ("target not found"). On those
+    # images gcc still bundles OpenMP, so there is nothing to add.
+    # ----------------------------------------------------------------------
+    - name: OpenMP runtime (split from gcc 16 on)
+      shell: msys2 {0}
+      run: |
+        pkg=mingw-w64-ucrt-x86_64-libgomp
+        if pacman -Si "$pkg" >/dev/null 2>&1; then
+          pacman --noconfirm -S --needed "$pkg"
+        else
+          echo "$pkg is not in this image's package database; gcc bundles OpenMP here"
+        fi
 
     # ----------------------------------------------------------------------
     # ORDER IS LOAD-BEARING, in both directions.
