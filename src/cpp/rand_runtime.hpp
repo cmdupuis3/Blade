@@ -351,7 +351,7 @@ inline void beta(double* out, size_t n, int64_t key, double a, double b) {
 // what the weights are.
 //
 // WEIGHT VALIDATION: this header never panics (a runtime header must not reach
-// blade_rt::panic -- see `stream_word`). The SCALAR parameters of the other
+// the runtime panic -- see `stream_word`). The SCALAR parameters of the other
 // families are validated by checks codegen EMITS before the fill (BL8001:
 // rate/shape/a/b finite and > 0, lam finite and >= 0, p in [0, 1] --
 // Rand.Elaborate.paramGuards, mirrored by the interpreter), because a NaN lam
