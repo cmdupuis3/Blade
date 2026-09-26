@@ -1260,19 +1260,30 @@ let internal expandRecArray (fname: string) (ctx: Ctx)
 /// the accumulator. Reject non-additive kernels and non-array-literal /
 /// non-variable sources (deferred/former reductions), the additive subset
 /// matching grad v1. `extents` maps in-scope array names to their extents.
-let rec internal hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, int>) (e: Expr)
+let rec internal hoistReduces (fname: string) (ctx: Ctx) (extents: Map<string, int>)
+                             (dims: Map<string, int list>) (e: Expr)
     : Result<Stmt list * Expr, string> =
     let re k = inheritSpan e k
-    let recurse = hoistReduces fname ctx extents
+    let recurse = hoistReduces fname ctx extents dims
     match e.Kind with
     | ExprKind.ExprReduce (src, kernel, initOpt, axesOpt) ->
         // A PARTIAL fold (`axes = n` with n < rank) produces an ARRAY, not a
         // scalar, so the accumulator-loop rewrite below does not model it.
         // Grad v1 differentiates the rank-1 fold only; an explicit axis count
         // is refused rather than silently rewritten as if it were one.
-        (match axesOpt with
-         | Some _ -> err fname "reduce with an explicit `axes = n` is not differentiable (v1): grad supports the rank-1 additive fold `reduce(A, (+)[, init])`"
-         | None -> Ok ())
+        //
+        // The same holds for the DEFAULT partial fold (axes = 1) over a named
+        // rank >= 2 source: the scalar accumulator below would sum ROWS into
+        // a scalar. Both are lowered only as the whole initializer of a `let`
+        // (GradNormalize.expandPartialFold); anywhere else they are refused
+        // by name rather than mis-typed.
+        let partialMsg =
+            "a partial `reduce` (an explicit `axes = n`, or the default innermost-axis fold of a rank >= 2 array) is differentiable only as the whole initializer of a `let` over a named array with static extents (v1): bind it first, `let rs = reduce(P, (+))`"
+        (match axesOpt, src.Kind with
+         | Some _, _ -> err fname partialMsg
+         | None, ExprKind.ExprVar nm when (match Map.tryFind nm dims with Some ds -> ds.Length >= 2 | None -> false) ->
+             err fname partialMsg
+         | None, _ -> Ok ())
         |> Result.bind (fun () ->
         (match kernel.Kind with
          | ExprKind.ExprSection OpAdd -> Ok OpAdd
