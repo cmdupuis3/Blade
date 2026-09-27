@@ -3033,6 +3033,11 @@ let getCudaFileContent () : string option =
 /// its spelling). Call sites resolve through the Id-keyed VarNames map, so
 /// the rename is total by construction; nothing emits a function by its
 /// string name. Shared by both multi-module assembly sites.
+///
+/// Since module namespacing (Lowering.qualifyModuleNames) every non-main
+/// member of a LOWERED program is already `<module>__<name>`, so this finds
+/// no collision there and is a no-op; it stays as the backstop for an
+/// IRProgram assembled some other way.
 let private disambiguateModuleFunctions (modules: IRModule list) : IRModule list =
     let nameCounts =
         modules

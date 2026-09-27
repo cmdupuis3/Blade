@@ -2323,6 +2323,66 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
     }
     (irModule, moduleExport)
 
+/// The C++ spelling of a module name as an identifier prefix: `units.SI` ->
+/// `units__SI`. The same function names a binding (whose IR name is the
+/// dotted `units.SI.x`, which CodeGenState.sanitizeCppName renders
+/// `units__SI__x`) and a function (`units__SI__f`), so both kinds of module
+/// member share one scheme.
+let moduleCppPrefix (moduleName: string) : string = moduleName.Replace(".", "__")
+
+/// The qualifier of the module at `index` in a multi-module program.
+let private moduleQualifier (index: int) (moduleName: string) : string =
+    if moduleName = "" then $"m{index}" else moduleName
+
+/// MODULE NAMESPACING. Every module of a program lands in ONE C++ translation
+/// unit (CodeGen merges them) and in one interpreter environment, and nothing
+/// used to qualify their names: `Util.scale + Util2.scale` passed the checker
+/// and died in g++ as a redeclaration of `double scale`, and a main-module
+/// `let scale` collided with an imported module's `scale` the same way. (Worse
+/// than a redeclaration is the silent case: a main-module FUNCTION parameter
+/// named `scale` shadowed the imported global inside that function.)
+///
+/// So every module but the LAST -- the entry (main) module, which every path
+/// that assembles a program puts last: ModuleResolve's dependency order, the
+/// multi-file corpus harness, `ide check`'s dependency prepend -- has its
+/// members renamed here, ONCE, after every lowering and optimization pass, so
+/// the C++ lane and the interpreter consume the same names:
+///   - a top-level binding `x` of module `M` becomes `M.x`: that is also its
+///     print LABEL in both lanes (`M.x = ...`) and its `--print` spelling, and
+///     sanitizeCppName renders it `M__x` in C++;
+///   - a function `f` becomes `M__f` (functions never print). Lifted lambdas
+///     (`__lambda_<id>`) are id-unique already and keep their names.
+/// Every reference is IRId-based (IRVar), and codegen's VarNames map is filled
+/// from these Name fields, so the rename is total by construction. The main
+/// module is untouched, so a single-module program emits byte-identical C++.
+///
+/// TYPES are not renamed: a type name declared by two modules of one program
+/// is refused by the checker (BL2009, TypeCheck.checkProgram) until type
+/// identity is module-qualified.
+let qualifyModuleNames (program: IRProgram) : IRProgram =
+    match program.Modules with
+    | [] | [ _ ] -> program
+    | modules ->
+        let lastIdx = modules.Length - 1
+        { program with
+            Modules =
+                modules |> List.mapi (fun i m ->
+                    if i = lastIdx then m
+                    else
+                        let q = moduleQualifier i m.Name
+                        let fp = moduleCppPrefix q
+                        { m with
+                            Functions =
+                                m.Functions |> List.map (fun f ->
+                                    if f.Name.StartsWith "__lambda_" then f
+                                    else { f with Name = $"{fp}__{f.Name}" })
+                            Bindings =
+                                m.Bindings |> List.map (fun b ->
+                                    // `_(a,b)` tuple carriers are emitted by id
+                                    // (bindingCppName) and never print.
+                                    if b.Name.StartsWith "_(" then b
+                                    else { b with Name = $"{q}.{b.Name}" }) }) }
+
 /// Lower a typed program (with optional raw program for static evaluation)
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
@@ -2366,13 +2426,22 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
             | PatStruct (_, flds) -> flds |> List.collect (snd >> patNames)
             | PatVariant (_, Some inner) | PatGuarded (inner, _) | PatTyped (inner, _) -> patNames inner
             | _ -> []
-        for m in p.Modules do
+        // Keyed by the name codegen will look the declaration up under, which
+        // for a non-main module is its QUALIFIED name (qualifyModuleNames):
+        // recording the bare name would both miss the lookup and let an
+        // imported module's `x` shadow main's own `x` span.
+        let lastIdx = p.Modules.Length - 1
+        p.Modules |> List.iteri (fun i m ->
+            let modName = m.Name |> String.concat "."
+            let q = moduleQualifier i modName
+            let valueKey (n: string) = if i = lastIdx || lastIdx = 0 then n else $"{q}.{n}"
+            let funcKey (n: string) = if i = lastIdx || lastIdx = 0 then n else $"{moduleCppPrefix q}__{n}"
             for d in m.Decls do
                 match d.Value with
                 | DeclLet b | DeclStatic b ->
-                    for n in patNames b.Pattern do IR.recordDeclSpan n d.Span
-                | DeclFunction fd -> IR.recordDeclSpan fd.Name d.Span
-                | _ -> ()
+                    for n in patNames b.Pattern do IR.recordDeclSpan (valueKey n) d.Span
+                | DeclFunction fd -> IR.recordDeclSpan (funcKey fd.Name) d.Span
+                | _ -> ())
     | None -> ()
 
     for (tmod, rawDecls) in List.zip program.Modules rawModules do
@@ -2495,6 +2564,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // Must run after EVERY specializing pass -- each can make a function
     // concrete or mint new references -- and before validateIR.
     IRValidate.eliminateDeadPolymorphs { Modules = irModules }
+    // Module namespacing, after every pass that could mint or specialize a
+    // member (see qualifyModuleNames).
+    |> qualifyModuleNames
 
 // Typecheck warning surfacing (shared by every CLI lane)
 

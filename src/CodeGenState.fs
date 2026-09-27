@@ -1468,7 +1468,11 @@ let cppReservedWords = Set.ofList [
 
 /// Sanitize a name to avoid C++ reserved word conflicts
 let sanitizeCppName (name: string) : string =
-    if Set.contains name cppReservedWords then name + "_"
+    // A module member's IR name is qualified with dots (`units.SI.x`, see
+    // Lowering.qualifyModuleNames). No Blade identifier contains a dot, so
+    // `M__x` can only meet a user name spelled `M__x` itself.
+    if name.Contains '.' then name.Replace(".", "__")
+    elif Set.contains name cppReservedWords then name + "_"
     else name
 
 /// Identifiers the generated TU's own includes declare at GLOBAL scope. None

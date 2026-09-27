@@ -1295,7 +1295,9 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
         // too, not a silently mis-shaped array (func-arrays T12 abort probe).
         (match b.Value, value with
          | IRArrayLit (elements, arrType), VArray arr ->
-             let cppName = if b.Name.StartsWith "_(" then $"__tup_{b.Id}" else b.Name
+             // The C++ lane's own spelling (bindingCppName): a module member
+             // `M.x` is `M__x` there, and the panic text must agree.
+             let cppName = if b.Name.StartsWith "_(" then $"__tup_{b.Id}" else Blade.CodeGenState.sanitizeCppName b.Name
              checkArrayLitRowExtents cppName elements arrType arr
          | _ -> ())
         // Copy semantics for assignable top-level array bindings whose
