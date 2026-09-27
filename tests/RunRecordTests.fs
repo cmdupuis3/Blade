@@ -219,5 +219,40 @@ let x = m.solve(A, b)
                          (js.Contains "\"status\":{\"ok\":false,\"code\":\"BL8007\"" && js.Contains "\"inputs\":[]") js
              | Error e -> check "record: aborting run" false e))
 
+    // MANY THREADS FAIL AT ONCE: every iteration of an OpenMP loop divides by
+    // zero. The runtime's failure exit used to call std::exit from each worker
+    // that got there -- concurrent static teardown, undefined. Now the first
+    // failure reports and leaves through _Exit after flushing and writing the
+    // record; every other worker parks. So: one diagnostic, a nonzero exit,
+    // and the record written once with that code.
+    let ompAbortSource = """
+let z: Array<Int64 like Idx<4000>> = 0 * (0..4000)
+let q = method_for(z) <@> lambda(x) where omp(x: 1) -> 10 / x |> compute
+"""
+    (match buildExe "rr_omp_abort" ompAbortSource with
+     | Error e ->
+         if isSkipError e then skip "record: concurrent failures" e else check "record: concurrently failing program compiles" false e
+     | Ok exe ->
+         let recPath = Path.GetFullPath(Path.Combine(e2eDir, "rr_omp_abort.record.json"))
+         if File.Exists recPath then File.Delete recPath
+         let priorThreads = Environment.GetEnvironmentVariable "OMP_NUM_THREADS"
+         Environment.SetEnvironmentVariable("OMP_NUM_THREADS", "8")
+         try
+             withRecord (Some recPath) (fun () ->
+                 match runExecutable exe with
+                 | Ok (code, out) ->
+                     let reports = out.Split('\n') |> Array.filter (fun l -> l.Contains "error[BL8013]") |> Array.length
+                     check "record: concurrent failures end the run with a nonzero status" (code <> 0) $"exit {code}: {out}"
+                     check "record: exactly one failure is reported however many workers fail" (reports = 1) $"{reports} report(s): {out}"
+                     if not (File.Exists recPath) then check "record: file written on the concurrent failure exit" false recPath
+                     else
+                         let js = File.ReadAllText recPath
+                         check "record: one well-formed record carrying the failure code"
+                             (js.Contains "\"status\":{\"ok\":false,\"code\":\"BL8013\"" && js.TrimEnd().EndsWith "]}"
+                              && (js.Split("\"blade_run_record\"").Length = 2)) js
+                 | Error e -> check "record: concurrently failing run" false e)
+         finally
+             Environment.SetEnvironmentVariable("OMP_NUM_THREADS", priorThreads))
+
     { Block = "Run Records"; Passed = passed; Failed = failed; Skipped = skipped
       FailedNames = List.ofSeq failedNames }

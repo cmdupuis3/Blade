@@ -272,6 +272,9 @@ namespace nested_array_utilities {
         size_t trail = parent.trailing_stride;
         T* pool = new T[(cnt > 0 ? cnt : 1) * trail];
         T** rows = new T*[cnt > 0 ? cnt : 1];
+        // Row 0 is the pool base EVEN WHEN NOTHING MATCHED: the teardown
+        // (deallocate_gather_dense_trail) recovers the pool as `a.data[0]`.
+        rows[0] = pool;
         for (size_t i = 0; i < cnt; i++) {
             for (size_t t = 0; t < trail; t++)
                 pool[i * trail + t] = parent.data[ranks[i] * trail + t];
@@ -375,14 +378,11 @@ namespace nested_array_utilities {
 
     // Gather-dense-trail residual (make_sparse_gather_dense_trail): Array<T,2> owning a fresh pool, its row table,
     // and its extents. The pool is not returned separately, so it is recovered as `a.data[0]` -- valid because the
-    // producer writes `rows[i] = pool + i * trail` in order, making row 0 the pool base.
-    //
-    // BOUNDED LEAK, cnt == 0: the producer still allocates a 1-slot pool and table so no pointer is null, but leaves
-    // `rows[0]` UNINITIALIZED, so the pool base is unrecoverable. We free the table and extents and leak that one
-    // block rather than `delete[]` an indeterminate pointer. Bound: one `trail * sizeof(T)` block per empty gather, once.
+    // producer writes `rows[i] = pool + i * trail` in order, making row 0 the pool base -- and it sets
+    // `rows[0] = pool` before the copy, so an EMPTY gather (cnt == 0, a 1-slot pool and table) frees its pool too.
     template<typename T>
     void deallocate_gather_dense_trail(Array<T, 2>& a) {
-        if (a.extents && a.extents[0] > 0) delete[] a.data[0];
+        if (a.data) delete[] a.data[0];
         delete[] a.data;
         delete[] a.extents;
         a.data = nullptr;

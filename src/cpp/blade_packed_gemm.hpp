@@ -17,12 +17,15 @@
 // Measured (Zen 3, single thread, cycles per MAC, loop vs packed):
 //   61x2003x61  0.62 -> 0.30    203x157x211  0.48 -> 0.17
 //   257x255x253 0.49 -> 0.17    1003x1001x997 0.62 -> 0.18   (~67% of FMA peak)
-// and 1.4-2.4x over the threaded loop at 8 threads. Below `worth()` the fixed
-// costs (packing, edge tiles) lose to the loop, which then runs instead.
+// and 1.4-2.4x over the threaded loop at 8 threads. Below the crossover the
+// fixed costs (packing, edge tiles) lose to the loop, which then runs instead.
+// WHETHER a shape is worth the packed path is decided at COMPILE time, on the
+// literal extents, by ONE predicate: CodeGenExpr.packedGemmWorth (the emitter
+// calls dgemm_nn only above it and emits the loop otherwise). This header
+// carries no copy of the rule to drift from it.
 //
 // Only GCC/Clang get the packed path (vector extensions); anything else --
-// cl.exe as nvcc's host compiler -- answers `worth() == false` and keeps the
-// loop.
+// cl.exe as nvcc's host compiler -- gets a dgemm_nn that IS the loop.
 #pragma once
 #include <cstddef>
 #include <cstring>
@@ -43,16 +46,6 @@ constexpr size_t MC = 96;     // row block: the packed A block (192 KB) in L2
 constexpr size_t NC = 2048;   // column block: the packed B panel (4 MB) in L3
 
 typedef double v4d __attribute__((vector_size(32)));
-
-/// Is the packed path worth it for this shape? Crossovers measured against
-/// the loop: M below ~18 or K below ~16 wastes most of a tile or pays a
-/// C load/store per few MACs, and under ~32K MACs packing does not amortize.
-/// Small N is fine (the loop is at its worst there). The emitter applies the
-/// SAME rule at compile time on the literal extents (CodeGenExpr.fs,
-/// materializeMatmulForm) -- keep the two in step.
-inline bool worth(size_t m, size_t k, size_t n) {
-    return m >= 18 && k >= 16 && m * n * k >= 32768;
-}
 
 /// Grow-only 64-byte-aligned scratch, one per thread (thread_local below):
 /// reallocating per call measured as THE mid-size cost (65^3: 0.60x with a
@@ -202,7 +195,6 @@ inline void dgemm_nn(size_t m, size_t k, size_t n,
 // No vector extensions, but the emitter calls dgemm_nn on the SHAPE, not the
 // compiler, so this must still compute C: it is the emitted i-t-j loop,
 // verbatim in arithmetic (per cell: T() then ascending t), serial.
-inline bool worth(size_t, size_t, size_t) { return false; }
 inline void dgemm_nn(size_t m, size_t k, size_t n,
                      double* const* A, double* const* B, double* const* C, bool) {
     for (size_t i = 0; i < m; i++) {

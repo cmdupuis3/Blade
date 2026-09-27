@@ -187,14 +187,27 @@ namespace blade_rr {
     std::fclose(f);
   }
 
-  // A file-scope instance of this writes the record when static destructors
-  // run -- after main returns AND on the runtime's failure exit, which
-  // leaves through std::exit. `rank` is read through a pointer so an MPI
-  // program's rank global (assigned in main) is seen as it is at exit.
+  // A file-scope instance of this writes the record: from its destructor when
+  // main returns, and -- the runtime's failure exit leaves through
+  // std::_Exit, which runs no static destructors -- from the failure-exit
+  // hook its `hook` member registers. Exactly one of the two runs. `rank` is read through a pointer so an MPI program's rank global
+  // (assigned in main) is seen as it is at exit.
+  struct AtExit;
+  struct AtExitHook { explicit AtExitHook(const AtExit* self); };
   struct AtExit {
     const char* program; const char* blade_version; bool uses_rng;
     const Input* inputs; int n_inputs; const int* rank;
-    ~AtExit() { write(program, blade_version, uses_rng, inputs, n_inputs, rank ? *rank : 0); }
+    // A default member initializer, so the emitted aggregate initialization
+    // (Blade.RunRecord.cppLines) is unchanged.
+    AtExitHook hook{this};
+    void write_now() const { write(program, blade_version, uses_rng, inputs, n_inputs, rank ? *rank : 0); }
+    ~AtExit() { write_now(); }
   };
+  inline const AtExit* registered = nullptr;
+  BLADE_RR_COLD inline void write_on_failure_exit() { if (registered) registered->write_now(); }
+  inline AtExitHook::AtExitHook(const AtExit* self) {
+    registered = self;
+    blade_rt::on_failure_exit(write_on_failure_exit);
+  }
 }
 #endif

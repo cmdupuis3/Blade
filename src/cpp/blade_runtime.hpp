@@ -6,7 +6,8 @@
 // OpenMP) pushed/popped by an RAII Scope at each Blade function-body entry
 // (BLADE_FRAME). On failure, blade_rt::panic prints an `error[BLxxxx]:`
 // line, the failing source location (when carried), and the Blade call
-// stack (innermost first), then exits(1).
+// stack (innermost first), then ends the process with status 1 -- once, even
+// when several OpenMP workers fail together (see panic).
 //
 // __CUDA_ARCH__ is defined ONLY during nvcc's device passes: host passes get
 // the real implementation, device passes get a no-op BLADE_FRAME macro and
@@ -16,6 +17,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <atomic>
 #include <type_traits>
 #if !defined(__CUDA_ARCH__)
 // ---- libm, evaluated at RUN TIME (docs/formalism.md section 2.4) ----------
@@ -166,8 +169,31 @@ namespace blade_rt {
   // reads these at exit): empty code = the program exited normally.
   inline const char* exit_code = "";
   inline const char* exit_message = "";
+  // panic leaves through std::_Exit: no static destructors and no atexit
+  // handlers -- tearing down iostreams, the OpenMP runtime or a provider
+  // library under worker threads that are still running is what made the old
+  // std::exit unsafe. What must still happen on the way out registers here
+  // (during static initialization, which is single-threaded) and runs in
+  // registration order: the run record's writer (blade_run_record.hpp) and a
+  // netcdf program's library finalize (CodeGen.netcdfRegisterLines). A
+  // private registry rather than at_quick_exit, which not every C++ runtime
+  // Blade targets provides.
+  inline void (*failure_exit_hooks[8])() = {};
+  inline void on_failure_exit(void (*f)()) {
+    for (auto& h : failure_exit_hooks) if (!h) { h = f; return; }
+  }
+  //
+  // `panicking` is set by the FIRST panic. OpenMP workers routinely fail
+  // together (every iteration of a parallel loop dividing by the same zero),
+  // and exiting from several threads at once is undefined -- the old
+  // std::exit ran the static destructors twice, concurrently. So exactly one
+  // failure reports and exits; any other parks here until the process ends
+  // under it (the atomic load is the forward-progress side effect an empty
+  // spin would lack).
+  inline std::atomic<int> panicking{0};
   [[noreturn]] inline void panic(const char* code, const char* msg,
                                  const char* file, int line) {
+    if (panicking.exchange(1) != 0) { for (;;) (void)panicking.load(); }
     exit_code = code;
     exit_message = msg;
     std::cerr << "error[" << code << "]: " << msg << "\n";
@@ -179,7 +205,14 @@ namespace blade_rt {
         std::cerr << " (" << stack[i].file << ":" << stack[i].line << ")";
       std::cerr << "\n";
     }
-    std::exit(1);
+    // Everything printed before the failure is kept (std::exit flushed it
+    // through the static destructors _Exit skips), then the hooks.
+    std::cerr.flush();
+    std::cout.flush();
+    std::fflush(nullptr);
+    for (auto h : failure_exit_hooks) if (h) h();
+    std::fflush(nullptr);
+    std::_Exit(1);
   }
 
   // ---- The arithmetic contract's FAULTS (docs/formalism.md section 2.4,
