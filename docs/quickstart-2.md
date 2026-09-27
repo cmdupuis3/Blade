@@ -379,11 +379,23 @@ let antisym = method_for(A, A) <@> reynolds(g, Antisymmetric)   // g(x,y) - g(y,
 
 `reynolds(g)` sums `g` over permutations of its *value arguments* (with
 signs, in the antisymmetric case), making the wrapped kernel commutative by
-construction. What that buys follows the same law as `comm`: with the **same
-array** in the wrapped positions you get symmetric storage and triangular
-iteration (equal permutation terms are deduplicated, so a commutative `g`
-costs one term); with **distinct arrays** you get a commutative kernel but a
-dense, non-index-symmetric output — Reynolds does not substitute for array
+construction — every output VALUE is symmetric. Symmetric STORAGE is a
+separate license, and it follows the same law as `comm`: with the **same
+array** in the wrapped positions AND `where comm(x, y)` on the wrapped kernel,
+you get symmetric storage and triangular iteration (equal permutation terms
+are deduplicated, so a commutative `g` costs one term). Under `reynolds` the
+clause is an iteration license over the permutation sum, not a claim about
+the bare `g`, so it is accepted even on a non-commutative `g` like `x / y`
+(outside `reynolds` that clause is refused, BL4013):
+
+```F#
+let g = lambda(x, y) where comm(x, y) -> x / y
+let packed = method_for(A, A) <@> reynolds(g) |> compute   // SymIdx<2, n> storage
+```
+
+Without the clause the same-array result is symmetric in value but stored
+dense. With **distinct arrays** you get a commutative kernel but a dense,
+non-index-symmetric output — Reynolds does not substitute for array
 identity. (Machine-checked: the H ∩ Stab license is exact.)
 
 Antisymmetric Reynolds zeroes diagonals automatically and negates on

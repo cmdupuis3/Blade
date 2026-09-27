@@ -702,6 +702,21 @@ immutable lambda bindings (internally the same marker `let static` uses).
 definition. Array captures are unit-checked (§3.10). Parameter types infer
 from context; array-typed parameters need explicit rank annotations.
 
+What the checker enforces of that purity today: a PARALLEL kernel body
+(`where omp(...)` / `cuda`, and anything nested in one) may not write a
+binding captured from outside it -- its cells run concurrently, so the store
+would be a data race (BL4005). A serial body's write to a captured `let mut`
+(or a named function's write to a module-level one) is still accepted as an
+ordered side effect; the optimizer treats such calls as barriers (CSE never
+merges across them).
+
+A `where comm(x, y)` clause is TRUSTED when the body's symmetry cannot be
+decided, and REFUSED (BL4013) when it is refuted: by a proved sign law
+(antisymmetric body) or by a concrete counterexample -- the body evaluated at
+sample points and their swaps (`x / y` is 2 at (2, 1) and 0.5 at (1, 2)).
+Under `reynolds(...)` the clause is an iteration license, not a claim about
+the bare kernel, and is never refuted (§5.3).
+
 Sections and partial application: `(+)`, `(/) x`, single-wildcard `f(_, y, z)`
 (multiple wildcards rejected — use a lambda).
 

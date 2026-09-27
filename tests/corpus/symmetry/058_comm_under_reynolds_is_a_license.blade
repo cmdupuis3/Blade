@@ -1,0 +1,11 @@
+// TEST: comm under reynolds stays an iteration license on a non-symmetric body
+// The stand-down: under reynolds(...) a comm clause licenses iterating the
+// signed permutation sum; it says nothing about the bare kernel, so the
+// counterexample search does not run (index-types/050, symmetry/019 pin the
+// same trust model). reynolds(g) = g(x, y) + g(y, x).
+let A = [1.0, 2.0, 4.0]
+let r = method_for(A, A) <@> reynolds(lambda(x, y) where comm(x, y) -> x / y) |> compute
+let r20 = r(2, 0)
+let r02 = r(0, 2)
+// EXPECT: r20 = 4.25
+// EXPECT: r02 = 4.25

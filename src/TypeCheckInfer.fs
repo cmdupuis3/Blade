@@ -8424,6 +8424,29 @@ and buildApplyInfo (env: TypeEnv)
             // Rows and params are not 1:1 (virtual expansion, index-param
             // co-iteration, defaults): any complex operand keeps the refusal armed.
             arrayTypes |> List.exists (fun at -> complexElem at.ElemType)
+    let pairElemIsInt (i: int) =
+        let rec intElem (t: IRType) =
+            match IR.stripUnits (env.Subst.Resolve t) with
+            | IRTIdxTagged (inner, _) -> intElem inner
+            | IRTScalar (ETInt32 | ETInt64) -> true
+            | ArrayElem arr -> intElem arr.ElemType
+            | _ -> false
+        [i; i + 1] |> List.exists (fun k ->
+            k >= 0 && k < arrayTypes.Length && intElem arrayTypes.[k].ElemType)
+    let commWitnessError () =
+        if isReynolds || List.isEmpty commGroups || lambdaInfo.Params.Length < 2 then None
+        else
+            lambdaInfo.Params
+            |> List.pairwise
+            |> List.indexed
+            |> List.tryPick (fun (i, (a, b)) ->
+                let declared = commGroups |> List.exists (fun g -> List.contains i g && List.contains (i + 1) g)
+                let provedInv = i < stage3Pairs.Length && stage3Pairs.[i] = Blade.Deduce.PInv
+                if not declared || provedInv || pairElemIsComplex i then None
+                else
+                    Blade.Deduce.witnessSwapAsymmetry a.VarId b.VarId (pairElemIsInt i) lambdaInfo.Body
+                    |> Option.map (fun (x, y, u, v) ->
+                        CommContradictsWitness (a.Name, b.Name, commWitnessText a.Name b.Name x y u v)))
     let contradictsIn (groups: int list list) (wanted: Blade.Deduce.Parity)
                       (needsComplexPair: bool) (mk: string -> string -> TypeError) =
         if List.isEmpty stage3Pairs || List.isEmpty groups then None
@@ -8443,6 +8466,12 @@ and buildApplyInfo (env: TypeEnv)
           lambdaInfo.AntisymGroups, Blade.Deduce.PConj, true, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
         |> List.tryPick (fun (g, wanted, needsComplexPair, mk) ->
                contradictsIn g wanted needsComplexPair mk)
+        // WITNESSED ASYMMETRY (see Deduce.witnessSwapAsymmetry): a declared
+        // comm pair whose body the parity tables leave at PBottom may still
+        // be DISPROVABLE by a concrete counterexample -- `x / y`, a lone `x`,
+        // `x - 2.0 * y`. Same refusal, same stand-down under reynolds (where
+        // comm is an iteration license, not a claim about the bare kernel).
+        |> Option.orElseWith (fun () -> commWitnessError ())
     match stage3Err with
     | Some e -> Error e
     | None ->
@@ -14727,6 +14756,30 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                          antisymGroups, Blade.Deduce.PConj, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
                    else [])
                 |> List.tryPick (fun (g, wanted, mk) -> declContradiction g wanted mk)
+                // The witnessed-asymmetry twin of the lambda-kernel seam (see
+                // Deduce.witnessSwapAsymmetry): a declared comm pair the parity
+                // tables leave unproved, disproved by a concrete counterexample.
+                // Real elements only (the evaluator has no complex numbers);
+                // a generic/unresolved element evaluates as Float.
+                |> Option.orElseWith (fun () ->
+                    if List.isEmpty commGroups || bodyElemIsComplex then None
+                    else
+                        let isIntTy (t: IRType) =
+                            match IR.stripUnits (env.Subst.Resolve t) with
+                            | IRTScalar (ETInt32 | ETInt64) -> true
+                            | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> true
+                            | _ -> false
+                        typedParams
+                        |> List.pairwise
+                        |> List.indexed
+                        |> List.tryPick (fun (i, (a, b)) ->
+                            let declared = commGroups |> List.exists (fun g -> List.contains i g && List.contains (i + 1) g)
+                            let provedInv = i < deducedPairs.Length && deducedPairs.[i] = Blade.Deduce.PInv
+                            if not declared || provedInv then None
+                            else
+                                Blade.Deduce.witnessSwapAsymmetry a.VarId b.VarId (isIntTy a.Type && isIntTy b.Type) tBody
+                                |> Option.map (fun (x, y, u, v) ->
+                                    CommContradictsWitness (a.Name, b.Name, commWitnessText a.Name b.Name x y u v))))
             match commContradiction with
             | Some e -> Error e
             | None ->

@@ -1,0 +1,6 @@
+// TEST: comm on a one-sided branch (rejects)
+// ERROR: BL4013
+// `if x > y then x else 0.0`: the evaluator runs conditionals too, so the
+// witness is concrete -- 2 at (2, 1), 0 swapped.
+let A = [1.0, 2.0, 3.0]
+let r = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> if x > y then x else 0.0 |> compute

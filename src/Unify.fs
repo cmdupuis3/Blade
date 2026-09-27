@@ -385,6 +385,10 @@ type TypeError =
     | ChainOpBadKernel of rightDesc: string
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | CommContradictsBody of param1: string * param2: string
+    // `where comm(p1, p2)` on a body the checker DISPROVES by a concrete
+    // counterexample (Deduce.witnessSwapAsymmetry): the witness is rendered
+    // "f(a, b) = u but f(b, a) = v". Same code as CommContradictsBody (BL4013).
+    | CommContradictsWitness of param1: string * param2: string * witness: string
     | AntisymmContradictsBody of param1: string * param2: string
     // The Hermitian third of the pair-swap contradiction family: the body
     // provably CONJUGATES under the swap (f(y,x) = conj(f(x,y)), deduced
