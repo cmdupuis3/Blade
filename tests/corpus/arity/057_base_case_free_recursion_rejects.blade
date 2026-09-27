@@ -1,0 +1,14 @@
+// TEST: Pack recursion with no base arm (rejects)
+// ERROR: BL7004
+// ERROR-CONTAINS: with no arm for it
+// REJECT-AT: lower
+// Base-case-free recursion is planned (formalism 8.2): specialized down to the
+// empty pack, `let head :: tail = args` reads element 0 of nothing. It used to
+// reach IR validation as a dangling reference (BL6001); the arity specializer
+// now names the missing arm.
+function total(args: Poly<T^0>) -> T^0 = {
+    match arity(args) with
+    | _ -> let head :: tail = args
+           head + total(tail)
+}
+let d = total(1.0, 2.0, 3.0)

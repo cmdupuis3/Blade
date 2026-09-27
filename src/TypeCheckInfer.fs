@@ -2027,7 +2027,10 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
 
     // ---- Arity special forms ----
     | ExprKind.ExprArity paramName -> Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))
-    | ExprKind.ExprNth -> Ok (mkTyped (TExprLit (LitInt 0L)) (IRTScalar ETInt64))
+    // `nth` (the recursion-depth variable) is PLANNED (formalism 8.2): it
+    // used to type as the literal 0 at every depth, a silently wrong value.
+    | ExprKind.ExprNth ->
+        Error (Other "`nth` (the recursion-depth variable) is planned, not built: it used to evaluate to 0 at every depth. Count the depth with an explicit parameter, or read the pack size with `arity(args)`.")
     | ExprKind.ExprZero ->
         // zero gets a fresh type variable -- unifies with int, float, bool context
         let ty = env.Subst.Fresh()

@@ -1263,8 +1263,9 @@ element as a literal (`1` for a product; `zero` there is the zero VALUE, not
 the identity — resolving it to the surrounding operation's identity is
 **(planned)**). (The spec's base-case-free
 recursion, the tuple-pattern spelling `let (head, tail) = args`, and an `nth`
-recursion-depth variable are **(planned)**: today the first two fail IR
-validation, BL6001.) Nested tuples preserve structure (`arity` counts
+recursion-depth variable are **(planned)**: today each is refused with a
+diagnostic naming the built form -- the missing base arm (BL7004), the cons
+pattern (BL3999), an explicit depth parameter (BL3999).) Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
 destructure instead): `object_for(f) <@> (A, (B, C))` is arity **2**, not 3 —
 `(B, C)` is one tuple-typed argument, distinct from

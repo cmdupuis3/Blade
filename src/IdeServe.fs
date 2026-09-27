@@ -136,7 +136,9 @@ let private concreteValueTypes (ir: Blade.IR.IRProgram) : Map<string, string> =
 let fullTierUpgrade : Blade.Ide.FullTierUpgrade =
     fun prog typed builder ->
         match (try Ok (Blade.Lowering.lowerTypedProgram typed (Some prog) builder)
-               with ex -> Error [ ("BL6002", ex.Message) ]) with
+               with
+               | Blade.Diagnostics.BladeDiagnosticException d -> Error [ (d.Code, d.Message) ]
+               | ex -> Error [ ("BL6002", ex.Message) ]) with
         | Error failures -> Error failures
         | Ok ir ->
             match Blade.IRValidate.validateIR ir with

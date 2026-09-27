@@ -2660,7 +2660,11 @@ let private lowerCheckedProgram (program: Program)
             let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
             phaseMark sw "lower"
             r
-        with ex ->
+        with
+        // A phase that refuses by exception with its OWN coded diagnostic
+        // (IRMono's base-case-free recursion refusal) keeps its code.
+        | Blade.Diagnostics.BladeDiagnosticException d -> Error [ d ]
+        | ex ->
             Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
 
 /// Structured-diagnostics entry: like `lower`, but errors stay as coded,

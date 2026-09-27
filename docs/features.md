@@ -147,7 +147,7 @@ corpus wins.
 | Arity | `arity(A: Poly<T^k>)` | Core | Static function; integer arity of poly-pack |
 | Poly-pack destructuring | `let head :: tail = args` | Core | Nested tuples; identity groups (neighboring identical arrays only). The tuple-pattern spelling `let (head, tail) = args` fails IR validation today (BL6001) |
 | Arg pack indexing | `args[k]` | Core | The `k`th element of poly-pack `args`. Also valid for general tuple arg packs. |
-| Recursion depth | `nth` | Speculative | Not pinned by any corpus test; do not rely on it |
+| Recursion depth | `nth` | Planned | Refused today (BL3999; it used to evaluate to 0 at every depth); corpus `arity/056` |
 
 ## 10. Combinator algebra
 

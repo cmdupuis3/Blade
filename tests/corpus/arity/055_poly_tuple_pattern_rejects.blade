@@ -1,0 +1,13 @@
+// TEST: A Poly pack destructured with a tuple pattern (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: let head :: tail = args
+// A pack is not a tuple: `let (head, tail) = args` used to type-check and die
+// in IR validation as a dangling reference (BL6001). The pack forms are the
+// cons pattern and `args[k]`.
+function depth(args: Poly<T^0>) -> Int64 = {
+    match arity(args) with
+    | 0 -> 0
+    | _ -> let (head, tail) = args
+           1 + depth(tail)
+}
+let d = depth(1.0, 2.0, 3.0)
