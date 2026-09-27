@@ -944,8 +944,8 @@
     },
     "BL9002": {
       "title": "internal codegen invariant violated",
-      "explanation": "BL9001 raised from the C++ emitter: codegen reached a state its own guards said was unreachable -- a node shape that an earlier phase should have rejected or rewritten.",
-      "fix": "A compiler bug; report it with the program. There is no source-level workaround beyond avoiding the construct that reached the emitter.",
+      "explanation": "BL9001 raised from the C++ back end. Either codegen reached a state its own guards said was unreachable -- a node shape that an earlier phase should have rejected or rewritten -- or the C++ compiler REJECTED the code Blade generated for a program that passed type checking. The latter is reported with the first compiler error, the path of the generated source and the path of the full compiler log (kept in the build directory; `--verbose` also prints it). A deliberate `#error` refusal is not this code (see BL7004), and neither is a toolchain failure such as a missing library at link time.",
+      "fix": "A compiler bug; report it with the program (the generated source and the compiler log it names are the useful attachments). There is no source-level workaround beyond avoiding the construct that reached the back end.",
       "examples": [],
       "docs": []
     },
