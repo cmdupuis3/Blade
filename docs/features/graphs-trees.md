@@ -18,6 +18,13 @@ kept in substance (§1); what changed is the *surface*, and in four places the
 surface change forced a substantive correction — each is marked
 **[correction]** and argued, not asserted.
 
+**Reading the code blocks.** This is a design document: its blocks use the
+FULL designed surface — the nested `leaf` shape sugar, `degrees(...)`,
+`Path<...>`, child/order virtual arrays, the graph arc. The implemented subset
+spells a shape as its preorder degree sequence (§2.3), and only blocks that
+compile today are untagged; the rest carry the `sketch` tag (`blade test docs`
+skips them). The first block of §2.3 is the implemented surface, run.
+
 Implementation plan: [plans/plan-graphs-trees.md](../plans/plan-graphs-trees.md).
 
 Source material: the deleted `rewrite/blade_extensions_v10.md` §2.3–2.4
@@ -89,7 +96,7 @@ have nominal identity (formalism §3.3) and there are **no implicit conversions
 between index types** (formalism §3.7). The bridge is an explicit transform, in
 the `flip`/`rename`/`subset` family:
 
-```blade
+```blade sketch
 let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
 let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 
@@ -157,7 +164,7 @@ that contract; the plan's P0 settles the representation (single tuple slot, the
 The precedent is settled and it is `IrrepsIdx<spec>`
 (`tests/corpus/index-types/111`–`114`):
 
-```blade
+```blade sketch
 let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]
 let x: Array<Float like IrrepsIdx<spec_h>> = [...]
 ```
@@ -168,7 +175,7 @@ baked into a parameterized index tag (`__irreps:<name>:<payload>`,
 pattern. A tree shape is spelled the same way and needs **no `Unit`-like
 top-level form and no new `type` syntax**:
 
-```blade
+```blade sketch
 let static crystal = [[leaf, leaf], [leaf, leaf, leaf]]
 type CrystalIdx = TreeIdx<crystal>
 
@@ -183,7 +190,7 @@ new literal syntax, no new lexer state — the elaborator only has to recognise
 
 Nesting is arbitrary and non-uniform:
 
-```blade
+```blade sketch
 let static skew = [ leaf,
                     [ leaf, [leaf, leaf] ],
                     [ [leaf], leaf, leaf ] ]
@@ -202,7 +209,7 @@ exactly this. Consequences, all inherited rather than invented:
   recurse), so generated shapes — complete *k*-ary trees, H-trees, octrees,
   a Huffman tree from static weights — are in scope:
 
-  ```blade
+  ```blade sketch
   static function complete(k: Int64, d: Int64) =
       if d == 0 then leaf else replicate_shape(k, complete(k, d - 1))
 
@@ -232,6 +239,20 @@ sequence** — the child count of each node in depth-first order:
 crystal = [[leaf, leaf], [leaf, leaf, leaf]]   ⇒   deg = [2, 2, 0, 0, 3, 0, 0, 0]
 ```
 
+It is also the spelling that is implemented today:
+
+```blade
+let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]   // [[leaf, leaf], [leaf, leaf, leaf]]
+type CrystalIdx = TreeIdx<crystal>
+let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]   // one value per leaf, preorder
+let cell = T((1, 2))                     // a static whole-path read
+let total = reduce(T, (+))
+let scaled = method_for(leaves(T)) <@> lambda(x) -> x * 10.0 |> compute   // bulk work: the leaf axis
+// EXPECT: cell = 5
+// EXPECT: total = 15
+// EXPECT: scaled = [10, 20, 30, 40, 50]
+```
+
 This is the only form the type carries, and it is sufficient: `size`, `off`,
 cardinality, depth, the leaf set and every subtree shape are derivable from it
 in one linear pass. It is a rank-1 `Int64` array, so it hashes — index identity
@@ -241,7 +262,7 @@ hash discipline (O(1) type equality) applied to a smaller object.
 A second, explicit construction route exists for machine-generated shapes, in
 the call-shaped special-form family (formalism §15.7):
 
-```blade
+```blade sketch
 let static big = degrees([2, 2, 0, 0, 3, 0, 0, 0])   // same shape as `crystal`
 type BigIdx = TreeIdx<big>
 ```
@@ -289,7 +310,7 @@ sub-shape (§1.2's `subtree`). The residual of a tree shape is a tree shape,
 which is the `SparseIdx` residual rule ("the residual of a key set is a key
 set") in a second family:
 
-```blade
+```blade sketch
 let static crystal = [[leaf, leaf], [leaf, leaf, leaf]]
 type CrystalIdx = TreeIdx<crystal>
 let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
@@ -327,7 +348,7 @@ denotes the leaf shape.
 A `Path<s>` is a **pack** — a variable-length tuple of child selectors. Packs
 are accessed with `[]` and applied with `()`, and nothing about that changes:
 
-```blade
+```blade sketch
 let p: Path<CrystalIdx> = (1, 2)
 let v = T(p)             // ()  — application: one O(1) offset lookup
 let c0 = p[0]            // []  — pack access: the first child selector, 1
@@ -384,7 +405,7 @@ non-affine, so a tree axis does not `collapse(k)` — the same reason
 Path addressing is for structure. Bulk numerics run on the flat pool, and the
 type system should say so. Three derived index types, all ordinary `Idx<n>`:
 
-```blade
+```blade sketch
 type Leaves = LeafIdx<crystal>       // Idx<5>  — leaves, preorder
 type Nodes  = NodeIdx<crystal>       // Idx<8>  — all nodes, preorder
 type Kids   = ChildIdx<crystal, p>   // Idx<deg(p)> — one node's children
@@ -392,7 +413,7 @@ type Kids   = ChildIdx<crystal, p>   // Idx<deg(p)> — one node's children
 
 and their virtual arrays (formalism §7.3), which erase completely:
 
-```blade
+```blade sketch
 range<LeafIdx<crystal>>      preorder<crystal>      postorder<crystal>
 ```
 
@@ -423,7 +444,7 @@ discharges the iteration half on its own. Three qualifications, all measured:
 This also makes **tree × array hybrids free**, closing v10's open question 3
 without new theory: a tree slot composes with ordinary slots like any other.
 
-```blade
+```blade sketch
 let field: Array<Float64 like CrystalIdx, Idx<3>>     // a 3-vector per tree cell
 let block: Array<Float64 like CrystalIdx, SymIdx<2, 6>>  // a symmetric matrix per cell
 let v = field(1, 2)          // Array<Float64 like Idx<3>> — trailing slot survives
@@ -462,7 +483,7 @@ Formalism §3.10 already tags index values with their index type: iteration
 over `Node` yields `i : Nat<Node>`, and an array whose *element* type is
 `Nat<Node>` and whose *index* type is `Node` is closed under application:
 
-```blade
+```blade sketch
 type Node = Idx<64>
 let succ: Array<Nat<Node> like Node>
 
@@ -491,7 +512,7 @@ Adjacency is the indexing structure, not a side table — that claim is kept, an
 it is now literally true because the adjacency array *is* a function
 `Node → Node`:
 
-```blade
+```blade sketch
 type Node = Idx<64>
 type Slot = Idx<4>
 struct Edge { to: Nat<Node>, weight: Float64 }
@@ -522,7 +543,7 @@ edge weights, which already has triangular storage and the `comm` license.
 
 A traversal produces arrays over the *step* axis, not over a trace type:
 
-```blade
+```blade sketch
 type Step = Idx<32>
 
 let rec trail: Array<Nat<Node> like Step>            // the walk
@@ -534,7 +555,7 @@ A stdlib bundle keeps the `Trace` *name* at the value level (sketch — Blade ha
 no parameterized type aliases today, so v1 returns these as separate bindings
 or a tuple; the named bundle is v2 surface):
 
-```blade
+```blade sketch
 struct WalkTrace {                    // one instantiation per (Node, Step) pair in v1
     trail: Array<Nat<Node> like Step>,   // addresses visited, in order
     seen:  Array<Int64 like Node>,       // the visited set — a value
@@ -559,7 +580,7 @@ storage, iteration and access). Acyclicity fixes none of the three.
 Acyclicity is exactly what `where` clauses are for: a claim about a value that
 licenses an optimization. It belongs beside `comm`, `anticomm`, `omp`, `cuda`:
 
-```blade
+```blade sketch
 function tsort(adj: Array<Nat<Node> like Node, RaggedIdx<deg>>)
     where acyclic(adj) -> Array<Nat<Node> like Node> = { ... }
 ```
@@ -611,7 +632,7 @@ recurrence on the walker's state; that is the whole mapping.
 
 ### 5.1 Bounded walk — `take k` as an axis
 
-```blade
+```blade sketch
 type Node   = Idx<64>
 type Walker = Idx<1024>
 type Step   = Idx<32>                 // `take 32` IS this type
@@ -646,7 +667,7 @@ recursion frames (TRMC, formalism §7.5).
 
 Layers are the take:
 
-```blade
+```blade sketch
 type Layer = Idx<3>
 type Feat  = Idx<16>
 
@@ -678,7 +699,7 @@ So collapse is: carry a `live` flag on the recursion axis, `guard` on it, and
 everything after collapse is zero — which is exactly "collapse stops the
 regress, signals termination, forgets the path" implemented as data flow.
 
-```blade
+```blade sketch
 // visited(n): per-walker indicator that the node reached at step n was seen before,
 // derived from the trail/seen arrays of §4.3
 let rec live: Array<Int64 like Step, Walker> =
@@ -724,7 +745,7 @@ The two things users actually want are both bounded:
 Δ ⊢ fix(s₀, f, until = p, max = k) : Comp[τ × Nat<Idx<k + 1>>]
 ```
 
-```blade
+```blade sketch
 let (h, iters) = fix(X0, layer, until = converged, max = 50) |> compute
 ```
 
@@ -745,7 +766,7 @@ descendants occupy a contiguous block *after* it, so **reverse preorder visits
 every child strictly before its parent**. A structural bottom-up fold is
 therefore a `let rec` over the reversed node axis:
 
-```blade
+```blade sketch
 type Nodes = NodeIdx<crystal>
 
 let rec up: Array<Float64 like Nodes> =
@@ -781,7 +802,7 @@ resulting type is `SymIdx<r, n>`: triangular/simplicial packed storage,
 cardinality C(n+r−1, r), canonicalizing access, r! iteration savings — all
 implemented, all proved (formalism §12, proofs.md §Binomial).
 
-```blade
+```blade sketch
 // A uniform symmetric tree is not a new type. It is this:
 let A: Array<Float64 like SymIdx<3, 8>>
 ```
@@ -802,7 +823,7 @@ groups with mixed characters — is also already implemented, as
 The meaningful non-uniform symmetry is **sibling exchange**: a node whose `a`
 child subtrees are shape-isomorphic and value-interchangeable.
 
-```blade
+```blade sketch
 let static mol = [ sym[leaf, leaf, leaf],      // three interchangeable H
                    leaf ]                       // the O
 ```
@@ -831,7 +852,7 @@ This closes v10's open question 2 with an answer.
 Sibling symmetry buys **iteration**, on the existing license surface with no
 parallel mechanism:
 
-```blade
+```blade sketch
 function pair_energy(a: Array<Float64 like Feat>, b: Array<Float64 like Feat>)
     where comm(a, b) -> Float64 = ...
 
