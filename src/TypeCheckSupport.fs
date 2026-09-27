@@ -3667,52 +3667,32 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             //
                             // Inside a declaration body the argument that IS the
                             // caller's to link is its OWN signature variable
-                            // (polymorphic): `function m2(row: T^1) -> T^0 =
-                            // tot(row) / extents(row)`. Unlinked, the call's
-                            // result fell back to `tot`'s DECLARED return, m2's
-                            // return was unified with tot's own variable, and
-                            // every instance of m2 shared one result type (BL6001
-                            // "unresolved type variable" as soon as m2 was called
-                            // at two). The HM rule: the COPY is bound to the
+                            // (polymorphic, reachable from its signature --
+                            // TypeEnv.CurrentSignature): `function m2(x: T) -> T
+                            // = idg(x)`. The HM rule: the COPY is bound to the
                             // caller's variable (never the other way), so the
                             // result is expressed in the caller's variables and
-                            // is generalized with them. A `T^k` variable not yet
-                            // shaped is given its array shape first, exactly as
-                            // an array intrinsic would (requireArrayArgMinRank --
-                            // its element inherits the polymorphic mark).
-                            // Never SHAPE a `Poly<T^k>` pack's element variable
-                            // (`head` of `let head :: tail = a`): the pack is
-                            // arity monomorphization's, and an element shape
-                            // fixed here detached every specialization from its
-                            // recursive tail (`comoment_prod`'s emitted body read
-                            // an undeclared `arr1`, arity/026, /058).
-                            let isPackElementVar (aid: int) =
-                                env.Variables |> Map.exists (fun _ vi ->
-                                    match env.Subst.Resolve vi.Type with
-                                    | IRTPoly (b, _) ->
-                                        (match env.Subst.Resolve b with
-                                         | IRTInfer x -> x = aid
-                                         | _ -> false)
-                                    | _ -> false)
-                            // ...and only the CURRENT declaration's variables: one
-                            // another declaration's result leaked in through its
-                            // declared return (an unlinked call) is that
-                            // declaration's to shape, never this call's
-                            // (`comoment`'s `mean(comoment_prod(a))` shaped
-                            // comoment_prod's own `T^1`). The declaration being
-                            // checked is the one whose FuncSigVarRange is still
-                            // open-ended (top-level declarations are checked one
-                            // at a time).
-                            // (The LATEST open range: a declaration that failed
-                            // leaves its range open-ended.)
-                            let ownLo =
-                                env.FuncSigVarRange.Values
-                                |> Seq.choose (fun (lo, hi) -> if hi = System.Int32.MaxValue then Some lo else None)
-                                |> Seq.fold (fun acc lo -> match acc with Some m when m >= lo -> acc | _ -> Some lo) None
+                            // is generalized with them. Only where the two
+                            // already have the same SHAPE (variable against
+                            // variable, arrays element-wise): an unshaped `T^k`
+                            // is never shaped here, since shaping a parameter
+                            // mid-body re-routes every array expression typed
+                            // after it (a deferred binop became a zip pipeline
+                            // the symmetry deduction cannot see through --
+                            // ad-jvp-comb/085's BL4010 vanished -- and a Poly
+                            // pack element lost its tail, arity/026, /058). That
+                            // shape (`m2(row: T^1) = tot(row) / ..` with tot's
+                            // parameter already an array) is specialized per
+                            // instance by IR monomorphization instead
+                            // (IRMono.specializeHMFunction's inner-call learning).
+                            // Never another declaration's variable leaked in
+                            // through an unlinked call's declared return, nor a
+                            // lambda annotation's `T^k` minted in the body.
                             let isOwn (aid: int) =
                                 env.Subst.IsPolymorphicId aid
-                                && (match ownLo with Some lo -> aid >= lo | None -> false)
-                            let rec linkOwn (arg: TypedExpr option) (p: IRType) (a: IRType) : bool =
+                                && (env.CurrentSignature
+                                    |> List.exists (fun t -> (freeInferVars env.Subst (env.Subst.Resolve t)).Contains aid))
+                            let rec linkOwn (p: IRType) (a: IRType) : bool =
                                 let p = stripUnitsDeep env.Subst (env.Subst.Resolve p)
                                 let a = stripUnitsDeep env.Subst (env.Subst.Resolve a)
                                 match p, a with
@@ -3720,24 +3700,17 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                     (match unify env.Subst (IRTInfer pid) (IRTInfer aid) with
                                      | Ok () -> true
                                      | Error _ -> false)
-                                | ArrayElem pa, IRTInfer aid when isOwn aid
-                                                                 && env.Subst.GetArityConstraint aid = Some pa.IndexTypes.Length
-                                                                 && arg.IsSome
-                                                                 && not (isPackElementVar aid) ->
-                                    (match requireArrayArgMinRank env arg.Value "call" pa.IndexTypes.Length with
-                                     | Ok _ -> linkOwn None p (env.Subst.Resolve arg.Value.Type)
-                                     | Error _ -> false)
                                 | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
-                                    linkOwn None pa.ElemType aa.ElemType
+                                    linkOwn pa.ElemType aa.ElemType
                                 | IRTTuple ps, IRTTuple xs when ps.Length = xs.Length ->
-                                    List.fold2 (fun acc x y -> linkOwn None x y || acc) false ps xs
+                                    List.fold2 (fun acc x y -> linkOwn x y || acc) false ps xs
                                 | _ -> false
                             let linked =
                                 if Set.isEmpty copyIds then false
                                 elif env.CurrentGenericObligations.IsSome then
                                     appArgPairs pCopies (tArgs |> List.map (_.Type))
-                                    |> List.fold (fun acc (i, pTy, aTy) ->
-                                        linkOwn (Some (List.item i tArgs)) pTy aTy || acc) false
+                                    |> List.fold (fun acc (_, pTy, aTy) ->
+                                        linkOwn pTy aTy || acc) false
                                 else
                                     appArgPairs pCopies (tArgs |> List.map (_.Type))
                                     |> List.fold (fun acc (_, pTy, aTy) ->

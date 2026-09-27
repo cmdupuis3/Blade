@@ -357,9 +357,20 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
             if hmIds.ContainsKey id then Some id
             elif fuel <= 0 then None
             else Map.tryFind id direct |> Option.bind (resolve (fuel - 1))
+        // A body-local let of a LIFTED LAMBDA (`let k = lambda(a) -> a * x`
+        // lowers to the same IRLet shape) is not an alias to eliminate: the
+        // lambda keeps its std::function-local form and its capture list, and
+        // a generic one is cloned per specialization with its captures
+        // substituted. Only a declared function (capture-free, user-named) is
+        // made transparent from inside a body.
+        let localIds = localLets |> List.map fst |> Set.ofList
+        let declaredTarget (t: IRId) =
+            let f = hmIds.[t]
+            f.Captures.IsEmpty && not (f.Name.StartsWith "__")
         let aliases =
             direct |> Map.toList
             |> List.choose (fun (bid, _) -> resolve 8 bid |> Option.map (fun t -> (bid, t)))
+            |> List.filter (fun (bid, t) -> not (localIds.Contains bid) || declaredTarget t)
             |> Map.ofList
         if aliases.IsEmpty then modules
         else
@@ -372,9 +383,15 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
                 // is bottom-up, so the body is done), and the let goes.
                 | IRLet (id, _, body) when aliases.ContainsKey id -> body
                 | _ -> e
+            // A lifted lambda that CAPTURED a body-local alias (`let t = total`
+            // read inside a kernel) now names the function itself -- a
+            // declared function is never a capture -- so the alias leaves its
+            // capture list too (it would be forwarded by a name nothing binds).
+            let dropAliasCaptures (f: IRFuncDef) =
+                { f with Captures = f.Captures |> List.filter (fun c -> not (aliases.ContainsKey c.Id)) }
             modules |> List.map (fun m ->
                 { m with
-                    Functions = m.Functions |> List.map (fun f -> { f with Body = mapIRExpr redirect f.Body })
+                    Functions = m.Functions |> List.map (fun f -> dropAliasCaptures { f with Body = mapIRExpr redirect f.Body })
                     Bindings =
                         m.Bindings
                         |> List.filter (fun b -> not (aliases.ContainsKey b.Id))
@@ -383,7 +400,53 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
 /// Generate a specialized copy of a function for a given set of type-var
 /// bindings. Substitutes types throughout params, return, and body, and
 /// mangles the name to encode the binding pattern.
-let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder: IRBuilder) (callables: Map<IRId, IRCallable>) : IRFuncDef * IRCallable list =
+/// What the spec's INNER generic calls teach about the variables its body
+/// carries beyond its own signature. A generic body calling a generic callee
+/// with an argument the checker could not link to the callee's instantiated
+/// copy (`m2(row: T^1) -> T^0 = tot(row) / extents(row)`, where tot's
+/// parameter is already an array and m2's `T^1` is not yet shaped) types the
+/// call's result -- and, through the body, m2's own return -- with the
+/// CALLEE's declared variable. The spec's bindings never mention it, so every
+/// instance of m2 carried tot's open variable (BL6001 at a second instance).
+/// Here each inner call's argument types are concrete, so the callee's return
+/// under them IS the call's result: the call's recorded type is matched
+/// against it, as collectHMCallSiteReturnBindings does for the caller-side
+/// variables at a module-level call. Iterated (a learned result can make the
+/// next call's arguments concrete); only fully concrete teachings are kept,
+/// and a variable already bound is never rebound.
+let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
+                                (bindings: Map<int, IRType>) : Map<int, IRType> =
+    let concrete (t: IRType) = Set.isEmpty (collectInferIds t)
+    let pass (b: Map<int, IRType>) =
+        let mutable acc = b
+        iterIRExpr (fun e ->
+            match e with
+            | IRApp (IRVar (fid, _), args, retTy) when fid <> func.Id ->
+                (match Map.tryFind fid callables with
+                 | Some callee when hasTypeVarsInParams callee && callee.Params.Length = args.Length ->
+                     let cb =
+                         List.zip callee.Params args
+                         |> List.fold (fun m (p, a) ->
+                             match exprTypeIfKnown a with
+                             | Some t -> unifyParamWithArg p.Type t m
+                             | None -> m) Map.empty
+                     let ret = substTypeInIRType cb callee.RetType
+                     if concrete ret then
+                         unifyParamWithArg retTy ret Map.empty
+                         |> Map.iter (fun k v ->
+                             if not (acc.ContainsKey k) && concrete v then acc <- Map.add k v acc)
+                 | _ -> ())
+            | _ -> ()) (substTypeInIRExpr b func.Body)
+        acc
+    let rec fix (b: Map<int, IRType>) (fuel: int) =
+        let b' = pass b
+        if fuel <= 0 || b'.Count = b.Count then b' else fix b' (fuel - 1)
+    fix bindings 8
+
+let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (builder: IRBuilder) (callables: Map<IRId, IRCallable>) : IRFuncDef * IRCallable list =
+    // The spec is KEYED and NAMED by the call site's bindings; it is
+    // SUBSTITUTED with those plus what its inner generic calls teach.
+    let bindings = learnFromInnerCalls func callables keyBindings
     let newParams =
         func.Params |> List.map (fun p ->
             { p with Type = substTypeInIRType bindings p.Type
@@ -548,7 +611,7 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
     // canonTypeKey so the emitted name matches the HM dedup key exactly (arrays
     // don't collapse to a colliding "T"; see canonTypeKey).
     let suffix =
-        bindings
+        keyBindings
         |> Map.toList
         |> List.sortBy fst
         |> List.map (fun (id, ty) -> $"_{id}_{canonTypeKey ty}")
@@ -559,7 +622,12 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
             Name = $"{func.Name}_HM{suffix}"
             Params = newParams
             RetType = newRetType
-            Body = bodyRewritten }
+            Body = bodyRewritten
+            // A spec's captures carry types too (a lifted callable applied
+            // directly is specialized here rather than cloned): substituted
+            // with THIS spec's bindings, since the module-level pass can only
+            // substitute the bindings that agree across every instance.
+            Captures = func.Captures |> List.map (fun c -> { c with Type = substTypeInIRType bindings c.Type }) }
     let clonesList = lambdaClones.Values |> List.ofSeq
     (spec, clonesList)
 
@@ -755,7 +823,33 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         // through its return type (see collectHMCallSiteReturnBindings).
         // Substitution-only: these never reach a specialization key.
         let callerSide = collectHMCallSiteReturnBindings hmFuncMap expr
-        calleeSide @ callerSide
+        // ...and through the SPEC's return, which can be more concrete than
+        // the declaration's return under the call's own bindings: a spec also
+        // substitutes what its inner generic calls taught (learnFromInnerCalls),
+        // so `let a = m2(ints)` learns the Int64 its spec returns where m2's
+        // declared return still names tot's variable.
+        let specSide =
+            let acc = System.Collections.Generic.List<int * IRType>()
+            iterIRExpr (fun e ->
+                match e with
+                | IRApp (IRVar (funcId, _), args, retTy) when hmFuncMap.ContainsKey funcId ->
+                    let func = hmFuncMap.[funcId]
+                    if args.Length = func.Params.Length then
+                        let b =
+                            List.zip func.Params args
+                            |> List.fold (fun m (p, a) ->
+                                match exprTypeIfKnown a with
+                                | Some t -> unifyParamWithArg p.Type t m
+                                | None -> m) Map.empty
+                        let key = (funcId, b |> Map.toList |> List.sortBy fst |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
+                        match Map.tryFind key specMap with
+                        | Some spec ->
+                            unifyParamWithArg retTy spec.RetType Map.empty
+                            |> Map.iter (fun k v -> acc.Add((k, v)))
+                        | None -> ()
+                | _ -> ()) expr
+            List.ofSeq acc
+        calleeSide @ callerSide @ specSide
         |> List.choose (fun (k, v) ->
             match v with
             | IRTInfer _ -> None  // self-binding; ignore

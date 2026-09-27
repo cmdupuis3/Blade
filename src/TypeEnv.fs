@@ -492,6 +492,13 @@ type TypeEnv = {
     /// The accumulator the function declaration being checked collects its
     /// generic casts into (None outside a declaration body).
     CurrentGenericObligations: ResizeArray<GenericObligation> option
+    /// The declaration being checked: its (declared or fresh) parameter and
+    /// return types; [] outside a declaration body. The call judgment links a
+    /// callee's instantiated copy only to variables REACHABLE from these (the
+    /// declaration's own signature, as far as it has been resolved) -- not to
+    /// a lambda annotation's `T^k` minted in the body, nor to another
+    /// declaration's variable leaked through an unlinked call.
+    CurrentSignature: IRType list
     /// CERTIFIED half of the typed equivariance lattice (FuncRepSpec below is
     /// the speculative half): per-function rep signatures for functions
     /// carrying an `__ml_equiv` conjunct (a source `where ml.equiv(G)` pin, or
@@ -600,6 +607,7 @@ let emptyEnv () = {
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None
+    CurrentSignature = []
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()

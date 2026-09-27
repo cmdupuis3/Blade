@@ -291,18 +291,25 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   still not bound: there it is usually tied to the declaration's own
   signature (a `Poly` pack element), and binding it collapsed arity/024,
   /026, /031. What IS linked there (fix/drf-p2-types) is an argument that is
-  the declaration's OWN signature variable: the COPY is bound to it (never
-  the reverse), and a not-yet-shaped `T^k` is first given its array shape as
-  an intrinsic would (`requireArrayArgMinRank`, element keeping the
-  polymorphic mark), so `m2(row: T^1) -> T^0 = tot(row) / extents(row)` has
-  a result in m2's own variables and specializes per instance (it was
-  BL6001 at two instances: the result fell back to tot's declared return and
-  m2's return was unified with tot's variable; functions/164). Two guards:
-  a pack element variable is never shaped (arity monomorphization owns
-  packs), and only variables minted by the declaration being checked count
-  as its own (another declaration's variable, leaked in through an unlinked
-  call's declared return, shaped `comoment_prod`'s own `T^1` from inside
-  `comoment` -- arity/026, /058).
+  the declaration's OWN signature variable (reachable from its signature,
+  `TypeEnv.CurrentSignature`) where parameter copy and argument already have
+  the same shape: the COPY is bound to it, never the reverse. An unshaped
+  `T^k` is deliberately NOT shaped at the call -- that re-routed every array
+  expression typed after it (a deferred binop became a zip pipeline the
+  symmetry deduction cannot see through: ad-jvp-comb/085 lost its BL4010;
+  a pack element lost its recursive tail: arity/026, /058). That shape --
+  `m2(row: T^1) -> T^0 = tot(row) / extents(row)`, tot's parameter already an
+  array -- is fixed in IR monomorphization instead: each spec learns what
+  its inner generic calls return under their now-concrete arguments
+  (`IRMono.learnFromInnerCalls`), and a module-level call learns the spec's
+  return (the `specSide` bindings), so m2 at Int and at Float is two specs
+  (it was BL6001: the result fell back to tot's declared return and m2's
+  return was unified with tot's variable; functions/164). Known residue: a
+  body whose array arithmetic stays DEFERRED over two unshaped `T^1`
+  parameters (`dot2(a: T^1, b: T^1) = tot(a * b)`) is still BL6001, and the
+  single-level `reduce(a * b, (+))` computes the product in Float64 at an
+  integer instance (Lowering's deferred-binop kernel defaults a polymorphic
+  element to Float64) -- a Lowering follow-up.
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 

@@ -1,6 +1,6 @@
 // TEST: The post-monomorphization cast backstop reports BL3019, not BL6001 (rejects)
 // ERROR: BL3019
-// ERROR-CONTAINS: (in function 'toint')
+// ERROR-CONTAINS: in function 'toint'
 // ============================================================================
 // Inside `outer` the instance `toint` is passed at is `outer`'s own open
 // variable, so no seam before monomorphization sees the Float64 it becomes;

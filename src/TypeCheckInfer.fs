@@ -14851,7 +14851,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     let genericObligations = ResizeArray<GenericObligation>()
     env.FuncGenericObligations.Remove funcVarId |> ignore
     let mutable bodyEnv = enterCallableBody envWithFunc
-    bodyEnv <- { bodyEnv with CurrentGenericObligations = Some genericObligations }
+    bodyEnv <- { bodyEnv with CurrentGenericObligations = Some genericObligations
+                              CurrentSignature = paramTypes @ [retType] }
     if funcDecl.WhereClause |> Option.map (fun w -> not w.Parallel.IsEmpty) |> Option.defaultValue false then
         bodyEnv <- { bodyEnv with InParallelBody = true }
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
