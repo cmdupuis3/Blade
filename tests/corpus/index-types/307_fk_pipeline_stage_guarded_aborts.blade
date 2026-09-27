@@ -1,0 +1,11 @@
+// TEST: A >>@ pipeline stage fed from a key column is guarded (aborts)
+// The first stage's parameter receives the column's cells; a compose-apply
+// used to hand it the trust of an iteration index. A lambda parameter is
+// proven only when a range feeds it.
+// ABORT: index out of bounds
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, -1]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let pipe = object_for(lambda(r) -> region_weight(r)) >>@ object_for(lambda(x) -> x * 2.0)
+let w = pipe <@> station_region |> compute

@@ -163,7 +163,8 @@ let zonkVarInfo (subst: Subst) (v: TypedVarInfo) : TypedVarInfo =
 // GUARDS. A subscript into a slot of a NAMED index type is either PROVEN or
 // CHECKED. Proven is a closed list: an integer literal (judged at compile
 // time), a bare VARIABLE of exactly that index type that is not bound to an
-// unproven value (a range / kernel parameter, a function parameter -- its
+// unproven value (a lambda parameter a RANGE feeds -- RangeFedParams; every
+// other lambda parameter receives data -- a function parameter -- its
 // callers are coerced, see below -- or a let of a proven value), an index
 // cast or guard already emitted, and a halo window read. EVERYTHING else --
 // a position, a plain Int64, a `Nat<_>` wildcard, an `if` / `match` / block,
@@ -195,7 +196,21 @@ type SubscriptGuardCtx = {
     /// The labels of a STRING-valued EnumIdx, in declaration (= ordinal)
     /// order; None for any other type name.
     EnumLabels: string -> string list option
+    /// Lambda parameters a RANGE operand feeds (`method_for(range<I>) <@>
+    /// lambda(i) -> ..`), collected over the whole module before zonk
+    /// (TypeCheck.rangeFedLambdaParams). Every OTHER user lambda parameter of
+    /// an index type is unproven -- a mask predicate, a sort key, a `>>@`
+    /// stage, a kernel over a key column all receive DATA.
+    RangeFedParams: System.Collections.Generic.HashSet<IRId>
 }
+
+/// A USER index type's values (a compiler tag -- a halo window, a `__`
+/// buffer's own index -- belongs to the machinery that made it).
+let private userIndexValue (t: IRType) =
+    match t with
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed tag) -> not (tag.StartsWith "__")
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefAnon _) -> true
+    | _ -> false
 
 let subscriptGuardCtx =
     new System.Threading.ThreadLocal<SubscriptGuardCtx option>(fun () -> None)
@@ -444,13 +459,6 @@ let private noteDataKernelParams (subst: Subst) (info: TypedApplyInfo) : unit =
             match a.Kind with
             | TExprRange _ | TExprDotDot _ -> false
             | _ -> true
-        // A USER index type's values (a compiler tag -- a halo window, a
-        // `__` buffer's own index -- belongs to the machinery that made it).
-        let userIndexValue (t: IRType) =
-            match t with
-            | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed tag) -> not (tag.StartsWith "__")
-            | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefAnon _) -> true
-            | _ -> false
         match info.Kernel.Kind with
         | TExprLambda li
         | TExprReynolds ({ Kind = TExprLambda li }, _) when operands.Length = li.Params.Length ->
@@ -621,7 +629,8 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
 
 /// A `let` of an index type whose zonked VALUE is not PROVEN (a position, a
 /// read out of an index-typed array, a call, a branch...) holds an unproven
-/// value: its uses are guarded like the value itself would have been.
+/// value: its uses are guarded like the value itself would have been. (A
+/// destructured let's LEAVES are always unproven: see zonkBinding.)
 and notePosition (vid: IRId) (bindingTy: IRType) (value: TypedExpr) : unit =
     match subscriptGuardCtx.Value with
     | Some ctx when (taggedIndexInner bindingTy).IsSome && not (isProvenIndex None value) ->
@@ -660,6 +669,13 @@ and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
     let zt = zonkType subst
     let value' = zonkExpr subst b.Value
     notePosition b.VarId (zt b.Type) value'
+    // `let (a, b) = (keys(3), keys(0))`: a leaf of an index type is a
+    // component of a value nobody proved -- unproven, whatever it holds.
+    (match subscriptGuardCtx.Value with
+     | Some ctx ->
+         for (_, id, ty) in b.SubBindings do
+             if userIndexValue (zt ty) then ctx.Positions.Add id |> ignore
+     | None -> ())
     { b with
         Type = zt b.Type
         Value = value'
@@ -667,6 +683,17 @@ and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
         PostChecks = b.PostChecks |> List.map (fun (id, e) -> (id, zonkExpr subst e)) }
 
 and zonkLambdaInfo (subst: Subst) (info: TypedLambdaInfo) : TypedLambdaInfo =
+    // A user lambda parameter of an index type is PROVEN only when a range
+    // feeds it; anything else hands it data (see RangeFedParams). `__`
+    // parameters belong to the desugarers (noteDataKernelParams marks the
+    // eta wrapper's when data feeds it).
+    (match subscriptGuardCtx.Value with
+     | Some ctx ->
+         for p in info.Params do
+             if not (p.Name.StartsWith "__") && not (ctx.RangeFedParams.Contains p.VarId)
+                && userIndexValue (zonkType subst p.Type) then
+                 ctx.Positions.Add p.VarId |> ignore
+     | None -> ())
     { info with
         Params = info.Params |> List.map (zonkParam subst)
         Body = zonkExpr subst info.Body

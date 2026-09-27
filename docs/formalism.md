@@ -649,14 +649,18 @@ is bounds-safe: its subscript is either PROVEN or CHECKED at run time
 `extents` when the extent is only known at run time). Proven is a closed
 list that trusts no type: a compile-time-checked literal, a bare variable of
 exactly that index type that is not bound to an unproven value (an iteration
-index, a parameter -- whose callers pass through the same checks -- or a
+index -- a lambda parameter a `range<I>` / `0..n` operand feeds -- a named
+function's parameter, whose callers pass through the same checks, or a
 `let` of a proven value), an emitted cast or guard, and a halo window read.
+Any other lambda parameter of an index type (a kernel over a key column, a
+`mask` predicate, a `sort` key, a `>>@` stage) receives data, as does each
+leaf of a destructured `let`.
 Everything else -- a position, a plain `Int64`, a `Nat<_>` wildcard, a
 branch, a call, an element read out of an index-typed array (foreign-key
 DATA, including a kernel parameter the loop feeds from such an array) -- is
 checked. A string key subscripting a string `EnumIdx` slot is mapped to its
-label's ordinal, a key that is no label stopping with BL8006. The checks are what the BL4003 untagged-integer advice
-points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
+label's ordinal, a key that is no label stopping with BL8006. The checks
+are what the BL4003 untagged-integer advice points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
 removes them. Not covered: a computed subscript into an ANONYMOUS index slot
 (an array without a named index type) is not checked -- name the index type
 to get the guarantee; compact, compound, sparse and ragged slots keep their

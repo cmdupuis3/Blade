@@ -10797,7 +10797,7 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // narrow: only a LITERAL operand, so this is literal retyping and not
     // general bidirectional propagation through arithmetic.
     | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt v) }), _
-        when v > 1L && (namedIndexParam env resolved).IsSome ->
+        when v > 1L && (match namedIndexParam env resolved with Some (_, Some _) -> true | _ -> false) ->
         // A negative index-typed value: only `-1`, group_by's "excluded"
         // key, is admitted (see the LitInt arm above).
         Error (SubscriptOutOfRange (-v, None, fst (namedIndexParam env resolved).Value))
