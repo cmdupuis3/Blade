@@ -1541,6 +1541,31 @@ and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     // `let name = lambda(params) where ... -> Type -> body`.
     expectIdent tokens >>= fun name afterName ->
     expect TokLParen afterName >>= fun _ afterLParen ->
+    // A `mut` parameter (`a: mut Array<..>`) is a TOP-LEVEL declaration's: a
+    // nested function desugars to a let-bound lambda, whose parameters carry
+    // no write permission (and whose calls have no `mut` positions to judge).
+    // Say so, instead of the lambda-parameter parser's "Expected ')' but got
+    // identifier" at the parameter NAME.
+    let rec mutParamAt (depth: int) (toks: Token list) =
+        match toks with
+        | [] -> None
+        | t :: rest ->
+            match t.Kind with
+            | TokRParen when depth = 0 -> None
+            | TokLParen -> mutParamAt (depth + 1) rest
+            | TokRParen -> mutParamAt (depth - 1) rest
+            | TokColon when depth = 0 ->
+                (match rest with
+                 | m :: _ when m.Kind = TokKeyword KwMut -> Some rest
+                 | _ -> mutParamAt depth rest)
+            | _ -> mutParamAt depth rest
+    match mutParamAt 0 afterLParen with
+    | Some mutToks ->
+        let line, col = currentPos mutToks
+        errorC "BL1001" ($"nested function '{name}' declares a `mut` parameter, which only a top-level "
+                         + "`function` can: a nested function is a let-bound lambda, and its parameters "
+                         + "carry no write permission. Declare the function at top level.") line col
+    | None ->
     sepBy parseLambdaParam TokComma afterLParen >>= fun parms afterParms ->
     expect TokRParen afterParms >>= fun _ afterRParen ->
 

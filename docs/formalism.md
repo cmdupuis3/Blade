@@ -104,7 +104,15 @@ and a float source into an int target unless the rounding is visible at the
 cast site, `Int64(floor(x))` / `Int64(ceil(x))`, so truncation is always
 spelled (a rounded value bound to a name and cast later refuses on
 purpose). Array operands lift elementwise like `cos(A)`; `Int64(floor(A))`
-fuses the rounding and the cast into one kernel.
+fuses the rounding and the cast into one kernel. A cast of a value whose type
+is a function's own type variable (`Float64(reduce(row, (+)))` over
+`row: T^1`) is a GENERIC cast: its legality depends on the instance, so it is
+judged at every call against the type the call gives `T` (and again after
+monomorphization) -- `stats.mean` casts this way, so an Int64 row averages in
+Float64 and a complex row is refused at the call. Likewise a generic body that
+returns `sqrt(x)` (or another complex-preserving math intrinsic) AS `x`'s own
+type is refused at an integer instance, where the Float64 result would be
+truncated.
 
 **Arithmetic semantics — one contract, every lane.** The compiled program
 (g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane
@@ -1037,12 +1045,19 @@ not imperative control flow. One side carries arrays/indices, the other the
 kernel; `in` accepts virtual arrays only:
 
 ```blade
-for (A, B) in range<I> <@> lambda(i, j, a, b) -> ...       // method_for style
+for (A, B) in range<I> <@> lambda(a, b, i) -> ...          // method_for style: cells, then indices
 for lambda(a, b) -> a * b <@> (A, B)                        // object_for style
 let loop = for (A, A) in SymIdx<2,N> where comm             // let-bound, awaits kernel
 let op   = for lambda(a, b) where comm -> a * b             // let-bound, awaits arrays
 for args in SymIdx<arity(args), N> where comm(args) <@> lambda(is, xs) -> ...  // poly
 ```
+
+A co-iteration kernel over `for (A, B) in range<I, J>` takes the operands'
+CELLS first -- `a` is `A(i, j)`, already indexed -- and then one parameter per
+range slot, the loop indices (`lambda(a, b, i, j)`; the indices may be
+omitted). The in-clause range is a trailing virtual operand, which is why its
+parameters come last (tests/corpus/loops/094). Applying a cell or an index
+value to arguments (`a(i, j)`) is refused (BL3003).
 
 ### 7.5 Recursive arrays
 
@@ -1818,7 +1833,7 @@ library concern.
 ```blade
 let loop = method_for(A, B)         let obj = object_for(f)
 loop <@> f                          obj <@> (A, B)
-for (A, B) in range<I> <@> lambda(i, j, a, b) -> ...
+for (A, B) in range<I> <@> lambda(a, b, i) -> ...
 c₁ <&> c₂    (M<@>f) <&!> (M<@>g)    L₁ <*> L₂    o₁ >>@ o₂    c₁ @>> c₂
 c >>= k      pure v     f <$> c      guard(p, c)  sequence [..]  replicate n c
 c |> compute

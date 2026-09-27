@@ -1,0 +1,17 @@
+// TEST: Numeric cast of a generic parameter, judged per instance
+// ============================================================================
+// A cast whose operand is a signature variable (`Float64(x)` over `x: T^0`)
+// used to refuse at the declaration (BL3019 "needs a concretely-typed
+// operand"): its legality depends on the instance. It is now judged at each
+// call, against the type the call gives `T` -- legal from Int64 and Float64.
+// ============================================================================
+function tofl(x: T^0) = Float64(x)
+let a = tofl(3)
+// EXPECT: a = 3
+let b = tofl(2.5)
+// EXPECT: b = 2.5
+function tofl_mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
+let c = tofl_mean([1, 2])
+// EXPECT: c = 1.5
+let d = tofl_mean([0.5, 1.0, 1.5])
+// EXPECT: d = 1

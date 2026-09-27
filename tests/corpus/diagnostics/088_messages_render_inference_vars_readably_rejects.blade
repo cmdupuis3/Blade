@@ -1,0 +1,9 @@
+// TEST: Type messages render inference variables readably (rejects)
+// ERROR: BL3001 @ 8:15
+// ERROR-CONTAINS: expected Bool, got ('a) -> 'a
+// ============================================================================
+// An unsolved variable used to print as the internal `T?10001`, and a
+// function type as `Arrow<T?10001 -> T?10001>`. Messages now spell the
+// surface form: `'a` for a variable, `(A) -> R` for a function type.
+function idg(a: T^0) -> T^0 = a
+let h: Bool = idg

@@ -105,10 +105,8 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // keys; imports re-register theirs from the per-module snapshot
     // (TypeModuleExport.Callees / Defaults) under `alias.name` or the selected
     // name. Nothing outside the checker reads these tables.
-    env.MutParamPositions.Clear()
-    env.FuncCoIterObligations.Clear()
-    env.FuncUnitTransform.Clear()
-    env.FuncUnitEqualities.Clear()
+    // (The `mut`-position, co-iteration and unit tables are keyed by binder
+    // id -- program-unique, so they need neither the clear nor a snapshot.)
     env.FuncConstraints.Clear()
     env.FuncDefaults.Clear()
     env.FuncDefaultCaptures.Clear()
@@ -265,7 +263,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                 | TyDeclMutualGroup (members, _) ->
                     $"""in mutual group '{(members |> List.map fst |> String.concat ", ")}'"""
             | DeclInterface i -> $"in interface '{i.Name}'"
-            | DeclImpl impl -> sprintf "in impl for '%A'" impl.ForType
+            | DeclImpl impl -> $"in impl for '{Blade.StructIdxFence.typeExprLabel impl.ForType}'"
             | DeclImport (qn, _) -> $"""in import '{(String.concat "." qn)}'"""
             | DeclUnit u -> $"in unit '{u.Name}'"
         let envWithCtx = pushContext declName currentEnv
@@ -396,11 +394,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
                     |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
                     |> Seq.map (fun kv -> (kv.Key, kv.Value))
                     |> Map.ofSeq
-                { MutParams = snap finalEnv.MutParamPositions
-                  CoIterObligations = snap finalEnv.FuncCoIterObligations
-                  UnitTransforms = snap finalEnv.FuncUnitTransform
-                  UnitEqualities = snap finalEnv.FuncUnitEqualities
-                  Constraints = snap finalEnv.FuncConstraints }
+                { Constraints = snap finalEnv.FuncConstraints }
         }
         moduleExports <- Map.add moduleName export moduleExports
     allErrors <- allErrors @ crossModuleDeclErrors env program

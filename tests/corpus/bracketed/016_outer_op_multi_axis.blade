@@ -1,0 +1,24 @@
+// TEST: Bracketed outer operator over multi-axis operands
+// ============================================================================
+// `A [+] B` is the all-pairs product of the operands' CELLS: output rank is
+// rank A + rank B (formalism 7.2), exactly `method_for(A, B) <@> (+)`. The
+// type rule said so, but the direct lowering walked one loop level per
+// OPERAND and handed two row pointers to a scalar kernel -- quickstart-1's
+// own `A [+] B` over two matrices died in g++. Rank-4 and rank-3 results
+// print flat (row-major).
+// ============================================================================
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like Idx<2>, Idx<3>> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+let v: Array<Float64 like Idx<2>> = [100.0, 200.0]
+
+let o = A [+] B
+let total_o = reduce(o, (+), axes = 4)
+// EXPECT: total_o = 1386
+let o_corner = o(1, 2, 1, 0)
+// EXPECT: o_corner = 46
+
+let p = A [*] v
+// EXPECT: p = [100, 200, 200, 400, 300, 600, 400, 800, 500, 1000, 600, 1200]
+
+let q = v [-] A
+// EXPECT: q = [99, 98, 97, 96, 95, 94, 199, 198, 197, 196, 195, 194]

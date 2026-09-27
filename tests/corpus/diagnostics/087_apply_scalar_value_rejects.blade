@@ -1,0 +1,8 @@
+// TEST: Applying a scalar value to arguments (rejects)
+// ERROR: BL3003 @ 7:11
+// ============================================================================
+// A head that settles on a scalar takes no arguments. dispatchAppOrIndex
+// mints a fresh result for a head it cannot route (it may still be an open
+// var), and nothing judged it afterwards: codegen emitted `x(0L)` on a double.
+let x = 1.0
+let y = x(0)

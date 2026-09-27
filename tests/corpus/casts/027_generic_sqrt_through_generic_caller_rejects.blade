@@ -1,0 +1,10 @@
+// TEST: Generic sqrt reached through another generic at an integer instance (rejects)
+// ERROR: BL3019 @ 9:12
+// ERROR-CONTAINS: 'r2' applies sqrt()
+// ============================================================================
+// `r2` forwards its own generic argument to `r`; the instance is open inside
+// `r2`'s body, so `r`'s demand is re-recorded against `r2`'s variable and
+// judged at `r2`'s calls (it used to emit a truncating int64 `r`).
+function r(x: T^0) -> T^0 = sqrt(x)
+function r2(x: T^0) -> T^0 = r(x)
+let a = r2(5)

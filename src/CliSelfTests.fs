@@ -1851,7 +1851,11 @@ let (a, b) = pair(7.0)
                                       && decl.Contains "\"diagnostics\":[]"
                                       && bare.Contains "\"exitCode\":0"
                                       && bare.Contains "\"diagnostics\":[]"
-                                      && bare.Contains "{\"name\":\"covariance\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
+                                      // stats.mean returns Float64 (it averages
+                                      // Int rows in double), so `a - mean(a)` is a
+                                      // row broadcast and the echo shows the shaped
+                                      // signature with its Float64 result.
+                                      && bare.Contains "{\"name\":\"covariance\",\"type\":\"(Array<T like Idx<_>>, Array<T like Idx<_>>) -> Array<Float64 like Idx<_>>\",\"value\":\"\"}"
                                       && not (bare.Contains "BL6001")
                                       // The session survives it: a later cell
                                       // still evaluates against the same state.

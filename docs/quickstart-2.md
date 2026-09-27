@@ -101,8 +101,12 @@ join via `in`:
 
 ```F#
 let loop = for (A, B) in range<Idx<M>, Idx<N>>
-let result = loop <@> lambda(i, j, a, b) -> ...
+let result = loop <@> lambda(a, b, i, j) -> ...
 ```
+
+The kernel receives the operands' cells first -- `a` is already `A(i, j)` --
+then the loop indices, which you may leave off when the body does not need
+them.
 
 The `in` clause takes virtual arrays only (`range<I>`, not a bare `Idx<N>`),
 and both orientations work — arrays left / kernel right, or kernel left /

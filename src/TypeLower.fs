@@ -955,15 +955,15 @@ and resolveSparseKeysSource (env: TypeEnv) (keysExpr: Expr) : Result<SparseKeysS
                         match c with
                         | StaticEval.SVInt v when v >= 0L -> Ok (vs @ [v])
                         | StaticEval.SVInt v -> Error $"SparseIdx: key coordinates must be non-negative; got {v}"
-                        | other -> Error (sprintf "SparseIdx: key tuple components must be Nat literals; got %A" other))) (Ok [])
+                        | other -> Error ($"SparseIdx: key tuple components must be Nat literals; got {StaticEval.ppStaticValue other}"))) (Ok [])
             | StaticEval.SVInt v when v >= 0L -> Ok [v]   // rank-1: bare Nat keys
             | StaticEval.SVInt v -> Error $"SparseIdx: key coordinates must be non-negative; got {v}"
-            | other -> Error (sprintf "SparseIdx: keys must be a static list of Nat tuples; got element %A" other)
+            | other -> Error ($"SparseIdx: keys must be a static list of Nat tuples; got element {StaticEval.ppStaticValue other}")
         (match sv with
          | StaticEval.SVTuple elems when not elems.IsEmpty ->
              elems |> List.fold (fun acc e ->
                  acc |> Result.bind (fun es -> decodeEntry e |> Result.map (fun d -> es @ [d]))) (Ok [])
-         | other -> Error (sprintf "SparseIdx: keys must be a non-empty static list of Nat tuples; got %A" other))
+         | other -> Error ($"SparseIdx: keys must be a non-empty static list of Nat tuples; got {StaticEval.ppStaticValue other}"))
         |> Result.bind (fun entries ->
             let arity = entries.Head.Length
             if entries |> List.exists (fun e -> e.Length <> arity) then
@@ -988,15 +988,15 @@ and resolveSparseKeysSource (env: TypeEnv) (keysExpr: Expr) : Result<SparseKeysS
                                 | IRTIdxTagged (IRTScalar (ETInt64 | ETInt32), _) -> true
                                 | _ -> false
                             if ts |> List.forall natLike then Ok (SkRuntime (IRVar (vi.VarId, vi.Type)), ts.Length)
-                            else Error (sprintf "SparseIdx<%s>: key tuple components must be Nat-valued; '%s' has element type %A" name name arr.ElemType)
+                            else Error (sprintf "SparseIdx<%s>: key tuple components must be Nat-valued; '%s' has element type %s" name name (ppIRType arr.ElemType))
                         | IRTNat _ | IRTScalar ETInt64 | IRTScalar ETInt32 ->
                             Ok (SkRuntime (IRVar (vi.VarId, vi.Type)), 1)
                         | other ->
-                            Error (sprintf "SparseIdx<%s>: keys must be a rank-1 array of Nat tuples (Array<(Nat, ...) like ...>); '%s' has element type %A" name name other))
+                            Error (sprintf "SparseIdx<%s>: keys must be a rank-1 array of Nat tuples (Array<(Nat, ...) like ...>); '%s' has element type %s" name name (ppIRType other)))
                    | ArrayElem _ ->
                        Error $"SparseIdx<{name}>: keys array must be rank 1 (one key tuple per entry)"
                    | other ->
-                       Error (sprintf "SparseIdx<%s>: keys must be an array (Array<(Nat, ...) like ...>); '%s' has type %A" name name other))
+                       Error (sprintf "SparseIdx<%s>: keys must be an array (Array<(Nat, ...) like ...>); '%s' has type %s" name name (ppIRType other)))
               | None -> Ok (SkRuntime (lowerExtentExpr env keysExpr), 1))
          | _ -> Ok (SkRuntime (lowerExtentExpr env keysExpr), 1))
 
@@ -1169,10 +1169,10 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                               (match arr.ElemType with
                                | IRTScalar ETBool -> ()
                                | other ->
-                                   failwithf "CompoundIdx<%s>: mask must have bool element type (Array<bool like ...>); '%s' has element type %A" name name other)
+                                   failwithf "CompoundIdx<%s>: mask must have bool element type (Array<bool like ...>); '%s' has element type %s" name name (ppIRType other))
                               arr.IndexTypes |> List.sumBy (_.Rank)
                           | other ->
-                              failwithf "CompoundIdx<%s>: mask must be an array (Array<bool like ...>); '%s' has type %A" name name other)
+                              failwithf "CompoundIdx<%s>: mask must be an array (Array<bool like ...>); '%s' has type %s" name name (ppIRType other))
                      IRVar (vi.VarId, vi.Type), rank
                  | None -> lowerExtentExpr env maskExpr, 1)
             | _ -> lowerExtentExpr env maskExpr, 1
