@@ -3,3 +3,7 @@
 // Useful for zip-like operations that need to know both sizes
 function selectLarger(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0
 = if arity(xs) >= arity(ys) then xs[0] else ys[0]
+
+// arity(xs) = 3 >= arity(ys) = 2, so xs[0].
+let s = selectLarger((1.0, 2.0, 3.0), (9.0, 8.0))
+// EXPECT: s = 1

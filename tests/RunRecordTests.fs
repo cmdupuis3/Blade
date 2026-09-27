@@ -10,8 +10,8 @@
 //      (exists, kind, size), the build policy the defines carried, the
 //      routes; and on a BL8007 abort the same file with `ok:false` and the
 //      code. Unset -> no file.
-// Hermetic like CsvTests: the CSV fixture is written on the fly, at both
-// resolution roots (compiler cwd + exe cwd).
+// Hermetic like CsvTests: the CSV fixture is written on the fly -- into the
+// scratch tree, never the repo -- at both resolution roots (compiler + exe cwd).
 module Blade.Tests.RunRecordTests
 
 open System
@@ -42,7 +42,13 @@ let runRunRecordTests () : BlockResult =
         printfn "  SKIP: %s (%s)" name why
         skipped <- skipped + 1
 
-    let fixDir = "tests/fixtures/csv_files"
+    // The fixture is written into the SCRATCH tree (the cwd-relative
+    // generated_cpp_tests the corpus runner already owns), never into the
+    // repository: this block used to write tests/fixtures/csv_files/rr_grid.csv,
+    // a TRACKED file, so every suite run rewrote a checked-in fixture (with LF
+    // endings over a CRLF checkout). The relative path is the same text at both
+    // resolution roots, so the program source names one path.
+    let fixDir = "generated_cpp_tests/run_record_fixtures"
     Directory.CreateDirectory fixDir |> ignore
     let fixFile (name: string) = fixDir + "/" + name
     let e2eDir = "./generated_cpp_tests"

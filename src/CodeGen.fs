@@ -2250,6 +2250,71 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
         let finish = [ "    cout << \"]\" << endl;" ]
         opens @ loops @ inner @ closes @ finish
 
+/// How one field of a struct prints inside `name = [{f1: v1, f2: v2}, ...]`,
+/// shared by both lanes (Interp/Print.fs reads the same classification).
+type StructFieldPrint =
+    /// `cout << row.field` -- a scalar (or anything else streamable).
+    | FieldScalar
+    /// A DENSE array of printable scalars: its values in the top-level array
+    /// format (genPrintArrayFlat: rank 2 nested, every other rank one flat run).
+    | FieldDenseArray of rank: int
+    /// Any other array (compact/symmetric, ragged, compound, sparse, wreath, or
+    /// a non-scalar element): a fixed placeholder -- never the wrapper's data
+    /// pointer, which is what `cout << row.field` streamed.
+    | FieldOpaqueArray of text: string
+
+let structFieldPrint (ftype: IRType) : StructFieldPrint =
+    let rec scalarElem (t: IRType) =
+        match t with
+        | IRTScalar et -> (match et with ETUnit -> false | _ -> true)
+        | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> scalarElem inner
+        | _ -> false
+    match IR.stripUnits ftype with
+    | ArrayElem at ->
+        let rank = arrayRank at
+        let dense =
+            not (isCompoundArrayType at || isSparseArrayType at || isRaggedArrayType at || isDepIdxArrayType at)
+            && at.IndexTypes |> List.forall (fun ix -> ix.Symmetry = SymNone)
+        if dense && rank >= 1 && scalarElem at.ElemType then FieldDenseArray rank
+        else FieldOpaqueArray $"<rank-{rank} array>"
+    | _ -> FieldScalar
+
+/// The statements printing the dense array `expr` (a struct field) in the
+/// top-level array format, no name and no newline: `[a, b]`, `[[a], [b]]`.
+/// Wrapped in its own `{ }` so several fields in one row cannot collide.
+let genPrintFieldArray (expr: string) (rank: int) (ind: string) : string list =
+    let v d = $"__f{d}"
+    if rank = 2 then
+        [ $"{ind}{{"
+          $"{ind}    cout << \"[\";"
+          $$"""{{ind}}    for (size_t __f0 = 0; __f0 < {{expr}}.extents[0]; __f0++) {"""
+          $"{ind}        if (__f0) cout << \", \";"
+          $"{ind}        cout << \"[\";"
+          $$"""{{ind}}        for (size_t __f1 = 0; __f1 < {{expr}}.extents[1]; __f1++) {"""
+          $"{ind}            if (__f1) cout << \", \";"
+          $"{ind}            cout << {expr}[__f0][__f1];"
+          $"{ind}        }}"
+          $"{ind}        cout << \"]\";"
+          $"{ind}    }}"
+          $"{ind}    cout << \"]\";"
+          $"{ind}}}" ]
+    else
+        let loops =
+            [ for d in 0 .. rank - 1 ->
+                $$"""{{ind}}    {{String.replicate d "    "}}for (size_t {{v d}} = 0; {{v d}} < {{expr}}.extents[{{d}}]; {{v d}}++) {""" ]
+        let idx = [ for d in 0 .. rank - 1 -> $"[{v d}]" ] |> String.concat ""
+        let inner = ind + "    " + String.replicate rank "    "
+        [ $"{ind}{{"
+          $"{ind}    cout << \"[\";"
+          $"{ind}    bool __ffirst = true;" ]
+        @ loops
+        @ [ $"{inner}if (!__ffirst) cout << \", \";"
+            $"{inner}__ffirst = false;"
+            $"{inner}cout << {expr}{idx};" ]
+        @ [ for d in rank - 1 .. -1 .. 0 -> $"""{ind}    {(String.replicate d "    ")}}}""" ]
+        @ [ $"{ind}    cout << \"]\";"
+            $"{ind}}}" ]
+
 /// Generate print loop for arrays with per-dimension symmetry awareness.
 /// Expands IRIndexType list into per-dimension loop structure:
 ///   - SymIdx<k,n>: k dims, first is free range, rest subtract prior vars in group
@@ -2551,9 +2616,23 @@ let genPrintStatements (modul: IRModule) : string list =
                         let bv = sanitizeCppName b.Name
                         let firstVar = $"{bv}__first"
                         let fieldPrints =
-                            fields |> List.mapi (fun i (fname, _) ->
+                            fields |> List.collect (fun (fname, ftype) ->
+                                let i = fields |> List.findIndex (fun (n, _) -> n = fname)
                                 let prefix = if i = 0 then "" else ", "
-                                $"        cout << \"{prefix}{fname}: \" << {bv}[i].{fname};")
+                                let label = $"        cout << \"{prefix}{fname}: \";"
+                                match structFieldPrint ftype with
+                                | FieldDenseArray rank ->
+                                    // An ARRAY-typed field used to stream as
+                                    // `cout << row.field`, i.e. the wrapper's
+                                    // data POINTER (`samples: 0x1fe4df26e90`),
+                                    // which both differential normalizers then
+                                    // masked. Printed as its values instead, in
+                                    // the top-level array format.
+                                    label :: genPrintFieldArray $"{bv}[i].{fname}" rank "        "
+                                | FieldOpaqueArray text ->
+                                    [ $"        cout << \"{prefix}{fname}: {text}\";" ]
+                                | FieldScalar ->
+                                    [ $"        cout << \"{prefix}{fname}: \" << {bv}[i].{fname};" ])
                         [
                             $"    cout << \"{b.Name} = [\";"
                             $"    bool {firstVar} = true;"
@@ -2631,7 +2710,32 @@ let genPrintStatements (modul: IRModule) : string list =
                 let isRaggedRowBinding =
                     isRaggedRowType arrType &&
                     (b.Value.IsIRIndex)
-                if isCompoundRowSubview then
+                // A GROUPED array (group_by, or a copy of one): rows are
+                // slices of one CSR pool whose lengths live in the grouping's
+                // offsets -- the value's own inner extent is the ragged
+                // placeholder 0, which is why this printed `[[], [], []]`.
+                // Nested rows, exactly like a ragged literal (and like the
+                // interpreter's SRagged print).
+                let grouped = Map.tryFind b.Id (groupedBindingsCell ()).Value
+                if grouped.IsSome then
+                    let (gv, gk) = grouped.Value
+                    let firstVar = $"{gv}__first"
+                    [
+                        $"    cout << \"{b.Name} = [\";"
+                        $$"""    for (size_t __ri = 0; __ri < {{gk}}__ngroups; __ri++) {"""
+                        "        if (__ri) cout << \", \";"
+                        "        cout << \"[\";"
+                        $"        bool {firstVar} = true;"
+                        $$"""        for (size_t __rj = 0, __rn = {{gk}}__offsets[__ri + 1] - {{gk}}__offsets[__ri]; __rj < __rn; __rj++) {"""
+                        $"            if (!{firstVar}) cout << \", \";"
+                        $"            {firstVar} = false;"
+                        $"            cout << {gv}[__ri][__rj];"
+                        "        }"
+                        "        cout << \"]\";"
+                        "    }"
+                        "    cout << \"]\" << endl;"
+                    ]
+                elif isCompoundRowSubview then
                     [$"    // (trailing-row view '{b.Name}' not auto-printed; the raw T* row carries no extents -- derive scalars via {b.Name}(t))"]
                 elif isRaggedRowBinding then
                     let bv = sanitizeCppName b.Name
@@ -2917,6 +3021,7 @@ let genMainProgram (modul: IRModule) (testName: string) : string =
     (moduleGlobalDeclsCell ()).Value <- []
     (streamBufDeclsCell ()).Value <- Set.empty
     (forcedDeferredIdsCell ()).Value <- Set.empty
+    (groupedBindingsCell ()).Value <- Map.empty
     (linalgUsedCell ()).Value <- false
     (tilesUsedCell ()).Value <- false
     (packedGemmUsedCell ()).Value <- false
@@ -3119,6 +3224,7 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // during genModule and genPrintStatements (called AFTER body generation)
     // reads it to auto-print deferred bindings that ended up materialized.
     (forcedDeferredIdsCell ()).Value <- Set.empty
+    (groupedBindingsCell ()).Value <- Map.empty
     (linalgUsedCell ()).Value <- false
     (tilesUsedCell ()).Value <- false
     (packedGemmUsedCell ()).Value <- false
@@ -3244,6 +3350,7 @@ let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string 
     // Reset the forced-deferred collector before body generation; the
     // genPrintStatements call below (correctly AFTER genModule) reads it.
     (forcedDeferredIdsCell ()).Value <- Set.empty
+    (groupedBindingsCell ()).Value <- Map.empty
     // Reset the S0 module-global promotion collector (see moduleGlobalDeclsCell).
     (moduleGlobalDeclsCell ()).Value <- []
     (linalgUsedCell ()).Value <- false

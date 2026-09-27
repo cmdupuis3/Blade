@@ -17,7 +17,7 @@
 #
 #   * label a pull request `ci:full`
 #   * run the workflow by hand (Actions -> CI -> Run workflow), where the
-#     `lanes` input can pick one lane instead of all three
+#     `lanes` input can pick one lane (or a named group) instead of all of them
 #   * the nightly schedule on master
 #
 # The first two are the BROAD opt-ins and skip the nightly-only lanes; the
@@ -42,12 +42,34 @@
 #              one compiler per file, no g++ in the loop, and it reaches
 #              categories the differential does not sweep. Programs the lane
 #              refuses skip; nothing falls back to C++
+#   interp     NIGHTLY-ONLY. `blade test interp`: the tree-walking interpreter
+#              against the compiled binary over EVERY corpus category
+#              (discovered, minus the named exclusions in tests/InterpDiff.fs),
+#              byte-identical output required. The interpreter and codegen are
+#              differential twins, and this is the gate that sees one drift
+#              from the other. It compiles AND interprets every program, so it
+#              costs about what the cpp lane does -- too long to sit in front
+#              of a pull request; `lanes: interp` runs it on demand.
+#   opt-diff   `blade test opt-diff`: every corpus program with every optimizer
+#              gate OFF against ON. The optimizer runs before the split into the
+#              two evaluators, so a pass that changes a value makes BOTH lanes
+#              print the same wrong answer and `interp` stays green; this is the
+#              only reference that can see it. Cheap -- it emits everything
+#              in-process and compiles only the pairs whose C++ differs (a few
+#              dozen) -- so it rides the pull-request opt-ins too.
+#              `lanes: differentials` selects interp and opt-diff together.
 #
 # Never run here: `test cuda` (no usable nvcc host compiler on hosted
 # runners), `test timing` and `test llvm-bench` (benchmarks are not pass/fail
 # signal, and a shared runner is the wrong instrument), `test diff-oracle`
-# (hours, and it needs the separate oracle build). The `interp` differential is
-# available on demand via the workflow_dispatch input.
+# (hours, and it needs the separate oracle build).
+#
+# The interpreter differential used to hang off the cpp lane behind a
+# workflow_dispatch checkbox, so no scheduled nightly ever ran it -- and when
+# dispatched it ran `blade test --interp`, i.e. the WHOLE default suite a
+# second time with the differential appended, over a hand-listed slice that
+# had fallen behind the corpus. It is its own lane now, running only the
+# differential, over every category.
 
 name: CI
 
@@ -76,11 +98,7 @@ on:
         description: 'Which test lanes to run'
         type: choice
         default: all
-        options: [all, none, cpp, providers, netcdf, zarr, csv, icechunk, provider-desugar, hybrid, llvm, llvm-suite]
-      include-interp:
-        description: 'Also run the interpreter/codegen differential (slow)'
-        type: boolean
-        default: false
+        options: [all, none, cpp, providers, netcdf, zarr, csv, icechunk, provider-desugar, hybrid, llvm, llvm-suite, interp, opt-diff, differentials]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -262,13 +280,36 @@ jobs:
               verbs       = 'test --llvm-backend'
               nightlyOnly = $true
             }
+            # The interpreter/codegen differential over EVERY corpus category
+            # (`blade test interp`, NOT `blade test --interp`: the flag re-runs
+            # the whole default suite and appends the differential, which the
+            # cpp lane has already paid for). Two pipelines per program, the
+            # same order of cost as the cpp lane -- nightly-only.
+            interp = @{
+              title       = 'Interpreter differential (every corpus category)'
+              timeout     = 150
+              verbs       = 'test interp'
+              nightlyOnly = $true
+            }
+            # The optimizer differential: gates OFF vs ON. Emission-only for
+            # the programs the optimizer leaves alone, so most of its cost is
+            # the lane's fixed setup; cheap enough for the pull-request opt-ins.
+            'opt-diff' = @{
+              title       = 'Optimizer differential (gates off vs on)'
+              timeout     = 45
+              verbs       = 'test opt-diff'
+              nightlyOnly = $false
+            }
           }
           $all = @($lanes.Keys)
 
           # Named groups, so splitting a lane does not cost the shorthand that
           # named it. `lanes: providers` still selects the provider set; it just
           # gets one job per provider now instead of one job in total.
-          $groups = @{ providers = @('netcdf', 'zarr', 'csv', 'icechunk', 'provider-desugar', 'hybrid') }
+          $groups = @{
+            providers     = @('netcdf', 'zarr', 'csv', 'icechunk', 'provider-desugar', 'hybrid')
+            differentials = @('interp', 'opt-diff')
+          }
 
           $selected = switch ($env:EVENT) {
             'schedule'          { $all }
@@ -361,6 +402,15 @@ jobs:
       # identity, link flags and source text, so a stale entry can only miss,
       # never lie.
       BLADE_EXE_CACHE: ${{ github.workspace }}\.blade-exe-cache
+      # -------------------------------------------------------------------
+      # FFT-MISCOMPILE HOOK (placeholder -- deliberately NOT implemented).
+      # A g++ flag or per-function attribute from the FFT-miscompile
+      # investigation lands in Build.fs (the one place every lane's compile
+      # flags come from), not here: a flag set only in CI would make CI
+      # green on binaries no developer builds. If it must ALSO be pinned
+      # per lane, it goes in this env block, named here, so the lanes and
+      # the local toolchain are visibly held to the same flags.
+      # -------------------------------------------------------------------
 
     steps:
       - uses: actions/checkout@v5
@@ -424,18 +474,6 @@ jobs:
             if ($LASTEXITCODE -ne 0) { $failed += $verb.Trim() }
           }
           if ($failed.Count -gt 0) { throw "red: $($failed -join '; ')" }
-
-      # The interpreter and codegen are differential twins, so this gate is
-      # what catches one drifting from the other -- it is just too slow to
-      # attach to a lane by default.
-      - name: Interpreter differential
-        if: matrix.lane == 'cpp' && inputs.include-interp
-        shell: pwsh
-        run: >
-          .\.github\scripts\Invoke-BladeTest.ps1
-          -Blade .\bin\Release\net10.0\Blade.exe
-          -Name 'interpreter differential'
-          -BladeArgs 'test','--interp'
 
       - uses: actions/upload-artifact@v6
         if: always()

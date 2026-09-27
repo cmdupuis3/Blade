@@ -59,7 +59,7 @@ Write-Host '::endgroup::'
 $lines = @(Get-Content -Path $log -ErrorAction SilentlyContinue)
 
 # The report of record, in the harness's own words.
-$totals = @($lines | Where-Object { $_ -match '^\s*(TOTAL:|Verdict:)' })
+$totals = @($lines | Where-Object { $_ -match '^\s*(TOTAL:|Verdict:|Interp Diff:|Opt Diff:)' })
 
 $problems = @()
 if ($code -ne 0) { $problems += "blade exits $code" }

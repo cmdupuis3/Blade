@@ -1,0 +1,20 @@
+// TEST: Struct Array Field Values
+// An array-typed struct field prints its VALUES in the top-level array format
+// (rank 1 flat, rank 2 nested), in both lanes. It used to stream as the
+// wrapper's data POINTER (`samples: 0x1fe4df26e90`), different on every run,
+// which both differential normalizers masked and the interpreter skipped.
+// The printed line has no pin grammar; the harness now fails any output
+// carrying a raw pointer, and the interpreter differential compares it.
+struct Probe {
+    id: Int,
+    samples: Array<Float64 like Idx<3>>,
+    grid: Array<Int64 like Idx<2>, Idx<2>>
+}
+let ps: Array<Probe like Idx<2>> = [
+    Probe { id = 1, samples = [1.5, 2.0, 2.5], grid = [[1, 2], [3, 4]] },
+    Probe { id = 2, samples = [3.0, 4.0, 5.0], grid = [[5, 6], [7, 8]] }
+]
+let s1 = ps[1].samples[2]
+// EXPECT: s1 = 5
+let g0 = ps[0].grid[1][0]
+// EXPECT: g0 = 3

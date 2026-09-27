@@ -708,7 +708,7 @@ let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
 /// -- which the emitter computes from the gk offsets, not from the gathered
 /// buffer. So if EVERY use of a group_by result is such a peel, the gather is
 /// dead: `genGroupByBinding` still emits the row-pointer table (the peel indexes
-/// it to build each RaggedRow, and auto-print reads its extents) but skips the
+/// it to build each RaggedRow) but skips the
 /// per-group `new[]` and the O(n) copy, leaving the rows null. That is legal --
 /// the pointer is read, never dereferenced -- and `delete[] nullptr` is a no-op,
 /// so teardown is unchanged.
@@ -779,6 +779,17 @@ let computeExtentsOnlyGroupBys (modul: IRModule) : Set<IRId> =
         | ExprShape (cs, _) -> cs |> List.iter scan
     for bind in modul.Bindings do scan bind.Value
     for f in modul.Functions do scan f.Body
+    // The AUTO-PRINT is a consumer too: a printed top-level grouped array
+    // shows its rows' VALUES (genPrintStatements, via the grouping's offsets),
+    // so its gather is live. Only a binding the print selection leaves out
+    // (`--print`, BLADE_PRINT) -- or one inside a function body, which is
+    // never printed -- can still lose its gather to the rule above.
+    let selection = printSelection ()
+    for bind in modul.Bindings do
+        match strip bind.Value with
+        | IRGroupBy _ when (match selection with None -> true | Some names -> Set.contains bind.Name names) ->
+            bad.Add bind.Id |> ignore
+        | _ -> ()
     // Elidable is exactly the COMPLEMENT of `bad`, which is why a group_by
     // nothing consumes at all is elided too: its gather is dead for the same
     // reason, just more obviously. (Tracking the extents-only peels positively
@@ -796,6 +807,28 @@ let extentsOnlyGroupBysCell () : Set<IRId> ref =
         extentsOnlyGroupBysStorage.Value <- fresh
         fresh
     else v
+
+/// GROUPED BINDINGS: binding id -> (emitted C++ name, grouping stem) for every
+/// binding whose value is a group_by result -- the group_by itself, and an
+/// alias of one (genVarAliasBinding). A grouped array's row LENGTHS live in
+/// the grouping (`<gk>__offsets`), not in the value (whose inner extent is the
+/// ragged placeholder 0), so the printer needs the grouping to print the rows;
+/// it reads this map because genPrintStatements runs after body generation
+/// and has no codegen context. Reset per assembly, like forcedDeferredIdsCell.
+let internal groupedBindingsStorage =
+    System.Threading.AsyncLocal<Map<IRId, string * string> ref>()
+
+let groupedBindingsCell () : Map<IRId, string * string> ref =
+    let v = groupedBindingsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        groupedBindingsStorage.Value <- fresh
+        fresh
+    else v
+
+let noteGroupedBinding (id: IRId) (cppName: string) (gkName: string) : unit =
+    let cell = groupedBindingsCell ()
+    cell.Value <- Map.add id (cppName, gkName) cell.Value
 
 /// Wrapper-emission helper: a local C++ closure mediating between a lifted
 /// function's signature (regular + capture params) and a consumer's expected

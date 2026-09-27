@@ -90,32 +90,31 @@ let deferredConcreteTests = Blade.Tests.Corpus.category "deferred-concrete"
 /// `allTests` below and CliSelfTests' key map.
 let treeTests = Blade.Tests.Corpus.category "trees"
 
-/// The wholly-negative categories carry no "(rejects)" marker in their own
-/// `// TEST:` names -- every file in them is meant to be refused, so the marker
-/// would be noise -- and Runner's classifier keys on exactly that marker. The
-/// STANDALONE verbs supply it (`blade test uniterrors` and friends wrap the
-/// list in Cli.fs's `asRejectProbes`), and the full-suite lane below did not:
-/// the same files were read as ORDINARY tests, so being correctly refused at
-/// lowering counted as a failure. That is why nine unit-errors probes were red
-/// in `[All]` while `blade test uniterrors` reported 14/14 green.
-///
-/// Kept identical to Cli.fs's helper on purpose; if one grows a rule the other
-/// must too, or the two lanes disagree again.
-let private asRejectProbes (tests: (string * string) list) =
-    tests
-    |> List.map (fun (name, source) ->
-        (if name.EndsWith "(rejects)" then name else name + " (rejects)"), source)
+/// Corpus directories a block OTHER than the corpus runner consumes, with
+/// that block's name. Every other directory under tests/corpus runs in
+/// `allTests` (single-file) or `multiFileTests` (multi-file); the corpus-wiring
+/// block (CliSelfTests) holds the two lists to the directories on disk.
+let corpusOwnedElsewhere : (string * string) list =
+    [ "diagnostics", "Diagnostics Corpus (tests/Test_DiagCorpus.fs: strict code AND span pins)" ]
 
-/// All tests combined
+/// The multi-file categories the Multi-File Modules block runs.
+let multiFileCategoriesRun = [ "multifile" ]
+
+/// All tests combined: EVERY single-file corpus directory on disk, DISCOVERED
+/// (Corpus.singleFileCategories), not listed. The list this replaces was a
+/// hand-maintained concatenation, and a new directory that nobody appended to
+/// it simply never ran -- with every summary line still green. The directories
+/// another block owns are the only exclusions, and they are named above.
+///
+/// The wholly-negative categories come back marked "(rejects)" from
+/// Corpus.categoryTests (Corpus.rejectOnlyCategories, the one definition the
+/// standalone keys and the interpreter differential share), which is what lets
+/// the classifier score a correct refusal as a pass.
 let allTests =
-    basicTests @ intrinsicsTests @ castsTests @ adTests @ adJvpTests @ adJvpCombTests @ mlE2eTests @ mlOpsTests @ mlEquivTests @ loopTests @ symmetryTests @ reynoldsTests @ arityTests @ functionTests
-    @ structTests @ structAbortTests @ structMutualTests @ sumTypeTests @ interfaceTests @ moduleTests @ guardTests @ guardCombinatorTests @ zeroCombinatorTests @ sequenceCombinatorTests @ tupleViewTests @ tupleTests @ replicateTests @ anonRangeTests @ recursiveArrayTests @ segmentsTests @ bracketedTests
-    @ indexTypeTests @ treeTests @ mutabilityTests @ asRejectProbes mutabilityErrorTests @ staticTests @ pplTests @ mathTests @ randTests @ displayTests @ asRejectProbes displayErrorTests @ spectraTests @ fallbackTests @ stackJoinTests @ sgsTests @ unitTests @ asRejectProbes unitErrorTests
-    @ foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes
-    @ inferenceProbes
-    @ funcArrayTests
-    @ deferredConcreteTests
-    @ memfreeTests @ memfreeStressTests
+    let elsewhere = corpusOwnedElsewhere |> List.map fst |> Set.ofList
+    Blade.Tests.Corpus.singleFileCategories ()
+    |> List.filter (fun d -> not (elsewhere.Contains d))
+    |> List.collect Blade.Tests.Corpus.categoryTests
 
 /// Which optional, toolchain-heavy blocks the full suite should include.
 /// All default to OFF: the CUDA block needs the x64 Native Tools prompt on
@@ -501,7 +500,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // skips cleanly if g++ is absent — the compiled binary is its reference.
     let interpDiff =
         if opts.IncludeInterpDiff then
-            Some (Blade.Tests.InterpDiff.runInterpDiffTests Blade.Tests.InterpDiff.currentSlice)
+            Some (Blade.Tests.InterpDiff.runInterpDiffTests (Blade.Tests.InterpDiff.currentSlice ()))
         else
             printfn "Interpreter differential: not run (opt-in; enable with 'blade test --interp' or run 'blade test interp')."
             None
