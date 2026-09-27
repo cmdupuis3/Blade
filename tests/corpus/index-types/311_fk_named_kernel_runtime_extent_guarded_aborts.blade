@@ -1,0 +1,16 @@
+// TEST: A named kernel over an index type with a RUNTIME extent is guarded (aborts)
+// ABORT: index out of bounds
+// ============================================================================
+// index-types/303's named-kernel guard needed a STATIC extent: with
+// `RegionIdx = Idx<nr>` over a runtime `nr`, the eta wrapper's call argument
+// (a key-column cell, unproven) stayed unguarded and codegen read past the
+// buffer, where the lambda-kernel twin fell back to `extents(A)`. The guard
+// now reads the extent's binding (formalism 3.10: the guarantee does not
+// depend on the extent being static).
+let nr = 3
+type StationIdx = Idx<4>
+type RegionIdx = Idx<nr>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 5]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+function wt(r: Nat<RegionIdx>) -> Float64 = region_weight(r)
+let w = method_for(station_region) <@> wt |> compute

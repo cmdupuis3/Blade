@@ -345,6 +345,22 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
                            tryEvalIntIR idx.Extent
+                       | _ -> None
+                   IndexExtentVar = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                           // `Idx<nr>` over a runtime `let nr` lowers to the
+                           // symbolic IRParam "nr" (TypeLower.lowerExtentExpr);
+                           // the module binding of that name is the extent.
+                           (match idx.Extent with
+                            | IRParam (name, _, _) when name <> "?" ->
+                                (match lookupVar name currentEnv with
+                                 | Some vi ->
+                                     (match currentEnv.Subst.Resolve vi.Type |> IR.stripUnits with
+                                      | IRTScalar (ETInt64 | ETInt32) as t -> Some (name, vi.VarId, t)
+                                      | _ -> None)
+                                 | None -> None)
+                            | _ -> None)
                        | _ -> None }
         try zonkModule currentEnv.Subst typedModule
         finally subscriptGuardCtx.Value <- saved

@@ -190,6 +190,12 @@ type SubscriptGuardCtx = {
     FreshId: unit -> IRId
     Positions: System.Collections.Generic.HashSet<IRId>
     IndexExtent: string -> int64 option
+    /// The RUNTIME extent of a named index type whose extent is a program
+    /// binding (`type RegionIdx = Idx<nr>` over a plain `let nr = ...`): the
+    /// binding, as a variable reference the guard can compare against. The
+    /// fallback when `IndexExtent` has no static value -- the named-function
+    /// kernel's twin of a lambda kernel's `extents(A)` fallback.
+    IndexExtentVar: string -> (string * IRId * IRType) option
     /// The kernel parameters noteDataKernelParams marked: unproven AND exempt
     /// from the `__`-name stand-down (they carry user data).
     DataVars: System.Collections.Generic.HashSet<IRId>
@@ -432,7 +438,17 @@ let private guardIndexArgs (f: TypedExpr) (args: TypedExpr list) : TypedExpr lis
                      | Some n ->
                          let ext = mkTypedSpan (TExprLit (Blade.Ast.LitInt n)) (IRTScalar ETInt64) a.Span
                          guardIndex a ext $"an argument outside {tag} (0 .. {n - 1L})"
-                     | None -> a)
+                     | None ->
+                         // A RUNTIME extent (formalism 3.10's guarantee does
+                         // not depend on the extent being static): compare
+                         // against the binding the extent names, read at the
+                         // call -- the named-function kernel's eta wrapper
+                         // `lambda(__k) -> wt(__k)` over a key column included.
+                         match ctx.IndexExtentVar tag with
+                         | Some (name, vid, ty) ->
+                             let ext = mkTypedSpan (TExprVar (name, vid, None)) ty a.Span
+                             guardIndex a ext $"an argument outside {tag} (its extent, {name})"
+                         | None -> a)
                 | _ -> a)
     | _ -> args
 
