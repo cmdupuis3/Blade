@@ -1947,6 +1947,25 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             | ExprShape (children, rebuild) -> rebuild (children |> List.map dropAliasLets)
         let newBody = dropAliasLets newBody
 
+        // A LIVE read of a pack element past the pack's end survives the
+        // fold only when no arm handled this arity: base-case-free recursion
+        // (`| _ -> let head :: tail = args` alone) specialized down to the
+        // empty pack. It used to reach IR validation as a dangling reference
+        // (BL6001); refuse it here, naming the missing arm.
+        let rec pastEndRead e =
+            match e with
+            | IRPolyIndex (IRVar (id, _), IRLit (IRLitInt k)) when Map.containsKey id aliasInfo ->
+                let (slotIdx, off) = aliasInfo.[id]
+                let idx = off + int k
+                if idx < 0 || idx >= aritiesArr.[slotIdx] then Some (slotIdx, idx) else None
+            | ExprShape (children, _) -> children |> List.tryPick pastEndRead
+        match pastEndRead newBody with
+        | Some (slotIdx, idx) ->
+            let n = aritiesArr.[slotIdx]
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
+                $"'{func.Name}' reads element {idx} of a {n}-element pack: its recursion reaches arity {n} with no arm for it (recursion without a base case is planned, not built). Add a base arm, e.g. `| {n} -> <the identity>` in the `match arity(...)`.")))
+        | None -> ()
+
         // Second pass: unroll IRForRange with literal bounds. This handles
         // `for k in 0..arity(args)` after arity is resolved. A body carrying
         // IRBreakIf (a `while`-guarded rec array inside an arity-poly

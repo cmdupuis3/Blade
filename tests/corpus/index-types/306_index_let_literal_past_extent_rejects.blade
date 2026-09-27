@@ -1,0 +1,8 @@
+// TEST: An index-typed let of a literal past the extent (rejects)
+// `let i: Nat<RegionIdx> = 7` used to type-check, and -- a let of a literal
+// being a PROVEN position -- `region_weight(i)` read unguarded past the end.
+// ERROR: BL4003
+type RegionIdx = Idx<3>
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let i: Nat<RegionIdx> = 7
+let x = region_weight(i)

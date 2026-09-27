@@ -307,13 +307,13 @@ let bad = method_for(range<LatIdx>) <@> lambda(i) -> B(i) |> compute
 
 ## 12. Foreign keys without a join engine
 
-*Features: integer foreign keys, captured-array deref. Corpus:
+*Features: EnumIdx key domains, captured-array deref. Corpus:
 `sql-foreign-keys`.*
 
 ```blade
+type RegionIdx = EnumIdx<["pacific", "atlantic", "indian"]>
 type StationIdx = Idx<4>
-type RegionIdx = Idx<3>                                // pacific, atlantic, indian
-let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 1]
+let station_region: Array<RegionIdx like StationIdx> = ["pacific", "indian", "pacific", "atlantic"]
 let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
 let values: Array<Float64 like StationIdx> = [10.0, 20.0, 30.0, 40.0]
 
@@ -322,10 +322,10 @@ let weighted = method_for(zip(station_region, values)) <@> lambda(r, v) -> v * r
 // EXPECT: weighted = [10, 40, 30, 20]
 ```
 
-The key column's element type `Nat<RegionIdx>` says its values are positions
-in `RegionIdx`, so `region_weight(r)` subscripts with an index value of the
-right type (an untyped `Int64` column works too, with a BL4003 advisory). (A
-key column typed by a string `EnumIdx` — `Array<RegionIdx like StationIdx>`
-with `RegionIdx = EnumIdx<["pacific", ...]>` — groups correctly with
-`group_keys`, but using its element as a subscript is currently rejected by
-the C++ back end with BL9002: a known compiler bug, not a language rule.)
+The key column holds `RegionIdx` labels, and `region_weight(r)` reads the
+cell at the label's position in the `EnumIdx` (a label the type does not
+declare is refused in a literal, and stops a run with BL8006). A positional
+key column works the same way: `Array<Nat<RegionIdx> like StationIdx>` with
+`RegionIdx = Idx<3>` holds positions `0 .. 2` (and `-1`, group_by's excluded
+key); every read through a key cell is bounds-checked, because the column is
+data, not a proof (formalism §3.10).

@@ -74,6 +74,10 @@ export interface SurfaceJson {
   mathIntrinsics: SurfaceMathIntrinsics;
   /** `StaticEval.knownBuiltinNames()`, sorted. */
   builtins: string[];
+  /** The subset of `builtins` with no run-time binding: legal only where the
+   *  static evaluator runs (`let static`, extents). `min` / `max` /
+   *  `length` are here -- an ordinary expression calling them is BL2001. */
+  staticOnlyBuiltins: string[];
   /** The builtin scalar type names. */
   scalarTypes: string[];
   /** Names `Ide.builtinCallOf` recognizes at a call site. */

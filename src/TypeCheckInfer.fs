@@ -2001,12 +2001,36 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match indexCastTarget env annoTy with
         | Some (tag, ext) -> inferIndexCast env e annoTy tag ext
         | None ->
-        checkExpr env annoTy e |> Result.map (fun tE ->
-            { tE with Type = annoTy })
+        checkExpr env annoTy e |> Result.bind (fun tE ->
+            let tE = { tE with Type = annoTy }
+            // A BOUNDED annotation (`-1.0 : Salinity`, Salinity =
+            // Float64<psu, min=0.0>) asserts the bound exactly as a `let`
+            // annotation does, so it gets the same guards: the value is bound
+            // once and checked (BL8001), then yielded. Unbounded ascriptions
+            // keep their node untouched.
+            let span = if e.Span.StartLine > 0 then e.Span else tE.Span
+            let ascName = $"__asc{env.Builder.FreshId()}"
+            let ascId = env.Builder.FreshId()
+            let ascEnv = bindVarSimple ascName ascId annoTy env
+            let subject = match tyAnno with TyNamed (n, []) -> $": {n}" | _ -> "an ascription"
+            synthesizeBoundChecks ascEnv (Some tyAnno) subject { Kind = ExprKind.ExprVar ascName; Span = span }
+            |> Result.map (fun checks ->
+                if checks.IsEmpty then tE
+                else
+                    let tb : TypedBinding = {
+                        Name = ascName; VarId = ascId; Type = annoTy
+                        Identity = None; IsMutable = false; Value = tE
+                        SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                    mkTypedSpan (TExprBlock (TStmtLet tb :: (checks |> List.map TStmtExpr),
+                                             Some (mkTypedSpan (TExprVar (ascName, ascId, None)) annoTy span)))
+                                annoTy span))
 
     // ---- Arity special forms ----
     | ExprKind.ExprArity paramName -> Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))
-    | ExprKind.ExprNth -> Ok (mkTyped (TExprLit (LitInt 0L)) (IRTScalar ETInt64))
+    // `nth` (the recursion-depth variable) is PLANNED (formalism 8.2): it
+    // used to type as the literal 0 at every depth, a silently wrong value.
+    | ExprKind.ExprNth ->
+        Error (Other "`nth` (the recursion-depth variable) is planned, not built: it used to evaluate to 0 at every depth. Count the depth with an explicit parameter, or read the pack size with `arity(args)`.")
     | ExprKind.ExprZero ->
         // zero gets a fresh type variable -- unifies with int, float, bool context
         let ty = env.Subst.Fresh()
@@ -5623,6 +5647,32 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             | ExprKind.ExprFor _
             | ExprKind.ExprBinOp (_, OpComposeObj, _, _) -> true
             | _ -> false
+        // `method_for(A, B) <@> polyFn` for a named function over a `Poly`
+        // pack: etaExpandFunctionKernel cannot wrap it (the pack width is the
+        // operand count, unknown to it), and the method_for arm took the
+        // un-expanded variable as a non-kernel (BL3007 `got variable`) while
+        // `object_for(polyFn) <@> (A, B)` and `polyFn <@> (A, B)` worked.
+        // It IS that application -- the same arrays against the same kernel --
+        // so it is typed as one (inferObjectFor builds the deferred former).
+        let polyNamedKernelRight =
+            match right.Kind with
+            | ExprKind.ExprVar name ->
+                (match lookupVar name env with
+                 | Some info when Option.isNone info.TypedValue ->
+                     (match env.Subst.Resolve info.Type with
+                      | FuncElem (paramTys, _) -> paramTys |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTPoly)
+                      | _ -> false)
+                 | _ -> false)
+            | _ -> false
+        match left.Kind with
+        | ExprKind.ExprMethodFor arrays when polyNamedKernelRight && not arrays.IsEmpty ->
+            let operand =
+                match arrays with
+                | [ single ] -> single
+                | many -> ({ Kind = ExprKind.ExprTuple many; Span = left.Span } : Expr)
+            let objFor : Expr = { Kind = ExprKind.ExprObjectFor right; Span = right.Span }
+            inferBinOp env mode OpApply objFor operand
+        | _ ->
         if syntacticFormer then
             // Explicit spelling: the unchanged path.
             inferExpr env left |> Result.bind applyWith
@@ -10689,13 +10739,17 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         // Strict in the OTHER direction: a bare `Nat` value cannot flow to
         // Nat<I> position without explicit cast -- but a LITERAL has no
         // pre-committed type, so context-driven typing applies here.
-        // NOT range-checked here: an index-typed VALUE position is also a
-        // foreign-key column, where out-of-range keys are data (`-1` is the
-        // "excluded" key of group_by, sql-group-by/028, 041). The literal
-        // doors that ARE positions -- a subscript, a cast `(7 : I)`, an
-        // argument to a `Nat<I>` parameter -- are checked where they occur.
-        ignore v
-        Ok (mkTyped (TExprLit lit) resolved)
+        // RANGE-CHECKED against a named plain index type's static extent:
+        // an index-typed VALUE -- a `Nat<I>` let, a foreign-key column's
+        // literal cells -- is a position of I, and a literal past the end
+        // (`[0, 2, 0, 7]` over Idx<3>) can never be one. The ONE admitted
+        // out-of-range key is `-1`, group_by's "excluded" key (sql-group-by/
+        // 028, 041), which the negated-literal arm below lets through; a
+        // value that is not proven -- that `-1`, any cell read out of a
+        // foreign-key column -- is guarded at its subscript (Zonk).
+        match namedIndexParam env resolved with
+        | Some (tag, Some n) when v >= n -> Error (SubscriptOutOfRange (v, Some n, tag))
+        | _ -> Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitInt _ as lit), (IRTNat _ | IRTUnitAnnotated (IRTNat _, _)) ->
         // Same context-driven rule for Nat targets, unit-annotated or bare:
         // `l1: Nat<angular_momentum> = 1` retypes the literal to the target.
@@ -10706,10 +10760,19 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETString))
-    | ExprKind.ExprLit (LitString _ as lit), IRTIdxTagged (IRTScalar ETString, _) ->
+    | ExprKind.ExprLit (LitString s as lit), IRTIdxTagged (IRTScalar ETString, tagRef) ->
         // section 4.18.3 parallel for string-valued index tags (EnumIdx with
-        // string values). Same context-driven coercion as the int case.
-        Ok (mkTyped (TExprLit lit) resolved)
+        // string values). Same context-driven coercion as the int case --
+        // and the same range check: a label the EnumIdx does not declare
+        // (["pacific", "bogus"] in a key column) is no key of it.
+        match tagRef with
+        | IRefNamed tag ->
+            (match Map.tryFind tag env.TypeDefs with
+             | Some (TDIEnumIdx (_, _, values, _)) when not (List.contains (EVString s) values) ->
+                 let avail = values |> List.map (function EVString v -> v | EVInt n -> string n)
+                 Error (EnumIdxUnknownLabel (tag, s, avail))
+             | _ -> Ok (mkTyped (TExprLit lit) resolved))
+        | _ -> Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitString _ as lit), IRTUnitAnnotated (IRTScalar ETString, _) ->
         // Quantity-tagged string position (`let s: String<title> = "K"`,
         // `"K" : title`): the literal adopts the annotation, same
@@ -10733,6 +10796,11 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // so `P { a = -1 }` failed where `P { a = 1 }` succeeded. Deliberately
     // narrow: only a LITERAL operand, so this is literal retyping and not
     // general bidirectional propagation through arithmetic.
+    | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt v) }), _
+        when v > 1L && (match namedIndexParam env resolved with Some (_, Some _) -> true | _ -> false) ->
+        // A negative index-typed value: only `-1`, group_by's "excluded"
+        // key, is admitted (see the LitInt arm above).
+        Error (SubscriptOutOfRange (-v, None, fst (namedIndexParam env resolved).Value))
     | ExprKind.ExprUnaryOp (OpNeg, ({ Kind = ExprKind.ExprLit (LitInt _ | LitFloat _) } as litExpr)), _ ->
         checkExpr env expected litExpr
         |> Result.map (fun tLit -> mkTyped (TExprUnaryOp (OpNeg, tLit)) tLit.Type)

@@ -1,0 +1,7 @@
+// TEST: A key column label the EnumIdx does not declare (rejects)
+// The string twin of index-types/300: "bogus" is no key of RegionIdx. It used
+// to be accepted, and group_keys filed it under the first label.
+// ERROR: BL3007
+type RegionIdx = EnumIdx<["pacific", "atlantic", "indian"]>
+type StationIdx = Idx<2>
+let station_region: Array<RegionIdx like StationIdx> = ["pacific", "bogus"]

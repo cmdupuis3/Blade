@@ -1,0 +1,7 @@
+// TEST: A foreign-key column literal below -1 (rejects)
+// `-1` is the one out-of-range key a column may hold: group_by's "excluded"
+// key. Any other negative literal is no key of the index type.
+// ERROR: BL4003
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, -2, 1]

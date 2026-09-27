@@ -1,0 +1,11 @@
+// TEST: A bounded ascription in range yields its value
+// The passing twin of struct-aborts/020: the ascription's guard is silent and
+// the value flows on; an unbounded ascription is untouched.
+Unit psu
+type Salinity = Float<psu, min=0.0>
+let t = 30.0 : Salinity
+// EXPECT: t = 30
+let u = (t + 5.0) : Salinity
+// EXPECT: u = 35
+let w = 2.5 : Float64
+// EXPECT: w = 2.5

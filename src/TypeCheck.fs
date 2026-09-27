@@ -87,6 +87,42 @@ let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileErr
             | _ -> ()
     List.ofSeq errors
 
+/// The lambda parameters a RANGE feeds, over a whole typed module (the one
+/// place Zonk's subscript guard may trust a lambda parameter's index type --
+/// SubscriptGuardCtx.RangeFedParams). A plain apply whose operand k is
+/// `range<I>` / `0..n` feeds kernel parameter k; a single multi-slot
+/// `range<Y, X>` feeds all of them. Collected BEFORE zonk because a kernel
+/// lambda can be zonked (at its own `let`) before the apply that feeds it.
+let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashSet<IRId> =
+    let fed = System.Collections.Generic.HashSet<IRId>()
+    let isRange (a: TypedExpr) =
+        match a.Kind with
+        | TExprRange _ | TExprDotDot _ -> true
+        | _ -> false
+    let rec walk (e: TypedExpr) =
+        (match e.Kind with
+         | TExprApply info when not info.IsComposeApply ->
+             let operands =
+                 info.Arrays |> List.collect (fun a ->
+                     match a.Kind with
+                     | TExprZip es -> es
+                     | _ -> [ a ])
+             let ps =
+                 match info.Kernel.Kind with
+                 | TExprLambda li | TExprReynolds ({ Kind = TExprLambda li }, _) -> li.Params
+                 | _ -> []
+             match operands with
+             | [ { Kind = TExprRange ixs } ] when ixs.Length > 1 && ixs.Length = ps.Length ->
+                 for p in ps do fed.Add p.VarId |> ignore
+             | _ when operands.Length = ps.Length ->
+                 List.iter2 (fun (p: TypedParam) a -> if isRange a then fed.Add p.VarId |> ignore) ps operands
+             | _ -> ()
+         | _ -> ())
+        for c in typedExprChildren e do walk c
+    for d in modul.Decls do
+        for e in declExprs d do walk e
+    fed
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
@@ -304,6 +340,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         subscriptGuardCtx.Value <-
             Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
                    Positions = System.Collections.Generic.HashSet<IRId>()
+                   DataVars = System.Collections.Generic.HashSet<IRId>()
+                   RangeFedParams = rangeFedLambdaParams typedModule
+                   EnumLabels = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIEnumIdx (_, _, values, _)) when EnumValue.allString values ->
+                           Some (values |> List.choose (function EVString s -> Some s | _ -> None))
+                       | _ -> None
                    IndexExtent = fun tag ->
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->

@@ -1,0 +1,32 @@
+// TEST: method_for(A, A) with a named Poly kernel
+// `method_for(data, data) <@> comoment` used to be BL3007 ("got variable")
+// while `object_for(comoment) <@> (data, data)` and `comoment <@> (data, data)`
+// worked. It is the same application, and computes the same covariance.
+// (Its output is SymIdx<2, X>; the in-range literal reads below are proven
+// per coordinate, so they carry no untagged-integer advisory.)
+from stats import mean
+
+function comoment_prod(a: Poly<T^1>) where comm(a) -> T^1 = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> let head :: tail = a
+           (head - mean(head)) * comoment_prod(tail)
+}
+
+function comoment(a: Poly<T^1>) where comm(a) -> T^0 = mean(comoment_prod(a))
+
+type X = Idx<3>
+type Time = Idx<4>
+let data: Array<Float64 like X, Time> = [[1.0, 2.0, 4.0, 7.0], [2.0, 1.0, 0.0, 1.0], [3.0, 3.0, 5.0, 5.0]]
+let c1 = object_for(comoment) <@> (data, data) |> compute
+let c3 = method_for(data, data) <@> comoment |> compute
+let a00 = c3(0, 0)
+// EXPECT: a00 = 5.25
+let a01 = c3(0, 1)
+// EXPECT: a01 = -0.75
+let a02 = c3(0, 2)
+// EXPECT: a02 = 2
+let a21 = c3(2, 1)
+// EXPECT: a21 = -0.5
+let b02 = c1(0, 2)
+// EXPECT: b02 = 2

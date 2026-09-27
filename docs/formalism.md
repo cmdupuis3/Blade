@@ -192,8 +192,9 @@ unit (as do comparisons, branch results, and a transcendental's argument
 being dimensionless), so `add(meters, seconds)` is BL3006 at the call.
 **Bounded primitives** (`Float<min=0, max=1>`) carry runtime-checked bounds
 and compose with units; the bound is checked wherever the annotation stands
--- a `let`, a function parameter (on entry), a function return -- including
-through a type alias (`type Sal = Float64<psu, min=0.0>`).
+-- a `let`, an expression ascription `e : T`, a function parameter (on entry),
+a function return -- including through a type alias
+(`type Sal = Float64<psu, min=0.0>`).
 **Mutually constrained types** (`type V1 ... and V2 ... where <expr>`) require
 joint assignment and assert (not solve) the constraint at runtime.
 
@@ -628,8 +629,10 @@ Iteration emits values tagged with their source index type as a **unit**:
 3. *Range.* A literal position — a subscript `3` / `-1`, a cast `(3 : I)`,
    or a literal argument to a `Nat<I>` parameter — is checked at compile time
    against the static extent (BL4003); a negative literal subscript is
-   refused on every plain slot. (A literal stored in an index-typed foreign-key
-   column is data, not a position: `-1` is group_by's "excluded" key.)
+   refused on every plain slot. A literal index-typed VALUE -- a `Nat<I>`
+   `let`, a cell of an index-typed foreign-key column -- is range-checked the
+   same way, with one exception: `-1`, group_by's "excluded" key. A string
+   `EnumIdx` literal must be one of the type's labels.
 
 **Positions and casts.** Arithmetic on an index value yields a *position*: a
 plain `Int64`, never an index value (`i + 1` is not proved to lie in `I`). An
@@ -646,16 +649,23 @@ is bounds-safe: its subscript is either PROVEN or CHECKED at run time
 `extents` when the extent is only known at run time). Proven is a closed
 list that trusts no type: a compile-time-checked literal, a bare variable of
 exactly that index type that is not bound to an unproven value (an iteration
-index, a parameter -- whose callers pass through the same checks -- or a
+index -- a lambda parameter a `range<I>` / `0..n` operand feeds -- a named
+function's parameter, whose callers pass through the same checks, or a
 `let` of a proven value), an emitted cast or guard, and a halo window read.
+Any other lambda parameter of an index type (a kernel over a key column, a
+`mask` predicate, a `sort` key, a `>>@` stage) receives data, as does each
+leaf of a destructured `let`.
 Everything else -- a position, a plain `Int64`, a `Nat<_>` wildcard, a
 branch, a call, an element read out of an index-typed array (foreign-key
-DATA) -- is checked. The checks are what the BL4003 untagged-integer advice
-points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
+DATA, including a kernel parameter the loop feeds from such an array) -- is
+checked. A string key subscripting a string `EnumIdx` slot is mapped to its
+label's ordinal, a key that is no label stopping with BL8006. The checks
+are what the BL4003 untagged-integer advice points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
 removes them. Not covered: a computed subscript into an ANONYMOUS index slot
 (an array without a named index type) is not checked -- name the index type
 to get the guarantee; compact, compound, sparse and ragged slots keep their
-own disciplines; compiler-synthesized buffers and indices (`let rec`
+own disciplines (a compact group's LITERAL coordinates are range-checked at
+compile time, each against the group's extent); compiler-synthesized buffers and indices (`let rec`
 prefixes, which read zero past the prefix by design, reduce desugars, AD
 sweeps) own their walks. (The rank-2 offset arithmetic behind the proven
 case is verified against a failure model; proofs.md §Safety.)
@@ -1258,8 +1268,9 @@ element as a literal (`1` for a product; `zero` there is the zero VALUE, not
 the identity — resolving it to the surrounding operation's identity is
 **(planned)**). (The spec's base-case-free
 recursion, the tuple-pattern spelling `let (head, tail) = args`, and an `nth`
-recursion-depth variable are **(planned)**: today the first two fail IR
-validation, BL6001.) Nested tuples preserve structure (`arity` counts
+recursion-depth variable are **(planned)**: today each is refused with a
+diagnostic naming the built form -- the missing base arm (BL7004), the cons
+pattern (BL3999), an explicit depth parameter (BL3999).) Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
 destructure instead): `object_for(f) <@> (A, (B, C))` is arity **2**, not 3 —
 `(B, C)` is one tuple-typed argument, distinct from

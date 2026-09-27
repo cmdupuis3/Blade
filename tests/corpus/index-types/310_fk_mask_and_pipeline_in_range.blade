@@ -1,0 +1,20 @@
+// TEST: Mask predicates and pipeline stages over valid keys
+// The in-range twin of 307-309: the same shapes over valid keys run through
+// their guards, and a range-fed kernel keeps its proven index.
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 1]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let values: Array<Float64 like StationIdx> = [10.0, 20.0, 30.0, 40.0]
+let pipe = object_for(lambda(r) -> region_weight(r)) >>@ object_for(lambda(x) -> x * 2.0)
+let w = pipe <@> station_region |> compute
+// EXPECT: w = [2, 4, 2, 1]
+let heavy = mask(station_region, lambda(r) -> region_weight(r) > 0.7)
+let picked = compound(values, heavy)
+let total = reduce(picked, (+))
+// EXPECT: total = 60
+let (a, b) = (station_region(1), station_region(3))
+let wa = region_weight(a) + region_weight(b)
+// EXPECT: wa = 2.5
+let doubled = method_for(range<RegionIdx>) <@> lambda(i) -> region_weight(i) * 2.0 |> compute
+// EXPECT: doubled = [2, 1, 4]

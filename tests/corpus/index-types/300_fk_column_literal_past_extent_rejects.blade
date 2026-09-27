@@ -1,0 +1,10 @@
+// TEST: A foreign-key column literal past the key type's extent (rejects)
+// `Nat<RegionIdx>` cells are positions of RegionIdx = Idx<3>: a literal 7 can
+// never be one. It used to be accepted as "data", and a kernel reading
+// region_weight(r) through it read past the buffer (-1.4e-310, exit 0).
+// ERROR: BL4003
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 7]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let w = method_for(station_region) <@> lambda(r) -> region_weight(r) |> compute

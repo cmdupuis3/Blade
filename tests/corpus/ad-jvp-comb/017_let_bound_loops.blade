@@ -21,7 +21,6 @@ function f2(a: Array<Float like I>) -> Float = {
     reduce(m, (+))
 }
 
-// WARN: BL4003
 let (v1, t1) = ad.jvp(f1)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
 let (v2, t2) = ad.jvp(f2)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
 // EXPECT: v1 = 7

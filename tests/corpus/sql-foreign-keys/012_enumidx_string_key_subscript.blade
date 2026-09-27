@@ -1,0 +1,21 @@
+// TEST: A string EnumIdx key subscripts by its ordinal
+// A key column typed by a string EnumIdx holds LABELS; reading an array over
+// that EnumIdx through a cell maps the label to its ordinal (the run-time twin
+// of the literal fold `region_weight("indian")`). This used to be BL9002 in
+// the C++ back end (no operator[] taking std::string) while the interpreter
+// read element 0 for every key.
+type RegionIdx = EnumIdx<["pacific", "atlantic", "indian"]>
+type StationIdx = Idx<4>
+let station_region: Array<RegionIdx like StationIdx> = ["pacific", "indian", "pacific", "atlantic"]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let values: Array<Float64 like StationIdx> = [10.0, 20.0, 30.0, 40.0]
+let w1 = method_for(station_region) <@> lambda(r) -> region_weight(r) |> compute
+// EXPECT: w1 = [1, 2, 1, 0.5]
+let w2 = method_for(zip(station_region, values)) <@> lambda(r, v) -> v * region_weight(r) |> compute
+// EXPECT: w2 = [10, 40, 30, 20]
+let w3 = method_for(zip(values, station_region)) <@> lambda(v, r) -> v * region_weight(r) |> compute
+// EXPECT: w3 = [10, 40, 30, 20]
+let ia = region_weight("indian")
+// EXPECT: ia = 2
+let second = region_weight(station_region(1))
+// EXPECT: second = 2

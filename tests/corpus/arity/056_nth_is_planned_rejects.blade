@@ -1,0 +1,12 @@
+// TEST: The recursion-depth variable nth is refused (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: planned, not built
+// `nth` is a planned feature (formalism 8.2): it used to type as the literal 0,
+// so `depth(1.0, 2.0, 3.0)` below printed 0 at recursion depth 3.
+function depth(args: Poly<T^0>) -> Int64 = {
+    match arity(args) with
+    | 0 -> nth
+    | _ -> let head :: tail = args
+           depth(tail)
+}
+let d = depth(1.0, 2.0, 3.0)

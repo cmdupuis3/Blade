@@ -26,7 +26,6 @@ function hand(a: Array<Float like I>) -> Float = {
     m(0, 2) + m(2, 0) + m(1, 1)
 }
 
-// WARN: BL4003
 let (vp, tp) = ad.jvp(packed)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
 let (vh, th) = ad.jvp(hand)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
 let dv = vp - vh

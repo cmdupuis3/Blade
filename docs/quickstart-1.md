@@ -556,9 +556,9 @@ let wrong = speed1 + dist                     // mps + meters
 
 Types can carry valid ranges (`Float<meters, min=0.0>`), encoding physical
 constraints — salinity that can never go negative, and so on. A binding
-annotated with a bounded type is checked when it is bound, and a function's
-bounded parameters and return value at every call; a violation stops the
-program with BL8001:
+annotated with a bounded type is checked when it is bound (as is an ascription
+`e : Salinity`), and a function's bounded parameters and return value at
+every call; a violation stops the program with BL8001:
 
 ```blade
 Unit psu
@@ -566,7 +566,9 @@ type Salinity = Float<psu, min=0.0>
 let s: Salinity = 35.0
 function freshen(x: Salinity, dilution: Float<psu>) -> Salinity = x - dilution
 let fresher = freshen(s, 5.0)        // freshen(s, 40.0) would stop with BL8001
+let mixed = (fresher + 2.0) : Salinity   // (fresher - 40.0) : Salinity would too
 // EXPECT: fresher = 30
+// EXPECT: mixed = 32
 ```
 
 ---
