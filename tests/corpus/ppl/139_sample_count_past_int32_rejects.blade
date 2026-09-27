@@ -1,0 +1,7 @@
+// TEST: PPL Sample Count Past The Fill Range Is Refused (rejects)
+// ERROR: BL5100
+// ERROR-CONTAINS: the sample count 4294967301 exceeds the largest supported rand fill extent
+// ppl.sample narrowed its static count with an unchecked `int x` before
+// emitting the __rand_* fill: 2^32 + 5 wrapped to 5 samples.
+import ppl as ppl
+let s = ppl.sample(exponential(2.0), 11, 4294967301)

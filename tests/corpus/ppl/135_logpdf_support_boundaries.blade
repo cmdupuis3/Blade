@@ -1,0 +1,69 @@
+// TEST: Logpdf Support And Boundaries
+import ppl as ppl
+// logpdf is -inf OFF the family's support and exact AT its boundaries -- the
+// oracle's convention (oracles/ppl/Density.fs, ORACLE_PINS.md "-inf means
+// outside the support"). The closed forms used to be ON-SUPPORT ONLY, so
+//   logpdf(exponential(1), -5) = +5     (above the density's maximum, 0)
+//   logpdf(uniform(0, 1), 7)   = 0      (a certain event, off [0, 1])
+//   logpdf(bernoulli(1), 1)    = NaN    (0 * log 0 in the x = 0 term)
+// Branch-free still (the formers stay inside the AD-able subset): a guarded
+// support term carries the -inf, the closed form reads x moved onto the
+// support (so it stays finite -- no log of a negative, no lgamma pole), and
+// x * log(y) is xlogy (0 * log 0 = 0).
+let ninf = log(0.0)
+
+// ---- off the support: -inf, never a finite value or NaN ----
+let exp_off = ppl.logpdf(exponential(1.0), -5.0)
+let uni_off = ppl.logpdf(uniform(0.0, 1.0), 7.0)
+let uni_off_lo = ppl.logpdf(uniform(0.0, 1.0), -0.25)
+let gam_off = ppl.logpdf(gamma(2.0, 1.0), -1.0)
+let lgn_off = ppl.logpdf(lognormal(0.0, 1.0), -1.0)
+let bet_off = ppl.logpdf(beta(2.0, 3.0), 1.5)
+let ber_off = ppl.logpdf(bernoulli(0.3), 0.5)
+let poi_neg = ppl.logpdf(poisson(2.0), -3.0)
+let poi_frac = ppl.logpdf(poisson(2.0), 1.5)
+let off_all_neg_inf = exp_off == ninf && uni_off == ninf && uni_off_lo == ninf && gam_off == ninf && lgn_off == ninf && bet_off == ninf && ber_off == ninf && poi_neg == ninf && poi_frac == ninf
+// EXPECT: off_all_neg_inf = true
+
+// ---- boundaries: open ends are -inf, closed ends are the density ----
+let gam_s1_0 = ppl.logpdf(gamma(1.0, 2.0), 0.0)
+let lgn_0 = ppl.logpdf(lognormal(0.0, 1.0), 0.0)
+let bet_11_0 = ppl.logpdf(beta(1.0, 1.0), 0.0)
+let bet_11_1 = ppl.logpdf(beta(1.0, 1.0), 1.0)
+let ber_0_1 = ppl.logpdf(bernoulli(0.0), 1.0)
+let open_ends_neg_inf = gam_s1_0 == ninf && lgn_0 == ninf && bet_11_0 == ninf && bet_11_1 == ninf && ber_0_1 == ninf
+// EXPECT: open_ends_neg_inf = true
+let exp_0 = ppl.logpdf(exponential(2.0), 0.0)
+let uni_a = ppl.logpdf(uniform(0.0, 2.0), 0.0)
+let uni_b = ppl.logpdf(uniform(0.0, 2.0), 2.0)
+// EXPECT: exp_0 = 0.69314718055994529
+// EXPECT: uni_a = -0.69314718055994529
+// EXPECT: uni_b = -0.69314718055994529
+// 0 * log 0 = 0: a certain outcome has log-probability exactly 0 (was NaN).
+let ber_1_1 = ppl.logpdf(bernoulli(1.0), 1.0)
+let ber_0_0 = ppl.logpdf(bernoulli(0.0), 0.0)
+let poi_l0_k0 = ppl.logpdf(poisson(0.0), 0.0)
+// EXPECT: ber_1_1 = 0
+// EXPECT: ber_0_0 = 0
+// EXPECT: poi_l0_k0 = 0
+
+// ---- interior: unchanged (dump-logpdf pins) ----
+let gau_in = ppl.logpdf(gaussian(0.0, 1.0), 40.0)
+let gam_in = ppl.logpdf(gamma(2.0, 1.0), 1.0)
+let bet_in = ppl.logpdf(beta(2.0, 3.0), 0.25)
+let poi_in = ppl.logpdf(poisson(2.0), 3.0)
+let ber_in = ppl.logpdf(bernoulli(0.3), 1.0)
+// EXPECT: gau_in = -800.91893853320467
+// EXPECT: gam_in = -1
+// EXPECT: bet_in = 0.52324814376454531
+// EXPECT: poi_in = -1.7123179275482193
+// EXPECT: ber_in = -1.2039728043259361
+
+// ---- NaN stays NaN (the oracle's negated tests: NaN is not "off support")
+let nanv = log(-1.0)
+let e_nan = ppl.logpdf(exponential(1.0), nanv)
+let g_nan = ppl.logpdf(gamma(2.0, 1.0), nanv)
+let l_nan = ppl.logpdf(lognormal(0.0, 1.0), nanv)
+let b_nan = ppl.logpdf(beta(2.0, 3.0), nanv)
+let nan_propagates = e_nan != e_nan && g_nan != g_nan && l_nan != l_nan && b_nan != b_nan
+// EXPECT: nan_propagates = true

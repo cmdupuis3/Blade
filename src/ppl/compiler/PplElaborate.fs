@@ -1859,10 +1859,12 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
 //                      formers read symbolically (the dist_map-lambda
 //                      precedent); no tower materializes and no order
 //                      argument is taken.
-// Log-densities are the ON-SUPPORT closed forms -- no branching, because an
-// if/match would leave the AD-able subset (Grad.fs:27-50); x outside the
-// support is the caller's contract (uniform's logpdf is the in-support
-// constant -log(b-a)). loglik emits a scalar accumulation loop
+// Log-densities are the closed forms plus a SUPPORT term: -inf outside the
+// family's support (the oracle's convention, oracles/ppl/Density.fs), exact
+// on it, and 0 * log 0 = 0 at the boundaries (xlogy). No branching -- an
+// if/match would leave the AD-able subset (Grad.fs:27-50) -- so the support
+// is carried by `guard` (see supportTermE / onSupportE / xlogyE below),
+// which both AD sweeps differentiate. loglik emits a scalar accumulation loop
 // (`let mut` + for + `+=`), never a combinator pipeline, so a later phase
 // can hand the body to ad.grad unchanged.
 
@@ -2006,6 +2008,54 @@ let private leE a b = syn (ExprBinOp (Elementwise, OpLe, a, b))
 let private gtE a b = syn (ExprBinOp (Elementwise, OpGt, a, b))
 let private ifE c t f = syn (ExprIf (c, t, f))
 
+// Support handling for the log-densities, BRANCH-FREE on purpose: `guard(c,
+// e)` (c ? e : 0) is inside both AD sweeps (a linear form -- the cotangent
+// and the tangent are gated by the same condition), where if/match are not.
+// Conditions are comparisons, so no gradient ever flows through them.
+let private geE a b = syn (ExprBinOp (Elementwise, OpGe, a, b))
+let private eqE a b = syn (ExprBinOp (Elementwise, OpEq, a, b))
+let private andE a b = syn (ExprBinOp (Elementwise, OpAnd, a, b))
+let private orE a b = syn (ExprBinOp (Elementwise, OpOr, a, b))
+let private notE a = syn (ExprUnaryOp (OpNot, a))
+let private guardE c e = syn (ExprGuard (c, e))
+
+/// Exactly 0.0 on the support, -inf (log 0) off it. The -inf is a literal's
+/// log, so neither sweep carries anything out of it.
+let private supportTermE (ok: Expr) : Expr = guardE (notE ok) (logE (fLit 0.0))
+
+/// x itself on the support (x + 0.0: the value, and d/dx = 1, unchanged),
+/// the in-support point `safe` off it -- so the closed form stays FINITE
+/// off the support (no log of a negative, no lgamma pole panic, no
+/// +inf - inf) and the support term alone carries the -inf.
+let private onSupportE (ok: Expr) (x: Expr) (safe: float) : Expr =
+    addE (guardE ok x) (guardE (notE ok) (fLit safe))
+
+/// xlogy(a, y) = a * log(y), with 0 * log 0 = 0 (the limit, and what makes
+/// bernoulli(1) at 1 and poisson(0) at 0 exact rather than NaN). When
+/// a <> 0 the value is exactly a * log(y); when a = 0 the log reads y + 1,
+/// which is finite for y >= 0, so neither the value nor d/dy is 0 * inf.
+let private xlogyE (a: Expr) (y: Expr) : Expr =
+    mulE a (logE (addE y (guardE (eqE a (fLit 0.0)) (fLit 1.0))))
+
+/// The support of each family, as a predicate over x -- the oracle's
+/// convention (oracles/ppl/Density.fs, ORACLE_PINS.md): a point outside the
+/// support, or on a boundary where the density is undefined, is -inf.
+/// Returns the predicate and an in-support safe point for `onSupportE`
+/// (None: the family's support is the whole line). The continuous
+/// predicates are written NEGATED, as the oracle writes them (`if x < 0 then
+/// -inf else ...`), so a NaN x counts as on the support and propagates
+/// through the closed form as NaN instead of reading as an ordinary -inf.
+let private familySupport (fam: string) (p: int -> Expr) (x: Expr) : (Expr * float) option =
+    match fam with
+    | "gaussian" -> None
+    | "exponential" -> Some (notE (ltE x (fLit 0.0)), 0.0)
+    | "uniform" -> Some (notE (orE (ltE x (p 0)) (gtE x (p 1))), 0.0)   // safe point unused
+    | "lognormal" | "gamma" -> Some (notE (leE x (fLit 0.0)), 1.0)
+    | "beta" -> Some (notE (orE (leE x (fLit 0.0)) (geE x (fLit 1.0))), 0.5)
+    | "poisson" -> Some (andE (geE x (fLit 0.0)) (eqE x (appE (v "floor") [x])), 0.0)
+    | "bernoulli" -> Some (orE (eqE x (fLit 0.0)) (eqE x (fLit 1.0)), 0.0)
+    | _ -> None
+
 /// Argument-position family recognition: `gaussian(mu, s2)` as a syntactic
 /// (tag, param exprs) -- the dist_map-lambda precedent. A user definition of
 /// the family's name shadows it (same rule as the formers), which makes the
@@ -2044,7 +2094,20 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
     let xName = $"__ppl_lp_{tok}_x"
     let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
     let p i = v (pName i)
-    let x = v xName
+    // The closed forms read `x` = the evaluation point moved onto the
+    // support (onSupportE); the support term adds the -inf off it. On the
+    // support both are exact no-ops (x + 0.0, + 0.0), so in-support values
+    // and gradients are those of the bare closed form.
+    let support = familySupport fam p (v xName)
+    let xsName = $"__ppl_lp_{tok}_xs"
+    let supportBinds, x =
+        match support with
+        | Some (ok, safe) when fam <> "uniform" -> [ (xsName, onSupportE ok (v xName) safe) ], v xsName
+        | _ -> [], v xName
+    let withSupport (value: Expr) =
+        match support with
+        | Some (ok, _) -> addE value (supportTermE ok)
+        | None -> value
     let extra, value =
         match fam with
         | "gaussian" ->
@@ -2054,44 +2117,44 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
              subE (mulE (fLit (-0.5)) (log2piE (p 1)))
                   (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
         | "exponential" ->
-            // log(rate) - rate x
+            // log(rate) - rate x, support x >= 0
             ([], subE (appE (v "log") [p 0]) (mulE (p 0) x))
         | "uniform" ->
-            // the in-support constant -log(b - a)
+            // -log(b - a) on [a, b]
             ([], subE (fLit 0.0) (appE (v "log") [subE (p 1) (p 0)]))
         | "lognormal" ->
-            // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2)
+            // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2), support x > 0
             let lxN = $"__ppl_lp_{tok}_lx"
             let dN = $"__ppl_lp_{tok}_d"
             ([ (lxN, appE (v "log") [x]); (dN, subE (v lxN) (p 0)) ],
              subE (subE (mulE (fLit (-0.5)) (log2piE (p 1))) (v lxN))
                   (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
         | "gamma" ->
-            // (shape-1) log(x) - rate x + shape log(rate) - lgamma(shape)
+            // (shape-1) log(x) - rate x + shape log(rate) - lgamma(shape), support x > 0
             ([], subE (addE (subE (mulE (subE (p 0) (fLit 1.0)) (logE x))
                                  (mulE (p 1) x))
                            (mulE (p 0) (logE (p 1))))
                       (lgammaE (p 0)))
         | "poisson" ->
-            // k log(lam) - lam - lgamma(k + 1)
-            ([], subE (subE (mulE x (logE (p 0))) (p 0))
+            // xlogy(k, lam) - lam - lgamma(k + 1), support k in {0, 1, 2, ...}
+            ([], subE (subE (xlogyE x (p 0)) (p 0))
                       (lgammaE (addE x (fLit 1.0))))
         | "beta" ->
-            // (a-1) log(x) + (b-1) log(1-x) - (lgamma a + lgamma b - lgamma(a+b))
+            // (a-1) log(x) + (b-1) log(1-x) - (lgamma a + lgamma b - lgamma(a+b)), support 0 < x < 1
             ([], subE (addE (mulE (subE (p 0) (fLit 1.0)) (logE x))
                             (mulE (subE (p 1) (fLit 1.0)) (logE (subE (fLit 1.0) x))))
                       (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
                             (lgammaE (addE (p 0) (p 1)))))
         | "bernoulli" ->
-            // x log(p) + (1-x) log(1-p)
-            ([], addE (mulE x (logE (p 0)))
-                      (mulE (subE (fLit 1.0) x) (logE (subE (fLit 1.0) (p 0)))))
+            // xlogy(x, p) + xlogy(1-x, 1-p), support x in {0, 1}
+            ([], addE (xlogyE x (p 0))
+                      (xlogyE (subE (fLit 1.0) x) (subE (fLit 1.0) (p 0))))
         | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
-    (pBinds @ [ (xName, xExpr) ] @ extra, value)
+    (pBinds @ [ (xName, xExpr) ] @ supportBinds @ extra, withSupport value)
 
 /// logpdf(family(params), x): the scalar log-density at x -- closed-form
-/// arithmetic over once-bound parameters, ON-SUPPORT by design (no branching;
-/// see the section comment).
+/// arithmetic over once-bound parameters, -inf off the family's support
+/// (branch-free; see the section comment).
 let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
@@ -2109,9 +2172,11 @@ let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName
 /// (its last -- and only -- declared index; the shape comes from the
 /// declared annotation or the computed method_for shape, never from a
 /// literal). Emitted as an AD-able scalar accumulation loop with the
-/// per-family constants hoisted out of the loop; uniform needs no loop at
-/// all (the on-support sum is -n log(b-a)). Leading variable axes are
-/// refused: a univariate family has no per-coordinate loglik.
+/// per-family constants hoisted out of the loop and one more accumulator
+/// for the per-sample support term (so a single off-support sample makes
+/// the sum -inf; uniform's loop reads the data for that term alone).
+/// Leading variable axes are refused: a univariate family has no
+/// per-coordinate loglik.
 let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (aName: string)
     : Result<(string * Expr) list * Expr, string> =
         match Map.tryFind aName ctx.Arrays with
@@ -2143,28 +2208,53 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
                             [ for i in 0 .. accs - 1 -> sMut (accN i) (fLit 0.0) ]
                             @ [ StmtForIn (iN, syn (ExprDotDot (iLit 0, iLit n)), body) ],
                             Some final))
+                // Per-sample support (logPdfParts' convention): the sample is
+                // moved onto the support before the closed-form sums read it,
+                // and one more accumulator collects the support term, so a
+                // single off-support sample makes the sum -inf. On the
+                // support every added term is an exact 0.0.
+                let xN = $"__ppl_ll_{tok}_x"
+                let xsN = $"__ppl_ll_{tok}_xs"
+                let support = familySupport fam p (v xN)
+                let x =
+                    match support with
+                    | Some _ when fam <> "uniform" -> v xsN
+                    | _ -> aRead
+                let loopS (accs: int) (body: Stmt list) (final: Expr) : Expr =
+                    match support with
+                    | None -> loop accs body final
+                    | Some (ok, safe) ->
+                        let pre =
+                            [ sLet xN aRead ]
+                            @ (if fam = "uniform" then [] else [ sLet xsN (onSupportE ok (v xN) safe) ])
+                        loop (accs + 1) (pre @ body @ [ accAdd accs (supportTermE ok) ])
+                             (addE final (v (accN accs)))
+                // xlogy over a SUM: s * log(y) with 0 * log 0 = 0 (see xlogyE).
+                let logTimes (y: Expr) (s: Expr) =
+                    mulE (logE (addE y (guardE (eqE s (fLit 0.0)) (fLit 1.0)))) s
                 let value =
                     match fam with
                     | "gaussian" ->
                         // -n/2 log(2 pi s2) - sum (x_i - mu)^2 / (2 s2)
                         let dN = $"__ppl_ll_{tok}_d"
-                        loop 1
-                             [ sLet dN (subE aRead (p 0)); accAdd 0 (mulE (v dN) (v dN)) ]
+                        loopS 1
+                             [ sLet dN (subE x (p 0)); accAdd 0 (mulE (v dN) (v dN)) ]
                              (subE (mulE (fLit (-nF / 2.0)) (log2piE (p 1)))
                                    (divE (v (accN 0)) (mulE (fLit 2.0) (p 1))))
                     | "exponential" ->
                         // n log(rate) - rate sum x_i
-                        loop 1 [ accAdd 0 aRead ]
+                        loopS 1 [ accAdd 0 x ]
                              (subE (mulE (fLit nF) (appE (v "log") [p 0])) (mulE (p 0) (v (accN 0))))
                     | "uniform" ->
-                        // the in-support constant: -n log(b - a); the data drops out
-                        mulE (fLit (-nF)) (appE (v "log") [subE (p 1) (p 0)])
+                        // -n log(b - a) on [a, b]; the data enter only through the support term
+                        loopS 0 []
+                             (mulE (fLit (-nF)) (appE (v "log") [subE (p 1) (p 0)]))
                     | "lognormal" ->
                         // -n/2 log(2 pi s2) - sum log x_i - sum (log x_i - mu)^2 / (2 s2)
                         let lxN = $"__ppl_ll_{tok}_lx"
                         let dN = $"__ppl_ll_{tok}_d"
-                        loop 2
-                             [ sLet lxN (appE (v "log") [aRead])
+                        loopS 2
+                             [ sLet lxN (appE (v "log") [x])
                                accAdd 0 (v lxN)
                                sLet dN (subE (v lxN) (p 0))
                                accAdd 1 (mulE (v dN) (v dN)) ]
@@ -2172,33 +2262,31 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
                                    (divE (v (accN 1)) (mulE (fLit 2.0) (p 1))))
                     | "gamma" ->
                         // (shape-1) sum log x_i - rate sum x_i + n (shape log rate - lgamma shape)
-                        loop 2 [ accAdd 0 (logE aRead); accAdd 1 aRead ]
+                        loopS 2 [ accAdd 0 (logE x); accAdd 1 x ]
                              (addE (subE (mulE (subE (p 0) (fLit 1.0)) (v (accN 0)))
                                          (mulE (p 1) (v (accN 1))))
                                    (mulE (fLit nF) (subE (mulE (p 0) (logE (p 1))) (lgammaE (p 0)))))
                     | "poisson" ->
-                        // log(lam) sum k_i - n lam - sum lgamma(k_i + 1); the
+                        // xlogy(sum k_i, lam) - n lam - sum lgamma(k_i + 1); the
                         // lgamma sum stays in the loop (k_i-dependent).
-                        loop 2 [ accAdd 0 aRead; accAdd 1 (lgammaE (addE aRead (fLit 1.0))) ]
-                             (subE (subE (mulE (logE (p 0)) (v (accN 0)))
+                        loopS 2 [ accAdd 0 x; accAdd 1 (lgammaE (addE x (fLit 1.0))) ]
+                             (subE (subE (logTimes (p 0) (v (accN 0)))
                                          (mulE (fLit nF) (p 0)))
                                    (v (accN 1)))
                     | "beta" ->
                         // (a-1) sum log x_i + (b-1) sum log(1-x_i) - n log B(a, b)
-                        loop 2 [ accAdd 0 (logE aRead); accAdd 1 (logE (subE (fLit 1.0) aRead)) ]
+                        loopS 2 [ accAdd 0 (logE x); accAdd 1 (logE (subE (fLit 1.0) x)) ]
                              (subE (addE (mulE (subE (p 0) (fLit 1.0)) (v (accN 0)))
                                          (mulE (subE (p 1) (fLit 1.0)) (v (accN 1))))
                                    (mulE (fLit nF) (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
                                                          (lgammaE (addE (p 0) (p 1))))))
                     | "bernoulli" ->
-                        // log(p) sum x_i + log(1-p) (n - sum x_i)
-                        loop 1 [ accAdd 0 aRead ]
-                             (addE (mulE (logE (p 0)) (v (accN 0)))
-                                   (mulE (logE (subE (fLit 1.0) (p 0))) (subE (fLit nF) (v (accN 0)))))
+                        // xlogy(sum x_i, p) + xlogy(n - sum x_i, 1 - p)
+                        loopS 1 [ accAdd 0 x ]
+                             (addE (logTimes (p 0) (v (accN 0)))
+                                   (logTimes (subE (fLit 1.0) (p 0)) (subE (fLit nF) (v (accN 0)))))
                     | _ -> fLit 0.0   // unreachable: checkDensityFamily gates
-                // uniform reads no data: no alias, or it would print as an unused copy.
-                let srcBinds = if fam = "uniform" then [] else [ (srcN, v aName) ]
-                Ok (pBinds @ srcBinds, value)
+                Ok (pBinds @ [ (srcN, v aName) ], value)
 
 let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
@@ -2896,7 +2984,10 @@ let private elabDistQuantileApprox (ctx: Ctx) (span: Span) (outName: string) (bi
 /// Static sample-count resolution shared by sample/dist_sample_approx.
 let private staticSampleCount (ctx: Ctx) (former: string) (nExpr: Expr) : Result<int, string> =
     match evalExpr ctx.Statics maxSteps nExpr with
-    | Ok (SVInt x) when x >= 1L -> Ok (int x)
+    | Ok (SVInt x) when x >= 1L && x <= int64 System.Int32.MaxValue -> Ok (int x)
+    | Ok (SVInt x) when x >= 1L ->
+        // Narrowing unchecked would silently draw x mod 2^32 samples.
+        Error $"{former}: the sample count {x} exceeds the largest supported rand fill extent ({System.Int32.MaxValue})"
     | Ok (SVInt x) -> Error $"{former}: the sample count must be >= 1 (got {x})"
     | _ -> Error $"{former}: the sample count must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; only the key and distribution parameters may be runtime values"
 
