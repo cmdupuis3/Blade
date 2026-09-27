@@ -1,0 +1,10 @@
+// TEST: Outer Product Unit Is The Product (rejects)
+// ERROR: BL3006
+// `a [*] b` over meters and seconds is meters*seconds; it used to be typed
+// meters (the left element's), so this ascription passed.
+Unit meters
+Unit seconds
+let a: Array<Float<meters> like Idx<2>> = [1.0, 2.0]
+let b: Array<Float<seconds> like Idx<3>> = [1.0, 2.0, 3.0]
+let c = a [*] b
+let bad: Float<meters> = c(0, 0)

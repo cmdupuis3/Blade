@@ -47,6 +47,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     env.MutParamPositions.Clear()
     env.FuncCoIterObligations.Clear()
     env.FuncUnitTransform.Clear()
+    env.FuncUnitEqualities.Clear()
     env.FuncConstraints.Clear()
     env.FuncDefaults.Clear()
     env.FuncDefaultCaptures.Clear()
@@ -299,6 +300,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
                 { MutParams = snap finalEnv.MutParamPositions
                   CoIterObligations = snap finalEnv.FuncCoIterObligations
                   UnitTransforms = snap finalEnv.FuncUnitTransform
+                  UnitEqualities = snap finalEnv.FuncUnitEqualities
                   Constraints = snap finalEnv.FuncConstraints }
         }
         moduleExports <- Map.add moduleName export moduleExports

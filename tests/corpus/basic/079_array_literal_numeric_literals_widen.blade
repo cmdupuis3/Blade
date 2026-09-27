@@ -1,0 +1,8 @@
+// TEST: Array literal of integer and float literals widens to Float64
+// Numeric LITERALS still widen together (they have no committed type):
+// `[1, 2.5, 3]` is a Float64 array -- it used to take the first element's
+// Int64 and fail in g++.
+let xs = [1, 2.5, 3]
+let s = reduce(xs, (+))
+// EXPECT: xs = [1, 2.5, 3]
+// EXPECT: s = 6.5

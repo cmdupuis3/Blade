@@ -1485,6 +1485,71 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Array literal ----
     | ExprKind.ExprArrayLit elems ->
         elems |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tElems ->
+            // Numeric LITERALS adopt the literal's joined element type (they
+            // have no committed type of their own: `[1, 2.5, 3]` is Float64,
+            // exactly as `let x: Float64 = 1` is). A non-literal VALUE never
+            // widens implicitly -- it meets the unification below as it is.
+            let tElems =
+                let isNumLit (e: TypedExpr) =
+                    match e.Kind with
+                    | TExprLit (LitInt _ | LitFloat _) -> true
+                    | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt _ | LitFloat _) }) -> true
+                    | _ -> false
+                let prims =
+                    tElems |> List.map (fun e ->
+                        match env.Subst.Resolve e.Type with
+                        | IRTScalar et -> Some et
+                        | _ -> None)
+                if tElems.Length >= 2 && prims |> List.forall Option.isSome && tElems |> List.exists isNumLit then
+                    let joined =
+                        prims |> List.map Option.get
+                        |> List.reduce (fun a b -> match IR.promoteElemType a b with Some p -> p | None -> a)
+                    let rec retype (e: TypedExpr) =
+                        match e.Kind with
+                        | TExprUnaryOp (OpNeg, inner) -> { e with Kind = TExprUnaryOp (OpNeg, retype inner); Type = IRTScalar joined }
+                        | _ -> { e with Type = IRTScalar joined }
+                    tElems |> List.map (fun e ->
+                        if isNumLit e && (match env.Subst.Resolve e.Type with IRTScalar et -> et <> joined | _ -> false)
+                           && (match joined with ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 | ETInt32 | ETInt64 -> true | _ -> false)
+                        then retype e
+                        else e)
+                else tElems
+            // ONE ELEMENT TYPE. The literal's type is read off its FIRST element
+            // (inferArrayLitType), so every other element must agree with it:
+            // unified (numeric literals still widen together -- `[1, 2.5]` is
+            // Float64 -- through the literal-variable rules) with units judged
+            // on their own, like every other seam. Before this the rest were
+            // never looked at: `[a_m, b_s]` took meters, `[1.5, true]` printed
+            // [1.5, 1], two differently tagged rows stacked, and mixed Int/Float
+            // or mixed rank died in g++.
+            let unitsOf (t: IRType) =
+                match env.Subst.Resolve t with
+                | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+                | r -> IR.getUnits r
+            let disagreement =
+                match tElems with
+                | first :: rest ->
+                    rest |> List.tryPick (fun e ->
+                        // Two nested SUB-LITERALS (rows written in brackets)
+                        // are the literal's own shape, which the ragged /
+                        // compact-simplex inference owns: `[[1, 2, 3], [4, 5],
+                        // [6]]` has rows of different types on purpose.
+                        let bothSubLiterals = first.Kind.IsTExprArrayLit && e.Kind.IsTExprArrayLit
+                        if bothSubLiterals then None else
+                        match unitsOf first.Type, unitsOf e.Type with
+                        | Some a, Some b when not (unitCompatible a b) || not (unitSameScale a b) ->
+                            Some (e, UnitMismatch ("the elements of an array literal", ppUnitSig a, ppUnitSig b))
+                        | _ ->
+                            match unify env.Subst (stripUnitsDeep env.Subst first.Type) (stripUnitsDeep env.Subst e.Type) with
+                            | Ok () -> None
+                            | Error _ ->
+                                Some (e, TypeMismatch (env.Subst.Resolve first.Type, env.Subst.Resolve e.Type)))
+                | [] -> None
+            match disagreement with
+            | Some (e, err) ->
+                if e.Span.StartLine > 0 then setCurrentExprSpan e.Span
+                Error err
+            | None ->
             let arrTy = inferArrayLitType env.Builder tElems
             Ok (mkTyped (TExprArrayLit (tElems, arrTy)) (mkArrayLike arrTy)))
 
@@ -3415,8 +3480,22 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                             | IRTScalar _, IRTInfer _ -> Ok acc
                             | IRTInfer _, IRTScalar _ -> Ok next
                             | _ -> unify env.Subst acc next |> Result.map (fun () -> acc)
+                        // UNITS MULTIPLY: prodsum is a sum of PRODUCTS, so the
+                        // result's element unit is the product of the operands'
+                        // (as for `a * b`), not the first operand's -- the
+                        // promotion join above keeps `acc` whole, unit included,
+                        // which typed prodsum(meters, seconds) as meters.
+                        let joinElemUnits (acc: IRType) (next: IRType) : Result<IRType, TypeError> =
+                            joinElem acc next |> Result.bind (fun joined ->
+                                unitRulesForOpWith OpMul (IR.getUnits (env.Subst.Resolve acc))
+                                                         (IR.getUnits (env.Subst.Resolve next)) None
+                                |> Result.map (fun u ->
+                                    let bare = IR.stripUnits (env.Subst.Resolve joined)
+                                    match u with
+                                    | Some u -> IRTUnitAnnotated (bare, u)
+                                    | None -> bare))
                         (match elemTy with
-                         | Some e -> joinElem e arrTy.ElemType
+                         | Some e -> joinElemUnits e arrTy.ElemType
                          | None -> Ok arrTy.ElemType)
                         |> Result.bind (fun joined ->
                             go (Some joined)
@@ -6666,6 +6745,10 @@ and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig o
 and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedExpr) : TypeResult<UnitSig option> =
     let combineBranches context (a: UnitSig option) (b: UnitSig option) =
         match a, b with
+        | Some ua, Some ub when (not (unitCompatible ua ub) || not (unitSameScale ua ub))
+                                && recordProbeEquality ua ub ->
+            // Probe run: the branches must agree for the CALL's units.
+            Ok (Some ua)
         | Some ua, Some ub ->
             if not (unitCompatible ua ub) then Error (UnitMismatch (context, ppUnitSig ua, ppUnitSig ub))
             // This walk RECOMPUTES signatures over an already-typed kernel
@@ -6706,9 +6789,21 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     | TExprBinOp (_, op, l, r) ->
         kernelBodyUnits env bound l |> Result.bind (fun lu ->
         kernelBodyUnits env bound r |> Result.bind (fun ru ->
-        unitRulesForOpWith op lu ru (Some r)))
+        match unitRulesForOpWith op lu ru (Some r), op, lu, ru with
+        // Probe run (funcUnitTransform): an equality op between two
+        // probe-dependent signatures is an EQUATION the call must satisfy,
+        // not a failure of the body -- record it and carry on.
+        | Error _, (OpAdd | OpSub | OpMod), Some a, Some b when recordProbeEquality a b -> Ok (Some a)
+        | Error _, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpMath2 "atan2"), Some a, Some b
+            when recordProbeEquality a b -> Ok None
+        | res, _, _, _ -> res))
     | TExprUnaryOp (op, inner) ->
-        kernelBodyUnits env bound inner |> Result.bind (unitRulesForUnaryOp op)
+        kernelBodyUnits env bound inner |> Result.bind (fun u ->
+            match unitRulesForUnaryOp op u, op, u with
+            // A transcendental of a probe-dependent value: the argument must
+            // be dimensionless at the call.
+            | Error _, OpMath name, Some s when name <> "sqrt" && recordProbeEquality s unitDimensionless -> Ok None
+            | res, _, _ -> res)
     | TExprIf (cond, thenBr, elseBr) ->
         errorsOnly cond |> Result.bind (fun () ->
         kernelBodyUnits env bound thenBr |> Result.bind (fun tu ->
@@ -6742,6 +6837,38 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
         args |> List.fold (fun acc a ->
             acc |> Result.bind (fun () -> errorsOnly a)) (Ok ())
         |> Result.bind (fun () ->
+            // The callee's own recorded EQUALITIES, at the units this walk
+            // computes for the arguments: a generic calling a generic
+            // composes them (recorded again when still probe-dependent), and
+            // a kernel body calling one with concrete units is judged here.
+            let equalities =
+                match f.Kind with
+                | TExprVar (n, _, _) ->
+                    (match env.FuncUnitEqualities.TryGetValue n with
+                     | true, eqs when not eqs.IsEmpty -> Some (n, eqs)
+                     | _ -> None)
+                | _ -> None
+            let equalityCheck =
+                match equalities with
+                | None -> Ok ()
+                | Some (n, eqs) ->
+                    args
+                    |> List.fold (fun acc a ->
+                        acc |> Result.bind (fun (us: UnitSig option list) ->
+                            kernelBodyUnits env bound a |> Result.map (fun u -> u :: us)))
+                        (Ok [])
+                    |> Result.bind (fun rev ->
+                        let argUnits = List.rev rev
+                        eqs
+                        |> List.fold (fun acc (x, y) ->
+                            acc |> Result.bind (fun () ->
+                                match instantiateProbeSig x argUnits, instantiateProbeSig y argUnits with
+                                | Some a, Some b when not (unitCompatible a b) || not (unitSameScale a b) ->
+                                    if recordProbeEquality a b then Ok ()
+                                    else Error (UnitMismatch ($"the arguments of '{n}', whose body combines them as one quantity", ppUnitSig a, ppUnitSig b))
+                                | _ -> Ok ()))
+                            (Ok ()))
+            equalityCheck |> Result.bind (fun () ->
             match f.Kind with
             | TExprVar (n, _, _) ->
                 (match lookupUnitTransform env n with
@@ -6825,7 +6952,10 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
         match env.Subst.Resolve t with
         | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
         | r -> IR.getUnits r
-    if openElem retTy && not parms.IsEmpty then
+    // Probe whenever some parameter is generic: the return transform needs a
+    // deduced return, but the EQUALITIES (FuncUnitEqualities) are demands on
+    // the arguments whatever the return type is.
+    if not parms.IsEmpty && (parms |> List.exists (fun p -> openElem p.Type)) then
         let bound =
             parms
             |> List.mapi (fun i p ->
@@ -6833,8 +6963,21 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
                  if openElem p.Type then Some (unitOfDims (Map.ofList [ (unitProbeBase i, 1) ]))
                  else elemUnits p.Type))
             |> Map.ofList
-        match kernelBodyUnits env bound body with
-        | Ok (Some u) ->
+        let collected = ResizeArray<UnitSig * UnitSig>()
+        let slot = unitProbeEqualities.Value
+        let saved = slot.Value
+        slot.Value <- Some collected
+        let walked =
+            try kernelBodyUnits env bound body
+            finally slot.Value <- saved
+        if collected.Count > 0 then
+            env.FuncUnitEqualities.[name] <- List.ofSeq collected
+        // The TRANSFORM keeps its old contract exactly: derived only for a
+        // deduced return, and only from a walk that needed no equation (a
+        // body that combined two parameters is judged by its equalities at
+        // the call; its return is left unstamped, as before).
+        match walked with
+        | Ok (Some u) when openElem retTy && collected.Count = 0 ->
             let n = unitNormalize u
             let exponents =
                 parms |> List.mapi (fun i _ ->
@@ -7021,10 +7164,17 @@ Bool) and combine the results, or compare tuples of scalars.")
     match op with
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
         // Comparisons require compatible units (unitRulesForOp errors on
-        // mismatch; the result carries no annotation)
+        // mismatch; the result carries no annotation). An OUTER comparison
+        // compares ELEMENTS, whose units live on the element type (`getUnits`
+        // of an array type is always None, so `a [<] b` over meters and
+        // seconds was never judged).
+        let lU, rU =
+            match mode, IR.stripUnits leftTy, IR.stripUnits rightTy with
+            | Outer, ArrayElem al, ArrayElem ar -> IR.getUnits al.ElemType, IR.getUnits ar.ElemType
+            | _ -> IR.getUnits leftTy, IR.getUnits rightTy
         (if isTupleTy leftTy || isTupleTy rightTy then tupleCompareCheck leftTy rightTy else Ok ())
         |> Result.bind (fun () ->
-            unitRulesForOp op (IR.getUnits leftTy) (IR.getUnits rightTy)
+            unitRulesForOp op lU rU
             |> Result.map (fun _ -> boolResultTy ()))
     | OpAnd | OpOr -> Ok (boolResultTy ())
     | _ ->
@@ -7113,16 +7263,36 @@ Bool) and combine the results, or compare tuples of scalars.")
                 | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
                 | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
                 | _ -> elemTy
+        // An OUTER product over two arrays combines ELEMENTS, so its unit rule
+        // runs on the element signatures (the same rule gram / the zip arm
+        // use, magnitude guard included) and the result's ELEMENT carries the
+        // outcome: `a [*] b` over meters and seconds is meter*seconds, and
+        // `a [+] b` over them is refused. Reading `getUnits` off the ARRAY
+        // types (always None) accepted the sum and typed the product meters.
+        let outerElemUnits =
+            match mode, lBare, rBare with
+            | Outer, ArrayElem arrL, ArrayElem arrR ->
+                Some (unitRulesForArrayOp "the elements of an outer product" op
+                        (IR.getUnits arrL.ElemType) (IR.getUnits arrR.ElemType) rExpr)
+            | _ -> None
+        match outerElemUnits with
+        | Some (Error e) -> Error e
+        | _ ->
         let bareResult =
             match mode with
             | Outer ->
                 match lBare, rBare with
                 | ArrayElem arrL, ArrayElem arrR ->
-                    // Element type stays the LEFT operand's (the
+                    // Element type stays the LEFT operand's PRIMITIVE (the
                     // arithmetic-Outer convention, matched by lowering's
-                    // kernelRetType = IRTScalar elemTypeL); everything else about
-                    // the result is synthesized fresh -- see mkOuterResult.
-                    mkOuterResult arrL arrR arrL.ElemType
+                    // kernelRetType = IRTScalar elemTypeL), wearing the
+                    // element unit the rule above derived; everything else
+                    // about the result is synthesized fresh -- see mkOuterResult.
+                    let elem =
+                        match outerElemUnits with
+                        | Some (Ok (Some u)) -> IRTUnitAnnotated (IR.stripUnits arrL.ElemType, u)
+                        | _ -> IR.stripUnits arrL.ElemType
+                    mkOuterResult arrL arrR elem
                 | _ -> lBare
             | Elementwise ->
                 match lBare, rBare with
@@ -14146,6 +14316,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     for kv in c.MutParams do e.MutParamPositions.[$"{alias}.{kv.Key}"] <- kv.Value
                     for kv in c.CoIterObligations do e.FuncCoIterObligations.[$"{alias}.{kv.Key}"] <- kv.Value
                     for kv in c.UnitTransforms do e.FuncUnitTransform.[$"{alias}.{kv.Key}"] <- kv.Value
+                    for kv in c.UnitEqualities do e.FuncUnitEqualities.[$"{alias}.{kv.Key}"] <- kv.Value
                     for kv in c.Constraints do e.FuncConstraints.[$"{alias}.{kv.Key}"] <- kv.Value
                     e
                 | ImportSelective names ->
@@ -14196,6 +14367,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             put e.MutParamPositions c.MutParams
                             put e.FuncCoIterObligations c.CoIterObligations
                             put e.FuncUnitTransform c.UnitTransforms
+                            put e.FuncUnitEqualities c.UnitEqualities
                             put e.FuncConstraints c.Constraints
                     e
             | None ->
@@ -14223,6 +14395,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     env.MutParamPositions.Remove funcDecl.Name |> ignore
     env.FuncCoIterObligations.Remove funcDecl.Name |> ignore
     env.FuncUnitTransform.Remove funcDecl.Name |> ignore
+    env.FuncUnitEqualities.Remove funcDecl.Name |> ignore
     env.FuncConstraints.Remove funcDecl.Name |> ignore
     env.FuncDefaults.Remove funcDecl.Name |> ignore
     env.FuncDefaultCaptures.Remove funcDecl.Name |> ignore

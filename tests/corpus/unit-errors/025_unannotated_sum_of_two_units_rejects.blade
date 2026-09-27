@@ -1,0 +1,9 @@
+// TEST: Unannotated Sum Of Two Units Rejects (rejects)
+// ERROR: BL3006
+// The unannotated spelling of 024: the same equation, the same refusal.
+Unit meters
+Unit seconds
+let a: Float<meters> = 1.0
+let b: Float<seconds> = 2.0
+function add(x, y) = x + y
+let c = add(a, b)

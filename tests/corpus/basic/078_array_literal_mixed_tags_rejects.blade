@@ -1,0 +1,9 @@
+// TEST: Array literal stacking two index types (rejects)
+// ERROR: BL3001
+// Rows over Lat and Lon (equal extent, different index types) stacked into
+// one array silently took the first row's index type for both.
+type LatIdx = Idx<3>
+type LonIdx = Idx<3>
+let a: Array<Float like LatIdx> = [1.0, 2.0, 3.0]
+let b: Array<Float like LonIdx> = [1.0, 2.0, 3.0]
+let m = [a, b]

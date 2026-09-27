@@ -210,6 +210,7 @@ and CalleeFacts = {
     MutParams: Map<string, int list>
     CoIterObligations: Map<string, (int list * int64 list) list>
     UnitTransforms: Map<string, int list * UnitSig>
+    UnitEqualities: Map<string, (UnitSig * UnitSig) list>
     Constraints: Map<string, string list * (string * string list) list>
 }
 
@@ -403,6 +404,14 @@ type TypeEnv = {
     /// Name-keyed like MutParamPositions, and shares its shadowing weakness.
     /// Shared by reference.
     FuncUnitTransform: System.Collections.Generic.Dictionary<string, int list * UnitSig>
+    /// The unit EQUALITIES a generic body imposes among its arguments,
+    /// recorded by the same probe as FuncUnitTransform: `x + y`, `x > y`,
+    /// branches that must agree, `exp(x / y)` -- each an equation between two
+    /// unit signatures over the synthetic probe bases (one per parameter).
+    /// The transform DERIVES a return unit; these CHECK a call: substituted
+    /// with the arguments' units, both sides must agree (BL3006), which is
+    /// what `add(meters, seconds)` through `x: T^0, y: T^0` never did.
+    FuncUnitEqualities: System.Collections.Generic.Dictionary<string, (UnitSig * UnitSig) list>
     /// Named functions' `where comm(...)` groups (by param index): funcName ->
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
@@ -558,6 +567,7 @@ let emptyEnv () = {
     MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
     FuncCoIterObligations = System.Collections.Generic.Dictionary<string, (int list * int64 list) list>()
     FuncUnitTransform = System.Collections.Generic.Dictionary<string, int list * UnitSig>()
+    FuncUnitEqualities = System.Collections.Generic.Dictionary<string, (UnitSig * UnitSig) list>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()

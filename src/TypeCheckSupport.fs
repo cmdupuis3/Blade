@@ -1874,6 +1874,55 @@ let abstractVarConflictMessage (subst: Subst) (callee: string)
 /// removes them from the residual before recording it.
 let unitProbeBase (i: int) : string = $"__unit_probe_{i}"
 
+/// The probe's EQUALITY collector (see TypeEnv.FuncUnitEqualities). Active
+/// only while `funcUnitTransform` walks a body; `kernelBodyUnits` hands it
+/// the two sides of every unit-equality op (`+ - %`, comparisons, atan2,
+/// branch agreement, a transcendental's dimensionless argument) that
+/// mentions a probe base, instead of failing on it. Per-thread, like every
+/// other piece of checker state that is not on the env.
+let unitProbeEqualities =
+    new System.Threading.ThreadLocal<ResizeArray<UnitSig * UnitSig> option ref>(fun () -> ref None)
+
+let internal unitSigMentionsProbe (u: UnitSig) : bool =
+    (unitNormalize u).Dims |> Map.exists (fun k _ -> k.StartsWith "__unit_probe_")
+
+/// Record `a = b` if a probe is running and either side is probe-dependent;
+/// false (nothing recorded) otherwise, so the caller keeps its own verdict.
+let internal recordProbeEquality (a: UnitSig) (b: UnitSig) : bool =
+    match unitProbeEqualities.Value.Value with
+    | Some acc when unitSigMentionsProbe a || unitSigMentionsProbe b ->
+        acc.Add((a, b))
+        true
+    | _ -> false
+
+/// Instantiate one side of a recorded equality at a call: every probe base
+/// `__unit_probe_i ^ e` becomes `argUnits[i] ^ e`. None when a contributing
+/// argument is BARE (no unit signature) -- a bare value makes no claim, so
+/// the equation is not judged (the transform's all-or-nothing rule).
+let internal instantiateProbeSig (sigU: UnitSig) (argUnits: UnitSig option list) : UnitSig option =
+    let n = unitNormalize sigU
+    let prefix = "__unit_probe_"
+    let probes =
+        n.Dims |> Map.toList |> List.choose (fun (k, e) ->
+            if k.StartsWith prefix then
+                match System.Int32.TryParse (k.Substring prefix.Length) with
+                | true, i -> Some (i, e)
+                | _ -> None
+            else None)
+    let residual = { n with Nominal = None; Dims = n.Dims |> Map.filter (fun k _ -> not (k.StartsWith prefix)) }
+    probes |> List.fold (fun acc (i, e) ->
+        acc |> Option.bind (fun u ->
+            List.tryItem i argUnits |> Option.flatten |> Option.map (fun au -> unitMul u (unitPow au e))))
+        (Some residual)
+
+/// The first recorded equality a call's argument units VIOLATE, instantiated
+/// (both sides), or None.
+let internal unitEqualityClash (eqs: (UnitSig * UnitSig) list) (argUnits: UnitSig option list) : (UnitSig * UnitSig) option =
+    eqs |> List.tryPick (fun (a, b) ->
+        match instantiateProbeSig a argUnits, instantiateProbeSig b argUnits with
+        | Some x, Some y when not (unitCompatible x y) || not (unitSameScale x y) -> Some (x, y)
+        | _ -> None)
+
 /// A recorded transform, applied: `residual * PROD_i argUnits[i] ^ exponents[i]`.
 /// Shared by the two consumers -- the call site (`unitStampedReturn`) and the
 /// nested-call arm of `kernelBodyUnits`, which is how one generic calling
@@ -2862,6 +2911,30 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                         (ppIRType (env.Subst.Resolve ac)) ar))
                             | _ -> None)
                     | _ -> None)
+        // THE CALLEE'S UNIT EQUALITIES (TypeEnv.FuncUnitEqualities): a generic
+        // body that adds, compares or branches between two parameters demands
+        // their units agree, and the call is where the units are known.
+        // `add(x: T^0, y: T^0) = x + y` applied to meters and seconds was
+        // accepted (and typed assignable to anything) before this.
+        let unitClash =
+            match unitClash with
+            | Some _ -> unitClash
+            | None ->
+                let calleeName = match tFunc.Kind with TExprVar (nm, _, _) -> Some nm | _ -> None
+                match calleeName |> Option.bind (fun nm ->
+                        match env.FuncUnitEqualities.TryGetValue nm with
+                        | true, eqs when not eqs.IsEmpty -> Some (nm, eqs)
+                        | _ -> None) with
+                | None -> None
+                | Some (nm, eqs) ->
+                    let argUnits =
+                        tArgs |> List.map (fun a ->
+                            match env.Subst.Resolve a.Type with
+                            | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+                            | r -> IR.getUnits r)
+                    unitEqualityClash eqs argUnits
+                    |> Option.map (fun (x, y) ->
+                        UnitMismatch ($"the arguments of '{nm}', whose body combines them as one quantity", ppUnitSig x, ppUnitSig y))
         // A Poly<T^r> pack param makes the arrow variadic -- its declared
         // param count says nothing about legal call-site arg counts, so
         // arity accounting stands down (monomorphization owns the call).

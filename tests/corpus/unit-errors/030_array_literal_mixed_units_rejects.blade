@@ -1,0 +1,9 @@
+// TEST: Array Literal Mixed Units Rejects (rejects)
+// ERROR: BL3006
+// An array literal has ONE element type; `[a, b]` over meters and seconds
+// took the first element's and printed both as meters.
+Unit meters
+Unit seconds
+let a: Float<meters> = 1.0
+let b: Float<seconds> = 2.0
+let xs = [a, b]

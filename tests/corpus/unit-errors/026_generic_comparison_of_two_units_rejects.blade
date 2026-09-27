@@ -1,0 +1,10 @@
+// TEST: Generic Comparison Of Two Units Rejects (rejects)
+// ERROR: BL3006
+// A comparison between two parameters is an equation too, even though the
+// function's return (a Float here) carries no unit of either.
+Unit meters
+Unit seconds
+let a: Float<meters> = 1.0
+let b: Float<seconds> = 2.0
+function bigger(x: T^0, y: T^0) -> Float64 = if x > y then 1.0 else 0.0
+let c = bigger(a, b)
