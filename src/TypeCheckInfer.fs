@@ -1356,8 +1356,10 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let dischargeErr =
                     match func.Kind with
                     | ExprKind.ExprVar fname ->
-                        match env.FuncConstraints.TryGetValue fname with
-                        | true, (paramNames, conjuncts) ->
+                        // The declaration this call RESOLVES to (binder id),
+                        // not whatever last declared the name.
+                        match defaultsKeyOfName env fname |> Option.map env.FuncConstraints.TryGetValue with
+                        | Some (true, (paramNames, conjuncts)) ->
                             let provOf (pname: string) : Set<string> =
                                 match List.tryFindIndex ((=) pname) paramNames with
                                 | Some i when i < args.Length -> provenanceOfSurface env args.[i]
@@ -11464,16 +11466,22 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
     // params so call sites can fill omitted trailing args (the same surface
     // desugar named functions use). All four let paths (expression-form,
     // block statement, top-level DeclLet, DeclStatic) funnel through here.
-    // Name-keyed like FuncConstraints, same known shadowing weakness.
-    (match binding.Pattern.Kind, binding.Value.Kind with
-     | PatVar name, ExprKind.ExprLambda (parms, _, _)
-            when parms |> List.exists (_.Default.IsSome) ->
-         env.FuncDefaults.[name] <- (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
-         // Same identity record checkFunctionDecl keeps for a named function
-         // (TypeEnv.FuncDefaultCaptures): the splice compares against it.
-         env.FuncDefaultCaptures.[name] <-
-             defaultCaptureIdentities env (parms |> List.map (fun p -> (p.Name, p.Default)))
-     | _ -> ())
+    // Keyed by the TYPED lambda's first parameter id (defaultsKeyOfVar): the
+    // binding's own id is minted later, on each of those paths separately.
+    inferLetBindingValueCore env binding |> Result.map (fun tv ->
+        (match binding.Pattern.Kind, binding.Value.Kind, tv.Kind with
+         | PatVar _, ExprKind.ExprLambda (parms, _, _), TExprLambda li
+                when parms |> List.exists (_.Default.IsSome) && not li.Params.IsEmpty ->
+             let key = li.Params.Head.VarId
+             env.FuncDefaults.[key] <- (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+             // Same identity record checkFunctionDecl keeps for a named function
+             // (TypeEnv.FuncDefaultCaptures): the splice compares against it.
+             env.FuncDefaultCaptures.[key] <-
+                 defaultCaptureIdentities env (parms |> List.map (fun p -> (p.Name, p.Default)))
+         | _ -> ())
+        tv)
+
+and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<TypedExpr> =
     // REDUCTION JOIN, Form 2: an array literal bound to a name is a candidate
     // LEG LIST for `reduce(name, (<&!>))`. Recorded unconditionally and read
     // by nothing else, so a literal nobody joins keeps its ordinary eager
@@ -14594,23 +14602,9 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     for kv in exports.StaticFunctions do
                         let qualName = $"{alias}.{kv.Key}"
                         e <- { e with StaticFunctions = Map.add qualName kv.Value e.StaticFunctions }
-                    // Defaults under `alias.name`, so `a.f()` fills a's
-                    // defaults even when another imported module also
-                    // declares an `f` (tryFillDefaultArgs consults this key
-                    // first). Captures ride along under the same key.
-                    for kv in exports.Defaults do
-                        let qualName = $"{alias}.{kv.Key}"
-                        e.FuncDefaults.[qualName] <- kv.Value
-                        match Map.tryFind kv.Key exports.DefaultCaptures with
-                        | Some caps -> e.FuncDefaultCaptures.[qualName] <- caps
-                        | None -> ()
-                    // The rest of the declaration facts the call judgment
-                    // reads by name, under the same `alias.name` key -- so the
-                    // qualified call is judged against the declaration it
-                    // names (mut write permission, co-iteration extents, the
-                    // return-unit transform, where-conjunct discharge).
-                    let c = exports.Callees
-                    for kv in c.Constraints do e.FuncConstraints.[$"{alias}.{kv.Key}"] <- kv.Value
+                    // (Defaults, where-conjuncts and the other callee facts are
+                    // keyed by binder id: `alias.name` binds the declaration's
+                    // own id, so nothing needs re-registering.)
                     e
                 | ImportSelective names ->
                     let mutable e = env
@@ -14625,17 +14619,6 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | Some fd ->
                             e <- { e with StaticFunctions = Map.add name fd e.StaticFunctions }
                         | None -> ()
-                        // The bare name now denotes THIS module's `name`, so
-                        // its defaults (and their capture identities) win
-                        // over whatever bare-name entry a later-checked
-                        // module left in the shared table.
-                        match Map.tryFind name exports.Defaults with
-                        | Some ps ->
-                            e.FuncDefaults.[name] <- ps
-                            match Map.tryFind name exports.DefaultCaptures with
-                            | Some caps -> e.FuncDefaultCaptures.[name] <- caps
-                            | None -> e.FuncDefaultCaptures.Remove name |> ignore
-                        | None -> ()
                         // Units, the same way the QUALIFIED arm above imports
                         // them (unit names have no qualified spelling -- an
                         // annotation is `Float<newton>`, never `Float<SI.newton>`
@@ -14646,18 +14629,6 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         match Map.tryFind name exports.Units with
                         | Some us -> e <- { e with Units = Map.add name us e.Units }
                         | None -> ()
-                        // The call judgment's declaration facts, the same way
-                        // as Defaults above: the bare name is now THIS
-                        // module's, so its entry wins -- and its ABSENCE wins
-                        // too, or a later-checked module's `mut` positions
-                        // would judge a call to this module's function.
-                        if Map.containsKey name exports.Variables then
-                            let c = exports.Callees
-                            let put (d: System.Collections.Generic.Dictionary<string, 'v>) (m: Map<string, 'v>) =
-                                match Map.tryFind name m with
-                                | Some v -> d.[name] <- v
-                                | None -> d.Remove name |> ignore
-                            put e.FuncConstraints c.Constraints
                     e
             | None ->
                 // Provider or unknown module -- bind alias as opaque so references type-check
@@ -14676,14 +14647,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // Every inference variable minted from here on is THIS declaration's
     // (see TypeEnv.FuncSigVarRange; the call judgment instantiates them).
     let sigVarLo = env.Subst.NextId
-    // This declaration OWNS its name's entries in the name-keyed callee-fact
-    // tables, and each is only SET below when the declaration has the fact --
-    // so an earlier same-named binding's entry must not survive into this
-    // one (checkModule clears them per module; this covers a same-module
-    // `let f = lambda ...` shadowed by a later `function f`).
-    env.FuncConstraints.Remove funcDecl.Name |> ignore
-    env.FuncDefaults.Remove funcDecl.Name |> ignore
-    env.FuncDefaultCaptures.Remove funcDecl.Name |> ignore
+    // (The callee-fact tables are keyed by this declaration's binder id,
+    // funcVarId below, so no same-named binding's entry can leak into it.)
 
     // Pre-scan all parameter + return type annotations to register type variable names.
     let allAnnotations =
@@ -14874,7 +14839,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         Error e
     | None ->
     if not customConjuncts.IsEmpty then
-        env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
+        env.FuncConstraints.[funcVarId] <- (paramNames, customConjuncts)
 
     let genericObligations = ResizeArray<GenericObligation>()
     env.FuncGenericObligations.Remove funcVarId |> ignore
@@ -14990,14 +14955,14 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // sites can fill omitted trailing args -- BEFORE the body is checked,
     // so recursive calls inside the body may omit them too.
     if funcDecl.Params |> List.exists (_.Default.IsSome) then
-        env.FuncDefaults.[funcDecl.Name] <- (funcDecl.Params |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+        env.FuncDefaults.[funcVarId] <- (funcDecl.Params |> List.map (fun p -> (p.Name, p.Type, p.Default)))
         // Binding identity of every free name the defaults read HERE, so the
         // call-site splice can tell the declaration-site `k` from a caller's
         // parameter of the same spelling (TypeEnv.FuncDefaultCaptures). Own
         // parameters are excluded (they are the required args, bound at the
         // splice); a name with no binding here (a function registered
         // elsewhere, an intrinsic) records nothing and is not checked.
-        env.FuncDefaultCaptures.[funcDecl.Name] <-
+        env.FuncDefaultCaptures.[funcVarId] <-
             defaultCaptureIdentities env (funcDecl.Params |> List.map (fun p -> (p.Name, p.Default)))
 
     // Register which parameter positions are `mut`, for the call-site write

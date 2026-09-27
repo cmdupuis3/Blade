@@ -193,28 +193,10 @@ type TypeModuleExport = {
     /// rewriteImportedStaticRefs seed these under "alias.name" (qualified) or
     /// "name" (selective) ahead of StaticEval.resolveStatics.
     StaticValues: Map<string, StaticEval.StaticValue>
-    /// This module's defaults-carrying callables (bare names), snapshotted
-    /// from the shared `FuncDefaults` table when the module's check ends --
-    /// BEFORE a later module can overwrite the bare-name entry with its own
-    /// `f`. A qualified import re-registers them as `alias.name` and a
-    /// selective one as `name`, so a call resolves the defaults of the
-    /// module it actually named.
-    Defaults: Map<string, (string * TypeExpr option * Expr option) list>
-    /// The matching FuncDefaultCaptures entries (see TypeEnv.FuncDefaultCaptures).
-    DefaultCaptures: Map<string, Map<string, IRId>>
-    /// The callee DECLARATION facts the call judgment still reads by NAME --
-    /// custom where-conjuncts -- snapshotted the same way and for the same
-    /// reason as `Defaults`, and re-registered under the same keys, so `M.f(x)`
-    /// and `f(x)` are judged against the same declaration. (The binder-id-keyed
-    /// facts -- `mut` positions, co-iteration obligations, unit transforms and
-    /// equalities -- need no snapshot: an imported name binds the declaration's
-    /// own id.)
-    Callees: CalleeFacts
-}
-
-/// Name-keyed callee declaration facts (see TypeModuleExport.Callees).
-and CalleeFacts = {
-    Constraints: Map<string, string list * (string * string list) list>
+    // (No callee-fact snapshots: every table the call judgment reads --
+    // defaults, where-conjuncts, `mut` positions, co-iteration, units -- is
+    // keyed by the declaration's BINDER ID, program-unique, and an imported
+    // name binds the declaration's own id, so the entries simply stay valid.)
 }
 
 /// A demand a GENERIC function body places on the instance of one of its own
@@ -347,27 +329,29 @@ type TypeEnv = {
     /// module-level dists, `func.param` tokens for Dist params). Consumed by
     /// Dist +/- dispatch and where-clause discharge. Shared by reference, like Warnings.
     Provenance: System.Collections.Generic.Dictionary<IRId, Set<string>>
-    /// Custom where-clause conjuncts per function: funcName -> (paramNames,
-    /// conjuncts). Populated by checkFunctionDecl; consulted at call sites for discharge.
-    FuncConstraints: System.Collections.Generic.Dictionary<string, string list * (string * string list) list>
+    /// Custom where-clause conjuncts per function: the declaration's BINDER ID
+    /// -> (paramNames, conjuncts). Populated by checkFunctionDecl; consulted at
+    /// call sites for discharge, through the name the call site resolves
+    /// (`lookupVar`), so a shadowing local of the same name is not judged by it.
+    FuncConstraints: System.Collections.Generic.Dictionary<IRId, string list * (string * string list) list>
     /// Parameter metadata for callables with DEFAULT parameter values:
-    /// callee name -> (paramName, surface type annotation, surface default)
+    /// callee BINDER ID -> (paramName, surface type annotation, surface default)
     /// per param, in declaration order. Populated by checkFunctionDecl and by
     /// let bindings whose value is a defaults-carrying lambda; consulted by
     /// the surface call-site desugar (omitted trailing args re-type the
-    /// default at the call site). Name-keyed like FuncConstraints, and shares
-    /// its known shadowing weakness. Shared by reference.
-    FuncDefaults: System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>
+    /// default at the call site). Keyed by the binder id the call head
+    /// resolves to (a nested or block-local `f` shadowing a defaults-carrying
+    /// global `f` is not filled from it). Shared by reference.
+    FuncDefaults: System.Collections.Generic.Dictionary<IRId, (string * TypeExpr option * Expr option) list>
     /// The BINDING IDENTITY of every free name a default expression reads
-    /// from its declaration scope: callee name -> (free name -> VarId at the
+    /// from its declaration scope: callee binder id -> (free name -> VarId at the
     /// declaration). A default is spliced into the CALL SITE as surface
     /// syntax and re-inferred there, so a name it reads resolves in the
     /// caller's scope -- `function f(x = k)` called from `function g(k) =
     /// f()` used to read g's parameter. The splice compares each free name's
     /// call-site binding against the identity recorded here and refuses on
-    /// disagreement (BL3012). Keyed exactly like FuncDefaults, including the
-    /// `alias.name` entries a qualified import registers. Shared by reference.
-    FuncDefaultCaptures: System.Collections.Generic.Dictionary<string, Map<string, IRId>>
+    /// disagreement (BL3012). Keyed exactly like FuncDefaults. Shared by reference.
+    FuncDefaultCaptures: System.Collections.Generic.Dictionary<IRId, Map<string, IRId>>
     /// Mutually constrained alias groups: groupId -> group info.
     MutualGroups: Map<string, MutualGroupInfo>
     /// Member alias name -> owning groupId, for annotation scanning.
@@ -561,7 +545,7 @@ type TypeEnv = {
     /// escape as values, so the surface list is what the join needs and the
     /// TYPED literal (four independent scalars) is not.
     ///
-    /// Name-keyed, with FuncDefaults' known shadowing weakness and the same
+    /// Name-keyed (FuncDefaults used to share this weakness; it is id-keyed now), with the
     /// justification: it is a SURFACE side channel, and the join re-validates
     /// what it finds against the resolved binding (an array literal of the
     /// same width) before using it. Shared by reference.
@@ -597,9 +581,9 @@ let emptyEnv () = {
     StructStatics = Map.empty
     Warnings = ResizeArray<string>()
     Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
-    FuncConstraints = System.Collections.Generic.Dictionary<string, string list * (string * string list) list>()
-    FuncDefaults = System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>()
-    FuncDefaultCaptures = System.Collections.Generic.Dictionary<string, Map<string, IRId>>()
+    FuncConstraints = System.Collections.Generic.Dictionary<IRId, string list * (string * string list) list>()
+    FuncDefaults = System.Collections.Generic.Dictionary<IRId, (string * TypeExpr option * Expr option) list>()
+    FuncDefaultCaptures = System.Collections.Generic.Dictionary<IRId, Map<string, IRId>>()
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()

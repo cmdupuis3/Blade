@@ -2278,6 +2278,23 @@ let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: 
 /// it would type the call (`Int64`) differently from the callable it invokes
 /// (`double twice(double)`, static/011). Those stay uninstantiated and
 /// unbound, exactly as before.
+///
+/// The key a callable's DEFAULTS and where-conjuncts are recorded under
+/// (TypeEnv.FuncDefaults / FuncDefaultCaptures / FuncConstraints): a declared
+/// function's binder id; for a `let`-bound LAMBDA, the id of its first
+/// parameter -- program-unique, and known where the defaults are recorded
+/// (the lambda is typed before its binding's id is minted, on four different
+/// let paths). Either way it is reached from the binding a call head
+/// RESOLVES to, so a local `f` shadowing a defaults-carrying `f` is never
+/// filled from the outer one's defaults (they used to be keyed by name).
+let internal defaultsKeyOfVar (vi: VarInfo) : IRId =
+    match vi.TypedValue with
+    | Some { Kind = TExprLambda li } when not li.Params.IsEmpty -> li.Params.Head.VarId
+    | _ -> vi.VarId
+
+let internal defaultsKeyOfName (env: TypeEnv) (name: string) : IRId option =
+    lookupVar name env |> Option.map defaultsKeyOfVar
+
 /// The DECLARATION binder a call head names: the head's own id, or -- for a
 /// `let` ALIAS of a declared function (`let g = total`), which shares the
 /// declaration's type, variables included -- the id the alias chain ends at.
@@ -3856,8 +3873,8 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 let expectedMin =
                     match tFunc.Kind with
                     | TExprVar (name, _, _) ->
-                        (match env.FuncDefaults.TryGetValue name with
-                         | true, ps ->
+                        (match defaultsKeyOfName env name |> Option.map env.FuncDefaults.TryGetValue with
+                         | Some (true, ps) ->
                              ps |> List.takeWhile (fun (_, _, d) -> Option.isNone d) |> List.length
                          | _ -> paramTys.Length)
                     | _ -> paramTys.Length
@@ -4717,29 +4734,28 @@ let internal tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (ar
     // (lookup key, param infos). FuncDefaultCaptures is consulted under the
     // same key, so the two tables cannot disagree about which declaration a
     // call resolved to.
+    // Keyed by the binding the head RESOLVES to (defaultsKeyOfName), so the
+    // defaults consulted are those of the callable this call actually names.
+    let byName (name: string) =
+        match defaultsKeyOfName env name with
+        | Some key ->
+            (match env.FuncDefaults.TryGetValue key with
+             | true, ps -> Some (Some key, ps)
+             | _ -> None)
+        | None -> None
     let paramInfos =
         match func.Kind with
-        | ExprKind.ExprVar name ->
-            (match env.FuncDefaults.TryGetValue name with
-             | true, ps -> Some (name, ps)
-             | _ -> None)
-        // Module-QUALIFIED callee (`a.f(...)`): a qualified import registers
-        // the module's defaults under `alias.name` (checkDecl's DeclImport
-        // arm), consulted FIRST -- two imported modules each declaring `f`
-        // with different defaults used to share one bare-name entry, and
-        // both calls got whichever module was checked last. The bare field
-        // name stays as the fallback for callees with no module export
+        | ExprKind.ExprVar name -> byName name
+        // Module-QUALIFIED callee (`a.f(...)`): the import binds `alias.name`
+        // to the declaration's own id, so it resolves to that module's `f`
+        // even when another imported module also declares one. The bare
+        // field name stays as the fallback for callees with no module export
         // behind them (a provider alias, a let-bound lambda).
         | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, fname) ->
-            (match env.FuncDefaults.TryGetValue (alias + "." + fname) with
-             | true, ps -> Some (alias + "." + fname, ps)
-             | _ ->
-                 match env.FuncDefaults.TryGetValue fname with
-                 | true, ps -> Some (fname, ps)
-                 | _ -> None)
+            byName (alias + "." + fname) |> Option.orElseWith (fun () -> byName fname)
         // Immediately-applied lambda literal: its params are right here.
         | ExprKind.ExprLambda (parms, _, _) when parms |> List.exists (_.Default.IsSome) ->
-            Some ("lambda", parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+            Some (None, parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
         | _ -> None
     match paramInfos with
     | None -> None
@@ -4869,8 +4885,8 @@ let internal tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (ar
         // required-parameter references are the splice's own business and
         // are excluded, exactly as the recording excluded them.
         let shadowed =
-            match env.FuncDefaultCaptures.TryGetValue defaultsKey with
-            | true, captures when not (Map.isEmpty captures) ->
+            match defaultsKey |> Option.map env.FuncDefaultCaptures.TryGetValue with
+            | Some (true, captures) when not (Map.isEmpty captures) ->
                 List.zip trailingSlots slotAssign
                 |> List.tryPick (fun ((slotName, _, dflt), assigned) ->
                     match assigned, dflt with
@@ -4935,14 +4951,18 @@ let internal tryFlattenFactoryChain (env: TypeEnv) (func: Expr) (args: Expr list
             | ExprKind.ExprApp (inner, innerArgs) -> collect inner (innerArgs :: groups)
             | _ -> (f, groups)
         let baseFn, groups = collect func [args]
+        let hasDefaults (name: string) =
+            match defaultsKeyOfName env name with
+            | Some key -> env.FuncDefaults.ContainsKey key
+            | None -> false
         let isDefaultsCallee =
             match baseFn.Kind with
-            | ExprKind.ExprVar name -> env.FuncDefaults.ContainsKey name
+            | ExprKind.ExprVar name -> hasDefaults name
             // Module-qualified base (`plot.contourf(...)(...)`): the
-            // `alias.name` entry a qualified import registers, else the bare
+            // `alias.name` binding a qualified import makes, else the bare
             // name (see tryFillDefaultArgs).
             | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, fname) ->
-                env.FuncDefaults.ContainsKey (alias + "." + fname) || env.FuncDefaults.ContainsKey fname
+                hasDefaults (alias + "." + fname) || hasDefaults fname
             | _ -> false
         if not isDefaultsCallee then None
         else

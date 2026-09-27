@@ -131,21 +131,10 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // `typeCheck` resets on entry too; this covers module-to-module inside one
     // compilation, and callers that reach checkProgram by another route.
     resetCurrentStmtSpan ()
-    // Fresh module: the NAME-KEYED callee-fact tables are shared by reference
-    // across every module of the program (one emptyEnv), and a declaration only
-    // ever SETS its entry. So a previous module's `f` (with a `mut` parameter,
-    // defaults, a unit transform...) used to stay under the bare key `f` and
-    // judge -- and be exported as -- THIS module's same-named `f`, which has
-    // none of them: a false BL4005 on `B.f(arr)` because `A.f` wrote through
-    // its first argument. This module's own declarations re-populate the bare
-    // keys; imports re-register theirs from the per-module snapshot
-    // (TypeModuleExport.Callees / Defaults) under `alias.name` or the selected
-    // name. Nothing outside the checker reads these tables.
-    // (The `mut`-position, co-iteration and unit tables are keyed by binder
-    // id -- program-unique, so they need neither the clear nor a snapshot.)
-    env.FuncConstraints.Clear()
-    env.FuncDefaults.Clear()
-    env.FuncDefaultCaptures.Clear()
+    // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
+    // co-iteration, units -- are keyed by binder id, program-unique, and
+    // shared by reference across the program's modules: a module's entries
+    // stay valid for every module that imports it, and nothing is cleared.)
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs), so type-checking
     // can consult them (e.g. a `replicate` count written as `let static`).
@@ -422,27 +411,6 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
             Units = finalEnv.Units
             StaticFunctions = finalEnv.StaticFunctions |> Map.filter (fun k _ -> not (k.Contains(".")))
             StaticValues = finalEnv.StaticValues |> Map.filter (fun k _ -> not (k.Contains(".")))
-            // Snapshot NOW: the tables are shared by reference and name-keyed,
-            // so the next module's `f` would overwrite this module's entry.
-            Defaults =
-                finalEnv.FuncDefaults
-                |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                |> Map.ofSeq
-            DefaultCaptures =
-                finalEnv.FuncDefaultCaptures
-                |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                |> Map.ofSeq
-            // Same snapshot, same reason, for the declaration facts the call
-            // judgment reads by name (TypeModuleExport.Callees).
-            Callees =
-                let snap (d: System.Collections.Generic.Dictionary<string, 'v>) : Map<string, 'v> =
-                    d
-                    |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                    |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                    |> Map.ofSeq
-                { Constraints = snap finalEnv.FuncConstraints }
         }
         moduleExports <- Map.add moduleName export moduleExports
     allErrors <- allErrors @ crossModuleDeclErrors env program
