@@ -5647,6 +5647,32 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             | ExprKind.ExprFor _
             | ExprKind.ExprBinOp (_, OpComposeObj, _, _) -> true
             | _ -> false
+        // `method_for(A, B) <@> polyFn` for a named function over a `Poly`
+        // pack: etaExpandFunctionKernel cannot wrap it (the pack width is the
+        // operand count, unknown to it), and the method_for arm took the
+        // un-expanded variable as a non-kernel (BL3007 `got variable`) while
+        // `object_for(polyFn) <@> (A, B)` and `polyFn <@> (A, B)` worked.
+        // It IS that application -- the same arrays against the same kernel --
+        // so it is typed as one (inferObjectFor builds the deferred former).
+        let polyNamedKernelRight =
+            match right.Kind with
+            | ExprKind.ExprVar name ->
+                (match lookupVar name env with
+                 | Some info when Option.isNone info.TypedValue ->
+                     (match env.Subst.Resolve info.Type with
+                      | FuncElem (paramTys, _) -> paramTys |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTPoly)
+                      | _ -> false)
+                 | _ -> false)
+            | _ -> false
+        match left.Kind with
+        | ExprKind.ExprMethodFor arrays when polyNamedKernelRight && not arrays.IsEmpty ->
+            let operand =
+                match arrays with
+                | [ single ] -> single
+                | many -> ({ Kind = ExprKind.ExprTuple many; Span = left.Span } : Expr)
+            let objFor : Expr = { Kind = ExprKind.ExprObjectFor right; Span = right.Span }
+            inferBinOp env mode OpApply objFor operand
+        | _ ->
         if syntacticFormer then
             // Explicit spelling: the unchanged path.
             inferExpr env left |> Result.bind applyWith
