@@ -13073,6 +13073,11 @@ and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: 
     match annot with
     | None -> Ok []
     | Some ty ->
+        // Through ALIASES: `type Sal = Float64<psu, min=0.0>` keeps its bound
+        // only in the surface body (lowering erases min=/max=), so `let s: Sal`
+        // must look the alias up to see it -- without this the inline spelling
+        // aborted BL8001 and the aliased one printed -1.
+        let ty = resolveSurfaceAlias env 8 ty
         // `Ast.boundedConjuncts` is the ONE definition of what a bounded
         // annotation asserts; the side labels are recovered in parallel from
         // the same node so a one-sided annotation still names its endpoint.
@@ -13094,6 +13099,50 @@ and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: 
                     let msg = $"Bound violation in '{subjectName}' ({side})"
                     mkTypedSpan (TExprConstraintCheck (tCond, "BL8001", msg)) IRTUnit tCond.Span))
             |> sequenceResults
+
+/// Runtime bound guards on a FUNCTION's bounded parameters (checked on entry)
+/// and bounded return (checked on the value the body produces). The body is
+/// rewritten to
+///
+///     { <param guards>; let __ret_f = <body>; <return guards>; __ret_f }
+///
+/// only when some guard exists, so an unbounded signature keeps its body node
+/// untouched. `bodyEnv` has the parameters bound.
+and internal wrapBoundedSignatureChecks (bodyEnv: TypeEnv) (funcDecl: FunctionDecl) (tBody: TypedExpr) : TypeResult<TypedExpr> =
+    if funcDecl.IsStatic then Ok tBody else
+    let span = tBody.Span
+    let synAt k : Expr = { Kind = k; Span = span }
+    let paramChecks =
+        funcDecl.Params
+        |> List.map (fun p ->
+            match p.Type with
+            | Some pty ->
+                synthesizeBoundChecks bodyEnv (Some pty) $"parameter {p.Name} of {funcDecl.Name}" (synAt (ExprVar p.Name))
+            | None -> Ok [])
+        |> sequenceResults
+        |> Result.map List.concat
+    paramChecks |> Result.bind (fun pChecks ->
+    let retName = $"__ret_{funcDecl.Name}"
+    let retId = bodyEnv.Builder.FreshId()
+    let retEnv = bindVarSimple retName retId tBody.Type bodyEnv
+    (match funcDecl.ReturnType with
+     | Some rty -> synthesizeBoundChecks retEnv (Some rty) $"the return value of {funcDecl.Name}" (synAt (ExprVar retName))
+     | None -> Ok [])
+    |> Result.map (fun rChecks ->
+        if pChecks.IsEmpty && rChecks.IsEmpty then tBody
+        else
+            let body =
+                if rChecks.IsEmpty then tBody
+                else
+                    let tb : TypedBinding = {
+                        Name = retName; VarId = retId; Type = tBody.Type
+                        Identity = None; IsMutable = false; Value = tBody
+                        SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                    mkTypedSpan (TExprBlock (TStmtLet tb :: (rChecks |> List.map TStmtExpr),
+                                             Some (mkTypedSpan (TExprVar (retName, retId, None)) tBody.Type span)))
+                                tBody.Type span
+            if pChecks.IsEmpty then body
+            else mkTypedSpan (TExprBlock (pChecks |> List.map TStmtExpr, Some body)) tBody.Type span))
 
 /// Resolve a surface type through ORDINARY alias chains. Distinct from
 /// `lowerTypeExpr`'s resolution, which answers in IRType and has therefore
@@ -14861,11 +14910,18 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             let effects = effectsOfBody env (Some funcVarId) tBody
             env.FuncEffects.[funcVarId] <- effects
             env.FuncSigVarRange.[funcVarId] <- (sigVarLo, env.Subst.NextId)
+            // Bounded PARAMETERS and RETURN (`x: Sal`, `-> Float64<min=0.0>`,
+            // through aliases too): runtime guards at entry and at the return,
+            // the same BL8001 guards a bounded `let` gets. Wrapped LAST, after
+            // every deduction has read the unguarded body.
+            match wrapBoundedSignatureChecks bodyEnv funcDecl tBody with
+            | Error e -> Error e
+            | Ok tBodyGuarded ->
             let tf : TypedFunctionDecl = {
                 Name = funcDecl.Name; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams
                 Params = resolvedParams; ReturnType = resolvedRet
-                WhereClause = funcDecl.WhereClause; Body = tBody
+                WhereClause = funcDecl.WhereClause; Body = tBodyGuarded
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
                 NameSpan = funcDecl.NameSpan
                 Effects = effects

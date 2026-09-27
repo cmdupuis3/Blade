@@ -1,0 +1,9 @@
+// TEST: Bounded Return Violated (aborts)
+// A function RETURN typed through a bounded alias: the value the body produces
+// is guarded before it is returned (the same BL8001 guard a bounded `let`
+// gets). Unguarded before, so `f(1.0)` returned -4.
+// ABORT: Bound violation in 'the return value of f' (min)
+type Sal = Float64<min=0.0>
+function f(x: Float64) -> Sal = x - 5.0
+let y = f(1.0)
+let z = y + 1.0
