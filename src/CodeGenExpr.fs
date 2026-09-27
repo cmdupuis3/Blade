@@ -611,7 +611,13 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                             | TfConjugateOnSwap -> "nested_array_utilities::ReadTransform::ConjugateOnSwap"
                         let g = groupNum
                         groupNum <- groupNum + 1
-                        sb.Append($$"""std::array<size_t,{{a}}> __g{{g}} = { {{(String.concat ", " these)}} }; """) |> ignore
+                        // (size_t) per coordinate: a lambda parameter or a
+                        // window centre `(w + k)` is int64-typed, and a bare
+                        // int64 in this brace-init is a narrowing error
+                        // (-Werror=narrowing) -- the halo read of a symmetric
+                        // source's row (tests/corpus/loops/211) never compiled.
+                        let coords = these |> List.map (fun c -> $"(size_t)({c})")
+                        sb.Append($$"""std::array<size_t,{{a}}> __g{{g}} = { {{(String.concat ", " coords)}} }; """) |> ignore
                         sb.Append($"bool __z{g}; int __p{g} = nested_array_utilities::canon_fold<{a}>(__g{g}, {strictArg}, __z{g}); ") |> ignore
                         sb.Append($"if (__z{g}) return {elemTypeStr}(); ") |> ignore
                         sb.Append($"auto __c{g} = nested_array_utilities::canon_left_justify<{a}>(__g{g}, {strictArg}); ") |> ignore
@@ -2543,6 +2549,9 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
         // entry NAME and include line differ.
         let linalgCall = Blade.LinAlgPatterns.classify (IRGram (lExpr, rExpr, sameArray))
         let resolved = linalgCall |> Option.bind Blade.LinAlgPatterns.resolveNodeRoute
+        (match linalgCall with
+         | Some call -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName call resolved
+         | None -> Blade.LinAlgPatterns.recordUnroutable (decisionSpan ()) varName "gram" "the operands are not one BLAS precision over dense rows (mixed element types, or a non-dense layout): Blade's own loops")
         let shimEntry = resolved |> Option.map snd
         let useShim = shimEntry.IsSome
         // Pool capacities for the shim's contiguity probe. See
@@ -2623,8 +2632,14 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // R = 2).
                     let triR = 6
                     let jam =
-                        if isComplexElem outElem then []
+                        if isComplexElem outElem then
+                            recordCodegenDecision "microkernel" varName
+                                (Blade.Effects.Declined "complex elements keep the plain nest (a 1.13x ceiling, and not bitwise at R = 2)")
+                                [ "triangular gram jam" ]
+                            []
                         else
+                            recordCodegenDecision "microkernel" varName Blade.Effects.Applied
+                                [ "triangular gram jam"; $"{triR} cells per tile over each row's span (bitwise)" ]
                             [ yield $$"""    for (; __gjr + {{triR}} <= __gspan; __gjr += {{triR}}) {"""
                               yield! [ for k in 0 .. triR - 1 ->
                                          $"""        {(rRowDecl $"__growj{k}" $"__gi + __gjr + {k}")}""" ]
@@ -2637,8 +2652,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                               yield! [ for k in 0 .. triR - 1 ->
                                          $"        {varName}[__gi][__gjr + {k}] = __gacc{k};" ]
                               yield "    }" ]
-                    [ yield (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR_DYNAMIC"
-                             else ompThreadsSuppressedBlockMarker ())
+                    [ yield intrinsicRowThreading varName true
                       yield $$"""for (size_t __gi = 0; __gi < {{mExtent}}; __gi++) {"""
                       yield $"""    {(lRowDecl "__growi" "__gi")}"""
                       yield $"    const size_t __gspan = {mExtent} - __gi;"
@@ -2805,6 +2819,13 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                                     | None -> 6
                             | _ -> runtimeKnee
                     let accName k = $"__gacc{k}"
+                    if doJam then
+                        recordCodegenDecision "microkernel" varName Blade.Effects.Applied
+                            [ "dense gram jam"; $"{jamR} cells per tile (bitwise)" ]
+                    else
+                        recordCodegenDecision "microkernel" varName
+                            (Blade.Effects.Declined "complex elements keep the plain nest (not bitwise under the jam)")
+                            [ "dense gram jam" ]
                     let rowName k = $"__growj{k}"
                     // NOTE: every element below is an EXPLICIT `yield`.
                     // The `if doJam` arm forces it: introducing one
@@ -2812,8 +2833,7 @@ and materializeGramForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
                     // the whole list, and the bare `sprintf` lines then
                     // compile to discarded expressions (FS3221) -- i.e.
                     // silently missing lines in the emitted C++.
-                    [ yield (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
-                             else ompThreadsSuppressedBlockMarker ())
+                    [ yield intrinsicRowThreading varName false
                       yield $$"""for (size_t __gi = 0; __gi < {{mExtent}}; __gi++) {"""
                       yield $"""    {(lRowDecl "__growi" "__gi")}"""
                       yield "    size_t __gj = 0;"
@@ -2904,6 +2924,11 @@ and materializeGramApplyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
         let halves = Blade.LinAlgPatterns.classifyGramApply lExpr rExpr xExpr
         let resolvedT = halves |> Option.bind (fun (t, _) -> Blade.LinAlgPatterns.resolveNodeRoute t)
         let resolvedY = halves |> Option.bind (fun (_, y) -> Blade.LinAlgPatterns.resolveNodeRoute y)
+        (match halves with
+         | Some (t, y) ->
+             Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName t resolvedT
+             Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName y resolvedY
+         | None -> Blade.LinAlgPatterns.recordUnroutable (decisionSpan ()) varName "gram_apply" "the operands are not one BLAS precision over dense rows: Blade's own two passes")
         let lCells = denseCellCountExpr lTy lName
         let rCells = denseCellCountExpr rTy rName
         for resolved in [ resolvedT; resolvedY ] do
@@ -2929,8 +2954,7 @@ and materializeGramApplyForm (subst: SubstMap) (names: Map<IRId, string>) (varNa
             | Some (_, entry) ->
                 [ $"/* {(dispatchMarkerTag resolvedY)} dispatch: gram_apply(A, B, x), y = A t */ {entry}({mExtent}, {nExtent}, {lName}.data, {lCells}, {tName}.data, {varName}.data);" ]
             | None ->
-                [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
-                   else ompThreadsSuppressedBlockMarker ())
+                [ intrinsicRowThreading varName false
                   $$"""for (size_t __gi = 0; __gi < {{mExtent}}; __gi++) {"""
                   $"    const {(irTypeToCpp la.ElemType)}* BLADE_RESTRICT __growi = &{lName}[__gi][0];"
                   $"    {outElemStr} __gacc = {outElemStr}();"
@@ -3032,6 +3056,9 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
         // so only the entry NAME and the include line differ.
         let linalgCall = Blade.LinAlgPatterns.classify (IRMatmul (lExpr, rExpr))
         let resolved = linalgCall |> Option.bind Blade.LinAlgPatterns.resolveNodeRoute
+        (match linalgCall with
+         | Some call -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName call resolved
+         | None -> Blade.LinAlgPatterns.recordUnroutable (decisionSpan ()) varName "matmul" "the operands are not one BLAS precision over dense rows: Blade's own loops")
         let shimEntry = resolved |> Option.map snd
         match resolved with
         | Some (Blade.LinAlgPatterns.CudaBlas, _) -> (cudaLinalgUsedCell ()).Value <- true
@@ -3080,9 +3107,8 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                 // is UNTOUCHED -- it is a vectorization assertion, not a thread
                 // construct, and the knob is about teams. See
                 // `ompThreadEmissionEnabled`.
-                let itjLoop =
-                    [ (if ompThreadEmissionEnabled () then "BLADE_OMP_PARALLEL_FOR"
-                       else ompThreadsSuppressedBlockMarker ())
+                let itjLoop () =
+                    [ intrinsicRowThreading varName false
                       $$"""for (size_t __mi = 0; __mi < {{mExtent}}; __mi++) {"""
                       $"    {outElemStr}* BLADE_RESTRICT __mcrow = &{varName}[__mi][0];"
                       $$"""    for (size_t __mj = 0; __mj < {{nExtent}}; __mj++) { __mcrow[__mj] = {{outElemStr}}(); }"""
@@ -3102,9 +3128,9 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                 // products in ascending t, and the tile is written in vector
                 // extensions so contraction follows the SAME flag -- measured
                 // bitwise under both -ffp-contract=off and =fast. 2-3.9x
-                // single-threaded from ~30^3 up; below the header's
-                // `worth()` crossover (M >= 18, K >= 16, >= 32768 MACs) the
-                // loop wins and runs instead. The decision is made HERE, on
+                // single-threaded from ~30^3 up; below the `packedGemmWorth`
+                // crossover (M >= 18, K >= 16, >= 32768 MACs) the loop wins
+                // and runs instead. The decision is made HERE, on
                 // literal extents: inferMatmul refuses operands whose extents
                 // are not static (BL5200), so a non-literal one cannot reach
                 // this arm today, and if one ever does it keeps the loop. The
@@ -3115,10 +3141,20 @@ and materializeMatmulForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
                     $"blade_pgemm::dgemm_nn((size_t)({mExtent}), (size_t)({kExtent}), (size_t)({nExtent}), ({lName}).data, ({rName}).data, {varName}.data, {threadedArg});"
                 let lit (s: string) = match System.Int64.TryParse s with | true, v -> Some v | _ -> None
                 match lit mExtent, lit kExtent, lit nExtent with
-                | Some m, Some k, Some n when m >= 18L && k >= 16L && m * n * k >= 32768L ->
+                | Some m, Some k, Some n when packedGemmWorth m k n ->
                     (packedGemmUsedCell ()).Value <- true
+                    recordCodegenDecision "microkernel" varName Blade.Effects.Applied
+                        [ "packed gemm (blade_pgemm::dgemm_nn, 6x8 register tile)"; $"M={m} K={k} N={n}" ]
                     [ "/* matmul: packed native kernel (blade_packed_gemm.hpp) */ " + pgemmCall ]
-                | _ -> itjLoop
+                | lm, lk, ln ->
+                    let shape =
+                        match lm, lk, ln with
+                        | Some m, Some k, Some n -> $"M={m} K={k} N={n}"
+                        | _ -> "non-literal extents"
+                    recordCodegenDecision "microkernel" varName
+                        (Blade.Effects.Declined "below the packed-gemm crossover (M >= 18, K >= 16, M*N*K >= 32768): the i-t-j loop wins")
+                        [ "packed gemm"; shape ]
+                    itjLoop ()
         Some (extentDecl @ [allocDecl] @ loop,
               [MatPool (varName, outElemStr, 2, "nullptr", None, ownedExtents)])
      | _ -> None)
@@ -3152,6 +3188,9 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
      | ArrayElem sa ->
         let call = Blade.LinAlgPatterns.classifyEigh sa
         let shimEntry = call |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
+        (match call with
+         | Some c -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName c (shimEntry |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+         | None -> ())
         match call, shimEntry with
         | Some c, Some entry ->
             (lapackUsedCell ()).Value <- true
@@ -3294,6 +3333,9 @@ and materializeLuForm (subst: SubstMap) (names: Map<IRId, string>) (varName: str
         let pivExtents = $"{pivName}_extents"
         let call = Blade.LinAlgPatterns.classifyLu aa
         let shimEntry = call |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
+        (match call with
+         | Some c -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName c (shimEntry |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+         | None -> ())
         match shimEntry with
         | Some _ -> (lapackUsedCell ()).Value <- true
         | None -> ()
@@ -3361,6 +3403,9 @@ and materializeLuSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName
         let infoName = $"{varName}__info"
         let call = Blade.LinAlgPatterns.classifyLuSolve la
         let shimEntry = call |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
+        (match call with
+         | Some c -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName c (shimEntry |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+         | None -> ())
         match shimEntry with
         | Some _ -> (lapackUsedCell ()).Value <- true
         | None -> ()
@@ -3472,6 +3517,9 @@ and materializeSolveForm (subst: SubstMap) (names: Map<IRId, string>) (varName: 
         // the chain would resolve to HostBlas anyway -- the same shortcut
         // `materializeEighForm` takes, and for the same recorded reason.
         let shimEntry = call |> Option.bind (Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas)
+        (match call with
+         | Some c -> Blade.LinAlgPatterns.recordRoute (decisionSpan ()) varName c (shimEntry |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+         | None -> ())
         match shimEntry with
         | Some _ -> (lapackUsedCell ()).Value <- true
         | None -> ()

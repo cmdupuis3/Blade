@@ -749,7 +749,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         match cppOf name src with
         | Error e -> fail name e
         | Ok cpp ->
-            let hasPragma = cpp.Contains "#pragma omp"
+            let hasPragma = (ompConstructView cpp).Contains "#pragma omp"
             // A dropped clause is exactly the silent case: no pragma AND no
             // marker. Assert the marker's absence too, so a future change that
             // "fixes" a case by suppressing it loudly is still caught here.
@@ -775,7 +775,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             // the distinction the licence controls, and `Contains` on the plain
             // form would match the collapse form as a prefix.
             let pragmaLines =
-                cpp.Split('\n')
+                (ompConstructView cpp).Split('\n')
                 |> Array.map (_.Trim())
                 |> Array.filter (fun l -> l.StartsWith "#pragma omp")
                 |> Array.toList
@@ -794,7 +794,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
             // The emitter writes the pragma and the loop header it governs as
             // consecutive lines, so the next non-blank line after the pragma is
             // that header.
-            let lines = cpp.Split('\n') |> Array.map (_.Trim())
+            let lines = (ompConstructView cpp).Split('\n') |> Array.map (_.Trim())
             let governed =
                 lines
                 |> Array.tryFindIndex (fun l -> l.StartsWith "#pragma omp")
@@ -827,7 +827,7 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         match cppOf name src with
         | Error e -> fail name e
         | Ok cpp ->
-            let lines = cpp.Split('\n') |> Array.map (_.Trim())
+            let lines = (ompConstructView cpp).Split('\n') |> Array.map (_.Trim())
             let pragmaLines = lines |> Array.filter (fun l -> l.StartsWith "#pragma omp") |> Array.toList
             let governedIsRowLoop () =
                 lines
@@ -882,8 +882,8 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         | Ok cpp ->
             let flat =
                 cpp.Split('\n') |> Array.map (_.TrimStart()) |> String.concat "\n"
-            let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
-            let present = mustNotContain |> List.filter flat.Contains
+            let missing = mustContain |> List.filter (fun s -> not (hasOmpPin flat s))
+            let present = mustNotContain |> List.filter (hasOmpPin flat)
             if not missing.IsEmpty then
                 fail name ($"""generated C++ lacks: {(String.concat " | " (missing |> List.map (_.Replace("\n", " \\n "))))}""")
             elif not present.IsEmpty then
@@ -896,8 +896,8 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         match cppOf name src with
         | Error e -> fail name e
         | Ok cpp ->
-            let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
-            let present = mustNotContain |> List.filter cpp.Contains
+            let missing = mustContain |> List.filter (fun s -> not (hasOmpPin cpp s))
+            let present = mustNotContain |> List.filter (hasOmpPin cpp)
             // A licensed fold calls the OpenMP runtime API, which needs the
             // header — `#pragma omp` alone does not. Asserted as "included, not
             // commented out", the shape genIncludes can regress to.
@@ -940,8 +940,8 @@ let runOmpPragmaTests () : Blade.Tests.TestHarness.BlockResult =
         | Ok cpp ->
             let flat =
                 cpp.Split('\n') |> Array.map (_.TrimStart()) |> String.concat "\n"
-            let missing = mustContain |> List.filter (fun s -> not (flat.Contains s))
-            let present = mustNotContain |> List.filter flat.Contains
+            let missing = mustContain |> List.filter (fun s -> not (hasOmpPin flat s))
+            let present = mustNotContain |> List.filter (hasOmpPin flat)
             if not missing.IsEmpty then
                 fail name ($"""knob-on C++ lacks: {(String.concat " | " (missing |> List.map (_.Replace("\n", " \\n "))))}""")
             elif not present.IsEmpty then

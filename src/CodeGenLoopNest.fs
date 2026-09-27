@@ -543,7 +543,7 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
             if collapseDepth >= 2 then
                 // Perfect, collapse-eligible rectangular prefix of >=2 levels:
                 // fuse them. (A collapsed rectangular prefix is balanced; static.)
-                $"#pragma omp parallel for collapse({collapseDepth})\n{pragmaIndent}"
+                $"BLADE_OMP_PARALLEL_FOR_COLLAPSE({collapseDepth})\n{pragmaIndent}"
             elif hasTriangularBelow then
                 // Outer loop rectangular (or single), but triangular work below:
                 // parallelize the outer loop with dynamic schedule for balance.
@@ -577,11 +577,11 @@ let genNestPragma (bindings: LoopIndexBinding list) (pragmaIndent: string) : str
                 // this pragma at all. Any future descending experiment needs a
                 // signed counter or a reversed-index body, and needs a REASON,
                 // which the analysis above says does not exist for this shape.)
-                $"#pragma omp parallel for schedule(dynamic)\n{pragmaIndent}"
+                $"BLADE_OMP_PARALLEL_FOR_DYNAMIC\n{pragmaIndent}"
             else
                 // Outer loop parallel, remaining work balanced (rectangular or
                 // none): plain static parallel for.
-                $"#pragma omp parallel for\n{pragmaIndent}"
+                $"BLADE_OMP_PARALLEL_FOR\n{pragmaIndent}"
 
 /// Position (index into `bindings`) of the level that should carry the nest's
 /// pragma: the OUTERMOST LICENSED one, which is not always level 0.
@@ -659,7 +659,8 @@ let ompSuppressedMarker (requested: bool) (pragmaEmitted: bool) (reason: string)
 let peelRowPragma (requested: bool) (licensed: bool) (blocker: string option)
                   (ind: string) : string list =
     if licensed && blocker.IsNone && ompThreadEmissionEnabled () then
-        [ ind + "#pragma omp parallel for schedule(dynamic)" ]
+        recordOmpConstruct "" "BLADE_OMP_PARALLEL_FOR_DYNAMIC" "peeled ragged / grouped row loop"
+        [ ind + "BLADE_OMP_PARALLEL_FOR_DYNAMIC" ]
     else
         let reason =
             if not (ompThreadEmissionEnabled ()) then ompThreadsSuppressedReason ()
@@ -1245,173 +1246,6 @@ let compoundOutputSubscript (bindings: LoopIndexBinding list) (outName: string) 
         | [tb] -> $".data[{cb.IndexName} * {outName}.trailing_stride + {tb.IndexName}]"
         | tbs -> $""".data[{cb.IndexName} * {outName}.trailing_stride + {(tbs |> List.map (fun b -> b.IndexName) |> String.concat " + ")}]"""
 
-/// --- Dense-halo carousel (sliding-window reuse) -----------------------------
-/// For the INNERMOST loop level whose sole element is a dense halo window, the
-/// body's simple window reads `A(w(k))` are hoisted into a span-sized set of
-/// rotating scalar locals: warm-up loads before the innermost header, then one
-/// shift + ONE new load at the loop tail -- instead of one load per read per
-/// iteration. Ordinal contiguity makes this sound: stepping the center by one
-/// evicts exactly the oldest ordinal and admits exactly one new one.
-/// The transform is a pure rendering substitution (reference-keyed SubstMap):
-/// values are bit-identical, and the reuse structure becomes explicit in the
-/// emitted C++ -- the seam that pays off for expensive sources (hashed/sparse
-/// maps, streamed windows, fused producers) where a re-read is not a cache hit.
-/// Bails (None) whenever rotation could be unsound or names unresolvable:
-/// Reynolds perm-rendering, any parallel level (omp collapse forbids code
-/// between headers, and a split iteration space breaks rotation), MPI slab,
-/// streamed sources, dynamic start offsets, spans > 8, or reads whose array /
-/// prefix indices reference anything but captures, outer scope, or virtual
-/// (range/window) params.
-let internal planHaloCarousel
-    (streamed: Map<string, ProviderReadSpec>)
-    (codeGen: LoopNestCodeGen)
-    (outerNames: Map<int, string>) : (SubstMap * string list * string list) option =
-    if codeGen.HasReynolds || codeGen.MpiSlab || not streamed.IsEmpty
-       || codeGen.Bindings.IsEmpty
-       || (codeGen.Bindings |> List.exists (_.IsParallel)) then None
-    else
-    let inner = List.last codeGen.Bindings
-    match inner.Elements with
-    | [elem] when (match elem.SlotTag with
-                   | Some t -> t.StartsWith "__halowin|d:"
-                   | None -> false) ->
-        // Center start offset (the warm-up's first center is `start`, since
-        // the shrunk loop begins at 0). Dynamic starts bail.
-        let startOpt =
-            match elem.Virtual with
-            | VirtualRange None -> Some 0L
-            | VirtualRange (Some (IRLit (IRLitInt s))) -> Some s
-            | _ -> None
-        match startOpt with
-        | None -> None
-        | Some start ->
-            let wid = elem.ParamVarId
-            let wname = elem.ParamName
-            // Names resolvable BEFORE emission: outer scope, captures, and
-            // every level's virtual params (range windows / ordinals). Real
-            // arrays' peeled names are emission-internal -- reads touching
-            // them bail per group.
-            let prefixMap =
-                let fromElems =
-                    codeGen.Bindings
-                    |> List.collect (_.Elements)
-                    |> List.choose (fun e ->
-                        match e.Virtual with
-                        | VirtualRange _ | VirtualReverse -> Some (e.ParamVarId, e.ParamName)
-                        | RealArray -> None)
-                // Captures fill gaps only -- see the note at the kernel-body
-                // nameMap below: `c.Name` is the source spelling and loses to
-                // whatever the enclosing scope actually emitted.
-                let m0 =
-                    codeGen.Captures
-                    |> List.fold (fun acc c -> if Map.containsKey c.Id acc then acc else Map.add c.Id c.Name acc) outerNames
-                fromElems |> List.fold (fun acc (k, v) -> Map.add k v acc) m0
-            let rec varIdsOf (e: IRExpr) : Set<int> =
-                let self = match e with IRVar (id, _) -> Set.singleton id | _ -> Set.empty
-                childrenOf e |> List.fold (fun acc c -> Set.union acc (varIdsOf c)) self
-            // Window reads by NODE REFERENCE (the SubstMap contract), from
-            // the one shared scan (IRAccess.windowReadsOf): this ring serves
-            // reads on the LAST axis with a static offset; anything else
-            // simply stays a direct read.
-            let found : (IRExpr * int * IRExpr list * int) list =   // node, arrId, prefix, k
-                Blade.IRAccess.windowReadsOf (function IRVar (vid, _) -> vid = wid | _ -> false) codeGen.KernelExpr
-                |> List.choose (fun r ->
-                    match r.Offset with
-                    | Some k when r.Dim = r.Rank - 1 -> Some (r.Node, r.ArrayId, r.Prefix, k)
-                    | _ -> None)
-            // Groups: same array + identically-rendered prefix (outer-window
-            // reads etc. -- invariant across the innermost run by the wid check).
-            let renderable (aid: int) (prefix: IRExpr list) =
-                Map.containsKey aid prefixMap
-                && (prefix |> List.forall (fun p ->
-                        let vs = varIdsOf p
-                        not (Set.contains wid vs)
-                        && vs |> Set.forall (fun v -> Map.containsKey v prefixMap)))
-            // A PLAIN DENSE source is never worth a ring. Its window read is one
-            // L1-resident load, and the ring does not remove it -- the buffer
-            // is indexed by the loop variable, so it lives in memory, and every
-            // window read stays a load (from the ring) PLUS one ring store and
-            // one source load per step. The ring's write-then-read-next-step is
-            // also a real loop-carried dependence, which withholds BLADE_IVDEP
-            // and with it vectorization. Measured per stencil against the ring
-            // (whole nest incl. the output's first touch, 400k cells): 1.30x at
-            // [0,1], 1.38x [-1,0,1], 1.31x [-2,-4], 1.40x [-3..3], 1.32x 2-D
-            // [-1,0,1]^2, 1.35x at 8M cells, 1.06x with an `exp` body that
-            // cannot vectorize either way -- output byte-identical at all.
-            // Such groups are left to the ordinary renderer, which reads
-            // `A[.., w + k]` for ANY offset list -- the path parallel nests
-            // already take. The ring stays for sources whose read is not a
-            // plain load.
-            let isPlainDenseSource (node: IRExpr) =
-                match node with
-                | IRIndex (IRVar (_, ty), _, _) ->
-                    (match ty with
-                     | ArrayElem at ->
-                        not (isCompoundArrayType at) && not (isSparseArrayType at)
-                        && at.IndexTypes |> List.forall (fun ix ->
-                               ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Dependencies.IsEmpty)
-                     | _ -> false)
-                | _ -> false
-            let groups =
-                found
-                |> List.filter (fun (node, _, _, _) -> not (isPlainDenseSource node))
-                |> List.filter (fun (_, aid, prefix, _) -> renderable aid prefix)
-                |> List.groupBy (fun (_, aid, prefix, _) ->
-                    (aid, prefix |> List.map (exprToCppCore emptySubst prefixMap) |> String.concat "|"))
-                |> List.filter (fun (_, reads) ->
-                    let ks = reads |> List.map (fun (_, _, _, k) -> k) |> List.distinct
-                    ks.Length >= 2 && (List.max ks - List.min ks + 1) <= 8)
-            if groups.IsEmpty then None
-            else
-                // Ring buffer, head = the loop index itself. The window's
-                // values stay STATIONARY in a pow2-capacity buffer; the loop
-                // index (which already increments once per pass) locates the
-                // logical start, so each iteration performs exactly ONE write
-                // -- the new value drops into the slot the departing value
-                // vacated ((i + span) & mask) -- and zero data movement.
-                // Reads are buf[(i + slot) & mask]; the pow2 pad makes the
-                // mod a mask (pad entries are seeded but never read live).
-                let idxName = inner.IndexName
-                let mutable subst : SubstMap = []
-                let mutable warmup : string list = []
-                let mutable tail : string list = []
-                groups |> List.iteri (fun g ((aid, _), reads) ->
-                    let arrS = Map.find aid prefixMap
-                    let (_, _, prefix, _) = List.head reads
-                    let prefixS =
-                        prefix |> List.map (exprToCppCore emptySubst prefixMap >> sprintf "[%s]") |> String.concat ""
-                    let ks = reads |> List.map (fun (_, _, _, k) -> k)
-                    let mink = List.min ks
-                    let maxk = List.max ks
-                    let span = maxk - mink + 1
-                    let cap = let mutable c = 1 in (while c < span do c <- c * 2); c
-                    let mask = cap - 1
-                    // Uniquified per nest via the output name: several halo
-                    // nests can share one C++ scope (sequential lets in main).
-                    let buf = $"__car_{(sanitizeCppName codeGen.OutputName)}_{g}"
-                    // size_t casts: the Array wrapper's operator[] takes size_t
-                    // and the wrapper also converts to a raw pointer, so an
-                    // int64 subscript is ambiguous -- exact-match it instead.
-                    let loadAt (ord: int64) = $"{arrS}{prefixS}[(size_t){ord}L]"
-                    let inits =
-                        [ for j in 0 .. span - 1 -> loadAt (start + int64 mink + int64 j) ]
-                        @ List.replicate (cap - span) (loadAt (start + int64 mink + int64 (span - 1)))
-                    warmup <- warmup @
-                        [ $"// halo carousel: {arrS} window [{mink}..{maxk}] -- ring of {cap}, head = {idxName}, one write/step"
-                          $"""std::array {buf}{{ {(String.concat ", " inits)} }};""" ]
-                    // The tail prefetches the value the NEXT step will read at
-                    // its far edge. On the last step there is no next step, and
-                    // the ordinal is one past the array (the interior shrink
-                    // ends the walk exactly at reach): guard the load. The slot
-                    // it would fill is never read again, so skipping it is exact
-                    // (docs/plans/structural/02, section 1.5).
-                    tail <- tail @
-                        [ $"if ((size_t)({wname} + {1 + maxk}L) < {arrS}.extents[{prefix.Length}]) {buf}[({idxName} + {span}UL) & {mask}UL] = {arrS}{prefixS}[(size_t)({wname} + {1 + maxk}L)];" ]
-                    for (node, _, _, k) in reads do
-                        subst <- (node, $"{buf}[({idxName} + {k - mink}UL) & {mask}UL]") :: subst)
-                Some (subst, warmup, tail)
-    | _ -> None
-
 let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: LoopNestCodeGen) (outerNames: Map<int, string>) (indent: int) : string list =
     let ind n = String.replicate n "    "
     let mutable lines = []
@@ -1513,6 +1347,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // nest, so `depth` advances by 3 before the first loop header.
     match foldChunk with
     | Some plan ->
+        recordOmpConstruct codeGen.OutputName "omp parallel num_threads(T) + fixed-order combine"
+            "comm-licensed parallel fold: outer level chunked per thread (Path B)"
         let outerBound = genLoopBoundExpr compoundArrays (List.head codeGen.Bindings)
         (ompApiUsedCell ()).Value <- true
         lines <- lines @ [
@@ -1542,10 +1378,6 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         ]
         depth <- depth + 3
     | None -> ()
-    // Dense-halo carousel plan (None when inapplicable): warm-up lines are
-    // injected just BEFORE the innermost header, the rotation at the loop
-    // tail, and the body renders through the reference-keyed SubstMap.
-    let carousel = planHaloCarousel streamed codeGen outerNames
     // Which rank-1 input peels may drop the Array<T,1> wrapper for a
     // raw `BLADE_RESTRICT` row pointer (see restrictPeelSites for the proof
     // obligation). Streamed positions are handled by genElementBindingStreamed
@@ -1585,12 +1417,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // `ivdep` claims NO loop-carried dependence at all; every gate clause is load-bearing:
     //  1. `outRowDecl.IsSome` -- exactly one scalar cell written per iteration
     //     at the innermost loop variable (excludes fold/`+=`/compound writes).
-    //  2. `carousel.IsNone` -- the halo carousel's ring buffer IS a real
-    //     loop-carried dependence (written at the tail, read next iteration).
-    //  3. no omp coverage instrumentation -- its `__omp_seen` marker rewrites
+    //  2. no omp coverage instrumentation -- its `__omp_seen` marker rewrites
     //     the same slot every iteration (a WAW chain); test-mode only.
-    //  4. the kernel body contains no loop of its own. This clause is not about
-    //     SOUNDNESS like the three above -- it is about the pragma being
+    //  3. the kernel body contains no loop of its own. This clause is not about
+    //     SOUNDNESS like the two above -- it is about the pragma being
     //     MEANINGFUL. A `prodsum` / `reduce` / `contains` body, or a nested
     //     combinator application, lowers to an IIFE with a `for` inside it, and
     //     the nest machinery cannot see that loop (it counts nest LEVELS). The
@@ -1608,7 +1438,6 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     let bodyHasInnerLoop = kernelBodyContainsInnerLoop codeGen.KernelExpr
     let ivdepEligible =
         outRowDecl.IsSome
-        && carousel.IsNone
         && not (ompInstrument && outerIsParallel)
         && not bodyHasInnerLoop
     // Last nest level that belongs to the OpenMP construct. A `collapse(d)`
@@ -1627,7 +1456,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         | None -> -1
         | Some pl ->
             let txt = genNestPragma (List.skip pl codeGen.Bindings) ""
-            let m = System.Text.RegularExpressions.Regex.Match(txt, @"collapse\((\d+)\)")
+            // The macro spelling (blade_portability.hpp): BLADE_OMP_PARALLEL_FOR_COLLAPSE(d).
+            let m = System.Text.RegularExpressions.Regex.Match(txt, @"_COLLAPSE\((\d+)\)")
             if m.Success then pl + int m.Groups.[1].Value - 1 else pl
     // CANONICAL COMPACT FILL: write the flat pool through the closed-form
     // offsets instead of walking the Iliffe skeleton (see compactFlatWritePlan
@@ -1659,6 +1489,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         let pragmaPrefix =
             if codeGen.FoldWrapper.IsNone && pragmaLevel = Some bidx
             then genNestPragma (List.skip bidx codeGen.Bindings) (ind depth) else ""
+        recordOmpConstruct codeGen.OutputName pragmaPrefix $"loop nest level {bidx} ({binding.IndexName})"
         // Mark a requested-but-suppressed pragma at the outer level so the
         // dropped clause is visible rather than silent (see ompSuppressedMarker).
         let suppressedMarker =
@@ -1706,16 +1537,8 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
             elif isOuter && foldChunk.IsSome then
                 $"for (size_t {binding.IndexName} = __rlo; {binding.IndexName} < __rhi; {binding.IndexName}++) {{"
             else genForLoopHeader compoundArrays binding
-        // Carousel warm-up: seed the rotating window locals for the first
-        // center, in the scope just outside the innermost loop (re-seeded
-        // per outer iteration in multi-level nests).
-        if bidx = lastBindingIdx then
-            match carousel with
-            | Some (_, warmupLines, _) ->
-                for w in warmupLines do lines <- lines @ [ind depth + w]
-            | None -> ()
-        // Output row hoist: same scope as the carousel warm-up (just
-        // outside the innermost header, re-taken per outer iteration). The
+        // Output row hoist: just outside the innermost header, re-taken per
+        // outer iteration. The
         // flat-pool plan replaces the skeleton walk with `pool + <closed-form
         // offset>`; everything downstream (the `__orow[__i(r-1)]` store, the
         // restrict qualifier, BLADE_IVDEP) is unchanged, because the innermost
@@ -1740,11 +1563,10 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
         // declined and why -- same rationale as `ompSuppressedMarker`, and the
         // same one-comment-line cost. This case only: the three SOUNDNESS
         // clauses are self-evident from the emitted code around them (a fold's
-        // `+=`, the carousel's ring buffer, the `__omp_seen` write are all
-        // visible), whereas "the body hides a loop" is precisely the fact the
+        // `+=`, the `__omp_seen` write are both visible), whereas "the body hides a loop" is precisely the fact the
         // emission cannot show, which is why the inert pragma read as a real one.
         let ivdepSuppressedMarker =
-            if bodyHasInnerLoop && outRowDecl.IsSome && carousel.IsNone
+            if bodyHasInnerLoop && outRowDecl.IsSome
                && not (ompInstrument && outerIsParallel)
                && bidx = lastBindingIdx && bidx > ompLastLevel
             then [ ind depth + "// [ivdep] declined: kernel body contains an inner loop (prodsum/reduce/contains/nested apply), so this header cannot vectorize" ]
@@ -1868,14 +1690,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     // rendered array-literal body left a spurious `#error` behind in an
     // otherwise perfectly good program.
     let reynoldsResult =
-        lazy (
-            match carousel with
-            | Some (csubst, _, _) ->
-                // Carousel body: same expression, window reads substituted to the
-                // rotating locals (planHaloCarousel already excluded Reynolds).
-                { CppExpr = exprToCppCore csubst nameMap codeGen.KernelExpr; TotalPerms = 1; UniqueTerms = 1 }
-            | None ->
-                genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
+        lazy (genKernelExprWithReynolds codeGen.KernelExpr codeGen.KernelParams codeGen.HasReynolds codeGen.IsAntisymmetric nameMap paramFinalNames)
     if codeGen.HasReynolds && reynoldsResult.Value.UniqueTerms < reynoldsResult.Value.TotalPerms then
         lines <- lines @ [ind depth + $"// Reynolds: {reynoldsResult.Value.UniqueTerms}/{reynoldsResult.Value.TotalPerms} perms unique (dedup {reynoldsResult.Value.TotalPerms / max 1 reynoldsResult.Value.UniqueTerms}x)"]
     // When the output row was hoisted, the write goes through the
@@ -1965,7 +1780,7 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
                 | _ -> None
             match literalLeaves with
             | Some leaves ->
-                let subst = match carousel with Some (csubst, _, _) -> csubst | None -> emptySubst
+                let subst = emptySubst
                 // Render the let prefix (empty for a bare literal body): each
                 // non-unit value becomes a scoped local named __v<id> --
                 // renderLetExpr's convention, so the leaves' IRVar references
@@ -2022,12 +1837,6 @@ let genLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (codeGen: Loop
     match rowWriteLines with
     | Some rw -> for l in rw do lines <- lines @ [ind depth + l]
     | None -> lines <- lines @ [ind depth + assignLine.Value]
-    // Carousel rotation: shift the window by one ordinal and load the single
-    // new leading value for the next center.
-    match carousel with
-    | Some (_, _, tailLines) ->
-        for t in tailLines do lines <- lines @ [ind depth + t]
-    | None -> ()
 
     // Close all loops
     for _ in codeGen.Bindings do
@@ -2258,7 +2067,6 @@ let tryGenFlatElementwiseNest
     elif ompTestModeEnabled () then None
     elif depth = 0 || nArrays = 0 then None
     elif List.length operandTypes <> nArrays then None
-    elif (planHaloCarousel streamed codeGen outerNames).IsSome then None
     else
     // ---- Gate 2: the output is a plain (non-tabulated) array of nest rank ---
     match codeGen.OutputType with
@@ -2383,9 +2191,11 @@ let tryGenFlatElementwiseNest
             // `ompThreadEmissionEnabled`.
             let threadsOn = ompThreadEmissionEnabled ()
             let pragma =
-                if allParallel && threadsOn then "#pragma omp parallel for simd"
-                elif allParallel then "#pragma omp simd"
+                if allParallel && threadsOn then "BLADE_OMP_PARALLEL_FOR_SIMD"
+                elif allParallel then "BLADE_OMP_SIMD"
                 else "BLADE_IVDEP"
+            if allParallel then
+                recordOmpConstruct codeGen.OutputName pragma "flat elementwise sweep over the whole pool"
             // Census line, so a licensed-but-serialized flat loop is not silent.
             // It sits BEFORE the pragma: nothing may come between an OpenMP
             // construct and the `for` it governs.
@@ -2619,6 +2429,9 @@ let tryGenRowFoldJamNest
                 $"    {out}[{iv}] = __ja0;"
                 "}" ]
         let kind = match codeGen.KernelExpr with IRReduce _ -> "reduce" | _ -> "prodsum"
+        recordCodegenDecision "microkernel" codeGen.OutputName Blade.Effects.Applied
+            [ (if kind = "reduce" then "row-fold jam (partial reduce over rows)" else "matvec jam (row-map prodsum)")
+              $"{jamR} rows per tile, one accumulator per row (bitwise)" ]
         Some (
             [ ind indent + $"// row-fold jam: {kind} over rows, {jamR} rows per tile, one accumulator per row (bitwise: each row keeps its own ascending fold)"
               ind indent + "{" ]
@@ -2646,7 +2459,10 @@ let internal tryGenGemvDispatch
         (indent: int) : string list option =
     match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
     | Blade.LinAlgPatterns.BlasL2 call ->
-        match Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call with
+        let entryOpt = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
+        Blade.LinAlgPatterns.recordRoute (decisionSpan ()) codeGen.OutputName call
+            (entryOpt |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+        match entryOpt with
         | None -> None
         | Some entry ->
             // Name map: enclosing scope first, captures filling only ids it does
@@ -2733,7 +2549,10 @@ let internal tryGenSyrkDispatch
         (indent: int) : string list option =
     match (Map.count streamed, codeGen.OmpRequested, operandTypes, codeGen) with
     | Blade.LinAlgPatterns.BlasL3 call ->
-        match Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call with
+        let entryOpt = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
+        Blade.LinAlgPatterns.recordRoute (decisionSpan ()) codeGen.OutputName call
+            (entryOpt |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+        match entryOpt with
         | None -> None
         | Some entry ->
             let aName =
@@ -2832,7 +2651,6 @@ let tryGenLinAlgNest
         (outerNames: Map<int, string>)
         (indent: int) : string list option =
     if ompTestModeEnabled () then None
-    elif (planHaloCarousel streamed codeGen outerNames).IsSome then None
     else
     match tryGenGemvDispatch streamed operandTypes codeGen outerNames indent with
     | Some lines -> Some lines
@@ -2844,108 +2662,6 @@ let tryGenLinAlgNest
 
 // Array Allocation Generation
 
-
-// Function Template Generation
-
-/// Generate template parameter list for a combinator function
-let genTemplateParams (inputCount: int) (hasOutput: bool) : string =
-    let inputs = 
-        [0 .. inputCount - 1] 
-        |> List.collect (fun i -> 
-            [$"typename ITYPE{i+1}"
-             $"const size_t IRANK{i+1}"
-             $"const size_t* ISYM{i+1}"])
-    let output =
-        if hasOutput then
-            ["typename OTYPE"; "const size_t ORANK"; "const size_t* OSYM"]
-        else []
-    inputs @ output |> String.concat ", "
-
-/// Generate function parameter list
-let genFunctionParams (inputNames: string list) (outputName: string) : string =
-    let inputs =
-        inputNames |> List.mapi (fun i name ->
-            [$"typename promote<ITYPE{i+1}, IRANK{i+1}>::type {name}"
-             $"const size_t {name}_extents[IRANK{i+1}]"])
-        |> List.concat
-    let output =
-        [$"typename promote<OTYPE, ORANK>::type {outputName}"
-         $"const size_t {outputName}_extents[ORANK]"]
-    inputs @ output |> String.concat ",\n    "
-
-// Complete Function Generation
-
-/// Generate a complete C++ function from LoopNestCodeGen
-let genFunction (codeGen: LoopNestCodeGen) (funcName: string) : string list =
-    let inputCount = codeGen.InputArrayNames.Length
-    
-    // Template declaration
-    let templateParams = genTemplateParams inputCount true
-    let funcParams = genFunctionParams codeGen.InputArrayNames codeGen.OutputName
-    
-    // Function signature
-    let signature = 
-        [$"template<{templateParams}>"
-         $"void {funcName}("
-         $$"""    {{funcParams}}) {"""]
-    
-    // Body with loop nest
-    let body = genLoopNest codeGen Map.empty 1
-    
-    // Close
-    let close = ["}"]
-    
-    signature @ body @ close
-
-/// Generate header includes
-let genIncludes () : string list =
-    ["#include <cstdint>"
-     "#include <cstdlib>"  // for rand()
-     "#include <cmath>"
-     "#include <complex>"
-     "#include <functional>"
-     "#include <tuple>"
-     "#include <variant>"
-     "#include <string>"
-     "#include <iostream>"
-     "#include <iomanip>"
-     "#include <chrono>"
-     "#include <algorithm>"  // std::stable_sort (used by sort())
-     "#include <numeric>"    // std::iota (used by sort())
-     "#include <vector>"     // solve()'s LU working copy (materializeSolveForm)
-     "#include <unordered_map>"  // group_keys Case 3 (dynamic ngroups via hash discovery)
-     "#include <unordered_set>"  // unique() dedup, contains() hoist (future)
-     // OpenMP is ENABLED (Build.compileCppWithExtra always passes -fopenmp);
-     // `#pragma omp` needs no header, so <omp.h> is included only when
-     // something calls the omp_* RUNTIME API: the test-mode instrumentation
-     // (known here) or a comm-licensed parallel fold (only known after body
-     // generation, so the assemblers append it via ompApiUsedCell -- the
-     // blade_linalg-include pattern).
-     (if ompTestModeEnabled () then "#include <omp.h>  // omp-coverage test-mode instrumentation" else "// #include <omp.h>")
-     "#include \"nested_array_utilities.cpp\""
-     "#include \"rand_runtime.hpp\""
-     "#include <exception>"                 // std::exception for main()'s BL8005 catch
-     "#include \"blade_runtime.hpp\""        // blade_rt::panic + BLADE_FRAME shadow stack
-     "#include \"blade_run_record.hpp\""     // BLADE_RUN_RECORD: manifest + observed inputs + status at exit
-     ]
-    // Memcheck instrumentation (BLADE_MEMCHECK=1 only): appended as an extra
-    // element, never a placeholder comment, so default output stays
-    // byte-identical to a build without the feature.
-    @ (if memcheckEnabled () then ["#include \"blade_memcheck.hpp\""] else [])
-    @
-    ["using namespace nested_array_utilities;"
-     "using std::cout;"
-     "using std::endl;"
-     ""]
-    // Display-frame emitter (docs/display-frames.md). Header-only, static
-    // inline and free when unused, so it is emitted unconditionally rather
-    // than behind a per-program feature scan.
-    @ Blade.Display.Frame.cppRuntime ()
-    @
-    [""
-     "#define TIME std::chrono::high_resolution_clock::now()"
-     "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
-     ""]
 
 // C++ runtime headers
 //
@@ -2963,8 +2679,8 @@ let genIncludes () : string list =
 // leaked into the C++ compile line.
 
 /// Resolve the path of a runtime header file shipped in the cpp/ directory
-/// next to the compiler binary. Used by both genRuntimeHeader and
-/// genRuntimeArrayTypesHeader; centralized here so the AppContext.BaseDirectory
+/// next to the compiler binary. Used by readCppRuntimeHeader (and through it
+/// deployRuntimeHeaders); centralized here so the AppContext.BaseDirectory
 /// and "cpp" subpath assumptions live in one place.
 let internal cppRuntimeHeaderPath (filename: string) : string =
     System.IO.Path.Combine(System.AppContext.BaseDirectory, "cpp", filename)
@@ -2998,26 +2714,6 @@ let internal readCppRuntimeHeader (filename: string) : string =
         let text = System.IO.File.ReadAllText path
         cppRuntimeHeaderCache.[filename] <- text
         text
-
-/// Generate the runtime header file content (read from cpp/nested_array_utilities.hpp).
-/// Main.fs writes the result alongside each test's generated .cpp so
-/// `#include "nested_array_utilities.hpp"` resolves at g++ time.
-let genRuntimeHeader () : string =
-    readCppRuntimeHeader "nested_array_utilities.hpp"
-
-/// Generate the array-types runtime header (read from cpp/nested_array_types.hpp).
-/// Contains the wrapper structs (Array<T,N>, Ragged<T>, RaggedRow<T>, and
-/// Compound<T,RANK>) that carry shape metadata alongside the data pointer.
-/// It `#include`s index_types.h (compound_index_t + the tabulated index bases),
-/// which is therefore deployed next to it -- see deployRuntimeHeaders.
-let genRuntimeArrayTypesHeader () : string =
-    readCppRuntimeHeader "nested_array_types.hpp"
-
-/// Read the index-types runtime header: compound_index_t plus the tabulated
-/// index bases. nested_array_types.hpp `#include`s it, so it must ship next to
-/// every generated .cpp (via deployRuntimeHeaders) for the include to resolve.
-let genIndexTypesHeader () : string =
-    readCppRuntimeHeader "index_types.h"
 
 /// The C++ runtime header set. SINGLE SOURCE OF TRUTH: a header newly
 /// depended on by the runtime is added here once (and to Blade.fsproj's copy
@@ -3200,18 +2896,6 @@ let genIncludesExternal () : string list =
      "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
      ""]
 
-
-// Full Program Generation
-
-/// Generate a complete C++ program from multiple LoopNestCodeGen
-let genProgram (functions: (string * LoopNestCodeGen) list) : string =
-    let includes = genIncludes ()
-    
-    let funcCode = 
-        functions 
-        |> List.collect (fun (name, cg) -> genFunction cg name @ [""])
-    
-    (includes @ funcCode) |> String.concat "\n"
 
 // Array Literal Generation
 
@@ -3894,8 +3578,14 @@ let allocScopeStackCell () : AllocScope list ref =
         fresh
     else v
 
+/// Fresh refs, never a mutation of the one found (see CodeGenState.freshCell).
 let resetAllocScopeStack () : unit =
-    (allocScopeStackCell ()).Value <- []
+    freshCell allocScopeStackStorage []
+
+/// This file's per-program cells; called at every program-assembly entry.
+let resetLoopNestCells () : unit =
+    freshCell streamBufDeclsStorage Set.empty
+    resetAllocScopeStack ()
 
 let currentAllocScope () : AllocScope option =
     match (allocScopeStackCell ()).Value with

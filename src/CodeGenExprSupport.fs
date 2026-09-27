@@ -901,6 +901,17 @@ let freshReturnFactsCell () : Map<IRId, FreshReturn> ref =
         fresh
     else v
 
+/// This file's per-program cells, reset by installing fresh refs in the
+/// current flow (CodeGenState.freshCell explains why a reset must never
+/// mutate the ref it finds). Called at every program-assembly entry.
+let resetExprSupportCells () : unit =
+    freshCell cudaDeviceDialectStorage false
+    freshCell copyInPlaceMutsStorage Map.empty
+    freshCell groupedCaptureFactsStorage Map.empty
+    freshCell extentsOnlyGroupBysStorage Set.empty
+    freshCell groupedBindingsStorage Map.empty
+    freshCell freshReturnFactsStorage Map.empty
+
 /// The fresh-return fact for whatever callable an expression in callee position
 /// resolves to (module function or synthetic). Unresolvable => NotFresh.
 let freshReturnOf (calleeExpr: IRExpr) : FreshReturn =
@@ -1527,3 +1538,13 @@ let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string o
     if not (simdReducibleElem elemStr) then None
     else foldKernelBuiltinOp callable |> Option.bind ompReductionOperator
 
+
+/// Is the packed native matmul kernel (blade_packed_gemm.hpp's dgemm_nn)
+/// worth it for an M x K times K x N product? THE one statement of the rule:
+/// the matmul emitter decides at compile time on the literal extents, and the
+/// header carries no runtime copy to drift from it. Crossovers measured
+/// against the i-t-j loop: M below ~18 or K below ~16 wastes most of a 6 x 8
+/// tile or pays a C load/store per few MACs, and under ~32K MACs packing does
+/// not amortize. Small N is fine (the loop is at its worst there).
+let packedGemmWorth (m: int64) (k: int64) (n: int64) : bool =
+    m >= 18L && k >= 16L && m * n * k >= 32768L

@@ -1414,12 +1414,12 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
             | Some msg -> codegenError ctx bodyInd msg
             | None ->
             if funcDef.IsRepro then
-                Blade.LinAlgPatterns.reproScopeDepth.Value <-
-                    Blade.LinAlgPatterns.reproScopeDepth.Value + 1
+                (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
+                    (Blade.LinAlgPatterns.reproScopeDepth ()).Value + 1
                 try genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
                 finally
-                    Blade.LinAlgPatterns.reproScopeDepth.Value <-
-                        Blade.LinAlgPatterns.reproScopeDepth.Value - 1
+                    (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
+                        (Blade.LinAlgPatterns.reproScopeDepth ()).Value - 1
             else genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
         finally Blade.Types.PoolReuseTable.setCurrentReturnDonor None
     // Shadow-stack frame: named as the Blade function so a runtime
@@ -1509,12 +1509,12 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
     let bodyStmts =
         try
             if funcDef.IsRepro then
-                Blade.LinAlgPatterns.reproScopeDepth.Value <-
-                    Blade.LinAlgPatterns.reproScopeDepth.Value + 1
+                (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
+                    (Blade.LinAlgPatterns.reproScopeDepth ()).Value + 1
                 try genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
                 finally
-                    Blade.LinAlgPatterns.reproScopeDepth.Value <-
-                        Blade.LinAlgPatterns.reproScopeDepth.Value - 1
+                    (Blade.LinAlgPatterns.reproScopeDepth ()).Value <-
+                        (Blade.LinAlgPatterns.reproScopeDepth ()).Value - 1
             else genFuncBody bodyCtx builder bodyNames bodyInd funcDef.Body
         finally Blade.Types.PoolReuseTable.setCurrentReturnDonor None
     let reproNote =
@@ -1868,13 +1868,13 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
 
     // Deterministic deallocation: the fresh-return fixpoint resolves callees
     // through the table installed above, so it must run AFTER it. The stack reset
-    // is a belt (the four assembly sites reset too): a previous module that raised
+    // is a belt (beginProgramAssembly resets too): a previous module that raised
     // mid-emission must not leave a frame active for this one's bindings.
-    (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
-    (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
-    (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
+    freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
+    freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
+    freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     // Also after the callables table: kernel bodies are resolved through it.
-    (extentsOnlyGroupBysCell ()).Value <- computeExtentsOnlyGroupBys modul
+    freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
 
     let ctx0 = emptyContext ()
@@ -1996,11 +1996,11 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     // Same install as genModule -- split-timing mode goes through this entry point
     // instead, and a missing install here would silently demote every callee to
     // NotFresh (leaks only, but a divergence between the two modes).
-    (freshReturnFactsCell ()).Value <- computeFreshReturnFacts modul
-    (copyInPlaceMutsCell ()).Value <- computeCopyInPlaceMuts modul
-    (groupedCaptureFactsCell ()).Value <- computeGroupedCaptureFacts modul
+    freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
+    freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
+    freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
     // Also after the callables table: kernel bodies are resolved through it.
-    (extentsOnlyGroupBysCell ()).Value <- computeExtentsOnlyGroupBys modul
+    freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
     let ctx0 = emptyContext ()
     let ctx0 = { ctx0 with ProviderReads = modul.ProviderReads; ProviderWrites = modul.ProviderWrites; RandomInits = modul.RandomInits; CompoundInits = modul.CompoundInits; SparseInits = modul.SparseInits; MutableArrayLets = modul.MutableArrayLets }
@@ -2173,7 +2173,9 @@ let genTypeDefs (modul: IRModule) : string list =
 // EXPECT pins and the interpreter's twin printers read), while the C++
 // expressions and temporaries go through `sanitizeCppName`, which is the
 // spelling `bindingCppName` declared the binding under. The two differ only
-// for a binding whose name is a C++ reserved word (`let final = ...`).
+// for a binding whose name is a C++ reserved word (`let final = ...`) or one
+// spelled as another binding's name plus a generated suffix
+// (`installUserNameRenames`: `a_extents` beside an array `a`).
 
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =
@@ -2848,14 +2850,18 @@ let private netcdfFinalizeLines : string list =
 
 /// Registered FIRST, before any netcdf call can fail.
 ///
-/// The end-of-main call alone was not enough: a failed nc_open and
-/// blade_rt::panic both leave through std::exit(1), which never reaches it --
-/// and on a build whose netcdf closure deadlocks at teardown, that path hangs
-/// exactly as the success path did. std::exit runs atexit handlers before
-/// ExitProcess, so registering covers every way out that is not an outright
-/// crash. The helper is idempotent, so this and the explicit call coexist.
+/// The end-of-main call alone was not enough: a failed nc_open leaves through
+/// std::exit(1), which never reaches it -- and on a build whose netcdf
+/// closure deadlocks at teardown, that path hangs exactly as the success path
+/// did. std::exit runs atexit handlers before ExitProcess, so that
+/// registration covers it. blade_rt::panic leaves through std::_Exit instead
+/// (once, whatever number of OpenMP workers fail together), which runs no
+/// atexit handler, so the finalize is registered with the runtime's own
+/// failure-exit hooks as well. The helper is idempotent, so these and the
+/// explicit call coexist.
 let private netcdfRegisterLines : string list =
-    [ "    std::atexit(__blade_nc_finalize);" ]
+    [ "    std::atexit(__blade_nc_finalize);"
+      "    blade_rt::on_failure_exit(__blade_nc_finalize);" ]
 
 /// The run record's file-scope lines (Blade.RunRecord.cppLines): the input
 /// manifest of this module -- its provider reads plus the folds this
@@ -3014,105 +3020,8 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
     let footerBody = footer |> List.rev |> List.tail |> List.rev  // drop footer's closing "}"
     header @ (if netcdf then netcdfRegisterLines else []) @ tryLine @ setupIndented @ setupTiming @ computeIndented @ computeTiming @ printCode @ footerBody @ catchClose
 
-/// Generate a C++ program (uses external runtime header)
-/// Generate print statements for all bindings in a module.
-/// Shared by genSelfContainedProgram and genProgramWithExternalRuntime.
-let genMainProgram (modul: IRModule) (testName: string) : string =
-    (exprWarningsCell ()).Value <- []
-    // Reset the CUDA kernel collector; genCudaKernel appends during genModule.
-    (cudaKernelDefsCell ()).Value <- []
-    (symmDeclsCell ()).Value <- []
-    (moduleGlobalDeclsCell ()).Value <- []
-    (streamBufDeclsCell ()).Value <- Set.empty
-    (forcedDeferredIdsCell ()).Value <- Set.empty
-    (groupedBindingsCell ()).Value <- Map.empty
-    (linalgUsedCell ()).Value <- false
-    (tilesUsedCell ()).Value <- false
-    (packedGemmUsedCell ()).Value <- false
-    (cudaLinalgUsedCell ()).Value <- false
-    (lapackUsedCell ()).Value <- false
-    (ompApiUsedCell ()).Value <- false
-    // Deterministic deallocation: clear both cells for this program. genModule
-    // reinstalls the facts immediately (it needs the callables table first).
-    (freshReturnFactsCell ()).Value <- Map.empty
-    (copyInPlaceMutsCell ()).Value <- Map.empty
-    resetAllocScopeStack ()
-    let builder = IRBuilder()
-    // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
-    // must not collide with typecheck/lowering ids arriving in the module --
-    // a reused id re-registers the original variable's name in VarNames.
-    // 2^30 is far above any real program's id count.
-    builder.EnsureAtLeast(0x40000000)
-
-    let includes = genIncludes ()
-    // MPI scaffolding (see genSelfContainedProgram).
-    let mpiOn = mpiEmitModeEnabled () && moduleUsesMpi modul
-    setMpiProgramOn mpiOn
-    let includes = if mpiOn then includes @ ["#include <mpi.h>"; "#include \"linearized_storage.hpp\""] else includes
-    let mpiDecls =
-        if mpiOn then
-            [ "static int __blade_mpi_rank = 0;"
-              "static int __blade_mpi_size = 1;" ]
-        else []
-    let (funcDefs, bindCode) = genModule modul builder
-    // blade_linalg.hpp include only when a linalg route (gram / matmul) was
-    // actually emitted this assembly (collector fills during genModule;
-    // Build.fs keys -DBLADE_HAS_BLAS + the -I/link flags off this include
-    // line). Appended post-body like the CUDA prototypes below. A program
-    // using neither gram nor matmul never names the header at all.
-    let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
-    // blade_tilecache.hpp only when a tiled binding was emitted (revision
-    // reuse, docs/plans/structural/04); Build.fs keys -DBLADE_TOOLCHAIN_ID
-    // off this include line.
-    let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
-    // blade_packed_gemm.hpp only when the native matmul arm called it.
-    let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
-    // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
-    // shape, its OWN cell and its own build consequence -- Build.fs
-    // sniffs THIS line to write the companion `.cu`, build it with nvcc and
-    // link it in. A third cell rather than a shared one because under
-    // `resolveNodeRoute`'s fallback chain one program can legitimately reach
-    // both backends (a device matmul beside a host dot), and each dependency
-    // surface must be advertised on its own.
-    let includes = if (cudaLinalgUsedCell ()).Value then includes @ ["#include \"blade_linalg_cuda.hpp\""] else includes
-    // blade_lapack.hpp: the same collect-then-append shape, its OWN cell and
-    // its own define (-DBLADE_HAS_LAPACK). Separate from the line above so a
-    // gram/matmul program never advertises a LAPACK dependency and an eigh
-    // program never advertises a BLAS one.
-    let includes = if (lapackUsedCell ()).Value then includes @ ["#include \"blade_lapack.hpp\""] else includes
-    // <omp.h> only when a comm-licensed parallel fold emitted omp_* runtime
-    // calls this assembly. Same collect-then-append shape as linalg; `#pragma
-    // omp` alone needs no header, so every other program keeps its includes.
-    let includes =
-        if (ompApiUsedCell ()).Value
-           && not (includes |> List.exists (fun (s: string) -> s.StartsWith "#include <omp.h>"))
-        then includes @ ["#include <omp.h>  // comm-licensed parallel fold (omp_get_max_threads)"] else includes
-
-    // extern "C" launch-wrapper prototypes for any CUDA kernels emitted during
-    // genModule. Bodies live in the .cu (nvcc); the .cpp needs only the proto to
-    // call across the linkage boundary. Extract each wrapper's signature line
-    // (starts `extern "C" void __launch_`) and `;`-terminate it.
-    let cudaProtos =
-        (cudaKernelDefsCell ()).Value
-        |> List.filter (fun line -> line.StartsWith("extern \"C\"") && line.Contains("void __launch_"))
-        |> List.map (fun sigLine ->
-            // The hybrid (mpi+cuda) wrappers are dllexport'd in the .cu;
-            // the host proto imports plainly (MinGW links the DLL exports).
-            let trimmed = sigLine.Replace("__declspec(dllexport) ", "").TrimEnd()
-            (if trimmed.EndsWith("{") then trimmed.Substring(0, trimmed.Length - 1).TrimEnd() else trimmed) + ";")
-    let symmDecls = (symmDeclsCell ()).Value
-    // S0: module-level bindings promoted to namespace scope (declaration only;
-    // main() still initializes them at their original program point).
-    let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
-
-    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-    let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented []
-    let rrLines = runRecordLines modul testName mpiOn (funcDefs @ mainFunc)
-
-    (includes @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainFunc) |> String.concat "\n"
-
 /// The .cu file content for the most recently assembled program, or None if no
-/// CUDA kernel was emitted. Call AFTER genMainProgram/genProgramFromIR (the
+/// CUDA kernel was emitted. Call AFTER genSelfContainedProgramFromIR (the
 /// collector is populated during assembly).
 let getCudaFileContent () : string option =
     match (cudaKernelDefsCell ()).Value with
@@ -3165,31 +3074,6 @@ let private disambiguateModuleFunctions (modules: IRModule list) : IRModule list
                         | Some n when n > 1 -> { f with Name = $"{prefix}__{f.Name}" }
                         | _ -> f) })
 
-/// Generate a complete C++ program from an IR program (all modules)
-let genProgramFromIR (program: IRProgram) (testName: string) : string =
-    match program.Modules with
-    | [] -> "// Empty program\nint main() { return 0; }\n"
-    | [modul] -> genMainProgram modul testName
-    | modules ->
-        let modules = disambiguateModuleFunctions modules
-        let merged = {
-            Name = "merged"
-            Types = modules |> List.collect (_.Types)
-            Functions = modules |> List.collect (_.Functions)
-            Bindings = modules |> List.collect (_.Bindings)
-            StaticFunctionUsage = Map.empty
-            ProviderReads = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderReads) Map.empty
-            ProviderWrites = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.ProviderWrites) Map.empty
-            RandomInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.RandomInits) Map.empty
-            CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
-            SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
-            MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
-            // Ids are module-global (one builder), so the union carries every
-            // copy's origin key across the merge intact.
-            DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
-        }
-        genMainProgram merged testName
-
 /// Provider-driven #include lines for a module: the union of each involved
 /// provider's declared includes (registry-dispatched over the module's
 /// reads and writes), plus linearized_storage.hpp when any provider-read or
@@ -3216,35 +3100,24 @@ let providerIncludes (modul: IRModule) : string list =
     (fromProviders @ (if anyPacked then ["#include \"linearized_storage.hpp\""] else []))
     |> List.distinct
 
-/// Generate C++ struct definition from IRTDStruct
-let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
+/// Assemble ONE (possibly merged) module into a translation unit. Every
+/// per-program emission cell was reset by the caller,
+/// genSelfContainedProgramFromIR (`beginProgramAssembly`): the collectors
+/// genModule* fills (CUDA kernel defs read afterwards by getCudaFileContent,
+/// namespace-scope symm decls, S0 module-global promotions, forced-deferred
+/// ids read by genPrintStatements, the include flags read below) start empty,
+/// and the deterministic-deallocation facts are reinstalled by genModule /
+/// genModuleSplit (they need the callables table first).
+let private genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     let builder = IRBuilder()
-    builder.EnsureAtLeast(0x40000000)  // see genMainProgram: keep codegen ids disjoint
-    // Reset the CUDA kernel collector for this program; genCudaKernel appends
-    // during genModule. Read afterward via getCudaFileContent for the .cu file.
-    (cudaKernelDefsCell ()).Value <- []
-    // Reset the symm-decl hoist collector; symmetric outputs append namespace-
-    // scope symm arrays during genModule, emitted in the preamble below.
-    (symmDeclsCell ()).Value <- []
-    // Reset the S0 module-global promotion collector (see moduleGlobalDeclsCell).
-    (moduleGlobalDeclsCell ()).Value <- []
-    (streamBufDeclsCell ()).Value <- Set.empty
-    // Reset the forced-deferred collector; forceDeferredArrayInput populates it
-    // during genModule and genPrintStatements (called AFTER body generation)
-    // reads it to auto-print deferred bindings that ended up materialized.
-    (forcedDeferredIdsCell ()).Value <- Set.empty
-    (groupedBindingsCell ()).Value <- Map.empty
-    (linalgUsedCell ()).Value <- false
-    (tilesUsedCell ()).Value <- false
-    (packedGemmUsedCell ()).Value <- false
-    (cudaLinalgUsedCell ()).Value <- false
-    (lapackUsedCell ()).Value <- false
-    (ompApiUsedCell ()).Value <- false
-    // Deterministic deallocation: see genMainProgram. genModule / genModuleSplit
-    // reinstall the facts (both entry points below install).
-    (freshReturnFactsCell ()).Value <- Map.empty
-    (copyInPlaceMutsCell ()).Value <- Map.empty
-    resetAllocScopeStack ()
+    // Codegen-synthesized ids (sequence children, __s1 stages, __ret temps)
+    // must not collide with typecheck/lowering ids arriving in the module --
+    // a reused id re-registers the original variable's name in VarNames.
+    // 2^30 is far above any real program's id count.
+    builder.EnsureAtLeast(0x40000000)
+    // User bindings whose names extend another binding's by `_...` step
+    // aside from the generated `<name>_suffix` namespace (CodeGenState).
+    installUserNameRenames (modul.Bindings |> List.map (fun b -> b.Name))
 
     let includes =
         // Provider reads/writes emit provider-specific runtime calls (nc_*,
@@ -3311,7 +3184,9 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     // gram/matmul program never advertises a LAPACK dependency and an eigh
     // program never advertises a BLAS one.
     let includes = if (lapackUsedCell ()).Value then includes @ ["#include \"blade_lapack.hpp\""] else includes
-    // <omp.h>: see genMainProgram -- appended only for a comm-licensed fold.
+    // <omp.h> only when a comm-licensed parallel fold emitted omp_* runtime
+    // calls this assembly. Same collect-then-append shape as linalg; `#pragma
+    // omp` alone needs no header, so every other program keeps its includes.
     let includes =
         if (ompApiUsedCell ()).Value
            && not (includes |> List.exists (fun (s: string) -> s.StartsWith "#include <omp.h>"))
@@ -3337,100 +3212,25 @@ let genSelfContainedProgram (modul: IRModule) (testName: string) : string =
     let rrLines = runRecordLines modul testName mpiOn (funcDefs @ mainBody)
     (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
 
-/// Generate a C++ program with external runtime header
-/// Returns (mainFileContent, headerFileContent)
-let genProgramWithExternalRuntime (modul: IRModule) (testName: string) : string * string =
-    let builder = IRBuilder()
-    builder.EnsureAtLeast(0x40000000)  // see genMainProgram: keep codegen ids disjoint
-    
-    let includes =
-        // See genSelfContainedProgram: provider headers only for provider I/O.
-        genIncludesExternal () @ providerIncludes modul
-    // MPI scaffolding (see genSelfContainedProgram).
-    let mpiOn = mpiEmitModeEnabled () && moduleUsesMpi modul
-    setMpiProgramOn mpiOn
-    let includes = if mpiOn then includes @ ["#include <mpi.h>"; "#include \"linearized_storage.hpp\""] else includes
-    let mpiDecls =
-        if mpiOn then
-            [ "static int __blade_mpi_rank = 0;"
-              "static int __blade_mpi_size = 1;" ]
-        else []
-    let typeDefs = genTypeDefs modul
-    // Reset the forced-deferred collector before body generation; the
-    // genPrintStatements call below (correctly AFTER genModule) reads it.
-    (forcedDeferredIdsCell ()).Value <- Set.empty
-    (groupedBindingsCell ()).Value <- Map.empty
-    // Reset the S0 module-global promotion collector (see moduleGlobalDeclsCell).
-    (moduleGlobalDeclsCell ()).Value <- []
-    (linalgUsedCell ()).Value <- false
-    (tilesUsedCell ()).Value <- false
-    (packedGemmUsedCell ()).Value <- false
-    (cudaLinalgUsedCell ()).Value <- false
-    (lapackUsedCell ()).Value <- false
-    (ompApiUsedCell ()).Value <- false
-    // Deterministic deallocation: see genMainProgram.
-    (freshReturnFactsCell ()).Value <- Map.empty
-    (copyInPlaceMutsCell ()).Value <- Map.empty
-    resetAllocScopeStack ()
-    let (funcDefs, bindCode) = genModule modul builder
-    // blade_linalg.hpp include only when a linalg route (gram / matmul) was
-    // actually emitted this assembly (collector fills during genModule;
-    // Build.fs keys -DBLADE_HAS_BLAS + the -I/link flags off this include
-    // line).
-    let includes = if (linalgUsedCell ()).Value then includes @ ["#include \"blade_linalg.hpp\""] else includes
-    // blade_tilecache.hpp only when a tiled binding was emitted (revision
-    // reuse, docs/plans/structural/04); Build.fs keys -DBLADE_TOOLCHAIN_ID
-    // off this include line.
-    let includes = if (tilesUsedCell ()).Value then includes @ ["#include \"blade_tilecache.hpp\""] else includes
-    // blade_packed_gemm.hpp only when the native matmul arm called it.
-    let includes = if (packedGemmUsedCell ()).Value then includes @ ["#include \"blade_packed_gemm.hpp\""] else includes
-    // blade_linalg_cuda.hpp: the DEVICE half of the same collect-then-append
-    // shape, its OWN cell and its own build consequence -- Build.fs
-    // sniffs THIS line to write the companion `.cu`, build it with nvcc and
-    // link it in. A third cell rather than a shared one because under
-    // `resolveNodeRoute`'s fallback chain one program can legitimately reach
-    // both backends (a device matmul beside a host dot), and each dependency
-    // surface must be advertised on its own.
-    let includes = if (cudaLinalgUsedCell ()).Value then includes @ ["#include \"blade_linalg_cuda.hpp\""] else includes
-    // blade_lapack.hpp: the same collect-then-append shape, its OWN cell and
-    // its own define (-DBLADE_HAS_LAPACK). Separate from the line above so a
-    // gram/matmul program never advertises a LAPACK dependency and an eigh
-    // program never advertises a BLAS one.
-    let includes = if (lapackUsedCell ()).Value then includes @ ["#include \"blade_lapack.hpp\""] else includes
-    // <omp.h>: see genMainProgram -- appended only for a comm-licensed fold.
-    let includes =
-        if (ompApiUsedCell ()).Value
-           && not (includes |> List.exists (fun (s: string) -> s.StartsWith "#include <omp.h>"))
-        then includes @ ["#include <omp.h>  // comm-licensed parallel fold (omp_get_max_threads)"] else includes
+/// Every per-program emission cell, reset for a new assembly: warnings and
+/// refusal channels (back-end holes from a previous assembly must not be
+/// attributed to this one -- the driver drains them, but a caller that never
+/// drains, the test harness, would otherwise accumulate across tests), the
+/// decl collectors, the include flags, the deallocation facts, the alloc
+/// scope stack. Each reset installs FRESH state in the current flow and
+/// never mutates what it finds, which may be a ref shared with a parent
+/// flow and every sibling pipeline (CodeGenState.freshCell).
+let beginProgramAssembly () : unit =
+    resetProgramStateCells ()
+    resetExprSupportCells ()
+    resetLoopNestCells ()
+    Blade.LinAlgPatterns.resetReproScope ()
 
-    let bodyIndented = bindCode |> List.map (fun s -> "    " + s)
-    let printCode = genPrintStatements modul
-    let mainFunc = genMainWrapper (mpiOn, mpiOn && moduleHybridMpiOmp modul, moduleUsesNetcdf modul) testName bodyIndented printCode
-
-    // S0: module-level bindings promoted to namespace scope (declaration only).
-    let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
-    let rrLines = runRecordLines modul testName mpiOn (funcDefs @ mainFunc)
-    let mainFile = (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ moduleGlobalDecls @ funcDefs @ mainFunc) |> String.concat "\n"
-    let headerFile = genRuntimeHeader ()
-    (mainFile, headerFile)
-
-/// Generate a self-contained C++ program from an IR program
+/// Generate a self-contained C++ program from an IR program: THE program
+/// assembler (CLI, REPL, notebook and every test lane go through here).
 let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : string * string list =
-    // Reset module-level expression warnings (per-task via AsyncLocal cell)
+    beginProgramAssembly ()
     let cell = exprWarningsCell ()
-    cell.Value <- []
-    (exprSentinelsCell ()).Value <- []
-    // Back-end holes from a previous assembly must not be attributed to this
-    // one (the driver drains the channel, but a caller that never drains --
-    // the test harness -- would otherwise accumulate across tests).
-    (unhandledNodesCell ()).Value <- []
-    (codegenRefusalsCell ()).Value <- []
-    (currentDeclCell ()).Value <- ""
-    resetStreamedValueState ()
-    // Deterministic deallocation: see genMainProgram.
-    (freshReturnFactsCell ()).Value <- Map.empty
-    (copyInPlaceMutsCell ()).Value <- Map.empty
-    resetAllocScopeStack ()
     let code =
         match program.Modules with
         | [] -> "// Empty program\nint main() { return 0; }\n"
@@ -3452,7 +3252,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 CompoundInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.CompoundInits) Map.empty
                 SparseInits = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.SparseInits) Map.empty
                 MutableArrayLets = modules |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
-                // See the genProgramFromIR twin: ids are module-global, so the
+                // Ids are module-global (one builder), so the
                 // union preserves every copy's origin key.
                 DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
             }

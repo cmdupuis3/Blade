@@ -1,0 +1,30 @@
+// TEST: Sparse Gather Trail Empty
+// ============================================================================
+// A partial read of a SPARSE array whose values carry a trailing dimension
+// gathers every matching key's trailing block into a fresh rank-2 dense array
+// (nested_array_utilities::make_sparse_gather_dense_trail). A prefix that
+// matches NO key still gets a 1-slot pool and row table; the producer used to
+// leave row 0 unset in that case, so the teardown could not recover the pool.
+// Here the gather runs for a matching prefix, an empty one and a single-key
+// one, inside a function and at top level; the extents and values around the
+// empty gather must be exactly the matching keys', in key order.
+// ============================================================================
+let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]
+type E = Idx<4>
+type T = Idx<2>
+let vals: Array<Float64 like E, T> = [[21.0, 21.5], [3.0, 3.5], [10.0, 10.5], [5.0, 5.5]]
+let S = sparse(vals, K)
+function rows(k: Int64) -> Int64 = {
+    let g = S((k, _))
+    let (n, t) = extents(g)
+    n * 10 + t
+}
+let a = rows(0)
+let b = rows(7)
+let c = rows(1)
+let hit = S((0, _))
+let miss = S((7, _))
+// EXPECT: a = 22
+// EXPECT: b = 2
+// EXPECT: c = 12
+// EXPECT: hit = [[3, 3.5], [5, 5.5]]

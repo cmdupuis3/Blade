@@ -167,6 +167,73 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// The LOOP-NEST constructs whose clauses postdate OpenMP 2.0:
+//
+//   BLADE_OMP_PARALLEL_FOR_COLLAPSE(n)        omp parallel for collapse(n)
+//   BLADE_OMP_PARALLEL_FOR_SIMD               omp parallel for simd
+//   BLADE_OMP_SIMD                            omp simd
+//   BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(s)  omp parallel for simd reduction(s)
+//
+// Emitted on the line before a `for` header, exactly where the raw `#pragma`
+// lines used to go (the pragma spelling is the header's choice, never the
+// emitter's -- the rule this file exists for). `collapse` and unsigned
+// (`size_t`) loop variables are OpenMP 3.0 (`_OPENMP >= 200805`); `simd` is
+// 4.0 (`201307`). Each form DEGRADES to the strongest construct the
+// implementation has, and every degradation is sound because the emission
+// site's licence covers the stronger form:
+//
+//   * collapse(n) -> no expansion below 3.0. The collapsed levels are a
+//     rectangular, fully licensed prefix; without collapse the nest simply
+//     runs serially, which is the pre-3.0 reading of a size_t loop anyway.
+//   * parallel for simd / ... reduction(s) -> the same without `simd` on a
+//     3.0 implementation (one team over disjoint iterations, the reduction
+//     keeping its licensed reassociation), nothing below it.
+//   * simd -> nothing below 4.0 (the loop runs as the ordinary serial loop).
+//
+// No OpenMP at all (a generated `.cpp` compiled by hand without -fopenmp, or
+// cl.exe's host half of the CUDA path) is the empty expansion throughout:
+// serial and correct, instead of an unknown-pragma diagnostic per loop.
+#if defined(_OPENMP) && (_OPENMP >= 200805)
+  #define BLADE_OMP_PRAGMA_(x) _Pragma(#x)
+#endif
+
+#ifndef BLADE_OMP_PARALLEL_FOR_COLLAPSE
+  #if defined(_OPENMP) && (_OPENMP >= 200805)
+    #define BLADE_OMP_PARALLEL_FOR_COLLAPSE(n) BLADE_OMP_PRAGMA_(omp parallel for collapse(n))
+  #else
+    #define BLADE_OMP_PARALLEL_FOR_COLLAPSE(n)
+  #endif
+#endif
+
+#ifndef BLADE_OMP_PARALLEL_FOR_SIMD
+  #if defined(_OPENMP) && (_OPENMP >= 201307)
+    #define BLADE_OMP_PARALLEL_FOR_SIMD _Pragma("omp parallel for simd")
+  #elif defined(_OPENMP) && (_OPENMP >= 200805)
+    #define BLADE_OMP_PARALLEL_FOR_SIMD _Pragma("omp parallel for")
+  #else
+    #define BLADE_OMP_PARALLEL_FOR_SIMD
+  #endif
+#endif
+
+#ifndef BLADE_OMP_SIMD
+  #if defined(_OPENMP) && (_OPENMP >= 201307)
+    #define BLADE_OMP_SIMD _Pragma("omp simd")
+  #else
+    #define BLADE_OMP_SIMD
+  #endif
+#endif
+
+#ifndef BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION
+  #if defined(_OPENMP) && (_OPENMP >= 201307)
+    #define BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(spec) BLADE_OMP_PRAGMA_(omp parallel for simd reduction(spec))
+  #elif defined(_OPENMP) && (_OPENMP >= 200805)
+    #define BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(spec) BLADE_OMP_PRAGMA_(omp parallel for reduction(spec))
+  #else
+    #define BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION(spec)
+  #endif
+#endif
+
+// ---------------------------------------------------------------------------
 // BLADE_REPRO_FN -- the `where repro` discharge on an emitted function
 // definition: the body's floating-point operation sequence is the source's
 // (no FMA contraction), and the function is never re-inlined into a caller

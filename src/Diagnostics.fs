@@ -404,6 +404,13 @@ module Codes =
             "BL5700", "display elaboration error"
             // BL6xxx: IR validation
             "BL6001", "IR validation error"
+            // A construct that TYPECHECKS but sits where lowering has no rule
+            // for it (`compound(...)` / `rand.<fam>(...)` / `sparse(...)` /
+            // `fill_random` inside a function body, an array-typed `zero` as a
+            // return value, a stray `_`). Raised by Lowering's refuseLowering,
+            // spanned at the expression; `blade check` lowers, so it reports
+            // these too.
+            "BL6002", "construct not valid in this position"
             // BL7xxx: backend limits
             "BL7001", "feature not yet supported by this backend"
             "BL7002", "CUDA backend limit"

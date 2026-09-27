@@ -185,3 +185,41 @@ let printGrandTotal (blocks: BlockResult list) =
         let hidden = allFailed.Length - failedRollUpCap
         if hidden > 0 then
             printfn "    ... and %d more (see the per-block [FAIL] lines above)" hidden
+
+// ----------------------------------------------------------------------------
+// OpenMP construct pins.
+//
+// Generated programs spell every OpenMP loop construct through the
+// blade_portability.hpp macros (`BLADE_OMP_PARALLEL_FOR_COLLAPSE(2)`, ...):
+// the header picks the pragma, the emitter never does. Emission-shape pins
+// keep the CANONICAL construct text (`#pragma omp parallel for collapse(2)`)
+// because that is what they mean; `ompConstructView` renders the emitted
+// macro invocations back to it, and `hasOmpPin` is `Contains` over the raw
+// text OR that view -- so a positive pin matches either spelling and a
+// negative one ("must not contain `#pragma omp`") still sees every construct.
+// The fp-reassoc `BLADE_OMP_SIMD_REDUCTION(spec)` accumulation form is left
+// as it is: it was a macro before the routing and its pins name the macro.
+// ----------------------------------------------------------------------------
+
+let private ompMacroRx =
+    System.Text.RegularExpressions.Regex(
+        @"\bBLADE_OMP_(?:PARALLEL_FOR_SIMD_REDUCTION\((?<red>[^)]*)\)|PARALLEL_FOR_COLLAPSE\((?<n>\d+)\)|(?<k>PARALLEL_FOR_DYNAMIC|PARALLEL_FOR_SIMD|PARALLEL_FOR|SIMD)\b)")
+
+/// The emitted text with each BLADE_OMP_* loop-construct macro replaced by
+/// the `#pragma omp ...` line it expands to under OpenMP 4.0+.
+let ompConstructView (cpp: string) : string =
+    ompMacroRx.Replace(cpp, fun (m: System.Text.RegularExpressions.Match) ->
+        let red = m.Groups.["red"]
+        let n = m.Groups.["n"]
+        if red.Success then $"#pragma omp parallel for simd reduction({red.Value})"
+        elif n.Success then $"#pragma omp parallel for collapse({n.Value})"
+        else
+            match m.Groups.["k"].Value with
+            | "PARALLEL_FOR_DYNAMIC" -> "#pragma omp parallel for schedule(dynamic)"
+            | "PARALLEL_FOR_SIMD" -> "#pragma omp parallel for simd"
+            | "PARALLEL_FOR" -> "#pragma omp parallel for"
+            | _ -> "#pragma omp simd")
+
+/// `cpp` carries `pin`, in its own spelling or in the construct view.
+let hasOmpPin (cpp: string) (pin: string) : bool =
+    cpp.Contains pin || (ompConstructView cpp).Contains pin

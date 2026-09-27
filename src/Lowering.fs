@@ -391,6 +391,22 @@ let rec forceReturnCombinator (expr: IRExpr) : IRExpr =
 let forceCallableBody (body: IRExpr) : IRExpr =
     forceReturnCombinator (forceBareCombinatorLets body)
 
+/// A LOWERING REFUSAL: the program typechecked, but a construct sits in a
+/// position lowering has no rule for (`compound(...)` or `rand.<fam>(...)`
+/// inside a function body, an array-typed `zero` as a return value, ...).
+/// Coded BL6002 and spanned at the offending expression, so `blade check`
+/// (which lowers after typechecking) and `blade emit` report it where it is
+/// written -- it used to be a spanless message from a bare `failwith`.
+let private refuseLowering (span: Span) (message: string) : 'a =
+    raise (Blade.Diagnostics.BladeDiagnosticException
+            (Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate span message))
+
+/// An internal lowering invariant broke (a shape typecheck should already have
+/// refused reached lowering): BL9003, spanned where the span is known.
+let private loweringIce (span: Span) (message: string) : 'a =
+    raise (Blade.Diagnostics.BladeDiagnosticException
+            ({ Blade.Diagnostics.Codes.ice message with Code = "BL9003"; Span = span }))
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -401,7 +417,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // A wildcard `_` is a hole, not a value. It is only meaningful where a
         // context consumes it (a compound-index coordinate marks a free axis).
         // Reaching lowering means it was used where no context interpreted it.
-        failwith "wildcard `_` is not valid here: it can only appear as a compound-index coordinate (e.g. B((a, _, c))) or in a pattern"
+        refuseLowering texpr.Span "wildcard `_` is not valid here: it can only appear as a compound-index coordinate (e.g. B((a, _, c))) or in a pattern"
     
     | TExprVar (name, varId, identity) ->
         // Variant constructors without payload (e.g. North) have type IRTNamed
@@ -441,7 +457,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // element type here, where Types.fs is in scope.
             match Blade.Types.castTargetOf name with
             | Some et -> IRUnaryOp (IRCast et, e)
-            | None -> failwith $"internal: OpCast head '{name}' is not a numeric cast target"
+            | None -> loweringIce texpr.Span $"OpCast head '{name}' is not a numeric cast target"
     
     | TExprApp (func, args) when
         (match func.Type, args with
@@ -470,7 +486,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // walk (haloExtentClash's checkSite) refuses a non-literal
             // offset over a compound inner with a spanned diagnostic. Kept
             // as the invariant it now is.
-            | None -> failwith "internal: halo window read over a masked domain reached lowering with a non-literal offset (TypeCheck.checkSite should have refused it)"
+            | None -> loweringIce offArg.Span "halo window read over a masked domain reached lowering with a non-literal offset (TypeCheck.checkSite should have refused it)"
         else
             IRBinOp (IRElementwise, IRAdd, f, lowerTypedExpr env offArg)
 
@@ -729,25 +745,25 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // TDeclLet intercepts it (needs the binding's array type for the
         // shape, records it in RandomInits). Reaching here means it was used
         // inline / in a nested let, which has no annotation to supply the shape.
-        failwith "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
+        refuseLowering texpr.Span "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
 
     | TExprRandGen _ ->
         // Materialized only as a top-level let-binding value, where TDeclLet
         // intercepts it (records the kind/key/params in RandomInits, allocates
         // the self-typed array). Reaching here means it was used inline / nested.
-        failwith "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
+        refuseLowering texpr.Span "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n)); inside a function, draw at top level and pass the array in"
 
     | TExprCompound _ ->
         // Only meaningful as a top-level let-binding value, where TDeclLet
         // intercepts it (records the lowered dense + mask in CompoundInits,
         // leaves a unit placeholder). Reaching here means it was used inline
         // or nested, which the compound-construction codegen path does not handle.
-        failwith "compound(dense, mask) is only valid as a top-level let-binding value (let B = compound(dense, mask))"
+        refuseLowering texpr.Span "compound(dense, mask) is only valid as a top-level let-binding value (let B = compound(dense, mask)); inside a function, build the compound at top level and pass it in"
 
     | TExprSparse _ ->
         // Same top-level-let-only discipline as compound(dense, mask): the
         // TDeclLet loop intercepts and records the values expr in SparseInits.
-        failwith "sparse(values, keys) is only valid as a top-level let-binding value (let S = sparse(values, keys))"
+        refuseLowering texpr.Span "sparse(values, keys) is only valid as a top-level let-binding value (let S = sparse(values, keys))"
     
     | TExprGuard (cond, body) ->
         IRGuard (lowerTypedExpr env cond, lowerTypedExpr env body)
@@ -888,7 +904,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // the binding-site materialization (inferLetBindingValue's zero
             // arm) does not cover -- emitting IRZero here would render as a
             // scalar `0` under an array type (a null pointer). Fail loudly.
-            failwith "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
+            refuseLowering texpr.Span "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
         | _ -> IRZero  // fallback
     
     | TExprReynolds (kernel, isAntisym) ->
@@ -1560,7 +1576,7 @@ let lowerTypedTypeDef (env: TypedLowerEnv) (ttd: TypedTypeDef) : IRTypeDef =
     | TTDMutualGroup _ ->
         // Lowered by lowerTypedDecl's TDeclType arm into one IRTDAlias per
         // member; reaching here is an internal invariant violation.
-        failwith "TTDMutualGroup lowers via lowerTypedDecl (one alias per member)"
+        loweringIce noSpan "TTDMutualGroup lowers via lowerTypedDecl (one alias per member)"
 
 /// Lower a typed binding
 let lowerTypedBinding (env: TypedLowerEnv) (binding: TypedBinding) : IRBinding * TypedLowerEnv =
@@ -2623,7 +2639,7 @@ let lower (source: string) : Result<IRProgram, string> =
             // Lowering can THROW on a failed compile-time provider load; keep
             // this convenience entry point from surfacing an unhandled exception.
             (try Ok (lowerTypedProgram typedProgram (Some program) builder)
-             with ex -> Error ex.Message)
+             with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message)
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
@@ -2664,8 +2680,11 @@ let private lowerCheckedProgram (program: Program)
         // A phase that refuses by exception with its OWN coded diagnostic
         // (IRMono's base-case-free recursion refusal) keeps its code.
         | Blade.Diagnostics.BladeDiagnosticException d -> Error [ d ]
+        // Anything else (a compile-time provider load that failed, a stage
+        // outside Lowering refusing by exception) is BL6001's "a lowering
+        // stage reported a failure" -- BL6002 is the positional refusal.
         | ex ->
-            Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+            Error [ Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
 
 /// Structured-diagnostics entry: like `lower`, but errors stay as coded,
 /// spanned Diagnostics, warnings come back structured, and the retained
@@ -2804,7 +2823,7 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
                 // Lowering can THROW on a failed compile-time provider load; keep
                 // this convenience entry point from surfacing an unhandled exception.
                 try Ok (lowerTypedProgram typedProgram (Some program) builder)
-                with ex -> Error ex.Message
+                with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message
             result, warnings
         | Error errors ->
             let warnings = typeCheckWarningDiagnostics false
@@ -2822,7 +2841,7 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
             printTypeCheckWarnings false None false
             // Lowering can THROW on a failed compile-time provider load.
             (try Ok (lowerTypedProgram typedProgram (Some program) builder)
-             with ex -> Error ex.Message)
+             with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message)
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
@@ -2841,7 +2860,7 @@ let lowerMultiSourceCaptured (sources: (string * string) list)
             let warnings = typeCheckWarningDiagnostics false
             let result =
                 try Ok (lowerTypedProgram typedProgram (Some program) builder)
-                with ex -> Error ex.Message
+                with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message
             result, warnings
         | Error errors ->
             let warnings = typeCheckWarningDiagnostics false

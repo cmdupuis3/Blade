@@ -1157,8 +1157,10 @@ let genMpiNestSimplicial (innerOmp: bool) (codeGen: LoopNestCodeGen) (name: stri
             // how many RANKS this build uses, only whether a rank's local work
             // is threaded. So `where mpi, omp(...)` under serial emission is
             // exactly `where mpi`. See `ompThreadEmissionEnabled`.
-            @ (if innerOmp && ompThreadEmissionEnabled () then [ "    #pragma omp parallel for" ]
-               elif innerOmp then [ $"    // [omp] requested but emitted serial: {(ompThreadsSuppressedReason ())}" ]
+            @ (if innerOmp && ompThreadEmissionEnabled () then
+                   recordOmpConstruct name "BLADE_OMP_PARALLEL_FOR" "cell range of this MPI rank's slab (hybrid mpi + omp)"
+                   [ "    BLADE_OMP_PARALLEL_FOR" ]
+               elif innerOmp then [ "    // " + ompSuppressedPhrase (ompThreadsSuppressedReason ()) ]
                else [])
             @ [ $$"""    for (size_t __blade_c = __blade_mpi_lo_{{name}}; __blade_c < __blade_mpi_hi_{{name}}; __blade_c++) {"""
                 // Per-cell unrank (O(r log n)). Odometer advance -- unrank once
@@ -1895,8 +1897,59 @@ let internal genWreathApply
     // way there is nothing to emit; the caller turns None into a `#error`.
     | _ -> None
 
+/// `blade plan`: the STRUCTURE the declared symmetry bought this application --
+/// packed (orbit-canonical) output storage, and triangular iteration over the
+/// commuting levels -- or, when the kernel declared `comm`/`anticomm` and got
+/// neither, why not. Read off the ApplyInfo the deduction produced, so the
+/// record states what codegen is about to emit, not a re-derivation of it.
+let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
+    if Blade.Effects.Decisions.active () then
+        let declared =
+            match resolveKernel info.Kernel with
+            | Some rk -> rk.Callable.IsCommutative || not rk.Callable.CommGroups.IsEmpty
+            | None -> false
+        let rec showId (a: ArrayIdentity) =
+            match a with
+            | AIDVariable n -> n
+            | AIDParameter (n, _) -> n
+            | AIDLiteral id -> $"<literal #{id}>"
+            | AIDDerived (b, op) -> $"{op}({showId b})"
+        let operands = info.Identities |> List.map showId |> String.concat ", "
+        let states = info.SymcomStates |> List.map string |> String.concat ", "
+        let packed =
+            match info.OutputType with
+            | ArrayElem at -> at.IndexTypes |> List.filter (fun ix -> ix.Symmetry <> SymNone && ix.Rank >= 2)
+            | _ -> []
+        let sameArray =
+            match info.Identities with
+            | a :: rest -> rest |> List.forall (sameIdentity a)
+            | [] -> false
+        match packed with
+        | _ :: _ ->
+            recordCodegenDecision "symmetric-storage" name Blade.Effects.Applied
+                ([ for ix in packed -> $"packed {ix.Symmetry} storage over {ix.Rank} levels (one canonical cell per orbit)" ]
+                 @ [ $"operands: {operands}" ])
+        | [] when declared ->
+            let why =
+                if not sameArray then
+                    $"the commuting positions hold different arrays ({operands}); packed storage is licensed only when the SAME array fills them"
+                else $"no commuting level survived deduction (symcom states: {states})"
+            recordCodegenDecision "symmetric-storage" name (Blade.Effects.Declined why) [ $"operands: {operands}" ]
+        | [] -> ()
+        let tri = info.TriangularLevels |> List.indexed |> List.filter snd |> List.map fst
+        if not tri.IsEmpty then
+            recordCodegenDecision "triangular-iteration" name Blade.Effects.Applied
+                [ $"""triangular levels {(tri |> List.map string |> String.concat ", ")}"""
+                  $"symcom states: {states}"
+                  $"speedup x{info.SpeedupFactor}" ]
+        elif declared then
+            recordCodegenDecision "triangular-iteration" name
+                (Blade.Effects.Declined $"every level iterates the full box (symcom states: {states})")
+                [ $"operands: {operands}" ]
+
 let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (builder: IRBuilder) : string list =
     let ind = indentStr ctx
+    recordApplyStructure name info
 
     // OMP LICENCE FOR THE PEELED ROW LOOP. Bound HERE, above `tryRaggedPeel`,
     // because both peel closures capture it.

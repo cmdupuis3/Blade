@@ -3122,11 +3122,13 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // statement to have the `x = x op expr` shape, so the builtin op
                 // is emitted directly (and the wrapper would be dead code).
                 (ompApiUsedCell ()).Value <- true
+                recordOmpConstruct name $"BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION({redOp}:{name})"
+                    "licensed fold with a builtin operator: OpenMP reduction over the flat sweep (Path A)"
                 elemErrCode @ guardLines @ [
                     $"{ind}// reduce: comm-licensed OpenMP reduction (builtin '{(binOpToCpp op)}'), flat sweep"
                     $"{ind}const size_t {rnName} = {boundExpr};"
                     $"{ind}{elemStr} {name} = {seedStr};"
-                    $"{ind}#pragma omp parallel for simd reduction({redOp}:{name})"
+                    $"{ind}BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION({redOp}:{name})"
                     $$"""{{ind}}for (size_t __ri = {{loopStart}}; __ri < {{rnName}}; __ri++) {"""
                     $"""{ind}    {name} = {name} {(binOpToCpp op)} {(elemAt "__ri")};"""
                     $"{ind}}}"
@@ -3177,7 +3179,9 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     @ [ $"{ind}                {partName}[__rt] = {(laneName 0)};"
                         $$"""{{ind}}            }""" ]
                 elemErrCode @ guardLines @ wrapperLines @ [
-                    $"{ind}// reduce: comm-licensed parallel fold, contiguous chunked partials ({kLanes}-lane)"
+                    (recordOmpConstruct name "omp parallel num_threads(T) + fixed-order combine"
+                        "comm-licensed fold: contiguous per-thread partials, combined in thread order (Path B)"
+                     $"{ind}// reduce: comm-licensed parallel fold, contiguous chunked partials ({kLanes}-lane)")
                     $"{ind}const size_t {rnName} = {boundExpr};"
                     $"{ind}{elemStr} {name} = {seedStr};"
                     $"{ind}{{"
@@ -3445,8 +3449,10 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                   FoldRequestedOmp = callable.IsOmpParallel }
                             match (0, facts, single.ArrayTypes, cg) with
                             | Blade.LinAlgPatterns.BlasL1 call ->
-                                Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
-                                |> Option.map (fun entry -> (call, entry))
+                                let entry = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
+                                Blade.LinAlgPatterns.recordRoute (decisionSpan ()) name call
+                                    (entry |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+                                entry |> Option.map (fun entry -> (call, entry))
                             | _ -> None
                     // BLADE_FP_REASSOC for the reduce-over-DEFERRED-COMPUTATION
                     // nest -- the shape `reduce(<unforced zip>, (+))` (the dot
@@ -3480,9 +3486,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     //   * Non-rectangular / fused / tabulated (compound, sparse)
                     //     head levels: `__ri + l` is not an element of the
                     //     iteration space.
-                    //   * Reynolds bodies, MPI slabs, and halo-window slots (the
-                    //     carousel body is stateful across iterations by
-                    //     construction, so it is not a function of the index).
+                    //   * Reynolds bodies, MPI slabs, and halo-window slots.
                     //   * `FoldChunk` (an `omp`-licensed fold): threads and lanes
                     //     are separate opt-ins and Path B already owns that arm.
                     //   * The FUSED TREE (several leaves, several accumulators) --
