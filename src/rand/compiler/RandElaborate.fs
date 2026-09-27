@@ -41,13 +41,23 @@ open Blade.StaticEval
 
 let private v (name: string) : Expr = syn (ExprVar name)
 
+/// A shape extent narrowed to the checker's per-axis `int` (TExprRandGen's
+/// dims), range-checked first: an unchecked `int n` wrapped 4294967301 to 5
+/// and filled five cells.
+let private narrowExtent (what: string) (n: int64) : Result<int, string> =
+    if n > int64 System.Int32.MaxValue then
+        Error $"{what}: shape extent {n} exceeds the largest supported rand fill extent ({System.Int32.MaxValue}) per axis"
+    elif n < int64 System.Int32.MinValue then
+        Error $"{what}: shape extents must be positive (got {n})"
+    else Ok (int n)
+
 /// Resolve a static-int argument: an int literal or a `let static` name.
 let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int, string> =
     match e.Kind with
-    | ExprKind.ExprLit (LitInt n) -> Ok (int n)
+    | ExprKind.ExprLit (LitInt n) -> narrowExtent what n
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
-        | Some (SVInt n) -> Ok (int n)
+        | Some (SVInt n) -> narrowExtent what n
         | Some _ -> Error $"{what}: '{name}' is not a static int"
         | None -> Error $"{what}: '{name}' is not a `let static` binding (rand shapes must be static)"
     | _ -> Error $"{what}: shape must be a static int or list of static ints"
