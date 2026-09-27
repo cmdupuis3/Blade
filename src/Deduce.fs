@@ -875,6 +875,13 @@ let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
         // trailing `|> compute` into the last branch of a kernel's `if`).
         | TExprCompute inner | TExprPure inner -> go inner
         | TExprBinOp (Elementwise, op, l, r) ->
+            // Integer semantics per NODE, from its own type when it is known:
+            // `x / 2.0` over integer elements is a floating division in C++.
+            let intNode =
+                match stripUnits e.Type with
+                | IRTScalar (ETInt32 | ETInt64) -> true
+                | IRTScalar (ETFloat32 | ETFloat64) -> false
+                | _ -> isInt
             (match go l, go r with
              | Some a, Some b ->
                  match op with
@@ -883,11 +890,11 @@ let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
                  | OpMul -> Some (a * b)
                  | OpDiv ->
                      if b = 0.0 then None
-                     elif isInt then Some (System.Math.Truncate (a / b))
+                     elif intNode then Some (System.Math.Truncate (a / b))
                      else Some (a / b)
                  | OpMod ->
                      if b = 0.0 then None
-                     elif isInt then Some (float (int64 a % int64 b))
+                     elif intNode then Some (float (int64 a % int64 b))
                      else Some (a - b * System.Math.Truncate (a / b))
                  | OpCaret -> Some (System.Math.Pow (a, b))
                  | OpMath2 "atan2" -> Some (System.Math.Atan2 (a, b))

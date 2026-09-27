@@ -1,0 +1,13 @@
+// TEST: A computed position written past the end aborts (aborts)
+// The out-of-range twin of 295: an out-of-bounds STORE used to write past
+// the caller's buffer; the guard stops it first.
+// WARN: BL4003
+// ABORT: index out of bounds
+type N = Idx<3>
+function put(out: mut Array<Float64 like N>, k: Int64) -> Float64 = {
+    out(k) = 9.0
+    out(0)
+}
+let mut g: Array<Float64 like N> = [0.0, 0.0, 0.0]
+let s = put(g, 7)
+let t = s + 1.0

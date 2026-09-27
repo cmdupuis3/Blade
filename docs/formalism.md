@@ -617,19 +617,25 @@ at compile time, a computed integer is a CHECKED conversion (run-time guard
 `0 <= e < extent(I)`, BL8006; it needs `I`'s static extent). A plain integer
 passed to a `Nat<I>` parameter goes through the same door.
 
-**What is guaranteed.** A read of a slot whose index type is NAMED and has a
-static extent is bounds-safe: the subscript is either proven (an iteration
-index or other value of that type, a compile-time-checked literal) or
-checked at run time (a position or plain `Int64` is guarded, BL8006, in both
-lanes). The guards are what the BL4003 untagged-integer advice points at:
-iterating with `range<I>` (or `halo<I, ...>` for neighbors) removes them.
-Not covered: a computed subscript into an ANONYMOUS index slot (a literal
-array without a named index type) is not checked — name the index type to
-get the guarantee; index values read out of runtime DATA (a provider-loaded
-foreign-key column) are trusted; compiler-synthesized buffers and indices
-(`let rec` prefixes, which read zero past the prefix by design, reduce
-desugars, AD sweeps) own their walks. (The rank-2 offset arithmetic behind
-the proven case is verified against a failure model; proofs.md §Safety.)
+**What is guaranteed.** A read or write of a slot whose index type is NAMED
+is bounds-safe: its subscript is either PROVEN or CHECKED at run time
+(BL8006, in both lanes; against the static extent, or the array's own
+`extents` when the extent is only known at run time). Proven is a closed
+list that trusts no type: a compile-time-checked literal, a bare variable of
+exactly that index type that is not bound to an unproven value (an iteration
+index, a parameter -- whose callers pass through the same checks -- or a
+`let` of a proven value), an emitted cast or guard, and a halo window read.
+Everything else -- a position, a plain `Int64`, a `Nat<_>` wildcard, a
+branch, a call, an element read out of an index-typed array (foreign-key
+DATA) -- is checked. The checks are what the BL4003 untagged-integer advice
+points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
+removes them. Not covered: a computed subscript into an ANONYMOUS index slot
+(an array without a named index type) is not checked -- name the index type
+to get the guarantee; compact, compound, sparse and ragged slots keep their
+own disciplines; compiler-synthesized buffers and indices (`let rec`
+prefixes, which read zero past the prefix by design, reduce desugars, AD
+sweeps) own their walks. (The rank-2 offset arithmetic behind the proven
+case is verified against a failure model; proofs.md §Safety.)
 
 This is the index-level mirror of physical units (§2.4): same mechanism, same
 error class.

@@ -6972,12 +6972,12 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
             finally slot.Value <- saved
         if collected.Count > 0 then
             env.FuncUnitEqualities.[name] <- List.ofSeq collected
-        // The TRANSFORM keeps its old contract exactly: derived only for a
-        // deduced return, and only from a walk that needed no equation (a
-        // body that combined two parameters is judged by its equalities at
-        // the call; its return is left unstamped, as before).
+        // The TRANSFORM is derived for a deduced return as before. A walk that
+        // recorded equations still yields one (`hyp(a, b) = sqrt(a*a + b*b)`
+        // returns unit(a)): the call judges the equations before the
+        // transform is applied, so a call that reaches the stamp satisfies them.
         match walked with
-        | Ok (Some u) when openElem retTy && collected.Count = 0 ->
+        | Ok (Some u) when openElem retTy ->
             let n = unitNormalize u
             let exponents =
                 parms |> List.mapi (fun i _ ->

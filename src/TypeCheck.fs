@@ -211,7 +211,12 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         let saved = subscriptGuardCtx.Value
         subscriptGuardCtx.Value <-
             Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
-                   Positions = System.Collections.Generic.HashSet<IRId>() }
+                   Positions = System.Collections.Generic.HashSet<IRId>()
+                   IndexExtent = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                           tryEvalIntIR idx.Extent
+                       | _ -> None }
         try zonkModule currentEnv.Subst typedModule
         finally subscriptGuardCtx.Value <- saved
     // Late direct-application rank check, on the zonked tree -- see
