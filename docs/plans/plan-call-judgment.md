@@ -309,7 +309,12 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   parameters (`dot2(a: T^1, b: T^1) = tot(a * b)`) is still BL6001, and the
   single-level `reduce(a * b, (+))` computes the product in Float64 at an
   integer instance (Lowering's deferred-binop kernel defaults a polymorphic
-  element to Float64) -- a Lowering follow-up.
+  element to Float64) -- a Lowering follow-up. (Both FIXED, fix/drf-p2-lowering:
+  the kernel keeps the element variable, so HM monomorphization clones it per
+  instance -- functions/168 -- and `IRMono.hmArgType` types a raw elementwise
+  binop argument as the array `lowerArrayBinOpsModule` will make it, so
+  `tot(a * b)` specializes tot -- functions/169. The same rewrite now reads a
+  unit-carrying `Int64<m>` element as Int64, not Float64: units/082.)
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 

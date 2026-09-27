@@ -1332,26 +1332,34 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                    | OpLt -> IRLt | OpLe -> IRLe | OpGt -> IRGt | OpGe -> IRGe
                    | OpAnd -> IRAnd | OpOr -> IROr
                    | OpMath2 name -> IRMath2 name | _ -> IRAdd
-        // Lambda params for arithmetic ops require concrete scalar types;
-        // default to Float64 if the array's elem type isn't a primitive
-        // (e.g. struct or unresolved infer), since codegen would otherwise
-        // fail downstream.
-        let elemTypeL =
-            match leftExpr.Type with
+        // A kernel param takes its operand's element type: the primitive
+        // (through a unit annotation or index tag, which erase), or -- inside
+        // a generic body -- the signature's element VARIABLE, kept open so HM
+        // monomorphization clones the kernel per instance and substitutes it
+        // (IRMono.specializeHMFunction's needsClone). Defaulting that variable
+        // to Float64 computed an Int64 instance's `a * b` in double: wrong
+        // past 2^53, narrowed on the way back. Float64 remains the fallback
+        // only for a non-primitive element (a struct), which codegen refuses
+        // downstream anyway.
+        let kernelElemOf (t: IRType) : IRType =
+            match t with
             | ArrayElem a ->
-                match a.ElemType with PrimElem et -> et | _ -> ETFloat64
-            | _ -> ETFloat64
-        let elemTypeR =
-            match rightExpr.Type with
-            | ArrayElem a ->
-                match a.ElemType with PrimElem et -> et | _ -> ETFloat64
-            | _ -> ETFloat64
+                match a.ElemType with
+                | AnyPrimElem et -> IRTScalar et
+                | InferElem _ as v -> v
+                // A unit-carrying generic element (`T<m>^1`): the unit erases
+                // like a concrete element's does; the variable stays open.
+                | IRTUnitAnnotated (InferElem _ as v, _) -> v
+                | _ -> IRTScalar ETFloat64
+            | _ -> IRTScalar ETFloat64
+        let elemTypeL = kernelElemOf leftExpr.Type
+        let elemTypeR = kernelElemOf rightExpr.Type
         let aId = env.Builder.FreshId()
         let bId = env.Builder.FreshId()
-        let body = IRBinOp(IRElementwise, irOp, IRVar (aId, IRTScalar elemTypeL), IRVar (bId, IRTScalar elemTypeR))
+        let body = IRBinOp(IRElementwise, irOp, IRVar (aId, elemTypeL), IRVar (bId, elemTypeR))
         let parms : IRParam list = [
-            { Name = "__a"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
-            { Name = "__b"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId }
+            { Name = "__a"; Type = elemTypeL; Index = 0; VarId = aId }
+            { Name = "__b"; Type = elemTypeR; Index = 1; VarId = bId }
         ]
         // Comparison/logical ops produce bool; arithmetic ops keep the left
         // operand's element type (matches IRBinOp typing conventions).
@@ -1359,7 +1367,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             match irOp with
             | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
                 IRTScalar ETBool
-            | _ -> IRTScalar elemTypeL
+            | _ -> elemTypeL
         let commGroups = if mode = Elementwise then [[0; 1]] else []
         let lambdaInfo =
             mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false

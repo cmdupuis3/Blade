@@ -112,6 +112,81 @@ let hasTypeVarsInParams (func: IRFuncDef) : bool =
 // expressions); the key difference is SpecRequest carrying (typeVarId ->
 // concreteType) bindings rather than a single arity int.
 
+/// Comparison / logical binops produce Bool elements; every other elementwise
+/// op keeps its operand's element type.
+let private isCmpOrLogicalIROp (op: IRBinOp) =
+    match op with
+    | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> true
+    | _ -> false
+
+/// The scalar a synthesized elementwise kernel computes in, for an array
+/// operand's element type: the primitive, through a unit annotation or index
+/// tag (both erase at codegen). A bare `PrimElem` match sent a unit-carrying
+/// `Int64<m>` element to the Float64 fallback -- an integer product computed in
+/// double. Float64 stays the fallback for a non-primitive (struct) element only.
+let private arrayBinOpKernelElem (elem: IRType) : ElemType =
+    match elem with
+    | AnyPrimElem et -> et
+    | _ -> ETFloat64
+
+/// The array type `lowerArrayBinOpsModule` gives an elementwise binop over
+/// operand types `lt` / `rt` (array-array: the left array's axes; array-scalar
+/// either way round: the array's), or None when neither operand is an array --
+/// and None for an arithmetic op whose array element is not yet a primitive
+/// (an open variable): the rewrite would not see that node until the variable
+/// is substituted, and answering its Float64 fallback here would mint a
+/// phantom Float64 specialization.
+let private arrayBinOpResultType (op: IRBinOp) (lt: IRType) (rt: IRType) : IRType option =
+    let reshape (arrTy: IRType) (a: IRArrayType) =
+        let ret =
+            if isCmpOrLogicalIROp op then Some (IRTScalar ETBool)
+            else
+                match a.ElemType with
+                | AnyPrimElem et -> Some (IRTScalar et)
+                | _ -> None
+        match ret, arrTy with
+        | Some r, IRTArrow (slots, _, ident) -> Some (IRTArrow (slots, r, ident))
+        | Some _, _ -> Some arrTy
+        | None, _ -> None
+    match lt, rt with
+    | ArrayElem la, ArrayElem _ -> reshape lt la
+    | ArrayElem la, IRTScalar _ -> reshape lt la
+    | IRTScalar _, ArrayElem ra -> reshape rt ra
+    | _ -> None
+
+/// An operand's type as `lowerArrayBinOpsModule` reads it (its `operandType`:
+/// node-carried, through `|> compute` and a `let`), plus a nested raw binop --
+/// which that bottom-up rewrite will already have turned into a typed
+/// combinator by the time it reaches the enclosing one.
+let rec private rawBinOpOperandType (e: IRExpr) : IRType option =
+    match e with
+    | IRCompute inner -> rawBinOpOperandType inner
+    | IRLet (_, _, body) -> rawBinOpOperandType body
+    | CarriedType ty -> Some ty
+    | IRBinOp (IRElementwise, op, l, r) ->
+        match rawBinOpOperandType l, rawBinOpOperandType r with
+        | Some lt, Some rt -> arrayBinOpResultType op lt rt
+        | _ -> None
+    | _ -> None
+
+/// The type an HM call site's ARGUMENT is judged at: `exprTypeIfKnown`, plus
+/// the one untyped form a generic body can pass -- an elementwise binop over
+/// operands that were unshaped `T^k` variables at lowering. There `a * b`
+/// cannot be recognized as an array op, so it stays a raw `IRBinOp` until
+/// `lowerArrayBinOpsModule` rewrites it AFTER this pass; a raw binop carries
+/// no type, so in `dot2(a: T^1, b: T^1) = tot(a * b)` the inner call taught
+/// `tot` nothing, no spec was made, and dot2's result stayed tot's open
+/// variable (BL6001). Once the enclosing spec has substituted the operands the
+/// node's type is exactly the one that rewrite will give it, so answer that.
+/// Scalar-only binops still answer None, as before.
+let hmArgType (e: IRExpr) : IRType option =
+    match exprTypeIfKnown e with
+    | Some t -> Some t
+    | None ->
+        match e with
+        | IRBinOp (IRElementwise, _, _, _) -> rawBinOpOperandType e
+        | _ -> None
+
 /// Collect call sites of HM-polymorphic functions.
 /// Returns list of (funcId, sortedBindings) pairs. Bindings are sorted
 /// by ID to give a canonical key for deduplication across call sites.
@@ -127,7 +202,7 @@ let collectHMCallSites (hmFuncMap: Map<IRId, IRFuncDef>) (expr: IRExpr) : (IRId 
                 else
                     List.zip func.Params args
                     |> List.fold (fun acc (p, arg) ->
-                        match exprTypeIfKnown arg with
+                        match hmArgType arg with
                         | Some argTy -> unifyParamWithArg p.Type argTy acc
                         | None -> acc) Map.empty
             // Convert to sorted list for canonical comparison
@@ -171,7 +246,7 @@ let collectHMCallSiteReturnBindings
                 let calleeBindings =
                     List.zip func.Params args
                     |> List.fold (fun acc (p, arg) ->
-                        match exprTypeIfKnown arg with
+                        match hmArgType arg with
                         | Some argTy -> unifyParamWithArg p.Type argTy acc
                         | None -> acc) Map.empty
                 let concreteRet = substTypeInIRType calleeBindings func.RetType
@@ -269,7 +344,7 @@ let hmValueRefRewrite (hmFuncMap: Map<IRId, IRFuncDef>)
                         |> List.fold (fun acc (p, a) ->
                             if isHmRef a then acc
                             else
-                                match exprTypeIfKnown a with
+                                match hmArgType a with
                                 | Some t -> unifyParamWithArg p.Type t acc
                                 | None -> acc) Map.empty
                     Some (hf.Params |> List.map (fun p -> substTypeInIRType hb p.Type))
@@ -427,7 +502,7 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
                      let cb =
                          List.zip callee.Params args
                          |> List.fold (fun m (p, a) ->
-                             match exprTypeIfKnown a with
+                             match hmArgType a with
                              | Some t -> unifyParamWithArg p.Type t m
                              | None -> m) Map.empty
                      let ret = substTypeInIRType cb callee.RetType
@@ -789,7 +864,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                 else
                     List.zip func.Params args
                     |> List.fold (fun acc (p, arg) ->
-                        match exprTypeIfKnown arg with
+                        match hmArgType arg with
                         | Some argTy -> unifyParamWithArg p.Type argTy acc
                         | None -> acc) Map.empty
             let sortedBindings = bindings |> Map.toList |> List.sortBy fst
@@ -838,7 +913,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                         let b =
                             List.zip func.Params args
                             |> List.fold (fun m (p, a) ->
-                                match exprTypeIfKnown a with
+                                match hmArgType a with
                                 | Some t -> unifyParamWithArg p.Type t m
                                 | None -> m) Map.empty
                         let key = (funcId, b |> Map.toList |> List.sortBy fst |> List.map (fun (id, ty) -> (id, canonTypeKey ty)))
@@ -1126,10 +1201,7 @@ let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder)
 /// products and scalar/broadcast binops are left untouched.
 let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     let newLambdas = System.Collections.Generic.List<IRCallable>()
-    let isCmpOrLogical op =
-        match op with
-        | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> true
-        | _ -> false
+    let isCmpOrLogical op = isCmpOrLogicalIROp op
     // Distinct identity per distinct operand var so codegen's symmetry
     // deduction treats `A_0 + A_1` as two different arrays (and `A_0 + A_0` as
     // the same array -- correct commutative collapse).
@@ -1186,7 +1258,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // materialized into a captured local; a single-array method_for maps it.
     let broadcastScalar op (arr: IRExpr) (arrTy: IRType) (la: IRArrayType)
                         (scalarE: IRExpr) (sElem: ElemType) (scalarOnLeft: bool) : IRExpr =
-        let arrElem = match la.ElemType with PrimElem et -> et | _ -> ETFloat64
+        let arrElem = arrayBinOpKernelElem la.ElemType
         let kernelRet = if isCmpOrLogical op then IRTScalar ETBool else IRTScalar arrElem
         let sId = builder.FreshId()
         let sTy = IRTScalar sElem
@@ -1227,8 +1299,8 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         | IRBinOp (IRElementwise, op, l, r) ->
             match operandType l, operandType r with
             | Some ((ArrayElem la) as lt), Some ((ArrayElem ra) as rt) ->
-                let elemTypeL = match la.ElemType with PrimElem et -> et | _ -> ETFloat64
-                let elemTypeR = match ra.ElemType with PrimElem et -> et | _ -> ETFloat64
+                let elemTypeL = arrayBinOpKernelElem la.ElemType
+                let elemTypeR = arrayBinOpKernelElem ra.ElemType
                 let kernelRet =
                     if isCmpOrLogical op then IRTScalar ETBool else IRTScalar elemTypeL
                 // Co-iteration kernel: lambda(__zl, __zr) -> __zl op __zr.
