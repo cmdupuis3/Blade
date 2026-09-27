@@ -118,9 +118,11 @@ let runGatherElisionTests () : BlockResult =
           // ...but a bare top-level `g` is a REFERENCE (it desugars to a
           // binding initialised from g), so it counts as a use and keeps the
           // gather. Conservative rather than clever: pinned so the distinction
-          // is deliberate and cannot drift silently.
+          // is deliberate and cannot drift silently. (The selection leaves g
+          // out, so the auto-print -- itself a consumer -- is not what keeps
+          // the gather here.)
           "a bare top-level mention of the grouped array keeps the gather",
-          header + "g\n", None,
+          header + "g\n", Some "keys",
           [poolSlice; copyStore], [nullRows]
           // `extents(gk)` needs no grouped array at all -- the direct spelling
           // allocates nothing per group and copies nothing.

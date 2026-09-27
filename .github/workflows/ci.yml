@@ -17,7 +17,7 @@
 #
 #   * label a pull request `ci:full`
 #   * run the workflow by hand (Actions -> CI -> Run workflow), where the
-#     `lanes` input can pick one lane instead of all three
+#     `lanes` input can pick one lane (or a named group) instead of all of them
 #   * the nightly schedule on master
 #
 # The first two are the BROAD opt-ins and skip the nightly-only lanes; the

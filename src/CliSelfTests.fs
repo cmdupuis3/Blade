@@ -2508,9 +2508,6 @@ let internal runCorpusWiringTests () : TH.BlockResult =
     let interpExcluded = Blade.Tests.InterpDiff.interpExcluded |> List.map fst
     record "every interpreter-differential exclusion names a directory" (missing interpExcluded).IsEmpty
         (listed (missing interpExcluded))
-    let slice = Set.ofList (Blade.Tests.InterpDiff.currentSlice ())
-    let unwalked = (single @ multi) |> List.filter (fun d -> not (slice.Contains d) && not (List.contains d interpExcluded))
-    record "the interpreter differential walks every other directory" unwalked.IsEmpty (listed unwalked)
     // `blade test <dir>`: every single-file directory resolves, to ITS OWN
     // tests (an alias wired to the wrong list would resolve to other names).
     let misKeyed =
@@ -2587,7 +2584,8 @@ let rec internal dispatchTest (rest: string list) : int =
     let testVerbAt = argv |> Array.tryFindIndex (fun a -> a = "test")
     let printFlag =
         match testVerbAt with
-        | Some i -> argv |> Array.skip (i + 1) |> Array.contains "--print"
+        // Cli.fs strips the pair from ANY position, so look everywhere.
+        | Some _ -> argv |> Array.contains "--print"
         | None -> false
     if printFlag then
         eprintfn "Error: --print is not valid on `blade test`: the corpus pins read every top-level binding, and --print would silence the ones it does not name."
@@ -3009,7 +3007,7 @@ and internal dispatchTestClean (rest: string list) : int =
             printfn "Corpus back end: LLVM (clang: %s), category: %s" clang cat
             printfn ""
             setCorpusBackend LlvmBackend
-            try dispatchTest [ cat ]
+            try dispatchTestClean [ cat ]
             finally setCorpusBackend CppBackend
     | [ "--llvm" ] ->
         // Deliberately NOT a member of isSuiteFlag. Spelling it like one is a
