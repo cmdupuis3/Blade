@@ -245,7 +245,7 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   function is now judged at an instantiated copy, and IR monomorphization
   treats a composition operand as a call site (`IRMono.hmValueRefRewrite`:
   r's parameter is l's return, l's return is r's parameter), so `h(3.0)`
-  still gets `idg_HM_..._double` (functions/157).
+  still gets `idg_HM_..._double` (functions/163).
 - **F3 (FIXED 2026-09-27, both sides)** A `let` alias of a declared function
   (`let g = total`) escaped the judgment; `calleeQuantifier` follows let-alias
   chains to the declaration, so calls through the alias are instantiated and
@@ -253,9 +253,9 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   the alias's binding. `IRMono.eliminateGenericAliases` makes a module-level
   alias of an HM function transparent (references redirected, the binding --
   a function value no lane prints -- removed) before the HM pass
-  (functions/155). The same pass treats a generic function passed as an
+  (functions/161). The same pass treats a generic function passed as an
   ARGUMENT as a call site at the parameter's type (`apply(idg, 2.0)`,
-  `applyS(idg, "a")`, `twice(idg, 3)`; functions/156). Not covered: an alias
+  `applyS(idg, "a")`, `twice(idg, 3)`; functions/162). Not covered: an alias
   bound INSIDE a function body (`let g = total` as a block statement).
 - **F5 (FIXED 2026-09-27)** Literal adaptivity stopped at the top level: a
   tuple of literals `(1.5, 2.0)` into `(Float32, Float32)` was refused
@@ -271,7 +271,7 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   monomorphic, non-literal argument OUTSIDE a declaration body is unified with
   its parameter's copy (the HM application rule; §5's "binding caller
   variables", in its narrowest form) so the call's result is its own instance
-  (functions/154). Inside a declaration body the old behaviour stands: an
+  (functions/160). Inside a declaration body the old behaviour stands: an
   open argument there is usually tied to the declaration's own signature (a
   `Poly` pack element), and binding it collapsed arity/024, /026, /031.
 
