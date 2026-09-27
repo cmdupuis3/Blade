@@ -1,0 +1,11 @@
+// TEST: A unit mismatch between match arms names the match, earlier arms first (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: arms of this `match` (the earlier arms vs this arm): meters vs seconds
+// ============================================================================
+Unit meters
+Unit seconds
+let a: Float<meters> = 1.0
+let b: Float<seconds> = 2.0
+let d = match 1 with
+    | 1 -> a
+    | _ -> b

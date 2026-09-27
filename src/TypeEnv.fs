@@ -784,6 +784,44 @@ let private indexIdentityNote (exp: IRType) (act: IRType) : string =
             | _ -> None)
         |> Option.defaultValue ""
 
+/// A type as the program SPELLS it: `ppIRType`, except that an index slot of a
+/// user-NAMED index type renders as that name (`Array<Float64 like Lat>`, the
+/// surface spelling of the annotation), recursively through tuples, units and
+/// function types. An index NAME is part of the type -- `Nat<Lat>` and
+/// `Nat<Lon>` do not unify at equal extent -- but not of `ppIRType`'s rendering
+/// (`Idx<3>` for any `type Lat = Idx<3>`), so a mismatch between two named
+/// axes read "expected Array<Float64 like Idx<3>>, got Array<Float64 like
+/// Idx<3>>". Compiler tags (`__`) and provider axis identities (which
+/// `indexIdentityNote` explains) keep the structural form.
+let rec ppIRTypeNominal (t: IRType) : string =
+    let slot (ix: IRIndexType) =
+        match ix.Tag with
+        | Some tg when not (tg.StartsWith "__") && not (isProviderAxisTag tg) -> tg
+        | _ -> ppIndexType ix
+    match t with
+    | ArrayElem at ->
+        let slots = at.IndexTypes |> List.map slot |> String.concat ", "
+        $"Array<{ppIRTypeNominal at.ElemType} like {slots}>"
+    | IRTTuple ts -> $"""({(ts |> List.map ppIRTypeNominal |> String.concat ", ")})"""
+    | IRTUnitAnnotated (inner, units) -> $"{ppIRTypeNominal inner}<{ppUnitSigType units}>"
+    | FuncElem (ps, r) ->
+        $"""({(ps |> List.map ppIRTypeNominal |> String.concat ", ")}) -> {ppIRTypeNominal r}"""
+    | _ -> ppIRType t
+
+/// Does the type mention a user-NAMED index slot anywhere (see ppIRTypeNominal)?
+let rec namesIndexAxis (t: IRType) : bool =
+    match t with
+    | ArrayElem at ->
+        at.IndexTypes |> List.exists (fun ix ->
+            match ix.Tag with
+            | Some tg -> not (tg.StartsWith "__") && not (isProviderAxisTag tg)
+            | None -> false)
+        || namesIndexAxis at.ElemType
+    | IRTTuple ts -> ts |> List.exists namesIndexAxis
+    | IRTUnitAnnotated (inner, _) -> namesIndexAxis inner
+    | FuncElem (ps, r) -> ps |> List.exists namesIndexAxis || namesIndexAxis r
+    | _ -> false
+
 /// Format a TypeError as a human-readable string (raw: before
 /// `humanizeTypeText`; see formatTypeError).
 let private formatTypeErrorRaw (err: TypeError) : string =
@@ -817,8 +855,15 @@ let private formatTypeErrorRaw (err: TypeError) : string =
     | DuplicateFunctionDecl (name, firstSite) ->
         $"duplicate declaration of function '{name}': this scope already declares it at {firstSite}. A function name may be declared only once per scope -- without this refusal the later declaration silently shadows the earlier one, and calls matching the first signature fail blaming the call site. Rename one of the declarations. (Dispatching one name across several signatures -- function clauses -- is a planned feature, not yet supported.)"
     | TypeMismatch (exp, act) ->
-        let rendered = $"Type mismatch: expected {ppIRType exp}, got {ppIRType act}"
-        if ppIRType exp = ppIRType act then rendered + indexIdentityNote exp act else rendered
+        // Two sides that RENDER alike differ in something the structural
+        // printer drops -- an index type's NAME, typically: spell the names.
+        // (Only then: every other mismatch keeps the structural wording its
+        // pins read.)
+        let e, a =
+            if ppIRType exp = ppIRType act then ppIRTypeNominal exp, ppIRTypeNominal act
+            else ppIRType exp, ppIRType act
+        let rendered = $"Type mismatch: expected {e}, got {a}"
+        if e = a then rendered + indexIdentityNote exp act else rendered
     | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"
     | KernelPackArity msg -> msg
     | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
@@ -917,6 +962,9 @@ class IS implemented, and the dense result folds like any other array." op level
     | JoinDimRange (dim, totalDims) -> $"join: dimension {dim} is out of range for a rank-{totalDims} array (valid dims 0..{totalDims - 1})"
     | JoinShapeMismatch (pos, detail) -> $"join: argument {pos} does not match argument 1 ({detail}). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d."
     | StackJoinCompactSlot (op, slot) -> $"{op}: index slot {slot} is a compact, ragged, or compound group. {op} materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first."
+    // An empty context is `unify`'s own (Unify.unifyUnitContext): it cannot
+    // know the seam, so it names none rather than guess one.
+    | UnitMismatch ("", left, right) -> $"Unit mismatch: {left} vs {right}"
     | UnitMismatch (context, left, right) -> $"Unit mismatch in {context}: {left} vs {right}"
     | QuantityArgMismatch (pos, quantity, got) ->
         $"argument {pos}: the parameter's declared type carries the quantity '{quantity}', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is {got}. Ascribe it at the call site (e.g. `x : {quantity}`); matching dimensions alone do not imply the quantity."
@@ -1136,11 +1184,23 @@ the array's flat storage holds them in." shape detail
 ///   * a compiler-MINTED placeholder extent, `Idx<__elementwise_inferred_n_3>`
 ///     (`__<op>_inferred_n..`, `__json_inferred_n0`): an extent the program
 ///     never names, rendered `n` -- the extent is "some length", which is all
-///     the placeholder ever meant.
+///     the placeholder ever meant. Two DIFFERENT placeholders in one message
+///     are two lengths that need not agree, so they are numbered in order of
+///     first appearance (`n`, `n2`, ...): rendering both `n` claimed a tie.
 let humanizeTypeText (msg: string) : string =
+    let extentOrder = System.Collections.Generic.Dictionary<string, int>()
     let withExtents =
         System.Text.RegularExpressions.Regex.Replace(
-            msg, @"__[A-Za-z0-9_]*?inferred_n[A-Za-z0-9_]*", "n")
+            msg, @"__[A-Za-z0-9_]*?inferred_n[A-Za-z0-9_]*",
+            fun (m: System.Text.RegularExpressions.Match) ->
+                let k =
+                    match extentOrder.TryGetValue m.Value with
+                    | true, k -> k
+                    | _ ->
+                        let k = extentOrder.Count
+                        extentOrder.[m.Value] <- k
+                        k
+                if k = 0 then "n" else $"n{k + 1}")
     let order = System.Collections.Generic.Dictionary<string, int>()
     System.Text.RegularExpressions.Regex.Replace(
         withExtents, @"T\?(\d+)",
@@ -1158,6 +1218,17 @@ let humanizeTypeText (msg: string) : string =
 /// Format a TypeError as a human-readable string.
 let formatTypeError (err: TypeError) : string =
     humanizeTypeText (formatTypeErrorRaw err)
+
+/// A USER error found where the checker has no error channel: the type
+/// lowering (`TypeLower.lowerIndexType` and friends return a type, not a
+/// Result). Raised with the error and, when the TypeError variant's own code
+/// is not the right one, the code to report; `TypeCheck.checkModule` catches
+/// it around each declaration and reports it like any other error of that
+/// declaration (span from the ambient statement/expression stamp). These
+/// sites used to `failwith`, which surfaced as BL9001 "a bug in the Blade
+/// compiler" with no span -- for a typo in the user's annotation.
+exception TypeErrorRaised of TypeError * string option
+    with override this.Message = formatTypeError this.Data0
 
 /// Format a CompileError with location and context
 let formatCompileError (err: CompileError) : string =

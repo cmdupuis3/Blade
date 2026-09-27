@@ -3665,27 +3665,10 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                      // rendering (`Idx<3>` for any `type Lat = Idx<3>`); when
                      // either side names an axis, spell the names, or the
                      // message hides the reason (or reads "declared X but got X").
-                     let ppNominal (t: IRType) =
-                         let named (ix: IRIndexType) =
-                             match ix.Tag with
-                             | Some tg when not (tg.StartsWith "__") -> tg
-                             | _ -> ppIndexType ix
-                         match t with
-                         | ArrayElem at ->
-                             let slots = at.IndexTypes |> List.map named |> String.concat ", "
-                             $"Array<{ppIRType at.ElemType} like {slots}>"
-                         | _ -> ppIRType t
-                     let namesAxis (t: IRType) =
-                         match t with
-                         | ArrayElem at ->
-                             at.IndexTypes |> List.exists (fun ix ->
-                                 match ix.Tag with
-                                 | Some tg -> not (tg.StartsWith "__")
-                                 | None -> false)
-                         | _ -> false
+                     // (TypeEnv.ppIRTypeNominal, shared with every TypeMismatch.)
                      let pp1, pp2 =
-                         if ppIRType pTy = ppIRType aTy || namesAxis pTy || namesAxis aTy then
-                             ppNominal pTy, ppNominal aTy
+                         if ppIRType pTy = ppIRType aTy || namesIndexAxis pTy || namesIndexAxis aTy then
+                             ppIRTypeNominal pTy, ppIRTypeNominal aTy
                          else ppIRType pTy, ppIRType aTy
                      Error (ArgTypeMismatch (i + 1, calleeDesc, pp1, pp2)))
             | None, _ ->

@@ -1,0 +1,6 @@
+// TEST: A scalar CompoundIdx mask is a user error, not an ICE (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: has type Int64
+// ============================================================================
+let m = 3
+function f(a: Array<Float64 like CompoundIdx<m>>) -> Float64 = 1.0

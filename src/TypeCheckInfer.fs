@@ -1478,7 +1478,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             // else-branch of a different literal length would be read at the
             // then-branch's length -- `nan`s past a short buffer. Same shared
             // refinement as every ascription seam (`staticExtentClash`).
-            unify env.Subst tThen.Type tElse.Type |> Result.bind (fun () ->
+            unify env.Subst tThen.Type tElse.Type
+            |> withUnifyContext "the branches of this `if` (then-branch vs else-branch)"
+            |> Result.bind (fun () ->
                 match staticExtentClash env.Subst tThen.Type tElse.Type with
                 | Some (d, e, a) ->
                     if elseBr.Span.StartLine > 0 then setCurrentExprSpan elseBr.Span
@@ -12547,7 +12549,14 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
     let resultTy = env.Subst.Fresh()
     matchWith env scrutinee cases resultTy (fun caseEnv body ->
         inferExpr caseEnv body |> Result.bind (fun tBody ->
-            unify env.Subst tBody.Type resultTy |> Result.bind (fun () ->
+            // unify names its FIRST argument as the expectation, and the
+            // expectation here is the arms BEFORE this one (`resultTy`); the
+            // report is flipped rather than the call, whose binding order
+            // the arms' shared type has always relied on.
+            unify env.Subst tBody.Type resultTy
+            |> flipMismatch
+            |> withUnifyContext "the arms of this `match` (the earlier arms vs this arm)"
+            |> Result.bind (fun () ->
                 match staticExtentClash env.Subst resultTy tBody.Type with
                 | Some (d, e, a) ->
                     if body.Span.StartLine > 0 then setCurrentExprSpan body.Span

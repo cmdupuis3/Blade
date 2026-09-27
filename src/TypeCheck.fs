@@ -303,13 +303,18 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | DeclImport (qn, _) -> $"""in import '{(String.concat "." qn)}'"""
             | DeclUnit u -> $"in unit '{u.Name}'"
         let envWithCtx = pushContext declName currentEnv
-        match checkDecl envWithCtx d.Value with
+        // A user error the type lowering found where it has no error channel
+        // (TypeEnv.TypeErrorRaised) is this declaration's error like any other.
+        let checked, raisedCode =
+            try checkDecl envWithCtx d.Value, None
+            with TypeErrorRaised (te, code) -> Error te, code
+        match checked with
         | Ok (td, env') ->
             decls <- td :: decls
             // Carry forward env' but restore original context (don't nest)
             currentEnv <- { env' with Context = currentEnv.Context }
         | Error err ->
-            let ce = locateError d.Span currentEnv err
+            let ce = { locateError d.Span currentEnv err with Code = raisedCode }
             errors <- ce :: errors
             // Continue with pre-failure env, but bind the failed decl's
             // name(s) to a FRESH inference var so downstream references
