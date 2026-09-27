@@ -86,43 +86,57 @@ let runGatherElisionTests () : BlockResult =
     let poolSlice = "g[__g] = g__pool + __off;"
     let copyStore = "g[__g][__k] ="
     let nullRows = "g[__g] = nullptr;"
+    // `print`: the BLADE_PRINT selection for the case (None = print every
+    // binding). The auto-print READS a grouped array's rows, so a printed
+    // group_by always keeps its gather; the elision cases leave `g` out of
+    // the selection, exactly as `blade run --print sizes` would.
     let cases =
-        [ // Sole consumer reads only extents -> gather is dead.
+        [ // Sole non-print consumer reads only extents -> gather is dead.
           "extents-only peel elides the gather",
-          header + sizesPeel,
+          header + sizesPeel, Some "sizes",
           [nullRows], [poolSlice; copyStore]
+          // ...but only when the print leaves `g` out: the default print shows
+          // g's rows, which reads every value.
+          "a printed group_by keeps its gather (the print reads its rows)",
+          header + sizesPeel, None,
+          [poolSlice; copyStore], [nullRows]
           // A second consumer reads VALUES -> the gather is live. This is the
           // load-bearing direction: eliding here emits a null dereference.
           "a values-reading consumer keeps the gather",
-          header + sizesPeel + sumsPeel,
+          header + sizesPeel + sumsPeel, Some "sizes,sums",
           [poolSlice; copyStore], [nullRows]
           // Values-only consumer: nothing to elide, unchanged behaviour.
           "a values-only peel is untouched",
-          header + sumsPeel,
+          header + sumsPeel, Some "sums",
           [poolSlice; copyStore], [nullRows]
-          // Nothing consumes it: the gather is dead for the same reason, just
-          // more obviously. Auto-print still reports it (reading extents only),
-          // so this is not dead-binding elimination -- only the copy goes.
+          // Nothing consumes it (and the print leaves it out): the gather is
+          // dead for the same reason, just more obviously. Not dead-binding
+          // elimination -- only the copy goes.
           "an unused group_by elides its gather",
-          header + "let n = extents(gk)\n",
+          header + "let n = extents(gk)\n", Some "n",
           [nullRows], [poolSlice; copyStore]
           // ...but a bare top-level `g` is a REFERENCE (it desugars to a
           // binding initialised from g), so it counts as a use and keeps the
           // gather. Conservative rather than clever: pinned so the distinction
           // is deliberate and cannot drift silently.
           "a bare top-level mention of the grouped array keeps the gather",
-          header + "g\n",
+          header + "g\n", None,
           [poolSlice; copyStore], [nullRows]
           // `extents(gk)` needs no grouped array at all -- the direct spelling
           // allocates nothing per group and copies nothing.
           "extents(gk) emits no group_by gather at all",
           "let keys = [0, 1, 0, 2, 1, 0]\n\
            let gk = group_keys(keys)\n\
-           let sizes = extents(gk)\n",
+           let sizes = extents(gk)\n", None,
           ["sizes[__g] = (int64_t)(gk__offsets[__g + 1] - gk__offsets[__g]);"],
           [poolSlice; copyStore; "new double*"] ]
-    for (name, src, mustContain, mustNotContain) in cases do
-        match Blade.Tests.Functions.cppOf "gather_elision" src with
+    for (name, src, print, mustContain, mustNotContain) in cases do
+        let prior = System.Environment.GetEnvironmentVariable "BLADE_PRINT"
+        System.Environment.SetEnvironmentVariable("BLADE_PRINT", Option.toObj print)
+        let emitted =
+            try Blade.Tests.Functions.cppOf "gather_elision" src
+            finally System.Environment.SetEnvironmentVariable("BLADE_PRINT", prior)
+        match emitted with
         | Error e -> fail name e
         | Ok cpp ->
             let flat =

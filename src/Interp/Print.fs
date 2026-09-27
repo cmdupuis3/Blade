@@ -19,16 +19,16 @@
 //   * dense arrays          -> ArrayOps.emitFlat (genPrintArrayFlat: rank 2
 //                              nested, every other rank >= 1 one flat run)
 //   * rank 0                -> `<rank-0>` placeholder
-//   * rank-1 struct arrays, all-scalar fields -> per-field print loop
-//       `name = [{f1: V1, f2: V2}, ...]` (mirrors genPrintStatements)
+//   * rank-1 struct arrays -> per-field print loop
+//       `name = [{f1: V1, f2: [a, b]}, ...]` (mirrors genPrintStatements;
+//       array fields print their values, CodeGen.structFieldPrint)
 // and mirrors CodeGen's no-stdout (C++ comment only) arms as zero output:
 //   compound arrays, function-valued arrays, struct arrays (rank>1/no fields),
 //   ragged sub-views.
 // The still-unrendered stdout-producing kinds are gated with PrintUnsupported so
-// the caller classifies the whole program SKIP-UNSUPPORTED (never wrong bytes):
-//   symmetric-aware arrays (rank 2-8); ragged/dep-idx literals/peel/row;
-//   rank-1 struct arrays with a non-scalar field (address-valued; no faithful
-//   interpreter image -- CodeGen streams it as a raw pointer).
+// the caller classifies the whole program SKIP-UNSUPPORTED (never wrong bytes).
+// No kind prints a POINTER in either lane any more, and the differential
+// normalizers no longer mask one: a pointer in output is a divergence.
 //
 // TIMING LINE. genMainWrapper prints `<testName> completed in <elapsed>s` first,
 // then the binding prints. `testName` is the source file stem, not IRModule.Name,
@@ -209,14 +209,12 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
 
     let emitScalar (b: IRBinding) (et: ElemType) : unit =
         match lookup b.Id with
-        // A scalar-TYPED binding whose value is an ARRAY: the object_for OUTER
-        // comparison/logical forms (`A [<] B`, `P [&&] Q`) collapse to scalar
-        // Bool at the checker, but genObjectForApplication still materializes an
-        // Array<bool,N>; the compiled binary prints its raw data pointer via
-        // `cout << arr`, which the InterpDiff normalizer masks to 0xPTR. Emit a
-        // matching hex token (the value is moot under the mask).
-        | Some (VArray _) ->
-            sb.Append(b.Name).Append(" = 0x0").Append('\n') |> ignore
+        // (A `0x0` arm stood here: a scalar-TYPED binding holding an array
+        // printed a fake pointer to match the compiled binary's `cout << arr`
+        // under the differential normalizers' pointer mask. The bracketed
+        // outer forms that produced it now type as arrays and print values,
+        // and the mask is gone, so a pointer in either lane's output is a
+        // divergence the gate reports instead of hides.)
         | Some v ->
             let text = formatScalar b.Name et v
             sb.Append(b.Name).Append(" = ").Append(text).Append('\n') |> ignore
@@ -260,19 +258,21 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
         | FuncElem _ ->
             ()   // arrays of function values: comment only (std::function unstreamable).
         | IRTNamed structName ->
-            // Rank-1 struct arrays with known, all-scalar fields print a
-            // per-field loop (stdout), mirroring genPrintStatements
-            // (CodeGen.fs ~10430-10457):
+            // Rank-1 struct arrays with a known field list print a per-field
+            // loop (stdout), mirroring genPrintStatements:
             //   name = [{f1: V1, f2: V2}, {f1: V1, f2: V2}, ...]
-            // Each field's DECLARED ElemType fixes the C++ operator<< overload
-            // and its formatting (reuse formatScalar). Rows ", "-separated
-            // inside `[...]`; fields ", "-separated inside `{...}`; field
-            // ORDER follows the declared IRTDStruct list. Everything else is
-            // deferred / comment-only: rank>1 or unknown/empty field list ->
-            // CodeGen comment (no stdout, emit nothing); ANY non-scalar field
-            // (address-valued in C++) -> CodeGen still emits the loop, but the
-            // interpreter has no faithful image, so GATE rather than risk
-            // wrong bytes (structs/013 'Trace.samples' must keep skipping).
+            // Each field prints as CodeGen.structFieldPrint classifies it: a
+            // scalar through its DECLARED ElemType (which fixes the C++
+            // operator<< overload -- reuse formatScalar); a DENSE array field
+            // as its values in the top-level array format; any other array as
+            // the same `<rank-N array>` placeholder the compiled side prints.
+            // (Array fields used to print as the compiled wrapper's data
+            // POINTER, masked by both differential normalizers, and this lane
+            // skipped them -- structs/013's `samples: 0x1fe4df26e90`.)
+            // Rows ", "-separated inside `[...]`; fields ", "-separated inside
+            // `{...}`; field ORDER follows the declared IRTDStruct list.
+            // rank>1 or unknown/empty field list -> CodeGen comment (no
+            // stdout, emit nothing).
             let structFields =
                 irModule.Types |> List.tryPick (fun td ->
                     match td with
@@ -280,15 +280,36 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                     | _ -> None)
             match structFields with
             | Some fields when rank = 1 && not (List.isEmpty fields) ->
-                // Resolve each field to a printable scalar ElemType FIRST (before
-                // touching sb): a non-scalar field defers the whole program.
-                let fieldEts =
+                // Resolve every field's rendering FIRST (before touching sb):
+                // a field this printer cannot render defers the whole program.
+                let fieldRenders =
                     fields |> List.map (fun (fname, ftype) ->
-                        match elemThrough ftype with
-                        | Some et when isPrintableScalarEt et -> (fname, et)
-                        | _ ->
-                            raise (PrintUnsupported
-                                    ($"rank-1 struct array '{b.Name}' print: field '{fname}' is not a printable scalar (M2.6)")))
+                        let render : Value -> string =
+                            match Blade.CodeGen.structFieldPrint ftype with
+                            | Blade.CodeGen.FieldOpaqueArray text -> fun _ -> text
+                            | Blade.CodeGen.FieldDenseArray _ ->
+                                let et =
+                                    match stripUnits ftype with
+                                    | ArrayElem at -> elemThrough at.ElemType
+                                    | _ -> None
+                                match et with
+                                | Some et ->
+                                    fun v ->
+                                        match v with
+                                        | VArray fa -> ArrayOps.formatDenseArrayText fa et
+                                        | _ ->
+                                            raise (PrintUnsupported
+                                                    $"rank-1 struct array '{b.Name}' print: field '{fname}' holds no array value")
+                                | None ->
+                                    raise (PrintUnsupported
+                                            $"rank-1 struct array '{b.Name}' print: field '{fname}' has no scalar element type")
+                            | Blade.CodeGen.FieldScalar ->
+                                match elemThrough ftype with
+                                | Some et when isPrintableScalarEt et -> fun v -> formatScalar b.Name et v
+                                | _ ->
+                                    raise (PrintUnsupported
+                                            ($"rank-1 struct array '{b.Name}' print: field '{fname}' is not a printable scalar (M2.6)"))
+                        (fname, render))
                 match lookup b.Id with
                 | Some (VArray ba) ->
                     sb.Append(b.Name).Append(" = [") |> ignore
@@ -302,7 +323,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                                 raise (PrintUnsupported
                                         $"rank-1 struct array '{b.Name}' print: row {i} is not a struct value")
                         sb.Append("{") |> ignore
-                        fieldEts |> List.iteri (fun j (fname, et) ->
+                        fieldRenders |> List.iteri (fun j (fname, render) ->
                             if j > 0 then sb.Append(", ") |> ignore
                             let fv =
                                 match rowFields |> Array.tryPick (fun (nm, v) -> if nm = fname then Some v else None) with
@@ -310,7 +331,7 @@ let printBindingsOnly (progName: string) (lookup: IRId -> Value option) (forcedI
                                 | None ->
                                     raise (PrintUnsupported
                                             $"rank-1 struct array '{b.Name}' print: row missing field '{fname}'")
-                            sb.Append(fname).Append(": ").Append(formatScalar b.Name et fv) |> ignore)
+                            sb.Append(fname).Append(": ").Append(render fv) |> ignore)
                         sb.Append("}") |> ignore
                     sb.Append("]").Append('\n') |> ignore
                 | Some _ ->

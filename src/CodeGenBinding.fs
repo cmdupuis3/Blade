@@ -61,7 +61,14 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRUngroupRows (rows, offsets, src) ->
         genUngroupRowsBinding ctx binding rows offsets src
     | IRGroupBy (vals, gk) ->
-        genGroupByBinding ctx binding builder vals gk
+        let (code, ctx') = genGroupByBinding ctx binding builder vals gk
+        // Every arm registers name -> grouping in GroupedArrays; the printer
+        // needs the same fact by binding id (groupedBindingsCell).
+        let name = bindingCppName binding
+        (match Map.tryFind name ctx'.GroupedArrays with
+         | Some gkName -> noteGroupedBinding binding.Id name gkName
+         | None -> ())
+        (code, ctx')
     | IRGroupBucket gk ->
         genGroupBucketBinding ctx binding builder gk
     | IRGroupSizes gk ->
@@ -2159,8 +2166,9 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // .extents points at the 2-element local size_t array {ngroups, 0};
     // .extents[0] = ngroups, .extents[1] reads 0 (placeholder for the
     // ragged inner). Element type T* keeps `grouped[g]` as a bare row
-    // pointer for downstream peeling. Print's inner-loop bound of 0
-    // means no values printed, matching prior behavior.
+    // pointer for downstream peeling. Print does NOT use that 0: it walks
+    // the rows through the grouping's offsets (genPrintStatements via
+    // groupedBindingsCell), as the interpreter prints its ragged rows.
     //
     // PER-SEGMENT STREAM (docs/plans/structural/07 §3.4): the values are a
     // rank-1 variable bound with `.stream` (no array named after it exists)
@@ -2302,8 +2310,8 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                  [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
     // GATHER ELISION: every consumer of this binding reads only row LENGTHS
     // (computeExtentsOnlyGroupBys), which come from the gk offsets. The row
-    // TABLE is still emitted -- the peel indexes it, and print reads its extents
-    // -- but the per-group buffers and the O(n) copy are dead, so the rows stay
+    // TABLE is still emitted -- the peel indexes it -- but the per-group
+    // buffers and the O(n) copy are dead, so the rows stay
     // null. Legal because the peel reads the pointer without dereferencing it,
     // and deallocate_ragged_rows_owned's `delete[] rows[i]` no-ops on null.
     let elideGather = Set.contains binding.Id (extentsOnlyGroupBysCell ()).Value
@@ -4171,6 +4179,40 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             // Compound/ragged/dep-idx initializers keep the historical alias
             // (no dense .extents/pool contract; no assignment path exercises
             // them today).
+            match Map.tryFind srcName ctx.GroupedArrays with
+            | Some gkName ->
+                // A GROUPED array (group_by's row table over one CSR pool). Its
+                // row LENGTHS live in the grouping's offsets, not in the value
+                // -- the value's inner extent is the ragged placeholder 0 -- so
+                // the dense deep copy below copied zero cells and left an EMPTY
+                // rank-2 array: `let h = g` printed `h = [[], [], []]` beside
+                // g's real rows, and a peel over h read nothing. Copy the pool
+                // and rebuild the row table instead (a copy, not an alias, for
+                // the reason the dense arm copies: the binding is assignable),
+                // and carry the grouping so peels and print read h like g.
+                // (The alias is a USE of g, so g's gather is never elided here;
+                // see computeExtentsOnlyGroupBys.)
+                let elemStr =
+                    match binding.Type with
+                    | ArrayElem at -> elemTypeToCpp at.ElemType
+                    | _ -> "double"
+                let extentsDecl =
+                    fst (emitExtentsTable ind (name + "_extents") 2
+                             [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
+                let code =
+                    [ $"{ind}// {name} = {srcName}: copy of a grouped array (grouping {gkName})" ]
+                    @ extentsDecl
+                    @ [ $$"""{{ind}}Array<{{elemStr}}*, 1> {{name}} = { new {{elemStr}}*[{{gkName}}__ngroups], {{name}}_extents };"""
+                        $"{ind}{elemStr}* {name}__pool = new {elemStr}[{gkName}__offsets[{gkName}__ngroups]];"
+                        $$"""{{ind}}for (size_t __g = 0; __g < {{gkName}}__ngroups; __g++) {"""
+                        $"{ind}    {name}[__g] = {name}__pool + {gkName}__offsets[__g];"
+                        $"{ind}    for (size_t __k = 0, __n = {gkName}__offsets[__g + 1] - {gkName}__offsets[__g]; __k < __n; __k++) {name}[__g][__k] = {srcName}[__g][__k];"
+                        $"{ind}}}" ]
+                registerShapedAlloc name "deallocate_ragged_storage" ($"{name}.data, {name}__pool")
+                noteGroupedBinding binding.Id name gkName
+                let ctx' = addVarName binding.Id name ctx
+                (code, { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays })
+            | None ->
             let mutArrayCopy =
                 if binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets then
                     match binding.Type with

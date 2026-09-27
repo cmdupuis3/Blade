@@ -2067,6 +2067,16 @@ let private emitFlat (sb: StringBuilder) (name: string) (arr: BladeArray) (et: E
         sb.Append(formatCell et (readCell arr coords)) |> ignore)
     sb.Append("]").Append('\n') |> ignore
 
+/// The value text a DENSE array prints as -- emitFlat's `[...]` without the
+/// `name = ` framing or the newline. A struct's array-typed field prints this
+/// (the twin of CodeGen.genPrintFieldArray).
+let formatDenseArrayText (arr: BladeArray) (et: ElemType) : string =
+    let sb = StringBuilder()
+    emitFlat sb "" arr et
+    let s = sb.ToString()
+    // emitFlat wrote `" = " + text + "\n"` for the empty name.
+    s.Substring(3, s.Length - 4)
+
 /// Symmetric-aware print: mirrors CodeGen.genPrintArraySymAware (CodeGen.fs:9791)
 /// exactly. Iterates the compact (triangular/strict-triangular) index space in
 /// left-justified storage coordinates -- bound at group component a is
@@ -2148,13 +2158,16 @@ let printArrayBinding (b: IRBinding) (arr: BladeArray) (sb: StringBuilder) : uni
         match elemThrough arrType.ElemType with
         | Some et when isPrintableScalarEt et ->
             match arr.Data with
-            // A group_by result is SRagged too, but its auto-print is the dense
-            // flat print over Extents=[ngroups; 0] (inner extent 0 emits no
-            // cells) -- route it to the flat emitter, not the backing pool.
-            | SRagged (rows, lens, _) when (match b.Value with IRGroupBy _ -> false | _ -> true) ->
-                // A ragged / DepIdx literal prints its rows nested, like every
-                // other rank-2 array (`lens[i]` bounds each row): the row
-                // boundary is the one thing the flat pool cannot show.
+            // A ragged / DepIdx literal AND a group_by result (or a copy of
+            // one: `let h = g` shares the SRagged value) print their rows
+            // nested, like every other rank-2 array (`lens[i]` bounds each
+            // row): the row boundary is the one thing the flat pool cannot
+            // show. The compiled printer walks a grouped array's rows through
+            // the grouping's offsets (genPrintStatements' grouped arm); it
+            // used to print the placeholder inner extent 0, i.e. `[[], [], []]`,
+            // and this arm excluded IRGroupBy to match -- which made a notebook
+            // alias print real rows where `blade run` printed empty ones.
+            | SRagged (rows, lens, _) ->
                 sb.Append(b.Name).Append(" = [") |> ignore
                 rows
                 |> Array.iteri (fun i row ->
