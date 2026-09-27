@@ -1,0 +1,10 @@
+// TEST: Duplicate index type declaration (rejects)
+// ============================================================================
+// `type A = Idx<3>` then `type A = Idx<4>`: the later one silently won, so a
+// 3-element literal annotated with the FIRST declaration's intent failed with
+// an extent error naming 4. Refused at the second declaration.
+type A = Idx<3>
+type A = Idx<4>
+let x: Array<Float64 like A> = [1.0, 2.0, 3.0]
+// ERROR: BL2009 @ 6:1
+// ERROR-CONTAINS: duplicate declaration of type 'A'

@@ -1,0 +1,13 @@
+// TEST: Duplicate top-level let (rejects)
+// ============================================================================
+// A second top-level `let` of a name used to pass the checker and then die
+// in g++ as a redeclaration -- while the interpreter SHADOWED it, so the two
+// lanes disagreed about what the program meant. Refused (BL2009) like a
+// duplicate function. (Inside a block, `let` may still shadow; at top level
+// an update is an assignment.)
+let a = 1.0
+let b = a + 1.0
+let a = 10.0
+let c = a + 1.0
+// ERROR: BL2009 @ 9:1
+// ERROR-CONTAINS: duplicate declaration of top-level value 'a': this module already declares it at line 7, column 1

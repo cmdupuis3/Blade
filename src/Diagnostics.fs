@@ -192,8 +192,13 @@ module Codes =
             // the first signature died blaming the caller. Same-scope only --
             // nested `function`s desugar to block lets and may still shadow an
             // outer name. Refused until same-name clause dispatch exists
-            // (plan-match-statements.md §5 R1).
-            "BL2009", "duplicate function declaration"
+            // (plan-match-statements.md §5 R1). Widened to every top-level
+            // namespace: a second top-level `let`/`static` of a name (or one
+            // beside a `function` of it), a second `type`/`struct`/sum type,
+            // a second `Unit`, and -- across the modules of one program --
+            // a type or variant-constructor name declared twice (type
+            // identity is not module-qualified yet).
+            "BL2009", "duplicate declaration"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"

@@ -1,0 +1,14 @@
+// TEST: Main type shadowing an imported index type (rejects)
+// MODULE: Main
+// ERROR: BL2009
+// ERROR-CONTAINS: duplicate declaration of type 'Cell': module 'Geo' already declares a type of that name
+// ============================================================================
+// Index-type provenance is nominal: `Nat<Cell>` from main's own `Cell` must
+// never index an array over Geo's `Cell`. But both were the name "Cell", so
+// main's `type Cell = Idx<5>` became the SAME index type as Geo's `Idx<3>`,
+// and `Geo.w(i)` with `i` ranging over main's five cells passed the very
+// check that exists to refuse it (reading past the end of a 3-cell array).
+module Main
+import Geo
+type Cell = Idx<5>
+let r = method_for(range<Cell>) <@> lambda(i) -> Geo.w(i) |> compute

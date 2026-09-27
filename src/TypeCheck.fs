@@ -26,6 +26,67 @@ open Blade.TypeCheckInfer
 open Blade.TypeCheckValidate
 
 // 12. Module and Program
+
+/// The type names one `type` declaration introduces (a mutual group names
+/// every member).
+let private typeDeclNames (td: TypeDecl) : string list =
+    match td with
+    | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _, _) | TyDeclSum (n, _, _) -> [ n ]
+    | TyDeclMutualGroup (members, _) -> members |> List.map fst
+
+/// BL2009 across MODULES, for the names that are not module-qualified yet.
+///
+/// Values and functions of a non-main module are namespaced at lowering
+/// (Lowering.qualifyModuleNames), but a TYPE's identity is still its bare
+/// name: `IRTNamed "P"`, an index type's `IRefNamed "Cell"`. So two modules
+/// each declaring `struct P` emitted two global C++ `struct P` (a g++
+/// redefinition) and the call judgment could not tell them apart -- `A.fx(q)`
+/// accepted B's `P` -- and a main-module `type Cell = Idx<5>` became the SAME
+/// nominal index type as an imported module's `Cell = Idx<3>`, so a
+/// provenance check that exists to keep them apart passed. Until type
+/// identity is keyed by (module, name), one program may declare a type name
+/// once. Variant constructors are global C++ names (enum members, ctor
+/// functions) and their tag table is keyed by bare name too, so they get the
+/// same rule -- within a module as well, since two sum types there sharing a
+/// constructor collide identically.
+let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileError list =
+    let errors = ResizeArray<CompileError>()
+    let seenTypes = System.Collections.Generic.Dictionary<string, string * Span>()
+    let seenCtors = System.Collections.Generic.Dictionary<string, string * Span>()
+    // The error-location side channel still holds the LAST expression the
+    // checker visited (in whichever module ran last); cleared per refusal so
+    // each one points at its own declaration.
+    let refuse (span: Span) (err: TypeError) =
+        resetCurrentStmtSpan ()
+        errors.Add (locateError span env err)
+    let siteOf (first: Span) (here: Span) =
+        let where = $"line {first.StartLine}, column {first.StartCol}"
+        match first.File, here.File with
+        | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
+        | _ -> where
+    for m in program.Modules do
+        let modName = m.Name |> String.concat "."
+        for d in m.Decls do
+            match d.Value with
+            | DeclType td ->
+                for n in typeDeclNames td do
+                    match seenTypes.TryGetValue n with
+                    | true, (firstMod, firstSpan) when firstMod <> modName ->
+                        refuse d.Span (DuplicateDecl ("type", n, siteOf firstSpan d.Span, Some firstMod))
+                    | true, _ -> ()   // same module: checkModule's own BL2009
+                    | _ -> seenTypes.[n] <- (modName, d.Span)
+                match td with
+                | TyDeclSum (_, _, variants) ->
+                    for v in variants do
+                        match seenCtors.TryGetValue v.Name with
+                        | true, (firstMod, firstSpan) ->
+                            let crossModule = if firstMod <> modName then Some firstMod else None
+                            refuse d.Span (DuplicateDecl ("constructor", v.Name, siteOf firstSpan d.Span, crossModule))
+                        | _ -> seenCtors.[v.Name] <- (modName, d.Span)
+                | _ -> ()
+            | _ -> ()
+    List.ofSeq errors
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
@@ -109,8 +170,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutable currentEnv = preEnv
     let mutable decls = []
     let mutable errors = []
-    // Module-scope `function` names already declared, first span each (BL2009).
-    let mutable declaredFunctions : Map<string, Span> = Map.empty
+    // Module-scope names already declared, first span each (BL2009), one
+    // map per namespace: values (`let`/`static`/`function` share one -- the
+    // bool marks a function, which keeps the function-vs-function message),
+    // types, units.
+    let mutable declaredValues : Map<string, Span * bool> = Map.empty
+    let mutable declaredTypes : Map<string, Span> = Map.empty
+    let mutable declaredUnits : Map<string, Span> = Map.empty
 
     for d in modul.Decls do
         // BL2009 -- duplicate top-level `function` name. Without this the
@@ -124,28 +190,56 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         // so the refusal is the only diagnostic instead of the root cause plus
         // downstream mismatch noise. Prerequisite for same-name clause
         // dispatch (plan-match-statements.md §5 R1).
+        //
+        // The same refusal covers every other top-level namespace: a second
+        // `let x` (or a `let x` beside a `function x`), a second `type`/
+        // `struct`/sum type `T`, a second `Unit u`. A top-level re-`let`
+        // passed the checker and then died in g++ as a redeclaration, while
+        // the interpreter SHADOWED it -- two lanes, two meanings; a duplicate
+        // type silently let the last declaration win. Wildcard `_` binds
+        // nothing and never clashes.
+        let firstSiteOf (firstSpan: Span) =
+            let where = $"line {firstSpan.StartLine}, column {firstSpan.StartCol}"
+            match firstSpan.File, d.Span.File with
+            | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
+            | _ -> where
+        let claim (names: string list) (table: Map<string, Span>) (kind: string) =
+            match names |> List.tryPick (fun n -> Map.tryFind n table |> Option.map (fun sp -> (n, sp))) with
+            | Some (n, sp) -> Some (DuplicateDecl (kind, n, firstSiteOf sp, None)), table
+            | None -> None, (names |> List.fold (fun t n -> Map.add n d.Span t) table)
         let duplicateOf =
             match d.Value with
             | DeclFunction f ->
-                match Map.tryFind f.Name declaredFunctions with
-                | Some firstSpan -> Some (f.Name, firstSpan)
+                match Map.tryFind f.Name declaredValues with
+                | Some (firstSpan, true) -> Some (DuplicateFunctionDecl (f.Name, firstSiteOf firstSpan))
+                | Some (firstSpan, false) -> Some (DuplicateDecl ("value", f.Name, firstSiteOf firstSpan, None))
                 | None ->
-                    declaredFunctions <- Map.add f.Name d.Span declaredFunctions
+                    declaredValues <- Map.add f.Name (d.Span, true) declaredValues
                     None
+            | DeclLet b | DeclStatic b ->
+                let names = patternNames b.Pattern |> List.filter (fun n -> n <> "_")
+                match names |> List.tryPick (fun n -> Map.tryFind n declaredValues |> Option.map (fun (sp, _) -> (n, sp))) with
+                | Some (n, sp) -> Some (DuplicateDecl ("value", n, firstSiteOf sp, None))
+                | None ->
+                    for n in names do declaredValues <- Map.add n (d.Span, false) declaredValues
+                    None
+            | DeclType td ->
+                let err, table = claim (typeDeclNames td) declaredTypes "type"
+                declaredTypes <- table
+                err
+            | DeclUnit u ->
+                let err, table = claim [ u.Name ] declaredUnits "unit"
+                declaredUnits <- table
+                err
             | _ -> None
         match duplicateOf with
-        | Some (name, firstSpan) ->
+        | Some dupErr ->
             // The duplicate decl skips checkDecl, whose per-decl reset would
             // otherwise clear the PREVIOUS decl's expression span -- without
             // this, locateError's precision order picks that stale span and
             // the refusal points into the FIRST declaration's body.
             resetCurrentStmtSpan ()
-            let firstSite =
-                let where = $"line {firstSpan.StartLine}, column {firstSpan.StartCol}"
-                match firstSpan.File, d.Span.File with
-                | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
-                | _ -> where
-            let ce = locateError d.Span currentEnv (DuplicateFunctionDecl (name, firstSite))
+            let ce = locateError d.Span currentEnv dupErr
             errors <- ce :: errors
         | None ->
 
@@ -309,6 +403,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
                   Constraints = snap finalEnv.FuncConstraints }
         }
         moduleExports <- Map.add moduleName export moduleExports
+    allErrors <- allErrors @ crossModuleDeclErrors env program
     // env.Warnings is shared by reference across all envWithExports updates
     // (mutable ResizeArray, not a Map), so all module-scope warnings
     // accumulate here.

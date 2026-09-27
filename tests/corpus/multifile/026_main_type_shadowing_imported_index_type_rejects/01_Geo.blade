@@ -1,0 +1,5 @@
+// TEST: Main type shadowing an imported index type (rejects)
+// MODULE: Geo
+module Geo
+type Cell = Idx<3>
+let w: Array<Float64 like Cell> = [1.0, 2.0, 3.0]

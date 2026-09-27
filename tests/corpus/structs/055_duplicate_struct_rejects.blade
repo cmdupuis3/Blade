@@ -1,0 +1,11 @@
+// TEST: Duplicate struct declaration (rejects)
+// ============================================================================
+// A second `struct Point` silently replaced the first: `p` was built as the
+// first Point, then its field read resolved against the second one's fields
+// (a confusing "no field 'x'" at the READ). Refused at the declaration.
+struct Point { x: Float64, y: Float64 }
+let p = Point { x = 1.0, y = 2.0 }
+struct Point { a: Int64 }
+let px = p.x
+// ERROR: BL2009 @ 7:1
+// ERROR-CONTAINS: duplicate declaration of type 'Point': this module already declares it at line 5, column 1

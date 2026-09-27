@@ -1,0 +1,5 @@
+// TEST: Two modules declaring one struct name (rejects)
+// MODULE: A
+module A
+struct P { x: Float64 }
+function fx(p: P) -> Float64 = p.x
