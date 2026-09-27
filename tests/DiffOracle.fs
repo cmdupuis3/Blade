@@ -66,16 +66,16 @@ let private runBlade (exePath: string) (srcFile: string) : Result<string, string
     with ex -> Error ex.Message
 
 /// Value lines only: timing lines vary run to run; line endings normalize.
-/// Heap pointer addresses are masked: the struct printer currently renders an
-/// array-typed field as its raw pointer (e.g. `samples: 0x1f3f4a878b0`), which
-/// differs on EVERY run — without masking, structs/013 flakes against any
-/// oracle. (Printing something useful instead of a pointer is a separate
-/// printer backlog item.)
+/// Heap pointers are NOT masked: the mask existed because the struct printer
+/// streamed an array-typed field as its raw address (`samples: 0x1f3f4a878b0`),
+/// and it hid that bug. The printer prints the field's values now, and a
+/// pointer in either binary's output is a difference this gate reports. (An
+/// oracle pinned before that fix prints the address, so structs/013 differs
+/// against it until the oracle is re-pinned -- a real behaviour change.)
 let private normalize (s: string) : string =
     s.Replace("\r\n", "\n").Split('\n')
     |> Array.filter (fun l -> not (l.Contains "completed in"))
-    |> Array.map (fun l ->
-        System.Text.RegularExpressions.Regex.Replace(l.TrimEnd(), "0x[0-9a-fA-F]+", "0xPTR"))
+    |> Array.map (fun l -> l.TrimEnd())
     |> String.concat "\n"
     |> fun t -> t.Trim()
 

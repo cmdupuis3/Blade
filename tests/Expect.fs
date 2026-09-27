@@ -894,3 +894,62 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
         let allErrors = collapseErrors @ errors
         if allErrors.IsEmpty then Ok ()
         else Error allErrors
+
+/// The first line of a program's output that shows a raw heap POINTER
+/// (`samples: 0x1fe4df26e90`), or None. A printer that streams an address
+/// instead of a value prints something different on every run, and both
+/// differential normalizers used to mask `0x...` to make that "agree" -- which
+/// hid the printer bug for as long as the mask stood. Program output never
+/// legitimately contains an address (integers print in decimal; hex literals
+/// are SOURCE syntax), so the gates now fail on one instead.
+///
+/// Eight or more hex digits after `0x`, not inside a word or a quoted string:
+/// short enough for any 64-bit address a runtime prints, long enough that a
+/// short `0x1F` a program deliberately printed as text is not mistaken for one.
+let rawPointerLine (output: string) : string option =
+    let re = System.Text.RegularExpressions.Regex(@"(?<![\w""])0x[0-9a-fA-F]{8,}\b")
+    output.Replace("\r\n", "\n").Split('\n')
+    |> Array.tryFind (fun l -> re.IsMatch l)
+    |> Option.map (fun l -> l.Trim())
+
+/// The `// ERROR:` / `// ERROR-CONTAINS:` lines `parseDiagPins` cannot turn
+/// into the pin their author wrote, verbatim. `parseDiagPins` used to degrade
+/// an unparseable `@ l:c` span to a CODE-ONLY pin -- `// ERROR: BL3006 @ 4;12`
+/// silently asserted less than it said -- so the runners fail on these
+/// instead. Rules: the code is `BL` + four digits; a span, when present, is
+/// `l:c` or `l:c-l:c` with positive integers; `ERROR-CONTAINS:` needs text.
+let parseMalformedDiagPinLines (source: string) : string list =
+    let codeRe = System.Text.RegularExpressions.Regex(@"^BL\d{4}$")
+    let lcRe = System.Text.RegularExpressions.Regex(@"^[1-9]\d*:[1-9]\d*$")
+    [ for raw in source.Split('\n') do
+        let t = raw.TrimEnd('\r').Trim()
+        if t.StartsWith "// ERROR-CONTAINS:" then
+            if t.Substring(18).Trim() = "" then yield t
+        elif t.StartsWith "// ERROR:" then
+            let spec = t.Substring(9).Trim()
+            let parts = spec.Split([|'@'|], 2)
+            let codeOk = codeRe.IsMatch(parts.[0].Trim())
+            let spanOk =
+                parts.Length = 1
+                || (let ends = parts.[1].Trim().Split([|'-'|], 2)
+                    ends |> Array.forall (fun e -> lcRe.IsMatch(e.Trim())))
+            if not (codeOk && spanOk) then yield t ]
+
+/// Every `// EXPECT:` line of a source, verbatim (trimmed). The reject-probe
+/// rule needs the raw lines: an `=`-bearing `// EXPECT:` on a probe that is
+/// refused before it runs parses as a pin nobody ever checks (tuples/005's
+/// prose `requires N >= 2` read as the pin `... N > = 2`).
+let expectLinesVerbatim (source: string) : string list =
+    expectLines source |> List.map fst
+
+/// `// NOPINS: <reason>` -- the explicit marker a value test that pins nothing
+/// must carry (the runner fails an unmarked one: it would pass on "compiled
+/// and exited 0" alone). Some reason text (possibly empty, which the runner
+/// rejects), or None when there is no marker.
+let parseNoPinsReason (source: string) : string option =
+    source.Split('\n')
+    |> Array.tryPick (fun raw ->
+        let t = raw.TrimEnd('\r').Trim()
+        if t.StartsWith "// NOPINS:" then Some (t.Substring(10).Trim())
+        elif t = "// NOPINS" then Some ""
+        else None)

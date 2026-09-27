@@ -10,3 +10,8 @@ struct Box {
 impl Scalable for Box {
     function scale(self, factor: Float64) -> Float64 = self.width * self.height * factor
 }
+
+// The impl is callable: 2 * 3 * 2.
+let b = Box { width = 2.0, height = 3.0 }
+let s = b.scale(2.0)
+// EXPECT: s = 12

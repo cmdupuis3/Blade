@@ -352,11 +352,41 @@ let runFullTest (testName: string) (source: string) (outputDir: string) (compile
     // line that failed to parse is a broken assertion anywhere, and a no-`=`
     // line on a NORMAL test is an assertion the author believed was being
     // checked but which had been silently dropped.
+    //
+    // On a probe, an `=`-bearing `// EXPECT:` is an error EVEN WHEN IT PARSES:
+    // a refused program never reaches the value check, so the line reads as a
+    // pin that is never checked (tuples/005's prose `requires N >= 2` parsed
+    // as the pin `... N > = 2`). Pin the refusal with `// ERROR:` instead.
+    //
+    // The list also carries the other pin-hygiene failures, all of which make
+    // a test assert less than its source says (see Expect):
+    //   * an `// ERROR:` line whose code or `@ l:c` span does not parse (it
+    //     used to degrade silently to a code-only pin);
+    //   * a VALUE test that pins nothing -- no EXPECT and no WARN pin -- and
+    //     does not say so with `// NOPINS: <reason>` (it passed on "compiled
+    //     and exited 0" alone); and a NOPINS marker that is empty or stale.
+    let isProbe = testName.EndsWith "(rejects)" || testName.EndsWith "(aborts)"
     let malformedExpectLines =
         let reported = parseMalformedExpectLines source
-        if testName.EndsWith "(rejects)" then
-            reported |> List.filter (fun line -> line.Contains "=")
-        else reported
+        let expectProblems =
+            if testName.EndsWith "(rejects)" then
+                expectLinesVerbatim source
+                |> List.filter (fun line -> line.Contains "=")
+                |> List.map (fun line -> $"{line}  <- an EXPECT on a reject-probe is never checked; pin the refusal with // ERROR:")
+            else reported
+        let diagProblems =
+            parseMalformedDiagPinLines source
+            |> List.map (fun line -> $"{line}  <- malformed ERROR pin (code BLnnnn, span l:c or l:c-l:c)")
+        let noPinsProblems =
+            match parseNoPinsReason source with
+            | Some "" -> [ "// NOPINS: needs a reason" ]
+            | Some _ when not expectedValues.IsEmpty -> [ "// NOPINS: marker on a test that HAS EXPECT pins -- remove it" ]
+            | Some _ -> []
+            | None when not isProbe && expectedValues.IsEmpty && reported.IsEmpty
+                        && warnPins.IsEmpty && warnCodegenPins.IsEmpty ->
+                [ "the test pins nothing (no // EXPECT: or // WARN:) and would pass on 'exited 0' alone -- add pins, or `// NOPINS: <reason>`" ]
+            | None -> []
+        expectProblems @ diagProblems @ noPinsProblems
 
     // F# pipeline (lower + codegen) runs under a lock by default — a
     // conservative guard over the pipeline's AsyncLocal side-channels, opt-out
@@ -849,7 +879,7 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
 
     if not result.MalformedExpectLines.IsEmpty then
         Blade.Tests.TestHarness.Fail,
-        $"""unparseable EXPECT pin(s): {(result.MalformedExpectLines |> String.concat " | ")}"""
+        $"""pin problem(s): {(result.MalformedExpectLines |> String.concat " | ")}"""
 
     elif not (resultWarningPinMisses result).IsEmpty then
         // Rule 1b, and deliberately AHEAD of the probe branches. A "(rejects)"
@@ -967,6 +997,12 @@ let classifyWithDetailAs (forceRejectProbe: bool) (result: FullTestResult) : Bla
     elif anySkip then
         let (stg, _) = stages |> List.find (fun (_, s) -> s = "SKIP")
         Blade.Tests.TestHarness.Skip, $"{stg} skipped"
+    elif (match result.RunResult with Ok (_, out) -> (rawPointerLine out).IsSome | _ -> false) then
+        // A printer that streams an ADDRESS instead of a value: the pins
+        // cannot see it (they read only the names they list), and it prints
+        // differently on every run. See Expect.rawPointerLine.
+        let line = match result.RunResult with Ok (_, out) -> defaultArg (rawPointerLine out) "" | _ -> ""
+        Blade.Tests.TestHarness.Fail, $"output prints a raw pointer: {line}"
     else
         // One-liner for passes (#3): the stages that ran, as the detail.
         Blade.Tests.TestHarness.Pass,
@@ -1145,12 +1181,38 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
             let pairs = sources |> List.map (snd >> parseWarnPins)
             (pairs |> List.collect fst, pairs |> List.collect snd)
         let (lowered, capturedWarnings) = lowerMultiSourceCaptured sources
+        // Pin hygiene, the single-file runner's rules over the UNION of the
+        // member files (see runFullTest's malformed-pin policy): malformed
+        // ERROR pins, EXPECT lines that cannot be checked, and a value test
+        // that pins nothing without saying so.
+        let isRejects = testName.EndsWith "(rejects)"
+        let texts = sources |> List.map snd
+        let unionExpected = texts |> List.collect parseExpectedValues
+        let pinProblems =
+            (texts |> List.collect parseMalformedDiagPinLines |> List.map (fun l -> $"{l}  <- malformed ERROR pin"))
+            @ (if isRejects then
+                   texts |> List.collect expectLinesVerbatim |> List.filter (fun l -> l.Contains "=")
+                   |> List.map (fun l -> $"{l}  <- an EXPECT on a reject-probe is never checked")
+               else texts |> List.collect parseMalformedExpectLines)
+            @ (match texts |> List.tryPick parseNoPinsReason with
+               | Some "" -> [ "// NOPINS: needs a reason" ]
+               | Some _ when not unionExpected.IsEmpty -> [ "// NOPINS: marker on a test that HAS EXPECT pins" ]
+               | Some _ -> []
+               | None when not isRejects && unionExpected.IsEmpty && warnPins.IsEmpty && warnCodegenPins.IsEmpty ->
+                   [ "the test pins nothing -- add // EXPECT: pins, or `// NOPINS: <reason>`" ]
+               | None -> [])
+        if not pinProblems.IsEmpty then
+            Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName
+                ($"""pin problem(s): {(String.concat " | " pinProblems)}""")
+            failed <- failed + 1
+            failedNames <- failedNames @ [testName]
+        else
         // A "(rejects)" probe, the single-file runner's rule on multi-file
         // terms: the PROGRAM must be refused, and the refusal must carry every
         // `// ERROR: BLxxxx` code and `// ERROR-CONTAINS:` substring pinned in
         // any member (pins union across members, like warning pins). Codes are
         // read from the checker's diagnostics; spans are not compared here.
-        if testName.EndsWith "(rejects)" then
+        if isRejects then
             let (codePins, containsPins) =
                 let ps = sources |> List.map (snd >> parseDiagPins)
                 (ps |> List.collect fst |> List.map (_.PinCode), ps |> List.collect snd)
@@ -1234,21 +1296,19 @@ let runMultiFileTestsFull (name: string) (tests: (string * (string * string) lis
                     | Ok exeFile ->
                         match runExecutable exeFile with
                         | Ok (0, output) ->
-                            // Parse expected values from the LAST source (Main module)
-                            let mainSource = sources |> List.last |> snd
-                            let expectedValues = parseExpectedValues mainSource
-                            // Same rule as the single-file runner: a pin that
-                            // does not parse is a failure, not a silently
-                            // skipped assertion. No multi-file test is a probe,
-                            // so there is no prose exemption to apply here.
-                            let malformed = parseMalformedExpectLines mainSource
-                            if not malformed.IsEmpty then
+                            // EXPECT pins are the UNION over the member files
+                            // (they used to be read from the LAST file only, so
+                            // a pin in any other member was dead). Malformed
+                            // pins were refused above, before anything ran.
+                            let expectedValues = unionExpected
+                            if (rawPointerLine output).IsSome then
                                 Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Fail testName
-                                    ($"""unparseable EXPECT pin(s): {(String.concat " | " malformed)}""")
+                                    ($"output prints a raw pointer: {(rawPointerLine output).Value}")
                                 failed <- failed + 1
                                 failedNames <- failedNames @ [testName]
                             elif expectedValues.IsEmpty then
-                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass testName "no EXPECT"
+                                // Only a `// NOPINS:` test reaches here.
+                                Blade.Tests.TestHarness.resultLine Blade.Tests.TestHarness.Pass testName "NOPINS"
                                 passed <- passed + 1
                             else
                                 match checkExpectedValues expectedValues output with

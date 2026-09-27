@@ -27,8 +27,9 @@
 // Legitimately different outputs: none by construction. Both sides are
 // built with FP contraction OFF (a fused chain may otherwise contract an
 // fma a materialized one cannot -- a last-ULP difference, not a bug), the
-// timing lines and heap pointers are normalized by the interpreter
-// differential's normalizer, and the exit code must match exactly.
+// timing lines are dropped by the interpreter differential's normalizer, and
+// the exit code must match exactly. A raw heap pointer in either output is a
+// FAIL of its own (Expect.rawPointerLine): nothing is masked.
 //
 // Verdicts per program:
 //   PASS  identical C++ ("optimizer inert"), or different C++ and identical
@@ -188,7 +189,14 @@ let runOptDiffTests (categories: string list) (includeMultiFile: bool) : BlockRe
                 |> Array.Parallel.map (fun p -> (p, compileAndRun outDir (p.Stem + "_on") p.On, compileAndRun outDir (p.Stem + "_off") p.Off))
             for (p, on, off) in results do
                 let who = attributions.[p.Stem] |> String.concat "+"
+                let pointerIn (r: Result<int * string, string>) =
+                    match r with
+                    | Ok (_, out) -> Blade.Tests.Expect.rawPointerLine out
+                    | Error _ -> None
                 match on, off with
+                | _ when (pointerIn on).IsSome || (pointerIn off).IsSome ->
+                    let line = defaultArg (pointerIn on) (defaultArg (pointerIn off) "")
+                    fail p.Name $"output prints a raw pointer ({who}): {line}"
                 | Ok (ca, oa), Ok (cb, ob) when ca = cb && oa = ob ->
                     pass p.Name $"C++ differs ({who}), output identical"
                 | Ok (ca, oa), Ok (cb, ob) ->
