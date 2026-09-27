@@ -2691,14 +2691,13 @@ let total = reduce(B, (+), axes = 2)
               | Error e -> e
               | Ok _ -> warns |> List.map (fun d -> d.Code + ": " + d.Message) |> String.concat "; "))
 
-        // (g) KNOWN HOLE, pinned rather than fixed: a plain-`unify` FUNCTION
-        // BOUNDARY still accepts a diverged axis. The plan's P3 outcome names
-        // this residual already; what (h) adds is the measurement that it is
-        // NOT a provider defect. Closing it means
-        // changing how EVERY named index type is matched at an argument
-        // position, which is a language-wide change to the direct-application
-        // seam, not a fix to axis provenance. If this ever starts REFUSING,
-        // that is good news: delete this pin and keep the one in (h).
+        // (g) The former KNOWN HOLE, now CLOSED: a FUNCTION BOUNDARY used to
+        // accept a diverged axis, because direct application never unified
+        // arguments with parameters. The call judgment
+        // (docs/plans/plan-call-judgment.md) made that the language-wide change
+        // this comment once said closing it would take, so the boundary refuses
+        // exactly as the let ascription does. Pinned as a refusal so the hole
+        // cannot reopen.
         (let src =
             sprintf """
 import icechunk as ic
@@ -2715,16 +2714,14 @@ let t = total_of(ck2.vars.temp |> ic.read)
 """
                     launderRoot
          let r = lower src
-         check "hole: a function BOUNDARY still accepts a diverged axis (known, pinned)"
-             (match r with Ok _ -> true | Error _ -> false)
-             (match r with Error e -> "now refuses -- see the comment: " + e | Ok _ -> ""))
+         check "closed: a function BOUNDARY refuses a diverged axis"
+             (match r with Error _ -> true | Ok _ -> false)
+             (match r with Ok _ -> "accepted -- the boundary hole reopened" | Error _ -> ""))
 
-        // (h) ... and the same laxity with NO provider in the program at all.
-        // This is the evidence for (g)'s claim: an argument position accepts a
-        // differently-named index type of equal extent, while the identical
-        // LET ascription refuses. Two seams, two answers -- the pre-existing
-        // unify-strictness split, which axis provenance rides along with
-        // rather than causes.
+        // (h) ... and the same with NO provider in the program at all: an
+        // argument position and a LET ascription now give ONE answer for a
+        // differently-named index type of equal extent (both refuse). Before
+        // the call judgment these were two seams with two answers.
         (let boundarySrc = """
 type A = Idx<5>
 type B = Idx<5>
@@ -2741,8 +2738,8 @@ type B = Idx<5>
 let b: Array<Float64 like B> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let a: Array<Float64 like A> = b
 """
-         check "hole: the boundary laxity is NOT provider-specific (two plain named axes do it too)"
-             ((match lower boundarySrc with Ok _ -> true | Error _ -> false)
+         check "closed: a boundary and an ascription both refuse two plain named axes of equal extent"
+             ((match lower boundarySrc with Error _ -> true | Ok _ -> false)
               && (match lower ascribeSrc with Error _ -> true | Ok _ -> false))
              (sprintf "boundary %A / ascription %A"
                   (match lower boundarySrc with Ok _ -> "Ok" | Error e -> e)
