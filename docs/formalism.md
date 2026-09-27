@@ -664,7 +664,8 @@ are what the BL4003 untagged-integer advice points at: iterating with `range<I>`
 removes them. Not covered: a computed subscript into an ANONYMOUS index slot
 (an array without a named index type) is not checked -- name the index type
 to get the guarantee; compact, compound, sparse and ragged slots keep their
-own disciplines; compiler-synthesized buffers and indices (`let rec`
+own disciplines (a compact group's LITERAL coordinates are range-checked at
+compile time, each against the group's extent); compiler-synthesized buffers and indices (`let rec`
 prefixes, which read zero past the prefix by design, reduce desugars, AD
 sweeps) own their walks. (The rank-2 offset arithmetic behind the proven
 case is verified against a failure model; proofs.md §Safety.)

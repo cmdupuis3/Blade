@@ -1336,6 +1336,19 @@ let internal subscriptStaticExtent (env: TypeEnv) (ix: IRIndexType) : int64 opti
     then Blade.IRPrint.tryEvalIntIR ix.Extent
     else None
 
+/// The static range of ONE flat coordinate of a compact group (SymIdx /
+/// AntisymIdx / HermitianIdx, rank >= 2): every coordinate of `S(i, j)`
+/// lies in `0 .. n-1` whatever the order (the read canonicalizes; an
+/// antisymmetric diagonal reads its structural zero). Compact reads are not
+/// run-time guarded (formalism 3.10: compact slots keep their own
+/// discipline), so a literal coordinate is judged here instead.
+let internal compactCoordExtent (ix: IRIndexType) : int64 option =
+    let synthetic = match ix.Tag with Some t -> t.StartsWith "__" | None -> false
+    match ix.Symmetry with
+    | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 && ix.IxKind = IxKPlain && not synthetic ->
+        Blade.IRPrint.tryEvalIntIR ix.Extent
+    | _ -> None
+
 /// The subscript judgment's CLASS and LITERAL rules for one subscript into
 /// one slot (formalism 3.10):
 ///   * CLASS: a subscript is an integer or an index value. Float, Bool,
@@ -1392,7 +1405,7 @@ let internal subscriptClassOrRangeError (env: TypeEnv) (synthetic: bool) (ix: IR
                           && not (match ix.Tag with Some t -> t.StartsWith "__" | None -> false) ->
                 Some (SubscriptOutOfRange (v, None, ppIndexType ix))
             | Some v ->
-                (match subscriptStaticExtent env ix with
+                (match subscriptStaticExtent env ix |> Option.orElse (compactCoordExtent ix) with
                  | Some ext when v >= ext -> Some (SubscriptOutOfRange (v, Some ext, ppIndexType ix))
                  | _ -> None)
             | None -> None
@@ -1506,7 +1519,10 @@ let internal checkArrayIndexTags (env: TypeEnv) (tArr: TypedExpr) (arrTy: IRArra
             // An integer LITERAL proved in range against a static extent needs
             // no advice: the compiler has just checked the very thing the
             // untagged-integer note warns about.
-            if (subscriptLiteralValue tArg).IsSome && (subscriptStaticExtent env idxType).IsSome then None else
+            // Likewise a literal coordinate of a compact group (SymIdx<2, X>),
+            // range-checked per coordinate by the class/literal rule above.
+            if (subscriptLiteralValue tArg).IsSome
+               && ((subscriptStaticExtent env idxType).IsSome || (compactCoordExtent idxType).IsSome) then None else
             match idxType.Tag with
             | Some tagName when not (tagName.StartsWith("__")) ->
                 match env.Subst.Resolve tArg.Type with

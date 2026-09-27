@@ -2,6 +2,8 @@
 // `method_for(data, data) <@> comoment` used to be BL3007 ("got variable")
 // while `object_for(comoment) <@> (data, data)` and `comoment <@> (data, data)`
 // worked. It is the same application, and computes the same covariance.
+// (Its output is SymIdx<2, X>; the in-range literal reads below are proven
+// per coordinate, so they carry no untagged-integer advisory.)
 from stats import mean
 
 function comoment_prod(a: Poly<T^1>) where comm(a) -> T^1 = {
