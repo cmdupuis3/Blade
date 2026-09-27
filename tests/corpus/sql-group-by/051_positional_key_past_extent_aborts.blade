@@ -1,0 +1,12 @@
+// TEST: A positional group key past the last bucket aborts (aborts)
+// `i + 1` over range<RegionIdx> is typed Nat<RegionIdx> but is a position
+// (index-types/297): its last cell is 3, outside Idx<3>. The counts pass used
+// to write counts[3] past the stack array; it now stops with the bounds code
+// in both lanes.
+// ABORT: index out of bounds
+type RegionIdx = Idx<3>
+let keys = method_for(range<RegionIdx>) <@> lambda(i) -> i + 1 |> compute
+let vals = [1.0, 2.0, 3.0]
+let gk = group_keys(keys)
+let g = group_by(vals, gk)
+let s = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute

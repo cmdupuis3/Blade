@@ -478,7 +478,12 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                       $"{ind}size_t {name}__ngroups = {ngroups};"
                       $$"""{{ind}}size_t {{name}}__counts[{{ngroups}}] = {0};""" ]
                     openPass
-                    [ $"{ind}    {name}__counts[__k]++;"
+                    // A key past the last bucket is not a position of the
+                    // key type: abort (BL8006, the interpreter's twin in
+                    // ArrayOps.buildGroupKeys) instead of writing past the
+                    // stack counts array. Negative keys already dropped.
+                    [ $$"""{{ind}}    if ((size_t)__k >= {{ngroups}}) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside 0 .. {{ngroups - 1}}", nullptr, 0);"""
+                      $"{ind}    {name}__counts[__k]++;"
                       $"{ind}}}"
                       $"{ind}size_t {name}__offsets[{ngroups + 1}];"
                       $"{ind}{name}__offsets[0] = 0;"
@@ -504,10 +509,10 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 // map is `static const` at the enclosing function scope:
                 // initialized once on first encounter (thread-safe magic
                 // static), reused across every group_keys evaluation in
-                // the same call site. Lookup falls through to bucket 0
-                // for unknown keys, preserving the prior silent-default
-                // behavior (EnumIdx is type-checked, so unknown keys
-                // indicate a typechecker bug rather than a user error).
+                // the same call site. An unknown key ABORTS (BL8006, the
+                // interpreter's twin in ArrayOps.buildGroupKeys): a key
+                // column can come from a provider, and falling through to
+                // bucket 0 silently merged it into the first group.
                 //
                 // Why a map and not a switch / if-chain: dispatch cost
                 // scales O(1) instead of O(values) per element. Especially
@@ -525,7 +530,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 let bucketMapDecl =
                     $"static const std::unordered_map<{elemStr}, size_t> {name}__bucket_map = {{{bucketEntries}}};"
                 let bucketLambdaDecl =
-                    $$"""auto {{name}}__bucket = [](const {{elemStr}}& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); return it != {{name}}__bucket_map.end() ? it->second : (size_t)0; };"""
+                    $$"""auto {{name}}__bucket = [](const {{elemStr}}& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); if (it == {{name}}__bucket_map.end()) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside its EnumIdx", nullptr, 0); return it->second; };"""
                 let code = keysElemErrCode @ [
                     $"{ind}// group_keys: {ngroups} groups, EnumIdx reverse lookup (unordered_map dispatch)"
                     $"{ind}size_t {name}__ngroups = {ngroups};"

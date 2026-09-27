@@ -1,0 +1,11 @@
+// TEST: A kernel reading through a foreign-key cell is guarded (aborts)
+// The kernel parameter `r` receives the column's DATA, not an iteration
+// index, so `region_weight(r)` is an unproven subscript (formalism 3.10): the
+// excluded key -1 stops with the bounds code instead of reading before the
+// buffer. (Only a range operand hands its kernel proven positions.)
+// ABORT: index out of bounds
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, -1]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let w = method_for(station_region) <@> lambda(r) -> region_weight(r) |> compute

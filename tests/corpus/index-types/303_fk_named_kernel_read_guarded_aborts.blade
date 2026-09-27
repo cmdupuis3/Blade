@@ -1,0 +1,11 @@
+// TEST: A named kernel fed foreign-key cells is guarded at its call (aborts)
+// `wt`'s parameter is `Nat<RegionIdx>` and its body trusts it; the loop that
+// applies it to a key column is the caller, and its argument -- a column
+// cell -- is unproven, so the call is guarded like any other.
+// ABORT: index out of bounds
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, -1]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+function wt(r: Nat<RegionIdx>) -> Float64 = region_weight(r)
+let w = method_for(station_region) <@> wt |> compute

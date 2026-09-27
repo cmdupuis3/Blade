@@ -628,8 +628,10 @@ Iteration emits values tagged with their source index type as a **unit**:
 3. *Range.* A literal position — a subscript `3` / `-1`, a cast `(3 : I)`,
    or a literal argument to a `Nat<I>` parameter — is checked at compile time
    against the static extent (BL4003); a negative literal subscript is
-   refused on every plain slot. (A literal stored in an index-typed foreign-key
-   column is data, not a position: `-1` is group_by's "excluded" key.)
+   refused on every plain slot. A literal index-typed VALUE -- a `Nat<I>`
+   `let`, a cell of an index-typed foreign-key column -- is range-checked the
+   same way, with one exception: `-1`, group_by's "excluded" key. A string
+   `EnumIdx` literal must be one of the type's labels.
 
 **Positions and casts.** Arithmetic on an index value yields a *position*: a
 plain `Int64`, never an index value (`i + 1` is not proved to lie in `I`). An
@@ -650,7 +652,9 @@ index, a parameter -- whose callers pass through the same checks -- or a
 `let` of a proven value), an emitted cast or guard, and a halo window read.
 Everything else -- a position, a plain `Int64`, a `Nat<_>` wildcard, a
 branch, a call, an element read out of an index-typed array (foreign-key
-DATA) -- is checked. The checks are what the BL4003 untagged-integer advice
+DATA, including a kernel parameter the loop feeds from such an array) -- is
+checked. A string key subscripting a string `EnumIdx` slot is mapped to its
+label's ordinal, a key that is no label stopping with BL8006. The checks are what the BL4003 untagged-integer advice
 points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
 removes them. Not covered: a computed subscript into an ANONYMOUS index slot
 (an array without a named index type) is not checked -- name the index type

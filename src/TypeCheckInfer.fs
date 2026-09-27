@@ -10689,13 +10689,17 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         // Strict in the OTHER direction: a bare `Nat` value cannot flow to
         // Nat<I> position without explicit cast -- but a LITERAL has no
         // pre-committed type, so context-driven typing applies here.
-        // NOT range-checked here: an index-typed VALUE position is also a
-        // foreign-key column, where out-of-range keys are data (`-1` is the
-        // "excluded" key of group_by, sql-group-by/028, 041). The literal
-        // doors that ARE positions -- a subscript, a cast `(7 : I)`, an
-        // argument to a `Nat<I>` parameter -- are checked where they occur.
-        ignore v
-        Ok (mkTyped (TExprLit lit) resolved)
+        // RANGE-CHECKED against a named plain index type's static extent:
+        // an index-typed VALUE -- a `Nat<I>` let, a foreign-key column's
+        // literal cells -- is a position of I, and a literal past the end
+        // (`[0, 2, 0, 7]` over Idx<3>) can never be one. The ONE admitted
+        // out-of-range key is `-1`, group_by's "excluded" key (sql-group-by/
+        // 028, 041), which the negated-literal arm below lets through; a
+        // value that is not proven -- that `-1`, any cell read out of a
+        // foreign-key column -- is guarded at its subscript (Zonk).
+        match namedIndexParam env resolved with
+        | Some (tag, Some n) when v >= n -> Error (SubscriptOutOfRange (v, Some n, tag))
+        | _ -> Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitInt _ as lit), (IRTNat _ | IRTUnitAnnotated (IRTNat _, _)) ->
         // Same context-driven rule for Nat targets, unit-annotated or bare:
         // `l1: Nat<angular_momentum> = 1` retypes the literal to the target.
@@ -10706,10 +10710,19 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETString))
-    | ExprKind.ExprLit (LitString _ as lit), IRTIdxTagged (IRTScalar ETString, _) ->
+    | ExprKind.ExprLit (LitString s as lit), IRTIdxTagged (IRTScalar ETString, tagRef) ->
         // section 4.18.3 parallel for string-valued index tags (EnumIdx with
-        // string values). Same context-driven coercion as the int case.
-        Ok (mkTyped (TExprLit lit) resolved)
+        // string values). Same context-driven coercion as the int case --
+        // and the same range check: a label the EnumIdx does not declare
+        // (["pacific", "bogus"] in a key column) is no key of it.
+        match tagRef with
+        | IRefNamed tag ->
+            (match Map.tryFind tag env.TypeDefs with
+             | Some (TDIEnumIdx (_, _, values, _)) when not (List.contains (EVString s) values) ->
+                 let avail = values |> List.map (function EVString v -> v | EVInt n -> string n)
+                 Error (EnumIdxUnknownLabel (tag, s, avail))
+             | _ -> Ok (mkTyped (TExprLit lit) resolved))
+        | _ -> Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitString _ as lit), IRTUnitAnnotated (IRTScalar ETString, _) ->
         // Quantity-tagged string position (`let s: String<title> = "K"`,
         // `"K" : title`): the literal adopts the annotation, same
@@ -10733,6 +10746,11 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
     // so `P { a = -1 }` failed where `P { a = 1 }` succeeded. Deliberately
     // narrow: only a LITERAL operand, so this is literal retyping and not
     // general bidirectional propagation through arithmetic.
+    | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt v) }), _
+        when v > 1L && (namedIndexParam env resolved).IsSome ->
+        // A negative index-typed value: only `-1`, group_by's "excluded"
+        // key, is admitted (see the LitInt arm above).
+        Error (SubscriptOutOfRange (-v, None, fst (namedIndexParam env resolved).Value))
     | ExprKind.ExprUnaryOp (OpNeg, ({ Kind = ExprKind.ExprLit (LitInt _ | LitFloat _) } as litExpr)), _ ->
         checkExpr env expected litExpr
         |> Result.map (fun tLit -> mkTyped (TExprUnaryOp (OpNeg, tLit)) tLit.Type)

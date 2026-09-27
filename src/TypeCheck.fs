@@ -304,6 +304,12 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         subscriptGuardCtx.Value <-
             Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
                    Positions = System.Collections.Generic.HashSet<IRId>()
+                   DataVars = System.Collections.Generic.HashSet<IRId>()
+                   EnumLabels = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIEnumIdx (_, _, values, _)) when EnumValue.allString values ->
+                           Some (values |> List.choose (function EVString s -> Some s | _ -> None))
+                       | _ -> None
                    IndexExtent = fun tag ->
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
