@@ -2842,6 +2842,16 @@ and internal dispatchTestClean (rest: string list) : int =
         // no toolchain; also part of the full suite.
         let failed = (runCorpusWiringTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "docs" ] ->
+        // Every ```blade block in CLAUDE.md and docs/: checked through the
+        // corpus front end, run when it pins values, refused when tagged
+        // `rejects`; `sketch` blocks are skipped (tests/DocTests.fs).
+        let failed = (Blade.Tests.DocTests.runDocTests None).Failed
+        if failed = 0 then 0 else 1
+    | [ "docs"; page ] ->
+        // Only the pages whose repo-relative path contains `page`.
+        let failed = (Blade.Tests.DocTests.runDocTests (Some page)).Failed
+        if failed = 0 then 0 else 1
     | [ "surfacing" ] ->
         // Warning/suggestion surfacing: codes, streams, and survival of the checker's error path.
         let failed = (runSurfacingTests ()).Failed

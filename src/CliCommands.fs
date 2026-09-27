@@ -14,7 +14,8 @@ let compilerVersion = Blade.RunRecord.bladeVersion
 /// and a sample of the corpus-category keys (one per tests/corpus/<dir>;
 /// multiword ones also accept the unhyphenated spelling). Listed for `--help`.
 let internal usageTestBlockKeys =
-    [ "access"; "alloc"; "attrs"; "cli"; "csv"; "cuda"; "diagnostics"; "display-frames"; "doctor"
+    [ "access"; "alloc"; "attrs"; "cli"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
+      "docs"; "doctor"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
       "ide-serve"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
       "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"
@@ -104,6 +105,8 @@ let printUsage () =
     printfn "  test diff-oracle [<dir>]          Diff printed values against the pinned ./oracle build"
     printfn "  test opt-diff [<dir>]             Diff every program with all optimizer gates OFF vs ON"
     printfn "  test llvm [<dir>|all]             The BLADE_LLVM lane vs the C++ lane (standalone only)"
+    printfn "  test docs [<page>]                Check every ```blade block in CLAUDE.md and docs/"
+    printfn "                                    (run it when it pins values; <page> filters by path)"
     printfn "  test --llvm-backend               The ordinary suite driven through the LLVM lane"
     printfn "  Test-block keys:"
     wrap "    " 96 usageTestBlockKeys

@@ -58,6 +58,10 @@
 #              in-process and compiles only the pairs whose C++ differs (a few
 #              dozen) -- so it rides the pull-request opt-ins too.
 #              `lanes: differentials` selects interp and opt-diff together.
+#   docs       `blade test docs`: every `blade` code block in CLAUDE.md and
+#              docs/ checked through the corpus front end, and compiled + run
+#              where it pins values (tests/DocTests.fs). Cheap; rides the
+#              pull-request opt-ins.
 #
 # Never run here: `test cuda` (no usable nvcc host compiler on hosted
 # runners), `test timing` and `test llvm-bench` (benchmarks are not pass/fail
@@ -98,7 +102,7 @@ on:
         description: 'Which test lanes to run'
         type: choice
         default: all
-        options: [all, none, cpp, providers, netcdf, zarr, csv, icechunk, provider-desugar, hybrid, llvm, llvm-suite, interp, opt-diff, differentials]
+        options: [all, none, cpp, providers, netcdf, zarr, csv, icechunk, provider-desugar, hybrid, llvm, llvm-suite, interp, opt-diff, differentials, docs]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -298,6 +302,15 @@ jobs:
               title       = 'Optimizer differential (gates off vs on)'
               timeout     = 45
               verbs       = 'test opt-diff'
+              nightlyOnly = $false
+            }
+            # The documentation as a test: every `blade` fence in CLAUDE.md and
+            # docs/ must lower (a plain block), run to its pins (a block with
+            # `// EXPECT:`), or be refused (`blade rejects`); `sketch` skips.
+            docs = @{
+              title       = 'Docs (every blade code block)'
+              timeout     = 30
+              verbs       = 'test docs'
               nightlyOnly = $false
             }
           }
