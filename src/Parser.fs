@@ -594,6 +594,28 @@ let rec skipToNextDecl (tokens: Token list) : Token list =
         tokens
     | _ -> skipToNextDecl (advance tokens)
 
+/// Newlines and `;` between top-level declarations. `;` is the optional
+/// same-line separator (formalism §15.1), accepted here exactly as in blocks.
+let rec skipSeparators (tokens: Token list) : Token list =
+    match tokens with
+    | t :: rest when t.Kind = TokNewline || t.Kind = TokSemi -> skipSeparators rest
+    | _ -> tokens
+
+/// A declaration followed by the statement terminator rule: a newline, `;`
+/// or end of file must follow -- never a second expression on the same line
+/// (`let b = 2 x` is refused, not split into `let b = 2` plus a printed `x`).
+/// `hasPrevious`: a declaration precedes this one in the module, so an
+/// operator-led line here is one `continuationAllowed` declined to join to
+/// it (it sits at column 1) and is refused, not read as a bare expression.
+let parseDeclTerminated (hasPrevious: bool) (tokens: Token list) : ParseResult<Decl> =
+    match (if hasPrevious then statementLeadingOperatorError tokens else None) with
+    | Some err -> err
+    | None ->
+    asStatement tokens (fun () ->
+        parseDecl tokens >>= fun decl remaining ->
+        requireStatementEnd tokens remaining >>= fun () remaining ->
+        success decl remaining)
+
 /// Parse a module, accumulating errors and recovering at declaration boundaries.
 /// Returns the module (with successfully parsed declarations) and any parse errors.
 let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) * Token list =
@@ -615,13 +637,13 @@ let parseModuleRecovering (tokens: Token list) : (ModuleDecl * ParseError list) 
     
     let mutable cont = true
     while cont do
-        toks <- skipNL toks
+        toks <- skipSeparators toks
         match peek toks with
         | Some TokEOF | None ->
             cont <- false
         | _ ->
             let (startLine, startCol) = currentPos toks
-            match parseDecl toks with
+            match parseDeclTerminated (not (List.isEmpty decls && List.isEmpty errors)) toks with
             | Ok (decl, remaining) ->
                 let (endLine, endCol) = consumedEnd toks remaining startLine startCol
                 let span = { StartLine = startLine; StartCol = startCol
@@ -651,13 +673,13 @@ let parseModule (tokens: Token list) : ParseResult<ModuleDecl> =
         | _ -> (["Main"], tokens)
     
     let rec loop decls toks =
-        let toks = skipNL toks
+        let toks = skipSeparators toks
         match peek toks with
         | Some TokEOF | None ->
             success (List.rev decls) toks
         | _ ->
             let (startLine, startCol) = currentPos toks
-            parseDecl toks >>= fun decl remaining ->
+            parseDeclTerminated (not (List.isEmpty decls)) toks >>= fun decl remaining ->
             let (endLine, endCol) = consumedEnd toks remaining startLine startCol
             let span = { StartLine = startLine; StartCol = startCol
                          EndLine = endLine; EndCol = endCol; File = PS.Cur.File }

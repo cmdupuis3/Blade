@@ -2416,19 +2416,6 @@ let genPrintStatements (modul: IRModule) : string list =
     // channel delivers BL7004 only for a translation unit that carries a
     // marker, and a recorded-but-unspliced message would leave the typo
     // printing nothing and exiting 0 -- the very failure this guards.
-    let selectionRefusal =
-        match selection with
-        | Some names ->
-            let sep = ", "
-            let declared = modul.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
-            let unknown = Set.difference names declared |> Set.toList
-            if unknown.IsEmpty then []
-            else
-                let known = declared |> Set.toList |> List.filter (fun n -> not (n.StartsWith "__")) |> String.concat sep
-                let missing = String.concat sep unknown
-                let verb = if unknown.Length = 1 then "is not a top-level binding of this program" else "are not top-level bindings of this program"
-                [ refusalErrorLine "    " $"--print: {missing} {verb} -- it has: {known}" ]
-        | None -> []
     // A deferred binding that a consumer FORCED (forceDeferredArrayInput
     // materialized it under its own name at main's top level) is a real
     // array by program end and prints like any eager binding; one that
@@ -2436,27 +2423,52 @@ let genPrintStatements (modul: IRModule) : string list =
     // populated during genModule, so callers must assemble print code AFTER
     // body generation.
     let forcedIds = (forcedDeferredIdsCell ()).Value
+    // |> compute of a DEFERRED combinator is a forced materialization and
+    // always prints; |> compute of anything ELSE prints exactly when the
+    // wrapped value itself would (an eager reduce/scalar is unchanged by
+    // compute -- `let s = reduce(xs, (+)) |> compute` must echo like the
+    // computeless form). Unmaterialized loop values never print.
+    let rec printableValue (v: IRExpr) =
+        match v with
+        | IRCompute (IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRVar _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _) -> true
+        | IRCompute inner -> printableValue inner
+        | IRMethodFor _ | IRObjectFor _ -> false
+        | _ -> true
+    let isPrintableBinding (b: IRBinding) =
+        if Set.contains b.Id deferredIds && not (Set.contains b.Id forcedIds) then false
+        // A STREAMED provider read has no materialized array (fiber
+        // reads happen inside consuming nests) -- nothing to print.
+        elif (match Map.tryFind b.Id modul.ProviderReads with
+              | Some spec -> spec.Streamed
+              | None -> false) then false
+        else printableValue b.Value
+    let selectionRefusal =
+        match selection with
+        | Some names ->
+            let sep = ", "
+            let declared = modul.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+            let unknown = Set.difference names declared |> Set.toList
+            // A SELECTED binding that is a deferred loop value (or a streamed
+            // read) would print nothing too: asked for by name, silence would
+            // read as "computed nothing" -- same refusal, different cause.
+            let silent =
+                modul.Bindings
+                |> List.filter (fun b -> Set.contains b.Name names && not (isPrintableBinding b))
+                |> List.map (fun b -> b.Name) |> List.distinct
+            if unknown.IsEmpty && silent.IsEmpty then []
+            elif not unknown.IsEmpty then
+                let known = declared |> Set.toList |> List.filter (fun n -> not (n.StartsWith "__")) |> String.concat sep
+                let missing = String.concat sep unknown
+                let verb = if unknown.Length = 1 then "is not a top-level binding of this program" else "are not top-level bindings of this program"
+                [ refusalErrorLine "    " $"--print: {missing} {verb} -- it has: {known}" ]
+            else
+                let names = String.concat sep silent
+                let verb = if silent.Length = 1 then "is a deferred loop value (or streamed read) that is never materialized" else "are deferred loop values (or streamed reads) that are never materialized"
+                [ refusalErrorLine "    " $"--print: {names} {verb}, so there is nothing to print -- materialize it with `|> compute` to print it" ]
+        | None -> []
     selectionRefusal @
     (modul.Bindings |> List.collect (fun b ->
-        // |> compute of a DEFERRED combinator is a forced materialization and
-        // always prints; |> compute of anything ELSE prints exactly when the
-        // wrapped value itself would (an eager reduce/scalar is unchanged by
-        // compute -- `let s = reduce(xs, (+)) |> compute` must echo like the
-        // computeless form). Unmaterialized loop values never print.
-        let rec printableValue (v: IRExpr) =
-            match v with
-            | IRCompute (IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRVar _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeMeth _ | IRBind _ | IRGuard _ | IRSequence _) -> true
-            | IRCompute inner -> printableValue inner
-            | IRMethodFor _ | IRObjectFor _ -> false
-            | _ -> true
-        let isPrintable =
-            if Set.contains b.Id deferredIds && not (Set.contains b.Id forcedIds) then false
-            // A STREAMED provider read has no materialized array (fiber
-            // reads happen inside consuming nests) -- nothing to print.
-            elif (match Map.tryFind b.Id modul.ProviderReads with
-                  | Some spec -> spec.Streamed
-                  | None -> false) then false
-            else printableValue b.Value
+        let isPrintable = isPrintableBinding b
         
         let hasSymmetry =
             match IR.stripUnits b.Type with

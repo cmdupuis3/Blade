@@ -1,0 +1,18 @@
+// TEST: Unary Minus Binds Looser Than Power
+// Prefix `-` binds LOOSER than `^`, the mathematical convention: `-2.0 ^ 2`
+// is -(2^2) = -4 (it used to be (-2)^2 = 4), and `exp(-t^2)` is the Gaussian
+// exp(-(t^2)), not exp(+t^2). The exponent is itself a unary operand, so
+// `2.0 ^ -1` parses, and `^` stays right-associative.
+let t = 1.5
+let a = -2.0 ^ 2
+let g = exp(-t^2)
+let g_ref = exp(-(t * t))
+let same = g == g_ref
+let h = 2.0 ^ -1
+let r = 2.0 ^ 3.0 ^ 2.0
+let m = 10.0 - 2.0 ^ 2
+// EXPECT: a = -4
+// EXPECT: same = true
+// EXPECT: h = 0.5
+// EXPECT: r = 512
+// EXPECT: m = 6

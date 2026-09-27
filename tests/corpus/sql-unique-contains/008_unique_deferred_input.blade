@@ -1,11 +1,11 @@
 // TEST: Unique Forces Deferred Input
-// unique over an array input that is still an UNFORCED computation (the
-// if/then/else kernel body swallows the trailing `|> compute` into the else
-// branch, leaving `w` deferred). unique's two scan passes read the input by
+// unique over an array input that is still an UNFORCED computation (no
+// `|> compute`, so `w` stays deferred; it once got there via a parser bug that
+// swallowed a trailing `|> compute` into the kernel's else branch). unique's two scan passes read the input by
 // name, so its codegen forces the deferred binding in place first (shared
 // forceDeferredArrayInput helper).
 let vals = [3.0, 1.0, 2.0, 3.0]
-let w = method_for(vals) <@> lambda(q) -> if q > 1.5 then 1.0 else 0.0 |> compute
+let w = method_for(vals) <@> lambda(q) -> if q > 1.5 then 1.0 else 0.0
 let u = unique(w)
 let result = method_for(u) <@> lambda(x) -> x |> compute
 // w = [1, 0, 1, 1] -> unique, first-occurrence order

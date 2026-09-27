@@ -1,0 +1,11 @@
+// TEST: Juxtaposed Statement (rejects)
+// ERROR: BL1001 @ 10:11
+// ERROR-CONTAINS: Expected the end of the statement
+// Two expressions side by side on one line have no meaning in Blade (no
+// implicit multiplication, and application needs parentheses). The parser
+// used to end the `let` at `1` and read `b` as a SECOND top-level statement:
+// a = 1, plus a printed bare `b` -- silently. The terminator rule (formalism
+// §15.1) requires a newline, `;` or a closer after every statement and
+// refuses anything else, at the offending token.
+let b = 3
+let a = 1 b

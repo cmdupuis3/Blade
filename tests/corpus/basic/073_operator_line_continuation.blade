@@ -1,0 +1,33 @@
+// TEST: Operator Line Continuation
+// A line that OPENS with a binary operator continues the expression above
+// when it is indented past the start of the statement (formalism §15.1) --
+// the reading braces always had (the lexer drops newlines inside them), now
+// also at top level. At the statement's own column it is refused instead
+// (diagnostics/085). `;` separates statements on one line, and a statement
+// may open with a negation when it is parenthesized.
+let x = 5
+let y = x
+    - 3
+let total = 1.0
+          + 2.0 * 3.0
+          - 0.5
+let within = x > 0
+    && x < 10
+let paren = (x
+- 1)
+let a = 1; let b = 2
+let c = a + b
+let neg = (-c)
+let blk = {
+    let p = 4
+    let q = p
+        * 2
+    q
+}
+// EXPECT: y = 2
+// EXPECT: total = 6.5
+// EXPECT: within = true
+// EXPECT: paren = 4
+// EXPECT: c = 3
+// EXPECT: neg = -3
+// EXPECT: blk = 8

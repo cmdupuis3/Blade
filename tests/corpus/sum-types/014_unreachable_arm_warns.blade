@@ -1,0 +1,19 @@
+// TEST: Unreachable Arm Warns
+// WARN: BL3022
+// An arm after an unguarded catch-all can never be selected; neither can one
+// whose constructor an earlier unguarded arm already took. Both used to be
+// silent dead code. (The guarded `Some(v) if v > 10` arm does NOT cover
+// Some: a guard may fall through.)
+type Opt = Some : Int64 | Nothing
+let o = Some(3)
+let v = match o with
+    | Some(n) if n > 10 -> 100
+    | Some(n) -> n
+    | Nothing -> 0
+    | _ -> 7
+let k = 2
+let w = match k with
+    | x -> x * 10
+    | 2 -> 5
+// EXPECT: v = 3
+// EXPECT: w = 20

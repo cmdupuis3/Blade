@@ -1,0 +1,13 @@
+// TEST: Non-Exhaustive Enum Match Warns
+// WARN: BL3023
+// A match over an enum that names neither every constructor nor a catch-all
+// aborts at run time (BL8002) on a missing one. The value here IS covered, so
+// the program runs; the gap (West) is reported statically, where it used to
+// surface only when a West actually arrived.
+type Direction = North | South | East | West
+let d = East
+let v = match d with
+    | North -> 1
+    | South -> 2
+    | East -> 3
+// EXPECT: v = 3

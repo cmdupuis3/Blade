@@ -533,6 +533,9 @@ module private Segments =
     /// clause on its own line -- says the previous line has not finished.
     let canStart (k: TokenKind) =
         match k with
+        // `!` is prefix-only, so it CAN open a statement -- the parser's
+        // continuation rule (ParserCore.isInfixContinuationOp) excludes it too.
+        | TokOp "!" -> true
         | TokOp _ | TokNamedInfix _ -> false
         | TokComma | TokSemi | TokColon | TokColonColon | TokDot | TokDotDot -> false
         | TokPipe | TokAt | TokHash | TokQuestion -> false

@@ -1625,6 +1625,81 @@ Newlines separate statements at top level and in blocks; ignored inside
 (functions) or `->` (lambdas) are inline expressions unless `{` opens a block;
 a block's final expression is its value.
 
+**Statement terminators.** A statement or declaration ends at a newline, a
+`;`, or a closer (`}` `)` `]` `|` `,`, end of file). Anything else on the
+same line is refused (BL1001): two expressions side by side have no meaning --
+there is no implicit multiplication and application needs parentheses -- so
+`let a = 1 b` and `{ let a = 2.0 x ... }` are errors, not a statement plus a
+silently printed or discarded `b`/`x`. Inside braces, where the lexer has
+dropped the newline tokens, "on a later line" is decided from source lines.
+`;` separates statements on one line at top level as in blocks.
+
+**Line continuation.** A line that opens with a binary operator (`+ - * / %
+^ == != < <= > >= && || :: ..`, the bracketed outer forms, or any combinator
+such as `|>` `<@>` `>>@`) continues the expression on the line above, as if
+the line break were a space -- it joins the innermost expression still open,
+so after `if c then a else b` it extends `b`. For the arithmetic / comparison
+/ logical operators the line must be indented PAST the column where the
+statement began; at that column (or left of it) the line is refused (BL1001),
+because `let y = x` over `- 3` reads as two statements to some readers and as
+`x - 3` to others. Write `(-3)` for a statement that begins with a negation.
+Inside `()`/`[]` opened within the statement a line break is always
+whitespace. A line opening with `(` or `[` begins a new statement (it never
+calls or indexes the line above); `.field` chains are line-insensitive.
+
+**Operator precedence**, loosest first (`e : T` is the postfix type
+annotation):
+
+| Level | Operators | Associativity |
+|---|---|---|
+| assignment | `=` `+=` `-=` `*=` `/=` | right |
+| annotation | `e : T` | postfix |
+| named infix | `:name:` | left |
+| pipeline | `\|>` `\|@>` | left |
+| choice | `<\|>` `<\|:>` | left |
+| parallel | `<&>` `<&!>` | left |
+| bind / compose | `>>=` `>>@` `@>>` `>>` | left |
+| apply | `<@>` `<$>` | left |
+| array product | `<*>` | left |
+| or | `\|\|` `[\|\|]` | left |
+| and | `&&` `[&&]` | left |
+| equality | `==` `!=` `[==]` `[!=]` | none |
+| comparison | `<` `<=` `>` `>=` (and `[<]` ...) | none |
+| cons | `::` | none |
+| range | `..` | none |
+| additive | `+` `-` `[+]` `[-]` | left |
+| multiplicative | `*` `/` `%` `[*]` `[/]` `[%]` | left |
+| prefix | `-` `!` | prefix |
+| power | `^` `[^]` | right |
+| postfix | `f(x)`, `t[k]`, `.field` | left |
+
+Prefix minus binds LOOSER than `^`, as in mathematics: `-t^2` is `-(t^2)`
+(so `exp(-t^2)` is the Gaussian) and `-2.0 ^ 2` is `-4`. The exponent is
+itself a prefix operand, so `2 ^ -1` parses. Equality and comparison do not
+chain: `0 < x < 3` and `a == b == c` are refused with a steer -- write
+`0 < x && x < 3`.
+
+**Lambda bodies.** An inline (braceless) lambda body extends through the
+apply level and no further: `lambda(x) -> a <@> b |> compute` is
+`(lambda(x) -> a <@> b) |> compute`. This holds THROUGH an `if`'s else
+branch, a final match arm or a `let` at the body's own nesting depth, so
+
+```blade
+let E = method_for(range<I, I>) <@> lambda(i, j) -> if i == j then 1.0 else 0.0 |> compute
+```
+
+computes the whole map (it does not pipe `0.0` into `compute`). Positions a
+keyword fences -- an `if` condition and then-branch, a match scrutinee, a
+non-final match arm -- and anything inside parentheses keep the full grammar.
+A `for <kernel>` former binds its kernel the same way.
+
+**Numeric literals.** Decimal integers and floats (`12`, `1.5`, `2e-3`) take
+`_` digit separators between two digits (`1_000_000`, `0.000_1`). `0x` / `0b`
+introduce hexadecimal / binary integers (`0xFF_FF`, `0b1010`), read as 64-bit
+bit patterns: values up to `2^64 - 1` are accepted and interpreted two's
+complement (`0xFFFFFFFFFFFFFFFF` is `-1`). A number glued to a name (`2x`) is
+a malformed literal (BL0003), not an implicit product.
+
 ### 15.2 Declarations
 
 ```blade
