@@ -1171,6 +1171,12 @@ let private runSurfaceTests () : TH.BlockResult =
           if scalarTypes <> Blade.TypeCheck.builtinScalarNames then yield "scalarTypes != builtinScalarNames"
           for b in coreBuiltins do
             if not (Set.contains b builtins) then yield $"builtins lacks {b}"
+          let staticOnly = strArray "staticOnlyBuiltins" |> Set.ofList
+          for b in [ "min"; "max"; "length" ] do
+            if not (Set.contains b staticOnly) then yield $"staticOnlyBuiltins lacks {b}"
+          for b in [ "exp"; "abs"; "fma"; "atan2"; "prodsum" ] do
+            if Set.contains b staticOnly then yield $"staticOnlyBuiltins lists run-time {b}"
+          if not (Set.isSubset staticOnly builtins) then yield "staticOnlyBuiltins is not a subset of builtins"
           if not (List.contains "hermitian" builtinCalls) then yield "builtinCalls lacks hermitian"
           if not (List.contains "display.emit" builtinCalls) then yield "builtinCalls lacks display.emit" ]
     if List.isEmpty failures then record name TH.Pass ""

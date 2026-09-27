@@ -49,7 +49,7 @@
 //   -> {"id":N,"cmd":"surface"}
 //   <- {"id":N,"version":1,"compilerVersion":"..","keywords":[{"word","token"}],
 //       "operators":[..],"mathIntrinsics":{"unary","binary","ternary","complex"},
-//       "builtins":[..],"scalarTypes":[..],"builtinCalls":[..],
+//       "builtins":[..],"staticOnlyBuiltins":[..],"scalarTypes":[..],"builtinCalls":[..],
 //       "diagnostics":[{"code","title","phase"}]}
 //
 // Byte-identical to `blade ide surface` apart from the leading `id`. A
