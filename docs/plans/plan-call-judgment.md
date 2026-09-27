@@ -239,22 +239,41 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   defaults, default captures) per module -- imports re-register from the
   per-module snapshots -- and `checkFunctionDecl` removes its own name's
   entries before setting them.
-- **F7 (follow-up, NOT fixed)** `f >> g` unifies with the declarations'
-  variables, pinning a generic `g` to its first composition (`idg("s")` after
-  `sq >> idg` is refused). Instantiating each side (tried) is right at the
-  type level but REGRESSES the plain `let h = sq >> idg; h(3.0)`: IR-phase
-  monomorphization does not treat a composition as a call site, so `idg`
-  reaches validation unspecialized (BL6001; master emits `double idg`). Needs
-  IRMono to mint specs from composition sites first.
-- **F3 (fixed, check side)** A `let` alias of a declared function (`let g = total`)
-  escaped the judgment; `calleeQuantifier` follows let-alias chains to the
-  declaration, so calls through the alias are instantiated and judged
-  (functions/151). EMITTING a call through a generic alias is a separate,
-  pre-existing IR-monomorphization gap (BL6001 on master too) -- follow-up.
-- **F5 (follow-up)** Literal adaptivity stops at the top level: a tuple of
-  literals `(1.5, 2.0)` into `(Float32, Float32)` is refused BL3001
-  (component literals are typed Float64 and narrowing is not widening). Fix
-  would thread per-component literal kinds into `argPairClash`'s tuple arm.
+- **F7 (FIXED 2026-09-27, fix/drf-mono)** `f >> g` unified with the
+  declarations' variables, pinning a generic `g` to its first composition
+  (`idg("s")` after `sq >> idg` was refused). Each operand naming a declared
+  function is now judged at an instantiated copy, and IR monomorphization
+  treats a composition operand as a call site (`IRMono.hmValueRefRewrite`:
+  r's parameter is l's return, l's return is r's parameter), so `h(3.0)`
+  still gets `idg_HM_..._double` (functions/157).
+- **F3 (FIXED 2026-09-27, both sides)** A `let` alias of a declared function
+  (`let g = total`) escaped the judgment; `calleeQuantifier` follows let-alias
+  chains to the declaration, so calls through the alias are instantiated and
+  judged (functions/151). EMITTING them was the IR gap: the call site named
+  the alias's binding. `IRMono.eliminateGenericAliases` makes a module-level
+  alias of an HM function transparent (references redirected, the binding --
+  a function value no lane prints -- removed) before the HM pass
+  (functions/155). The same pass treats a generic function passed as an
+  ARGUMENT as a call site at the parameter's type (`apply(idg, 2.0)`,
+  `applyS(idg, "a")`, `twice(idg, 3)`; functions/156). Not covered: an alias
+  bound INSIDE a function body (`let g = total` as a block statement).
+- **F5 (FIXED 2026-09-27)** Literal adaptivity stopped at the top level: a
+  tuple of literals `(1.5, 2.0)` into `(Float32, Float32)` was refused
+  BL3001. `argPairClash` now takes the argument's literal SHAPE
+  (`ArgLit`: leaf / tuple of shapes), so each component literal adapts; a
+  tuple VARIABLE still narrows and still refuses (tuples/027, /028).
+- **Kernel eta wrapper + open arguments (FIXED 2026-09-27)** The
+  named-function kernel wrapper `lambda(__k) -> f(__k)` pinned its params to
+  the DECLARATION's variables, and a call whose argument is open fell back to
+  the declared return, so `method_for(B) <@> mean` over Float64 rows bound
+  `mean` itself to Float64 (a later `mean(int_row)` was BL3001, an earlier
+  one died in g++). The wrapper now pins an instantiated copy, and an open,
+  monomorphic, non-literal argument OUTSIDE a declaration body is unified with
+  its parameter's copy (the HM application rule; §5's "binding caller
+  variables", in its narrowest form) so the call's result is its own instance
+  (functions/154). Inside a declaration body the old behaviour stands: an
+  open argument there is usually tied to the declaration's own signature (a
+  `Poly` pack element), and binding it collapsed arity/024, /026, /031.
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 
