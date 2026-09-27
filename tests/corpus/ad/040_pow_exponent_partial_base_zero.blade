@@ -1,0 +1,28 @@
+// TEST: AD Exponent Partial At Base Zero (Both Modes)
+import ad as ad
+// d(x^e)/de = x^e * log(x). At x = 0 (e > 0) that is 0 * -inf = NaN in
+// floating point, while the limit -- and the derivative of the constant
+// 0^e = 0 -- is 0. Both sweeps now read log(x + guard(x == 0, 1)): exactly
+// log(x) for x <> 0, log(1) = 0 at the base-zero point. The base partial
+// e * x^(e-1) was already finite there.
+function p(x: Float, e: Float) -> Float = x ^ e
+let (pv, px, pe) = ad.grad(p)(0.0, 2.5)
+let (pjv, pjt) = ad.jvp(p)(0.0, 2.5, 0.0, 1.0)
+let (pjv2, pjt2) = ad.jvp(p)(0.0, 2.5, 1.0, 0.0)
+let pe_finite = pe == pe
+let pjt_finite = pjt == pjt
+// EXPECT: pv = 0
+// EXPECT: px = 0
+// EXPECT: pe = 0
+// EXPECT: pe_finite = true
+// EXPECT: pjt = 0
+// EXPECT: pjt_finite = true
+// EXPECT: pjt2 = 0
+// Away from zero the partials are the textbook ones: at x = 2, e = 3,
+// d/dx = 3 * 2^2 = 12 and d/de = 8 log 2.
+let (qv, qx, qe) = ad.grad(p)(2.0, 3.0)
+let (qjv, qjt) = ad.jvp(p)(2.0, 3.0, 0.0, 1.0)
+// EXPECT: qv = 8
+// EXPECT: qx = 12
+// EXPECT: qe = 5.5451774444795623
+// EXPECT: qjt = 5.5451774444795623

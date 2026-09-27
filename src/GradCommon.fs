@@ -118,6 +118,21 @@ let internal pow a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let internal neg a = syn (ExprUnaryOp (OpNeg, a))
 let internal call name args = syn (ExprApp (v name, args))
 
+/// d(b^e)/de = b^e * log(b), with the b = 0 case at its limit 0 (for e > 0;
+/// 0^e * log 0 is 0 * -inf = NaN otherwise): guard(b != 0, b^e * log(b)).
+/// `guard` rather than if/else so the emitted derivative stays inside both
+/// sweeps (ad.jvp(ad.grad(f)) re-differentiates it); a ternary in both
+/// lanes, so the untaken b^e * log(b) is never evaluated. The guard sits
+/// OUTSIDE the product so an Int base only ever meets the literal 0.0 (a
+/// comparison, which adapts silently) -- `b + guard(.., 1.0)` would be an
+/// int/float mix (BL3020) in generated code. A NaN base is != 0 and stays
+/// NaN. A literal base needs no guard.
+let internal powExpPartial (b: Expr) (e: Expr) : Expr =
+    let partial = mul (pow b e) (call "log" [b])
+    match b.Kind with
+    | ExprKind.ExprLit _ -> partial
+    | _ -> syn (ExprGuard (syn (ExprBinOp (Elementwise, OpNeq, b, fLit 0.0)), partial))
+
 /// Intrinsics whose derivative is IDENTICALLY ZERO (a.e.), so `derivRule`
 /// returning None for them means "contributes nothing", not "unknown". Split
 /// out from derivRule's None because those two readings must not be confused:
