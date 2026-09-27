@@ -136,7 +136,7 @@
       "examples": [
         "tests/corpus/functions/126_duplicate_function_rejects.blade",
         "tests/corpus/functions/152_duplicate_toplevel_let_rejects.blade",
-        "tests/corpus/structs/055_duplicate_struct_rejects.blade",
+        "tests/corpus/structs/056_duplicate_struct_rejects.blade",
         "tests/corpus/multifile/025_same_named_struct_rejects/03_Main.blade"
       ],
       "docs": [
