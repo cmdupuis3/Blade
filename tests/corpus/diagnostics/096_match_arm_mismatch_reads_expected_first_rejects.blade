@@ -1,0 +1,11 @@
+// TEST: An inferred match arm's type mismatch reads expected-then-got (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: expected Float64, got Bool
+// ============================================================================
+// The arms before the failing one set the expectation. unify names its first
+// argument as the expected side and the inferred-match seam passed the new
+// arm first, so this read "expected Bool, got Float64" -- backwards.
+let x = 2
+let c = match x with
+    | 1 -> 1.0
+    | _ -> true

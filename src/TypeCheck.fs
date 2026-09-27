@@ -131,21 +131,10 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // `typeCheck` resets on entry too; this covers module-to-module inside one
     // compilation, and callers that reach checkProgram by another route.
     resetCurrentStmtSpan ()
-    // Fresh module: the NAME-KEYED callee-fact tables are shared by reference
-    // across every module of the program (one emptyEnv), and a declaration only
-    // ever SETS its entry. So a previous module's `f` (with a `mut` parameter,
-    // defaults, a unit transform...) used to stay under the bare key `f` and
-    // judge -- and be exported as -- THIS module's same-named `f`, which has
-    // none of them: a false BL4005 on `B.f(arr)` because `A.f` wrote through
-    // its first argument. This module's own declarations re-populate the bare
-    // keys; imports re-register theirs from the per-module snapshot
-    // (TypeModuleExport.Callees / Defaults) under `alias.name` or the selected
-    // name. Nothing outside the checker reads these tables.
-    // (The `mut`-position, co-iteration and unit tables are keyed by binder
-    // id -- program-unique, so they need neither the clear nor a snapshot.)
-    env.FuncConstraints.Clear()
-    env.FuncDefaults.Clear()
-    env.FuncDefaultCaptures.Clear()
+    // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
+    // co-iteration, units -- are keyed by binder id, program-unique, and
+    // shared by reference across the program's modules: a module's entries
+    // stay valid for every module that imports it, and nothing is cleared.)
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs), so type-checking
     // can consult them (e.g. a `replicate` count written as `let static`).
@@ -303,13 +292,18 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             | DeclImport (qn, _) -> $"""in import '{(String.concat "." qn)}'"""
             | DeclUnit u -> $"in unit '{u.Name}'"
         let envWithCtx = pushContext declName currentEnv
-        match checkDecl envWithCtx d.Value with
+        // A user error the type lowering found where it has no error channel
+        // (TypeEnv.TypeErrorRaised) is this declaration's error like any other.
+        let declResult, raisedCode =
+            try checkDecl envWithCtx d.Value, None
+            with TypeErrorRaised (te, code) -> Error te, code
+        match declResult with
         | Ok (td, env') ->
             decls <- td :: decls
             // Carry forward env' but restore original context (don't nest)
             currentEnv <- { env' with Context = currentEnv.Context }
         | Error err ->
-            let ce = locateError d.Span currentEnv err
+            let ce = { locateError d.Span currentEnv err with Code = raisedCode }
             errors <- ce :: errors
             // Continue with pre-failure env, but bind the failed decl's
             // name(s) to a FRESH inference var so downstream references
@@ -351,6 +345,22 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
                            tryEvalIntIR idx.Extent
+                       | _ -> None
+                   IndexExtentVar = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                           // `Idx<nr>` over a runtime `let nr` lowers to the
+                           // symbolic IRParam "nr" (TypeLower.lowerExtentExpr);
+                           // the module binding of that name is the extent.
+                           (match idx.Extent with
+                            | IRParam (name, _, _) when name <> "?" ->
+                                (match lookupVar name currentEnv with
+                                 | Some vi ->
+                                     (match currentEnv.Subst.Resolve vi.Type |> IR.stripUnits with
+                                      | IRTScalar (ETInt64 | ETInt32) as t -> Some (name, vi.VarId, t)
+                                      | _ -> None)
+                                 | None -> None)
+                            | _ -> None)
                        | _ -> None }
         try zonkModule currentEnv.Subst typedModule
         finally subscriptGuardCtx.Value <- saved
@@ -417,27 +427,6 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
             Units = finalEnv.Units
             StaticFunctions = finalEnv.StaticFunctions |> Map.filter (fun k _ -> not (k.Contains(".")))
             StaticValues = finalEnv.StaticValues |> Map.filter (fun k _ -> not (k.Contains(".")))
-            // Snapshot NOW: the tables are shared by reference and name-keyed,
-            // so the next module's `f` would overwrite this module's entry.
-            Defaults =
-                finalEnv.FuncDefaults
-                |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                |> Map.ofSeq
-            DefaultCaptures =
-                finalEnv.FuncDefaultCaptures
-                |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                |> Map.ofSeq
-            // Same snapshot, same reason, for the declaration facts the call
-            // judgment reads by name (TypeModuleExport.Callees).
-            Callees =
-                let snap (d: System.Collections.Generic.Dictionary<string, 'v>) : Map<string, 'v> =
-                    d
-                    |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                    |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                    |> Map.ofSeq
-                { Constraints = snap finalEnv.FuncConstraints }
         }
         moduleExports <- Map.add moduleName export moduleExports
     allErrors <- allErrors @ crossModuleDeclErrors env program

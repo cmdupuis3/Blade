@@ -1,0 +1,5 @@
+// TEST: SparseIdx keys that are not Nat tuples are a user error, not an ICE (rejects)
+// ERROR: BL3999
+// ERROR-CONTAINS: keys must be a static list of Nat tuples
+// ============================================================================
+let x: Array<Float64 like SparseIdx<[1.0, 2.0]>> = [1.0]

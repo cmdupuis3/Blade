@@ -1,0 +1,11 @@
+// TEST: A unit mismatch between if-branches names the if, not an assignment (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: Unit mismatch in the branches of this
+// ============================================================================
+// unify stamped "Unit mismatch in assignment" on every unit clash it found,
+// whatever seam asked; the if seam now says which values disagree.
+Unit meters
+Unit seconds
+let a: Float<meters> = 1.0
+let b: Float<seconds> = 2.0
+let c = if a > 0.0 then a else b

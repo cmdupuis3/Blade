@@ -933,7 +933,7 @@ and orbitIndexRecord env (id: IRId) (levels: (int * bool) list)
         mkWreathIndexRecord id normalized baseExtent
 
 /// Resolve a SparseIdx keys expression to its (source, rank). Shared by the
-/// SparseIdx<keys> TYPE form (lowerIndexType, which failwiths on Error) and
+/// SparseIdx<keys> TYPE form (lowerIndexType, which raises TypeErrorRaised) and
 /// the sparse(values, keys) BUILDER (which surfaces Error as a type error).
 ///
 ///   STATIC:  the keys expression folds under the static contract (a `let
@@ -1122,7 +1122,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         // enumeration of a SparseIdx-shaped slot -- closed-form (SkDomain)
         // when the constraints are linear, a certified baked table otherwise.
         // Refusals surface at the range<> seam (TypeCheckInfer) with their
-        // own code; this arm's failwith is the annotation-only backstop.
+        // own code; this arm's TypeErrorRaised is the annotation-only backstop.
         | Some (TDIStruct _) when (match Map.tryFind name (staticEnvOf env).Structs with
                                   | Some si -> si.IsStatic
                                   | None -> false) ->
@@ -1139,7 +1139,7 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                  { Id = id; Rank = rank; Extent = IRSparseKeys (SkStatic entries)
                    Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
                    Kind = SDimension; Dependencies = [] }
-             | Error msg -> failwith msg)
+             | Error why -> raise (TypeErrorRaised (ConstrainedDomainRefused (name, why), None)))
         | _ ->
             { Id = id; Rank = 1; Extent = IRParam (name, 0, IRTNat None); Symmetry = SymNone
               Tag = Some name; IxKind = ixKindOfTag (Some name); Kind = SDimension; Dependencies = [] }
@@ -1164,15 +1164,15 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
                               // Construction (popcount + flatten to std::vector<bool>) is
                               // cheap only for a boolean mask, so a non-bool (or non-array)
                               // mask is a hard type error here rather than a silent
-                              // downstream miscompile. (A span-attributed diagnostic would
-                              // be nicer, but lowerIndexType has no error channel today.)
+                              // downstream miscompile. lowerIndexType has no error channel,
+                              // so it raises TypeErrorRaised, reported per declaration.
                               (match arr.ElemType with
                                | IRTScalar ETBool -> ()
                                | other ->
-                                   failwithf "CompoundIdx<%s>: mask must have bool element type (Array<bool like ...>); '%s' has element type %s" name name (ppIRType other))
+                                   raise (TypeErrorRaised (Other $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has element type {ppIRType other}", Some "BL3001")))
                               arr.IndexTypes |> List.sumBy (_.Rank)
                           | other ->
-                              failwithf "CompoundIdx<%s>: mask must be an array (Array<bool like ...>); '%s' has type %s" name name (ppIRType other))
+                              raise (TypeErrorRaised (Other $"CompoundIdx<{name}>: the mask must be an array of Bool (Array<Bool like ...>), but '{name}' has type {ppIRType other}", Some "BL3001")))
                      IRVar (vi.VarId, vi.Type), rank
                  | None -> lowerExtentExpr env maskExpr, 1)
             | _ -> lowerExtentExpr env maskExpr, 1
@@ -1185,11 +1185,11 @@ and lowerIndexType env (_position: int) (ty: TypeExpr) : IRIndexType =
         // lookup is by tuple hash (no grid, no per-axis extents). The
         // static/runtime branch split lives in resolveSparseKeysSource.
         // Validation failures are hard errors like the compound-mask arm's
-        // (lowerIndexType has no error channel today).
+        // (TypeErrorRaised: lowerIndexType has no error channel).
         let source, rank =
             match resolveSparseKeysSource env keysExpr with
             | Ok sr -> sr
-            | Error msg -> failwith msg
+            | Error msg -> raise (TypeErrorRaised (Other msg, None))
         { Id = id; Rank = rank; Extent = IRSparseKeys source
           Symmetry = SymNone; Tag = Some "__sparseidx"; IxKind = IxKSparse
           Kind = SDimension; Dependencies = [] }

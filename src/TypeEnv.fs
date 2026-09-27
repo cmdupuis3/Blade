@@ -193,28 +193,10 @@ type TypeModuleExport = {
     /// rewriteImportedStaticRefs seed these under "alias.name" (qualified) or
     /// "name" (selective) ahead of StaticEval.resolveStatics.
     StaticValues: Map<string, StaticEval.StaticValue>
-    /// This module's defaults-carrying callables (bare names), snapshotted
-    /// from the shared `FuncDefaults` table when the module's check ends --
-    /// BEFORE a later module can overwrite the bare-name entry with its own
-    /// `f`. A qualified import re-registers them as `alias.name` and a
-    /// selective one as `name`, so a call resolves the defaults of the
-    /// module it actually named.
-    Defaults: Map<string, (string * TypeExpr option * Expr option) list>
-    /// The matching FuncDefaultCaptures entries (see TypeEnv.FuncDefaultCaptures).
-    DefaultCaptures: Map<string, Map<string, IRId>>
-    /// The callee DECLARATION facts the call judgment still reads by NAME --
-    /// custom where-conjuncts -- snapshotted the same way and for the same
-    /// reason as `Defaults`, and re-registered under the same keys, so `M.f(x)`
-    /// and `f(x)` are judged against the same declaration. (The binder-id-keyed
-    /// facts -- `mut` positions, co-iteration obligations, unit transforms and
-    /// equalities -- need no snapshot: an imported name binds the declaration's
-    /// own id.)
-    Callees: CalleeFacts
-}
-
-/// Name-keyed callee declaration facts (see TypeModuleExport.Callees).
-and CalleeFacts = {
-    Constraints: Map<string, string list * (string * string list) list>
+    // (No callee-fact snapshots: every table the call judgment reads --
+    // defaults, where-conjuncts, `mut` positions, co-iteration, units -- is
+    // keyed by the declaration's BINDER ID, program-unique, and an imported
+    // name binds the declaration's own id, so the entries simply stay valid.)
 }
 
 /// A demand a GENERIC function body places on the instance of one of its own
@@ -347,27 +329,29 @@ type TypeEnv = {
     /// module-level dists, `func.param` tokens for Dist params). Consumed by
     /// Dist +/- dispatch and where-clause discharge. Shared by reference, like Warnings.
     Provenance: System.Collections.Generic.Dictionary<IRId, Set<string>>
-    /// Custom where-clause conjuncts per function: funcName -> (paramNames,
-    /// conjuncts). Populated by checkFunctionDecl; consulted at call sites for discharge.
-    FuncConstraints: System.Collections.Generic.Dictionary<string, string list * (string * string list) list>
+    /// Custom where-clause conjuncts per function: the declaration's BINDER ID
+    /// -> (paramNames, conjuncts). Populated by checkFunctionDecl; consulted at
+    /// call sites for discharge, through the name the call site resolves
+    /// (`lookupVar`), so a shadowing local of the same name is not judged by it.
+    FuncConstraints: System.Collections.Generic.Dictionary<IRId, string list * (string * string list) list>
     /// Parameter metadata for callables with DEFAULT parameter values:
-    /// callee name -> (paramName, surface type annotation, surface default)
+    /// callee BINDER ID -> (paramName, surface type annotation, surface default)
     /// per param, in declaration order. Populated by checkFunctionDecl and by
     /// let bindings whose value is a defaults-carrying lambda; consulted by
     /// the surface call-site desugar (omitted trailing args re-type the
-    /// default at the call site). Name-keyed like FuncConstraints, and shares
-    /// its known shadowing weakness. Shared by reference.
-    FuncDefaults: System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>
+    /// default at the call site). Keyed by the binder id the call head
+    /// resolves to (a nested or block-local `f` shadowing a defaults-carrying
+    /// global `f` is not filled from it). Shared by reference.
+    FuncDefaults: System.Collections.Generic.Dictionary<IRId, (string * TypeExpr option * Expr option) list>
     /// The BINDING IDENTITY of every free name a default expression reads
-    /// from its declaration scope: callee name -> (free name -> VarId at the
+    /// from its declaration scope: callee binder id -> (free name -> VarId at the
     /// declaration). A default is spliced into the CALL SITE as surface
     /// syntax and re-inferred there, so a name it reads resolves in the
     /// caller's scope -- `function f(x = k)` called from `function g(k) =
     /// f()` used to read g's parameter. The splice compares each free name's
     /// call-site binding against the identity recorded here and refuses on
-    /// disagreement (BL3012). Keyed exactly like FuncDefaults, including the
-    /// `alias.name` entries a qualified import registers. Shared by reference.
-    FuncDefaultCaptures: System.Collections.Generic.Dictionary<string, Map<string, IRId>>
+    /// disagreement (BL3012). Keyed exactly like FuncDefaults. Shared by reference.
+    FuncDefaultCaptures: System.Collections.Generic.Dictionary<IRId, Map<string, IRId>>
     /// Mutually constrained alias groups: groupId -> group info.
     MutualGroups: Map<string, MutualGroupInfo>
     /// Member alias name -> owning groupId, for annotation scanning.
@@ -508,6 +492,13 @@ type TypeEnv = {
     /// The accumulator the function declaration being checked collects its
     /// generic casts into (None outside a declaration body).
     CurrentGenericObligations: ResizeArray<GenericObligation> option
+    /// The declaration being checked: its (declared or fresh) parameter and
+    /// return types; [] outside a declaration body. The call judgment links a
+    /// callee's instantiated copy only to variables REACHABLE from these (the
+    /// declaration's own signature, as far as it has been resolved) -- not to
+    /// a lambda annotation's `T^k` minted in the body, nor to another
+    /// declaration's variable leaked through an unlinked call.
+    CurrentSignature: IRType list
     /// CERTIFIED half of the typed equivariance lattice (FuncRepSpec below is
     /// the speculative half): per-function rep signatures for functions
     /// carrying an `__ml_equiv` conjunct (a source `where ml.equiv(G)` pin, or
@@ -561,7 +552,7 @@ type TypeEnv = {
     /// escape as values, so the surface list is what the join needs and the
     /// TYPED literal (four independent scalars) is not.
     ///
-    /// Name-keyed, with FuncDefaults' known shadowing weakness and the same
+    /// Name-keyed (FuncDefaults used to share this weakness; it is id-keyed now), with the
     /// justification: it is a SURFACE side channel, and the join re-validates
     /// what it finds against the resolved binding (an array literal of the
     /// same width) before using it. Shared by reference.
@@ -597,9 +588,9 @@ let emptyEnv () = {
     StructStatics = Map.empty
     Warnings = ResizeArray<string>()
     Provenance = System.Collections.Generic.Dictionary<IRId, Set<string>>()
-    FuncConstraints = System.Collections.Generic.Dictionary<string, string list * (string * string list) list>()
-    FuncDefaults = System.Collections.Generic.Dictionary<string, (string * TypeExpr option * Expr option) list>()
-    FuncDefaultCaptures = System.Collections.Generic.Dictionary<string, Map<string, IRId>>()
+    FuncConstraints = System.Collections.Generic.Dictionary<IRId, string list * (string * string list) list>()
+    FuncDefaults = System.Collections.Generic.Dictionary<IRId, (string * TypeExpr option * Expr option) list>()
+    FuncDefaultCaptures = System.Collections.Generic.Dictionary<IRId, Map<string, IRId>>()
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
@@ -616,6 +607,7 @@ let emptyEnv () = {
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None
+    CurrentSignature = []
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
@@ -784,6 +776,44 @@ let private indexIdentityNote (exp: IRType) (act: IRType) : string =
             | _ -> None)
         |> Option.defaultValue ""
 
+/// A type as the program SPELLS it: `ppIRType`, except that an index slot of a
+/// user-NAMED index type renders as that name (`Array<Float64 like Lat>`, the
+/// surface spelling of the annotation), recursively through tuples, units and
+/// function types. An index NAME is part of the type -- `Nat<Lat>` and
+/// `Nat<Lon>` do not unify at equal extent -- but not of `ppIRType`'s rendering
+/// (`Idx<3>` for any `type Lat = Idx<3>`), so a mismatch between two named
+/// axes read "expected Array<Float64 like Idx<3>>, got Array<Float64 like
+/// Idx<3>>". Compiler tags (`__`) and provider axis identities (which
+/// `indexIdentityNote` explains) keep the structural form.
+let rec ppIRTypeNominal (t: IRType) : string =
+    let slot (ix: IRIndexType) =
+        match ix.Tag with
+        | Some tg when not (tg.StartsWith "__") && not (isProviderAxisTag tg) -> tg
+        | _ -> ppIndexType ix
+    match t with
+    | ArrayElem at ->
+        let slots = at.IndexTypes |> List.map slot |> String.concat ", "
+        $"Array<{ppIRTypeNominal at.ElemType} like {slots}>"
+    | IRTTuple ts -> $"""({(ts |> List.map ppIRTypeNominal |> String.concat ", ")})"""
+    | IRTUnitAnnotated (inner, units) -> $"{ppIRTypeNominal inner}<{ppUnitSigType units}>"
+    | FuncElem (ps, r) ->
+        $"""({(ps |> List.map ppIRTypeNominal |> String.concat ", ")}) -> {ppIRTypeNominal r}"""
+    | _ -> ppIRType t
+
+/// Does the type mention a user-NAMED index slot anywhere (see ppIRTypeNominal)?
+let rec namesIndexAxis (t: IRType) : bool =
+    match t with
+    | ArrayElem at ->
+        at.IndexTypes |> List.exists (fun ix ->
+            match ix.Tag with
+            | Some tg -> not (tg.StartsWith "__") && not (isProviderAxisTag tg)
+            | None -> false)
+        || namesIndexAxis at.ElemType
+    | IRTTuple ts -> ts |> List.exists namesIndexAxis
+    | IRTUnitAnnotated (inner, _) -> namesIndexAxis inner
+    | FuncElem (ps, r) -> ps |> List.exists namesIndexAxis || namesIndexAxis r
+    | _ -> false
+
 /// Format a TypeError as a human-readable string (raw: before
 /// `humanizeTypeText`; see formatTypeError).
 let private formatTypeErrorRaw (err: TypeError) : string =
@@ -817,8 +847,15 @@ let private formatTypeErrorRaw (err: TypeError) : string =
     | DuplicateFunctionDecl (name, firstSite) ->
         $"duplicate declaration of function '{name}': this scope already declares it at {firstSite}. A function name may be declared only once per scope -- without this refusal the later declaration silently shadows the earlier one, and calls matching the first signature fail blaming the call site. Rename one of the declarations. (Dispatching one name across several signatures -- function clauses -- is a planned feature, not yet supported.)"
     | TypeMismatch (exp, act) ->
-        let rendered = $"Type mismatch: expected {ppIRType exp}, got {ppIRType act}"
-        if ppIRType exp = ppIRType act then rendered + indexIdentityNote exp act else rendered
+        // Two sides that RENDER alike differ in something the structural
+        // printer drops -- an index type's NAME, typically: spell the names.
+        // (Only then: every other mismatch keeps the structural wording its
+        // pins read.)
+        let e, a =
+            if ppIRType exp = ppIRType act then ppIRTypeNominal exp, ppIRTypeNominal act
+            else ppIRType exp, ppIRType act
+        let rendered = $"Type mismatch: expected {e}, got {a}"
+        if e = a then rendered + indexIdentityNote exp act else rendered
     | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"
     | KernelPackArity msg -> msg
     | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
@@ -917,6 +954,9 @@ class IS implemented, and the dense result folds like any other array." op level
     | JoinDimRange (dim, totalDims) -> $"join: dimension {dim} is out of range for a rank-{totalDims} array (valid dims 0..{totalDims - 1})"
     | JoinShapeMismatch (pos, detail) -> $"join: argument {pos} does not match argument 1 ({detail}). join(A, B, d) requires equal rank, equal element type, and equal extents on EVERY axis except the joined dimension d."
     | StackJoinCompactSlot (op, slot) -> $"{op}: index slot {slot} is a compact, ragged, or compound group. {op} materializes a dense rectangular result, so its operands must be dense (plain Idx) on every axis -- decompact the axis first."
+    // An empty context is `unify`'s own (Unify.unifyUnitContext): it cannot
+    // know the seam, so it names none rather than guess one.
+    | UnitMismatch ("", left, right) -> $"Unit mismatch: {left} vs {right}"
     | UnitMismatch (context, left, right) -> $"Unit mismatch in {context}: {left} vs {right}"
     | QuantityArgMismatch (pos, quantity, got) ->
         $"argument {pos}: the parameter's declared type carries the quantity '{quantity}', and a quantity-typed slot only accepts values ASSERTED to be that quantity -- this argument is {got}. Ascribe it at the call site (e.g. `x : {quantity}`); matching dimensions alone do not imply the quantity."
@@ -1136,11 +1176,23 @@ the array's flat storage holds them in." shape detail
 ///   * a compiler-MINTED placeholder extent, `Idx<__elementwise_inferred_n_3>`
 ///     (`__<op>_inferred_n..`, `__json_inferred_n0`): an extent the program
 ///     never names, rendered `n` -- the extent is "some length", which is all
-///     the placeholder ever meant.
+///     the placeholder ever meant. Two DIFFERENT placeholders in one message
+///     are two lengths that need not agree, so they are numbered in order of
+///     first appearance (`n`, `n2`, ...): rendering both `n` claimed a tie.
 let humanizeTypeText (msg: string) : string =
+    let extentOrder = System.Collections.Generic.Dictionary<string, int>()
     let withExtents =
         System.Text.RegularExpressions.Regex.Replace(
-            msg, @"__[A-Za-z0-9_]*?inferred_n[A-Za-z0-9_]*", "n")
+            msg, @"__[A-Za-z0-9_]*?inferred_n[A-Za-z0-9_]*",
+            fun (m: System.Text.RegularExpressions.Match) ->
+                let k =
+                    match extentOrder.TryGetValue m.Value with
+                    | true, k -> k
+                    | _ ->
+                        let k = extentOrder.Count
+                        extentOrder.[m.Value] <- k
+                        k
+                if k = 0 then "n" else $"n{k + 1}")
     let order = System.Collections.Generic.Dictionary<string, int>()
     System.Text.RegularExpressions.Regex.Replace(
         withExtents, @"T\?(\d+)",
@@ -1158,6 +1210,17 @@ let humanizeTypeText (msg: string) : string =
 /// Format a TypeError as a human-readable string.
 let formatTypeError (err: TypeError) : string =
     humanizeTypeText (formatTypeErrorRaw err)
+
+/// A USER error found where the checker has no error channel: the type
+/// lowering (`TypeLower.lowerIndexType` and friends return a type, not a
+/// Result). Raised with the error and, when the TypeError variant's own code
+/// is not the right one, the code to report; `TypeCheck.checkModule` catches
+/// it around each declaration and reports it like any other error of that
+/// declaration (span from the ambient statement/expression stamp). These
+/// sites used to `failwith`, which surfaced as BL9001 "a bug in the Blade
+/// compiler" with no span -- for a typo in the user's annotation.
+exception TypeErrorRaised of TypeError * string option
+    with override this.Message = formatTypeError this.Data0
 
 /// Format a CompileError with location and context
 let formatCompileError (err: CompileError) : string =

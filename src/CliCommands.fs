@@ -295,9 +295,7 @@ let private frontEndToIR (filePath: string) (strictPins: bool) (mark: string -> 
         mark "validateIR"
         match validated with
         | Error errs ->
-            let ds =
-                errs |> List.map (fun s ->
-                    Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s)
+            let ds = errs |> List.map IRValidate.diagnosticOfValidationMessage
             Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok ir -> Ok (ir, sm)
 

@@ -1,0 +1,9 @@
+// TEST: Two different compiler-minted extents in one message are numbered (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: (Array<Float64 like Idx<n>>, Array<Float64 like Idx<n2>>)
+// ============================================================================
+// Each generic result carries its own placeholder extent; both rendered `n`,
+// which claims the two arrays share a length.
+function g(row: T^1) = reduce(row, (+)) * row
+function h(row: T^1) = row * reduce(row, (+))
+let r: Bool = (g([1.0, 2.0]), h([1.0, 2.0, 3.0]))

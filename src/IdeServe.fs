@@ -142,7 +142,7 @@ let fullTierUpgrade : Blade.Ide.FullTierUpgrade =
         | Error failures -> Error failures
         | Ok ir ->
             match Blade.IRValidate.validateIR ir with
-            | Error errs -> Error (errs |> List.map (fun e -> ("BL6001", e)))
+            | Error errs -> Error (errs |> List.map (fun e -> (Blade.IRValidate.codeOfValidationMessage e, e)))
             | Ok validated -> Ok (concreteValueTypes validated)
 
 // Request decoding (System.Text.Json in, hand-rolled JSON out -- the payload

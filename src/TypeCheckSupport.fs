@@ -2278,6 +2278,23 @@ let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: 
 /// it would type the call (`Int64`) differently from the callable it invokes
 /// (`double twice(double)`, static/011). Those stay uninstantiated and
 /// unbound, exactly as before.
+///
+/// The key a callable's DEFAULTS and where-conjuncts are recorded under
+/// (TypeEnv.FuncDefaults / FuncDefaultCaptures / FuncConstraints): a declared
+/// function's binder id; for a `let`-bound LAMBDA, the id of its first
+/// parameter -- program-unique, and known where the defaults are recorded
+/// (the lambda is typed before its binding's id is minted, on four different
+/// let paths). Either way it is reached from the binding a call head
+/// RESOLVES to, so a local `f` shadowing a defaults-carrying `f` is never
+/// filled from the outer one's defaults (they used to be keyed by name).
+let internal defaultsKeyOfVar (vi: VarInfo) : IRId =
+    match vi.TypedValue with
+    | Some { Kind = TExprLambda li } when not li.Params.IsEmpty -> li.Params.Head.VarId
+    | _ -> vi.VarId
+
+let internal defaultsKeyOfName (env: TypeEnv) (name: string) : IRId option =
+    lookupVar name env |> Option.map defaultsKeyOfVar
+
 /// The DECLARATION binder a call head names: the head's own id, or -- for a
 /// `let` ALIAS of a declared function (`let g = total`), which shares the
 /// declaration's type, variables included -- the id the alias chain ends at.
@@ -2386,6 +2403,36 @@ let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (mapping: 
             judgeGenericObligations env fname obs (fun r ->
                 Map.tryFind r mapping |> Option.bind (fun copy -> concreteElemOf env.Subst (IRTInfer copy)))
         | _ -> None
+
+/// A declared generic function named as a VALUE -- an argument to a
+/// higher-order parameter (`apply(toint, 2.5)`), a composition operand (`sq
+/// >> toint`) -- is used at the type its position fixes, and IR
+/// monomorphization specializes it there (IRMono.hmValueRefRewrite). Its
+/// GENERIC OBLIGATIONS are judged against that use, as at a call: a cast of
+/// the signature variable that the use makes a float-to-integer truncation
+/// (or a complex projection) is BL3019 here, at the reference, rather than the
+/// IR validator's unlocated backstop after monomorphization. Side-effect free:
+/// the instance is read off the declaration's type against `useTy` one-sidedly
+/// (the declaration's variables are never bound by a use).
+let internal genericValueObligationClash (env: TypeEnv) (fnRef: TypedExpr) (useTy: IRType) : TypeError option =
+    match fnRef.Kind, calleeDeclId env fnRef with
+    | TExprVar (fname, _, _), Some fid ->
+        (match env.FuncGenericObligations.TryGetValue fid with
+         | true, obs when not obs.IsEmpty ->
+             let rec learn (p: IRType) (a: IRType) (m: Map<int, IRType>) =
+                 match IR.stripUnits (env.Subst.Resolve p), IR.stripUnits (env.Subst.Resolve a) with
+                 | IRTInfer r, at -> if m.ContainsKey r then m else Map.add r at m
+                 | ArrayElem pa, ArrayElem aa -> learn pa.ElemType aa.ElemType m
+                 | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
+                     List.fold2 (fun m pt at -> learn pt at m) m pts ats
+                 | FuncElem (pps, pr), FuncElem (aps, ar) when pps.Length = aps.Length ->
+                     learn pr ar (List.fold2 (fun m pt at -> learn pt at m) m pps aps)
+                 | _ -> m
+             let inst = learn fnRef.Type useTy Map.empty
+             judgeGenericObligations env fname obs (fun r ->
+                 Map.tryFind r inst |> Option.bind (concreteElemOf env.Subst))
+         | _ -> None)
+    | _ -> None
 
 /// A generic body calling a generic callee with its OWN signature variables:
 /// the callee's obligations are then the caller's too (`function r2(x: T^0)
@@ -3559,6 +3606,13 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         // The callee's GENERIC CASTS, judged against the
                         // instance the arguments just built.
                         |> Option.orElse (genericObligationClash env tFunc copyMap |> Option.map (fun e -> (0, e)))
+                        // ...and those of a generic function passed AS an
+                        // argument, at the parameter type it meets.
+                        |> Option.orElse (
+                            tArgs |> List.indexed |> List.tryPick (fun (i, a) ->
+                                if i >= pCopies.Length then None
+                                else genericValueObligationClash env a (List.item i pCopies)
+                                     |> Option.map (fun e -> (i, e))))
                     propagateGenericObligations env tFunc paramTys tArgs
                     // Extents are NOT part of type identity, and a `T^1` shared
                     // by two parameters admits arrays of different lengths
@@ -3610,8 +3664,53 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             // signature (a pack element `head` of `a: Poly<T^1>`), and
                             // binding it to a non-generic copy collapsed the declaration to
                             // one instance (arity/024, /026, /031).
+                            //
+                            // Inside a declaration body the argument that IS the
+                            // caller's to link is its OWN signature variable
+                            // (polymorphic, reachable from its signature --
+                            // TypeEnv.CurrentSignature): `function m2(x: T) -> T
+                            // = idg(x)`. The HM rule: the COPY is bound to the
+                            // caller's variable (never the other way), so the
+                            // result is expressed in the caller's variables and
+                            // is generalized with them. Only where the two
+                            // already have the same SHAPE (variable against
+                            // variable, arrays element-wise): an unshaped `T^k`
+                            // is never shaped here, since shaping a parameter
+                            // mid-body re-routes every array expression typed
+                            // after it (a deferred binop became a zip pipeline
+                            // the symmetry deduction cannot see through --
+                            // ad-jvp-comb/085's BL4010 vanished -- and a Poly
+                            // pack element lost its tail, arity/026, /058). That
+                            // shape (`m2(row: T^1) = tot(row) / ..` with tot's
+                            // parameter already an array) is specialized per
+                            // instance by IR monomorphization instead
+                            // (IRMono.specializeHMFunction's inner-call learning).
+                            // Never another declaration's variable leaked in
+                            // through an unlinked call's declared return, nor a
+                            // lambda annotation's `T^k` minted in the body.
+                            let isOwn (aid: int) =
+                                env.Subst.IsPolymorphicId aid
+                                && (env.CurrentSignature
+                                    |> List.exists (fun t -> (freeInferVars env.Subst (env.Subst.Resolve t)).Contains aid))
+                            let rec linkOwn (p: IRType) (a: IRType) : bool =
+                                let p = stripUnitsDeep env.Subst (env.Subst.Resolve p)
+                                let a = stripUnitsDeep env.Subst (env.Subst.Resolve a)
+                                match p, a with
+                                | IRTInfer pid, IRTInfer aid when copyIds.Contains pid && isOwn aid ->
+                                    (match unify env.Subst (IRTInfer pid) (IRTInfer aid) with
+                                     | Ok () -> true
+                                     | Error _ -> false)
+                                | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
+                                    linkOwn pa.ElemType aa.ElemType
+                                | IRTTuple ps, IRTTuple xs when ps.Length = xs.Length ->
+                                    List.fold2 (fun acc x y -> linkOwn x y || acc) false ps xs
+                                | _ -> false
                             let linked =
-                                if Set.isEmpty copyIds || env.CurrentGenericObligations.IsSome then false
+                                if Set.isEmpty copyIds then false
+                                elif env.CurrentGenericObligations.IsSome then
+                                    appArgPairs pCopies (tArgs |> List.map (_.Type))
+                                    |> List.fold (fun acc (_, pTy, aTy) ->
+                                        linkOwn pTy aTy || acc) false
                                 else
                                     appArgPairs pCopies (tArgs |> List.map (_.Type))
                                     |> List.fold (fun acc (_, pTy, aTy) ->
@@ -3665,27 +3764,10 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                      // rendering (`Idx<3>` for any `type Lat = Idx<3>`); when
                      // either side names an axis, spell the names, or the
                      // message hides the reason (or reads "declared X but got X").
-                     let ppNominal (t: IRType) =
-                         let named (ix: IRIndexType) =
-                             match ix.Tag with
-                             | Some tg when not (tg.StartsWith "__") -> tg
-                             | _ -> ppIndexType ix
-                         match t with
-                         | ArrayElem at ->
-                             let slots = at.IndexTypes |> List.map named |> String.concat ", "
-                             $"Array<{ppIRType at.ElemType} like {slots}>"
-                         | _ -> ppIRType t
-                     let namesAxis (t: IRType) =
-                         match t with
-                         | ArrayElem at ->
-                             at.IndexTypes |> List.exists (fun ix ->
-                                 match ix.Tag with
-                                 | Some tg -> not (tg.StartsWith "__")
-                                 | None -> false)
-                         | _ -> false
+                     // (TypeEnv.ppIRTypeNominal, shared with every TypeMismatch.)
                      let pp1, pp2 =
-                         if ppIRType pTy = ppIRType aTy || namesAxis pTy || namesAxis aTy then
-                             ppNominal pTy, ppNominal aTy
+                         if ppIRType pTy = ppIRType aTy || namesIndexAxis pTy || namesIndexAxis aTy then
+                             ppIRTypeNominal pTy, ppIRTypeNominal aTy
                          else ppIRType pTy, ppIRType aTy
                      Error (ArgTypeMismatch (i + 1, calleeDesc, pp1, pp2)))
             | None, _ ->
@@ -3764,8 +3846,8 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 let expectedMin =
                     match tFunc.Kind with
                     | TExprVar (name, _, _) ->
-                        (match env.FuncDefaults.TryGetValue name with
-                         | true, ps ->
+                        (match defaultsKeyOfName env name |> Option.map env.FuncDefaults.TryGetValue with
+                         | Some (true, ps) ->
                              ps |> List.takeWhile (fun (_, _, d) -> Option.isNone d) |> List.length
                          | _ -> paramTys.Length)
                     | _ -> paramTys.Length
@@ -4625,29 +4707,28 @@ let internal tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (ar
     // (lookup key, param infos). FuncDefaultCaptures is consulted under the
     // same key, so the two tables cannot disagree about which declaration a
     // call resolved to.
+    // Keyed by the binding the head RESOLVES to (defaultsKeyOfName), so the
+    // defaults consulted are those of the callable this call actually names.
+    let byName (name: string) =
+        match defaultsKeyOfName env name with
+        | Some key ->
+            (match env.FuncDefaults.TryGetValue key with
+             | true, ps -> Some (Some key, ps)
+             | _ -> None)
+        | None -> None
     let paramInfos =
         match func.Kind with
-        | ExprKind.ExprVar name ->
-            (match env.FuncDefaults.TryGetValue name with
-             | true, ps -> Some (name, ps)
-             | _ -> None)
-        // Module-QUALIFIED callee (`a.f(...)`): a qualified import registers
-        // the module's defaults under `alias.name` (checkDecl's DeclImport
-        // arm), consulted FIRST -- two imported modules each declaring `f`
-        // with different defaults used to share one bare-name entry, and
-        // both calls got whichever module was checked last. The bare field
-        // name stays as the fallback for callees with no module export
+        | ExprKind.ExprVar name -> byName name
+        // Module-QUALIFIED callee (`a.f(...)`): the import binds `alias.name`
+        // to the declaration's own id, so it resolves to that module's `f`
+        // even when another imported module also declares one. The bare
+        // field name stays as the fallback for callees with no module export
         // behind them (a provider alias, a let-bound lambda).
         | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, fname) ->
-            (match env.FuncDefaults.TryGetValue (alias + "." + fname) with
-             | true, ps -> Some (alias + "." + fname, ps)
-             | _ ->
-                 match env.FuncDefaults.TryGetValue fname with
-                 | true, ps -> Some (fname, ps)
-                 | _ -> None)
+            byName (alias + "." + fname) |> Option.orElseWith (fun () -> byName fname)
         // Immediately-applied lambda literal: its params are right here.
         | ExprKind.ExprLambda (parms, _, _) when parms |> List.exists (_.Default.IsSome) ->
-            Some ("lambda", parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+            Some (None, parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
         | _ -> None
     match paramInfos with
     | None -> None
@@ -4777,8 +4858,8 @@ let internal tryFillDefaultArgs (env: TypeEnv) (callSpan: Span) (func: Expr) (ar
         // required-parameter references are the splice's own business and
         // are excluded, exactly as the recording excluded them.
         let shadowed =
-            match env.FuncDefaultCaptures.TryGetValue defaultsKey with
-            | true, captures when not (Map.isEmpty captures) ->
+            match defaultsKey |> Option.map env.FuncDefaultCaptures.TryGetValue with
+            | Some (true, captures) when not (Map.isEmpty captures) ->
                 List.zip trailingSlots slotAssign
                 |> List.tryPick (fun ((slotName, _, dflt), assigned) ->
                     match assigned, dflt with
@@ -4843,14 +4924,18 @@ let internal tryFlattenFactoryChain (env: TypeEnv) (func: Expr) (args: Expr list
             | ExprKind.ExprApp (inner, innerArgs) -> collect inner (innerArgs :: groups)
             | _ -> (f, groups)
         let baseFn, groups = collect func [args]
+        let hasDefaults (name: string) =
+            match defaultsKeyOfName env name with
+            | Some key -> env.FuncDefaults.ContainsKey key
+            | None -> false
         let isDefaultsCallee =
             match baseFn.Kind with
-            | ExprKind.ExprVar name -> env.FuncDefaults.ContainsKey name
+            | ExprKind.ExprVar name -> hasDefaults name
             // Module-qualified base (`plot.contourf(...)(...)`): the
-            // `alias.name` entry a qualified import registers, else the bare
+            // `alias.name` binding a qualified import makes, else the bare
             // name (see tryFillDefaultArgs).
             | ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, fname) ->
-                env.FuncDefaults.ContainsKey (alias + "." + fname) || env.FuncDefaults.ContainsKey fname
+                hasDefaults (alias + "." + fname) || hasDefaults fname
             | _ -> false
         if not isDefaultsCallee then None
         else

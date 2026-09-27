@@ -1,0 +1,13 @@
+// TEST: The post-monomorphization cast backstop reports BL3019, not BL6001 (rejects)
+// ERROR: BL3019
+// ERROR-CONTAINS: in function 'toint'
+// ============================================================================
+// Inside `outer` the instance `toint` is passed at is `outer`'s own open
+// variable, so no seam before monomorphization sees the Float64 it becomes;
+// the IR validator's cast sweep does, and its message now carries its own
+// code (IRValidate.diagnosticOfValidationMessage) and the declaration's name
+// rather than the specialization's C++ name.
+function toint(x: T^0) -> Int64 = Int64(x)
+function applyG(g: (T) -> Int64, x: T) -> Int64 = g(x)
+function outer(x: T^0) -> Int64 = applyG(toint, x)
+let r = outer(2.5)

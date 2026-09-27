@@ -889,9 +889,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         let weightsArg = if hasWeights then Some (List.head leadArgs) else None
         let parArgs = if hasWeights then List.tail leadArgs else leadArgs
         // Extents must be static ints (the elaborator resolves them to literals).
+        // Range-checked BEFORE the narrowing to `int`: a direct call with an
+        // extent past Int32 wrapped silently (the rand/ppl surface paths
+        // refuse it in their elaborators; this is the intrinsic's own check).
         let dimResults =
             dimArgs |> List.map (fun d ->
                 match d.Kind with
+                | ExprKind.ExprLit (LitInt n) when n > int64 System.Int32.MaxValue ->
+                    Error $"rand.{kind}: shape extent {n} is too large (at most {System.Int32.MaxValue} per axis)"
                 | ExprKind.ExprLit (LitInt n) when n > 0L -> Ok (int n)
                 | ExprKind.ExprLit (LitInt n) -> Error $"rand.{kind}: shape extents must be positive (got {n})"
                 | _ -> Error $"rand.{kind}: shape must be a static positive int (or list of them)")
@@ -918,6 +923,8 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             match arrTy.IndexTypes with
                             | [ix] ->
                                 match ix.Extent with
+                                | IRLit (IRLitInt k) when k > int64 System.Int32.MaxValue ->
+                                    Error (Other $"rand.{kind}: weights extent {k} is too large (at most {System.Int32.MaxValue})")
                                 | IRLit (IRLitInt k) when k > 0L -> Ok (tW, int k)
                                 | IRLit (IRLitInt k) ->
                                     Error (Other $"rand.{kind}: weights extent must be positive (got {k})")
@@ -1356,8 +1363,10 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 let dischargeErr =
                     match func.Kind with
                     | ExprKind.ExprVar fname ->
-                        match env.FuncConstraints.TryGetValue fname with
-                        | true, (paramNames, conjuncts) ->
+                        // The declaration this call RESOLVES to (binder id),
+                        // not whatever last declared the name.
+                        match defaultsKeyOfName env fname |> Option.map env.FuncConstraints.TryGetValue with
+                        | Some (true, (paramNames, conjuncts)) ->
                             let provOf (pname: string) : Set<string> =
                                 match List.tryFindIndex ((=) pname) paramNames with
                                 | Some i when i < args.Length -> provenanceOfSurface env args.[i]
@@ -1373,6 +1382,36 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 match dischargeErr with
                 | Some msg -> Error (Other msg)
                 | None ->
+                    // A declared GENERIC function passed to a head that is not
+                    // itself a declared function (a lambda, a function-typed
+                    // parameter): the argument is a USE, so it is typed at an
+                    // instantiated copy of its signature, as a composition
+                    // operand is. Typed at the declaration's own variables,
+                    // `(lambda(f, x) -> f(x))(idg, 2.0)` bound the lambda's
+                    // `f` to them, nothing ever made them concrete, and the
+                    // program died BL6001; with the copy, the lambda's use
+                    // fixes it and IR monomorphization specializes `idg` at
+                    // the head's parameter type (IRMono.hmValueRefRewrite).
+                    // A declared head keeps the call judgment, which
+                    // instantiates its own signature and never binds an
+                    // argument's.
+                    let tArgs =
+                        let headIsDeclared =
+                            match calleeDeclId env tFunc with
+                            | Some fid -> env.FuncSigVarRange.ContainsKey fid
+                            | None -> false
+                        if headIsDeclared then tArgs
+                        else
+                            tArgs |> List.map (fun (a: TypedExpr) ->
+                                match a.Kind with
+                                | TExprVar _ ->
+                                    let quantified, closed = calleeQuantifier env a
+                                    if not closed then a
+                                    else
+                                        match instantiateOpenVars env.Subst quantified [a.Type] with
+                                        | [ copy ], ids when not (Set.isEmpty ids) -> { a with Type = copy }
+                                        | _ -> a
+                                | _ -> a)
                     // ARITY LIFT before dispatch: a call that mixes arrays
                     // and scalars across ONE rank-0 signature variable is
                     // re-synthesized as the map it means. Declines fall
@@ -1478,7 +1517,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             // else-branch of a different literal length would be read at the
             // then-branch's length -- `nan`s past a short buffer. Same shared
             // refinement as every ascription seam (`staticExtentClash`).
-            unify env.Subst tThen.Type tElse.Type |> Result.bind (fun () ->
+            unify env.Subst tThen.Type tElse.Type
+            |> withUnifyContext "the branches of this `if` (then-branch vs else-branch)"
+            |> Result.bind (fun () ->
                 match staticExtentClash env.Subst tThen.Type tElse.Type with
                 | Some (d, e, a) ->
                     if elseBr.Span.StartLine > 0 then setCurrentExprSpan elseBr.Span
@@ -5958,14 +5999,26 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     let tys, _ = instantiateOpenVars env.Subst quantified [t.Type]
                     List.head tys
                 | _ -> t.Type
-            match env.Subst.Resolve(instOperand tL), env.Subst.Resolve(instOperand tR) with
+            let lInst, rInst = instOperand tL, instOperand tR
+            match env.Subst.Resolve lInst, env.Subst.Resolve rInst with
             | FuncElem (fArgs, fRet), FuncElem (gArgs, gRet) ->
                 // f's return is g's argument: they must agree (the unify
                 // result used to be discarded, so `(Float -> Float) >>
                 // (String -> String)` type-checked and died in g++).
                 let gIn = match gArgs with [gArg] -> gArg | _ -> IRTTuple gArgs
                 match unify env.Subst fRet gIn with
-                | Ok () -> Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
+                | Ok () ->
+                    // The use fixes each operand's instance: judge a generic
+                    // operand's casts there (genericValueObligationClash).
+                    let obligation =
+                        [ tL, lInst; tR, rInst ] |> List.tryPick (fun (t, inst) ->
+                            genericValueObligationClash env t (env.Subst.Resolve inst)
+                            |> Option.map (fun e -> (t, e)))
+                    match obligation with
+                    | Some (t, e) ->
+                        if t.Span.StartLine > 0 then setCurrentExprSpan t.Span
+                        Error e
+                    | None -> Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
                 | Error _ -> Error (TypeMismatch (env.Subst.Resolve gIn, env.Subst.Resolve fRet))
             | FuncElem _, _ ->
                 eprintfn "Warning: right side of >> should be a function"
@@ -11420,16 +11473,22 @@ and inferLetBindingValue (env: TypeEnv) (binding: Binding) : TypeResult<TypedExp
     // params so call sites can fill omitted trailing args (the same surface
     // desugar named functions use). All four let paths (expression-form,
     // block statement, top-level DeclLet, DeclStatic) funnel through here.
-    // Name-keyed like FuncConstraints, same known shadowing weakness.
-    (match binding.Pattern.Kind, binding.Value.Kind with
-     | PatVar name, ExprKind.ExprLambda (parms, _, _)
-            when parms |> List.exists (_.Default.IsSome) ->
-         env.FuncDefaults.[name] <- (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
-         // Same identity record checkFunctionDecl keeps for a named function
-         // (TypeEnv.FuncDefaultCaptures): the splice compares against it.
-         env.FuncDefaultCaptures.[name] <-
-             defaultCaptureIdentities env (parms |> List.map (fun p -> (p.Name, p.Default)))
-     | _ -> ())
+    // Keyed by the TYPED lambda's first parameter id (defaultsKeyOfVar): the
+    // binding's own id is minted later, on each of those paths separately.
+    inferLetBindingValueCore env binding |> Result.map (fun tv ->
+        (match binding.Pattern.Kind, binding.Value.Kind, tv.Kind with
+         | PatVar _, ExprKind.ExprLambda (parms, _, _), TExprLambda li
+                when parms |> List.exists (_.Default.IsSome) && not li.Params.IsEmpty ->
+             let key = li.Params.Head.VarId
+             env.FuncDefaults.[key] <- (parms |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+             // Same identity record checkFunctionDecl keeps for a named function
+             // (TypeEnv.FuncDefaultCaptures): the splice compares against it.
+             env.FuncDefaultCaptures.[key] <-
+                 defaultCaptureIdentities env (parms |> List.map (fun p -> (p.Name, p.Default)))
+         | _ -> ())
+        tv)
+
+and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<TypedExpr> =
     // REDUCTION JOIN, Form 2: an array literal bound to a name is a candidate
     // LEG LIST for `reduce(name, (<&!>))`. Recorded unconditionally and read
     // by nothing else, so a literal nobody joins keeps its ordinary eager
@@ -12547,7 +12606,14 @@ and inferMatch env scrutinee cases : TypeResult<TypedExpr> =
     let resultTy = env.Subst.Fresh()
     matchWith env scrutinee cases resultTy (fun caseEnv body ->
         inferExpr caseEnv body |> Result.bind (fun tBody ->
-            unify env.Subst tBody.Type resultTy |> Result.bind (fun () ->
+            // unify names its FIRST argument as the expectation, and the
+            // expectation here is the arms BEFORE this one (`resultTy`); the
+            // report is flipped rather than the call, whose binding order
+            // the arms' shared type has always relied on.
+            unify env.Subst tBody.Type resultTy
+            |> flipMismatch
+            |> withUnifyContext "the arms of this `match` (the earlier arms vs this arm)"
+            |> Result.bind (fun () ->
                 match staticExtentClash env.Subst resultTy tBody.Type with
                 | Some (d, e, a) ->
                     if body.Span.StartLine > 0 then setCurrentExprSpan body.Span
@@ -14543,23 +14609,9 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     for kv in exports.StaticFunctions do
                         let qualName = $"{alias}.{kv.Key}"
                         e <- { e with StaticFunctions = Map.add qualName kv.Value e.StaticFunctions }
-                    // Defaults under `alias.name`, so `a.f()` fills a's
-                    // defaults even when another imported module also
-                    // declares an `f` (tryFillDefaultArgs consults this key
-                    // first). Captures ride along under the same key.
-                    for kv in exports.Defaults do
-                        let qualName = $"{alias}.{kv.Key}"
-                        e.FuncDefaults.[qualName] <- kv.Value
-                        match Map.tryFind kv.Key exports.DefaultCaptures with
-                        | Some caps -> e.FuncDefaultCaptures.[qualName] <- caps
-                        | None -> ()
-                    // The rest of the declaration facts the call judgment
-                    // reads by name, under the same `alias.name` key -- so the
-                    // qualified call is judged against the declaration it
-                    // names (mut write permission, co-iteration extents, the
-                    // return-unit transform, where-conjunct discharge).
-                    let c = exports.Callees
-                    for kv in c.Constraints do e.FuncConstraints.[$"{alias}.{kv.Key}"] <- kv.Value
+                    // (Defaults, where-conjuncts and the other callee facts are
+                    // keyed by binder id: `alias.name` binds the declaration's
+                    // own id, so nothing needs re-registering.)
                     e
                 | ImportSelective names ->
                     let mutable e = env
@@ -14574,17 +14626,6 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | Some fd ->
                             e <- { e with StaticFunctions = Map.add name fd e.StaticFunctions }
                         | None -> ()
-                        // The bare name now denotes THIS module's `name`, so
-                        // its defaults (and their capture identities) win
-                        // over whatever bare-name entry a later-checked
-                        // module left in the shared table.
-                        match Map.tryFind name exports.Defaults with
-                        | Some ps ->
-                            e.FuncDefaults.[name] <- ps
-                            match Map.tryFind name exports.DefaultCaptures with
-                            | Some caps -> e.FuncDefaultCaptures.[name] <- caps
-                            | None -> e.FuncDefaultCaptures.Remove name |> ignore
-                        | None -> ()
                         // Units, the same way the QUALIFIED arm above imports
                         // them (unit names have no qualified spelling -- an
                         // annotation is `Float<newton>`, never `Float<SI.newton>`
@@ -14595,18 +14636,6 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         match Map.tryFind name exports.Units with
                         | Some us -> e <- { e with Units = Map.add name us e.Units }
                         | None -> ()
-                        // The call judgment's declaration facts, the same way
-                        // as Defaults above: the bare name is now THIS
-                        // module's, so its entry wins -- and its ABSENCE wins
-                        // too, or a later-checked module's `mut` positions
-                        // would judge a call to this module's function.
-                        if Map.containsKey name exports.Variables then
-                            let c = exports.Callees
-                            let put (d: System.Collections.Generic.Dictionary<string, 'v>) (m: Map<string, 'v>) =
-                                match Map.tryFind name m with
-                                | Some v -> d.[name] <- v
-                                | None -> d.Remove name |> ignore
-                            put e.FuncConstraints c.Constraints
                     e
             | None ->
                 // Provider or unknown module -- bind alias as opaque so references type-check
@@ -14625,14 +14654,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // Every inference variable minted from here on is THIS declaration's
     // (see TypeEnv.FuncSigVarRange; the call judgment instantiates them).
     let sigVarLo = env.Subst.NextId
-    // This declaration OWNS its name's entries in the name-keyed callee-fact
-    // tables, and each is only SET below when the declaration has the fact --
-    // so an earlier same-named binding's entry must not survive into this
-    // one (checkModule clears them per module; this covers a same-module
-    // `let f = lambda ...` shadowed by a later `function f`).
-    env.FuncConstraints.Remove funcDecl.Name |> ignore
-    env.FuncDefaults.Remove funcDecl.Name |> ignore
-    env.FuncDefaultCaptures.Remove funcDecl.Name |> ignore
+    // (The callee-fact tables are keyed by this declaration's binder id,
+    // funcVarId below, so no same-named binding's entry can leak into it.)
 
     // Pre-scan all parameter + return type annotations to register type variable names.
     let allAnnotations =
@@ -14823,12 +14846,13 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         Error e
     | None ->
     if not customConjuncts.IsEmpty then
-        env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
+        env.FuncConstraints.[funcVarId] <- (paramNames, customConjuncts)
 
     let genericObligations = ResizeArray<GenericObligation>()
     env.FuncGenericObligations.Remove funcVarId |> ignore
     let mutable bodyEnv = enterCallableBody envWithFunc
-    bodyEnv <- { bodyEnv with CurrentGenericObligations = Some genericObligations }
+    bodyEnv <- { bodyEnv with CurrentGenericObligations = Some genericObligations
+                              CurrentSignature = paramTypes @ [retType] }
     if funcDecl.WhereClause |> Option.map (fun w -> not w.Parallel.IsEmpty) |> Option.defaultValue false then
         bodyEnv <- { bodyEnv with InParallelBody = true }
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
@@ -14939,14 +14963,14 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // sites can fill omitted trailing args -- BEFORE the body is checked,
     // so recursive calls inside the body may omit them too.
     if funcDecl.Params |> List.exists (_.Default.IsSome) then
-        env.FuncDefaults.[funcDecl.Name] <- (funcDecl.Params |> List.map (fun p -> (p.Name, p.Type, p.Default)))
+        env.FuncDefaults.[funcVarId] <- (funcDecl.Params |> List.map (fun p -> (p.Name, p.Type, p.Default)))
         // Binding identity of every free name the defaults read HERE, so the
         // call-site splice can tell the declaration-site `k` from a caller's
         // parameter of the same spelling (TypeEnv.FuncDefaultCaptures). Own
         // parameters are excluded (they are the required args, bound at the
         // splice); a name with no binding here (a function registered
         // elsewhere, an intrinsic) records nothing and is not checked.
-        env.FuncDefaultCaptures.[funcDecl.Name] <-
+        env.FuncDefaultCaptures.[funcVarId] <-
             defaultCaptureIdentities env (funcDecl.Params |> List.map (fun p -> (p.Name, p.Default)))
 
     // Register which parameter positions are `mut`, for the call-site write

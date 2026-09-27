@@ -109,8 +109,7 @@ let lowerSessionDiag (fileName: string option) (source: string)
             | Ok ir ->
             match Blade.IRValidate.validateIR ir with
             | Error errs ->
-                reject (errs |> List.map (fun s ->
-                    Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s))
+                reject (errs |> List.map Blade.IRValidate.diagnosticOfValidationMessage)
             | Ok validated ->
                 Ok { Prog = prog; Typed = tp; Builder = builder; Ir = validated; Warnings = warnings }
 

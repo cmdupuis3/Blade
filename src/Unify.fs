@@ -977,6 +977,29 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     | _ ->
         i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone
 
+/// The context `unify` stamps on a unit mismatch it finds itself. Unify is a
+/// pure type relation with no idea which seam called it (a call argument, an
+/// `if`'s branches, a match arm, an annotation), so it names none: the
+/// message reads "Unit mismatch: a vs b" unless the seam relabels it
+/// (`withUnifyContext`). It used to say "in assignment" for every one of them.
+let unifyUnitContext = ""
+
+/// Relabel a unit mismatch `unify` found (see unifyUnitContext) with the
+/// seam's own context; every other result passes through unchanged.
+let withUnifyContext (context: string) (r: TypeResult<'a>) : TypeResult<'a> =
+    match r with
+    | Error (UnitMismatch (c, l, rr)) when c = unifyUnitContext -> Error (UnitMismatch (context, l, rr))
+    | _ -> r
+
+/// Swap the two sides of a mismatch `unify` reported: unify names its FIRST
+/// argument as the expectation, so a seam that had to unify in the other
+/// order (the new value first) flips the report back to expected / got.
+let flipMismatch (r: TypeResult<'a>) : TypeResult<'a> =
+    match r with
+    | Error (TypeMismatch (a, b)) -> Error (TypeMismatch (b, a))
+    | Error (UnitMismatch (c, l, rr)) -> Error (UnitMismatch (c, rr, l))
+    | _ -> r
+
 let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     let orig1 = t1
     let orig2 = t2
@@ -1247,7 +1270,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
         // at least one side structural.)
         unify subst inner1 inner2 |> Result.bind (fun () ->
             if not (unitCompatible u1 u2) then
-                Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2))
+                Error (UnitMismatch (unifyUnitContext, ppUnitSig u1, ppUnitSig u2))
             // Same dims, different MAGNITUDE (`day` into a `second` slot).
             // Convertible, but unify is a pure type-level relation with no
             // expression in hand to multiply, so it cannot bridge the factor
@@ -1256,7 +1279,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             // is actually inserted.
             elif not (unitSameScale u1 u2) then
                 Error (Other (sprintf
-                        "assignment relates %s and %s: same dimensions, but magnitudes differing by the factor %s. Scale the value explicitly, or annotate it as %s"
+                        "these values relate %s and %s: same dimensions, but magnitudes differing by the factor %s. Scale the value explicitly, or annotate it as %s"
                         (ppUnitSig u1) (ppUnitSig u2)
                         (ppUnitScale (unitConversionFactor u2 u1)) (ppUnitSig u1)))
             else Ok ())
