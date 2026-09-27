@@ -1,0 +1,18 @@
+// TEST: A generic elementwise binop on unit-carrying Int64 arrays computes in Int64
+// ============================================================================
+// The post-monomorphization binop rewrite read the element with a strict
+// primitive match, so an `Int64<m>` element fell to the Float64 fallback: the
+// subtraction below ran in double (9007199254740993 is not a double) and the
+// result narrowed back.
+// ============================================================================
+Unit m
+function d(a: T^1, b: T^1) = a - b
+function tot(r: T^1) -> T^0 = reduce(r, (+))
+function dot2(a: T^1, b: T^1) = tot(a * b)
+let A: Array<Int64<m> like Idx<2>> = [9007199254740993, 2]
+let B: Array<Int64<m> like Idx<2>> = [9007199254740992, 3]
+let C = d(A, B)
+// EXPECT: C = [1, -1]
+let P: Array<Int64<m> like Idx<2>> = [3037000499, 2]
+let s = dot2(P, P)
+// EXPECT: s = 9223372030926249005

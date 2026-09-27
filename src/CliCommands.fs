@@ -23,7 +23,7 @@ let internal usageTestBlockKeys =
       "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "run-record"
       "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"
       "surface"; "surfacing"; "sympower"; "timing"; "treerank"; "type-structure"; "unify"
-      "validate-arrow"; "zarr" ]
+      "validate-arrow"; "validation-codes"; "zarr" ]
 
 let internal usageCorpusKeys =
     [ "basic"; "intrinsics"; "casts"; "ad"; "ad-jvp"; "loops"; "symmetry"; "reynolds"; "arity"

@@ -1,0 +1,22 @@
+// TEST: An elementwise binop over generic parameters passed to a generic call specializes
+// ============================================================================
+// Over unshaped `T^1` parameters `a * b` is not yet known to be an array op
+// when the body is lowered, so it stays an untyped binop until after
+// monomorphization -- and the call `tot(a * b)` taught `tot` nothing: no
+// specialization, and the caller's result stayed tot's open variable (BL6001).
+// The argument is now typed as the array the binop will become.
+// ============================================================================
+function tot(r: T^1) -> T^0 = reduce(r, (+))
+function dot2(a: T^1, b: T^1) = tot(a * b)
+function dot3(a: T^1, b: T^1, c: T^1) = tot(a * b + c)
+function dsum(a: T^1, b: T^1) = tot(a - b)
+let ri = dot2([3037000499, 2, 5], [3037000499, 3, 7])
+// EXPECT: ri = 9223372030926249042
+let rf = dot2([1.5, 2.25, 3.0], [0.5, 2.0, 0.25])
+// EXPECT: rf = 6
+let r3i = dot3([3037000499, 2], [3037000499, 3], [1, 1])
+// EXPECT: r3i = 9223372030926249009
+let r3f = dot3([1.5, 2.5], [2.0, 4.0], [0.25, 0.5])
+// EXPECT: r3f = 13.75
+let rd = dsum([9007199254740993, 5], [1, 2])
+// EXPECT: rd = 9007199254740995
