@@ -110,9 +110,20 @@ array. The **last declared index of the source array is always the sample
 | `moments(A, k)` | `Array<T like I..., N> -> Array<T like SymIdx<k, D>>` | raw (non-central) order-`k` comoment tensor, packed symmetric over the fused leading axes |
 | `comoments(A, 2)` | same | central pair comoment (covariance); orders > 2 deferred to the subset-lattice expansion |
 | `comoments(X, Y)` | rectangular | central cross-covariance block between two arrays (no `comm` clause — not symmetric) |
-| `cumulants(A, k)` | | joint cumulant tensors 1..k via Möbius inversion over the set-partition lattice (Bell(k) partitions) of the raw power sums |
+| `cumulants(A, k)` | | joint cumulant tensors 1..k via Möbius inversion over the set-partition lattice (Bell(k) partitions) of the power sums of the CENTERED rows (order 1 adds the mean back) |
 | `mixed_cumulants(A, B, p, q)` | | the `(p, q)` joint-cumulant block between two named sources (`A`-slots major, `B`-slots inner); structurally zero at every order for a declared-independent pair |
 | `free_cumulants(A, k)` | | non-crossing-partition-lattice cumulants (free probability, as opposed to `cumulants`' classical/all-partitions lattice) |
+
+**Central formers center first.** `comoments`, `cumulants`, `mixed_cumulants`,
+`mstate`, `free_cumulants` and `dist` never assemble a central quantity from
+RAW power sums (`E[xy] - E[x]E[y]` cancels catastrophically when the mean
+dwarfs the spread: at `[1e8, 1e8+1, 1e8+2]` the raw binary64 variance is 2,
+not 2/3). The pool path shifts each row by its mean before the shared sweep
+(a second, central pool beside the raw one `moments` reads); the per-cell
+kernels center each fiber. Every quantity of order >= 2 is shift-invariant,
+and order-1 outputs add the shift back -- the shifted-moment reduction of
+`proofs/BladeShiftedMoments.v` with the mean as the shift. Pinned by corpus
+`ppl/134`.
 
 `moments(A, k)` elaborates (as the doc comment at PplElaborate.fs:8-11
 states) to exactly:

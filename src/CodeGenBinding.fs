@@ -1693,10 +1693,32 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 | None -> ""
                 | Some (wExpr, k) ->
                     $", nested_array_utilities::pool_base({(exprToCpp ctx.VarNames wExpr)}.data), (size_t){k}LL"
-            let parArgs =
-                parExprs
-                |> List.map (fun p -> $", (double)({(exprToCpp ctx.VarNames p)})")
-                |> String.concat ""
+            // Scalar parameters with a DOMAIN (Rand.Elaborate.paramGuards) are
+            // bound to locals and checked before the fill, in the emitted
+            // text for the same shadow-frame reason as the address guards
+            // below; the interpreter mirror raises the identical BL8001. A
+            // family with no guarded parameter keeps the inline casts.
+            let guards = Blade.Rand.Elaborate.paramGuards kind
+            let parLines, parArgs =
+                if guards.IsEmpty then
+                    [],
+                    (parExprs
+                     |> List.map (fun p -> $", (double)({(exprToCpp ctx.VarNames p)})")
+                     |> String.concat "")
+                else
+                    let parName i = $"{name}__par{i}"
+                    let binds =
+                        parExprs |> List.mapi (fun i p ->
+                            $"{ind}const double {parName i} = (double)({(exprToCpp ctx.VarNames p)});")
+                    let checks =
+                        guards |> List.collect (fun (i, pname, dom) ->
+                            let msg = Blade.Rand.Elaborate.paramGuardMessage kind pname dom
+                            [ $"{ind}if (!({Blade.Rand.Elaborate.paramDomainCpp dom (parName i)})) {{"
+                              $"{ind}    std::cerr << \"Blade runtime: {msg} (got \" << {parName i} << \")\" << std::endl;"
+                              $"{ind}    blade_rt::panic(\"BL8001\", \"{msg}\", nullptr, 0);"
+                              $"{ind}}}" ])
+                    binds @ checks,
+                    (parExprs |> List.mapi (fun i _ -> $", {parName i}") |> String.concat "")
             // The `_at` address channel sits right after the key: the stream
             // key and the sample offset, both int64, before the weights/pars.
             // Bound to locals and RANGE-CHECKED HERE, in the emitted text --
@@ -1724,7 +1746,7 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                      $", {sName}, {oName}")
             let fillLine =
                 $"{ind}blade_rand::{kind}(nested_array_utilities::pool_base({name}.data), (size_t){card}LL, (int64_t)({(exprToCpp ctx.VarNames keyExpr)}){addressArgs}{weightsArgs}{parArgs});"
-            ([extentsArr; allocLine] @ addressLines @ [fillLine], addVarName binding.Id name ctx)
+            ([extentsArr; allocLine] @ addressLines @ parLines @ [fillLine], addVarName binding.Id name ctx)
     | _ ->
         ([refusalErrorLine ind ($"rand binding '{name}' is not an array type")], addVarName binding.Id name ctx)
 

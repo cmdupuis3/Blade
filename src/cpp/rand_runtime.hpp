@@ -350,11 +350,15 @@ inline void beta(double* out, size_t n, int64_t key, double a, double b) {
 // stream position a function of `n` alone, so the mirror stays in step no matter
 // what the weights are.
 //
-// WEIGHT VALIDATION follows the wave-1 convention exactly: these fills never
-// panic and never validate (gamma with shape <= 0 does not check, it just lets
-// the arithmetic produce what it produces), and the one guard that exists --
-// beta's `s <= 0` -> 0.0 -- is there to keep the output PRINTABLE rather than to
-// report an error. Two guards here are of that same kind:
+// WEIGHT VALIDATION: this header never panics (a runtime header must not reach
+// the runtime panic -- see `stream_word`). The SCALAR parameters of the other
+// families are validated by checks codegen EMITS before the fill (BL8001:
+// rate/shape/a/b finite and > 0, lam finite and >= 0, p in [0, 1] --
+// Rand.Elaborate.paramGuards, mirrored by the interpreter), because a NaN lam
+// used to hang the Knuth loop and a non-positive shape returned NaN silently.
+// The weights keep the clamp convention instead, and beta's `s <= 0` -> 0.0
+// guard is there to keep the output PRINTABLE rather than to report an error.
+// Two guards here are of that same kind:
 //   * A negative or NaN weight contributes 0 to the scan (`w[i] > 0.0` is false
 //     for both). This is not error reporting; a non-monotone cumulative array
 //     would make the inverse-CDF walk meaningless, so clamping is what gives the

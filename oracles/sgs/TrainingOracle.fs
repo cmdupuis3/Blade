@@ -105,15 +105,9 @@ module TrainingOracle =
                  // exact stress: central second comoment over the tile
                  let rows =
                      Array.init 3 (fun c -> pts |> Array.map (fun (i, j, k) -> fieldAt c i j k))
-                 let t = 8.0
-                 let mu = rows |> Array.map (fun r -> Array.sum r / t)
-                 let prodsum (a: float[]) (b: float[]) =
-                     let mutable acc = 0.0
-                     for q in 0 .. a.Length - 1 do
-                         acc <- acc + a.[q] * b.[q]
-                     acc
+                 // computed exactly (Exact.fs), independent of the emitted formula
                  let pairs = [| (0, 0); (0, 1); (0, 2); (1, 1); (1, 2); (2, 2) |]
-                 let cen = pairs |> Array.map (fun (a, b) -> prodsum rows.[a] rows.[b] / t - mu.[a] * mu.[b])
+                 let cen = pairs |> Array.map (fun (a, b) -> Exact.centralComoment rows.[a] rows.[b])
                  let tOut = MathUtils.matVec symToIrr cen
                  yield (gIn, tOut) |]
 

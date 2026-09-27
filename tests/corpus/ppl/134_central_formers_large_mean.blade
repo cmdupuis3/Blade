@@ -1,0 +1,51 @@
+// TEST: PPL Central Formers At A Large Mean (No Raw-Moment Cancellation)
+import ppl as ppl
+import stats
+// ============================================================================
+// Every central former used to assemble its answer from RAW power sums,
+// E[xy] - E[x]E[y]: at a mean of 1e8 the binary64 variance of
+// [1e8, 1e8+1, 1e8+2] came out 2 (true 2/3), and the third cumulant of the
+// symmetric row was nowhere near 0. The formers now center first -- the pool
+// rows are shifted by their means (two passes), and the per-cell kernels
+// (dist) center each fiber -- so the answers below are EXACT: both centered
+// rows are [-1, 0, 1]. stats.variance, which always centered, agrees.
+// ============================================================================
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<2>, TimeIdx> = [[100000000.0, 100000001.0, 100000002.0], [1.0, 2.0, 3.0]]
+
+// pool path: comoments, cumulants of orders 1 and 3
+let c2 = ppl.comoments(A, 2)
+// EXPECT: c2 = [0.6666666666666666, 0.6666666666666666, 0.6666666666666666]
+let k1 = ppl.cumulants(A, 1)
+// EXPECT: k1 = [100000001.0, 2.0]
+let k3 = ppl.cumulants(A, 3)
+// EXPECT: k3 = [0.0, 0.0, 0.0, 0.0]
+
+// streaming state: the mean carries the shift back, the central sums come from the shifted pool
+let s = ppl.mstate(A, 3)
+let (m1, m2, m3) = ppl.mstate_cumulants(s)
+// EXPECT: m1 = [100000001.0, 2.0]
+// EXPECT: m2 = [0.6666666666666666, 0.6666666666666666, 0.6666666666666666]
+// EXPECT: m3 = [0.0, 0.0, 0.0, 0.0]
+
+// free cumulants: the non-crossing recursion runs in shifted coordinates
+let (f1, f2, f3) = ppl.free_cumulants(A, 3)
+// EXPECT: f1 = [100000001.0, 2.0]
+// EXPECT: f3 = [0.0, 0.0, 0.0, 0.0]
+
+// kernel path: dist's per-order cumulant kernels center each fiber
+let d = ppl.dist(A, 2)
+let d1 = ppl.cumulant(d, 1)
+// EXPECT: d1 = [100000001.0, 2.0]
+let d2 = ppl.cumulant(d, 2)
+// EXPECT: d2 = [0.6666666666666666, 0.6666666666666666, 0.6666666666666666]
+
+// cross block over a joint (centered) pool
+let X: Array<Float64 like Idx<1>, TimeIdx> = [[100000000.0, 100000001.0, 100000002.0]]
+let Y: Array<Float64 like Idx<1>, TimeIdx> = [[3.0, 2.0, 1.0]]
+let cxy = ppl.comoments(X, Y)
+// EXPECT: cxy = [[-0.6666666666666666]]
+
+let row: Array<Float64 like TimeIdx> = [100000000.0, 100000001.0, 100000002.0]
+let sv = stats.variance(row)
+// EXPECT: sv = 0.6666666666666666

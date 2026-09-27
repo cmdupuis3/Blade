@@ -9,7 +9,8 @@
 ///   - for-in loop nests (runtime-expression bounds allowed),
 ///   - if-EXPRESSIONS for guards (no statement-level control flow),
 ///   - rank-2+ inputs copied in via `w(i*n+j) = a(i, j)`,
-///   - rank-2+ outputs assembled as nested array literals of runtime reads.
+///   - work arrays zero-initialized and rank-2+ outputs reshaped by `method_for(range<..>)` maps (`zerosLit`,
+///     `reshapeFlat`) -- O(1) source text per buffer, never an O(cells) literal.
 ///
 /// Unfolding convention (documented once, used everywhere): Kolda-Bader mode-n matricization, 0-based -- X(i_0..i_{N-1}) maps
 /// to M(i_mode, j) with j = Sum_{k<>mode} i_k * J_k, J_k = Prod_{m<k, m<>mode} I_m.
@@ -33,7 +34,16 @@ let sAssign lhs e = StmtExpr (syn (ExprAssign (lhs, e)))
 let sFor var lo hi body = StmtForIn (var, syn (ExprDotDot (iLit lo, iLit hi)), body)
 /// for-in with expression bounds (runtime lower bounds proven: ml's tpDecl iterates table-driven ranges).
 let sForE var loE hiE body = StmtForIn (var, syn (ExprDotDot (loE, hiE)), body)
-let zerosLit (n: int) = syn (ExprArrayLit (List.replicate n (fLit 0.0)))
+/// A zero-initialized flat work array of n cells in O(1) source text: `method_for(range<Idx<n>>) <@> lambda(i) -> 0.0
+/// |> compute`. It used to be an n-element `[0.0, ...]` literal -- at eigh n = 150 two of those plus the output reshape
+/// emitted ~68k C++ lines and g++ timed out. (Not `replicate(n, pure(0.0))`: lowering expands a replicate into an
+/// n-way sequence, the same O(n) text again.) Under reverse-mode AD the eager-map lowering turns this back into its
+/// zero-literal construction buffer, exactly the shape the literal had.
+let zerosLit (n: int) =
+    let ps : LambdaParam list = [ { Name = "__zi"; Type = None; Default = None; NameSpan = noSpan } ]
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply,
+                                      syn (ExprMethodFor [ syn (ExprRange [ TyIdx (iLit n) ]) ]),
+                                      syn (ExprLambda (ps, None, fLit 0.0))))))
 let tyFloat = TyNamed ("Float", [])
 let tyFloatArr (n: int) = TyArray (tyFloat, [ TyIdx (iLit n) ])
 
@@ -56,11 +66,21 @@ let idx2 (arr: string) (i: Expr) (j: Expr) = syn (ExprApp (v arr, [i; j]))
 /// Flat row-major cell arr(i*stride + j) of a rank-1 work array.
 let flat (arr: string) (stride: int) (i: Expr) (j: Expr) =
     idx arr (add (mul i (iLit stride)) j)
-/// Rank-2 nested literal of runtime reads over a flat work array ([[c(0), c(1)], [c(2), c(3)]] -- corpus math/005).
-let nestedFromFlat (arr: string) (rows: int) (cols: int) : Expr =
-    syn (ExprArrayLit
-        [ for i in 0 .. rows - 1 ->
-            syn (ExprArrayLit [ for j in 0 .. cols - 1 -> idx arr (iLit (i * cols + j)) ]) ])
+/// Rank-N reshape of a flat row-major work array: `method_for(range<Idx<d0>>, ..., range<Idx<dk>>) <@> lambda(i0, ..,
+/// ik) -> arr(i0*s0 + ... + ik) |> compute` -- O(rank) source text. It replaces a nested array literal of one runtime
+/// read per cell (O(cells) text; see `zerosLit`). The cells, and so the values, are the same.
+let reshapeFlat (arr: string) (dims: int list) : Expr =
+    let names = dims |> List.mapi (fun k _ -> $"__rs{k}")
+    let strides = [ for k in 0 .. dims.Length - 1 -> List.fold (*) 1 (List.skip (k + 1) dims) ]
+    let flatE =
+        List.map2 (fun nm st -> if st = 1 then v nm else mul (v nm) (iLit st)) names strides
+        |> List.reduce add
+    let ops = dims |> List.map (fun d -> syn (ExprRange [ TyIdx (iLit d) ]))
+    let ps : LambdaParam list = names |> List.map (fun nm -> { Name = nm; Type = None; Default = None; NameSpan = noSpan })
+    syn (ExprCompute (syn (ExprBinOp (Elementwise, OpApply, syn (ExprMethodFor ops), syn (ExprLambda (ps, None, idx arr flatE))))))
+
+/// Rank-2 reshape of a flat work array (corpus math/005).
+let nestedFromFlat (arr: string) (rows: int) (cols: int) : Expr = reshapeFlat arr [ rows; cols ]
 let tyFloatMat (rows: int) (cols: int) =
     TyArray (tyFloat, [ TyIdx (iLit rows); TyIdx (iLit cols) ])
 
@@ -71,14 +91,11 @@ let prodInts (xs: int list) = List.fold (*) 1 xs
 /// Rank-N dense tensor type: Array<Float like Idx<d0>, Idx<d1>, ...>.
 let tyFloatTensor (dims: int list) =
     TyArray (tyFloat, dims |> List.map (fun d -> TyIdx (iLit d)))
-/// Rank-N nested literal of runtime reads over a flat row-major work array (the rank-N generalization of nestedFromFlat).
-let rec nestedFromFlatN (arr: string) (dims: int list) (offset: int) : Expr =
-    match dims with
-    | [] -> failwith "nestedFromFlatN: empty dims"
-    | [last] -> syn (ExprArrayLit [ for i in 0 .. last - 1 -> idx arr (iLit (offset + i)) ])
-    | d :: rest ->
-        let stride = prodInts rest
-        syn (ExprArrayLit [ for i in 0 .. d - 1 -> nestedFromFlatN arr rest (offset + i * stride) ])
+/// Rank-N reshape of a flat row-major work array (the rank-N generalization of nestedFromFlat); `offset` must be 0.
+let nestedFromFlatN (arr: string) (dims: int list) (offset: int) : Expr =
+    if dims.IsEmpty then failwith "nestedFromFlatN: empty dims"
+    if offset <> 0 then failwith "nestedFromFlatN: only a whole-buffer reshape (offset 0) is supported"
+    reshapeFlat arr dims
 /// N-deep loop nest: vars/extents outermost first, around the given body.
 let loopNest (vars: string list) (extents: int list) (body: Stmt list) : Stmt list =
     List.foldBack2 (fun name extent acc -> [ sFor name 0 extent acc ]) vars extents body
@@ -100,7 +117,8 @@ let tupleE (xs: Expr list) = syn (ExprTuple xs)
 ///
 /// One-sided Jacobi on a working copy W: for each column pair (p, q) the rotation angle comes from the 2x2 Gram entries
 /// a=|wp|^2, b=|wq|^2, c=wp.wq via the stable smaller-root formula (t^2 + 2*zeta*t - 1 = 0, zeta=(b-a)/2c); a pair with
-/// |c| <= 1e-15*sqrt(a*b) guards to the identity through if-EXPRESSIONS. V accumulates the same column rotations from an
+/// |c| <= 1e-15*sqrt(a)*sqrt(b) guards (split roots: sqrt(a*b) overflows once the entries pass ~1e77, which froze every
+/// pair as converged and returned non-orthogonal factors) to the identity through if-EXPRESSIONS. V accumulates the same column rotations from an
 /// identity. Post: S = column norms, selection-sort descending with column swaps, U = normalized columns, sign fix (first
 /// row attaining max |entry| per U column made positive; U and V columns flip together).
 ///
@@ -138,7 +156,7 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
                               sAccum (v "bb") (mul (v "wq") (v "wq"))
                               sAccum (v "cc") (mul (v "wp") (v "wq")) ]
                           sLet "conv" (cmp OpLe (absE (v "cc"))
-                                                (mul (fLit 1.0e-15) (sqrtE (mul (v "aa") (v "bb")))))
+                                                (mul (fLit 1.0e-15) (mul (sqrtE (v "aa")) (sqrtE (v "bb")))))
                           sLet "zeta" (divE (sub (v "bb") (v "aa"))
                                             (ifE (v "conv", fLit 1.0, mul (fLit 2.0) (v "cc"))))
                           sLet "tt" (divE (ifE (cmp OpGe (v "zeta") (fLit 0.0), fLit 1.0, negOne))
@@ -213,8 +231,9 @@ let svdDecl (name: string) (m: int) (n: int) (sweeps: int) : FunctionDecl =
 /// eigenvectors. Symmetry of the input is ASSUMED, not checked.
 ///
 /// Cyclic two-sided Jacobi on a working copy AW: for pivot (p, q) the angle comes from theta = (a_qq - a_pp)/(2*a_pq) via
-/// the same stable smaller-root formula as svd (t^2 + 2*theta*t - 1 = 0); |a_pq| <= 1e-15*sqrt(|a_pp*a_qq| + 1e-300) guards
-/// to the identity (the tiny absolute floor keeps the guard alive on indefinite/zero diagonals). Each rotation updates AW's
+/// the same stable smaller-root formula as svd (t^2 + 2*theta*t - 1 = 0); |a_pq| <= 1e-15*(sqrt|a_pp|*sqrt|a_qq| + 1e-150)
+/// guards to the identity (the tiny absolute floor keeps the guard alive on indefinite/zero diagonals; the roots are split
+/// so the product cannot overflow at large scale). Each rotation updates AW's
 /// columns AND rows (AW <- R^T AW R) and accumulates the column rotation into QM. Post: eigenvalues = diagonal,
 /// selection-sort descending with QM column swaps, sign fix on QM columns (first row attaining max |entry| made positive).
 /// Mirrors math/Jacobi.fs `eigh` operation-for-operation, so values agree to the ulp.
@@ -242,7 +261,7 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
                           sLet "aqq" (aAt (v "qq") (v "qq"))
                           sLet "conv" (cmp OpLe (absE (v "apq"))
                                                 (mul (fLit 1.0e-15)
-                                                     (sqrtE (add (absE (mul (v "app") (v "aqq"))) (fLit 1.0e-300)))))
+                                                     (add (mul (sqrtE (absE (v "app"))) (sqrtE (absE (v "aqq")))) (fLit 1.0e-150))))
                           sLet "theta" (divE (sub (v "aqq") (v "app"))
                                              (ifE (v "conv", fLit 1.0, mul (fLit 2.0) (v "apq"))))
                           sLet "tt" (divE (ifE (cmp OpGe (v "theta") (fLit 0.0), fLit 1.0, negOne))

@@ -123,24 +123,49 @@ type private PoolInfo = {
     Names: Map<int list, string>
     /// Static sample count (the raw-moment normalizer).
     N: float
+    /// Per row position, the binding holding that row's SHIFT c (its mean) for a CENTRAL pool, whose sums are
+    /// P_S = Sum_t Prod_{l in S} (row_l(t) - c_l); empty for a RAW pool (c = 0).
+    Shifts: string list
 }
 
-/// The raw prodsum P_S.
+/// The pool's prodsum P_S (raw, or about the shifts for a central pool).
 let private poolRead (pool: PoolInfo) (s: int list) : Expr =
     v pool.Names.[List.sort s]
 
-/// The raw moment E[Prod_{l in S} x_l] = P_S / N.
+/// The pool's moment E[Prod_{l in S} (x_l - c_l)] = P_S / N. For a RAW pool this is the raw moment. For a CENTRAL
+/// pool it is the moment of the shifted rows, which is what every shift-invariant quantity (comoments, cumulants and
+/// free cumulants of order >= 2, central sums) is built from; order-1 quantities read `poolMean` instead.
 let private poolMoment (pool: PoolInfo) (s: int list) : Expr =
     divE (poolRead pool s) (fLit pool.N)
 
+/// The mean of row position i: c_i + P_i / N on a central pool (the correction P_i / N is the rounding residue of the
+/// two-pass mean, ~0), P_i / N on a raw one.
+let private poolMean (pool: PoolInfo) (i: int) : Expr =
+    match pool.Shifts with
+    | [] -> poolMoment pool [i]
+    | shifts -> addE (v shifts.[i]) (poolMoment pool [i])
+
 /// Emit the single-pass pool over a shared row list. `uniq` seeds binding names; `rows` = one slice expr per row position; `needed` =
 /// the multisets the caller's cells read (deduped/canonicalized). Returns decls + reader.
-let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
+///
+/// `center` makes it a CENTRAL pool: each row is first shifted by its own mean (two passes: one `reduce` per row for
+/// the mean, then the shared sweep over the centered rows). Raw power sums are the wrong coordinates in floating
+/// point -- at [1e8, 1e8+1, 1e8+2] the binary64 variance P_ii/N - (P_i/N)^2 is 2, not 2/3 -- while the sums about a
+/// shift that tracks the data carry a relative error independent of the mean's magnitude (the shifted-moment
+/// reduction, proofs/BladeShiftedMoments.v + proofs/reals/BladeShiftedRounding.v: any shift, a rounded mean included).
+let private poolDecls (span: Span) (uniq: string) (center: bool) (rows: Expr list)
     (needed: int list list) (n: float) : Located<Decl> list * PoolInfo =
     let mkDecl name value =
         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
     let rowName i = $"__ppl_row_{uniq}_{i}"
-    let rowDecls = rows |> List.mapi (fun i e -> mkDecl (rowName i) e)
+    let shiftName i = $"__ppl_c_{uniq}_{i}"
+    let rowDecls =
+        if center then
+            rows |> List.mapi (fun i e ->
+                [ mkDecl (shiftName i) (meanE e n)
+                  mkDecl (rowName i) (subE e (v (shiftName i))) ])
+            |> List.concat
+        else rows |> List.mapi (fun i e -> mkDecl (rowName i) e)
     let lName = $"__ppl_poolL_{uniq}"
     let lValue =
         match rows with
@@ -169,7 +194,8 @@ let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
                                       Value = reduceAddE chain
                                       Mutability = BindLet }; Span = span }
     let names = sets |> List.map (fun s -> (s, pName s)) |> Map.ofList
-    (rowDecls @ [mkDecl lName lValue] @ kDecls @ [outDecl], { Names = names; N = n })
+    let shifts = if center then [ for i in 0 .. rows.Length - 1 -> shiftName i ] else []
+    (rowDecls @ [mkDecl lName lValue] @ kDecls @ [outDecl], { Names = names; N = n; Shifts = shifts })
 
 /// Row slices of a single-leading-axis array: A(0) .. A(d-1).
 let private rowSlices (aName: string) (d: int) : Expr list =
@@ -177,6 +203,7 @@ let private rowSlices (aName: string) (d: int) : Expr list =
 
 /// The order-r cumulant cell at `labels`: Sum over set partitions pi of [r]: (-1)^(|pi|-1)(|pi|-1)! * Prod_B E[Prod x_B].
 let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
+    if r = 1 then poolMean pool labels.[0] else
     let terms =
         setPartitions r |> List.map (fun p ->
             let b = p.Length
@@ -357,6 +384,8 @@ type private Ctx = {
     Indep: Set<string * string>
     /// Single-array pools already emitted this module (source array name -> handle); later formers over the same array reuse the sweep.
     Pools: Map<string, PoolInfo> ref
+    /// CENTRAL pools (rows shifted by their means), same caching; the central formers read these.
+    CentralPools: Map<string, PoolInfo> ref
     /// Pre-scanned maximal multiset size each source array needs across all its formers, so the first former emits one maximal pool.
     PoolMax: Map<string, int>
     /// Pool-path former outputs that are FLAT lex SymIdx<2, d>-shaped tensors (binding name -> variable-axis extent d); consumers
@@ -373,8 +402,21 @@ let private acquirePool (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: flo
     | None ->
         let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
         let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
-        let (pd, pool) = poolDecls span aName (rowSlices aName d) needed n
+        let (pd, pool) = poolDecls span aName false (rowSlices aName d) needed n
         ctx.Pools.Value <- Map.add aName pool ctx.Pools.Value
+        (pd, pool)
+
+/// The CENTRAL counterpart of `acquirePool` (rows shifted by their means, see `poolDecls`): the pool every central
+/// former reads -- comoments, cumulants, mstate, free cumulants. Raw `moments` keep the raw pool.
+let private acquireCentralPool (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: float) (selfMax: int)
+    : Located<Decl> list * PoolInfo =
+    match Map.tryFind aName ctx.CentralPools.Value with
+    | Some pool -> ([], pool)
+    | None ->
+        let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
+        let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
+        let (pd, pool) = poolDecls span $"{aName}_c" true (rowSlices aName d) needed n
+        ctx.CentralPools.Value <- Map.add aName pool ctx.CentralPools.Value
         (pd, pool)
 
 let private indepKey (a: string) (b: string) = if a <= b then (a, b) else (b, a)
@@ -427,12 +469,18 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
     | _ ->
         Error "moments expects moments(A, k): an annotated module-level array and a static order"
 
-/// Central pair kernel body: E[ab] - ma*mb, spelled over reduce/prodsum (both proven kernel-position primitives).
+/// Central pair kernel body, TWO-PASS: center each fiber by its mean, then E[ya yb] - E[ya] E[yb] over the centered
+/// fibers (the second term is the rounding residue of the mean, ~0, kept so the formula stays exact algebra).
+/// The one-pass E[ab] - ma*mb it replaces cancels catastrophically when the mean dwarfs the spread (see `poolDecls`).
+/// Spelled over reduce/prodsum (both proven kernel-position primitives).
 let private centralPairBody (n: float) =
     syn (ExprBlock (
         [ sLet "__ma" (meanE (v "__x1") n)
-          sLet "__mb" (meanE (v "__x2") n) ],
-        Some (subE (divE (prodsumE [v "__x1"; v "__x2"]) (fLit n)) (mulE (v "__ma") (v "__mb")))))
+          sLet "__mb" (meanE (v "__x2") n)
+          sLet "__ya" (subE (v "__x1") (v "__ma"))
+          sLet "__yb" (subE (v "__x2") (v "__mb")) ],
+        Some (subE (divE (prodsumE [v "__ya"; v "__yb"]) (fLit n))
+                   (mulE (meanE (v "__ya") n) (meanE (v "__yb") n)))))
 
 /// comoments(A, 2) same-array | comoments(X, Y) cross-block.
 let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
@@ -450,7 +498,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
                     // Single-pass path: C_ij = P_ij/N - (P_i/N)(P_j/N) off the shared pool.
                     let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
-                    let (pd, pool) = acquirePool ctx span aName d (float n) 2
+                    let (pd, pool) = acquireCentralPool ctx span aName d (float n) 2
                     ctx.FlatDims.Value <- Map.add outName d ctx.FlatDims.Value
                     let cells =
                         [ for labels in canonicalTuples d 2 ->
@@ -498,7 +546,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                         [ for i in 0 .. dx - 1 -> [i] ]
                         @ [ for j in 0 .. dy - 1 -> [dx + j] ]
                         @ [ for i in 0 .. dx - 1 do for j in 0 .. dy - 1 -> [i; dx + j] ]
-                    let (pd, pool) = poolDecls span outName rows needed (float nX)
+                    let (pd, pool) = poolDecls span outName true rows needed (float nX)
                     let cells =
                         arrLitE
                             [ for i in 0 .. dx - 1 ->
@@ -521,17 +569,26 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
 /// Order-r cumulant kernel over fiber params __x1..__xr:
 ///   kappa_r = Sum over set partitions pi of [r]: (-1)^(|pi|-1) (|pi|-1)! * Prod over blocks B: E[Prod_{i in B} x_i]
 /// Each distinct block's raw moment E[Prod x_B] = prodsum(x_B)/N is bound once (2^r - 1 lets), shared across Bell(r) terms.
+///
+/// TWO-PASS: each fiber is centered by its own mean first (`__c<i>`, `__y<i>`), and the block moments are taken over the
+/// centered fibers -- cumulants of order >= 2 are shift-invariant, so the partition sum is unchanged algebraically while
+/// the raw-moment cancellation (see `poolDecls`) is gone. Order 1 is the mean itself, `__c1 + E[__y1]`.
 let private cumulantKernelBody (r: int) (n: float) : Expr =
     let blockName (s: int list) = "__m" + (s |> List.map (fun i -> string (i + 1)) |> String.concat "")
+    let centering =
+        [ for i in 1 .. r do
+            yield sLet $"__c{i}" (meanE (v $"__x{i}") n)
+            yield sLet $"__y{i}" (subE (v $"__x{i}") (v $"__c{i}")) ]
     let lets =
         nonemptySubsets r |> List.map (fun s ->
-            sLet (blockName s) (divE (prodsumE (s |> List.map (fun i -> v $"__x{i + 1}"))) (fLit n)))
+            sLet (blockName s) (divE (prodsumE (s |> List.map (fun i -> v $"__y{i + 1}"))) (fLit n)))
     let terms =
         setPartitions r |> List.map (fun p ->
             let b = p.Length
             let w = (if b % 2 = 1 then 1.0 else -1.0) * factorial (b - 1)
             p |> List.fold (fun acc blk -> mulE acc (v (blockName (List.sort blk)))) (fLit w))
-    syn (ExprBlock (lets, Some (terms |> List.reduce addE)))
+    let result = if r = 1 then addE (v "__c1") (v (blockName [0])) else terms |> List.reduce addE
+    syn (ExprBlock (centering @ lets, Some result))
 
 /// The proven three-decl former pipeline over ONE array: L = method_for(A xk); kernel = lambda over annotated fiber params
 /// (comm for k >= 2); out = L <@> kernel |> compute.
@@ -568,7 +625,7 @@ let private elabCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 // Single-pass path: the shared pool sweep (one sample-axis traversal instead of one prodsum loop per block per cell);
                 // kappa_r cells as straight-line partition sums over pool reads.
                 let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
-                let (pd, pool) = acquirePool ctx span aName d (float n) r
+                let (pd, pool) = acquireCentralPool ctx span aName d (float n) r
                 let cells =
                     [ for labels in canonicalTuples d r ->
                         cumulantCellExpr pool (List.toArray labels) r ]
@@ -818,11 +875,13 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
                     // Single-pass path: the shared pool sweep, then mean and every central comoment SUM as straight-line cells:
                     // M_S = Sum_{K subset S} (-1)^|K| Prod_{i in K} mu_i * P_{S\K}, P_empty = n. State components are FLAT lex
                     // ArrayLits (Packed = false), same representation merge outputs carry.
-                    let (pd, pool) = acquirePool ctx span aName d (float n) r
+                    // CENTRAL pool: M_S is shift-invariant, so the binomial expansion below runs on the shifted sums (mu_i
+                    // there is the ~0 residue P_i/N), and the mean carries the shift back.
+                    let (pd, pool) = acquireCentralPool ctx span aName d (float n) r
                     let meanN = mstateComponent sName "mean"
                     let mN p = mstateComponent sName $"m{p}"
                     let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-                    let meanDecl = mkDecl meanN (arrLitE [ for i in 0 .. d - 1 -> poolMoment pool [i] ])
+                    let meanDecl = mkDecl meanN (arrLitE [ for i in 0 .. d - 1 -> poolMean pool i ])
                     let mDecls =
                         [ for p in 2 .. r ->
                             let cells =
@@ -1034,7 +1093,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                         cellLabels |> List.collect (fun labArr ->
                             setPartitions r |> List.collect (fun pt ->
                                 pt |> List.map (fun blk -> blk |> List.map (fun pos -> labArr.[pos]) |> List.sort)))
-                    let (pd, pool) = poolDecls span outName rows needed (float nX)
+                    let (pd, pool) = poolDecls span outName true rows needed (float nX)
                     let cells = [ for labArr in cellLabels -> cumulantCellExpr pool labArr r ]
                     Ok (pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ])
                 | _ ->
@@ -3699,18 +3758,20 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                             else Error "free_cumulants: destructure into plain names"
                         | _ -> Error $"free_cumulants: destructure the result -- `let (f1, ..., f{r}) = free_cumulants({aName}, {r})`"
                     compNames |> Result.map (fun fkNames ->
-                        // Raw moments mu_S = P_S / N from the shared pool sweep.
-                        let (pd, pool) = acquirePool ctx span aName d (float n) r
+                        // Moments of the CENTERED rows from the central pool sweep: free cumulants of order >= 2 are
+                        // shift-invariant, so the recursion runs in shifted coordinates, where the order-1 free cumulant is
+                        // the ~0 residue P_i/N (read directly below); the fk_1 OUTPUT is the true mean, shift added back.
+                        let (pd, pool) = acquireCentralPool ctx span aName d (float n) r
                         let muDecls = pd
                         let muRead (labels: int list) = poolMoment pool labels
-                        // fk tensors ascending; fk_1 = mu_1; flat lex reads on earlier fk outputs.
+                        // fk tensors ascending; flat lex reads on earlier fk outputs; order-1 blocks read the shifted mean.
                         let fkRead (kIdx: int) (labels: int list) =
-                            if labels.Length = 1 then appE (v fkNames.[0]) (labels |> List.map iLit)
+                            if labels.Length = 1 then poolMoment pool labels
                             else appE (v fkNames.[labels.Length - 1]) [iLit (lexOffsetOf d labels.Length labels)]
                         let fkDecl p nm =
                             if p = 1 then
                                 { Value = DeclLet { Pattern = pvar nm; Type = None
-                                                    Value = arrLitE [ for i in 0 .. d - 1 -> poolMoment pool [i] ]
+                                                    Value = arrLitE [ for i in 0 .. d - 1 -> poolMean pool i ]
                                                     Mutability = BindLet }; Span = span }
                             else
                                 let cells =
@@ -4251,7 +4312,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                 | _ -> None)
             |> List.fold (fun m (a, k) -> Map.add a (max k (defaultArg (Map.tryFind a m) 0)) m) Map.empty
         let ctx = { Arrays = arrays; Aliases = aliases; Statics = statics; Indep = indep
-                    Pools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
+                    Pools = ref Map.empty; CentralPools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
         // Pass 1.5: expression-position logpdf/loglik inside top-level
         // function bodies (the density-form model layer, plan section 4) --
         // each site becomes a block of statement lets, so `function

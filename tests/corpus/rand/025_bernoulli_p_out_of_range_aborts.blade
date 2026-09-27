@@ -1,0 +1,8 @@
+// TEST: Rand: a Bernoulli probability outside [0, 1] aborts (aborts)
+// ABORT: error[BL8001]
+// ABORT: parameter 'p' must be in [0, 1]
+// p = 1.5 used to draw all ones without complaint; the domain is now checked
+// before the fill, in both lanes.
+import rand as r
+let p = 1.5
+let b = r.bernoulli(3, p, 4)

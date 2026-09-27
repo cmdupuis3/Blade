@@ -1,0 +1,24 @@
+// TEST: Math svd/eigh: the Jacobi convergence guard survives large scales
+// The one-sided Jacobi guard compared |c| against 1e-15*sqrt(a*b), where a, b
+// are the squared column norms: at entries ~1e80 the product a*b overflows to
+// +inf, EVERY pair reads as converged, and svd returned the unrotated columns
+// -- S = [1.414e80, 1e80] and a non-orthogonal U for [[1,1],[0,1]]*1e80. The
+// guard now splits the root, sqrt(a)*sqrt(b); eigh's |a_pp*a_qq| guard got
+// the same treatment (it overflowed past entries ~1e154).
+import math as m
+
+// svd of [[1,1],[0,1]] * 1e80: sigma = 1e80 * ((sqrt(5) +- 1) / 2)
+let Ab: Array<Float64 like Idx<2>, Idx<2>> = [[1.0e80, 1.0e80], [0.0, 1.0e80]]
+let (Ub, Sb, Vb) = m.svd(Ab)
+// EXPECT: Sb = [1.618033988749895e80, 6.180339887498948e79]
+let udot = Ub(0, 0) * Ub(0, 1) + Ub(1, 0) * Ub(1, 1)
+let u_orthogonal = if abs(udot) < 0.000000000001 then 1.0 else 0.0
+// EXPECT: u_orthogonal = 1.0
+
+// eigh of [[2,1],[1,2]] * 1e160: eigenvalues 3e160, 1e160
+let Sh: Array<Float64 like Idx<2>, Idx<2>> = [[2.0e160, 1.0e160], [1.0e160, 2.0e160]]
+let (Qh, lamh) = m.eigh(Sh)
+// EXPECT: lamh = [3.0e160, 1.0e160]
+let qdot = Qh(0, 0) * Qh(0, 1) + Qh(1, 0) * Qh(1, 1)
+let q_orthogonal = if abs(qdot) < 0.000000000001 then 1.0 else 0.0
+// EXPECT: q_orthogonal = 1.0

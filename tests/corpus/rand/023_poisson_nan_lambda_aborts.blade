@@ -1,0 +1,10 @@
+// TEST: Rand: a NaN Poisson rate aborts instead of hanging (aborts)
+// ABORT: error[BL8001]
+// ABORT: parameter 'lam' must be a finite number >= 0
+// A NaN lam used to hang forever: it fails the `lam >= 10` split, so the
+// Knuth product-of-uniforms loop ran, and `p <= exp(-NaN)` never fires. The
+// parameter domain is now checked before the fill, in both lanes.
+import rand as r
+let z = 0.0
+let lam = z / z
+let p = r.poisson_at(7, 0, 0, lam, 3)
