@@ -1,6 +1,13 @@
 # Equivariant-NN showcase notebooks
 
-Status: IN FLIGHT — probes green; branch `feat/eqnn-notebooks` (off master);
+Status (current): **ALL BUILT; CONDENSED 2026-08-28 (ac65019e)** — the four
+shipping notebooks are `examples/tetris_shapes.bladenb`,
+`examples/aspirin_energy.bladenb`, `examples/matched_moments.bladenb` and
+`examples/cod_crystals.bladenb`; NB2 was removed after its negative result
+(§3 keeps the record). The status paragraph below is the original plan's,
+kept for history.
+
+Original status: IN FLIGHT — probes green; branch `feat/eqnn-notebooks` (off master);
 live-plot infra IMPLEMENTED 2026-08-25 (§4); Blade-REPL session
 bugfixes DONE (uncommitted in that repo); raw datasets fetched to
 `C:\Users\cdupu\Data\{md17_aspirin,tetris}`; reverse-mode combinator AD is a

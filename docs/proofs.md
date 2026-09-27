@@ -954,8 +954,8 @@ distinct arguments, comm kernel).
 two index tuples in the same S_4 orbit (`same_s4_orbit`, via
 `s4_orbit_witness`) carry different values — so the sound joint form for a
 comm-repeated symmetric argument is the wreath product, not the full
-symmetric group on all 2r positions
-([plan-orbit-index-types.md](plan-orbit-index-types.md)).
+symmetric group on all 2r positions (the `OrbIdx` index types built on this
+are in [features.md](features.md) §5; their retired plan is in git history).
 
 **Exactness at r = 2, by finite enumeration.** Over 24 slot permutations
 and 16 index tuples at extent n = 2: `distinct_stabilizer_is_block_group`
