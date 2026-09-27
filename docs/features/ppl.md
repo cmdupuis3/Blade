@@ -419,17 +419,31 @@ cross-family identity).
 
 ```
 logpdf(family(params), x)   the scalar log-density at x: closed-form
-                             arithmetic over once-bound parameters,
-                             ON-SUPPORT by design (no branching -- an
+                             arithmetic over once-bound parameters, -inf
+                             off the family's support (branch-free -- an
                              if/match would leave the AD-able subset).
 loglik(family(params), A)   the SUMMED log-density over A's sample axis
                              (its last -- and only -- declared index), an
                              AD-able scalar accumulation loop (`let mut` +
                              for + `+=`) with per-family constants hoisted
-                             out of the loop. Leading variable axes are
+                             out of the loop; one off-support sample makes
+                             it -inf. Leading variable axes are
                              refused -- a univariate family has no
                              per-coordinate loglik.
 ```
+
+**Support.** The supports are the oracle's (`oracles/ppl/Density.fs`):
+exponential `[0, inf)`, uniform `[a, b]`, lognormal and gamma `(0, inf)`,
+beta `(0, 1)`, poisson the non-negative integers, bernoulli `{0, 1}`,
+gaussian the whole line. Outside it `logpdf` is `-inf`; `0 * log 0` is `0`
+(`bernoulli(1)` at 1, `poisson(0)` at 0). All of it is carried by `guard`,
+which both AD sweeps differentiate: a support term `guard(!ok, log(0.0))`,
+the closed form read at `x` moved onto the support (`x + 0.0` on it, a
+constant in-support point off it -- finite, and no lgamma pole), and
+`xlogy(a, y) = a * log(y + guard(a == 0, 1))`. On the support every added
+term is an exact no-op, so values and gradients there are the bare closed
+form's; off it the gradient in `x` is a finite 0. Invalid PARAMETERS are
+not checked (the oracle raises on them). `tests/corpus/ppl/135-138`.
 
 (`logPdfParts`/`logLikParts`, PplElaborate.fs:1980-2159.) Gaussian,
 exponential, uniform, and lognormal are closed forms with no special

@@ -1,0 +1,65 @@
+// TEST: Logpdf Support Gradients (Both AD Modes)
+import ppl as ppl
+import ad as ad
+// The support handling is branch-free and stays inside both sweeps: inside
+// the support the gradient is the closed form's own (x moved onto the
+// support is x + 0.0, d/dx = 1), off it the -inf value comes with a FINITE
+// zero gradient in x (the support term's condition carries none, and the
+// closed form reads a constant in-support point). At bernoulli(1) the xlogy
+// term has a finite derivative, so d/dp log p = 1 instead of NaN.
+function bp(p: Float64) -> Float64 = ppl.logpdf(bernoulli(p), 1.0)
+let (bpv, bpg) = ad.grad(bp)(1.0)
+let (bjv, bjt) = ad.jvp(bp)(1.0, 1.0)
+// EXPECT: bpv = 0
+// EXPECT: bpg = 1
+// EXPECT: bjt = 1
+
+function gx(x: Float64) -> Float64 = ppl.logpdf(gamma(2.0, 1.0), x)
+let (giv, gig) = ad.grad(gx)(1.5)
+let (gijv, gijt) = ad.jvp(gx)(1.5, 1.0)
+// d/dx [(shape-1) log x - rate x] = 1/x - 1
+// EXPECT: gig = -0.33333333333333337
+// EXPECT: gijt = -0.33333333333333337
+let (gov, gog) = ad.grad(gx)(-1.0)
+let (gojv, gojt) = ad.jvp(gx)(-1.0, 1.0)
+let gamma_off_value_neg_inf = gov == log(0.0)
+// EXPECT: gamma_off_value_neg_inf = true
+// EXPECT: gog = 0
+// EXPECT: gojt = 0
+
+function ex(x: Float64) -> Float64 = ppl.logpdf(exponential(2.0), x)
+let (eiv, eig) = ad.grad(ex)(0.5)
+let (eov, eog) = ad.grad(ex)(-3.0)
+let (eojv, eojt) = ad.jvp(ex)(-3.0, 1.0)
+// EXPECT: eig = -2
+// EXPECT: eog = 0
+// EXPECT: eojt = 0
+
+// loglik over a certain outcome: the sum's derivative in p is n / p = 3.
+let ones: Array<Float64 like Idx<3>> = [1.0, 1.0, 1.0]
+function ber_sum(p: Float64) -> Float64 = ppl.loglik(bernoulli(p), ones)
+let (bsv, bsg) = ad.grad(ber_sum)(1.0)
+let (bsjv, bsjt) = ad.jvp(ber_sum)(1.0, 1.0)
+// EXPECT: bsv = 0
+// EXPECT: bsg = 3
+// EXPECT: bsjt = 3
+
+// The other support shapes: poisson's integer test (a floor in the guard
+// CONDITION, which neither sweep reads), lognormal's and beta's open ends.
+// d/dlam [k log lam - lam] = k/lam - 1; d/dx lognormal(0, 1) = -(1 + log x)/x;
+// d/dx beta(a, b) = (a-1)/x - (b-1)/(1-x).
+function pl(lam: Float64) -> Float64 = ppl.logpdf(poisson(lam), 3.0)
+let (plv, plg) = ad.grad(pl)(2.0)
+// EXPECT: plg = 0.5
+function lx(x: Float64) -> Float64 = ppl.logpdf(lognormal(0.0, 1.0), x)
+let (lxv, lxg) = ad.grad(lx)(2.0)
+// EXPECT: lxg = -0.84657359027997264
+function bx(x: Float64) -> Float64 = ppl.logpdf(beta(2.0, 3.0), x)
+let (bxv, bxg) = ad.grad(bx)(0.25)
+let (bxjv, bxjt) = ad.jvp(bx)(0.25, 1.0)
+// EXPECT: bxg = 1.3333333333333335
+// EXPECT: bxjt = 1.3333333333333335
+
+// Forward-over-reverse through the guards: d2/dx2 [log x - x] = -1/x^2.
+let (hv, hg, htv, htg) = ad.jvp(ad.grad(gx))(1.5, 1.0)
+// EXPECT: htg = -0.44444444444444442

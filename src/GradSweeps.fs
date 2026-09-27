@@ -239,8 +239,11 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
         adjointOf rc r (mul c l) |> Result.map (fun sr -> pre @ sl @ sr))
     | ExprKind.ExprBinOp (_, OpDiv, l, r) ->
         let pre, c = bindCot rc cot
+        // d(l/r)/dr = -l/r^2, spelled -(c/r)*(l/r): the r*r form overflows
+        // (and the c*l form can) long before the quotient does -- at
+        // l = r = 1e200 it answered 0 instead of -1e-200.
         adjointOf rc l (div c r) |> Result.bind (fun sl ->
-        adjointOf rc r (neg (div (mul c l) (mul r r))) |> Result.map (fun sr -> pre @ sl @ sr))
+        adjointOf rc r (neg (mul (div c r) (div l r))) |> Result.map (fun sr -> pre @ sl @ sr))
     | ExprKind.ExprBinOp (_, OpCaret, b, { Kind = ExprKind.ExprLit (LitInt n) }) when int n >= 0 ->
         // Constant natural exponent: emit the closed form directly rather
         // than routing through the general rule, which would leave a
@@ -259,10 +262,11 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
         // e*b^e/b so that b = 0 stays finite. The log term is reachable
         // only when `e` is itself active -- a constant exponent takes the
         // ExprLit/inactive-var path to Ok [] and never evaluates log(b),
-        // so a negative base still differentiates.
+        // so a negative base still differentiates. At b = 0 the exponent
+        // term is its limit 0, not 0 * log 0 = NaN (powExpPartial).
         let pre, c = bindCot rc cot
         adjointOf rc b (mul c (mul e (pow b (sub e (fLit 1.0))))) |> Result.bind (fun sb ->
-        adjointOf rc e (mul c (mul (pow b e) (call "log" [b]))) |> Result.map (fun se ->
+        adjointOf rc e (mul c (powExpPartial b e)) |> Result.map (fun se ->
             pre @ sb @ se))
     | ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) ->
         Ok []   // boolean-valued: no adjoint
@@ -836,7 +840,8 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
     | { Kind = ExprKind.ExprBinOp (_, OpDiv, l, r) } ->
         tangentOfExpr rc l |> Result.bind (fun tl ->
         tangentOfExpr rc r |> Result.map (fun tr ->
-            subZ (divZ tl r) (divZ (mulZ l tr) (mul r r))))
+            // (l/r)*(tr/r), not l*tr/(r*r): see the adjoint's overflow note.
+            subZ (divZ tl r) (mulZ (div l r) (divZ tr r))))
     | { Kind = ExprKind.ExprBinOp (_, OpCaret, b, { Kind = ExprKind.ExprLit (LitInt n) }) } when int n >= 0 ->
         // Constant natural exponent: closed form (mirrors the adjoint arm).
         let n' = int n
@@ -854,7 +859,7 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         tangentOfExpr rc bb |> Result.bind (fun tb ->
         tangentOfExpr rc ee |> Result.map (fun te ->
             addZ (mulZ (mul ee (pow bb (sub ee (fLit 1.0)))) tb)
-                 (mulZ (mul (pow bb ee) (call "log" [bb])) te)))
+                 (mulZ (powExpPartial bb ee) te)))
     | { Kind = ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) } ->
         Ok (fLit 0.0)   // boolean-valued: no tangent
     | { Kind = ExprKind.ExprBinOp (_, OpMod, _, _) } -> Ok (fLit 0.0)  // int-valued
