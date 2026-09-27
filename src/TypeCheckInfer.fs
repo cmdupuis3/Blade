@@ -1373,6 +1373,36 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 match dischargeErr with
                 | Some msg -> Error (Other msg)
                 | None ->
+                    // A declared GENERIC function passed to a head that is not
+                    // itself a declared function (a lambda, a function-typed
+                    // parameter): the argument is a USE, so it is typed at an
+                    // instantiated copy of its signature, as a composition
+                    // operand is. Typed at the declaration's own variables,
+                    // `(lambda(f, x) -> f(x))(idg, 2.0)` bound the lambda's
+                    // `f` to them, nothing ever made them concrete, and the
+                    // program died BL6001; with the copy, the lambda's use
+                    // fixes it and IR monomorphization specializes `idg` at
+                    // the head's parameter type (IRMono.hmValueRefRewrite).
+                    // A declared head keeps the call judgment, which
+                    // instantiates its own signature and never binds an
+                    // argument's.
+                    let tArgs =
+                        let headIsDeclared =
+                            match calleeDeclId env tFunc with
+                            | Some fid -> env.FuncSigVarRange.ContainsKey fid
+                            | None -> false
+                        if headIsDeclared then tArgs
+                        else
+                            tArgs |> List.map (fun (a: TypedExpr) ->
+                                match a.Kind with
+                                | TExprVar _ ->
+                                    let quantified, closed = calleeQuantifier env a
+                                    if not closed then a
+                                    else
+                                        match instantiateOpenVars env.Subst quantified [a.Type] with
+                                        | [ copy ], ids when not (Set.isEmpty ids) -> { a with Type = copy }
+                                        | _ -> a
+                                | _ -> a)
                     // ARITY LIFT before dispatch: a call that mixes arrays
                     // and scalars across ONE rank-0 signature variable is
                     // re-synthesized as the map it means. Declines fall
@@ -5960,14 +5990,26 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     let tys, _ = instantiateOpenVars env.Subst quantified [t.Type]
                     List.head tys
                 | _ -> t.Type
-            match env.Subst.Resolve(instOperand tL), env.Subst.Resolve(instOperand tR) with
+            let lInst, rInst = instOperand tL, instOperand tR
+            match env.Subst.Resolve lInst, env.Subst.Resolve rInst with
             | FuncElem (fArgs, fRet), FuncElem (gArgs, gRet) ->
                 // f's return is g's argument: they must agree (the unify
                 // result used to be discarded, so `(Float -> Float) >>
                 // (String -> String)` type-checked and died in g++).
                 let gIn = match gArgs with [gArg] -> gArg | _ -> IRTTuple gArgs
                 match unify env.Subst fRet gIn with
-                | Ok () -> Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
+                | Ok () ->
+                    // The use fixes each operand's instance: judge a generic
+                    // operand's casts there (genericValueObligationClash).
+                    let obligation =
+                        [ tL, lInst; tR, rInst ] |> List.tryPick (fun (t, inst) ->
+                            genericValueObligationClash env t (env.Subst.Resolve inst)
+                            |> Option.map (fun e -> (t, e)))
+                    match obligation with
+                    | Some (t, e) ->
+                        if t.Span.StartLine > 0 then setCurrentExprSpan t.Span
+                        Error e
+                    | None -> Ok (mkTyped (TExprCompose (op, tL, tR)) (mkFuncArrow fArgs gRet))
                 | Error _ -> Error (TypeMismatch (env.Subst.Resolve gIn, env.Subst.Resolve fRet))
             | FuncElem _, _ ->
                 eprintfn "Warning: right side of >> should be a function"

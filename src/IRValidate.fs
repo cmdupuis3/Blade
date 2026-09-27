@@ -294,7 +294,11 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         let (ExprShape (children, _)) = e
         children |> List.iter (checkCasts ctx)
     for b in modul.Bindings do checkCasts $"in binding '{b.Name}'" b.Value
-    for f in modul.Functions do checkCasts $"in function '{f.Name}'" f.Body
+    // A specialization's C++ name (`toint_HM_10000_double`) is not a name the
+    // program wrote: the message names the declaration it was cloned from.
+    let sourceName (n: string) =
+        System.Text.RegularExpressions.Regex.Replace(n, "_HM_.*$", "")
+    for f in modul.Functions do checkCasts $"in function '{sourceName f.Name}'" f.Body
 
     // --- Check 2: No dangling VarId references ---
     // Scope threads through every binder via BinderShape (IRLet's body,
@@ -457,3 +461,28 @@ let validateIR (program: IRProgram) : Result<IRProgram, string list> =
     else
         let messages = allErrors |> List.map (fun e -> $"[IR Validation] {e.Context}: {e.Message}")
         Error messages
+
+/// The diagnostic one `validateIR` message stands for. A structural defect of
+/// the IR is BL6001 -- a compiler invariant, reported as the validator's own
+/// band. But a check here can also find a USER error no earlier seam could see
+/// (the cast-obligation backstop, check 1c: a generic function's cast judged
+/// at an instance monomorphization produced); such a message names its code
+/// as a `BLxxxx: ` prefix, and the diagnostic carries THAT code, with the
+/// prefix and the "[IR Validation]" tag dropped from its text. Every consumer
+/// of validateIR (the CLI, the REPL, the IDE server) maps messages through
+/// this, so a BL3019 is not reported as BL6001 "IR validation" with "BL3019:"
+/// buried in its text.
+let diagnosticOfValidationMessage (s: string) : Blade.Diagnostics.Diagnostic =
+    let m = System.Text.RegularExpressions.Regex.Match(
+                s, @"^\[IR Validation\] (.*?): (BL\d{4}): (.*)$",
+                System.Text.RegularExpressions.RegexOptions.Singleline)
+    if m.Success then
+        let code = m.Groups.[2].Value
+        Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) Blade.Ast.noSpan
+            $"{m.Groups.[3].Value} ({m.Groups.[1].Value})"
+    else
+        Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s
+
+/// The code alone (see diagnosticOfValidationMessage), for consumers that
+/// carry (code, message) pairs.
+let codeOfValidationMessage (s: string) : string = (diagnosticOfValidationMessage s).Code

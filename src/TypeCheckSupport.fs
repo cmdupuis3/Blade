@@ -2387,6 +2387,36 @@ let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (mapping: 
                 Map.tryFind r mapping |> Option.bind (fun copy -> concreteElemOf env.Subst (IRTInfer copy)))
         | _ -> None
 
+/// A declared generic function named as a VALUE -- an argument to a
+/// higher-order parameter (`apply(toint, 2.5)`), a composition operand (`sq
+/// >> toint`) -- is used at the type its position fixes, and IR
+/// monomorphization specializes it there (IRMono.hmValueRefRewrite). Its
+/// GENERIC OBLIGATIONS are judged against that use, as at a call: a cast of
+/// the signature variable that the use makes a float-to-integer truncation
+/// (or a complex projection) is BL3019 here, at the reference, rather than the
+/// IR validator's unlocated backstop after monomorphization. Side-effect free:
+/// the instance is read off the declaration's type against `useTy` one-sidedly
+/// (the declaration's variables are never bound by a use).
+let internal genericValueObligationClash (env: TypeEnv) (fnRef: TypedExpr) (useTy: IRType) : TypeError option =
+    match fnRef.Kind, calleeDeclId env fnRef with
+    | TExprVar (fname, _, _), Some fid ->
+        (match env.FuncGenericObligations.TryGetValue fid with
+         | true, obs when not obs.IsEmpty ->
+             let rec learn (p: IRType) (a: IRType) (m: Map<int, IRType>) =
+                 match IR.stripUnits (env.Subst.Resolve p), IR.stripUnits (env.Subst.Resolve a) with
+                 | IRTInfer r, at -> if m.ContainsKey r then m else Map.add r at m
+                 | ArrayElem pa, ArrayElem aa -> learn pa.ElemType aa.ElemType m
+                 | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
+                     List.fold2 (fun m pt at -> learn pt at m) m pts ats
+                 | FuncElem (pps, pr), FuncElem (aps, ar) when pps.Length = aps.Length ->
+                     learn pr ar (List.fold2 (fun m pt at -> learn pt at m) m pps aps)
+                 | _ -> m
+             let inst = learn fnRef.Type useTy Map.empty
+             judgeGenericObligations env fname obs (fun r ->
+                 Map.tryFind r inst |> Option.bind (concreteElemOf env.Subst))
+         | _ -> None)
+    | _ -> None
+
 /// A generic body calling a generic callee with its OWN signature variables:
 /// the callee's obligations are then the caller's too (`function r2(x: T^0)
 /// -> T^0 = r(x)` over `r(x: T^0) -> T^0 = sqrt(x)`), since whatever instance
@@ -3559,6 +3589,13 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         // The callee's GENERIC CASTS, judged against the
                         // instance the arguments just built.
                         |> Option.orElse (genericObligationClash env tFunc copyMap |> Option.map (fun e -> (0, e)))
+                        // ...and those of a generic function passed AS an
+                        // argument, at the parameter type it meets.
+                        |> Option.orElse (
+                            tArgs |> List.indexed |> List.tryPick (fun (i, a) ->
+                                if i >= pCopies.Length then None
+                                else genericValueObligationClash env a (List.item i pCopies)
+                                     |> Option.map (fun e -> (i, e))))
                     propagateGenericObligations env tFunc paramTys tArgs
                     // Extents are NOT part of type identity, and a `T^1` shared
                     // by two parameters admits arrays of different lengths
@@ -3610,8 +3647,80 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             // signature (a pack element `head` of `a: Poly<T^1>`), and
                             // binding it to a non-generic copy collapsed the declaration to
                             // one instance (arity/024, /026, /031).
+                            //
+                            // Inside a declaration body the argument that IS the
+                            // caller's to link is its OWN signature variable
+                            // (polymorphic): `function m2(row: T^1) -> T^0 =
+                            // tot(row) / extents(row)`. Unlinked, the call's
+                            // result fell back to `tot`'s DECLARED return, m2's
+                            // return was unified with tot's own variable, and
+                            // every instance of m2 shared one result type (BL6001
+                            // "unresolved type variable" as soon as m2 was called
+                            // at two). The HM rule: the COPY is bound to the
+                            // caller's variable (never the other way), so the
+                            // result is expressed in the caller's variables and
+                            // is generalized with them. A `T^k` variable not yet
+                            // shaped is given its array shape first, exactly as
+                            // an array intrinsic would (requireArrayArgMinRank --
+                            // its element inherits the polymorphic mark).
+                            // Never SHAPE a `Poly<T^k>` pack's element variable
+                            // (`head` of `let head :: tail = a`): the pack is
+                            // arity monomorphization's, and an element shape
+                            // fixed here detached every specialization from its
+                            // recursive tail (`comoment_prod`'s emitted body read
+                            // an undeclared `arr1`, arity/026, /058).
+                            let isPackElementVar (aid: int) =
+                                env.Variables |> Map.exists (fun _ vi ->
+                                    match env.Subst.Resolve vi.Type with
+                                    | IRTPoly (b, _) ->
+                                        (match env.Subst.Resolve b with
+                                         | IRTInfer x -> x = aid
+                                         | _ -> false)
+                                    | _ -> false)
+                            // ...and only the CURRENT declaration's variables: one
+                            // another declaration's result leaked in through its
+                            // declared return (an unlinked call) is that
+                            // declaration's to shape, never this call's
+                            // (`comoment`'s `mean(comoment_prod(a))` shaped
+                            // comoment_prod's own `T^1`). The declaration being
+                            // checked is the one whose FuncSigVarRange is still
+                            // open-ended (top-level declarations are checked one
+                            // at a time).
+                            // (The LATEST open range: a declaration that failed
+                            // leaves its range open-ended.)
+                            let ownLo =
+                                env.FuncSigVarRange.Values
+                                |> Seq.choose (fun (lo, hi) -> if hi = System.Int32.MaxValue then Some lo else None)
+                                |> Seq.fold (fun acc lo -> match acc with Some m when m >= lo -> acc | _ -> Some lo) None
+                            let isOwn (aid: int) =
+                                env.Subst.IsPolymorphicId aid
+                                && (match ownLo with Some lo -> aid >= lo | None -> false)
+                            let rec linkOwn (arg: TypedExpr option) (p: IRType) (a: IRType) : bool =
+                                let p = stripUnitsDeep env.Subst (env.Subst.Resolve p)
+                                let a = stripUnitsDeep env.Subst (env.Subst.Resolve a)
+                                match p, a with
+                                | IRTInfer pid, IRTInfer aid when copyIds.Contains pid && isOwn aid ->
+                                    (match unify env.Subst (IRTInfer pid) (IRTInfer aid) with
+                                     | Ok () -> true
+                                     | Error _ -> false)
+                                | ArrayElem pa, IRTInfer aid when isOwn aid
+                                                                 && env.Subst.GetArityConstraint aid = Some pa.IndexTypes.Length
+                                                                 && arg.IsSome
+                                                                 && not (isPackElementVar aid) ->
+                                    (match requireArrayArgMinRank env arg.Value "call" pa.IndexTypes.Length with
+                                     | Ok _ -> linkOwn None p (env.Subst.Resolve arg.Value.Type)
+                                     | Error _ -> false)
+                                | ArrayElem pa, ArrayElem aa when pa.IndexTypes.Length = aa.IndexTypes.Length ->
+                                    linkOwn None pa.ElemType aa.ElemType
+                                | IRTTuple ps, IRTTuple xs when ps.Length = xs.Length ->
+                                    List.fold2 (fun acc x y -> linkOwn None x y || acc) false ps xs
+                                | _ -> false
                             let linked =
-                                if Set.isEmpty copyIds || env.CurrentGenericObligations.IsSome then false
+                                if Set.isEmpty copyIds then false
+                                elif env.CurrentGenericObligations.IsSome then
+                                    appArgPairs pCopies (tArgs |> List.map (_.Type))
+                                    |> List.fold (fun acc (i, pTy, aTy) ->
+                                        linkOwn (Some (List.item i tArgs)) pTy aTy || acc) false
                                 else
                                     appArgPairs pCopies (tArgs |> List.map (_.Type))
                                     |> List.fold (fun acc (_, pTy, aTy) ->

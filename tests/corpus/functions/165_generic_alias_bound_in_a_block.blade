@@ -1,0 +1,20 @@
+// TEST: A generic function aliased inside a block is specialized
+// ============================================================================
+// Module-level `let g = total` aliases were made transparent to
+// monomorphization (functions/161); the same alias bound as a BLOCK statement
+// still named a binding that was no generic function, so no specialization was
+// requested and `total` reached validation open (BL6001).
+// ============================================================================
+function total(row: T^1) -> T^0 = reduce(row, (+))
+let r = {
+    let g = total
+    g([1, 2, 3])
+}
+// EXPECT: r = 6
+function f(xs: Array<Float64 like Idx<2>>) -> Float64 = {
+    let h = total
+    let k = h
+    k(xs)
+}
+let s = f([1.5, 2.0])
+// EXPECT: s = 3.5

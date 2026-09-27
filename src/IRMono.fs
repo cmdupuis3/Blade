@@ -331,12 +331,27 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
         |> List.map (fun f -> (f.Id, f)) |> Map.ofList
     if hmIds.IsEmpty then modules
     else
+        // Module-level `let g = total`, and the same alias bound INSIDE a
+        // body (`{ let g = total; g(xs) }`, an IRLet) -- ids are
+        // program-unique, so one map serves both.
+        let localLets =
+            let acc = System.Collections.Generic.List<IRId * IRId>()
+            let scan (e: IRExpr) =
+                iterIRExpr (fun n ->
+                    match n with
+                    | IRLet (id, IRVar (target, _), _) -> acc.Add((id, target))
+                    | _ -> ()) e
+            for m in modules do
+                for f in m.Functions do scan f.Body
+                for b in m.Bindings do scan b.Value
+            List.ofSeq acc
         let direct =
-            modules |> List.collect _.Bindings
-            |> List.choose (fun b ->
-                match b.Value with
-                | IRVar (target, _) -> Some (b.Id, target)
-                | _ -> None)
+            (modules |> List.collect _.Bindings
+             |> List.choose (fun b ->
+                 match b.Value with
+                 | IRVar (target, _) -> Some (b.Id, target)
+                 | _ -> None))
+            @ localLets
             |> Map.ofList
         let rec resolve (fuel: int) (id: IRId) =
             if hmIds.ContainsKey id then Some id
@@ -353,6 +368,9 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
                 | IRVar (id, _) when aliases.ContainsKey id ->
                     let f = hmIds.[aliases.[id]]
                     IRVar (f.Id, mkFuncArrow (f.Params |> List.map _.Type) f.RetType)
+                // A body-local alias: its references were redirected (the walk
+                // is bottom-up, so the body is done), and the let goes.
+                | IRLet (id, _, body) when aliases.ContainsKey id -> body
                 | _ -> e
             modules |> List.map (fun m ->
                 { m with
@@ -403,15 +421,47 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
             | IRApp (IRVar (id, _), _, _) -> acc.Add id |> ignore
             | _ -> ()) body
         acc
-    let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>) (c: IRCallable) : bool =
+    // Ids passed as a direct ARGUMENT or composed (`applyG(toint, x)`, `f >>
+    // toint`): hmValueRefRewrite treats those references as call sites and
+    // specializes them at the use type, through the same memoized spec path
+    // as an application -- so they are not cloned either. Cloning one with
+    // THIS function's bindings (which never mention the referenced function's
+    // own variables) produced `toint_HM_<id>` still carrying toint's open
+    // variable (BL6001) when a generic body passed a generic function on.
+    let valueRefIdsOf (body: IRExpr) =
+        let acc = System.Collections.Generic.HashSet<IRId>()
+        iterIRExpr (fun e ->
+            match e with
+            | IRApp (_, args, _) ->
+                for a in args do
+                    match a with
+                    | IRVar (id, _) -> acc.Add id |> ignore
+                    | _ -> ()
+            | IRCompose (l, r) ->
+                for a in [ l; r ] do
+                    match a with
+                    | IRVar (id, _) -> acc.Add id |> ignore
+                    | _ -> ()
+            | _ -> ()) body
+        acc
+    let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>)
+                   (valueRefIds: System.Collections.Generic.HashSet<IRId>) (c: IRCallable) : bool =
         // (a) closures capturing one of this function's params, or (b)
         // HM-polymorphic callables referenced as first-class values (e.g. an
         // operator-section lambda passed as a `reduce` kernel): the
         // module-level pass drops every un-applied HM function, so without a
         // clone the spec body would reference a deleted id. Applied HM
-        // callees are excluded -- they specialize via the normal spec path.
+        // callees are excluded -- they specialize via the normal spec path --
+        // and so is a value reference in argument / composition position
+        // whose signature variables THIS spec's bindings do not mention: the
+        // clone would substitute nothing (see valueRefIdsOf).
+        let sigVars =
+            Set.union (c.Params |> List.fold (fun s p -> Set.union s (collectInferIds p.Type)) Set.empty)
+                      (collectInferIds c.RetType)
+        let viaValueRef =
+            valueRefIds.Contains c.Id && (sigVars |> Set.forall (fun v -> not (bindings.ContainsKey v)))
         (c.Captures |> List.exists (fun cap -> Set.contains cap.Id origParamIds))
-        || (hasTypeVarsInSignature c && not (appliedIds.Contains c.Id))
+        || (hasTypeVarsInSignature c && not (appliedIds.Contains c.Id) && not viaValueRef)
     // Walk bodyWithTypes to identify referenced lambdas needing clones --
     // TRANSITIVELY. A lifted kernel can reference a SECOND callable as a value
     // (`__lambda_49`'s broadcast body holding `__lambda_48`), and that second
@@ -426,11 +476,12 @@ let specializeHMFunction (func: IRFuncDef) (bindings: Map<int, IRType>) (builder
     while pendingBodies.Count > 0 do
         let scanBody = pendingBodies.Dequeue()
         let appliedIds = appliedIdsOf scanBody
+        let valueRefIds = valueRefIdsOf scanBody
         mapIRExpr (fun e ->
             (match e with
              | IRVar (id, _) when callables.ContainsKey id && not (lambdaClones.ContainsKey id) ->
                  let lam = callables.[id]
-                 if needsClone appliedIds lam then
+                 if needsClone appliedIds valueRefIds lam then
                      let cloneId = builder.FreshId()
                      let newCaps =
                          lam.Captures |> List.map (fun cap ->

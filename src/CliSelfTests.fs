@@ -475,6 +475,65 @@ let private runStrictPinTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// The IR validator's USER-error backstops report their own code at the
+/// command line. The cast-obligation sweep (IRValidate check 1c) finds a
+/// generic function's float-to-integer cast at an instance only
+/// monomorphization produced -- `outer` forwards its own open variable, so no
+/// seam before it sees the Float64. The compile lane used to stamp every
+/// validation message BL6001 ("IR validation error") with "BL3019:" buried in
+/// the text; it now maps them through IRValidate.diagnosticOfValidationMessage.
+/// (The corpus harness matches a pinned code anywhere in the refusal text, so
+/// casts/032 cannot see the difference; this block drives `compileFile`.)
+let private runValidationCodeTests () : TH.BlockResult =
+    let blockName = "Validation Codes"
+    TH.printHeader "IR-validation backstops report their own code (compile lane)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let src =
+        "function toint(x: T^0) -> Int64 = Int64(x)\n\
+         function applyG(g: (T) -> Int64, x: T) -> Int64 = g(x)\n\
+         function outer(x: T^0) -> Int64 = applyG(toint, x)\n\
+         let r = outer(2.5)\n"
+    let tmpDir = Path.Combine(Path.GetTempPath(), "blade_validation_codes_" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(tmpDir) |> ignore
+    let quietly (f: unit -> 'a) : 'a =
+        let sw = new StringWriter()
+        let (oldOut, oldErr) = (Console.Out, Console.Error)
+        try
+            Console.SetOut sw
+            Console.SetError sw
+            f ()
+        finally
+            Console.SetOut oldOut
+            Console.SetError oldErr
+    try
+        let path = Path.Combine(tmpDir, "backstop.blade")
+        File.WriteAllText(path, src)
+        let (result: Result<string * string list, string>) = quietly (fun () -> compileFile path false false)
+        let name = "compile lane: the cast backstop is error[BL3019], not BL6001"
+        match result with
+        | Error e when e.Contains "BL3019" && not (e.Contains "BL6001") && e.Contains "(in function 'toint')" ->
+            record name TH.Pass ""
+        | Error e -> record name TH.Fail (e.Replace("\n", " | "))
+        | Ok _ -> record name TH.Fail "compiled instead of failing"
+        // The mapping itself: a structural message stays BL6001.
+        let d = Blade.IRValidate.diagnosticOfValidationMessage "[IR Validation] in binding 'r': unresolved type variable T?7 in expression"
+        let name = "a structural validation message stays BL6001"
+        if d.Code = "BL6001" then record name TH.Pass "" else record name TH.Fail $"got {d.Code}"
+    finally
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    TH.printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
 /// Warning/suggestion SURFACING, end to end. Not expressible in the corpus:
 /// drives `ide check --json` and the two console streams, which no corpus
 /// harness touches (the diagnostics corpus never renders; the value corpus
@@ -2733,7 +2792,7 @@ let internal runCorpusWiringTests () : TH.BlockResult =
 /// (which live in this file -- see runAllTestsFullWith's doc comment for why they're passed in).
 let internal runFullSuite opts =
     runAllTestsFullWith
-        [runCliSmokeTests; runStrictPinTests; runSurfacingTests; runSurfaceTests
+        [runCliSmokeTests; runStrictPinTests; runValidationCodeTests; runSurfacingTests; runSurfaceTests
          runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests
          runCorpusWiringTests] opts
 
@@ -2841,6 +2900,11 @@ and internal dispatchTestClean (rest: string list) : int =
     | [ "strict-pins" ] | [ "strictpins" ] ->
         // The --strict-pins CLI gate standalone. In-process, no toolchain; also part of the full suite.
         let failed = (runStrictPinTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "validation-codes" ] | [ "validationcodes" ] ->
+        // IR-validation backstops keep their own code at the CLI. In-process,
+        // no toolchain; also part of the full suite.
+        let failed = (runValidationCodeTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "corpus-wiring" ] | [ "corpuswiring" ] ->
         // Every tests/corpus directory is consumed by the default suite, the
