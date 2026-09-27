@@ -63,7 +63,10 @@ module Oracle =
                      yield fieldAt c i j k |])
 
     /// Central second comoment (population), packed upper triangle
-    /// [(0,0);(0,1);(0,2);(1,1);(1,2);(2,2)]: E[ab] - ma*mb, sums ascending.
+    /// [(0,0);(0,1);(0,2);(1,1);(1,2);(2,2)], computed EXACTLY (Exact.fs:
+    /// exact means and centered products, one rounding) -- independent of the
+    /// formula the compiler emits. The raw second moments and means are the
+    /// float ascending-sum values the userland route of sgs/005 pins.
     let private tau (rows: float[][]) : float[] * float[] * float[] =
         let t = float rows.[0].Length
         let mean (r: float[]) = Array.sum r / t
@@ -75,7 +78,7 @@ module Oracle =
             acc
         let pairs = [| (0, 0); (0, 1); (0, 2); (1, 1); (1, 2); (2, 2) |]
         let raw = pairs |> Array.map (fun (a, b) -> prodsum rows.[a] rows.[b] / t)
-        let cen = Array.mapi (fun p (a, b) -> raw.[p] - mu.[a] * mu.[b]) pairs
+        let cen = pairs |> Array.map (fun (a, b) -> Exact.centralComoment rows.[a] rows.[b])
         raw, mu, cen
 
     let dump () =

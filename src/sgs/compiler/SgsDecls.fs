@@ -100,10 +100,16 @@ let boxFilterDecl (name: string) (n: int) (w: int) : FunctionDecl =
 /// sgs.stress for fixed (n, w), m = n/w, T = w^3: the EXACT subgrid stress
 /// per coarse cell -- the second central comoment of velocity under the
 /// filter-cell measure, packed in CartesianBridge.packPairs order:
-///   tau_p(cell) = prodsum(u_a, u_b | tile)/T - (sum(u_a)/T)(sum(u_b)/T)
-/// Mirrors the sgs/ oracle's tau function (ascending-t prodsums and sums,
-/// raw/T - mu_a*mu_b) -- and therefore also the userland comm-machinery
-/// route of corpus sgs/005, which the identity pin asserts.
+///   tau_p(cell) = (1/T) Sum_t y_a(t) y_b(t) - (s_a/T)(s_b/T),
+///   y_c(t) = u_c(t) - mu_c(cell),  mu_c = (1/T) Sum_t u_c(t),  s_c = Sum_t y_c(t)
+/// TWO PASSES over each tile: the tile means first, then the centered
+/// products (s_c is the rounding residue of the mean, ~0, kept so the formula
+/// is exact algebra). The one-pass raw form prodsum/T - mu_a*mu_b it replaces
+/// cancels catastrophically when the mean flow dwarfs the fluctuation -- the
+/// regime a subgrid stress lives in -- and made the stress's Galilean
+/// invariance hold only to the rounding of the raw moments; centered, a boost
+/// moves tau only through the rounding of the centered values themselves.
+/// The sgs/ oracle computes the same quantity exactly (oracles/sgs/Exact.fs).
 let stressDecl (name: string) (n: int) (w: int) : FunctionDecl =
     let m = n / w
     let m3 = m * m * m
@@ -113,13 +119,15 @@ let stressDecl (name: string) (n: int) (w: int) : FunctionDecl =
     let fine (tE: Expr) (dE: Expr) = add (mul tE (iLit w)) dE
     let uc (c: int) =
         idxN "u" [ iLit c; fine (v "ti") (v "di"); fine (v "tj") (v "dj"); fine (v "tk") (v "dk") ]
-    let sweep =
-        [ yield sLet "x0" (uc 0)
-          yield sLet "x1" (uc 1)
-          yield sLet "x2" (uc 2)
-          yield sAccum (idx "sm" (add (iLit 0) cellBase)) (v "x0")
-          yield sAccum (idx "sm" (add (iLit m3) cellBase)) (v "x1")
-          yield sAccum (idx "sm" (add (iLit (2 * m3)) cellBase)) (v "x2")
+    let meanSweep =
+        [ for c in 0 .. 2 -> sAccum (idx "sm" (add (iLit (c * m3)) cellBase)) (uc c) ]
+    let centeredSweep =
+        [ yield sLet "x0" (sub (uc 0) (idx "mu" (add (iLit 0) cellBase)))
+          yield sLet "x1" (sub (uc 1) (idx "mu" (add (iLit m3) cellBase)))
+          yield sLet "x2" (sub (uc 2) (idx "mu" (add (iLit (2 * m3)) cellBase)))
+          yield sAccum (idx "s1" (add (iLit 0) cellBase)) (v "x0")
+          yield sAccum (idx "s1" (add (iLit m3) cellBase)) (v "x1")
+          yield sAccum (idx "s1" (add (iLit (2 * m3)) cellBase)) (v "x2")
           yield! (packPairs |> Array.toList |> List.mapi (fun p (a, b) ->
                       sAccum (idx "pp" (add (iLit (p * m3)) cellBase))
                              (mul (v $"x{a}") (v $"x{b}")))) ]
@@ -127,19 +135,27 @@ let stressDecl (name: string) (n: int) (w: int) : FunctionDecl =
         packPairs |> Array.toList |> List.mapi (fun p (a, b) ->
             sAssign (idx "out" (add (iLit (p * m3)) cellBase))
                     (sub (divE (idx "pp" (add (iLit (p * m3)) cellBase)) (fLit tF))
-                         (mul (divE (idx "sm" (add (iLit (a * m3)) cellBase)) (fLit tF))
-                              (divE (idx "sm" (add (iLit (b * m3)) cellBase)) (fLit tF)))))
+                         (mul (divE (idx "s1" (add (iLit (a * m3)) cellBase)) (fLit tF))
+                              (divE (idx "s1" (add (iLit (b * m3)) cellBase)) (fLit tF)))))
+    let tileLoops (body: Stmt list) =
+        sFor "ti" 0 m
+            [ sFor "tj" 0 m
+                [ sFor "tk" 0 m
+                    [ sFor "di" 0 w
+                        [ sFor "dj" 0 w
+                            [ sFor "dk" 0 w body ] ] ] ] ]
     let body =
         blockE (
             [ sLetMut "sm" (zerosLit (3 * m3))
+              sLetMut "mu" (zerosLit (3 * m3))
+              sLetMut "s1" (zerosLit (3 * m3))
               sLetMut "pp" (zerosLit (6 * m3))
               sLetMut "out" (zerosLit (6 * m3))
-              sFor "ti" 0 m
-                [ sFor "tj" 0 m
-                    [ sFor "tk" 0 m
-                        [ sFor "di" 0 w
-                            [ sFor "dj" 0 w
-                                [ sFor "dk" 0 w sweep ] ] ] ] ]
+              tileLoops meanSweep
+              // the tile means into a SEPARATE buffer (accumulate-then-divide,
+              // no read-then-rewrite -- the box filter's grad-safe shape)
+              sFor "p" 0 (3 * m3) [ sAssign (idx "mu" (v "p")) (divE (idx "sm" (v "p")) (fLit tF)) ]
+              tileLoops centeredSweep
               sFor "ti" 0 m
                 [ sFor "tj" 0 m
                     [ sFor "tk" 0 m assemble ] ] ],

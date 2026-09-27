@@ -9,6 +9,7 @@
     <Compile Include="Combinatorics.fs" />
     <Compile Include="SymTensor.fs" />
     <Compile Include="MomentCumulant.fs" />
+    <Compile Include="Exact.fs" />
     <Compile Include="Dist.fs" />
     <Compile Include="Density.fs" />
     <Compile Include="Streaming.fs" />

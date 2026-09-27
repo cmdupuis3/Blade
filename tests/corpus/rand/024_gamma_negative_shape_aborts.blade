@@ -1,0 +1,8 @@
+// TEST: Rand: a non-positive Gamma shape aborts instead of returning NaN (aborts)
+// ABORT: error[BL8001]
+// ABORT: parameter 'shape' must be a finite number > 0
+// Gamma(shape, rate) needs shape > 0; a negative shape used to return NaN
+// draws silently. Checked before the fill, in both lanes.
+import rand as r
+let sh = 0.0 - 2.0
+let g = r.gamma(7, sh, 1.0, 3)

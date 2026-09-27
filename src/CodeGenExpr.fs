@@ -3218,8 +3218,13 @@ and materializeEighForm (subst: SubstMap) (names: Map<IRId, string>) (varName: s
             // single-line IIFE at expression positions, where a line comment
             // would swallow the rest of the statement (the lesson math/057
             // taught the gram emitter).
+            // The shim's LAPACK `info` is CAPTURED and a non-zero one panics,
+            // like the lu/solve arms: `?syev`/`?heev` report a failed
+            // convergence (typically a NaN/Inf operand) there, and discarding
+            // it handed back whatever the driver left in Q and LAM.
+            let infoName = $"{varName}__info"
             let dispatch =
-                $"/* lapack dispatch: eigh(S) -> (Q, LAM), {routeLabel} */ {entry}({nExtent}, {operandArg}, {lamName}.data, {qName}.data);"
+                $"/* lapack dispatch: eigh(S) -> (Q, LAM), {routeLabel} */ int {infoName} = {entry}({nExtent}, {operandArg}, {lamName}.data, {qName}.data); if ({infoName} != 0) {{ blade_rt::panic(\"BL8008\", \"eigh(S): the LAPACK eigensolver failed (non-zero info) -- the operand holds NaN/Inf or did not converge\", nullptr, 0); }}"
             // The binding value the existing destructuring consumes. Spelled
             // with the EXPLICIT tuple type rather than `auto` so it matches the
             // `std::tuple<Array<double, 2>, Array<double, 1>>` form a
