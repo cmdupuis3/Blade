@@ -239,6 +239,11 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   defaults, default captures) per module -- imports re-register from the
   per-module snapshots -- and `checkFunctionDecl` removes its own name's
   entries before setting them.
+  (Superseded, fix/drf-p2-types: the last two name-keyed tables, defaults
+  and where-conjuncts, are keyed by binder id too -- a let-bound lambda's by
+  its first parameter's id -- so there is nothing to clear or snapshot, and a
+  block-local or nested `f` no longer borrows a global `f`'s defaults,
+  functions/167.)
 - **F7 (FIXED 2026-09-27, fix/drf-mono)** `f >> g` unified with the
   declarations' variables, pinning a generic `g` to its first composition
   (`idg("s")` after `sq >> idg` was refused). Each operand naming a declared
@@ -255,8 +260,19 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   a function value no lane prints -- removed) before the HM pass
   (functions/161). The same pass treats a generic function passed as an
   ARGUMENT as a call site at the parameter's type (`apply(idg, 2.0)`,
-  `applyS(idg, "a")`, `twice(idg, 3)`; functions/162). Not covered: an alias
-  bound INSIDE a function body (`let g = total` as a block statement).
+  `applyS(idg, "a")`, `twice(idg, 3)`; functions/162). An alias bound INSIDE
+  a body (`let g = total` as a block statement, an IRLet) is made transparent
+  the same way (fix/drf-p2-types, functions/165), and a generic function a
+  generic body passes on (`applyG(toint, x)` inside `outer(x: T^0)`) is no
+  longer CLONED into the caller's specialization with the caller's bindings
+  (which never mention the callee's variables): it is specialized at its use
+  type like any other value reference (functions/166). A generic function
+  passed to a NON-declared head (a lambda, a function-typed parameter) is
+  typed at an instantiated copy of its signature, as a composition operand
+  is. Still not covered: an UNANNOTATED lambda parameter used as a function
+  (`(lambda(f, x) -> f(x))(idg, 2.0)`) -- applying an open variable does not
+  make it an arrow (it may be an array read), so nothing links `idg`'s copy to
+  `x` and the program still dies BL6001; annotating `f` works.
 - **F5 (FIXED 2026-09-27)** Literal adaptivity stopped at the top level: a
   tuple of literals `(1.5, 2.0)` into `(Float32, Float32)` was refused
   BL3001. `argPairClash` now takes the argument's literal SHAPE
@@ -271,9 +287,22 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   monomorphic, non-literal argument OUTSIDE a declaration body is unified with
   its parameter's copy (the HM application rule; §5's "binding caller
   variables", in its narrowest form) so the call's result is its own instance
-  (functions/160). Inside a declaration body the old behaviour stands: an
-  open argument there is usually tied to the declaration's own signature (a
-  `Poly` pack element), and binding it collapsed arity/024, /026, /031.
+  (functions/160). Inside a declaration body a monomorphic open argument is
+  still not bound: there it is usually tied to the declaration's own
+  signature (a `Poly` pack element), and binding it collapsed arity/024,
+  /026, /031. What IS linked there (fix/drf-p2-types) is an argument that is
+  the declaration's OWN signature variable: the COPY is bound to it (never
+  the reverse), and a not-yet-shaped `T^k` is first given its array shape as
+  an intrinsic would (`requireArrayArgMinRank`, element keeping the
+  polymorphic mark), so `m2(row: T^1) -> T^0 = tot(row) / extents(row)` has
+  a result in m2's own variables and specializes per instance (it was
+  BL6001 at two instances: the result fell back to tot's declared return and
+  m2's return was unified with tot's variable; functions/164). Two guards:
+  a pack element variable is never shaped (arity monomorphization owns
+  packs), and only variables minted by the declaration being checked count
+  as its own (another declaration's variable, leaked in through an unlinked
+  call's declared return, shaped `comoment_prod`'s own `T^1` from inside
+  `comoment` -- arity/026, /058).
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 

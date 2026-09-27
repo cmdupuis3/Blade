@@ -889,9 +889,14 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         let weightsArg = if hasWeights then Some (List.head leadArgs) else None
         let parArgs = if hasWeights then List.tail leadArgs else leadArgs
         // Extents must be static ints (the elaborator resolves them to literals).
+        // Range-checked BEFORE the narrowing to `int`: a direct call with an
+        // extent past Int32 wrapped silently (the rand/ppl surface paths
+        // refuse it in their elaborators; this is the intrinsic's own check).
         let dimResults =
             dimArgs |> List.map (fun d ->
                 match d.Kind with
+                | ExprKind.ExprLit (LitInt n) when n > int64 System.Int32.MaxValue ->
+                    Error $"rand.{kind}: shape extent {n} is too large (at most {System.Int32.MaxValue} per axis)"
                 | ExprKind.ExprLit (LitInt n) when n > 0L -> Ok (int n)
                 | ExprKind.ExprLit (LitInt n) -> Error $"rand.{kind}: shape extents must be positive (got {n})"
                 | _ -> Error $"rand.{kind}: shape must be a static positive int (or list of them)")
@@ -918,6 +923,8 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             match arrTy.IndexTypes with
                             | [ix] ->
                                 match ix.Extent with
+                                | IRLit (IRLitInt k) when k > int64 System.Int32.MaxValue ->
+                                    Error (Other $"rand.{kind}: weights extent {k} is too large (at most {System.Int32.MaxValue})")
                                 | IRLit (IRLitInt k) when k > 0L -> Ok (tW, int k)
                                 | IRLit (IRLitInt k) ->
                                     Error (Other $"rand.{kind}: weights extent must be positive (got {k})")

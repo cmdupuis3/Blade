@@ -1,0 +1,7 @@
+// TEST: A direct __rand_* call with an extent past Int32 is refused, not wrapped (rejects)
+// ERROR-CONTAINS: is too large
+// ============================================================================
+// The intrinsic narrowed each literal extent to a 32-bit int unchecked, so
+// 4294967298 became 2. The rand and ppl surfaces range-check in their
+// elaborators; the intrinsic checks on its own.
+let x = __rand_uniform(1, 4294967298)

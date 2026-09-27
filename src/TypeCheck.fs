@@ -294,10 +294,10 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         let envWithCtx = pushContext declName currentEnv
         // A user error the type lowering found where it has no error channel
         // (TypeEnv.TypeErrorRaised) is this declaration's error like any other.
-        let checked, raisedCode =
+        let declResult, raisedCode =
             try checkDecl envWithCtx d.Value, None
             with TypeErrorRaised (te, code) -> Error te, code
-        match checked with
+        match declResult with
         | Ok (td, env') ->
             decls <- td :: decls
             // Carry forward env' but restore original context (don't nest)
