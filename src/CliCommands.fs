@@ -66,9 +66,9 @@ let printUsage () =
     printfn "                                    --memcheck, --cuda"
     printfn "  emit <file.blade> [-o <out.cpp>]  Emit C++ source without compiling (stdout without -o;"
     printfn "                                    with -o the runtime headers are deployed beside it)"
-    printfn "  check <file.blade>                Type-check only (no code generation)"
-    printfn "  plan <file.blade> [--json]        Type-check and lower, then list every optimization"
-    printfn "                                    decision the cost-only layer took (rule, subject,"
+    printfn "  check <file.blade>                Type-check and lower (no code generation)"
+    printfn "  plan <file.blade> [--json]        Type-check, lower and generate (no C++ compile), then"
+    printfn "                                    list every optimization decision taken (rule, subject,"
     printfn "                                    applied/declined with reason, evidence) and the"
     printfn "                                    program's input manifest"
     printfn "  doctor [--json]                   Report native-toolchain health: g++/OpenMP core"
@@ -936,8 +936,10 @@ let replLoop () : int =
 
 /// `blade plan <file>`: the optimization DECISION RECORD (plan-fortran-
 /// killer-2.md section 3 step 5). Installs a Blade.Effects.Decisions
-/// collector, runs the same parse -> typecheck -> lower pipeline `emit`
-/// runs (every cost-only pass fires during lowering), and prints one line
+/// collector, runs the same parse -> typecheck -> lower -> generate pipeline
+/// `emit` runs (the cost-only passes fire during lowering; storage,
+/// iteration shape, OpenMP, BLAS routing, tile-cache and microkernel choices
+/// during generation -- the C++ text is discarded), and prints one line
 /// per decision: rule and version, subject, source position when the pass
 /// had one, applied or declined with the first reason, and the evidence
 /// the pass discharged. Diagnostic data only -- nothing here is a licence
@@ -954,10 +956,26 @@ let planFile (filePath: string) (json: bool) : int =
             Blade.Effects.Decisions.drain () |> ignore
             reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok (program, _), _ ->
-            let ds = Blade.Effects.Decisions.drain ()
             // The input manifest (docs/plans/plan-fortran-killer-2.md section 7):
             // runtime provider reads plus the inputs this compilation folded.
+            // Drained BEFORE code generation, whose run-record lines drain the
+            // same fold log.
             let inputs = Blade.RunRecord.manifestOf program.Modules (Blade.ProviderStatics.drainFoldLog ())
+            // The decisions only EMISSION makes -- packed storage and
+            // triangular iteration, OpenMP placement and drops, BLAS/LAPACK
+            // routes, tile-cache admissions, the jammed / packed microkernels
+            // -- record while the C++ is generated, so plan generates it (the
+            // same validated IR `emit` would compile) and discards the text.
+            // Honors the same environment gates `emit` does (BLADE_BLAS,
+            // BLADE_OMP_THREADS, BLADE_TILE_CACHE, ...).
+            (match Blade.IRValidate.validateIR program with
+             | Ok ir ->
+                 (try
+                     CodeGen.genSelfContainedProgramFromIR ir (Path.GetFileNameWithoutExtension filePath) |> ignore
+                     CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                  with _ -> ())
+             | Error _ -> ())
+            let ds = Blade.Effects.Decisions.drain ()
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds
                 // `{"file":..,"decisions":[..]}` -> add the manifest as a sibling.
@@ -1012,7 +1030,7 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                 printTypeCheckWarnings useColor (Some sm) false
                 let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
                 reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-            | Ok _ ->
+            | Ok (typed, builder, _) ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
                     // Strict mode: the pin suggestions ARE the failure. Their
@@ -1022,9 +1040,23 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                     printTypeCheckWarnings useColor (Some sm) true
                     reportFailure rendered
                 | None ->
+                    // `check` LOWERS too (no C++): a construct that typechecks
+                    // but sits where lowering has no rule for it -- `compound`
+                    // or `rand.<fam>` inside a function body -- is refused with
+                    // its spanned BL6002 HERE, not only once `emit` runs. Same
+                    // call and same exception mapping as the compile driver's
+                    // lowerCheckedProgram.
+                    let lowered =
+                        try Ok (Blade.Lowering.lowerTypedProgram typed (Some program) builder)
+                        with
+                        | Blade.Diagnostics.BladeDiagnosticException d -> Error d
+                        | ex -> Error (Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message)
                     printTypeCheckWarnings useColor (Some sm) false
-                    printfn "OK"
-                    0
+                    match lowered with
+                    | Error d -> reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
+                    | Ok _ ->
+                        printfn "OK"
+                        0
 
 /// Emit back-end source to file or stdout: C++ normally, textual LLVM IR when
 /// the BLADE_LLVM lane took the program.

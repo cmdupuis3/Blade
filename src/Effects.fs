@@ -121,10 +121,17 @@ module Decisions =
     /// tests call this; without it `record` is a no-op.
     let start () = cell.Value <- System.Collections.Generic.List<Decision>()
 
+    /// Is a collector installed? Recording sites whose evidence costs work to
+    /// build (codegen's routing / storage / omp decisions) check this first.
+    let active () = not (isNull cell.Value)
+
+    /// Record `d` once. Code generation renders some sub-expressions more than
+    /// once (lazy renders, re-emitted nests), and each render reaches the same
+    /// decision; the record states each decision a single time.
     let record (d: Decision) =
         match cell.Value with
         | null -> ()
-        | l -> l.Add d
+        | l -> if not (l.Contains d) then l.Add d
 
     /// Take every decision recorded since `start` and clear the collector.
     let drain () : Decision list =

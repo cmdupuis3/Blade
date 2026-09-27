@@ -208,7 +208,7 @@ let (u, v) = (method_for(A) <@> lambda(x) where %s -> x * 2.0 + 1.0) <&!> (metho
                         | Error e -> check ($"hybrid {label}: lowers under gate") false e
                         | Ok cpp ->
                             for (what, marker) in expectMarkers do
-                                check ($"hybrid {label}: {what}") (cpp.Contains marker)
+                                check ($"hybrid {label}: {what}") (hasOmpPin cpp marker)
                                     ($"marker '{marker}' missing")
                             CodeGen.deployRuntimeHeaders outDir
                             let f = Path.Combine(outDir, $"hyb_{label}_mpi.cpp")

@@ -115,6 +115,7 @@ let planTiles (modul: IRModule) : Map<string, TilePlan> * Map<IRId, TilePlan> =
         | null | "" | "0" -> false
         | _ -> true
     let decline (b: IRBinding) (why: string) =
+        recordCodegenDecision "tile-cache" b.Name (Blade.Effects.Declined why) []
         if verbose then eprintfn "[tiles] plan %s: declined -- %s" b.Name why
     for b in modul.Bindings do
         match b.Value with
@@ -260,6 +261,9 @@ let planTiles (modul: IRModule) : Map<string, TilePlan> * Map<IRId, TilePlan> =
                                 if unread.IsEmpty then ""
                                 else sprintf "; no reader but the nest for %s (unneeded chunks never fetched)" (String.concat ", " unread)
                             eprintfn "[tiles] plan %s: %d tile(s) over %d input(s), probe %s%s" b.Name nt inputPlans.Length (if hoisted then "hoisted to the read" else "at the binding") note
+                        recordCodegenDecision "tile-cache" b.Name Blade.Effects.Applied
+                            [ $"{nt} leading-axis tile(s) over {inputPlans.Length} icechunk input(s)"
+                              (if hoisted then "probe hoisted to the input read (hit tiles' chunks are never read)" else "probe at the binding") ]
                         plans.Add
                             { Output = outName; BindingId = b.Id; Inputs = inputPlans
                               Tiles = nt; LeadBounds = leadBounds; Trailing = trailing

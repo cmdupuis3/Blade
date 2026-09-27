@@ -674,8 +674,8 @@ let runLinAlgEmissionTests () : BlockResult =
         match cppOf blasOn name src with
         | Error e -> fail name e
         | Ok cpp ->
-            let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
-            let present = mustNotContain |> List.filter cpp.Contains
+            let missing = mustContain |> List.filter (fun s -> not (hasOmpPin cpp s))
+            let present = mustNotContain |> List.filter (hasOmpPin cpp)
             if not missing.IsEmpty then
                 fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then
@@ -1131,8 +1131,8 @@ let runLinAlgEmissionTests () : BlockResult =
         match cppOfGates blasOn cublasOn name src with
         | Error e -> fail name e
         | Ok cpp ->
-            let missing = mustContain |> List.filter (fun s -> not (cpp.Contains s))
-            let present = mustNotContain |> List.filter cpp.Contains
+            let missing = mustContain |> List.filter (fun s -> not (hasOmpPin cpp s))
+            let present = mustNotContain |> List.filter (hasOmpPin cpp)
             if not missing.IsEmpty then
                 fail name ($"""generated C++ lacks: {(String.concat " | " missing)}""")
             elif not present.IsEmpty then

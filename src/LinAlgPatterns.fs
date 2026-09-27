@@ -109,10 +109,23 @@ let resolveBlasTier () : BlasTier =
 /// interpreter's operation sequence), never a library's -- BLAS differs in
 /// the last ULP, LAPACK's eigenbasis is not even unique. A ref bumped and
 /// restored by genFuncDef/genFuncDefAsLambda, not an env gate: it is
-/// program-position state, and codegen is single-threaded. Lives HERE (not
-/// CodeGenState) because this module compiles first and owns the gates.
-let reproScopeDepth = ref 0
-let reproScopeActive () = reproScopeDepth.Value > 0
+/// program-position state. PER FLOW (AsyncLocal), not a process-global ref:
+/// the test harness generates programs in parallel, and a global depth let
+/// one pipeline's repro body switch every other pipeline's routes off. Lives
+/// HERE (not CodeGenState) because this module compiles first and owns the
+/// gates.
+let private reproScopeStorage = System.Threading.AsyncLocal<int ref>()
+let reproScopeDepth () : int ref =
+    let v = reproScopeStorage.Value
+    if isNull (box v) then
+        let fresh = ref 0
+        reproScopeStorage.Value <- fresh
+        fresh
+    else v
+let reproScopeActive () = (reproScopeDepth ()).Value > 0
+/// A fresh per-flow depth (never a mutation of an inherited ref): called at
+/// every program-assembly entry, beside CodeGenState.resetProgramStateCells.
+let resetReproScope () = reproScopeStorage.Value <- ref 0
 
 let blasAvailable () : bool =
     not (reproScopeActive ()) && resolveBlasTier () <> TierOff
@@ -754,6 +767,59 @@ let resolveNodeRoute (call: LinAlgCall) : (LinAlgBackend * string) option =
     match (if cublasAvailable () then ask CudaBlas else None) with
     | Some r -> Some r
     | None -> ask HostBlas
+
+// The routing DECISION RECORD (`blade plan`)
+
+/// Why `call` gets no entry point under `backend`, in the terms the gates and
+/// the policy table use; None when it has one. The explanatory twin of
+/// `shimEntryPoint`, read in the same order, so the two cannot disagree about
+/// WHETHER a call routes -- only this one says why not.
+let declineReason (backend: LinAlgBackend) (call: LinAlgCall) : string option =
+    if (shimEntryPoint backend call).IsSome then None
+    elif reproScopeActive () then
+        Some "inside a `where repro` body every route reads OFF: its arithmetic is Blade's own loops (the interpreter's operation sequence)"
+    else
+        let isLapack = call.Routine = Eigh || call.Routine = Solve || call.Routine = Getrf || call.Routine = Getrs
+        match backend with
+        | HostBlas when isLapack && not (lapackAvailable ()) ->
+            Some "LAPACK gate off (OPENBLAS_DIR / BLADE_BLAS / BLADE_LAPACK_LINK): Blade's own emitted routine runs"
+        | HostBlas when not isLapack && not (blasAvailable ()) ->
+            Some "BLAS gate off (BLADE_BLAS=0/off, or none of BLADE_BLAS / OPENBLAS_DIR / BLADE_BLAS_LINK set): Blade's own loops, byte-identical with the interpreter"
+        | CudaBlas when not (cublasAvailable ()) ->
+            Some "cuBLAS gate off (BLADE_CUBLAS unset)"
+        | _ ->
+            let why =
+                policy |> List.tryPick (fun (r, _, b, _, rationale) ->
+                    if r = call.Routine && b = backend then Some rationale else None)
+            Some ("policy routes it native -- " + defaultArg why "no policy row")
+
+/// Record a NODE route's outcome for `blade plan`: the backend and entry
+/// point it landed on, or why it stayed on Blade's own loops (the host
+/// reason; the device gate is named only when it was on and still declined).
+/// `subject` is the binding the call materializes.
+let recordRoute (span: Blade.Ast.Span) (subject: string) (call: LinAlgCall) (resolved: (LinAlgBackend * string) option) : unit =
+    if Blade.Effects.Decisions.active () then
+        let routine = $"{call.Routine} ({call.Level}, {precisionLetter call.Precision})"
+        let outcome, evidence =
+            match resolved with
+            | Some (backend, entry) ->
+                Blade.Effects.Applied, [ routine; $"{backend}: {entry}"; $"tier {resolveBlasTier ()}" ]
+            | None ->
+                let why =
+                    (if cublasAvailable () then declineReason CudaBlas call else None)
+                    |> Option.orElse (declineReason HostBlas call)
+                    |> Option.defaultValue "no entry point"
+                Blade.Effects.Declined why, [ routine ]
+        Blade.Effects.Decisions.record
+            { Rule = "blas-routing"; Version = 1; Span = span
+              Subject = subject; Outcome = outcome; Evidence = evidence }
+
+/// A shape that is NOT a BLAS route at all (mixed precisions, a non-dense
+/// layout): recorded as a declined route so the plan says why the loop ran.
+let recordUnroutable (span: Blade.Ast.Span) (subject: string) (what: string) (why: string) : unit =
+    Blade.Effects.Decisions.record
+        { Rule = "blas-routing"; Version = 1; Span = span
+          Subject = subject; Outcome = Blade.Effects.Declined why; Evidence = [ what ] }
 
 // Classification entry points
 

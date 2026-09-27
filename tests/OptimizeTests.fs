@@ -294,13 +294,13 @@ let private recarrayGradNonlinearEmission () =
             false
 
 /// A halo window over a PLAIN DENSE source reads the source directly --
-/// `a[w + k]` over the shrunk interior, in bounds by construction -- and no
-/// carousel ring is built (planHaloCarousel's dense-source gate: the ring is
-/// memory-resident, so it only adds a store and a load per step, and its
-/// loop-carried dependence withholds vectorization). This test used to pin
-/// the ring's guarded tail prefetch (docs/plans/structural/02, 1.5), which
-/// no dense source reaches any more; the guard stays in the planner for the
-/// sources that still take the ring.
+/// `a[w + k]` over the shrunk interior, in bounds by construction. (The
+/// halo carousel ring this used to be measured against -- memory-resident,
+/// so it only added a store and a load per step, and its loop-carried
+/// dependence withheld vectorization -- is gone: no dense source took it
+/// after be9f1f93, and the symmetric sources that still did read their packed
+/// rows uncanonicalized -- tests/corpus/loops/211. The `halo carousel` probe
+/// below stays as the tripwire that it does not come back unannounced.)
 let private haloDenseSourceReadsDirect () =
     let name = "halo_dense_source_reads_direct"
     let src =
@@ -677,6 +677,155 @@ let private gramAdvisorySrc =
     + "let Gd = decompact(G, 0)\n"
     + "let y = method_for(Gd) <@> lambda(row) -> prodsum(row, v) |> compute\n"
 
+// ---------------------------------------------------------------------------
+// `blade plan`'s CODEGEN decisions: the structure declared symmetry buys,
+// OpenMP placement and drops, BLAS/LAPACK routing, the microkernels. These
+// record while the C++ is generated, so the record is taken over lower +
+// generate (what `blade plan` runs), not lowering alone.
+
+/// The decision record over lower + code generation, text discarded.
+let private planDecisionsOf (src: string) : Result<Blade.Effects.Decision list, string> =
+    Blade.Effects.Decisions.start ()
+    let r =
+        try
+            match lower src with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir ->
+                CodeGen.genSelfContainedProgramFromIR ir "plan_case" |> ignore
+                Ok (Blade.Effects.Decisions.drain ())
+        with ex -> Error ($"codegen raised: {ex.Message}")
+    Blade.Effects.Decisions.drain () |> ignore
+    r
+
+/// Some `rule` decision satisfies `want` in the lower + generate record.
+let private planCase (name: string) (src: string) (rule: string)
+                     (want: Blade.Effects.Decision -> bool) (describe: string) =
+    match planDecisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = rule)
+        if mine |> List.exists want then
+            resultLine Pass name ($"{mine.Length} `{rule}` decision(s); {describe}")
+            true
+        else
+            let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "empty" else seen
+            resultLine Fail name ($"wanted {describe}; the record: {shown}")
+            false
+
+let private evidenceMentioning (needle: string) (d: Blade.Effects.Decision) =
+    d.Evidence |> List.exists (fun (e: string) -> e.Contains needle)
+
+/// The comm covariance of ONE array (tests/corpus/symmetry/017): packed
+/// output storage and a triangular nest, both applied.
+let private planCommSameArraySrc =
+    "type TimeIdx = Idx<2>\n"
+    + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
+    + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
+    + "let r = method_for(A, A) <@> k |> compute\n"
+
+/// The same kernel over two DIFFERENT arrays: `comm` licenses no packed
+/// storage, and the record says why.
+let private planCommDistinctSrc =
+    "type TimeIdx = Idx<2>\n"
+    + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
+    + "let B: Array<Float64 like Idx<2>, TimeIdx> = [[5.0, 6.0], [7.0, 8.0]]\n"
+    + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
+    + "let r = method_for(A, B) <@> k |> compute\n"
+
+/// An `omp`-licensed outer product: the placed construct is recorded.
+let private planOmpSrc =
+    "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    + "let m = method_for(A, B) <@> lambda(x, y) where omp(x: 1) -> x * y |> compute\n"
+
+let private planMatmulSrc (m: int) (k: int) (n: int) =
+    "import math as m\n"
+    + $"let A: Array<Float64 like Idx<{m}>, Idx<{k}>> = method_for(range<Idx<{m}>>, range<Idx<{k}>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + $"let B: Array<Float64 like Idx<{k}>, Idx<{n}>> = method_for(range<Idx<{k}>>, range<Idx<{n}>>) <@> lambda(i, j) -> Float64(i * j) |> compute\n"
+    + "let C = m.matmul(A, B)\n"
+
+/// A partial row fold over a plain dense rank-2 array: the row-fold jam.
+let private planRowFoldSrc =
+    "let M: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + "let s = reduce(M, (+))\n"
+
+/// gram of one array, BLAS off: the triangular native arm and its jam.
+let private planGramSrc =
+    "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + "let G = gram(A, A)\n"
+
+/// PARALLEL EMISSION ISOLATION. The per-program emission cells are
+/// AsyncLocal refs, and a child flow inherits its parent's ref OBJECT: when
+/// the parent had assembled a program first (as this does, on purpose), every
+/// parallel pipeline used to share one ref, and one pipeline's per-program
+/// reset cleared a flag another had just set -- a program losing its
+/// `#include "blade_packed_gemm.hpp"`. Resets now install fresh refs
+/// (CodeGenState.freshCell). Many assemblies race here, each on its own large
+/// stack like the corpus harness, alternating a program that needs the
+/// packed-gemm header with one that must not name it; every translation unit
+/// must carry the include exactly when it calls the kernel.
+let private parallelEmissionIsolated () =
+    let name = "parallel_emission_cells_isolated"
+    withGate "BLADE_BLAS" "0" (fun () ->
+    withGate "OPENBLAS_DIR" null (fun () ->
+        match lower (planMatmulSrc 20 16 110), lower "let x = [1.0, 2.0, 3.0]\nlet y = x + 1.0\n" with
+        | Error e, _ | _, Error e -> resultLine Fail name ($"lower: {e}"); false
+        | Ok big, Ok small ->
+            // Touch every cell in THIS flow first: the children inherit it.
+            CodeGen.genSelfContainedProgramFromIR big "iso_parent" |> ignore
+            let consistent (cpp: string) =
+                cpp.Contains "blade_pgemm::dgemm_nn" = cpp.Contains "#include \"blade_packed_gemm.hpp\""
+            let outcomes =
+                [| 0 .. 63 |]
+                |> Array.Parallel.map (fun i ->
+                    Blade.Runtime.runOnLargeStack (fun () ->
+                        let ir = if i % 2 = 0 then big else small
+                        let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir $"iso_{i}"
+                        (i % 2 = 0, cpp.Contains "blade_pgemm::dgemm_nn", consistent cpp)))
+            let bad = outcomes |> Array.filter (fun (_, _, ok) -> not ok) |> Array.length
+            let lostKernel = outcomes |> Array.filter (fun (isBig, calls, _) -> isBig <> calls) |> Array.length
+            if bad = 0 && lostKernel = 0 then
+                resultLine Pass name "64 concurrent assemblies: every include set matches its own program"
+                true
+            else
+                resultLine Fail name ($"{bad} translation unit(s) with a mismatched packed-gemm include, {lostKernel} with the wrong kernel choice")
+                false))
+
+let private planCases () =
+    let pinBlas (v: string) f =
+        withGate "BLADE_BLAS" v (fun () -> withGate "OPENBLAS_DIR" null (fun () -> withGate "BLADE_BLAS_LINK" null f))
+    [ planCase "plan_symmetric_storage_applied" planCommSameArraySrc "symmetric-storage" applied
+          "packed storage for the comm covariance of one array"
+      planCase "plan_triangular_iteration_applied" planCommSameArraySrc "triangular-iteration" applied
+          "triangular iteration over the commuting levels"
+      planCase "plan_symmetric_storage_declined_distinct" planCommDistinctSrc "symmetric-storage"
+          (declinedMentioning "different arrays") "declined: the commuting positions hold different arrays"
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_omp_placement_applied" planOmpSrc "omp"
+              (fun d -> applied d && evidenceMentioning "BLADE_OMP_PARALLEL_FOR" d)
+              "omp applied, the placed construct in the evidence")
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_omp_drop_declined" planOmpSrc "omp" (declinedMentioning "BLADE_OMP_THREADS")
+              "omp declined, naming the BLADE_OMP_THREADS knob")
+      pinBlas "0" (fun () ->
+          planCase "plan_blas_route_declined_gate_off" (planMatmulSrc 20 16 110) "blas-routing"
+              (declinedMentioning "BLAS gate off") "matmul declined: BLAS gate off")
+      pinBlas "1" (fun () ->
+          planCase "plan_blas_route_applied_gate_on" (planMatmulSrc 20 16 110) "blas-routing"
+              (fun d -> applied d && evidenceMentioning "blade_matmul_d" d) "matmul routed to blade_matmul_d")
+      pinBlas "0" (fun () ->
+          planCase "plan_packed_gemm_applied" (planMatmulSrc 20 16 110) "microkernel"
+              (fun d -> applied d && evidenceMentioning "packed gemm" d) "packed gemm above the crossover")
+      pinBlas "0" (fun () ->
+          planCase "plan_packed_gemm_declined_small" (planMatmulSrc 3 3 3) "microkernel"
+              (declinedMentioning "crossover") "packed gemm declined below the crossover")
+      pinBlas "0" (fun () ->
+          planCase "plan_row_fold_jam_applied" planRowFoldSrc "microkernel"
+              (fun d -> applied d && evidenceMentioning "row-fold jam" d) "row-fold jam over the rows")
+      pinBlas "0" (fun () ->
+          planCase "plan_triangular_gram_jam_applied" planGramSrc "microkernel"
+              (fun d -> applied d && evidenceMentioning "triangular gram jam" d) "triangular gram jam") ]
+
 let private runCase (name: string) (src: string) (wantBreaks: int) (wantAborts: int) =
     match cppOfSource name src with
     | Error e -> resultLine Fail name e; false
@@ -837,6 +986,7 @@ let runOptimizeTests () =
           // The gram_apply advisory: left as written, spelled in the evidence.
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]
+        @ planCases ()
         @ validatorPins ()
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed

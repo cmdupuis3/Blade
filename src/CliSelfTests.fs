@@ -293,6 +293,39 @@ let runCliSmokeTests () : TH.BlockResult =
             let (code, _, err) = spawn dir [ "test"; "interp"; "no-such-category" ]
             let ok = code = 1 && err.Contains "unknown corpus category 'no-such-category'" && not (err.Contains "BL9001")
             recordCase "cli: `test interp <typo>` is a clean usage error, not BL9001" ok (if ok then "" else err)
+            // `check` LOWERS: a construct that typechecks but has no lowering
+            // rule where it sits is refused by check itself -- coded BL6002 and
+            // spanned at the expression -- not first by `emit`, spanless.
+            File.WriteAllText(Path.Combine(dir, "cf.blade"),
+                "function f(x: Array<Float like Idx<5>>) -> Float = {\n"
+                + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
+                + "    let c = compound(x, m)\n"
+                + "    reduce(c, (+))\n"
+                + "}\n"
+                + "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+                + "let s = f(a)\n")
+            let (code, out, err) = spawn dir [ "check"; "cf.blade" ]
+            recordCase "cli: `check` reports a lowering refusal as spanned BL6002"
+                (code <> 0 && err.Contains "BL6002" && err.Contains "cf.blade:3:13" && not (out.Contains "OK"))
+                (out + err)
+            // `plan` records the decisions only code generation makes (here the
+            // packed storage and triangular nest `comm` buys for one array),
+            // in the text form and in the JSON, whose field set is unchanged.
+            File.WriteAllText(Path.Combine(dir, "cov.blade"),
+                "type TimeIdx = Idx<2>\n"
+                + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
+                + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
+                + "let r = method_for(A, A) <@> k |> compute\n")
+            let (code, out, err) = spawn dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` lists the storage and iteration decisions codegen makes"
+                (code = 0 && out.Contains "[symmetric-storage v1] r" && out.Contains "[triangular-iteration v1] r"
+                 && not (out.Contains "0 optimization decision(s)"))
+                (out + err)
+            let (code, out, err) = spawn dir [ "plan"; "cov.blade"; "--json" ]
+            recordCase "cli: `plan --json` carries them in the unchanged decision schema"
+                (code = 0 && out.Contains "\"rule\":\"symmetric-storage\"" && out.Contains "\"outcome\":\"applied\""
+                 && out.Contains "\"version\":1" && out.Contains "\"evidence\":[" && out.Contains "\"inputs\":")
+                (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     if not capabilities.Value.HasGpp || selfExe.IsNone then
