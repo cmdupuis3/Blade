@@ -76,6 +76,7 @@ violation names the file and 1-based line:
 | BOM | A UTF-8 BOM on line 1 is stripped. |
 | Trailing newline | One tolerated. Interior blank lines are errors. |
 | Ragged rows | Error (cell count must match line 1). |
+| Blanks | Each cell is trimmed of ASCII space, `\t`, `\r`, `\v`, `\f` on both sides (`2.0 ` is `2.0`), by both readers. |
 | Empty cells | Error. |
 | Data cells | Numeric only — string columns are deferred (`ProviderPayload` carries only floats/ints). |
 | Number parsing | Locale-independent (InvariantCulture / `strtod` under the never-set "C" locale). `nan`, `inf`, `-inf` accepted as float specials. |
@@ -84,9 +85,13 @@ violation names the file and 1-based line:
 
 Whole-table homogeneous (the EnumIdx column axis makes `data` one array):
 
-- Every data cell matches `^[+-]?[0-9]+$` → **Int64**.
+- Every data cell matches `^[+-]?[0-9]+$` AND fits Int64 → **Int64**.
 - Otherwise every cell must parse as a float → **Float64** (so `1e5` and
-  `2.5` are floats; one decimal cell floats the whole table).
+  `2.5` are floats; one decimal cell floats the whole table, and so does one
+  integer literal outside Int64, e.g. `99999999999999999999` -- rather than
+  a saturated `strtoll` or a throwing `Int64.Parse`). If an Int64 table's
+  file later gains an out-of-range cell, the compiled reader aborts
+  (`ERANGE`) instead of saturating.
 
 ## Writes
 

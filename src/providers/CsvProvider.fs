@@ -19,9 +19,13 @@
 // trailing '\r' stripped per line), a UTF-8 BOM on line 1 is stripped, one trailing
 // newline tolerated; ragged rows, empty cells, and interior blank lines are errors
 // named with a line number; data cells are numeric only (strings deferred --
-// ProviderPayload is closed over floats/ints). Whole-table dtype: every cell an
-// integer literal -> Int64, else Float64 (locale-independent; "nan"/"inf"/"-inf"
-// accepted as float specials to round-trip C++ output).
+// ProviderPayload is closed over floats/ints). Cells are trimmed of ASCII blanks
+// (space, \t, \r, \v, \f -- `cellBlanks`, the same set the C++ reader trims), so
+// "2.0 " reads as 2.0 in both. Whole-table dtype: every cell an integer literal
+// THAT FITS Int64 -> Int64, else Float64 (so 99999999999999999999 makes the table
+// Float64 rather than saturating in strtoll or throwing in Int64.Parse);
+// locale-independent; "nan"/"inf"/"-inf" accepted as float specials to round-trip
+// C++ output.
 //
 // Writes (`c.write("out.csv", A)`, rank <= 2): no header row; rank-1 writes one value
 // per line (reloads as R x 1), rank-2 writes comma rows. Floats print with 17
@@ -61,19 +65,43 @@ let rowCount (f: CsvFile) =
 
 // The one parser (metadata, fold payload, and interp reads all derive)
 
-/// Integer-literal cell: optional sign, digits only. This decides Int64 vs
-/// Float64 -- "1e5" and "1.0" are floats even though integral in value.
-let private isIntCell (s: string) =
-    let s = s.Trim()
-    if s.Length = 0 then false
+/// The blanks trimmed off every cell -- ASCII only, and exactly the set the
+/// emitted C++ reader trims (CppCsv.genParseFill's `cellBlanksCpp`). .NET's
+/// bare Trim() would also strip Unicode spaces the C++ side keeps.
+let private cellBlanks = [| ' '; '\t'; '\r'; '\v'; '\f' |]
+
+let private trimCell (s: string) = s.Trim cellBlanks
+
+/// `cellBlanks` as the body of a C++ string literal, derived so the two
+/// readers cannot drift apart.
+let private cellBlanksCpp =
+    cellBlanks
+    |> Array.map (function
+        | ' ' -> " " | '\t' -> @"\t" | '\r' -> @"\r" | '\v' -> @"\v" | '\f' -> @"\f"
+        | c -> failwith $"cellBlanksCpp: no C++ escape for U+{int c:X4}")
+    |> String.concat ""
+
+/// Integer-literal cell that FITS Int64: optional sign, ASCII digits only,
+/// in range. This decides Int64 vs Float64 -- "1e5" and "1.0" are floats even
+/// though integral in value, and so is an integer literal outside Int64 (the
+/// emitted reader's strtoll would saturate it, Int64.Parse would throw).
+let private tryParseIntCell (s: string) : int64 option =
+    let s = trimCell s
+    if s.Length = 0 then None
     else
         let body = if s.[0] = '+' || s.[0] = '-' then s.Substring 1 else s
-        body.Length > 0 && body |> Seq.forall Char.IsDigit
+        if body.Length > 0 && body |> Seq.forall Char.IsAsciiDigit then
+            match Int64.TryParse(s, Globalization.NumberStyles.AllowLeadingSign, Globalization.CultureInfo.InvariantCulture) with
+            | true, n -> Some n
+            | _ -> None
+        else None
+
+let private isIntCell (s: string) = (tryParseIntCell s).IsSome
 
 /// Locale-independent float parse; accepts the C-locale specials the C++
 /// writer produces ("nan"/"inf"/"-inf"), spelled differently by .NET.
 let private tryParseFloat (s: string) : float option =
-    let t = s.Trim()
+    let t = trimCell s
     match t.ToLowerInvariant() with
     | "nan" | "+nan" | "-nan" -> Some nan
     | "inf" | "+inf" | "infinity" | "+infinity" -> Some infinity
@@ -109,10 +137,10 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
                     err <- Some $"quote character in '{path}' at line {lineNo} -- quoting/escaping is not supported (v1)"; [||]
                 else
                     let row = line.Split ','
-                    match row |> Array.tryFindIndex (fun c -> c.Trim() = "") with
+                    match row |> Array.tryFindIndex (fun c -> trimCell c = "") with
                     | Some ci ->
                         err <- Some $"empty cell (column {ci + 1}) in '{path}' at line {lineNo}"; [||]
-                    | None -> row |> Array.map (fun c -> c.Trim()))
+                    | None -> row |> Array.map trimCell)
         match err with
         | Some e -> Error e
         | None ->
@@ -191,7 +219,10 @@ let readVarData (path: string) (varName: string) : Result<Blade.ProviderRegistry
                     let xs = Array.zeroCreate<int64> (rows * cols)
                     for r in 0 .. rows - 1 do
                         for c in 0 .. cols - 1 do
-                            xs.[r * cols + c] <- Int64.Parse(dataRows.[r].[c], Globalization.CultureInfo.InvariantCulture)
+                            xs.[r * cols + c] <-
+                                match tryParseIntCell dataRows.[r].[c] with
+                                | Some n -> n
+                                | None -> failwith "unreachable: an Int64 table's cells were classified by tryParseIntCell"
                     Blade.ProviderRegistry.PInts xs
                 | _ ->
                     let xs = Array.zeroCreate<float> (rows * cols)
@@ -303,7 +334,13 @@ module CppCsv =
         let p = cppPath path
         let convert =
             if isInt then
-                [ $"            long long {v}_val = std::strtoll({v}_cs, &{v}_end, 10);" ]
+                // The compile-time classifier only makes a table Int64 when
+                // every cell fits (tryParseIntCell); a cell that no longer
+                // fits means the file changed, and strtoll would saturate it
+                // silently -- ERANGE is the signal.
+                [ "            errno = 0;"
+                  $"            long long {v}_val = std::strtoll({v}_cs, &{v}_end, 10);"
+                  $"""            if (errno == ERANGE) {(csvExit v $"integer cell '\" << {v}_cell << \"' in '{p}' at line \" << {v}_lineno << \" is outside the Int64 range -- file changed since compilation?")}""" ]
             else
                 [ $"            double {v}_val = std::strtod({v}_cs, &{v}_end);" ]
         [ $"""// Read {v} from CSV {p} ({rows} x {cols}{(if headered then ", headered" else "")})"""
@@ -333,6 +370,8 @@ module CppCsv =
             $"            size_t {v}_comma = {v}_line.find(',', {v}_pos);"
             $"            size_t {v}_len = ({v}_comma == std::string::npos ? {v}_line.size() : {v}_comma) - {v}_pos;"
             $"            std::string {v}_cell = {v}_line.substr({v}_pos, {v}_len);"
+            // Trim exactly the compile-time parser's `cellBlanks` set.
+            $"            {{ size_t {v}_b = {v}_cell.find_first_not_of(\"{cellBlanksCpp}\"); if ({v}_b == std::string::npos) {v}_cell.clear(); else {v}_cell = {v}_cell.substr({v}_b, {v}_cell.find_last_not_of(\"{cellBlanksCpp}\") - {v}_b + 1); }}"
             $"""            if ({v}_col >= {cols}) {(csvExit v $"row at line \" << {v}_lineno << \" of '{p}' has more than {cols} cells")}"""
             $"            const char* {v}_cs = {v}_cell.c_str(); char* {v}_end = nullptr;" ]
         @ convert
@@ -429,7 +468,8 @@ module CppCsv =
           "#include <string>"
           "#include <iostream>"
           "#include <iomanip>"
-          "#include <cstdlib>" ]
+          "#include <cstdlib>"
+          "#include <cerrno>" ]
 
 // F#-side fixture writer (tests and programmatic file creation)
 
