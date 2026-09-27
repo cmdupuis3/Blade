@@ -2680,8 +2680,11 @@ let private lowerCheckedProgram (program: Program)
         // A phase that refuses by exception with its OWN coded diagnostic
         // (IRMono's base-case-free recursion refusal) keeps its code.
         | Blade.Diagnostics.BladeDiagnosticException d -> Error [ d ]
+        // Anything else (a compile-time provider load that failed, a stage
+        // outside Lowering refusing by exception) is BL6001's "a lowering
+        // stage reported a failure" -- BL6002 is the positional refusal.
         | ex ->
-            Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+            Error [ Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
 
 /// Structured-diagnostics entry: like `lower`, but errors stay as coded,
 /// spanned Diagnostics, warnings come back structured, and the retained

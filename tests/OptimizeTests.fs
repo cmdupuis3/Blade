@@ -987,6 +987,7 @@ let runOptimizeTests () =
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]
         @ planCases ()
+        @ [ parallelEmissionIsolated () ]
         @ validatorPins ()
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed

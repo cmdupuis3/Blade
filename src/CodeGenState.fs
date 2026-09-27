@@ -932,7 +932,7 @@ let tileLoopLines (ind: string) (plan: TilePlan) (loopCode: string list) : strin
     let hitHead, hitBody =
         if plan.Hoisted then
             $"{f}__hit[__tt]",
-            [ $"{ind}        if (!blade_tiles::load({f}__tkeys[__tt], __tbase, __tbytes)) {{ std::cerr << \"Blade tile cache error: tile \" << __tt << \" of '{f}' passed the probe but left the store before its load (a concurrent eviction?); its input chunks were never read, so this run cannot recompute it -- run again\" << std::endl; std::exit(1); }}" ]
+            [ $"{ind}        if (!blade_tiles::load({f}__tkeys[__tt], __tbase, __tbytes)) {{ blade_rt::panic(\"BL8005\", \"tile cache: a tile of '{f}' passed the probe but left the store before its load (a concurrent eviction?); its input chunks were never read, so this run cannot recompute it -- run again\", nullptr, 0); }}" ]
         else
             $"blade_tiles::load({f}__tkeys[__tt], __tbase, __tbytes)", []
     [ $"{ind}// revision reuse (docs/plans/structural/04): {f} is computed one leading-axis tile at a time;"

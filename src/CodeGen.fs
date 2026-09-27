@@ -2173,7 +2173,9 @@ let genTypeDefs (modul: IRModule) : string list =
 // EXPECT pins and the interpreter's twin printers read), while the C++
 // expressions and temporaries go through `sanitizeCppName`, which is the
 // spelling `bindingCppName` declared the binding under. The two differ only
-// for a binding whose name is a C++ reserved word (`let final = ...`).
+// for a binding whose name is a C++ reserved word (`let final = ...`) or one
+// spelled as another binding's name plus a generated suffix
+// (`installUserNameRenames`: `a_extents` beside an array `a`).
 
 /// Generate code to print a scalar value
 let genPrintScalar (name: string) : string list =

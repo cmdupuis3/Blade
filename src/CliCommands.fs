@@ -968,13 +968,16 @@ let planFile (filePath: string) (json: bool) : int =
             // same validated IR `emit` would compile) and discards the text.
             // Honors the same environment gates `emit` does (BLADE_BLAS,
             // BLADE_OMP_THREADS, BLADE_TILE_CACHE, ...).
+            // A plan without its emission half says so (stderr), rather than
+            // passing for a program that simply made no emission decisions.
             (match Blade.IRValidate.validateIR program with
              | Ok ir ->
                  (try
                      CodeGen.genSelfContainedProgramFromIR ir (Path.GetFileNameWithoutExtension filePath) |> ignore
                      CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
-                  with _ -> ())
-             | Error _ -> ())
+                  with ex -> eprintfn "plan: code generation failed (%s); emission decisions are missing" ex.Message)
+             | Error errs ->
+                 eprintfn "plan: IR validation failed (%s); emission decisions are missing" (String.concat "; " errs))
             let ds = Blade.Effects.Decisions.drain ()
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds
@@ -1050,7 +1053,7 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                         try Ok (Blade.Lowering.lowerTypedProgram typed (Some program) builder)
                         with
                         | Blade.Diagnostics.BladeDiagnosticException d -> Error d
-                        | ex -> Error (Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message)
+                        | ex -> Error (Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message)
                     printTypeCheckWarnings useColor (Some sm) false
                     match lowered with
                     | Error d -> reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
