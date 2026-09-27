@@ -1,0 +1,6 @@
+// TEST: comm on an unequally weighted sum (rejects)
+// ERROR: BL4013
+// `x - 2.0 * y` is neither symmetric nor antisymmetric, so neither sign law
+// applies (PBottom); the witness at (2, 1) -- 0 against -3 -- refutes comm.
+let A = [1.0, 2.0, 3.0]
+let r = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x - 2.0 * y |> compute

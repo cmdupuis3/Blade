@@ -834,6 +834,119 @@ let deduceAdjacentPairs (resolver: IRId -> SignParity list option)
         |> List.pairwise
         |> List.map (fun (a, b) -> parityOf resolver a.VarId b.VarId body)
 
+// WITNESSED ASYMMETRY -- the refutation twin of PInv.
+//
+// `parityOf` answers PBottom for two very different bodies: one the analysis
+// cannot see through (`sqrt(x * y)` behind a call it has no summary for), and
+// one that is PROVABLY not invariant (`x / y`, `x`, `x - 2.0 * y`). The first
+// must stay trusted -- PBottom is the documented escape hatch, and a `comm`
+// clause there is the author's claim. The second is a false claim the checker
+// can DISPROVE, and trusting it stores a triangle and answers half the reads
+// with the wrong value (x / y over (A, A) returned r(2, 0) = 0.25, true 4).
+//
+// The certificate is a CONCRETE COUNTEREXAMPLE: the body is evaluated at a few
+// sample points (a, b) and at their swap (b, a); a clear difference at one
+// point proves f(x, y) <> f(y, x) as a LAW. It is sound by construction -- a
+// symmetric body evaluates to the same value either way (up to rounding, which
+// the relative tolerance absorbs: every sample is a small dyadic number) -- and
+// complete for any body the evaluator can run. The evaluator is closed-world:
+// it runs only literals, the two swapped parameters, scalar arithmetic,
+// comparisons, logic, `if`, casts and the math intrinsics. Anything else -- a
+// captured value, another parameter, a call, an array read, a complex operand
+// -- answers "no evaluation", and no witness is claimed (the body stays
+// trusted exactly as before).
+//
+// `isInt` selects integer semantics (truncating `/` and `%`) for kernels over
+// integer elements, matching the emitted C++.
+let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
+                         : (float * float * float * float) option =
+    let body = flattenBindings body
+    let rec ev (x: float) (y: float) (e: TypedExpr) : float option =
+        let go = ev x y
+        let bool b = Some (if b then 1.0 else 0.0)
+        match e.Kind with
+        | TExprLit (LitInt v) -> Some (float v)
+        | TExprLit (LitFloat v) -> Some v
+        | TExprLit (LitBool b) -> bool b
+        | TExprVar (_, id, _) when id = pi -> Some x
+        | TExprVar (_, id, _) when id = pj -> Some y
+        | TExprBlock ([], Some f) -> go f
+        // `|> compute` on a scalar is the identity (the parser binds a
+        // trailing `|> compute` into the last branch of a kernel's `if`).
+        | TExprCompute inner | TExprPure inner -> go inner
+        | TExprBinOp (Elementwise, op, l, r) ->
+            // Integer semantics per NODE, from its own type when it is known:
+            // `x / 2.0` over integer elements is a floating division in C++.
+            let intNode =
+                match stripUnits e.Type with
+                | IRTScalar (ETInt32 | ETInt64) -> true
+                | IRTScalar (ETFloat32 | ETFloat64) -> false
+                | _ -> isInt
+            (match go l, go r with
+             | Some a, Some b ->
+                 match op with
+                 | OpAdd -> Some (a + b)
+                 | OpSub -> Some (a - b)
+                 | OpMul -> Some (a * b)
+                 | OpDiv ->
+                     if b = 0.0 then None
+                     elif intNode then Some (System.Math.Truncate (a / b))
+                     else Some (a / b)
+                 | OpMod ->
+                     if b = 0.0 then None
+                     elif intNode then Some (float (int64 a % int64 b))
+                     else Some (a - b * System.Math.Truncate (a / b))
+                 | OpCaret -> Some (System.Math.Pow (a, b))
+                 | OpMath2 "atan2" -> Some (System.Math.Atan2 (a, b))
+                 | OpEq -> bool (a = b)
+                 | OpNeq -> bool (a <> b)
+                 | OpLt -> bool (a < b)
+                 | OpLe -> bool (a <= b)
+                 | OpGt -> bool (a > b)
+                 | OpGe -> bool (a >= b)
+                 | OpAnd -> bool (a <> 0.0 && b <> 0.0)
+                 | OpOr -> bool (a <> 0.0 || b <> 0.0)
+                 | _ -> None
+             | _ -> None)
+        | TExprUnaryOp (op, inner) ->
+            (match go inner with
+             | Some a ->
+                 match op with
+                 | OpNeg -> Some (-a)
+                 | OpNot -> bool (a = 0.0)
+                 | OpReal -> Some a
+                 | OpConj -> Some a
+                 | OpMath "exp" -> Some (exp a)
+                 | OpMath "log" -> Some (log a)
+                 | OpMath "sqrt" -> Some (sqrt a)
+                 | OpMath "sin" -> Some (sin a)
+                 | OpMath "cos" -> Some (cos a)
+                 | OpMath "tan" -> Some (tan a)
+                 | OpMath "tanh" -> Some (tanh a)
+                 | OpMath "abs" -> Some (abs a)
+                 | OpMath "floor" -> Some (floor a)
+                 | OpMath "ceil" -> Some (ceil a)
+                 | OpCast ("Float" | "Float64" | "Float32") -> Some a
+                 | _ -> None
+             | None -> None)
+        | TExprIf (c, t, f) ->
+            (match go c with
+             | Some cv -> if cv <> 0.0 then go t else go f
+             | None -> None)
+        | _ -> None
+    let samples =
+        if isInt then [ (2.0, 1.0); (1.0, 3.0); (3.0, 5.0); (-2.0, 7.0); (4.0, 9.0) ]
+        else [ (2.0, 1.0); (1.0, 3.0); (0.5, 4.0); (-1.5, 2.5); (3.0, 5.0) ]
+    let usesPair = usesVar pi body || usesVar pj body
+    if not usesPair then None
+    else
+        samples |> List.tryPick (fun (a, b) ->
+            match ev a b body, ev b a body with
+            | Some u, Some v when System.Double.IsFinite u && System.Double.IsFinite v
+                                  && abs (u - v) > 1e-9 * (max 1.0 (max (abs u) (abs v))) ->
+                Some (a, b, u, v)
+            | _ -> None)
+
 // Late tier: arity-polymorphic (Poly-pack) kernels -- the all-arity
 // exchange law.
 //

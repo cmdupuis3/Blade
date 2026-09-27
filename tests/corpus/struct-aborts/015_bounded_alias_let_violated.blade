@@ -1,0 +1,9 @@
+// TEST: Bounded Alias Let Violated (aborts)
+// The alias twin of 012/013. `type Sal = Float64<min=0.0>` keeps its bound only
+// in the alias's SURFACE body (lowering erases min=/max=), and the let guard
+// read the annotation as written -- a bare `Sal` -- so the bound evaporated and
+// `-1` printed. The guard synthesizer now resolves the alias first.
+// ABORT: Bound violation in 's3' (min)
+type Sal = Float64<min=0.0>
+let s3: Sal = -1.0
+let t = s3 + 1.0

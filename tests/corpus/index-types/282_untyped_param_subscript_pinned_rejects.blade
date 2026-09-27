@@ -1,0 +1,13 @@
+// TEST: Unannotated subscript parameter is an index of its array's type (rejects)
+// ERROR: BL3001
+// `function g(i) = A(i)` used `i` only as a subscript into a Lat array, and a
+// call with a Lon index was accepted: `i` defaulted to plain Int64, and a
+// tagged value may always flow into a plain one. Once the body is typed, an
+// unannotated parameter used as a subscript into ONE named index type is
+// pinned to that index type (formalism 3.10), so the call meets the nominal
+// rule.
+type Lat = Idx<3>
+type Lon = Idx<4>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+function g(i) = A(i)
+let r = g((3 : Lon))

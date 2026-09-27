@@ -1,0 +1,6 @@
+// TEST: Bounded Param Violated (aborts)
+// A bounded PARAMETER is checked on entry, so the body may rely on it.
+// ABORT: Bound violation in 'parameter x of g' (max)
+function g(x: Float64<min=0.0, max=1.0>) -> Float64 = x * 2.0
+let y = g(3.0)
+let z = y + 1.0

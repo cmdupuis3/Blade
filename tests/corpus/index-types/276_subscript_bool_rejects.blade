@@ -1,0 +1,6 @@
+// TEST: Bool subscript refused (rejects)
+// ERROR: BL4003
+// `A(true)` was read as A(1) -- the C++ bool-to-integer promotion, never a
+// Blade rule. A Bool is not a position.
+let A = [10.0, 20.0, 30.0]
+let v = A(true)

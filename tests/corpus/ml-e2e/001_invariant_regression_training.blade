@@ -25,11 +25,9 @@ import ad as ad
 // allocates its own zeroed grad buffers, calls ad.grad(loss), and returns the
 // descended weights. Trajectories are block-local (never auto-printed).
 //
-// BL4003: the state-vector idiom reads its slots with bare integer literals
-// (`s(0)..s(26)` unpacking the 27 weights, and the row reads after the loop).
-// Each is a real untagged subscript with a real fix -- `(0 : State)` -- but one
-// cast per slot is pure noise at this width, so the note is pinned, not taken.
-// WARN: BL4003
+// The state-vector idiom reads its slots with bare integer literals; each is
+// checked against State's static extent at compile time (formalism 3.10), so
+// the literal needs no cast and draws no untagged-integer note.
 // ============================================================================
 
 // ---- graph structure: complete digraph on 5 nodes -------------------------

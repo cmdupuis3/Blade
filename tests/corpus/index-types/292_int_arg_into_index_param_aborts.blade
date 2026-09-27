@@ -1,0 +1,10 @@
+// TEST: Plain integer argument into an index parameter is checked (aborts)
+// `needsLat(i: Nat<Lat>)` promises its body a Lat index; a computed Int64
+// argument passes through the checked conversion, so 7 into Idx<3> stops
+// instead of reading A(7).
+// ABORT: index cast out of range
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+function needsLat(i: Nat<Lat>) -> Float64 = A(i) + 1.0
+function seven() -> Int64 = 7
+let v = needsLat(seven())

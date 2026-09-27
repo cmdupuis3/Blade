@@ -1,0 +1,8 @@
+// TEST: Literal argument outside an index parameter's type (rejects)
+// ERROR: BL4003
+// A literal argument to a Nat<Lat> parameter is a known position, checked at
+// compile time like `(7 : Lat)`.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+function needsLat(i: Nat<Lat>) -> Float64 = A(i) + 1.0
+let v = needsLat(7)

@@ -1,0 +1,11 @@
+// TEST: Named-function kernel rechecked under the iteration's index type (rejects)
+// ERROR: BL3001
+// The kernel spelling of 282: `method_for(range<Lon>) <@> g` iterates 4 Lon
+// positions through a function that reads a 3-cell Lat array. A lambda kernel
+// is rechecked once its parameter meets the iteration; the named function's
+// eta wrapper now is too (the post-zonk subscript sweep's call half).
+type Lat = Idx<3>
+type Lon = Idx<4>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+function g(i) = A(i)
+let r = method_for(range<Lon>) <@> g |> compute

@@ -1,0 +1,13 @@
+// TEST: A computed position written through a mut parameter is a checked store
+// `out(k) = v` with a plain Int64 `k` into a named-index slot is guarded like
+// a read (formalism 3.10); an in-range store lands in the caller's array.
+// WARN: BL4003
+type N = Idx<3>
+function put(out: mut Array<Float64 like N>, k: Int64) -> Float64 = {
+    out(k) = 9.0
+    out(k)
+}
+let mut g: Array<Float64 like N> = [0.0, 0.0, 0.0]
+let s = put(g, 2)
+// EXPECT: g = [0, 0, 9]
+// EXPECT: s = 9

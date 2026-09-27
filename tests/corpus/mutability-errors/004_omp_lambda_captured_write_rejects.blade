@@ -1,0 +1,12 @@
+// TEST: omp lambda writes a captured array (rejects)
+// ERROR: BL4005
+// A parallel kernel's cells run concurrently, so a store into a binding
+// captured from outside its body is a data race: the emitted loop was
+// `#pragma omp parallel for simd` around `g[0] = g[0] + ...`. A SERIAL body
+// keeps its write channel (functions/135, 139; memfree/004).
+let mut g = [0.0, 0.0]
+let A = [1.0, 2.0, 3.0]
+let r = A <@> lambda(x) where omp(x: 1) -> {
+    g(0) = g(0) + x
+    x
+} |> compute

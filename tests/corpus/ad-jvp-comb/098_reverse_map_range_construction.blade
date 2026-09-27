@@ -36,7 +36,6 @@ function loss(x: Array<Float like I>) -> Float = {
     m(0) + 2.0 * m(1) + m(2) - m(3)
 }
 
-// WARN: BL4003
 let x0 = [1.0, 2.0, 3.0, 4.0]
 let mut dx = [0.0, 0.0, 0.0, 0.0]
 let lv = ad.grad(loss)(x0, dx)

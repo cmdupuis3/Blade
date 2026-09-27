@@ -1,0 +1,11 @@
+// TEST: comm on a symmetric body the tables cannot prove stays trusted
+// `sqrt(x * y) + abs(x - y)` IS commutative, but the parity tables stop at
+// `abs` of an antisymmetric operand (PBottom). The counterexample search
+// evaluates it at every sample and finds f(x, y) = f(y, x) each time, so no
+// witness exists and the clause keeps its documented trust.
+let A = [1.0, 4.0, 9.0]
+let r = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> sqrt(x * y) + abs(x - y) |> compute
+let r01 = r(0, 1)
+let r10 = r(1, 0)
+// EXPECT: r01 = 5
+// EXPECT: r10 = 5

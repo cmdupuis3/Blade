@@ -93,6 +93,12 @@ type TypeError =
     // Index-type violations (BL4003)
     | IndexTagMismatchNamed of expected: string * actual: string
     | IndexTagMismatchAnon of expected: string
+    /// A subscript whose value is not an index at all (Float, Bool, Complex,
+    /// String): formalism 3.10, the subscript judgment's class rule.
+    | SubscriptNotIntegral of actual: string
+    /// An integer literal subscript (or `(lit : I)`) outside the static
+    /// extent it indexes -- known at compile time, so refused there.
+    | SubscriptOutOfRange of value: int64 * extent: int64 option * slot: string
     | CrossNominalIndexArith of left: string * right: string
     | CrossAnonIndexArith of left: int * right: int
     | IndexTypeArithForbidden of name: string
@@ -384,6 +390,10 @@ type TypeError =
     | ChainOpBadKernel of rightDesc: string
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | CommContradictsBody of param1: string * param2: string
+    // `where comm(p1, p2)` on a body the checker DISPROVES by a concrete
+    // counterexample (Deduce.witnessSwapAsymmetry): the witness is rendered
+    // "f(a, b) = u but f(b, a) = v". Same code as CommContradictsBody (BL4013).
+    | CommContradictsWitness of param1: string * param2: string * witness: string
     | AntisymmContradictsBody of param1: string * param2: string
     // The Hermitian third of the pair-swap contradiction family: the body
     // provably CONJUGATES under the swap (f(y,x) = conj(f(x,y)), deduced
@@ -577,6 +587,14 @@ type Subst() =
     /// binds, validated when the var meets a concrete type (unify).
     /// Parallels arityConstraints, the EXACT-rank pin `T^k` uses.
     let mutable rankLowerBounds : Map<int, int> = Map.empty
+    /// Inference vars that appeared in SUBSCRIPT position (formalism 3.10):
+    /// an index is an integer, so if nothing else pins such a var, zonk
+    /// defaults it to Int64 instead of the generic Float64 default (which
+    /// handed g++ a `double` subscript). A DEFAULT, not a binding: the var
+    /// still unifies with a `Nat<I>` iteration type later, and the post-zonk
+    /// subscript sweep judges whatever it finally became. Travels on
+    /// var-to-var binds like the polymorphic mark.
+    let mutable indexDefaults : Set<int> = Set.empty
 
     member _.Fresh() =
         let id = nextId
@@ -601,7 +619,17 @@ type Subst() =
          | IRTInfer id2 when Set.contains id polymorphicIds ->
              polymorphicIds <- Set.add id2 polymorphicIds
          | _ -> ())
+        (match ty with
+         | IRTInfer id2 when Set.contains id indexDefaults ->
+             indexDefaults <- Set.add id2 indexDefaults
+         | _ -> ())
         map <- Map.add id ty map
+
+    member _.MarkIndexDefault(id: int) =
+        indexDefaults <- Set.add id indexDefaults
+
+    member _.IsIndexDefault(id: int) : bool =
+        Set.contains id indexDefaults
 
     member _.TryFind(id) =
         Map.tryFind id map

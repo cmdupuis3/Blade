@@ -53,6 +53,11 @@ let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
                 IRTLoop { lt with
                             ArrayTypes = lt.ArrayTypes |> List.map replace
                             KernelType = lt.KernelType |> Option.map replace }
+            // Unit- and tag-wrapped types carry a variable INSIDE the wrapper
+            // (`T<m>` is IRTUnitAnnotated(IRTInfer, m)): without these arms a
+            // generalized value's `T<m>` stayed SHARED across every use.
+            | IRTUnitAnnotated (inner, u) -> IRTUnitAnnotated (replace inner, u)
+            | IRTIdxTagged (inner, r) -> IRTIdxTagged (replace inner, r)
             | _ -> ty  // IRTScalar, IRTUnit, IRTNamed, IRTNat (no inference vars to replace)
         replace scheme.Body
 
@@ -210,6 +215,7 @@ and CalleeFacts = {
     MutParams: Map<string, int list>
     CoIterObligations: Map<string, (int list * int64 list) list>
     UnitTransforms: Map<string, int list * UnitSig>
+    UnitEqualities: Map<string, (UnitSig * UnitSig) list>
     Constraints: Map<string, string list * (string * string list) list>
 }
 
@@ -245,6 +251,12 @@ type TypeEnv = {
     /// in `OuterScope` is bound INSIDE the innermost body -- which is what
     /// `bodyLocalBinding` tests.
     InCallableBody: bool
+    /// True while the body of a PARALLEL-licensed kernel is typed (a lambda
+    /// or function whose where clause carries `omp(...)` / `cuda`), and in
+    /// everything nested inside it: its cells run concurrently, so a store
+    /// into a binding captured from outside the body is a data race
+    /// (assignTargetError refuses it).
+    InParallelBody: bool
     /// Names of the `mut` parameters of the function whose body is being
     /// checked (all array-typed -- MutParamNotArray rejects any other kind
     /// first). Rebinding one WHOLE (`a = <array expr>`) cannot reach the
@@ -403,6 +415,14 @@ type TypeEnv = {
     /// Name-keyed like MutParamPositions, and shares its shadowing weakness.
     /// Shared by reference.
     FuncUnitTransform: System.Collections.Generic.Dictionary<string, int list * UnitSig>
+    /// The unit EQUALITIES a generic body imposes among its arguments,
+    /// recorded by the same probe as FuncUnitTransform: `x + y`, `x > y`,
+    /// branches that must agree, `exp(x / y)` -- each an equation between two
+    /// unit signatures over the synthetic probe bases (one per parameter).
+    /// The transform DERIVES a return unit; these CHECK a call: substituted
+    /// with the arguments' units, both sides must agree (BL3006), which is
+    /// what `add(meters, seconds)` through `x: T^0, y: T^0` never did.
+    FuncUnitEqualities: System.Collections.Generic.Dictionary<string, (UnitSig * UnitSig) list>
     /// Named functions' `where comm(...)` groups (by param index): funcName ->
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
@@ -534,6 +554,7 @@ let emptyEnv () = {
     InPolyContext = false
     InLambdaBody = false
     InCallableBody = false
+    InParallelBody = false
     MutArrayParams = Set.empty
     CurrentCommGroups = []
     Interfaces = Map.empty
@@ -558,6 +579,7 @@ let emptyEnv () = {
     MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
     FuncCoIterObligations = System.Collections.Generic.Dictionary<string, (int list * int64 list) list>()
     FuncUnitTransform = System.Collections.Generic.Dictionary<string, int list * UnitSig>()
+    FuncUnitEqualities = System.Collections.Generic.Dictionary<string, (UnitSig * UnitSig) list>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
@@ -773,6 +795,9 @@ let formatTypeError (err: TypeError) : string =
     // Promoted variants (Stage 5): text reproduced verbatim.
     | IndexTagMismatchNamed (expected, actual) -> $"Array index tag mismatch: slot expects '{expected}' but argument has type '{actual}'."
     | IndexTagMismatchAnon expected -> $"Array index tag mismatch: slot expects named tag '{expected}' but argument is an anonymous index value."
+    | SubscriptNotIntegral actual -> $"an array subscript must be an integer or an index value, but this one is {actual}. Subscripts are positions: convert explicitly (`Int64(floor(x))`) if a computed number is meant as a position, or index with a value produced by iteration (`range<I>`)."
+    | SubscriptOutOfRange (v, Some n, slot) -> $"the literal position {v} is out of range for {slot}, whose extent is {n} (valid positions are 0 .. {n - 1L}). A literal position is checked at compile time."
+    | SubscriptOutOfRange (v, None, slot) -> $"the literal position {v} is out of range for {slot}: a position is never negative."
     | CrossNominalIndexArith (left, right) -> $"Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '{left}' and '{right}'."
     | CrossAnonIndexArith (left, right) -> $"Cross-nominal index-type arithmetic: cannot combine values of distinct anonymous index domains (#{left} vs #{right})."
     | CompoundTupleForm rank -> $"Compound arrays take FLAT positional subscripts like SymIdx: write B(c0, ..., c{rank - 1}), not the tuple form B((c0, ..., c{rank - 1})) -- and wildcards (`_`) are not accepted on a compound axis. Partial/wildcard reads (pinning some coordinates, gathering the matches) are a SparseIdx feature: build the valid tuples as a SparseIdx<keys> and index S((c0, _, ...)) there (formalism 3.5)."
@@ -929,6 +954,7 @@ complex half)." where_
     | ChainOpBadKernel rightDesc -> $"<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got {rightDesc}"
     | ChainOpUndecidable (leftDesc, rightDesc) -> $"cannot infer the roles of the <@> operands: the left side is {leftDesc} and the right side is {rightDesc}, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays)."
     | CommContradictsBody (p1, p2) -> $"`where comm({p1}, {p2})` contradicts the kernel body, which is provably ANTIcommutative under that swap (f({p2}, {p1}) = -f({p1}, {p2})): triangular storage would silently corrupt half the output. Remove the comm clause, or wrap the kernel in reynolds(...) if a signed iteration license over the permutation sum is what you intend."
+    | CommContradictsWitness (p1, p2, w) -> $"`where comm({p1}, {p2})` contradicts the kernel body, which is provably NOT commutative under that swap: {w}. Triangular storage would compute one of the two and answer the other's reads with it. Remove the comm clause (dense storage computes both triangles), or wrap the kernel in reynolds(...) if symmetrizing it is what you intend."
     | AntisymmContradictsBody (p1, p2) -> $"`where anticomm({p1}, {p2})` contradicts the kernel body, which is provably COMMUTATIVE under that swap (f({p2}, {p1}) = f({p1}, {p2})): strict-triangular anticommutative storage would drop the diagonal and negate half the output. Remove the anticomm clause (use `where comm({p1}, {p2})` for the symmetric triangle), or wrap the kernel in reynolds(..., Antisymmetric) if a signed antisymmetrization is what you intend."
     | CommContradictsConjBody (p1, p2) -> $"`where comm({p1}, {p2})` contradicts the kernel body, which provably CONJUGATES under that swap (f({p2}, {p1}) = conj(f({p1}, {p2}))): symmetric storage recovers mirrored cells by IDENTITY, so every read across the diagonal would return the stored value un-conjugated -- the imaginary part of half the output silently flips sign. Remove the comm clause (dense storage computes both triangles); if the symmetric real part is what you intend, real(...) of this kernel IS commutative; if a Hermitian Gram matrix is the goal, `gram(A, A)` routes to Hermitian storage, whose mirrored reads conjugate."
     | AntisymmContradictsConjBody (p1, p2) -> $"`where anticomm({p1}, {p2})` contradicts the kernel body, which provably CONJUGATES under that swap (f({p2}, {p1}) = conj(f({p1}, {p2}))): strict-triangular storage recovers mirrored cells by NEGATION, but the true mirror is the conjugate -- the real part of half the output silently flips sign (only the imaginary half happens to agree). Remove the anticomm clause (dense storage computes both triangles); if the antisymmetric imaginary part is what you intend, imag(...) of this kernel IS anticommutative."
@@ -1150,7 +1176,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // BL3007's generic "invalid builtin argument" bucket: it's an
             // annotation contradicting its own body -- drop the clause, or
             // wrap in `reynolds` for the signed iteration license.
-            | CommContradictsBody _ | AntisymmContradictsBody _
+            | CommContradictsBody _ | AntisymmContradictsBody _ | CommContradictsWitness _
             | CommContradictsConjBody _ | AntisymmContradictsConjBody _ -> "BL4013"
             // Same family, other direction: nothing is DECLARED here -- the
             // output would inherit the input's compact class, and the
@@ -1185,6 +1211,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | UnknownWhereConstraint _ -> "BL4001"
             | DistOrderCompileTime _ -> "BL4002"
             | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | CrossNominalIndexArith _
+            | SubscriptNotIntegral _ | SubscriptOutOfRange _
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
             | BlockSpecArgMismatch _
             | CompoundTupleForm _ | CompoundUnderSupplied _ | CompoundOverSupplied _

@@ -1,0 +1,8 @@
+// TEST: Bounded Unit Alias Let Violated (aborts)
+// quickstart-1's own example: a unit-carrying bounded alias. Same defect and
+// same fix as 015, through the unit spelling of the alias body.
+// ABORT: Bound violation in 's3' (min)
+Unit psu
+type Sal = Float64<psu, min=0.0>
+let s3: Sal = -1.0
+let t = s3 + 1.0

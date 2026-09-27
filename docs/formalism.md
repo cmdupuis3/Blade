@@ -167,8 +167,17 @@ types and distributes elementwise over arrays.
 
 **Units of measure** are annotations on primitives, not types: `Unit meters`,
 `Unit velocity = meters / seconds`, `Float<velocity>`. Unit arithmetic checks
-addition (same unit) and composes under `*`/`/`. **Bounded primitives**
-(`Float<min=0, max=1>`) carry runtime-checked bounds and compose with units.
+addition (same unit) and composes under `*`/`/` -- elementwise, outer
+(`a [*] b` is meters·seconds), in `prodsum`, and across the elements of an
+array literal (one element type, one unit). Through a GENERIC function the
+body's demands are recorded once per declaration and judged at every call:
+`function add(x: T^0, y: T^0) = x + y` requires its two arguments to share a
+unit (as do comparisons, branch results, and a transcendental's argument
+being dimensionless), so `add(meters, seconds)` is BL3006 at the call.
+**Bounded primitives** (`Float<min=0, max=1>`) carry runtime-checked bounds
+and compose with units; the bound is checked wherever the annotation stands
+-- a `let`, a function parameter (on entry), a function return -- including
+through a type alias (`type Sal = Float64<psu, min=0.0>`).
 **Mutually constrained types** (`type V1 ... and V2 ... where <expr>`) require
 joint assignment and assert (not solve) the constraint at runtime.
 
@@ -579,16 +588,54 @@ Iteration emits values tagged with their source index type as a **unit**:
 `method_for(range<LatIdx>) <@> lambda(i) -> ...` gives `i : Nat<LatIdx>`.
 
 - Array indexing requires unit match: `A : Array<T, LatIdx>` accepts
-  `Nat<LatIdx>`, rejects `Nat<LonIdx>` even at equal extent.
-- Literals need explicit units (`A(10 : Nat<LatIdx>)`); arithmetic preserves
-  units; mixed-unit arithmetic is an error.
-- Bounds safety by construction: emitted indices are in range, indexing
-  requires matching units, therefore `A(i)` is always valid. (The rank-2
-  offset arithmetic behind this is verified against a failure model;
-  proofs.md §Safety.)
-- Explicit casts (`i as Nat<LonIdx>`) are the escape hatch, and lambda
-  captures are checked by unit — a captured array is only indexable by
-  iteration variables of its own index type.
+  `Nat<LatIdx>`, rejects `Nat<LonIdx>` even at equal extent. Lambda captures
+  and named-function kernels are checked the same way once their parameters
+  meet the iteration (a function `g(i) = A(i)` whose unannotated `i` is used
+  only as a subscript into `LatIdx` IS a `Nat<LatIdx>` parameter).
+
+**The subscript judgment.** Every subscript `A(e)` into a slot of index type
+`I` is judged by three rules, eagerly and again once inference is complete:
+
+1. *Class.* `e` is an integer or an index value. `Float`, `Bool`, `Complex`
+   and `String` subscripts are refused (BL4003); an otherwise unconstrained
+   variable in subscript position defaults to `Int64`, not `Float64`.
+   Keyed slots (`SparseIdx`, `EnumIdx`) and halo window offsets stand down.
+2. *Nominal.* An index value of a DIFFERENT index type is refused (BL4003 at
+   a subscript, BL3001 at a call).
+3. *Range.* A literal position — a subscript `3` / `-1`, a cast `(3 : I)`,
+   or a literal argument to a `Nat<I>` parameter — is checked at compile time
+   against the static extent (BL4003); a negative literal subscript is
+   refused on every plain slot. (A literal stored in an index-typed foreign-key
+   column is data, not a position: `-1` is group_by's "excluded" key.)
+
+**Positions and casts.** Arithmetic on an index value yields a *position*: a
+plain `Int64`, never an index value (`i + 1` is not proved to lie in `I`). An
+annotated index operand refuses the arithmetic outright; an unannotated
+kernel parameter's arithmetic (`lambda(i) -> u(i + 3)`) is a position.
+`(e : I)` is the one door from integers into `I`: a literal is range-checked
+at compile time, a computed integer is a CHECKED conversion (run-time guard
+`0 <= e < extent(I)`, BL8006; it needs `I`'s static extent). A plain integer
+passed to a `Nat<I>` parameter goes through the same door.
+
+**What is guaranteed.** A read or write of a slot whose index type is NAMED
+is bounds-safe: its subscript is either PROVEN or CHECKED at run time
+(BL8006, in both lanes; against the static extent, or the array's own
+`extents` when the extent is only known at run time). Proven is a closed
+list that trusts no type: a compile-time-checked literal, a bare variable of
+exactly that index type that is not bound to an unproven value (an iteration
+index, a parameter -- whose callers pass through the same checks -- or a
+`let` of a proven value), an emitted cast or guard, and a halo window read.
+Everything else -- a position, a plain `Int64`, a `Nat<_>` wildcard, a
+branch, a call, an element read out of an index-typed array (foreign-key
+DATA) -- is checked. The checks are what the BL4003 untagged-integer advice
+points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
+removes them. Not covered: a computed subscript into an ANONYMOUS index slot
+(an array without a named index type) is not checked -- name the index type
+to get the guarantee; compact, compound, sparse and ragged slots keep their
+own disciplines; compiler-synthesized buffers and indices (`let rec`
+prefixes, which read zero past the prefix by design, reduce desugars, AD
+sweeps) own their walks. (The rank-2 offset arithmetic behind the proven
+case is verified against a failure model; proofs.md §Safety.)
 
 This is the index-level mirror of physical units (§2.4): same mechanism, same
 error class.
@@ -690,6 +737,21 @@ immutable lambda bindings (internally the same marker `let static` uses).
 (`comm`, return type) as on functions, block bodies in braces. Pure by
 definition. Array captures are unit-checked (§3.10). Parameter types infer
 from context; array-typed parameters need explicit rank annotations.
+
+What the checker enforces of that purity today: a PARALLEL kernel body
+(`where omp(...)` / `cuda`, and anything nested in one) may not write a
+binding captured from outside it -- its cells run concurrently, so the store
+would be a data race (BL4005). A serial body's write to a captured `let mut`
+(or a named function's write to a module-level one) is still accepted as an
+ordered side effect; the optimizer treats such calls as barriers (CSE never
+merges across them).
+
+A `where comm(x, y)` clause is TRUSTED when the body's symmetry cannot be
+decided, and REFUSED (BL4013) when it is refuted: by a proved sign law
+(antisymmetric body) or by a concrete counterexample -- the body evaluated at
+sample points and their swaps (`x / y` is 2 at (2, 1) and 0.5 at (1, 2)).
+Under `reynolds(...)` the clause is an iteration license, not a claim about
+the bare kernel, and is never refuted (§5.3).
 
 Sections and partial application: `(+)`, `(/) x`, single-wildcard `f(_, y, z)`
 (multiple wildcards rejected — use a lambda).

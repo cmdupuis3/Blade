@@ -1,0 +1,4 @@
+// TEST: Array literal mixing a row and a scalar (rejects)
+// ERROR: BL3001
+// `[[1.0, 2.0], 3.0]` has no element type; it died in g++.
+let xs = [[1.0, 2.0], 3.0]

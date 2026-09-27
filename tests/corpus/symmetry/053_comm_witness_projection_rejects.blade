@@ -1,0 +1,7 @@
+// TEST: comm on a lone projection (rejects)
+// ERROR: BL4013
+// `lambda(x, y) -> x` is the plainest non-commutative body: f(x, y) = x but
+// f(y, x) = y. The parity table answers PBottom for a bare swapped parameter;
+// the counterexample refutes the clause.
+let A = [1.0, 2.0, 3.0]
+let r = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x |> compute

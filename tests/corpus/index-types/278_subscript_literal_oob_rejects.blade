@@ -1,0 +1,8 @@
+// TEST: Literal subscript past a static extent refused (rejects)
+// ERROR: BL4003
+// `A(5)` on a Lat = Idx<3> array drew only the untagged-integer advice -- the
+// same warning an in-range literal got -- and read past the buffer. The
+// extent is static, so the literal is checked against it.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let v = A(5)

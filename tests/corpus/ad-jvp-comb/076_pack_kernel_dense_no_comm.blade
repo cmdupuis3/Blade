@@ -31,6 +31,5 @@ let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
 // The late-tier deduction sees the pack invariant and offers the pin 075
 // takes; observationally inert, so the values below are the dense proof.
 // WARN: BL4010
-// WARN: BL4003
 // EXPECT: v = 10
 // EXPECT: t = 6

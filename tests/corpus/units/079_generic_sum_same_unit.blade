@@ -1,0 +1,11 @@
+// TEST: Generic Sum Of One Unit Accepted
+// The accepting twin of unit-errors/024: the equation the body records is
+// satisfied when both arguments carry the same unit.
+Unit meters
+let a: Float<meters> = 1.0
+let b: Float<meters> = 2.0
+function add(x: T^0, y: T^0) = x + y
+let c = add(a, b)
+let d = add(3.0, 4.0)
+// EXPECT: c = 3
+// EXPECT: d = 7

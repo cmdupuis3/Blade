@@ -1485,6 +1485,71 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     // ---- Array literal ----
     | ExprKind.ExprArrayLit elems ->
         elems |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tElems ->
+            // Numeric LITERALS adopt the literal's joined element type (they
+            // have no committed type of their own: `[1, 2.5, 3]` is Float64,
+            // exactly as `let x: Float64 = 1` is). A non-literal VALUE never
+            // widens implicitly -- it meets the unification below as it is.
+            let tElems =
+                let isNumLit (e: TypedExpr) =
+                    match e.Kind with
+                    | TExprLit (LitInt _ | LitFloat _) -> true
+                    | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitInt _ | LitFloat _) }) -> true
+                    | _ -> false
+                let prims =
+                    tElems |> List.map (fun e ->
+                        match env.Subst.Resolve e.Type with
+                        | IRTScalar et -> Some et
+                        | _ -> None)
+                if tElems.Length >= 2 && prims |> List.forall Option.isSome && tElems |> List.exists isNumLit then
+                    let joined =
+                        prims |> List.map Option.get
+                        |> List.reduce (fun a b -> match IR.promoteElemType a b with Some p -> p | None -> a)
+                    let rec retype (e: TypedExpr) =
+                        match e.Kind with
+                        | TExprUnaryOp (OpNeg, inner) -> { e with Kind = TExprUnaryOp (OpNeg, retype inner); Type = IRTScalar joined }
+                        | _ -> { e with Type = IRTScalar joined }
+                    tElems |> List.map (fun e ->
+                        if isNumLit e && (match env.Subst.Resolve e.Type with IRTScalar et -> et <> joined | _ -> false)
+                           && (match joined with ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 | ETInt32 | ETInt64 -> true | _ -> false)
+                        then retype e
+                        else e)
+                else tElems
+            // ONE ELEMENT TYPE. The literal's type is read off its FIRST element
+            // (inferArrayLitType), so every other element must agree with it:
+            // unified (numeric literals still widen together -- `[1, 2.5]` is
+            // Float64 -- through the literal-variable rules) with units judged
+            // on their own, like every other seam. Before this the rest were
+            // never looked at: `[a_m, b_s]` took meters, `[1.5, true]` printed
+            // [1.5, 1], two differently tagged rows stacked, and mixed Int/Float
+            // or mixed rank died in g++.
+            let unitsOf (t: IRType) =
+                match env.Subst.Resolve t with
+                | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
+                | r -> IR.getUnits r
+            let disagreement =
+                match tElems with
+                | first :: rest ->
+                    rest |> List.tryPick (fun e ->
+                        // Two nested SUB-LITERALS (rows written in brackets)
+                        // are the literal's own shape, which the ragged /
+                        // compact-simplex inference owns: `[[1, 2, 3], [4, 5],
+                        // [6]]` has rows of different types on purpose.
+                        let bothSubLiterals = first.Kind.IsTExprArrayLit && e.Kind.IsTExprArrayLit
+                        if bothSubLiterals then None else
+                        match unitsOf first.Type, unitsOf e.Type with
+                        | Some a, Some b when not (unitCompatible a b) || not (unitSameScale a b) ->
+                            Some (e, UnitMismatch ("the elements of an array literal", ppUnitSig a, ppUnitSig b))
+                        | _ ->
+                            match unify env.Subst (stripUnitsDeep env.Subst first.Type) (stripUnitsDeep env.Subst e.Type) with
+                            | Ok () -> None
+                            | Error _ ->
+                                Some (e, TypeMismatch (env.Subst.Resolve first.Type, env.Subst.Resolve e.Type)))
+                | [] -> None
+            match disagreement with
+            | Some (e, err) ->
+                if e.Span.StartLine > 0 then setCurrentExprSpan e.Span
+                Error err
+            | None ->
             let arrTy = inferArrayLitType env.Builder tElems
             Ok (mkTyped (TExprArrayLit (tElems, arrTy)) (mkArrayLike arrTy)))
 
@@ -1922,6 +1987,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         | Some err -> Error err
         | None ->
         let annoTy = lowerTypeExpr env tyAnno
+        match indexCastTarget env annoTy with
+        | Some (tag, ext) -> inferIndexCast env e annoTy tag ext
+        | None ->
         checkExpr env annoTy e |> Result.map (fun tE ->
             { tE with Type = annoTy })
 
@@ -3412,8 +3480,22 @@ and inferProdSum (env: TypeEnv) (args: Expr list) : TypeResult<TypedExpr> =
                             | IRTScalar _, IRTInfer _ -> Ok acc
                             | IRTInfer _, IRTScalar _ -> Ok next
                             | _ -> unify env.Subst acc next |> Result.map (fun () -> acc)
+                        // UNITS MULTIPLY: prodsum is a sum of PRODUCTS, so the
+                        // result's element unit is the product of the operands'
+                        // (as for `a * b`), not the first operand's -- the
+                        // promotion join above keeps `acc` whole, unit included,
+                        // which typed prodsum(meters, seconds) as meters.
+                        let joinElemUnits (acc: IRType) (next: IRType) : Result<IRType, TypeError> =
+                            joinElem acc next |> Result.bind (fun joined ->
+                                unitRulesForOpWith OpMul (IR.getUnits (env.Subst.Resolve acc))
+                                                         (IR.getUnits (env.Subst.Resolve next)) None
+                                |> Result.map (fun u ->
+                                    let bare = IR.stripUnits (env.Subst.Resolve joined)
+                                    match u with
+                                    | Some u -> IRTUnitAnnotated (bare, u)
+                                    | None -> bare))
                         (match elemTy with
-                         | Some e -> joinElem e arrTy.ElemType
+                         | Some e -> joinElemUnits e arrTy.ElemType
                          | None -> Ok arrTy.ElemType)
                         |> Result.bind (fun joined ->
                             go (Some joined)
@@ -4840,35 +4922,13 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
             // One bracket = one index dimension. Mirrors ExprApp's
             // tArgs.Length <= arrTy.IndexTypes.Length check.
             let identity = match tT.Kind with TExprVar (_, _, id) -> id | _ -> None
-            // Tag check on the single index (same rule as ExprApp).
-            let tagMismatch =
-                match arrTy.IndexTypes with
-                | [] -> None
-                | idxType :: _ ->
-                    match idxType.Tag with
-                    | Some tagName when not (tagName.StartsWith("__")) ->
-                        match env.Subst.Resolve tI.Type with
-                        | IRTIdxTagged (_, IRefNamed argName) when argName = tagName -> None
-                        | IRTIdxTagged (_, IRefNamed argName) ->
-                            Some (IndexTagMismatchNamed (tagName, argName))
-                        | IRTIdxTagged (_, IRefAnon _) ->
-                            Some (IndexTagMismatchAnon tagName)
-                        // Wildcard-typed index: warn, don't error -- kept in
-                        // step with checkArrayIndexTags above.
-                        | IRTIdxTagged (_, IRefAny)
-                        | IRTScalar (ETInt32 | ETInt64) ->
-                            // BL4003, same as checkArrayIndexTags' twin --
-                            // including its synthesized-buffer suppression, so
-                            // the one-bracket spelling cannot drift from the
-                            // call spelling on a desugarer's own scratch array.
-                            if not (isSynthesizedBuffer tT) && not (isSynthesizedIndex tI) then
-                                emitWarning env "BL4003" tI.Span ($"Array indexed with untagged integer where slot expects tag '{tagName}'. Consider an explicit cast like `(expr : {tagName})` or iterate via `range<{tagName}>` to flow the tag automatically.")
-                            None
-                        | _ -> None
-                    | _ -> None
-            match tagMismatch with
-            | Some err -> Error err
-            | None ->
+            // The whole subscript judgment on the single index -- the SAME
+            // function as the call spelling (class, literal range, nominal
+            // tag, synthesized-buffer suppression), so the one-bracket
+            // spelling cannot drift from `A(i)`.
+            match (if arrTy.IndexTypes.IsEmpty then Ok () else checkArrayIndexTags env tT arrTy [tI]) with
+            | Error err -> Error err
+            | Ok () ->
                 if 1 = arrTy.IndexTypes.Length then
                     Ok (mkTyped (TExprIndex (tT, [tI], identity)) arrTy.ElemType)
                 elif 1 < arrTy.IndexTypes.Length then
@@ -6685,6 +6745,10 @@ and unitRulesForUnaryOp (op: UnaryOp) (u: UnitSig option) : TypeResult<UnitSig o
 and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedExpr) : TypeResult<UnitSig option> =
     let combineBranches context (a: UnitSig option) (b: UnitSig option) =
         match a, b with
+        | Some ua, Some ub when (not (unitCompatible ua ub) || not (unitSameScale ua ub))
+                                && recordProbeEquality ua ub ->
+            // Probe run: the branches must agree for the CALL's units.
+            Ok (Some ua)
         | Some ua, Some ub ->
             if not (unitCompatible ua ub) then Error (UnitMismatch (context, ppUnitSig ua, ppUnitSig ub))
             // This walk RECOMPUTES signatures over an already-typed kernel
@@ -6725,9 +6789,21 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
     | TExprBinOp (_, op, l, r) ->
         kernelBodyUnits env bound l |> Result.bind (fun lu ->
         kernelBodyUnits env bound r |> Result.bind (fun ru ->
-        unitRulesForOpWith op lu ru (Some r)))
+        match unitRulesForOpWith op lu ru (Some r), op, lu, ru with
+        // Probe run (funcUnitTransform): an equality op between two
+        // probe-dependent signatures is an EQUATION the call must satisfy,
+        // not a failure of the body -- record it and carry on.
+        | Error _, (OpAdd | OpSub | OpMod), Some a, Some b when recordProbeEquality a b -> Ok (Some a)
+        | Error _, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpMath2 "atan2"), Some a, Some b
+            when recordProbeEquality a b -> Ok None
+        | res, _, _, _ -> res))
     | TExprUnaryOp (op, inner) ->
-        kernelBodyUnits env bound inner |> Result.bind (unitRulesForUnaryOp op)
+        kernelBodyUnits env bound inner |> Result.bind (fun u ->
+            match unitRulesForUnaryOp op u, op, u with
+            // A transcendental of a probe-dependent value: the argument must
+            // be dimensionless at the call.
+            | Error _, OpMath name, Some s when name <> "sqrt" && recordProbeEquality s unitDimensionless -> Ok None
+            | res, _, _ -> res)
     | TExprIf (cond, thenBr, elseBr) ->
         errorsOnly cond |> Result.bind (fun () ->
         kernelBodyUnits env bound thenBr |> Result.bind (fun tu ->
@@ -6761,6 +6837,38 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
         args |> List.fold (fun acc a ->
             acc |> Result.bind (fun () -> errorsOnly a)) (Ok ())
         |> Result.bind (fun () ->
+            // The callee's own recorded EQUALITIES, at the units this walk
+            // computes for the arguments: a generic calling a generic
+            // composes them (recorded again when still probe-dependent), and
+            // a kernel body calling one with concrete units is judged here.
+            let equalities =
+                match f.Kind with
+                | TExprVar (n, _, _) ->
+                    (match env.FuncUnitEqualities.TryGetValue n with
+                     | true, eqs when not eqs.IsEmpty -> Some (n, eqs)
+                     | _ -> None)
+                | _ -> None
+            let equalityCheck =
+                match equalities with
+                | None -> Ok ()
+                | Some (n, eqs) ->
+                    args
+                    |> List.fold (fun acc a ->
+                        acc |> Result.bind (fun (us: UnitSig option list) ->
+                            kernelBodyUnits env bound a |> Result.map (fun u -> u :: us)))
+                        (Ok [])
+                    |> Result.bind (fun rev ->
+                        let argUnits = List.rev rev
+                        eqs
+                        |> List.fold (fun acc (x, y) ->
+                            acc |> Result.bind (fun () ->
+                                match instantiateProbeSig x argUnits, instantiateProbeSig y argUnits with
+                                | Some a, Some b when not (unitCompatible a b) || not (unitSameScale a b) ->
+                                    if recordProbeEquality a b then Ok ()
+                                    else Error (UnitMismatch ($"the arguments of '{n}', whose body combines them as one quantity", ppUnitSig a, ppUnitSig b))
+                                | _ -> Ok ()))
+                            (Ok ()))
+            equalityCheck |> Result.bind (fun () ->
             match f.Kind with
             | TExprVar (n, _, _) ->
                 (match lookupUnitTransform env n with
@@ -6776,7 +6884,7 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
                          (Ok [])
                      |> Result.map (fun rev ->
                          applyUnitTransform exponents residual (List.rev rev)))
-            | _ -> Ok None)
+            | _ -> Ok None))
     // ELEMENT-aware like the TExprVar arm: an array PARAMETER carries its unit
     // in `bound`, not on its type, so reading only the type reported "no claim"
     // for `reduce(row, (+))` -- the whole body of `mean`. Falling back to the
@@ -6844,7 +6952,10 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
         match env.Subst.Resolve t with
         | ArrayElem at -> IR.getUnits (env.Subst.Resolve at.ElemType)
         | r -> IR.getUnits r
-    if openElem retTy && not parms.IsEmpty then
+    // Probe whenever some parameter is generic: the return transform needs a
+    // deduced return, but the EQUALITIES (FuncUnitEqualities) are demands on
+    // the arguments whatever the return type is.
+    if not parms.IsEmpty && (parms |> List.exists (fun p -> openElem p.Type)) then
         let bound =
             parms
             |> List.mapi (fun i p ->
@@ -6852,8 +6963,21 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
                  if openElem p.Type then Some (unitOfDims (Map.ofList [ (unitProbeBase i, 1) ]))
                  else elemUnits p.Type))
             |> Map.ofList
-        match kernelBodyUnits env bound body with
-        | Ok (Some u) ->
+        let collected = ResizeArray<UnitSig * UnitSig>()
+        let slot = unitProbeEqualities.Value
+        let saved = slot.Value
+        slot.Value <- Some collected
+        let walked =
+            try kernelBodyUnits env bound body
+            finally slot.Value <- saved
+        if collected.Count > 0 then
+            env.FuncUnitEqualities.[name] <- List.ofSeq collected
+        // The TRANSFORM is derived for a deduced return as before. A walk that
+        // recorded equations still yields one (`hyp(a, b) = sqrt(a*a + b*b)`
+        // returns unit(a)): the call judges the equations before the
+        // transform is applied, so a call that reaches the stamp satisfies them.
+        match walked with
+        | Ok (Some u) when openElem retTy ->
             let n = unitNormalize u
             let exponents =
                 parms |> List.mapi (fun i _ ->
@@ -6865,7 +6989,7 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
                     Nominal = None
                     Dims = n.Dims |> Map.filter (fun k _ -> not (k.StartsWith "__unit_probe_")) }
             env.FuncUnitTransform.[name] <- (exponents, residual)
-        | Ok None | Error _ -> ()
+        | _ -> ()
 
 /// ELEMENT-level sibling of `kernelBodyUnits`, for the array operands of a
 /// nested map. The scalar walk answers about SCALAR positions and reads a
@@ -7040,10 +7164,17 @@ Bool) and combine the results, or compare tuples of scalars.")
     match op with
     | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe ->
         // Comparisons require compatible units (unitRulesForOp errors on
-        // mismatch; the result carries no annotation)
+        // mismatch; the result carries no annotation). An OUTER comparison
+        // compares ELEMENTS, whose units live on the element type (`getUnits`
+        // of an array type is always None, so `a [<] b` over meters and
+        // seconds was never judged).
+        let lU, rU =
+            match mode, IR.stripUnits leftTy, IR.stripUnits rightTy with
+            | Outer, ArrayElem al, ArrayElem ar -> IR.getUnits al.ElemType, IR.getUnits ar.ElemType
+            | _ -> IR.getUnits leftTy, IR.getUnits rightTy
         (if isTupleTy leftTy || isTupleTy rightTy then tupleCompareCheck leftTy rightTy else Ok ())
         |> Result.bind (fun () ->
-            unitRulesForOp op (IR.getUnits leftTy) (IR.getUnits rightTy)
+            unitRulesForOp op lU rU
             |> Result.map (fun _ -> boolResultTy ()))
     | OpAnd | OpOr -> Ok (boolResultTy ())
     | _ ->
@@ -7132,16 +7263,36 @@ Bool) and combine the results, or compare tuples of scalars.")
                 | IRTScalar ETFloat64, _ | _, IRTScalar ETFloat64 -> IRTScalar ETFloat64
                 | IRTScalar ETFloat32, _ | _, IRTScalar ETFloat32 -> IRTScalar ETFloat32
                 | _ -> elemTy
+        // An OUTER product over two arrays combines ELEMENTS, so its unit rule
+        // runs on the element signatures (the same rule gram / the zip arm
+        // use, magnitude guard included) and the result's ELEMENT carries the
+        // outcome: `a [*] b` over meters and seconds is meter*seconds, and
+        // `a [+] b` over them is refused. Reading `getUnits` off the ARRAY
+        // types (always None) accepted the sum and typed the product meters.
+        let outerElemUnits =
+            match mode, lBare, rBare with
+            | Outer, ArrayElem arrL, ArrayElem arrR ->
+                Some (unitRulesForArrayOp "the elements of an outer product" op
+                        (IR.getUnits arrL.ElemType) (IR.getUnits arrR.ElemType) rExpr)
+            | _ -> None
+        match outerElemUnits with
+        | Some (Error e) -> Error e
+        | _ ->
         let bareResult =
             match mode with
             | Outer ->
                 match lBare, rBare with
                 | ArrayElem arrL, ArrayElem arrR ->
-                    // Element type stays the LEFT operand's (the
+                    // Element type stays the LEFT operand's PRIMITIVE (the
                     // arithmetic-Outer convention, matched by lowering's
-                    // kernelRetType = IRTScalar elemTypeL); everything else about
-                    // the result is synthesized fresh -- see mkOuterResult.
-                    mkOuterResult arrL arrR arrL.ElemType
+                    // kernelRetType = IRTScalar elemTypeL), wearing the
+                    // element unit the rule above derived; everything else
+                    // about the result is synthesized fresh -- see mkOuterResult.
+                    let elem =
+                        match outerElemUnits with
+                        | Some (Ok (Some u)) -> IRTUnitAnnotated (IR.stripUnits arrL.ElemType, u)
+                        | _ -> IR.stripUnits arrL.ElemType
+                    mkOuterResult arrL arrR elem
                 | _ -> lBare
             | Elementwise ->
                 match lBare, rBare with
@@ -8443,6 +8594,29 @@ and buildApplyInfo (env: TypeEnv)
             // Rows and params are not 1:1 (virtual expansion, index-param
             // co-iteration, defaults): any complex operand keeps the refusal armed.
             arrayTypes |> List.exists (fun at -> complexElem at.ElemType)
+    let pairElemIsInt (i: int) =
+        let rec intElem (t: IRType) =
+            match IR.stripUnits (env.Subst.Resolve t) with
+            | IRTIdxTagged (inner, _) -> intElem inner
+            | IRTScalar (ETInt32 | ETInt64) -> true
+            | ArrayElem arr -> intElem arr.ElemType
+            | _ -> false
+        [i; i + 1] |> List.exists (fun k ->
+            k >= 0 && k < arrayTypes.Length && intElem arrayTypes.[k].ElemType)
+    let commWitnessError () =
+        if isReynolds || List.isEmpty commGroups || lambdaInfo.Params.Length < 2 then None
+        else
+            lambdaInfo.Params
+            |> List.pairwise
+            |> List.indexed
+            |> List.tryPick (fun (i, (a, b)) ->
+                let declared = commGroups |> List.exists (fun g -> List.contains i g && List.contains (i + 1) g)
+                let provedInv = i < stage3Pairs.Length && stage3Pairs.[i] = Blade.Deduce.PInv
+                if not declared || provedInv || pairElemIsComplex i then None
+                else
+                    Blade.Deduce.witnessSwapAsymmetry a.VarId b.VarId (pairElemIsInt i) lambdaInfo.Body
+                    |> Option.map (fun (x, y, u, v) ->
+                        CommContradictsWitness (a.Name, b.Name, commWitnessText a.Name b.Name x y u v)))
     let contradictsIn (groups: int list list) (wanted: Blade.Deduce.Parity)
                       (needsComplexPair: bool) (mk: string -> string -> TypeError) =
         if List.isEmpty stage3Pairs || List.isEmpty groups then None
@@ -8462,6 +8636,12 @@ and buildApplyInfo (env: TypeEnv)
           lambdaInfo.AntisymGroups, Blade.Deduce.PConj, true, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
         |> List.tryPick (fun (g, wanted, needsComplexPair, mk) ->
                contradictsIn g wanted needsComplexPair mk)
+        // WITNESSED ASYMMETRY (see Deduce.witnessSwapAsymmetry): a declared
+        // comm pair whose body the parity tables leave at PBottom may still
+        // be DISPROVABLE by a concrete counterexample -- `x / y`, a lone `x`,
+        // `x - 2.0 * y`. Same refusal, same stand-down under reynolds (where
+        // comm is an iteration license, not a claim about the bare kernel).
+        |> Option.orElseWith (fun () -> commWitnessError ())
     match stage3Err with
     | Some e -> Error e
     | None ->
@@ -10073,7 +10253,10 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
         // provisional rejections to the kernel-apply second pass (see
         // typedExprHasUnresolvedType). Defaults above type WITHOUT the flag --
         // they are decl-time values and keep decl-time strictness.
-        inferExpr { paramEnv with InLambdaBody = true } body |> Result.bind (fun tBody ->
+        let parallelKernel =
+            paramEnv.InParallelBody
+            || (whereClause |> Option.map (fun w -> not w.Parallel.IsEmpty) |> Option.defaultValue false)
+        inferExpr { paramEnv with InLambdaBody = true; InParallelBody = parallelKernel } body |> Result.bind (fun tBody ->
             // A lambda body is a value-forming boundary: reject a wildcard `_`
             // that escaped into it (its only legitimate role is a compound-index
             // coordinate), rather than letting it reach lowering.
@@ -10326,12 +10509,18 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
-    | ExprKind.ExprLit (LitInt _ as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
+    | ExprKind.ExprLit (LitInt v as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
         // section 4.18.3: untyped int literal acquires the index tag from annotation
         // context. `let i: Idx<3> = 0` works; the 0 becomes Nat<Idx<3>>.
         // Strict in the OTHER direction: a bare `Nat` value cannot flow to
         // Nat<I> position without explicit cast -- but a LITERAL has no
         // pre-committed type, so context-driven typing applies here.
+        // NOT range-checked here: an index-typed VALUE position is also a
+        // foreign-key column, where out-of-range keys are data (`-1` is the
+        // "excluded" key of group_by, sql-group-by/028, 041). The literal
+        // doors that ARE positions -- a subscript, a cast `(7 : I)`, an
+        // argument to a `Nat<I>` parameter -- are checked where they occur.
+        ignore v
         Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitInt _ as lit), (IRTNat _ | IRTUnitAnnotated (IRTNat _, _)) ->
         // Same context-driven rule for Nat targets, unit-annotated or bare:
@@ -10543,6 +10732,61 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
                     // bare-quantity ascription), and the entry-time `resolved`
                     // predates them.
                     | _ -> Error (TypeMismatch (env.Subst.Resolve expected, env.Subst.Resolve tE.Type)))
+
+/// A cast TARGET that is a named integer index type `I` (formalism 3.10):
+/// its tag and, when it has one, its static extent.
+and internal indexCastTarget (env: TypeEnv) (annoTy: IRType) : (string * int64 option) option =
+    match env.Subst.Resolve annoTy with
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed tag) ->
+        let ext =
+            match lookupTypeDef tag env with
+            | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                Blade.IRPrint.tryEvalIntIR idx.Extent
+            | _ -> None
+        // An EnumIdx's int keys are raw keys, not positions -- not a cast target
+        // this rule knows how to check.
+        (match lookupTypeDef tag env with
+         | Some (TDIEnumIdx _) -> None
+         | _ -> Some (tag, ext))
+    | _ -> None
+
+/// `(e : I)` for a named integer index type I -- the cast into an index
+/// space, and the ONE place a plain integer becomes an index value:
+///   * a LITERAL is a known position: range-checked against I's static
+///     extent at compile time (`(7 : Lat)` over Idx<3> is refused);
+///   * an index value of I already, or a still-open variable (an
+///     unannotated kernel parameter the ascription pins), unifies as before;
+///   * a plain INTEGER value is a CHECKED conversion: the value is bound
+///     once and guarded `0 <= v < extent(I)` at run time (BL8006), in both
+///     lanes -- the guard is an ordinary constraint check, so codegen and the
+///     interpreter need nothing new. It needs I's extent at compile time;
+///     without one the cast is refused rather than left unchecked.
+/// Everything else (a DIFFERENT index type, a float) is the mismatch it was.
+and internal inferIndexCast (env: TypeEnv) (e: Expr) (annoTy: IRType) (tag: string) (ext: int64 option) : TypeResult<TypedExpr> =
+    let litVal =
+        match e.Kind with
+        | ExprKind.ExprLit (LitInt v) -> Some v
+        | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt v) }) -> Some (-v)
+        | _ -> None
+    match litVal with
+    | Some v when v < 0L -> Error (SubscriptOutOfRange (v, None, tag))
+    | Some v when (match ext with Some n -> v >= n | None -> false) ->
+        Error (SubscriptOutOfRange (v, ext, tag))
+    | Some _ ->
+        checkExpr env annoTy e |> Result.map (fun tE -> { tE with Type = annoTy })
+    | None ->
+    inferExpr env e |> Result.bind (fun tE ->
+        let span = if e.Span.StartLine > 0 then e.Span else tE.Span
+        match IR.stripUnits (env.Subst.Resolve tE.Type) with
+        | IRTScalar (ETInt32 | ETInt64) ->
+            match ext with
+            | None ->
+                Error (Other $"a cast of a computed integer to the index type '{tag}' is a checked conversion, and checking it needs '{tag}'s extent at compile time, which is not known here. Iterate with range<{tag}> to produce '{tag}' values, or give '{tag}' a static extent.")
+            | Some n -> Ok (checkedIndexConversion env tE annoTy tag n span)
+        | _ ->
+            match unify env.Subst tE.Type annoTy with
+            | Ok () -> Ok { tE with Type = annoTy }
+            | Error _ -> Error (TypeMismatch (env.Subst.Resolve annoTy, env.Subst.Resolve tE.Type)))
 
 // ---- Shared helpers for both let paths (let-as-expression and top-level DeclLet) ----
 
@@ -13003,6 +13247,11 @@ and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: 
     match annot with
     | None -> Ok []
     | Some ty ->
+        // Through ALIASES: `type Sal = Float64<psu, min=0.0>` keeps its bound
+        // only in the surface body (lowering erases min=/max=), so `let s: Sal`
+        // must look the alias up to see it -- without this the inline spelling
+        // aborted BL8001 and the aliased one printed -1.
+        let ty = resolveSurfaceAlias env 8 ty
         // `Ast.boundedConjuncts` is the ONE definition of what a bounded
         // annotation asserts; the side labels are recovered in parallel from
         // the same node so a one-sided annotation still names its endpoint.
@@ -13024,6 +13273,50 @@ and synthesizeBoundChecks (env: TypeEnv) (annot: TypeExpr option) (subjectName: 
                     let msg = $"Bound violation in '{subjectName}' ({side})"
                     mkTypedSpan (TExprConstraintCheck (tCond, "BL8001", msg)) IRTUnit tCond.Span))
             |> sequenceResults
+
+/// Runtime bound guards on a FUNCTION's bounded parameters (checked on entry)
+/// and bounded return (checked on the value the body produces). The body is
+/// rewritten to
+///
+///     { <param guards>; let __ret_f = <body>; <return guards>; __ret_f }
+///
+/// only when some guard exists, so an unbounded signature keeps its body node
+/// untouched. `bodyEnv` has the parameters bound.
+and internal wrapBoundedSignatureChecks (bodyEnv: TypeEnv) (funcDecl: FunctionDecl) (tBody: TypedExpr) : TypeResult<TypedExpr> =
+    if funcDecl.IsStatic then Ok tBody else
+    let span = tBody.Span
+    let synAt k : Expr = { Kind = k; Span = span }
+    let paramChecks =
+        funcDecl.Params
+        |> List.map (fun p ->
+            match p.Type with
+            | Some pty ->
+                synthesizeBoundChecks bodyEnv (Some pty) $"parameter {p.Name} of {funcDecl.Name}" (synAt (ExprVar p.Name))
+            | None -> Ok [])
+        |> sequenceResults
+        |> Result.map List.concat
+    paramChecks |> Result.bind (fun pChecks ->
+    let retName = $"__ret_{funcDecl.Name}"
+    let retId = bodyEnv.Builder.FreshId()
+    let retEnv = bindVarSimple retName retId tBody.Type bodyEnv
+    (match funcDecl.ReturnType with
+     | Some rty -> synthesizeBoundChecks retEnv (Some rty) $"the return value of {funcDecl.Name}" (synAt (ExprVar retName))
+     | None -> Ok [])
+    |> Result.map (fun rChecks ->
+        if pChecks.IsEmpty && rChecks.IsEmpty then tBody
+        else
+            let body =
+                if rChecks.IsEmpty then tBody
+                else
+                    let tb : TypedBinding = {
+                        Name = retName; VarId = retId; Type = tBody.Type
+                        Identity = None; IsMutable = false; Value = tBody
+                        SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                    mkTypedSpan (TExprBlock (TStmtLet tb :: (rChecks |> List.map TStmtExpr),
+                                             Some (mkTypedSpan (TExprVar (retName, retId, None)) tBody.Type span)))
+                                tBody.Type span
+            if pChecks.IsEmpty then body
+            else mkTypedSpan (TExprBlock (pChecks |> List.map TStmtExpr, Some body)) tBody.Type span))
 
 /// Resolve a surface type through ORDINARY alias chains. Distinct from
 /// `lowerTypeExpr`'s resolution, which answers in IRType and has therefore
@@ -14027,6 +14320,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     for kv in c.MutParams do e.MutParamPositions.[$"{alias}.{kv.Key}"] <- kv.Value
                     for kv in c.CoIterObligations do e.FuncCoIterObligations.[$"{alias}.{kv.Key}"] <- kv.Value
                     for kv in c.UnitTransforms do e.FuncUnitTransform.[$"{alias}.{kv.Key}"] <- kv.Value
+                    for kv in c.UnitEqualities do e.FuncUnitEqualities.[$"{alias}.{kv.Key}"] <- kv.Value
                     for kv in c.Constraints do e.FuncConstraints.[$"{alias}.{kv.Key}"] <- kv.Value
                     e
                 | ImportSelective names ->
@@ -14077,6 +14371,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             put e.MutParamPositions c.MutParams
                             put e.FuncCoIterObligations c.CoIterObligations
                             put e.FuncUnitTransform c.UnitTransforms
+                            put e.FuncUnitEqualities c.UnitEqualities
                             put e.FuncConstraints c.Constraints
                     e
             | None ->
@@ -14104,6 +14399,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     env.MutParamPositions.Remove funcDecl.Name |> ignore
     env.FuncCoIterObligations.Remove funcDecl.Name |> ignore
     env.FuncUnitTransform.Remove funcDecl.Name |> ignore
+    env.FuncUnitEqualities.Remove funcDecl.Name |> ignore
     env.FuncConstraints.Remove funcDecl.Name |> ignore
     env.FuncDefaults.Remove funcDecl.Name |> ignore
     env.FuncDefaultCaptures.Remove funcDecl.Name |> ignore
@@ -14294,6 +14590,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
 
     let mutable bodyEnv = enterCallableBody envWithFunc
+    if funcDecl.WhereClause |> Option.map (fun w -> not w.Parallel.IsEmpty) |> Option.defaultValue false then
+        bodyEnv <- { bodyEnv with InParallelBody = true }
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
         let assign = match p.Mutability with
@@ -14469,6 +14767,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // and the unify just binds it. Either way we propagate the
             // result so genuine mismatches surface here rather than
             // exploding at codegen.
+            //
+            // An UNANNOTATED parameter the body uses as a SUBSCRIPT is an
+            // index: see pinSubscriptParams (formalism 3.10).
+            pinSubscriptParams env (funcDecl.Params |> List.map (fun p -> p.Type.IsNone)) typedParams tBody
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
             // The wreath gate again, on the RESOLVED return type. The one at
             // the signature above sees only DECLARED annotations; an
@@ -14682,6 +14984,30 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                          antisymGroups, Blade.Deduce.PConj, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
                    else [])
                 |> List.tryPick (fun (g, wanted, mk) -> declContradiction g wanted mk)
+                // The witnessed-asymmetry twin of the lambda-kernel seam (see
+                // Deduce.witnessSwapAsymmetry): a declared comm pair the parity
+                // tables leave unproved, disproved by a concrete counterexample.
+                // Real elements only (the evaluator has no complex numbers);
+                // a generic/unresolved element evaluates as Float.
+                |> Option.orElseWith (fun () ->
+                    if List.isEmpty commGroups || bodyElemIsComplex then None
+                    else
+                        let isIntTy (t: IRType) =
+                            match IR.stripUnits (env.Subst.Resolve t) with
+                            | IRTScalar (ETInt32 | ETInt64) -> true
+                            | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> true
+                            | _ -> false
+                        typedParams
+                        |> List.pairwise
+                        |> List.indexed
+                        |> List.tryPick (fun (i, (a, b)) ->
+                            let declared = commGroups |> List.exists (fun g -> List.contains i g && List.contains (i + 1) g)
+                            let provedInv = i < deducedPairs.Length && deducedPairs.[i] = Blade.Deduce.PInv
+                            if not declared || provedInv then None
+                            else
+                                Blade.Deduce.witnessSwapAsymmetry a.VarId b.VarId (isIntTy a.Type && isIntTy b.Type) tBody
+                                |> Option.map (fun (x, y, u, v) ->
+                                    CommContradictsWitness (a.Name, b.Name, commWitnessText a.Name b.Name x y u v))))
             match commContradiction with
             | Some e -> Error e
             | None ->
@@ -14763,11 +15089,18 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             let effects = effectsOfBody env (Some funcVarId) tBody
             env.FuncEffects.[funcVarId] <- effects
             env.FuncSigVarRange.[funcVarId] <- (sigVarLo, env.Subst.NextId)
+            // Bounded PARAMETERS and RETURN (`x: Sal`, `-> Float64<min=0.0>`,
+            // through aliases too): runtime guards at entry and at the return,
+            // the same BL8001 guards a bounded `let` gets. Wrapped LAST, after
+            // every deduction has read the unguarded body.
+            match wrapBoundedSignatureChecks bodyEnv funcDecl tBody with
+            | Error e -> Error e
+            | Ok tBodyGuarded ->
             let tf : TypedFunctionDecl = {
                 Name = funcDecl.Name; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams
                 Params = resolvedParams; ReturnType = resolvedRet
-                WhereClause = funcDecl.WhereClause; Body = tBody
+                WhereClause = funcDecl.WhereClause; Body = tBodyGuarded
                 CommGroups = commGroups; IsStatic = funcDecl.IsStatic
                 NameSpan = funcDecl.NameSpan
                 Effects = effects
@@ -15001,6 +15334,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ | TyBoundedIdx _
             | TyLeafIdx _ | TyNodeIdx _ ->
                 let idx = indexRecordFor env chasedBody
+                // An extent is a COUNT. The literal spellings are refused by
+                // the IndexTypeValidator; this catches a computed one (`let
+                // static n = 0 - 4; type I = Idx<n>`), which folds only here.
+                match (match idx.Extent with IROrbitClass _ -> None | e -> Blade.IRPrint.tryEvalIntIR e) with
+                | Some v when v < 0L ->
+                    Error (Other $"type '{name}': an index type's extent is a count of positions and must be non-negative, but it folds to {v}.")
+                | _ ->
                 // Nominative-alias rule: the alias name BECOMES the identity
                 // tag. Two exceptions, both reachable only from stage 3's
                 // `type S = SymIdx<k, IrrepsIdx<spec>>` (no legacy form of

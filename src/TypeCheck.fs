@@ -47,6 +47,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     env.MutParamPositions.Clear()
     env.FuncCoIterObligations.Clear()
     env.FuncUnitTransform.Clear()
+    env.FuncUnitEqualities.Clear()
     env.FuncConstraints.Clear()
     env.FuncDefaults.Clear()
     env.FuncDefaultCaptures.Clear()
@@ -203,7 +204,21 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
 
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
-    let zonked = zonkModule currentEnv.Subst typedModule
+    // The zonk walk also retypes index POSITIONS and guards unproven
+    // subscripts into named index types (Zonk.fs, SUBSCRIPT POSITIONS AND
+    // GUARDS); its context carries the builder for guard bindings.
+    let zonked =
+        let saved = subscriptGuardCtx.Value
+        subscriptGuardCtx.Value <-
+            Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
+                   Positions = System.Collections.Generic.HashSet<IRId>()
+                   IndexExtent = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                           tryEvalIntIR idx.Extent
+                       | _ -> None }
+        try zonkModule currentEnv.Subst typedModule
+        finally subscriptGuardCtx.Value <- saved
     // Late direct-application rank check, on the zonked tree -- see
     // collectAppRankErrors. Suppressed when the module already has errors:
     // a failed decl binds its name to a fresh var (the cascade guard above),
@@ -225,6 +240,15 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             zonked.Decls |> List.collect declExprs
                          |> List.collect (collectAppTreeErrors currentEnv.Subst)
         else []
+    // The subscript judgment's post-zonk half (collectSubscriptErrors): the
+    // class and nominal rules over every subscript and every index-typed
+    // call argument, now that no kernel parameter is still open. Same
+    // cascade suppression as the rank sweep.
+    let subscriptErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors then
+            zonked.Decls |> List.collect declExprs
+                         |> List.collect (collectSubscriptErrors currentEnv)
+        else []
     // Misplaced provider writes: structural, inference-independent (an
     // unresolved receiver simply fails the IRTNamed match), so unlike the rank
     // sweep it runs even when the module already has errors.
@@ -237,7 +261,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let groupKeysErrors =
         zonked.Decls |> List.collect declGroupKeysRoots
                      |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ writeErrors @ groupKeysErrors)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ writeErrors @ groupKeysErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()
@@ -281,6 +305,7 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
                 { MutParams = snap finalEnv.MutParamPositions
                   CoIterObligations = snap finalEnv.FuncCoIterObligations
                   UnitTransforms = snap finalEnv.FuncUnitTransform
+                  UnitEqualities = snap finalEnv.FuncUnitEqualities
                   Constraints = snap finalEnv.FuncConstraints }
         }
         moduleExports <- Map.add moduleName export moduleExports

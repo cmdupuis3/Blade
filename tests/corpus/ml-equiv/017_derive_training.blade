@@ -16,11 +16,9 @@ import ad as ad
 // trajectory; the final weights are its last row. The loss fold itself is an
 // additive `reduce` (grad differentiates it exactly).
 //
-// BL4003: the state-vector idiom reads its slots with bare integer literals
-// (`s(0)..s(3)` unpacking the weights, `wtraj(1)..` pulling the rows back out).
-// Each is a real untagged subscript with a real fix -- `(0 : State)` -- but one
-// cast per slot is pure noise at this width, so the note is pinned, not taken.
-// WARN: BL4003
+// The state-vector idiom reads its slots with bare integer literals; each is
+// checked against State's static extent at compile time (formalism 3.10), so
+// the literal needs no cast and draws no untagged-integer note.
 // ============================================================================
 let static SIN = [(0, 0, 2), (1, 1, 1)]
 let static SOUT = [(0, 0, 1), (1, 1, 2)]
