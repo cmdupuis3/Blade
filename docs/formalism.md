@@ -192,8 +192,9 @@ unit (as do comparisons, branch results, and a transcendental's argument
 being dimensionless), so `add(meters, seconds)` is BL3006 at the call.
 **Bounded primitives** (`Float<min=0, max=1>`) carry runtime-checked bounds
 and compose with units; the bound is checked wherever the annotation stands
--- a `let`, a function parameter (on entry), a function return -- including
-through a type alias (`type Sal = Float64<psu, min=0.0>`).
+-- a `let`, an expression ascription `e : T`, a function parameter (on entry),
+a function return -- including through a type alias
+(`type Sal = Float64<psu, min=0.0>`).
 **Mutually constrained types** (`type V1 ... and V2 ... where <expr>`) require
 joint assignment and assert (not solve) the constraint at runtime.
 

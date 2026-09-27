@@ -23,7 +23,7 @@ corpus wins.
 | Complex conjugates | `conj(x)` | Core |  |
 | Units of measure | `Unit meters`, `Float<velocity>`,<br> unit arithmetic | Core | Annotations on primitive types only |
 | Unit-carrying type variables | `T<time>^r`, `T<time>` | Core | The caret marks the head as a VARIABLE rather than a named type; `^0` is optional, so `T<time>` and `T<time>^0` are the same type (one lowering, so units, unification, monomorphization and diagnostics cannot drift between them). A misspelled unit is BL3015 in either spelling. A head naming a real type keeps its ordinary meaning |
-| Bounded primitives | `Float<min=0, max=1>`, `Float<psu, min=0.0>` | Core | Runtime-checked bounds (BL8001), composing with units; checked at a `let` annotation, a function parameter (on entry) and return, including through a type alias. An expression ascription `e : Bounded` is NOT checked today |
+| Bounded primitives | `Float<min=0, max=1>`, `Float<psu, min=0.0>` | Core | Runtime-checked bounds (BL8001), composing with units; checked at a `let` annotation, an expression ascription `e : Bounded`, a function parameter (on entry) and return, including through a type alias |
 | Mutually constrained types | `type V1 ... and V2 ...`<br>`where <constraint>` | Core | Joint assignment required |
 | Boolean Operators |  `&&`/`\|\|`/`!` | Core | |
 

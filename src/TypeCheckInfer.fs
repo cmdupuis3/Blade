@@ -2001,8 +2001,29 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         match indexCastTarget env annoTy with
         | Some (tag, ext) -> inferIndexCast env e annoTy tag ext
         | None ->
-        checkExpr env annoTy e |> Result.map (fun tE ->
-            { tE with Type = annoTy })
+        checkExpr env annoTy e |> Result.bind (fun tE ->
+            let tE = { tE with Type = annoTy }
+            // A BOUNDED annotation (`-1.0 : Salinity`, Salinity =
+            // Float64<psu, min=0.0>) asserts the bound exactly as a `let`
+            // annotation does, so it gets the same guards: the value is bound
+            // once and checked (BL8001), then yielded. Unbounded ascriptions
+            // keep their node untouched.
+            let span = if e.Span.StartLine > 0 then e.Span else tE.Span
+            let ascName = $"__asc{env.Builder.FreshId()}"
+            let ascId = env.Builder.FreshId()
+            let ascEnv = bindVarSimple ascName ascId annoTy env
+            let subject = match tyAnno with TyNamed (n, []) -> $": {n}" | _ -> "an ascription"
+            synthesizeBoundChecks ascEnv (Some tyAnno) subject { Kind = ExprKind.ExprVar ascName; Span = span }
+            |> Result.map (fun checks ->
+                if checks.IsEmpty then tE
+                else
+                    let tb : TypedBinding = {
+                        Name = ascName; VarId = ascId; Type = annoTy
+                        Identity = None; IsMutable = false; Value = tE
+                        SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                    mkTypedSpan (TExprBlock (TStmtLet tb :: (checks |> List.map TStmtExpr),
+                                             Some (mkTypedSpan (TExprVar (ascName, ascId, None)) annoTy span)))
+                                annoTy span))
 
     // ---- Arity special forms ----
     | ExprKind.ExprArity paramName -> Ok (mkTyped (TExprArity paramName) (IRTScalar ETInt64))

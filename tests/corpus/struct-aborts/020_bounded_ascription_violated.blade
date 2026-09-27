@@ -1,0 +1,8 @@
+// TEST: Bounded Ascription Violated (aborts)
+// An expression ascription `e : Salinity` asserts the bound exactly as a
+// `let` annotation does (015/016); it used to be checked in neither lane.
+// ABORT: Bound violation in ': Salinity' (min)
+Unit psu
+type Salinity = Float<psu, min=0.0>
+let z = -2.0
+let bad = z : Salinity
