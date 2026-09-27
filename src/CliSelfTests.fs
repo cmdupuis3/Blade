@@ -140,6 +140,14 @@ let runCliSmokeTests () : TH.BlockResult =
              | Ok sel ->
                  recordCase "print: an unknown name splices a refusal naming it and the real bindings"
                      (sel.Contains "#error" && sel.Contains "totl" && sel.Contains "x, y, z") ""))
+    // A name that IS a binding but never prints (a deferred loop value) is
+    // refused the same way: asked for by name, silence is the typo's twin.
+    withPrint (Some "w") (fun () ->
+        match cppOf "print_deferred" (printSrc + "let w = method_for(z) <@> lambda(v) -> v * 2.0\n") with
+        | Error e -> record "print: a deferred binding refuses" TH.Fail e
+        | Ok sel ->
+            recordCase "print: selecting a never-materialized loop value splices a refusal"
+                (sel.Contains "#error" && sel.Contains "deferred loop value" && sel.Contains "|> compute") "")
     // The two lanes agree under one pin: the interpreter prints the same set.
     withPrint (Some "y") (fun () ->
         match Blade.Lowering.lower printSrc with
@@ -1415,9 +1423,9 @@ let (a, b) = pair(7.0)
         | [panic; after; probe] when code = 0
                                      && panic.Contains "\"kept\":false" && panic.Contains "\"exitCode\":1"
                                      && panic.Contains "\"lane\":\"interp\"" && panic.Contains "\"bindings\":[]"
-                                     && panic.Contains "\"stderr\":\"error[BL8007]"
+                                     && panic.Contains "\"stderr\":\"error[BL8013]"
                                      && panic.Contains "\"severity\":\"error\",\"line\":1,\"col\":1"
-                                     && panic.Contains "integer division or modulo by zero"
+                                     && panic.Contains "integer division by zero"
                                      && after.Contains "\"kept\":true"
                                      && probe.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
             record name TH.Pass ""

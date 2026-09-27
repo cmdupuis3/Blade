@@ -1,0 +1,12 @@
+// TEST: Leading Minus At Statement Column (rejects)
+// ERROR: BL1001 @ 11:1
+// ERROR-CONTAINS: indented past the start of that statement
+// A line that opens with a binary operator continues the expression above
+// only when it is indented past the start of that statement (formalism
+// §15.1). At the statement's own column it is ambiguous -- `let y = x` then
+// `- 3` used to be two statements: y = 5 and a printed bare -3, silently --
+// so it is refused. Indent it to subtract (see basic/064), or write `(-3)`
+// for a new statement.
+let x = 5
+let y = x
+- 3

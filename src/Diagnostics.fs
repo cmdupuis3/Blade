@@ -284,6 +284,14 @@ module Codes =
             // specialization shrink past the base arm. The condition belongs
             // INSIDE the chosen arm's body.
             "BL3021", "undecidable specialization-index match arm"
+            // BL3022 / BL3023: WARNINGS, static coverage facts about a match's
+            // arm list (TypeCheckSupport.matchCoverageWarnings). An arm after
+            // an unguarded catch-all (or after every constructor) can never
+            // be selected; a match over a variant/enum type that names
+            // neither every constructor nor a catch-all aborts at run time
+            // (BL8002) on the missing ones.
+            "BL3022", "unreachable match arm"
+            "BL3023", "non-exhaustive match over a variant type"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -455,6 +463,19 @@ module Codes =
             // (dense, compound + mask, stream open), and mirrored by the
             // interpreter's materializeProviderRead.
             "BL8012", "provider shape mismatch"
+            // An integer operation with no integer answer: `/` or `%` by zero,
+            // or `^` with a negative exponent. The ARITHMETIC CONTRACT
+            // (docs/formalism.md section 2.4): raised identically by
+            // blade_rt::idiv / imod / ipow (blade_runtime.hpp), the LLVM shim
+            // (blade_llvm_shim.c) and the interpreter (Interp/Numerics.fs).
+            // The compiled program used to die with a silent
+            // STATUS_INTEGER_DIVIDE_BY_ZERO and the interpreter borrowed BL8007.
+            "BL8013", "integer arithmetic fault"
+            // A float -> integer cast (`Int64(floor(x))`) of NaN, an infinity,
+            // or a value outside the target width. Same three-lane contract;
+            // the compiled lane used to answer x86's INT_MIN sentinel while
+            // the interpreter saturated.
+            "BL8014", "float-to-integer conversion out of range"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

@@ -343,6 +343,13 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
   "optimize" them into cached values.
 - The interpreter (`src/Interp/`) and codegen are differential twins: behavior changes must
   land in both or `test interp` / `diff-oracle` gates will catch the drift.
+- Scalar arithmetic has ONE written contract, `docs/formalism.md` §2.4 "Arithmetic semantics":
+  integer ops wrap; `/` `%` by zero and a negative integer exponent panic BL8013; a float→int
+  cast of NaN/out-of-range panics BL8014; integer `^` is exact; transcendental intrinsics are
+  the platform libm AT RUN TIME (`blade_libm::`, never constant-folded). A change to it lands
+  in every lane at once: `CodeGenExprSupport.renderContractBinOp`/`renderUnaryOpTyped` +
+  `src/cpp/blade_runtime.hpp`, `src/Interp/Numerics.fs`, `src/EmitLlvm.fs` +
+  `src/cpp/blade_llvm_shim.c`, and `StaticEval.evalBinOp`.
 - Diagnostics have stable `BLxxxx` codes (`src/Diagnostics.fs`); corpus tests pin them, so
   changing a code or message means updating pins in the same change.
 

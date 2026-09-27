@@ -46,7 +46,8 @@ type EffectSummary = {
     ReadsExternal: bool
     /// May abort at run time: a bounds check (BL8006), an empty reduction
     /// (BL8003), a singular solve (BL8007), a non-exhaustive match (BL8002),
-    /// a value constraint (BL8001), a domain-checked intrinsic (BL8008).
+    /// a value constraint (BL8001), a domain-checked intrinsic (BL8008), an
+    /// integer arithmetic fault or float-to-int conversion (BL8013 / BL8014).
     MayFail: bool
     /// Calls something whose effects are not known: a lambda-valued
     /// variable, a higher-order parameter, a callee with no summary.

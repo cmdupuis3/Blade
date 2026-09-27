@@ -854,10 +854,15 @@ and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticVal
     | OpAdd, SVInt a, SVInt b -> Ok (SVInt (a + b))
     | OpSub, SVInt a, SVInt b -> Ok (SVInt (a - b))
     | OpMul, SVInt a, SVInt b -> Ok (SVInt (a * b))
-    | OpDiv, SVInt a, SVInt b when b <> 0L -> Ok (SVInt (a / b))
-    | OpDiv, SVInt _, SVInt _ -> Error "Static evaluation: division by zero"
-    | OpMod, SVInt a, SVInt b when b <> 0L -> Ok (SVInt (a % b))
-    | OpMod, SVInt _, SVInt _ -> Error "Static evaluation: modulo by zero"
+    // The arithmetic contract (docs/formalism.md section 2.4) at compile time:
+    // MIN / -1 wraps to MIN and MIN % -1 is 0 (.NET would throw
+    // OverflowException out of the compiler); a zero divisor refuses.
+    | OpDiv, SVInt _, SVInt 0L -> Error "Static evaluation: division by zero"
+    | OpDiv, SVInt a, SVInt -1L -> Ok (SVInt (0L - a))
+    | OpDiv, SVInt a, SVInt b -> Ok (SVInt (a / b))
+    | OpMod, SVInt _, SVInt 0L -> Error "Static evaluation: modulo by zero"
+    | OpMod, SVInt _, SVInt -1L -> Ok (SVInt 0L)
+    | OpMod, SVInt a, SVInt b -> Ok (SVInt (a % b))
     // Float arithmetic
     | OpAdd, SVFloat a, SVFloat b -> Ok (SVFloat (a + b))
     | OpSub, SVFloat a, SVFloat b -> Ok (SVFloat (a - b))

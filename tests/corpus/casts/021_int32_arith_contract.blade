@@ -1,0 +1,20 @@
+// TEST: Int32 Arith Contract
+// ============================================================================
+// The integer rows of the arithmetic contract at Int32 width
+// (docs/formalism.md section 2.4): exact `^` wrapping modulo 2^32, and
+// MIN / -1 wrapping to MIN.
+
+let xs: Array<Int32 like Idx<2>> = [Int32(3), Int32(-4)]
+let b = reduce(xs, (+)) + Int32(4)
+let p = b ^ Int32(19)
+let w = Int32(2) ^ Int32(31)
+let m = Int32(-2147483647) - Int32(1)
+let neg = b - Int32(4)
+let q = m / neg
+let r = m % neg
+let ys = xs ^ Int32(3)
+// EXPECT: p = 1162261467
+// EXPECT: w = -2147483648
+// EXPECT: q = -2147483648
+// EXPECT: r = 0
+// EXPECT: ys = [27, -64]

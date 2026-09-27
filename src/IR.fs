@@ -2175,10 +2175,24 @@ let irNodeMayAbort (e: IRExpr) : bool =
     // -- cannot abort on their own ------------------------------------------
     | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero | IROpaqueExtent
     | IRArity _ | IRRange _ | IRVirtualReverse _ -> false
-    // Integer `/` and `%` by zero abort (the interpreter's BL8007; SIGFPE in
-    // the binary). The node is judged without its operand types, so every
-    // division / modulo answers yes -- a float one only costs a fusion.
+    // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
+    // contract of docs/formalism.md section 2.4). The node is judged without
+    // its operand types, so a division / modulo answers yes unless its
+    // divisor is a literal that cannot fault -- any float, or a nonzero
+    // integer (MIN / -1 wraps) -- so the `x / 2.0` and `n / 2` idioms stay
+    // fusible; a float one with a computed divisor only costs a fusion.
+    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitFloat _ | IRLitFloat32 _)) -> false
+    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitInt n)) -> n = 0L
     | IRBinOp (_, (IRDiv | IRMod), _, _) -> true
+    // Integer `^` with a negative exponent aborts (BL8013). A literal
+    // exponent that is a nonnegative integer or any float cannot, which
+    // keeps the `x ^ 2` idiom fusible; anything else answers yes.
+    | IRBinOp (_, IRCaret, _, (IRLit (IRLitFloat _ | IRLitFloat32 _))) -> false
+    | IRBinOp (_, IRCaret, _, IRLit (IRLitInt n)) -> n < 0L
+    | IRBinOp (_, IRCaret, _, _) -> true
+    // A cast to an integer type aborts on a NaN / out-of-range float
+    // operand (BL8014). Judged without the operand type, like `/`.
+    | IRUnaryOp (IRCast (ETInt64 | ETInt32), _) -> true
     | IRBinOp _ | IRComplex _ | IRFma _ -> false
     | IRUnaryOp (IRMath ("lgamma" | "digamma"), _) -> true
     | IRUnaryOp _ -> false

@@ -106,13 +106,43 @@ spelled (a rounded value bound to a name and cast later refuses on
 purpose). Array operands lift elementwise like `cos(A)`; `Int64(floor(A))`
 fuses the rounding and the cast into one kernel.
 
-Integer `+`, `-` and `*` wrap: Int32 and Int64 arithmetic is two's
-complement modulo 2³² / 2⁶⁴ in every lane (the interpreter's .NET integers
-are unchecked; the C++ build passes `-fwrapv`; the LLVM lane emits no
-`nsw`). So `x + 1 > x` is `false` at the maximum, and a wrapped sum still
-carries the true value modulo 2⁶⁴ (`proofs/BladeNumericContract.v`,
-`int64_observation_exact`). Integer `/` and `%` truncate toward zero; a zero
-divisor is a runtime fault (BL8007 in the interpreter), not a wrapped value.
+**Arithmetic semantics — one contract, every lane.** The compiled program
+(g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane
+(`src/EmitLlvm.fs` + `src/cpp/blade_llvm_shim.c`) and compile-time static
+evaluation compute the same value, or fail with the same code (a `let static`
+fold refuses at compile time instead):
+
+| Operation | Result |
+|---|---|
+| Int `+` `-` `*` | two's complement modulo 2³² / 2⁶⁴ — WRAPS (interpreter: unchecked .NET integers; C++: `-fwrapv`; LLVM: no `nsw`). `x + 1 > x` is `false` at the maximum, and a wrapped sum still carries the true value modulo 2⁶⁴ (`proofs/BladeNumericContract.v`, `int64_observation_exact`) |
+| Int `/` `%` | truncate toward zero. A zero divisor PANICS **BL8013** (`integer division by zero` / `integer modulo by zero`). `MIN / -1` wraps to `MIN` and `MIN % -1` is `0` (C++ UB, an x86 trap, a .NET exception — defined here) |
+| Int `^` Int | EXACT, wrapping like `*` (square-and-multiply modulo 2ʷ); `0 ^ 0 = 1`; a negative exponent PANICS **BL8013** (`integer power with a negative exponent`) — convert to Float64 first for a real power |
+| Real `^` | `x * x` when the exponent is exactly 2, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double |
+| float → int cast (`Int64(floor(x))`) | truncation of a value the target can hold; NaN, ±∞, or anything outside `[-2ʷ⁻¹, 2ʷ⁻¹)` PANICS **BL8014** — never a saturated value or a platform sentinel |
+| Int64 → Int32 cast | wraps (two's complement) |
+| transcendental intrinsics (`exp log log10 sin cos tan sinh cosh tanh asin acos atan atan2`, and `pow`) | the PLATFORM libm's value, computed AT RUN TIME — never folded at compile time, so a literal argument and the same value read from an array agree. A Float32 operand is evaluated by the double function and rounded once to Float32; an integer operand widens to double |
+| `sqrt` `floor` `ceil` `abs` `fma` | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
+| integer literals | exact, including array-literal leaves (never routed through a double) |
+
+A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) with
+the call stack; nothing in the table is undefined behavior in any lane. The
+fast paths are kept by construction: a nonzero literal divisor other than
+`-1` compiles to a plain `/`, a literal nonnegative exponent to a multiply
+chain (`x ^ 2` is one multiply in both the integer and the real case), and
+the libm functions are declared `const` under a non-builtin name
+(`blade_libm::`, `src/cpp/blade_runtime.hpp`), so a loop-invariant call is
+still hoisted — only the fold is gone.
+
+"The platform libm" is a per-platform claim: the interpreter P/Invokes the
+same library the compiled program links (ucrtbase on Windows), so the
+differential gates are byte-exact on one machine; two operating systems may
+legitimately differ in a transcendental's last ulp. Outside the contract,
+documented rather than hidden: complex transcendentals and complex `^`
+(libstdc++'s own algorithms; the interpreter declines what it cannot
+reproduce), CUDA device bodies (device libm, plain integer `/`), a host
+compiler without asm labels (MSVC, the nvcc host pass: `blade_libm::`
+forwards to `std::` there), and `lgamma`/`digamma`, which are Blade's own
+series on both sides (BL8008 outside `x > 0`).
 
 Mixed-type arithmetic still promotes — float beats int, wider beats
 narrower within a category, complex promotes componentwise, and a mixed
@@ -1650,6 +1680,81 @@ Newlines separate statements at top level and in blocks; ignored inside
 `()`/`[]`/`{}`; consecutive newlines collapse; `;` optional. Bodies after `=`
 (functions) or `->` (lambdas) are inline expressions unless `{` opens a block;
 a block's final expression is its value.
+
+**Statement terminators.** A statement or declaration ends at a newline, a
+`;`, or a closer (`}` `)` `]` `|` `,`, end of file). Anything else on the
+same line is refused (BL1001): two expressions side by side have no meaning --
+there is no implicit multiplication and application needs parentheses -- so
+`let a = 1 b` and `{ let a = 2.0 x ... }` are errors, not a statement plus a
+silently printed or discarded `b`/`x`. Inside braces, where the lexer has
+dropped the newline tokens, "on a later line" is decided from source lines.
+`;` separates statements on one line at top level as in blocks.
+
+**Line continuation.** A line that opens with a binary operator (`+ - * / %
+^ == != < <= > >= && || :: ..`, the bracketed outer forms, or any combinator
+such as `|>` `<@>` `>>@`) continues the expression on the line above, as if
+the line break were a space -- it joins the innermost expression still open,
+so after `if c then a else b` it extends `b`. For the arithmetic / comparison
+/ logical operators the line must be indented PAST the column where the
+statement began; at that column (or left of it) the line is refused (BL1001),
+because `let y = x` over `- 3` reads as two statements to some readers and as
+`x - 3` to others. Write `(-3)` for a statement that begins with a negation.
+Inside `()`/`[]` opened within the statement a line break is always
+whitespace. A line opening with `(` or `[` begins a new statement (it never
+calls or indexes the line above); `.field` chains are line-insensitive.
+
+**Operator precedence**, loosest first (`e : T` is the postfix type
+annotation):
+
+| Level | Operators | Associativity |
+|---|---|---|
+| assignment | `=` `+=` `-=` `*=` `/=` | right |
+| annotation | `e : T` | postfix |
+| named infix | `:name:` | left |
+| pipeline | `\|>` `\|@>` | left |
+| choice | `<\|>` `<\|:>` | left |
+| parallel | `<&>` `<&!>` | left |
+| bind / compose | `>>=` `>>@` `@>>` `>>` | left |
+| apply | `<@>` `<$>` | left |
+| array product | `<*>` | left |
+| or | `\|\|` `[\|\|]` | left |
+| and | `&&` `[&&]` | left |
+| equality | `==` `!=` `[==]` `[!=]` | none |
+| comparison | `<` `<=` `>` `>=` (and `[<]` ...) | none |
+| cons | `::` | none |
+| range | `..` | none |
+| additive | `+` `-` `[+]` `[-]` | left |
+| multiplicative | `*` `/` `%` `[*]` `[/]` `[%]` | left |
+| prefix | `-` `!` | prefix |
+| power | `^` `[^]` | right |
+| postfix | `f(x)`, `t[k]`, `.field` | left |
+
+Prefix minus binds LOOSER than `^`, as in mathematics: `-t^2` is `-(t^2)`
+(so `exp(-t^2)` is the Gaussian) and `-2.0 ^ 2` is `-4`. The exponent is
+itself a prefix operand, so `2 ^ -1` parses. Equality and comparison do not
+chain: `0 < x < 3` and `a == b == c` are refused with a steer -- write
+`0 < x && x < 3`.
+
+**Lambda bodies.** An inline (braceless) lambda body extends through the
+apply level and no further: `lambda(x) -> a <@> b |> compute` is
+`(lambda(x) -> a <@> b) |> compute`. This holds THROUGH an `if`'s else
+branch, a final match arm or a `let` at the body's own nesting depth, so
+
+```blade
+let E = method_for(range<I, I>) <@> lambda(i, j) -> if i == j then 1.0 else 0.0 |> compute
+```
+
+computes the whole map (it does not pipe `0.0` into `compute`). Positions a
+keyword fences -- an `if` condition and then-branch, a match scrutinee, a
+non-final match arm -- and anything inside parentheses keep the full grammar.
+A `for <kernel>` former binds its kernel the same way.
+
+**Numeric literals.** Decimal integers and floats (`12`, `1.5`, `2e-3`) take
+`_` digit separators between two digits (`1_000_000`, `0.000_1`). `0x` / `0b`
+introduce hexadecimal / binary integers (`0xFF_FF`, `0b1010`), read as 64-bit
+bit patterns: values up to `2^64 - 1` are accepted and interpreted two's
+complement (`0xFFFFFFFFFFFFFFFF` is `-1`). A number glued to a name (`2x`) is
+a malformed literal (BL0003), not an implicit product.
 
 ### 15.2 Declarations
 

@@ -57,6 +57,11 @@ type TypeError =
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType
+    /// BL3004 too: a constructor pattern naming no known variant (a typo
+    /// like `| Sqaure(w)`), or a Capitalized bare binder in a match over a
+    /// variant type -- which would silently bind a catch-all variable.
+    /// `message` is the full rendered text (known variants, did-you-mean).
+    | UnknownConstructorPattern of tag: string * message: string
     /// BL2007. A provider's NATIVE library (libnetcdf) failed to load while
     /// reading store metadata at a `let store = alias.load(path)` site.
     /// Distinct from a missing/unreadable STORE (those keep checkDecl's

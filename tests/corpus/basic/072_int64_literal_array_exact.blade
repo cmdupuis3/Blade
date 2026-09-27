@@ -1,0 +1,15 @@
+// TEST: Int64 Literal Array Exact
+// ============================================================================
+// Integer array literals are stored EXACTLY. The C++ emitter used to route
+// every leaf through a double: 2^53 + 1 came back as 2^53, and INT64_MAX
+// became 2^63, which converts back out of range (x86: INT64_MIN). The sum
+// wraps, per the arithmetic contract (docs/formalism.md section 2.4).
+
+let a = [9007199254740993, 3]
+let b: Array<Int64 like Idx<3>> = [9223372036854775807, 1, -9223372036854775807]
+let s = reduce(b, (+))
+let big = reduce([9223372036854775807, 1], (+))
+// EXPECT: a = [9007199254740993, 3]
+// EXPECT: b = [9223372036854775807, 1, -9223372036854775807]
+// EXPECT: s = 1
+// EXPECT: big = -9223372036854775808

@@ -787,6 +787,7 @@ let formatTypeError (err: TypeError) : string =
     | InvalidArrayCapture name -> $"Lambda cannot capture array '{name}'"
     | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
     | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
+    | UnknownConstructorPattern (_, message) -> message
     | ProviderNativeLoadFailure (provider, path, detail) ->
         $"provider '{provider}' cannot load its native library, so the store '{path}' cannot be read at compile time: {detail}. Every type this store binds is unresolvable until the library loads -- install the provider's runtime, or point its install-root variable at it (NETCDF_DIR for netcdf: the compiler and generated programs then use that install's own libraries)."
     | ProviderStoreUnresolvable (provider, path, detail) ->
@@ -1121,7 +1122,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ -> "BL3001"
             | ArityMismatch _ | KernelPackArity _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"
-            | PatternTypeMismatch _ -> "BL3004"
+            | PatternTypeMismatch _ | UnknownConstructorPattern _ -> "BL3004"
             | InvalidArrayCapture _ -> "BL3005"
             // Promoted variants (Stage 5)
             | UnitMismatch _ -> "BL3006"

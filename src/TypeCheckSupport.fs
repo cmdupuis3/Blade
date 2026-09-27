@@ -776,6 +776,65 @@ let freshLiteralType (subst: Subst) lit =
 
 // 9. Pattern Type Checking
 
+/// The declared constructors of a variant/enum type, in declaration order
+/// (empty when `typeName` is not a variant type).
+let variantConstructorsOf (env: TypeEnv) (typeName: string) : (string * bool) list =
+    match Map.tryFind typeName env.TypeDefs with
+    | Some (TDIVariant (_, _, variants)) -> variants |> List.map (fun (n, d) -> (n, d.IsSome))
+    | _ -> []
+
+/// The variant type a scrutinee of type `ty` resolves to, if any.
+let scrutineeVariantType (env: TypeEnv) (ty: IRType) : string option =
+    match env.Subst.Resolve ty with
+    | IRTNamed n when not (List.isEmpty (variantConstructorsOf env n)) -> Some n
+    | _ -> None
+
+/// Constructor names a misspelled `name` plausibly meant: a case-insensitive
+/// match, one transposition, or one character inserted/deleted/substituted.
+let constructorSpellingCandidates (known: string list) (name: string) : string list =
+    let close (a: string) (b: string) =
+        if a.ToLowerInvariant() = b.ToLowerInvariant() then true
+        elif abs (a.Length - b.Length) > 1 then false
+        elif a.Length = b.Length then
+            let diffs = Seq.zip a b |> Seq.filter (fun (x, y) -> x <> y) |> Seq.toList
+            match diffs with
+            | [] | [_] -> true
+            | [(x1, y1); (x2, y2)] -> x1 = y2 && x2 = y1
+            | _ -> false
+        else
+            let short, long = if a.Length < b.Length then a, b else b, a
+            [0 .. long.Length - 1] |> List.exists (fun i -> long.Remove(i, 1) = short)
+    known |> List.filter (fun k -> k <> name && close k name) |> List.distinct
+
+/// The refusal for a constructor pattern that names no constructor: a typo'd
+/// tag (`| Sqaure(w)`) or a Capitalized bare binder over a variant scrutinee
+/// (`| Suoth ->`, which would bind a catch-all VARIABLE and kill every later
+/// arm). `typeName` is the scrutinee's variant type when known.
+let unknownConstructorError (env: TypeEnv) (name: string) (typeName: string option) (bare: bool) : TypeError =
+    let known =
+        match typeName with
+        | Some t -> variantConstructorsOf env t |> List.map fst
+        | None -> env.VariantTags |> Map.toList |> List.map fst |> List.sort
+    let owner =
+        match typeName with
+        | Some t -> $"'{t}' has no constructor named {name}"
+        | None -> $"{name} is not a constructor of any declared variant type"
+    let listing =
+        if List.isEmpty known then ""
+        else
+            let what = match typeName with Some _ -> "its constructors" | None -> "known constructors"
+            let ks = String.concat ", " known in $" ({what}: {ks})"
+    let suggestion =
+        match constructorSpellingCandidates known name with
+        | [] -> ""
+        | cs -> let alts = String.concat " or " cs in $" Did you mean {alts}?"
+    let why =
+        if bare then
+            $" A Capitalized name in a match over a variant type is read as a constructor -- as a variable it would match EVERYTHING and make every later arm dead. Fix the spelling, or use a lowercase binder (or `_`) if a catch-all is what you meant."
+        else
+            $" A constructor pattern `{name}(...)` must name a declared variant."
+    UnknownConstructorPattern (name, $"pattern '{name}': {owner}{listing}.{suggestion}{why}")
+
 /// Type-check a pattern against an expected type. Returns a TypedPattern
 /// whose Bindings list contains every (name, varId, type) introduced.
 let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
@@ -803,6 +862,15 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
             // the payload be spelled.
             Error (Other $"pattern '{name}': this constructor of '{parentName}' carries a payload, so a bare '{name}' here would not test the variant -- it would bind a fresh VARIABLE named {name} that matches everything (making every later arm dead). Match it as {name}(p) (or {name}(_) to ignore the payload); rename the binder if a variable is what you meant.")
         | None ->
+            // A Capitalized name that is NOT a constructor, in a match over a
+            // variant type, is a misspelled constructor far more often than a
+            // binder (values are snake_case): `| Suoth -> 2` used to bind a
+            // catch-all variable and silently kill `| East -> 3` below it.
+            match scrutineeVariantType env expected with
+            | Some typeName when name.Length > 0 && System.Char.IsUpper name.[0] ->
+                setCurrentExprSpan pat.Span
+                Error (unknownConstructorError env name (Some typeName) true)
+            | _ ->
             let varId = env.Builder.FreshId()
             Ok { Kind = TPatVar (name, varId); Type = expected
                  Bindings = [(name, varId, expected)] }
@@ -894,15 +962,13 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
                 Ok { Kind = TPatVariant (tag, None, isEnum)
                      Type = IRTNamed parentName; Bindings = [] }
         | None ->
-            // Unknown variant tag: allow it, bind any payload
-            match payloadPat with
-            | Some p ->
-                let payTy = env.Subst.Fresh()
-                checkPattern env payTy p |> Result.map (fun tPayload ->
-                    { Kind = TPatVariant (tag, Some tPayload, false); Type = expected
-                      Bindings = tPayload.Bindings })
-            | None ->
-                Ok { Kind = TPatVariant (tag, None, false); Type = expected; Bindings = [] }
+            // Unknown variant tag. This used to be ACCEPTED ("allow it, bind
+            // any payload") and reached g++ as an undeclared constructor --
+            // a typo like `| Sqaure(w)` failed as a C++ compile error, or in
+            // an enum match compared a garbage ordinal. Refused here, naming
+            // the scrutinee type's real constructors.
+            setCurrentExprSpan pat.Span
+            Error (unknownConstructorError env tag (scrutineeVariantType env expected) false)
 
     | PatternKind.PatStruct (typeName, fieldPats) ->
         let fieldTypes =
@@ -945,6 +1011,55 @@ let rec checkPattern (env: TypeEnv) (expected: IRType) (pat: Pattern)
         let annotTy = lowerTypeExpr env tyAnnotation
         unify env.Subst annotTy expected |> Result.bind (fun () ->
             checkPattern env annotTy innerPat)
+
+/// Coverage warnings for a checked match, both STATIC facts about the arm
+/// list (no value analysis):
+///
+///   BL3022  an arm no value can reach: it follows an unguarded catch-all
+///           (`_` / a binder), or an unguarded arm that already took every
+///           value of the same constructor (or, over a variant type, all of
+///           them).
+///   BL3023  a match over a variant/enum type that names neither every
+///           constructor nor a catch-all: a missing constructor aborts at
+///           run time (BL8002).
+///
+/// Only unguarded arms count as covering -- a guard may fall through.
+let matchCoverageWarnings (env: TypeEnv) (scrutineeTy: IRType) (scrutineeSpan: Span)
+                          (cases: MatchCase list) (tCases: TypedMatchCase list) : unit =
+    let rec irrefutable (p: TypedPattern) =
+        match p.Kind with
+        | TPatWild | TPatVar _ -> true
+        | TPatTuple ps -> List.forall irrefutable ps
+        | _ -> false
+    let variantType = scrutineeVariantType env scrutineeTy
+    let constructors = variantType |> Option.map (variantConstructorsOf env >> List.map fst) |> Option.defaultValue []
+    let mutable caughtAll = false
+    let mutable covered = Set.empty<string>
+    for (case, tCase) in List.zip cases tCases do
+        let unguarded = tCase.Guard.IsNone
+        let span = case.Pattern.Span
+        if caughtAll then
+            emitWarning env "BL3022" span
+                "unreachable match arm: an earlier arm already matches every value that could reach this one (an unguarded `_` / variable binder, or every constructor of the type). Remove the arm, or move it above the arm that shadows it."
+        else
+            match tCase.Pattern.Kind with
+            | TPatVariant (tag, payload, _) when Set.contains tag covered ->
+                ignore payload
+                emitWarning env "BL3022" span
+                    $"unreachable match arm: an earlier unguarded arm already matches every {tag} value, so this one can never be selected. Remove it, or move it above the arm that shadows it."
+            | TPatVariant (tag, payload, _) when unguarded && (payload |> Option.forall irrefutable) ->
+                covered <- Set.add tag covered
+                if not (List.isEmpty constructors) && constructors |> List.forall (fun c -> Set.contains c covered) then
+                    caughtAll <- true
+            | _ when unguarded && irrefutable tCase.Pattern -> caughtAll <- true
+            | _ -> ()
+    match variantType with
+    | Some typeName when not caughtAll ->
+        let missing = constructors |> List.filter (fun c -> not (Set.contains c covered))
+        if not (List.isEmpty missing) then
+            emitWarning env "BL3023" scrutineeSpan
+                $"""non-exhaustive match on '{typeName}': no arm matches {String.concat ", " missing}. A value of an unmatched constructor aborts the program at run time (BL8002). Add an arm for each, or a `_ ->` catch-all."""
+    | _ -> ()
 
 // 10. Expression Type Inference (every Expr variant handled explicitly)
 

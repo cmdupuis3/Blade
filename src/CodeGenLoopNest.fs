@@ -3215,18 +3215,47 @@ let genProgram (functions: (string * LoopNestCodeGen) list) : string =
 
 // Array Literal Generation
 
-/// Extract float values from array literal for initialization
-let rec extractLiteralValues (expr: IRExpr) : float list =
+/// One scalar leaf of an array literal, KEPT IN ITS OWN DOMAIN. An integer
+/// leaf must never detour through `float`: a double has 53 significand bits,
+/// so `[9007199254740993, 3]` used to print `9007199254740992`, and
+/// `[9223372036854775807, 1]` stored INT64_MIN (2^63 as a double converts
+/// back out of range). docs/formalism.md section 2.4, "Arithmetic semantics".
+type LiteralLeaf =
+    | LeafFloat of float
+    | LeafInt of int64
+
+/// Extract the scalar leaves of an array literal, in row-major order.
+let rec extractLiteralValues (expr: IRExpr) : LiteralLeaf list =
     match expr with
-    | IRLit (IRLitFloat f) -> [f]
-    | IRLit (IRLitFloat32 f) -> [float f]
-    | IRLit (IRLitInt n) -> [float n]
-    | IRLit (IRLitBool b) -> [if b then 1.0 else 0.0]
-    | IRUnaryOp (IRNeg, IRLit (IRLitFloat f)) -> [-f]
-    | IRUnaryOp (IRNeg, IRLit (IRLitFloat32 f)) -> [float -f]
-    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> [float -n]
+    | IRLit (IRLitFloat f) -> [LeafFloat f]
+    | IRLit (IRLitFloat32 f) -> [LeafFloat (float f)]
+    | IRLit (IRLitInt n) -> [LeafInt n]
+    | IRLit (IRLitBool b) -> [LeafInt (if b then 1L else 0L)]
+    | IRUnaryOp (IRNeg, IRLit (IRLitFloat f)) -> [LeafFloat -f]
+    | IRUnaryOp (IRNeg, IRLit (IRLitFloat32 f)) -> [LeafFloat (float -f)]
+    // Two's-complement negation: wraps at INT64_MIN like every integer op.
+    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> [LeafInt (0L - n)]
     | IRArrayLit (elements, _) -> elements |> List.collect extractLiteralValues
     | _ -> []
+
+/// Render one literal leaf for a store into an element of C++ type
+/// `elemType`. Floating elements take the round-trip double spelling
+/// (floatToCppLiteral); integral elements take the EXACT integer spelling --
+/// verbatim decimal, with INT64_MIN written as an expression because the
+/// token 9223372036854775808 does not fit a signed 64-bit literal. (The old
+/// `%g` spelling here printed 1234567 as `1.23457e+06`, a narrowing error in
+/// a braced initializer.)
+let renderLiteralLeaf (elemType: string) (leaf: LiteralLeaf) : string =
+    let isFloating = elemType.Contains "double" || elemType.Contains "float"
+    match leaf with
+    | LeafFloat v -> floatToCppLiteral v
+    // A float element takes the decimal with an `f` suffix: ONE rounding,
+    // straight to float, as C++ converts int64 -> float (via double would
+    // round twice above 2^53).
+    | LeafInt n when isFloating && not (elemType.Contains "double") -> $"{n}.0f"
+    | LeafInt n when isFloating -> floatToCppLiteral (float n)
+    | LeafInt n when n = System.Int64.MinValue -> "(-9223372036854775807LL - 1)"
+    | LeafInt n -> string n
 
 /// Compute dimensions of an array literal
 let rec computeArrayDims (expr: IRExpr) : int list =
@@ -4264,9 +4293,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                             // floatToCppLiteral); integral elements keep the
                             // bare spelling (a `.0` suffix would be a C++
                             // narrowing error in the braced initializer).
-                            let renderFlat (v: float) =
-                                if elemType.Contains "double" || elemType.Contains "float"
-                                then floatToCppLiteral v else sprintf "%g" v
+                            let renderFlat = renderLiteralLeaf elemType
                             let flatValues = allValues |> List.map renderFlat |> String.concat ", "
                             let extentsDecl = $"{ind}static constexpr const size_t {varName}_extents[1] = {{{nRows}}};"
                             let lensDecl = $"{ind}static constexpr const size_t {varName}_lens[{nRows}] = {{{lensList}}};"
@@ -4300,9 +4327,7 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                 rowLengths |> List.scan (fun acc len -> acc + len) 0
             let offsetsList = offsets |> List.map string |> String.concat ", "
             // Same float/integral literal split as the DepIdx branch above.
-            let renderFlat (v: float) =
-                if elemType.Contains "double" || elemType.Contains "float"
-                then floatToCppLiteral v else sprintf "%g" v
+            let renderFlat = renderLiteralLeaf elemType
             let flatValues = allValues |> List.map renderFlat |> String.concat ", "
             let extentsDecl = $"{ind}static constexpr const size_t {varName}_extents[1] = {{{n}}};"
             let lensDecl = $"{ind}static constexpr const size_t {varName}_lens[{n}] = {{{lensList}}};"
@@ -4495,10 +4520,10 @@ let genArrayLiteral (ctx: CodeGenContext) (varName: string) (elements: IRExpr li
                     // in row-major order, so the alignment is exact.
                     let paths = enumerateIndexPaths dims
                     List.zip paths values |> List.map (fun (path, v) ->
-                        // Round-trip literal (see floatToCppLiteral); plain
-                        // assignment converts implicitly for integral
-                        // element types, so no narrowing concern here.
-                        $"{ind}{varName}{(formatIndexPath path)} = {(floatToCppLiteral v)};")
+                        // Exact per-domain spelling (renderLiteralLeaf): an
+                        // integer leaf never detours through double (the
+                        // old float list stored 2^53+1 as 2^53).
+                        $"{ind}{varName}{(formatIndexPath path)} = {(renderLiteralLeaf elemType v)};")
                 else
                     // Per-element path: walk the nested IRArrayLit. Index path
                     // accumulates as we descend; leaves render via exprToCpp.

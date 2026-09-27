@@ -1,0 +1,29 @@
+// TEST: Int Pow Exact
+// ============================================================================
+// Integer `^` is EXACT, and wraps modulo 2^64 like `*` (docs/formalism.md
+// section 2.4). It used to be `pow(b, e)` in double: 3^35 printed
+// 50031545098999704 (true value ...707) in the interpreter, and the compiled
+// lane refused to build an Int64 binding of it (-Werror=float-conversion).
+// The base arrives computed as well as literal, and the exponent both ways.
+
+let xs: Array<Int64 like Idx<2>> = [3, 1]
+let b = reduce(xs, (+)) - 1
+let e = reduce(xs, (+)) + 31
+let p = b ^ 39
+let q = 3 ^ 35
+let r = b ^ e
+let wrap = 2 ^ 63
+let wrap40 = 3 ^ 40
+let zz = 0 ^ 0
+let negb = (0 - b) ^ 3
+let sq = b ^ 2
+let ys = xs ^ 2
+// EXPECT: p = 4052555153018976267
+// EXPECT: q = 50031545098999707
+// EXPECT: r = 50031545098999707
+// EXPECT: wrap = -9223372036854775808
+// EXPECT: wrap40 = -6289078614652622815
+// EXPECT: zz = 1
+// EXPECT: negb = -27
+// EXPECT: sq = 9
+// EXPECT: ys = [9, 1]

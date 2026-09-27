@@ -17,9 +17,12 @@
     },
     "BL0003": {
       "title": "invalid numeric literal",
-      "explanation": "A run of digits could not be parsed as an Int64 or a Float: a malformed exponent, a doubled decimal point, a trailing separator, or a value outside the integer range.",
-      "fix": "Rewrite the literal in a form the target type accepts. Integer literals are Int64; a value too large for that must be written as a float, and a float needs digits on both sides of any exponent marker.",
-      "examples": [],
+      "explanation": "A run of digits could not be parsed as an Int64 or a Float: a malformed exponent, a `_` digit separator that does not sit between two digits (`1_`, `1__0`), a hex/binary literal with no digits, a bad digit, or more than 64 bits, a value outside the integer range -- or a number glued directly to a name (`2x`), which Blade does not read as a product.",
+      "fix": "Rewrite the literal in a form the target type accepts. Integer literals are Int64; a value too large for that must be written as a float, and a float needs digits on both sides of any exponent marker. Separators go between digits (`1_000`); hex and binary are `0x1F` / `0b1010`. For a product write the operator: `2 * x`.",
+      "examples": [
+        "tests/corpus/diagnostics/081_number_glued_to_name_rejects.blade",
+        "tests/corpus/diagnostics/086_numeric_literal_malformed_rejects.blade"
+      ],
       "docs": []
     },
     "BL0999": {
@@ -376,6 +379,28 @@
       ],
       "docs": [
         "docs/plans/plan-match-statements.md"
+      ]
+    },
+    "BL3022": {
+      "title": "unreachable match arm",
+      "explanation": "A WARNING, not an error. An arm that no value can reach: it follows an unguarded catch-all (`_` or a variable binder), or an unguarded arm that already took every value of the same constructor, or -- over a variant/enum type -- arms that already named every constructor. Arms are tried top to bottom, so this one is dead code; usually it is an arm that was meant to come FIRST, or the shadowing arm is a misspelling. Only unguarded arms count as covering: a guarded arm may fall through.",
+      "fix": "Delete the dead arm, or move it above the arm that shadows it. In a test that deliberately exercises the shape, pin it with `// WARN: BL3022`.",
+      "examples": [
+        "tests/corpus/sum-types/014_unreachable_arm_warns.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3023": {
+      "title": "non-exhaustive match over a variant type",
+      "explanation": "A WARNING, not an error. A `match` whose scrutinee is a variant or enum type names neither every constructor nor a catch-all. A value of an unmatched constructor has no arm to take and aborts the program at run time with BL8002; this reports the gap statically, naming the missing constructors, instead of only when such a value arrives.",
+      "fix": "Add an arm for each missing constructor the message names, or a final `_ -> ...` catch-all. In a test that deliberately exercises the shape, pin it with `// WARN: BL3023`.",
+      "examples": [
+        "tests/corpus/sum-types/015_nonexhaustive_enum_warns.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
       ]
     },
     "BL3999": {
@@ -883,6 +908,29 @@
         "tests/NetcdfTests.fs"
       ],
       "docs": []
+    },
+    "BL8013": {
+      "title": "integer arithmetic fault",
+      "explanation": "An integer operation had no integer answer: `/` or `%` with a zero divisor, or `^` with a negative exponent. Blade's arithmetic contract (docs/formalism.md section 2.4) makes this a panic in every lane -- the compiled program, the LLVM lane and the interpreter fail with the same code and message. `MIN / -1` is NOT a fault: it wraps to MIN, like every other overflowing integer operation, and `MIN % -1` is 0.",
+      "fix": "Guard the divisor (`if d != 0 then n / d else ...`) or the exponent before the operation. For a negative exponent convert to Float64 first (`Float64(b) ^ Float64(e)`) if a real result is what is wanted.",
+      "examples": [
+        "tests/corpus/basic/067_int_div_by_zero_aborts.blade",
+        "tests/corpus/basic/071_int_pow_negative_exponent_aborts.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL8014": {
+      "title": "float-to-integer conversion out of range",
+      "explanation": "A float -> integer cast (`Int64(floor(x))`, `Int32(ceil(x))`) received NaN, an infinity, or a value outside the target type's range. A float-to-int conversion truncates a value the target can hold; anything else panics identically in every lane rather than producing a platform sentinel or a saturated value the program would silently compute on.",
+      "fix": "Check the operand before casting -- a NaN usually means an upstream 0/0 or an empty mean -- or clamp it explicitly to the range the integer is meant to cover.",
+      "examples": [
+        "tests/corpus/casts/017_float_to_int_nan_aborts.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
     },
     "BL9001": {
       "title": "internal compiler error",
