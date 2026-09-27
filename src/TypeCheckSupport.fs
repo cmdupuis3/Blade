@@ -3915,6 +3915,30 @@ let effectsOfBody (env: TypeEnv) (selfId: IRId option) (body: TypedExpr) : Blade
                 Blade.Effects.emitsOutput
             | TExprRead _ -> Blade.Effects.readsExternal
             | TExprUnaryOp (OpMath ("lgamma" | "digamma"), _) -> Blade.Effects.mayFail
+            // Integer `/` and `%` by zero abort (IR.irNodeMayAbort's twin). A
+            // provably floating-point division cannot; anything not yet known
+            // to be floating answers yes.
+            | TExprBinOp (_, (OpDiv | OpMod), _, _) ->
+                let rec floating (t: IRType) =
+                    match IR.stripUnits (env.Subst.Resolve t) with
+                    | IRTScalar (ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) -> true
+                    | ArrayElem at -> floating at.ElemType
+                    | _ -> false
+                if floating e.Type then Blade.Effects.noEffects else Blade.Effects.mayFail
+            // `^` with a non-literal exponent (the integer-power domain
+            // checks, BL8013/BL8014) and a float -> integer cast (NaN /
+            // out-of-range) abort too -- IR.irNodeMayAbort's other twins.
+            | TExprBinOp (_, OpCaret, _, r) when not r.Kind.IsTExprLit -> Blade.Effects.mayFail
+            | TExprUnaryOp (OpCast name, x) when
+                    (match Blade.Types.castTargetOf name with
+                     | Some (ETInt32 | ETInt64) ->
+                         let rec floating (t: IRType) =
+                             match IR.stripUnits (env.Subst.Resolve t) with
+                             | IRTScalar (ETFloat32 | ETFloat64) -> true
+                             | ArrayElem at -> floating at.ElemType
+                             | _ -> false
+                         floating x.Type
+                     | _ -> false) -> Blade.Effects.mayFail
             | TExprIndex _ | TExprTupleIndex _ | TExprReduce _ | TExprSolve _ | TExprEigh _
             | TExprLu _ | TExprLuSolve _
             | TExprMatch _ | TExprConstraintCheck _ | TExprGuard _ -> Blade.Effects.mayFail

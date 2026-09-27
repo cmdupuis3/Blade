@@ -53,6 +53,11 @@ let instantiate (subst: Subst) (scheme: TypeScheme) : IRType =
                 IRTLoop { lt with
                             ArrayTypes = lt.ArrayTypes |> List.map replace
                             KernelType = lt.KernelType |> Option.map replace }
+            // Unit- and tag-wrapped types carry a variable INSIDE the wrapper
+            // (`T<m>` is IRTUnitAnnotated(IRTInfer, m)): without these arms a
+            // generalized value's `T<m>` stayed SHARED across every use.
+            | IRTUnitAnnotated (inner, u) -> IRTUnitAnnotated (replace inner, u)
+            | IRTIdxTagged (inner, r) -> IRTIdxTagged (replace inner, r)
             | _ -> ty  // IRTScalar, IRTUnit, IRTNamed, IRTNat (no inference vars to replace)
         replace scheme.Body
 
