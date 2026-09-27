@@ -1,0 +1,13 @@
+// TEST: A parallel kernel may write its own binding that shadows a captured name
+// The refusal (004) is by BINDING, not by name: `g` inside the kernel is its
+// own fresh array, private to the cell, so writing it is a local store.
+let mut g = [0.0, 0.0]
+let A = [1.0, 2.0, 3.0]
+let r = A <@> lambda(x) where omp(x: 1) -> {
+    let mut g = [0.0, 0.0]
+    g(0) = x
+    g(0) * 2.0
+} |> compute
+let g0 = g(0)
+// EXPECT: r = [2, 4, 6]
+// EXPECT: g0 = 0

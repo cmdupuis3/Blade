@@ -10253,7 +10253,10 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
         // provisional rejections to the kernel-apply second pass (see
         // typedExprHasUnresolvedType). Defaults above type WITHOUT the flag --
         // they are decl-time values and keep decl-time strictness.
-        inferExpr { paramEnv with InLambdaBody = true } body |> Result.bind (fun tBody ->
+        let parallelKernel =
+            paramEnv.InParallelBody
+            || (whereClause |> Option.map (fun w -> not w.Parallel.IsEmpty) |> Option.defaultValue false)
+        inferExpr { paramEnv with InLambdaBody = true; InParallelBody = parallelKernel } body |> Result.bind (fun tBody ->
             // A lambda body is a value-forming boundary: reject a wildcard `_`
             // that escaped into it (its only legitimate role is a compound-index
             // coordinate), rather than letting it reach lowering.
@@ -14586,6 +14589,8 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
 
     let mutable bodyEnv = enterCallableBody envWithFunc
+    if funcDecl.WhereClause |> Option.map (fun w -> not w.Parallel.IsEmpty) |> Option.defaultValue false then
+        bodyEnv <- { bodyEnv with InParallelBody = true }
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
         let assign = match p.Mutability with

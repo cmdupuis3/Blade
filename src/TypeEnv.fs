@@ -246,6 +246,12 @@ type TypeEnv = {
     /// in `OuterScope` is bound INSIDE the innermost body -- which is what
     /// `bodyLocalBinding` tests.
     InCallableBody: bool
+    /// True while the body of a PARALLEL-licensed kernel is typed (a lambda
+    /// or function whose where clause carries `omp(...)` / `cuda`), and in
+    /// everything nested inside it: its cells run concurrently, so a store
+    /// into a binding captured from outside the body is a data race
+    /// (assignTargetError refuses it).
+    InParallelBody: bool
     /// Names of the `mut` parameters of the function whose body is being
     /// checked (all array-typed -- MutParamNotArray rejects any other kind
     /// first). Rebinding one WHOLE (`a = <array expr>`) cannot reach the
@@ -543,6 +549,7 @@ let emptyEnv () = {
     InPolyContext = false
     InLambdaBody = false
     InCallableBody = false
+    InParallelBody = false
     MutArrayParams = Set.empty
     CurrentCommGroups = []
     Interfaces = Map.empty

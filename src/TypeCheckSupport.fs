@@ -4519,6 +4519,31 @@ let internal assignTargetError (env: TypeEnv) (tL: TypedExpr) : TypeError option
                     + "so a `mut` parameter's caller would see nothing change. Write the elements "
                     + "(`a(i) = ...`), or return the new array and rebind at the call site."))
         else
+            // 3. A write from INSIDE a PARALLEL kernel body (`where omp(...)`
+            //    / `cuda`, or anything nested in one) to a binding that lives
+            //    OUTSIDE it (a captured `let mut`, a module global): the cells
+            //    run concurrently, so the store is a data race (the emitted
+            //    loop was `#pragma omp parallel for simd` around `g[0] = g[0]
+            //    + ...`). Only the body's own bindings and its `mut`
+            //    PARAMETERS may be written there. Matched by VarId, so a
+            //    body-local binding that SHADOWS an outer name is its own.
+            //    A SERIAL body keeps its write channel: named functions that
+            //    update a module-level `let mut` are a pinned feature
+            //    (memfree/004, 015, 016; functions/135, 139 pin the CSE
+            //    barrier it needs).
+            let capturedWrite =
+                env.InParallelBody
+                && env.InCallableBody
+                && (match lookupVar name env, Map.tryFind name env.OuterScope with
+                    | Some cur, Some outer -> cur.VarId = outer.VarId
+                    | _ -> false)
+            if capturedWrite then
+                Some (MutAssignRefused (name,
+                        "it is bound outside this parallel kernel's body, whose cells run "
+                        + "concurrently under `omp`/`cuda`, so the store is a data race. Pass the "
+                        + "array as a `mut` parameter (`a: mut Array<...>`), or return the value "
+                        + "and bind it outside (a reduction: `reduce`, or a fused `<&!>` fold)."))
+            else
             match lookupVar name env with
             | Some info when info.Assign = ReadOnly ->
                 // A bare store onto a `let static` keeps its own long-standing
