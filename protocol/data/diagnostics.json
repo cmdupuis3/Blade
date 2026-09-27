@@ -788,6 +788,16 @@
       "examples": [],
       "docs": []
     },
+    "BL6002": {
+      "title": "construct not valid in this position",
+      "explanation": "The program typechecks, but a construct sits where lowering has no rule for it: `compound(dense, mask)`, a sequenced `rand.<family>(...)` draw, `sparse(values, keys)` or `fill_random` anywhere but as a top-level `let` value (inside a function body, say), an array-typed `zero` as a return value or call argument, or a `_` outside a compound coordinate or a pattern. The diagnostic is spanned at the expression, and `blade check` reports it (check lowers after typechecking) -- it used to surface only at `emit`, with no span.",
+      "fix": "Do what the message says for that construct: bind it at top level (`let B = compound(dense, mask)`, `let A = rand.uniform(key, n)`) and pass the array in, or bind an array `zero` to an annotated `let` first.",
+      "examples": [
+        "tests/corpus/diagnostics/090_compound_in_function_body_rejects.blade",
+        "tests/corpus/diagnostics/091_rand_draw_in_function_body_rejects.blade"
+      ],
+      "docs": []
+    },
     "BL7001": {
       "title": "feature not yet supported by this backend",
       "explanation": "The C++ backend met a construct it has no emission for -- a genuine back-end GAP, not a refusal. Distinct from BL7004, where codegen understood the construct and declined on principle, and from BL4003, where both backends refuse in the front end.",

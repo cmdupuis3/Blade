@@ -82,7 +82,7 @@ The binary is `bin/Release/net10.0/Blade.exe` (below, `blade` = that exe or
 `dotnet run --project Blade.fsproj -c Release --`):
 
 ```bash
-blade check prog.blade        # typecheck only
+blade check prog.blade        # typecheck + lower (no C++)
 blade emit prog.blade         # emit C++ without compiling
 blade compile prog.blade      # produce an executable
 blade run prog.blade          # compile and run (--verbose, --mpi N, --memcheck, --run-record out.json,
