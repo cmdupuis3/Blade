@@ -427,11 +427,22 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                         mkTyped (TExprUnaryOp (OpMath name, tArg)) resTy)
             | IRTScalar ETBool | IRTScalar ETString ->
                 Error (IntrinsicNeedsNumeric name)
-            | IRTInfer _ when isComplexMathIntrinsic name ->
+            | IRTInfer vid when isComplexMathIntrinsic name ->
                 // Unresolved operand: DEFER, since apply-site unification may
                 // later bind it COMPLEX (exp/log/sqrt/trig preserve complex),
                 // so pinning Float64 now would reject complex kernels; the
                 // kernel re-stamp in buildApplyInfo corrects the result type.
+                //
+                // In a named GENERIC body the operand is a signature variable
+                // and nothing re-stamps: the result keeps the variable's type,
+                // exact for every float and complex instance and a silent
+                // truncation for an integer one (`function r(x: T^0) -> T^0 =
+                // sqrt(x)` at Int64 emitted `int64_t r(int64_t x) { return
+                // std::sqrt(x); }`). Record the demand; each call judges it.
+                if not env.InLambdaBody && env.Subst.IsPolymorphicId vid then
+                    (match env.CurrentGenericObligations with
+                     | Some acc -> acc.Add(GOFractionalMath (vid, name))
+                     | None -> ())
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
             | IRTInfer _ when not env.InLambdaBody ->
                 // floor/ceil/log10 have no complex overload -- the operand
@@ -914,7 +925,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                                     Error (Other $"rand.{kind}: the weights array must have a STATIC extent -- codegen passes its length beside the pool pointer, so a symbolic or parameter extent cannot be filled")
                             | _ -> Error (Other $"rand.{kind}: weights must be a rank-1 Float64 array")
                         | AnyPrimElem et ->
-                            Error (Other (sprintf "rand.%s: weights must have Float64 elements (got %A)" kind et))
+                            Error (Other ($"rand.{kind}: weights must have Float64 elements (got {ppIRType (IRTScalar et)})"))
                         | _ ->
                             Error (Other $"rand.{kind}: weights must be a rank-1 Float64 array")
                 | _ ->
@@ -1306,7 +1317,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
             let unsuppliedMut =
                 match func.Kind with
                 | ExprKind.ExprVar fname when not (fname.StartsWith "__") ->
-                    (match env.MutParamPositions.TryGetValue fname with
+                    (match declIdOfName env fname |> Option.map (fun fid -> env.MutParamPositions.TryGetValue fid) |> Option.defaultValue (false, []) with
                      | true, positions -> positions |> List.tryFind (fun p -> p >= args.Length)
                                           |> Option.map (fun p -> (fname, p))
                      | _ -> None)
@@ -3192,8 +3203,20 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr opti
                 | _ -> env.Builder.FreshInferType()
             | _ -> env.Builder.FreshInferType()
         (match env.Subst.Resolve(tArr.Type) with
-         | IRTInfer _ ->
+         | IRTInfer arrVid ->
             let elemType = deduceElemFromKernel ()
+            // ELEMENT POLYMORPHISM SURVIVES THE SHAPE, as in
+            // requireArrayArgMinRank: when the folded operand is a SIGNATURE
+            // variable (`reduce(row, (+))` over `row: T^1` in a declaration
+            // body), its element is generic too. Without the mark the fold's
+            // element was generic only if a declared `-> T^0` return happened
+            // to be unified with it (the var-to-var bind copies the mark),
+            // so an UNANNOTATED return -- or a cast of the fold -- saw a
+            // plain var zonk would default to Float64.
+            if env.Subst.IsPolymorphicId arrVid then
+                (match env.Subst.Resolve elemType |> IR.stripUnits with
+                 | IRTInfer eid -> env.Subst.MarkPolymorphic eid
+                 | _ -> ())
             // One axis per FOLDED axis. The default is one (rank-1 -- the
             // shape every existing `lambda(g) -> reduce(g, (+))` receives, so
             // this arm is unchanged for it); an explicit `axes = n` over an
@@ -3216,10 +3239,15 @@ and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr opti
                 | _ -> 0
             let nSlots = max (max 1 (defaultArg axisCountOpt 1)) pinnedRank
             let freshIdxs =
+                // The name carries the record's own id, as requireArrayArg's
+                // mints do: shape monomorphization bakes extents BY NAME, so
+                // one fixed `__inferred_n` shared by every fold in a program
+                // made unrelated axes one identity.
                 [ for _ in 1 .. nSlots ->
-                    { Id = env.Builder.FreshId()
+                    let ixId = env.Builder.FreshId()
+                    { Id = ixId
                       Rank = 1
-                      Extent = IRParam ("__inferred_n", 0, IRTNat None)
+                      Extent = IRParam ($"__reduce_inferred_n_{ixId}", 0, IRTNat None)
                       Symmetry = SymNone
                       Tag = None; IxKind = IxKPlain
                       Kind = SDimension
@@ -3806,7 +3834,7 @@ and inferGram (env: TypeEnv) leftE rightE : TypeResult<TypedExpr> =
                     | _ -> false
                 match unify env.Subst (stripUnits lTy.ElemType) (stripUnits rTy.ElemType) with
                 | Error _ ->
-                    Error (Other (sprintf "gram(A, B): the operands must share one element type, got %A and %A. Convert one operand explicitly (e.g. `Float64(B)` / `Complex128(A)`, which lift elementwise) so the contraction's width is named in the source." (env.Subst.Resolve (stripUnits lTy.ElemType)) (env.Subst.Resolve (stripUnits rTy.ElemType))))
+                    Error (Other (sprintf "gram(A, B): the operands must share one element type, got %s and %s. Convert one operand explicitly (e.g. `Float64(B)` / `Complex128(A)`, which lift elementwise) so the contraction's width is named in the source." (ppIRType (env.Subst.Resolve (stripUnits lTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits rTy.ElemType)))))
                 | Ok () ->
                     // The contraction sum_k A[i][k]*conj(B[j][k]) is
                     // multiplicative, so the result's unit signature follows
@@ -3882,7 +3910,7 @@ and inferGramApply (env: TypeEnv) leftE rightE vecE : TypeResult<TypedExpr> =
                 let sameElem (a: IRType) (b: IRType) = unify env.Subst (stripUnits a) (stripUnits b)
                 match sameElem lTy.ElemType rTy.ElemType |> Result.bind (fun () -> sameElem lTy.ElemType xTy.ElemType) with
                 | Error _ ->
-                    Error (Other (sprintf "gram_apply(A, B, x): the operands must share one element type, got %A, %A and %A. Convert explicitly (e.g. `Float64(B)`, `Complex128(x)`, which lift elementwise) so the contraction's width is named in the source." (env.Subst.Resolve (stripUnits lTy.ElemType)) (env.Subst.Resolve (stripUnits rTy.ElemType)) (env.Subst.Resolve (stripUnits xTy.ElemType))))
+                    Error (Other (sprintf "gram_apply(A, B, x): the operands must share one element type, got %s, %s and %s. Convert explicitly (e.g. `Float64(B)`, `Complex128(x)`, which lift elementwise) so the contraction's width is named in the source." (ppIRType (env.Subst.Resolve (stripUnits lTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits rTy.ElemType))) (ppIRType (env.Subst.Resolve (stripUnits xTy.ElemType)))))
                 | Ok () ->
                     let outBare = env.Subst.Resolve (stripUnits lTy.ElemType)
                     unitRulesForOp OpMul (getUnits lTy.ElemType) (getUnits rTy.ElemType) |> Result.bind (fun u1 ->
@@ -4433,7 +4461,7 @@ and inferTranspose (env: TypeEnv) array d1 d2 : TypeResult<TypedExpr> =
                         else
                             let culprit, cd, car, cix =
                                 if not (plain ar1 ix1) then "first", d1, ar1, ix1 else "second", d2, ar2, ix2
-                            Error (Other (sprintf "transpose: the %s axis (dim %d) is bound in a %A index group (rank %d), and the other axis is outside it. Swapping across a group boundary would decompose the group's symmetry. Decompact the axis first (decompact then transpose)." culprit cd cix.Symmetry car))))))
+                            Error (Other (sprintf "transpose: the %s axis (dim %d) is bound in a %s index group (rank %d), and the other axis is outside it. Swapping across a group boundary would decompose the group's symmetry. Decompact the axis first (decompact then transpose)." culprit cd (match cix.Symmetry with SymSymmetric -> "symmetric" | SymAntisymmetric -> "antisymmetric" | SymHermitian -> "Hermitian" | SymWreath -> "orbit" | SymNone -> "plain") car))))))
 
 
 
@@ -4909,7 +4937,7 @@ and inferReplicate (env: TypeEnv) count body : TypeResult<TypedExpr> =
                     mkArrayArrow [seqIdx] (IRTScalar ETFloat64) None
             Ok (mkTyped (TExprReplicate (litCount n, tB)) resultType)
         | _ ->
-            Error (Other (sprintf "replicate count must be >= 1, got %A" n))))
+            Error (Other (match n with Some k -> $"replicate count must be >= 1, got {k}" | None -> "replicate count must be a compile-time integer >= 1"))))
 
 // ---- Reynolds ----
 
@@ -5490,6 +5518,22 @@ and inferNumericCast (env: TypeEnv) (span: Span) (name: string) (target: ElemTyp
                 // findBadDeferredCast re-judges this node once the param is
                 // bound.
                 mkCast (IRTScalar target)
+            | IRTInfer vid when env.InCallableBody && env.Subst.IsPolymorphicId vid ->
+                // GENERIC CAST: the operand's element is a SIGNATURE variable
+                // of the function being declared (`Float64(reduce(row, (+)))`
+                // over `row: T^1`). Its source class is decided per call
+                // site, by the same instantiation IR monomorphization
+                // specializes on, so the legality judgment moves there with
+                // it: every call is judged against the instance the call
+                // judgment built (TypeCheckSupport.genericObligationClash), and the
+                // specialized body is judged again after monomorphization
+                // (IRValidate's cast sweep) for the seams no call judgment
+                // sees (eta-wrapped kernels). The result is the target,
+                // carrying the operand's unit like every cast.
+                (match env.CurrentGenericObligations with
+                 | Some acc -> acc.Add(GOCast (vid, name, target, isRoundedOperand tArg))
+                 | None -> ())
+                mkCast (scalarResult units)
             | IRTInfer _ ->
                 Error (InvalidCast ($"{name}() needs a concretely-typed operand, and this one's type is not "
                                     + "determined here -- annotate the value (or the parameter it came from) "
@@ -5850,14 +5894,21 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
         inferExpr env left |> Result.bind (fun tL ->
         inferExpr env right |> Result.bind (fun tR ->
             // f >> g : (A -> B) >> (B -> C) = (A -> C)
-            // NOTE: this binds a declared generic's OWN variables (`sq >> idg`
-            // pins `idg` to Float64 for every later caller). Instantiating
-            // here instead is right at the type level, but IR-phase
-            // monomorphization does not treat a composition as a call site,
-            // so the generic `idg` then reached validation unspecialized
-            // (BL6001) -- left as is until IRMono learns compositions
-            // (docs/plans/plan-call-judgment.md §9, F7).
-            match env.Subst.Resolve(tL.Type), env.Subst.Resolve(tR.Type) with
+            // Each operand that names a DECLARED generic function is judged
+            // at an INSTANTIATED copy of its signature, as at every call: the
+            // composition is a use, and unifying the declaration's own
+            // variables pinned `idg` to Float64 for every later caller after
+            // `sq >> idg` (docs/plans/plan-call-judgment.md section 9, F7).
+            // IR monomorphization treats a composition operand as a call site
+            // (IRMono.hmValueRefRewrite), so the use still gets its spec.
+            let instOperand (t: TypedExpr) =
+                match t.Kind with
+                | TExprVar _ ->
+                    let quantified, _ = calleeQuantifier env t
+                    let tys, _ = instantiateOpenVars env.Subst quantified [t.Type]
+                    List.head tys
+                | _ -> t.Type
+            match env.Subst.Resolve(instOperand tL), env.Subst.Resolve(instOperand tR) with
             | FuncElem (fArgs, fRet), FuncElem (gArgs, gRet) ->
                 // f's return is g's argument: they must agree (the unify
                 // result used to be discarded, so `(Float -> Float) >>
@@ -5980,7 +6031,31 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // element type is stamped over the inferred pipeline type.
             let elemUnits t =
                 match t with ArrayElem at -> IR.getUnits at.ElemType | _ -> None
-            if mode = Elementwise && bothArrays && isZipOp then
+            // OUTER op on two arrays of which at least one is multi-axis:
+            // `A [+] B` is `method_for(A, B) <@> lambda(a, b) -> a + b` --
+            // the all-pairs product of the operands' CELLS (formalism 7.2:
+            // output rank = rank A + rank B). The type rule (mkOuterResult)
+            // already said so, but the direct TExprBinOp lowering walks one
+            // loop level per OPERAND, handing two row pointers to a scalar
+            // kernel -- quickstart-1's own `A [+] B` over two matrices died in
+            // g++. Re-synthesize through the former (the zip arm's pattern)
+            // so the loop nest is the one method_for already builds for any
+            // rank. Rank-1 pairs keep the direct path, byte-identical.
+            let multiAxis =
+                match lRes, rRes with
+                | ArrayElem aL, ArrayElem aR -> aL.IndexTypes.Length > 1 || aR.IndexTypes.Length > 1
+                | _ -> false
+            if mode = Outer && bothArrays && isZipOp && multiAxis then
+                match unitRulesForArrayOp "an outer-product array operator" op (elemUnits lRes) (elemUnits rRes) (Some tR) with
+                | Error e -> Error e
+                | Ok resUnits ->
+                    let sp = mergeSpan left.Span right.Span
+                    let kbody = mkExpr sp (ExprBinOp (Elementwise, op, mkExpr sp (ExprVar "__ol"), mkExpr sp (ExprVar "__or")))
+                    let klam = mkExpr sp (ExprLambda ([{ Name = "__ol"; Type = None; Default = None; NameSpan = noSpan }; { Name = "__or"; Type = None; Default = None; NameSpan = noSpan }], None, kbody))
+                    let kfor = mkExpr sp (ExprMethodFor [left; right])
+                    let synth = mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply, kfor, klam))))
+                    inferExpr env synth |> Result.map (stampElemUnits env resUnits)
+            elif mode = Elementwise && bothArrays && isZipOp then
                 // Zip-able operand shapes: one index record per operand (dense
                 // rank-1, or packed symmetry-class storage of any logical rank --
                 // the co-iteration walks its flat canonical cells), or BOTH
@@ -6198,7 +6273,29 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         match IR.getUnits resTy0 with
                         | Some u -> mkArrayLike { arr with ElemType = IRTUnitAnnotated (IR.stripUnits arr.ElemType, u) }
                         | None -> mkArrayLike arr
-                    if mode <> Elementwise || not isZipOp || not (unboundVar resTy0) then resTy0
+                    // A VAR KNOWN TO BE AN ARRAY beside a scalar: a pack
+                    // element `head` that some call already demanded rank >= 1
+                    // of (the call judgment's rank lower bound -- `mean(head)`),
+                    // or a caret var. The promotion rules would answer the
+                    // SCALAR's type (`head - mean(head)` typed Float64 once
+                    // stats.mean returned a concrete Float64), and the enclosing
+                    // `* comoment_prod(tail)` then broadcast the wrong operand
+                    // (arity/031: `Array<double,1> * double` in g++). The
+                    // result is shaped like the var; its element stays the
+                    // var's (monomorphization substitutes it).
+                    let knownArrayVar (t: IRType) =
+                        match IR.stripUnits t with
+                        | IRTInfer vid ->
+                            (match env.Subst.GetRankLowerBound vid, env.Subst.GetArityConstraint vid with
+                             | Some k, _ when k >= 1 -> true
+                             | _, Some k when k >= 1 -> true
+                             | _ -> false)
+                        | _ -> false
+                    let isScalarTy (t: IRType) = (IR.stripUnits t).IsIRTScalar
+                    if mode = Elementwise && isZipOp && isScalarTy resTy0
+                       && ((knownArrayVar lRes && isScalarTy rRes) || (knownArrayVar rRes && isScalarTy lRes)) then
+                        (if knownArrayVar lRes then lRes else rRes)
+                    elif mode <> Elementwise || not isZipOp || not (unboundVar resTy0) then resTy0
                     else
                         match lRes, rRes with
                         | ArrayElem arr, other when unboundVar other -> reshape arr
@@ -6844,7 +6941,7 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
             let equalities =
                 match f.Kind with
                 | TExprVar (n, _, _) ->
-                    (match env.FuncUnitEqualities.TryGetValue n with
+                    (match calleeDeclId env f |> Option.map (fun fid -> env.FuncUnitEqualities.TryGetValue fid) |> Option.defaultValue (false, []) with
                      | true, eqs when not eqs.IsEmpty -> Some (n, eqs)
                      | _ -> None)
                 | _ -> None
@@ -6870,8 +6967,8 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
                             (Ok ()))
             equalityCheck |> Result.bind (fun () ->
             match f.Kind with
-            | TExprVar (n, _, _) ->
-                (match lookupUnitTransform env n with
+            | TExprVar _ ->
+                (match calleeDeclId env f |> Option.bind (lookupUnitTransform env) with
                  | None -> Ok None
                  | Some (exponents, residual) ->
                      // The argument signatures this walk computes, not the ones
@@ -6941,7 +7038,7 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
 /// Only a DEDUCED return is probed: a concrete return type either carries its
 /// own signature or legitimately has none, and either way the call site leaves
 /// it alone.
-and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
+and funcUnitTransform (env: TypeEnv) (funcId: IRId) (unannotatedReturn: bool) (parms: TypedParam list)
                       (retTy: IRType) (body: TypedExpr) : unit =
     let openElem (t: IRType) =
         match env.Subst.Resolve t with
@@ -6971,13 +7068,18 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
             try kernelBodyUnits env bound body
             finally slot.Value <- saved
         if collected.Count > 0 then
-            env.FuncUnitEqualities.[name] <- List.ofSeq collected
+            env.FuncUnitEqualities.[funcId] <- List.ofSeq collected
         // The TRANSFORM is derived for a deduced return as before. A walk that
         // recorded equations still yields one (`hyp(a, b) = sqrt(a*a + b*b)`
         // returns unit(a)): the call judges the equations before the
         // transform is applied, so a call that reaches the stamp satisfies them.
         match walked with
-        | Ok (Some u) when openElem retTy ->
+        // ...or an UNANNOTATED return the body made concrete through a generic
+        // cast (`Float64(reduce(row, (+))) / Float64(extents(row))`, stats.mean):
+        // the cast keeps its operand's unit, so the result still measures what
+        // the arguments measure, and nothing written on the signature says
+        // otherwise.
+        | Ok (Some u) when openElem retTy || unannotatedReturn ->
             let n = unitNormalize u
             let exponents =
                 parms |> List.mapi (fun i _ ->
@@ -6988,7 +7090,7 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
                 { n with
                     Nominal = None
                     Dims = n.Dims |> Map.filter (fun k _ -> not (k.StartsWith "__unit_probe_")) }
-            env.FuncUnitTransform.[name] <- (exponents, residual)
+            env.FuncUnitTransform.[funcId] <- (exponents, residual)
         | _ -> ()
 
 /// ELEMENT-level sibling of `kernelBodyUnits`, for the array operands of a
@@ -7568,11 +7670,20 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
                 Some (
                     inferLambda env lamParams None bodyApp
                     |> Result.bind (fun tLam ->
-                        // Pin the residual param types to the callee's declared
-                        // ones: direct application keeps its looseness
-                        // (no param-vs-arg unification), mirroring the prefix
-                        // partial-application eta-expansion.
-                        unify env.Subst tLam.Type (mkFuncArrow paramTys retTy)
+                        // Pin the wrapper's param types to the callee's
+                        // signature -- an INSTANTIATED copy of it, as at every
+                        // call and at the partial-application eta arms. Pinning
+                        // the DECLARATION's own variables bound a generic
+                        // callee to this one kernel use: `method_for(B) <@>
+                        // mean` over Float64 rows made `mean(int_row)` anywhere
+                        // after it a BL3001 against `Array<Float64 ..>` (and a
+                        // call before it a g++ error against the one emitted
+                        // `double mean(Array<double,1>)`).
+                        let quantified, _ =
+                            calleeQuantifier env (mkTyped (TExprVar (name, info.VarId, None)) info.Type)
+                        let pinTys, _ = instantiateOpenVars env.Subst quantified (paramTys @ [retTy])
+                        unify env.Subst tLam.Type
+                            (mkFuncArrow (List.truncate paramTys.Length pinTys) (List.last pinTys))
                         |> Result.map (fun () ->
                             // Surface the callee's `where` clause onto the wrapper
                             // lambda. Params are 1:1 with the callee's, so:
@@ -9054,7 +9165,53 @@ and buildApplyInfo (env: TypeEnv)
         let resolved = env.Subst.Resolve(lambdaInfo.ReturnType)
         match resolved with
         | ArrayElem arr ->
-            let tDims = arr.IndexTypes |> List.map (fun idx -> { idx with Kind = TDimension })
+            // COMPILER-MINTED EXTENTS ARE NOT OUTPUT EXTENTS. A row kernel's
+            // body shapes its `T^k` parameter before this seam unifies it
+            // with the row: `r * 2.0` (the elementwise demand,
+            // materializeArityVar) and `reduce(r, (+))` (the fold's own
+            // demand) both mint index records whose Extent is a
+            // `__..._inferred_n..` placeholder, and unify never compares --
+            // so never replaces -- extents. The return of `r * 2.0` then
+            // carried the placeholder into the output's T-dims and codegen
+            // allocated `out_extents[1] = __elementwise_inferred_n_6`, a g++
+            // error (`r - mean(r)` escaped only because its partner is an
+            // unresolved var, which pins nothing). The placeholder HAS an
+            // answer right here: the parameter it was minted for is aligned,
+            // axis for axis, with the fiber of the operand it binds. Map each
+            // placeholder the resolved params carry to that fiber record and
+            // read the return's placeholder records through it. Records that
+            // are not placeholders (loops/121's `fs`, a kernel returning a
+            // row over a DIFFERENT index) are untouched.
+            let isMintedPlaceholder (e: IRExpr) =
+                match e with
+                | IRParam (n, _, _) -> n.StartsWith "__" && n.Contains "_inferred_n"
+                | _ -> false
+            let placeholderFibers : Map<string, IRIndexType> =
+                lambdaInfo.Params
+                |> List.mapi (fun i p ->
+                    match IR.stripUnits (env.Subst.Resolve p.Type) with
+                    | ArrayElem pArr when i < arrayTypes.Length && i < kernelInputRanks.Length ->
+                        let irank = kernelInputRanks.[i]
+                        let at = arrayTypes.[i]
+                        if irank > 0 && pArr.IndexTypes.Length = irank && at.IndexTypes.Length >= irank then
+                            let fiber = at.IndexTypes |> List.skip (at.IndexTypes.Length - irank)
+                            List.zip pArr.IndexTypes fiber
+                            |> List.choose (fun (pIx, fIx) ->
+                                match pIx.Extent with
+                                | IRParam (n, _, _) when isMintedPlaceholder pIx.Extent
+                                                        && not (isMintedPlaceholder fIx.Extent) ->
+                                    Some (n, fIx)
+                                | _ -> None)
+                        else []
+                    | _ -> [])
+                |> List.concat
+                |> Map.ofList
+            let tDims =
+                arr.IndexTypes |> List.map (fun idx ->
+                    match idx.Extent with
+                    | IRParam (n, _, _) when placeholderFibers.ContainsKey n ->
+                        { placeholderFibers.[n] with Kind = TDimension }
+                    | _ -> { idx with Kind = TDimension })
             (tDims, tDims.Length)
         | _ ->
             // ABSTRACT rank-k return (`T^k` / `T<u>^k`). `Resolve` leaves such a
@@ -9544,6 +9701,23 @@ and buildApplyInfo (env: TypeEnv)
         | Some name -> Error (IntrinsicNotComplex name)
         | None ->
         match findBadDeferredCast lambdaInfo.Body with
+        | Some err -> Error err
+        | None ->
+        // A kernel PARAMETER applied to arguments, now that apply-site
+        // unification has bound it: `lambda(i, j, a, b) -> a(i, j)` over
+        // `for (A, B) in range<M, N>` binds `a` to the M index (cells come
+        // first, then indices) and applying it reached g++. See
+        // TypeCheckSupport.nonCallableHead.
+        let paramIds = lambdaInfo.Params |> List.map (_.VarId) |> Set.ofList
+        let rec appliedParam (e: TypedExpr) : TypeError option =
+            match e.Kind with
+            | TExprApp ({ Kind = TExprVar (_, vid, _) } as f, args)
+                    when paramIds.Contains vid && not (List.isEmpty args) ->
+                (match nonCallableHead env.Subst f with
+                 | Some t -> Some (InvalidApplication t)
+                 | None -> args |> List.tryPick appliedParam)
+            | _ -> typedExprChildren e |> List.tryPick appliedParam
+        match appliedParam lambdaInfo.Body with
         | Some err -> Error err
         | None ->
         // HALO-EXTENT AGREEMENT (BL3016, the halo twin of kernelExtentClash).
@@ -14317,10 +14491,6 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                     // names (mut write permission, co-iteration extents, the
                     // return-unit transform, where-conjunct discharge).
                     let c = exports.Callees
-                    for kv in c.MutParams do e.MutParamPositions.[$"{alias}.{kv.Key}"] <- kv.Value
-                    for kv in c.CoIterObligations do e.FuncCoIterObligations.[$"{alias}.{kv.Key}"] <- kv.Value
-                    for kv in c.UnitTransforms do e.FuncUnitTransform.[$"{alias}.{kv.Key}"] <- kv.Value
-                    for kv in c.UnitEqualities do e.FuncUnitEqualities.[$"{alias}.{kv.Key}"] <- kv.Value
                     for kv in c.Constraints do e.FuncConstraints.[$"{alias}.{kv.Key}"] <- kv.Value
                     e
                 | ImportSelective names ->
@@ -14368,10 +14538,6 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                                 match Map.tryFind name m with
                                 | Some v -> d.[name] <- v
                                 | None -> d.Remove name |> ignore
-                            put e.MutParamPositions c.MutParams
-                            put e.FuncCoIterObligations c.CoIterObligations
-                            put e.FuncUnitTransform c.UnitTransforms
-                            put e.FuncUnitEqualities c.UnitEqualities
                             put e.FuncConstraints c.Constraints
                     e
             | None ->
@@ -14396,10 +14562,6 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // so an earlier same-named binding's entry must not survive into this
     // one (checkModule clears them per module; this covers a same-module
     // `let f = lambda ...` shadowed by a later `function f`).
-    env.MutParamPositions.Remove funcDecl.Name |> ignore
-    env.FuncCoIterObligations.Remove funcDecl.Name |> ignore
-    env.FuncUnitTransform.Remove funcDecl.Name |> ignore
-    env.FuncUnitEqualities.Remove funcDecl.Name |> ignore
     env.FuncConstraints.Remove funcDecl.Name |> ignore
     env.FuncDefaults.Remove funcDecl.Name |> ignore
     env.FuncDefaultCaptures.Remove funcDecl.Name |> ignore
@@ -14502,6 +14664,12 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // ...and record the binder as a named function, so a lambda that calls it
     // does not drag it onto its capture list (see DeclaredFuncIds).
     env.DeclaredFuncIds.Add funcVarId |> ignore
+    // A re-check of the same binder (the static pre-pass registers the id
+    // first) starts from no recorded facts.
+    env.MutParamPositions.Remove funcVarId |> ignore
+    env.FuncCoIterObligations.Remove funcVarId |> ignore
+    env.FuncUnitTransform.Remove funcVarId |> ignore
+    env.FuncUnitEqualities.Remove funcVarId |> ignore
 
     // `x: mut T` params bind MutPassable so the body may assign into them
     // (gradient out-buffers). Array-typed only: the C++ ABI passes the
@@ -14589,7 +14757,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     if not customConjuncts.IsEmpty then
         env.FuncConstraints.[funcDecl.Name] <- (paramNames, customConjuncts)
 
+    let genericObligations = ResizeArray<GenericObligation>()
+    env.FuncGenericObligations.Remove funcVarId |> ignore
     let mutable bodyEnv = enterCallableBody envWithFunc
+    bodyEnv <- { bodyEnv with CurrentGenericObligations = Some genericObligations }
     if funcDecl.WhereClause |> Option.map (fun w -> not w.Parallel.IsEmpty) |> Option.defaultValue false then
         bodyEnv <- { bodyEnv with InParallelBody = true }
     let typedParams = funcDecl.Params |> List.mapi (fun i p ->
@@ -14720,7 +14891,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
         |> List.filter (fun (_, p) -> p.Mutability = Mutable)
         |> List.map fst
     if not mutPositions.IsEmpty then
-        env.MutParamPositions.[funcDecl.Name] <- mutPositions
+        env.MutParamPositions.[funcVarId] <- mutPositions
 
     // Open the license scope for the body; closed after `result` is
     // computed (both success and error paths flow past the exit below).
@@ -14824,7 +14995,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             let coIterObs =
                 coIterObligations env (funcDecl.Params |> List.map (_.Name)) tBody
             if not (List.isEmpty coIterObs) then
-                env.FuncCoIterObligations.[funcDecl.Name] <- coIterObs
+                env.FuncCoIterObligations.[funcVarId] <- coIterObs
             // Register the function's parallel strategies for the same reason,
             // paired with its param NAMES: an `omp(a: n)` var is resolved by
             // name against the callable's params (Lowering.extractParallelism),
@@ -15081,7 +15252,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                            repResolve funcDecl.Name funcVarId repParams resolvedRet tBody with
                  | Some prop -> Blade.DeduceRep.TypedCertProposals.add prop tBody.Span
                  | None -> ())
-            funcUnitTransform env funcDecl.Name resolvedParams resolvedRet tBody
+            funcUnitTransform env funcVarId funcDecl.ReturnType.IsNone resolvedParams resolvedRet tBody
             // The effect summary (Blade.Effects): computed here, with every
             // earlier declaration's summary in FuncEffects and this
             // function's own recursive calls read as pure, then published
@@ -15089,6 +15260,27 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             let effects = effectsOfBody env (Some funcVarId) tBody
             env.FuncEffects.[funcVarId] <- effects
             env.FuncSigVarRange.[funcVarId] <- (sigVarLo, env.Subst.NextId)
+            // A fractional-math demand matters only when the T-typed result
+            // reaches the RETURN as T: `-> T^0 = sqrt(x)` truncates at an
+            // integer instance, `-> Float64 = sqrt(x) * 2.0` and
+            // `Float64(sqrt(x))` do not (the emitted C++ computes the
+            // intermediate in double either way). Kept only when the
+            // operand's variable still appears in the resolved return -- or the
+            // return is still open at all (a generic call's declared return,
+            // through which a propagated demand flows).
+            let retVars = freeInferVars env.Subst (env.Subst.Resolve resolvedRet)
+            let kept =
+                genericObligations
+                |> Seq.filter (fun ob ->
+                    match ob with
+                    | GOCast _ -> true
+                    | GOFractionalMath (v, _) ->
+                        match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
+                        | IRTInfer r -> retVars.Contains r || not retVars.IsEmpty
+                        | _ -> false)
+                |> List.ofSeq
+            if not kept.IsEmpty then
+                env.FuncGenericObligations.[funcVarId] <- kept
             // Bounded PARAMETERS and RETURN (`x: Sal`, `-> Float64<min=0.0>`,
             // through aliases too): runtime guards at entry and at the return,
             // the same BL8001 guards a bounded `let` gets. Wrapped LAST, after

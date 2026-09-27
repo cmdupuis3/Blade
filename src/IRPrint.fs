@@ -75,6 +75,13 @@ let rec ppIRType = function
                     | _ -> failwith "unreachable")
                 |> String.concat ", "
             $"Array<{ppIRType result} like {indices}>"
+        elif not slots.IsEmpty && identity.IsNone
+             && slots |> List.forall (function SVal _ -> true | _ -> false) then
+            // A plain FUNCTION type: the surface spelling `(A, B) -> R`, which
+            // is what a parameter annotation says (`g: (Float64) -> Float64`),
+            // rather than the internal `Arrow<A, B -> R>`.
+            let ps = slots |> List.map (function SVal ty -> ppIRType ty | _ -> "?") |> String.concat ", "
+            $"({ps}) -> {ppIRType result}"
         else
             let slotStr =
                 slots |> List.map (function

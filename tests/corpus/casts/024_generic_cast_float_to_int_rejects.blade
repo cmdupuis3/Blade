@@ -1,0 +1,9 @@
+// TEST: Generic Int64 cast instantiated at a float (rejects)
+// ERROR: BL3019 @ 8:15
+// ERROR-CONTAINS: would truncate a float
+// ============================================================================
+// `Int64(x)` over a generic `x` is legal at an integer instance and refused
+// at a float one, where the truncation must be spelled (`floor`/`ceil`).
+function toint(x: T^0) = Int64(x)
+let c = toint(3)
+let d = toint(2.5)

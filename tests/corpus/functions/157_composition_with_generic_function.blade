@@ -1,0 +1,18 @@
+// TEST: Composing a generic function does not bind its declaration
+// ============================================================================
+// `sq >> idg` unified with `idg`'s DECLARATION variables, pinning `idg` to
+// Float64 for every later caller: `idg("s")` after it was refused BL3001. The
+// composition now uses an instantiated copy, like a call, and IR
+// monomorphization treats a composition operand as a call site (idg's
+// parameter is sq's return), so `h(3.0)` still gets its specialization.
+// ============================================================================
+function sq(x: Float64) -> Float64 = x * x
+function idg(a: T^0) -> T^0 = a
+let h = sq >> idg
+let v = h(3.0)
+// EXPECT: v = 9
+let s = idg("s")
+// EXPECT: s = "s"
+let k = idg >> sq
+let w = k(4.0)
+// EXPECT: w = 16

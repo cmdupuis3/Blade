@@ -1,0 +1,16 @@
+// TEST: A generic function called through a let alias is specialized
+// ============================================================================
+// `let g = total` shares `total`'s declaration; calls through `g` were judged
+// (functions/151) but EMITTED nothing: the IR call site named the alias's
+// binding, which is no generic function, so monomorphization requested no
+// specialization and `g`, `total` and every call reached validation with an
+// open type variable (BL6001). The alias is now transparent to
+// monomorphization -- each call through it specializes `total`.
+// ============================================================================
+function total(row: T^1) -> T^0 = reduce(row, (+))
+let g = total
+let h = g
+let s = g([1, 2])
+// EXPECT: s = 3
+let t = h([1.5, 2.0])
+// EXPECT: t = 3.5

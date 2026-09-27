@@ -14,6 +14,10 @@ open Blade.IR
 /// HM call sites the arg type is fully concrete.
 let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRType>) : Map<int, IRType> =
     match paramTy, argTy with
+    // A var-to-var pair teaches nothing concrete, and recording it first
+    // would shadow a later argument that does (a generic FUNCTION argument's
+    // open type ahead of a concrete scalar teaching the same variable).
+    | IRTInfer _, IRTInfer _ -> acc
     | IRTInfer n, t when not (acc.ContainsKey n) -> Map.add n t acc
     | IRTInfer n, t when acc.[n] = t -> acc  // Consistent reuse -- fine
     | IRTInfer _, _ -> acc  // Inconsistent -- leave as-is; the IR validator will catch it
@@ -224,6 +228,139 @@ let rec canonTypeKey (ty: IRType) : string =
         $"""arr_{(canonTypeKey arr.ElemType)}__{(arr.IndexTypes |> List.map idxKey |> String.concat "_")}"""
     | IRTInfer id -> $"v{id}"
     | _ -> "T"
+
+/// FUNCTION VALUES of HM-polymorphic functions (docs/plans/plan-call-judgment.md
+/// section 9, F3/F7). Specialization is call-site driven, and a generic
+/// function named WITHOUT being applied -- passed to a higher-order parameter
+/// (`apply(idg, 2.0)`, `applyS(idg, "a")`) or composed (`sq >> idg`) -- was no
+/// call site: no spec was requested, the open original survived to validation
+/// (BL6001 "unresolved type variable"), or the checker had to bind the
+/// declaration's own variables to the one use it could see. Each such
+/// reference has a USE type fixed by its position, and that is a call site in
+/// every sense the monomorphizer needs:
+///   * an ARGUMENT, against the callee's parameter type at that position (the
+///     callee's own bindings, learned from its other arguments, substituted
+///     first, so `twice(idg, 2.0)` over `twice(g: (T) -> T, x: T)` works);
+///   * the right operand of `l >> r`: r's parameter is l's return;
+///   * the left operand: l's return is r's parameter.
+/// `onRef hmId bindings` is asked for each such reference; it returns the
+/// replacement (the spec's IRVar) or None. Collection passes a recorder
+/// returning None; the rewrite passes the spec lookup.
+let hmValueRefRewrite (hmFuncMap: Map<IRId, IRFuncDef>)
+                      (onRef: IRId -> Map<int, IRType> -> IRExpr option)
+                      (e: IRExpr) : IRExpr =
+    let arrowOf (f: IRFuncDef) = mkFuncArrow (f.Params |> List.map _.Type) f.RetType
+    let isHmRef (a: IRExpr) =
+        match a with
+        | IRVar (id, _) -> hmFuncMap.ContainsKey id
+        | _ -> false
+    let learn (hm: IRFuncDef) (expected: IRType) =
+        unifyParamWithArg (arrowOf hm) expected Map.empty
+    match e with
+    | IRApp (head, args, retTy) when args |> List.exists isHmRef ->
+        let paramTys : IRType list option =
+            match head with
+            | IRVar (hid, _) when hmFuncMap.ContainsKey hid ->
+                let hf = hmFuncMap.[hid]
+                if hf.Params.Length <> args.Length then None
+                else
+                    let hb =
+                        List.zip hf.Params args
+                        |> List.fold (fun acc (p, a) ->
+                            if isHmRef a then acc
+                            else
+                                match exprTypeIfKnown a with
+                                | Some t -> unifyParamWithArg p.Type t acc
+                                | None -> acc) Map.empty
+                    Some (hf.Params |> List.map (fun p -> substTypeInIRType hb p.Type))
+            | _ ->
+                match exprTypeIfKnown head with
+                | Some (FuncElem (ps, _)) -> Some ps
+                | _ -> None
+        match paramTys with
+        | Some ps when ps.Length = args.Length ->
+            let args' =
+                List.zip args ps |> List.map (fun (a, pTy) ->
+                    match a with
+                    | IRVar (id, _) when hmFuncMap.ContainsKey id ->
+                        (match pTy with
+                         | FuncElem _ -> onRef id (learn hmFuncMap.[id] pTy) |> Option.defaultValue a
+                         | _ -> a)
+                    | _ -> a)
+            if List.forall2 (fun (x: IRExpr) y -> obj.ReferenceEquals (x, y)) args args' then e
+            else IRApp (head, args', retTy)
+        | _ -> e
+    | IRCompose (l, r) when isHmRef l || isHmRef r ->
+        let single (ps: IRType list) = match ps with [p] -> p | _ -> IRTTuple ps
+        let r' =
+            match r with
+            | IRVar (rid, _) when hmFuncMap.ContainsKey rid ->
+                (match exprTypeIfKnown l with
+                 | Some (FuncElem (_, lRet)) ->
+                     let hm = hmFuncMap.[rid]
+                     let b = unifyParamWithArg (single (hm.Params |> List.map _.Type)) lRet Map.empty
+                     onRef rid b |> Option.defaultValue r
+                 | _ -> r)
+            | _ -> r
+        let l' =
+            match l with
+            | IRVar (lid, _) when hmFuncMap.ContainsKey lid ->
+                (match exprTypeIfKnown r' with
+                 | Some (FuncElem (rps, _)) ->
+                     let hm = hmFuncMap.[lid]
+                     let b = unifyParamWithArg hm.RetType (single rps) Map.empty
+                     onRef lid b |> Option.defaultValue l
+                 | _ -> l)
+            | _ -> l
+        if obj.ReferenceEquals (l, l') && obj.ReferenceEquals (r, r') then e else IRCompose (l', r')
+    | _ -> e
+
+/// `let g = total` -- a module-level ALIAS of an HM-polymorphic function. The
+/// checker judges calls through the alias against the declaration
+/// (calleeQuantifier follows the chain), but the IR call site names the
+/// ALIAS's binding, which is no HM function, so no spec was requested and the
+/// binding itself kept the open signature (BL6001 on `g`, `total`, and every
+/// call). The alias is transparent: every reference is redirected to the
+/// declaration (chains followed), and the binding -- a function value, which
+/// no lane prints -- is removed. Runs over the whole program before the
+/// merged HM pass, so the per-module binding counts that pass splits back on
+/// are the post-removal ones.
+let eliminateGenericAliases (modules: IRModule list) : IRModule list =
+    let hmIds =
+        modules |> List.collect _.Functions |> List.filter hasTypeVarsInParams
+        |> List.map (fun f -> (f.Id, f)) |> Map.ofList
+    if hmIds.IsEmpty then modules
+    else
+        let direct =
+            modules |> List.collect _.Bindings
+            |> List.choose (fun b ->
+                match b.Value with
+                | IRVar (target, _) -> Some (b.Id, target)
+                | _ -> None)
+            |> Map.ofList
+        let rec resolve (fuel: int) (id: IRId) =
+            if hmIds.ContainsKey id then Some id
+            elif fuel <= 0 then None
+            else Map.tryFind id direct |> Option.bind (resolve (fuel - 1))
+        let aliases =
+            direct |> Map.toList
+            |> List.choose (fun (bid, _) -> resolve 8 bid |> Option.map (fun t -> (bid, t)))
+            |> Map.ofList
+        if aliases.IsEmpty then modules
+        else
+            let redirect (e: IRExpr) =
+                match e with
+                | IRVar (id, _) when aliases.ContainsKey id ->
+                    let f = hmIds.[aliases.[id]]
+                    IRVar (f.Id, mkFuncArrow (f.Params |> List.map _.Type) f.RetType)
+                | _ -> e
+            modules |> List.map (fun m ->
+                { m with
+                    Functions = m.Functions |> List.map (fun f -> { f with Body = mapIRExpr redirect f.Body })
+                    Bindings =
+                        m.Bindings
+                        |> List.filter (fun b -> not (aliases.ContainsKey b.Id))
+                        |> List.map (fun b -> { b with Value = mapIRExpr redirect b.Value }) })
 
 /// Generate a specialized copy of a function for a given set of type-var
 /// bindings. Substitutes types throughout params, return, and body, and
@@ -454,6 +591,18 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         // `hanning` and `wosa_lsdft`.
         let sitesFromClones =
             lambdaClones |> Seq.collect (fun c -> collectHMCallSites hmFuncMap c.Body) |> List.ofSeq
+        // Generic functions named as VALUES (hmValueRefRewrite): arguments to
+        // higher-order parameters and composition operands.
+        let valueSites =
+            let acc = System.Collections.Generic.List<IRId * (int * IRType) list>()
+            let record (id: IRId) (b: Map<int, IRType>) =
+                acc.Add((id, b |> Map.toList |> List.sortBy fst)); None
+            let scan (body: IRExpr) = iterIRExpr (fun n -> hmValueRefRewrite hmFuncMap record n |> ignore) body
+            for f in modul.Functions do scan f.Body
+            for b in modul.Bindings do scan b.Value
+            for (_, spec) in Map.toList specMap do scan spec.Body
+            for c in lambdaClones do scan c.Body
+            List.ofSeq acc
         // Dedup on the SPEC KEY (the canonTypeKey string form), not on raw
         // `IRType` trees: `List.distinct` had to structurally hash and compare
         // whole type trees -- extent expressions included -- once per call site
@@ -466,7 +615,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
         // n` renders as `vn` and nothing else does -- so key-equal sites never
         // disagree about whether they are specializable.
         let uniqueSites =
-            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones)
+            (sitesFromFuncs @ sitesFromBindings @ sitesFromSpecs @ sitesFromClones @ valueSites)
             |> List.map (fun (funcId, sortedBindings) ->
                 ((funcId, sortedBindings |> List.map (fun (id, ty) -> (id, canonTypeKey ty))),
                  (funcId, sortedBindings)))
@@ -532,6 +681,11 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
                        args, spec.RetType)
             | None -> e
         | _ -> e
+    let specRef (id: IRId) (b: Map<int, IRType>) : IRExpr option =
+        let key = (id, b |> Map.toList |> List.sortBy fst |> List.map (fun (k, ty) -> (k, canonTypeKey ty)))
+        Map.tryFind key specMap
+        |> Option.map (fun spec -> IRVar (spec.Id, mkFuncArrow (spec.Params |> List.map _.Type) spec.RetType))
+    let rewriteCallSite e = rewriteCallSite e |> hmValueRefRewrite hmFuncMap specRef
 
     // 4. Build a *global*, conflict-free type-var binding map for the whole
     //    module: a downstream binding like `let r = result(0)` references
@@ -761,6 +915,7 @@ let monomorphizeHMFunctions (modul: IRModule) (builder: IRBuilder) : IRModule =
 /// A single-module program takes the fast path and is bit-identical to before,
 /// down to the ids the builder mints.
 let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder) : IRModule list =
+    let modules = eliminateGenericAliases modules
     match modules with
     | [] -> []
     | [ single ] -> [ monomorphizeHMFunctions single builder ]

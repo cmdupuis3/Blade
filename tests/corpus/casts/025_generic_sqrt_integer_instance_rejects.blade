@@ -1,0 +1,9 @@
+// TEST: Generic sqrt returned at an integer instance (rejects)
+// ERROR: BL3019 @ 8:11
+// ERROR-CONTAINS: sqrt of an integer is a Float64
+// ============================================================================
+// `function r(x: T^0) -> T^0 = sqrt(x)` is exact for float and complex `T`,
+// but at Int64 it emitted `int64_t r(int64_t x) { return std::sqrt(x); }` --
+// a silent truncation (and stats.stddev over an Int row died in g++).
+function r(x: T^0) -> T^0 = sqrt(x)
+let a = r(9)

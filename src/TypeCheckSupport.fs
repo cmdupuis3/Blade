@@ -2075,8 +2075,8 @@ let applyUnitTransform (exponents: int list) (residual: UnitSig)
 /// `alias.name` key the import registers (TypeModuleExport.Callees) -- NOT by
 /// dropping the alias, which used to hand a callee with no recorded transform
 /// the transform of whichever same-named function another module declared.
-let lookupUnitTransform (env: TypeEnv) (n: string) : (int list * UnitSig) option =
-    match env.FuncUnitTransform.TryGetValue n with
+let lookupUnitTransform (env: TypeEnv) (fid: IRId) : (int list * UnitSig) option =
+    match env.FuncUnitTransform.TryGetValue fid with
     | true, t -> Some t
     | _ -> None
 
@@ -2132,7 +2132,7 @@ let lookupUnitTransform (env: TypeEnv) (n: string) : (int list * UnitSig) option
 /// by their own rule. `unitStampedReturnOnto` therefore decides "deduced" on
 /// the DECLARED return (`declRet`) and stamps the transform's unit onto the
 /// result the judgment chose. `unitStampedReturn` is the one-type spelling.
-let internal unitStampedReturnOnto (env: TypeEnv) (callee: string option)
+let internal unitStampedReturnOnto (env: TypeEnv) (callee: IRId option)
                                   (tArgs: TypedExpr list) (declRet: IRType) (resultRet: IRType) : IRType =
     // The element UNIT of a type, at the depth the unit lives: the type itself
     // for a scalar position, its `ElemType` for an array.
@@ -2143,12 +2143,14 @@ let internal unitStampedReturnOnto (env: TypeEnv) (callee: string option)
     let resolvedDecl = env.Subst.Resolve declRet
     let deduced =
         // Only a DEDUCED return is in scope: one whose element is still an open
-        // variable. A concrete return type either carries its own signature or
-        // legitimately has none.
+        // variable, or an unannotated one the body made concrete (a recorded
+        // transform exists only for those -- funcUnitTransform). A declared
+        // concrete return either carries its own signature or legitimately has
+        // none.
         match resolvedDecl with
         | ArrayElem at -> (env.Subst.Resolve at.ElemType).IsIRTInfer
         | IRTInfer _ -> true
-        | _ -> false
+        | _ -> (callee |> Option.bind (lookupUnitTransform env)).IsSome
     let resolvedRet = env.Subst.Resolve resultRet
     if not deduced || (elemUnits resolvedDecl).IsSome || (elemUnits resolvedRet).IsSome then resultRet
     else
@@ -2164,7 +2166,7 @@ let internal unitStampedReturnOnto (env: TypeEnv) (callee: string option)
                     mkArrayLike { at with ElemType = IRTUnitAnnotated (env.Subst.Resolve at.ElemType, u) }
                 | r -> IRTUnitAnnotated (r, u)
 
-let internal unitStampedReturn (env: TypeEnv) (callee: string option)
+let internal unitStampedReturn (env: TypeEnv) (callee: IRId option)
                               (tArgs: TypedExpr list) (retTy: IRType) : IRType =
     unitStampedReturnOnto env callee tArgs retTy retTy
 
@@ -2217,12 +2219,12 @@ let rec internal substInferVars (mapping: Map<int, IRType>) (ty: IRType) : IRTyp
 /// would. The polymorphic MARK does not travel: it tells zonk to keep a
 /// DECLARATION's variable open for monomorphization, and a copy is never one.
 /// Returns the copied types and the set of fresh ids.
-let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: IRType list)
-                                 : IRType list * Set<int> =
+let internal instantiateOpenVarsWithMap (subst: Subst) (quantified: int -> bool) (tys: IRType list)
+                                        : IRType list * Set<int> * Map<int, int> =
     let resolved = tys |> List.map subst.Resolve
     let free =
         resolved |> List.map (freeInferVars subst) |> Set.unionMany |> Set.filter quantified
-    if free.IsEmpty then (resolved, Set.empty)
+    if free.IsEmpty then (resolved, Set.empty, Map.empty)
     else
         let pairs =
             free |> Set.toList |> List.map (fun v ->
@@ -2234,7 +2236,12 @@ let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: 
                     (v, fid)
                 | _ -> failwith "unreachable: Subst.Fresh returns IRTInfer")
         let mapping = pairs |> List.map (fun (v, fid) -> (v, IRTInfer fid)) |> Map.ofList
-        (resolved |> List.map (substInferVars mapping), pairs |> List.map snd |> Set.ofList)
+        (resolved |> List.map (substInferVars mapping), pairs |> List.map snd |> Set.ofList, Map.ofList pairs)
+
+let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: IRType list)
+                                 : IRType list * Set<int> =
+    let (copied, ids, _) = instantiateOpenVarsWithMap subst quantified tys
+    (copied, ids)
 
 /// Which open variables a call through `tFunc` may instantiate, and whether
 /// the callee's declaration is FINISHED. Only a declared function quantifies
@@ -2250,10 +2257,10 @@ let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: 
 /// it would type the call (`Int64`) differently from the callable it invokes
 /// (`double twice(double)`, static/011). Those stay uninstantiated and
 /// unbound, exactly as before.
-let internal calleeQuantifier (env: TypeEnv) (tFunc: TypedExpr) : (int -> bool) * bool =
-    // A `let` ALIAS of a declared function (`let g = total`) shares the
-    // declaration's type, variables included, so it quantifies the same
-    // variables -- or calls through the alias would escape the judgment.
+/// The DECLARATION binder a call head names: the head's own id, or -- for a
+/// `let` ALIAS of a declared function (`let g = total`), which shares the
+/// declaration's type, variables included -- the id the alias chain ends at.
+let internal calleeDeclId (env: TypeEnv) (tFunc: TypedExpr) : IRId option =
     let rec declId (fuel: int) (name: string) (vid: IRId) : IRId =
         if env.FuncSigVarRange.ContainsKey vid || fuel <= 0 then vid
         else
@@ -2264,13 +2271,140 @@ let internal calleeQuantifier (env: TypeEnv) (tFunc: TypedExpr) : (int -> bool) 
                  | _ -> vid)
             | None -> vid
     match tFunc.Kind with
-    | TExprVar (name, vid0, _) ->
-        let vid = declId 8 name vid0
+    | TExprVar (name, vid0, _) -> Some (declId 8 name vid0)
+    | _ -> None
+
+/// `calleeDeclId` for a SURFACE callee name (the partial-application seam
+/// sees the call head before it is typed).
+let internal declIdOfName (env: TypeEnv) (name: string) : IRId option =
+    match lookupVar name env with
+    | Some vi -> calleeDeclId env (mkTyped (TExprVar (name, vi.VarId, None)) vi.Type)
+    | None -> None
+
+let internal calleeQuantifier (env: TypeEnv) (tFunc: TypedExpr) : (int -> bool) * bool =
+    // A `let` ALIAS of a declared function quantifies the declaration's
+    // variables (calleeDeclId) -- or calls through the alias would escape
+    // the judgment.
+    match calleeDeclId env tFunc with
+    | Some vid ->
         (match env.FuncSigVarRange.TryGetValue vid with
          | true, (lo, hi) ->
              (fun v -> v >= lo && v < hi && env.Subst.IsPolymorphicId v), hi <> System.Int32.MaxValue
          | _ -> (fun _ -> false), false)
     | _ -> (fun _ -> false), false
+
+/// The numeric CAST legality rule (formalism 2.4), over a concrete source
+/// element: None = legal, Some message = the BL3019 refusal. The shared rule
+/// behind the generic-cast judgments (a cast whose operand is a declaration's
+/// signature variable is judged per instance, not at the declaration).
+let internal castLegality (name: string) (target: ElemType) (src: ElemType) (rounded: bool) : string option =
+    let isInt = function ETInt32 | ETInt64 -> true | _ -> false
+    let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
+    let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
+    match src with
+    | ETBool | ETString | ETUnit ->
+        Some $"{name}() expects a numeric operand; got {ppIRType (IRTScalar src)}."
+    | _ when isComplex src && not (isComplex target) ->
+        Some ($"{name}() cannot cast a complex value: project a real component first -- "
+              + "real(z), imag(z), abs(z), or arg(z).")
+    | _ when isFloat src && isInt target && not rounded ->
+        Some ($"{name}() would truncate a float: spell the rounding at the cast site -- "
+              + $"{name}(floor(x)) or {name}(ceil(x)).")
+    | _ -> None
+
+/// The GENERIC OBLIGATIONS of a callee (TypeEnv.GenericObligation), judged
+/// against one instance: `instanceOf v` is the concrete element the call
+/// gives declaration variable `v` (None = still open: not judged here).
+let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations: GenericObligation list)
+                                     (instanceOf: int -> ElemType option) : TypeError option =
+    let rootOf (vid: int) =
+        match env.Subst.Resolve (IRTInfer vid) |> IR.stripUnits with
+        | IRTInfer r -> Some r
+        | _ -> None
+    let isInt = function ETInt32 | ETInt64 -> true | _ -> false
+    obligations |> List.tryPick (fun ob ->
+        let vid = match ob with GOCast (v, _, _, _) | GOFractionalMath (v, _) -> v
+        match rootOf vid |> Option.bind instanceOf with
+        | None -> None
+        | Some src ->
+            match ob with
+            | GOCast (_, name, target, rounded) ->
+                castLegality name target src rounded
+                |> Option.map (fun msg ->
+                    InvalidCast ($"'{fname}' casts a value of its generic parameter type, and this call makes "
+                                 + $"that type {ppIRType (IRTScalar src)}: " + msg))
+            | GOFractionalMath (_, name) when isInt src ->
+                Some (InvalidCast ($"'{fname}' applies {name}() to a value of its generic parameter type and "
+                                   + $"returns it as that type, and this call makes that type {ppIRType (IRTScalar src)}: "
+                                   + $"{name} of an integer is a Float64, which an {ppIRType (IRTScalar src)} result "
+                                   + "would truncate. Convert the argument first -- Float64(x), or Float64(xs) "
+                                   + "for an array."))
+            | GOFractionalMath _ -> None)
+
+/// The element a (resolved) type carries, when it is concrete.
+let internal concreteElemOf (subst: Subst) (t: IRType) : ElemType option =
+    match IR.stripUnits (subst.Resolve t) with
+    | IRTScalar et -> Some et
+    | IRTIdxTagged (inner, _) ->
+        (match IR.stripUnits inner with IRTScalar et -> Some et | _ -> None)
+    | _ -> None
+
+/// GENERIC OBLIGATIONS at a call, judged against the call judgment's
+/// instantiation: `mapping` is its declaration-variable -> copy map, and a
+/// copy the arguments made concrete is judged. A copy still open (an
+/// argument open at the call, an eta-wrapped kernel) is left to the
+/// post-zonk sweep (TypeCheckValidate.collectGenericObligationErrors) and,
+/// for casts, the post-monomorphization one (IRValidate).
+let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (mapping: Map<int, int>) : TypeError option =
+    match calleeDeclId env tFunc with
+    | None -> None
+    | Some fid ->
+        match env.FuncGenericObligations.TryGetValue fid with
+        | true, obs ->
+            let fname = match tFunc.Kind with TExprVar (n, _, _) -> n | _ -> "the callee"
+            judgeGenericObligations env fname obs (fun r ->
+                Map.tryFind r mapping |> Option.bind (fun copy -> concreteElemOf env.Subst (IRTInfer copy)))
+        | _ -> None
+
+/// A generic body calling a generic callee with its OWN signature variables:
+/// the callee's obligations are then the caller's too (`function r2(x: T^0)
+/// -> T^0 = r(x)` over `r(x: T^0) -> T^0 = sqrt(x)`), since whatever instance
+/// reaches the caller reaches the callee. The call judgment cannot decide
+/// them here (the instance is open), so they are re-recorded against the
+/// caller's variable -- read off the declared parameters against the
+/// arguments, as monomorphization will -- and judged at the caller's calls.
+let internal propagateGenericObligations (env: TypeEnv) (tFunc: TypedExpr)
+                                         (paramTys: IRType list) (tArgs: TypedExpr list) : unit =
+    match env.CurrentGenericObligations, calleeDeclId env tFunc with
+    | Some acc, Some fid ->
+        (match env.FuncGenericObligations.TryGetValue fid with
+         | true, obs ->
+             let rec learn (p: IRType) (a: IRType) (m: Map<int, IRType>) =
+                 match IR.stripUnits (env.Subst.Resolve p), IR.stripUnits (env.Subst.Resolve a) with
+                 | IRTInfer r, at -> if m.ContainsKey r then m else Map.add r at m
+                 | ArrayElem pa, ArrayElem aa -> learn pa.ElemType aa.ElemType m
+                 | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
+                     List.fold2 (fun m pt at -> learn pt at m) m pts ats
+                 | _ -> m
+             let n = min paramTys.Length tArgs.Length
+             let inst =
+                 List.fold2 (fun m p (a: TypedExpr) -> learn p a.Type m) Map.empty
+                     (List.truncate n paramTys) (List.truncate n tArgs)
+             let callerVar (v: int) =
+                 match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
+                 | IRTInfer r ->
+                     (match Map.tryFind r inst |> Option.map IR.stripUnits with
+                      | Some (IRTInfer c) when env.Subst.IsPolymorphicId c && c <> r -> Some c
+                      | _ -> None)
+                 | _ -> None
+             for ob in obs do
+                 match ob with
+                 | GOCast (v, h, t, rd) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GOCast (c, h, t, rd)))
+                 | GOFractionalMath (v, nm) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GOFractionalMath (c, nm)))
+         | _ -> ())
+    | _ -> ()
 
 /// Strip unit annotations at every depth (array elements, tuple components,
 /// function slots). The call judgment compares SHAPES with units removed --
@@ -2304,6 +2438,23 @@ let internal numericLiteralKind (a: TypedExpr) : ElemType option =
         | TExprUnaryOp (_, inner) -> go inner
         | _ -> None
     go a
+
+/// The LITERAL SHAPE of an argument: a numeric literal leaf, a tuple of
+/// shapes (a tuple literal's components adapt one by one: `h((1.5, 2.0))` into
+/// `(Float32, Float32)` is two literals meaning Float32, not a narrowing of a
+/// `(Float64, Float64)` value), or nothing.
+type internal ArgLit =
+    | ALNone
+    | ALLeaf of ElemType
+    | ALTuple of ArgLit list
+
+let rec internal argLiteralShape (a: TypedExpr) : ArgLit =
+    match a.Kind with
+    | TExprTuple es -> ALTuple (es |> List.map argLiteralShape)
+    | _ ->
+        match numericLiteralKind a with
+        | Some et -> ALLeaf et
+        | None -> ALNone
 
 /// Coarse head kind of a RESOLVED type, for the judgment's fallback: two
 /// different known kinds never agree; `None` (an open, deferred or otherwise
@@ -2344,7 +2495,7 @@ let internal headKindOf (t: IRType) : string option =
 /// caller's variable from a callee's signature is inference this seam has
 /// never done; the post-zonk sweep judges it once it is closed), and a
 /// fallback unify is attempted only on a closed argument.
-let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (litKind: ElemType option)
+let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (litKind: ArgLit)
                               (p: IRType) (a: IRType) : TypeError option =
     // A copy an EARLIER argument already taught: this argument must meet
     // what the first one taught, by the same judgment -- tags, element types
@@ -2420,8 +2571,8 @@ let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (l
         elif widen && isInt pe && isInt ae then None
         else
             match litKind, pe with
-            | Some ETInt64, (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
-            | Some ETFloat64, (ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
+            | ALLeaf ETInt64, (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
+            | ALLeaf ETFloat64, (ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
             | _ -> mismatch ()
     | ArrayElem pa, ArrayElem aa ->
         if pa.IndexTypes.Length <> aa.IndexTypes.Length then mismatch ()
@@ -2442,15 +2593,20 @@ let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (l
                                          ppIndexType pi, max 1 pi.Rank,
                                          ppIndexType ai, max 1 ai.Rank))
             | Some _ -> mismatch ()
-            | None -> recur false None pa.ElemType aa.ElemType
+            | None -> recur false ALNone pa.ElemType aa.ElemType
     | IRTTuple ps, IRTTuple args ->
         if ps.Length <> args.Length then mismatch ()
-        else List.zip ps args |> List.tryPick (fun (x, y) -> recur widen None x y)
+        else
+            let comps =
+                match litKind with
+                | ALTuple ls when ls.Length = ps.Length -> ls
+                | _ -> List.replicate ps.Length ALNone
+            List.zip3 ps args comps |> List.tryPick (fun (x, y, l) -> recur widen l x y)
     | FuncElem (pps, pr), FuncElem (aps, ar) ->
         if pps.Length <> aps.Length then mismatch ()
         else
-            (List.zip pps aps |> List.tryPick (fun (x, y) -> recur false None x y))
-            |> Option.orElseWith (fun () -> recur false None pr ar)
+            (List.zip pps aps |> List.tryPick (fun (x, y) -> recur false ALNone x y))
+            |> Option.orElseWith (fun () -> recur false ALNone pr ar)
     | IRTNamed n1, IRTNamed n2 -> if n1 = n2 then None else mismatch ()
     | _ ->
         match headKindOf p, headKindOf a with
@@ -2487,6 +2643,31 @@ let internal staticExtentClash (subst: Subst) (expected: IRType) (actual: IRType
             | Some e, Some a when e <> a -> Some (d, e, a)
             | _ -> None)
     | _ -> None
+
+/// APPLYING A VALUE THAT TAKES NO ARGUMENTS: the head's RESOLVED type, when it
+/// is a scalar, a plain Nat, or an index value under a USER-named tag, and the
+/// head is a user-written, spanned variable. Such a head was routed to the
+/// dispatcher's fresh-var catch-all (it may be an open var that later becomes
+/// an array or a function), and codegen emitted `x(0L)` on a `double` -- a g++
+/// error. Narrow on purpose: an index value under a COMPILER tag is callable by
+/// design (a halo window `w(1)`, `Nat<__halowin|..>`), and a synthesized head's
+/// stamp is its desugarer's contract. Judged where the head is concrete: here
+/// at the call, and after a kernel's parameters meet their operands
+/// (buildApplyInfo) -- never post-zonk, where a zonk-DEFAULTED Float64 (an
+/// unreadable provider store's placeholder) would be a false refusal.
+let internal nonCallableHead (subst: Subst) (f: TypedExpr) : IRType option =
+    let userHead =
+        f.Span.StartLine > 0
+        && (match f.Kind with
+            | TExprVar (nm, _, _) -> not (nm.StartsWith "__")
+            | _ -> false)
+    if not userHead then None
+    else
+        let t = IR.stripUnits (subst.Resolve f.Type)
+        match t with
+        | IRTScalar _ | IRTNat _ -> Some t
+        | IRTIdxTagged (_, IRefNamed tag) when not (tag.StartsWith "__") -> Some t
+        | _ -> None
 
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
@@ -3037,8 +3218,8 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             | None ->
                 let calleeName = match tFunc.Kind with TExprVar (nm, _, _) -> Some nm | _ -> None
                 match calleeName |> Option.bind (fun nm ->
-                        match env.FuncUnitEqualities.TryGetValue nm with
-                        | true, eqs when not eqs.IsEmpty -> Some (nm, eqs)
+                        match calleeDeclId env tFunc |> Option.map (fun fid -> env.FuncUnitEqualities.TryGetValue fid) with
+                        | Some (true, eqs) when not eqs.IsEmpty -> Some (nm, eqs)
                         | _ -> None) with
                 | None -> None
                 | Some (nm, eqs) ->
@@ -3068,6 +3249,15 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             | TExprApp (f, args) ->
                 appRootAndOffset f |> Option.map (fun (n, off) -> (n, off + List.length args))
             | _ -> None
+        // The DECLARATION the application spine's root names (binder id, through
+        // `let` aliases), which keys the callee's recorded facts.
+        let rootDeclId : IRId =
+            let rec rootOf (t: TypedExpr) =
+                match t.Kind with
+                | TExprVar _ -> Some t
+                | TExprApp (f, _) -> rootOf f
+                | _ -> None
+            rootOf tFunc |> Option.bind (calleeDeclId env) |> Option.defaultValue -1
         // mutClash (BL4005) - WRITE PERMISSION, the one check here about the
         // caller's binding form rather than its type. A `mut` parameter writes
         // back into the caller's array, so the caller must hold write access
@@ -3092,7 +3282,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         let mutClash =
             match appRootAndOffset tFunc with
             | Some (fname, offset) when not (fname.StartsWith "__") ->
-                (match env.MutParamPositions.TryGetValue fname with
+                (match env.MutParamPositions.TryGetValue rootDeclId with
                  | true, positions ->
                      positions
                      |> List.tryPick (fun declPos ->
@@ -3161,7 +3351,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         let coIterClash =
             match appRootAndOffset tFunc with
             | Some (fname, offset) ->
-                (match env.FuncCoIterObligations.TryGetValue fname with
+                (match env.FuncCoIterObligations.TryGetValue rootDeclId with
                  | true, obs ->
                      // THE WHOLE APPLICATION SPINE. When a multi-group
                      // application reaches this seam as `TExprApp(TExprApp(f,
@@ -3229,7 +3419,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         let mutAliasClash =
             match appRootAndOffset tFunc with
             | Some (fname, offset) when not (fname.StartsWith "__") ->
-                (match env.MutParamPositions.TryGetValue fname with
+                (match env.MutParamPositions.TryGetValue rootDeclId with
                  | true, positions ->
                      let rec root (t: TypedExpr) =
                          match t.Kind with
@@ -3336,15 +3526,19 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 if isVariadic || tArgs.Length < paramTys.Length || synthesizedCallee then (None, None, [])
                 else
                     let quantified, closedDecl = calleeQuantifier env tFunc
-                    let copied, copyIds = instantiateOpenVars env.Subst quantified (paramTys @ [retTy])
+                    let copied, copyIds, copyMap = instantiateOpenVarsWithMap env.Subst quantified (paramTys @ [retTy])
                     let pCopies = List.truncate paramTys.Length copied
                     let retCopy = List.last copied
                     let clash =
                         appArgPairs pCopies (tArgs |> List.map (_.Type))
                         |> List.tryPick (fun (i, pTy, aTy) ->
                             let arg = List.item i tArgs
-                            argPairClash env.Subst copyIds true (numericLiteralKind arg) pTy aTy
+                            argPairClash env.Subst copyIds true (argLiteralShape arg) pTy aTy
                             |> Option.map (fun e -> (i, e)))
+                        // The callee's GENERIC CASTS, judged against the
+                        // instance the arguments just built.
+                        |> Option.orElse (genericObligationClash env tFunc copyMap |> Option.map (fun e -> (0, e)))
+                    propagateGenericObligations env tFunc paramTys tArgs
                     // Extents are NOT part of type identity, and a `T^1` shared
                     // by two parameters admits arrays of different lengths
                     // (the monomorph reads a `T^k` parameter's extents at run
@@ -3374,9 +3568,51 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         // length over a value that may have another's.
                         | None when extentsDisagree -> None
                         | None ->
+                            // AN OPEN ARGUMENT MEETS ITS PARAMETER'S COPY -- the
+                            // HM application rule, for the one kind of open
+                            // argument that is the caller's own to bind: a plain
+                            // monomorphic variable (a lambda parameter, the eta
+                            // wrapper `lambda(__k) -> mean(__k)` a named-function
+                            // kernel becomes). Without it the result fell back to
+                            // the DECLARED return, and whatever later resolved the
+                            // caller's variable (the kernel's row) bound the
+                            // DECLARATION through it: `method_for(B) <@> mean` over
+                            // Float64 rows pinned `mean` to Float64, and every later
+                            // `mean(int_row)` was refused (or, called earlier, died
+                            // in g++ against the one emitted `double mean(..)`).
+                            // A declaration's own signature variable (polymorphic)
+                            // and a literal's width-flexible variable are never
+                            // bound here: the first is IR monomorphization's, the
+                            // second adapts to its parameter on its own terms.
+                            // Not inside a named function DECLARATION body: there an open
+                            // argument is typically tied to the declaration's own
+                            // signature (a pack element `head` of `a: Poly<T^1>`), and
+                            // binding it to a non-generic copy collapsed the declaration to
+                            // one instance (arity/024, /026, /031).
+                            let linked =
+                                if Set.isEmpty copyIds || env.CurrentGenericObligations.IsSome then false
+                                else
+                                    appArgPairs pCopies (tArgs |> List.map (_.Type))
+                                    |> List.fold (fun acc (_, pTy, aTy) ->
+                                        match env.Subst.Resolve aTy with
+                                        | IRTInfer aid when not (env.Subst.IsPolymorphicId aid)
+                                                           && (env.Subst.GetLiteralDefault aid).IsNone
+                                                           && not (env.Subst.IsIndexDefault aid) ->
+                                            (match unify env.Subst (IRTInfer aid) (stripUnitsDeep env.Subst pTy) with
+                                             | Ok () -> true
+                                             | Error _ -> acc)
+                                        | _ -> acc) false
                             let r = env.Subst.Resolve retCopy
-                            if Set.isEmpty (Set.intersect (freeInferVars env.Subst r) copyIds) then Some r
-                            else None
+                            let openCopies = Set.intersect (freeInferVars env.Subst r) copyIds
+                            if Set.isEmpty openCopies then Some r
+                            else
+                                // Linked: every copy the return still mentions is
+                                // reachable from a parameter copy, i.e. from the
+                                // arguments -- the caller's variables now carry it.
+                                let paramFree =
+                                    pCopies |> List.map (fun t -> freeInferVars env.Subst (env.Subst.Resolve t))
+                                    |> Set.unionMany
+                                if linked && Set.isSubset openCopies paramFree then Some r else None
                     (clash, instRet, pCopies)
             let (judgedClash, judgedRet, judgedCopies) = judged
             match judgedClash, coIterClash with
@@ -3394,7 +3630,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 (match e with
                  | IndexRankMismatch (site, pTy, pr, aTy, ar) ->
                      Error (IndexRankMismatch ($"argument {i + 1}, {site}", pTy, pr, aTy, ar))
-                 | ExtentArgMismatch _ -> Error e
+                 | ExtentArgMismatch _ | InvalidCast _ -> Error e
                  | _ ->
                      // An open declared parameter (`T^1`) reads as a
                      // variable id; show what THIS call's instance of it was
@@ -3479,7 +3715,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             // result the judgment chose.
             let retTy =
                 unitStampedReturnOnto env
-                    (match tFunc.Kind with TExprVar (n, _, _) -> Some n | _ -> None)
+                    (calleeDeclId env tFunc)
                     tArgs retTy (judgedRet |> Option.defaultValue retTy)
             match coerceIndexArgs env paramTys tArgs with
             | Error e -> Error e
@@ -3516,6 +3752,9 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             else
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
     | _ ->
+        match nonCallableHead env.Subst tFunc with
+        | Some t when not (List.isEmpty tArgs) -> Error (InvalidApplication t)
+        | _ ->
         let retTy = env.Subst.Fresh()
         Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
 
@@ -3835,8 +4074,8 @@ let coIterObligations (env: TypeEnv) (paramNames: string list)
         // blame the wrong argument. Missing it just leaves the status quo.
         | TExprApp (f, args) ->
             (match f.Kind with
-             | TExprVar (callee, _, _) ->
-                 (match env.FuncCoIterObligations.TryGetValue callee with
+             | TExprVar _ ->
+                 (match env.FuncCoIterObligations.TryGetValue (calleeDeclId env f |> Option.defaultValue -1) with
                   | true, obs ->
                       obs |> List.choose (fun (ps, lits) ->
                           let mapped = ps |> List.choose (fun k -> List.tryItem k args)

@@ -1,0 +1,10 @@
+// TEST: stdlib mean over a complex row (rejects)
+// ERROR: BL3019 @ 9:14
+// ERROR-CONTAINS: 'mean' casts a value of its generic parameter type
+// ============================================================================
+// stats computes in Float64 (functions/152); a complex row has no Float64
+// value to cast to, so the generic cast refuses at the call, naming the
+// projections, instead of reaching g++.
+from stats import mean
+let cs: Array<Complex128 like Idx<2>> = [complex(1.0, 2.0), complex(3.0, 4.0)]
+let m = mean(cs)

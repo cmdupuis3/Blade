@@ -974,6 +974,19 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     else
     match t1, t2 with
     | IRTInfer id1, IRTInfer id2 when id1 = id2 -> Ok ()
+    // A var against a UNIT WRAPPER OF ITSELF. The unit-annotated arm below
+    // unifies `IRTUnitAnnotated (inner, _)` with anything by dropping the
+    // unit (units are judged by the unit rules, not by unify), so this pair
+    // is `unify a a` -- trivially true. Reaching the occurs check instead
+    // reported "Infinite type detected" for `row / reduce(row, (+))` in a
+    // `T^1 -> T^1` function used as a kernel: the quotient's element is the
+    // fold's element wrapped in the division's (dimensionless) unit, and the
+    // eta wrapper's signature pin met the bare element var.
+    | IRTInfer id, IRTUnitAnnotated (inner, _)
+    | IRTUnitAnnotated (inner, _), IRTInfer id
+        when (match subst.Resolve inner |> stripTagAnnotation with
+              | IRTInfer id2 -> id2 = id
+              | _ -> false) -> Ok ()
     | IRTInfer id, ty | ty, IRTInfer id ->
         if occursIn id ty then Error (Other "Infinite type detected")
         else

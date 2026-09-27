@@ -1,0 +1,16 @@
+// TEST: Generic sqrt whose result does not return as the parameter type
+// ============================================================================
+// The integer-instance refusal (casts/025) is about a T-typed sqrt landing in
+// a T-typed return. When the result flows into a Float64 (a declared return,
+// an explicit cast, a comparison) nothing truncates, and Int64 arguments stay
+// legal.
+// ============================================================================
+function r(x: T^0) -> Float64 = sqrt(x) * 2.0
+let a = r(4)
+// EXPECT: a = 4
+function q(x: T^0) = Float64(sqrt(x))
+let b = q(9)
+// EXPECT: b = 3
+function e(x: T^0) = exp(x) > 0.5
+let c = e(1)
+// EXPECT: c = true

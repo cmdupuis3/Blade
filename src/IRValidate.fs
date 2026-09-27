@@ -260,7 +260,42 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
             | Some id -> addError ctx $"unresolved type variable T?{id} in body"
             | None -> ()
             checkKindAgreement ctx ty
-    
+
+    // --- Check 1c: numeric cast legality, after monomorphization ---
+    // A cast whose operand was a SIGNATURE variable of a generic function
+    // (`Float64(reduce(row, (+)))` over `row: T^1`) is legal or not per
+    // instance; the call judgment judges every call it can see
+    // (TypeCheckSupport.genericObligationClash), and this is the backstop for the
+    // seams it cannot (an eta-wrapped kernel whose argument was open): a
+    // specialized body casting a complex value to a real one, or a float to
+    // an integer without a visible floor/ceil, is refused here instead of
+    // compiling to a C++ error (complex) or a silent truncation (float).
+    let rec checkCasts (ctx: string) (e: IRExpr) =
+        (match e with
+         | IRUnaryOp (IRCast target, operand) ->
+             let src =
+                 match typeOf operand with
+                 | IRTScalar et | IRTUnitAnnotated (IRTScalar et, _) | IRTIdxTagged (IRTScalar et, _) -> Some et
+                 | _ -> None
+             let rounded =
+                 match operand with
+                 | IRUnaryOp (IRMath ("floor" | "ceil"), _) -> true
+                 | _ -> false
+             let isInt = function ETInt32 | ETInt64 -> true | _ -> false
+             let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
+             let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
+             (match src with
+              | Some s when isComplex s && not (isComplex target) ->
+                  addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a complex value (a generic function instantiated at {ppIRType (IRTScalar s)}): project a real component first -- real(z), imag(z), abs(z), or arg(z)"
+              | Some s when isFloat s && isInt target && not rounded ->
+                  addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a {ppIRType (IRTScalar s)} value (a generic function instantiated at a float) would truncate: spell the rounding at the cast site -- floor(x) or ceil(x)"
+              | _ -> ())
+         | _ -> ())
+        let (ExprShape (children, _)) = e
+        children |> List.iter (checkCasts ctx)
+    for b in modul.Bindings do checkCasts $"in binding '{b.Name}'" b.Value
+    for f in modul.Functions do checkCasts $"in function '{f.Name}'" f.Body
+
     // --- Check 2: No dangling VarId references ---
     // Scope threads through every binder via BinderShape (IRLet's body,
     // IRForRange's body, a match case's guard and body) and recursion is the

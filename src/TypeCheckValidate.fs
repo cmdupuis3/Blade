@@ -600,6 +600,34 @@ let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : Compi
                      if clash then
                          Some (mkErr a.Span (ArgTypeMismatch (i + 1, fname, ppIRType pr, ppIRType ar)))
                      else None)
+                 |> Option.orElse (
+                     // The callee's GENERIC OBLIGATIONS (TypeEnv.GenericObligation),
+                     // for a call whose arguments were still open when the call
+                     // judgment ran -- the eta wrapper `lambda(__k) -> mean(__k)`
+                     // a named-function kernel becomes. The instance is read off
+                     // the (now concrete) arguments against the declared
+                     // parameters, the way IR monomorphization will read it.
+                     match calleeDeclId env f with
+                     | Some fid ->
+                         (match env.FuncGenericObligations.TryGetValue fid with
+                          | true, obs ->
+                              let rec learn (p: IRType) (a: IRType) (acc: Map<int, IRType>) =
+                                  match IR.stripUnits (subst.Resolve p), IR.stripUnits (subst.Resolve a) with
+                                  | IRTInfer r, at -> if acc.ContainsKey r then acc else Map.add r at acc
+                                  | ArrayElem pa, ArrayElem aa -> learn pa.ElemType aa.ElemType acc
+                                  | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
+                                      List.fold2 (fun m pt at -> learn pt at m) acc pts ats
+                                  | IRTIdxTagged (pi, _), IRTIdxTagged (ai, _) -> learn pi ai acc
+                                  | _ -> acc
+                              let n = min ps.Length args.Length
+                              let inst =
+                                  List.fold2 (fun m p (a: TypedExpr) -> learn p a.Type m) Map.empty
+                                      (List.truncate n ps) (List.truncate n args)
+                              judgeGenericObligations env fname obs (fun r ->
+                                  Map.tryFind r inst |> Option.bind (concreteElemOf subst))
+                              |> Option.map (fun e -> mkErr expr.Span e)
+                          | _ -> None)
+                     | None -> None)
                  |> Option.toList
              | _ -> [])
         | _ -> []

@@ -202,22 +202,35 @@ type TypeModuleExport = {
     Defaults: Map<string, (string * TypeExpr option * Expr option) list>
     /// The matching FuncDefaultCaptures entries (see TypeEnv.FuncDefaultCaptures).
     DefaultCaptures: Map<string, Map<string, IRId>>
-    /// The rest of the callee DECLARATION facts the call judgment reads by
-    /// name -- `mut` positions, co-iteration obligations, the return-unit
-    /// transform, custom where-conjuncts -- snapshotted the same way and for
-    /// the same reason as `Defaults`, and re-registered under the same keys, so
-    /// `M.f(x)` and `f(x)` are judged against the same declaration.
+    /// The callee DECLARATION facts the call judgment still reads by NAME --
+    /// custom where-conjuncts -- snapshotted the same way and for the same
+    /// reason as `Defaults`, and re-registered under the same keys, so `M.f(x)`
+    /// and `f(x)` are judged against the same declaration. (The binder-id-keyed
+    /// facts -- `mut` positions, co-iteration obligations, unit transforms and
+    /// equalities -- need no snapshot: an imported name binds the declaration's
+    /// own id.)
     Callees: CalleeFacts
 }
 
 /// Name-keyed callee declaration facts (see TypeModuleExport.Callees).
 and CalleeFacts = {
-    MutParams: Map<string, int list>
-    CoIterObligations: Map<string, (int list * int64 list) list>
-    UnitTransforms: Map<string, int list * UnitSig>
-    UnitEqualities: Map<string, (UnitSig * UnitSig) list>
     Constraints: Map<string, string list * (string * string list) list>
 }
+
+/// A demand a GENERIC function body places on the instance of one of its own
+/// signature variables -- judged per call (TypeCheckSupport.genericObligationClash,
+/// against the call judgment's instantiation, and again by the post-zonk sweep
+/// for calls whose arguments were open at the seam), because at the
+/// declaration the variable's element class is not known.
+type GenericObligation =
+    /// `Float64(x)` / `Int64(floor(x))` over a value of the variable's type:
+    /// the cast's legality (formalism 2.4) depends on the source class.
+    | GOCast of var: int * head: string * target: ElemType * rounded: bool
+    /// `sqrt(x)` (or another complex-preserving math intrinsic) over a value
+    /// of the variable's type, typed AS that type: exact for Float32 /
+    /// Float64 / complex instances, but an integer instance would hand an
+    /// integer-typed result a Float64 value (a silent truncation).
+    | GOFractionalMath of var: int * name: string
 
 /// Type checking environment
 type TypeEnv = {
@@ -362,16 +375,19 @@ type TypeEnv = {
     /// Functions whose return type introduces a mutual group (`-> (P1, P2)`):
     /// funcName -> groupId. Joint check emitted at return; callers don't re-check. Shared by reference.
     MutualReturnFuncs: System.Collections.Generic.Dictionary<string, string>
-    /// Callee name -> the 0-based positions of its `mut` parameters. A `mut`
+    /// Callee BINDER ID -> the 0-based positions of its `mut` parameters. A `mut`
     /// parameter grants the callee WRITE access to the caller's array, so the
     /// caller has to have write access to grant: formalism 2.7 lists only
     /// `let mut x = e` as passable to a `mut` param. The check needs the
     /// callee's DECLARATION at the call site, and the function type carries
-    /// only param types, so the positions ride here. Name-keyed like
-    /// FuncConstraints/FuncDefaults, and shares their known shadowing
-    /// weakness. Shared by reference.
-    MutParamPositions: System.Collections.Generic.Dictionary<string, int list>
-    /// Callee name -> the co-iterations its body performs over its own
+    /// only param types, so the positions ride here. Keyed by the declaration's
+    /// BINDER ID (TypeCheckSupport.calleeDeclId resolves a call head, through
+    /// `let` aliases and across modules), not its name: a name-keyed table let a
+    /// nested non-`mut` `function f` borrow a global `mut f`'s positions (a
+    /// false BL4005), and two modules' same-named functions judge each other.
+    /// Shared by reference.
+    MutParamPositions: System.Collections.Generic.Dictionary<IRId, int list>
+    /// Callee BINDER ID -> the co-iterations its body performs over its own
     /// PARAMETERS: each entry is (parameter positions walked, literal leading
     /// extents of that co-iteration's other operands), all of which must agree.
     ///
@@ -392,10 +408,9 @@ type TypeEnv = {
     /// enough -- a body sees only names bound before it, and mutual recursion
     /// is rejected (BL2001).
     ///
-    /// Name-keyed like MutParamPositions, and shares its shadowing weakness.
-    /// Shared by reference.
-    FuncCoIterObligations: System.Collections.Generic.Dictionary<string, (int list * int64 list) list>
-    /// Callee name -> how its return's UNIT is built from its arguments':
+    /// Keyed by binder id like MutParamPositions. Shared by reference.
+    FuncCoIterObligations: System.Collections.Generic.Dictionary<IRId, (int list * int64 list) list>
+    /// Callee BINDER ID -> how its return's UNIT is built from its arguments':
     /// `(exponents, residual)` means the result measures
     /// `residual * PROD_i (unit of argument i) ^ exponents[i]`.
     ///
@@ -412,9 +427,8 @@ type TypeEnv = {
     /// base dimension per generic parameter (checkFunctionDecl), consumed by
     /// `unitStampedReturn` at the call site. Absent = no claim, which is the
     /// pre-existing silence; a body the unit walk cannot read is never entered.
-    /// Name-keyed like MutParamPositions, and shares its shadowing weakness.
-    /// Shared by reference.
-    FuncUnitTransform: System.Collections.Generic.Dictionary<string, int list * UnitSig>
+    /// Keyed by binder id like MutParamPositions. Shared by reference.
+    FuncUnitTransform: System.Collections.Generic.Dictionary<IRId, int list * UnitSig>
     /// The unit EQUALITIES a generic body imposes among its arguments,
     /// recorded by the same probe as FuncUnitTransform: `x + y`, `x > y`,
     /// branches that must agree, `exp(x / y)` -- each an equation between two
@@ -422,7 +436,8 @@ type TypeEnv = {
     /// The transform DERIVES a return unit; these CHECK a call: substituted
     /// with the arguments' units, both sides must agree (BL3006), which is
     /// what `add(meters, seconds)` through `x: T^0, y: T^0` never did.
-    FuncUnitEqualities: System.Collections.Generic.Dictionary<string, (UnitSig * UnitSig) list>
+    /// Keyed by binder id like MutParamPositions. Shared by reference.
+    FuncUnitEqualities: System.Collections.Generic.Dictionary<IRId, (UnitSig * UnitSig) list>
     /// Named functions' `where comm(...)` groups (by param index): funcName ->
     /// int list list. Populated by checkFunctionDecl; must survive
     /// eta-expansion (etaExpandFunctionKernel) onto the loop-kernel wrapper, or
@@ -481,6 +496,18 @@ type TypeEnv = {
     /// DeclaredFuncIds: a shadowing local never borrows a summary. Shared
     /// by reference.
     FuncEffects: System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>
+    /// Function BINDER ID -> the GENERIC CASTS its body performs: casts whose
+    /// operand is one of the declaration's own signature variables
+    /// (`Float64(reduce(row, (+)))` over `row: T^1`), as (operand var id, cast
+    /// head, target, operand spelled floor/ceil). Their legality depends on the
+    /// instance, so it is judged per call against the call judgment's
+    /// instantiation (TypeCheckSupport.genericObligationClash) and again after IR
+    /// monomorphization (IRValidate). Keyed by id like FuncSigVarRange.
+    /// Shared by reference.
+    FuncGenericObligations: System.Collections.Generic.Dictionary<IRId, GenericObligation list>
+    /// The accumulator the function declaration being checked collects its
+    /// generic casts into (None outside a declaration body).
+    CurrentGenericObligations: ResizeArray<GenericObligation> option
     /// CERTIFIED half of the typed equivariance lattice (FuncRepSpec below is
     /// the speculative half): per-function rep signatures for functions
     /// carrying an `__ml_equiv` conjunct (a source `where ml.equiv(G)` pin, or
@@ -576,10 +603,10 @@ let emptyEnv () = {
     MutualGroups = Map.empty
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
-    MutParamPositions = System.Collections.Generic.Dictionary<string, int list>()
-    FuncCoIterObligations = System.Collections.Generic.Dictionary<string, (int list * int64 list) list>()
-    FuncUnitTransform = System.Collections.Generic.Dictionary<string, int list * UnitSig>()
-    FuncUnitEqualities = System.Collections.Generic.Dictionary<string, (UnitSig * UnitSig) list>()
+    MutParamPositions = System.Collections.Generic.Dictionary<IRId, int list>()
+    FuncCoIterObligations = System.Collections.Generic.Dictionary<IRId, (int list * int64 list) list>()
+    FuncUnitTransform = System.Collections.Generic.Dictionary<IRId, int list * UnitSig>()
+    FuncUnitEqualities = System.Collections.Generic.Dictionary<IRId, (UnitSig * UnitSig) list>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncAntisymGroups = System.Collections.Generic.Dictionary<string, int list list>()
     FuncDeducedPairs = System.Collections.Generic.Dictionary<string, string list * Blade.Deduce.Parity list>()
@@ -587,6 +614,8 @@ let emptyEnv () = {
     DeclaredFuncIds = System.Collections.Generic.HashSet<IRId>()
     FuncSigVarRange = System.Collections.Generic.Dictionary<IRId, int * int>()
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
+    FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
+    CurrentGenericObligations = None
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()
     PackDeducedComm = System.Collections.Generic.Dictionary<string, string * Blade.Deduce.Parity>()
@@ -755,8 +784,9 @@ let private indexIdentityNote (exp: IRType) (act: IRType) : string =
             | _ -> None)
         |> Option.defaultValue ""
 
-/// Format a TypeError as a human-readable string
-let formatTypeError (err: TypeError) : string =
+/// Format a TypeError as a human-readable string (raw: before
+/// `humanizeTypeText`; see formatTypeError).
+let private formatTypeErrorRaw (err: TypeError) : string =
     match err with
     | UnboundVariable name ->
         // The steer for imperative-loop refugees. `while`/`do` are not
@@ -785,8 +815,9 @@ let formatTypeError (err: TypeError) : string =
     | ArgTypeMismatch (pos, func, expTy, actTy) ->
         $"argument {pos} of {func}: type mismatch: the parameter is declared {expTy} but the argument is {actTy}. A call site performs no conversion between these -- pass a value of the declared type, or change the parameter's declared type."
     | InvalidArrayCapture name -> $"Lambda cannot capture array '{name}'"
-    | InvalidApplication funcTy -> sprintf "Cannot apply non-function type: %A" funcTy
-    | PatternTypeMismatch (pat, ty) -> sprintf "Pattern '%s' incompatible with type %A" pat ty
+    | InvalidApplication funcTy ->
+        $"a value of type {ppIRType funcTy} is applied to arguments, but only functions and arrays take arguments. (A co-iteration kernel receives each operand's cell, already indexed, and then the loop indices: `for (A, B) in range<I, J> <@> lambda(a, b, i, j) -> a * b`.)"
+    | PatternTypeMismatch (pat, ty) -> $"Pattern '{pat}' incompatible with type {ppIRType ty}"
     | UnknownConstructorPattern (_, message) -> message
     | ProviderNativeLoadFailure (provider, path, detail) ->
         $"provider '{provider}' cannot load its native library, so the store '{path}' cannot be read at compile time: {detail}. Every type this store binds is unresolvable until the library loads -- install the provider's runtime, or point its install-root variable at it (NETCDF_DIR for netcdf: the compiler and generated programs then use that install's own libraries)."
@@ -949,7 +980,7 @@ complex half)." where_
         $"Ragged literal: the annotation names `RaggedIdx<{lensName}>`, and {lensName} holds {declared}, but the literal's rows are {actual}. A ragged array takes its row lengths from its LITERAL -- the baked lens and offsets are computed from this nesting, and nothing reads `{lensName}` back -- so the annotation would describe a shape the array does not have. Fix whichever one is wrong; if the lengths are meant to come from the data, drop the annotation and let the literal infer the ragged type."
     | RaggedLensNotStatic lensName ->
         $"Ragged literal: the annotation names `RaggedIdx<{lensName}>`, but `{lensName}` is not a compile-time value. A ragged array's row lengths are baked from the LITERAL's own nesting, so a lens known only at run time can neither be honoured nor checked -- it would be accepted and then ignored. Make `{lensName}` a compile-time array of integer literals (so the two can be compared), or drop the annotation and let the literal infer the ragged type. Allocating to lengths only the running program knows is separate, planned work."
-    | ObjectForKernel got -> sprintf "object_for kernel must be a lambda, reynolds, or zero, but got %A" got
+    | ObjectForKernel got -> $"object_for kernel must be a lambda, reynolds, or zero, but got {got}"
     | ChainOpNeedsMethodFor leftDesc -> $"<@> requires method_for or object_for on the left side, but got {leftDesc}"
     | ChainOpBadKernel rightDesc -> $"<@> kernel must be a lambda, operator section, named function, reynolds(...), or zero, but got {rightDesc}"
     | ChainOpUndecidable (leftDesc, rightDesc) -> $"cannot infer the roles of the <@> operands: the left side is {leftDesc} and the right side is {rightDesc}, so the arrays/kernel roles are ambiguous. A former is implicit only when one side is decisive: a kernel (lambda, operator section, named function, reynolds(...), zero) or a former. Write it explicitly: method_for(arrays) <@> kernel, or object_for(kernel) <@> (arrays)."
@@ -1080,6 +1111,38 @@ the array's flat storage holds them in." shape detail
     | ProviderNoSelectiveImport pname -> $"provider module '{pname}' does not support selective import -- use `import {pname} as <alias>` and call <alias>.load/read/write"
     | IndexTypeArithForbidden name -> $"Arithmetic on index type '{name}' is not permitted. Index types are nominal labels -- for value-level arithmetic on positions, use virtual array iteration (which produces plain ints); for new index types derived from arithmetic, type-level construction is a separate workstream not yet implemented."
     | Other msg -> msg
+
+/// Render the compiler's INTERNAL type spellings the way a reader can use them.
+/// Two families leak into messages through `ppIRType`, which is also the
+/// compiler's internal printer (so it keeps printing them faithfully):
+///   * an unsolved inference variable, `T?10001` -- rendered `'a`, `'b`, ...
+///     in order of first appearance, so two mentions of one variable in one
+///     message still read as the same variable;
+///   * a compiler-MINTED placeholder extent, `Idx<__elementwise_inferred_n_3>`
+///     (`__<op>_inferred_n..`, `__json_inferred_n0`): an extent the program
+///     never names, rendered `n` -- the extent is "some length", which is all
+///     the placeholder ever meant.
+let humanizeTypeText (msg: string) : string =
+    let withExtents =
+        System.Text.RegularExpressions.Regex.Replace(
+            msg, @"__[A-Za-z0-9_]*?inferred_n[A-Za-z0-9_]*", "n")
+    let order = System.Collections.Generic.Dictionary<string, int>()
+    System.Text.RegularExpressions.Regex.Replace(
+        withExtents, @"T\?(\d+)",
+        fun (m: System.Text.RegularExpressions.Match) ->
+            let id = m.Groups.[1].Value
+            let k =
+                match order.TryGetValue id with
+                | true, k -> k
+                | _ ->
+                    let k = order.Count
+                    order.[id] <- k
+                    k
+            if k < 26 then "'" + string (char (int 'a' + k)) else $"'t{k}")
+
+/// Format a TypeError as a human-readable string.
+let formatTypeError (err: TypeError) : string =
+    humanizeTypeText (formatTypeErrorRaw err)
 
 /// Format a CompileError with location and context
 let formatCompileError (err: CompileError) : string =

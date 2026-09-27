@@ -1,0 +1,9 @@
+// TEST: Type messages render compiler-minted extents readably (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: got Array<Float64 like Idx<n>>
+// ============================================================================
+// A generic result's extent is a placeholder the compiler minted
+// (`__elementwise_inferred_n_3`, `__reduce_inferred_n_7`); messages showed
+// it verbatim. It renders as `n`, the "some length" it stands for.
+function g(row: T^1) = reduce(row, (+)) * row
+let r: Bool = g([1.0, 2.0, 3.0])
