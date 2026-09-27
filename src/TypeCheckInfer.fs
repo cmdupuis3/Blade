@@ -1922,6 +1922,9 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         | Some err -> Error err
         | None ->
         let annoTy = lowerTypeExpr env tyAnno
+        match indexCastTarget env annoTy with
+        | Some (tag, ext) -> inferIndexCast env e annoTy tag ext
+        | None ->
         checkExpr env annoTy e |> Result.map (fun tE ->
             { tE with Type = annoTy })
 
@@ -4840,35 +4843,13 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
             // One bracket = one index dimension. Mirrors ExprApp's
             // tArgs.Length <= arrTy.IndexTypes.Length check.
             let identity = match tT.Kind with TExprVar (_, _, id) -> id | _ -> None
-            // Tag check on the single index (same rule as ExprApp).
-            let tagMismatch =
-                match arrTy.IndexTypes with
-                | [] -> None
-                | idxType :: _ ->
-                    match idxType.Tag with
-                    | Some tagName when not (tagName.StartsWith("__")) ->
-                        match env.Subst.Resolve tI.Type with
-                        | IRTIdxTagged (_, IRefNamed argName) when argName = tagName -> None
-                        | IRTIdxTagged (_, IRefNamed argName) ->
-                            Some (IndexTagMismatchNamed (tagName, argName))
-                        | IRTIdxTagged (_, IRefAnon _) ->
-                            Some (IndexTagMismatchAnon tagName)
-                        // Wildcard-typed index: warn, don't error -- kept in
-                        // step with checkArrayIndexTags above.
-                        | IRTIdxTagged (_, IRefAny)
-                        | IRTScalar (ETInt32 | ETInt64) ->
-                            // BL4003, same as checkArrayIndexTags' twin --
-                            // including its synthesized-buffer suppression, so
-                            // the one-bracket spelling cannot drift from the
-                            // call spelling on a desugarer's own scratch array.
-                            if not (isSynthesizedBuffer tT) && not (isSynthesizedIndex tI) then
-                                emitWarning env "BL4003" tI.Span ($"Array indexed with untagged integer where slot expects tag '{tagName}'. Consider an explicit cast like `(expr : {tagName})` or iterate via `range<{tagName}>` to flow the tag automatically.")
-                            None
-                        | _ -> None
-                    | _ -> None
-            match tagMismatch with
-            | Some err -> Error err
-            | None ->
+            // The whole subscript judgment on the single index -- the SAME
+            // function as the call spelling (class, literal range, nominal
+            // tag, synthesized-buffer suppression), so the one-bracket
+            // spelling cannot drift from `A(i)`.
+            match (if arrTy.IndexTypes.IsEmpty then Ok () else checkArrayIndexTags env tT arrTy [tI]) with
+            | Error err -> Error err
+            | Ok () ->
                 if 1 = arrTy.IndexTypes.Length then
                     Ok (mkTyped (TExprIndex (tT, [tI], identity)) arrTy.ElemType)
                 elif 1 < arrTy.IndexTypes.Length then
@@ -6776,7 +6757,7 @@ and kernelBodyUnits (env: TypeEnv) (bound: Map<IRId, UnitSig option>) (e: TypedE
                          (Ok [])
                      |> Result.map (fun rev ->
                          applyUnitTransform exponents residual (List.rev rev)))
-            | _ -> Ok None)
+            | _ -> Ok None))
     // ELEMENT-aware like the TExprVar arm: an array PARAMETER carries its unit
     // in `bound`, not on its type, so reading only the type reported "no claim"
     // for `reduce(row, (+))` -- the whole body of `mean`. Falling back to the
@@ -6865,7 +6846,7 @@ and funcUnitTransform (env: TypeEnv) (name: string) (parms: TypedParam list)
                     Nominal = None
                     Dims = n.Dims |> Map.filter (fun k _ -> not (k.StartsWith "__unit_probe_")) }
             env.FuncUnitTransform.[name] <- (exponents, residual)
-        | Ok None | Error _ -> ()
+        | _ -> ()
 
 /// ELEMENT-level sibling of `kernelBodyUnits`, for the array operands of a
 /// nested map. The scalar walk answers about SCALAR positions and reads a
@@ -10326,12 +10307,18 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
-    | ExprKind.ExprLit (LitInt _ as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
+    | ExprKind.ExprLit (LitInt v as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
         // section 4.18.3: untyped int literal acquires the index tag from annotation
         // context. `let i: Idx<3> = 0` works; the 0 becomes Nat<Idx<3>>.
         // Strict in the OTHER direction: a bare `Nat` value cannot flow to
         // Nat<I> position without explicit cast -- but a LITERAL has no
         // pre-committed type, so context-driven typing applies here.
+        // NOT range-checked here: an index-typed VALUE position is also a
+        // foreign-key column, where out-of-range keys are data (`-1` is the
+        // "excluded" key of group_by, sql-group-by/028, 041). The literal
+        // doors that ARE positions -- a subscript, a cast `(7 : I)`, an
+        // argument to a `Nat<I>` parameter -- are checked where they occur.
+        ignore v
         Ok (mkTyped (TExprLit lit) resolved)
     | ExprKind.ExprLit (LitInt _ as lit), (IRTNat _ | IRTUnitAnnotated (IRTNat _, _)) ->
         // Same context-driven rule for Nat targets, unit-annotated or bare:
@@ -10543,6 +10530,61 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
                     // bare-quantity ascription), and the entry-time `resolved`
                     // predates them.
                     | _ -> Error (TypeMismatch (env.Subst.Resolve expected, env.Subst.Resolve tE.Type)))
+
+/// A cast TARGET that is a named integer index type `I` (formalism 3.10):
+/// its tag and, when it has one, its static extent.
+and internal indexCastTarget (env: TypeEnv) (annoTy: IRType) : (string * int64 option) option =
+    match env.Subst.Resolve annoTy with
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed tag) ->
+        let ext =
+            match lookupTypeDef tag env with
+            | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                Blade.IRPrint.tryEvalIntIR idx.Extent
+            | _ -> None
+        // An EnumIdx's int keys are raw keys, not positions -- not a cast target
+        // this rule knows how to check.
+        (match lookupTypeDef tag env with
+         | Some (TDIEnumIdx _) -> None
+         | _ -> Some (tag, ext))
+    | _ -> None
+
+/// `(e : I)` for a named integer index type I -- the cast into an index
+/// space, and the ONE place a plain integer becomes an index value:
+///   * a LITERAL is a known position: range-checked against I's static
+///     extent at compile time (`(7 : Lat)` over Idx<3> is refused);
+///   * an index value of I already, or a still-open variable (an
+///     unannotated kernel parameter the ascription pins), unifies as before;
+///   * a plain INTEGER value is a CHECKED conversion: the value is bound
+///     once and guarded `0 <= v < extent(I)` at run time (BL8006), in both
+///     lanes -- the guard is an ordinary constraint check, so codegen and the
+///     interpreter need nothing new. It needs I's extent at compile time;
+///     without one the cast is refused rather than left unchecked.
+/// Everything else (a DIFFERENT index type, a float) is the mismatch it was.
+and internal inferIndexCast (env: TypeEnv) (e: Expr) (annoTy: IRType) (tag: string) (ext: int64 option) : TypeResult<TypedExpr> =
+    let litVal =
+        match e.Kind with
+        | ExprKind.ExprLit (LitInt v) -> Some v
+        | ExprKind.ExprUnaryOp (OpNeg, { Kind = ExprKind.ExprLit (LitInt v) }) -> Some (-v)
+        | _ -> None
+    match litVal with
+    | Some v when v < 0L -> Error (SubscriptOutOfRange (v, None, tag))
+    | Some v when (match ext with Some n -> v >= n | None -> false) ->
+        Error (SubscriptOutOfRange (v, ext, tag))
+    | Some _ ->
+        checkExpr env annoTy e |> Result.map (fun tE -> { tE with Type = annoTy })
+    | None ->
+    inferExpr env e |> Result.bind (fun tE ->
+        let span = if e.Span.StartLine > 0 then e.Span else tE.Span
+        match IR.stripUnits (env.Subst.Resolve tE.Type) with
+        | IRTScalar (ETInt32 | ETInt64) ->
+            match ext with
+            | None ->
+                Error (Other $"a cast of a computed integer to the index type '{tag}' is a checked conversion, and checking it needs '{tag}'s extent at compile time, which is not known here. Iterate with range<{tag}> to produce '{tag}' values, or give '{tag}' a static extent.")
+            | Some n -> Ok (checkedIndexConversion env tE annoTy tag n span)
+        | _ ->
+            match unify env.Subst tE.Type annoTy with
+            | Ok () -> Ok { tE with Type = annoTy }
+            | Error _ -> Error (TypeMismatch (env.Subst.Resolve annoTy, env.Subst.Resolve tE.Type)))
 
 // ---- Shared helpers for both let paths (let-as-expression and top-level DeclLet) ----
 
@@ -14468,6 +14510,10 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // and the unify just binds it. Either way we propagate the
             // result so genuine mismatches surface here rather than
             // exploding at codegen.
+            //
+            // An UNANNOTATED parameter the body uses as a SUBSCRIPT is an
+            // index: see pinSubscriptParams (formalism 3.10).
+            pinSubscriptParams env (funcDecl.Params |> List.map (fun p -> p.Type.IsNone)) typedParams tBody
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
             // The wreath gate again, on the RESOLVED return type. The one at
             // the signature above sees only DECLARED annotations; an
@@ -15000,6 +15046,13 @@ and registerTypeDecl (env: TypeEnv) (typeDecl: TypeDecl) : TypeResult<TypeEnv> =
             | TyIdx _ | TySymIdx _ | TyAntisymIdx _ | TyOrbIdx _ | TyHermitianIdx _ | TyBoundedIdx _
             | TyLeafIdx _ | TyNodeIdx _ ->
                 let idx = indexRecordFor env chasedBody
+                // An extent is a COUNT. The literal spellings are refused by
+                // the IndexTypeValidator; this catches a computed one (`let
+                // static n = 0 - 4; type I = Idx<n>`), which folds only here.
+                match (match idx.Extent with IROrbitClass _ -> None | e -> Blade.IRPrint.tryEvalIntIR e) with
+                | Some v when v < 0L ->
+                    Error (Other $"type '{name}': an index type's extent is a count of positions and must be non-negative, but it folds to {v}.")
+                | _ ->
                 // Nominative-alias rule: the alias name BECOMES the identity
                 // tag. Two exceptions, both reachable only from stage 3's
                 // `type S = SymIdx<k, IrrepsIdx<spec>>` (no legacy form of

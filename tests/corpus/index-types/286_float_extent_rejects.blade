@@ -1,0 +1,5 @@
+// TEST: Float index extent refused (rejects)
+// ERROR: BL4003
+// An extent counts positions; `Idx<3.5>` was silently truncated to 3.
+type I = Idx<3.5>
+let r = method_for(range<I>) <@> lambda(i) -> 1.0 |> compute

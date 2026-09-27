@@ -772,6 +772,9 @@ let formatTypeError (err: TypeError) : string =
     // Promoted variants (Stage 5): text reproduced verbatim.
     | IndexTagMismatchNamed (expected, actual) -> $"Array index tag mismatch: slot expects '{expected}' but argument has type '{actual}'."
     | IndexTagMismatchAnon expected -> $"Array index tag mismatch: slot expects named tag '{expected}' but argument is an anonymous index value."
+    | SubscriptNotIntegral actual -> $"an array subscript must be an integer or an index value, but this one is {actual}. Subscripts are positions: convert explicitly (`Int64(floor(x))`) if a computed number is meant as a position, or index with a value produced by iteration (`range<I>`)."
+    | SubscriptOutOfRange (v, Some n, slot) -> $"the literal position {v} is out of range for {slot}, whose extent is {n} (valid positions are 0 .. {n - 1L}). A literal position is checked at compile time."
+    | SubscriptOutOfRange (v, None, slot) -> $"the literal position {v} is out of range for {slot}: a position is never negative."
     | CrossNominalIndexArith (left, right) -> $"Cross-nominal index-type arithmetic: cannot combine values of distinct index domains '{left}' and '{right}'."
     | CrossAnonIndexArith (left, right) -> $"Cross-nominal index-type arithmetic: cannot combine values of distinct anonymous index domains (#{left} vs #{right})."
     | CompoundTupleForm rank -> $"Compound arrays take FLAT positional subscripts like SymIdx: write B(c0, ..., c{rank - 1}), not the tuple form B((c0, ..., c{rank - 1})) -- and wildcards (`_`) are not accepted on a compound axis. Partial/wildcard reads (pinning some coordinates, gathering the matches) are a SparseIdx feature: build the valid tuples as a SparseIdx<keys> and index S((c0, _, ...)) there (formalism 3.5)."
@@ -1184,6 +1187,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | UnknownWhereConstraint _ -> "BL4001"
             | DistOrderCompileTime _ -> "BL4002"
             | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | CrossNominalIndexArith _
+            | SubscriptNotIntegral _ | SubscriptOutOfRange _
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
             | BlockSpecArgMismatch _
             | CompoundTupleForm _ | CompoundUnderSupplied _ | CompoundOverSupplied _

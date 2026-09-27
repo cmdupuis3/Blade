@@ -1,0 +1,7 @@
+// TEST: Negative static extent refused (rejects)
+// A computed extent folds where the index type is registered; a negative one
+// is refused there instead of reaching g++ as a negative allocation.
+// ERROR-CONTAINS: must be non-negative
+let static n = 0 - 4
+type I = Idx<n>
+let r = method_for(range<I>) <@> lambda(i) -> 1.0 |> compute

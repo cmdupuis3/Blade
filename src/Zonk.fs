@@ -106,6 +106,8 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
             | _ ->
                 match subst.GetLiteralDefault(n) with
                 | Some et -> IRTScalar et
+                // A var only ever seen as a SUBSCRIPT is an index: Int64.
+                | None when subst.IsIndexDefault n -> IRTScalar ETInt64
                 | None -> IRTScalar ETFloat64
     | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ -> resolved
     | IRTTuple ts -> IRTTuple (ts |> List.map (zonkType subst))
@@ -143,6 +145,118 @@ let zonkParam (subst: Subst) (p: TypedParam) : TypedParam =
 /// Zonk a TypedVarInfo
 let zonkVarInfo (subst: Subst) (v: TypedVarInfo) : TypedVarInfo =
     { v with Type = zonkType subst v.Type }
+
+// ---------------------------------------------------------------------------
+// SUBSCRIPT POSITIONS AND GUARDS (formalism 3.10), applied while zonking --
+// the one walk that sees every node with its final type.
+//
+// POSITIONS. Arithmetic on an index value is a POSITION (a plain integer),
+// never an index value: `i + 3` with `i : Nat<X>` is not proven to lie in X.
+// An ANNOTATED operand already refuses the arithmetic (inferArithType's
+// IndexTypeArithForbidden); an unannotated kernel parameter is still an open
+// variable when its body is typed, so the node took the variable's type and
+// became `Nat<X>` once the parameter met the iteration -- the loophole that
+// let `u(i + 3)` read past u. Zonk retypes such a node to its plain integer,
+// and a `let` bound to a position is a position too (its uses are retyped).
+//
+// GUARDS. A subscript into a slot of a NAMED index type with a static extent
+// is either PROVEN -- an index value of that type (iteration, a checked cast
+// or conversion, a literal checked at compile time) -- or CHECKED: a plain
+// integer there (a position, or an Int64 value) is wrapped in a BL8006 guard
+// `0 <= k < n`. Compiler-synthesized buffers and indices (`__` names: `let
+// rec` prefix buffers, reduce desugars, AD sweeps, element-bound loops) own
+// their walks and stand down, as do literals (judged at compile time) and
+// slots with no static extent. An anonymous (untagged) slot is not guarded.
+// ---------------------------------------------------------------------------
+
+/// Per-zonk context: a fresh-id source for guards that must bind their index
+/// (an impure one), and the let-bound variables that hold positions.
+type SubscriptGuardCtx = {
+    FreshId: unit -> IRId
+    Positions: System.Collections.Generic.HashSet<IRId>
+}
+
+let subscriptGuardCtx =
+    new System.Threading.ThreadLocal<SubscriptGuardCtx option>(fun () -> None)
+
+let private isPlainIntTy (t: IRType) =
+    match t with
+    | IRTScalar (ETInt32 | ETInt64) -> true
+    | IRTUnitAnnotated (IRTScalar (ETInt32 | ETInt64), _) -> true
+    | _ -> false
+
+let private taggedIndexInner (t: IRType) =
+    match t with
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64) as inner, (IRefNamed _ | IRefAnon _)) -> Some inner
+    | _ -> None
+
+let rec private mentionsReservedName (e: TypedExpr) : bool =
+    match e.Kind with
+    | TExprVar (name, _, _) -> name.StartsWith "__"
+    | TExprBinOp (_, _, l, r) -> mentionsReservedName l || mentionsReservedName r
+    | TExprUnaryOp (_, x) -> mentionsReservedName x
+    | TExprApp (f, args) -> mentionsReservedName f || args |> List.exists mentionsReservedName
+    | TExprIf (c, t, f) -> mentionsReservedName c || mentionsReservedName t || mentionsReservedName f
+    | TExprBlock (_, Some f) -> mentionsReservedName f
+    | _ -> false
+
+let rec private isPureIndexExpr (e: TypedExpr) : bool =
+    match e.Kind with
+    | TExprVar _ | TExprLit _ -> true
+    | TExprBinOp (Blade.Ast.Elementwise, (Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul), l, r) ->
+        isPureIndexExpr l && isPureIndexExpr r
+    | TExprUnaryOp (Blade.Ast.OpNeg, x) -> isPureIndexExpr x
+    | _ -> false
+
+let private isLiteralIndex (e: TypedExpr) =
+    match e.Kind with
+    | TExprLit (Blade.Ast.LitInt _) -> true
+    | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt _) }) -> true
+    | _ -> false
+
+/// Wrap the unproven subscripts of one (zonked) read in their guards.
+let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+    let synthetic = match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> false
+    match arr.Type with
+    | ArrayElem at when not synthetic && idxs.Length <= at.IndexTypes.Length ->
+        List.mapi (fun k (a: TypedExpr) ->
+            let ix = at.IndexTypes.[k]
+            let staticExt =
+                if ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
+                then Blade.IRPrint.tryEvalIntIR ix.Extent else None
+            match ix.Tag, staticExt with
+            | Some tag, Some n when not (tag.StartsWith "__")
+                                    && not (isLiteralIndex a)
+                                    && not a.Kind.IsTExprWildcard
+                                    && not (mentionsReservedName a)
+                                    && isPlainIntTy a.Type ->
+                let span = a.Span
+                let mk k ty = mkTypedSpan k ty span
+                let intTy = IRTScalar ETInt64
+                let boolTy = IRTScalar ETBool
+                let msg = $"index out of bounds: a computed position outside {tag} (0 .. {n - 1L})"
+                let guardOn (v: TypedExpr) =
+                    let cond =
+                        mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAnd,
+                                        mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLe, mk (TExprLit (Blade.Ast.LitInt 0L)) intTy, v)) boolTy,
+                                        mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLt, v, mk (TExprLit (Blade.Ast.LitInt n)) intTy)) boolTy)) boolTy
+                    TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", msg)) IRTUnit)
+                if isPureIndexExpr a then
+                    mk (TExprBlock ([ guardOn a ], Some a)) a.Type
+                else
+                    match subscriptGuardCtx.Value with
+                    | Some ctx ->
+                        let vid = ctx.FreshId ()
+                        let name = $"__sub{vid}"
+                        let v = mk (TExprVar (name, vid, None)) a.Type
+                        let tb : TypedBinding = {
+                            Name = name; VarId = vid; Type = a.Type
+                            Identity = None; IsMutable = false; Value = a
+                            SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                        mk (TExprBlock ([ TStmtLet tb; guardOn v ], Some v)) a.Type
+                    | None -> a
+            | _ -> a) idxs
+    | _ -> idxs
 
 /// Zonk all types in a TypedExpr tree (bottom-up)
 let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
@@ -225,7 +339,9 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprApp (f, args) -> TExprApp (z f, zs args)
         | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
         | TExprPolyTail (p, drop) -> TExprPolyTail (z p, drop)
-        | TExprIndex (arr, idxs, id) -> TExprIndex (z arr, zs idxs, id)
+        | TExprIndex (arr, idxs, id) ->
+            let arr' = z arr
+            TExprIndex (arr', guardSubscripts arr' (zs idxs), id)
         | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
         // Collections
         | TExprTuple es -> TExprTuple (zs es)
@@ -252,7 +368,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprSequence es -> TExprSequence (zs es)
         | TExprAlign (es, sp) -> TExprAlign (zs es, sp)
         // Structured
-        | TExprLet (name, vid, value, body) -> TExprLet (name, vid, z value, z body)
+        | TExprLet (name, vid, value, body) ->
+            let value' = z value
+            notePosition vid (zt value.Type) value'
+            TExprLet (name, vid, value', z body)
         | TExprMatch (scr, cases) ->
             TExprMatch (z scr, cases |> List.map (zonkMatchCase subst))
         | TExprLambda info -> TExprLambda (zonkLambdaInfo subst info)
@@ -288,7 +407,23 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
                                           IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) })
                             SharedIndexTypes = info.SharedIndexTypes |> List.map (zonkIndexType subst)
                             OutputType = zt info.OutputType }
-    { expr with Kind = kind; Type = zt expr.Type }
+    let ty = zt expr.Type
+    // A POSITION is a plain integer (see the section note above).
+    let ty =
+        match kind, taggedIndexInner ty with
+        | TExprBinOp (_, (Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul | Blade.Ast.OpDiv | Blade.Ast.OpMod), _, _), Some inner -> inner
+        | TExprVar (_, vid, _), Some inner
+            when (match subscriptGuardCtx.Value with Some ctx -> ctx.Positions.Contains vid | None -> false) -> inner
+        | _ -> ty
+    { expr with Kind = kind; Type = ty }
+
+/// A `let` whose declared (zonked) type is an index value but whose zonked
+/// VALUE is a plain integer holds a POSITION: its uses are positions too.
+and notePosition (vid: IRId) (bindingTy: IRType) (value: TypedExpr) : unit =
+    match subscriptGuardCtx.Value with
+    | Some ctx when (taggedIndexInner bindingTy).IsSome && isPlainIntTy value.Type ->
+        ctx.Positions.Add vid |> ignore
+    | _ -> ()
 
 and zonkMatchCase (subst: Subst) (case: TypedMatchCase) : TypedMatchCase =
     { Pattern = zonkPattern subst case.Pattern
@@ -320,9 +455,15 @@ and zonkStmt (subst: Subst) (stmt: TypedStmt) : TypedStmt =
 
 and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
     let zt = zonkType subst
+    let value' = zonkExpr subst b.Value
+    notePosition b.VarId (zt b.Type) value'
+    let bTy =
+        match subscriptGuardCtx.Value with
+        | Some ctx when ctx.Positions.Contains b.VarId -> value'.Type
+        | _ -> zt b.Type
     { b with
-        Type = zt b.Type
-        Value = zonkExpr subst b.Value
+        Type = bTy
+        Value = value'
         SubBindings = b.SubBindings |> List.map (fun (n, id, ty) -> (n, id, zt ty))
         PostChecks = b.PostChecks |> List.map (fun (id, e) -> (id, zonkExpr subst e)) }
 

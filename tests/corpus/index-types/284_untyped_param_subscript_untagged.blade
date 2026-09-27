@@ -1,0 +1,8 @@
+// TEST: Unannotated subscript parameter over an untagged array is an Int64
+// The untagged twin of 282: `i` indexes only an anonymous array, so it is
+// pinned to Int64 -- not the Float64 default that handed g++ a `double`
+// subscript -- and an integer call is an ordinary call.
+let A = [10.0, 20.0, 30.0]
+function g(i) = A(i)
+let v = g(2)
+// EXPECT: v = 30

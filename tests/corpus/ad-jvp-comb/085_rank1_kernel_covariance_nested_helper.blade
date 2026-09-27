@@ -33,7 +33,6 @@ function f(a: Array<Float like R, C>) -> Float = {
 
 let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
                        [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
-// WARN: BL4003
 // Both kernel slots receive `a`, and factoring `mean` out makes the kernel
 // deduce commutative where 071's single expression did not -- a pin, not a
 // behaviour change: the storage stays dense either way.

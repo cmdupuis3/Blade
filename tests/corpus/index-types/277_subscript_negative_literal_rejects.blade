@@ -1,0 +1,7 @@
+// TEST: Negative literal subscript refused (rejects)
+// ERROR: BL4003
+// A literal subscript is a KNOWN position, checked at compile time; a
+// negative one is out of range for every array (it read the word before the
+// buffer).
+let A = [10.0, 20.0, 30.0]
+let v = A(-1)

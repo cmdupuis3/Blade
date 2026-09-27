@@ -1,0 +1,7 @@
+// TEST: Float argument to a subscript parameter refused (rejects)
+// ERROR: BL3001
+// With `i` pinned to an index (284), `g(1.5)` is the argument mismatch it is
+// instead of a `double` subscript in the emitted C++.
+let A = [10.0, 20.0, 30.0]
+function g(i) = A(i)
+let v = g(1.5)

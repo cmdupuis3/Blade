@@ -1,0 +1,5 @@
+// TEST: Rank-zero SymIdx refused (rejects)
+// ERROR: BL4003
+// A symmetric group spans at least one coordinate; SymIdx<0, 3> reached g++.
+type S = SymIdx<0, 3>
+let A: Array<Float64 like S> = fill_random(1)
