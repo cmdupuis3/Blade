@@ -1,0 +1,20 @@
+// TEST: A tuple subscript into a compound symmetric output (rejects)
+// `cov <@> (B, B)` over two spatial axes is SymIdx<2, 6> over the compound
+// (X, Y) space, which indexes FLAT (`calc(0, 0)`, p = x * 2 + y), like every
+// compound axis (formalism 3.2). The tuple spelling reached g++ as a
+// std::tuple subscript (BL9002) while the interpreter read cell 0 for any
+// tuple; it is refused in both lanes.
+// ERROR: BL4003
+from stats import mean
+
+function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 =
+    mean((a - mean(a)) * (b - mean(b)))
+
+type X = Idx<3>
+type Y = Idx<2>
+type Time = Idx<4>
+let B: Array<Float64 like X, Y, Time> = [[[1.0, 2.0, 4.0, 7.0], [0.0, 1.0, 0.0, 1.0]],
+                                         [[2.0, 1.0, 0.0, 1.0], [5.0, 5.0, 3.0, 3.0]],
+                                         [[3.0, 3.0, 5.0, 5.0], [1.0, 2.0, 3.0, 4.0]]]
+let calc = cov <@> (B, B) |> compute
+let c01 = calc((0, 1), (2, 0))

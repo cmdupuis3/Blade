@@ -111,6 +111,9 @@ type TypeError =
     /// An integer literal subscript (or `(lit : I)`) outside the static
     /// extent it indexes -- known at compile time, so refused there.
     | SubscriptOutOfRange of value: int64 * extent: int64 option * slot: string
+    /// A TUPLE subscript into a positional slot (a SymIdx over a compound
+    /// S-tuple, say): such slots index FLAT; tuples are SparseIdx keys.
+    | SubscriptTupleForm of slot: string
     | CrossNominalIndexArith of left: string * right: string
     | CrossAnonIndexArith of left: int * right: int
     | IndexTypeArithForbidden of name: string

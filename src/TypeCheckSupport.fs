@@ -1374,6 +1374,11 @@ let internal subscriptClassOrRangeError (env: TypeEnv) (synthetic: bool) (ix: IR
                 None
             | IRTScalar (ETFloat32 | ETFloat64 | ETBool | ETComplex64 | ETComplex128 | ETString) as t ->
                 Some (SubscriptNotIntegral (ppIRType t))
+            // A tuple is a SparseIdx key (keyed, stood down above) or a
+            // CompoundIdx's refused spelling (CompoundTupleForm); into a
+            // positional slot it reached g++ as a std::tuple subscript
+            // (BL9002) and the interpreter read cell 0.
+            | IRTTuple _ when ix.IxKind = IxKPlain -> Some (SubscriptTupleForm (ppIndexType ix))
             | _ -> None
         match classErr with
         | Some e -> Some e
