@@ -1,0 +1,12 @@
+// TEST: Top-level bindings named like print loop variables print
+// The print blocks sit in the scope of every top-level binding; their loop
+// variables used to be `i`, `j`, `k`, ..., so a rank-2 binding named `j`
+// printed as `j[i][j]` and g++ rejected the program (BL9002).
+let j = [[1.0, 2.0], [3.0, 4.0]]
+// EXPECT: j = [[1, 2], [3, 4]]
+let i = [[5, 6], [7, 8]]
+// EXPECT: i = [[5, 6], [7, 8]]
+let k = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+// EXPECT: k = [1, 2, 3, 4, 5, 6, 7, 8]
+let n_ = [[[1.5, 2.5]], [[3.5, 4.5]]]
+// EXPECT: n_ = [1.5, 2.5, 3.5, 4.5]

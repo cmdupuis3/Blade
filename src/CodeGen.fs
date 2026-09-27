@@ -2179,10 +2179,17 @@ let genTypeDefs (modul: IRModule) : string list =
 let genPrintScalar (name: string) : string list =
     [$"    cout << \"{name} = \" << {(sanitizeCppName name)} << endl;"]
 
+/// The print blocks' loop variables. HYGIENIC: a print block sits in the
+/// scope of every top-level binding, so a loop var spelled like a user name
+/// (`i`, `j`, `k`, ...) captured it -- a rank-2 binding named `j` printed as
+/// `j[i][j]` and g++ rejected the program (BL9002). `__` names are the
+/// compiler's own.
+let private printLoopVar (d: int) : string = $"__pr{d}"
+
 /// Rank-2 print in the NESTED form -- `name = [[a, b], [c, d]]` -- which is the
 /// shape a rank-2 literal is written in, so the printed line round-trips as
 /// source. `outerBound` / `innerBound` are C++ expressions; the inner one may
-/// reference the outer loop var `i` (a compact group's row shrinks with it),
+/// reference the outer loop var `printLoopVar 0` (a compact group's row shrinks with it),
 /// which is why this takes bound TEXT rather than deriving `extents[d]` itself.
 ///
 /// Rank 1 is already one level of brackets and ranks >= 3 stay flat: the pins
@@ -2192,15 +2199,16 @@ let genPrintScalar (name: string) : string list =
 let private genPrintNested2 (name: string) (outerBound: string) (innerBound: string) : string list =
     let v = sanitizeCppName name
     let firstVar = $"{v}__first"
+    let i, j = printLoopVar 0, printLoopVar 1
     [ $"    cout << \"{name} = [\";"
-      $$"""    for (size_t i = 0; i < {{outerBound}}; i++) {"""
-      "        if (i) cout << \", \";"
+      $$"""    for (size_t {{i}} = 0; {{i}} < {{outerBound}}; {{i}}++) {"""
+      $"        if ({i}) cout << \", \";"
       "        cout << \"[\";"
       $"        bool {firstVar} = true;"
-      $$"""        for (size_t j = 0; j < {{innerBound}}; j++) {"""
+      $$"""        for (size_t {{j}} = 0; {{j}} < {{innerBound}}; {{j}}++) {"""
       $"            if (!{firstVar}) cout << \", \";"
       $"            {firstVar} = false;"
-      $"            cout << {v}[i][j];"
+      $"            cout << {v}[{i}][{j}];"
       "        }"
       "        cout << \"]\";"
       "    }"
@@ -2227,11 +2235,8 @@ let genPrintArrayFlat (name: string) (rank: int) : string list =
     elif rank = 2 then
         genPrintNested2 name ($"{v}.extents[0]") ($"{v}.extents[1]")
     else
-        // Loop-var names as genPrintArraySymAware spells them, with the same
-        // numbered overflow past eight (nothing collides: the print block is
-        // its own statement scope).
-        let loopVarNames = [| "i"; "j"; "k"; "l"; "m"; "n_"; "p"; "q" |]
-        let loopVar d = if d < loopVarNames.Length then loopVarNames.[d] else $"d{d}"
+        // Loop-var names as genPrintArraySymAware spells them (printLoopVar).
+        let loopVar d = printLoopVar d
         let opens = [
             $"    cout << \"{name} = [\";"
             $"    bool {firstVar} = true;" ]
@@ -2324,7 +2329,6 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
     let v = sanitizeCppName name
     // Expand index types into per-dimension info: (loopVar, dimIdx, offsetVars)
     // offsetVars = list of loop vars to subtract from extent (empty for free dims)
-    let loopVarNames = [| "i"; "j"; "k"; "l"; "m"; "n_"; "p"; "q" |]
     // Same refusal as the interpreter's emitSymAware, for the same reason: the
     // two printers must byte-match, and neither has a wreath walk. A triangular
     // walk here would emit C++ that prints a cell set nothing else agrees with.
@@ -2346,10 +2350,10 @@ let genPrintArraySymAware (name: string) (indexTypes: IRIndexType list) : string
             let strictConst = if idx.Symmetry = SymAntisymmetric then 1 else 0
             let groupDims =
                 [0 .. idxRank - 1] |> List.map (fun a ->
-                    let loopVar = if dimIdx + a < loopVarNames.Length then loopVarNames.[dimIdx + a] else $"d{dimIdx + a}"
+                    let loopVar = printLoopVar (dimIdx + a)
                     let offsets =
                         if isSym && a > 0 then
-                            [0 .. a - 1] |> List.map (fun prev -> loopVarNames.[dimIdx + prev])
+                            [0 .. a - 1] |> List.map (fun prev -> printLoopVar (dimIdx + prev))
                         else []
                     // Strict offset applies on every group level beyond the
                     // first (a > 0): level a subtracts a * strictConst.
@@ -2628,15 +2632,15 @@ let genPrintStatements (modul: IRModule) : string list =
                                     // which both differential normalizers then
                                     // masked. Printed as its values instead, in
                                     // the top-level array format.
-                                    label :: genPrintFieldArray $"{bv}[i].{fname}" rank "        "
+                                    label :: genPrintFieldArray $"{bv}[{printLoopVar 0}].{fname}" rank "        "
                                 | FieldOpaqueArray text ->
                                     [ $"        cout << \"{prefix}{fname}: {text}\";" ]
                                 | FieldScalar ->
-                                    [ $"        cout << \"{prefix}{fname}: \" << {bv}[i].{fname};" ])
+                                    [ $"        cout << \"{prefix}{fname}: \" << {bv}[{printLoopVar 0}].{fname};" ])
                         [
                             $"    cout << \"{b.Name} = [\";"
                             $"    bool {firstVar} = true;"
-                            $$"""    for (size_t i = 0; i < {{bv}}.extents[0]; i++) {"""
+                            $$"""    for (size_t {{printLoopVar 0}} = 0; {{printLoopVar 0}} < {{bv}}.extents[0]; {{printLoopVar 0}}++) {"""
                             $"        if (!{firstVar}) cout << \", \";"
                             $"        {firstVar} = false;"
                             "        cout << \"{\";"
