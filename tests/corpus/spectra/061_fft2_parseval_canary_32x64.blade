@@ -1,0 +1,19 @@
+// TEST: Spectra fft2: Parseval canary at 32x64 (toolchain regression guard)
+// The 2-D twin of 060: both fft2 passes run the interleaved complex
+// butterfly g++ 15.2.0 miscompiled under an FMA -march with
+// -ffp-contract=fast (GCC PR 124802). 32x64 is the smallest size of this
+// field that compiler got wrong (8x16 and 16x32 came out right), and small
+// enough for the interpreter lane's step budget. Parseval for the
+// unnormalized transform: sum |X|^2 = r*c * sum x^2; the relative residual is
+// rounding noise, so the pin is the boolean at 1e-9 relative.
+import spectra as sp
+type Rows = Idx<32>
+type Cols = Idx<64>
+let parseval_ok = {
+    let x: Array<Float64 like Rows, Cols> = method_for(range<Rows>) <*> method_for(range<Cols>) <@> lambda(i, j) -> sin(0.37 * Float64(i) + 0.11 * Float64(j) + 0.013 * Float64(i * j)) |> compute
+    let X = sp.fft2(x)
+    let sx = reduce(method_for(range<Rows>) <*> method_for(range<Cols>) <@> lambda(i, j) -> x(i, j) * x(i, j), (+), 0.0, axes = 2)
+    let sX = reduce(method_for(range<Rows>) <*> method_for(range<Cols>) <@> lambda(i, j) -> real(X(i, j)) * real(X(i, j)) + imag(X(i, j)) * imag(X(i, j)), (+), 0.0, axes = 2)
+    abs(sX - 2048.0 * sx) < 1.0e-9 * 2048.0 * sx
+}
+// EXPECT: parseval_ok = true

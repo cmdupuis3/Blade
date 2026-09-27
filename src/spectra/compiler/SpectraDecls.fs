@@ -106,55 +106,6 @@ let invTwiddles (n: int) (m: int) : (float * float) list =
         (cos (2.0 * System.Math.PI * float j / float n),
          sin (2.0 * System.Math.PI * float j / float n)) ]
 
-/// The radix-2 butterfly network over SPLIT real/imaginary work arrays `sr`/`si` (n cells each, already holding the
-/// bit-reversed input), twiddles in `twr`/`twi` (n/2 cells). The complex multiply is spelled in components --
-/// t = (wr*qr - wi*qi, wr*qi + wi*qr), exactly the oracle's naive `cmul` -- and nothing is ever packed as an
-/// interleaved complex vector. That layout is deliberate: g++ 15.2's SLP vectorizer miscompiles the interleaved
-/// std::complex butterfly under -march=<FMA ISA> -ffp-contract=fast (fmaddsub/permute sequences; the DC bin of a
-/// 512-point fft came out off by 217, and master's own 4096-point fft by 2028), while the split form vectorizes as
-/// plain lane-wise arithmetic.
-let butterflyStmts (n: int) : Stmt list =
-    [ for st in 1 .. fftStages n do
-        let len = 1 <<< st
-        let half = len / 2
-        let tstr = n / len
-        yield sFor "b" 0 (n / len)
-          [ sFor "j" 0 half
-              [ sLet "p" (add (mul (v "b") (iLit len)) (v "j"))
-                sLet "q" (add (v "p") (iLit half))
-                sLet "wr" (idx "twr" (mul (v "j") (iLit tstr)))
-                sLet "wi" (idx "twi" (mul (v "j") (iLit tstr)))
-                sLet "qr" (idx "sr" (v "q"))
-                sLet "qi" (idx "si" (v "q"))
-                sLet "tr" (sub (mul (v "wr") (v "qr")) (mul (v "wi") (v "qi")))
-                sLet "ti" (add (mul (v "wr") (v "qi")) (mul (v "wi") (v "qr")))
-                sLet "ar" (idx "sr" (v "p"))
-                sLet "ai" (idx "si" (v "p"))
-                sAssign (idx "sr" (v "p")) (add (v "ar") (v "tr"))
-                sAssign (idx "si" (v "p")) (add (v "ai") (v "ti"))
-                sAssign (idx "sr" (v "q")) (sub (v "ar") (v "tr"))
-                sAssign (idx "si" (v "q")) (sub (v "ai") (v "ti")) ] ] ]
-
-/// The split twiddle tables `twr`/`twi` (n/2 cells) of e^(sgn*2*pi*i*j/n): from the quarter-wave table by the exact
-/// symmetries (see `pow2TwiddleStmts`) for n >= 4, from the direct table for n = 2.
-let splitTwiddleStmts (n: int) (sgn: float) : Stmt list =
-    if n >= 4 then
-        let q4 = n / 4
-        let jv = v "j"
-        let le = cmp OpLe jv (iLit q4)
-        let neg e = syn (ExprUnaryOp (OpNeg, e))
-        let s0 = ifE (le, idx "qc" (sub (iLit q4) jv), idx "qc" (sub jv (iLit q4)))
-        [ sLet "qc" (syn (ExprArrayLit (quarterCos n |> List.map fLit)))
-          sLetMut "twr" (zerosLit (n / 2))
-          sLetMut "twi" (zerosLit (n / 2))
-          sFor "j" 0 (n / 2)
-            [ sAssign (idx "twr" jv) (ifE (le, idx "qc" jv, neg (idx "qc" (sub (iLit (n / 2)) jv))))
-              sAssign (idx "twi" jv) (if sgn < 0.0 then neg s0 else s0) ] ]
-    else
-        let tws = if sgn < 0.0 then fwdTwiddles n (n / 2) else invTwiddles n (n / 2)
-        [ sLet "twr" (syn (ExprArrayLit (tws |> List.map (fst >> fLit))))
-          sLet "twi" (syn (ExprArrayLit (tws |> List.map (snd >> fLit)))) ]
-
 // fft -- unnormalized forward DFT of a real signal, complex output
 
 /// Radix-2 iterative Cooley-Tukey for power-of-2 n; naive table-driven O(n^2) DFT otherwise. Stages are statically
@@ -164,15 +115,27 @@ let fftDecl (name: string) (n: int) : FunctionDecl =
     let body =
         if isPow2 n && n >= 2 then
             let stages = fftStages n
+            let twStmts =
+                if n >= 4 then pow2TwiddleStmts "tw" "qc" n (-1.0)
+                else [ sLet "tw" (cplxArrLit (fwdTwiddles n (n / 2))) ]
             let stmts =
-                splitTwiddleStmts n (-1.0)
-                @ [ sLetMut "sr" (zerosLit n)
-                    sLetMut "si" (zerosLit n)
-                    // Gather copy-in through the bit-reversal permutation (gather, not scatter -- the oracle mirrors this).
-                    sFor "i" 0 n [ sAssign (idx "sr" (v "i")) (idx "x" (bitrevE stages (v "i"))) ] ]
-                @ butterflyStmts n
+                twStmts
                 @ [ sLetMut "sx" (cplxZerosLit n)
-                    sFor "i" 0 n [ sAssign (idx "sx" (v "i")) (cplx (idx "sr" (v "i")) (idx "si" (v "i"))) ] ]
+                    // Gather copy-in through the bit-reversal permutation (gather, not scatter -- the oracle mirrors this).
+                    sFor "i" 0 n
+                      [ sAssign (idx "sx" (v "i")) (cplx (idx "x" (bitrevE stages (v "i"))) (fLit 0.0)) ] ]
+                @ [ for st in 1 .. stages do
+                      let len = 1 <<< st
+                      let half = len / 2
+                      let tstr = n / len
+                      yield sFor "b" 0 (n / len)
+                        [ sFor "j" 0 half
+                            [ sLet "p" (add (mul (v "b") (iLit len)) (v "j"))
+                              sLet "q" (add (v "p") (iLit half))
+                              sLet "t" (mul (idx "tw" (mul (v "j") (iLit tstr))) (idx "sx" (v "q")))
+                              sLet "p0" (idx "sx" (v "p"))
+                              sAssign (idx "sx" (v "p")) (add (v "p0") (v "t"))
+                              sAssign (idx "sx" (v "q")) (sub (v "p0") (v "t")) ] ] ]
             blockE (stmts, Some (v "sx"))
         else
             // Naive DFT: X(k) = Sum_i x(i) * e^(-2*pi*i*k*i/n), twiddle by table at (k*i) mod n (nonnegative Int %, C++ semantics match F#).
@@ -196,17 +159,26 @@ let ifftDecl (name: string) (n: int) : FunctionDecl =
     let stmts =
         if isPow2 n && n >= 2 then
             let stages = fftStages n
-            splitTwiddleStmts n 1.0
-            @ [ sLetMut "sr" (zerosLit n)
-                sLetMut "si" (zerosLit n)
+            (if n >= 4 then pow2TwiddleStmts "tw" "qc" n 1.0
+             else [ sLet "tw" (cplxArrLit (invTwiddles n (n / 2))) ])
+            @ [ sLetMut "sx" (cplxZerosLit n)
                 sFor "i" 0 n
-                  [ sLet "g" (idx "xs" (bitrevE stages (v "i")))
-                    sAssign (idx "sr" (v "i")) (realE (v "g"))
-                    sAssign (idx "si" (v "i")) (imagE (v "g")) ] ]
-            @ butterflyStmts n
+                  [ sAssign (idx "sx" (v "i")) (idx "xs" (bitrevE stages (v "i"))) ] ]
+            @ [ for st in 1 .. stages do
+                  let len = 1 <<< st
+                  let half = len / 2
+                  let tstr = n / len
+                  yield sFor "b" 0 (n / len)
+                    [ sFor "j" 0 half
+                        [ sLet "p" (add (mul (v "b") (iLit len)) (v "j"))
+                          sLet "q" (add (v "p") (iLit half))
+                          sLet "t" (mul (idx "tw" (mul (v "j") (iLit tstr))) (idx "sx" (v "q")))
+                          sLet "p0" (idx "sx" (v "p"))
+                          sAssign (idx "sx" (v "p")) (add (v "p0") (v "t"))
+                          sAssign (idx "sx" (v "q")) (sub (v "p0") (v "t")) ] ] ]
             @ [ sLetMut "xo" (zerosLit n)
                 sFor "i" 0 n
-                  [ sAssign (idx "xo" (v "i")) (divE (idx "sr" (v "i")) (fLit (float n))) ] ]
+                  [ sAssign (idx "xo" (v "i")) (divE (realE (idx "sx" (v "i"))) (fLit (float n))) ] ]
         else
             [ sLet "tw" (cplxArrLit (invTwiddles n n))
               sLetMut "xo" (zerosLit n)
