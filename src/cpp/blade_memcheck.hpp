@@ -108,7 +108,7 @@ struct Report {
 #endif
         baseline_bytes  = g_live_bytes.load();
         baseline_blocks = g_live_blocks.load();
-        // blade_rt::panic leaves through _Exit, which runs no static
+        // The runtime's failure exit leaves through _Exit, which runs no static
         // destructor: the one report line is printed by this hook instead.
         blade_rt::on_failure_exit(report_on_failure_exit);
     }
