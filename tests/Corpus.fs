@@ -133,3 +133,43 @@ let multiFileCategory (dirName: string) : (string * (string * string) list) list
         let (testName, _) = parts.[0]
         (testName, parts |> Array.map snd |> Array.toList))
     |> Array.toList
+
+/// Every MULTI-FILE category on disk: the corpus root's subdirectories that
+/// hold NO .blade directly (each test is a subdirectory of module files).
+/// The complement of `singleFileCategories`, so the two together are every
+/// directory under tests/corpus -- which is what the wiring check
+/// (CliSelfTests' corpus-wiring block) asserts is consumed by some runner.
+let multiFileCategories () : string list =
+    Directory.GetDirectories corpusRoot.Value
+    |> Array.filter (fun d -> Directory.GetFiles(d, "*.blade").Length = 0)
+    |> Array.map Path.GetFileName
+    |> Array.sortWith (fun a b -> String.CompareOrdinal(a, b))
+    |> Array.toList
+
+/// The WHOLLY-NEGATIVE categories: every file in them is meant to be refused,
+/// and their `// TEST:` names carry no "(rejects)" marker (the marker would be
+/// noise on every line) -- yet the runner's classifier keys on exactly that
+/// marker. THE one definition: the default suite (RunAll.allTests), the
+/// standalone `blade test <key>` arms (CliSelfTests) and the interpreter
+/// differential (InterpDiff) all read it. It used to be three hand lists that
+/// disagreed (two named display-errors, InterpDiff's did not, so `blade test
+/// interp display-errors` scored every correct refusal as a failure).
+///
+/// `diagnostics` is here for the lanes that sweep every directory (the
+/// interpreter differential); the default suite leaves it to its own strict
+/// block (tests/Test_DiagCorpus.fs), which also checks spans and requires
+/// every produced diagnostic to be pinned.
+let rejectOnlyCategories : Set<string> =
+    Set.ofList [ "diagnostics"; "display-errors"; "mutability-errors"; "unit-errors" ]
+
+/// Mark every test "(rejects)" (idempotently), for a reject-only category.
+let asRejectProbes (tests: (string * string) list) : (string * string) list =
+    tests
+    |> List.map (fun (name, source) ->
+        (if name.EndsWith "(rejects)" then name else name + " (rejects)"), source)
+
+/// A single-file category's tests AS ITS CONSUMERS MUST CLASSIFY THEM: the
+/// reject-only categories come back marked (see rejectOnlyCategories).
+let categoryTests (dirName: string) : (string * string) list =
+    let tests = category dirName
+    if rejectOnlyCategories.Contains dirName then asRejectProbes tests else tests
