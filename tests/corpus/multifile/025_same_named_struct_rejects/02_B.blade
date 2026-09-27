@@ -1,0 +1,5 @@
+// TEST: Two modules declaring one struct name (rejects)
+// MODULE: B
+module B
+struct P { y: Int64 }
+function mk() -> P = P { y = 7 }

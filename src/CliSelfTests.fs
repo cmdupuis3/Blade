@@ -179,6 +179,196 @@ let runCliSmokeTests () : TH.BlockResult =
         finally
             try Directory.Delete(pDir, true) with _ -> ()
 
+    // --- One flag parser for every file verb ---
+    //
+    // Only `run` used to parse its flags; every other verb matched an exact
+    // argv shape, so `check f --verbose`, `compile f --verbose`,
+    // `emit f --verbose -o x` failed as "unrecognized command".
+    let parses verb toks = parseVerbArgs verb toks
+    recordCase "flags: check accepts --verbose after the file"
+        (match parses "check" [ "f.blade"; "--verbose" ] with
+         | Ok o -> o.File = Some "f.blade" && o.Verbose
+         | Error _ -> false) ""
+    recordCase "flags: emit takes --verbose and -o in any order"
+        (match parses "emit" [ "--verbose"; "f.blade"; "-o"; "x.cpp" ], parses "emit" [ "f.blade"; "-o"; "x.cpp"; "--verbose" ] with
+         | Ok a, Ok b -> a = b && a.Output = Some "x.cpp" && a.Verbose
+         | _ -> false) ""
+    recordCase "flags: compile takes --verbose before -o"
+        (match parses "compile" [ "f.blade"; "--verbose"; "-o"; "out.exe" ] with
+         | Ok o -> o.Output = Some "out.exe" && o.Verbose
+         | Error _ -> false) ""
+    recordCase "flags: ide check takes --json on either side of the file"
+        (match parses "ide check" [ "f.blade"; "--json" ], parses "ide check" [ "--json"; "f.blade" ] with
+         | Ok a, Ok b -> a.File = Some "f.blade" && b.File = Some "f.blade"
+         | _ -> false) ""
+    recordCase "flags: an unknown flag is named, with what the verb accepts"
+        (match parses "check" [ "f.blade"; "--bogus" ] with
+         | Error msg -> msg.Contains "--bogus" && msg.Contains "check" && msg.Contains "--verbose"
+         | Ok _ -> false) ""
+    recordCase "flags: a flag another verb owns is refused by this one"
+        (match parses "check" [ "f.blade"; "-o"; "x" ], parses "run" [ "f.blade"; "--mpi"; "0" ] with
+         | Error a, Error b -> a.Contains "-o" && b.Contains "positive"
+         | _ -> false) ""
+    recordCase "flags: ide check explains why it takes no --strict-pins"
+        (match parses "ide check" [ "f.blade"; "--strict-pins" ] with
+         | Error msg -> msg.Contains "--strict-pins" && msg.Contains "BL4010"
+         | Ok _ -> false) ""
+
+    // --- The help text: current file extension, every mode flag ---
+    let help =
+        let sw = new StringWriter()
+        let prior = Console.Out
+        Console.SetOut sw
+        try printUsage () finally Console.SetOut prior
+        sw.ToString()
+    recordCase "help: speaks .blade, not the pre-rename .edgi" (not (help.Contains ".edgi") && help.Contains ".blade") ""
+    recordCase "help: documents --print, --run-record and test <key>"
+        (help.Contains "--print" && help.Contains "--run-record" && help.Contains "test <key>"
+         && help.Contains "multifile" && help.Contains "opt-diff") ""
+
+    // --- BL9002: generated code the C++ back end rejects is a Blade bug ---
+    let cppPath = Path.Combine(Path.GetTempPath(), "blade-build", "prog-1-2-3", "prog.cpp")
+    let gxx =
+        $"Compilation failed (exit 1):\n{cppPath}: In function 'int main()':\n{cppPath}:12:8: error: redeclaration of 'double scale'\n{cppPath}:10:8: note: 'double scale' previously declared here\nCommand: g++ -O3"
+    recordCase "ICE: a g++ error in the generated file is a back-end rejection"
+        (backendRejection gxx cppPath = Some "error: redeclaration of 'double scale'") ""
+    recordCase "ICE: an #error refusal keeps its own text (BL7004 channel / header gate)"
+        ((backendRejection $"Compilation failed (exit 1):\n{cppPath}:3:2: error: #error BLAS gate off" cppPath).IsNone) ""
+    recordCase "ICE: a link failure is a toolchain problem, not generated code"
+        ((backendRejection "Compilation failed (exit 1):\nC:/msys64/ucrt64/bin/ld.exe: cannot find -lnetcdf\ncollect2.exe: error: ld returned 1 exit status" cppPath).IsNone) ""
+    (let dir = Path.Combine(Path.GetTempPath(), "blade_ice_" + Guid.NewGuid().ToString("N"))
+     Directory.CreateDirectory dir |> ignore
+     try
+         let r = reportBackendRejection "error: redeclaration of 'double scale'" gxx cppPath dir false
+         recordCase "ICE: rendered as BL9002, naming the first error, the source and the kept log"
+             (r.Contains "BL9002" && r.Contains "redeclaration of 'double scale'" && r.Contains cppPath
+              && r.Contains "not in your program" && File.Exists(Path.Combine(dir, "backend-errors.log"))) (if r.Contains "BL9002" then "" else r)
+     finally
+         try Directory.Delete(dir, true) with _ -> ())
+
+    // --- Builds happen in a private scratch directory, never beside the source ---
+    //
+    // `blade run` wrote the .cpp, ~15 runtime headers and the executable
+    // beside the source and deleted "the headers it created" afterwards, so two
+    // runs in one directory deleted each other's headers mid-compile, and every
+    // run left an executable behind.
+    let selfExe =
+        [ Path.Combine(AppContext.BaseDirectory, "Blade.exe"); Path.Combine(AppContext.BaseDirectory, "Blade") ]
+        |> List.tryFind File.Exists
+    let spawn (cwd: string) (args: string list) : int * string * string =
+        match selfExe with
+        | None -> (-1, "", "no Blade executable beside the test assembly")
+        | Some exe ->
+            let psi = System.Diagnostics.ProcessStartInfo(exe)
+            for a in args do psi.ArgumentList.Add a
+            psi.WorkingDirectory <- cwd
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            use p = System.Diagnostics.Process.Start psi
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit 180000 then (p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill() with _ -> ())
+                (-1, o.Result, "timed out")
+    let beside (dir: string) =
+        Directory.GetFiles dir |> Array.map Path.GetFileName |> Array.sort |> List.ofArray
+    if selfExe.IsNone then
+        record "cli: bare `blade` prints usage" TH.Skip "no Blade executable beside the test assembly"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_verbs_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            // A bare `blade` STARTED THE FULL SUITE in the current directory.
+            let (code, out, _) = spawn dir []
+            let ok = code = 0 && out.Contains "Usage:" && not (Directory.Exists(Path.Combine(dir, "generated_cpp_tests")))
+            recordCase "cli: bare `blade` prints usage (and does not start the suite)" ok
+                (if ok then "" else out.Substring(0, min 200 out.Length))
+            File.WriteAllText(Path.Combine(dir, "v.blade"), "let x = 1 + 2 * 3\n")
+            let (code, out, err) = spawn dir [ "check"; "v.blade"; "--verbose" ]
+            recordCase "cli: `check f --verbose` is a check, not an unrecognized command"
+                (code = 0 && out.Contains "OK") (out + err)
+            let (code, _, err) = spawn dir [ "test"; "interp"; "no-such-category" ]
+            let ok = code = 1 && err.Contains "unknown corpus category 'no-such-category'" && not (err.Contains "BL9001")
+            recordCase "cli: `test interp <typo>` is a clean usage error, not BL9001" ok (if ok then "" else err)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "build dir: run writes nothing beside the source" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_build_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            File.WriteAllText(Path.Combine(dir, "a.blade"), "let x = 1 + 2 * 3\n")
+            File.WriteAllText(Path.Combine(dir, "b.blade"), "let y = 40 + 2\n")
+            // A header of the user's own that happens to share a runtime
+            // header's name: no compile may touch it.
+            File.WriteAllText(Path.Combine(dir, "index_types.h"), "// mine\n")
+            // Two concurrent runs in ONE directory (the reported race), then
+            // the directory must hold exactly what it held before.
+            let t1 = System.Threading.Tasks.Task.Run(fun () -> spawn dir [ "run"; "a.blade" ])
+            let t2 = System.Threading.Tasks.Task.Run(fun () -> spawn dir [ "run"; "b.blade" ])
+            let (c1, o1, e1) = t1.Result
+            let (c2, o2, e2) = t2.Result
+            recordCase "build dir: two concurrent runs in one directory both succeed"
+                (c1 = 0 && o1.Contains "x = 7" && c2 = 0 && o2.Contains "y = 42") (o1 + e1 + o2 + e2)
+            recordCase "build dir: run leaves nothing beside the source"
+                (beside dir = [ "a.blade"; "b.blade"; "index_types.h" ]) (String.concat ", " (beside dir))
+            recordCase "build dir: a same-named file of the user's is untouched"
+                (File.ReadAllText(Path.Combine(dir, "index_types.h")) = "// mine\n") ""
+            // `compile` without -o still places the executable beside the
+            // source (its documented output), and nothing else.
+            let (c3, o3, e3) = spawn dir [ "compile"; "a.blade" ]
+            let exeName = "a" + Platforms.exeExtension
+            recordCase "build dir: compile places only the executable beside the source"
+                (c3 = 0 && o3.Trim().EndsWith exeName
+                 && beside dir = List.sort [ "a.blade"; "b.blade"; "index_types.h"; exeName ])
+                (o3 + e3 + " | " + String.concat ", " (beside dir))
+            // Flags after the file still work from a scratch build, and the
+            // run record lands where it was asked for (not in the scratch dir).
+            let (c4, o4, e4) = spawn dir [ "run"; "a.blade"; "--run-record"; "rr.json" ]
+            recordCase "build dir: run --run-record writes the record where asked"
+                (c4 = 0 && File.Exists(Path.Combine(dir, "rr.json"))) (o4 + e4)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+
+    // --- REPL / notebook: re-running a declaration cell replaces it ---
+    //
+    // The rebind key had no `struct` / `interface` / `impl` arm, so re-running
+    // a struct cell APPENDED a second `struct P` (silently last-wins then, a
+    // BL2009 refusal now) instead of replacing the first.
+    recordCase "repl: struct, static struct, interface and impl cells have a rebind key"
+        (Blade.ReplSession.bindingName "struct P { x: Float64 }" = Some "P"
+         && Blade.ReplSession.bindingName "static struct Band { i: Int<min=0, max=3> }" = Some "Band"
+         && Blade.ReplSession.bindingName "interface Shape {" = Some "Shape"
+         && Blade.ReplSession.bindingName "impl Shape for Box {" = Some "impl Shape for Box") ""
+    (let (src, _) =
+        Blade.ReplSession.assembleCells
+            [ "struct P { x: Float64 }"; "let p = P { x = 1.0 }"; "struct P { x: Float64, y: Float64 }" ]
+     let count = src.Split([| "struct P" |], StringSplitOptions.None).Length - 1
+     recordCase "repl: a re-run struct cell replaces the first declaration" (count = 1) (if count = 1 then "" else src))
+
+    // --- Module namespacing: both lanes print what the pins say ---
+    //
+    // The interpreter differential gate covers single-file categories only,
+    // so the two multi-module programs whose NAMES the namespacing changed
+    // are run through the interpreter here and held to their own pins (the
+    // compiled lane is held to the same pins by `blade test multifile`).
+    for (testName, files) in Blade.Tests.Corpus.multiFileCategory "multifile" do
+        if testName.StartsWith "Same-named values across modules" || testName.StartsWith "Same-named functions across modules" then
+            let label = $"modules: interpreter honours the pins of '{testName}'"
+            match Blade.Lowering.lowerMultiSource files with
+            | Error e -> record label TH.Fail e
+            | Ok ir ->
+                let r = Blade.Interp.Run.runProgram ir "modules_interp" Blade.Interp.Value.defaultLimits
+                let pins = files |> List.collect (fun (_, src) -> Blade.Tests.Expect.parseExpectedValues src)
+                match Blade.Tests.Expect.checkExpectedValues pins r.Stdout with
+                | Ok () when not pins.IsEmpty -> record label TH.Pass ""
+                | Ok () -> record label TH.Fail "no pins found"
+                | Error errs -> record label TH.Fail (String.concat "; " errs + " | " + r.Stdout)
+
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
@@ -2570,6 +2760,18 @@ let internal suiteClearedKnobs =
       "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD" ]
     @ Blade.Optimize.optimizerGates
 
+/// Whether `cat` names a corpus directory `test <lane> <cat>` can run: any
+/// single-file category, plus the lane's own extra spellings (`opt-diff`
+/// runs the multi-file corpus too; `llvm` takes `all` / `corpus`).
+let private corpusCategoryExists (lane: string) (cat: string) : bool =
+    let extras =
+        match lane with
+        | "opt-diff" | "optdiff" -> [ "multifile" ]
+        | "llvm" -> [ "all"; "corpus" ]
+        | _ -> []
+    List.contains cat extras
+    || (try List.contains cat (Blade.Tests.Corpus.singleFileCategories ()) with _ -> false)
+
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 ///
 /// Runs with every `suiteClearedKnobs` variable UNSET, restoring the caller's
@@ -2781,6 +2983,17 @@ and internal dispatchTestClean (rest: string list) : int =
         // the dense corpus slice -- identical printed VALUES required.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice).Failed
         if failed = 0 then 0 else 1
+    // The differential lanes that take a LITERAL tests/corpus/<dir> name:
+    // a name that is no such directory is a usage error, reported as one --
+    // it used to escape as an exception from the corpus loader and surface as
+    // BL9001, an "internal compiler error" for a typo.
+    | [ ("diff-oracle" | "interp" | "opt-diff" | "optdiff" | "llvm") as lane; cat ]
+            when not (corpusCategoryExists lane cat) ->
+        let known =
+            try Blade.Tests.Corpus.singleFileCategories () |> String.concat ", "
+            with ex -> $"(the corpus itself was not found: {ex.Message})"
+        eprintfn "error: unknown corpus category '%s' for `test %s` -- it takes a directory name under tests/corpus: %s" cat lane known
+        1
     | [ "diff-oracle"; cat ] ->
         // Single corpus category against the pinned oracle.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed

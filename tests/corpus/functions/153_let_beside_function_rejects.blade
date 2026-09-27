@@ -1,0 +1,8 @@
+// TEST: Top-level let and function of one name (rejects)
+// ============================================================================
+// Values and functions share one top-level namespace: a `let` of a function's
+// name is the same redeclaration as a second `let`.
+function total(x: Float64) -> Float64 = x * 2.0
+let total = 3.0
+// ERROR: BL2009 @ 5:1
+// ERROR-CONTAINS: duplicate declaration of top-level value 'total'

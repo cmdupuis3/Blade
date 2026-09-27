@@ -86,83 +86,59 @@ let private dispatchInner (args: string[]) : int =
     | Some msg -> eprintfn "Error: %s" msg; 1
     | None ->
     match args with
-    // User-facing commands.
-    // `run <file> [--verbose] [--mpi N] [--memcheck]` -- flags in any order
-    // after the file.
-    | _ when args.Length >= 2 && args.[0] = "run" ->
-        let rest = args.[1..] |> Array.toList
-        let mutable verbose = false
-        let mutable mpiRanks = None
-        let mutable file = None
-        let mutable bad = None
-        let rec parse toks =
-            match toks with
-            | [] -> ()
-            | "--verbose" :: tl ->
-                verbose <- true
-                // Build.fs's executable cache reports `[cache] hit/store
-                // <hash8>` on stderr under this pin (it has no verbose
-                // parameter of its own; see exeCacheVerbose).
+    // No command: the usage text. (This used to START THE FULL TEST SUITE in
+    // the current directory -- a bare `blade` typed to see what the tool does
+    // spent twenty minutes compiling the corpus into ./generated_cpp_tests.
+    // The suite is `blade test`; `--full` keeps its old spelling.)
+    | [||] -> printUsage (); 0
+    | [| "--help" |] | [| "-h" |] | [| "help" |] -> printUsage (); 0
+    | [| "--full" |] -> runFullSuite defaultFullSuiteOptions
+
+    // The five file verbs share ONE flag parser (parseVerbArgs): flags in any
+    // order around the file, each verb accepting exactly the flags it has a
+    // meaning for, and an unknown flag named as such -- where it used to fall
+    // through to "unrecognized command" for every verb but `run`.
+    | _ when args.Length >= 1 && (args.[0] = "run" || args.[0] = "compile" || args.[0] = "emit"
+                                  || args.[0] = "check" || args.[0] = "plan") ->
+        let verb = args.[0]
+        match parseVerbArgs verb (args.[1..] |> Array.toList) with
+        | Error msg -> usageFailure msg
+        | Ok o ->
+            // Build.fs's executable cache reports `[cache] hit/store <hash8>`
+            // on stderr under this pin (it has no verbose parameter of its
+            // own; see exeCacheVerbose).
+            if o.Verbose && (verb = "run" || verb = "compile") then
                 System.Environment.SetEnvironmentVariable("BLADE_EXE_CACHE_VERBOSE", "1")
-                parse tl
-            | "--cuda" :: tl ->
-                // Flip device-kernel emission for `where cuda` licences --
-                // the same gate the CUDA test harness sets (setCudaEmitMode).
-                // Downstream is untouched: emitted __global__ kernels make the
-                // backend inference pick .cu + the nvcc split-compile path.
-                // Off by default so a licence alone never changes the compile
-                // toolchain out from under a plain `blade run`.
-                CodeGen.setCudaEmitMode true
-                parse tl
-            | "--memcheck" :: tl ->
-                // A process-level pin rather than a parameter: CodeGen (the
-                // blade_memcheck.hpp include), Build (the Debug+ASan compile
-                // profile and the longer run timeout) all read BLADE_MEMCHECK
-                // at their own sites, and exporting the variable directly is
-                // the equivalent harness spelling.
-                System.Environment.SetEnvironmentVariable("BLADE_MEMCHECK", "1")
-                parse tl
-            | "--mpi" :: n :: tl ->
-                (match System.Int32.TryParse n with
-                 | true, v when v > 0 -> mpiRanks <- Some v; parse tl
-                 | _ -> bad <- Some $"--mpi expects a positive rank count, got '{n}'")
-            | ["--mpi"] -> bad <- Some "--mpi requires a rank count (e.g. run prog.blade --mpi 4)"
-            | "--run-record" :: p :: tl when not (p.StartsWith "--") ->
-                // The executable writes its run record (input manifest +
-                // observed identities + status) to this path at exit. A
-                // process-level pin, as --memcheck is: the child inherits
-                // the environment, and the exe runs with ITS directory as
-                // cwd, so the path is made absolute here.
-                System.Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", System.IO.Path.GetFullPath p)
-                parse tl
-            | ["--run-record"] | "--run-record" :: _ -> bad <- Some "--run-record requires a destination path (e.g. run prog.blade --run-record run.json)"
-            | f :: tl when file.IsNone && not (f.StartsWith "--") -> file <- Some f; parse tl
-            | f :: _ -> bad <- Some $"unexpected argument '{f}'"
-        parse rest
-        match bad, file with
-        | Some msg, _ -> eprintfn "Error: %s" msg; 1
-        | None, None -> usageFailure "run needs a source file (e.g. run prog.blade)"
-        | None, Some f -> runFile f verbose mpiRanks strictPins
-
-    | [| "compile"; file |] ->
-        match compileToExe file None false strictPins with
-        | Ok path -> printfn "%s" path; 0
-        | Error e -> reportFailure e
-    | [| "compile"; file; "-o"; output |] ->
-        match compileToExe file (Some output) false strictPins with
-        | Ok path -> printfn "%s" path; 0
-        | Error e -> reportFailure e
-
-    | [| "emit"; file |] -> emitFile file None false strictPins
-    | [| "emit"; file; "-o"; output |] -> emitFile file (Some output) false strictPins
-    | [| "emit"; file; "--verbose" |] -> emitFile file None true strictPins
-    | [| "emit"; file; "-o"; output; "--verbose" |] -> emitFile file (Some output) true strictPins
-
-    | [| "check"; file |] -> checkFile file strictPins
-
-    // The optimization decision record (Blade.Effects.Decisions).
-    | [| "plan"; file |] -> planFile file false
-    | [| "plan"; file; "--json" |] | [| "plan"; "--json"; file |] -> planFile file true
+            // Flip device-kernel emission for `where cuda` licences -- the
+            // same gate the CUDA test harness sets (setCudaEmitMode).
+            // Downstream is untouched: emitted __global__ kernels make the
+            // backend inference pick .cu + the nvcc split-compile path. Off by
+            // default so a licence alone never changes the compile toolchain
+            // out from under a plain `blade run`.
+            if o.Cuda then CodeGen.setCudaEmitMode true
+            // A process-level pin rather than a parameter: CodeGen (the
+            // blade_memcheck.hpp include), Build (the Debug+ASan compile
+            // profile and the longer run timeout) all read BLADE_MEMCHECK at
+            // their own sites, and exporting the variable directly is the
+            // equivalent harness spelling.
+            if o.Memcheck then System.Environment.SetEnvironmentVariable("BLADE_MEMCHECK", "1")
+            // The executable writes its run record (input manifest + observed
+            // identities + status) to this path at exit. A process-level pin,
+            // as --memcheck is: the child inherits the environment. Made
+            // absolute here because the program runs in the SOURCE file's
+            // directory, not necessarily the caller's.
+            o.RunRecord |> Option.iter (fun p ->
+                System.Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", System.IO.Path.GetFullPath p))
+            match verb, o.File with
+            | _, None -> usageFailure $"{verb} needs a source file (e.g. {verb} prog.blade)"
+            | "run", Some f -> runFile f o.Verbose o.Mpi strictPins
+            | "compile", Some f ->
+                match compileToExe f o.Output o.Verbose strictPins with
+                | Ok path -> printfn "%s" path; 0
+                | Error e -> reportFailure e
+            | "emit", Some f -> emitFile f o.Output o.Verbose strictPins
+            | "check", Some f -> checkFile f strictPins
+            | _, Some f -> planFile f o.Json
 
     // Native-toolchain health report (docs/plans/plan-toolchain-packaging.md).
     | [| "doctor" |] -> Blade.Doctor.runDoctor false
@@ -174,10 +150,13 @@ let private dispatchInner (args: string[]) : int =
 
     | [| "repl" |] -> replLoop ()
 
-    // Editor tooling (JSON on stdout; see Ide.fs).
-    | [| "ide"; "check"; "--json"; file |]
-    | [| "ide"; "check"; file; "--json" |]
-    | [| "ide"; "check"; file |] -> Blade.Ide.ideCheck file
+    // Editor tooling (JSON on stdout; see Ide.fs). `--json` is accepted in any
+    // position for compatibility (the payload is always JSON).
+    | _ when args.Length >= 2 && args.[0] = "ide" && args.[1] = "check" ->
+        match parseVerbArgs "ide check" (args.[2..] |> Array.toList) with
+        | Error msg -> usageFailure msg
+        | Ok { File = None } -> usageFailure "ide check needs a source file (e.g. ide check --json prog.blade)"
+        | Ok { File = Some f } -> Blade.Ide.ideCheck f
 
     // The same payload, served: one long-lived process, NDJSON both ways.
     | [| "ide"; "serve" |] -> Blade.IdeServe.serve compilerVersion
@@ -191,10 +170,6 @@ let private dispatchInner (args: string[]) : int =
     | _ when args.Length >= 1 && args.[0] = "test" ->
         dispatchTest (args.[1..] |> Array.toList)
 
-    // Backward-compat flags.
-    | [||] -> runFullSuite defaultFullSuiteOptions
-    | [| "--full" |] -> runFullSuite defaultFullSuiteOptions
-    | [| "--help" |] -> printUsage (); 0
     | _ -> usageFailure ($"""unrecognized command: {(String.Join(" ", args))}""")
 
 /// Top-level error boundary: turns any escaping exception into a rendered

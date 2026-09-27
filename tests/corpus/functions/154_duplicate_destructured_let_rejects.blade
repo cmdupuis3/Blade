@@ -1,0 +1,8 @@
+// TEST: Duplicate name through a destructuring let (rejects)
+// ============================================================================
+// A destructuring `let` binds each of its leaves at top level, so a leaf that
+// an earlier `let` already bound is a duplicate too.
+let x = 1
+let (y, x) = (2, 3.5)
+// ERROR: BL2009 @ 5:1
+// ERROR-CONTAINS: duplicate declaration of top-level value 'x'

@@ -56,8 +56,8 @@ let s5 = L <@> (A, B, C) |> compute
 
 // A width-3 parameter absorbing the WHOLE pack -- ruling 2's "`lambda(r:
 // Tuple<4>)` also legal", one arity down.
-let M = object_for(lambda(p: Tuple<3>) -> p[0] + p[1] + p[2])
-let s6 = M <@> (A, B, C) |> compute
+let M3 = object_for(lambda(p: Tuple<3>) -> p[0] + p[1] + p[2])
+let s6 = M3 <@> (A, B, C) |> compute
 // EXPECT: s6 = [111, 211, 121, 221, 112, 212, 122, 222]
 // Identical to s0, as it must be: same three leaves, same grid, and
 // `x + y[0] + y[1]` and `p[0] + p[1] + p[2]` are the same sum. Only the

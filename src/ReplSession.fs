@@ -260,8 +260,19 @@ module ReplTypes =
 /// recursive array bound its name as the literal string "rec", which is not a
 /// name any rebind can match and not a binding any run output carries -- the
 /// notebook echoed `rec` with an empty type and value.
+///
+/// `struct` (also `static struct`) and `interface` name what they declare the
+/// same way `type` does. They were missing, so re-running a struct cell found
+/// no name to supersede and APPENDED a second `struct P` -- which the checker
+/// now refuses (BL2009) and which used to silently let the later one win.
 let private bindingNameRe =
-    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+|rec\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+)([A-Za-z_][A-Za-z0-9_]*)")
+    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+|rec\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+|(?:static\s+)?struct\s+|interface\s+)([A-Za-z_][A-Za-z0-9_]*)")
+
+/// `impl I for T { ... }` declares no name of its own; its rebind key is the
+/// (interface, type) pair, spelled `impl I for T`, so re-running the cell
+/// replaces the earlier implementation instead of adding a second one.
+let private implKeyRe =
+    Regex(@"^\s*impl\s+([A-Za-z_][A-Za-z0-9_]*)\s+for\s+([A-Za-z_][A-Za-z0-9_<>, ]*?)\s*\{")
 
 /// A destructuring declaration: `let (a, b) = ...`, `let mut (x, _) = ...`,
 /// nested parens allowed. Group 1 is the pattern text between the outer parens.
@@ -293,6 +304,9 @@ let bindingName (snippet: string) : string option =
     let line = firstSignificantLine snippet
     let m = bindingNameRe.Match line
     if m.Success then Some m.Groups.[1].Value
+    else
+    let im = implKeyRe.Match line
+    if im.Success then Some $"impl {im.Groups.[1].Value} for {im.Groups.[2].Value}"
     else
         // A destructuring `let (a, b) = ...` declares its LEAVES; its rebind
         // key is the leaf list, `(a,b)`, so re-running the cell supersedes the

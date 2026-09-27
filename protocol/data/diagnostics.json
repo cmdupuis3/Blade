@@ -130,11 +130,14 @@
       ]
     },
     "BL2009": {
-      "title": "duplicate function declaration",
-      "explanation": "A second top-level `function` declaration reuses a name the same module scope already declares; the refusal names both sites. Before this code existed the later declaration silently SHADOWED the earlier one: the name rebound to the last declaration, and a call matching the FIRST signature died with a rank or type mismatch (BL3001) blaming the call site instead of the real cause. Same-scope only: a nested `function` desugars to a block-scoped binding and may still shadow an outer function of the same name, and an imported name (`from X import f`) is not a declaration, so neither trips this. Dispatching one name across several signatures -- function clauses, where same-name declarations at compatible-but-distinct signatures form a clause set selected at specialization -- is a planned feature (docs/plans/plan-match-statements.md, refinement R1); until it lands, every same-scope duplicate is refused.",
-      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. If the two bodies were meant to be rank-dispatched alternatives of one function (a scalar base case and an array case), that is the planned function-clause feature -- today, write one function whose body dispatches, or give the variants distinct names.",
+      "title": "duplicate declaration",
+      "explanation": "A second top-level declaration reuses a name its namespace already holds; the refusal names both sites. Values and functions share one namespace (a second `let x`, a `let x` beside `function x`, a leaf of a destructuring `let` an earlier `let` bound), types another (`type`, `struct`, sum types, index types), units a third. Before this code a duplicate function silently SHADOWED the first (calls matching the first signature died blaming the call site), a top-level re-`let` passed the checker and died in g++ as a redeclaration while the interpreter shadowed it -- two lanes, two meanings -- and a duplicate `type`/`struct` let the last one win silently. Across the modules of one program a TYPE name (and a variant-constructor name) may be declared only once: type identity is still the bare name, so two modules' `struct P` would be one type to the checker and two definitions to C++, and a main-module `type Cell` would silently become the same nominal index type as an imported module's `Cell`. Same-scope only: inside a block, `let` and nested `function`s may still shadow outer names, and an imported name (`from X import f`) is not a declaration. Values and functions of different modules never clash: a non-main module's members are namespaced (`Util.scale`).",
+      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. To update a top-level `let`, assign it (`x = ...`) rather than declaring it again. For a type or constructor name two modules both declare, rename one of them. If two function bodies were meant to be rank-dispatched alternatives of one function, that is the planned function-clause feature (docs/plans/plan-match-statements.md, R1) -- today, write one function whose body dispatches, or give the variants distinct names.",
       "examples": [
-        "tests/corpus/functions/126_duplicate_function_rejects.blade"
+        "tests/corpus/functions/126_duplicate_function_rejects.blade",
+        "tests/corpus/functions/152_duplicate_toplevel_let_rejects.blade",
+        "tests/corpus/structs/055_duplicate_struct_rejects.blade",
+        "tests/corpus/multifile/025_same_named_struct_rejects/03_Main.blade"
       ],
       "docs": [
         "docs/plans/plan-match-statements.md"
@@ -941,8 +944,8 @@
     },
     "BL9002": {
       "title": "internal codegen invariant violated",
-      "explanation": "BL9001 raised from the C++ emitter: codegen reached a state its own guards said was unreachable -- a node shape that an earlier phase should have rejected or rewritten.",
-      "fix": "A compiler bug; report it with the program. There is no source-level workaround beyond avoiding the construct that reached the emitter.",
+      "explanation": "BL9001 raised from the C++ back end. Either codegen reached a state its own guards said was unreachable -- a node shape that an earlier phase should have rejected or rewritten -- or the C++ compiler REJECTED the code Blade generated for a program that passed type checking. The latter is reported with the first compiler error, the path of the generated source and the path of the full compiler log (kept in the build directory; `--verbose` also prints it). A deliberate `#error` refusal is not this code (see BL7004), and neither is a toolchain failure such as a missing library at link time.",
+      "fix": "A compiler bug; report it with the program (the generated source and the compiler log it names are the useful attachments). There is no source-level workaround beyond avoiding the construct that reached the back end.",
       "examples": [],
       "docs": []
     },

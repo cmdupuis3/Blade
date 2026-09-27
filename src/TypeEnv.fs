@@ -770,6 +770,20 @@ let formatTypeError (err: TypeError) : string =
         | "while" | "do" ->
             $"Unbound variable: {name}. Blade has no imperative loops -- iteration is declarative. A converge/accumulate loop is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`), and iterate-until-converged is that array's inductive arm carrying a `while` guard over a BUDGET extent (`| prefix :: n while <cond> -> prefix :: <step>` -- frozen once the guard goes false, BL8010 if it never does). A fold is `reduce(...)`, and a parallel map is `method_for(range<...>) <@> lambda(...)` or plain array arithmetic. See formalism 7.5."
         | _ -> $"Unbound variable: {name}"
+    | DuplicateDecl (kind, name, firstSite, None) ->
+        let what, advice =
+            match kind with
+            | "value" ->
+                "top-level value", "A top-level name is bound once per module: rename one of them (inside a block, `let` may shadow; at top level a second `let` would be two globals of one name, and assignment `x = ...` is the way to update a `let`)."
+            | "type" -> "type", "A type name is declared once per program: rename one of them."
+            | "unit" -> "unit", "A unit is declared once per module: rename one, or derive it (`Unit b = a`)."
+            | "constructor" ->
+                "variant constructor", "A constructor name belongs to one sum type per program (constructors are matched and emitted by bare name): rename one of them."
+            | other -> other, "Rename one of the declarations."
+        $"duplicate declaration of {what} '{name}': this module already declares it at {firstSite}. {advice}"
+    | DuplicateDecl (kind, name, firstSite, Some firstModule) ->
+        let what = if kind = "constructor" then "variant constructor" else kind
+        $"duplicate declaration of {what} '{name}': module '{firstModule}' already declares a {what} of that name (at {firstSite}), and one program cannot hold two of one name -- type identity is not module-qualified yet, so the two would be confused with each other (and emitted as one C++ name). Rename one of them."
     | DuplicateFunctionDecl (name, firstSite) ->
         $"duplicate declaration of function '{name}': this scope already declares it at {firstSite}. A function name may be declared only once per scope -- without this refusal the later declaration silently shadows the earlier one, and calls matching the first signature fail blaming the call site. Rename one of the declarations. (Dispatching one name across several signatures -- function clauses -- is a planned feature, not yet supported.)"
     | TypeMismatch (exp, act) ->
@@ -1110,7 +1124,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | UnboundVariable _ | ImportNameMissing _ -> "BL2001"
             // Same-scope duplicate `function` name: a name-binding refusal,
             // so it lives in the BL2xxx resolution band, not BL3xxx.
-            | DuplicateFunctionDecl _ -> "BL2009"
+            | DuplicateFunctionDecl _ | DuplicateDecl _ -> "BL2009"
             // Environment condition, not a type judgment: the provider's
             // native library is unloadable, so the store's names cannot
             // resolve -- same band as BL2004's "module not found".

@@ -1,0 +1,12 @@
+// TEST: Two modules declaring one variant constructor (rejects)
+// MODULE: Main
+// ERROR: BL2009
+// ERROR-CONTAINS: duplicate declaration of variant constructor 'Red'
+// ============================================================================
+// Constructors are matched by bare name and emitted as global C++ names
+// (enum members, constructor functions), so two sum types of one program
+// cannot share one.
+module Main
+import A
+import B
+let c = Red

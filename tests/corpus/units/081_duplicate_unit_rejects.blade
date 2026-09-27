@@ -1,0 +1,10 @@
+// TEST: Duplicate unit declaration (rejects)
+// ============================================================================
+// A unit is declared once per module; a second `Unit meters` would silently
+// redefine the first.
+Unit meters
+Unit seconds
+Unit meters = seconds
+let d: Float<meters> = 2.0
+// ERROR: BL2009 @ 6:1
+// ERROR-CONTAINS: duplicate declaration of unit 'meters'

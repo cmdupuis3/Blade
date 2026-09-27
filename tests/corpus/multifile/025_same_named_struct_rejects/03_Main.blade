@@ -1,0 +1,14 @@
+// TEST: Two modules declaring one struct name (rejects)
+// MODULE: Main
+// ERROR: BL2009
+// ERROR-CONTAINS: duplicate declaration of type 'P': module 'A' already declares a type of that name
+// ============================================================================
+// A struct's identity is its bare name, so A's `P` and B's `P` were ONE type
+// to the checker -- `A.fx(B.mk())` passed A's field read a B value -- and two
+// global `struct P` definitions to g++ (a redefinition). Until type identity
+// is module-qualified, one program declares a type name once.
+module Main
+import A
+import B
+let q = B.mk()
+let v = A.fx(q)

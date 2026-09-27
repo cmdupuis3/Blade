@@ -233,13 +233,15 @@ let private scopedCases
       // The same shape across a module boundary: the kernel lambda lives in
       // the defining module (it was lifted out of a body there), the literal
       // comes from an importer, and the clone is placed beside its origin.
+      // A non-main module's functions are emitted module-qualified
+      // (Lowering.qualifyModuleNames), hence the `Fibers__` spelling.
       ("cross_module_lifted_kernel_lambda_bakes_the_inner_bound",
        [ ("Fibers", "module Fibers\n" + rowdotFn)
          ("Main", "module Main\nimport Fibers\n"
                   + "let W: Array<Float64 like Idx<3>> = [1.0, 2.0, 3.0]\n"
                   + mat43 + "let r = Fibers.rowdot(M, W)\n") ],
-       [ ("Array<double, 1> rowdot_shape_n3_p4(", [ "__jm = 4;"; "__jn = 3;" ], [ ".extents[" ])
-         ("Array<double, 1> rowdot(", [ "__jn = A.extents[1];" ], []) ])
+       [ ("Array<double, 1> Fibers__rowdot_shape_n3_p4(", [ "__jm = 4;"; "__jn = 3;" ], [ ".extents[" ])
+         ("Array<double, 1> Fibers__rowdot(", [ "__jn = A.extents[1];" ], []) ])
 
       // PROVENANCE NEGATIVE. A source-level function used as a kernel declares
       // its OWN `Idx<n>` -- identically spelled, unrelated axis -- so its names

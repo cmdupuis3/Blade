@@ -28,6 +28,18 @@ type TypeError =
     /// compatible-but-distinct signatures become a clause set; everything
     /// else stays refused here.
     | DuplicateFunctionDecl of name: string * firstSite: string
+    /// BL2009's other arms: a second top-level declaration of a name the
+    /// same NAMESPACE already holds -- a `let`/`static` value (lets and
+    /// functions share one namespace), a type (`type`/`struct`/sum type), or
+    /// a `Unit` -- in the same module, or a type name another module of the
+    /// program already declares. A top-level re-`let` used to pass the checker
+    /// and then die in g++ as a redeclaration (the interpreter meanwhile
+    /// SHADOWED it, so the two lanes disagreed on what the program meant); a
+    /// duplicate `type`/`struct` silently let the last one win. `kind` names
+    /// the namespace ("value", "type", "unit"); `firstSite` is preformatted.
+    /// `crossModule` carries the module that declared the name first when the
+    /// clash spans modules (type identity is not module-qualified yet).
+    | DuplicateDecl of kind: string * name: string * firstSite: string * crossModule: string option
     | TypeMismatch of expected: IRType * actual: IRType
     | ArityMismatch of expected: int * actual: int
     /// BL3002, kernel-apply seam. The WIDTH SCHEMA did not cover the pack

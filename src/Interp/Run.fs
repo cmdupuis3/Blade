@@ -202,9 +202,21 @@ let private printableModule (program: IRProgram) : IRModule =
     match program.Modules with
     | [ single ] -> single
     | many ->
+        // Every per-module table merges, as codegen's merge does -- TYPES
+        // included: taking the head module's alone left the printer unable to
+        // see a struct any later module (main, typically) declared, while the
+        // compiled lane's merged module could.
+        let mergeMaps (pick: IRModule -> Map<'k, 'v>) =
+            many |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc (pick m)) Map.empty
         { many.Head with
+            Types = many |> List.collect _.Types
             Functions = many |> List.collect _.Functions
             Bindings = many |> List.collect _.Bindings
+            ProviderReads = mergeMaps _.ProviderReads
+            ProviderWrites = mergeMaps _.ProviderWrites
+            RandomInits = mergeMaps _.RandomInits
+            CompoundInits = mergeMaps _.CompoundInits
+            SparseInits = mergeMaps _.SparseInits
             MutableArrayLets = many |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty }
 
 // Random-fill bindings (rand.<fam>, RandomInits/RandGen).

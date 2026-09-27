@@ -1442,8 +1442,11 @@ let describeCrashExit (exitCode: int) : string option =
         | 139 -> sg "SIGSEGV"
         | _ -> None
 
-/// Run a compiled executable
-let runExecutable (exeFile: string) : Result<int * string, string> =
+/// Run a compiled executable with an explicit working directory. `blade run`
+/// builds in a private scratch directory but runs the program where its SOURCE
+/// lives, so relative data paths keep resolving exactly as they did when the
+/// executable was written beside the source.
+let runExecutableIn (cwd: string) (exeFile: string) : Result<int * string, string> =
     try
         let exeFullPath = Path.GetFullPath(exeFile)
         let psi = ProcessStartInfo(exeFullPath)
@@ -1451,7 +1454,7 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
         psi.RedirectStandardError <- true
         psi.UseShellExecute <- false
         psi.CreateNoWindow <- true
-        psi.WorkingDirectory <- Path.GetDirectoryName(exeFullPath)
+        psi.WorkingDirectory <- cwd
         prependNetcdfBin psi
         
         use proc = Process.Start(psi)
@@ -1499,6 +1502,10 @@ let runExecutable (exeFile: string) : Result<int * string, string> =
                        (describe "stderr" (grab stderrTask)))
     with ex ->
         Error $"Execution exception: {ex.Message}"
+
+/// Run a compiled executable in its own directory (the harness contract).
+let runExecutable (exeFile: string) : Result<int * string, string> =
+    runExecutableIn (Path.GetDirectoryName(Path.GetFullPath exeFile)) exeFile
 
 // MPI launch support (mpiexec resolution + wrapped execution)
 
@@ -1558,7 +1565,7 @@ let hasMpiLink : Lazy<bool> =
 /// Run a compiled MPI executable under `mpiexec -n <ranks>`. Same
 /// stream/timeout discipline as runExecutable; mpiexec propagates a failing
 /// rank's exit code. 60s timeout (multi-process startup is slower than a bare exe).
-let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
+let runExecutableMpiIn (cwd: string) (ranks: int) (exeFile: string) : Result<int * string, string> =
     match mpiexecPath.Value with
     | None -> Error $"mpiexec not found ({Platforms.mpiRuntimeHint})"
     | Some mpiexec ->
@@ -1569,7 +1576,7 @@ let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, strin
             psi.RedirectStandardError <- true
             psi.UseShellExecute <- false
             psi.CreateNoWindow <- true
-            psi.WorkingDirectory <- Path.GetDirectoryName(exeFullPath)
+            psi.WorkingDirectory <- cwd
             prependNetcdfBin psi
             use proc = Process.Start(psi)
             let stdoutTask = Blade.Runtime.readToEndOffPool proc.StandardOutput
@@ -1584,6 +1591,10 @@ let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, strin
                 Error "Execution timed out after 60s (mpiexec)"
         with ex ->
             Error $"Execution exception: {ex.Message}"
+
+/// `runExecutableMpiIn` in the executable's own directory.
+let runExecutableMpi (ranks: int) (exeFile: string) : Result<int * string, string> =
+    runExecutableMpiIn (Path.GetDirectoryName(Path.GetFullPath exeFile)) ranks exeFile
 
 /// Sanitize a test name for use as a filename (cross-platform).
 let sanitizeFileName (name: string) : string =

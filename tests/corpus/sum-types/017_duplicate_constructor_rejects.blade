@@ -1,0 +1,9 @@
+// TEST: Two sum types sharing a constructor (rejects)
+// ============================================================================
+// Constructors are matched by bare name and emitted as global C++ enum
+// members, so two sum types of one program cannot both declare `Red`.
+type Color = Red | Green
+type Light = Red | Amber
+let c = Red
+// ERROR: BL2009 @ 5:1
+// ERROR-CONTAINS: duplicate declaration of variant constructor 'Red'
