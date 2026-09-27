@@ -117,8 +117,30 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
   `blade test opt-diff` (standalone, whole corpus; `tests/OptDiff.fs`) emits every program with
   all optimizer gates OFF and ON and compiles + runs only the pairs whose C++ differs, comparing
   normalized output. Run it after touching any pass; a new pass's gate goes in `optimizerGates`.
-- Every corpus category has a standalone `blade test <key>`; `blade test sql` runs the
-  same sql-* union the full suite does.
+- `blade test interp` (no category) walks EVERY corpus directory — single-file and
+  `multifile`, discovered from disk — minus the named exclusions in
+  `tests/InterpDiff.fs` (`interpExcluded`: only `memfree-stress`). `blade test --interp` is
+  NOT that: it is the whole default suite with the differential appended. CI runs
+  `test interp` and `test opt-diff` as their own lanes (nightly; opt-diff also on `ci:full`).
+- The corpus is DISCOVERED, not listed: every single-file directory runs in the default suite
+  (`RunAll.allTests`; only `diagnostics` is owned by another block), answers to
+  `blade test <its-literal-dir-name>` (aliases like `uniterrors` are extra spellings), and is
+  walked by `test interp`. The wholly-negative directories (every file must be refused, names
+  unmarked) are ONE list, `Corpus.rejectOnlyCategories`. The default suite's "Corpus Wiring"
+  block (`blade test corpus-wiring`) fails if a hand-written fact stops matching the disk — a
+  new multi-file directory without a runner, an exclusion naming a missing directory.
+  `blade test sql` runs the discovered sql-* union.
+- `blade test` clears every emission-affecting knob for its duration (`suiteClearedKnobs` in
+  `src/CliSelfTests.fs`: BLAS gates, BLADE_PRINT, FP_REASSOC/FP_CONTRACT/MARCH, OMP_THREADS,
+  TILE_CACHE, LLVM, the optimizer gates, AD_HALO_GATHER, ...), prints one line naming any it
+  found set, and restores them after; blocks that exercise a knob set it themselves.
+  `blade test --print ...` is refused (the pins read every binding).
+- Pin hygiene is enforced, not advisory: a value test with no `// EXPECT:` or `// WARN:` pin
+  FAILS unless it carries `// NOPINS: <reason>`; an `// ERROR:` whose code or `@ l:c` span
+  does not parse fails (it used to degrade to a code-only pin); an `=`-bearing `// EXPECT:`
+  on a `(rejects)` probe fails (it is never checked — pin the refusal with `// ERROR:`); and
+  any program output containing a raw heap pointer (`0x` + 8 hex digits) fails. The
+  differential normalizers no longer mask pointers.
 - To iterate on a single corpus test, `blade run tests/corpus/<cat>/<file>.blade` (fast, but
   pins are only validated by the harness, not by `run`).
 - Full-suite runs from concurrent sessions must use private working directories (the scratch
@@ -135,7 +157,10 @@ One `.blade` file per test; pins are comments (grammar documented in `tests/corp
 - `// WARN: BLxxxx` and `// WARN-CODEGEN: <substring>` are **strict in both directions**: an
   unpinned warning fails the test AND a pin that never fires fails the test. If you fix a
   warning false-positive, remove its now-dead pins in the same change.
-- `// MODULE: <name>` for multi-file tests (pins union across member files).
+- `// MODULE: <name>` for multi-file tests (pins — EXPECT, ERROR, WARN — union across member
+  files).
+- `// NOPINS: <reason>` — required on a value test that pins nothing (e.g. a
+  declaration-only parse test); a stale marker on a test with pins fails.
 
 `.editorconfig` exempts `tests/corpus/**` and `examples/**` from trailing-whitespace and
 final-newline fixing — these are byte-pinned assets; never auto-reformat them.
