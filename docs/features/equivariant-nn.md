@@ -132,7 +132,7 @@ live in domain libraries. This is the boundary that keeps the core group-theory-
 
 ### 1. Annotations
 
-```blade
+```blade sketch
 let v: Array<Float like Idx<3>> with equiv(G, rep)
 let energy: Float with invariant(G)          // sugar for equiv(G, trivial)
 
@@ -174,7 +174,7 @@ the inferred representation.
 
 ### 4. Equivariant index types
 
-```blade
+```blade sketch
 type EquivIdx<n, G, ρ>                       // dimension, group, representation
 type VectorIdx       = EquivIdx<3, SO<3>, standard>
 type PseudovectorIdx = EquivIdx<3, SO<3>, adjoint>
@@ -199,7 +199,7 @@ Goal: type-safe, zero-overhead E(3)-equivariant networks. Positioning vs e3nn:
 
 ### 5. Irreps
 
-```blade
+```blade sketch
 type Parity = Even | Odd
 type Irrep<L: Nat, p: Parity>                 // L0e, L1o, L2e, ... named aliases
 static function dim(ir)    = 2 * L + 1
@@ -213,7 +213,7 @@ representation theory at compile time.
 
 ### 6. `IrrepsIdx<spec>` — the block-structured index
 
-```blade
+```blade sketch
 type IrrepsIdx<spec> = DepIdx<
     Idx<length(spec)>,                                    // block
     lambda(b) -> Idx<mult(spec(b))>, Idx<dim(irrep(spec(b)))>  // (mult, m)
@@ -258,7 +258,7 @@ lands. Corpus: `index-types/111–119`, `ml-ops/005–008`.
 Dependent + constrained records (core features) encode the selection rules in
 types:
 
-```blade
+```blade sketch
 struct CGPath {
     l1, l2: Nat<angular_momentum>,
     l_out:  Nat<angular_momentum, min=abs(l1-l2), max=l1+l2>,
@@ -402,21 +402,23 @@ via its normal inliner and codegen is unchanged.
 Surface (v1 — ordinary required-static arguments; angle-bracket static
 args are future sugar):
 
-```blade
-let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]   // (l, parity, mult), parity 0=e/1=o
-let static cfg1  = (spec_in, sh_spec(2), spec_h)         // (spec1, spec2, specOut)
-let static w1dim = tp_weight_dim(cfg1)                   // sizing builtins:
-let static w2dim = linear_weight_dim(spec_h, spec_h)     // total_dim, sh_spec, ...
+```blade sketch
+// sketch: an overview -- spec_in, x, w, N, x_rows are the caller's; corpus ml-ops/ has complete programs
+import ml as ml
+let static spec_h = [(0, 0, 2), (1, 1, 2), (2, 0, 1)]      // (l, parity, mult), parity 0=e/1=o
+let static cfg1  = (spec_in, ml.sh_spec(2), spec_h)        // (spec1, spec2, specOut)
+let static w1dim = ml.tp_weight_dim(cfg1)                  // sizing builtins:
+let static w2dim = ml.linear_weight_dim(spec_h, spec_h)    // total_dim, sh_spec, ...
 
-let sh  = y_to(2, x, y, z)                    // real solid harmonics, lmax <= 2 (v1)
-let out = tensor_product(cfg1, x1, sh, w)     // uvw fully-connected, path-validated
-let z   = linear(spec_in, spec_out, w, x)     // block-diagonal, first-match blocks
-let g   = gated(spec, x)                      // scalar double-duty gates (F2 rule)
+let sh  = ml.y_to(2, x, y, z)                    // real solid harmonics, lmax <= 2 (v1)
+let out = ml.tensor_product(cfg1, x1, sh, w)     // uvw fully-connected, path-validated
+let z   = ml.linear(spec_in, spec_out, w, x)     // block-diagonal, first-match blocks
+let g   = ml.gated(spec, x)                      // scalar double-duty gates (F2 rule)
 
 // batched row forms over flat row-major storage (N static): the per-node
 // case of graph networks, with no hand-written row-extract/write-back loops
-let g1 = gated_rows(spec, N, x_rows)
-let h1 = linear_rows(spec_in, spec_out, N, w, x_rows)
+let g1 = ml.gated_rows(spec, N, x_rows)
+let h1 = ml.linear_rows(spec_in, spec_out, N, w, x_rows)
 ```
 
 Checks at elaboration: `all_valid_outputs` for tensor products, block-0

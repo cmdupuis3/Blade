@@ -14,6 +14,14 @@ array identity license no symmetry; the H ∩ Stab lowering law is an exactness;
 compound-index application is the single joint-tuple form; MonadPlus right distribution is
 not a law.
 
+**Implemented vs specified.** This document specifies the language; a few
+constructs it names are designed but not built. Those are marked
+**(planned)** where they appear (tables carry a Status column), and the
+implementation status of everything else is pinned by `tests/corpus/`.
+Code blocks tagged `blade` are checked by `blade test docs`; blocks written
+in the formalism's own notation (metavariables such as `T₁^r₁`, `A*`, `...`)
+are marked `sketch` and are not programs.
+
 ---
 
 ## 1. The S/T model
@@ -31,7 +39,7 @@ The two fundamental array operations — iteration (enumerating positions) and
 indexing (accessing positions) — are fused in Blade into a single concept, the
 **loop object**, which can be constructed from either side:
 
-```blade
+```blade sketch
 method_for(A, B)   // from structure: arrays determine iteration+indexing
 object_for(f)      // from operation: kernel arity determines iteration+indexing
 <@>                // application connects them, producing a Computation
@@ -43,8 +51,8 @@ both iteration and indexing, kernels receive values anonymously — no index
 naming — which is what lets one kernel serve every arity.
 
 S/T and T/S compose rather than compete: S/T governs outer structure
-(iteration, parallelism, symmetry); T/S combinators (`fold`, `scan`,
-`tree_reduce`) govern reduction strategy inside kernels.
+(iteration, parallelism, symmetry); T/S combinators govern reduction strategy
+inside kernels (`reduce` today; `scan` and `tree_reduce` are **(planned)**).
 
 Why S/T is *required* (not merely chosen) for symmetric-tensor speedups is a
 theorem package, not doctrine: iteration-object impossibility in T/S,
@@ -165,7 +173,7 @@ Type variables (single capitals) are universally quantified within a
 signature; the same letter denotes the same type; `cast<A,B>` is the promotion
 result:
 
-```blade
+```blade sketch
 function add(a: A^0, b: A^0) -> A^0
 function scale(s: A^0, v: B^1) -> cast<A,B>^1
 ```
@@ -201,18 +209,18 @@ over optimal layout.
 
 Over `ArrayExpr` (results are `ArrayExpr`):
 
-| Combinator | Signature sketch | Semantics |
-|-----------|------------------|-----------|
-| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) |
-| `align(A₁..Aₙ, spec)` | → `AlignedExpr` | zip + stencil metadata (dims, offsets, boundary ∈ Shrink/Pad/Periodic/Reflect); kernel receives N separate arguments |
-| `stencil(A, {d: offsets}, boundary)` | sugar | desugars to `align` of `shift`s |
-| `stack(A₁..Aₙ)` | → rank+1, fresh leading symmetry class | `stack(A,B,C)(k)` selects array k |
-| `transpose(A, p)` | permutation p | hard transpose (data movement on materialize); `transpose(transpose(A,p),q) ≡ transpose(A, q∘p)`; on symmetric arrays with the identity-under-σ permutation it is the identity, on antisymmetric it negates per parity |
-| `diag(A, (d₁,d₂))` | rank−1 | collapse two dims to their diagonal |
-| `join(A, B, d)` / `subset(A, d, (s,e))` / `split(A, d, i)` | | concatenate / range-extract / split = two subsets; split-join round-trips |
-| `reverse(A, d)` / `shift(A, d, k, boundary)` | | index reversal (involution) / offset with boundary handling |
-| `A <\|:> B` | fallback | `A(i)` if allocated else `B(i)`, checked per curry level; A's layout dominates iteration order; symmetric A requires symmetric allocation |
-| `decompact(A, axis)` | compact → dense | expand a symmetric/antisymmetric compact axis to dense storage; sign-correct for antisymmetric sources; chainable to full dense; error on non-compact axes |
+| Combinator | Signature sketch | Semantics | Status |
+|-----------|------------------|-----------|--------|
+| `zip(A₁..Aₙ)` | → Tuple elements over shared k = min rank prefix | `zip(A,B)(i..) = Tuple(A(i..), B(i..))`; output symmetry = intersection where all inputs agree; kernel receives one flat parameter per array by default (`lambda(a,b)`), or the whole `n`-tuple as one value if its parameter is written `Tuple<n>` (§2.8) | Implemented |
+| `align(A₁..Aₙ, spec)` | → `AlignedExpr` | zip + stencil metadata (dims, offsets, boundary ∈ Shrink/Pad/Periodic/Reflect); kernel receives N separate arguments | **(planned)** |
+| `stencil(A, {d: offsets}, boundary)` | sugar | desugars to `align` of `shift`s | **(planned)** — neighbor access today is `halo<I, [offsets]>` (§7.3) |
+| `stack(A₁..Aₙ)` | → rank+1, fresh leading symmetry class | `stack(A,B,C)(k)` selects array k | Implemented |
+| `transpose(A, p)` | permutation p | hard transpose (data movement on materialize); `transpose(transpose(A,p),q) ≡ transpose(A, q∘p)`; on symmetric arrays with the identity-under-σ permutation it is the identity, on antisymmetric it negates per parity | Implemented |
+| `diag(A, (d₁,d₂))` | rank−1 | collapse two dims to their diagonal | **(planned)** |
+| `join(A, B, d)` / `subset(A, d, (s,e))` / `split(A, d, i)` | | concatenate / range-extract / split = two subsets; split-join round-trips | `join` Implemented; `subset`/`split` **(planned)** ([plans/plan-subset-split.md](plans/plan-subset-split.md)) |
+| `reverse(A, d)` / `shift(A, d, k, boundary)` | | index reversal (involution) / offset with boundary handling | **(planned)** — the `reverse<I>` virtual array (§7.3) is Implemented |
+| `A <\|:> B` | fallback | `A(i)` if allocated else `B(i)`, checked per curry level; A's layout dominates iteration order; symmetric A requires symmetric allocation | Implemented |
+| `decompact(A, axis)` | compact → dense | expand a symmetric/antisymmetric compact axis to dense storage; sign-correct for antisymmetric sources; chainable to full dense; error on non-compact axes | Implemented |
 
 ### 2.7 Binding forms
 
@@ -394,7 +402,8 @@ and hash agree — this is what lets two files with the same grid interoperate.
 
 **Named index types** (`type LatIdx = Idx<360>`) add nominal identity and unit
 identity (§3.10); anonymous occurrences each get fresh identity. **Tagged
-index types** `Idx<n, Tag>` (enum tags) distinguish same-extent spaces
+index types** `Idx<n, Tag>` (**(planned)**; named index types give the same
+nominal distinction today) distinguish same-extent spaces
 (staggered/Arakawa grids).
 
 ### 3.4 Symmetric index types
@@ -421,7 +430,7 @@ proofs.md §Binomial).
   expressible as nested DepIdx (scope of recursive bounds) — SymIdx is
   primitive.
 
-**Nested/mixed symmetry** (spec level): `NestedSymIdx<n>` (symmetric pairs of
+**Nested/mixed symmetry** (spec level, **(planned)**): `NestedSymIdx<n>` (symmetric pairs of
 symmetric pairs; S = n(n+1)/2, cardinality S(S+1)/2; elasticity tensors),
 `RiemannIdx<n>` (antisym pairs, symmetric between them; n=4 → 21). Users
 compose via `Sym<I,I>`, `Antisym<I,I>`, products; the `unsafe indextype`
@@ -440,7 +449,7 @@ tuples, each once, in lex order (proofs.md §Compound).
 
 Two construction routes:
 
-```blade
+```blade sketch
 type OceanIdx = CompoundIdx<ocean_mask>    // static type route
 let view = compound(dense, mask)           // runtime builder route (§15, sql.md)
 ```
@@ -506,34 +515,40 @@ The dependence erases to runtime bounds in C++.
 extent = Σᵢ |f(i)|; iteration yields (i, j : f(i)); the storage bijection is
 the general left-justified one (proofs.md §DMWF). Instances:
 
-```blade
+```blade sketch
 type RaggedIdx = DepIdx<Idx<n>, lambda(i) -> Idx<lengths(i)>>   // ragged
 type TriIdx<n> = DepIdx<Idx<n>, lambda(i) -> Idx<n - i>>        // triangular
 type IrrepsIdx<spec> = DepIdx<...>                              // ML blocks
 ```
 
-`RaggedIdx` exists in closed form (lengths visible) and opaque form (lengths
+(`DepIdx` is the semantic model, not a surface type: the instances are
+written with their own names, and ragged arrays come from literals and
+`group_by`.) `RaggedIdx` exists in closed form (lengths visible) and opaque form (lengths
 abstract at function boundaries); both support reduce/extents/indexing, and
 ragged literals construct them directly.
 
 ### 3.7 Index transforms
 
-`flip(A, dim)` (reverses ordering, changes hash), `rename(A, old -> new)` (tag
+**(planned)** — none of these is built; `rename` has no surface spelling yet,
+and `subset`/`align` share the §2.6 status. `flip(A, dim)` (reverses ordering, changes hash), `rename(A, old -> new)` (tag
 change), `subset(A, dim=lo..hi)` (new extent + hash), `align(A, B, dim)` (join
 on common indices). All explicit; no implicit conversions; mismatches are type
 errors.
 
 ### 3.8 Files as type providers
 
-```blade
-type ERA5 = NetCDFProvider<"era5.nc">
-// ERA5.lat_idx : Idx<721>, ERA5.t2m : Array<Float like Idx<721>, Idx<1440>, Idx<8760>>
+```blade sketch
+import netcdf as nc
+let era5 = nc.load("era5.nc")        // metadata read at COMPILE time
+let t2m = era5.vars.t2m |> nc.read   // era5.index.lat : Idx<721>, ...; t2m typed from the file
 ```
 
-Compile-time metadata inspection instantiates index types; runtime reads
-values. Valid because file *structure* is quasi-static and structure (not
-values) determines types. Provider slots (NetCDF now; HDF5/Zarr planned) sit
-behind one interface.
+Compile-time metadata inspection instantiates index types (`era5.index.<dim>`)
+and typed variables (`era5.vars.<name>`); runtime reads values. Valid because
+file *structure* is quasi-static and structure (not values) determines types.
+NetCDF, Zarr, CSV and Icechunk providers are implemented (`blade test
+netcdf|zarr|csv|icechunk`); HDF5 is planned. (The earlier spelling
+`type ERA5 = NetCDFProvider<"era5.nc">` is gone.)
 
 ### 3.9 Symmetry lives in the index type
 
@@ -674,7 +689,7 @@ value level.
 
 ### 4.2 Type identity
 
-```blade
+```blade sketch
 Array<T like I₁, I₂, ..., Iₙ> ≡ Array<Array<T like I₁, ..., Iₙ₋₁> like Iₙ>
 ```
 
@@ -690,13 +705,13 @@ expression producing a valid index is a valid index (literals, arithmetic,
 function results, conditionals). Indexing and function application intermix
 freely because they are the same thing:
 
-```blade
+```blade sketch
 let models: Array<(Params → TimeSeries) like LatIdx, LonIdx>
 models(lat, lon)(params)(t) : Float
 ```
 
-**Poly-indexing**: `A(indices)` with a tuple of length rank(A); `all_indices(A)`
-iterates all valid tuples respecting structure. Use for rank-polymorphic
+**Poly-indexing** **(planned)**: `A(indices)` with a tuple of length rank(A);
+`all_indices(A)` iterates all valid tuples respecting structure. Use for rank-polymorphic
 operations (trace, sum-all); for standard arrays prefer curried/loop access to
 preserve cache order.
 
@@ -728,7 +743,7 @@ so `omp(p: n)` licenses its first n rows; `cuda` and
 other backends substitute), and T-dimension spec (`tdim({extent, symm, name})`
 records) when output dims don't derive from inputs.
 
-```blade
+```blade sketch
 function name(x₁: T₁^r₁, ..., xₙ: Tₙ^rₙ)
 where comm(xᵢ, xⱼ), omp(x₁: 2), tdim({ extent: e, symm: k, name: "freq" })
 -> T_out^r_out
@@ -742,11 +757,12 @@ immutable lambda bindings (internally the same marker `let static` uses).
 ### 5.2 Lambdas
 
 `lambda(a, b) -> expr`, optional type/rank annotations, `where` clauses
-(`comm`, return type) as on functions, block bodies in braces. Pure by
-definition. Array captures are unit-checked (§3.10). Parameter types infer
-from context; array-typed parameters need explicit rank annotations.
+(`comm`, return type) as on functions, block bodies in braces. Lambdas are
+values that may capture; they are NOT required to be pure. Array captures are
+unit-checked (§3.10). Parameter types infer from context; array-typed
+parameters need explicit rank annotations.
 
-What the checker enforces of that purity today: a PARALLEL kernel body
+The one purity rule the checker enforces is about races: a PARALLEL kernel body
 (`where omp(...)` / `cuda`, and anything nested in one) may not write a
 binding captured from outside it -- its cells run concurrently, so the store
 would be a data race (BL4005). A serial body's write to a captured `let mut`
@@ -761,15 +777,18 @@ sample points and their swaps (`x / y` is 2 at (2, 1) and 0.5 at (1, 2)).
 Under `reynolds(...)` the clause is an iteration license, not a claim about
 the bare kernel, and is never refuted (§5.3).
 
-Sections and partial application: `(+)`, `(/) x`, single-wildcard `f(_, y, z)`
-(multiple wildcards rejected — use a lambda).
+Sections and partial application: operator sections `(+)`, `(*)`, ... as
+kernels, and single-wildcard `f(_, y, z)` (multiple wildcards rejected — use a
+lambda). A function applied to fewer arguments than it declares is curried
+(`f(5)` of a 4-parameter `f` awaits the other three).
 
 ### 5.3 Reynolds operators
 
 `reynolds(g)` is the VALUE-LEVEL symmetrizing wrapper: it builds the kernel
 `K(x₁..xₙ) = Σ_σ g(x_σ(1)..x_σ(n))` (with `Antisymmetric`, the sign-weighted
-sum), permuting the kernel's value arguments; `positions=[...]` restricts to a
-subset. K is commutative by construction — reynolds manufactures H = Sₙ. What
+sum), permuting the kernel's value arguments. (Restricting to a subset of
+positions, `positions=[...]`, is **(planned)**; the wrapped kernel must be a
+lambda over scalar values.) K is commutative by construction — reynolds manufactures H = Sₙ. What
 that buys still follows the H ∩ Stab law (§11.2):
 
 - **Identical arrays**: full transfer — symmetric (or strict antisymmetric)
@@ -801,10 +820,12 @@ not currently a surface construct.
 
 `static function` may capture only `let static`/static values and is callable
 at compile time; `let static` values close over literals, other statics, and
-static applications. Static functions appear in type positions
-(`Idx<triangle(n)>`). No totality proofs (vs Idris/Agda); explicit marking
+static applications. Static functions reach type positions through a
+`let static` (`let static m = triangle(n)` then `Idx<m>`; an index type's
+argument is a static expression over names and literals, plus `arity(p)`, not
+a general call, so `Idx<triangle(n)>` itself does not parse). No totality proofs (vs Idris/Agda); explicit marking
 (vs C++ constexpr's syntactic restrictions). `static type` functions
-(`Vec<N>`) are compile-time-only: not storable, not passable, not returnable
+(`Vec<N>`, **(planned)**; not parsed today) are compile-time-only: not storable, not passable, not returnable
 at runtime — keeping type-level computation decidable.
 
 ## 6. Core Operations
@@ -817,7 +838,7 @@ at runtime — keeping type-level computation decidable.
 | `==` `!=` `<` `<=` `>` `>=` | `[==]` ... `[>=]` | comparison |
 | `&&` `\|\|` | `[&&]` `[\|\|]` | logical |
 
-```blade
+```blade sketch
 A + B    =  method_for(zip(A, B)) <@> lambda((a, b)) -> a + b   // co-iteration
 A [+] B  =  method_for(A, B) <@> (+)                             // cross-iteration
 ```
@@ -833,10 +854,14 @@ infers `comm`/`anticomm` for kernels built from them (`a + b` ⇒ comm(a, b)).
 
 ### 6.3 Geometric primitives and reductions
 
-`norm` (equivariant → invariant), `dot` (symmetric; invariant result), `cross`
-(antisymmetric; representation per domain library), `sum`/`mean` (rank-
-reducing, equivariance-preserving), `min`/`max` (invariant-only — ordering
-requires invariance). Equivariance signatures live in the ML module
+**(planned)** as core names: `norm` (equivariant → invariant), `dot`
+(symmetric; invariant result), `cross` (antisymmetric; representation per
+domain library), `sum`/`mean` (rank-reducing, equivariance-preserving),
+`min`/`max` (invariant-only — ordering requires invariance; today `min`/`max`
+exist only in static evaluation). What exists today: `reduce` (§6.4),
+`prodsum(a, b)` (the fused dot product), `gram`/`gram_apply`, the standard
+library's `stats.mean`/`variance`/`stddev`, and `import math as m` for
+`m.matmul`, `m.solve`, `m.lu`/`m.lu_solve`, `m.eigh`. Equivariance signatures live in the ML module
 ([features/equivariant-nn.md](features/equivariant-nn.md)); the core carries
 the annotation hook only.
 
@@ -855,8 +880,9 @@ the annotation hook only.
   are outer products of the cotangent with the two n-cell intermediates.
 - `hermitian(A)` — adjoint.
 - `conj(x)` — componentwise conjugation (identity on reals).
-- `reduce(A[, kernel[, init]][, axes = n])` — right-to-left fold of the
-  innermost `n` dimensions, `n = 1` by default (rank k in, rank k−n out;
+- `reduce(A[, kernel[, init]][, axes = n])` — a LEFT fold, in ascending
+  storage order, of the innermost `n` dimensions
+  (`reduce([1, 2, 3, 4], lambda(a, b) -> a - b)` is `((1 - 2) - 3) - 4 = -8`), `n = 1` by default (rank k in, rank k−n out;
   `n = rank(A)` is the full fold to a scalar); default kernel `(+)`; see
   [features/sql.md](features/sql.md) §10 for typing details, the axis-count
   rules and the empty-input rule. Under the default `n = 1`, an anonymous
@@ -883,7 +909,7 @@ objects.
 
 ### 7.1 The two constructors
 
-```blade
+```blade sketch
 method_for : A* → MethodLoop        // arrays bound, kernel awaited
 object_for : Function → ObjectLoop  // kernel bound, arrays awaited
 ```
@@ -921,7 +947,7 @@ the loop object, not the kernel body. S-dims are deduced at application sites.
 
 Type-level iteration sources with `Void` element type; they erase completely:
 
-```blade
+```blade sketch
 range<I>       // enumerate I in storage (= lex) order:  λi:I. i
 reverse<I>     // reversed
 ```
@@ -1045,12 +1071,22 @@ not imperative control flow. One side carries arrays/indices, the other the
 kernel; `in` accepts virtual arrays only:
 
 ```blade
-for (A, B) in range<I> <@> lambda(a, b, i) -> ...          // method_for style: cells, then indices
-for lambda(a, b) -> a * b <@> (A, B)                        // object_for style
-let loop = for (A, A) in SymIdx<2,N> where comm             // let-bound, awaits kernel
-let op   = for lambda(a, b) where comm -> a * b             // let-bound, awaits arrays
-for args in SymIdx<arity(args), N> where comm(args) <@> lambda(is, xs) -> ...  // poly
+let static N = 3
+type I = Idx<N>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like I> = [4.0, 5.0, 6.0]
+
+let r1 = for (A, B) in range<I> <@> lambda(a, b, i) -> a * b + Float64(i) |> compute  // method_for style: cells, then indices
+let r2 = (for lambda(a, b) -> a * b) <@> (A, B) |> compute                            // object_for style
+let loop = for (A, A) in range<SymIdx<2, N>>                    // let-bound, awaits kernel
+let op   = for lambda(a, b) where comm(a, b) -> a * b          // let-bound, awaits arrays
+let r3 = op <@> (A, A) |> compute                              // SymIdx<2, N> storage
 ```
+
+A `for <kernel>` former's inline lambda body extends through the apply level
+(§15.1), so the object_for style parenthesizes the former before `<@>`. A
+poly former over a symmetric pack (`for args in SymIdx<arity(args), N> ...`)
+is **(planned)**; arity-polymorphic kernels are applied with `object_for`.
 
 A co-iteration kernel over `for (A, B) in range<I, J>` takes the operands'
 CELLS first -- `a` is `A(i, j)`, already indexed -- and then one parameter per
@@ -1066,7 +1102,7 @@ sequential recurrence — time-stepping, training epochs, an RNG stream — is a
 **self-referential array definition by structural induction on the extent**,
 not imperative control flow:
 
-```blade
+```blade sketch
 type Times = Idx<1600>
 let rec qh: Array<Complex128 like Times, Y, X> =
     match qh with
@@ -1110,8 +1146,8 @@ Rules, all checked syntactically:
   extends the base case rather than adding a rule: the empty-array boundary
   yields zero slices, so §10.4's monadic zero governs not just the whole
   axis but every read that runs off its start. It is the array-side twin of
-  §8.2's implicit identity base case for recursive kernels (`f(())` returns
-  f's identity element).
+  §8.2's identity base case for recursive kernels (`f(())` returns f's
+  identity element; today that arm is written explicitly, §8.2).
 
   The consequence is that a multi-lag scheme states its startup transient in
   its *weights* instead of defending it at the call site. An AB3 integrator
@@ -1153,7 +1189,7 @@ final slice.
 The inductive arm may carry a **convergence guard**, which turns the declared
 extent from a trip count into a **budget**:
 
-```blade
+```blade sketch
 type It = Idx<200>                       // a BUDGET, not a trip count
 let rec u: Array<Float like It, Y, X> =
     match u with
@@ -1193,11 +1229,13 @@ Rank polymorphism varies the shape of one input (`sum : T^r → T^0`). Arity
 polymorphism varies the NUMBER of inputs, and the arity determines output
 rank, loop depth, and symmetry:
 
-```blade
-let moment = for lambda(is, xs) where comm(xs) -> product(xs)
-moment <@> (data, data)        // covariance   (rank 2)
-moment <@> (data, data, data)  // coskewness   (rank 3)
+```blade sketch
+let moment = object_for(comoment)   // comoment(a: Poly<T^1>) where comm(a) -> T^0
+moment <@> (data, data)             // covariance   (rank 2)
+moment <@> (data, data, data)       // coskewness   (rank 3)
 ```
+
+(docs/quickstart-1.md §10 has the complete, compiled program.)
 
 Variadic functions cannot express this: their output type is fixed regardless
 of argument count. Arity-dependent output typing requires type-level arity —
@@ -1206,18 +1244,22 @@ general dependent types.
 
 ### 8.2 Kernel syntax
 
-```blade
+```blade sketch
 function kernel(a: Poly<T^k>) -> T^m
 where comm(a)
 ```
 
 `Poly<T^k>`: a pack of rank-k slices. In the body: destructuring
-`let (head, tail) = args` (left-associative; excess names bind `()`; warning
-outside poly scope), indexing `args[k]` (`[]` = structural access), scope
-variables `arity` (pack size) and `nth` (recursion depth), and iteration over
-the pack via the poly former `method_for(range<Idx<arity(p)>>)`. Recursive
-kernels need no explicit base case: `f(())`
-returns f's identity element. Nested tuples preserve structure (`arity` counts
+`let head :: tail = args` (left-associative), indexing `args[k]` (`[]` =
+structural access), `arity(args)` (pack size), and iteration over the pack via
+the poly former `method_for(range<Idx<arity(p)>>)`. A recursive kernel
+matches `arity(args)` and writes its `| 0 ->` arm with the kernel's identity
+element as a literal (`1` for a product; `zero` there is the zero VALUE, not
+the identity — resolving it to the surrounding operation's identity is
+**(planned)**). (The spec's base-case-free
+recursion, the tuple-pattern spelling `let (head, tail) = args`, and an `nth`
+recursion-depth variable are **(planned)**: today the first two fail IR
+validation, BL6001.) Nested tuples preserve structure (`arity` counts
 top level; `comm` does not penetrate sub-tuples; no deep indexing —
 destructure instead): `object_for(f) <@> (A, (B, C))` is arity **2**, not 3 —
 `(B, C)` is one tuple-typed argument, distinct from
@@ -1261,7 +1303,7 @@ store the joint-symmetric output at all: strict counting inequality
 
 Correct examples:
 
-```blade
+```blade sketch
 // Self-covariance, 1 S-dim: unchanged
 object_for(cov) <@> (A, A)      // A : Array<Float like Idx<N>, Idx<Time>>
 // Output: Array<Float like SymIdx<2, N>>
@@ -1347,7 +1389,7 @@ joint cell; the name is the declaration, whether it stands in an operand slot
 (`prodsum(e, v)`) or is a leg's own traversal (`reduce(e, (+))`) -- the leg
 folds the shared cell, not a second evaluation. One leg is the identity (a scalar, not
 a 1-tuple); zero legs has no index space and is refused. Both spellings are
-`docs/plan-reduction-joins.md`; note that `object_for(<&!>) <@> (c₁, …, c_k)`
+pinned in `tests/corpus/`; note that `object_for(<&!>) <@> (c₁, …, c_k)`
 over deferred MAPS keeps its existing reading (n-ary map fusion answering k
 arrays) — the legs, not the operator, say which join is meant.
 - `<*>` concatenates array lists: `method_for(A) <*> method_for(B) ≡
@@ -1374,7 +1416,7 @@ Both associative, with `object_for(id)` / `M <@> id` as identities.
 **Compose-Apply duality** (proved; the mechanized proof is literally map
 fusion):
 
-```blade
+```blade sketch
 (object_for(f) >>@ object_for(g)) <@> A  ≡  (method_for(A) <@> f) @>> (method_for(A) <@> g)
 ```
 
@@ -1387,10 +1429,12 @@ the base case; together they characterize when the two entry points coincide.
 ### 10.4 Choice, zero, guard (MonadPlus)
 
 - `()` / `method_for()` — the empty loop, identity for `<*>`, base case for
-  arity recursion (`method_for() <@> moment ≡ pure 1`).
-- `zero` — the zero kernel: S-dims from arrays, no T-dims; resolves to the
-  operation-appropriate identity (1 under `*`, 0 under `+`) in arity
-  recursion base cases.
+  arity recursion (the `| 0 ->` arm of a recursive `Poly` kernel is the
+  kernel applied to `()`).
+- `zero` — the zero kernel: S-dims from arrays, no T-dims. (Resolving `zero`
+  to the operation-appropriate identity — 1 under `*`, 0 under `+` — in arity
+  recursion base cases is **(planned)**: today it is the zero value, so a
+  product base case is written `| 0 -> 1`.)
 - `guard(p, c)` — `c` if p, else zeros of c's shape; `guard(p, guard(q, c)) ≡
   guard(p && q, c)`; exhaustive guards compose to plain choice.
 - `c₁ <|> c₂` — first non-zero; associative, idempotent, `M <@> zero` is the
@@ -1471,7 +1515,7 @@ commutativity checking.
 
 ### 11.3 OutputSymmetry
 
-```blade
+```blade sketch
 OutputSymmetry(A₁...Aₙ, f) =
     groups = identity groups under c            // §8.3
     for each group: joint symmetry over the group's compound S-tuple (§8.4)
@@ -1762,6 +1806,7 @@ apply level and no further: `lambda(x) -> a <@> b |> compute` is
 branch, a final match arm or a `let` at the body's own nesting depth, so
 
 ```blade
+type I = Idx<3>
 let E = method_for(range<I, I>) <@> lambda(i, j) -> if i == j then 1.0 else 0.0 |> compute
 ```
 
@@ -1779,7 +1824,7 @@ a malformed literal (BL0003), not an implicit product.
 
 ### 15.2 Declarations
 
-```blade
+```blade sketch
 type LatIdx = Idx<180>                       // type aliases
 type OceanIdx = CompoundIdx<ocean_mask>
 
@@ -1797,7 +1842,7 @@ library concern.
 
 §5 covers semantics. Grammar reminders: `where` before return type; `omp`/
 `cuda`/`tdim` clauses; `lambda(args) -> body`; `static` values/functions;
-`static type` functions; local `function` = an immutable lambda binding
+`static type` functions (**(planned)**); local `function` = an immutable lambda binding
 (internally the same marker `let static` uses).
 
 ### 15.4 Control and data
@@ -1825,12 +1870,14 @@ library concern.
   where ...`, joint assignment) — all checked at construction.
 - Interfaces: signatures only; `impl I for S { ... }`; interface composition
   `interface P : M, T { ... }`.
-- Modules: `module` groups declarations; `import`/`from`/`as` reserved for
-  multifile (in progress).
+- Modules: `module Name` groups declarations; `import M [as a]` / `from M
+  import x, y` resolve other files (stdlib and search roots) into ONE
+  program. A non-main module's members are namespaced in the emitted C++
+  (`M__x`), and every top-level name is declared once per module (BL2009).
 
 ### 15.5 Loops and combinators
 
-```blade
+```blade sketch
 let loop = method_for(A, B)         let obj = object_for(f)
 loop <@> f                          obj <@> (A, B)
 for (A, B) in range<I> <@> lambda(a, b, i) -> ...
@@ -1847,7 +1894,8 @@ Rank-0 collapse (§10.3) makes conventional notation sound without paradigm
 commitment: `a + b`, `a * b`, `-a` lift elementwise over arrays at any rank
 (the primitive is always elementwise; rank never changes its meaning);
 `[+]`-family gives outer products; contractions are named functions built
-from primitives (`sum`, `dot`, `matvec`, `matmul`). The S/T machinery stays
+from primitives (`reduce`, `prodsum`, `gram`, `gram_apply`, and the math
+module's `m.matmul`; `sum`, `dot`, `matvec` as core names are **(planned)**). The S/T machinery stays
 explicit at structure level (`method_for`, `comm`, `compute`); kernels read
 pseudo-natively. Equivariance annotations flow through pseudo-native ops
 (inference-failure ⇒ non-equivariant, not error).
@@ -1868,7 +1916,7 @@ notation without operator extension.
 
 Boolean ops `&& || !` (short-circuit; no keywords, no bitwise); fused
 assignment `+= -= *= /=` including array elements; single-wildcard partial
-application; sectioned operators `(+)`, `(/) x`.
+application; sectioned operators `(+)`, `(*)`, ... in kernel position.
 
 ---
 
@@ -1884,10 +1932,10 @@ application; sectioned operators `(+)`, `(/) x`.
 | `<*>` | array product (MethodLoop concatenation; outer product on arrays) |
 | `>>@` / `@>>` | compose-then-apply / apply-then-compose |
 | `<\|>` / `<\|:>` | computation choice / array fallback |
-| `zip` `align` `stencil` `stack` `transpose` `diag` `join` `subset` `split` `reverse` `shift` `decompact` | array combinators |
+| `zip` `stack` `transpose` `join` `decompact` | array combinators (planned: `align` `stencil` `diag` `subset` `split` `reverse(A, d)` `shift`, §2.6) |
 | `guard` `sequence` `replicate` | conditional / collection combinators |
 | `\|> compute` | materialize |
-| `comm(...)` `poly(args)` `arity` `nth` | commutativity, arity polymorphism |
+| `comm(...)` `Poly<T^k>` `arity(a)` | commutativity, arity polymorphism |
 | `omp(x: n)` `cuda` `tdim(...)` | backend/parallelism/T-dim clauses |
 | `mask` `compound` `intersect` `union` `unique` `contains` `group_keys` `group_by` `sort` `reduce` `extents` | relational forms |
 | `gram` `gram_apply` `hermitian` `conj` | linear-algebra value operators |
