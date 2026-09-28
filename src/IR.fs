@@ -216,7 +216,12 @@ type IRExpr =
     | IRHaloUnhash of window: IRExpr * offset: int64
     | IRArity of resolved: int option * paramName: string  // None = unresolved (use paramName), Some n = bound
     | IRNth
-    | IRZero
+    /// `zero` at a type lowering could not yet name a literal for: a generic
+    /// element variable (`a + zero` in `addz(a: T^0)`), resolved to the
+    /// instance's own zero once monomorphization makes it concrete
+    /// (IRMono.resolveTypedZerosModule, via `zeroLiteralOf`). The type rides
+    /// the node so HM substitution reaches it like any other carried type.
+    | IRZero of ty: IRTypeG<IRExpr>
     | IRRank of array: IRExpr
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     // Pack tail from cons-destructuring `let head :: tail = A`: a "shifted
@@ -735,6 +740,23 @@ let (|AnyPrimElem|_|) (ty: IRType) =
     | IRTScalar et -> Some et
     | IRTUnitAnnotated (IRTScalar et, _) -> Some et
     | IRTIdxTagged (IRTScalar et, _) -> Some et
+    | _ -> None
+
+/// The literal `zero` denotes at a scalar type, read through a unit
+/// annotation or index tag (both erase): `0` for an integer, `0.0f` / `0.0`
+/// for a float of that width, `false` for Bool, and the complex zero of that
+/// width built from its own components (`std::complex<T>(0, 0)`). None for
+/// anything else -- an open variable, an array, a struct -- which the caller
+/// decides about. Shared by lowering (a concrete `zero`) and the post-
+/// monomorphization resolution of a generic one, so the two cannot disagree.
+let zeroLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
+    match ty with
+    | AnyPrimElem (ETInt32 | ETInt64) -> Some (IRLit (IRLitInt 0L))
+    | AnyPrimElem ETFloat32 -> Some (IRLit (IRLitFloat32 0.0f))
+    | AnyPrimElem ETFloat64 -> Some (IRLit (IRLitFloat 0.0))
+    | AnyPrimElem ETBool -> Some (IRLit (IRLitBool false))
+    | AnyPrimElem ETComplex64 -> Some (IRComplex (IRLit (IRLitFloat32 0.0f), IRLit (IRLitFloat32 0.0f)))
+    | AnyPrimElem ETComplex128 -> Some (IRComplex (IRLit (IRLitFloat 0.0), IRLit (IRLitFloat 0.0)))
     | _ -> None
 
 /// Unit-annotated primitive: returns both the elem type and the unit
@@ -1900,7 +1922,7 @@ let private badChildren (ctor: string) : 'a =
 let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
     | IRVirtualReverse _ | IRArity _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
     | IRRange (idxTys, offset) ->
@@ -2173,7 +2195,7 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
 let irNodeMayAbort (e: IRExpr) : bool =
     match e with
     // -- cannot abort on their own ------------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
     | IRArity _ | IRRange _ | IRVirtualReverse _ -> false
     // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
     // contract of docs/formalism.md section 2.4). The node is judged without
@@ -2268,7 +2290,7 @@ let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
     | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRZip _ -> false
     | IRVar _ | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _
     | IRDiag _ | IRAlign _ | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRIf _ | IRMatch _ -> false
-    | IRLit _ | IRParam _ | IRNth | IRZero | IROpaqueExtent | IRArity _ | IRRange _
+    | IRLit _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent | IRArity _ | IRRange _
     | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _
     | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRLet _
     | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRComposeObj _ | IRCompose _ | IRPure _
@@ -2373,6 +2395,7 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         match e with
         | IRVar (id, ty) -> IRVar (id, st ty)
         | IRParam (n, i, ty) -> IRParam (n, i, st ty)
+        | IRZero ty -> IRZero (st ty)
         | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
         | IRArrayLit (elems, aty) ->
             IRArrayLit (elems, { aty with ElemType = st aty.ElemType })
@@ -2419,6 +2442,7 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
     | IRLit IRLitUnit -> Some IRTUnit
+    | IRZero ty -> Some ty
     | _ -> None
 
 /// Map from struct name to its fields, used by typeOf for IRFieldAccess
@@ -3246,7 +3270,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _ | IRDiag _
     | IRZip _ | IRAlign _ | IRStack [] | IRJoin ([], _)
     | IRTupleCons _ | IRTupleDecons _ | IRPolyIndex _ | IRPolyTail _ | IRReplicate _
-    | IRVirtualReverse _ | IRZero ->
+    | IRVirtualReverse _ ->
         IRTUnit
 
     // -- Coverage tail ---------------------------------------------------
@@ -3257,7 +3281,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
     | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
-    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ ->
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _

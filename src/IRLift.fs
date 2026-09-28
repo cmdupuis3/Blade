@@ -519,7 +519,7 @@ let wrapLets (bindings: (IRId * IRType * IRExpr) list) (body: IRExpr) : IRExpr =
 let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     match expr with
     // Leaves: nothing to do
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _
     | IRRange _ | IRVirtualReverse _ | IRArity _
     | IROpaqueExtent -> expr
 

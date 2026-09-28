@@ -6053,6 +6053,56 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // operator, and tests the PRE-materialization snapshots so shaping
             // one side cannot make the other look pinned. See the S1 SEAM 1
             // block below.
+            //
+            // `zero` BESIDE A PARTNER is the partner's zero. It is typed a
+            // fresh variable (any context may adopt it), and as an operand
+            // nothing ever bound that variable: the promotion rules answer the
+            // partner's type WITHOUT unifying, so the zero stayed open, zonk
+            // defaulted it to Float64 and lowering emitted `0.0` -- `a + zero`
+            // at an Int64 (or Float32) operand computed `int64 + double` and
+            // narrowed on the way out (g++ -Werror, BL9002), and inside a
+            // generic `addz(a: T^0) = a + zero` every instance got the same
+            // `0.0`. Bind it to the partner's scalar type -- the element, for
+            // an array partner (the zero broadcasts) -- with units stripped:
+            // `zero` carries no signature, so `x_m * zero` stays meters, as
+            // before. A generic partner (`T^0`, a polymorphic element) binds
+            // the zero TO that variable, so HM monomorphization substitutes
+            // it per instance and lowering emits each instance's own zero
+            // (Lowering's TExprZero arm, IR.zeroLiteralOf).
+            //
+            // An unshaped `T^k` partner (k >= 1) has no element to name yet:
+            // the zero keeps its own variable, marked polymorphic so zonk
+            // leaves it open, and IRMono.resolveTypedZerosModule gives it the
+            // array partner's element once monomorphization has made that
+            // concrete. Any OTHER open partner (an unannotated kernel
+            // parameter, which may still resolve to a row) is left alone.
+            let zeroAdoptsPartner (z: TypedExpr) (partner: TypedExpr) =
+                match z.Kind, env.Subst.Resolve z.Type with
+                | TExprZero, IRTInfer zid ->
+                    let numericOrBool (t: IRType) =
+                        match t with
+                        | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 | ETBool) -> true
+                        | _ -> false
+                    let rank0Generic (t: IRType) =
+                        match t with
+                        | IRTInfer pid ->
+                            pid <> zid && env.Subst.IsPolymorphicId pid
+                            && (env.Subst.GetArityConstraint pid).IsNone
+                        | _ -> false
+                    match IR.stripUnits (env.Subst.Resolve partner.Type) with
+                    | t when numericOrBool t || rank0Generic t -> env.Subst.Bind(zid, t)
+                    | ArrayElem arr ->
+                        (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                         | e when numericOrBool e || rank0Generic e -> env.Subst.Bind(zid, e)
+                         | _ -> ())
+                    | IRTInfer pid when pid <> zid ->
+                        (match env.Subst.GetArityConstraint pid with
+                         | Some k when k >= 1 -> env.Subst.MarkPolymorphic zid
+                         | _ -> ())
+                    | _ -> ()
+                | _ -> ()
+            zeroAdoptsPartner tL tR
+            zeroAdoptsPartner tR tL
             let lRes0 = env.Subst.Resolve tL.Type
             let rRes0 = env.Subst.Resolve tR.Type
             let isDist t = match t with IRTDist _ -> true | _ -> false
@@ -6479,7 +6529,16 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                   Kind = SDimension; Dependencies = [] })
                         mkArrayArrow axes (IRTScalar ETBool) None
                     | None ->
-                    if mode = Elementwise && isZipOp && isScalarTy resTy0
+                    // `zero + a` over an unshaped caret `a`: the promotion
+                    // rules answer the LEFT operand, which is the zero's own
+                    // open variable; the value is `a`'s shape and element (the
+                    // zero broadcasts), exactly as `a + zero` answers.
+                    let zeroBesideCaret =
+                        mode = Elementwise && not isCmpOrLogical
+                        && (match tL.Kind with TExprZero -> true | _ -> false)
+                        && (caretRank rRes).IsSome
+                    if zeroBesideCaret then rRes
+                    elif mode = Elementwise && isZipOp && isScalarTy resTy0
                        && ((knownArrayVar lRes && isScalarTy rRes) || (knownArrayVar rRes && isScalarTy lRes)) then
                         (if knownArrayVar lRes then lRes else rRes)
                     elif mode <> Elementwise || not isZipOp || not (unboundVar resTy0) then resTy0

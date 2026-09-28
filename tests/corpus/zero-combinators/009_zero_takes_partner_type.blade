@@ -1,0 +1,57 @@
+// TEST: zero beside an operand is that operand's zero, at every generic instance
+// ============================================================================
+// An operand `zero` kept its own open type, which defaulted to Float64: an
+// Int64 `a + zero` computed `int64 + 0.0` (g++ -Werror narrowing, BL9002), a
+// Float32 one computed in double, and inside a generic body every instance
+// got the same `0.0`. It now takes its partner's type -- the element, beside
+// an array -- and a generic zero becomes each instance's own literal after
+// monomorphization.
+// ============================================================================
+Unit m
+function addz(a: T^0) = a + zero
+function zadd(a: T^0) = zero + a
+function addza(a: T^1) = a + zero
+function zadda(a: T^1) = zero + a
+function addzu(a: T<m>^0) = a + zero
+function posz(a: T^1) = a > zero
+// 2^63 - 1 is exact in Int64, not in Float64.
+let ri = addz(9223372036854775807)
+// EXPECT: ri = 9223372036854775807
+let rf = addz(2.5)
+// EXPECT: rf = 2.5
+let f32: Float32 = 0.1
+let r32 = addz(f32)
+// EXPECT: r32 = 0.100000001490116
+let c128 = complex(1.0, 2.0)
+let rc = addz(c128)
+// EXPECT: rc = (1,2)
+let zi = zadd(9223372036854775806)
+// EXPECT: zi = 9223372036854775806
+let zf = zadd(0.25)
+// EXPECT: zf = 0.25
+let ai = addza([9007199254740993, 2])
+// EXPECT: ai = [9007199254740993, 2]
+let af = addza([0.5, 1.5])
+// EXPECT: af = [0.5, 1.5]
+let za = zadda([4, 5])
+// EXPECT: za = [4, 5]
+let d: Float64<m> = 2.5
+let du = addzu(d)
+// EXPECT: du = 2.5
+let n: Int64<m> = 9007199254740993
+let nu = addzu(n)
+// EXPECT: nu = 9007199254740993
+let pz = posz([-1, 0, 2])
+// EXPECT: pz = [false, false, true]
+// The non-generic controls.
+let ci: Int64 = 9007199254740993
+let cz = ci + zero
+// EXPECT: cz = 9007199254740993
+let c32: Float32 = 0.7
+let z32 = zero + c32
+// EXPECT: z32 = 0.699999988079071
+let cc = complex(0.5, -1.0) + zero
+// EXPECT: cc = (0.5,-1)
+let xs = [9007199254740993, 1]
+let ys = xs + zero
+// EXPECT: ys = [9007199254740993, 1]
