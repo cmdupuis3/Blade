@@ -6395,6 +6395,50 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                              | _ -> false)
                         | _ -> false
                     let isScalarTy (t: IRType) = (IR.stripUnits t).IsIRTScalar
+                    // A COMPARISON / LOGICAL op over a still-unshaped caret
+                    // var (`a > b` over two `T^1` parameters: neither side
+                    // pins a shape, so the demand above rightly declined and
+                    // the op stays deferred to lowerArrayBinOpsModule, which
+                    // after monomorphization co-iterates it with a Bool
+                    // kernel). The promotion rules answered the SCALAR
+                    // `Bool` -- so the function returned `bool` while its body
+                    // built an Array<bool>: g++ took the array's implicit
+                    // pointer conversion and printed `true` for an elementwise
+                    // result; the interpreter refused to print an array as a
+                    // scalar. Whichever way the other (unpinned) side
+                    // resolves -- a scalar broadcast or a zip partner -- the
+                    // result is a Bool array of the caret's exact rank, so say
+                    // so. Its axes are the abstract ones a `^k` annotation
+                    // mints (extents unknown here, read at run time); the
+                    // arithmetic twin needs none of this because its result
+                    // is the operand variable itself.
+                    let caretRank (t: IRType) =
+                        match IR.stripUnits t with
+                        | IRTInfer vid ->
+                            (match env.Subst.GetArityConstraint vid with
+                             | Some k when k >= 1 -> Some k
+                             | _ -> None)
+                        | _ -> None
+                    let isCmpOrLogical =
+                        match op with
+                        | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr -> true
+                        | _ -> false
+                    let deferredBoolRank =
+                        if mode = Elementwise && isCmpOrLogical && IR.stripUnits resTy0 = IRTScalar ETBool then
+                            match caretRank lRes, caretRank rRes with
+                            | Some k, _ | None, Some k -> Some k
+                            | None, None -> None
+                        else None
+                    match deferredBoolRank with
+                    | Some k ->
+                        let axes =
+                            List.init k (fun _ ->
+                                { Id = env.Builder.FreshId(); Rank = 1
+                                  Extent = IRParam ("?", 0, IRTNat None)
+                                  Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                                  Kind = SDimension; Dependencies = [] })
+                        mkArrayArrow axes (IRTScalar ETBool) None
+                    | None ->
                     if mode = Elementwise && isZipOp && isScalarTy resTy0
                        && ((knownArrayVar lRes && isScalarTy rRes) || (knownArrayVar rRes && isScalarTy lRes)) then
                         (if knownArrayVar lRes then lRes else rRes)
