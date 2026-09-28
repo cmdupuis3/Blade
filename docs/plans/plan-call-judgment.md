@@ -328,11 +328,15 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   generic one stays `IRZero T` through HM substitution and becomes each
   instance's literal after monomorphization
   (`IRMono.resolveTypedZerosModule`; zero-combinators/009 -- including a
-  `T^0` lifted at an array, where the zero is the element's). The comparison
-  bug had a rank-0 twin: `gt0(a: T^0, b: T^0) = a > b` called with arrays
-  only was an HM instance at the array still claiming a scalar Bool;
-  `tryArityLiftCall` now maps an all-array call whose return is a concrete
-  scalar, as it already mapped the mixed one (arity/059).
+  `T^0` lifted at an array, where the zero is the element's). OPEN: the
+  comparison bug's rank-0 twin -- `gt0(a: T^0, b: T^0) = a > b` called with
+  arrays only is an HM instance at the array still claiming a scalar Bool
+  (compiled lane prints `true`). Lifting every all-array call with a concrete
+  scalar return is wrong: `T^r` and a bare `T` lower to the same unpinned
+  variable as `T^0`, and `describe(x: T^r) -> Int64` (arity/051) or a lambda
+  whose parameter is rank-closed later (functions/033) legitimately return a
+  scalar from an array. Telling a declared `T^0` apart needs the caret kept
+  on the variable -- a design decision, left for the lead.
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 
