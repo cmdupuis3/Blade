@@ -2811,6 +2811,28 @@ let internal runCorpusWiringTests () : TH.BlockResult =
                 (tests |> List.map fst) <> want)
     record "every single-file directory answers to blade test <its-name>" misKeyed.IsEmpty
         (if misKeyed.IsEmpty then "" else $"unresolved or mis-wired: {listed misKeyed}")
+    // The pin grammar every lane reads (the compiled run, the interpreter
+    // differential, the diff oracles all go through Expect): a NESTED Bool
+    // pin -- what a rank-2 comparison prints -- is an assertion, not a
+    // malformed line, and it is judged on its elements against either
+    // printed row form.
+    let nestedBoolSrc = "// EXPECT: m = [[false, true], [false, false]]"
+    let nestedPins = Blade.Tests.Expect.parseExpectedValues nestedBoolSrc
+    record "a nested Bool pin parses to its row-major elements"
+        (nestedPins = [ Blade.Tests.Expect.ExpectedArray1DBool ("m", [false; true; false; false]) ]
+         && (Blade.Tests.Expect.parseMalformedExpectLines nestedBoolSrc).IsEmpty)
+        $"%A{nestedPins}"
+    let judge (out: string) = Blade.Tests.Expect.checkExpectedValues nestedPins out
+    record "a nested Bool pin matches the nested and the flat printed forms"
+        (judge "m = [[false, true], [false, false]]\n" = Ok ()
+         && judge "m = [false, true, false, false]\n" = Ok ()) ""
+    record "a nested Bool pin refuses a differing element and a differing count"
+        ((match judge "m = [[false, true], [false, true]]\n" with Error _ -> true | Ok () -> false)
+         && (match judge "m = [[false, true]]\n" with Error _ -> true | Ok () -> false)) ""
+    let badNested = "// EXPECT: m = [[false, maybe], [true, false]]\n// EXPECT: n = [[true], []]"
+    record "a nested Bool pin with a non-Bool leaf or an empty row is malformed, not dropped"
+        ((Blade.Tests.Expect.parseMalformedExpectLines badNested).Length = 2
+         && (Blade.Tests.Expect.parseExpectedValues badNested).IsEmpty) ""
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed = count TH.Pass, count TH.Fail
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
