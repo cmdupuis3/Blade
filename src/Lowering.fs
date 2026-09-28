@@ -892,20 +892,29 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprZero ->
         // Lower to type-appropriate zero literal based on resolved type
+        // (through a unit annotation or index tag, which erase; a complex
+        // zero is built at its own width -- the untyped `0` it used to be
+        // has no `complex + int` overload in C++ and no value in the
+        // interpreter).
+        match zeroLiteralOf texpr.Type with
+        | Some lit -> lit
+        | None ->
         match texpr.Type with
-        | IRTScalar ETInt32 | IRTScalar ETInt64 -> IRLit (IRLitInt 0L)
-        | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> IRLit (IRLitInt 0L)
-        | IRTScalar ETBool -> IRLit (IRLitBool false)
-        | IRTScalar ETFloat32 -> IRLit (IRLitFloat32 0.0f)
-        | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
-        | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
+        // A GENERIC zero (`a + zero` in `addz(a: T^0)`: inferBinOp bound
+        // the zero to T) has no literal yet -- a `0.0` here was every
+        // instance's zero, `int64 + double` at an Int64 one (g++ -Werror,
+        // BL9002). Keep the type on the node: HM monomorphization
+        // substitutes it per instance, and resolveTypedZerosModule turns it
+        // into that instance's literal (a variable still open there takes
+        // the old Float64 default).
+        | IRTInfer _ | IRTUnitAnnotated (IRTInfer _, _) -> IRZero texpr.Type
         | ArrayElem _ ->
             // An array-typed zero that reached lowering sits in a position
             // the binding-site materialization (inferLetBindingValue's zero
             // arm) does not cover -- emitting IRZero here would render as a
             // scalar `0` under an array type (a null pointer). Fail loudly.
             refuseLowering texpr.Span "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
-        | _ -> IRZero  // fallback
+        | other -> IRZero other  // fallback (a struct / string / tuple zero)
     
     | TExprReynolds (kernel, isAntisym) ->
         IRReynolds (lowerTypedExpr env kernel, isAntisym)
@@ -2522,6 +2531,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // an array op at lowering time (its element type was an unresolved
         // var), so it gets the same elementwise-loop lowering top-level
         // `x + y` does.
+        // Generic zeros first: each specialization's `zero` becomes its own
+        // literal (so a broadcast built below carries the right scalar type).
+        let irModule = IRMono.resolveTypedZerosModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also

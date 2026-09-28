@@ -6053,6 +6053,56 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // operator, and tests the PRE-materialization snapshots so shaping
             // one side cannot make the other look pinned. See the S1 SEAM 1
             // block below.
+            //
+            // `zero` BESIDE A PARTNER is the partner's zero. It is typed a
+            // fresh variable (any context may adopt it), and as an operand
+            // nothing ever bound that variable: the promotion rules answer the
+            // partner's type WITHOUT unifying, so the zero stayed open, zonk
+            // defaulted it to Float64 and lowering emitted `0.0` -- `a + zero`
+            // at an Int64 (or Float32) operand computed `int64 + double` and
+            // narrowed on the way out (g++ -Werror, BL9002), and inside a
+            // generic `addz(a: T^0) = a + zero` every instance got the same
+            // `0.0`. Bind it to the partner's scalar type -- the element, for
+            // an array partner (the zero broadcasts) -- with units stripped:
+            // `zero` carries no signature, so `x_m * zero` stays meters, as
+            // before. A generic partner (`T^0`, a polymorphic element) binds
+            // the zero TO that variable, so HM monomorphization substitutes
+            // it per instance and lowering emits each instance's own zero
+            // (Lowering's TExprZero arm, IR.zeroLiteralOf).
+            //
+            // An unshaped `T^k` partner (k >= 1) has no element to name yet:
+            // the zero keeps its own variable, marked polymorphic so zonk
+            // leaves it open, and IRMono.resolveTypedZerosModule gives it the
+            // array partner's element once monomorphization has made that
+            // concrete. Any OTHER open partner (an unannotated kernel
+            // parameter, which may still resolve to a row) is left alone.
+            let zeroAdoptsPartner (z: TypedExpr) (partner: TypedExpr) =
+                match z.Kind, env.Subst.Resolve z.Type with
+                | TExprZero, IRTInfer zid ->
+                    let numericOrBool (t: IRType) =
+                        match t with
+                        | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 | ETBool) -> true
+                        | _ -> false
+                    let rank0Generic (t: IRType) =
+                        match t with
+                        | IRTInfer pid ->
+                            pid <> zid && env.Subst.IsPolymorphicId pid
+                            && (env.Subst.GetArityConstraint pid).IsNone
+                        | _ -> false
+                    match IR.stripUnits (env.Subst.Resolve partner.Type) with
+                    | t when numericOrBool t || rank0Generic t -> env.Subst.Bind(zid, t)
+                    | ArrayElem arr ->
+                        (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                         | e when numericOrBool e || rank0Generic e -> env.Subst.Bind(zid, e)
+                         | _ -> ())
+                    | IRTInfer pid when pid <> zid ->
+                        (match env.Subst.GetArityConstraint pid with
+                         | Some k when k >= 1 -> env.Subst.MarkPolymorphic zid
+                         | _ -> ())
+                    | _ -> ()
+                | _ -> ()
+            zeroAdoptsPartner tL tR
+            zeroAdoptsPartner tR tL
             let lRes0 = env.Subst.Resolve tL.Type
             let rRes0 = env.Subst.Resolve tR.Type
             let isDist t = match t with IRTDist _ -> true | _ -> false
@@ -6102,6 +6152,36 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                  // pinned (`r1 * r2` over two `T^1` params stays deferred).
                  if pinsShape rRes0 then materializeArityVar env tL "elementwise"
                  if pinsShape lRes0 then materializeArityVar env tR "elementwise"
+             // OUTER (`a [*] b`): the product of two arrays is the all-pairs
+             // array of rank (rank a + rank b) whose element is the left
+             // operand's -- a shape an UNSHAPED `T^k` operand cannot express
+             // while it is a bare variable (the whole array IS the variable,
+             // so there is no element to name and no axes to concatenate).
+             // Left unshaped, the fallback typed `a [*] b` over two `T^1`
+             // parameters as `T` itself (rank 1) and lowering emitted the raw
+             // `(a * b)` on two Arrays (g++: no operator*). Here each operand's
+             // shape is pinned by its OWN caret -- an outer product never
+             // relates the operands' axes -- so the demand is not speculation
+             // even when both sides are variables; it is the same rank-k shape
+             // the caret already forces (materializeArityVar), after which the
+             // concrete-typed outer path (mkOuterResult, or the method_for
+             // re-synthesis for multi-axis operands) applies unchanged. Only
+             // when BOTH operands are arrays or caret vars: an outer op
+             // against a scalar has no cross axis and keeps its old reading.
+             | (OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+               | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
+               | OpAnd | OpOr) when mode = Outer ->
+                 let arrayOrCaret (t: IRType) =
+                     match IR.stripUnits t with
+                     | ArrayElem _ -> true
+                     | IRTInfer vid ->
+                         (match env.Subst.GetArityConstraint vid with
+                          | Some k when k >= 1 -> true
+                          | _ -> false)
+                     | _ -> false
+                 if arrayOrCaret lRes0 && arrayOrCaret rRes0 then
+                     materializeArityVar env tL "outer"
+                     materializeArityVar env tR "outer"
              | _ -> ())
             let lRes = env.Subst.Resolve tL.Type
             let rRes = env.Subst.Resolve tR.Type
@@ -6316,7 +6396,17 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
-            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy0 ->
+            //
+            // An OUTER op is typed on the RESOLVED operands: a caret operand
+            // the demand above just shaped still carries its bare variable on
+            // the typed node, and the outer rule read that as a non-array and
+            // answered the left variable -- rank 1 for `a [*] b` over two
+            // `T^1` parameters. (Elementwise keeps the node types: its
+            // array-producing arms already read `lRes`/`rRes` above.)
+            let lArith, rArith =
+                if mode = Outer then env.Subst.Resolve tL.Type, env.Subst.Resolve tR.Type
+                else tL.Type, tR.Type
+            inferArithType env.Builder mode op lArith rArith (Some tR) |> Result.bind (fun resTy0 ->
                 // BL3020: a mixed-elem-type op converts a NON-literal operand
                 // implicitly. Warn only once the op has typed successfully,
                 // so a real error is never accompanied by advice about a
@@ -6395,7 +6485,64 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                              | _ -> false)
                         | _ -> false
                     let isScalarTy (t: IRType) = (IR.stripUnits t).IsIRTScalar
-                    if mode = Elementwise && isZipOp && isScalarTy resTy0
+                    // A COMPARISON / LOGICAL op over a still-unshaped caret
+                    // var (`a > b` over two `T^1` parameters: neither side
+                    // pins a shape, so the demand above rightly declined and
+                    // the op stays deferred to lowerArrayBinOpsModule, which
+                    // after monomorphization co-iterates it with a Bool
+                    // kernel). The promotion rules answered the SCALAR
+                    // `Bool` -- so the function returned `bool` while its body
+                    // built an Array<bool>: g++ took the array's implicit
+                    // pointer conversion and printed `true` for an elementwise
+                    // result; the interpreter refused to print an array as a
+                    // scalar. Whichever way the other (unpinned) side
+                    // resolves -- a scalar broadcast or a zip partner -- the
+                    // result is a Bool array of the caret's exact rank, so say
+                    // so. Its axes are the abstract ones a `^k` annotation
+                    // mints (extents unknown here, read at run time); the
+                    // arithmetic twin needs none of this because its result
+                    // is the operand variable itself.
+                    let caretRank (t: IRType) =
+                        match IR.stripUnits t with
+                        | IRTInfer vid ->
+                            (match env.Subst.GetArityConstraint vid with
+                             | Some k when k >= 1 -> Some k
+                             | _ -> None)
+                        | _ -> None
+                    let isCmpOrLogical =
+                        match op with
+                        | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr -> true
+                        | _ -> false
+                    let deferredBoolRank =
+                        if mode = Elementwise && isCmpOrLogical && IR.stripUnits resTy0 = IRTScalar ETBool then
+                            match caretRank lRes, caretRank rRes with
+                            // Two carets of DIFFERENT ranks share no
+                            // elementwise shape: claim none, and leave the
+                            // pair to the path that judges it.
+                            | Some k, Some j when k <> j -> None
+                            | Some k, _ | None, Some k -> Some k
+                            | None, None -> None
+                        else None
+                    match deferredBoolRank with
+                    | Some k ->
+                        let axes =
+                            List.init k (fun _ ->
+                                { Id = env.Builder.FreshId(); Rank = 1
+                                  Extent = IRParam ("?", 0, IRTNat None)
+                                  Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                                  Kind = SDimension; Dependencies = [] })
+                        mkArrayArrow axes (IRTScalar ETBool) None
+                    | None ->
+                    // `zero + a` over an unshaped caret `a`: the promotion
+                    // rules answer the LEFT operand, which is the zero's own
+                    // open variable; the value is `a`'s shape and element (the
+                    // zero broadcasts), exactly as `a + zero` answers.
+                    let zeroBesideCaret =
+                        mode = Elementwise && not isCmpOrLogical
+                        && (match tL.Kind with TExprZero -> true | _ -> false)
+                        && (caretRank rRes).IsSome
+                    if zeroBesideCaret then rRes
+                    elif mode = Elementwise && isZipOp && isScalarTy resTy0
                        && ((knownArrayVar lRes && isScalarTy rRes) || (knownArrayVar rRes && isScalarTy lRes)) then
                         (if knownArrayVar lRes then lRes else rRes)
                     elif mode <> Elementwise || not isZipOp || not (unboundVar resTy0) then resTy0

@@ -404,7 +404,7 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRMatch (scrutinee, cases) ->
         renderMatchExpr subst names scrutinee cases
     | IRNth -> exprError "nth keyword not supported in expression position"
-    | IRZero -> "0"
+    | IRZero _ -> "0"
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
         match idx with

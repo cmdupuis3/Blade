@@ -394,7 +394,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                         | IRLit _ -> "IRLit [literal in kernel slot]"
                         | IRBinOp _ -> "IRBinOp [unlifted operator expression]"
                         | IRApp _ -> "IRApp [unlifted application]"
-                        | IRZero -> "IRZero [zero placeholder; should have been synthesized to a callable]"
+                        | IRZero _ -> "IRZero [zero placeholder; should have been synthesized to a callable]"
                         | IRReynolds _ -> "IRReynolds [nested Reynolds wrapper, not supported]"
                         | _ -> "non-callable expression"
                     let prefix =

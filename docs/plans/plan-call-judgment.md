@@ -315,6 +315,28 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   binop argument as the array `lowerArrayBinOpsModule` will make it, so
   `tot(a * b)` specializes tot -- functions/169. The same rewrite now reads a
   unit-carrying `Int64<m>` element as Int64, not Float64: units/082.)
+- **Unshaped `T^k` operands, three more (FIXED, fix/drf-late)** The same
+  deferred shape had three wrong answers. A COMPARISON / logical op over two
+  unshaped carets typed a scalar Bool around a body that builds an
+  Array<bool> -- the compiled program printed `true` for an elementwise
+  result; it is now a Bool array of the caret's rank (functions/170). A
+  bracketed OUTER op (`a [*] b`) typed as `T` itself (rank 1) and emitted the
+  raw `(a * b)` on Arrays; each caret operand is now shaped by its own caret
+  and the concrete outer path applies (bracketed/017). An operand `zero` never
+  took its partner's type, so `a + zero` at an Int64 instance (or a concrete
+  Int64) was `a + 0.0`; it binds to the partner's scalar / element type, a
+  generic one stays `IRZero T` through HM substitution and becomes each
+  instance's literal after monomorphization
+  (`IRMono.resolveTypedZerosModule`; zero-combinators/009 -- including a
+  `T^0` lifted at an array, where the zero is the element's). OPEN: the
+  comparison bug's rank-0 twin -- `gt0(a: T^0, b: T^0) = a > b` called with
+  arrays only is an HM instance at the array still claiming a scalar Bool
+  (compiled lane prints `true`). Lifting every all-array call with a concrete
+  scalar return is wrong: `T^r` and a bare `T` lower to the same unpinned
+  variable as `T^0`, and `describe(x: T^r) -> Int64` (arity/051) or a lambda
+  whose parameter is rank-closed later (functions/033) legitimately return a
+  scalar from an array. Telling a declared `T^0` apart needs the caret kept
+  on the variable -- a design decision, left for the lead.
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 

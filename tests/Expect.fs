@@ -318,6 +318,35 @@ let private tryParseBoolListPin (s: string) : bool list option =
             if parsed |> List.forall Option.isSome then Some (parsed |> List.map Option.get)
             else None
 
+/// Parse a NESTED bool pin `[[true, false], [false, true]]` -- the shape a
+/// rank >= 2 Bool array prints (an elementwise comparison of two matrices, a
+/// bracketed `a [<] b`) -- into its elements in row-major order.
+///
+/// Flattened, exactly as the ACTUAL side (tryParse1DBoolArray) and the nested
+/// complex pin already are: the rank-2 printers disagree about row brackets,
+/// so only the elements and their count are observable, and both lanes (the
+/// compiled run and the interpreter differential) then compare the same
+/// ExpectedArray1DBool. Strict per row in tryParseBoolListPin's sense: every
+/// leaf is a literal `true`/`false`; an empty row, a bare leaf beside a row,
+/// or anything else fails the whole pin (reported as malformed, never dropped).
+let rec private tryParseNestedBoolPin (s: string) : bool list option =
+    let t = s.Trim()
+    if not (t.Length >= 2 && t.StartsWith("[") && t.EndsWith("]")) then None
+    else
+        let inner = t.Substring(1, t.Length - 2).Trim()
+        if String.IsNullOrWhiteSpace(inner) then None
+        else
+            let rows = splitTopLevelCommas inner
+            if rows |> List.forall (fun r -> r.Trim().StartsWith("[")) then
+                let parsed =
+                    rows |> List.map (fun r ->
+                        match tryParseNestedBoolPin r with
+                        | Some bs -> Some bs
+                        | None -> tryParseBoolListPin r)
+                if parsed |> List.forall Option.isSome then Some (parsed |> List.collect Option.get)
+                else None
+            else None
+
 /// Every `// EXPECT:` line of a source, as (verbatim trimmed line, payload)
 /// where the payload is the text after the marker. Both the pin parser and
 /// the malformed-line reporter walk THIS list, so the two can never disagree
@@ -348,7 +377,14 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
             // rank-2 complex array prints. tryParse2DList reads floats only, so
             // route its miss to the complex parser (which flattens rows) rather
             // than reporting a malformed pin for a line that is fine.
-            | None -> parseComplexArray value |> Option.map (fun pairs -> ExpectedArray1DComplex (name, pairs))
+            | None ->
+                match parseComplexArray value with
+                | Some pairs -> Some (ExpectedArray1DComplex (name, pairs))
+                // A nested BOOL pin -- `[[false, true], [false, false]]`, a
+                // rank-2 comparison result -- flattened like the complex one
+                // (tryParseNestedBoolPin). Without this arm the pin was
+                // reported malformed although the program printed it exactly.
+                | None -> tryParseNestedBoolPin value |> Option.map (fun bs -> ExpectedArray1DBool (name, bs))
         elif value.StartsWith("[(") then
             // Complex array: [(r1,i1), (r2,i2), ...]
             match parseComplexArray value with
@@ -401,6 +437,7 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
 /// Format: // EXPECT: varname = "hello"                           (String scalar — quotes required)
 /// Format: // EXPECT: varname = ["a", "b", "c"]                   (String array — quotes around each element)
 /// Format: // EXPECT: varname = [true, false, true]               (Bool array — literal true/false per element)
+/// Format: // EXPECT: varname = [[true, false], [false, true]]    (rank-2 Bool array — compared flattened, row-major)
 let parseExpectedValues (source: string) : ExpectedValue list =
     expectLines source |> List.choose (snd >> tryParseExpectPin)
 

@@ -1,0 +1,38 @@
+// TEST: A bracketed outer operator over generic array parameters
+// ============================================================================
+// `a [*] b` over unshaped `T^1` parameters typed as `T` itself (rank 1): the
+// function returned a rank-1 array and lowering emitted the raw `(a * b)` on
+// two Arrays, which g++ refused (BL9002). The outer product of a rank-j and a
+// rank-k array is rank j + k in the left operand's element, at every
+// instance, exactly as over concrete arrays.
+// ============================================================================
+function outer_mul(a: T^1, b: T^1) = a [*] b
+function outer_sub(a: T^1, b: U^1) = a [-] b
+function outer_lt(a: T^1, b: T^1) = a [<] b
+function outer_add21(a: T^2, b: T^1) = a [+] b
+let pi = outer_mul([1, 2, 3], [10, 20])
+// EXPECT: pi = [[10, 20], [20, 40], [30, 60]]
+let corner = pi(2, 1)
+// EXPECT: corner = 60
+// 3037000499^2 is exact in Int64, not in Float64.
+let sq = outer_mul([3037000499], [3037000499, 2])
+// EXPECT: sq = [[9223372030926249001, 6074000998]]
+let pf = outer_mul([0.5, 1.5], [2.0, 4.0])
+// EXPECT: pf = [[1, 2], [3, 6]]
+let x32: Array<Float32 like Idx<2>> = [0.1, 0.7]
+let y32: Array<Float32 like Idx<1>> = [0.3]
+let p32 = outer_mul(x32, y32)
+// EXPECT: p32 = [[0.0300000011920929], [0.210000008344650]]
+let pc = outer_mul([complex(1.0, 1.0)], [complex(0.0, 1.0), complex(2.0, 0.0)])
+// EXPECT: pc = [[(-1,1), (2,2)]]
+let ps = outer_sub([1.0, 2.0], [0.5, 0.25, 0.125])
+// EXPECT: ps = [[0.5, 0.75, 0.875], [1.5, 1.75, 1.875]]
+let pl = outer_lt([1, 3], [2, 3, 4])
+// EXPECT: pl = [[true, true, true], [false, false, true]]
+let p3 = outer_add21([[1.0, 2.0], [3.0, 4.0]], [10.0, 20.0])
+// EXPECT: p3 = [11, 21, 12, 22, 13, 23, 14, 24]
+// The non-generic control.
+let ci: Array<Int64 like Idx<3>> = [1, 2, 3]
+let di: Array<Int64 like Idx<2>> = [10, 20]
+let pcc = ci [*] di
+// EXPECT: pcc = [[10, 20], [20, 40], [30, 60]]

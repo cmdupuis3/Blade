@@ -327,7 +327,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
     | IRArity (None, name) -> $"arity({name})"
     | IRArity (Some n, name) -> $"arity({name}={n})"
     | IRNth -> "nth"
-    | IRZero -> "zero"
+    | IRZero _ -> "zero"
     | IRRank arr -> $"rank({pp arr})"
     | IRPolyIndex (pack, idx) -> $"{pp pack}[{pp idx}]"
     | IRPolyTail (pack, drop) -> $"{pp pack}[{drop}..]"

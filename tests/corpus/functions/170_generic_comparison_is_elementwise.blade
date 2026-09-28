@@ -1,0 +1,50 @@
+// TEST: A comparison over generic array parameters is an elementwise Bool array
+// ============================================================================
+// `a > b` over two unshaped `T^1` parameters typed as a SCALAR Bool: the
+// function was emitted returning `bool` while its body built an Array<bool>,
+// so the compiled program printed `true` (the array's pointer, converted) for
+// what is an elementwise result, and the interpreter refused to print an
+// array as a scalar. The result is a Bool array of the operands' rank, at
+// every instance; the logical operators and a rank-0 generic partner (a
+// broadcast) follow the same rule.
+// ============================================================================
+function gt(a: T^1, b: T^1) = a > b
+function same(a: T^1, b: T^1) = a == b
+function differ(a: T^1, b: T^1) = a != b
+function both(a: T^1, b: T^1) = a && b
+function either(a: T^1, b: T^1) = a || b
+function gt2(a: T^2, b: T^2) = a > b
+function above(a: T^1, t: U^0) = a > t
+let gi = gt([1, 5, 3], [2, 4, 3])
+// EXPECT: gi = [false, true, false]
+let gf = gt([1.5, 2.5, 0.25], [2.5, 1.5, 0.25])
+// EXPECT: gf = [false, true, false]
+let x32: Array<Float32 like Idx<3>> = [0.1, 0.7, 1.3]
+let y32: Array<Float32 like Idx<3>> = [0.3, 0.7, 0.2]
+let g32 = gt(x32, y32)
+// EXPECT: g32 = [false, false, true]
+let e32 = same(x32, y32)
+// EXPECT: e32 = [false, true, false]
+let big = same([9007199254740993, 1], [9007199254740992, 1])
+// EXPECT: big = [false, true]
+let cz = [complex(1.0, 2.0), complex(0.0, 1.0)]
+let cw = [complex(1.0, 2.0), complex(1.0, 0.0)]
+let ce = differ(cz, cw)
+// EXPECT: ce = [false, true]
+let bb = both([true, false, true], [true, true, false])
+// EXPECT: bb = [true, false, false]
+let be = either([true, false, false], [false, false, true])
+// EXPECT: be = [true, false, true]
+let m = gt2([[1.0, 5.0], [3.0, 0.0]], [[2.0, 4.0], [3.0, 1.0]])
+// EXPECT: m = [[false, true], [false, false]]
+let ai = above([1, 5, 3], 2)
+// EXPECT: ai = [false, true, true]
+let af = above([0.5, 1.5], 1.0)
+// EXPECT: af = [false, true]
+// The non-generic control spells the same comparison over concrete arrays.
+type I = Idx<3>
+function gtc(a: Array<Int64 like I>, b: Array<Int64 like I>) = a > b
+let ci: Array<Int64 like I> = [1, 5, 3]
+let di: Array<Int64 like I> = [2, 4, 3]
+let gc = gtc(ci, di)
+// EXPECT: gc = [false, true, false]

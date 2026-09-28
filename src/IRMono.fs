@@ -1184,6 +1184,65 @@ let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder)
                     |> Map.fold (fun acc k v -> Map.add k v acc) m.DerivedFuncOrigins
                 else m.DerivedFuncOrigins })
 
+/// Post-monomorphization: every generic `zero` (`IRZero ty`, lowered from a
+/// `zero` whose type was still a variable) becomes its instance's literal.
+/// HM substitution has already rewritten `ty` inside each specialization, so
+/// `addz(a: T^0) = a + zero` reads `0` in the Int64 clone, `0.0f` in the
+/// Float32 one and the complex zero in a Complex one (IR.zeroLiteralOf).
+///
+/// A zero beside an UNSHAPED `T^k` operand kept its own variable (there was
+/// no element to bind it to at typecheck; inferBinOp marked it polymorphic so
+/// it survived zonk): it takes the element of the binop partner, which the
+/// clone has made a concrete array. Runs before lowerArrayBinOpsModule, which
+/// then broadcasts a literal of the right type. A zero still open after all
+/// that (no partner, never specialized) keeps the Float64 default every
+/// unpinned zero always had; a non-scalar one (a struct) is left as it was.
+let resolveTypedZerosModule (modul: IRModule) : IRModule =
+    let isOpen (t: IRType) =
+        match t with
+        | IRTInfer _ | IRTUnitAnnotated (IRTInfer _, _) -> true
+        | _ -> false
+    let hasZero =
+        let mutable hit = false
+        let scan (b: IRExpr) =
+            if not hit then
+                iterIRExpr (fun e -> match e with IRZero _ -> hit <- true | _ -> ()) b
+        modul.Functions |> List.iter (fun f -> scan f.Body)
+        modul.Bindings |> List.iter (fun b -> scan b.Value)
+        hit
+    if not hasZero then modul
+    else
+    let partnerZero (partner: IRExpr) : IRExpr option =
+        match exprTypeIfKnown partner with
+        | Some (ArrayElem a) -> zeroLiteralOf a.ElemType
+        | Some t -> zeroLiteralOf t
+        | None -> None
+    let resolve (e: IRExpr) : IRExpr =
+        match e with
+        | IRZero ty ->
+            (match zeroLiteralOf ty, ty with
+             | Some lit, _ -> lit
+             // A `T^0` specialized at an ARRAY (the arity lift: `addz(A)`
+             // runs elementwise): the zero bound to `T` is now array-typed,
+             // but as an operand it is the scalar that broadcasts -- the
+             // element's zero, so the binop rewrite below sees
+             // (array, scalar), not a zip over a `zero` operand.
+             | None, ArrayElem a -> zeroLiteralOf a.ElemType |> Option.defaultValue e
+             | None, _ -> e)
+        | IRBinOp (mode, op, l, (IRZero ty as z)) when isOpen ty ->
+            IRBinOp (mode, op, l, partnerZero l |> Option.defaultValue z)
+        | IRBinOp (mode, op, (IRZero ty as z), r) when isOpen ty ->
+            IRBinOp (mode, op, partnerZero r |> Option.defaultValue z, r)
+        | _ -> e
+    let fallback (e: IRExpr) : IRExpr =
+        match e with
+        | IRZero ty when isOpen ty -> IRLit (IRLitFloat 0.0)
+        | _ -> e
+    let rewrite b = b |> mapIRExpr resolve |> mapIRExpr fallback
+    { modul with
+        Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
+        Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
+
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>
 /// compute` co-iteration combinator -- the same shape TypeCheck.inferBinOp
