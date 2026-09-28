@@ -6102,6 +6102,36 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                  // pinned (`r1 * r2` over two `T^1` params stays deferred).
                  if pinsShape rRes0 then materializeArityVar env tL "elementwise"
                  if pinsShape lRes0 then materializeArityVar env tR "elementwise"
+             // OUTER (`a [*] b`): the product of two arrays is the all-pairs
+             // array of rank (rank a + rank b) whose element is the left
+             // operand's -- a shape an UNSHAPED `T^k` operand cannot express
+             // while it is a bare variable (the whole array IS the variable,
+             // so there is no element to name and no axes to concatenate).
+             // Left unshaped, the fallback typed `a [*] b` over two `T^1`
+             // parameters as `T` itself (rank 1) and lowering emitted the raw
+             // `(a * b)` on two Arrays (g++: no operator*). Here each operand's
+             // shape is pinned by its OWN caret -- an outer product never
+             // relates the operands' axes -- so the demand is not speculation
+             // even when both sides are variables; it is the same rank-k shape
+             // the caret already forces (materializeArityVar), after which the
+             // concrete-typed outer path (mkOuterResult, or the method_for
+             // re-synthesis for multi-axis operands) applies unchanged. Only
+             // when BOTH operands are arrays or caret vars: an outer op
+             // against a scalar has no cross axis and keeps its old reading.
+             | (OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+               | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
+               | OpAnd | OpOr) when mode = Outer ->
+                 let arrayOrCaret (t: IRType) =
+                     match IR.stripUnits t with
+                     | ArrayElem _ -> true
+                     | IRTInfer vid ->
+                         (match env.Subst.GetArityConstraint vid with
+                          | Some k when k >= 1 -> true
+                          | _ -> false)
+                     | _ -> false
+                 if arrayOrCaret lRes0 && arrayOrCaret rRes0 then
+                     materializeArityVar env tL "outer"
+                     materializeArityVar env tR "outer"
              | _ -> ())
             let lRes = env.Subst.Resolve tL.Type
             let rRes = env.Subst.Resolve tR.Type
@@ -6316,7 +6346,17 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
-            inferArithType env.Builder mode op tL.Type tR.Type (Some tR) |> Result.bind (fun resTy0 ->
+            //
+            // An OUTER op is typed on the RESOLVED operands: a caret operand
+            // the demand above just shaped still carries its bare variable on
+            // the typed node, and the outer rule read that as a non-array and
+            // answered the left variable -- rank 1 for `a [*] b` over two
+            // `T^1` parameters. (Elementwise keeps the node types: its
+            // array-producing arms already read `lRes`/`rRes` above.)
+            let lArith, rArith =
+                if mode = Outer then env.Subst.Resolve tL.Type, env.Subst.Resolve tR.Type
+                else tL.Type, tR.Type
+            inferArithType env.Builder mode op lArith rArith (Some tR) |> Result.bind (fun resTy0 ->
                 // BL3020: a mixed-elem-type op converts a NON-literal operand
                 // implicitly. Warn only once the op has typed successfully,
                 // so a real error is never accompanied by advice about a
