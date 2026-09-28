@@ -98,9 +98,9 @@ let rec internal treeViewSpine (env: TypeEnv) (e: Expr) : (Expr * Expr list) opt
 let internal tryArityLiftCall (env: TypeEnv) (func: Expr) (args: Expr list)
                               (tArgs: TypedExpr list) (funcTy: IRType) : Expr option =
     match env.Subst.Resolve funcTy with
-    | FuncElem (paramTys, _) when paramTys.Length = args.Length
+    | FuncElem (paramTys, retTy) when paramTys.Length = args.Length
                                   && args.Length = tArgs.Length
-                                  && args.Length > 1
+                                  && args.Length >= 1
                                   && not (paramTys |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTPoly)) ->
         // Every parameter must be an OPEN, rank-0 signature variable: `T^0`,
         // or its caret-free spellings `T` / `T<u>` which lower to the same
@@ -121,9 +121,40 @@ let internal tryArityLiftCall (env: TypeEnv) (func: Expr) (args: Expr list)
             let ids = varIds |> List.map Option.get
             let ranks = argRanks |> List.map Option.get
             let arrayRanks = ranks |> List.filter (fun r -> r > 0) |> List.distinct
+            // ALL-ARRAY, with a return that does not follow the variable: a
+            // rank-0 function whose result is a CONCRETE scalar (`gt0(a: T^0,
+            // b: T^0) = a > b` answers Bool). Called with arrays everywhere,
+            // HM instantiates `T` at the array and the body runs elementwise
+            // -- but the instance still claims the scalar return, so the
+            // compiled program printed `true` (an Array<bool> converted to
+            // bool) for an elementwise result. That is the lift's own case:
+            // map the call over the arrays, exactly as the mixed call below.
+            // A return that IS the variable (`sq0(x: T^0) -> T^0`) keeps the
+            // HM instance, whose type is already the array.
+            let concreteScalarReturn =
+                match IR.stripUnits (env.Subst.Resolve retTy) with
+                | IRTScalar _ -> true
+                | _ -> false
+            let allArrayLift =
+                arrayRanks.Length = 1 && not (List.contains 0 ranks) && concreteScalarReturn
+            if allArrayLift then
+                let sp = args |> List.fold (fun acc (a: Expr) -> mergeSpan acc a.Span) func.Span
+                let uid = env.Builder.FreshId()
+                let pname i = $"__al{uid}_{i}"
+                let lamParams =
+                    args |> List.mapi (fun i _ ->
+                        ({ Name = pname i; Type = None; Default = None; NameSpan = noSpan } : LambdaParam))
+                let newArgs = args |> List.mapi (fun i (a: Expr) -> mkExpr a.Span (ExprVar (pname i)))
+                let former =
+                    match args with
+                    | [a] -> mkExpr sp (ExprMethodFor [a])
+                    | many -> mkExpr sp (ExprMethodFor [mkExpr sp (ExprZip many)])
+                let body = mkExpr sp (ExprApp (func, newArgs))
+                Some (mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
+                          former, mkExpr sp (ExprLambda (lamParams, None, body)))))))
             // MIXED, and unambiguously so: at least one array position, at
             // least one scalar position, and all array positions at ONE rank.
-            if arrayRanks.Length <> 1 || not (List.contains 0 ranks) then None
+            elif args.Length < 2 || arrayRanks.Length <> 1 || not (List.contains 0 ranks) then None
             // ... and the disagreement must actually land on a SHARED
             // variable. Distinct variables per position (`f(a: T^0, b: U^0)`)
             // have nothing to reconcile, and lifting them would change the
@@ -6516,6 +6547,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     let deferredBoolRank =
                         if mode = Elementwise && isCmpOrLogical && IR.stripUnits resTy0 = IRTScalar ETBool then
                             match caretRank lRes, caretRank rRes with
+                            // Two carets of DIFFERENT ranks share no
+                            // elementwise shape: claim none, and leave the
+                            // pair to the path that judges it.
+                            | Some k, Some j when k <> j -> None
                             | Some k, _ | None, Some k -> Some k
                             | None, None -> None
                         else None

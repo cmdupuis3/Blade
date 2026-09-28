@@ -1,0 +1,27 @@
+// TEST: A T^0 function with a concrete scalar return lifts over array arguments
+// ============================================================================
+// `gt0(a: T^0, b: T^0) = a > b` answers Bool. Called with arrays in every
+// position, HM instantiated `T` at the array and the body ran elementwise --
+// but the instance still claimed the scalar Bool return, so the compiled
+// program printed `true` for an elementwise result. The call is now the map
+// it means (the mixed-call lift of 036-038, with no scalar position): a Bool
+// array of the arguments' shape. A return that IS the variable (035) keeps
+// its HM instance.
+// ============================================================================
+function gt0(a: T^0, b: T^0) = a > b
+function isneg(a: T^0) = a < 0.0
+function gtu(a: T^0, b: U^0) = a > b
+let A: Array<Float like Idx<3>> = [1.0, 5.0, 3.0]
+let B: Array<Float like Idx<3>> = [2.0, 4.0, 3.0]
+let r = gt0(A, B)
+// EXPECT: r = [false, true, false]
+let ri = gt0([9007199254740993, 1], [9007199254740992, 2])
+// EXPECT: ri = [true, false]
+let s = gt0(1.0, 2.0)
+// EXPECT: s = false
+let n = isneg([1.5, -2.5])
+// EXPECT: n = [false, true]
+let nm = isneg([[1.0, -1.0], [-3.0, 2.0]])
+// EXPECT: nm = [[false, true], [true, false]]
+let gu = gtu([1, 5], [2, 4])
+// EXPECT: gu = [false, true]
