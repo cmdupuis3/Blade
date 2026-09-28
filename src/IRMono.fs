@@ -1220,9 +1220,15 @@ let resolveTypedZerosModule (modul: IRModule) : IRModule =
     let resolve (e: IRExpr) : IRExpr =
         match e with
         | IRZero ty ->
-            (match zeroLiteralOf ty with
-             | Some lit -> lit
-             | None -> e)
+            (match zeroLiteralOf ty, ty with
+             | Some lit, _ -> lit
+             // A `T^0` specialized at an ARRAY (the arity lift: `addz(A)`
+             // runs elementwise): the zero bound to `T` is now array-typed,
+             // but as an operand it is the scalar that broadcasts -- the
+             // element's zero, so the binop rewrite below sees
+             // (array, scalar), not a zip over a `zero` operand.
+             | None, ArrayElem a -> zeroLiteralOf a.ElemType |> Option.defaultValue e
+             | None, _ -> e)
         | IRBinOp (mode, op, l, (IRZero ty as z)) when isOpen ty ->
             IRBinOp (mode, op, l, partnerZero l |> Option.defaultValue z)
         | IRBinOp (mode, op, (IRZero ty as z), r) when isOpen ty ->
