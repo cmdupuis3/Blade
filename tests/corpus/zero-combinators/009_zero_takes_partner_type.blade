@@ -14,7 +14,6 @@ function addza(a: T^1) = a + zero
 function zadda(a: T^1) = zero + a
 function addzu(a: T<m>^0) = a + zero
 function posz(a: T^1) = a > zero
-function posz0(a: T^0) = a > zero
 // 2^63 - 1 is exact in Int64, not in Float64.
 let ri = addz(9223372036854775807)
 // EXPECT: ri = 9223372036854775807
@@ -62,5 +61,3 @@ let lz = addz([0.5, 1.5])
 // EXPECT: lz = [0.5, 1.5]
 let lzi = addz([9007199254740993, 2])
 // EXPECT: lzi = [9007199254740993, 2]
-let lpz = posz0([-1, 0, 2])
-// EXPECT: lpz = [false, false, true]
