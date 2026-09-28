@@ -327,7 +327,12 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   Int64) was `a + 0.0`; it binds to the partner's scalar / element type, a
   generic one stays `IRZero T` through HM substitution and becomes each
   instance's literal after monomorphization
-  (`IRMono.resolveTypedZerosModule`; zero-combinators/009).
+  (`IRMono.resolveTypedZerosModule`; zero-combinators/009 -- including a
+  `T^0` lifted at an array, where the zero is the element's). The comparison
+  bug had a rank-0 twin: `gt0(a: T^0, b: T^0) = a > b` called with arrays
+  only was an HM instance at the array still claiming a scalar Bool;
+  `tryArityLiftCall` now maps an all-array call whose return is a concrete
+  scalar, as it already mapped the mixed one (arity/059).
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 
