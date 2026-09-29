@@ -1,0 +1,5 @@
+// TEST: Same-named functions across modules and main
+// MODULE: A
+module A
+function f(x: Float64) -> Float64 = x * 2.0
+function g(x: Float64) -> Float64 = f(x) + 1.0

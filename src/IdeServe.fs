@@ -49,7 +49,7 @@
 //   -> {"id":N,"cmd":"surface"}
 //   <- {"id":N,"version":1,"compilerVersion":"..","keywords":[{"word","token"}],
 //       "operators":[..],"mathIntrinsics":{"unary","binary","ternary","complex"},
-//       "builtins":[..],"scalarTypes":[..],"builtinCalls":[..],
+//       "builtins":[..],"staticOnlyBuiltins":[..],"scalarTypes":[..],"builtinCalls":[..],
 //       "diagnostics":[{"code","title","phase"}]}
 //
 // Byte-identical to `blade ide surface` apart from the leading `id`. A
@@ -136,11 +136,13 @@ let private concreteValueTypes (ir: Blade.IR.IRProgram) : Map<string, string> =
 let fullTierUpgrade : Blade.Ide.FullTierUpgrade =
     fun prog typed builder ->
         match (try Ok (Blade.Lowering.lowerTypedProgram typed (Some prog) builder)
-               with ex -> Error [ ("BL6002", ex.Message) ]) with
+               with
+               | Blade.Diagnostics.BladeDiagnosticException d -> Error [ (d.Code, d.Message) ]
+               | ex -> Error [ ("BL6002", ex.Message) ]) with
         | Error failures -> Error failures
         | Ok ir ->
             match Blade.IRValidate.validateIR ir with
-            | Error errs -> Error (errs |> List.map (fun e -> ("BL6001", e)))
+            | Error errs -> Error (errs |> List.map (fun e -> (Blade.IRValidate.codeOfValidationMessage e, e)))
             | Ok validated -> Ok (concreteValueTypes validated)
 
 // Request decoding (System.Text.Json in, hand-rolled JSON out -- the payload

@@ -14,12 +14,22 @@
 //     import stats
 //     let m = stats.mean([1.0, 2.0, 3.0]) // same, qualified
 //
-// RANK. Every function takes `T^1` and returns `T^0`: one row in, one scalar
-// out. That is what makes them usable as KERNELS -- `method_for(A) <@> mean`
-// applies `mean` per row of a rank-2 `A` and deduces the rank-1 result, and
-// `(a - mean(a)) * (b - mean(b))` inside a `where comm(a, b)` kernel is the
+// RANK. Every function takes `T^1` and returns a scalar: one row in, one
+// number out. That is what makes them usable as KERNELS -- `method_for(A) <@>
+// mean` applies `mean` per row of a rank-2 `A` and deduces the rank-1 result,
+// and `(a - mean(a)) * (b - mean(b))` inside a `where comm(a, b)` kernel is the
 // centering step of a covariance. A whole-array fold is `reduce(A, (+),
 // axes = k)`, not one of these.
+//
+// ELEMENTS. The result is a Float64 for every real row: an integer row's mean
+// is not an integer (`mean([1, 2, 4])` is 2.333..., not the truncated 2 that
+// `reduce(row, (+)) / extents(row)` gives over Int64), and a Float32 row is
+// averaged in double. Each function spells the conversion where it happens --
+// `Float64(reduce(row, (+)))` -- a GENERIC cast, judged per call against the
+// row the call passes. A Float64 row computes exactly what it always did (the
+// casts are identities there). A COMPLEX row is refused at the call (BL3019:
+// the cast cannot pick a real part for you); average `real(z)` and `imag(z)`,
+// or write `reduce(z, (+)) / Complex128(extents(z))` for the complex mean.
 //
 // UNITS ride through all three, and this is checked, not hoped for: `mean` is a
 // sum divided by a COUNT, so its result carries the row's unit
@@ -46,16 +56,19 @@
 // Bessel's correction, so the choice is written down where it is made.
 module stats
 
-/// Arithmetic mean of a row. `mean(row) = (sum of row) / (length of row)`.
-function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+/// Arithmetic mean of a row. `mean(row) = (sum of row) / (length of row)`,
+/// in Float64 (see the ELEMENTS note).
+function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
 
 /// Population variance of a row: the mean squared deviation from the mean.
 /// Divides by n, not n-1 (see the module note). Written as one centering pass
 /// plus one fold rather than as `mean((row - mean(row)) ^ 2)` so it does not
 /// depend on cross-module monomorphization of a generic calling a generic.
-function variance(row: T^1) -> T^0 = {
-    let n = extents(row)
-    let m = reduce(row, (+)) / n
+/// The centering `row - m` computes in Float64 (`m` is one), whatever the
+/// row's element type.
+function variance(row: T^1) = {
+    let n = Float64(extents(row))
+    let m = Float64(reduce(row, (+))) / n
     let centered = row - m
     reduce(centered * centered, (+)) / n
 }
@@ -70,4 +83,4 @@ function variance(row: T^1) -> T^0 = {
 /// would be refused outright rather than silently unconstrained (`sqrt` no
 /// longer answers "no signature" on the way through -- see
 /// tests/corpus/unit-errors/019).
-function stddev(row: T^1) -> T^0 = sqrt(variance(row))
+function stddev(row: T^1) = sqrt(variance(row))

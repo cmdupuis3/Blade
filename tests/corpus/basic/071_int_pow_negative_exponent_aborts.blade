@@ -1,0 +1,10 @@
+// TEST: Int Pow Negative Exponent Aborts (aborts)
+// ============================================================================
+// An integer `^` with a negative exponent has no integer answer: BL8013 in
+// every lane (docs/formalism.md section 2.4). Convert to Float64 first when a
+// real result is what is meant.
+
+let xs: Array<Int64 like Idx<2>> = [1, -3]
+let e = reduce(xs, (+))
+let p = 2 ^ e
+// ABORT: error[BL8013]: integer power with a negative exponent

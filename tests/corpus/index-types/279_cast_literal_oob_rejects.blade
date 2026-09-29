@@ -1,0 +1,8 @@
+// TEST: Literal cast outside its index type refused (rejects)
+// ERROR: BL4003
+// `(7 : Lat)` over Lat = Idx<3> manufactured a Lat index of 7, which silenced
+// the untagged-integer advice AND read past the array. A literal cast is a
+// known position: checked against the target's extent at compile time.
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let v = A((7 : Lat))

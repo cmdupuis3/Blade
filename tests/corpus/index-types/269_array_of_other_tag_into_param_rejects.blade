@@ -1,0 +1,13 @@
+// TEST: Array over another named index into a parameter (rejects)
+// ERROR: BL3001
+// ============================================================================
+// Named index types are nominal even at equal extent (`Nat<Lat>` and
+// `Nat<Lon>` never unify), and so are the arrays over them. An
+// `Array<F like Lat>` passed where `Array<F like Lon>` is declared used to be
+// accepted at a direct call -- the parameter's tag then told every read inside
+// the callee the wrong axis.
+type Lat = Idx<3>
+type Lon = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+function f(x: Array<Float64 like Lon>) -> Float64 = reduce(x, (+))
+let v = f(A)

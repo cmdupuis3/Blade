@@ -1,0 +1,16 @@
+// TEST: Exhaustive Enum Match Is Silent
+// Every constructor named (or a catch-all present), no arm shadowed: neither
+// coverage warning fires (WARN pins are strict both ways, so this pins their
+// ABSENCE). A lowercase binder over a variant type is an ordinary catch-all.
+type Direction = North | South | East | West
+let d = West
+let v = match d with
+    | North -> 1
+    | South -> 2
+    | East -> 3
+    | West -> 4
+let u = match d with
+    | North -> 1
+    | other -> 5
+// EXPECT: v = 4
+// EXPECT: u = 5

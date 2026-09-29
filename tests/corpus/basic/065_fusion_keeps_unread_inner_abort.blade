@@ -1,0 +1,7 @@
+// TEST: Fusion keeps an unread inner abort (aborts)
+// Twin of basic/064: a host kernel that never reads the inner map's value
+// dropped the inner evaluation outright when fused -- and its abort with it.
+let x = [1.0, -1.0, 2.0]
+let c = [1.0, 0.0, 1.0]
+let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k * 2.0) |> compute
+// ABORT: BL8008

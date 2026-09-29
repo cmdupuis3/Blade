@@ -172,6 +172,24 @@ let private fusionChain =
     + "let y = a + b * c - d\n"
     + "let total = reduce(y, (+))\n"
 
+/// A may-abort inner map (lgamma) read only under the host's branch: fusing
+/// would skip the inner evaluation on the untaken cells, so the pass declines
+/// (Optimize charter rule 1). The same inner read on every cell still fuses.
+let private fusionMayAbortConditional =
+    "let x = [1.0, 3.0, 2.0]
+"
+    + "let c = [1.0, 0.0, 1.0]
+"
+    + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> if k > 0.5 then g else 0.0) |> compute
+"
+let private fusionMayAbortUnconditional =
+    "let x = [1.0, 3.0, 2.0]
+"
+    + "let c = [1.0, 0.0, 1.0]
+"
+    + "let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k + g) |> compute
+"
+
 // ---------------------------------------------------------------------------
 
 /// The decision record for a source: install a collector, lower, drain.
@@ -276,13 +294,13 @@ let private recarrayGradNonlinearEmission () =
             false
 
 /// A halo window over a PLAIN DENSE source reads the source directly --
-/// `a[w + k]` over the shrunk interior, in bounds by construction -- and no
-/// carousel ring is built (planHaloCarousel's dense-source gate: the ring is
-/// memory-resident, so it only adds a store and a load per step, and its
-/// loop-carried dependence withholds vectorization). This test used to pin
-/// the ring's guarded tail prefetch (docs/plans/structural/02, 1.5), which
-/// no dense source reaches any more; the guard stays in the planner for the
-/// sources that still take the ring.
+/// `a[w + k]` over the shrunk interior, in bounds by construction. (The
+/// halo carousel ring this used to be measured against -- memory-resident,
+/// so it only added a store and a load per step, and its loop-carried
+/// dependence withheld vectorization -- is gone: no dense source took it
+/// after be9f1f93, and the symmetric sources that still did read their packed
+/// rows uncanonicalized -- tests/corpus/loops/211. The `halo carousel` probe
+/// below stays as the tripwire that it does not come back unannounced.)
 let private haloDenseSourceReadsDirect () =
     let name = "halo_dense_source_reads_direct"
     let src =
@@ -320,14 +338,14 @@ let private joinShareReadByDirectFold () =
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         // One in the lifted kernel body, one in the share's per-iteration const.
-        let exps = System.Text.RegularExpressions.Regex.Matches(cpp, @"std::exp\(").Count
+        let exps = System.Text.RegularExpressions.Regex.Matches(cpp, @"blade_libm::exp\(").Count
         let shared = cpp.Contains "sharing e per iteration"
         let legReadsShare = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"_j0\(\w+_0, e\);")
         if exps = 2 && shared && legReadsShare then
-            resultLine Pass name "2 std::exp sites (kernel body + share const); the fold leg reads `e`"
+            resultLine Pass name "2 blade_libm::exp sites (kernel body + share const); the fold leg reads `e`"
             true
         else
-            resultLine Fail name ($"expected 2 std::exp sites, the share note and `_j0(.., e)`; got exps={exps}, shared={shared}, legReadsShare={legReadsShare}")
+            resultLine Fail name ($"expected 2 blade_libm::exp sites, the share note and `_j0(.., e)`; got exps={exps}, shared={shared}, legReadsShare={legReadsShare}")
             false
 
 /// `reduce(method_for(q, k) <@> lambda(a, b) -> f(a, b), (+))` under the
@@ -350,7 +368,7 @@ let private outerProductPartialFoldStreams () =
     | Ok cpp ->
         let pools = System.Text.RegularExpressions.Regex.Matches(cpp, @"Array<double, 2>").Count
         let rowMode = cpp.Contains "__pfrow" || cpp.Contains "__pfsrc"
-        let fusedFold = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"= __wrap_\d+_\w+\(\w+, std::exp\(")
+        let fusedFold = System.Text.RegularExpressions.Regex.IsMatch(cpp, @"= __wrap_\d+_\w+\(\w+, blade_libm::exp\(")
         if pools = 0 && not rowMode && fusedFold then
             resultLine Pass name "no rank-2 pool, no row-mode scaffolding; exp folded inside the wrapper"
             true
@@ -483,6 +501,173 @@ let private cseDropsRepeatedFold () =
             resultLine Fail name ($"expected 2 scalar folds in the program (one per body), got {folds}")
             false
 
+/// Run `f` with the environment variable `var` set to `value`, restoring it.
+/// The optimizer gates are read per call, which is what makes this work.
+let private withGate (var: string) (value: string) (f: unit -> 'a) : 'a =
+    let prior = System.Environment.GetEnvironmentVariable var
+    System.Environment.SetEnvironmentVariable(var, value)
+    try f () finally System.Environment.SetEnvironmentVariable(var, prior)
+
+/// BLADE_CSE=0: the same program keeps both folds in each body (4 in all),
+/// and the decision says why.
+let private cseGateOffKeepsFolds () =
+    let name = "cse_gate_off_keeps_both_folds"
+    match withGate "BLADE_CSE" "0" (fun () -> cppOfSource name cseSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let folds = System.Text.RegularExpressions.Regex.Matches(cpp, @"double __r = ").Count
+        if folds = 4 then
+            resultLine Pass name "two scalar folds per body with BLADE_CSE=0"
+            true
+        else
+            resultLine Fail name ($"expected 4 scalar folds with CSE off, got {folds}")
+            false
+
+/// BLADE_POOL_REUSE=0: no alias declaration reaches the emission.
+let private poolReuseGateOffEmitsNoAlias () =
+    let name = "pool_reuse_gate_off_emits_no_alias"
+    match withGate "BLADE_POOL_REUSE" "0" (fun () -> cppOfSource name poolReuseChainSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        if cpp.Contains "pool reuse:" then
+            resultLine Fail name "a `pool reuse:` alias was emitted with BLADE_POOL_REUSE=0"
+            false
+        else
+            resultLine Pass name "no pool alias with BLADE_POOL_REUSE=0"
+            true
+
+/// No `rule` decision may be APPLIED for this source (the barrier cases).
+let private notAppliedCase (name: string) (src: string) (rule: string) (why: string) =
+    match decisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        match ds |> List.filter (fun d -> d.Rule = rule && applied d) with
+        | [] -> resultLine Pass name why; true
+        | hits ->
+            let seen = hits |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            resultLine Fail name ($"`{rule}` must not apply ({why}); saw: {seen}")
+            false
+
+/// CSE across a call that mutates the array through a `mut` parameter: the
+/// second fold must see the write (tests/corpus/functions/134 pins 98).
+let private cseMutParamCallSrc =
+    "type I = Idx<7>\n"
+    + "function bump(a: mut Array<Float like I>) -> Float = {\n"
+    + "    a((0 : I)) = 100.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let mut y = x * 2.0\n"
+    + "    let s1 = reduce(y, (+))\n"
+    + "    let z = bump(y)\n"
+    + "    let s2 = reduce(y, (+))\n"
+    + "    s2 - s1 + z\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let m = g(a)\n"
+
+/// CSE across a call that writes a module-level `let mut`.
+let private cseGlobalWriteCallSrc =
+    "type I = Idx<3>\n"
+    + "let mut G: Array<Float like I> = [1.0, 2.0, 3.0]\n"
+    + "function poke() -> Float = {\n"
+    + "    G((0 : I)) = 100.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function g() -> Float = {\n"
+    + "    let s1 = reduce(G, (+))\n"
+    + "    let z = poke()\n"
+    + "    let s2 = reduce(G, (+))\n"
+    + "    s2 - s1 + z\n"
+    + "}\n"
+    + "let m = g()\n"
+
+/// Two folds whose kernels differ only in the 11th significant digit of a
+/// float literal: NOT the same value (the old `%A` key merged them).
+let private cseFloatLiteralSrc =
+    "type I = Idx<7>\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
+    + "    let s2 = reduce(x, lambda(a, b) -> a + b * 0.10000000001)\n"
+    + "    (s2 - s1) * 1.0e12\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let m = g(a)\n"
+
+/// ... nor do `0.0` and `-0.0` (IEEE-equal, bitwise different).
+let private cseSignedZeroSrc =
+    "type I = Idx<3>\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.0)\n"
+    + "    let s2 = reduce(x, lambda(a, b) -> a + b * -0.0)\n"
+    + "    1.0 / s1 - 1.0 / s2\n"
+    + "}\n"
+    + "let a = [-1.0, -2.0, -3.0]\n"
+    + "let m = g(a)\n"
+
+/// Two folds with identical inline lambda kernels ARE the same value: the
+/// pass must still fire on a kernel-carrying pair (a lifted lambda carries
+/// no effect summary of its own, so it is judged by its body).
+let private cseIdenticalLambdasSrc =
+    "type I = Idx<7>\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let s1 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
+    + "    let s2 = reduce(x, lambda(a, b) -> a + b * 0.1)\n"
+    + "    s2 - s1\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let m = g(a)\n"
+
+/// A call that writes NOTHING is not a barrier (tests/corpus/functions/137).
+let private cseAcrossPureCallSrc =
+    "type I = Idx<7>\n"
+    + "function sumsq(v: Array<Float like I>) -> Float = reduce(v * v, (+))\n"
+    + "function scaled(x: Array<Float like I>) -> Float = {\n"
+    + "    let y = x * 2.0\n"
+    + "    let s1 = reduce(y, (+))\n"
+    + "    let q = sumsq(y)\n"
+    + "    let s2 = reduce(y, (+))\n"
+    + "    s1 * 0.5 + s2 * 0.25 + q\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let r = scaled(a)\n"
+
+/// Twins, one written through a `mut` argument: never merged, in either
+/// role (tests/corpus/functions/138).
+let private cseTwinOfMutatedSrc =
+    "type I = Idx<7>\n"
+    + "function dbl(v: Array<Float like I>) -> Array<Float like I> = v * 2.0\n"
+    + "function bump(a: mut Array<Float like I>) -> Float = {\n"
+    + "    a((0 : I)) = 100.0\n"
+    + "    0.0\n"
+    + "}\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let mut y1 = dbl(x)\n"
+    + "    let y2 = dbl(x)\n"
+    + "    let z = bump(y1)\n"
+    + "    reduce(y2, (+)) + z\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]\n"
+    + "let t = g(a)\n"
+
+/// A kernel reached through a local alias (`let k = lambda ..`) that writes a
+/// module-level `let mut`: the judge cannot see its body through the alias,
+/// so the name is the worst case (tests/corpus/functions/139).
+let private cseLambdaAliasKernelSrc =
+    "type I = Idx<3>\n"
+    + "let mut G: Array<Float like I> = [1.0, 2.0, 3.0]\n"
+    + "function g(x: Array<Float like I>) -> Float = {\n"
+    + "    let k = lambda(a, b) -> {\n"
+    + "        G((0 : I)) = G((0 : I)) + 1.0\n"
+    + "        a + b\n"
+    + "    }\n"
+    + "    let s1 = reduce(x, k)\n"
+    + "    let s2 = reduce(x, k)\n"
+    + "    s1 + s2\n"
+    + "}\n"
+    + "let a = [1.0, 2.0, 3.0]\n"
+    + "let m = g(a)\n"
+
 /// The structural/05 D7 advisory: gram, decompact, a row prodsum -- recorded
 /// as left-as-written with the `gram_apply` spelling in the evidence.
 let private gramAdvisorySrc =
@@ -491,6 +676,155 @@ let private gramAdvisorySrc =
     + "let G = gram(A, A)\n"
     + "let Gd = decompact(G, 0)\n"
     + "let y = method_for(Gd) <@> lambda(row) -> prodsum(row, v) |> compute\n"
+
+// ---------------------------------------------------------------------------
+// `blade plan`'s CODEGEN decisions: the structure declared symmetry buys,
+// OpenMP placement and drops, BLAS/LAPACK routing, the microkernels. These
+// record while the C++ is generated, so the record is taken over lower +
+// generate (what `blade plan` runs), not lowering alone.
+
+/// The decision record over lower + code generation, text discarded.
+let private planDecisionsOf (src: string) : Result<Blade.Effects.Decision list, string> =
+    Blade.Effects.Decisions.start ()
+    let r =
+        try
+            match lower src with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir ->
+                CodeGen.genSelfContainedProgramFromIR ir "plan_case" |> ignore
+                Ok (Blade.Effects.Decisions.drain ())
+        with ex -> Error ($"codegen raised: {ex.Message}")
+    Blade.Effects.Decisions.drain () |> ignore
+    r
+
+/// Some `rule` decision satisfies `want` in the lower + generate record.
+let private planCase (name: string) (src: string) (rule: string)
+                     (want: Blade.Effects.Decision -> bool) (describe: string) =
+    match planDecisionsOf src with
+    | Error e -> resultLine Fail name e; false
+    | Ok ds ->
+        let mine = ds |> List.filter (fun d -> d.Rule = rule)
+        if mine |> List.exists want then
+            resultLine Pass name ($"{mine.Length} `{rule}` decision(s); {describe}")
+            true
+        else
+            let seen = ds |> List.map Blade.Effects.Decisions.render |> String.concat " | "
+            let shown = if seen = "" then "empty" else seen
+            resultLine Fail name ($"wanted {describe}; the record: {shown}")
+            false
+
+let private evidenceMentioning (needle: string) (d: Blade.Effects.Decision) =
+    d.Evidence |> List.exists (fun (e: string) -> e.Contains needle)
+
+/// The comm covariance of ONE array (tests/corpus/symmetry/017): packed
+/// output storage and a triangular nest, both applied.
+let private planCommSameArraySrc =
+    "type TimeIdx = Idx<2>\n"
+    + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
+    + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
+    + "let r = method_for(A, A) <@> k |> compute\n"
+
+/// The same kernel over two DIFFERENT arrays: `comm` licenses no packed
+/// storage, and the record says why.
+let private planCommDistinctSrc =
+    "type TimeIdx = Idx<2>\n"
+    + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
+    + "let B: Array<Float64 like Idx<2>, TimeIdx> = [[5.0, 6.0], [7.0, 8.0]]\n"
+    + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
+    + "let r = method_for(A, B) <@> k |> compute\n"
+
+/// An `omp`-licensed outer product: the placed construct is recorded.
+let private planOmpSrc =
+    "let A = [1.0, 2.0, 3.0]\nlet B = [4.0, 5.0, 6.0]\n"
+    + "let m = method_for(A, B) <@> lambda(x, y) where omp(x: 1) -> x * y |> compute\n"
+
+let private planMatmulSrc (m: int) (k: int) (n: int) =
+    "import math as m\n"
+    + $"let A: Array<Float64 like Idx<{m}>, Idx<{k}>> = method_for(range<Idx<{m}>>, range<Idx<{k}>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + $"let B: Array<Float64 like Idx<{k}>, Idx<{n}>> = method_for(range<Idx<{k}>>, range<Idx<{n}>>) <@> lambda(i, j) -> Float64(i * j) |> compute\n"
+    + "let C = m.matmul(A, B)\n"
+
+/// A partial row fold over a plain dense rank-2 array: the row-fold jam.
+let private planRowFoldSrc =
+    "let M: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + "let s = reduce(M, (+))\n"
+
+/// gram of one array, BLAS off: the triangular native arm and its jam.
+let private planGramSrc =
+    "let A: Array<Float64 like Idx<9>, Idx<5>> = method_for(range<Idx<9>>, range<Idx<5>>) <@> lambda(i, j) -> Float64(i + j) |> compute\n"
+    + "let G = gram(A, A)\n"
+
+/// PARALLEL EMISSION ISOLATION. The per-program emission cells are
+/// AsyncLocal refs, and a child flow inherits its parent's ref OBJECT: when
+/// the parent had assembled a program first (as this does, on purpose), every
+/// parallel pipeline used to share one ref, and one pipeline's per-program
+/// reset cleared a flag another had just set -- a program losing its
+/// `#include "blade_packed_gemm.hpp"`. Resets now install fresh refs
+/// (CodeGenState.freshCell). Many assemblies race here, each on its own large
+/// stack like the corpus harness, alternating a program that needs the
+/// packed-gemm header with one that must not name it; every translation unit
+/// must carry the include exactly when it calls the kernel.
+let private parallelEmissionIsolated () =
+    let name = "parallel_emission_cells_isolated"
+    withGate "BLADE_BLAS" "0" (fun () ->
+    withGate "OPENBLAS_DIR" null (fun () ->
+        match lower (planMatmulSrc 20 16 110), lower "let x = [1.0, 2.0, 3.0]\nlet y = x + 1.0\n" with
+        | Error e, _ | _, Error e -> resultLine Fail name ($"lower: {e}"); false
+        | Ok big, Ok small ->
+            // Touch every cell in THIS flow first: the children inherit it.
+            CodeGen.genSelfContainedProgramFromIR big "iso_parent" |> ignore
+            let consistent (cpp: string) =
+                cpp.Contains "blade_pgemm::dgemm_nn" = cpp.Contains "#include \"blade_packed_gemm.hpp\""
+            let outcomes =
+                [| 0 .. 63 |]
+                |> Array.Parallel.map (fun i ->
+                    Blade.Runtime.runOnLargeStack (fun () ->
+                        let ir = if i % 2 = 0 then big else small
+                        let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir $"iso_{i}"
+                        (i % 2 = 0, cpp.Contains "blade_pgemm::dgemm_nn", consistent cpp)))
+            let bad = outcomes |> Array.filter (fun (_, _, ok) -> not ok) |> Array.length
+            let lostKernel = outcomes |> Array.filter (fun (isBig, calls, _) -> isBig <> calls) |> Array.length
+            if bad = 0 && lostKernel = 0 then
+                resultLine Pass name "64 concurrent assemblies: every include set matches its own program"
+                true
+            else
+                resultLine Fail name ($"{bad} translation unit(s) with a mismatched packed-gemm include, {lostKernel} with the wrong kernel choice")
+                false))
+
+let private planCases () =
+    let pinBlas (v: string) f =
+        withGate "BLADE_BLAS" v (fun () -> withGate "OPENBLAS_DIR" null (fun () -> withGate "BLADE_BLAS_LINK" null f))
+    [ planCase "plan_symmetric_storage_applied" planCommSameArraySrc "symmetric-storage" applied
+          "packed storage for the comm covariance of one array"
+      planCase "plan_triangular_iteration_applied" planCommSameArraySrc "triangular-iteration" applied
+          "triangular iteration over the commuting levels"
+      planCase "plan_symmetric_storage_declined_distinct" planCommDistinctSrc "symmetric-storage"
+          (declinedMentioning "different arrays") "declined: the commuting positions hold different arrays"
+      withGate "BLADE_OMP_THREADS" null (fun () ->
+          planCase "plan_omp_placement_applied" planOmpSrc "omp"
+              (fun d -> applied d && evidenceMentioning "BLADE_OMP_PARALLEL_FOR" d)
+              "omp applied, the placed construct in the evidence")
+      withGate "BLADE_OMP_THREADS" "1" (fun () ->
+          planCase "plan_omp_drop_declined" planOmpSrc "omp" (declinedMentioning "BLADE_OMP_THREADS")
+              "omp declined, naming the BLADE_OMP_THREADS knob")
+      pinBlas "0" (fun () ->
+          planCase "plan_blas_route_declined_gate_off" (planMatmulSrc 20 16 110) "blas-routing"
+              (declinedMentioning "BLAS gate off") "matmul declined: BLAS gate off")
+      pinBlas "1" (fun () ->
+          planCase "plan_blas_route_applied_gate_on" (planMatmulSrc 20 16 110) "blas-routing"
+              (fun d -> applied d && evidenceMentioning "blade_matmul_d" d) "matmul routed to blade_matmul_d")
+      pinBlas "0" (fun () ->
+          planCase "plan_packed_gemm_applied" (planMatmulSrc 20 16 110) "microkernel"
+              (fun d -> applied d && evidenceMentioning "packed gemm" d) "packed gemm above the crossover")
+      pinBlas "0" (fun () ->
+          planCase "plan_packed_gemm_declined_small" (planMatmulSrc 3 3 3) "microkernel"
+              (declinedMentioning "crossover") "packed gemm declined below the crossover")
+      pinBlas "0" (fun () ->
+          planCase "plan_row_fold_jam_applied" planRowFoldSrc "microkernel"
+              (fun d -> applied d && evidenceMentioning "row-fold jam" d) "row-fold jam over the rows")
+      pinBlas "0" (fun () ->
+          planCase "plan_triangular_gram_jam_applied" planGramSrc "microkernel"
+              (fun d -> applied d && evidenceMentioning "triangular gram jam" d) "triangular gram jam") ]
 
 let private runCase (name: string) (src: string) (wantBreaks: int) (wantAborts: int) =
     match cppOfSource name src with
@@ -504,6 +838,70 @@ let private runCase (name: string) (src: string) (wantBreaks: int) (wantAborts: 
         else
             resultLine Fail name ($"expected {wantBreaks} guard break(s) / {wantAborts} abort(s), got {breaks} / {aborts}")
             false
+
+// ---------------------------------------------------------------------------
+// IR validator reach (IRValidate.validateModule). Its walkers are folds over
+// ExprShape / BinderShape, so a defect below ANY node is seen; these pins
+// corrupt a lowered program in the three places the old hand-listed walkers
+// were blind: a dangling reference under an unlisted node (IRGram), a
+// module binding that reads a LATER binding (the scope used to hold every
+// binding id), and an empty match in a FUNCTION body (checked for bindings
+// only). The untouched program must still validate.
+// ---------------------------------------------------------------------------
+
+let private validatorSrc =
+    "function f(x: Float64) -> Float64 = x + 1.0\n"
+    + "let a: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]\n"
+    + "let b = f(2.0)\n"
+
+let private validatorCase (name: string) (corrupt: Blade.IR.IRProgram -> Blade.IR.IRProgram) (needle: string option) =
+    match lower validatorSrc with
+    | Error e -> resultLine Fail name ($"lower: {e}"); false
+    | Ok ir ->
+        match needle, Blade.IRValidate.validateIR (corrupt ir) with
+        | None, Ok _ -> resultLine Pass name "the program validates"; true
+        | None, Error es -> resultLine Fail name (String.concat " | " es); false
+        | Some n, Error es when es |> List.exists (fun m -> m.Contains n) ->
+            resultLine Pass name ($"refused: {n}"); true
+        | Some n, Error es -> resultLine Fail name ("wanted `" + n + "`, saw: " + String.concat " | " es); false
+        | Some n, Ok _ -> resultLine Fail name ($"wanted `{n}`, but the corrupted program validated"); false
+
+let private mapMain (f: Blade.IR.IRModule -> Blade.IR.IRModule) (p: Blade.IR.IRProgram) : Blade.IR.IRProgram =
+    { p with Modules = p.Modules |> List.map f }
+
+let private validatorPins () =
+    let var (id, ty) = Blade.IR.IRVar (id, ty)
+    [ validatorCase "validate_clean_program" id None
+      // `a` rebuilt as gram(dangling, a): only a walker that descends IRGram sees v999999.
+      validatorCase "validate_dangling_under_gram"
+          (mapMain (fun m ->
+              { m with
+                  Bindings =
+                      m.Bindings |> List.map (fun b ->
+                          if b.Name = "b" then
+                              let aB = m.Bindings |> List.find (fun x -> x.Name = "a")
+                              { b with Value = Blade.IR.IRGram (var (999999, aB.Type), var (aB.Id, aB.Type), false) }
+                          else b) }))
+          (Some "dangling VarId reference: v999999")
+      // `b` moved ahead of `a` and made to read it: a use before definition.
+      validatorCase "validate_forward_binding_reference"
+          (mapMain (fun m ->
+              match m.Bindings |> List.tryFind (fun x -> x.Name = "a"), m.Bindings |> List.tryFind (fun x -> x.Name = "b") with
+              | Some aB, Some bB ->
+                  let bB' = { bB with Value = Blade.IR.IRExtent (var (aB.Id, aB.Type), 0) }
+                  let rest = m.Bindings |> List.filter (fun x -> x.Name <> "b")
+                  { m with Bindings = bB' :: rest }
+              | _ -> m))
+          (Some "dangling VarId reference")
+      // f's body replaced by a zero-case match.
+      validatorCase "validate_empty_match_in_function"
+          (mapMain (fun m ->
+              { m with
+                  Functions =
+                      m.Functions |> List.map (fun fn ->
+                          if fn.Name = "f" then { fn with Body = Blade.IR.IRMatch (Blade.IR.IRLit (Blade.IR.IRLitFloat 0.0), []) }
+                          else fn) }))
+          (Some "empty match expression") ]
 
 let runOptimizeTests () =
     printHeader "Blade-DSL: Optimization Layer Tests"
@@ -533,6 +931,10 @@ let runOptimizeTests () =
               (declinedMentioning "step ordinal") "declined for the step ordinal"
           decisionCase "decision_fusion_applied" fusionChain "elementwise-fusion" applied
               "elementwise-fusion applied"
+          decisionCase "decision_fusion_declined_conditional_abort" fusionMayAbortConditional "elementwise-fusion"
+              (declinedMentioning "may abort") "declined: the inner kernel may abort under a branch"
+          decisionCase "decision_fusion_applied_unconditional_abort" fusionMayAbortUnconditional "elementwise-fusion" applied
+              "elementwise-fusion applied (inner read on every cell)"
           // Reverse-mode AD of an additive recurrence is O(n): loop count pin.
           recarrayGradEmission ()
           recarrayGradNonlinearEmission ()
@@ -553,9 +955,40 @@ let runOptimizeTests () =
           // Let-level CSE over repeatable values, and its decision.
           cseDropsRepeatedFold ()
           decisionCase "decision_cse_applied" cseSrc "cse" applied "cse applied"
+          decisionCase "decision_cse_identical_lambdas_applied" cseIdenticalLambdasSrc "cse" applied
+              "cse applied to two folds with identical lambda kernels"
+          decisionCase "decision_cse_across_pure_call_applied" cseAcrossPureCallSrc "cse" applied
+              "cse applied across a call that writes nothing"
+          // Legality: a write between the two evaluations is a barrier, a
+          // let the write names is never merged, and callable identity is
+          // structural (never a `%A` rendering).
+          notAppliedCase "cse_twin_of_mutated_array" cseTwinOfMutatedSrc "cse"
+              "the let mut twin is written through a mut argument"
+          notAppliedCase "cse_barrier_lambda_alias_kernel" cseLambdaAliasKernelSrc "cse"
+              "the kernel is a local alias the judge cannot see through"
+          notAppliedCase "cse_barrier_mut_param_call" cseMutParamCallSrc "cse"
+              "a call writing the array through a mut parameter sits between the folds"
+          notAppliedCase "cse_barrier_global_write_call" cseGlobalWriteCallSrc "cse"
+              "a call writing a module-level let mut sits between the folds"
+          notAppliedCase "cse_float_literal_identity" cseFloatLiteralSrc "cse"
+              "0.1 and 0.10000000001 are different kernels"
+          notAppliedCase "cse_signed_zero_identity" cseSignedZeroSrc "cse"
+              "0.0 and -0.0 are different kernels"
+          // The escape hatches (charter rule 3): emission and decision.
+          cseGateOffKeepsFolds ()
+          withGate "BLADE_CSE" "0" (fun () ->
+              decisionCase "decision_cse_disabled" cseSrc "cse" (declinedMentioning "disabled by BLADE_CSE")
+                  "cse declined, disabled by BLADE_CSE")
+          poolReuseGateOffEmitsNoAlias ()
+          withGate "BLADE_POOL_REUSE" "0" (fun () ->
+              decisionCase "decision_pool_reuse_disabled" poolReuseChainSrc "pool-reuse"
+                  (declinedMentioning "disabled by BLADE_POOL_REUSE") "pool-reuse declined, disabled by BLADE_POOL_REUSE")
           // The gram_apply advisory: left as written, spelled in the evidence.
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]
+        @ planCases ()
+        @ [ parallelEmissionIsolated () ]
+        @ validatorPins ()
     let passed = results |> List.filter id |> List.length
     let failed = results.Length - passed
     printFooter "Optimization Layer" [$"{passed} passed"; $"{failed} failed"]

@@ -1,0 +1,14 @@
+// TEST: A generic body passing a generic function on specializes it per instance
+// ============================================================================
+// `outer` hands `idg` to `applyG` with its own variable; monomorphization
+// cloned `idg` into outer's specialization with OUTER's bindings, which never
+// mention idg's variable, so the clone stayed open (BL6001). A generic passed
+// as an argument is specialized at its use type instead (hmValueRefRewrite).
+// ============================================================================
+function idg(x: T) -> T = x
+function applyG(g: (T) -> T, x: T) -> T = g(x)
+function outer(x: T^0) -> T^0 = applyG(idg, x)
+let r = outer(2.5)
+// EXPECT: r = 2.5
+let s = outer(3)
+// EXPECT: s = 3

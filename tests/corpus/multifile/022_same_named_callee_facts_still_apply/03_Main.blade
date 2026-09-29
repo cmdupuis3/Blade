@@ -1,0 +1,16 @@
+// TEST: Same-named functions: the importing module still gets each one's facts (rejects)
+// MODULE: Main
+// ERROR: BL4005
+// ERROR: BL3006
+// ============================================================================
+// The other half of 021: clearing the shared tables per module must not lose
+// the facts an IMPORT brings. B is checked after A, so A's bare entries are
+// gone by then -- but `A.f` still has its `mut` first parameter (a plain `let`
+// may not be passed there) and `A.g` still squares its argument's unit.
+module Main
+import A
+import B
+let arr = [1.0, 2.0]
+let v = A.f(arr, 1.0)
+let x: Float<meters> = 3.0
+let z: Float<meters> = A.g(x)

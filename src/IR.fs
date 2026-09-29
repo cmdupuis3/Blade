@@ -216,7 +216,12 @@ type IRExpr =
     | IRHaloUnhash of window: IRExpr * offset: int64
     | IRArity of resolved: int option * paramName: string  // None = unresolved (use paramName), Some n = bound
     | IRNth
-    | IRZero
+    /// `zero` at a type lowering could not yet name a literal for: a generic
+    /// element variable (`a + zero` in `addz(a: T^0)`), resolved to the
+    /// instance's own zero once monomorphization makes it concrete
+    /// (IRMono.resolveTypedZerosModule, via `zeroLiteralOf`). The type rides
+    /// the node so HM substitution reaches it like any other carried type.
+    | IRZero of ty: IRTypeG<IRExpr>
     | IRRank of array: IRExpr
     | IRPolyIndex of pack: IRExpr * index: IRExpr  // Dynamic poly-pack indexing: args[k]
     // Pack tail from cons-destructuring `let head :: tail = A`: a "shifted
@@ -735,6 +740,23 @@ let (|AnyPrimElem|_|) (ty: IRType) =
     | IRTScalar et -> Some et
     | IRTUnitAnnotated (IRTScalar et, _) -> Some et
     | IRTIdxTagged (IRTScalar et, _) -> Some et
+    | _ -> None
+
+/// The literal `zero` denotes at a scalar type, read through a unit
+/// annotation or index tag (both erase): `0` for an integer, `0.0f` / `0.0`
+/// for a float of that width, `false` for Bool, and the complex zero of that
+/// width built from its own components (`std::complex<T>(0, 0)`). None for
+/// anything else -- an open variable, an array, a struct -- which the caller
+/// decides about. Shared by lowering (a concrete `zero`) and the post-
+/// monomorphization resolution of a generic one, so the two cannot disagree.
+let zeroLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
+    match ty with
+    | AnyPrimElem (ETInt32 | ETInt64) -> Some (IRLit (IRLitInt 0L))
+    | AnyPrimElem ETFloat32 -> Some (IRLit (IRLitFloat32 0.0f))
+    | AnyPrimElem ETFloat64 -> Some (IRLit (IRLitFloat 0.0))
+    | AnyPrimElem ETBool -> Some (IRLit (IRLitBool false))
+    | AnyPrimElem ETComplex64 -> Some (IRComplex (IRLit (IRLitFloat32 0.0f), IRLit (IRLitFloat32 0.0f)))
+    | AnyPrimElem ETComplex128 -> Some (IRComplex (IRLit (IRLitFloat 0.0), IRLit (IRLitFloat 0.0)))
     | _ -> None
 
 /// Unit-annotated primitive: returns both the elem type and the unit
@@ -1900,7 +1922,7 @@ let private badChildren (ctor: string) : 'a =
 let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     match expr with
     // -- Leaves: no expression children ------------------------------------
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero | IROpaqueExtent
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
     | IRVirtualReverse _ | IRArity _ ->
         [], (function [] -> expr | _ -> badChildren "leaf")
     | IRRange (idxTys, offset) ->
@@ -2151,6 +2173,135 @@ let (|BinderShape|_|) (expr: IRExpr) : (IRExpr list * (Set<IRId> * IRExpr list) 
                   (patternBoundIds c.Pattern, Option.toList c.Guard @ [c.Body])))
     | _ -> None
 
+// Node classification predicates -- EXHAUSTIVE (no `| _ ->` arm)
+//
+// Each answers a question about ONE node's own behaviour (children are the
+// caller's business, via ExprShape). A new IRExpr variant fails to compile
+// here until someone decides its answer: the catch-all these replace
+// silently answered for variants nobody had thought about.
+
+/// May evaluating this node, by ITSELF, abort the program? (Children and
+/// callees are the caller's to walk.) The IR twin of the MayFail arm of
+/// TypeCheckSupport.effectsOfBody -- indexing (BL8006), reduction (BL8003),
+/// solve/eigh/lu (BL8007), match (BL8002), constraint checks and guards
+/// (BL8001), lgamma/digamma (BL8008) -- widened CONSERVATIVELY to every
+/// array-level form whose emitter carries a runtime extent / bounds / domain
+/// check, or whose check story nobody has audited: an array form answering
+/// `true` only costs an optimization that needed it to be `false`.
+/// Scalar arithmetic, literals, references, tuple/struct plumbing, and the
+/// loop-object / combinator VALUES (building a loop object runs nothing)
+/// answer `false`. Calls (IRApp) answer `false` here: the callee's summary
+/// is the caller's to consult, since only the caller can resolve it.
+let irNodeMayAbort (e: IRExpr) : bool =
+    match e with
+    // -- cannot abort on their own ------------------------------------------
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent
+    | IRArity _ | IRRange _ | IRVirtualReverse _ -> false
+    // Integer `/` and `%` by zero abort (BL8013 in every lane, the arithmetic
+    // contract of docs/formalism.md section 2.4). The node is judged without
+    // its operand types, so a division / modulo answers yes unless its
+    // divisor is a literal that cannot fault -- any float, or a nonzero
+    // integer (MIN / -1 wraps) -- so the `x / 2.0` and `n / 2` idioms stay
+    // fusible; a float one with a computed divisor only costs a fusion.
+    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitFloat _ | IRLitFloat32 _)) -> false
+    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitInt n)) -> n = 0L
+    | IRBinOp (_, (IRDiv | IRMod), _, _) -> true
+    // Integer `^` with a negative exponent aborts (BL8013). A literal
+    // exponent that is a nonnegative integer or any float cannot, which
+    // keeps the `x ^ 2` idiom fusible; anything else answers yes.
+    | IRBinOp (_, IRCaret, _, (IRLit (IRLitFloat _ | IRLitFloat32 _))) -> false
+    | IRBinOp (_, IRCaret, _, IRLit (IRLitInt n)) -> n < 0L
+    | IRBinOp (_, IRCaret, _, _) -> true
+    // A cast to an integer type aborts on a NaN / out-of-range float
+    // operand (BL8014). Judged without the operand type, like `/`.
+    | IRUnaryOp (IRCast (ETInt64 | ETInt32), _) -> true
+    | IRBinOp _ | IRComplex _ | IRFma _ -> false
+    | IRUnaryOp (IRMath ("lgamma" | "digamma"), _) -> true
+    | IRUnaryOp _ -> false
+    | IRTuple _ | IRTupleProj _ | IRTupleCons _ | IRTupleDecons _
+    | IRFieldAccess _ | IRStructLit _ -> false
+    | IRIf _ | IRLet _ | IRSequence _ -> false
+    | IRApp _ -> false
+    | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRParallel _ | IRFusion _
+    | IRComposeObj _ | IRComposeMeth _ | IRCompose _ | IRPure _ | IRReynolds _ -> false
+    | IRRank _ | IRExtent _ -> false
+    | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _
+    | IROrbitClass _ | IRSegments _ | IRSegmentsGrid _ -> false
+    | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _ -> false
+    | IRAssign _ | IRForRange _ | IRBreakIf _ -> false
+    | IRArrayLit _ | IRArrayNegate _ | IRArrayConjugate _ | IRContains _ -> false
+    // -- may abort (checked reads, folds, factorizations, refusals) ---------
+    | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRPolyIndex _ | IRPolyTail _
+    | IRHaloUnhash _ -> true
+    | IRMatch _ | IRGuard _ | IRConstraintCheck _ -> true
+    | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
+    | IRSolve _ | IREigh _ | IRLu _ | IRLuSolve _ -> true
+    // -- array-level forms: runtime extent agreement / unaudited ------------
+    | IRCompute _ | IRApplyCombinator _ | IRComposeApply _ -> true
+    | IRZip _ | IRAlign _ | IRStack _ | IRJoin _ | IRShift _ | IRReverse _ | IRDiag _
+    | IRTranspose _ | IRDecompact _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
+    | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ | IRSort _ -> true
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRGroupSizes _
+    | IRUngroup _ | IRUngroupGrid _ | IRUngroupRows _ -> true
+    | IRChoice _ | IRFallback _ | IRArrayProduct _ | IRFunctorMap _ | IRReplicate _ -> true
+
+/// Does this value OWN a freshly allocated pool that nothing else can reach?
+/// THE one definition, shared by codegen's escape analysis
+/// (CodeGenLoopNest.isFreshPoolForm) and the optimizer's pool-reuse planner
+/// (Optimize.planPoolReuse) -- pool-reuse soundness depends on the two
+/// agreeing, and they used to be hand copies. `appFresh` answers for a CALL:
+/// codegen consults its fresh-return facts, the planner (which cannot see
+/// what a callee hands back) says no.
+///
+/// Deliberately NOT fresh, against a naive reading of "fresh-pool producer":
+///   * IRChoice / IRFallback / IRGuard / IRComposeMeth -- their results BORROW an
+///     operand's `.extents` pointer, so an escaping result must pin its operands.
+///   * IRSequence / IRReplicate -- the emitter DOES now give the result its own
+///     dense pool (a per-child copy nest, like stack), so these could become
+///     fresh; they are held out because the emitter still does not register
+///     that pool for freeing, and a barrier here would stop propagation to
+///     children the frees do reach. Flip both together, never just this one.
+///   * IRParallel / IRFusion / IRFunctorMap / IRZip -- deferred forms whose
+///     forcing shape depends on whether the leaf is a computation or a concrete
+///     array; not worth proving.
+///   * every view/projection form (IRVar, IRIndex, IRSlice, IRCurry, IRSubset,
+///     IRShift, IRReverse, IRDiag, IRAlign, IRTuple, IRTupleProj, IRFieldAccess,
+///     IRIf, IRMatch, IRApp on a callee `appFresh` rejects).
+/// Exhaustive on purpose: "not fresh" is the safe answer for escape
+/// propagation (a wrong fresh frees too early; a wrong not-fresh only leaks),
+/// but a new variant must still be CLASSIFIED, not defaulted.
+let rec isFreshPoolFormWith (appFresh: IRExpr -> bool) (e: IRExpr) : bool =
+    match e with
+    | IRCompute inner -> isFreshPoolFormWith appFresh inner
+    | IRApplyCombinator _ | IRComposeApply _ -> true
+    | IRArrayLit _ -> true
+    | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ -> true
+    | IRTranspose _ | IRDecompact _ | IRStack _ | IRJoin _ | IRGram _ | IRGramApply _ | IRMatmul _ -> true
+    // eigh / lu: BOTH pools each produces are fresh (`allocate<>` under derived
+    // names) with their own extents tables; lu_solve / solve: x is a fresh pool
+    // (b's values are COPIED in, not aliased). None borrows an operand.
+    | IREigh _ | IRLu _ | IRLuSolve _ | IRSolve _ -> true
+    | IRArrayNegate _ | IRArrayConjugate _ -> true
+    | IRReduce _ | IRReduceCompute _ | IRProdSum _ -> true
+    | IRApp (f, _, _) -> appFresh f
+    // -- not fresh (see above) ----------------------------------------------
+    | IRChoice _ | IRFallback _ | IRGuard _ | IRComposeMeth _ -> false
+    | IRSequence _ | IRReplicate _ -> false
+    | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRZip _ -> false
+    | IRVar _ | IRIndex _ | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _
+    | IRDiag _ | IRAlign _ | IRTuple _ | IRTupleProj _ | IRFieldAccess _ | IRIf _ | IRMatch _ -> false
+    | IRLit _ | IRParam _ | IRNth | IRZero _ | IROpaqueExtent | IRArity _ | IRRange _
+    | IRVirtualReverse _ | IRBinOp _ | IRUnaryOp _ | IRComplex _ | IRFma _
+    | IRTupleCons _ | IRTupleDecons _ | IRStructLit _ | IRLet _
+    | IRMethodFor _ | IRObjectFor _ | IRBind _ | IRComposeObj _ | IRCompose _ | IRPure _
+    | IRReynolds _ | IRArrayProduct _ | IRContains _
+    | IRDisplayEmit _ | IRDisplayJson _ | IRDisplayNum _ | IRDisplayStr _
+    | IRGroupBy _ | IRGroupKeys _ | IRGroupBucket _ | IRSegments _ | IRSegmentsGrid _
+    | IRUngroupGrid _ | IRUngroupRows _ | IRUngroup _ | IRGroupSizes _
+    | IRPolyIndex _ | IRPolyTail _ | IRHaloUnhash _ | IRRank _ | IRExtent _
+    | IRRaggedLookup _ | IRCompoundMask _ | IRCompoundProject _ | IRSparseKeys _ | IROrbitClass _
+    | IRAssign _ | IRForRange _ | IRConstraintCheck _ | IRBreakIf _ -> false
+
 // Expression Mapping (bottom-up rewriter)
 
 /// Apply f to every sub-expression bottom-up, then to the root.
@@ -2244,6 +2395,7 @@ let substTypeInIRExpr (bindings: Map<int, IRType>) (expr: IRExpr) : IRExpr =
         match e with
         | IRVar (id, ty) -> IRVar (id, st ty)
         | IRParam (n, i, ty) -> IRParam (n, i, st ty)
+        | IRZero ty -> IRZero (st ty)
         | IRApp (fn, args, retType) -> IRApp (fn, args, st retType)
         | IRArrayLit (elems, aty) ->
             IRArrayLit (elems, { aty with ElemType = st aty.ElemType })
@@ -2290,6 +2442,7 @@ let (|CarriedType|_|) (expr: IRExpr) : IRType option =
     | IRLit (IRLitBool _) -> Some (IRTScalar ETBool)
     | IRLit (IRLitString _) -> Some (IRTScalar ETString)
     | IRLit IRLitUnit -> Some IRTUnit
+    | IRZero ty -> Some ty
     | _ -> None
 
 /// Map from struct name to its fields, used by typeOf for IRFieldAccess
@@ -3117,7 +3270,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     | IRSlice _ | IRCurry _ | IRSubset _ | IRShift _ | IRReverse _ | IRDiag _
     | IRZip _ | IRAlign _ | IRStack [] | IRJoin ([], _)
     | IRTupleCons _ | IRTupleDecons _ | IRPolyIndex _ | IRPolyTail _ | IRReplicate _
-    | IRVirtualReverse _ | IRZero ->
+    | IRVirtualReverse _ ->
         IRTUnit
 
     // -- Coverage tail ---------------------------------------------------
@@ -3128,7 +3281,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // typing rule -- and if one of these arms ever fires, a family pattern
     // was edited out of sync: fail loudly, never mistype.
     | IRVar _ | IRParam _ | IRApp _ | IRArrayLit _ | IRStructLit _
-    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ ->
+    | IRApplyCombinator _ | IRComposeApply _ | IRLit _ | IRZero _ ->
         unreachableTyping "CarriedType" expr
     | IRSort _ | IRArrayNegate _ | IRArrayConjugate _ | IRIntersect _
     | IRUnion _ | IRUnique _ | IRCompute _ | IRPure _ | IRLet _ | IRIf _

@@ -64,7 +64,8 @@ let declaredTupleWidth (t: TypeExpr option) : int option =
 /// double>`. Shared by all four destructuring sites (`DeclLet`, `let static`,
 /// block `StmtLet`, expression position) so they cannot drift.
 ///
-/// Deliberately silent for every NON-tuple scrutinee: a `Poly` pack, a struct,
+/// A `Poly` pack is refused (its forms are `head :: tail` and `args[k]`).
+/// Deliberately silent for every other NON-tuple scrutinee: a struct,
 /// or a type still unresolved at this point is somebody else's judgement, and
 /// answering here would turn inference order into a diagnostic.
 let tupleDestructureArityError (env: TypeEnv) (pats: Pattern list) (valueTy: IRType) : TypeError option =
@@ -78,6 +79,11 @@ let tupleDestructureArityError (env: TypeEnv) (pats: Pattern list) (valueTy: IRT
                 then $" ({flat.Length} leaves when flattened)"
                 else ""
             Some (Other ($"this `let` binds {pats.Length} names, but the value is a {ts.Length}-tuple{flatNote}. A tuple pattern needs one name per component -- or one per flattened leaf -- so write {ts.Length}, or project the components you want with `t[i]`."))
+    // A Poly PACK is not a tuple: `let (head, tail) = args` reached IR
+    // validation as a dangling reference (BL6001). The pack forms are the
+    // cons pattern and structural indexing.
+    | IRTPoly _ ->
+        Some (Other "a `Poly` pack does not destructure with a tuple pattern: write `let head :: tail = args` (the first element and the REMAINING pack), or index an element with `args[k]`.")
     | _ -> None
 
 /// Fourth family member -- see `TypeEnv.WarningLog` for the storage and why it

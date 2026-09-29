@@ -2691,14 +2691,13 @@ let total = reduce(B, (+), axes = 2)
               | Error e -> e
               | Ok _ -> warns |> List.map (fun d -> d.Code + ": " + d.Message) |> String.concat "; "))
 
-        // (g) KNOWN HOLE, pinned rather than fixed: a plain-`unify` FUNCTION
-        // BOUNDARY still accepts a diverged axis. The plan's P3 outcome names
-        // this residual already; what (h) adds is the measurement that it is
-        // NOT a provider defect. Closing it means
-        // changing how EVERY named index type is matched at an argument
-        // position, which is a language-wide change to the direct-application
-        // seam, not a fix to axis provenance. If this ever starts REFUSING,
-        // that is good news: delete this pin and keep the one in (h).
+        // (g) The former KNOWN HOLE, now CLOSED: a FUNCTION BOUNDARY used to
+        // accept a diverged axis, because direct application never unified
+        // arguments with parameters. The call judgment
+        // (docs/plans/plan-call-judgment.md) made that the language-wide change
+        // this comment once said closing it would take, so the boundary refuses
+        // exactly as the let ascription does. Pinned as a refusal so the hole
+        // cannot reopen.
         (let src =
             sprintf """
 import icechunk as ic
@@ -2715,16 +2714,14 @@ let t = total_of(ck2.vars.temp |> ic.read)
 """
                     launderRoot
          let r = lower src
-         check "hole: a function BOUNDARY still accepts a diverged axis (known, pinned)"
-             (match r with Ok _ -> true | Error _ -> false)
-             (match r with Error e -> "now refuses -- see the comment: " + e | Ok _ -> ""))
+         check "closed: a function BOUNDARY refuses a diverged axis"
+             (match r with Error _ -> true | Ok _ -> false)
+             (match r with Ok _ -> "accepted -- the boundary hole reopened" | Error _ -> ""))
 
-        // (h) ... and the same laxity with NO provider in the program at all.
-        // This is the evidence for (g)'s claim: an argument position accepts a
-        // differently-named index type of equal extent, while the identical
-        // LET ascription refuses. Two seams, two answers -- the pre-existing
-        // unify-strictness split, which axis provenance rides along with
-        // rather than causes.
+        // (h) ... and the same with NO provider in the program at all: an
+        // argument position and a LET ascription now give ONE answer for a
+        // differently-named index type of equal extent (both refuse). Before
+        // the call judgment these were two seams with two answers.
         (let boundarySrc = """
 type A = Idx<5>
 type B = Idx<5>
@@ -2741,8 +2738,8 @@ type B = Idx<5>
 let b: Array<Float64 like B> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let a: Array<Float64 like A> = b
 """
-         check "hole: the boundary laxity is NOT provider-specific (two plain named axes do it too)"
-             ((match lower boundarySrc with Ok _ -> true | Error _ -> false)
+         check "closed: a boundary and an ascription both refuse two plain named axes of equal extent"
+             ((match lower boundarySrc with Error _ -> true | Ok _ -> false)
               && (match lower ascribeSrc with Error _ -> true | Ok _ -> false))
              (sprintf "boundary %A / ascription %A"
                   (match lower boundarySrc with Ok _ -> "Ok" | Error e -> e)
@@ -3780,6 +3777,55 @@ let total = reduce(F, (+), axes = 2)
                      | Ok interp -> check "tiles: E@s1 stdout equals the interpreter's" (stdoutOnly cold = icNormOut interp) (stdoutOnly cold + "\n---\n" + icNormOut interp)
                      | Error e -> check "tiles: E@s1 interpreter run" false e)
                     check "tiles: the store holds one file per tile" ((Directory.GetFiles(store, "*.tile", SearchOption.AllDirectories)).Length = 2) ""
+
+                    // A SHORT entry (a torn write, a truncating copy) is a
+                    // miss that is deleted and recomputed -- never a
+                    // "corrupt store" exit, never partial cells.
+                    let tiles = Directory.GetFiles(store, "*.tile", SearchOption.AllDirectories) |> Array.sort
+                    let lensOf (fs: string[]) = fs |> Array.map (fun p -> FileInfo(p).Length) |> Array.sort
+                    let storedLens = lensOf tiles
+                    let fullLen = FileInfo(tiles.[0]).Length
+                    (use fs = new FileStream(tiles.[0], FileMode.Open, FileAccess.Write)
+                     fs.SetLength(fullLen - 8L))
+                    (match runTiled exeS1 with
+                     | Ok healed ->
+                         check "tiles: a truncated entry is a miss -- that tile recomputes, the other still hits"
+                             (census healed "[tiles] F: computed 1/2, hit 1/2") healed
+                         check "tiles: stdout over a truncated entry is byte-identical to the cold run" (stdoutOnly healed = stdoutOnly cold) ""
+                         check "tiles: the truncated entry is replaced by a complete one"
+                             (File.Exists tiles.[0] && FileInfo(tiles.[0]).Length = fullLen) ""
+                     | Error e -> check "tiles: a truncated entry does not kill the run" false e)
+
+                    // Many processes storing into ONE cold store at once: each
+                    // writes a private temp file and renames it onto the key,
+                    // so every run succeeds with the same stdout, the store
+                    // ends with exactly one complete file per tile, and no
+                    // temp file is left behind. The store's parents do not
+                    // exist yet (they are created), and the value carries
+                    // surrounding whitespace, which the compiler's gate trims
+                    // -- the program's must agree or it would store nothing.
+                    let deep = Path.Combine(store, "fresh", "deeper", "store")
+                    Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", "  " + deep + " ")
+                    try
+                        let runs =
+                            [| for _ in 1 .. 6 -> Threading.Tasks.Task.Run(fun () -> runTiled exeS1) |]
+                            |> Array.map (fun t -> t.Result)
+                        let oks = runs |> Array.choose (function Ok o -> Some o | Error _ -> None)
+                        let errs = runs |> Array.choose (function Error e -> Some e | Ok _ -> None)
+                        check "tiles: six concurrent cold runs against one store all succeed"
+                            (errs.Length = 0) (String.concat "\n---\n" errs)
+                        check "tiles: the concurrent runs print byte-identical stdout"
+                            (oks |> Array.forall (fun o -> stdoutOnly o = stdoutOnly cold)) ""
+                        let published = if Directory.Exists deep then Directory.GetFiles(deep, "*.tile", SearchOption.AllDirectories) else [||]
+                        check "tiles: a whitespace-padded store path under missing parents holds exactly one complete file per tile"
+                            (published.Length = 2 && lensOf published = storedLens)
+                            (sprintf "%d tile file(s)" published.Length)
+                        let leftovers = if Directory.Exists deep then Directory.GetFiles(deep, "*.tmp", SearchOption.AllDirectories) else [||]
+                        check "tiles: concurrent stores leave no temp file behind" (leftovers.Length = 0) (String.concat ", " leftovers)
+                    finally
+                        Environment.SetEnvironmentVariable("BLADE_TILE_CACHE", store)
+                        // the s2 section below counts the files under `store` itself
+                        (try Directory.Delete(Path.Combine(store, "fresh"), true) with _ -> ())
                 | Ok _, Error e | Error e, _ -> check "tiles: E@s1 runs" false e
                 match buildTiled "ic_tiles_s2" srcS2 with
                 | Error e -> baselineFailed "tiles s2" e

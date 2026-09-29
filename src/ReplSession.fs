@@ -260,8 +260,19 @@ module ReplTypes =
 /// recursive array bound its name as the literal string "rec", which is not a
 /// name any rebind can match and not a binding any run output carries -- the
 /// notebook echoed `rec` with an empty type and value.
+///
+/// `struct` (also `static struct`) and `interface` name what they declare the
+/// same way `type` does. They were missing, so re-running a struct cell found
+/// no name to supersede and APPENDED a second `struct P` -- which the checker
+/// now refuses (BL2009) and which used to silently let the later one win.
 let private bindingNameRe =
-    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+|rec\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+)([A-Za-z_][A-Za-z0-9_]*)")
+    Regex(@"^\s*(?:let\s+(?:mut\s+|static\s+|rec\s+)?|static\s+function\s+|function\s+|type\s+|Unit\s+|(?:static\s+)?struct\s+|interface\s+)([A-Za-z_][A-Za-z0-9_]*)")
+
+/// `impl I for T { ... }` declares no name of its own; its rebind key is the
+/// (interface, type) pair, spelled `impl I for T`, so re-running the cell
+/// replaces the earlier implementation instead of adding a second one.
+let private implKeyRe =
+    Regex(@"^\s*impl\s+([A-Za-z_][A-Za-z0-9_]*)\s+for\s+([A-Za-z_][A-Za-z0-9_<>, ]*?)\s*\{")
 
 /// A destructuring declaration: `let (a, b) = ...`, `let mut (x, _) = ...`,
 /// nested parens allowed. Group 1 is the pattern text between the outer parens.
@@ -293,6 +304,9 @@ let bindingName (snippet: string) : string option =
     let line = firstSignificantLine snippet
     let m = bindingNameRe.Match line
     if m.Success then Some m.Groups.[1].Value
+    else
+    let im = implKeyRe.Match line
+    if im.Success then Some $"impl {im.Groups.[1].Value} for {im.Groups.[2].Value}"
     else
         // A destructuring `let (a, b) = ...` declares its LEAVES; its rebind
         // key is the leaf list, `(a,b)`, so re-running the cell supersedes the
@@ -533,6 +547,9 @@ module private Segments =
     /// clause on its own line -- says the previous line has not finished.
     let canStart (k: TokenKind) =
         match k with
+        // `!` is prefix-only, so it CAN open a statement -- the parser's
+        // continuation rule (ParserCore.isInfixContinuationOp) excludes it too.
+        | TokOp "!" -> true
         | TokOp _ | TokNamedInfix _ -> false
         | TokComma | TokSemi | TokColon | TokColonColon | TokDot | TokDotDot -> false
         | TokPipe | TokAt | TokHash | TokQuestion -> false
@@ -819,16 +836,51 @@ let private remapDiagnostic (candidate: ResizeArray<string>) (ps: Placement list
 /// rejection arrives as spanned diagnostics, but a runtime guard panic and a
 /// toolchain failure arrive on stderr with no position at all -- and a client
 /// that builds its error card from `Diagnostics.[0]` would show "rejected"
-/// with no reason. Those become ONE 1:1 error diagnostic carrying the message
-/// verbatim; the text stays on `Stderr` as well, for a client that shows both.
-let private ensureFailureDiagnostic (r: EvalResult) : EvalResult =
+/// with no reason. Those become ONE error diagnostic; the text stays on
+/// `Stderr` as well, for a client that shows both.
+///
+/// A RUNTIME PANIC is not positionless, though: both lanes print it as
+/// `error[BLxxxx]: <message>` followed, when the guard carries a span, by
+/// `  --> <file>:<line>` (blade_runtime.hpp's panic and the interpreter's
+/// formatPanic, byte-identical). That is parsed: the diagnostic gets the CODE,
+/// the bare message (it used to repeat the `error[BLxxxx]:` prefix inside a
+/// card that already says "error"), and the session line remapped onto the
+/// submission like any front-end diagnostic -- a panic raised while re-running
+/// an EARLIER cell says "elsewhere in session". Anything else (a toolchain
+/// failure) keeps the old 1:1, code-less, verbatim diagnostic.
+let private panicHeadRe = System.Text.RegularExpressions.Regex(@"^\s*error\[(BL\d{4})\]:\s*(.*)$")
+let private panicLocRe = System.Text.RegularExpressions.Regex(@"^\s*-->\s*.*:(\d+)\s*$")
+
+let private ensureFailureDiagnostic (remap: Blade.Diagnostics.Diagnostic -> EvalDiagnostic) (r: EvalResult) : EvalResult =
     if r.Kept || r.Stderr.Trim() = "" then r
     elif r.Diagnostics |> List.exists (fun d -> d.Severity = "error") then r
     else
-        { r with
-            Diagnostics =
-                { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                  Message = r.Stderr.Trim(); Code = "" } :: r.Diagnostics }
+        let lines = r.Stderr.Replace("\r\n", "\n").Split('\n')
+        let head =
+            lines |> Array.tryPick (fun l ->
+                let m = panicHeadRe.Match l
+                if m.Success then Some (m.Groups.[1].Value, m.Groups.[2].Value.Trim()) else None)
+        match head with
+        | Some (code, msg) ->
+            let line =
+                lines |> Array.tryPick (fun l ->
+                    let m = panicLocRe.Match l
+                    match m.Success, System.Int32.TryParse m.Groups.[1].Value with
+                    | true, (true, n) when n > 0 -> Some n
+                    | _ -> None)
+            let span =
+                match line with
+                | Some n -> ({ StartLine = n; StartCol = 1; EndLine = n; EndCol = 0; File = None } : Blade.Ast.Span)
+                | None -> Blade.Ast.noSpan
+            let d : Blade.Diagnostics.Diagnostic =
+                { Code = code; Severity = Blade.Diagnostics.SevError; Phase = Blade.Diagnostics.PhBackend
+                  Span = span; Message = msg; Notes = []; Context = [] }
+            { r with Diagnostics = remap d :: r.Diagnostics }
+        | None ->
+            { r with
+                Diagnostics =
+                    { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
+                      Message = r.Stderr.Trim(); Code = "" } :: r.Diagnostics }
 
 // The engine.
 
@@ -1230,7 +1282,7 @@ type ReplSession(runCwd: string) =
             // `reads` is the static superset of session names this lane can
             // resolve against the run's output lines; the target rides along.
             let printOnly = Some (Set.ofList (reads @ Option.toList target))
-            ensureFailureDiagnostic <|
+            ensureFailureDiagnostic (remapDiagnostic candidate placements) <|
             match this.EvalCandidate(candidate, target, printOnly, ignore) with
             | CandidateRejected (ds, _) ->
                 { Kept = false; ExitCode = 1; Lane = LaneInterp; ElapsedMs = 0

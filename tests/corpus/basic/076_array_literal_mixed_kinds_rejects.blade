@@ -1,0 +1,5 @@
+// TEST: Array literal mixing Float and Bool (rejects)
+// ERROR: BL3001
+// An array literal has ONE element type, read from its first element; the
+// others were never compared against it, so `[1.5, true]` printed [1.5, 1].
+let xs = [1.5, true]

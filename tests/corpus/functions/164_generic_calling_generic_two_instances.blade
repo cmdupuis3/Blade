@@ -1,0 +1,31 @@
+// TEST: A generic function calling a generic function specializes per instance
+// ============================================================================
+// Inside `m2`'s body the call `tot(row)` passed m2's OWN signature variable,
+// and the call's result fell back to tot's DECLARED return: m2's return was
+// unified with tot's variable, so every instance of m2 shared one result type
+// and calling it at Int and at Float was BL6001 "unresolved type variable".
+// The instantiated copy is now linked to the caller's variable (the HM
+// application rule), so each instance of m2 gets its own result.
+// ============================================================================
+function tot(row: T^1) -> T^0 = reduce(row, (+))
+function m2(row: T^1) -> T^0 = tot(row) / extents(row)
+function m3(row: T^1) -> T^0 = m2(row) + tot(row)
+function rs(m: T^2) = reduce(m, (+))
+function rs2(m: T^2) = rs(m) * 2
+function tot2(row: T^1) = tot(row) * 2
+let a = m2([2, 4, 6])
+// EXPECT: a = 4
+let b = m2([1.5, 2.5])
+// EXPECT: b = 2
+let c = m3([1, 2, 3])
+// EXPECT: c = 8
+let d = m3([1.5, 2.5])
+// EXPECT: d = 6
+let g = rs2([[1, 2], [3, 4]])
+// EXPECT: g = [6, 14]
+let h = rs2([[1.5, 2.0], [3.0, 4.0]])
+// EXPECT: h = [7, 14]
+let i = tot2([1, 2])
+// EXPECT: i = 6
+let j = tot2([0.25, 0.5])
+// EXPECT: j = 1.5

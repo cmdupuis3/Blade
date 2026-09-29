@@ -1,0 +1,8 @@
+// TEST: A CompoundIdx mask that is not Bool is a user error, not an ICE (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: the mask must be an array of Bool
+// ============================================================================
+// The type lowering has no error channel and used to `failwith`, which
+// surfaced as BL9001 "this is a bug in the Blade compiler" with no location.
+let m = [1.0, 2.0, 3.0]
+let x: Array<Float64 like CompoundIdx<m>> = [1.0]

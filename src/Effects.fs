@@ -46,7 +46,8 @@ type EffectSummary = {
     ReadsExternal: bool
     /// May abort at run time: a bounds check (BL8006), an empty reduction
     /// (BL8003), a singular solve (BL8007), a non-exhaustive match (BL8002),
-    /// a value constraint (BL8001), a domain-checked intrinsic (BL8008).
+    /// a value constraint (BL8001), a domain-checked intrinsic (BL8008), an
+    /// integer arithmetic fault or float-to-int conversion (BL8013 / BL8014).
     MayFail: bool
     /// Calls something whose effects are not known: a lambda-valued
     /// variable, a higher-order parameter, a callee with no summary.
@@ -120,10 +121,17 @@ module Decisions =
     /// tests call this; without it `record` is a no-op.
     let start () = cell.Value <- System.Collections.Generic.List<Decision>()
 
+    /// Is a collector installed? Recording sites whose evidence costs work to
+    /// build (codegen's routing / storage / omp decisions) check this first.
+    let active () = not (isNull cell.Value)
+
+    /// Record `d` once. Code generation renders some sub-expressions more than
+    /// once (lazy renders, re-emitted nests), and each render reaches the same
+    /// decision; the record states each decision a single time.
     let record (d: Decision) =
         match cell.Value with
         | null -> ()
-        | l -> l.Add d
+        | l -> if not (l.Contains d) then l.Add d
 
     /// Take every decision recorded since `start` and clear the collector.
     let drain () : Decision list =

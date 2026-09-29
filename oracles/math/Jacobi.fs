@@ -25,7 +25,7 @@ let svd (sweeps: int) (a: float[,]) : float[,] * float[] * float[,] =
                     aa <- aa + wp * wp
                     bb <- bb + wq * wq
                     cc <- cc + wp * wq
-                let conv = abs cc <= 1.0e-15 * sqrt (aa * bb)
+                let conv = abs cc <= 1.0e-15 * (sqrt aa * sqrt bb)
                 let zeta = (bb - aa) / (if conv then 1.0 else 2.0 * cc)
                 let tt = (if zeta >= 0.0 then 1.0 else -1.0) / (abs zeta + sqrt (1.0 + zeta * zeta))
                 let cs = if conv then 1.0 else 1.0 / sqrt (1.0 + tt * tt)
@@ -87,7 +87,7 @@ let eigh (sweeps: int) (s0: float[,]) : float[,] * float[] =
                 let apq = aw.[p, r]
                 let app = aw.[p, p]
                 let aqq = aw.[r, r]
-                let conv = abs apq <= 1.0e-15 * sqrt (abs app * abs aqq + 1.0e-300)
+                let conv = abs apq <= 1.0e-15 * (sqrt (abs app) * sqrt (abs aqq) + 1.0e-150)
                 let theta = (aqq - app) / (if conv then 1.0 else 2.0 * apq)
                 let tt = (if theta >= 0.0 then 1.0 else -1.0) / (abs theta + sqrt (1.0 + theta * theta))
                 let cs = if conv then 1.0 else 1.0 / sqrt (1.0 + tt * tt)

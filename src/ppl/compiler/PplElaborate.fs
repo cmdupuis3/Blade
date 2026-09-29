@@ -123,24 +123,49 @@ type private PoolInfo = {
     Names: Map<int list, string>
     /// Static sample count (the raw-moment normalizer).
     N: float
+    /// Per row position, the binding holding that row's SHIFT c (its mean) for a CENTRAL pool, whose sums are
+    /// P_S = Sum_t Prod_{l in S} (row_l(t) - c_l); empty for a RAW pool (c = 0).
+    Shifts: string list
 }
 
-/// The raw prodsum P_S.
+/// The pool's prodsum P_S (raw, or about the shifts for a central pool).
 let private poolRead (pool: PoolInfo) (s: int list) : Expr =
     v pool.Names.[List.sort s]
 
-/// The raw moment E[Prod_{l in S} x_l] = P_S / N.
+/// The pool's moment E[Prod_{l in S} (x_l - c_l)] = P_S / N. For a RAW pool this is the raw moment. For a CENTRAL
+/// pool it is the moment of the shifted rows, which is what every shift-invariant quantity (comoments, cumulants and
+/// free cumulants of order >= 2, central sums) is built from; order-1 quantities read `poolMean` instead.
 let private poolMoment (pool: PoolInfo) (s: int list) : Expr =
     divE (poolRead pool s) (fLit pool.N)
 
+/// The mean of row position i: c_i + P_i / N on a central pool (the correction P_i / N is the rounding residue of the
+/// two-pass mean, ~0), P_i / N on a raw one.
+let private poolMean (pool: PoolInfo) (i: int) : Expr =
+    match pool.Shifts with
+    | [] -> poolMoment pool [i]
+    | shifts -> addE (v shifts.[i]) (poolMoment pool [i])
+
 /// Emit the single-pass pool over a shared row list. `uniq` seeds binding names; `rows` = one slice expr per row position; `needed` =
 /// the multisets the caller's cells read (deduped/canonicalized). Returns decls + reader.
-let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
+///
+/// `center` makes it a CENTRAL pool: each row is first shifted by its own mean (two passes: one `reduce` per row for
+/// the mean, then the shared sweep over the centered rows). Raw power sums are the wrong coordinates in floating
+/// point -- at [1e8, 1e8+1, 1e8+2] the binary64 variance P_ii/N - (P_i/N)^2 is 2, not 2/3 -- while the sums about a
+/// shift that tracks the data carry a relative error independent of the mean's magnitude (the shifted-moment
+/// reduction, proofs/BladeShiftedMoments.v + proofs/reals/BladeShiftedRounding.v: any shift, a rounded mean included).
+let private poolDecls (span: Span) (uniq: string) (center: bool) (rows: Expr list)
     (needed: int list list) (n: float) : Located<Decl> list * PoolInfo =
     let mkDecl name value =
         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
     let rowName i = $"__ppl_row_{uniq}_{i}"
-    let rowDecls = rows |> List.mapi (fun i e -> mkDecl (rowName i) e)
+    let shiftName i = $"__ppl_c_{uniq}_{i}"
+    let rowDecls =
+        if center then
+            rows |> List.mapi (fun i e ->
+                [ mkDecl (shiftName i) (meanE e n)
+                  mkDecl (rowName i) (subE e (v (shiftName i))) ])
+            |> List.concat
+        else rows |> List.mapi (fun i e -> mkDecl (rowName i) e)
     let lName = $"__ppl_poolL_{uniq}"
     let lValue =
         match rows with
@@ -169,7 +194,8 @@ let private poolDecls (span: Span) (uniq: string) (rows: Expr list)
                                       Value = reduceAddE chain
                                       Mutability = BindLet }; Span = span }
     let names = sets |> List.map (fun s -> (s, pName s)) |> Map.ofList
-    (rowDecls @ [mkDecl lName lValue] @ kDecls @ [outDecl], { Names = names; N = n })
+    let shifts = if center then [ for i in 0 .. rows.Length - 1 -> shiftName i ] else []
+    (rowDecls @ [mkDecl lName lValue] @ kDecls @ [outDecl], { Names = names; N = n; Shifts = shifts })
 
 /// Row slices of a single-leading-axis array: A(0) .. A(d-1).
 let private rowSlices (aName: string) (d: int) : Expr list =
@@ -177,6 +203,7 @@ let private rowSlices (aName: string) (d: int) : Expr list =
 
 /// The order-r cumulant cell at `labels`: Sum over set partitions pi of [r]: (-1)^(|pi|-1)(|pi|-1)! * Prod_B E[Prod x_B].
 let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
+    if r = 1 then poolMean pool labels.[0] else
     let terms =
         setPartitions r |> List.map (fun p ->
             let b = p.Length
@@ -357,6 +384,8 @@ type private Ctx = {
     Indep: Set<string * string>
     /// Single-array pools already emitted this module (source array name -> handle); later formers over the same array reuse the sweep.
     Pools: Map<string, PoolInfo> ref
+    /// CENTRAL pools (rows shifted by their means), same caching; the central formers read these.
+    CentralPools: Map<string, PoolInfo> ref
     /// Pre-scanned maximal multiset size each source array needs across all its formers, so the first former emits one maximal pool.
     PoolMax: Map<string, int>
     /// Pool-path former outputs that are FLAT lex SymIdx<2, d>-shaped tensors (binding name -> variable-axis extent d); consumers
@@ -373,8 +402,21 @@ let private acquirePool (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: flo
     | None ->
         let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
         let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
-        let (pd, pool) = poolDecls span aName (rowSlices aName d) needed n
+        let (pd, pool) = poolDecls span aName false (rowSlices aName d) needed n
         ctx.Pools.Value <- Map.add aName pool ctx.Pools.Value
+        (pd, pool)
+
+/// The CENTRAL counterpart of `acquirePool` (rows shifted by their means, see `poolDecls`): the pool every central
+/// former reads -- comoments, cumulants, mstate, free cumulants. Raw `moments` keep the raw pool.
+let private acquireCentralPool (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: float) (selfMax: int)
+    : Located<Decl> list * PoolInfo =
+    match Map.tryFind aName ctx.CentralPools.Value with
+    | Some pool -> ([], pool)
+    | None ->
+        let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
+        let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
+        let (pd, pool) = poolDecls span $"{aName}_c" true (rowSlices aName d) needed n
+        ctx.CentralPools.Value <- Map.add aName pool ctx.CentralPools.Value
         (pd, pool)
 
 let private indepKey (a: string) (b: string) = if a <= b then (a, b) else (b, a)
@@ -427,12 +469,18 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
     | _ ->
         Error "moments expects moments(A, k): an annotated module-level array and a static order"
 
-/// Central pair kernel body: E[ab] - ma*mb, spelled over reduce/prodsum (both proven kernel-position primitives).
+/// Central pair kernel body, TWO-PASS: center each fiber by its mean, then E[ya yb] - E[ya] E[yb] over the centered
+/// fibers (the second term is the rounding residue of the mean, ~0, kept so the formula stays exact algebra).
+/// The one-pass E[ab] - ma*mb it replaces cancels catastrophically when the mean dwarfs the spread (see `poolDecls`).
+/// Spelled over reduce/prodsum (both proven kernel-position primitives).
 let private centralPairBody (n: float) =
     syn (ExprBlock (
         [ sLet "__ma" (meanE (v "__x1") n)
-          sLet "__mb" (meanE (v "__x2") n) ],
-        Some (subE (divE (prodsumE [v "__x1"; v "__x2"]) (fLit n)) (mulE (v "__ma") (v "__mb")))))
+          sLet "__mb" (meanE (v "__x2") n)
+          sLet "__ya" (subE (v "__x1") (v "__ma"))
+          sLet "__yb" (subE (v "__x2") (v "__mb")) ],
+        Some (subE (divE (prodsumE [v "__ya"; v "__yb"]) (fLit n))
+                   (mulE (meanE (v "__ya") n) (meanE (v "__yb") n)))))
 
 /// comoments(A, 2) same-array | comoments(X, Y) cross-block.
 let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
@@ -450,7 +498,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
                     // Single-pass path: C_ij = P_ij/N - (P_i/N)(P_j/N) off the shared pool.
                     let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
-                    let (pd, pool) = acquirePool ctx span aName d (float n) 2
+                    let (pd, pool) = acquireCentralPool ctx span aName d (float n) 2
                     ctx.FlatDims.Value <- Map.add outName d ctx.FlatDims.Value
                     let cells =
                         [ for labels in canonicalTuples d 2 ->
@@ -498,7 +546,7 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                         [ for i in 0 .. dx - 1 -> [i] ]
                         @ [ for j in 0 .. dy - 1 -> [dx + j] ]
                         @ [ for i in 0 .. dx - 1 do for j in 0 .. dy - 1 -> [i; dx + j] ]
-                    let (pd, pool) = poolDecls span outName rows needed (float nX)
+                    let (pd, pool) = poolDecls span outName true rows needed (float nX)
                     let cells =
                         arrLitE
                             [ for i in 0 .. dx - 1 ->
@@ -521,17 +569,26 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
 /// Order-r cumulant kernel over fiber params __x1..__xr:
 ///   kappa_r = Sum over set partitions pi of [r]: (-1)^(|pi|-1) (|pi|-1)! * Prod over blocks B: E[Prod_{i in B} x_i]
 /// Each distinct block's raw moment E[Prod x_B] = prodsum(x_B)/N is bound once (2^r - 1 lets), shared across Bell(r) terms.
+///
+/// TWO-PASS: each fiber is centered by its own mean first (`__c<i>`, `__y<i>`), and the block moments are taken over the
+/// centered fibers -- cumulants of order >= 2 are shift-invariant, so the partition sum is unchanged algebraically while
+/// the raw-moment cancellation (see `poolDecls`) is gone. Order 1 is the mean itself, `__c1 + E[__y1]`.
 let private cumulantKernelBody (r: int) (n: float) : Expr =
     let blockName (s: int list) = "__m" + (s |> List.map (fun i -> string (i + 1)) |> String.concat "")
+    let centering =
+        [ for i in 1 .. r do
+            yield sLet $"__c{i}" (meanE (v $"__x{i}") n)
+            yield sLet $"__y{i}" (subE (v $"__x{i}") (v $"__c{i}")) ]
     let lets =
         nonemptySubsets r |> List.map (fun s ->
-            sLet (blockName s) (divE (prodsumE (s |> List.map (fun i -> v $"__x{i + 1}"))) (fLit n)))
+            sLet (blockName s) (divE (prodsumE (s |> List.map (fun i -> v $"__y{i + 1}"))) (fLit n)))
     let terms =
         setPartitions r |> List.map (fun p ->
             let b = p.Length
             let w = (if b % 2 = 1 then 1.0 else -1.0) * factorial (b - 1)
             p |> List.fold (fun acc blk -> mulE acc (v (blockName (List.sort blk)))) (fLit w))
-    syn (ExprBlock (lets, Some (terms |> List.reduce addE)))
+    let result = if r = 1 then addE (v "__c1") (v (blockName [0])) else terms |> List.reduce addE
+    syn (ExprBlock (centering @ lets, Some result))
 
 /// The proven three-decl former pipeline over ONE array: L = method_for(A xk); kernel = lambda over annotated fiber params
 /// (comm for k >= 2); out = L <@> kernel |> compute.
@@ -568,7 +625,7 @@ let private elabCumulants (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
                 // Single-pass path: the shared pool sweep (one sample-axis traversal instead of one prodsum loop per block per cell);
                 // kappa_r cells as straight-line partition sums over pool reads.
                 let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
-                let (pd, pool) = acquirePool ctx span aName d (float n) r
+                let (pd, pool) = acquireCentralPool ctx span aName d (float n) r
                 let cells =
                     [ for labels in canonicalTuples d r ->
                         cumulantCellExpr pool (List.toArray labels) r ]
@@ -818,11 +875,13 @@ let private elabMState (ctx: Ctx) (span: Span) (sName: string) (args: Expr list)
                     // Single-pass path: the shared pool sweep, then mean and every central comoment SUM as straight-line cells:
                     // M_S = Sum_{K subset S} (-1)^|K| Prod_{i in K} mu_i * P_{S\K}, P_empty = n. State components are FLAT lex
                     // ArrayLits (Packed = false), same representation merge outputs carry.
-                    let (pd, pool) = acquirePool ctx span aName d (float n) r
+                    // CENTRAL pool: M_S is shift-invariant, so the binomial expansion below runs on the shifted sums (mu_i
+                    // there is the ~0 residue P_i/N), and the mean carries the shift back.
+                    let (pd, pool) = acquireCentralPool ctx span aName d (float n) r
                     let meanN = mstateComponent sName "mean"
                     let mN p = mstateComponent sName $"m{p}"
                     let mkDecl name value = { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-                    let meanDecl = mkDecl meanN (arrLitE [ for i in 0 .. d - 1 -> poolMoment pool [i] ])
+                    let meanDecl = mkDecl meanN (arrLitE [ for i in 0 .. d - 1 -> poolMean pool i ])
                     let mDecls =
                         [ for p in 2 .. r ->
                             let cells =
@@ -1034,7 +1093,7 @@ let private elabMixedCumulants (ctx: Ctx) (span: Span) (outName: string) (bindin
                         cellLabels |> List.collect (fun labArr ->
                             setPartitions r |> List.collect (fun pt ->
                                 pt |> List.map (fun blk -> blk |> List.map (fun pos -> labArr.[pos]) |> List.sort)))
-                    let (pd, pool) = poolDecls span outName rows needed (float nX)
+                    let (pd, pool) = poolDecls span outName true rows needed (float nX)
                     let cells = [ for labArr in cellLabels -> cumulantCellExpr pool labArr r ]
                     Ok (pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ])
                 | _ ->
@@ -1800,10 +1859,12 @@ let private elabDistNegativity (ctx: Ctx) (span: Span) (binding: Binding)
 //                      formers read symbolically (the dist_map-lambda
 //                      precedent); no tower materializes and no order
 //                      argument is taken.
-// Log-densities are the ON-SUPPORT closed forms -- no branching, because an
-// if/match would leave the AD-able subset (Grad.fs:27-50); x outside the
-// support is the caller's contract (uniform's logpdf is the in-support
-// constant -log(b-a)). loglik emits a scalar accumulation loop
+// Log-densities are the closed forms plus a SUPPORT term: -inf outside the
+// family's support (the oracle's convention, oracles/ppl/Density.fs), exact
+// on it, and 0 * log 0 = 0 at the boundaries (xlogy). No branching -- an
+// if/match would leave the AD-able subset (Grad.fs:27-50) -- so the support
+// is carried by `guard` (see supportTermE / onSupportE / xlogyE below),
+// which both AD sweeps differentiate. loglik emits a scalar accumulation loop
 // (`let mut` + for + `+=`), never a combinator pipeline, so a later phase
 // can hand the body to ad.grad unchanged.
 
@@ -1947,6 +2008,54 @@ let private leE a b = syn (ExprBinOp (Elementwise, OpLe, a, b))
 let private gtE a b = syn (ExprBinOp (Elementwise, OpGt, a, b))
 let private ifE c t f = syn (ExprIf (c, t, f))
 
+// Support handling for the log-densities, BRANCH-FREE on purpose: `guard(c,
+// e)` (c ? e : 0) is inside both AD sweeps (a linear form -- the cotangent
+// and the tangent are gated by the same condition), where if/match are not.
+// Conditions are comparisons, so no gradient ever flows through them.
+let private geE a b = syn (ExprBinOp (Elementwise, OpGe, a, b))
+let private eqE a b = syn (ExprBinOp (Elementwise, OpEq, a, b))
+let private andE a b = syn (ExprBinOp (Elementwise, OpAnd, a, b))
+let private orE a b = syn (ExprBinOp (Elementwise, OpOr, a, b))
+let private notE a = syn (ExprUnaryOp (OpNot, a))
+let private guardE c e = syn (ExprGuard (c, e))
+
+/// Exactly 0.0 on the support, -inf (log 0) off it. The -inf is a literal's
+/// log, so neither sweep carries anything out of it.
+let private supportTermE (ok: Expr) : Expr = guardE (notE ok) (logE (fLit 0.0))
+
+/// x itself on the support (x + 0.0: the value, and d/dx = 1, unchanged),
+/// the in-support point `safe` off it -- so the closed form stays FINITE
+/// off the support (no log of a negative, no lgamma pole panic, no
+/// +inf - inf) and the support term alone carries the -inf.
+let private onSupportE (ok: Expr) (x: Expr) (safe: float) : Expr =
+    addE (guardE ok x) (guardE (notE ok) (fLit safe))
+
+/// xlogy(a, y) = a * log(y), with 0 * log 0 = 0 (the limit, and what makes
+/// bernoulli(1) at 1 and poisson(0) at 0 exact rather than NaN). When
+/// a <> 0 the value is exactly a * log(y); when a = 0 the log reads y + 1,
+/// which is finite for y >= 0, so neither the value nor d/dy is 0 * inf.
+let private xlogyE (a: Expr) (y: Expr) : Expr =
+    mulE a (logE (addE y (guardE (eqE a (fLit 0.0)) (fLit 1.0))))
+
+/// The support of each family, as a predicate over x -- the oracle's
+/// convention (oracles/ppl/Density.fs, ORACLE_PINS.md): a point outside the
+/// support, or on a boundary where the density is undefined, is -inf.
+/// Returns the predicate and an in-support safe point for `onSupportE`
+/// (None: the family's support is the whole line). The continuous
+/// predicates are written NEGATED, as the oracle writes them (`if x < 0 then
+/// -inf else ...`), so a NaN x counts as on the support and propagates
+/// through the closed form as NaN instead of reading as an ordinary -inf.
+let private familySupport (fam: string) (p: int -> Expr) (x: Expr) : (Expr * float) option =
+    match fam with
+    | "gaussian" -> None
+    | "exponential" -> Some (notE (ltE x (fLit 0.0)), 0.0)
+    | "uniform" -> Some (notE (orE (ltE x (p 0)) (gtE x (p 1))), 0.0)   // safe point unused
+    | "lognormal" | "gamma" -> Some (notE (leE x (fLit 0.0)), 1.0)
+    | "beta" -> Some (notE (orE (leE x (fLit 0.0)) (geE x (fLit 1.0))), 0.5)
+    | "poisson" -> Some (andE (geE x (fLit 0.0)) (eqE x (appE (v "floor") [x])), 0.0)
+    | "bernoulli" -> Some (orE (eqE x (fLit 0.0)) (eqE x (fLit 1.0)), 0.0)
+    | _ -> None
+
 /// Argument-position family recognition: `gaussian(mu, s2)` as a syntactic
 /// (tag, param exprs) -- the dist_map-lambda precedent. A user definition of
 /// the family's name shadows it (same rule as the formers), which makes the
@@ -1985,7 +2094,20 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
     let xName = $"__ppl_lp_{tok}_x"
     let pBinds = ps |> List.mapi (fun i e -> (pName i, e))
     let p i = v (pName i)
-    let x = v xName
+    // The closed forms read `x` = the evaluation point moved onto the
+    // support (onSupportE); the support term adds the -inf off it. On the
+    // support both are exact no-ops (x + 0.0, + 0.0), so in-support values
+    // and gradients are those of the bare closed form.
+    let support = familySupport fam p (v xName)
+    let xsName = $"__ppl_lp_{tok}_xs"
+    let supportBinds, x =
+        match support with
+        | Some (ok, safe) when fam <> "uniform" -> [ (xsName, onSupportE ok (v xName) safe) ], v xsName
+        | _ -> [], v xName
+    let withSupport (value: Expr) =
+        match support with
+        | Some (ok, _) -> addE value (supportTermE ok)
+        | None -> value
     let extra, value =
         match fam with
         | "gaussian" ->
@@ -1995,44 +2117,44 @@ let private logPdfParts (tok: string) (fam: string) (ps: Expr list) (xExpr: Expr
              subE (mulE (fLit (-0.5)) (log2piE (p 1)))
                   (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
         | "exponential" ->
-            // log(rate) - rate x
+            // log(rate) - rate x, support x >= 0
             ([], subE (appE (v "log") [p 0]) (mulE (p 0) x))
         | "uniform" ->
-            // the in-support constant -log(b - a)
+            // -log(b - a) on [a, b]
             ([], subE (fLit 0.0) (appE (v "log") [subE (p 1) (p 0)]))
         | "lognormal" ->
-            // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2)
+            // -log(x) - log(2 pi s2)/2 - (log(x) - mu)^2 / (2 s2), support x > 0
             let lxN = $"__ppl_lp_{tok}_lx"
             let dN = $"__ppl_lp_{tok}_d"
             ([ (lxN, appE (v "log") [x]); (dN, subE (v lxN) (p 0)) ],
              subE (subE (mulE (fLit (-0.5)) (log2piE (p 1))) (v lxN))
                   (divE (mulE (v dN) (v dN)) (mulE (fLit 2.0) (p 1))))
         | "gamma" ->
-            // (shape-1) log(x) - rate x + shape log(rate) - lgamma(shape)
+            // (shape-1) log(x) - rate x + shape log(rate) - lgamma(shape), support x > 0
             ([], subE (addE (subE (mulE (subE (p 0) (fLit 1.0)) (logE x))
                                  (mulE (p 1) x))
                            (mulE (p 0) (logE (p 1))))
                       (lgammaE (p 0)))
         | "poisson" ->
-            // k log(lam) - lam - lgamma(k + 1)
-            ([], subE (subE (mulE x (logE (p 0))) (p 0))
+            // xlogy(k, lam) - lam - lgamma(k + 1), support k in {0, 1, 2, ...}
+            ([], subE (subE (xlogyE x (p 0)) (p 0))
                       (lgammaE (addE x (fLit 1.0))))
         | "beta" ->
-            // (a-1) log(x) + (b-1) log(1-x) - (lgamma a + lgamma b - lgamma(a+b))
+            // (a-1) log(x) + (b-1) log(1-x) - (lgamma a + lgamma b - lgamma(a+b)), support 0 < x < 1
             ([], subE (addE (mulE (subE (p 0) (fLit 1.0)) (logE x))
                             (mulE (subE (p 1) (fLit 1.0)) (logE (subE (fLit 1.0) x))))
                       (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
                             (lgammaE (addE (p 0) (p 1)))))
         | "bernoulli" ->
-            // x log(p) + (1-x) log(1-p)
-            ([], addE (mulE x (logE (p 0)))
-                      (mulE (subE (fLit 1.0) x) (logE (subE (fLit 1.0) (p 0)))))
+            // xlogy(x, p) + xlogy(1-x, 1-p), support x in {0, 1}
+            ([], addE (xlogyE x (p 0))
+                      (xlogyE (subE (fLit 1.0) x) (subE (fLit 1.0) (p 0))))
         | _ -> ([], fLit 0.0)   // unreachable: checkDensityFamily gates
-    (pBinds @ [ (xName, xExpr) ] @ extra, value)
+    (pBinds @ [ (xName, xExpr) ] @ supportBinds @ extra, withSupport value)
 
 /// logpdf(family(params), x): the scalar log-density at x -- closed-form
-/// arithmetic over once-bound parameters, ON-SUPPORT by design (no branching;
-/// see the section comment).
+/// arithmetic over once-bound parameters, -inf off the family's support
+/// (branch-free; see the section comment).
 let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
     match args with
@@ -2050,9 +2172,11 @@ let private elabLogPdf (active: string -> bool) (ctx: Ctx) (span: Span) (outName
 /// (its last -- and only -- declared index; the shape comes from the
 /// declared annotation or the computed method_for shape, never from a
 /// literal). Emitted as an AD-able scalar accumulation loop with the
-/// per-family constants hoisted out of the loop; uniform needs no loop at
-/// all (the on-support sum is -n log(b-a)). Leading variable axes are
-/// refused: a univariate family has no per-coordinate loglik.
+/// per-family constants hoisted out of the loop and one more accumulator
+/// for the per-sample support term (so a single off-support sample makes
+/// the sum -inf; uniform's loop reads the data for that term alone).
+/// Leading variable axes are refused: a univariate family has no
+/// per-coordinate loglik.
 let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (aName: string)
     : Result<(string * Expr) list * Expr, string> =
         match Map.tryFind aName ctx.Arrays with
@@ -2084,28 +2208,53 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
                             [ for i in 0 .. accs - 1 -> sMut (accN i) (fLit 0.0) ]
                             @ [ StmtForIn (iN, syn (ExprDotDot (iLit 0, iLit n)), body) ],
                             Some final))
+                // Per-sample support (logPdfParts' convention): the sample is
+                // moved onto the support before the closed-form sums read it,
+                // and one more accumulator collects the support term, so a
+                // single off-support sample makes the sum -inf. On the
+                // support every added term is an exact 0.0.
+                let xN = $"__ppl_ll_{tok}_x"
+                let xsN = $"__ppl_ll_{tok}_xs"
+                let support = familySupport fam p (v xN)
+                let x =
+                    match support with
+                    | Some _ when fam <> "uniform" -> v xsN
+                    | _ -> aRead
+                let loopS (accs: int) (body: Stmt list) (final: Expr) : Expr =
+                    match support with
+                    | None -> loop accs body final
+                    | Some (ok, safe) ->
+                        let pre =
+                            [ sLet xN aRead ]
+                            @ (if fam = "uniform" then [] else [ sLet xsN (onSupportE ok (v xN) safe) ])
+                        loop (accs + 1) (pre @ body @ [ accAdd accs (supportTermE ok) ])
+                             (addE final (v (accN accs)))
+                // xlogy over a SUM: s * log(y) with 0 * log 0 = 0 (see xlogyE).
+                let logTimes (y: Expr) (s: Expr) =
+                    mulE (logE (addE y (guardE (eqE s (fLit 0.0)) (fLit 1.0)))) s
                 let value =
                     match fam with
                     | "gaussian" ->
                         // -n/2 log(2 pi s2) - sum (x_i - mu)^2 / (2 s2)
                         let dN = $"__ppl_ll_{tok}_d"
-                        loop 1
-                             [ sLet dN (subE aRead (p 0)); accAdd 0 (mulE (v dN) (v dN)) ]
+                        loopS 1
+                             [ sLet dN (subE x (p 0)); accAdd 0 (mulE (v dN) (v dN)) ]
                              (subE (mulE (fLit (-nF / 2.0)) (log2piE (p 1)))
                                    (divE (v (accN 0)) (mulE (fLit 2.0) (p 1))))
                     | "exponential" ->
                         // n log(rate) - rate sum x_i
-                        loop 1 [ accAdd 0 aRead ]
+                        loopS 1 [ accAdd 0 x ]
                              (subE (mulE (fLit nF) (appE (v "log") [p 0])) (mulE (p 0) (v (accN 0))))
                     | "uniform" ->
-                        // the in-support constant: -n log(b - a); the data drops out
-                        mulE (fLit (-nF)) (appE (v "log") [subE (p 1) (p 0)])
+                        // -n log(b - a) on [a, b]; the data enter only through the support term
+                        loopS 0 []
+                             (mulE (fLit (-nF)) (appE (v "log") [subE (p 1) (p 0)]))
                     | "lognormal" ->
                         // -n/2 log(2 pi s2) - sum log x_i - sum (log x_i - mu)^2 / (2 s2)
                         let lxN = $"__ppl_ll_{tok}_lx"
                         let dN = $"__ppl_ll_{tok}_d"
-                        loop 2
-                             [ sLet lxN (appE (v "log") [aRead])
+                        loopS 2
+                             [ sLet lxN (appE (v "log") [x])
                                accAdd 0 (v lxN)
                                sLet dN (subE (v lxN) (p 0))
                                accAdd 1 (mulE (v dN) (v dN)) ]
@@ -2113,33 +2262,31 @@ let private logLikParts (ctx: Ctx) (tok: string) (fam: string) (ps: Expr list) (
                                    (divE (v (accN 1)) (mulE (fLit 2.0) (p 1))))
                     | "gamma" ->
                         // (shape-1) sum log x_i - rate sum x_i + n (shape log rate - lgamma shape)
-                        loop 2 [ accAdd 0 (logE aRead); accAdd 1 aRead ]
+                        loopS 2 [ accAdd 0 (logE x); accAdd 1 x ]
                              (addE (subE (mulE (subE (p 0) (fLit 1.0)) (v (accN 0)))
                                          (mulE (p 1) (v (accN 1))))
                                    (mulE (fLit nF) (subE (mulE (p 0) (logE (p 1))) (lgammaE (p 0)))))
                     | "poisson" ->
-                        // log(lam) sum k_i - n lam - sum lgamma(k_i + 1); the
+                        // xlogy(sum k_i, lam) - n lam - sum lgamma(k_i + 1); the
                         // lgamma sum stays in the loop (k_i-dependent).
-                        loop 2 [ accAdd 0 aRead; accAdd 1 (lgammaE (addE aRead (fLit 1.0))) ]
-                             (subE (subE (mulE (logE (p 0)) (v (accN 0)))
+                        loopS 2 [ accAdd 0 x; accAdd 1 (lgammaE (addE x (fLit 1.0))) ]
+                             (subE (subE (logTimes (p 0) (v (accN 0)))
                                          (mulE (fLit nF) (p 0)))
                                    (v (accN 1)))
                     | "beta" ->
                         // (a-1) sum log x_i + (b-1) sum log(1-x_i) - n log B(a, b)
-                        loop 2 [ accAdd 0 (logE aRead); accAdd 1 (logE (subE (fLit 1.0) aRead)) ]
+                        loopS 2 [ accAdd 0 (logE x); accAdd 1 (logE (subE (fLit 1.0) x)) ]
                              (subE (addE (mulE (subE (p 0) (fLit 1.0)) (v (accN 0)))
                                          (mulE (subE (p 1) (fLit 1.0)) (v (accN 1))))
                                    (mulE (fLit nF) (subE (addE (lgammaE (p 0)) (lgammaE (p 1)))
                                                          (lgammaE (addE (p 0) (p 1))))))
                     | "bernoulli" ->
-                        // log(p) sum x_i + log(1-p) (n - sum x_i)
-                        loop 1 [ accAdd 0 aRead ]
-                             (addE (mulE (logE (p 0)) (v (accN 0)))
-                                   (mulE (logE (subE (fLit 1.0) (p 0))) (subE (fLit nF) (v (accN 0)))))
+                        // xlogy(sum x_i, p) + xlogy(n - sum x_i, 1 - p)
+                        loopS 1 [ accAdd 0 x ]
+                             (addE (logTimes (p 0) (v (accN 0)))
+                                   (logTimes (subE (fLit 1.0) (p 0)) (subE (fLit nF) (v (accN 0)))))
                     | _ -> fLit 0.0   // unreachable: checkDensityFamily gates
-                // uniform reads no data: no alias, or it would print as an unused copy.
-                let srcBinds = if fam = "uniform" then [] else [ (srcN, v aName) ]
-                Ok (pBinds @ srcBinds, value)
+                Ok (pBinds @ [ (srcN, v aName) ], value)
 
 let private elabLogLik (active: string -> bool) (ctx: Ctx) (span: Span) (outName: string) (binding: Binding) (args: Expr list)
     : Result<Located<Decl> list, string> =
@@ -2837,7 +2984,10 @@ let private elabDistQuantileApprox (ctx: Ctx) (span: Span) (outName: string) (bi
 /// Static sample-count resolution shared by sample/dist_sample_approx.
 let private staticSampleCount (ctx: Ctx) (former: string) (nExpr: Expr) : Result<int, string> =
     match evalExpr ctx.Statics maxSteps nExpr with
-    | Ok (SVInt x) when x >= 1L -> Ok (int x)
+    | Ok (SVInt x) when x >= 1L && x <= int64 System.Int32.MaxValue -> Ok (int x)
+    | Ok (SVInt x) when x >= 1L ->
+        // Narrowing unchecked would silently draw x mod 2^32 samples.
+        Error $"{former}: the sample count {x} exceeds the largest supported rand fill extent ({System.Int32.MaxValue})"
     | Ok (SVInt x) -> Error $"{former}: the sample count must be >= 1 (got {x})"
     | _ -> Error $"{former}: the sample count must be a compile-time integer (a literal, `let static`, or static-function call) -- shapes are static everywhere in Blade; only the key and distribution parameters may be runtime values"
 
@@ -3699,18 +3849,20 @@ let private elabFreeCumulants (ctx: Ctx) (span: Span) (binding: Binding) (args: 
                             else Error "free_cumulants: destructure into plain names"
                         | _ -> Error $"free_cumulants: destructure the result -- `let (f1, ..., f{r}) = free_cumulants({aName}, {r})`"
                     compNames |> Result.map (fun fkNames ->
-                        // Raw moments mu_S = P_S / N from the shared pool sweep.
-                        let (pd, pool) = acquirePool ctx span aName d (float n) r
+                        // Moments of the CENTERED rows from the central pool sweep: free cumulants of order >= 2 are
+                        // shift-invariant, so the recursion runs in shifted coordinates, where the order-1 free cumulant is
+                        // the ~0 residue P_i/N (read directly below); the fk_1 OUTPUT is the true mean, shift added back.
+                        let (pd, pool) = acquireCentralPool ctx span aName d (float n) r
                         let muDecls = pd
                         let muRead (labels: int list) = poolMoment pool labels
-                        // fk tensors ascending; fk_1 = mu_1; flat lex reads on earlier fk outputs.
+                        // fk tensors ascending; flat lex reads on earlier fk outputs; order-1 blocks read the shifted mean.
                         let fkRead (kIdx: int) (labels: int list) =
-                            if labels.Length = 1 then appE (v fkNames.[0]) (labels |> List.map iLit)
+                            if labels.Length = 1 then poolMoment pool labels
                             else appE (v fkNames.[labels.Length - 1]) [iLit (lexOffsetOf d labels.Length labels)]
                         let fkDecl p nm =
                             if p = 1 then
                                 { Value = DeclLet { Pattern = pvar nm; Type = None
-                                                    Value = arrLitE [ for i in 0 .. d - 1 -> poolMoment pool [i] ]
+                                                    Value = arrLitE [ for i in 0 .. d - 1 -> poolMean pool i ]
                                                     Mutability = BindLet }; Span = span }
                             else
                                 let cells =
@@ -4251,7 +4403,7 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                 | _ -> None)
             |> List.fold (fun m (a, k) -> Map.add a (max k (defaultArg (Map.tryFind a m) 0)) m) Map.empty
         let ctx = { Arrays = arrays; Aliases = aliases; Statics = statics; Indep = indep
-                    Pools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
+                    Pools = ref Map.empty; CentralPools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
         // Pass 1.5: expression-position logpdf/loglik inside top-level
         // function bodies (the density-form model layer, plan section 4) --
         // each site becomes a block of statement lets, so `function

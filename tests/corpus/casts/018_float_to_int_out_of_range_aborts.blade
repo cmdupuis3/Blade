@@ -1,0 +1,9 @@
+// TEST: Float To Int Out Of Range Aborts (aborts)
+// ============================================================================
+// Int64(floor(1e30)) has no Int64 answer: BL8014 in every lane. It printed
+// 9223372036854775807 interpreted (saturation) and -9223372036854775808
+// compiled (x86's sentinel). docs/formalism.md section 2.4.
+
+let xs: Array<Float64 like Idx<2>> = [1.0e30, 0.0]
+let big = Int64(floor(reduce(xs, (+))))
+// ABORT: error[BL8014]

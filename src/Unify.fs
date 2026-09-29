@@ -28,6 +28,18 @@ type TypeError =
     /// compatible-but-distinct signatures become a clause set; everything
     /// else stays refused here.
     | DuplicateFunctionDecl of name: string * firstSite: string
+    /// BL2009's other arms: a second top-level declaration of a name the
+    /// same NAMESPACE already holds -- a `let`/`static` value (lets and
+    /// functions share one namespace), a type (`type`/`struct`/sum type), or
+    /// a `Unit` -- in the same module, or a type name another module of the
+    /// program already declares. A top-level re-`let` used to pass the checker
+    /// and then die in g++ as a redeclaration (the interpreter meanwhile
+    /// SHADOWED it, so the two lanes disagreed on what the program meant); a
+    /// duplicate `type`/`struct` silently let the last one win. `kind` names
+    /// the namespace ("value", "type", "unit"); `firstSite` is preformatted.
+    /// `crossModule` carries the module that declared the name first when the
+    /// clash spans modules (type identity is not module-qualified yet).
+    | DuplicateDecl of kind: string * name: string * firstSite: string * crossModule: string option
     | TypeMismatch of expected: IRType * actual: IRType
     | ArityMismatch of expected: int * actual: int
     /// BL3002, kernel-apply seam. The WIDTH SCHEMA did not cover the pack
@@ -57,6 +69,11 @@ type TypeError =
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType
+    /// BL3004 too: a constructor pattern naming no known variant (a typo
+    /// like `| Sqaure(w)`), or a Capitalized bare binder in a match over a
+    /// variant type -- which would silently bind a catch-all variable.
+    /// `message` is the full rendered text (known variants, did-you-mean).
+    | UnknownConstructorPattern of tag: string * message: string
     /// BL2007. A provider's NATIVE library (libnetcdf) failed to load while
     /// reading store metadata at a `let store = alias.load(path)` site.
     /// Distinct from a missing/unreadable STORE (those keep checkDecl's
@@ -88,6 +105,15 @@ type TypeError =
     // Index-type violations (BL4003)
     | IndexTagMismatchNamed of expected: string * actual: string
     | IndexTagMismatchAnon of expected: string
+    /// A subscript whose value is not an index at all (Float, Bool, Complex,
+    /// String): formalism 3.10, the subscript judgment's class rule.
+    | SubscriptNotIntegral of actual: string
+    /// An integer literal subscript (or `(lit : I)`) outside the static
+    /// extent it indexes -- known at compile time, so refused there.
+    | SubscriptOutOfRange of value: int64 * extent: int64 option * slot: string
+    /// A TUPLE subscript into a positional slot (a SymIdx over a compound
+    /// S-tuple, say): such slots index FLAT; tuples are SparseIdx keys.
+    | SubscriptTupleForm of slot: string
     | CrossNominalIndexArith of left: string * right: string
     | CrossAnonIndexArith of left: int * right: int
     | IndexTypeArithForbidden of name: string
@@ -204,6 +230,21 @@ type TypeError =
     /// (buildApplyInfo), which is why `pos` says "argument"/"parameter"
     /// rather than naming a call form.
     | ExtentArgMismatch of pos: int * dim: int * expected: int64 * actual: int64
+    /// BL3016 (same family): the ASCRIPTION twin of ExtentArgMismatch -- a
+    /// value whose literal extent disagrees with the literal extent of the
+    /// type it is ascribed to (`let`, an annotated return, a match arm or
+    /// block final checked against an expected type), or two `if`/`match`
+    /// branches disagreeing with each other. `site` names which. The shared
+    /// predicate is TypeCheckSupport.staticExtentClash.
+    | ExtentAscribeMismatch of site: string * dim: int * expected: int64 * actual: int64
+    /// BL2001. `from M import x` where module M exports no `x`. `exported`
+    /// is a short list of names M does export, for the message.
+    | ImportNameMissing of modul: string * name: string * exported: string
+    /// BL4005 (the aliasing twin of MutArgNotPassable): one root binding is
+    /// passed to a `mut` parameter AND to another parameter of the same call,
+    /// so the callee's writes through one alias are visible through the other
+    /// mid-call -- the Fortran no-alias rule.
+    | MutArgAliased of func: string * mutPos: int * otherPos: int * name: string
     /// BL3016 (same family as ExtentArgMismatch, the halo twin): a kernel body
     /// reads an array through a halo window (`A(w(o))`), the halo's declared
     /// inner extent and the array's extent on that slot are BOTH compile-time
@@ -364,6 +405,10 @@ type TypeError =
     | ChainOpBadKernel of rightDesc: string
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | CommContradictsBody of param1: string * param2: string
+    // `where comm(p1, p2)` on a body the checker DISPROVES by a concrete
+    // counterexample (Deduce.witnessSwapAsymmetry): the witness is rendered
+    // "f(a, b) = u but f(b, a) = v". Same code as CommContradictsBody (BL4013).
+    | CommContradictsWitness of param1: string * param2: string * witness: string
     | AntisymmContradictsBody of param1: string * param2: string
     // The Hermitian third of the pair-swap contradiction family: the body
     // provably CONJUGATES under the swap (f(y,x) = conj(f(x,y)), deduced
@@ -557,11 +602,25 @@ type Subst() =
     /// binds, validated when the var meets a concrete type (unify).
     /// Parallels arityConstraints, the EXACT-rank pin `T^k` uses.
     let mutable rankLowerBounds : Map<int, int> = Map.empty
+    /// Inference vars that appeared in SUBSCRIPT position (formalism 3.10):
+    /// an index is an integer, so if nothing else pins such a var, zonk
+    /// defaults it to Int64 instead of the generic Float64 default (which
+    /// handed g++ a `double` subscript). A DEFAULT, not a binding: the var
+    /// still unifies with a `Nat<I>` iteration type later, and the post-zonk
+    /// subscript sweep judges whatever it finally became. Travels on
+    /// var-to-var binds like the polymorphic mark.
+    let mutable indexDefaults : Set<int> = Set.empty
 
     member _.Fresh() =
         let id = nextId
         nextId <- nextId + 1
         IRTInfer id
+
+    /// The id the next `Fresh()` will mint. Ids are monotonic, so a pair of
+    /// reads brackets exactly the variables minted in between -- which is how
+    /// a `function` declaration's own signature variables are told apart from
+    /// variables it shares with its environment (TypeEnv.FuncSigVarRange).
+    member _.NextId = nextId
 
     member _.Bind(id, ty) =
         // POLYMORPHIC MARK PROPAGATION (var-to-var only). The mark says "zonk
@@ -575,7 +634,17 @@ type Subst() =
          | IRTInfer id2 when Set.contains id polymorphicIds ->
              polymorphicIds <- Set.add id2 polymorphicIds
          | _ -> ())
+        (match ty with
+         | IRTInfer id2 when Set.contains id indexDefaults ->
+             indexDefaults <- Set.add id2 indexDefaults
+         | _ -> ())
         map <- Map.add id ty map
+
+    member _.MarkIndexDefault(id: int) =
+        indexDefaults <- Set.add id indexDefaults
+
+    member _.IsIndexDefault(id: int) : bool =
+        Set.contains id indexDefaults
 
     member _.TryFind(id) =
         Map.tryFind id map
@@ -908,6 +977,29 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     | _ ->
         i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone
 
+/// The context `unify` stamps on a unit mismatch it finds itself. Unify is a
+/// pure type relation with no idea which seam called it (a call argument, an
+/// `if`'s branches, a match arm, an annotation), so it names none: the
+/// message reads "Unit mismatch: a vs b" unless the seam relabels it
+/// (`withUnifyContext`). It used to say "in assignment" for every one of them.
+let unifyUnitContext = ""
+
+/// Relabel a unit mismatch `unify` found (see unifyUnitContext) with the
+/// seam's own context; every other result passes through unchanged.
+let withUnifyContext (context: string) (r: TypeResult<'a>) : TypeResult<'a> =
+    match r with
+    | Error (UnitMismatch (c, l, rr)) when c = unifyUnitContext -> Error (UnitMismatch (context, l, rr))
+    | _ -> r
+
+/// Swap the two sides of a mismatch `unify` reported: unify names its FIRST
+/// argument as the expectation, so a seam that had to unify in the other
+/// order (the new value first) flips the report back to expected / got.
+let flipMismatch (r: TypeResult<'a>) : TypeResult<'a> =
+    match r with
+    | Error (TypeMismatch (a, b)) -> Error (TypeMismatch (b, a))
+    | Error (UnitMismatch (c, l, rr)) -> Error (UnitMismatch (c, rr, l))
+    | _ -> r
+
 let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     let orig1 = t1
     let orig2 = t2
@@ -920,6 +1012,19 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
     else
     match t1, t2 with
     | IRTInfer id1, IRTInfer id2 when id1 = id2 -> Ok ()
+    // A var against a UNIT WRAPPER OF ITSELF. The unit-annotated arm below
+    // unifies `IRTUnitAnnotated (inner, _)` with anything by dropping the
+    // unit (units are judged by the unit rules, not by unify), so this pair
+    // is `unify a a` -- trivially true. Reaching the occurs check instead
+    // reported "Infinite type detected" for `row / reduce(row, (+))` in a
+    // `T^1 -> T^1` function used as a kernel: the quotient's element is the
+    // fold's element wrapped in the division's (dimensionless) unit, and the
+    // eta wrapper's signature pin met the bare element var.
+    | IRTInfer id, IRTUnitAnnotated (inner, _)
+    | IRTUnitAnnotated (inner, _), IRTInfer id
+        when (match subst.Resolve inner |> stripTagAnnotation with
+              | IRTInfer id2 -> id2 = id
+              | _ -> false) -> Ok ()
     | IRTInfer id, ty | ty, IRTInfer id ->
         if occursIn id ty then Error (Other "Infinite type detected")
         else
@@ -1165,7 +1270,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
         // at least one side structural.)
         unify subst inner1 inner2 |> Result.bind (fun () ->
             if not (unitCompatible u1 u2) then
-                Error (UnitMismatch ("assignment", ppUnitSig u1, ppUnitSig u2))
+                Error (UnitMismatch (unifyUnitContext, ppUnitSig u1, ppUnitSig u2))
             // Same dims, different MAGNITUDE (`day` into a `second` slot).
             // Convertible, but unify is a pure type-level relation with no
             // expression in hand to multiply, so it cannot bridge the factor
@@ -1174,7 +1279,7 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
             // is actually inserted.
             elif not (unitSameScale u1 u2) then
                 Error (Other (sprintf
-                        "assignment relates %s and %s: same dimensions, but magnitudes differing by the factor %s. Scale the value explicitly, or annotate it as %s"
+                        "these values relate %s and %s: same dimensions, but magnitudes differing by the factor %s. Scale the value explicitly, or annotate it as %s"
                         (ppUnitSig u1) (ppUnitSig u2)
                         (ppUnitScale (unitConversionFactor u2 u1)) (ppUnitSig u1)))
             else Ok ())

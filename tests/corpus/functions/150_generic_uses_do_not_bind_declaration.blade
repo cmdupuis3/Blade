@@ -1,0 +1,17 @@
+// TEST: Generic composed and shared-variable widening still compile
+// ============================================================================
+// Positives for the call judgment's follow-ups: a composition with a declared
+// generic on the right (`sq >> idg`) still type-checks and runs now that the
+// composition's unify result is CHECKED rather than discarded, and the second
+// teaching of a shared signature variable -- now judged against the first --
+// still WIDENS a scalar (`pick(2.5, 3)`), which the monomorph's C++ call
+// performs.
+function sq(x: Float64) -> Float64 = x * x
+function idg(a: T^0) -> T^0 = a
+let h = sq >> idg
+let hv = h(3.0)
+// EXPECT: hv = 9
+
+function pick(a: T^0, b: T^0) -> T^0 = a + b
+let pw = pick(2.5, 3)
+// EXPECT: pw = 5.5

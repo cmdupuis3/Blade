@@ -20,6 +20,5 @@ function f(a: Array<Float like R, C>) -> Float = {
 
 let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
                        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
-// WARN: BL4003
 // EXPECT: v = 36
 // EXPECT: t = 3

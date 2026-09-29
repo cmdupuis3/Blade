@@ -45,6 +45,23 @@ not parse FAILS the test — a dropped assertion is worse than no assertion.
 | `// ERROR-CONTAINS: <substring>` | the refusal message contains this |
 | `// WARN: BLxxxx` | the compiler emits this warning CODE |
 | `// WARN-CODEGEN: <substring>` | codegen emits a warning containing this |
+| `// NOPINS: <reason>` | this VALUE test deliberately pins nothing (required then) |
+
+Three pin-hygiene rules make a test fail rather than assert less than it says:
+
+- A value test (not `(rejects)` / `(aborts)`) with no `// EXPECT:` and no
+  `// WARN:` pin fails unless it carries `// NOPINS: <reason>` -- it would
+  otherwise pass on "compiled and exited 0" alone. A NOPINS marker on a test
+  that has EXPECT pins is stale and fails too.
+- An `// ERROR:` whose code is not `BLnnnn` or whose `@` span is not `l:c` /
+  `l:c-l:c` fails (it used to degrade silently to a code-only pin).
+- An `=`-bearing `// EXPECT:` on a `(rejects)` probe fails: the program is
+  refused before anything prints, so it is a pin nobody checks. Prose without
+  `=` is still allowed there; pin the refusal itself with `// ERROR:`.
+
+Separately, any program output that shows a raw heap pointer (`0x` followed by
+eight or more hex digits) fails the test: a printer streaming an address prints
+something different on every run, and the differential gates no longer mask it.
 
 `// WARN:` and `// WARN-CODEGEN:` are the warning-side pins, and unlike the
 others they are enforced in **both** directions:
@@ -72,19 +89,24 @@ Notes:
 - `(rejects)` probes are held to the same rule. The checker's warning channels
   survive its error path, so a program refused at typecheck has still earned
   whatever it emitted before the refusal.
-- Multi-file tests take the **union** of the pins across their member sources:
-  a cross-module program is typechecked as one program, so its warnings cannot
-  be attributed to a single file.
+- Multi-file tests take the **union** of the pins across their member sources
+  (EXPECT and ERROR pins as well as WARN pins): a cross-module program is
+  typechecked as one program, so its warnings cannot be attributed to a single
+  file, and a value pin belongs wherever its author put it.
 
 ## Categories
 
-Loaded by tests/Corpus.fs; named in the Test_*.fs modules (e.g. Test_Basic.fs
-maps `basicTests` to `basic/`). `multifile/` holds one subdirectory per test,
-one `.blade` per module file (with `// MODULE:`), compiled together.
+Loaded by tests/Corpus.fs and DISCOVERED: every directory holding `.blade`
+files runs in the default suite (tests/RunAll.fs's `allTests`), answers to
+`blade test <dir>`, and is walked by `blade test interp` -- a new directory
+needs no wiring. `diagnostics/` is the exception, owned by its own strict
+block (tests/Test_DiagCorpus.fs). `multifile/` holds one subdirectory per
+test, one `.blade` per module file (with `// MODULE:`), compiled together.
 
-`mutability-errors/` and `unit-errors/` run as reject-probes (wrapped in
-`asRejectProbes` in tests/RunAll.fs's `allTests`, also reachable as
-`blade test mutability-errors` / `blade test unit-errors`). `struct-aborts/`
+The wholly-negative directories -- `diagnostics/`, `display-errors/`,
+`mutability-errors/`, `unit-errors/` -- run as reject-probes without a
+`(rejects)` marker in their names: `Corpus.rejectOnlyCategories` is the one
+list every lane reads. `struct-aborts/`
 runs unwrapped — its tests expect compile success followed by a nonzero
 runtime exit, pinned by `// ABORT:`.
 

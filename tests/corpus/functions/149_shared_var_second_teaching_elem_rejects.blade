@@ -1,0 +1,10 @@
+// TEST: Shared signature variable taught two array element types (rejects)
+// ERROR: BL3001
+// ============================================================================
+// A Float64 array then an Int64 array into one `T^1`: scalars widen at a call,
+// but an `Array<int64>` is not an `Array<double>`, so the specialization built
+// from the first teaching was handed the second verbatim and g++ refused it.
+let A = [1.0, 2.0, 3.0]
+let B = [1, 2, 3]
+function second(a: T^1, b: T^1) -> T^1 = b
+let r = second(A, B)

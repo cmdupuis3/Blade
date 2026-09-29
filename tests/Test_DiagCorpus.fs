@@ -34,8 +34,13 @@ let runDiagCorpusTests () : BlockResult =
 
     for (name, source) in Corpus.category "diagnostics" do
         let (pins, contains) = parseDiagPins source
+        let malformed = parseMalformedDiagPinLines source
         let result, _sm = Lowering.lowerDiag None source
         match result with
+        | _ when not malformed.IsEmpty ->
+            // parseDiagPins degrades an unparseable span to a code-only pin,
+            // which would assert less than the line says.
+            check name false ($"""malformed ERROR pin(s): {(String.concat " | " malformed)}""")
         | Ok _ ->
             check name false "expected diagnostics but the source compiled cleanly"
         | Error diags ->

@@ -18,7 +18,6 @@ function f(a: Array<Float like J>) -> Float = {
     m(0, 2) + m(2, 0) + m(1, 1)
 }
 
-// WARN: BL4003
 let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
 // EXPECT: v = 100
 // EXPECT: t = 60

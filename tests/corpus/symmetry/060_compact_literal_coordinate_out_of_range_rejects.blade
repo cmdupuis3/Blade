@@ -1,0 +1,16 @@
+// TEST: A literal coordinate past a compact group's extent (rejects)
+// ERROR: BL4003
+// Compact reads keep their own discipline and are not run-time guarded, so a
+// literal coordinate of SymIdx<2, X> is judged at compile time, per
+// coordinate: 5 is no position of X = Idx<3>. It used to read past the
+// packed triangle. (In-range literals are proven silently: arity/058.)
+from stats import mean
+
+function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 =
+    mean((a - mean(a)) * (b - mean(b)))
+
+type X = Idx<3>
+type Time = Idx<4>
+let data: Array<Float64 like X, Time> = [[1.0, 2.0, 4.0, 7.0], [2.0, 1.0, 0.0, 1.0], [3.0, 3.0, 5.0, 5.0]]
+let c = method_for(data, data) <@> cov |> compute
+let bad = c(0, 5)

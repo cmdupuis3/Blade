@@ -61,7 +61,14 @@ let rec genBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilde
     | IRUngroupRows (rows, offsets, src) ->
         genUngroupRowsBinding ctx binding rows offsets src
     | IRGroupBy (vals, gk) ->
-        genGroupByBinding ctx binding builder vals gk
+        let (code, ctx') = genGroupByBinding ctx binding builder vals gk
+        // Every arm registers name -> grouping in GroupedArrays; the printer
+        // needs the same fact by binding id (groupedBindingsCell).
+        let name = bindingCppName binding
+        (match Map.tryFind name ctx'.GroupedArrays with
+         | Some gkName -> noteGroupedBinding binding.Id name gkName
+         | None -> ())
+        (code, ctx')
     | IRGroupBucket gk ->
         genGroupBucketBinding ctx binding builder gk
     | IRGroupSizes gk ->
@@ -471,7 +478,12 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                       $"{ind}size_t {name}__ngroups = {ngroups};"
                       $$"""{{ind}}size_t {{name}}__counts[{{ngroups}}] = {0};""" ]
                     openPass
-                    [ $"{ind}    {name}__counts[__k]++;"
+                    // A key past the last bucket is not a position of the
+                    // key type: abort (BL8006, the interpreter's twin in
+                    // ArrayOps.buildGroupKeys) instead of writing past the
+                    // stack counts array. Negative keys already dropped.
+                    [ $$"""{{ind}}    if ((size_t)__k >= {{ngroups}}) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside 0 .. {{ngroups - 1}}", nullptr, 0);"""
+                      $"{ind}    {name}__counts[__k]++;"
                       $"{ind}}}"
                       $"{ind}size_t {name}__offsets[{ngroups + 1}];"
                       $"{ind}{name}__offsets[0] = 0;"
@@ -497,10 +509,10 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 // map is `static const` at the enclosing function scope:
                 // initialized once on first encounter (thread-safe magic
                 // static), reused across every group_keys evaluation in
-                // the same call site. Lookup falls through to bucket 0
-                // for unknown keys, preserving the prior silent-default
-                // behavior (EnumIdx is type-checked, so unknown keys
-                // indicate a typechecker bug rather than a user error).
+                // the same call site. An unknown key ABORTS (BL8006, the
+                // interpreter's twin in ArrayOps.buildGroupKeys): a key
+                // column can come from a provider, and falling through to
+                // bucket 0 silently merged it into the first group.
                 //
                 // Why a map and not a switch / if-chain: dispatch cost
                 // scales O(1) instead of O(values) per element. Especially
@@ -518,7 +530,7 @@ and genGroupKeysBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRB
                 let bucketMapDecl =
                     $"static const std::unordered_map<{elemStr}, size_t> {name}__bucket_map = {{{bucketEntries}}};"
                 let bucketLambdaDecl =
-                    $$"""auto {{name}}__bucket = [](const {{elemStr}}& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); return it != {{name}}__bucket_map.end() ? it->second : (size_t)0; };"""
+                    $$"""auto {{name}}__bucket = [](const {{elemStr}}& __v) -> size_t { auto it = {{name}}__bucket_map.find(__v); if (it == {{name}}__bucket_map.end()) blade_rt::panic("BL8006", "index out of bounds: a group_keys key outside its EnumIdx", nullptr, 0); return it->second; };"""
                 let code = keysElemErrCode @ [
                     $"{ind}// group_keys: {ngroups} groups, EnumIdx reverse lookup (unordered_map dispatch)"
                     $"{ind}size_t {name}__ngroups = {ngroups};"
@@ -1693,10 +1705,32 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                 | None -> ""
                 | Some (wExpr, k) ->
                     $", nested_array_utilities::pool_base({(exprToCpp ctx.VarNames wExpr)}.data), (size_t){k}LL"
-            let parArgs =
-                parExprs
-                |> List.map (fun p -> $", (double)({(exprToCpp ctx.VarNames p)})")
-                |> String.concat ""
+            // Scalar parameters with a DOMAIN (Rand.Elaborate.paramGuards) are
+            // bound to locals and checked before the fill, in the emitted
+            // text for the same shadow-frame reason as the address guards
+            // below; the interpreter mirror raises the identical BL8001. A
+            // family with no guarded parameter keeps the inline casts.
+            let guards = Blade.Rand.Elaborate.paramGuards kind
+            let parLines, parArgs =
+                if guards.IsEmpty then
+                    [],
+                    (parExprs
+                     |> List.map (fun p -> $", (double)({(exprToCpp ctx.VarNames p)})")
+                     |> String.concat "")
+                else
+                    let parName i = $"{name}__par{i}"
+                    let binds =
+                        parExprs |> List.mapi (fun i p ->
+                            $"{ind}const double {parName i} = (double)({(exprToCpp ctx.VarNames p)});")
+                    let checks =
+                        guards |> List.collect (fun (i, pname, dom) ->
+                            let msg = Blade.Rand.Elaborate.paramGuardMessage kind pname dom
+                            [ $"{ind}if (!({Blade.Rand.Elaborate.paramDomainCpp dom (parName i)})) {{"
+                              $"{ind}    std::cerr << \"Blade runtime: {msg} (got \" << {parName i} << \")\" << std::endl;"
+                              $"{ind}    blade_rt::panic(\"BL8001\", \"{msg}\", nullptr, 0);"
+                              $"{ind}}}" ])
+                    binds @ checks,
+                    (parExprs |> List.mapi (fun i _ -> $", {parName i}") |> String.concat "")
             // The `_at` address channel sits right after the key: the stream
             // key and the sample offset, both int64, before the weights/pars.
             // Bound to locals and RANGE-CHECKED HERE, in the emitted text --
@@ -1724,7 +1758,7 @@ and genRandGenBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                      $", {sName}, {oName}")
             let fillLine =
                 $"{ind}blade_rand::{kind}(nested_array_utilities::pool_base({name}.data), (size_t){card}LL, (int64_t)({(exprToCpp ctx.VarNames keyExpr)}){addressArgs}{weightsArgs}{parArgs});"
-            ([extentsArr; allocLine] @ addressLines @ [fillLine], addVarName binding.Id name ctx)
+            ([extentsArr; allocLine] @ addressLines @ parLines @ [fillLine], addVarName binding.Id name ctx)
     | _ ->
         ([refusalErrorLine ind ($"rand binding '{name}' is not an array type")], addVarName binding.Id name ctx)
 
@@ -2137,8 +2171,9 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
     // .extents points at the 2-element local size_t array {ngroups, 0};
     // .extents[0] = ngroups, .extents[1] reads 0 (placeholder for the
     // ragged inner). Element type T* keeps `grouped[g]` as a bare row
-    // pointer for downstream peeling. Print's inner-loop bound of 0
-    // means no values printed, matching prior behavior.
+    // pointer for downstream peeling. Print does NOT use that 0: it walks
+    // the rows through the grouping's offsets (genPrintStatements via
+    // groupedBindingsCell), as the interpreter prints its ragged rows.
     //
     // PER-SEGMENT STREAM (docs/plans/structural/07 §3.4): the values are a
     // rank-1 variable bound with `.stream` (no array named after it exists)
@@ -2280,8 +2315,8 @@ and genGroupByBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                  [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
     // GATHER ELISION: every consumer of this binding reads only row LENGTHS
     // (computeExtentsOnlyGroupBys), which come from the gk offsets. The row
-    // TABLE is still emitted -- the peel indexes it, and print reads its extents
-    // -- but the per-group buffers and the O(n) copy are dead, so the rows stay
+    // TABLE is still emitted -- the peel indexes it -- but the per-group
+    // buffers and the O(n) copy are dead, so the rows stay
     // null. Legal because the peel reads the pointer without dereferencing it,
     // and deallocate_ragged_rows_owned's `delete[] rows[i]` no-ops on null.
     let elideGather = Set.contains binding.Id (extentsOnlyGroupBysCell ()).Value
@@ -3087,11 +3122,13 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                 // statement to have the `x = x op expr` shape, so the builtin op
                 // is emitted directly (and the wrapper would be dead code).
                 (ompApiUsedCell ()).Value <- true
+                recordOmpConstruct name $"BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION({redOp}:{name})"
+                    "licensed fold with a builtin operator: OpenMP reduction over the flat sweep (Path A)"
                 elemErrCode @ guardLines @ [
                     $"{ind}// reduce: comm-licensed OpenMP reduction (builtin '{(binOpToCpp op)}'), flat sweep"
                     $"{ind}const size_t {rnName} = {boundExpr};"
                     $"{ind}{elemStr} {name} = {seedStr};"
-                    $"{ind}#pragma omp parallel for simd reduction({redOp}:{name})"
+                    $"{ind}BLADE_OMP_PARALLEL_FOR_SIMD_REDUCTION({redOp}:{name})"
                     $$"""{{ind}}for (size_t __ri = {{loopStart}}; __ri < {{rnName}}; __ri++) {"""
                     $"""{ind}    {name} = {name} {(binOpToCpp op)} {(elemAt "__ri")};"""
                     $"{ind}}}"
@@ -3142,7 +3179,9 @@ and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuil
                     @ [ $"{ind}                {partName}[__rt] = {(laneName 0)};"
                         $$"""{{ind}}            }""" ]
                 elemErrCode @ guardLines @ wrapperLines @ [
-                    $"{ind}// reduce: comm-licensed parallel fold, contiguous chunked partials ({kLanes}-lane)"
+                    (recordOmpConstruct name "omp parallel num_threads(T) + fixed-order combine"
+                        "comm-licensed fold: contiguous per-thread partials, combined in thread order (Path B)"
+                     $"{ind}// reduce: comm-licensed parallel fold, contiguous chunked partials ({kLanes}-lane)")
                     $"{ind}const size_t {rnName} = {boundExpr};"
                     $"{ind}{elemStr} {name} = {seedStr};"
                     $"{ind}{{"
@@ -3410,8 +3449,10 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                                   FoldRequestedOmp = callable.IsOmpParallel }
                             match (0, facts, single.ArrayTypes, cg) with
                             | Blade.LinAlgPatterns.BlasL1 call ->
-                                Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
-                                |> Option.map (fun entry -> (call, entry))
+                                let entry = Blade.LinAlgPatterns.shimEntryPoint Blade.LinAlgPatterns.HostBlas call
+                                Blade.LinAlgPatterns.recordRoute (decisionSpan ()) name call
+                                    (entry |> Option.map (fun e -> (Blade.LinAlgPatterns.HostBlas, e)))
+                                entry |> Option.map (fun entry -> (call, entry))
                             | _ -> None
                     // BLADE_FP_REASSOC for the reduce-over-DEFERRED-COMPUTATION
                     // nest -- the shape `reduce(<unforced zip>, (+))` (the dot
@@ -3445,9 +3486,7 @@ and genReduceComputeBindingCore (ctx: CodeGenContext) (binding: IRBinding) (buil
                     //   * Non-rectangular / fused / tabulated (compound, sparse)
                     //     head levels: `__ri + l` is not an element of the
                     //     iteration space.
-                    //   * Reynolds bodies, MPI slabs, and halo-window slots (the
-                    //     carousel body is stateful across iterations by
-                    //     construction, so it is not a function of the index).
+                    //   * Reynolds bodies, MPI slabs, and halo-window slots.
                     //   * `FoldChunk` (an `omp`-licensed fold): threads and lanes
                     //     are separate opt-ins and Path B already owns that arm.
                     //   * The FUSED TREE (several leaves, several accumulators) --
@@ -4149,6 +4188,40 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
             // Compound/ragged/dep-idx initializers keep the historical alias
             // (no dense .extents/pool contract; no assignment path exercises
             // them today).
+            match Map.tryFind srcName ctx.GroupedArrays with
+            | Some gkName ->
+                // A GROUPED array (group_by's row table over one CSR pool). Its
+                // row LENGTHS live in the grouping's offsets, not in the value
+                // -- the value's inner extent is the ragged placeholder 0 -- so
+                // the dense deep copy below copied zero cells and left an EMPTY
+                // rank-2 array: `let h = g` printed `h = [[], [], []]` beside
+                // g's real rows, and a peel over h read nothing. Copy the pool
+                // and rebuild the row table instead (a copy, not an alias, for
+                // the reason the dense arm copies: the binding is assignable),
+                // and carry the grouping so peels and print read h like g.
+                // (The alias is a USE of g, so g's gather is never elided here;
+                // see computeExtentsOnlyGroupBys.)
+                let elemStr =
+                    match binding.Type with
+                    | ArrayElem at -> elemTypeToCpp at.ElemType
+                    | _ -> "double"
+                let extentsDecl =
+                    fst (emitExtentsTable ind (name + "_extents") 2
+                             [($"{gkName}__ngroups", false); ("0 /* inner extent is ragged */", false)])
+                let code =
+                    [ $"{ind}// {name} = {srcName}: copy of a grouped array (grouping {gkName})" ]
+                    @ extentsDecl
+                    @ [ $$"""{{ind}}Array<{{elemStr}}*, 1> {{name}} = { new {{elemStr}}*[{{gkName}}__ngroups], {{name}}_extents };"""
+                        $"{ind}{elemStr}* {name}__pool = new {elemStr}[{gkName}__offsets[{gkName}__ngroups]];"
+                        $$"""{{ind}}for (size_t __g = 0; __g < {{gkName}}__ngroups; __g++) {"""
+                        $"{ind}    {name}[__g] = {name}__pool + {gkName}__offsets[__g];"
+                        $"{ind}    for (size_t __k = 0, __n = {gkName}__offsets[__g + 1] - {gkName}__offsets[__g]; __k < __n; __k++) {name}[__g][__k] = {srcName}[__g][__k];"
+                        $"{ind}}}" ]
+                registerShapedAlloc name "deallocate_ragged_storage" ($"{name}.data, {name}__pool")
+                noteGroupedBinding binding.Id name gkName
+                let ctx' = addVarName binding.Id name ctx
+                (code, { ctx' with GroupedArrays = Map.add name gkName ctx'.GroupedArrays })
+            | None ->
             let mutArrayCopy =
                 if binding.IsMutable || Set.contains binding.Id ctx.MutableArrayLets then
                     match binding.Type with

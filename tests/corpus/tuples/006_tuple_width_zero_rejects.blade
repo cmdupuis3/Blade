@@ -8,4 +8,4 @@
 
 function f(t: Tuple<0>) -> Float64 = 1.0
 let x = f((1.0, 2.0))
-// EXPECT: parse failure -- Tuple<N> requires N >= 2
+// Refused at parse: Tuple<N> requires N >= 2 (BL1004, pinned above).

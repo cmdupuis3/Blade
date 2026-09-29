@@ -546,6 +546,93 @@ let internal declGroupKeysRoots (decl: TypedDecl) : (string option * TypedExpr) 
     | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
 
+/// POST-ZONK SUBSCRIPT SWEEP -- the late half of the subscript judgment
+/// (formalism 3.10), whose eager half is `checkArrayIndexTags`. The eager
+/// half sees a kernel parameter or an unannotated function parameter while it
+/// is still an open variable; by now every subscript carries the type codegen
+/// will emit, so the CLASS rule (no Float / Bool / Complex / String position)
+/// and the NOMINAL rule (a tagged slot refuses a differently tagged index)
+/// are total here. Its call-site twin: a direct call whose argument was open
+/// when the call judgment ran (the eta wrapper `lambda(__k) -> g(__k)` that
+/// a named-function kernel over `range<Lon>` becomes) is judged again for
+/// the two index rules the judgment would have applied -- a different tag,
+/// or a non-integer value, meeting an index parameter.
+let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : CompileError list =
+    let subst = env.Subst
+    let mkErr (span: Span) (e: TypeError) : CompileError =
+        { Error = e; Span = span; Context = []; Code = None }
+    let judgeSubscripts (arr: TypedExpr) (arrTy: IRArrayType) (args: TypedExpr list) =
+        let synthetic = isSynthesizedBuffer arr
+        subscriptSlotPairs arrTy args
+        |> List.tryPick (fun (a, ix) ->
+            match subscriptClassOrRangeError env synthetic ix a with
+            | Some e -> Some (mkErr a.Span e)
+            | None ->
+                match ix.Tag, IR.stripUnits (subst.Resolve a.Type) with
+                | Some tag, IRTIdxTagged (_, IRefNamed argTag)
+                    when not (tag.StartsWith "__") && argTag <> tag && not (slotIsEnumIdx env ix) ->
+                    Some (mkErr a.Span (IndexTagMismatchNamed (tag, argTag)))
+                | _ -> None)
+        |> Option.toList
+    let here =
+        match expr.Kind with
+        | TExprIndex (arr, args, _) ->
+            (match subst.Resolve arr.Type with
+             | ArrayElem at -> judgeSubscripts arr at args
+             | _ -> [])
+        | TExprApp (f, args) ->
+            (match subst.Resolve f.Type with
+             | ArrayElem at -> judgeSubscripts f at args
+             | FuncElem (ps, _) ->
+                 let fname = match f.Kind with TExprVar (nm, _, _) -> nm | _ -> "this function"
+                 let n = min ps.Length args.Length
+                 List.zip (List.truncate n ps) (List.truncate n args)
+                 |> List.indexed
+                 |> List.tryPick (fun (i, (p, a)) ->
+                     let pr = IR.stripUnits (subst.Resolve p)
+                     let ar = IR.stripUnits (subst.Resolve a.Type)
+                     let clash =
+                         match pr, ar with
+                         | IRTIdxTagged (_, IRefNamed t1), IRTIdxTagged (_, IRefNamed t2) -> t1 <> t2
+                         | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _),
+                           IRTScalar (ETFloat32 | ETFloat64 | ETBool | ETComplex64 | ETComplex128) -> true
+                         | _ -> false
+                     if clash then
+                         Some (mkErr a.Span (ArgTypeMismatch (i + 1, fname, ppIRType pr, ppIRType ar)))
+                     else None)
+                 |> Option.orElse (
+                     // The callee's GENERIC OBLIGATIONS (TypeEnv.GenericObligation),
+                     // for a call whose arguments were still open when the call
+                     // judgment ran -- the eta wrapper `lambda(__k) -> mean(__k)`
+                     // a named-function kernel becomes. The instance is read off
+                     // the (now concrete) arguments against the declared
+                     // parameters, the way IR monomorphization will read it.
+                     match calleeDeclId env f with
+                     | Some fid ->
+                         (match env.FuncGenericObligations.TryGetValue fid with
+                          | true, obs ->
+                              let rec learn (p: IRType) (a: IRType) (acc: Map<int, IRType>) =
+                                  match IR.stripUnits (subst.Resolve p), IR.stripUnits (subst.Resolve a) with
+                                  | IRTInfer r, at -> if acc.ContainsKey r then acc else Map.add r at acc
+                                  | ArrayElem pa, ArrayElem aa -> learn pa.ElemType aa.ElemType acc
+                                  | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
+                                      List.fold2 (fun m pt at -> learn pt at m) acc pts ats
+                                  | IRTIdxTagged (pi, _), IRTIdxTagged (ai, _) -> learn pi ai acc
+                                  | _ -> acc
+                              let n = min ps.Length args.Length
+                              let inst =
+                                  List.fold2 (fun m p (a: TypedExpr) -> learn p a.Type m) Map.empty
+                                      (List.truncate n ps) (List.truncate n args)
+                              judgeGenericObligations env fname obs (fun r ->
+                                  Map.tryFind r inst |> Option.bind (concreteElemOf subst))
+                              |> Option.map (fun e -> mkErr expr.Span e)
+                          | _ -> None)
+                     | None -> None)
+                 |> Option.toList
+             | _ -> [])
+        | _ -> []
+    here @ (typedExprChildren expr |> List.collect (collectSubscriptErrors env))
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let internal declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]

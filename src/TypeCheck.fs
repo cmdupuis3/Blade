@@ -26,6 +26,103 @@ open Blade.TypeCheckInfer
 open Blade.TypeCheckValidate
 
 // 12. Module and Program
+
+/// The type names one `type` declaration introduces (a mutual group names
+/// every member).
+let private typeDeclNames (td: TypeDecl) : string list =
+    match td with
+    | TyDeclAlias (n, _, _) | TyDeclStruct (n, _, _, _, _) | TyDeclSum (n, _, _) -> [ n ]
+    | TyDeclMutualGroup (members, _) -> members |> List.map fst
+
+/// BL2009 across MODULES, for the names that are not module-qualified yet.
+///
+/// Values and functions of a non-main module are namespaced at lowering
+/// (Lowering.qualifyModuleNames), but a TYPE's identity is still its bare
+/// name: `IRTNamed "P"`, an index type's `IRefNamed "Cell"`. So two modules
+/// each declaring `struct P` emitted two global C++ `struct P` (a g++
+/// redefinition) and the call judgment could not tell them apart -- `A.fx(q)`
+/// accepted B's `P` -- and a main-module `type Cell = Idx<5>` became the SAME
+/// nominal index type as an imported module's `Cell = Idx<3>`, so a
+/// provenance check that exists to keep them apart passed. Until type
+/// identity is keyed by (module, name), one program may declare a type name
+/// once. Variant constructors are global C++ names (enum members, ctor
+/// functions) and their tag table is keyed by bare name too, so they get the
+/// same rule -- within a module as well, since two sum types there sharing a
+/// constructor collide identically.
+let private crossModuleDeclErrors (env: TypeEnv) (program: Program) : CompileError list =
+    let errors = ResizeArray<CompileError>()
+    let seenTypes = System.Collections.Generic.Dictionary<string, string * Span>()
+    let seenCtors = System.Collections.Generic.Dictionary<string, string * Span>()
+    // The error-location side channel still holds the LAST expression the
+    // checker visited (in whichever module ran last); cleared per refusal so
+    // each one points at its own declaration.
+    let refuse (span: Span) (err: TypeError) =
+        resetCurrentStmtSpan ()
+        errors.Add (locateError span env err)
+    let siteOf (first: Span) (here: Span) =
+        let where = $"line {first.StartLine}, column {first.StartCol}"
+        match first.File, here.File with
+        | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
+        | _ -> where
+    for m in program.Modules do
+        let modName = m.Name |> String.concat "."
+        for d in m.Decls do
+            match d.Value with
+            | DeclType td ->
+                for n in typeDeclNames td do
+                    match seenTypes.TryGetValue n with
+                    | true, (firstMod, firstSpan) when firstMod <> modName ->
+                        refuse d.Span (DuplicateDecl ("type", n, siteOf firstSpan d.Span, Some firstMod))
+                    | true, _ -> ()   // same module: checkModule's own BL2009
+                    | _ -> seenTypes.[n] <- (modName, d.Span)
+                match td with
+                | TyDeclSum (_, _, variants) ->
+                    for v in variants do
+                        match seenCtors.TryGetValue v.Name with
+                        | true, (firstMod, firstSpan) ->
+                            let crossModule = if firstMod <> modName then Some firstMod else None
+                            refuse d.Span (DuplicateDecl ("constructor", v.Name, siteOf firstSpan d.Span, crossModule))
+                        | _ -> seenCtors.[v.Name] <- (modName, d.Span)
+                | _ -> ()
+            | _ -> ()
+    List.ofSeq errors
+
+/// The lambda parameters a RANGE feeds, over a whole typed module (the one
+/// place Zonk's subscript guard may trust a lambda parameter's index type --
+/// SubscriptGuardCtx.RangeFedParams). A plain apply whose operand k is
+/// `range<I>` / `0..n` feeds kernel parameter k; a single multi-slot
+/// `range<Y, X>` feeds all of them. Collected BEFORE zonk because a kernel
+/// lambda can be zonked (at its own `let`) before the apply that feeds it.
+let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashSet<IRId> =
+    let fed = System.Collections.Generic.HashSet<IRId>()
+    let isRange (a: TypedExpr) =
+        match a.Kind with
+        | TExprRange _ | TExprDotDot _ -> true
+        | _ -> false
+    let rec walk (e: TypedExpr) =
+        (match e.Kind with
+         | TExprApply info when not info.IsComposeApply ->
+             let operands =
+                 info.Arrays |> List.collect (fun a ->
+                     match a.Kind with
+                     | TExprZip es -> es
+                     | _ -> [ a ])
+             let ps =
+                 match info.Kernel.Kind with
+                 | TExprLambda li | TExprReynolds ({ Kind = TExprLambda li }, _) -> li.Params
+                 | _ -> []
+             match operands with
+             | [ { Kind = TExprRange ixs } ] when ixs.Length > 1 && ixs.Length = ps.Length ->
+                 for p in ps do fed.Add p.VarId |> ignore
+             | _ when operands.Length = ps.Length ->
+                 List.iter2 (fun (p: TypedParam) a -> if isRange a then fed.Add p.VarId |> ignore) ps operands
+             | _ -> ()
+         | _ -> ())
+        for c in typedExprChildren e do walk c
+    for d in modul.Decls do
+        for e in declExprs d do walk e
+    fed
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
@@ -34,6 +131,10 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // `typeCheck` resets on entry too; this covers module-to-module inside one
     // compilation, and callers that reach checkProgram by another route.
     resetCurrentStmtSpan ()
+    // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
+    // co-iteration, units -- are keyed by binder id, program-unique, and
+    // shared by reference across the program's modules: a module's entries
+    // stay valid for every module that imports it, and nothing is cleared.)
     // Resolve compile-time-known static VALUES up front (the same
     // StaticEval.resolveStatics the lowering phase runs), so type-checking
     // can consult them (e.g. a `replicate` count written as `let static`).
@@ -92,8 +193,13 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutable currentEnv = preEnv
     let mutable decls = []
     let mutable errors = []
-    // Module-scope `function` names already declared, first span each (BL2009).
-    let mutable declaredFunctions : Map<string, Span> = Map.empty
+    // Module-scope names already declared, first span each (BL2009), one
+    // map per namespace: values (`let`/`static`/`function` share one -- the
+    // bool marks a function, which keeps the function-vs-function message),
+    // types, units.
+    let mutable declaredValues : Map<string, Span * bool> = Map.empty
+    let mutable declaredTypes : Map<string, Span> = Map.empty
+    let mutable declaredUnits : Map<string, Span> = Map.empty
 
     for d in modul.Decls do
         // BL2009 -- duplicate top-level `function` name. Without this the
@@ -107,28 +213,56 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         // so the refusal is the only diagnostic instead of the root cause plus
         // downstream mismatch noise. Prerequisite for same-name clause
         // dispatch (plan-match-statements.md §5 R1).
+        //
+        // The same refusal covers every other top-level namespace: a second
+        // `let x` (or a `let x` beside a `function x`), a second `type`/
+        // `struct`/sum type `T`, a second `Unit u`. A top-level re-`let`
+        // passed the checker and then died in g++ as a redeclaration, while
+        // the interpreter SHADOWED it -- two lanes, two meanings; a duplicate
+        // type silently let the last declaration win. Wildcard `_` binds
+        // nothing and never clashes.
+        let firstSiteOf (firstSpan: Span) =
+            let where = $"line {firstSpan.StartLine}, column {firstSpan.StartCol}"
+            match firstSpan.File, d.Span.File with
+            | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
+            | _ -> where
+        let claim (names: string list) (table: Map<string, Span>) (kind: string) =
+            match names |> List.tryPick (fun n -> Map.tryFind n table |> Option.map (fun sp -> (n, sp))) with
+            | Some (n, sp) -> Some (DuplicateDecl (kind, n, firstSiteOf sp, None)), table
+            | None -> None, (names |> List.fold (fun t n -> Map.add n d.Span t) table)
         let duplicateOf =
             match d.Value with
             | DeclFunction f ->
-                match Map.tryFind f.Name declaredFunctions with
-                | Some firstSpan -> Some (f.Name, firstSpan)
+                match Map.tryFind f.Name declaredValues with
+                | Some (firstSpan, true) -> Some (DuplicateFunctionDecl (f.Name, firstSiteOf firstSpan))
+                | Some (firstSpan, false) -> Some (DuplicateDecl ("value", f.Name, firstSiteOf firstSpan, None))
                 | None ->
-                    declaredFunctions <- Map.add f.Name d.Span declaredFunctions
+                    declaredValues <- Map.add f.Name (d.Span, true) declaredValues
                     None
+            | DeclLet b | DeclStatic b ->
+                let names = patternNames b.Pattern |> List.filter (fun n -> n <> "_")
+                match names |> List.tryPick (fun n -> Map.tryFind n declaredValues |> Option.map (fun (sp, _) -> (n, sp))) with
+                | Some (n, sp) -> Some (DuplicateDecl ("value", n, firstSiteOf sp, None))
+                | None ->
+                    for n in names do declaredValues <- Map.add n (d.Span, false) declaredValues
+                    None
+            | DeclType td ->
+                let err, table = claim (typeDeclNames td) declaredTypes "type"
+                declaredTypes <- table
+                err
+            | DeclUnit u ->
+                let err, table = claim [ u.Name ] declaredUnits "unit"
+                declaredUnits <- table
+                err
             | _ -> None
         match duplicateOf with
-        | Some (name, firstSpan) ->
+        | Some dupErr ->
             // The duplicate decl skips checkDecl, whose per-decl reset would
             // otherwise clear the PREVIOUS decl's expression span -- without
             // this, locateError's precision order picks that stale span and
             // the refusal points into the FIRST declaration's body.
             resetCurrentStmtSpan ()
-            let firstSite =
-                let where = $"line {firstSpan.StartLine}, column {firstSpan.StartCol}"
-                match firstSpan.File, d.Span.File with
-                | Some f1, Some f2 when f1 <> f2 -> $"{f1}, {where}"
-                | _ -> where
-            let ce = locateError d.Span currentEnv (DuplicateFunctionDecl (name, firstSite))
+            let ce = locateError d.Span currentEnv dupErr
             errors <- ce :: errors
         | None ->
 
@@ -154,17 +288,22 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                 | TyDeclMutualGroup (members, _) ->
                     $"""in mutual group '{(members |> List.map fst |> String.concat ", ")}'"""
             | DeclInterface i -> $"in interface '{i.Name}'"
-            | DeclImpl impl -> sprintf "in impl for '%A'" impl.ForType
+            | DeclImpl impl -> $"in impl for '{Blade.StructIdxFence.typeExprLabel impl.ForType}'"
             | DeclImport (qn, _) -> $"""in import '{(String.concat "." qn)}'"""
             | DeclUnit u -> $"in unit '{u.Name}'"
         let envWithCtx = pushContext declName currentEnv
-        match checkDecl envWithCtx d.Value with
+        // A user error the type lowering found where it has no error channel
+        // (TypeEnv.TypeErrorRaised) is this declaration's error like any other.
+        let declResult, raisedCode =
+            try checkDecl envWithCtx d.Value, None
+            with TypeErrorRaised (te, code) -> Error te, code
+        match declResult with
         | Ok (td, env') ->
             decls <- td :: decls
             // Carry forward env' but restore original context (don't nest)
             currentEnv <- { env' with Context = currentEnv.Context }
         | Error err ->
-            let ce = locateError d.Span currentEnv err
+            let ce = { locateError d.Span currentEnv err with Code = raisedCode }
             errors <- ce :: errors
             // Continue with pre-failure env, but bind the failed decl's
             // name(s) to a FRESH inference var so downstream references
@@ -187,7 +326,44 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
 
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
-    let zonked = zonkModule currentEnv.Subst typedModule
+    // The zonk walk also retypes index POSITIONS and guards unproven
+    // subscripts into named index types (Zonk.fs, SUBSCRIPT POSITIONS AND
+    // GUARDS); its context carries the builder for guard bindings.
+    let zonked =
+        let saved = subscriptGuardCtx.Value
+        subscriptGuardCtx.Value <-
+            Some { FreshId = (fun () -> currentEnv.Builder.FreshId())
+                   Positions = System.Collections.Generic.HashSet<IRId>()
+                   DataVars = System.Collections.Generic.HashSet<IRId>()
+                   RangeFedParams = rangeFedLambdaParams typedModule
+                   EnumLabels = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIEnumIdx (_, _, values, _)) when EnumValue.allString values ->
+                           Some (values |> List.choose (function EVString s -> Some s | _ -> None))
+                       | _ -> None
+                   IndexExtent = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                           tryEvalIntIR idx.Extent
+                       | _ -> None
+                   IndexExtentVar = fun tag ->
+                       match Map.tryFind tag currentEnv.TypeDefs with
+                       | Some (TDIIndexType (_, idx, _)) when idx.IxKind = IxKPlain && idx.Symmetry = SymNone ->
+                           // `Idx<nr>` over a runtime `let nr` lowers to the
+                           // symbolic IRParam "nr" (TypeLower.lowerExtentExpr);
+                           // the module binding of that name is the extent.
+                           (match idx.Extent with
+                            | IRParam (name, _, _) when name <> "?" ->
+                                (match lookupVar name currentEnv with
+                                 | Some vi ->
+                                     (match currentEnv.Subst.Resolve vi.Type |> IR.stripUnits with
+                                      | IRTScalar (ETInt64 | ETInt32) as t -> Some (name, vi.VarId, t)
+                                      | _ -> None)
+                                 | None -> None)
+                            | _ -> None)
+                       | _ -> None }
+        try zonkModule currentEnv.Subst typedModule
+        finally subscriptGuardCtx.Value <- saved
     // Late direct-application rank check, on the zonked tree -- see
     // collectAppRankErrors. Suppressed when the module already has errors:
     // a failed decl binds its name to a fresh var (the cascade guard above),
@@ -209,6 +385,15 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             zonked.Decls |> List.collect declExprs
                          |> List.collect (collectAppTreeErrors currentEnv.Subst)
         else []
+    // The subscript judgment's post-zonk half (collectSubscriptErrors): the
+    // class and nominal rules over every subscript and every index-typed
+    // call argument, now that no kernel parameter is still open. Same
+    // cascade suppression as the rank sweep.
+    let subscriptErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors then
+            zonked.Decls |> List.collect declExprs
+                         |> List.collect (collectSubscriptErrors currentEnv)
+        else []
     // Misplaced provider writes: structural, inference-independent (an
     // unresolved receiver simply fails the IRTNamed match), so unlike the rank
     // sweep it runs even when the module already has errors.
@@ -221,7 +406,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let groupKeysErrors =
         zonked.Decls |> List.collect declGroupKeysRoots
                      |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ writeErrors @ groupKeysErrors)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ writeErrors @ groupKeysErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()
@@ -242,20 +427,9 @@ let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError li
             Units = finalEnv.Units
             StaticFunctions = finalEnv.StaticFunctions |> Map.filter (fun k _ -> not (k.Contains(".")))
             StaticValues = finalEnv.StaticValues |> Map.filter (fun k _ -> not (k.Contains(".")))
-            // Snapshot NOW: the tables are shared by reference and name-keyed,
-            // so the next module's `f` would overwrite this module's entry.
-            Defaults =
-                finalEnv.FuncDefaults
-                |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                |> Map.ofSeq
-            DefaultCaptures =
-                finalEnv.FuncDefaultCaptures
-                |> Seq.filter (fun kv -> not (kv.Key.Contains(".")) && Map.containsKey kv.Key finalEnv.Variables)
-                |> Seq.map (fun kv -> (kv.Key, kv.Value))
-                |> Map.ofSeq
         }
         moduleExports <- Map.add moduleName export moduleExports
+    allErrors <- allErrors @ crossModuleDeclErrors env program
     // env.Warnings is shared by reference across all envWithExports updates
     // (mutable ResizeArray, not a Map), so all module-scope warnings
     // accumulate here.

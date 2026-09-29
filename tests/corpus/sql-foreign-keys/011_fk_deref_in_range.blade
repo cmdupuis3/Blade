@@ -1,0 +1,16 @@
+// TEST: Foreign-key deref through a key column, in range
+// The in-range twin of index-types/302-304: the same three spellings (a lambda
+// kernel, a zip co-iteration, a named kernel) read region_weight through
+// valid keys, each through its guard.
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 1]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let values: Array<Float64 like StationIdx> = [10.0, 20.0, 30.0, 40.0]
+let w1 = method_for(station_region) <@> lambda(r) -> region_weight(r) |> compute
+// EXPECT: w1 = [1, 2, 1, 0.5]
+let w2 = method_for(zip(station_region, values)) <@> lambda(r, v) -> v * region_weight(r) |> compute
+// EXPECT: w2 = [10, 40, 30, 20]
+function wt(r: Nat<RegionIdx>) -> Float64 = region_weight(r)
+let w3 = method_for(station_region) <@> wt |> compute
+// EXPECT: w3 = [1, 2, 1, 0.5]

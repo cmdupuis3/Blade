@@ -1,0 +1,10 @@
+// TEST: A function's call to itself is coerced like any other call (aborts)
+// Inside `function g(i) = ...`, the recursive call is typed while `i` is still
+// open, so the call judgment cannot coerce it; the zonk pass guards the
+// argument against the pinned `Nat<Lat>` parameter instead of letting A(i)
+// read A(3).
+// ABORT: index out of bounds
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+function g(i) = if i < 5 then g(i + 1) else A(i)
+let v = g((0 : Lat))

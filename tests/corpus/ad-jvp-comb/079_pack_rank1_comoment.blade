@@ -42,7 +42,6 @@ function f(a: Array<Float like R, C>) -> Float = {
     cov(0, 0) + 3.0 * cov(0, 1)
 }
 
-// WARN: BL4003
 let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
                        [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
 let presid = v - f([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]])

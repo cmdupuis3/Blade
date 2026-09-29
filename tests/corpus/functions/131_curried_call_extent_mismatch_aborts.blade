@@ -1,13 +1,16 @@
-// TEST: Curried Call Extent Mismatch Aborts (aborts)
+// TEST: Curried Call Extent Mismatch (rejects)
+// ERROR: BL3016
 // ============================================================================
 // The curried spelling of diagnostics/075: `f(a)(b)`. The inner `f(a)` is
-// desugared to a partial-application lambda BEFORE the call-site obligation
-// seam sees it, and inside that lambda `b`'s slot is still an open
-// parameter, so the literal-extent check (BL3016) has nothing to compare.
-// The runtime guard in `f`'s body (BL8011) is the effective check for every
-// partial-application spelling.
+// desugared to a partial-application lambda before the call-site obligation
+// seam sees it, and inside that lambda `b`'s slot used to be an open
+// parameter, so the literal-extent check (BL3016) had nothing to compare and
+// only the runtime guard in `f`'s body (BL8011) caught it.
+//
+// The call judgment instantiates `f`'s signature per call and pins the
+// residual parameter to that instance (`T` taught by `a`), so the outer
+// application compares `b`'s extent against 3 at compile time.
 function f(a: T^1, b: T^1) = a + b
 let a = [1.0, 2.0, 3.0]
 let b = [4.0, 5.0]
 let out = f(a)(b)
-// ABORT: BL8011

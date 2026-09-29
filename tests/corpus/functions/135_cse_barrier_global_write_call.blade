@@ -1,0 +1,18 @@
+// TEST: Functions CSE Barrier Global Write Call
+// The other write channel a function body cannot see: a callee assigning a
+// module-level `let mut`. Two identical folds of G around such a call are
+// two different values (6, then 105); CSE once merged them (m = 0).
+type I = Idx<3>
+let mut G: Array<Float like I> = [1.0, 2.0, 3.0]
+function poke() -> Float = {
+    G((0 : I)) = 100.0
+    0.0
+}
+function g() -> Float = {
+    let s1 = reduce(G, (+))
+    let z = poke()
+    let s2 = reduce(G, (+))
+    s2 - s1 + z
+}
+let m = g()
+// EXPECT: m = 99

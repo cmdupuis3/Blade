@@ -1,4 +1,5 @@
 // TEST: Arity Return Type
+// NOPINS: declaration-only -- pins that T^arity(param) parses and typechecks in a return type; no call can satisfy it (args[0] is rank 1)
 // T^arity(param) in return type - rank depends on poly pack size
 function identity(args: Poly<T^1>) -> T^arity(args)
 = args[0]

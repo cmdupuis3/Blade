@@ -16,9 +16,14 @@ import ppl as ppl
 //
 // THE GALILEAN PIN (previews the Phase-2 `ml.galilean` judgment): boosting
 // u -> u + U0 (U0 = (0.3,-0.2,0.5)) moves the RAW second moments by O(1)
-// but leaves the CENTRAL comoment tau unchanged to fp noise — tau is
-// boost-invariant BY CONSTRUCTION, which is exactly the axiom the judgment
-// assigns to `sgs.stress` (Var -> Inv).
+// but leaves the CENTRAL comoment tau unchanged to fp noise. tau is
+// boost-invariant MATHEMATICALLY (the mean subtraction cancels the boost
+// exactly in real arithmetic), which is the axiom the judgment assigns to
+// `sgs.stress` (Var -> Inv); in floating point route (1) below -- raw second
+// moments minus products of means -- holds it only to the rounding of the
+// raw moments, which is why the pin is a tolerance, not an equality. (The
+// ppl former and `sgs.stress` center BEFORE multiplying, so a boost reaches
+// them only through the rounding of the centered values.)
 // (Coarse-grid gradient invariance is deferred to the Phase-1b sgs.grad
 // tests: at N_coarse = 2 the periodic central difference is degenerate.)
 // ============================================================================
@@ -54,7 +59,7 @@ let tau = [m00 - mu0 * mu0, m01 - mu0 * mu1, m02 - mu0 * mu2, m11 - mu1 * mu1, m
 
 // (2) the ppl former route: same tensor, one call, flat packed pool
 let c2 = ppl.comoments(A, 2)
-// EXPECT: c2 = [0.25325184801754563, 0.023596559909789594, -0.08610568558444831, 0.8664234203346481, -0.7664919700416585, 1.0160853438383561]
+// EXPECT: c2 = [0.2532518480175457, 0.023596559909789594, -0.08610568558444831, 0.8664234203346483, -0.7664919700416587, 1.0160853438383561]
 
 let mut agree = [0.0]
 let agree_done = {

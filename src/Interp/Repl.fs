@@ -101,14 +101,15 @@ let lowerSessionDiag (fileName: string option) (source: string)
             // it here so the REPL surfaces a diagnostic instead of an
             // unhandled exception killing the session.
             match (try Ok (Blade.Lowering.lowerTypedProgram tp (Some prog) builder)
-                   with ex -> Error ex.Message) with
-            | Error msg ->
-                reject [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan msg ]
+                   with
+                   | Blade.Diagnostics.BladeDiagnosticException d -> Error d
+                   | ex -> Error (Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message)) with
+            | Error d ->
+                reject [ d ]
             | Ok ir ->
             match Blade.IRValidate.validateIR ir with
             | Error errs ->
-                reject (errs |> List.map (fun s ->
-                    Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s))
+                reject (errs |> List.map Blade.IRValidate.diagnosticOfValidationMessage)
             | Ok validated ->
                 Ok { Prog = prog; Typed = tp; Builder = builder; Ir = validated; Warnings = warnings }
 

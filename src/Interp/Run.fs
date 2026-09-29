@@ -202,9 +202,21 @@ let private printableModule (program: IRProgram) : IRModule =
     match program.Modules with
     | [ single ] -> single
     | many ->
+        // Every per-module table merges, as codegen's merge does -- TYPES
+        // included: taking the head module's alone left the printer unable to
+        // see a struct any later module (main, typically) declared, while the
+        // compiled lane's merged module could.
+        let mergeMaps (pick: IRModule -> Map<'k, 'v>) =
+            many |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc (pick m)) Map.empty
         { many.Head with
+            Types = many |> List.collect _.Types
             Functions = many |> List.collect _.Functions
             Bindings = many |> List.collect _.Bindings
+            ProviderReads = mergeMaps _.ProviderReads
+            ProviderWrites = mergeMaps _.ProviderWrites
+            RandomInits = mergeMaps _.RandomInits
+            CompoundInits = mergeMaps _.CompoundInits
+            SparseInits = mergeMaps _.SparseInits
             MutableArrayLets = many |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty }
 
 // Random-fill bindings (rand.<fam>, RandomInits/RandGen).
@@ -595,7 +607,12 @@ let private execProgram (state: Core.InterpState) (merged: IRModule) (program: I
     let printOnly =
         match printOnly with
         | Some _ -> printOnly
-        | None -> Blade.CodeGenState.printSelection ()
+        | None ->
+            let ambient = Blade.CodeGenState.printSelection ()
+            // The ambient pin is the user's `--print`: a name that would
+            // print nothing is refused, as codegen refuses it (BL7004).
+            ambient |> Option.iter (Print.checkAmbientSelection state.ForcedDeferred merged)
+            ambient
     Print.printBindingsOnly testName lookup state.ForcedDeferred merged printOnly sb
 
     // The memo this run hands to its successor: every top-level binding that

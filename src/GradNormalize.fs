@@ -395,7 +395,7 @@ let internal expandEagerMap (fname: string) (ctx: Ctx)
         // A `reduce` inside the kernel body is now in STATEMENT position, so
         // it lowers by the ordinary additive-fold rule -- into the innermost
         // loop, where its accumulator is loop-local and replays exactly.
-        hoistReduces fname ctx extents substituted |> Result.map (fun (pre, body') ->
+        hoistReduces fname ctx extents denv substituted |> Result.map (fun (pre, body') ->
         let bufLet =
             StmtLet { Mutability = BindMut
                       Pattern = synPat (PatVar name)
@@ -408,6 +408,126 @@ let internal expandEagerMap (fname: string) (ctx: Ctx)
                 [ StmtForIn (nm, syn (ExprDotDot (iLit 0L, iLit (int64 n))), inner) ])
                 idxNames dims (pre @ [write])
         (Some (bufLet :: loops, dims)))))))
+    | _ -> Ok None
+
+/// Static dims of a MAP application's result (the outer product of its
+/// operands' axes; a `zip` contributes its shared operand shape once), for the
+/// partial-fold lowering below in FORWARD mode, where the map is kept as a
+/// loop object and `staticDimsOf` does not see through it.
+///
+/// Only a CELL-WISE kernel makes the result's shape the iteration space: every
+/// parameter rank 0 and a non-literal body. A rank-carrying parameter
+/// (`lambda(row: T^1)`) is bound to a FIBER and iterates only the leading
+/// axes; an array-literal body raises the rank. Those -- and a kernel this
+/// cannot see (a let-bound lambda, anything unrecognized) -- answer None, as
+/// does an operand whose dims are not literal.
+let private mapIterDims (ctx: Ctx) (denv: Map<string, int list>) (e: Expr) : int list option =
+    let rec strip (x: Expr) =
+        match x.Kind with
+        | ExprKind.ExprCompute inner | ExprKind.ExprTyped (inner, _) -> strip inner
+        | _ -> x
+    let rankOfTy (t: TypeExpr option) =
+        match t |> Option.map (resolveTy ctx) with
+        | Some (TyVar (_, Some r)) -> r
+        | Some (TyAbstractArray (_, { Kind = ExprKind.ExprLit (LitInt r) }, _)) -> int r
+        | Some (TyAbstractArray _) -> 1
+        | Some (TyArray (_, its)) -> its.Length
+        | _ -> 0
+    let notLit (body: Expr) = match body.Kind with ExprKind.ExprArrayLit _ -> false | _ -> true
+    let cellwise (k: Expr) =
+        match k.Kind with
+        | ExprKind.ExprLambda (ps, _, body) -> ps |> List.forall (fun p -> rankOfTy p.Type = 0) && notLit body
+        | ExprKind.ExprVar f when Map.containsKey f ctx.Decls ->
+            let fd = ctx.Decls.[f]
+            fd.Params |> List.forall (fun p -> rankOfTy p.Type = 0) && notLit fd.Body
+        | ExprKind.ExprVar f -> isMathIntrinsic f
+        | _ -> false
+    match strip e with
+    | MapApply mv when not mv.Ops.IsEmpty && cellwise mv.Kern ->
+        let opDims (op: Expr) =
+            match op.Kind with
+            | ExprKind.ExprRange [t] -> literalIdxExtent ctx t |> Option.map (fun n -> [n])
+            | ExprKind.ExprVar n -> Map.tryFind n denv
+            | ExprKind.ExprZip ({ Kind = ExprKind.ExprVar n } :: _) -> Map.tryFind n denv
+            | _ -> None
+        mv.Ops |> List.fold (fun acc op ->
+            acc |> Option.bind (fun ds -> opDims op |> Option.map (fun d -> ds @ d))) (Some [])
+    | _ -> None
+
+/// Lower a PARTIAL additive fold bound by a `let` --
+///
+///     let rs = reduce(P, (+))            // P rank r >= 2: folds the innermost axis
+///     let rs = reduce(P, (+), axes = k)  // folds the k innermost axes
+///
+/// -- into the element-accumulation construction loop both sweeps already
+/// differentiate:
+///
+///     let mut rs = <zeros of P's leading r - k dims>
+///     for i0 .. for i(r-1) { rs(i0 .. i(r-k-1)) = rs(...) + P(i0 .. i(r-1)) }
+///
+/// The adjoint of that element accumulation is the row BROADCAST
+/// (Pbar(i, j) += rsbar(i)); the tangent is the same fold of the tangent. A
+/// fold of every axis (k = r) accumulates into a scalar, like the rank-1
+/// rewrite in `hoistReduces`. Without this, `hoistReduces` met a rank-2
+/// source and emitted a SCALAR accumulator over its rows -- a type error at
+/// user code in reverse mode (BL3001) and an internal BL5501 in forward mode.
+///
+/// `dimsOf` answers the source's static dims (the dims env, or -- forward
+/// mode, where maps stay loop objects -- the map's iteration space). Returns
+/// `Ok None` for anything that is not such a let (the caller is then
+/// unchanged): a non-name source, an unknown or rank-1 shape.
+let internal expandPartialFold (fname: string) (ctx: Ctx) (dimsOf: string -> int list option)
+                               (name: string) (annot: TypeExpr option) (value: Expr)
+    : Result<(Stmt list * int list) option, string> =
+    let rec strip (x: Expr) =
+        match x.Kind with
+        | ExprKind.ExprTyped (inner, _) -> strip inner
+        | _ -> x
+    match (strip value).Kind with
+    | ExprKind.ExprReduce ({ Kind = ExprKind.ExprVar src }, { Kind = ExprKind.ExprSection OpAdd }, initOpt, axesOpt) ->
+        match dimsOf src with
+        | Some dims when dims.Length >= 2 ->
+            let rank = dims.Length
+            let axesR =
+                match axesOpt with
+                | None -> Ok 1
+                | Some { Kind = ExprKind.ExprLit (LitInt k) } when k >= 1L && int k <= rank -> Ok (int k)
+                | Some _ -> err fname $"a partial `reduce` in differentiated code needs a literal `axes = k` with 1 <= k <= {rank} (the rank of '{src}')"
+            axesR |> Result.bind (fun k ->
+            if initOpt.IsSome then
+                err fname $"a partial `reduce` over the rank-{rank} array '{src}' does not take an `init` in differentiated code (v1); add the offset after the fold"
+            else
+            let resDims = List.take (rank - k) dims
+            let cells = resDims |> List.fold (*) 1
+            if cells > maxLoweredCells then
+                err fname $"this partial fold's result has {cells} cells; the lowering materializes it as a zero-literal buffer, which is capped at {maxLoweredCells} (v1)"
+            else
+            let keptAnnot =
+                match annot with
+                | Some t when not resDims.IsEmpty ->
+                    (match arrayLiteralExtents (resolveArrayTy ctx t) with
+                     | Some (true, ds) when ds = resDims -> Ok (Some t)
+                     | _ -> err fname $"the annotation on '{name}' does not read as `Array<Float like Idx<n>, ...>` matching the fold's result shape {resDims} (v1); drop it, or spell the extents literally")
+                | other -> Ok other
+            keptAnnot |> Result.map (fun keptAnnot ->
+                let idxNames = dims |> List.map (fun _ -> fresh ctx "__pf")
+                let idxVars = idxNames |> List.map v
+                let read = syn (ExprApp (v src, idxVars))
+                let target =
+                    if resDims.IsEmpty then v name
+                    else syn (ExprApp (v name, List.take (rank - k) idxVars))
+                let bufLet =
+                    StmtLet { Mutability = BindMut
+                              Pattern = synPat (PatVar name)
+                              Type = keptAnnot
+                              Value = zerosOfDims resDims }
+                let write = StmtExpr (syn (ExprAssign (target, add target read)))
+                let loops =
+                    List.foldBack2 (fun nm n inner ->
+                        [ StmtForIn (nm, syn (ExprDotDot (iLit 0L, iLit (int64 n))), inner) ])
+                        idxNames dims [ write ]
+                Some (bufLet :: loops, resDims)))
+        | _ -> Ok None
     | _ -> Ok None
 
 /// The pre-pass proper: rewrite one function body's statements, expanding
@@ -583,7 +703,7 @@ let internal preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : R
                     // (which would otherwise meet the map as a reduce source
                     // and refuse it).
                     let plainLet () =
-                        hoistReduces fname ctx env b.Value |> Result.map (fun (pre, value') ->
+                        hoistReduces fname ctx env denv b.Value |> Result.map (fun (pre, value') ->
                             let byAnn =
                                 match b.Type with
                                 | Some t -> arrayLiteralExtents (resolveArrayTy ctx t)
@@ -595,10 +715,18 @@ let internal preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : R
                                 | Some cnt -> Map.add nm cnt env
                                 | None -> env
                             let denv0, loopEnv' = rebound nm
+                            // Forward mode keeps an eager map as a loop object,
+                            // so its dims come from the iteration space (the
+                            // partial-fold lowering reads them); reverse mode
+                            // lowered every map it can before reaching here.
                             let denv' =
                                 match (match byAnn with
                                        | Some (true, ds) -> Some ds
-                                       | _ -> staticDimsOf ctx denv0 value') with
+                                       | _ ->
+                                           match staticDimsOf ctx denv0 value' with
+                                           | Some ds -> Some ds
+                                           | None when errMode.Value = "jvp" -> mapIterDims ctx denv0 value'
+                                           | None -> None) with
                                 | Some ds -> Map.add nm ds denv0
                                 | None -> denv0
                             ((env', denv', loopEnv'), outp @ pre @ [StmtLet { b with Value = value' }]))
@@ -612,21 +740,32 @@ let internal preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : R
                                 | d :: _ -> Map.add nm d env
                                 | [] -> env
                             Ok ((env', Map.add nm dims denv0, loopEnv'), outp @ emitted)
-                        | None -> plainLet ()))
+                        | None ->
+                            expandPartialFold fname ctx (fun src -> Map.tryFind src denv) nm b.Type b.Value
+                            |> Result.bind (fun folded ->
+                                match folded with
+                                | Some (emitted, dims) ->
+                                    let denv0, loopEnv' = rebound nm
+                                    let env', denv' =
+                                        match dims with
+                                        | d :: _ -> Map.add nm d env, Map.add nm dims denv0
+                                        | [] -> Map.remove nm env, denv0
+                                    Ok ((env', denv', loopEnv'), outp @ emitted)
+                                | None -> plainLet ())))
                 | StmtLet b ->
                     noNestedSort "a let initializer" b.Value |> Result.bind (fun () ->
-                    hoistReduces fname ctx env b.Value |> Result.map (fun (pre, value') ->
+                    hoistReduces fname ctx env denv b.Value |> Result.map (fun (pre, value') ->
                         let names = patternBoundNames b.Pattern
                         let denv' = names |> List.fold (fun m n -> Map.remove n m) denv
                         let loopEnv' = names |> List.fold (fun m n -> Map.remove n m) loopEnv
                         ((env, denv', loopEnv'), outp @ pre @ [StmtLet { b with Value = value' }])))
                 | StmtExpr ex ->
                     noNestedSort "this statement" ex |> Result.bind (fun () ->
-                    hoistReduces fname ctx env ex |> Result.map (fun (pre, ex') ->
+                    hoistReduces fname ctx env denv ex |> Result.map (fun (pre, ex') ->
                         ((env, denv, loopEnv), outp @ pre @ [StmtExpr ex'])))
                 | StmtAssign (lhs, op, rhs) ->
                     noNestedSort "this assignment" rhs |> Result.bind (fun () ->
-                    hoistReduces fname ctx env rhs |> Result.map (fun (pre, rhs') ->
+                    hoistReduces fname ctx env denv rhs |> Result.map (fun (pre, rhs') ->
                         ((env, denv, loopEnv), outp @ pre @ [StmtAssign (lhs, op, rhs')])))
                 | StmtForIn (var, range, body) ->
                     goStmts (env, denv, loopEnv) body |> Result.map (fun (_, body') ->
@@ -635,11 +774,11 @@ let internal preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : R
             (Ok (st0, []))
     unitLetCheck
     |> Result.bind (fun () -> goStmts (paramExtents, initDims, Map.empty) stmts0)
-    |> Result.bind (fun ((env, _, _), stmts') ->
+    |> Result.bind (fun ((env, denvEnd, _), stmts') ->
         match finalOpt with
         | Some fe ->
             noNestedSort "the returned expression" fe |> Result.bind (fun () ->
-            hoistReduces fname ctx env fe |> Result.map (fun (pre, fe') ->
+            hoistReduces fname ctx env denvEnd fe |> Result.map (fun (pre, fe') ->
                 inheritSpan fd.Body (ExprBlock (dropDeadLoopBindings (stmts' @ pre) (Some fe'), Some fe'))))
         | None ->
             Ok (inheritSpan fd.Body (ExprBlock (dropDeadLoopBindings stmts' None, None))))
@@ -672,6 +811,102 @@ let internal checkInlinable (fname: string) (fd: FunctionDecl) (argCount: int)
     elif argCount <> fd.Params.Length then
         err fname $"'{fd.Name}' called with {argCount} arguments, expects {fd.Params.Length}"
     else Ok ()
+
+/// Alpha-rename every same-name `let` REBINDING in a function body's
+/// top-level block to a fresh name (SSA over the statement binders), before
+/// anything downstream sees the body.
+///
+/// Both sweeps key their bookkeeping by NAME: the reverse sweep's cotangent
+/// buffers are `d<name>`, and it re-evaluates forward expressions by name,
+/// resolving to whatever the name is bound to LAST. So `let t = sin(x); let
+/// t2 = t * t; let t = cos(x); ...` used to route t2's cotangent into the
+/// second `t` and re-evaluate `t * t` at cos(x) -- a silently wrong gradient
+/// for a legal program (`let` rebinding in its own scope is ordinary Blade).
+/// After this pass every statement binder in the body is unique, which is
+/// the invariant the name-keyed sweeps silently assumed.
+///
+/// A name counts as already bound when it is a parameter, a same-module
+/// function or module value (a local shadowing `f` would otherwise be taken
+/// for a call to the function `f` by the hoister), or an earlier statement
+/// binder. The first binding of a fresh name keeps its spelling, so error
+/// messages and the common no-rebind body are unchanged (the pass returns
+/// the declaration itself when it renamed nothing). A recursive array's
+/// self-name (`ExprRecArray.Name`) is its own binder, so its value renames
+/// under the NEW mapping. Destructuring patterns are refused downstream;
+/// their names only shadow here.
+let internal ssaRebindLets (ctx: Ctx) (fd: FunctionDecl) : Result<FunctionDecl, string> =
+    match fd.Body.Kind with
+    | ExprKind.ExprBlock (stmts, finalOpt) ->
+        let seen = System.Collections.Generic.HashSet<string>()
+        for p in fd.Params do seen.Add p.Name |> ignore
+        for KeyValue (n, _) in ctx.Decls do seen.Add n |> ignore
+        for n in ctx.ModuleVals do seen.Add n |> ignore
+        let mutable renamedAny = false
+        let rec isRecArray (e: Expr) =
+            match e.Kind with
+            | ExprKind.ExprRecArray _ -> true
+            | ExprKind.ExprTyped (inner, _) -> isRecArray inner
+            | _ -> false
+        let rec goStmt (ren: Map<string, string>) (st: Stmt) : Result<Stmt * Map<string, string>, string> =
+            match st with
+            | StmtSpanned (inner, sp) ->
+                goStmt ren inner |> Result.map (fun (s', r') -> (StmtSpanned (s', sp), r'))
+            | StmtLet b ->
+                let rebind (n: string) =
+                    if seen.Add n then (n, Map.remove n ren)
+                    else
+                        let n' = fresh ctx $"{n}__rb"
+                        seen.Add n' |> ignore
+                        renamedAny <- true
+                        (n', Map.add n n' ren)
+                let rec renamePat (p: Pattern) : (Pattern * Map<string, string>) option =
+                    match p.Kind with
+                    | PatternKind.PatVar n ->
+                        let (n', renNext) = rebind n
+                        Some ({ p with Kind = PatternKind.PatVar n' }, renNext)
+                    | PatternKind.PatTyped (sub, t) ->
+                        renamePat sub |> Option.map (fun (s', r') -> ({ p with Kind = PatternKind.PatTyped (s', t) }, r'))
+                    | _ -> None
+                match renamePat b.Pattern with
+                | Some (pat', renNext) ->
+                    renameExpr (if isRecArray b.Value then renNext else ren) b.Value
+                    |> Result.map (fun v' -> (StmtLet { b with Pattern = pat'; Value = v' }, renNext))
+                | None ->
+                    let names = patternBoundNames b.Pattern
+                    for n in names do seen.Add n |> ignore
+                    renameExpr ren b.Value
+                    |> Result.map (fun v' -> (StmtLet { b with Value = v' }, shadowNames names ren))
+            | StmtAssign (l, op, rhs) ->
+                renameExpr ren l |> Result.bind (fun l' ->
+                renameExpr ren rhs |> Result.map (fun r' -> (StmtAssign (l', op, r'), ren)))
+            | StmtExpr inner ->
+                renameExpr ren inner |> Result.map (fun i -> (StmtExpr i, ren))
+            | StmtForIn (v, rng, body) ->
+                // Removed from the surface (BL1003); kept total in case an
+                // internal producer still builds one: the loop variable and
+                // the body's binders shadow only inside the body.
+                renameExpr ren rng |> Result.bind (fun rng' ->
+                seen.Add v |> ignore
+                body
+                |> List.fold (fun acc s2 ->
+                    acc |> Result.bind (fun (ys, renB) ->
+                        goStmt renB s2 |> Result.map (fun (s', renB') -> (s' :: ys, renB'))))
+                    (Ok ([], Map.remove v ren))
+                |> Result.map (fun (body', _) -> (StmtForIn (v, rng', List.rev body'), ren)))
+        stmts
+        |> List.fold (fun acc st ->
+            acc |> Result.bind (fun (ys, ren) ->
+                goStmt ren st |> Result.map (fun (s', ren') -> (s' :: ys, ren'))))
+            (Ok ([], Map.empty))
+        |> Result.bind (fun (stmts', renEnd) ->
+            if not renamedAny then Ok fd
+            else
+            (match finalOpt with
+             | None -> Ok None
+             | Some fe -> renameExpr renEnd fe |> Result.map Some)
+            |> Result.map (fun fe' ->
+                { fd with Body = inheritSpan fd.Body (ExprBlock (List.rev stmts', fe')) }))
+    | _ -> Ok fd
 
 /// Normalize + inline a function body to the flat NStmt fragment:
 /// all user calls inlined, all statements validated.
@@ -709,6 +944,9 @@ and internal normalizeBodyUncached (fname: string) (ctx: Ctx) (depth: int) (fd: 
     : Result<NStmt list * Expr, string> =
     // Lower the imperative-free surface constructs (recursive arrays, reduce)
     // into accumulation/construction statements before the NFor pipeline runs.
+    // SSA the let rebinds first: every name-keyed pass below assumes unique
+    // binders (see `ssaRebindLets`). Rename refusals carry the mode prefix.
+    (match ssaRebindLets ctx fd with Ok v -> Ok v | Error m -> err fname m) |> Result.bind (fun fd ->
     preNormalizeBody fname ctx fd |> Result.bind (fun body' ->
     convertBody fname body' |> Result.bind (fun (stmts, finalE) ->
     // hoist calls inside the final expression too
@@ -742,7 +980,7 @@ and internal normalizeBodyUncached (fname: string) (ctx: Ctx) (depth: int) (fd: 
                 normStmts body |> Result.map (fun body' ->
                     [NFor (var, lo, hi, body')]))
         |> Result.map List.concat
-    normStmts (stmts @ finalHoist) |> Result.map (fun ns -> (ns, finalE')))))
+    normStmts (stmts @ finalHoist) |> Result.map (fun ns -> (ns, finalE'))))))
 
 /// Inline `let target = callee(args)`: bind arguments to fresh param names,
 /// splice the callee's own normalized body with all its binders renamed,

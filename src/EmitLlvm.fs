@@ -204,6 +204,7 @@ let private grpExternReturns = 3      // the shim's printers and libm: effects, 
 let private grpShimAlloc = 4          // the pool allocator
 let private grpShimPanic = 5          // the panic path
 let private grpShimFree = 6           // the pool deallocator (obviously not `nofree`)
+let private grpShimArith = 7          // arithmetic-contract helpers: may panic (BL8013/BL8014), so no `willreturn`
 
 let private attrGroupText (anyFrees: bool) (g: int) : string =
     // Blade has no exceptions (nounwind: deletes all Windows SEH lowering)
@@ -226,6 +227,7 @@ let private attrGroupText (anyFrees: bool) (g: int) : string =
     elif g = grpShimAlloc then "nofree nounwind"
     elif g = grpShimPanic then "cold noreturn nounwind"
     elif g = grpShimFree then "nounwind willreturn"
+    elif g = grpShimArith then "nofree nounwind"
     else ""
 
 /// The facts a whole module carries, computed once before any instruction is
@@ -882,6 +884,13 @@ let private shimTable : Map<string, ShimFn> =
           "blade_alloc_cells",
           { Ret = "ptr"; RetAttrs = "noalias align 64"; Args = [ "i64"; "i64" ]; Group = grpShimAlloc }
           "blade_free", { Ret = "void"; RetAttrs = ""; Args = [ "ptr" ]; Group = grpShimFree }
+          // The arithmetic contract (docs/formalism.md section 2.4): the twins of
+          // blade_rt::idiv / imod / ipow / f2i and blade_arith::fpow.
+          "blade_idiv", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64" ]; Group = grpShimArith }
+          "blade_imod", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64" ]; Group = grpShimArith }
+          "blade_ipow", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64" ]; Group = grpShimArith }
+          "blade_f2i64", { Ret = "i64"; RetAttrs = ""; Args = [ "double" ]; Group = grpShimArith }
+          "blade_fpow", io "double" [ "double"; "double" ]
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
           "blade_out_f64", io "void" [ "double" ]
@@ -1050,6 +1059,33 @@ let private libmUnary : Map<string, string> =
       // `std::abs` on a double IS fabs; typeOf pins the result Float64.
       "abs", "fabs" ]
     |> Map.ofList
+
+/// Transcendental libm entry points whose call sites carry `nobuiltin`: the
+/// arithmetic contract (docs/formalism.md section 2.4) says their value is
+/// the platform libm's AT RUN TIME, never a compile-time fold. LLVM's constant
+/// folder evaluates a recognized libcall on constant arguments with the HOST
+/// compiler's own libm -- which happens to be the target's on this toolchain,
+/// but is not the contract. `nobuiltin` on the call site withdraws the
+/// libcall recognition for exactly that call. sqrt/floor/ceil/fabs are
+/// absent: they are correctly rounded, so a fold is the runtime value, and
+/// sqrt must stay recognizable to vectorize.
+let private libmNoFold : Set<string> =
+    Set.ofList [ "exp"; "log"; "log10"; "sin"; "cos"; "tan"; "sinh"; "cosh"; "tanh"
+                 "asin"; "acos"; "atan"; "atan2"; "pow" ]
+
+/// The integer literal an IR operand IS (`3`, `-1`), if it is one.
+let private literalIntOf (e: IRExpr) : int64 option =
+    match e with
+    | IRLit (IRLitInt n) -> Some n
+    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> Some (0L - n)
+    | _ -> None
+
+/// Call a shim symbol (declared through shimTable) that returns a value.
+let private callShim (c: Ctx) (name: string) (ret: Sc) (args: (Sc * string) list) : Val =
+    needShim c name
+    let dest = freshReg c
+    ln c (renderCall { Dest = Some dest; RetTy = ret; Callee = "@" + name; Args = args })
+    { Reg = dest; Ty = ret }
 
 // ---------------------------------------------------------------------------
 // Static-extent arrays: dense pools and packed simplex pools
@@ -2381,9 +2417,38 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
     // into immediate UB.
     | IRAnd | IROr -> emitShortCircuit c op l r
     | IRCaret ->
-        let a = coerce c ScF64 (emitExpr c l)
-        let b = coerce c ScF64 (emitExpr c r)
-        callLibm2 c "pow" a b
+        // The arithmetic contract (docs/formalism.md section 2.4), the twin
+        // of CodeGenExprSupport.renderContractBinOp: integer ^ integer is
+        // EXACT and wraps (it used to go through a double `pow`, so 3^39 came
+        // back rounded); a negative exponent panics BL8013 in the shim. Real
+        // `^` is blade_fpow -- x * x at an exponent of exactly 2, else libm pow.
+        let a0 = emitExpr c l
+        let b0 = emitExpr c r
+        if promote a0.Ty b0.Ty = ScI64 then
+            let a = coerce c ScI64 a0
+            let b = coerce c ScI64 b0
+            match literalIntOf r with
+            | Some n when n >= 0L && n <= 8L ->
+                // A small literal exponent unrolls to a multiply chain: the
+                // same residue modulo 2^64 as the shim's square-and-multiply.
+                if n = 0L then { Reg = "1"; Ty = ScI64 }
+                else
+                    let mutable acc = a
+                    for _ in 2L .. n do
+                        let dest = freshReg c
+                        ln c (renderBin { Dest = dest; Opcode = "mul"; Flags = ""; Ty = ScI64; Lhs = acc.Reg; Rhs = a.Reg })
+                        acc <- { Reg = dest; Ty = ScI64 }
+                    acc
+            | _ -> callShim c "blade_ipow" ScI64 [ ScI64, a.Reg; ScI64, b.Reg ]
+        else
+            let a = coerce c ScF64 a0
+            let b = coerce c ScF64 b0
+            match r with
+            | IRLit (IRLitInt 2L) | IRLit (IRLitFloat 2.0) ->
+                let dest = freshReg c
+                ln c (renderBin { Dest = dest; Opcode = "fmul"; Flags = fmfFor c ScF64; Ty = ScF64; Lhs = a.Reg; Rhs = a.Reg })
+                { Reg = dest; Ty = ScF64 }
+            | _ -> callShim c "blade_fpow" ScF64 [ ScF64, a.Reg; ScF64, b.Reg ]
     | IRMath2 "log_base" ->
         // No libm log_base; the quotient IS the definition, matching
         // CodeGenExprSupport.renderMath2.
@@ -2431,8 +2496,16 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
                 // C++ integer division and `%` truncate toward zero: sdiv/srem.
                 | ScI64, IRDiv -> "sdiv" | ScI64, IRMod -> "srem"
                 | _ -> refuse ($"arithmetic on {(llTy common)} operands")
-            ln c (renderBin { Dest = dest; Opcode = opcode; Flags = fmfFor c common; Ty = common; Lhs = a.Reg; Rhs = b.Reg })
-            { Reg = dest; Ty = common }
+            match common, op, literalIntOf r with
+            // A zero or -1 divisor (or one not known) goes through the shim:
+            // zero panics BL8013 and MIN / -1 wraps, where sdiv/srem are UB
+            // (the arithmetic contract; blade_rt::idiv in the C++ lane). A
+            // nonzero literal other than -1 can do neither: plain sdiv/srem.
+            | ScI64, (IRDiv | IRMod), lit when (match lit with Some n -> n = 0L || n = -1L | None -> true) ->
+                callShim c (if op = IRDiv then "blade_idiv" else "blade_imod") ScI64 [ ScI64, a.Reg; ScI64, b.Reg ]
+            | _ ->
+                ln c (renderBin { Dest = dest; Opcode = opcode; Flags = fmfFor c common; Ty = common; Lhs = a.Reg; Rhs = b.Reg })
+                { Reg = dest; Ty = common }
 
 and private emitShortCircuit (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
     let slot = allocaOf c "i1"
@@ -2486,19 +2559,26 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
     // for (Float32/Int32/complex) refuse like every other Float32/complex
     // program does.
     | IRCast ETFloat64 -> coerce c ScF64 (emitExpr c x)
-    | IRCast ETInt64 -> coerce c ScI64 (emitExpr c x)
+    // Float -> Int64 is the checked conversion of the arithmetic contract:
+    // NaN / out of range panics BL8014 (blade_f2i64), where fptosi is poison.
+    | IRCast ETInt64 ->
+        let v = emitExpr c x
+        if v.Ty = ScF64 then callShim c "blade_f2i64" ScI64 [ ScF64, v.Reg ]
+        else coerce c ScI64 v
     | IRCast et -> refuse ($"a numeric cast to {(Blade.Types.castNameOf et)}")
 
 and private callLibm1 (c: Ctx) (fn: string) (arg: Val) : Val =
     need c ($"declare double @{fn}(double{(paramAttr ())}){(attrRef c grpExternReturns)}")
     let dest = freshReg c
-    ln c (renderCall { Dest = Some dest; RetTy = ScF64; Callee = "@" + fn; Args = [ ScF64, arg.Reg ] })
+    ln c (renderCall { Dest = Some dest; RetTy = ScF64; Callee = "@" + fn; Args = [ ScF64, arg.Reg ] }
+          + (if libmNoFold.Contains fn then " nobuiltin" else ""))
     { Reg = dest; Ty = ScF64 }
 
 and private callLibm2 (c: Ctx) (fn: string) (a: Val) (b: Val) : Val =
     need c ($"declare double @{fn}(double{(paramAttr ())}, double{(paramAttr ())}){(attrRef c grpExternReturns)}")
     let dest = freshReg c
-    ln c (renderCall { Dest = Some dest; RetTy = ScF64; Callee = "@" + fn; Args = [ ScF64, a.Reg; ScF64, b.Reg ] })
+    ln c (renderCall { Dest = Some dest; RetTy = ScF64; Callee = "@" + fn; Args = [ ScF64, a.Reg; ScF64, b.Reg ] }
+          + (if libmNoFold.Contains fn then " nobuiltin" else ""))
     { Reg = dest; Ty = ScF64 }
 
 and private emitMatch (c: Ctx) (whole: IRExpr) (scrutinee: IRExpr) (cases: IRMatchCase list) : Val =

@@ -1,0 +1,13 @@
+// TEST: Co-iteration kernel with the index parameters first (rejects)
+// ERROR: BL3003
+// ============================================================================
+// `for (A, B) in range<M, N>` hands the kernel each operand's CELL, already
+// indexed, and THEN the loop indices (loops/094): `lambda(a, b, i, j)`. The
+// docs used to show `lambda(i, j, a, b) -> a(i, j) * b(i, j)`; written that
+// way, `a` binds the M index and `a(i, j)` applies an index value. That
+// reached g++ (`a(A____i0____i1, ...)` on an index struct); it is refused.
+type M = Idx<2>
+type N = Idx<3>
+let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B: Array<Float64 like M, N> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let result = for (A, B) in range<M, N> <@> lambda(i, j, a, b) -> a(i, j) * b(i, j) |> compute

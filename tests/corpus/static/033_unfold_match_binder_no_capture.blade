@@ -1,0 +1,12 @@
+// TEST: Unfold match binder does not capture a caller name
+// A match-case binder inside an inlined static function was neither
+// freshened nor respected by the substitution: the caller's array `m`,
+// passed as `x`, was captured by the body's own `| m -> ...` binder, so
+// `x(0)` became an index into the matched Float (the emitted C++ called
+// `__match_5(0L)` and g++ refused it). Now the binder is renamed apart.
+// s = A + 2 * m(0) = A + 20.
+static function shift_by(x, k) = lambda(a) -> match k with | m -> a + m * x(0)
+let m = [10.0, 20.0]
+let A = [1.0, 2.0, 3.0]
+let s = (static object_for(shift_by(m, 2.0))) <@> A |> compute
+// EXPECT: s = [21.0, 22.0, 23.0]

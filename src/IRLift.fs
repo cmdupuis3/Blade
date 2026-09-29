@@ -519,7 +519,7 @@ let wrapLets (bindings: (IRId * IRType * IRExpr) list) (body: IRExpr) : IRExpr =
 let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     match expr with
     // Leaves: nothing to do
-    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero
+    | IRLit _ | IRVar _ | IRParam _ | IRNth | IRZero _
     | IRRange _ | IRVirtualReverse _ | IRArity _
     | IROpaqueExtent -> expr
 
@@ -839,6 +839,31 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
             else (accB @ b, accE @ [e'])) ([], [])
         wrapLets binds (IRArrayLit (esPeeled, ty))
 
+    // Short-circuit operators: `l && r` evaluates r only when l is true (and
+    // `l || r` only when l is false -- formalism.md's `&&` short-circuits), so
+    // r's lifts must NOT hoist above the operator: that would evaluate r's
+    // statement-shaped operand (a solve, a reduce) unconditionally -- a panic
+    // the program never raises when l decides the result. l's lifts hoist as
+    // usual (l is always evaluated). When r lifts nothing the node is kept
+    // as is; when it does, the operator becomes the select it means, with
+    // r's lets drained INSIDE the arm that evaluates it -- the same place
+    // the IRIf arm below leaves a branch's lifts.
+    // (Scalar only: an ARRAY-typed `&&` is an elementwise map and has no
+    // single select to become -- it keeps the ordinary binop arm below.)
+    | IRBinOp (mode, (IRAnd | IROr as op), l, r)
+        when (match typeOf l with ArrayElem _ -> false | _ -> true) ->
+        let (lBinds, lFinal) = liftChild builder (liftExpr builder l)
+        let r' = liftExpr builder r
+        let (rBinds, rFinal) = liftChild builder r'
+        (match rBinds with
+         | [] -> wrapLets lBinds (IRBinOp (mode, op, lFinal, rFinal))
+         | _ ->
+             let rArm = wrapLets rBinds rFinal
+             let sel =
+                 match op with
+                 | IRAnd -> IRIf (lFinal, rArm, IRLit (IRLitBool false))
+                 | _ -> IRIf (lFinal, IRLit (IRLitBool true), rArm)
+             wrapLets lBinds sel)
     // BinOps: array-typed binops can have inline forms on either side.
     | IRBinOp (mode, op, l, r) ->
         let l' = liftExpr builder l

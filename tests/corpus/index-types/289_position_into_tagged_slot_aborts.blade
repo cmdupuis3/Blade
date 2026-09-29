@@ -1,0 +1,9 @@
+// TEST: Index arithmetic past the end is a checked read (aborts)
+// `i + 3` over range<X> is a POSITION, not an X index (formalism 3.10): the
+// unannotated kernel parameter was still open when its body was typed, so
+// the sum used to inherit Nat<X> and read u(5), u(6), u(7) past the buffer
+// as garbage. A position into a named index slot is guarded.
+// ABORT: index out of bounds
+type X = Idx<5>
+let u: Array<Float64 like X> = [1.0, 2.0, 4.0, 7.0, 11.0]
+let d = method_for(range<X>) <@> lambda(i) -> u(i + 3) |> compute

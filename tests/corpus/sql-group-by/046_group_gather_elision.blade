@@ -10,12 +10,18 @@
 // is invisible to a value check -- an elided and a gathered program print the
 // same numbers, which is the whole point -- so the emission shape is pinned
 // separately, in the "Group Gather Elision" block (tests/Test_Sqlish.fs).
+//
+// The AUTO-PRINT is a consumer too: a printed grouped array shows its rows'
+// values, so under the default print (every top-level binding) no top-level
+// group_by here is elided. The elision fires when `--print` leaves the grouped
+// array out, and inside function bodies; the emission block pins both.
 type Row = Idx<6>
 let keys: Array<Int64 like Row> = [0, 1, 0, 2, 1, 0]
 let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
 let gk = group_keys(keys)
 
-// ---- ELIDED: the only consumer of `eg` reads extents.
+// ---- ELIDABLE: apart from the auto-print, the only consumer of `eg` reads
+// extents (elided when the print selection leaves `eg` out).
 let eg = group_by(vals, gk)
 let esizes = method_for(eg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
 // EXPECT: esizes = [3, 2, 1]
@@ -40,12 +46,13 @@ let zb = group_by(other, gk)
 let zs = method_for(zip(za, zb)) <@> lambda(ra: T^1, rb: T^1) -> reduce(ra, (+)) + reduce(rb, (+)) |> compute
 // EXPECT: zs = [110, 77, 44]
 
-// ---- Nothing consumes `ug`, so its gather is dead too -- the same rule, just
-// a more obvious instance of it. This is NOT dead-binding elimination: the
-// binding survives and auto-prints exactly as a gathered one would, because
-// printing a grouped array reads its extents and no values.
+// ---- Nothing but the auto-print consumes `ug`, and the print reads its rows.
+// (This pin used to read `ug = [[], [], []]`: the compiled printer walked the
+// placeholder inner extent 0 instead of the grouping's offsets, so every
+// grouped array printed empty rows. The interpreter printed them empty to
+// match -- except through an alias, where it printed the real rows.)
 let ug = group_by(vals, gk)
-// EXPECT: ug = [[], [], []]
+// EXPECT: ug = [[10, 30, 60], [20, 50], [40]]
 
 // ---- A dropped row is gathered by nobody either way, so elision and the
 // negative-key rule compose without interacting.

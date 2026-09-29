@@ -1,0 +1,13 @@
+// TEST: Nat of another index type into a Nat parameter (rejects)
+// ERROR: BL3001
+// ============================================================================
+// `Nat<Lat>` is bounds-safe BY CONSTRUCTION only if nothing else flows into it.
+// Direct application never unified arguments with parameters, so a `Lon`
+// coordinate (extent 10) reached `needsLat` and read A(7) out of a 3-element
+// array. Kernel application already refused the same thing
+// (index-types/133); the call judgment applies the one nominal rule to both.
+type Lat = Idx<3>
+type Lon = Idx<10>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+function needsLat(i: Nat<Lat>) -> Float64 = A(i) + 1.0
+let v = needsLat((7 : Lon))

@@ -103,14 +103,20 @@ and parseBracelessBinders (tokens: Token list) : ParseResult<Expr> option =
         if sCol < baseCol then (if List.isEmpty stmts then None else noValue ())
         else
         match peek toks with
+        | Some _ when not (List.isEmpty stmts) && Option.isSome (statementLeadingOperatorError toks) ->
+            Some (Option.get (statementLeadingOperatorError toks))
         | Some (TokKeyword KwLet) ->
-            (match parseLetStmt (advance toks) with
+            (match asStatement toks (fun () ->
+                       parseLetStmt (advance toks) >>= fun stmt rest ->
+                       requireStatementEnd toks rest >>= fun () rest -> success stmt rest) with
              | Ok (stmt, rest) ->
                  let rest = skipTerminator rest
                  loop (spanned rest stmt :: stmts) rest
              | Error e -> Some (Error e))
         | Some (TokKeyword KwFunction) ->
-            (match parseNestedFunction (advance toks) with
+            (match asStatement toks (fun () ->
+                       parseNestedFunction (advance toks) >>= fun stmt rest ->
+                       requireStatementEnd toks rest >>= fun () rest -> success stmt rest) with
              | Ok (stmt, rest) ->
                  let rest = skipTerminator rest
                  loop (spanned rest stmt :: stmts) rest
@@ -121,7 +127,7 @@ and parseBracelessBinders (tokens: Token list) : ParseResult<Expr> option =
         | Some TokComma | Some TokEOF | None ->
             if List.isEmpty stmts then None else noValue ()
         | Some _ ->
-            (match parseInlineExpr toks with
+            (match asStatement toks (fun () -> parseInlineExpr toks) with
              | Ok (value, rest) ->
                  Some (success (mkExpr (rangeSpan tokens rest)
                                        (ExprBlock (List.rev stmts, Some value))) rest)
@@ -131,6 +137,7 @@ and parseBracelessBinders (tokens: Token list) : ParseResult<Expr> option =
 and parseAssignment (tokens: Token list) : ParseResult<Expr> =
     parseTyped tokens >>= fun left rest ->
     match peek rest with
+    | _ when bodyCapped rest -> success left rest
     | Some (TokOp "=") ->
         advance rest |> parseAssignment >>= fun right remaining ->
         success (mkExpr (mergeSpan left.Span right.Span) (ExprAssign (left, right))) remaining
@@ -163,6 +170,7 @@ and parseAssignment (tokens: Token list) : ParseResult<Expr> =
 and parseTyped (tokens: Token list) : ParseResult<Expr> =
     parseNamedInfix tokens >>= fun expr rest ->
     match peek rest with
+    | _ when bodyCapped rest -> success expr rest
     | Some TokColon ->
         advance rest |> parseTypeExpr >>= fun ty remaining ->
         // Span runs from the base expression through the annotated type.
@@ -175,6 +183,7 @@ and parseNamedInfix (tokens: Token list) : ParseResult<Expr> =
     parsePipeline tokens >>= fun left rest ->
     let rec loop (acc: Expr) toks =
         match peek toks with
+        | _ when bodyCapped toks -> success acc toks
         | Some (TokNamedInfix name) ->
             advance toks |> parsePipeline >>= fun right remaining ->
             // Desugar :name: to function application: name(a, b)
@@ -189,6 +198,7 @@ and parsePipeline (tokens: Token list) : ParseResult<Expr> =
     let rec loop acc toks =
         let (peeked, toks') = peekContinuation toks
         match peeked with
+        | _ when bodyCapped toks' -> success acc toks
         | Some (TokOp "|>") ->
             advance toks' |> parseChoice >>= fun right remaining ->
             match right.Kind with
@@ -209,6 +219,7 @@ and parseChoice (tokens: Token list) : ParseResult<Expr> =
     let rec loop acc toks =
         let (peeked, toks') = peekContinuation toks
         match peeked with
+        | _ when bodyCapped toks' -> success acc toks
         | Some (ChoiceOp op) ->
             advance toks' |> parseParallel >>= fun right remaining ->
             loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
@@ -220,6 +231,7 @@ and parseParallel (tokens: Token list) : ParseResult<Expr> =
     let rec loop acc toks =
         let (peeked, toks') = peekContinuation toks
         match peeked with
+        | _ when bodyCapped toks' -> success acc toks
         | Some (ParallelOp op) ->
             advance toks' |> parseBind >>= fun right remaining ->
             loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
@@ -231,6 +243,7 @@ and parseBind (tokens: Token list) : ParseResult<Expr> =
     let rec loop acc toks =
         let (peeked, toks') = peekContinuation toks
         match peeked with
+        | _ when bodyCapped toks' -> success acc toks
         | Some (BindOp op) ->
             advance toks' |> parseApply >>= fun right remaining ->
             loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (Elementwise, op, acc, right))) remaining
@@ -266,8 +279,8 @@ and parseArrayProduct (tokens: Token list) : ParseResult<Expr> =
 and parseOr (tokens: Token list) : ParseResult<Expr> =
     parseAnd tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
-        | Some (OrOp (mode, op)) ->
+        match peekContinuation toks with
+        | Some (OrOp (mode, op)), toks ->
             advance toks |> parseAnd >>= fun right remaining ->
             loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
@@ -276,41 +289,59 @@ and parseOr (tokens: Token list) : ParseResult<Expr> =
 and parseAnd (tokens: Token list) : ParseResult<Expr> =
     parseEquality tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
-        | Some (AndOp (mode, op)) ->
+        match peekContinuation toks with
+        | Some (AndOp (mode, op)), toks ->
             advance toks |> parseEquality >>= fun right remaining ->
             loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
+/// Equality and comparison are NON-associative: `a == b == c` and `0 < x < 3`
+/// are refused with a steer rather than read as `(0 < x) < 3` (a Bool compared
+/// with a number) or left dangling for the caller to misreport as "Expected
+/// declaration". Parenthesize to compare a comparison's result.
+and chainedComparisonError (opToks: Token list) (isEquality: bool) : ParseResult<Expr> =
+    let t = List.head opToks
+    let op = match t.Kind with TokOp o -> o | _ -> "?"
+    let msg =
+        if isEquality then
+            $"Equality does not chain: `a == b {op} c` is not a three-way test. Write `a == b && b {op} c`, or parenthesize `(a == b) {op} c` to compare the Bool result."
+        else
+            $"Comparisons do not chain: `a < x {op} b` is not a range test. Write `a < x && x {op} b`."
+    errorFull "BL1999" msg t.Line t.Col t.EndLine t.EndCol
+
 and parseEquality (tokens: Token list) : ParseResult<Expr> =
     parseComparison tokens >>= fun left rest ->
-    match peek rest with
-    | Some (EqualityOp (mode, op)) ->
+    match peekContinuation rest with
+    | Some (EqualityOp (mode, op)), rest ->
         advance rest |> parseComparison >>= fun right remaining ->
-        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining
+        (match peekContinuation remaining with
+         | Some (EqualityOp _), opToks -> chainedComparisonError opToks true
+         | _ -> success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining)
     | _ -> success left rest
 
 and parseComparison (tokens: Token list) : ParseResult<Expr> =
     parseCons tokens >>= fun left rest ->
-    match peek rest with
-    | Some (ComparisonOp (mode, op)) ->
+    match peekContinuation rest with
+    | Some (ComparisonOp (mode, op)), rest ->
         advance rest |> parseCons >>= fun right remaining ->
-        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining
+        (match peekContinuation remaining with
+         | Some (ComparisonOp _), opToks -> chainedComparisonError opToks false
+         | _ -> success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining)
     | _ -> success left rest
 
 and parseCons (tokens: Token list) : ParseResult<Expr> =
     parseDotDot tokens >>= fun left rest ->
-    match peek rest with
-    | Some TokColonColon ->
+    match peekContinuation rest with
+    | Some TokColonColon, rest ->
         advance rest |> parseDotDot >>= fun right remaining ->
         success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (Elementwise, OpCons, left, right))) remaining
     | _ -> success left rest
 
 and parseDotDot (tokens: Token list) : ParseResult<Expr> =
     parseAdditive tokens >>= fun left rest ->
-    match peek rest with
-    | Some TokDotDot ->
+    match peekContinuation rest with
+    | Some TokDotDot, rest ->
         advance rest |> parseAdditive >>= fun right remaining ->
         success (mkExpr (mergeSpan left.Span right.Span) (ExprDotDot (left, right))) remaining
     | _ -> success left rest
@@ -318,37 +349,41 @@ and parseDotDot (tokens: Token list) : ParseResult<Expr> =
 and parseAdditive (tokens: Token list) : ParseResult<Expr> =
     parseMultiplicative tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
-        | Some (AdditiveOp (mode, op)) ->
+        match peekContinuation toks with
+        | Some (AdditiveOp (mode, op)), toks ->
             advance toks |> parseMultiplicative >>= fun right remaining ->
             loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
 and parseMultiplicative (tokens: Token list) : ParseResult<Expr> =
-    parsePower tokens >>= fun left rest ->
+    parseUnary tokens >>= fun left rest ->
     let rec loop acc toks =
-        match peek toks with
-        | Some (MultiplicativeOp (mode, op)) ->
-            advance toks |> parsePower >>= fun right remaining ->
+        match peekContinuation toks with
+        | Some (MultiplicativeOp (mode, op)), toks' ->
+            advance toks' |> parseUnary >>= fun right remaining ->
             loop (mkExpr (mergeSpan acc.Span right.Span) (ExprBinOp (mode, op, acc, right))) remaining
         | _ -> success acc toks
     loop left rest
 
-and parsePower (tokens: Token list) : ParseResult<Expr> =
-    parseUnary tokens >>= fun left rest ->
-    match peek rest with
-    | Some (PowerOp (mode, op)) ->
-        advance rest |> parsePower >>= fun right remaining ->
-        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining
-    | _ -> success left rest
-
+/// Prefix `-` / `!` bind LOOSER than `^` (the mathematical convention, and
+/// Python's / Julia's / Fortran's): `-t^2` is `-(t^2)`, so `exp(-t^2)` is the
+/// Gaussian. The exponent is itself a unary operand, so `2 ^ -1` still parses,
+/// and `^` stays right-associative (`2^3^2` = `2^(3^2)`).
 and parseUnary (tokens: Token list) : ParseResult<Expr> =
     match peek tokens with
     | Some (UnaryOp op) ->
         advance tokens |> parseUnary >>= fun expr remaining ->
         success (mkExpr (mergeSpan (headSpan tokens) expr.Span) (ExprUnaryOp (op, expr))) remaining
-    | _ -> parsePostfix tokens
+    | _ -> parsePower tokens
+
+and parsePower (tokens: Token list) : ParseResult<Expr> =
+    parsePostfix tokens >>= fun left rest ->
+    match peekContinuation rest with
+    | Some (PowerOp (mode, op)), rest' ->
+        advance rest' |> parseUnary >>= fun right remaining ->
+        success (mkExpr (mergeSpan left.Span right.Span) (ExprBinOp (mode, op, left, right))) remaining
+    | _ -> success left rest
 
 /// Parse struct construction: Name { field1 = val1, field2 = val2 }
 and parseStructExpr (name: string) (tokens: Token list) : ParseResult<Expr> =
@@ -887,6 +922,13 @@ the axis count is the named final argument `axes = n`" line col
     | Some TokLBrace ->
         parseBlock (advance tokens)
 
+    // A malformed number (`2x`, `1_`, `0xZZ`, `9999999999999999999`): the
+    // lexer's message already says what is wrong, so report it verbatim under
+    // the registered numeric-literal code, spanning the whole literal.
+    | Some (TokError msg) when isNumericLexError msg ->
+        let t = List.head tokens
+        errorFull "BL0003" msg t.Line t.Col t.EndLine t.EndCol
+
     | Some kind ->
         let line, col = currentPos tokens
         error $"Unexpected token: {describeToken kind}" line col
@@ -922,8 +964,13 @@ and parseLambda (tokens: Token list) : ParseResult<Expr> =
     | _ ->
         // Inline body parses at Apply precedence so |> isn't consumed: this
         // means `lambda(x) -> a <@> b |> compute` parses as
-        // `(lambda(x) -> a <@> b) |> compute`.
-        parseApply afterArrow >>= fun body remaining ->
+        // `(lambda(x) -> a <@> b) |> compute`. The cap makes that hold
+        // THROUGH a nested if/else, match arm or let at the body's own depth
+        // too: `method_for(A) <@> lambda(q) -> if q > 0.0 then q else 0.0
+        // |> compute` computes the whole map, not the else branch (which
+        // re-entered the full grammar and swallowed the pipe, leaving the
+        // binding an unprinted deferred loop object). formalism §15.1.
+        withBodyCap afterArrow (fun () -> parseApply afterArrow) >>= fun body remaining ->
         success (mkE tokens remaining (ExprLambda (parms, whereClause, body))) remaining
 
 and parseLambdaParam (tokens: Token list) : ParseResult<LambdaParam> =
@@ -1053,15 +1100,18 @@ and parseLet (tokens: Token list) : ParseResult<Expr> =
         success (mkExpr sp (ExprLet (binding, mkExpr sp (ExprLit LitUnit)))) afterValue
 
 and parseIf (tokens: Token list) : ParseResult<Expr> =
-    parseExprImpl tokens >>= fun cond afterCond ->
+    // Condition and then-branch are fenced by `then` / `else`, so an inline
+    // lambda body's cap does not reach them; the else branch is open-ended
+    // and keeps it (formalism §15.1).
+    withoutBodyCap (fun () -> parseExprImpl tokens) >>= fun cond afterCond ->
     expect (TokKeyword KwThen) afterCond >>= fun _ afterThen ->
-    parseExprImpl afterThen >>= fun thenBr afterThenBr ->
+    withoutBodyCap (fun () -> parseExprImpl afterThen) >>= fun thenBr afterThenBr ->
     expect (TokKeyword KwElse) afterThenBr >>= fun _ afterElse ->
     parseExprImpl afterElse >>= fun elseBr remaining ->
     success (mkE tokens remaining (ExprIf (cond, thenBr, elseBr))) remaining
 
 and parseMatch (tokens: Token list) : ParseResult<Expr> =
-    parseExprImpl tokens >>= fun scrutinee afterScrutinee ->
+    withoutBodyCap (fun () -> parseExprImpl tokens) >>= fun scrutinee afterScrutinee ->
     expect (TokKeyword KwWith) afterScrutinee >>= fun _ afterWith ->
     manyMatchCases (skipNL afterWith) >>= fun cases remaining ->
     success (mkE tokens remaining (ExprMatch (scrutinee, cases))) remaining
@@ -1096,7 +1146,7 @@ and parseMatchCase (tokens: Token list) : ParseResult<MatchCase> =
             expect (TokOp "->") afterGuard >>= fun _ afterArrow ->
             // parseBody: inline expressions stop at newline; multi-line
             // bodies (e.g. nested match) require braces.
-            parseBody afterArrow >>= fun body remaining ->
+            parseArmBody afterArrow >>= fun body remaining ->
             success { Pattern = pat; Guard = Some guard; Body = body } remaining
         // `while` belongs to the RECURSIVE-ARRAY arm and only there: it
         // declares when the induction stops (and freezes), which is a
@@ -1113,11 +1163,26 @@ and parseMatchCase (tokens: Token list) : ParseResult<MatchCase> =
                 line col
         | _ ->
             expect (TokOp "->") afterPat >>= fun _ afterArrow ->
-            parseBody afterArrow >>= fun body remaining ->
+            parseArmBody afterArrow >>= fun body remaining ->
             success { Pattern = pat; Guard = None; Body = body } remaining
     | _ ->
         let line, col = currentPos tokens
         error "Expected '|' to start match case" line col
+
+/// A match arm body. Inside an inline lambda body (cap active) a NON-final
+/// arm is fenced by the next `| pattern`, so it is parsed without the cap --
+/// `lambda(x) -> match x with | 0 -> a |> f | _ -> b` keeps its pipe in the
+/// first arm. Whether another arm follows is only known after parsing, so
+/// the uncapped parse is tried first and kept only when a `|` follows it;
+/// otherwise this is the final arm and the capped parse decides, leaving a
+/// trailing `|> compute` to the expression the lambda belongs to.
+and parseArmBody (tokens: Token list) : ParseResult<Expr> =
+    if PS.Cur.BodyCapDepth < 0 then parseBody tokens
+    else
+        match withoutBodyCap (fun () -> parseBody tokens) with
+        | Ok (body, rest) when (match peek (skipNL rest) with Some TokPipe -> true | _ -> false) ->
+            Ok (body, rest)
+        | _ -> parseBody tokens
 
 // Restricted expression parser for match guards: stops before -> (doesn't consume it).
 and parseGuardExpr (tokens: Token list) : ParseResult<Expr> =
@@ -1243,7 +1308,9 @@ and parseForConstruct (tokens: Token list) : ParseResult<Expr> =
             // No in-clause: equivalent to method_for(A, B)
             success (mkE tokens afterRParen (ExprFor (ForArrays (arrays, None), [], None))) afterRParen
     | _ ->
-        parseExprImpl tokens >>= fun kernel remaining ->
+        // The kernel binds like an inline lambda body (Apply level, capped):
+        // a trailing `|> compute` applies to the `for` value, not the kernel.
+        withBodyCap tokens (fun () -> parseApply tokens) >>= fun kernel remaining ->
         success (mkE tokens remaining (ExprFor (ForKernel kernel, [], None))) remaining
 
 and parseObjectFor (tokens: Token list) : ParseResult<Expr> =
@@ -1376,45 +1443,45 @@ and parseBlock (tokens: Token list) : ParseResult<Expr> =
             success (mkE tokens (advance toks) (ExprBlock (statements, finalExpr))) (advance toks)
         | Some TokSemi ->
             loop stmts (advance toks)
-        | Some (TokKeyword KwLet) ->
-            advance toks |> parseLetStmt >>= fun stmt remaining ->
-            let remaining = skipTerminator remaining
-            loop (spanned remaining stmt :: stmts) remaining
-        | Some (TokKeyword KwFunction) ->
-            // Nested function declaration: parsed as a let binding of a lambda.
-            advance toks |> parseNestedFunction >>= fun stmt remaining ->
-            let remaining = skipTerminator remaining
-            loop (spanned remaining stmt :: stmts) remaining
-        | Some (TokKeyword KwFor) ->
-            // Imperative `for IDENT in a..b { }` is removed from the surface
-            // language: iteration is loop objects (parallel) or recursive
-            // arrays (sequential). This shell stays only to give the shape a
-            // steering diagnostic instead of a confusing misparse at `in`.
-            // (Internal generators still construct StmtForIn directly.)
-            let afterFor = advance toks
-            match peek afterFor with
-            | Some (TokIdent _) ->
-                let afterIdent = advance afterFor
-                match peek afterIdent with
-                | Some (TokKeyword KwIn) ->
-                    let line, col = currentPos toks
-                    errorC "BL1003" forInRemovedMsg line col
-                | _ ->
-                    // Loop-object `for` expression: the surviving form.
-                    parseExprImpl toks >>= fun expr remaining ->
-                    let remaining = skipTerminator remaining
-                    loop (spanned remaining (StmtExpr expr) :: stmts) remaining
-            | _ ->
-                parseExprImpl toks >>= fun expr remaining ->
-                let remaining = skipTerminator remaining
-                loop (spanned remaining (StmtExpr expr) :: stmts) remaining
+        // An operator-led line at the statement column after another
+        // statement: neither a continuation nor a sensible new statement.
+        | Some _ when not (List.isEmpty stmts) && Option.isSome (statementLeadingOperatorError toks) ->
+            Option.get (statementLeadingOperatorError toks)
         | Some _ ->
-            parseExprImpl toks >>= fun expr remaining ->
-            let remaining = skipTerminator remaining
-            loop (spanned remaining (StmtExpr expr) :: stmts) remaining
+            asStatement toks (fun () -> parseBlockStmt toks) >>= fun stmt remaining ->
+            loop (spanned remaining stmt :: stmts) remaining
         | None ->
             errorEof "Unexpected end of input in block"
     loop [] tokens
+
+/// One block statement from `toks` (non-empty, not `}`/`;`), through the
+/// terminator rule and the separator after it.
+and parseBlockStmt (toks: Token list) : ParseResult<Stmt> =
+    let finish (stmt: Stmt) (remaining: Token list) =
+        requireStatementEnd toks remaining >>= fun () remaining ->
+        success stmt (skipTerminator remaining)
+    match peek toks with
+    | Some (TokKeyword KwLet) ->
+        advance toks |> parseLetStmt >>= finish
+    | Some (TokKeyword KwFunction) ->
+        // Nested function declaration: parsed as a let binding of a lambda.
+        advance toks |> parseNestedFunction >>= finish
+    | Some (TokKeyword KwFor) ->
+        // Imperative `for IDENT in a..b { }` is removed from the surface
+        // language: iteration is loop objects (parallel) or recursive
+        // arrays (sequential). This shell stays only to give the shape a
+        // steering diagnostic instead of a confusing misparse at `in`.
+        // (Internal generators still construct StmtForIn directly.)
+        let afterFor = advance toks
+        (match peek afterFor, peek (advance afterFor) with
+         | Some (TokIdent _), Some (TokKeyword KwIn) ->
+             let line, col = currentPos toks
+             errorC "BL1003" forInRemovedMsg line col
+         | _ ->
+             // Loop-object `for` expression: the surviving form.
+             parseExprImpl toks >>= fun expr remaining -> finish (StmtExpr expr) remaining)
+    | _ ->
+        parseExprImpl toks >>= fun expr remaining -> finish (StmtExpr expr) remaining
 
 and skipTerminator toks =
     match peek toks with
@@ -1422,11 +1489,83 @@ and skipTerminator toks =
     | Some TokSemi -> advance toks
     | _ -> toks
 
+/// The statement terminator rule (formalism §15.1): a statement or
+/// declaration ends at a newline, a `;`, or a closer (`}` `)` `]` `|` `,`,
+/// end of file). Anything else on the SAME line is a second expression
+/// juxtaposed with the first, which Blade never gives a meaning -- it has no
+/// implicit multiplication and application needs parentheses -- so it is
+/// refused here instead of being split off as a silent extra statement
+/// (`let b = 2 x` used to bind b = 2 and print x).
+///
+/// Newlines inside (), [] and {} are dropped by the lexer, so "on a later
+/// line" is decided from token LINES, not from a TokNewline being present.
+/// `stmtStart` is the token list the statement was parsed from.
+and requireStatementEnd (stmtStart: Token list) (remaining: Token list) : ParseResult<unit> =
+    match remaining with
+    | [] -> success () remaining
+    | t :: _ ->
+        match t.Kind with
+        | TokNewline | TokSemi | TokEOF
+        | TokRBrace | TokRParen | TokRBracket | TokPipe | TokComma -> success () remaining
+        | TokError msg when isNumericLexError msg ->
+            errorFull "BL0003" msg t.Line t.Col t.EndLine t.EndCol
+        | kind ->
+            let (sLine, sCol) = currentPos stmtStart
+            let (eLine, _) = consumedEnd stmtStart remaining sLine sCol
+            if t.Line > eLine then success () remaining
+            else
+            match stmtStart with
+            // `while cond { ... }` / `do { ... }`: not keywords (a program may
+            // bind the names), so the statement read was the bare name and the
+            // condition is what sits beside it. Same steer the checker gives
+            // an unbound `while`, raised here because the shape can no longer
+            // reach the checker.
+            | s :: _ when (match s.Kind with TokIdent ("while" | "do") -> true | _ -> false) ->
+                let name = match s.Kind with TokIdent n -> n | _ -> ""
+                errorFull "BL1003"
+                    ($"`{name}` is not a loop: Blade has no imperative loops -- iteration is declarative. "
+                     + "A converge/accumulate loop is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`), "
+                     + "and iterate-until-converged is that array's inductive arm carrying a `while` guard over a BUDGET extent "
+                     + "(`| prefix :: n while <cond> -> prefix :: <step>`). A fold is `reduce(...)`, and a parallel map is "
+                     + "`method_for(range<...>) <@> lambda(...)` or plain array arithmetic. See formalism 7.5.")
+                    s.Line s.Col s.EndLine s.EndCol
+            | _ ->
+                errorFull "BL1001"
+                    ($"Expected the end of the statement (a new line or ';') but got {describeToken kind}. "
+                     + "Two expressions side by side have no meaning in Blade -- there is no implicit "
+                     + "multiplication (write `2 * x`) and application needs parentheses (write `f(x)`).")
+                    t.Line t.Col t.EndLine t.EndCol
+
 and parseNestedFunction (tokens: Token list) : ParseResult<Stmt> =
     // `function name(params) where ... -> Type = body` desugars to
     // `let name = lambda(params) where ... -> Type -> body`.
     expectIdent tokens >>= fun name afterName ->
     expect TokLParen afterName >>= fun _ afterLParen ->
+    // A `mut` parameter (`a: mut Array<..>`) is a TOP-LEVEL declaration's: a
+    // nested function desugars to a let-bound lambda, whose parameters carry
+    // no write permission (and whose calls have no `mut` positions to judge).
+    // Say so, instead of the lambda-parameter parser's "Expected ')' but got
+    // identifier" at the parameter NAME.
+    let rec mutParamAt (depth: int) (toks: Token list) =
+        match toks with
+        | [] -> None
+        | t :: rest ->
+            match t.Kind with
+            | TokRParen when depth = 0 -> None
+            | TokLParen -> mutParamAt (depth + 1) rest
+            | TokRParen -> mutParamAt (depth - 1) rest
+            | TokColon when depth = 0 ->
+                (match rest with
+                 | m :: _ when m.Kind = TokKeyword KwMut -> Some rest
+                 | _ -> mutParamAt depth rest)
+            | _ -> mutParamAt depth rest
+    match mutParamAt 0 afterLParen with
+    | Some mutToks ->
+        let line, col = currentPos mutToks
+        errorC "BL1001" ($"nested function '{name}' declares a `mut` parameter, which only a top-level "
+                         + "`function` can: a nested function is a let-bound lambda, and its parameters "
+                         + "carry no write permission. Declare the function at top level.") line col
+    | None ->
     sepBy parseLambdaParam TokComma afterLParen >>= fun parms afterParms ->
     expect TokRParen afterParms >>= fun _ afterRParen ->
 

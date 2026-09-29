@@ -72,9 +72,9 @@ let genFusedNestPragma (bindings: LoopIndexBinding list) (staggered: bool) (prag
                 b.BoundDependencies.IsEmpty && b.StrictOffset = 0
             let hasTriangularBelow = rest |> List.exists (fun b -> not (isRectangular b))
             if hasTriangularBelow then
-                $"#pragma omp parallel for schedule(dynamic)\n{pragmaIndent}"
+                $"BLADE_OMP_PARALLEL_FOR_DYNAMIC\n{pragmaIndent}"
             else
-                $"#pragma omp parallel for\n{pragmaIndent}"
+                $"BLADE_OMP_PARALLEL_FOR\n{pragmaIndent}"
 
 /// Check that a set of fusion leaves can legally merge into ONE loop nest.
 /// Leaves may have DIFFERENT depths (arities): a shallower leaf's loop levels
@@ -249,6 +249,7 @@ let genFusedLoopNestStreamed (streamed: Map<string, ProviderReadSpec>) (leafCgs:
                 let forced = { pBinding with IsParallel = true } :: List.tail primary.Bindings
                 genFusedNestPragma forced staggered (ind depth)
             else ""
+        recordOmpConstruct primary.OutputName pragmaPrefix "fused nest, outer level"
         // Any leaf's own omp request is enough to make suppression here worth
         // reporting: a `<&>` soft join adopts a single shared header, so one
         // leaf's clause can be dropped by the JOINED decision even though that

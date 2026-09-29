@@ -1,0 +1,9 @@
+// TEST: Fusion keeps fusing an unconditional inner read
+// Control for basic/064-065: a host that reads the inner value on every cell
+// evaluates the spliced lgamma exactly where the unfused program would, so
+// the (may-abort) inner map still fuses; no cell hits the pole here.
+// lgamma(1) = 0, lgamma(3) = ln 2, lgamma(2) = 0.
+let x = [1.0, 3.0, 2.0]
+let c = [1.0, 0.0, 1.0]
+let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k + g) |> compute
+// EXPECT: y = [1, 0.693147180559946, 1]

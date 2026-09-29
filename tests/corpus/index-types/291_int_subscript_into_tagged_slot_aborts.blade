@@ -1,0 +1,10 @@
+// TEST: Plain integer into a named index slot is a checked read (aborts)
+// `x(k)` with `k: Int64` draws the untagged-integer advice and used to read
+// past the array at k = 9. It is now a guarded read.
+// WARN: BL4003
+// ABORT: index out of bounds
+type N = Idx<5>
+let x: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0, 5.0]
+function get(k: Int64) -> Float64 = x(k)
+let b = get(9)
+let c = b + 1.0

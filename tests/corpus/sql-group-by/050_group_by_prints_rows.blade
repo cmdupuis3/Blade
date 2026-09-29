@@ -1,0 +1,17 @@
+// TEST: Group By Prints Its Rows
+// A grouped array prints its ROWS, in both lanes. The compiled printer used to
+// walk the value's placeholder inner extent 0 and print `g = [[], [], []]`;
+// the interpreter printed the same thing for a direct group_by and the real
+// rows through an alias, so `let h = g` disagreed between the notebook and
+// `blade run`. The alias also COPIED as a dense rank-2 array of inner extent
+// 0 in C++ -- an empty array a peel over h then read nothing from.
+let region = [0, 1, 0, 2]
+let temps = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let g = group_by(temps, gk)
+// EXPECT: g = [[10, 30], [20], [40]]
+let h = g
+// EXPECT: h = [[10, 30], [20], [40]]
+// The copy is a real grouped array: a peel over it reads its rows.
+let sums = method_for(h) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
+// EXPECT: sums = [40, 20, 40]

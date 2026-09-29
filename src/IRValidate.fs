@@ -53,30 +53,6 @@ let rec containsInfer (ty: IRType) : int option =
         | None -> containsInfer ret
     | _ -> None
 
-/// Collect all VarIds defined (brought into scope) by an expression
-let rec collectDefinedIds (expr: IRExpr) : Set<IRId> =
-    match expr with
-    | IRLet (id, value, body) -> Set.add id (Set.union (collectDefinedIds value) (collectDefinedIds body))
-    | IRForRange (vid, lo, hi, body) ->
-        Set.add vid (Set.unionMany [collectDefinedIds lo; collectDefinedIds hi; collectDefinedIds body])
-    | IRMatch (scrut, cases) ->
-        let caseIds = cases |> List.collect (fun c ->
-            let patIds = collectPatternIds c.Pattern
-            Set.toList patIds)
-        Set.union (collectDefinedIds scrut) (Set.ofList caseIds)
-    | _ -> Set.empty
-
-/// Collect VarIds bound by a pattern
-and collectPatternIds (pat: IRPattern) : Set<IRId> =
-    match pat with
-    | IRPatVar id -> Set.singleton id
-    | IRPatTuple pats -> pats |> List.map collectPatternIds |> Set.unionMany
-    | IRPatCons (h, t) -> Set.union (collectPatternIds h) (collectPatternIds t)
-    | IRPatVariant (_, _, Some inner, _) -> collectPatternIds inner
-    | IRPatStruct (_, flds) ->
-        flds |> List.fold (fun acc (_, p) -> Set.union acc (collectPatternIds p)) Set.empty
-    | _ -> Set.empty
-
 // Dead-polymorph elimination (whole program, post-monomorphization)
 
 /// Does this function still carry an unresolved type variable ANYWHERE -- its
@@ -284,83 +260,78 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
             | Some id -> addError ctx $"unresolved type variable T?{id} in body"
             | None -> ()
             checkKindAgreement ctx ty
-    
+
+    // --- Check 1c: numeric cast legality, after monomorphization ---
+    // A cast whose operand was a SIGNATURE variable of a generic function
+    // (`Float64(reduce(row, (+)))` over `row: T^1`) is legal or not per
+    // instance; the call judgment judges every call it can see
+    // (TypeCheckSupport.genericObligationClash), and this is the backstop for the
+    // seams it cannot (an eta-wrapped kernel whose argument was open): a
+    // specialized body casting a complex value to a real one, or a float to
+    // an integer without a visible floor/ceil, is refused here instead of
+    // compiling to a C++ error (complex) or a silent truncation (float).
+    let rec checkCasts (ctx: string) (e: IRExpr) =
+        (match e with
+         | IRUnaryOp (IRCast target, operand) ->
+             let src =
+                 match typeOf operand with
+                 | IRTScalar et | IRTUnitAnnotated (IRTScalar et, _) | IRTIdxTagged (IRTScalar et, _) -> Some et
+                 | _ -> None
+             let rounded =
+                 match operand with
+                 | IRUnaryOp (IRMath ("floor" | "ceil"), _) -> true
+                 | _ -> false
+             let isInt = function ETInt32 | ETInt64 -> true | _ -> false
+             let isFloat = function ETFloat32 | ETFloat64 -> true | _ -> false
+             let isComplex = function ETComplex64 | ETComplex128 -> true | _ -> false
+             (match src with
+              | Some s when isComplex s && not (isComplex target) ->
+                  addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a complex value (a generic function instantiated at {ppIRType (IRTScalar s)}): project a real component first -- real(z), imag(z), abs(z), or arg(z)"
+              | Some s when isFloat s && isInt target && not rounded ->
+                  addError ctx $"BL3019: a cast to {ppIRType (IRTScalar target)} of a {ppIRType (IRTScalar s)} value (a generic function instantiated at a float) would truncate: spell the rounding at the cast site -- floor(x) or ceil(x)"
+              | _ -> ())
+         | _ -> ())
+        let (ExprShape (children, _)) = e
+        children |> List.iter (checkCasts ctx)
+    for b in modul.Bindings do checkCasts $"in binding '{b.Name}'" b.Value
+    // A specialization's C++ name (`toint_HM_10000_double`) is not a name the
+    // program wrote: the message names the declaration it was cloned from.
+    let sourceName (n: string) =
+        System.Text.RegularExpressions.Regex.Replace(n, "_HM_.*$", "")
+    for f in modul.Functions do checkCasts $"in function '{sourceName f.Name}'" f.Body
+
     // --- Check 2: No dangling VarId references ---
-    // Walk the expression tree, threading scope through lets, lambdas, matches, for-ranges
+    // Scope threads through every binder via BinderShape (IRLet's body,
+    // IRForRange's body, a match case's guard and body) and recursion is the
+    // ExprShape fold, so no variant's subtree is skipped -- the old hand list
+    // stopped at IRGram, IRMatmul, IRSolve, IRSlice, IRShift, IRMask, IRZip,
+    // IRStack, IRJoin, IRGroupBy, IRCurry, IRReverse, IRContains, ... and
+    // never looked below them.
     let rec checkScope (scope: Set<IRId>) (ctx: string) (expr: IRExpr) =
         match expr with
         | IRVar (id, _) ->
             if not (Set.contains id scope) then
                 addError ctx $"dangling VarId reference: v{id}"
-        | IRLet (id, value, body) ->
-            checkScope scope ctx value
-            checkScope (Set.add id scope) ctx body
-        | IRForRange (vid, lo, hi, body) ->
-            checkScope scope ctx lo
-            checkScope scope ctx hi
-            checkScope (Set.add vid scope) ctx body
-        | IRMatch (scrut, cases) ->
-            checkScope scope ctx scrut
-            for c in cases do
-                let patIds = collectPatternIds c.Pattern
-                let caseScope = Set.union scope patIds
-                c.Guard |> Option.iter (checkScope caseScope ctx)
-                checkScope caseScope ctx c.Body
-        | IRApp (f, args, _) ->
-            checkScope scope ctx f
-            args |> List.iter (checkScope scope ctx)
-        | IRBinOp (_, _, l, r) -> checkScope scope ctx l; checkScope scope ctx r
-        | IRUnaryOp (_, e) -> checkScope scope ctx e
-        | IRIf (c, t, e) -> checkScope scope ctx c; checkScope scope ctx t; checkScope scope ctx e
-        | IRTuple es -> es |> List.iter (checkScope scope ctx)
-        | IRComplex (re, im) -> checkScope scope ctx re; checkScope scope ctx im
-        | IRFma (a, b, c) -> checkScope scope ctx a; checkScope scope ctx b; checkScope scope ctx c
-        | IRTupleProj (e, _, _) -> checkScope scope ctx e
-        | IRArrayLit (es, _) -> es |> List.iter (checkScope scope ctx)
-        | IRIndex (arr, idxs, _) -> checkScope scope ctx arr; idxs |> List.iter (checkScope scope ctx)
-        | IRFieldAccess (obj, _) -> checkScope scope ctx obj
-        | IRStructLit (_, fields) -> fields |> List.iter (fun (_, e) -> checkScope scope ctx e)
-        | IRCompute inner -> checkScope scope ctx inner
-        | IRReynolds (inner, _) -> checkScope scope ctx inner
-        | IRMethodFor info -> info.Arrays |> List.iter (checkScope scope ctx)
-        | IRObjectFor info -> checkScope scope ctx info.Kernel
-        | IRSort (a, k) -> checkScope scope ctx a; checkScope scope ctx k
-        | IRTranspose (a, _, _) -> checkScope scope ctx a
-        | IRDecompact (a, _) -> checkScope scope ctx a
-        | IRHaloUnhash (w, _) -> checkScope scope ctx w
-        | IRArrayNegate a -> checkScope scope ctx a
-        | IRArrayConjugate a -> checkScope scope ctx a
-        | IRReduce (a, k, i) ->
-            checkScope scope ctx a; checkScope scope ctx k
-            (match i with Some e -> checkScope scope ctx e | None -> ())
-        | IRProdSum args -> args |> List.iter (checkScope scope ctx)
-        | IRApplyCombinator info ->
-            checkScope scope ctx info.Loop
-            checkScope scope ctx info.Kernel
-            info.Arrays |> List.iter (checkScope scope ctx)
-        | IRComposeApply info ->
-            checkScope scope ctx info.Composition
-            info.InputArrays |> List.iter (checkScope scope ctx)
-        | IRParallel (a, b, _) -> checkScope scope ctx a; checkScope scope ctx b
-        | IRFusion (a, b) -> checkScope scope ctx a; checkScope scope ctx b
-        | IRChoice (a, b) -> checkScope scope ctx a; checkScope scope ctx b
-        | IRFallback (a, b) -> checkScope scope ctx a; checkScope scope ctx b
-        | IRBind (c, k) -> checkScope scope ctx c; checkScope scope ctx k
-        | IRFunctorMap (f, c) -> checkScope scope ctx f; checkScope scope ctx c
-        | IRGuard (c, b) -> checkScope scope ctx c; checkScope scope ctx b
-        | IRSequence es -> es |> List.iter (checkScope scope ctx)
-        | IRPure e -> checkScope scope ctx e
-        | IRAssign (t, v) -> checkScope scope ctx t; checkScope scope ctx v
-        | IRConstraintCheck (c, _, _, _) -> checkScope scope ctx c
-        | IRBreakIf c -> checkScope scope ctx c
-        | _ -> ()  // Literals, params, etc. -- no var refs
-    
-    let mutable cumulativeScope = moduleIds
+        | BinderShape (free, scopes) ->
+            free |> List.iter (checkScope scope ctx)
+            for (bound, kids) in scopes do
+                let inner = Set.union scope bound
+                kids |> List.iter (checkScope inner ctx)
+        | ExprShape (children, _) -> children |> List.iter (checkScope scope ctx)
+
+    // A module binding sees the functions (any module's), the bindings of
+    // OTHER modules (imports; ids are program-unique), and the bindings of
+    // this module declared BEFORE it -- not itself, not a later one: the
+    // bindings emit in order as locals of one scope, so a forward or self
+    // reference is a use before definition. (The scope used to be seeded
+    // with every binding id, which made that check vacuous.)
+    let ownBindingIds = modul.Bindings |> List.map _.Id |> Set.ofList
+    let mutable cumulativeScope = Set.difference moduleIds ownBindingIds
     for b in modul.Bindings do
         let ctx = $"in binding '{b.Name}'"
         checkScope cumulativeScope ctx b.Value
         cumulativeScope <- Set.add b.Id cumulativeScope
-    
+
     for f in modul.Functions do
         let ctx = $"in function '{f.Name}'"
         let paramIds = f.Params |> List.map _.VarId |> Set.ofList
@@ -375,9 +346,9 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         let captureIds = f.Captures |> List.map _.Id |> Set.ofList
         let funcScope = Set.unionMany [moduleIds; paramIds; captureIds]
         checkScope funcScope ctx f.Body
-    
+
     // --- Check 3: ApplyInfo consistency ---
-    let rec checkApplyInfo (ctx: string) (expr: IRExpr) =
+    let checkApplyInfoNode (ctx: string) (expr: IRExpr) =
         match expr with
         | IRApplyCombinator info ->
             if info.Arrays.Length <> info.ArrayTypes.Length then
@@ -423,7 +394,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                         | IRLit _ -> "IRLit [literal in kernel slot]"
                         | IRBinOp _ -> "IRBinOp [unlifted operator expression]"
                         | IRApp _ -> "IRApp [unlifted application]"
-                        | IRZero -> "IRZero [zero placeholder; should have been synthesized to a callable]"
+                        | IRZero _ -> "IRZero [zero placeholder; should have been synthesized to a callable]"
                         | IRReynolds _ -> "IRReynolds [nested Reynolds wrapper, not supported]"
                         | _ -> "non-callable expression"
                     let prefix =
@@ -447,42 +418,26 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
                     | IRMethodFor _ -> "IRMethodFor [should be IRApplyCombinator, not IRComposeApply]"
                     | _ -> "non-compose expression"
                 addError ctx $"ComposeApplyInfo: Composition is {shapeName}; expected IRComposeObj or IRVar"
-        | _ -> ()
-        // Recurse into sub-expressions
-        match expr with
-        | IRLet (_, v, b) -> checkApplyInfo ctx v; checkApplyInfo ctx b
-        | IRCompute inner -> checkApplyInfo ctx inner
-        | IRParallel (a, b, _) -> checkApplyInfo ctx a; checkApplyInfo ctx b
-        | IRFusion (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
-        | IRChoice (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
-        | IRFallback (a, b) -> checkApplyInfo ctx a; checkApplyInfo ctx b
-        | IRBind (c, k) -> checkApplyInfo ctx c; checkApplyInfo ctx k
-        | IRFunctorMap (f, c) -> checkApplyInfo ctx f; checkApplyInfo ctx c
-        | IRGuard (_, b) -> checkApplyInfo ctx b
-        | IRSequence elems -> elems |> List.iter (checkApplyInfo ctx)
-        | _ -> ()
-    
-    for b in modul.Bindings do
-        checkApplyInfo $"in binding '{b.Name}'" b.Value
-    for f in modul.Functions do
-        checkApplyInfo $"in function '{f.Name}'" f.Body
-    
+        | _ -> ()   // node-local: only the two apply records carry this metadata
+
     // --- Check 4: No empty match arms ---
-    let rec checkEmptyMatch (ctx: string) (expr: IRExpr) =
+    let checkEmptyMatchNode (ctx: string) (expr: IRExpr) =
         match expr with
         | IRMatch (_, []) -> addError ctx "empty match expression (no cases)"
-        | _ -> ()
-        match expr with
-        | IRLet (_, v, b) -> checkEmptyMatch ctx v; checkEmptyMatch ctx b
-        | IRIf (c, t, e) -> checkEmptyMatch ctx c; checkEmptyMatch ctx t; checkEmptyMatch ctx e
-        | IRMatch (s, cases) ->
-            checkEmptyMatch ctx s
-            cases |> List.iter (fun c -> checkEmptyMatch ctx c.Body)
-        | IRCompute inner -> checkEmptyMatch ctx inner
-        | _ -> ()
-    
+        | _ -> ()   // node-local: only a match can have zero cases
+
+    // Checks 3 and 4 are node-local; iterIRExpr (the ExprShape fold) visits
+    // every node of every binding AND function body -- the old hand-written
+    // descents skipped IRIf / IRMatch / IRApp / IRReduce / ... (check 3) and
+    // function bodies entirely (check 4).
+    let everyNode (ctx: string) (e: IRExpr) =
+        iterIRExpr (fun n ->
+            checkApplyInfoNode ctx n
+            checkEmptyMatchNode ctx n) e
     for b in modul.Bindings do
-        checkEmptyMatch $"in binding '{b.Name}'" b.Value
+        everyNode $"in binding '{b.Name}'" b.Value
+    for f in modul.Functions do
+        everyNode $"in function '{f.Name}'" f.Body
 
     // Restore the prior AnalysisContext so the validator doesn't
     // leak its installed CallablesTable to subsequent passes.
@@ -506,3 +461,28 @@ let validateIR (program: IRProgram) : Result<IRProgram, string list> =
     else
         let messages = allErrors |> List.map (fun e -> $"[IR Validation] {e.Context}: {e.Message}")
         Error messages
+
+/// The diagnostic one `validateIR` message stands for. A structural defect of
+/// the IR is BL6001 -- a compiler invariant, reported as the validator's own
+/// band. But a check here can also find a USER error no earlier seam could see
+/// (the cast-obligation backstop, check 1c: a generic function's cast judged
+/// at an instance monomorphization produced); such a message names its code
+/// as a `BLxxxx: ` prefix, and the diagnostic carries THAT code, with the
+/// prefix and the "[IR Validation]" tag dropped from its text. Every consumer
+/// of validateIR (the CLI, the REPL, the IDE server) maps messages through
+/// this, so a BL3019 is not reported as BL6001 "IR validation" with "BL3019:"
+/// buried in its text.
+let diagnosticOfValidationMessage (s: string) : Blade.Diagnostics.Diagnostic =
+    let m = System.Text.RegularExpressions.Regex.Match(
+                s, @"^\[IR Validation\] (.*?): (BL\d{4}): (.*)$",
+                System.Text.RegularExpressions.RegexOptions.Singleline)
+    if m.Success then
+        let code = m.Groups.[2].Value
+        Blade.Diagnostics.mkError code (Blade.Diagnostics.Codes.phaseOfCode code) Blade.Ast.noSpan
+            $"{m.Groups.[3].Value} ({m.Groups.[1].Value})"
+    else
+        Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s
+
+/// The code alone (see diagnosticOfValidationMessage), for consumers that
+/// carry (code, message) pairs.
+let codeOfValidationMessage (s: string) : string = (diagnosticOfValidationMessage s).Code

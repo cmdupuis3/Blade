@@ -379,7 +379,17 @@ let categorical (key: int64) (weights: float[]) (n: int) : int64[] =
 /// The parameter-count mismatch cases are unreachable -- the typechecker arm
 /// fixes each family's arity -- but they fail loudly rather than silently
 /// drawing from the wrong transform.
+/// The parameter-domain guards codegen emits before a fill
+/// (Rand.Elaborate.paramGuards): same predicate, same BL8001, same message.
+let checkParams (kind: string) (pars: float list) : unit =
+    for (i, pname, dom) in Blade.Rand.Elaborate.paramGuards kind do
+        match List.tryItem i pars with
+        | Some x when not (Blade.Rand.Elaborate.paramInDomain dom x) ->
+            raise (Blade.Interp.Value.InterpPanic ("BL8001", Blade.Rand.Elaborate.paramGuardMessage kind pname dom, None, 0))
+        | _ -> ()
+
 let draws (kind: string) (key: int64) (pars: float list) (n: int) : float[] =
+    checkParams kind pars
     match kind, pars with
     | "uniform", []             -> uniform key n
     | "normal", []              -> normal key n
@@ -427,6 +437,10 @@ let inline private fillAt (key: int64) (stream: int64) (offset: int64) (n: int) 
 
 /// `draws` for the `_at` kinds: same transforms, addressed per sample.
 let drawsAt (kind: string) (key: int64) (stream: int64) (offset: int64) (pars: float list) (n: int) : float[] =
+    // Guard order as emitted: stream, offset, then the parameters.
+    streamWord stream |> ignore
+    checkOffset offset
+    checkParams kind pars
     match kind, pars with
     | "uniform_at", []          -> fillAt key stream offset n nextUniform
     | "normal_at", []           -> fillAt key stream offset n nextNormal

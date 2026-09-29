@@ -5,9 +5,9 @@ Guidance for AI coding agents working in the Blade repository.
 ## What Blade is
 
 Blade is an array-functional programming language: ML-style syntax over a numpy/R-flavored
-math surface. The compiler is F# (`src/*.fs`, one exe project `Blade.fsproj`) emitting C++20,
-compiled with g++ and run. A tree-walking interpreter (`src/Interp/`) mirrors codegen for
-differential testing and the REPL.
+math surface. The compiler is F# (`src/*.fs`, one exe project `Blade.fsproj`) emitting C++17
+(every compile of generated code passes `-std=c++17`), compiled with g++ and run. A
+tree-walking interpreter (`src/Interp/`) mirrors codegen for differential testing and the REPL.
 
 Three concepts carry the language ("structure-first" programming, `docs/quickstart-1.md`):
 
@@ -51,7 +51,7 @@ oracles/{math,ml,ppl,sgs,spectra}/
                            Run: dotnet run --project oracles/<domain>.
 tests/                     harness compiled into Blade.fsproj (no xunit). Corpus tests live
                            in tests/corpus/<category>/*.blade, one test per file.
-stdlib/                    Blade-source stdlib (units/SI.blade, plot.blade), deployed beside
+stdlib/                    Blade-source stdlib (units/SI.blade, stats.blade, plot.blade), beside
                            the binary; BLADE_STDLIB adds a search root. Read at RUN time, so
                            edits need no rebuild: in a CHECKOUT the resolver prefers this
                            directory over the deployed copy (ModuleResolve's Blade.fsproj
@@ -82,14 +82,20 @@ The binary is `bin/Release/net10.0/Blade.exe` (below, `blade` = that exe or
 `dotnet run --project Blade.fsproj -c Release --`):
 
 ```bash
-blade check prog.blade        # typecheck only
+blade check prog.blade        # typecheck + lower (no C++)
 blade emit prog.blade         # emit C++ without compiling
 blade compile prog.blade      # produce an executable
 blade run prog.blade          # compile and run (--verbose, --mpi N, --memcheck, --run-record out.json,
                               #                  --print a,b -- print only these top-level bindings)
 blade plan prog.blade         # optimization decisions + the input manifest (--json)
 blade test                    # full default suite
+blade test docs               # every `blade` code block in CLAUDE.md + docs/ (tests/DocTests.fs)
 ```
+
+Bare `blade` (no verb) prints the usage, which lists every `blade test` key. `blade run` /
+`compile` build in a private `%TEMP%\blade-build\<name>-<path hash>-<pid>-<nonce>` directory and
+run the program with the SOURCE's directory as its working directory; `--verbose` keeps the
+build directory. A g++ rejection of generated code is an internal error, BL9002.
 
 `--strict-pins` (valid on `check`/`emit`/`compile`/`run`) promotes BL4010 pin suggestions to
 errors; it also has its own test block, `blade test strict-pins`.
@@ -110,10 +116,41 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
 - Two different category namespaces:
   - `blade test <key>` uses alias keys from `src/CliSelfTests.fs` (dispatchTest's key
     map); multiword categories accept both spellings (`index-types` / `indextypes`).
-  - `blade test interp <dir>` / `blade test diff-oracle <dir>` take the **literal**
-    `tests/corpus/<dir>` name: `blade test interp index-types`.
-- Every corpus category has a standalone `blade test <key>`; `blade test sql` runs the
-  same sql-* union the full suite does.
+  - `blade test interp <dir>` / `blade test diff-oracle <dir>` / `blade test opt-diff <dir>`
+    take the **literal** `tests/corpus/<dir>` name: `blade test interp index-types`.
+- The optimizer (`src/Optimize.fs`) runs in Lowering, BEFORE the codegen/interpreter split, so
+  `test interp` cannot see an optimizer miscompile (both lanes print the same wrong value).
+  `blade test opt-diff` (standalone, whole corpus; `tests/OptDiff.fs`) emits every program with
+  all optimizer gates OFF and ON and compiles + runs only the pairs whose C++ differs, comparing
+  normalized output. Run it after touching any pass; a new pass's gate goes in `optimizerGates`.
+- `blade test interp` (no category) walks EVERY corpus directory — single-file and
+  `multifile`, discovered from disk — minus the named exclusions in
+  `tests/InterpDiff.fs` (`interpExcluded`: only `memfree-stress`). `blade test --interp` is
+  NOT that: it is the whole default suite with the differential appended. CI runs
+  `test interp` and `test opt-diff` as their own lanes (nightly; opt-diff also on `ci:full`).
+- The corpus is DISCOVERED, not listed: every single-file directory runs in the default suite
+  (`RunAll.allTests`; only `diagnostics` is owned by another block), answers to
+  `blade test <its-literal-dir-name>` (aliases like `uniterrors` are extra spellings), and is
+  walked by `test interp`. The wholly-negative directories (every file must be refused, names
+  unmarked) are ONE list, `Corpus.rejectOnlyCategories`. The default suite's "Corpus Wiring"
+  block (`blade test corpus-wiring`) fails if a hand-written fact stops matching the disk — a
+  new multi-file directory without a runner, an exclusion naming a missing directory.
+  `blade test sql` runs the discovered sql-* union.
+- `blade test` clears every emission-affecting knob for its duration (`suiteClearedKnobs` in
+  `src/CliSelfTests.fs`: BLAS gates, BLADE_PRINT, FP_REASSOC/FP_CONTRACT/MARCH, OMP_THREADS,
+  TILE_CACHE, LLVM, the optimizer gates, AD_HALO_GATHER, ...), prints one line naming any it
+  found set, and restores them after; blocks that exercise a knob set it themselves.
+  `blade test --print ...` is refused (the pins read every binding).
+- Pin hygiene is enforced, not advisory: a value test with no `// EXPECT:` or `// WARN:` pin
+  FAILS unless it carries `// NOPINS: <reason>`; an `// ERROR:` whose code or `@ l:c` span
+  does not parse fails (it used to degrade to a code-only pin); an `=`-bearing `// EXPECT:`
+  on a `(rejects)` probe fails (it is never checked — pin the refusal with `// ERROR:`); and
+  any program output containing a raw heap pointer (`0x` + 8 hex digits) fails. The
+  differential normalizers no longer mask pointers.
+- `blade test docs [<page>]` checks every `blade` code fence in CLAUDE.md and docs/: a plain
+  block must lower, one with `// EXPECT:` lines is also run and its pins checked. Fence flags
+  after `blade` — `sketch` / `rejects` / `prelude` / `cont` / `check` (plans opt in) — are
+  specified in `tests/DocTests.fs`. A doc example that cannot compile is a sketch or a bug.
 - To iterate on a single corpus test, `blade run tests/corpus/<cat>/<file>.blade` (fast, but
   pins are only validated by the harness, not by `run`).
 - Full-suite runs from concurrent sessions must use private working directories (the scratch
@@ -130,7 +167,10 @@ One `.blade` file per test; pins are comments (grammar documented in `tests/corp
 - `// WARN: BLxxxx` and `// WARN-CODEGEN: <substring>` are **strict in both directions**: an
   unpinned warning fails the test AND a pin that never fires fails the test. If you fix a
   warning false-positive, remove its now-dead pins in the same change.
-- `// MODULE: <name>` for multi-file tests (pins union across member files).
+- `// MODULE: <name>` for multi-file tests (pins — EXPECT, ERROR, WARN — union across member
+  files).
+- `// NOPINS: <reason>` — required on a value test that pins nothing (e.g. a
+  declaration-only parse test); a stale marker on a test with pins fails.
 
 `.editorconfig` exempts `tests/corpus/**` and `examples/**` from trailing-whitespace and
 final-newline fixing — these are byte-pinned assets; never auto-reformat them.
@@ -146,11 +186,17 @@ final-newline fixing — these are byte-pinned assets; never auto-reformat them.
 | `BLADE_OMP_THREADS` | `1`/`0`/`off` **suppresses OMP pragma emission**; runtime thread count is plain `OMP_NUM_THREADS` |
 | `BLADE_FP_REASSOC` | `1`/`on` licenses reassociated (lane-parallel) fold codegen |
 | `BLADE_AD_HALO_GATHER` | reverse-mode rule for a `halo` stencil map: unset/`1` keeps the map and emits the GATHER adjoint (default); `0`/`off` lowers it into the construction loop and scatters. Same function either way; `blade test access` compares the two byte-for-byte |
+| `BLADE_FUSION` / `BLADE_FREEZE_IDIOM` / `BLADE_CSE` / `BLADE_POOL_REUSE` | the optimizer's per-pass escape hatches (`src/Optimize.fs`, `optimizerGates`): `0`/`off` disables elementwise-chain fusion / freeze-idiom recognition / let-level CSE / scratch pool reuse; unset = on. A disabled CSE or pool-reuse pass still records its decision as `declined -- disabled by ...` in `blade plan`. They change the EMISSION, so the exe cache keys on them for free. `blade test opt-diff` compares every program with all of them off vs on |
 | `BLADE_MARCH` / `BLADE_FP_CONTRACT` | g++ `-march=` (default `native`) / `-ffp-contract=` (default `fast`) |
 | `BLADE_STDLIB` | extra stdlib search root |
 | `BLADE_PRINT` | which top-level bindings the program prints (comma/space separated); unset = all of them, the default every corpus pin reads. Set by `--print a,b` on any verb. Read by BOTH lanes (codegen's print pass and the interpreter's), so a differential run compares like with like; a name that is no binding refuses BL7004. It changes the EMISSION, so the exe cache keys on it for free |
 | `BLADE_TILE_CACHE` | revision reuse (structural/04): unset = OFF; `1`/`on` = `%LOCALAPPDATA%\Blade\tile-cache`, an absolute path = that store. Read by the COMPILER (plans tiled bindings) and by the COMPILED PROGRAM (probe/load/store); `BLADE_TILE_CACHE_VERBOSE=1` prints the planner's admissions and the run's `[tiles]`/`[chunks]` census |
 | `BLADE_RUN_RECORD` | read by the COMPILED PROGRAM at exit: path of the JSON run record (input manifest + observed size/mtime per input, executable/compiler identity, FP policy and library routes from the `-DBLADE_RR_*` build defines, RNG generator, ok / BLxxxx status). `blade run --run-record path` sets it |
+| `BLADE_LLVM` | `1`/`on`: `blade run`/`compile`/`emit` try the direct LLVM back end first (falls back to C++ when it declines); unset = off. `BLADE_LLVM_CLANG` locates clang |
+| `BLADE_EXE_CACHE` | content-addressed executable cache: unset/`1`/`on` = `%LOCALAPPDATA%\Blade\exe-cache`, `0`/`off` = disabled (`--no-cache`), an absolute path = that directory. Keys on the emitted text and on the CPU `-march=native` resolves to, so a shared cache never serves a stale or foreign binary; a relative path disables it |
+| `BLADE_TOOLCHAIN_FILE` | the `blade.toolchain.json` consulted (default: beside the executable; written by `blade setup`); its keys mirror these env vars; the file's contents are cached per path |
+| `BLADE_PERF_COUNTERS` / `BLADE_PHASE_TIMING` | compiler self-profiling: `[perf]` counters / `[phase]` timings on stderr |
+| `BLADE_INTERP_TIMEOUT_MS` | per-test ceiling of the interpreter differential (default 300000); raise it to record a slow test's true wall time. A harness knob, read once per process |
 | `NETCDF_DIR` | NetCDF provider include/link root |
 
 ## Writing Blade: language essentials
@@ -161,12 +207,12 @@ multi-file programs.
 
 ```blade
 let static n = 4                 // compile-time, immutable everywhere
-let x = 1                        // reassignable in its OWN scope only
+let x = 1                        // reassign with `x = 2` in its OWN scope; a second top-level `let x` is BL2009
 let mut y = 2                    // reassignable; `mut` params are ARRAY-only (element writes alias the caller; scalars: return instead, BL4005)
 
 function add1(array: T^2) -> T^2 = { array + 1 }
 
-function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)   // or: from stats import mean
 function covariance(a: T^1, b: T^1) where comm(a, b) =
     mean((a - mean(a)) * (b - mean(b)))
 
@@ -190,9 +236,21 @@ type EarthArray = Array<Float like LatIdx, LonIdx>
   `OrbIdx` (declarable at any depth, but beyond depth 1 only *deduced* classes reach
   storage), `IrrepsIdx<spec>` (equivariant ML).
 - `Nat<LatIdx>` and `Nat<LonIdx>` don't unify even at equal extent — index provenance is
-  part of the type, which is what makes `A(i)` bounds-safe by construction.
+  part of the type. A subscript into a NAMED index type is either proven (a literal, an
+  iteration index or parameter of exactly that type, a cast/guard) or checked at run time
+  (BL8006); subscripts into anonymous arrays (`let v = [1, 2, 3]`) are NOT checked
+  (`docs/formalism.md` §3.10). Iterate with `range<I>` / `halo<I, ...>` to get the proofs.
 - `()` is application/indexing (curried); `[]` is ONLY tuple/pack structural access
   (`t[0]`, `args[k]`), never array indexing.
+- Statements end at a newline, `;`, or a closer; anything else on the same line is BL1001
+  (no implicit multiplication). A line opening with a binary operator continues the one
+  above (indented past the statement's column); a line opening with `(`/`[` starts a new
+  statement, never a call or index of the line above. At top level a `let`'s value starts on
+  the `=` line (inside a block it may break after `=`). Prefix minus binds looser than `^`:
+  `-x^2` is `-(x^2)` (formalism §15.1).
+- Arithmetic has one contract in every lane (formalism §2.4): integers wrap; integer `/`
+  `%` by zero and a negative integer exponent panic BL8013; a NaN/out-of-range float→int
+  cast panics BL8014.
 - `where` clauses carry kernel metadata: `comm(a, b)` / `anticomm(...)` (interchangeable
   args), `omp(x: n)` (parallelism license, depth-capped), `cuda`, `tdim({...})`. A bare
   `omp` on a `reduce` kernel licenses fold reordering and requires commutativity (else
@@ -206,16 +264,16 @@ sequential structure is a recursive array. There is nothing else, by design.**
 
 The imperative loop is not merely missing — it was removed and diagnosed:
 
-```blade
+```blade rejects
 function f() -> Int64 = {
     let mut s = 0
-    for k in 0..3 { s += k }   // ERROR BL1003: removed from the language
+    for k in 0..3 { s += k }   // removed from the language
     s
 }
+// ERROR: BL1003
 ```
 
-(BL1003 fires inside a block; at top level the same text dies earlier as a BL1999 parse
-error.)
+(BL1003 fires at top level and inside blocks alike.)
 
 Do not try to reintroduce it through workarounds. Every "loop-shaped" problem has a
 first-class construct:
@@ -254,9 +312,9 @@ block or a gather/conditional, when the loop composes with combinators
 multi-slot (`range<Y, X>`) or non-plain (`SymIdx`/`CompoundIdx`/`halo`), or
 when you want the named index tag to flow into the result.
 
-Real code (from `examples/` and `tests/corpus/` — these compile):
+Real code (excerpts from `examples/` — the full files compile and run):
 
-```blade
+```blade sketch
 // Filter + aggregate (examples/01_weather_stations.blade)
 let qc_ok = mask(r_qc, lambda(q) -> q == 0)
 let good_temps = compound(r_temp, qc_ok)
@@ -295,8 +353,12 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
 
 - **`method_for(A, B)` is the outer product; `method_for(zip(A, B))` is co-iteration.**
   Confusing them silently changes the output rank.
-- **`reduce` folds right-to-left, innermost axis first.** Irrelevant for `(+)`; decisive the
-  moment your fold kernel isn't commutative.
+- **`reduce` is a LEFT fold in ascending storage order, innermost axis first**:
+  `reduce([1, 2, 3, 4], lambda(a, b) -> a - b)` is `((1 - 2) - 3) - 4 = -8`. Irrelevant for
+  `(+)`; decisive the moment your fold kernel isn't commutative or associative.
+- **Captured writes race only in parallel bodies.** A kernel or function may assign a
+  captured `let mut` binding in serial code; inside an `omp` / `cuda` body the same write is
+  refused (BL4005). Element writes through a `mut` array parameter alias the caller's array.
 - **Don't hand-optimize.** No manual triangular index math, no hand-placed OpenMP pragmas,
   no manual BLAS calls. Declare `comm`/`anticomm`/`omp` and use array identity at the call
   site; the compiler derives triangular storage/iteration (r! savings), pragma placement,
@@ -321,8 +383,9 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
 - `///` doc comment above a declaration; `//` banner blocks as section headers; trailing
   `// EXPECT:` comments pin values in examples and corpus tests.
 - 4-space indent inside `{ }` blocks. `where` goes between the parameter list and the return
-  type; both same-line and own-line placements exist in the codebase — be consistent within
-  a file.
+  type (`function f(a: T^1, b: T^1) where comm(a, b) -> T^0 = ...`; after `->` it is a parse
+  error); both same-line and own-line placements exist in the codebase — be consistent
+  within a file.
 
 ## Working on the compiler (F#)
 
@@ -337,15 +400,23 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
   "optimize" them into cached values.
 - The interpreter (`src/Interp/`) and codegen are differential twins: behavior changes must
   land in both or `test interp` / `diff-oracle` gates will catch the drift.
+- Scalar arithmetic has ONE written contract, `docs/formalism.md` §2.4 "Arithmetic semantics":
+  integer ops wrap; `/` `%` by zero and a negative integer exponent panic BL8013; a float→int
+  cast of NaN/out-of-range panics BL8014; integer `^` is exact; transcendental intrinsics are
+  the platform libm AT RUN TIME (`blade_libm::`, never constant-folded). A change to it lands
+  in every lane at once: `CodeGenExprSupport.renderContractBinOp`/`renderUnaryOpTyped` +
+  `src/cpp/blade_runtime.hpp`, `src/Interp/Numerics.fs`, `src/EmitLlvm.fs` +
+  `src/cpp/blade_llvm_shim.c`, and `StaticEval.evalBinOp`.
 - Diagnostics have stable `BLxxxx` codes (`src/Diagnostics.fs`); corpus tests pin them, so
   changing a code or message means updating pins in the same change.
 
 ## Docs map
 
 `docs/formalism.md` is canonical for semantics (types, index types, loop objects,
-combinators, symmetry, §15 concrete syntax). `docs/features.md` is the feature census; its
-Status column can lag the implementation, so trust formalism.md and the corpus when they
-disagree. `docs/proofs.md` maps which guarantees are machine-checked in `proofs/` versus
+combinators, symmetry, §2.4 arithmetic, §3.10 subscripts, §15 concrete syntax).
+`docs/features.md` is the feature census with a per-row Status; trust formalism.md and the
+corpus when they disagree. Every `blade` code block in the docs is checked by `blade test docs`.
+`docs/proofs.md` maps which guarantees are machine-checked in `proofs/` versus
 implemented-and-corpus-pinned. Tutorials: `docs/quickstart-1.md`, `docs/quickstart-2.md`.
 The richest idiom sources are `examples/01_weather_stations.blade`,
 `examples/03_signal_conditioning.blade`, and `examples/lsdft.blade`.

@@ -1,0 +1,36 @@
+// TEST: Loglik Support And Boundaries
+import ppl as ppl
+// loglik sums logpdf, so ONE off-support sample makes the sum -inf (the
+// oracle's loglik is exactly that sum), and a certain outcome sums to 0.
+// The hoisted closed forms used to ignore the support -- uniform never read
+// its data at all -- and bernoulli(1) over all-ones data was
+// log(1 - 1) * (n - n) = -inf * 0 = NaN.
+let ninf = log(0.0)
+let ones: Array<Float64 like Idx<3>> = [1.0, 1.0, 1.0]
+let zeros: Array<Float64 like Idx<3>> = [0.0, 0.0, 0.0]
+let bad: Array<Float64 like Idx<3>> = [0.5, 1.0, 2.0]
+let neg: Array<Float64 like Idx<3>> = [1.0, -2.0, 3.0]
+
+let ll_ber_certain = ppl.loglik(bernoulli(1.0), ones)
+let ll_ber_never = ppl.loglik(bernoulli(0.0), zeros)
+let ll_poi_zero = ppl.loglik(poisson(0.0), zeros)
+// EXPECT: ll_ber_certain = 0
+// EXPECT: ll_ber_never = 0
+// EXPECT: ll_poi_zero = 0
+
+let ll_uni_off = ppl.loglik(uniform(0.0, 1.0), bad)
+let ll_gam_off = ppl.loglik(gamma(2.0, 1.0), neg)
+let ll_exp_off = ppl.loglik(exponential(1.0), neg)
+let ll_lgn_off = ppl.loglik(lognormal(0.0, 1.0), neg)
+let ll_bet_off = ppl.loglik(beta(2.0, 2.0), bad)
+let ll_ber_off = ppl.loglik(bernoulli(0.5), bad)
+let ll_poi_off = ppl.loglik(poisson(1.0), bad)
+let off_all_neg_inf = ll_uni_off == ninf && ll_gam_off == ninf && ll_exp_off == ninf && ll_lgn_off == ninf && ll_bet_off == ninf && ll_ber_off == ninf && ll_poi_off == ninf
+// EXPECT: off_all_neg_inf = true
+
+// On the support the sums are the old ones: gamma(2, 1) at 1 is -1 per
+// sample; uniform(0, 4) over in-range data is -n log 4.
+let ll_gam_on = ppl.loglik(gamma(2.0, 1.0), ones)
+let ll_uni_on = ppl.loglik(uniform(0.0, 4.0), bad)
+// EXPECT: ll_gam_on = -3
+// EXPECT: ll_uni_on = -4.1588830833596715

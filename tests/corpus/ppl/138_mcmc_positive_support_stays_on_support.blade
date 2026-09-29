@@ -1,0 +1,30 @@
+// TEST: MCMC On A Positive Support Stays On The Support
+import ppl as ppl
+import ad as ad
+// theta ~ Exponential(1), five observations ~ N(theta, 1) with mean 0.2. The
+// posterior is exp(-theta - (5/2)(theta - 0.2)^2) on theta >= 0, i.e. a
+// N(0, 1/5) truncated to [0, inf): mean sqrt(0.2) sqrt(2/pi) =
+// 0.35682208977308993, variance 0.2 (1 - 2/pi) = 0.07267604552648372.
+// When logpdf(exponential) was on-support-only, a negative proposal scored
+// log(1) - theta = +|theta| -- MORE probable the further it strayed -- so the
+// chains left the support. Now it scores -inf and is rejected: no sample is
+// negative, and the moments are the truncated normal's.
+let data: Array<Float64 like Idx<5>> = [0.5, -0.3, 0.4, 0.1, 0.3]
+function logpost(theta: Float64) -> Float64 =
+    ppl.logpdf(exponential(1.0), theta) + ppl.loglik(gaussian(theta, 1.0), data)
+
+let cm = ppl.mh(logpost, 0.5, 4096, 0.5, 2024)
+let ch = ppl.hmc(logpost, 0.5, 4096, 0.2, 4, 2024)
+let negs_mh = reduce(method_for(cm) <@> lambda(t) -> if t < 0.0 then 1.0 else 0.0, (+))
+let negs_hmc = reduce(method_for(ch) <@> lambda(t) -> if t < 0.0 then 1.0 else 0.0, (+))
+// EXPECT: negs_mh = 0
+// EXPECT: negs_hmc = 0
+let m_mh = ppl.chain_mean(cm, 512)
+let m_hmc = ppl.chain_mean(ch, 512)
+let v_mh = ppl.chain_var(cm, 512)
+let mean_ok_mh = abs(m_mh - 0.35682208977308993) < 0.05
+let mean_ok_hmc = abs(m_hmc - 0.35682208977308993) < 0.05
+let var_ok_mh = abs(v_mh - 0.07267604552648372) < 0.03
+// EXPECT: mean_ok_mh = true
+// EXPECT: mean_ok_hmc = true
+// EXPECT: var_ok_mh = true

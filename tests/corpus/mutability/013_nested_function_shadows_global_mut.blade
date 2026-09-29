@@ -1,0 +1,22 @@
+// TEST: A nested function shadowing a global `mut` function is its own callee
+// ============================================================================
+// The call judgment's declaration facts (`mut` positions, co-iteration
+// obligations, unit transforms and equalities) were keyed by callee NAME, so
+// the nested non-`mut` `f` inside `g` borrowed the global `f`'s `mut` first
+// parameter and `f(x)` was refused BL4005 ("'x' is a non-`mut` parameter").
+// They are keyed by the declaration's binder id now.
+// ============================================================================
+function f(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+    a(0) = 99.0
+    a(0)
+}
+function g(x: Array<Float64 like Idx<3>>) -> Float64 = {
+    function f(a: Array<Float64 like Idx<3>>) -> Float64 = a(1)
+    f(x)
+}
+let arr = [1.0, 2.0, 3.0]
+let v = g(arr)
+// EXPECT: v = 2
+let mut w = [1.0, 2.0, 3.0]
+let u = f(w)
+// EXPECT: u = 99

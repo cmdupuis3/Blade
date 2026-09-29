@@ -1,0 +1,7 @@
+// TEST: comm on a named function refuted by a counterexample (rejects)
+// ERROR: BL4013
+// The declaration-level twin: a named function's clause is checked against
+// its own body, where the same evaluator finds atan2(x, y) <> atan2(y, x).
+function k(x: T^0, y: T^0) where comm(x, y) -> T^0 = atan2(x, y)
+let A = [1.0, 2.0, 3.0]
+let r = method_for(A, A) <@> k |> compute

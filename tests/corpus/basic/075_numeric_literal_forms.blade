@@ -1,0 +1,21 @@
+// TEST: Numeric Literal Forms
+// `_` digit separators (between two digits, in any digit run) and hex /
+// binary integer literals. Hex and binary are 64-bit BIT PATTERNS, as in
+// Java: anything up to 2^64 - 1 is accepted and read two's-complement, so a
+// hashing constant like 0x9E3779B97F4A7C15 is writable as itself.
+let million = 1_000_000
+let f = 1_000.25
+let e = 1.25e0_1
+let h = 0x1F
+let hb = 0xFF_FF
+let b = 0b1010_1010
+let golden = 0x9E3779B97F4A7C15
+let all_ones = 0xFFFFFFFFFFFFFFFF
+// EXPECT: million = 1000000
+// EXPECT: f = 1000.25
+// EXPECT: e = 12.5
+// EXPECT: h = 31
+// EXPECT: hb = 65535
+// EXPECT: b = 170
+// EXPECT: golden = -7046029254386353131
+// EXPECT: all_ones = -1

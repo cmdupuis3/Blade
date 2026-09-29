@@ -12,7 +12,14 @@ namespace BladeML
 /// not odd. The spec implicitly assumes even scalars in block 0.
 module Activations =
 
-    let sigmoid (x: float) : float = 1.0 / (1.0 + exp (-x))
+    /// Two-sided, overflow-free: e = exp(-|x|) in (0, 1]. Mirrors the
+    /// compiler's __ml_sigmoid (MLElaborate.sigmoidDecl) operation for
+    /// operation; bit-identical to 1 / (1 + exp(-x)) for x >= 0.
+    let sigmoid (x: float) : float =
+        if x >= 0.0 then 1.0 / (1.0 + exp (-x))
+        else
+            let e = exp x
+            e / (1.0 + e)
     let silu (x: float) : float = x * sigmoid x
     let relu (x: float) : float = max x 0.0
 

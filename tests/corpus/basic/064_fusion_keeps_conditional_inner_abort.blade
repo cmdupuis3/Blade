@@ -1,0 +1,11 @@
+// TEST: Fusion keeps a conditional inner abort (aborts)
+// Elementwise fusion splices an inner map's kernel into the host kernel in
+// place of the host's parameter. The inner lgamma map aborts (BL8008, the
+// pole at -1) for every cell before the host runs; spliced under the host's
+// `if k > 0.5`, the pole cell (k = 0) was skipped and y printed [0, 0, 0]
+// -- an abort REMOVED by an optimization (charter rule 1). An inner kernel
+// that may abort now fuses only where the host reads it unconditionally.
+let x = [1.0, -1.0, 2.0]
+let c = [1.0, 0.0, 1.0]
+let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> if k > 0.5 then g else 0.0) |> compute
+// ABORT: BL8008

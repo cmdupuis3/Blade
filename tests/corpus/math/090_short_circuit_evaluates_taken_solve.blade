@@ -1,0 +1,13 @@
+// TEST: Short-circuit still evaluates a taken solve
+// Control for math/089: when the left operand does NOT decide the result,
+// the right operand's lifted solve runs inside the operator and its value
+// reaches the result. A = [[2, 0], [0, 4]], b = [2, 8]: x = [1, 2].
+import math as m
+let A: Array<Float64 like Idx<2>, Idx<2>> = [[2.0, 0.0], [0.0, 4.0]]
+let b: Array<Float64 like Idx<2>> = [2.0, 8.0]
+let ok = true
+let no = false
+let r_and = ok && (m.solve(A, b)(1) > 1.5)
+let r_or = no || (m.solve(A, b)(0) > 1.5)
+// EXPECT: r_and = true
+// EXPECT: r_or = false

@@ -5,7 +5,7 @@ plus supporting pins in `tests/corpus/rand/` and `tests/corpus/ad/`, plus two
 worked examples, `examples/02_portfolio_moments.blade` and
 `examples/05_streaming_telemetry.blade`). The module started as a compile-time
 moment/cumulant algebra with no named distributions, no density, and no
-inference engine; `docs/plan-ppl-proper.md` (2026-08-05) closed most of that
+inference engine; the ppl-proper plan (2026-08-05, retired once built — `git log --all -- docs/plan-ppl-proper.md`) closed most of that
 gap, and the module is no longer only a compile-time moment algebra. It now
 has named distribution families with closed-form log-densities, exact and
 approximate sampling, two general-purpose MCMC engines (Metropolis-Hastings
@@ -36,8 +36,14 @@ belong to other passes reached through elaboration output: `Grad`'s own
 `BL5500` when an `hmc` model body falls outside the AD-able subset, and the
 checker's `BL3007` for `cumulant(d, k)` projection (§5).
 
-```blade
+Every example on this page assumes the import (a page-wide prelude for
+`blade test docs`):
+
+```blade prelude
 import ppl as ppl
+```
+
+```blade
 type TimeIdx = Idx<6>
 let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
 let mu = ppl.moments(A, 1)          // mean
@@ -52,8 +58,9 @@ let y  = ppl.dist_map(d, 2, lambda(x) -> x * x)   // exact pushforward through x
 Only `import ppl [as <alias>]` is legal. `alias` defaults to `"ppl"` when
 omitted. A selective import —
 
-```blade
+```blade rejects
 from ppl import moments   // ERROR
+// ERROR: BL5100
 ```
 
 — is a compile error: *"`ppl` supports only `import ppl [as <alias>]`; a
@@ -110,9 +117,20 @@ array. The **last declared index of the source array is always the sample
 | `moments(A, k)` | `Array<T like I..., N> -> Array<T like SymIdx<k, D>>` | raw (non-central) order-`k` comoment tensor, packed symmetric over the fused leading axes |
 | `comoments(A, 2)` | same | central pair comoment (covariance); orders > 2 deferred to the subset-lattice expansion |
 | `comoments(X, Y)` | rectangular | central cross-covariance block between two arrays (no `comm` clause — not symmetric) |
-| `cumulants(A, k)` | | joint cumulant tensors 1..k via Möbius inversion over the set-partition lattice (Bell(k) partitions) of the raw power sums |
+| `cumulants(A, k)` | | joint cumulant tensors 1..k via Möbius inversion over the set-partition lattice (Bell(k) partitions) of the power sums of the CENTERED rows (order 1 adds the mean back) |
 | `mixed_cumulants(A, B, p, q)` | | the `(p, q)` joint-cumulant block between two named sources (`A`-slots major, `B`-slots inner); structurally zero at every order for a declared-independent pair |
 | `free_cumulants(A, k)` | | non-crossing-partition-lattice cumulants (free probability, as opposed to `cumulants`' classical/all-partitions lattice) |
+
+**Central formers center first.** `comoments`, `cumulants`, `mixed_cumulants`,
+`mstate`, `free_cumulants` and `dist` never assemble a central quantity from
+RAW power sums (`E[xy] - E[x]E[y]` cancels catastrophically when the mean
+dwarfs the spread: at `[1e8, 1e8+1, 1e8+2]` the raw binary64 variance is 2,
+not 2/3). The pool path shifts each row by its mean before the shared sweep
+(a second, central pool beside the raw one `moments` reads); the per-cell
+kernels center each fiber. Every quantity of order >= 2 is shift-invariant,
+and order-1 outputs add the shift back -- the shifted-moment reduction of
+`proofs/BladeShiftedMoments.v` with the mean as the shift. Pinned by corpus
+`ppl/134`.
 
 `moments(A, k)` elaborates (as the doc comment at PplElaborate.fs:8-11
 states) to exactly:
@@ -162,6 +180,9 @@ Estimator/Dist-tower example combining both
 (`examples/02_portfolio_moments.blade`, part (e)):
 
 ```blade
+type FDayIdx = Idx<4>
+let X: Array<Float64 like Idx<2>, FDayIdx> = [[1.0, 2.0, 3.0, 2.0], [0.5, 1.5, 1.0, 1.0]]
+let Y: Array<Float64 like Idx<2>, FDayIdx> = [[0.2, 0.4, 0.2, 0.4], [1.0, 3.0, 2.0, 2.0]]
 let _ = ppl.independent(X, Y)
 let dx = ppl.dist(X, 3)
 let dy = ppl.dist(Y, 3)
@@ -195,6 +216,9 @@ hand-coded per order.
 Example (`tests/corpus/ppl/025_mstate_merge.blade`):
 
 ```blade
+type TimeIdx = Idx<2>
+let XA: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 5.0]]
+let XB: Array<Float64 like Idx<2>, TimeIdx> = [[4.0, 6.0], [4.0, 2.0]]
 let sA = ppl.mstate(XA, 4)
 let sB = ppl.mstate(XB, 4)
 let s = ppl.mstate_merge(sA, sB)
@@ -227,11 +251,16 @@ Example (`tests/corpus/ppl/039_dist_map.blade`, matching the hand-jetted
 `ppl/033`):
 
 ```blade
+type TimeIdx = Idx<6>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[1.0, 2.0, 4.0, 6.0, 0.0, 3.0]]
 let xd = ppl.dist(A, 6)
 let dy = ppl.dist_map(xd, 3, lambda(x) -> x * x)
-let y1 = ppl.cumulant(dy, 1)   // EXPECT: [11.0]
-let y2 = ppl.cumulant(dy, 2)   // EXPECT: [154.0]
-let y3 = ppl.cumulant(dy, 3)   // EXPECT: [2178.0]
+let y1 = ppl.cumulant(dy, 1)
+let y2 = ppl.cumulant(dy, 2)
+let y3 = ppl.cumulant(dy, 3)
+// EXPECT: y1 = [11.0]
+// EXPECT: y2 = [154.0]
+// EXPECT: y3 = [2178.0]
 ```
 
 The order-budget refusal is elaboration-time `BL5100`
@@ -275,6 +304,8 @@ Example (`tests/corpus/ppl/045_dist_reweight_bayes.blade` — a runtime-centered
 quadratic likelihood, prior over `{0, 1, 2}`):
 
 ```blade
+type TimeIdx = Idx<3>
+let A: Array<Float64 like Idx<1>, TimeIdx> = [[0.0, 1.0, 2.0]]
 let vhat = 1.6
 let d = ppl.dist(A, 4)   // order-4 prior
 let evidence = ppl.dist_expect(d, 1.0 - 0.2*vhat*vhat, 0.4*vhat, 0.0 - 0.2)
@@ -388,17 +419,31 @@ cross-family identity).
 
 ```
 logpdf(family(params), x)   the scalar log-density at x: closed-form
-                             arithmetic over once-bound parameters,
-                             ON-SUPPORT by design (no branching -- an
+                             arithmetic over once-bound parameters, -inf
+                             off the family's support (branch-free -- an
                              if/match would leave the AD-able subset).
 loglik(family(params), A)   the SUMMED log-density over A's sample axis
                              (its last -- and only -- declared index), an
                              AD-able scalar accumulation loop (`let mut` +
                              for + `+=`) with per-family constants hoisted
-                             out of the loop. Leading variable axes are
+                             out of the loop; one off-support sample makes
+                             it -inf. Leading variable axes are
                              refused -- a univariate family has no
                              per-coordinate loglik.
 ```
+
+**Support.** The supports are the oracle's (`oracles/ppl/Density.fs`):
+exponential `[0, inf)`, uniform `[a, b]`, lognormal and gamma `(0, inf)`,
+beta `(0, 1)`, poisson the non-negative integers, bernoulli `{0, 1}`,
+gaussian the whole line. Outside it `logpdf` is `-inf`; `0 * log 0` is `0`
+(`bernoulli(1)` at 1, `poisson(0)` at 0). All of it is carried by `guard`,
+which both AD sweeps differentiate: a support term `guard(!ok, log(0.0))`,
+the closed form read at `x` moved onto the support (`x + 0.0` on it, a
+constant in-support point off it -- finite, and no lgamma pole), and
+`xlogy(a, y) = a * log(y + guard(a == 0, 1))`. On the support every added
+term is an exact no-op, so values and gradients there are the bare closed
+form's; off it the gradient in `x` is a finite 0. Invalid PARAMETERS are
+not checked (the oracle raises on them). `tests/corpus/ppl/135-138`.
 
 (`logPdfParts`/`logLikParts`, PplElaborate.fs:1980-2159.) Gaussian,
 exponential, uniform, and lognormal are closed forms with no special
@@ -423,7 +468,7 @@ trigamma, does not exist in the language yet — see Roadmap).
 
 Both formers work **inside top-level function bodies**, in expression
 position, not just as a top-level `let` RHS — this is the density-form model
-layer (`docs/plan-ppl-proper.md` §4): a "model" is an ordinary named function
+layer (the ppl-proper plan's §4): a "model" is an ordinary named function
 summing `logpdf`/`loglik` terms, and each call site rewrites to the same
 closed-form arithmetic the decl-position formers emit, hoisted as statement
 lets into the enclosing block (`rewriteBodyFormers`, PplElaborate.fs:2307,
@@ -605,11 +650,14 @@ function logpost(theta: Float64) -> Float64 =
     ppl.logpdf(gaussian(0.0, 4.0), theta) + ppl.loglik(gaussian(theta, 2.0), data)
 
 let c1 = ppl.mh(logpost, 0.0, 4096, 1.0, 1234)
+let c2 = ppl.mh(logpost, 0.0, 4096, 1.0, 987654321)
 let m1 = ppl.chain_mean(c1, 512)   // post-burn mean vs the exact posterior
 let v1 = ppl.chain_var(c1, 512)
-let rh = ppl.rhat(c1, ppl.mh(logpost, 0.0, 4096, 1.0, 987654321))
-// EXPECT: mean_ok_1 = true   (|m1 - 1.0363636363636362| < 0.05)
-// EXPECT: rhat_ok = true     (rh < 1.01)
+let rh = ppl.rhat(c1, c2)          // chains are named module-level bindings
+let mean_ok_1 = abs(m1 - 1.0363636363636362) < 0.05
+let rhat_ok = rh < 1.01
+// EXPECT: mean_ok_1 = true
+// EXPECT: rhat_ok = true
 ```
 
 The HMC gamma-model payoff (`tests/corpus/ppl/117_hmc_gamma_poisson_lgamma.blade`)
@@ -618,6 +666,7 @@ Poisson-likelihood model, sampled unconstrained as `t = log(lam)` with the
 log-Jacobian folded straight into the log-posterior:
 
 ```blade
+import ad as ad                     // hmc's leapfrog gradient rides ad.grad
 let pdata: Array<Float64 like Idx<5>> = [3.0, 1.0, 4.0, 1.0, 5.0]
 function logpost(t: Float64) -> Float64 =
     ppl.logpdf(gamma(2.0, 1.0), exp(t)) + t + ppl.loglik(poisson(exp(t)), pdata)
@@ -674,12 +723,14 @@ estimated `Dist`.
 Example (`tests/corpus/ppl/121_dist_over_chain_roundtrip.blade`):
 
 ```blade
+import ad as ad
 function lp(x: Float64) -> Float64 = 0.0 - x * x / 2.0
 let c = ppl.hmc(lp, 0.3, 512, 0.5, 4, 7)
 let d = ppl.dist(c, 2)
 let m1 = ppl.dist_expect(d, 0.0, 1.0)
 let cm = ppl.chain_mean(c, 0)
-let mean_rt = abs(m1 - cm) < 0.000000000001   // EXPECT: true -- same sums, different loop shapes
+let mean_rt = abs(m1 - cm) < 0.000000000001   // same sums, different loop shapes
+// EXPECT: mean_rt = true
 ```
 
 Tests: `ppl/104-107` (hand-checked chain moments/autocorr/ess/rhat over a
@@ -737,8 +788,10 @@ Example, `bayes` (`tests/corpus/ppl/122_bayes_normal_normal.blade`):
 ```blade
 let data: Array<Float64 like Idx<5>> = [1.2, 0.7, 2.3, -0.4, 1.9]
 let post = ppl.bayes(gaussian(0.0, 4.0), gaussian_lik(2.0), data, 4)
-let k1 = ppl.cumulant(post, 1)   // EXPECT: [1.0363636363636362]
-let k2 = ppl.cumulant(post, 2)   // EXPECT: [0.36363636363636365]
+let k1 = ppl.cumulant(post, 1)
+let k2 = ppl.cumulant(post, 2)
+// EXPECT: k1 = [1.0363636363636362]
+// EXPECT: k2 = [0.36363636363636365]
 ```
 
 Example, `dist_condition` — the 2D regression-line case
@@ -748,7 +801,8 @@ Example, `dist_condition` — the 2D regression-line case
 let A: Array<Float64 like Idx<2>, Idx<4>> = [[1.0, 2.0, 3.0, 6.0], [2.0, 3.0, 5.0, 10.0]]
 let d = ppl.dist(A, 2)
 let c = ppl.dist_condition(d, 0, 4.0)   // condition x=4, read off E[y|x=4]
-let cm = ppl.cumulant(c, 1)             // EXPECT: [6.642857142857143]
+let cm = ppl.cumulant(c, 1)             // E[y | x = 4]
+// EXPECT: cm = [6.642857142857143]
 ```
 
 Both close the loop against sampling. `tests/corpus/ppl/133_bayes_vs_mcmc_agreement.blade`
@@ -758,17 +812,24 @@ computes the same Normal-Normal posterior three ways — `bayes` exactly, an
 tolerance:
 
 ```blade
+import ad as ad
+let data: Array<Float64 like Idx<5>> = [1.2, 0.7, 2.3, -0.4, 1.9]
+function logpost(theta: Float64) -> Float64 =
+    ppl.logpdf(gaussian(0.0, 4.0), theta) + ppl.loglik(gaussian(theta, 2.0), data)
+
 let post = ppl.bayes(gaussian(0.0, 4.0), gaussian_lik(2.0), data, 2)
 let pm = ppl.dist_expect(post, 0.0, 1.0)          // exact posterior mean
 
 let cmh = ppl.mh(logpost, 0.0, 4096, 1.0, 1234)
 let dmh = ppl.dist(cmh, 2)
 let sm = ppl.dist_expect(dmh, 0.0, 1.0)           // mh, via the round-trip
-let mh_mean_agrees = abs(sm - pm) < 0.05          // EXPECT: true
+let mh_mean_agrees = abs(sm - pm) < 0.05
 
 let chmc = ppl.hmc(logpost, 0.0, 4096, 0.25, 4, 1234)
 let hm = ppl.chain_mean(chmc, 512)                // hmc, via chain_mean
-let hmc_mean_agrees = abs(hm - pm) < 0.05         // EXPECT: true
+let hmc_mean_agrees = abs(hm - pm) < 0.05
+// EXPECT: mh_mean_agrees = true
+// EXPECT: hmc_mean_agrees = true
 ```
 
 Tests: `ppl/122-124` (the three conjugate pairs), `ppl/125-127` (non-
@@ -893,7 +954,7 @@ documented in more depth for compiler maintainers at `oracles/ppl/NOTES.md`.
 
 ## Roadmap
 
-`docs/plan-ppl-proper.md` (2026-08-05) laid out six phases (plus cross-cutting
+The ppl-proper plan (2026-08-05) laid out six phases (plus cross-cutting
 work) to grow the module from a compile-time moment algebra into a proper
 sampling-based PPL system. §2.7-2.13 above are the result: P1 through P4 and
 the core of P5 are implemented and corpus-tested. What follows is what

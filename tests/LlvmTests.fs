@@ -1956,6 +1956,17 @@ let runLlvmTests () : int =
     printGrandTotal blocks
     if blocks |> List.sumBy (_.Failed) = 0 then 0 else 1
 
+/// The reserved words `runLlvmCategory` takes in place of a corpus directory,
+/// after its normalization (lower-cased, leading dashes dropped). The CLI's
+/// unknown-category guard reads this list, so a word added to the match below
+/// must be added here too -- a word missing here is refused before it runs
+/// (CI's `test llvm goldens` step was, once).
+let llvmCategoryWords =
+    [ "all"; "corpus"; "goldens"; "pins"; "facts"; "blocks"; "simplex"; "bricks"; "bench" ]
+
+let isLlvmCategoryWord (cat: string) =
+    List.contains (cat.ToLower().TrimStart('-')) llvmCategoryWords
+
 /// `blade test llvm <category>` -- the differential over one named corpus
 /// directory (the literal tests/corpus/<dir> name, as `test interp <dir>`
 /// takes). The reserved word `all` (alias `corpus`) sweeps EVERY single-file

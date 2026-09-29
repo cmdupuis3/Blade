@@ -1,0 +1,18 @@
+// TEST: Functions CSE Across Pure Call
+// The barrier rule must not turn CSE off: a call to a function that writes
+// nothing (its effect summary is repeatable) is NOT a barrier, so the second
+// `reduce(y, (+))` below is still the same value as the first and is dropped
+// (`blade plan` records `[cse v2] scaled: applied`; tests/OptimizeTests.fs
+// pins the emission). This file is the value side.
+type I = Idx<7>
+function sumsq(v: Array<Float like I>) -> Float = reduce(v * v, (+))
+function scaled(x: Array<Float like I>) -> Float = {
+    let y = x * 2.0
+    let s1 = reduce(y, (+))
+    let q = sumsq(y)
+    let s2 = reduce(y, (+))
+    s1 * 0.5 + s2 * 0.25 + q
+}
+let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+let r = scaled(a)
+// EXPECT: r = 602

@@ -1,0 +1,45 @@
+// TEST: Call judgment admits legitimate calls
+// ============================================================================
+// The call judgment (docs/plans/plan-call-judgment.md) instantiates a declared
+// function's signature per call and unifies the COPY against the arguments,
+// under the coercions a call licenses. These are the calls it must keep
+// accepting: one generic at two element types (the copy, never the
+// declaration, is what a call binds), scalar widening, a literal meaning a
+// narrower numeric parameter, an untagged integer into a `Nat<I>` parameter,
+// a tagged one into a plain `Int64`, and prefix partial application.
+// (Variadic `Poly` packs, the other stand-down, are pinned by arity/.)
+// ============================================================================
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+
+function total(row: T^1) -> T^0 = reduce(row, (+))
+let tf = total([1.5, 2.5, 3.0])
+// EXPECT: tf = 7
+let ti = total([1, 2, 3])
+// EXPECT: ti = 6
+
+function half(x: Float64) -> Float64 = x / 2.0
+let n: Int64 = 7
+let h = half(n)
+// EXPECT: h = 3.5
+let hl = half(3)
+// EXPECT: hl = 1.5
+
+function ident32(x: Int32) -> Int32 = x
+let i32 = ident32(21)
+// EXPECT: i32 = 21
+
+function at(i: Nat<Lat>) -> Float64 = A(i)
+let a1 = at(1)
+// EXPECT: a1 = 20
+let viaTag = method_for(range<Lat>) <@> lambda(i) -> at(i) |> compute
+// EXPECT: viaTag = [10, 20, 30]
+
+function twice(k: Int64) -> Int64 = k * 2
+let plainFromTag = method_for(range<Lat>) <@> lambda(i) -> twice(i) |> compute
+// EXPECT: plainFromTag = [0, 2, 4]
+
+function add3(a: Float64, b: Float64, c: Float64) -> Float64 = a + b + c
+let part = add3(1.0)
+let pv = part(2.0, 3.0)
+// EXPECT: pv = 6

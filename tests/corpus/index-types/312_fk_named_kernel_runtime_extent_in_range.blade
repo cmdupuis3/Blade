@@ -1,0 +1,15 @@
+// TEST: A named kernel over a runtime-extent index type reads in-range keys
+// ============================================================================
+// The runtime-extent guard (index-types/311) passes every key that is a
+// position of RegionIdx.
+let nr = 3
+type StationIdx = Idx<4>
+type RegionIdx = Idx<nr>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, 1]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+function wt(r: Nat<RegionIdx>) -> Float64 = region_weight(r)
+let w = method_for(station_region) <@> wt |> compute
+let w3 = w(3)
+// EXPECT: w3 = 0.5
+let total = reduce(w, (+))
+// EXPECT: total = 4.5

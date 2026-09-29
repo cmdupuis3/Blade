@@ -1,0 +1,9 @@
+// TEST: Same-named functions: the importing module still gets each one's facts (rejects)
+// MODULE: A
+module A
+Unit meters
+function f(a: mut Array<Float64 like Idx<2>>, v: Float64) -> Float64 = {
+    a(0) = v
+    a(0)
+}
+function g(a: T^0) -> T^0 = a * a

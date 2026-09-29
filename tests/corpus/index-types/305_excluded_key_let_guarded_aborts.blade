@@ -1,0 +1,10 @@
+// TEST: A let holding the excluded key is not a proven position (aborts)
+// `let j: Nat<RegionIdx> = -1` is admitted (-1 is a key value), but it is no
+// position: its read is guarded, never trusted like `let i = 2` is.
+// ABORT: index out of bounds
+type RegionIdx = Idx<3>
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let i: Nat<RegionIdx> = 2
+let ok = region_weight(i)
+let j: Nat<RegionIdx> = -1
+let bad = region_weight(j)

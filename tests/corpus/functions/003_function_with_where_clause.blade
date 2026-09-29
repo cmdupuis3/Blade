@@ -9,3 +9,8 @@
 function covariance(A: Array<Float64 like Idx<n>>, B: Array<Float64 like Idx<n>>) 
   where comm(A, B) -> Array<Float64 like Idx<n>, Idx<n>> = 
   method_for(A, B) <@> lambda(x, y) -> x * y |> compute
+
+let A = [1.0, 2.0]
+let B = [3.0, 4.0]
+let M = covariance(A, B)
+// EXPECT: M = [[3, 4], [6, 8]]

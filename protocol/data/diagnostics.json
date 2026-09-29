@@ -17,9 +17,12 @@
     },
     "BL0003": {
       "title": "invalid numeric literal",
-      "explanation": "A run of digits could not be parsed as an Int64 or a Float: a malformed exponent, a doubled decimal point, a trailing separator, or a value outside the integer range.",
-      "fix": "Rewrite the literal in a form the target type accepts. Integer literals are Int64; a value too large for that must be written as a float, and a float needs digits on both sides of any exponent marker.",
-      "examples": [],
+      "explanation": "A run of digits could not be parsed as an Int64 or a Float: a malformed exponent, a `_` digit separator that does not sit between two digits (`1_`, `1__0`), a hex/binary literal with no digits, a bad digit, or more than 64 bits, a value outside the integer range -- or a number glued directly to a name (`2x`), which Blade does not read as a product.",
+      "fix": "Rewrite the literal in a form the target type accepts. Integer literals are Int64; a value too large for that must be written as a float, and a float needs digits on both sides of any exponent marker. Separators go between digits (`1_000`); hex and binary are `0x1F` / `0b1010`. For a product write the operator: `2 * x`.",
+      "examples": [
+        "tests/corpus/diagnostics/081_number_glued_to_name_rejects.blade",
+        "tests/corpus/diagnostics/086_numeric_literal_malformed_rejects.blade"
+      ],
       "docs": []
     },
     "BL0999": {
@@ -127,11 +130,14 @@
       ]
     },
     "BL2009": {
-      "title": "duplicate function declaration",
-      "explanation": "A second top-level `function` declaration reuses a name the same module scope already declares; the refusal names both sites. Before this code existed the later declaration silently SHADOWED the earlier one: the name rebound to the last declaration, and a call matching the FIRST signature died with a rank or type mismatch (BL3001) blaming the call site instead of the real cause. Same-scope only: a nested `function` desugars to a block-scoped binding and may still shadow an outer function of the same name, and an imported name (`from X import f`) is not a declaration, so neither trips this. Dispatching one name across several signatures -- function clauses, where same-name declarations at compatible-but-distinct signatures form a clause set selected at specialization -- is a planned feature (docs/plans/plan-match-statements.md, refinement R1); until it lands, every same-scope duplicate is refused.",
-      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. If the two bodies were meant to be rank-dispatched alternatives of one function (a scalar base case and an array case), that is the planned function-clause feature -- today, write one function whose body dispatches, or give the variants distinct names.",
+      "title": "duplicate declaration",
+      "explanation": "A second top-level declaration reuses a name its namespace already holds; the refusal names both sites. Values and functions share one namespace (a second `let x`, a `let x` beside `function x`, a leaf of a destructuring `let` an earlier `let` bound), types another (`type`, `struct`, sum types, index types), units a third. Before this code a duplicate function silently SHADOWED the first (calls matching the first signature died blaming the call site), a top-level re-`let` passed the checker and died in g++ as a redeclaration while the interpreter shadowed it -- two lanes, two meanings -- and a duplicate `type`/`struct` let the last one win silently. Across the modules of one program a TYPE name (and a variant-constructor name) may be declared only once: type identity is still the bare name, so two modules' `struct P` would be one type to the checker and two definitions to C++, and a main-module `type Cell` would silently become the same nominal index type as an imported module's `Cell`. Same-scope only: inside a block, `let` and nested `function`s may still shadow outer names, and an imported name (`from X import f`) is not a declaration. Values and functions of different modules never clash: a non-main module's members are namespaced (`Util.scale`).",
+      "fix": "Rename one of the two declarations, or delete the one that was meant to be replaced. To update a top-level `let`, assign it (`x = ...`) rather than declaring it again. For a type or constructor name two modules both declare, rename one of them. If two function bodies were meant to be rank-dispatched alternatives of one function, that is the planned function-clause feature (docs/plans/plan-match-statements.md, R1) -- today, write one function whose body dispatches, or give the variants distinct names.",
       "examples": [
-        "tests/corpus/functions/126_duplicate_function_rejects.blade"
+        "tests/corpus/functions/126_duplicate_function_rejects.blade",
+        "tests/corpus/functions/152_duplicate_toplevel_let_rejects.blade",
+        "tests/corpus/structs/056_duplicate_struct_rejects.blade",
+        "tests/corpus/multifile/025_same_named_struct_rejects/03_Main.blade"
       ],
       "docs": [
         "docs/plans/plan-match-statements.md"
@@ -376,6 +382,28 @@
       ],
       "docs": [
         "docs/plans/plan-match-statements.md"
+      ]
+    },
+    "BL3022": {
+      "title": "unreachable match arm",
+      "explanation": "A WARNING, not an error. An arm that no value can reach: it follows an unguarded catch-all (`_` or a variable binder), or an unguarded arm that already took every value of the same constructor, or -- over a variant/enum type -- arms that already named every constructor. Arms are tried top to bottom, so this one is dead code; usually it is an arm that was meant to come FIRST, or the shadowing arm is a misspelling. Only unguarded arms count as covering: a guarded arm may fall through.",
+      "fix": "Delete the dead arm, or move it above the arm that shadows it. In a test that deliberately exercises the shape, pin it with `// WARN: BL3022`.",
+      "examples": [
+        "tests/corpus/sum-types/014_unreachable_arm_warns.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL3023": {
+      "title": "non-exhaustive match over a variant type",
+      "explanation": "A WARNING, not an error. A `match` whose scrutinee is a variant or enum type names neither every constructor nor a catch-all. A value of an unmatched constructor has no arm to take and aborts the program at run time with BL8002; this reports the gap statically, naming the missing constructors, instead of only when such a value arrives.",
+      "fix": "Add an arm for each missing constructor the message names, or a final `_ -> ...` catch-all. In a test that deliberately exercises the shape, pin it with `// WARN: BL3023`.",
+      "examples": [
+        "tests/corpus/sum-types/015_nonexhaustive_enum_warns.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
       ]
     },
     "BL3999": {
@@ -760,6 +788,16 @@
       "examples": [],
       "docs": []
     },
+    "BL6002": {
+      "title": "construct not valid in this position",
+      "explanation": "The program typechecks, but a construct sits where lowering has no rule for it: `compound(dense, mask)`, a sequenced `rand.<family>(...)` draw, `sparse(values, keys)` or `fill_random` anywhere but as a top-level `let` value (inside a function body, say), an array-typed `zero` as a return value or call argument, or a `_` outside a compound coordinate or a pattern. The diagnostic is spanned at the expression, and `blade check` reports it (check lowers after typechecking) -- it used to surface only at `emit`, with no span.",
+      "fix": "Do what the message says for that construct: bind it at top level (`let B = compound(dense, mask)`, `let A = rand.uniform(key, n)`) and pass the array in, or bind an array `zero` to an annotated `let` first.",
+      "examples": [
+        "tests/corpus/diagnostics/090_compound_in_function_body_rejects.blade",
+        "tests/corpus/diagnostics/091_rand_draw_in_function_body_rejects.blade"
+      ],
+      "docs": []
+    },
     "BL7001": {
       "title": "feature not yet supported by this backend",
       "explanation": "The C++ backend met a construct it has no emission for -- a genuine back-end GAP, not a refusal. Distinct from BL7004, where codegen understood the construct and declined on principle, and from BL4003, where both backends refuse in the front end.",
@@ -884,6 +922,29 @@
       ],
       "docs": []
     },
+    "BL8013": {
+      "title": "integer arithmetic fault",
+      "explanation": "An integer operation had no integer answer: `/` or `%` with a zero divisor, or `^` with a negative exponent. Blade's arithmetic contract (docs/formalism.md section 2.4) makes this a panic in every lane -- the compiled program, the LLVM lane and the interpreter fail with the same code and message. `MIN / -1` is NOT a fault: it wraps to MIN, like every other overflowing integer operation, and `MIN % -1` is 0.",
+      "fix": "Guard the divisor (`if d != 0 then n / d else ...`) or the exponent before the operation. For a negative exponent convert to Float64 first (`Float64(b) ^ Float64(e)`) if a real result is what is wanted.",
+      "examples": [
+        "tests/corpus/basic/067_int_div_by_zero_aborts.blade",
+        "tests/corpus/basic/071_int_pow_negative_exponent_aborts.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
+    "BL8014": {
+      "title": "float-to-integer conversion out of range",
+      "explanation": "A float -> integer cast (`Int64(floor(x))`, `Int32(ceil(x))`) received NaN, an infinity, or a value outside the target type's range. A float-to-int conversion truncates a value the target can hold; anything else panics identically in every lane rather than producing a platform sentinel or a saturated value the program would silently compute on.",
+      "fix": "Check the operand before casting -- a NaN usually means an upstream 0/0 or an empty mean -- or clamp it explicitly to the range the integer is meant to cover.",
+      "examples": [
+        "tests/corpus/casts/017_float_to_int_nan_aborts.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
     "BL9001": {
       "title": "internal compiler error",
       "explanation": "An invariant inside the compiler broke, or an unexpected exception escaped to the CLI boundary. This is a bug in Blade, not in the program being compiled.",
@@ -893,8 +954,8 @@
     },
     "BL9002": {
       "title": "internal codegen invariant violated",
-      "explanation": "BL9001 raised from the C++ emitter: codegen reached a state its own guards said was unreachable -- a node shape that an earlier phase should have rejected or rewritten.",
-      "fix": "A compiler bug; report it with the program. There is no source-level workaround beyond avoiding the construct that reached the emitter.",
+      "explanation": "BL9001 raised from the C++ back end. Either codegen reached a state its own guards said was unreachable -- a node shape that an earlier phase should have rejected or rewritten -- or the C++ compiler REJECTED the code Blade generated for a program that passed type checking. The latter is reported with the first compiler error, the path of the generated source and the path of the full compiler log (kept in the build directory; `--verbose` also prints it). A deliberate `#error` refusal is not this code (see BL7004), and neither is a toolchain failure such as a missing library at link time.",
+      "fix": "A compiler bug; report it with the program (the generated source and the compiler log it names are the useful attachments). There is no source-level workaround beyond avoiding the construct that reached the back end.",
       "examples": [],
       "docs": []
     },

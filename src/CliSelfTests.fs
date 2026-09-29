@@ -140,6 +140,14 @@ let runCliSmokeTests () : TH.BlockResult =
              | Ok sel ->
                  recordCase "print: an unknown name splices a refusal naming it and the real bindings"
                      (sel.Contains "#error" && sel.Contains "totl" && sel.Contains "x, y, z") ""))
+    // A name that IS a binding but never prints (a deferred loop value) is
+    // refused the same way: asked for by name, silence is the typo's twin.
+    withPrint (Some "w") (fun () ->
+        match cppOf "print_deferred" (printSrc + "let w = method_for(z) <@> lambda(v) -> v * 2.0\n") with
+        | Error e -> record "print: a deferred binding refuses" TH.Fail e
+        | Ok sel ->
+            recordCase "print: selecting a never-materialized loop value splices a refusal"
+                (sel.Contains "#error" && sel.Contains "deferred loop value" && sel.Contains "|> compute") "")
     // The two lanes agree under one pin: the interpreter prints the same set.
     withPrint (Some "y") (fun () ->
         match Blade.Lowering.lower printSrc with
@@ -170,6 +178,236 @@ let runCliSmokeTests () : TH.BlockResult =
                     | Error e -> record "print: compiled run honours the selection" TH.Fail e)
         finally
             try Directory.Delete(pDir, true) with _ -> ()
+
+    // --- One flag parser for every file verb ---
+    //
+    // Only `run` used to parse its flags; every other verb matched an exact
+    // argv shape, so `check f --verbose`, `compile f --verbose`,
+    // `emit f --verbose -o x` failed as "unrecognized command".
+    let parses verb toks = parseVerbArgs verb toks
+    recordCase "flags: check accepts --verbose after the file"
+        (match parses "check" [ "f.blade"; "--verbose" ] with
+         | Ok o -> o.File = Some "f.blade" && o.Verbose
+         | Error _ -> false) ""
+    recordCase "flags: emit takes --verbose and -o in any order"
+        (match parses "emit" [ "--verbose"; "f.blade"; "-o"; "x.cpp" ], parses "emit" [ "f.blade"; "-o"; "x.cpp"; "--verbose" ] with
+         | Ok a, Ok b -> a = b && a.Output = Some "x.cpp" && a.Verbose
+         | _ -> false) ""
+    recordCase "flags: compile takes --verbose before -o"
+        (match parses "compile" [ "f.blade"; "--verbose"; "-o"; "out.exe" ] with
+         | Ok o -> o.Output = Some "out.exe" && o.Verbose
+         | Error _ -> false) ""
+    recordCase "flags: ide check takes --json on either side of the file"
+        (match parses "ide check" [ "f.blade"; "--json" ], parses "ide check" [ "--json"; "f.blade" ] with
+         | Ok a, Ok b -> a.File = Some "f.blade" && b.File = Some "f.blade"
+         | _ -> false) ""
+    recordCase "flags: an unknown flag is named, with what the verb accepts"
+        (match parses "check" [ "f.blade"; "--bogus" ] with
+         | Error msg -> msg.Contains "--bogus" && msg.Contains "check" && msg.Contains "--verbose"
+         | Ok _ -> false) ""
+    recordCase "flags: a flag another verb owns is refused by this one"
+        (match parses "check" [ "f.blade"; "-o"; "x" ], parses "run" [ "f.blade"; "--mpi"; "0" ] with
+         | Error a, Error b -> a.Contains "-o" && b.Contains "positive"
+         | _ -> false) ""
+    recordCase "flags: ide check explains why it takes no --strict-pins"
+        (match parses "ide check" [ "f.blade"; "--strict-pins" ] with
+         | Error msg -> msg.Contains "--strict-pins" && msg.Contains "BL4010"
+         | Ok _ -> false) ""
+
+    // --- The help text: current file extension, every mode flag ---
+    let help =
+        let sw = new StringWriter()
+        let prior = Console.Out
+        Console.SetOut sw
+        try printUsage () finally Console.SetOut prior
+        sw.ToString()
+    recordCase "help: speaks .blade, not the pre-rename .edgi" (not (help.Contains ".edgi") && help.Contains ".blade") ""
+    recordCase "help: documents --print, --run-record and test <key>"
+        (help.Contains "--print" && help.Contains "--run-record" && help.Contains "test <key>"
+         && help.Contains "multifile" && help.Contains "opt-diff") ""
+
+    // --- BL9002: generated code the C++ back end rejects is a Blade bug ---
+    let cppPath = Path.Combine(Path.GetTempPath(), "blade-build", "prog-1-2-3", "prog.cpp")
+    let gxx =
+        $"Compilation failed (exit 1):\n{cppPath}: In function 'int main()':\n{cppPath}:12:8: error: redeclaration of 'double scale'\n{cppPath}:10:8: note: 'double scale' previously declared here\nCommand: g++ -O3"
+    recordCase "ICE: a g++ error in the generated file is a back-end rejection"
+        (backendRejection gxx cppPath = Some "error: redeclaration of 'double scale'") ""
+    recordCase "ICE: an #error refusal keeps its own text (BL7004 channel / header gate)"
+        ((backendRejection $"Compilation failed (exit 1):\n{cppPath}:3:2: error: #error BLAS gate off" cppPath).IsNone) ""
+    recordCase "ICE: a link failure is a toolchain problem, not generated code"
+        ((backendRejection "Compilation failed (exit 1):\nC:/msys64/ucrt64/bin/ld.exe: cannot find -lnetcdf\ncollect2.exe: error: ld returned 1 exit status" cppPath).IsNone) ""
+    (let dir = Path.Combine(Path.GetTempPath(), "blade_ice_" + Guid.NewGuid().ToString("N"))
+     Directory.CreateDirectory dir |> ignore
+     try
+         let r = reportBackendRejection "error: redeclaration of 'double scale'" gxx cppPath dir false
+         recordCase "ICE: rendered as BL9002, naming the first error, the source and the kept log"
+             (r.Contains "BL9002" && r.Contains "redeclaration of 'double scale'" && r.Contains cppPath
+              && r.Contains "not in your program" && File.Exists(Path.Combine(dir, "backend-errors.log"))) (if r.Contains "BL9002" then "" else r)
+     finally
+         try Directory.Delete(dir, true) with _ -> ())
+
+    // --- Builds happen in a private scratch directory, never beside the source ---
+    //
+    // `blade run` wrote the .cpp, ~15 runtime headers and the executable
+    // beside the source and deleted "the headers it created" afterwards, so two
+    // runs in one directory deleted each other's headers mid-compile, and every
+    // run left an executable behind.
+    let selfExe =
+        [ Path.Combine(AppContext.BaseDirectory, "Blade.exe"); Path.Combine(AppContext.BaseDirectory, "Blade") ]
+        |> List.tryFind File.Exists
+    let spawn (cwd: string) (args: string list) : int * string * string =
+        match selfExe with
+        | None -> (-1, "", "no Blade executable beside the test assembly")
+        | Some exe ->
+            let psi = System.Diagnostics.ProcessStartInfo(exe)
+            for a in args do psi.ArgumentList.Add a
+            psi.WorkingDirectory <- cwd
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            use p = System.Diagnostics.Process.Start psi
+            let o = Blade.Runtime.readToEndOffPool p.StandardOutput
+            let e = Blade.Runtime.readToEndOffPool p.StandardError
+            if p.WaitForExit 180000 then (p.ExitCode, o.Result, e.Result)
+            else
+                (try p.Kill() with _ -> ())
+                (-1, o.Result, "timed out")
+    let beside (dir: string) =
+        Directory.GetFiles dir |> Array.map Path.GetFileName |> Array.sort |> List.ofArray
+    if selfExe.IsNone then
+        record "cli: bare `blade` prints usage" TH.Skip "no Blade executable beside the test assembly"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_verbs_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            // A bare `blade` STARTED THE FULL SUITE in the current directory.
+            let (code, out, _) = spawn dir []
+            let ok = code = 0 && out.Contains "Usage:" && not (Directory.Exists(Path.Combine(dir, "generated_cpp_tests")))
+            recordCase "cli: bare `blade` prints usage (and does not start the suite)" ok
+                (if ok then "" else out.Substring(0, min 200 out.Length))
+            File.WriteAllText(Path.Combine(dir, "v.blade"), "let x = 1 + 2 * 3\n")
+            let (code, out, err) = spawn dir [ "check"; "v.blade"; "--verbose" ]
+            recordCase "cli: `check f --verbose` is a check, not an unrecognized command"
+                (code = 0 && out.Contains "OK") (out + err)
+            let (code, _, err) = spawn dir [ "test"; "interp"; "no-such-category" ]
+            let ok = code = 1 && err.Contains "unknown corpus category 'no-such-category'" && not (err.Contains "BL9001")
+            recordCase "cli: `test interp <typo>` is a clean usage error, not BL9001" ok (if ok then "" else err)
+            // ...but the guard must not refuse a lane's RESERVED words: it once
+            // knew only `all` / `corpus` for llvm, and CI's `test llvm goldens`
+            // step died on it. The goldens themselves are CI's step; this pins
+            // only that the word gets past the guard.
+            let (_, _, err) = spawn dir [ "test"; "llvm"; "goldens" ]
+            recordCase "cli: `test llvm goldens` is not refused as an unknown category"
+                (not (err.Contains "unknown corpus category")) err
+            // `check` LOWERS: a construct that typechecks but has no lowering
+            // rule where it sits is refused by check itself -- coded BL6002 and
+            // spanned at the expression -- not first by `emit`, spanless.
+            File.WriteAllText(Path.Combine(dir, "cf.blade"),
+                "function f(x: Array<Float like Idx<5>>) -> Float = {\n"
+                + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
+                + "    let c = compound(x, m)\n"
+                + "    reduce(c, (+))\n"
+                + "}\n"
+                + "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+                + "let s = f(a)\n")
+            let (code, out, err) = spawn dir [ "check"; "cf.blade" ]
+            recordCase "cli: `check` reports a lowering refusal as spanned BL6002"
+                (code <> 0 && err.Contains "BL6002" && err.Contains "cf.blade:3:13" && not (out.Contains "OK"))
+                (out + err)
+            // `plan` records the decisions only code generation makes (here the
+            // packed storage and triangular nest `comm` buys for one array),
+            // in the text form and in the JSON, whose field set is unchanged.
+            File.WriteAllText(Path.Combine(dir, "cov.blade"),
+                "type TimeIdx = Idx<2>\n"
+                + "let A: Array<Float64 like Idx<2>, TimeIdx> = [[1.0, 2.0], [3.0, 4.0]]\n"
+                + "let k = lambda(a: Array<Float64 like TimeIdx>, b: Array<Float64 like TimeIdx>) where comm(a, b) -> prodsum(a, b)\n"
+                + "let r = method_for(A, A) <@> k |> compute\n")
+            let (code, out, err) = spawn dir [ "plan"; "cov.blade" ]
+            recordCase "cli: `plan` lists the storage and iteration decisions codegen makes"
+                (code = 0 && out.Contains "[symmetric-storage v1] r" && out.Contains "[triangular-iteration v1] r"
+                 && not (out.Contains "0 optimization decision(s)"))
+                (out + err)
+            let (code, out, err) = spawn dir [ "plan"; "cov.blade"; "--json" ]
+            recordCase "cli: `plan --json` carries them in the unchanged decision schema"
+                (code = 0 && out.Contains "\"rule\":\"symmetric-storage\"" && out.Contains "\"outcome\":\"applied\""
+                 && out.Contains "\"version\":1" && out.Contains "\"evidence\":[" && out.Contains "\"inputs\":")
+                (out + err)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "build dir: run writes nothing beside the source" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_build_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            File.WriteAllText(Path.Combine(dir, "a.blade"), "let x = 1 + 2 * 3\n")
+            File.WriteAllText(Path.Combine(dir, "b.blade"), "let y = 40 + 2\n")
+            // A header of the user's own that happens to share a runtime
+            // header's name: no compile may touch it.
+            File.WriteAllText(Path.Combine(dir, "index_types.h"), "// mine\n")
+            // Two concurrent runs in ONE directory (the reported race), then
+            // the directory must hold exactly what it held before.
+            let t1 = System.Threading.Tasks.Task.Run(fun () -> spawn dir [ "run"; "a.blade" ])
+            let t2 = System.Threading.Tasks.Task.Run(fun () -> spawn dir [ "run"; "b.blade" ])
+            let (c1, o1, e1) = t1.Result
+            let (c2, o2, e2) = t2.Result
+            recordCase "build dir: two concurrent runs in one directory both succeed"
+                (c1 = 0 && o1.Contains "x = 7" && c2 = 0 && o2.Contains "y = 42") (o1 + e1 + o2 + e2)
+            recordCase "build dir: run leaves nothing beside the source"
+                (beside dir = [ "a.blade"; "b.blade"; "index_types.h" ]) (String.concat ", " (beside dir))
+            recordCase "build dir: a same-named file of the user's is untouched"
+                (File.ReadAllText(Path.Combine(dir, "index_types.h")) = "// mine\n") ""
+            // `compile` without -o still places the executable beside the
+            // source (its documented output), and nothing else.
+            let (c3, o3, e3) = spawn dir [ "compile"; "a.blade" ]
+            let exeName = "a" + Platforms.exeExtension
+            recordCase "build dir: compile places only the executable beside the source"
+                (c3 = 0 && o3.Trim().EndsWith exeName
+                 && beside dir = List.sort [ "a.blade"; "b.blade"; "index_types.h"; exeName ])
+                (o3 + e3 + " | " + String.concat ", " (beside dir))
+            // Flags after the file still work from a scratch build, and the
+            // run record lands where it was asked for (not in the scratch dir).
+            let (c4, o4, e4) = spawn dir [ "run"; "a.blade"; "--run-record"; "rr.json" ]
+            recordCase "build dir: run --run-record writes the record where asked"
+                (c4 = 0 && File.Exists(Path.Combine(dir, "rr.json"))) (o4 + e4)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+
+    // --- REPL / notebook: re-running a declaration cell replaces it ---
+    //
+    // The rebind key had no `struct` / `interface` / `impl` arm, so re-running
+    // a struct cell APPENDED a second `struct P` (silently last-wins then, a
+    // BL2009 refusal now) instead of replacing the first.
+    recordCase "repl: struct, static struct, interface and impl cells have a rebind key"
+        (Blade.ReplSession.bindingName "struct P { x: Float64 }" = Some "P"
+         && Blade.ReplSession.bindingName "static struct Band { i: Int<min=0, max=3> }" = Some "Band"
+         && Blade.ReplSession.bindingName "interface Shape {" = Some "Shape"
+         && Blade.ReplSession.bindingName "impl Shape for Box {" = Some "impl Shape for Box") ""
+    (let (src, _) =
+        Blade.ReplSession.assembleCells
+            [ "struct P { x: Float64 }"; "let p = P { x = 1.0 }"; "struct P { x: Float64, y: Float64 }" ]
+     let count = src.Split([| "struct P" |], StringSplitOptions.None).Length - 1
+     recordCase "repl: a re-run struct cell replaces the first declaration" (count = 1) (if count = 1 then "" else src))
+
+    // --- Module namespacing: both lanes print what the pins say ---
+    //
+    // The interpreter differential gate covers single-file categories only,
+    // so the two multi-module programs whose NAMES the namespacing changed
+    // are run through the interpreter here and held to their own pins (the
+    // compiled lane is held to the same pins by `blade test multifile`).
+    for (testName, files) in Blade.Tests.Corpus.multiFileCategory "multifile" do
+        if testName.StartsWith "Same-named values across modules" || testName.StartsWith "Same-named functions across modules" then
+            let label = $"modules: interpreter honours the pins of '{testName}'"
+            match Blade.Lowering.lowerMultiSource files with
+            | Error e -> record label TH.Fail e
+            | Ok ir ->
+                let r = Blade.Interp.Run.runProgram ir "modules_interp" Blade.Interp.Value.defaultLimits
+                let pins = files |> List.collect (fun (_, src) -> Blade.Tests.Expect.parseExpectedValues src)
+                match Blade.Tests.Expect.checkExpectedValues pins r.Stdout with
+                | Ok () when not pins.IsEmpty -> record label TH.Pass ""
+                | Ok () -> record label TH.Fail "no pins found"
+                | Error errs -> record label TH.Fail (String.concat "; " errs + " | " + r.Stdout)
 
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
@@ -271,6 +509,65 @@ let private runStrictPinTests () : TH.BlockResult =
         [ $"{passed} passed"; $"{failed} failed" ]
         @ (if skipped > 0 then [$"{skipped} skipped"] else [])
     TH.printFooter blockName parts
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = skipped
+      FailedNames = failedNames }
+
+/// The IR validator's USER-error backstops report their own code at the
+/// command line. The cast-obligation sweep (IRValidate check 1c) finds a
+/// generic function's float-to-integer cast at an instance only
+/// monomorphization produced -- `outer` forwards its own open variable, so no
+/// seam before it sees the Float64. The compile lane used to stamp every
+/// validation message BL6001 ("IR validation error") with "BL3019:" buried in
+/// the text; it now maps them through IRValidate.diagnosticOfValidationMessage.
+/// (The corpus harness matches a pinned code anywhere in the refusal text, so
+/// casts/032 cannot see the difference; this block drives `compileFile`.)
+let private runValidationCodeTests () : TH.BlockResult =
+    let blockName = "Validation Codes"
+    TH.printHeader "IR-validation backstops report their own code (compile lane)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name outcome detail =
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let src =
+        "function toint(x: T^0) -> Int64 = Int64(x)\n\
+         function applyG(g: (T) -> Int64, x: T) -> Int64 = g(x)\n\
+         function outer(x: T^0) -> Int64 = applyG(toint, x)\n\
+         let r = outer(2.5)\n"
+    let tmpDir = Path.Combine(Path.GetTempPath(), "blade_validation_codes_" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(tmpDir) |> ignore
+    let quietly (f: unit -> 'a) : 'a =
+        let sw = new StringWriter()
+        let (oldOut, oldErr) = (Console.Out, Console.Error)
+        try
+            Console.SetOut sw
+            Console.SetError sw
+            f ()
+        finally
+            Console.SetOut oldOut
+            Console.SetError oldErr
+    try
+        let path = Path.Combine(tmpDir, "backstop.blade")
+        File.WriteAllText(path, src)
+        let (result: Result<string * string list, string>) = quietly (fun () -> compileFile path false false)
+        let name = "compile lane: the cast backstop is error[BL3019], not BL6001"
+        match result with
+        | Error e when e.Contains "BL3019" && not (e.Contains "BL6001") && e.Contains "(in function 'toint')" ->
+            record name TH.Pass ""
+        | Error e -> record name TH.Fail (e.Replace("\n", " | "))
+        | Ok _ -> record name TH.Fail "compiled instead of failing"
+        // The mapping itself: a structural message stays BL6001.
+        let d = Blade.IRValidate.diagnosticOfValidationMessage "[IR Validation] in binding 'r': unresolved type variable T?7 in expression"
+        let name = "a structural validation message stays BL6001"
+        if d.Code = "BL6001" then record name TH.Pass "" else record name TH.Fail $"got {d.Code}"
+    finally
+        try Directory.Delete(tmpDir, true) with _ -> ()
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    TH.printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
     { TH.BlockResult.Block = blockName
       Passed = passed
       Failed = failed
@@ -538,22 +835,27 @@ let private runIdeServeTests () : TH.BlockResult =
         else
             record name TH.Fail $"{raw.Split('\n').Length} newline-separated parts"
 
-        // 4. Full tier: monomorphization upgrades both HM values, and only
-        // where it actually knows more than the typed AST did.
+        // 4. Full tier: monomorphization adds `concreteType` only where it
+        // actually knows more than the typed AST did. For an HM call it no
+        // longer does: the call judgment instantiates the callee's signature
+        // per call (docs/plans/plan-call-judgment.md), so the typed AST
+        // already says `r: Int64` / `s: Float64` -- these used to read `T`,
+        // the CALLEE's type variable leaking into the caller's binding, and
+        // were upgraded here.
         let (code, responses, _) = drive [checkReq 12 "full" hmPath hmSource; shutdownReq]
         let fullBody = match responses with [r] -> r | _ -> ""
-        let name = "check tier=full: HM value bindings gain concreteType"
+        let name = "check tier=full: HM value bindings are already concrete"
         if code = 0 && fullBody.Contains "\"tier\":\"full\""
-           && fullBody.Contains "\"concreteType\":\"Int64\""
-           && fullBody.Contains "\"concreteType\":\"Float64\"" then
+           && fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"Int64\""
+           && fullBody.Contains "\"name\":\"s\",\"kind\":\"let\",\"line\":3,\"col\":1,\"type\":\"Float64\"" then
             record name TH.Pass ""
         else
             record name TH.Fail $"exit {code}, response: {fullBody}"
 
-        // 5. `type` is never rewritten in place: the client wants both, and
-        // decides which to show.
-        let name = "full tier keeps the fast `type` beside the upgrade"
-        if fullBody.Contains "\"name\":\"r\",\"kind\":\"let\",\"line\":2,\"col\":1,\"type\":\"T\",\"concreteType\":\"Int64\"" then
+        // 5. `concreteType` is emitted only as a genuinely different spelling:
+        // a binding the typed AST already typed concretely gets none.
+        let name = "full tier adds no concreteType where the type is already concrete"
+        if not (fullBody.Contains "\"concreteType\"") then
             record name TH.Pass ""
         else
             record name TH.Fail $"response: {fullBody}"
@@ -968,6 +1270,12 @@ let private runSurfaceTests () : TH.BlockResult =
           if scalarTypes <> Blade.TypeCheck.builtinScalarNames then yield "scalarTypes != builtinScalarNames"
           for b in coreBuiltins do
             if not (Set.contains b builtins) then yield $"builtins lacks {b}"
+          let staticOnly = strArray "staticOnlyBuiltins" |> Set.ofList
+          for b in [ "min"; "max"; "length" ] do
+            if not (Set.contains b staticOnly) then yield $"staticOnlyBuiltins lacks {b}"
+          for b in [ "exp"; "abs"; "fma"; "atan2"; "prodsum" ] do
+            if Set.contains b staticOnly then yield $"staticOnlyBuiltins lists run-time {b}"
+          if not (Set.isSubset staticOnly builtins) then yield "staticOnlyBuiltins is not a subset of builtins"
           if not (List.contains "hermitian" builtinCalls) then yield "builtinCalls lacks hermitian"
           if not (List.contains "display.emit" builtinCalls) then yield "builtinCalls lacks display.emit" ]
     if List.isEmpty failures then record name TH.Pass ""
@@ -1410,11 +1718,36 @@ let (a, b) = pair(7.0)
         | [panic; after; probe] when code = 0
                                      && panic.Contains "\"kept\":false" && panic.Contains "\"exitCode\":1"
                                      && panic.Contains "\"lane\":\"interp\"" && panic.Contains "\"bindings\":[]"
-                                     && panic.Contains "\"stderr\":\"error[BL8007]"
+                                     && panic.Contains "\"stderr\":\"error[BL8013]"
                                      && panic.Contains "\"severity\":\"error\",\"line\":1,\"col\":1"
-                                     && panic.Contains "integer division or modulo by zero"
+                                     && panic.Contains "integer division by zero"
+                                     // The panic's CODE is the diagnostic's code,
+                                     // and the message is not re-prefixed with it.
+                                     && panic.Contains "\"code\":\"BL8013\""
+                                     && not (panic.Contains "\"message\":\"error[")
                                      && after.Contains "\"kept\":true"
                                      && probe.Contains "{\"name\":\"\",\"type\":\"Int64\",\"value\":\"6\"}" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 14b. ...and when the guard carries a span it is POSITIONED: the
+        // `  --> file:line` the panic prints is remapped onto the cell (a
+        // struct constraint reports its `where` line, the cell's 4th), and a
+        // span in an EARLIER cell says "elsewhere in session" rather than
+        // squiggling this one. (A guard with no span -- 1 / 0 above -- stays
+        // at 1:1, which is honest.)
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let a = 1.0\nstruct Pos {\n    v: Float64\n} where v >= 0.0\nlet p = Pos { v = a - 5.0 }"
+                    evalReq 2 "nb2" "struct Pos {\n    v: Float64\n} where v >= 0.0"
+                    evalReq 3 "nb2" "let p = Pos { v = -5.0 }"
+                    shutdownReq ]
+        let name = "a runtime panic is positioned at its cell line with its code"
+        match responses with
+        | [here; _; elsewhere] when code = 0
+                       && here.Contains "\"kept\":false"
+                       && here.Contains "\"severity\":\"error\",\"line\":4,"
+                       && here.Contains "\"message\":\"Constraint violation in Pos\",\"code\":\"BL8001\""
+                       && elsewhere.Contains "\"message\":\"elsewhere in session: Constraint violation in Pos\",\"code\":\"BL8001\"" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -1623,7 +1956,11 @@ let (a, b) = pair(7.0)
                                       && decl.Contains "\"diagnostics\":[]"
                                       && bare.Contains "\"exitCode\":0"
                                       && bare.Contains "\"diagnostics\":[]"
-                                      && bare.Contains "{\"name\":\"covariance\",\"type\":\"(T^1, T^1) -> T^1\",\"value\":\"\"}"
+                                      // stats.mean returns Float64 (it averages
+                                      // Int rows in double), so `a - mean(a)` is a
+                                      // row broadcast and the echo shows the shaped
+                                      // signature with its Float64 result.
+                                      && bare.Contains "{\"name\":\"covariance\",\"type\":\"(Array<T like Idx<_>>, Array<T like Idx<_>>) -> Array<Float64 like Idx<_>>\",\"value\":\"\"}"
                                       && not (bare.Contains "BL6001")
                                       // The session survives it: a later cell
                                       // still evaluates against the same state.
@@ -2042,8 +2379,13 @@ let private runIdeCellsTests () : TH.BlockResult =
         let (code, responses, _) =
             drive [ cellsReq 4 "full" nbPath [ "function id(x: T) -> T = x"; "let r = id(42)" ]; shutdownReq ]
         let fullBody = match responses with [r] -> r | _ -> ""
-        let name = "checkCells tier=full upgrades HM bindings with concreteType"
-        if code = 0 && fullBody.Contains "\"tier\":\"full\"" && fullBody.Contains "\"concreteType\":\"Int64\"" then
+        // The HM binding is concrete in the typed AST itself now (the call
+        // judgment instantiates `id` per call), so the full tier has nothing
+        // to upgrade; what this pins is that the full tier still runs and
+        // reports the concrete type.
+        let name = "checkCells tier=full reports HM bindings concretely"
+        if code = 0 && fullBody.Contains "\"tier\":\"full\""
+           && fullBody.Contains "\"name\":\"r\"" && fullBody.Contains "\"type\":\"Int64\"" then
             record name TH.Pass ""
         else record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
@@ -2346,30 +2688,261 @@ let private runIdeReferencesTests () : TH.BlockResult =
       Skipped = skipped
       FailedNames = failedNames }
 
+/// The single-file corpus category a `blade test <key>` names, as (display
+/// name, tests), or None. Aliases first (display names and the historical
+/// spellings), then ANY corpus directory by its literal name. Reject-only
+/// directories come back marked "(rejects)" (Corpus.categoryTests), the one
+/// classification RunAll's default suite and the interpreter differential use.
+/// The corpus-wiring block asserts every directory on disk resolves here.
+let internal resolveCategoryKey (cat: string) : (string * (string * string) list) option =
+        match cat.ToLower().TrimStart('-') with
+        | "basic" -> Some ("Basic", basicTests)
+        | "intrinsics" -> Some ("Intrinsics", intrinsicsTests)
+        | "casts" -> Some ("Casts", castsTests)
+        | "ad" -> Some ("AD", adTests)
+        | "ad-jvp" | "adjvp" -> Some ("AD JVP", adJvpTests)
+        | "ad-jvp-comb" | "adjvpcomb" -> Some ("AD JVP Combinators", adJvpCombTests)
+        | "loops" -> Some ("Loops", loopTests)
+        | "symmetry" -> Some ("Symmetry", symmetryTests)
+        | "reynolds" -> Some ("Reynolds", reynoldsTests)
+        | "arity" -> Some ("Arity", arityTests)
+        | "functions" -> Some ("Functions", functionTests)
+        | "structs" -> Some ("Structs", structTests)
+        | "struct-aborts" | "structaborts" -> Some ("Struct Aborts", structAbortTests)
+        | "struct-mutual" | "mutual" -> Some ("Struct Mutual", structMutualTests)
+        | "sum-types" | "sumtypes" -> Some ("Sum Types", sumTypeTests)
+        | "interfaces" -> Some ("Interfaces", interfaceTests)
+        | "modules" -> Some ("Modules", moduleTests)
+        | "guards" -> Some ("Guards", guardTests)
+        | "guard-combinators" | "guardcombinators" -> Some ("Guard Combinators", guardCombinatorTests)
+        | "zero-combinators" | "zerocombinators" -> Some ("Zero Combinators", zeroCombinatorTests)
+        | "sequence-combinators" | "sequencecombinators" -> Some ("Sequence Combinators", sequenceCombinatorTests)
+        | "replicate" -> Some ("Replicate", replicateTests)
+        | "anon-ranges" | "anonranges" -> Some ("Anonymous Ranges", anonRangeTests)
+        | "recursive-arrays" | "recursivearrays" -> Some ("Recursive Arrays", recursiveArrayTests)
+        | "segments" -> Some ("Segments", segmentsTests)
+        | "tuple-views" | "tupleviews" -> Some ("Tuple Views", tupleViewTests)
+        | "bracketed" -> Some ("Bracketed", bracketedTests)
+        // The `Tuple<N>` surface layer (docs/plan-tuples-vs-arg-packs.md
+        // 6b). Mixed category: positives plus "(rejects)" probes, so no
+        // asRejectProbes wrapper.
+        | "tuples" -> Some ("Tuples", tupleTests)
+        | "index-types" | "indextypes" -> Some ("Index Types", indexTypeTests)
+        | "static" -> Some ("Static", staticTests)
+        | "units" -> Some ("Units", unitTests)
+        | "unit-errors" | "uniterrors" -> Some ("Unit Errors", Blade.Tests.Corpus.categoryTests "unit-errors")
+        | "mutability" -> Some ("Mutability", mutabilityTests)
+        | "mutability-errors" | "mutabilityerrors" -> Some ("Mutability Errors", Blade.Tests.Corpus.categoryTests "mutability-errors")
+        | "func-arrays" | "funcarrays" | "fa" -> Some ("Func Arrays", funcArrayTests)
+        | "ppl" -> Some ("PPL", pplTests)
+        | "math" -> Some ("Math", mathTests)
+        | "rand" -> Some ("Rand", randTests)
+        | "display" -> Some ("Display", Blade.Tests.Display.displayTests)
+        | "display-errors" | "displayerrors" ->
+            Some ("Display Errors", Blade.Tests.Corpus.categoryTests "display-errors")
+        | "spectra" -> Some ("Spectra", spectraTests)
+        | "fallback" -> Some ("Fallback", fallbackTests)
+        | "stack-join" | "stackjoin" -> Some ("Stack/Join", stackJoinTests)
+        | "sgs" -> Some ("SGS", sgsTests)
+        | "ml-ops" | "mlops" -> Some ("ML Ops", mlOpsTests)
+        | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
+        | "ml-equiv" | "mlequiv" | "equiv" -> Some ("ML Equiv", mlEquivTests)
+        // The full sql-* union, DISCOVERED like RunAll's default suite (a hand
+        // list here silently missed unique-contains/semijoins/v24d-probes once).
+        | "sqlish" | "sql" ->
+            Some ("SQL-ish",
+                  Blade.Tests.Corpus.singleFileCategories ()
+                  |> List.filter (fun d -> d.StartsWith "sql-")
+                  |> List.collect Blade.Tests.Corpus.categoryTests)
+        | "deferred-concrete" | "deferredconcrete" -> Some ("Deferred Concrete", Blade.Tests.RunAll.deferredConcreteTests)
+        | "memfree" -> Some ("Mem Free", Blade.Tests.RunAll.memfreeTests)
+        | "memfree-stress" | "memfreestress" -> Some ("Mem Free Stress", Blade.Tests.RunAll.memfreeStressTests)
+        | "trees" -> Some ("Trees", Blade.Tests.RunAll.treeTests)
+        // Every other corpus directory answers to its LITERAL name
+        // (`blade test inference-probes`, `blade test sql-group-by`), so no
+        // category can lack a standalone key: the aliases above are spellings,
+        // not the definition of what exists. Multi-file directories are the
+        // `multifile` arm's.
+        | key when List.contains key (Blade.Tests.Corpus.singleFileCategories ()) ->
+            Some (key, Blade.Tests.Corpus.categoryTests key)
+        | _ -> None
+
+/// CORPUS WIRING: every directory under tests/corpus is consumed, by name, by
+/// the lanes that claim to sweep the corpus. Part of the default suite.
+///
+/// A new corpus directory used to need three hand edits -- RunAll.allTests,
+/// the key map above, and InterpDiff's slice -- and missing one was silent: the
+/// directory simply never ran, and every summary line stayed green. The lists
+/// are DERIVED from the directories on disk now; what is left to assert is
+/// that the few hand-written facts still describe the disk: the exclusions
+/// name real directories, every multi-file directory has a runner, and every
+/// directory answers to `blade test <its-name>`.
+let internal runCorpusWiringTests () : TH.BlockResult =
+    let blockName = "Corpus Wiring"
+    TH.printHeader "Corpus Wiring (every tests/corpus directory is consumed)"
+    let results = ResizeArray<string * TH.Outcome>()
+    let record name ok detail =
+        let outcome = if ok then TH.Pass else TH.Fail
+        TH.resultLine outcome name detail
+        results.Add((name, outcome))
+    let single = Blade.Tests.Corpus.singleFileCategories ()
+    let multi = Blade.Tests.Corpus.multiFileCategories ()
+    let onDisk = Set.ofList (single @ multi)
+    let missing (names: string seq) = names |> Seq.filter (fun n -> not (onDisk.Contains n)) |> List.ofSeq
+    let listed (xs: string list) = if xs.IsEmpty then "" else String.concat ", " xs
+    record "the corpus root has categories" (single.Length > 0) $"{single.Length} single-file, {multi.Length} multi-file"
+    // The default suite: single-file directories run in allTests unless
+    // another block owns them; multi-file ones need a runner by name.
+    let elsewhere = Blade.Tests.RunAll.corpusOwnedElsewhere |> List.map fst
+    record "every directory another block owns exists" (missing elsewhere).IsEmpty (listed (missing elsewhere))
+    let unrunMulti = multi |> List.filter (fun d -> not (List.contains d Blade.Tests.RunAll.multiFileCategoriesRun))
+    record "every multi-file directory has a runner in the default suite" unrunMulti.IsEmpty
+        (if unrunMulti.IsEmpty then "" else $"no runner for: {listed unrunMulti} (add it to RunAll.multiFileCategoriesRun and wire its block)")
+    record "every multi-file runner names a directory" (missing Blade.Tests.RunAll.multiFileCategoriesRun).IsEmpty
+        (listed (missing Blade.Tests.RunAll.multiFileCategoriesRun))
+    // The one reject-only definition.
+    record "every reject-only category exists" (missing Blade.Tests.Corpus.rejectOnlyCategories).IsEmpty
+        (listed (missing Blade.Tests.Corpus.rejectOnlyCategories))
+    // The interpreter differential: everything but its named exclusions.
+    let interpExcluded = Blade.Tests.InterpDiff.interpExcluded |> List.map fst
+    record "every interpreter-differential exclusion names a directory" (missing interpExcluded).IsEmpty
+        (listed (missing interpExcluded))
+    // `blade test <dir>`: every single-file directory resolves, to ITS OWN
+    // tests (an alias wired to the wrong list would resolve to other names).
+    let misKeyed =
+        single |> List.filter (fun d ->
+            match resolveCategoryKey d with
+            | None -> true
+            | Some (_, tests) ->
+                let want = Blade.Tests.Corpus.categoryTests d |> List.map fst
+                (tests |> List.map fst) <> want)
+    record "every single-file directory answers to blade test <its-name>" misKeyed.IsEmpty
+        (if misKeyed.IsEmpty then "" else $"unresolved or mis-wired: {listed misKeyed}")
+    // The pin grammar every lane reads (the compiled run, the interpreter
+    // differential, the diff oracles all go through Expect): a NESTED Bool
+    // pin -- what a rank-2 comparison prints -- is an assertion, not a
+    // malformed line, and it is judged on its elements against either
+    // printed row form.
+    let nestedBoolSrc = "// EXPECT: m = [[false, true], [false, false]]"
+    let nestedPins = Blade.Tests.Expect.parseExpectedValues nestedBoolSrc
+    record "a nested Bool pin parses to its row-major elements"
+        (nestedPins = [ Blade.Tests.Expect.ExpectedArray1DBool ("m", [false; true; false; false]) ]
+         && (Blade.Tests.Expect.parseMalformedExpectLines nestedBoolSrc).IsEmpty)
+        $"%A{nestedPins}"
+    let judge (out: string) = Blade.Tests.Expect.checkExpectedValues nestedPins out
+    record "a nested Bool pin matches the nested and the flat printed forms"
+        (judge "m = [[false, true], [false, false]]\n" = Ok ()
+         && judge "m = [false, true, false, false]\n" = Ok ()) ""
+    record "a nested Bool pin refuses a differing element and a differing count"
+        ((match judge "m = [[false, true], [false, true]]\n" with Error _ -> true | Ok () -> false)
+         && (match judge "m = [[false, true]]\n" with Error _ -> true | Ok () -> false)) ""
+    let badNested = "// EXPECT: m = [[false, maybe], [true, false]]\n// EXPECT: n = [[true], []]"
+    record "a nested Bool pin with a non-Bool leaf or an empty row is malformed, not dropped"
+        ((Blade.Tests.Expect.parseMalformedExpectLines badNested).Length = 2
+         && (Blade.Tests.Expect.parseExpectedValues badNested).IsEmpty) ""
+    let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
+    let passed, failed = count TH.Pass, count TH.Fail
+    let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq
+    TH.printFooter blockName [ $"{passed} passed"; $"{failed} failed" ]
+    { TH.BlockResult.Block = blockName
+      Passed = passed
+      Failed = failed
+      Skipped = 0
+      FailedNames = failedNames }
+
 /// Run the full suite, appending the CLI smoke block and the strict-pin block
 /// (which live in this file -- see runAllTestsFullWith's doc comment for why they're passed in).
 let internal runFullSuite opts =
     runAllTestsFullWith
-        [runCliSmokeTests; runStrictPinTests; runSurfacingTests; runSurfaceTests
-         runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests] opts
+        [runCliSmokeTests; runStrictPinTests; runValidationCodeTests; runSurfacingTests; runSurfaceTests
+         runIdeServeTests; runIdeEvalTests; runIdeCellsTests; runIdeReferencesTests
+         runCorpusWiringTests] opts
+
+/// The environment knobs that change what the compiler EMITS, how the program
+/// is BUILT, or what it PRINTS -- every one read per call from the process
+/// environment, so a developer's shell reaches straight into a test run.
+/// `blade test` clears them all for its duration (and restores them after).
+///
+/// The suites were written against the pristine default, and that is a
+/// correctness matter, not a preference: corpus EXPECT pins are exact printed
+/// values (BLAS routes and reassociated folds are licensed to differ in the
+/// last ULP; FP contraction likewise), emission-shape tests assert the default
+/// loop nests and pass set (BLADE_FUSION / BLADE_CSE / ... off changes the
+/// emitted text), `interp` / `diff-oracle` must never run gate-on
+/// (MathElaborate: the synthesized Jacobi is the verification truth), and
+/// BLADE_PRINT would silently drop every binding a pin reads. A developer whose
+/// shell carried OPENBLAS_DIR for notebook work saw ~8 reds that vanished when
+/// run "clean" -- the same shape as every knob below.
+///
+/// Blocks that exercise a knob set and restore it in-process, which this clear
+/// does not disturb. Deliberately NOT here: BLADE_MEMCHECK (an ASan corpus
+/// run is a real workflow -- it changes the build profile, not what a correct
+/// program prints), BLADE_EXE_CACHE (where binaries are cached, not what they
+/// are; the cache keys on the emitted text), BLADE_STDLIB, the toolchain
+/// locators (BLADE_LLVM_CLANG, BLADE_TOOLCHAIN_FILE, BLADE_*_INCLUDE/LINK)
+/// and BLADE_INTERP_TIMEOUT_MS (a harness diagnostic).
+let internal suiteClearedKnobs =
+    [ "OPENBLAS_DIR"; "BLADE_BLAS"; "BLADE_CUBLAS"
+      "BLADE_PRINT"
+      "BLADE_FP_REASSOC"; "BLADE_FP_CONTRACT"; "BLADE_MARCH"
+      "BLADE_OMP_THREADS"
+      "BLADE_TILE_CACHE"; "BLADE_TILE_CACHE_VERBOSE"
+      "BLADE_LLVM"; "BLADE_LLVM_BRICKS"; "BLADE_LLVM_FACTS"
+      "BLADE_AD_HALO_GATHER"; "BLADE_SHAPE_SPEC_CAP"; "BLADE_RUN_RECORD" ]
+    @ Blade.Optimize.optimizerGates
+
+/// Whether `cat` names a corpus directory `test <lane> <cat>` can run: any
+/// single-file category, plus the lane's own extra spellings (`opt-diff`
+/// runs the multi-file corpus too; `llvm` takes its reserved words --
+/// `all`, `goldens`, `facts`, ... -- from `LlvmTests.llvmCategoryWords`).
+let private corpusCategoryExists (lane: string) (cat: string) : bool =
+    let extras =
+        match lane with
+        | "opt-diff" | "optdiff" -> [ "multifile" ]
+        | _ -> []
+    List.contains cat extras
+    || (lane = "llvm" && Blade.Tests.LlvmTests.isLlvmCategoryWord cat)
+    || (try List.contains cat (Blade.Tests.Corpus.singleFileCategories ()) with _ -> false)
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
 ///
-/// AMBIENT BLAS ENV IS CLEARED FIRST. The suites were written against the
-/// pristine default -- gate off, Blade emitting its own loops -- and that is a
-/// correctness matter, not a preference: corpus EXPECT pins are exact printed
-/// values and the BLAS routes are licensed to differ in the last ULP, the
-/// emission-shape tests assert the NATIVE loop nests, and `interp` /
-/// `diff-oracle` must never run gate-on (MathElaborate: the synthesized
-/// Jacobi is the verification truth). A developer whose shell carries
-/// OPENBLAS_DIR for notebook work would otherwise see ~8 reds that vanish
-/// when run "clean". Tests that exercise the gate itself set and restore
-/// these variables in-process, which this clear does not disturb.
+/// Runs with every `suiteClearedKnobs` variable UNSET, restoring the caller's
+/// values afterwards, and says in one line which ones it found set. `--print`
+/// is refused outright: it selects which bindings a program prints, and the
+/// corpus pins read the bindings it would drop.
 let rec internal dispatchTest (rest: string list) : int =
-    for var in [ "OPENBLAS_DIR"; "BLADE_BLAS" ] do
-        if System.Environment.GetEnvironmentVariable var <> null then
-            eprintfn "test: clearing ambient %s for this run (suites assume the BLAS gate off; gate suites manage it themselves)" var
-            System.Environment.SetEnvironmentVariable(var, null)
+    // Cli.fs strips `--print <names>` from argv (it is a mode for every verb)
+    // and pins BLADE_PRINT before dispatch, so the flag is recognised from the
+    // process command line rather than from `rest`.
+    let argv = System.Environment.GetCommandLineArgs()
+    let testVerbAt = argv |> Array.tryFindIndex (fun a -> a = "test")
+    let printFlag =
+        match testVerbAt with
+        // Cli.fs strips the pair from ANY position, so look everywhere.
+        | Some _ -> argv |> Array.contains "--print"
+        | None -> false
+    if printFlag then
+        eprintfn "Error: --print is not valid on `blade test`: the corpus pins read every top-level binding, and --print would silence the ones it does not name."
+        eprintfn "       Select a category instead (`blade test <category>`), or run one program with `blade run prog.blade --print a,b`."
+        2
+    else
+    let saved =
+        suiteClearedKnobs
+        |> List.distinct
+        |> List.choose (fun k ->
+            match System.Environment.GetEnvironmentVariable k with
+            | null -> None
+            | v -> Some (k, v))
+    if not saved.IsEmpty then
+        let names = saved |> List.map (fun (k, v) -> $"{k}={v}") |> String.concat " "
+        eprintfn "test: ignoring ambient %s for this run (the suites assume the default emission; blocks that exercise a knob set it themselves)" names
+    for (k, _) in saved do System.Environment.SetEnvironmentVariable(k, null)
+    try dispatchTestClean rest
+    finally
+        for (k, v) in saved do System.Environment.SetEnvironmentVariable(k, v)
+
+/// `dispatchTest` after the environment is made pristine.
+and internal dispatchTestClean (rest: string list) : int =
     // `--omp` / `--cuda` / `--timing` / `--mpi` / `--interp` / `--diff-oracle`
     // opt the corresponding blocks into the full suite, in any combination;
     // each also has a standalone arm below.
@@ -2390,6 +2963,27 @@ let rec internal dispatchTest (rest: string list) : int =
     | [ "strict-pins" ] | [ "strictpins" ] ->
         // The --strict-pins CLI gate standalone. In-process, no toolchain; also part of the full suite.
         let failed = (runStrictPinTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "validation-codes" ] | [ "validationcodes" ] ->
+        // IR-validation backstops keep their own code at the CLI. In-process,
+        // no toolchain; also part of the full suite.
+        let failed = (runValidationCodeTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "corpus-wiring" ] | [ "corpuswiring" ] ->
+        // Every tests/corpus directory is consumed by the default suite, the
+        // interpreter differential and a `blade test <dir>` key. In-process,
+        // no toolchain; also part of the full suite.
+        let failed = (runCorpusWiringTests ()).Failed
+        if failed = 0 then 0 else 1
+    | [ "docs" ] ->
+        // Every ```blade block in CLAUDE.md and docs/: checked through the
+        // corpus front end, run when it pins values, refused when tagged
+        // `rejects`; `sketch` blocks are skipped (tests/DocTests.fs).
+        let failed = (Blade.Tests.DocTests.runDocTests None).Failed
+        if failed = 0 then 0 else 1
+    | [ "docs"; page ] ->
+        // Only the pages whose repo-relative path contains `page`.
+        let failed = (Blade.Tests.DocTests.runDocTests (Some page)).Failed
         if failed = 0 then 0 else 1
     | [ "surfacing" ] ->
         // Warning/suggestion surfacing: codes, streams, and survival of the checker's error path.
@@ -2536,14 +3130,38 @@ let rec internal dispatchTest (rest: string list) : int =
         // the dense corpus slice -- identical printed VALUES required.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" Blade.Tests.DiffOracle.denseSlice).Failed
         if failed = 0 then 0 else 1
+    // The differential lanes that take a LITERAL tests/corpus/<dir> name:
+    // a name that is no such directory is a usage error, reported as one --
+    // it used to escape as an exception from the corpus loader and surface as
+    // BL9001, an "internal compiler error" for a typo.
+    | [ ("diff-oracle" | "interp" | "opt-diff" | "optdiff" | "llvm") as lane; cat ]
+            when not (corpusCategoryExists lane cat) ->
+        let known =
+            try Blade.Tests.Corpus.singleFileCategories () |> String.concat ", "
+            with ex -> $"(the corpus itself was not found: {ex.Message})"
+        eprintfn "error: unknown corpus category '%s' for `test %s` -- it takes a directory name under tests/corpus: %s" cat lane known
+        1
     | [ "diff-oracle"; cat ] ->
         // Single corpus category against the pinned oracle.
         let failed = (Blade.Tests.DiffOracle.runDiffOracleTests "./oracle/Blade.exe" [cat]).Failed
         if failed = 0 then 0 else 1
+    | [ "opt-diff" ] | [ "optdiff" ] ->
+        // Optimizer differential: every corpus program (single-file
+        // categories + multifile) with every Blade.Optimize gate OFF vs ON.
+        // Emission-only for programs the optimizer leaves untouched; the
+        // rest are compiled and run both ways (needs g++). Standalone only.
+        let failed = (Blade.Tests.OptDiff.runOptDiffTests (Blade.Tests.Corpus.singleFileCategories ()) true).Failed
+        if failed = 0 then 0 else 1
+    | [ ("opt-diff" | "optdiff"); cat ] ->
+        // One corpus category (the LITERAL tests/corpus/<dir> name).
+        let failed =
+            if cat = "multifile" then (Blade.Tests.OptDiff.runOptDiffTests [] true).Failed
+            else (Blade.Tests.OptDiff.runOptDiffTests [ cat ] false).Failed
+        if failed = 0 then 0 else 1
     | [ "interp" ] ->
         // Interpreter differential gate: tree-walking IR interpreter vs the
         // compiled binary over the supported corpus slice -- byte-identical normalized stdout required.
-        let failed = (Blade.Tests.InterpDiff.runInterpDiffTests Blade.Tests.InterpDiff.currentSlice).Failed
+        let failed = (Blade.Tests.InterpDiff.runInterpDiffTests (Blade.Tests.InterpDiff.currentSlice ())).Failed
         if failed = 0 then 0 else 1
     | [ "interp"; cat ] ->
         // Single corpus category through the interpreter differential gate.
@@ -2749,7 +3367,7 @@ let rec internal dispatchTest (rest: string list) : int =
             printfn "Corpus back end: LLVM (clang: %s), category: %s" clang cat
             printfn ""
             setCorpusBackend LlvmBackend
-            try dispatchTest [ cat ]
+            try dispatchTestClean [ cat ]
             finally setCorpusBackend CppBackend
     | [ "--llvm" ] ->
         // Deliberately NOT a member of isSuiteFlag. Spelling it like one is a
@@ -2798,75 +3416,7 @@ let rec internal dispatchTest (rest: string list) : int =
         Blade.Tests.HybridTests.runHybridTests ()
     | [ cat ] ->
         // Test a specific category: blade test basic, blade test loops, etc.
-        // The two "-errors" corpora are ENTIRELY negative (every source is
-        // meant to be refused) but their `// TEST:` names carry no "(rejects)"
-        // marker for the runner to classify on -- mark them here.
-        let asRejectProbes (tests: (string * string) list) =
-            tests
-            |> List.map (fun (name, source) ->
-                (if name.EndsWith "(rejects)" then name else name + " (rejects)"), source)
-        let categoryTests =
-            match cat.ToLower().TrimStart('-') with
-            | "basic" -> Some ("Basic", basicTests)
-            | "intrinsics" -> Some ("Intrinsics", intrinsicsTests)
-            | "casts" -> Some ("Casts", castsTests)
-            | "ad" -> Some ("AD", adTests)
-            | "ad-jvp" | "adjvp" -> Some ("AD JVP", adJvpTests)
-            | "ad-jvp-comb" | "adjvpcomb" -> Some ("AD JVP Combinators", adJvpCombTests)
-            | "loops" -> Some ("Loops", loopTests)
-            | "symmetry" -> Some ("Symmetry", symmetryTests)
-            | "reynolds" -> Some ("Reynolds", reynoldsTests)
-            | "arity" -> Some ("Arity", arityTests)
-            | "functions" -> Some ("Functions", functionTests)
-            | "structs" -> Some ("Structs", structTests)
-            | "struct-aborts" | "structaborts" -> Some ("Struct Aborts", structAbortTests)
-            | "struct-mutual" | "mutual" -> Some ("Struct Mutual", structMutualTests)
-            | "sum-types" | "sumtypes" -> Some ("Sum Types", sumTypeTests)
-            | "interfaces" -> Some ("Interfaces", interfaceTests)
-            | "modules" -> Some ("Modules", moduleTests)
-            | "guards" -> Some ("Guards", guardTests)
-            | "guard-combinators" | "guardcombinators" -> Some ("Guard Combinators", guardCombinatorTests)
-            | "zero-combinators" | "zerocombinators" -> Some ("Zero Combinators", zeroCombinatorTests)
-            | "sequence-combinators" | "sequencecombinators" -> Some ("Sequence Combinators", sequenceCombinatorTests)
-            | "replicate" -> Some ("Replicate", replicateTests)
-            | "anon-ranges" | "anonranges" -> Some ("Anonymous Ranges", anonRangeTests)
-            | "recursive-arrays" | "recursivearrays" -> Some ("Recursive Arrays", recursiveArrayTests)
-            | "segments" -> Some ("Segments", segmentsTests)
-            | "tuple-views" | "tupleviews" -> Some ("Tuple Views", tupleViewTests)
-            | "bracketed" -> Some ("Bracketed", bracketedTests)
-            // The `Tuple<N>` surface layer (docs/plan-tuples-vs-arg-packs.md
-            // 6b). Mixed category: positives plus "(rejects)" probes, so no
-            // asRejectProbes wrapper.
-            | "tuples" -> Some ("Tuples", tupleTests)
-            | "index-types" | "indextypes" -> Some ("Index Types", indexTypeTests)
-            | "static" -> Some ("Static", staticTests)
-            | "units" -> Some ("Units", unitTests)
-            | "unit-errors" | "uniterrors" -> Some ("Unit Errors", asRejectProbes unitErrorTests)
-            | "mutability" -> Some ("Mutability", mutabilityTests)
-            | "mutability-errors" | "mutabilityerrors" -> Some ("Mutability Errors", asRejectProbes mutabilityErrorTests)
-            | "func-arrays" | "funcarrays" | "fa" -> Some ("Func Arrays", funcArrayTests)
-            | "ppl" -> Some ("PPL", pplTests)
-            | "math" -> Some ("Math", mathTests)
-            | "rand" -> Some ("Rand", randTests)
-            | "display" -> Some ("Display", Blade.Tests.Display.displayTests)
-            | "display-errors" | "displayerrors" ->
-                Some ("Display Errors", asRejectProbes Blade.Tests.Display.displayErrorTests)
-            | "spectra" -> Some ("Spectra", spectraTests)
-            | "fallback" -> Some ("Fallback", fallbackTests)
-            | "stack-join" | "stackjoin" -> Some ("Stack/Join", stackJoinTests)
-            | "sgs" -> Some ("SGS", sgsTests)
-            | "ml-ops" | "mlops" -> Some ("ML Ops", mlOpsTests)
-            | "ml-e2e" | "mle2e" -> Some ("ML E2E", mlE2eTests)
-            | "ml-equiv" | "mlequiv" | "equiv" -> Some ("ML Equiv", mlEquivTests)
-            // The full sql-* union, matching what RunAll's default suite runs
-            // (unique-contains/semijoins/v24d-probes were silently missing
-            // from this shortcut before).
-            | "sqlish" | "sql" -> Some ("SQL-ish", foreignKeyTests @ maskTests @ setOpTests @ uniqueContainsTests @ semijoinTests @ groupByTests @ sortTests @ reduceTests @ extentsTests @ extentsMultiRankTests @ regressionTests @ sqlCombinedTests @ v24dProbes)
-            | "deferred-concrete" | "deferredconcrete" -> Some ("Deferred Concrete", Blade.Tests.RunAll.deferredConcreteTests)
-            | "memfree" -> Some ("Mem Free", Blade.Tests.RunAll.memfreeTests)
-            | "memfree-stress" | "memfreestress" -> Some ("Mem Free Stress", Blade.Tests.RunAll.memfreeStressTests)
-            | "trees" -> Some ("Trees", Blade.Tests.RunAll.treeTests)
-            | _ -> None
+        let categoryTests = resolveCategoryKey cat
         match categoryTests with
         | Some (name, tests) ->
             let r = runTestCategoryFull name tests "./generated_cpp_tests"

@@ -1,0 +1,11 @@
+// TEST: A generic function passed as a value is judged at its use (rejects)
+// ERROR: BL3019
+// ERROR-CONTAINS: 'toint' casts a value of its generic parameter type
+// ============================================================================
+// `toint` truncates at a float instance. Passed to a (Float64) -> Int64
+// parameter it is used at Float64 -- judged there, at the reference, rather
+// than by the IR validator after monomorphization (which reported it as
+// BL6001 with "BL3019:" in its text).
+function toint(x: T^0) -> Int64 = Int64(x)
+function apply(g: (Float64) -> Int64, x: Float64) -> Int64 = g(x)
+let w = apply(toint, 2.5)

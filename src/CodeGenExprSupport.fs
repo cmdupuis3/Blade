@@ -140,8 +140,8 @@ let binOpToCpp = function
 /// Render a BINARY math intrinsic. Call-shaped rather than infix, the same
 /// exception `^` already needs (`pow(l, r)`), so every IRBinOp emission site
 /// routes IRMath2 here before reaching binOpToCpp.
-///   atan2(y, x)    -> std::atan2(y, x)
-///   log_base(x, b) -> (std::log(x) / std::log(b))
+///   atan2(y, x)    -> blade_libm::atan2(y, x)
+///   log_base(x, b) -> (blade_libm::log(x) / blade_libm::log(b))
 /// There is no std::log_base; the quotient IS the definition, and emitting it
 /// inline keeps the interpreter's mirror (Numerics.evalArith) a one-liner over
 /// the same two std::log calls. Both operands are real by construction
@@ -149,7 +149,10 @@ let binOpToCpp = function
 /// CUDA device dialect the names go UNQUALIFIED, matching renderUnaryOpTyped's
 /// real-operand rule -- CUDA's device overloads live in the global namespace.
 let renderMath2 (name: string) (lStr: string) (rStr: string) : string =
-    let q (fn: string) = if inCudaDeviceDialect () then fn else "std::" + fn
+    // Host: blade_libm:: -- the run-time libm, never a compile-time fold, and
+    // its overloads round a Float32 pair once to float (the arithmetic
+    // contract, docs/formalism.md section 2.4; blade_runtime.hpp).
+    let q (fn: string) = if inCudaDeviceDialect () then fn else "blade_libm::" + fn
     match name with
     | "log_base" -> $"""({(q "log")}({lStr}) / {(q "log")}({rStr}))"""
     | _ -> $"{(q name)}({lStr}, {rStr})"
@@ -207,6 +210,16 @@ let rec scalarElemOf (t: IRType) : ElemType option =
     | IRTUnitAnnotated (inner, _) -> scalarElemOf inner
     | _ -> None
 
+/// The real intrinsics whose value is the RUN-TIME platform libm's
+/// (blade_runtime.hpp `blade_libm`; docs/formalism.md section 2.4). The
+/// interpreter's mathBackend routes the same names to ucrtbase.
+let libmRuntimeNames : Set<string> =
+    Set.ofList [ "exp"; "log"; "log10"; "sin"; "cos"; "tan"; "sinh"; "cosh"; "tanh"
+                 "asin"; "acos"; "atan" ]
+
+let private isComplexElem (et: ElemType) =
+    match et with ETComplex64 | ETComplex128 -> true | _ -> false
+
 /// Render a function-call unary op, choosing the spelling by operand type and
 /// active dialect. Host rendering is unaryOpToCpp verbatim. In the CUDA device
 /// dialect: complex operands use thrust:: (thrust has no free real()/imag(), so
@@ -227,7 +240,25 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
             | IRMath name -> $"{name}({inner})"
             | _ -> $"{(unaryOpToCpp op)}({inner})"
     else
-        $"{(unaryOpToCpp op)}({inner})"
+        match op, scalarElemOf operandTy with
+        // Float -> integer cast: truncation of a value the target can hold,
+        // else a BL8014 panic (blade_rt::f2i; docs/formalism.md section 2.4).
+        // A bare static_cast is UB on NaN / out-of-range (x86 answers the
+        // INT_MIN sentinel) where the interpreter used to saturate.
+        | IRCast ((ETInt64 | ETInt32) as et), Some (ETFloat64 | ETFloat32) ->
+            (if et = ETInt64 then $"blade_rt::f2i64({inner})" else $"blade_rt::f2i32({inner})")
+        // A transcendental on a REAL operand: blade_libm::, the run-time
+        // platform libm (never folded at compile time), whose overloads
+        // evaluate a Float32 operand in double and round once to float and
+        // widen an integral one -- the arithmetic contract (docs/formalism.md
+        // section 2.4), mirrored by Interp/Numerics.evalMath. Complex operands
+        // keep std:: (outside the contract); sqrt/floor/ceil keep std:: too:
+        // correctly rounded, so a fold is the run-time value, and sqrt must
+        // stay the vectorizable builtin.
+        | IRMath name, et when libmRuntimeNames.Contains name
+                               && not (et |> Option.exists isComplexElem) ->
+            $"blade_libm::{name}({inner})"
+        | _ -> $"{(unaryOpToCpp op)}({inner})"
 
 /// Coerce a rendered scalar operand to match std::complex's SAME-TYPE-ONLY
 /// operator overload set (`complex<double> * 2` and `complex<double> *
@@ -264,6 +295,58 @@ let emitBinOpWithComplexCoercion
             $"({lC} {(binToCpp op)} {rC})"
         | _ -> $"({lStr} {(binToCpp op)} {rStr})"
     | _ -> $"({lStr} {(binToCpp op)} {rStr})"
+
+/// The integer literal an operand IS, if it is one (`3`, `-1`).
+let private intLiteralOf (e: IRExpr) : int64 option =
+    match e with
+    | IRLit (IRLitInt n) -> Some n
+    | IRUnaryOp (IRNeg, IRLit (IRLitInt n)) -> Some (0L - n)
+    | _ -> None
+
+/// Render `/`, `%` and `^` under the ARITHMETIC CONTRACT (docs/formalism.md
+/// section 2.4), which the interpreter (Interp/Numerics.fs) and the LLVM lane
+/// (EmitLlvm.emitBinOp) implement identically:
+///
+///   * integer `/` `%` : a zero divisor panics BL8013 and MIN / -1 wraps
+///     (blade_rt::idiv / imod). A nonzero literal divisor other than -1 can
+///     do neither, so it stays a plain `/` -- the common `n / 2` costs
+///     nothing and keeps its kernel's shadow frame elided.
+///   * integer `^`     : exact, wrapping (blade_arith::ipow_nn); a
+///     non-literal exponent may be negative, which panics (blade_rt::ipow).
+///     It used to emit `pow(b, e)` -- a double, so 3^39 came back rounded and
+///     an Int64 binding of it failed -Werror=float-conversion.
+///   * real `^`        : blade_arith::fpow (x*x at exponent 2, else libm pow),
+///     rounded ONCE to Float32 when that is the node's type (pow(float, long)
+///     is a double; storing it in a float was an implicit narrowing).
+///
+/// None = the caller's ordinary rendering. Complex `^` and the CUDA device
+/// dialect keep the old `pow(l, r)` / infix spelling: device bodies cannot
+/// reach blade_rt (host-only), and complex pow is outside the contract.
+let renderContractBinOp
+        (op: IRBinOp) (l: IRExpr) (r: IRExpr) (lStr: string) (rStr: string)
+        (inferTy: IRExpr -> IRType) : string option =
+    let isInt et = match et with ETInt32 | ETInt64 -> true | _ -> false
+    match op with
+    | IRDiv | IRMod | IRCaret when not (inCudaDeviceDialect ()) ->
+        match scalarElemOf (inferTy l), scalarElemOf (inferTy r) with
+        | Some le, Some re when isInt le && isInt re ->
+            let w = if le = ETInt64 || re = ETInt64 then "64" else "32"
+            match op, intLiteralOf r with
+            | (IRDiv | IRMod), Some n when n <> 0L && n <> -1L -> None
+            | IRDiv, _ -> Some $"blade_rt::idiv{w}({lStr}, {rStr})"
+            | IRMod, _ -> Some $"blade_rt::imod{w}({lStr}, {rStr})"
+            | _, Some n when n >= 0L -> Some $"blade_arith::ipow_nn{w}({lStr}, {rStr})"
+            | _ -> Some $"blade_rt::ipow{w}({lStr}, {rStr})"
+        | Some le, Some re when op = IRCaret ->
+            // The C++ EVALUATION width, not the node type: Float32 with an
+            // integer computes in float (a literal exponent adapts, `s ^ 2`
+            // over a Float32 `s` is a Float32), exactly as `s * 2` does.
+            let isReal et = match et with ETFloat32 | ETFloat64 | ETInt32 | ETInt64 -> true | _ -> false
+            if not (isReal le && isReal re) then None
+            elif le = ETFloat64 || re = ETFloat64 then Some $"blade_arith::fpow({lStr}, {rStr})"
+            else Some $"blade_arith::fpowf({lStr}, {rStr})"
+        | _ -> None
+    | _ -> None
 
 /// Render a float as a C++ double literal. `sprintf "%g"` would violate two
 /// invariants: ROUND-TRIP precision (%g truncates to 6 sig figs, breaking any
@@ -325,10 +408,11 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRBinOp (_, op, l, r) ->
         let lStr = exprToCppSimple names l
         let rStr = exprToCppSimple names r
-        match op with
-        | IRCaret -> $"pow({lStr}, {rStr})"
-        | IRMath2 name -> renderMath2 name lStr rStr
-        | _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
+        match renderContractBinOp op l r lStr rStr inferExprType, op with
+        | Some s, _ -> s
+        | None, IRCaret -> $"pow({lStr}, {rStr})"
+        | None, IRMath2 name -> renderMath2 name lStr rStr
+        | None, _ -> emitBinOpWithComplexCoercion op l r lStr rStr inferExprType binOpToCpp
     | IRFma (a, b, c) ->
         $"std::fma({(exprToCppSimple names a)}, {(exprToCppSimple names b)}, {(exprToCppSimple names c)})"
     | IRUnaryOp (IRConj, e) ->
@@ -624,7 +708,7 @@ let computeGroupedCaptureFacts (modul: IRModule) : Map<IRId, IRId> =
 /// -- which the emitter computes from the gk offsets, not from the gathered
 /// buffer. So if EVERY use of a group_by result is such a peel, the gather is
 /// dead: `genGroupByBinding` still emits the row-pointer table (the peel indexes
-/// it to build each RaggedRow, and auto-print reads its extents) but skips the
+/// it to build each RaggedRow) but skips the
 /// per-group `new[]` and the O(n) copy, leaving the rows null. That is legal --
 /// the pointer is read, never dereferenced -- and `delete[] nullptr` is a no-op,
 /// so teardown is unchanged.
@@ -695,6 +779,17 @@ let computeExtentsOnlyGroupBys (modul: IRModule) : Set<IRId> =
         | ExprShape (cs, _) -> cs |> List.iter scan
     for bind in modul.Bindings do scan bind.Value
     for f in modul.Functions do scan f.Body
+    // The AUTO-PRINT is a consumer too: a printed top-level grouped array
+    // shows its rows' VALUES (genPrintStatements, via the grouping's offsets),
+    // so its gather is live. Only a binding the print selection leaves out
+    // (`--print`, BLADE_PRINT) -- or one inside a function body, which is
+    // never printed -- can still lose its gather to the rule above.
+    let selection = printSelection ()
+    for bind in modul.Bindings do
+        match strip bind.Value with
+        | IRGroupBy _ when (match selection with None -> true | Some names -> Set.contains bind.Name names) ->
+            bad.Add bind.Id |> ignore
+        | _ -> ()
     // Elidable is exactly the COMPLEMENT of `bad`, which is why a group_by
     // nothing consumes at all is elided too: its gather is dead for the same
     // reason, just more obviously. (Tracking the extents-only peels positively
@@ -712,6 +807,28 @@ let extentsOnlyGroupBysCell () : Set<IRId> ref =
         extentsOnlyGroupBysStorage.Value <- fresh
         fresh
     else v
+
+/// GROUPED BINDINGS: binding id -> (emitted C++ name, grouping stem) for every
+/// binding whose value is a group_by result -- the group_by itself, and an
+/// alias of one (genVarAliasBinding). A grouped array's row LENGTHS live in
+/// the grouping (`<gk>__offsets`), not in the value (whose inner extent is the
+/// ragged placeholder 0), so the printer needs the grouping to print the rows;
+/// it reads this map because genPrintStatements runs after body generation
+/// and has no codegen context. Reset per assembly, like forcedDeferredIdsCell.
+let internal groupedBindingsStorage =
+    System.Threading.AsyncLocal<Map<IRId, string * string> ref>()
+
+let groupedBindingsCell () : Map<IRId, string * string> ref =
+    let v = groupedBindingsStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        groupedBindingsStorage.Value <- fresh
+        fresh
+    else v
+
+let noteGroupedBinding (id: IRId) (cppName: string) (gkName: string) : unit =
+    let cell = groupedBindingsCell ()
+    cell.Value <- Map.add id (cppName, gkName) cell.Value
 
 /// Wrapper-emission helper: a local C++ closure mediating between a lifted
 /// function's signature (regular + capture params) and a consumer's expected
@@ -783,6 +900,17 @@ let freshReturnFactsCell () : Map<IRId, FreshReturn> ref =
         freshReturnFactsStorage.Value <- fresh
         fresh
     else v
+
+/// This file's per-program cells, reset by installing fresh refs in the
+/// current flow (CodeGenState.freshCell explains why a reset must never
+/// mutate the ref it finds). Called at every program-assembly entry.
+let resetExprSupportCells () : unit =
+    freshCell cudaDeviceDialectStorage false
+    freshCell copyInPlaceMutsStorage Map.empty
+    freshCell groupedCaptureFactsStorage Map.empty
+    freshCell extentsOnlyGroupBysStorage Set.empty
+    freshCell groupedBindingsStorage Map.empty
+    freshCell freshReturnFactsStorage Map.empty
 
 /// The fresh-return fact for whatever callable an expression in callee position
 /// resolves to (module function or synthetic). Unresolvable => NotFresh.
@@ -1410,3 +1538,13 @@ let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string o
     if not (simdReducibleElem elemStr) then None
     else foldKernelBuiltinOp callable |> Option.bind ompReductionOperator
 
+
+/// Is the packed native matmul kernel (blade_packed_gemm.hpp's dgemm_nn)
+/// worth it for an M x K times K x N product? THE one statement of the rule:
+/// the matmul emitter decides at compile time on the literal extents, and the
+/// header carries no runtime copy to drift from it. Crossovers measured
+/// against the i-t-j loop: M below ~18 or K below ~16 wastes most of a 6 x 8
+/// tile or pays a C load/store per few MACs, and under ~32K MACs packing does
+/// not amortize. Small N is fine (the loop is at its worst there).
+let packedGemmWorth (m: int64) (k: int64) (n: int64) : bool =
+    m >= 18L && k >= 16L && m * n * k >= 32768L

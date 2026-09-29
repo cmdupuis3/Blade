@@ -41,13 +41,23 @@ open Blade.StaticEval
 
 let private v (name: string) : Expr = syn (ExprVar name)
 
+/// A shape extent narrowed to the checker's per-axis `int` (TExprRandGen's
+/// dims), range-checked first: an unchecked `int n` wrapped 4294967301 to 5
+/// and filled five cells.
+let private narrowExtent (what: string) (n: int64) : Result<int, string> =
+    if n > int64 System.Int32.MaxValue then
+        Error $"{what}: shape extent {n} exceeds the largest supported rand fill extent ({System.Int32.MaxValue}) per axis"
+    elif n < int64 System.Int32.MinValue then
+        Error $"{what}: shape extents must be positive (got {n})"
+    else Ok (int n)
+
 /// Resolve a static-int argument: an int literal or a `let static` name.
 let private staticInt (statics: StaticEnv) (what: string) (e: Expr) : Result<int, string> =
     match e.Kind with
-    | ExprKind.ExprLit (LitInt n) -> Ok (int n)
+    | ExprKind.ExprLit (LitInt n) -> narrowExtent what n
     | ExprKind.ExprVar name ->
         match Map.tryFind name statics.Values with
-        | Some (SVInt n) -> Ok (int n)
+        | Some (SVInt n) -> narrowExtent what n
         | Some _ -> Error $"{what}: '{name}' is not a static int"
         | None -> Error $"{what}: '{name}' is not a `let static` binding (rand shapes must be static)"
     | _ -> Error $"{what}: shape must be a static int or list of static ints"
@@ -131,6 +141,62 @@ let private paramNames (op: string) : string list =
     | "beta"        -> ["a"; "b"]
     | "categorical" -> ["weights"]
     | _             -> []
+
+/// The DOMAIN of a scalar distribution parameter, checked at RUNTIME right
+/// before the fill in BOTH lanes (CodeGenBinding.genRandGenBinding emits the
+/// guard; Interp/RandMirror raises the same panic). A parameter outside it
+/// has no distribution to draw from, and the transforms do not fail loudly on
+/// their own: Poisson's product-of-uniforms loop never terminates on a NaN
+/// lam (the `lam >= 10` split is false, and `p <= exp(-NaN)` never fires),
+/// and Gamma/Beta/Exponential return NaN or garbage for a non-positive shape
+/// or rate. So each one is refused (BL8001) instead.
+type ParamDomain =
+    /// finite and > 0 (rates, shapes, beta's a and b)
+    | Positive
+    /// finite and >= 0 (Poisson's lam: lam = 0 is the point mass at 0)
+    | NonNegative
+    /// in [0, 1] (Bernoulli's p); NaN fails the comparison and is refused
+    | UnitInterval
+
+/// Family (with or without the `_at` suffix) -> (parameter position, name,
+/// domain), positions counted among the family's scalar parameters in
+/// surface order. `categorical`'s array parameter is not listed: its
+/// weights keep the documented clamp (a negative/NaN weight reads as 0).
+let paramGuards (kind: string) : (int * string * ParamDomain) list =
+    let fam = if kind.EndsWith "_at" then kind.Substring(0, kind.Length - 3) else kind
+    match fam with
+    | "exponential" -> [ 0, "rate", Positive ]
+    | "gamma"       -> [ 0, "shape", Positive; 1, "rate", Positive ]
+    | "poisson"     -> [ 0, "lam", NonNegative ]
+    | "bernoulli"   -> [ 0, "p", UnitInterval ]
+    | "beta"        -> [ 0, "a", Positive; 1, "b", Positive ]
+    | _             -> []
+
+/// Does `x` lie in the domain? The same predicate both lanes evaluate (the C++
+/// spelling is `paramDomainCpp`), NaN-rejecting by construction: every arm is
+/// a conjunction of ordered comparisons, all false on NaN.
+let paramInDomain (d: ParamDomain) (x: float) : bool =
+    match d with
+    | Positive -> System.Double.IsFinite x && x > 0.0
+    | NonNegative -> System.Double.IsFinite x && x >= 0.0
+    | UnitInterval -> x >= 0.0 && x <= 1.0
+
+/// The C++ condition that holds when the parameter named by `cppVar` lies in
+/// the domain (the negation guards the panic).
+let paramDomainCpp (d: ParamDomain) (cppVar: string) : string =
+    match d with
+    | Positive -> $"std::isfinite({cppVar}) && {cppVar} > 0.0"
+    | NonNegative -> $"std::isfinite({cppVar}) && {cppVar} >= 0.0"
+    | UnitInterval -> $"{cppVar} >= 0.0 && {cppVar} <= 1.0"
+
+/// The panic message, identical in both lanes.
+let paramGuardMessage (kind: string) (pname: string) (d: ParamDomain) : string =
+    let want =
+        match d with
+        | Positive -> "a finite number > 0"
+        | NonNegative -> "a finite number >= 0"
+        | UnitInterval -> "in [0, 1]"
+    $"rand.{kind}: parameter '{pname}' must be {want}"
 
 /// Elaborate one qualified rand op. `keyE` and the distribution parameters are passed through verbatim
 /// (they are runtime Float64 expressions); the shape becomes trailing int-literal args.

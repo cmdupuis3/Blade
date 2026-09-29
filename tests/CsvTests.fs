@@ -667,6 +667,109 @@ let s = reduce(V, (+), axes = 2)
      | Ok _ -> check "accept: naming the store's axes at their true extents" true ""
      | Error e -> check "accept: naming the store's axes at their true extents" false e)
 
+    // ---------------------------------------------------------------
+    // 10. The compile-time and run-time readers agree on every cell
+    //
+    // Two disagreements, both found by the 2026-09 deep review: the
+    // compile-time parser TRIMMED cells and the emitted reader did not (a
+    // trailing space aborted the run with "non-numeric cell '2.0 '" on a file
+    // the compiler had accepted), and an integer literal past Int64 was
+    // classified Int64 -- strtoll then SATURATED it to 9223372036854775807 at
+    // run time, while Int64.Parse threw (a BL9001 ICE under `let static`, an
+    // interpreter crash on a dense read). Now: the same ASCII blank set is
+    // trimmed on both sides, and a cell that does not fit Int64 makes the
+    // table Float64, in the classifier, the fold, the interpreter and the
+    // emitted reader alike.
+    // ---------------------------------------------------------------
+    printfn "\n--- reader agreement (blanks, Int64 range) ---"
+    (match parseFile (tmpFile "ws.csv" "1.0,2.0 \n 3.0,\t4.0\n") with
+     | Ok (f, _) -> check "agree: blank-padded cells are numeric (Float64 matrix)" (f.Elem = ETFloat64 && f.Shape = CsvMatrix (2, 2)) (sprintf "%A" f)
+     | Error e -> check "agree: blank-padded cells are numeric (Float64 matrix)" false e)
+    (match parseFile (tmpFile "wsint.csv" "1 ,2\n3,\t4\n") with
+     | Ok (f, _) -> check "agree: blank-padded integer cells stay Int64" (f.Elem = ETInt64) (sprintf "%A" f.Elem)
+     | Error e -> check "agree: blank-padded integer cells stay Int64" false e)
+    (match parseFile (tmpFile "big.csv" "1,2\n3,99999999999999999999\n") with
+     | Ok (f, _) -> check "agree: an integer literal outside Int64 makes the table Float64" (f.Elem = ETFloat64) (sprintf "%A" f.Elem)
+     | Error e -> check "agree: an integer literal outside Int64 makes the table Float64" false e)
+    (match parseFile (tmpFile "edge.csv" "9223372036854775807,-9223372036854775808\n") with
+     | Ok (f, _) -> check "agree: the Int64 extremes themselves stay Int64" (f.Elem = ETInt64) (sprintf "%A" f.Elem)
+     | Error e -> check "agree: the Int64 extremes themselves stay Int64" false e)
+    (match parseFile (tmpFile "edge2.csv" "9223372036854775808\n") with
+     | Ok (f, _) -> check "agree: one past Int64.MaxValue is Float64" (f.Elem = ETFloat64) (sprintf "%A" f.Elem)
+     | Error e -> check "agree: one past Int64.MaxValue is Float64" false e)
+    (match readVarData (tmpFile "big_rv.csv" "1,2\n3,99999999999999999999\n") "data" with
+     | Ok { Payload = Blade.ProviderRegistry.PFloats xs } ->
+         check "agree: readVarData reads the out-of-range cell as a float" (xs = [| 1.0; 2.0; 3.0; 1e20 |]) (sprintf "%A" xs)
+     | Ok d -> check "agree: readVarData reads the out-of-range cell as a float" false (sprintf "%A" d.Payload)
+     | Error e -> check "agree: readVarData reads the out-of-range cell as a float" false e)
+    (match readVarData (tmpFile "ws_rv.csv" "1,2 \n\t3,4\n") "data" with
+     | Ok { Payload = Blade.ProviderRegistry.PInts xs } ->
+         check "agree: readVarData trims blanks (Int64 payload)" (xs = [| 1L; 2L; 3L; 4L |]) (sprintf "%A" xs)
+     | Ok d -> check "agree: readVarData trims blanks (Int64 payload)" false (sprintf "%A" d.Payload)
+     | Error e -> check "agree: readVarData trims blanks (Int64 payload)" false e)
+    writeFixture "ag_ws.csv" [ "1.0,2.0 "; " 3.0,\t4.0" ]
+    writeFixture "ag_big.csv" [ "1,2"; "3,99999999999999999999" ]
+    writeFixture "ag_int.csv" [ "1,2"; "3,4" ]
+    let agreeSource = sprintf """
+import csv as c
+let w = c.load("%s")
+let W = w.vars.data |> c.read
+let b = c.load("%s")
+let B = b.vars.data |> c.read
+let k = c.load("%s")
+let K = k.vars.data |> c.read
+let wsum = reduce(W, (+), axes = 2)
+let big = B(1, 1)
+let ksum = reduce(K, (+), axes = 2)
+"""                           (fixFile "ag_ws.csv") (fixFile "ag_big.csv") (fixFile "ag_int.csv")
+    (let foldSource = sprintf """
+import csv as c
+let b = c.load("%s")
+let static B = b.vars.data |> c.read
+"""                           (fixFile "ag_big.csv")
+     match lower foldSource with
+     | Ok _ -> check "agree: static fold of an out-of-range integer cell lowers (was BL9001)" true ""
+     | Error e -> check "agree: static fold of an out-of-range integer cell lowers (was BL9001)" false e)
+    (match lower agreeSource with
+     | Ok ir ->
+         let r = Blade.Interp.Run.runProgram ir "csv_agree_interp" Blade.Interp.Value.defaultLimits
+         check "agree: interpreter runs the blank / out-of-range reads"
+             (r.ExitCode = Blade.Interp.Run.ExitOk) (sprintf "%A: %s" r.ExitCode r.Stderr)
+         check "agree: interpreter values (wsum = 10, big = 1e+20, ksum = 10)"
+             (r.Stdout.Contains "wsum = 10" && r.Stdout.Contains "big = 1e+20" && r.Stdout.Contains "ksum = 10") r.Stdout
+         let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "csv_agree_e2e"
+         CodeGen.deployRuntimeHeaders e2eDir
+         let cppFile = Path.Combine(e2eDir, "csv_agree_e2e.cpp")
+         File.WriteAllText(cppFile, cppCode)
+         (match compileCpp cppFile e2eDir with
+          | Ok exePath ->
+              (match runExecutable exePath with
+               | Ok (0, runOut) ->
+                   check "agree: compiled values match the interpreter (wsum = 10, big = 1e+20, ksum = 10)"
+                       (runOut.Contains "wsum = 10" && runOut.Contains "big = 1e+20" && runOut.Contains "ksum = 10") runOut
+                   // The Int64 table's file changes under the exe to hold a
+                   // cell strtoll cannot represent: a loud abort, not the
+                   // saturated 9223372036854775807 it used to read.
+                   let runtimeFix = Path.Combine(e2eDir, fixFile "ag_int.csv")
+                   let orig = File.ReadAllText runtimeFix
+                   (try
+                       File.WriteAllText(runtimeFix, "1,2\n3,99999999999999999999\n")
+                       (match runExecutable exePath with
+                        | Ok (code, driftOut) ->
+                            check "agree: an out-of-range integer at run time aborts loudly (no saturation)"
+                                (code <> 0 && driftOut.Contains "CSV error" && driftOut.Contains "outside the Int64 range"
+                                 && not (driftOut.Contains "9223372036854775807"))
+                                ($"exit {code}: {(driftOut.Substring(0, min 300 driftOut.Length))}")
+                        | Error e -> check "agree: an out-of-range integer at run time aborts loudly (no saturation)" false e)
+                    finally
+                       File.WriteAllText(runtimeFix, orig))
+               | Ok (code, runOut) -> check "agree: compiled reader runs (exit 0)" false ($"exit {code}: {runOut}")
+               | Error e -> check "agree: compiled reader runs (exit 0)" false e)
+          | Error e ->
+              if isSkipError e then printfn "  SKIP csv agreement e2e (compile skipped): %s" e
+              else check "agree: compiles" false e)
+     | Error e -> check "agree: lowers" false e)
+
     (try Directory.Delete(tmp, true) with _ -> ())
 
     printfn "\n=== CSV Provider Tests: %d passed, %d failed ===" passed failed

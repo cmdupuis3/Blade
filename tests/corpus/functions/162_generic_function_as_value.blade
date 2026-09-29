@@ -1,0 +1,23 @@
+// TEST: A generic function passed as a value is specialized at its use type
+// ============================================================================
+// Passing a generic function to a higher-order parameter was no call site for
+// monomorphization: `apply(idg, 2.0)` type-checked and died BL6001 with `idg`
+// unspecialized. The argument position fixes the use type -- the callee's
+// parameter type there -- and that now requests the specialization, once per
+// distinct use (`idg` at Float64 and at String below).
+// ============================================================================
+function idg(a: T^0) -> T^0 = a
+function apply(g: (Float64) -> Float64, x: Float64) -> Float64 = g(x)
+let r = apply(idg, 2.0)
+// EXPECT: r = 2
+function applyS(g: (String) -> String, x: String) -> String = g(x)
+let s = applyS(idg, "a")
+// EXPECT: s = "a"
+function sq(x: Float64) -> Float64 = x * x
+let u = apply(sq, 3.0)
+// EXPECT: u = 9
+function twice(g: (T) -> T, x: T) -> T = g(g(x))
+let t2 = twice(idg, 2.5)
+// EXPECT: t2 = 2.5
+let t3 = twice(idg, 3)
+// EXPECT: t3 = 3

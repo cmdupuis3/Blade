@@ -1,0 +1,16 @@
+// TEST: Tuple literal components adapt to a narrow tuple parameter
+// ============================================================================
+// A numeric literal argument adapts to the scalar parameter it is written
+// against (`g(1.5)` into a Float32); inside a tuple literal it did not: the
+// components were typed Float64 and `h((1.5, 2.0))` into `(Float32, Float32)`
+// was refused BL3001 as a narrowing. Each component is a literal and adapts.
+// ============================================================================
+function g(x: Float32) -> Float32 = x
+let a = g(1.5)
+// EXPECT: a = 1.5
+function h(p: (Float32, Float32)) -> Float32 = p[0] + p[1]
+let b = h((1.5, 2.0))
+// EXPECT: b = 3.5
+function k(p: (Float32, Int32)) -> Float32 = p[0]
+let c = k((0.25, 7))
+// EXPECT: c = 0.25

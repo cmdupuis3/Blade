@@ -191,10 +191,29 @@ let private o3UnlessPseudoscalar (s: Spec) : string =
 
 // Op synthesis
 
-/// __ml_sigmoid: shared scalar helper for gated activations.
+/// __ml_sigmoid: shared scalar helper for gated activations, in the
+/// two-sided form that never overflows:
+///   e = exp(-|z|)   (in (0, 1])
+///   sigmoid(z) = 1 / (1 + e)   for z >= 0
+///              = e / (1 + e)   otherwise
+/// The one-sided 1/(1 + exp(-z)) has exp(-z) = inf for z < -709, so its
+/// gradient is 0 * inf = NaN there in BOTH AD modes (silu at -800 had a NaN
+/// gradient). Here every intermediate, and every partial either sweep takes
+/// of it, is finite for every z -- including the untaken side, whose
+/// derivative is evaluated (then gated to zero) by the reverse sweep. The
+/// sides are selected with `guard`, the branch-free conditional both sweeps
+/// differentiate (if/else is outside the AD-able subset); `!(z >= 0)` rather
+/// than `z < 0` so a NaN input stays NaN. For z >= 0 the value is bit-for-bit
+/// the old one-sided formula.
 let private sigmoidDecl (name: string) : FunctionDecl =
+    let z = v "z"
+    let guardE c e = syn (ExprGuard (c, e))
+    let nonNeg = syn (ExprBinOp (Elementwise, OpGe, z, fLit 0.0))
+    let neg = syn (ExprUnaryOp (OpNot, nonNeg))
+    let e () = syn (ExprApp (v "exp", [ add (guardE nonNeg (sub (fLit 0.0) z)) (guardE neg z) ]))
     mkFunc name [ ("z", TyNamed ("Float", [])) ] (TyNamed ("Float", []))
-        (divE (fLit 1.0) (add (fLit 1.0) (syn (ExprApp (v "exp", [ syn (ExprUnaryOp (OpNeg, v "z")) ])))))
+        (add (guardE nonNeg (divE (fLit 1.0) (add (fLit 1.0) (e ()))))
+             (guardE neg (divE (e ()) (add (fLit 1.0) (e ())))))
 
 /// NOT equiv-stamped: a rep-INTRODUCTION form. Three invariant scalars in, a
 /// Rep out -- sound only under the premise that (x, y, z) really are the

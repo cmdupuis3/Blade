@@ -1,0 +1,7 @@
+// TEST: Rand Shape Extent Past The Fill Range Is Refused (rejects)
+// ERROR: BL5300
+// ERROR-CONTAINS: shape extent 4294967301 exceeds the largest supported rand fill extent
+// The shape literal used to be narrowed with an unchecked `int n`, so
+// 4294967301 = 2^32 + 5 wrapped to 5 and the fill silently drew five cells.
+import rand as r
+let u = r.uniform(1, 4294967301)

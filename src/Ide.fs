@@ -725,6 +725,17 @@ let rec private ppConcrete (names: Map<IRId, string>) (t: IRType) : string =
 /// name here. The `OpMath` arm is deliberately absent -- it returns whichever
 /// intrinsic the node names, and those are already reported as
 /// `mathIntrinsics`.
+/// A `builtins` name with no run-time meaning (see renderSurfaceWith): not
+/// a math / plain-call intrinsic (TypeCheckSupport's predicates, the ones the
+/// checker rewrites at a call), not a builtin call form, and not `segments`
+/// (a run-time grouping accessor the static evaluator also folds).
+let staticOnlyBuiltinNames () : Set<string> =
+    let runtime (n: string) =
+        Blade.TypeCheckSupport.isUnaryIntrinsic n
+        || Blade.TypeCheckSupport.isBinaryIntrinsic n
+        || n = "fma" || n = "prodsum" || n = "segments"
+    Blade.StaticEval.knownBuiltinNames () |> Set.filter (runtime >> not)
+
 let builtinCallNames : string list =
     [ "hermitian"; "conj"; "method_for"; "object_for"; "pure"; "compute"; "read"
       "guard"; "reynolds"; "zero"; "rank"; "arity"; "extents"; "reduce"; "mask"
@@ -2210,6 +2221,13 @@ let renderSurfaceWith (id: int option) (compilerVersion: string) : string =
     // will actually accept, and the `__` prefix is the repo's own marker for
     // "internal, not API" -- clients filter it if they want the user surface.
     appendNameArray sb "builtins" (Blade.StaticEval.knownBuiltinNames ())
+    sb.Append ',' |> ignore
+    // The subset of `builtins` with NO run-time binding: callable only where
+    // the static evaluator runs (`let static`, extents, where-clauses).
+    // `min` / `max` / `length` are the ones a user trips on -- listed as
+    // builtins, they are BL2001 in an ordinary expression. Honest listing,
+    // not a new feature (run-time min/max are out of scope).
+    appendNameArray sb "staticOnlyBuiltins" (staticOnlyBuiltinNames ())
     sb.Append ',' |> ignore
     appendNameArray sb "scalarTypes" Blade.TypeCheck.builtinScalarNames
     sb.Append ',' |> ignore

@@ -1,0 +1,350 @@
+# One call judgment
+
+Status: BUILT 2026-09-26 on fix/drf-call-judgment (direct + qualified calls, ascription extents, match merge, P2-44/45/46 fold-ins); see §5 for what is left.
+
+## 1. The problem
+
+Argument/parameter agreement and value/ascription agreement are enforced by
+separate seams that do not share code, and each seam grew its own subset of
+the rules. A deep review of master @81cdd61b confirmed four families of hole:
+
+| id | seam | defect |
+|----|------|--------|
+| P0-4 | direct application (`dispatchAppOrIndex`, FuncElem arm) | arguments are never unified with parameters; only hand-added checks run (irreps, per-slot rank, units, slot-count rank, mut, element CLASS, extent, co-iteration). A dense 3x3 into a `SymIdx<2,3>` param is read as packed storage; `Nat<Lon>` into `Nat<Lat>` reads out of bounds; `Float` into `Int64`, struct `Q` into `P`, a tuple into `Float64`, `Array<Int64>` into `Array<Float64>` all pass `check` and die in g++. |
+| P0-5 | module-qualified application (`M.f(args)`, TypeCheckInfer ExprApp arm) | builds `TExprApp` by hand and repeats only two of the direct seam's checks: no units, no mut, no extent, no co-iteration, no arity; a qualified ARRAY read `Geo.w(1)` is typed as a fresh variable. |
+| P1-18 | `let` / return / `if` / `match` ascription | static extents never compared: `let x: Array<F like Idx<5>> = a3` copies 5 out of a 3-buffer. |
+| P2-50 | `checkMatch` | swallows `checkExpr`'s specific error and retries with a lenient unify; duplicates `inferMatch`. |
+
+### 1.1 The "keeps HM alive" rationale, re-examined
+
+The comments at the direct seam say unifying would over-constrain: a
+`function`'s type is bound ONCE (`bindVarSimple`, no scheme) so its type
+variables are shared by every call site. That part is TRUE (the second
+reviewer's claim that `ExprVar` instantiates the callee's scheme holds only
+for let-generalized values; `function` declarations never get a scheme).
+The conclusion drawn from it is not: the fix for shared variables is to
+INSTANTIATE at the call, which is exactly what HM application does. The
+judgment below instantiates the callee's signature per call (fresh copies of
+every open variable in it) and unifies the COPY against the arguments. The
+declaration's own variables are never bound by a call, so the IR-phase
+monomorphizer (`IRMono`), which reads call-site argument types and the
+declaration's still-open polymorphic vars, sees exactly what it sees today.
+
+## 2. The judgment
+
+`judgeCall env callee paramTys retTy tArgs` (TypeCheckSupport.fs), called by
+every application seam. Steps, in order; the first failure is the verdict.
+
+1. **Width schema** — `regroupArgsByWidth` (unchanged).
+2. **Stand-downs** (unchanged, now in ONE place): a variadic `Poly<T^r>`
+   parameter (monomorphization owns the call) and UNDER-application (the
+   arity error must not be buried) skip steps 4–5. Over-application judges the
+   prefix the arrow consumes; the rest re-dispatches on the result.
+3. **Binding-form checks** — `mutClash` (BL4005) plus NEW mut ALIASING
+   (P2-46): the same root binding passed to a `mut` parameter and to any other
+   parameter of the same call is refused (BL4005, "aliases argument k").
+4. **Instantiate → unify** — for a DECLARED function (callee `TExprVar` whose
+   binder id has a `FuncSigVarRange`), copy exactly the open variables its
+   declaration minted: `checkFunctionDecl` brackets them with `Subst.NextId`
+   (ids are monotonic), which is what HM would quantify -- and of those only
+   the POLYMORPHIC-marked ones, the variables zonk keeps open and IRMono
+   specializes per call. An unannotated parameter's plain variable is not
+   generic (zonk defaults it and one body is emitted), so instantiating it
+   typed calls differently from the callable they invoke (static/011, found
+   by the first full suite). A variable shared
+   with the environment is never copied. A `__`-named (elaborator-synthesized)
+   callee is not judged at all. A lambda, a function-typed parameter
+   or a curried head quantifies NOTHING: its open variables belong to its
+   environment, and binding them would pin a lambda to its first call's
+   types while its emitted body keeps the zonk default (fable review #1).
+   Arity pins, rank lower bounds and literal defaults travel with a copy; the
+   polymorphic mark does not (a copy is never a declaration variable). Then
+   per position, `argPairClash copy(param) arg`, a structural walk that binds
+   ONLY copies and uses unify only at a copy variable or a closed fallback,
+   under the coercions the emitted C++ call performs and the old seam
+   allowed:
+   - **units stripped DEEP** (array elements, tuples, Dist elements) — step 5
+     owns units; unify's unit arm would otherwise bind a generic `T` to
+     `Float<m>` and give `variance` an `m` return instead of `m^2`;
+   - **scalar widening** at the top level and in tuple components (a concrete
+     scalar into a concrete scalar parameter it promotes to, never narrowing,
+     never inside an array or function type); a numeric LITERAL adapts to any
+     numeric parameter of its kind (`ident32(21)`);
+   - **tags**: untagged into `Nat<I>` and tagged into plain `Int64` both
+     stay legal (the cast/bounds story is the index seam's); a tag vs a
+     DIFFERENT tag refuses; `Nat<_>` (IRefAny) is a wildcard;
+   - array **virtual/stored** character is not compared (a range passed to an
+     array parameter is materialized);
+   - a caret claims RANK while unify's arity pin counts SLOTS, so a packed
+     `SymIdx<2,n>` array meeting a `T^2` copy is accepted by rank without
+     binding (review #4d);
+   - two `Dist`s keep the class-only judgment (order/axes are the ppl
+     formers'); loop objects and `Poly` packs stand down.
+   An argument OPEN at a position is not judged there (it keeps today's
+   rank-lower-bound propagation and is judged by the post-zonk sweep), so no
+   caller variable is bound by the judgment (review #2).
+   Diagnostics, most specific first, at the argument's span: block-spec /
+   irreps identity, per-slot component rank (`IndexRankMismatch`), slot-count
+   rank (`ArgRankMismatch`), abstract-variable conflict (same signature
+   variable taught two types; wording unchanged — it runs on the declaration's
+   still-open variables, which calls never bind), then everything else as
+   `ArgTypeMismatch` (BL3001).
+5. **Units** — `unitClash` (unchanged: BL3006 / BL3010 / magnitude).
+6. **Static extents** — `staticExtentClash` (NEW shared predicate, §3).
+7. **Co-iteration** — `coIterClash` (unchanged, BL3016).
+8. **Result** — the instantiated return when it is fully determined by the
+   arguments (no copy variable left open), else the declared return (today's
+   behaviour). `unitStampedReturnOnto` decides "deduced" on the DECLARED
+   return and stamps the recorded unit transform onto the chosen result
+   (review #3 — otherwise a concrete instantiated return would silently turn
+   the stamp off).
+
+`firstArgTypeClash` and `firstAbstractVarConflict`'s eager call are subsumed
+by step 4; `firstAbstractVarConflict` stays for the post-zonk sweep
+(`collectAppRankErrors`), which judges arguments that were open at the seam.
+
+## 3. Shared static-extent refinement
+
+Extents are deliberately NOT part of type identity (memory
+extent-identity-design: shape monomorphization at codegen, ragged future), so
+this is a post-unify REFINEMENT, never unification.
+`staticExtentClash subst expected actual` compares literal-vs-literal extents
+(via `tryEvalIntIR`) slot by slot for equal slot counts, one level into
+tuples. Symbolic / ragged / runtime extents stand down. Called from:
+
+- the direct/qualified call judgment (step 6, BL3016 `ExtentArgMismatch`);
+- `checkExpr`'s default arm after a successful unify — this one site covers
+  let ascription, annotated function returns, block finals and match arms
+  checked against an expected type. Reported as a new TypeError case
+  `ExtentAscribeMismatch` mapped to the EXISTING code BL3016 (no new BL code,
+  so no surface/diagnostics.json churn);
+- `if` branches and inferred `match` arms: two branches with different
+  literal extents are refused (the node's type is one branch's, so the other
+  would be read at the wrong length).
+
+The existing `providerReadExtentClash` keeps its provider-specific wording and
+runs first at the provider-read forms.
+
+Coverage limit: a GENERIC callee's result carries the callee's synthesized
+symbolic extents (`requireArrayArgMinRank`'s `IRParam` records), so
+`let r: Array<F like Idx<3>> = mean_rows(A)` stands down here -- the
+literal-vs-literal rule has nothing to compare.
+
+## 4. Seams and who calls what
+
+| seam | today | after |
+|------|-------|-------|
+| direct app (`dispatchAppOrIndex` FuncElem) | hand checks | `judgeCall` |
+| qualified app `M.f(..)` | own node + 2 checks | rewritten to the unqualified path (`ExprVar "M.f"`), so defaults, eta-expansion, arity lift, constraint discharge, dispatch and `judgeCall` are the SAME code; side tables (mut positions, co-iteration obligations, unit transforms, where-constraints) are snapshotted per module and re-registered under `alias.name` at import, like `Defaults` |
+| qualified array read `Geo.w(i)` | fresh-var result | ArrayElem arm of `dispatchAppOrIndex` (tag checks, residual views) |
+| kernel app (`buildApplyInfo`) | real unify, per element | unchanged: its pairing is element-of-iteration vs parameter and it already binds (the kernel is a lambda or an eta wrapper); listed as a follow-up to share `staticExtentClash` for baked kernel params |
+| let / return / block / match-arm ascription | `checkExpr` default arm unify | + `staticExtentClash` |
+| `if` / inferred `match` | branch unify | + branch extent agreement |
+| `checkMatch` | swallow + lenient retry | one `matchWith` function parameterized by the arm judgment; `checkExpr`'s error propagates |
+| impl method body | `let _ = unify` | checked result (P2-44) |
+| composition `f >> g` | `let _ = unify` | checked result (P2-44) |
+| static pre-registration | `let _ = unify` | left: forward-ref placeholder unification whose failure is reported by the real check |
+| `from M import x` | silently ignored when missing | refused (P2-45) |
+
+## 5. Left out, with reasons
+
+- Units through generic helpers (`funcUnitTransform` gaps) and array-literal
+  element unification: separate rounds, not in this path.
+- Binding CALLER variables from callee signatures (arguments open at the call
+  head): an inference change with its own blast radius; the post-zonk sweep
+  keeps catching rank.
+- Kernel application rerouting (see table).
+- The KERNEL-position name-keyed tables (`FuncCommGroups`,
+  `FuncAntisymGroups`, `FuncParallel`, `FuncFoldBuiltin`, `FuncDeducedPairs`,
+  `PackDeducedComm`, `MutualReturnFuncs`, `JoinLegLists`) are not snapshotted
+  per module: a qualified function in `<@>` position (`method_for(A) <@>
+  M.f`) is already refused by the kernel slot, so none of them is reached
+  through `alias.name` today. Only the call judgment's tables ride
+  `TypeModuleExport.Callees`.
+- Assignment statements (`x = e`, TypeCheckInfer block/impl statement arms)
+  still discard their unify result -- not a call seam; follow-up.
+- Full let-generalization of `function` declarations (a real scheme at
+  `bindVarSimple`): would change what kernel application and ascriptions bind
+  and push work onto IRMono; instantiate-at-the-judgment gets the soundness
+  without it.
+
+## 6. Migration order
+
+1. `judgeCall` step 4 + shared extent predicate at the direct seam; update
+   the stale rationale comments. Run types/index-types/functions/units/arity/
+   symmetry/diagnostics.
+2. Qualified calls through the unqualified path; side-table snapshots;
+   delete the duplicated blocks. Run modules/multifile + stdlib consumers
+   (plot/display, rand, math, ml, ppl).
+3. Ascription extents in `checkExpr` + `if`/match branch agreement.
+4. `matchWith` merge (P2-50).
+5. Fold-ins: mut aliasing, P2-44 discards, P2-45 import.
+6. Corpus regression tests; examples/ and examples/physics/ check sweep;
+   full `blade test --interp`.
+
+## 7. Adversarial review (fable, before implementation) and what changed
+
+Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
+`ExprVar` instantiates only let-generalized values). Adopted:
+
+1. Instantiate only a DECLARED function's own variables (`FuncSigVarRange`
+   watermark), never a lambda's / parameter's / environment-shared ones.
+2. The judgment binds only copies; an open argument is not judged, and the
+   fallback unify runs only on closed arguments.
+3. `unitStampedReturnOnto`: "deduced" is decided on the declared return, the
+   stamp lands on the instantiated one; units are stripped DEEP.
+4. Coercions added after the census: tagged into plain `Int`, tuple-component
+   widening, virtual/stored not compared, packed `SymIdx` into `T^k` by rank,
+   Dists class-only; integer to integer in either width (a recurrence index
+   into an `i: Int` parameter is an established idiom -- 11 ppl/ml/ad corpus
+   programs).
+5. Qualified callees: the `lookupUnitTransform` tail fallback is removed (the
+   `alias.name` entry is registered), so two modules' same-named functions no
+   longer share a transform.
+6. Found during implementation: the partial-application / placeholder eta
+   arms pinned their lambda to the callee's DECLARED types; with an
+   instantiated call result inside the lambda that pin bound the declaration
+   itself, so both now pin against an instantiated copy. A recursive call's
+   result is not instantiated (the declaration is still being inferred).
+7. Tree-tag mismatches defer to the post-zonk tree sweep's more precise
+   BL4003. (A copy an earlier argument already taught originally deferred to
+   `firstAbstractVarConflict`; the final-diff review showed that predicate
+   peels tags, never compares extents and admits `Array<Int64>` after
+   `Array<Float64>` -- see §9 F1.)
+
+## 9. Final-diff review (fable, MERGE-WITH-FOLLOWUPS) and the follow-ups
+
+- **F1 (fixed)** A shared signature variable's SECOND teaching was not judged.
+  Now an already-taught copy judges the argument against what the first one
+  taught (`argPairClash` on the resolved copy: tags, element types, scalar
+  widening only at the top): `second0((1 : Lat), (4 : Lon))`, a Lon array then
+  a Lat array, and a Float-then-Int array pair are BL3001.
+  `firstAbstractVarConflict` still runs first and keeps its wording for the
+  rank / scalar-narrowing conflicts; when a co-iteration extent clash also
+  fires it is reported instead (diagnostics/075-076 keep their BL3016).
+  EXTENTS are deliberately NOT compared across teachings -- they are not type
+  identity, and a `T^k` parameter reads its extents at run time (loops/150
+  passes a 9- and a 4-cell array to two `T^1` parameters; refusing that was
+  the first attempt, caught by the census). The actual defect in the review's
+  `second(B5, A3)` probe was the RESULT: the instantiated return claimed the
+  first argument's literal Idx<5> over a 3-cell value. When the teachings'
+  literal extents disagree, the call now keeps the declared (symbolic)
+  return (functions/148). The downstream `need5(r)` in that probe is the
+  pre-existing param-extent-baking runtime hole, not this seam.
+- **F2 (fixed)** Name-keyed callee facts leaked across modules: a declaration
+  only SET its entry and the tables are shared by every module, so A's `f`
+  (`mut` first parameter) judged B's same-named `f` (false BL4005) and A's
+  unit transform rode out under B's `g`. `checkModule` now clears the six
+  tables (mut positions, co-iteration, unit transforms, where-conjuncts,
+  defaults, default captures) per module -- imports re-register from the
+  per-module snapshots -- and `checkFunctionDecl` removes its own name's
+  entries before setting them.
+  (Superseded, fix/drf-p2-types: the last two name-keyed tables, defaults
+  and where-conjuncts, are keyed by binder id too -- a let-bound lambda's by
+  its first parameter's id -- so there is nothing to clear or snapshot, and a
+  block-local or nested `f` no longer borrows a global `f`'s defaults,
+  functions/167.)
+- **F7 (FIXED 2026-09-27, fix/drf-mono)** `f >> g` unified with the
+  declarations' variables, pinning a generic `g` to its first composition
+  (`idg("s")` after `sq >> idg` was refused). Each operand naming a declared
+  function is now judged at an instantiated copy, and IR monomorphization
+  treats a composition operand as a call site (`IRMono.hmValueRefRewrite`:
+  r's parameter is l's return, l's return is r's parameter), so `h(3.0)`
+  still gets `idg_HM_..._double` (functions/163).
+- **F3 (FIXED 2026-09-27, both sides)** A `let` alias of a declared function
+  (`let g = total`) escaped the judgment; `calleeQuantifier` follows let-alias
+  chains to the declaration, so calls through the alias are instantiated and
+  judged (functions/151). EMITTING them was the IR gap: the call site named
+  the alias's binding. `IRMono.eliminateGenericAliases` makes a module-level
+  alias of an HM function transparent (references redirected, the binding --
+  a function value no lane prints -- removed) before the HM pass
+  (functions/161). The same pass treats a generic function passed as an
+  ARGUMENT as a call site at the parameter's type (`apply(idg, 2.0)`,
+  `applyS(idg, "a")`, `twice(idg, 3)`; functions/162). An alias bound INSIDE
+  a body (`let g = total` as a block statement, an IRLet) is made transparent
+  the same way (fix/drf-p2-types, functions/165), and a generic function a
+  generic body passes on (`applyG(toint, x)` inside `outer(x: T^0)`) is no
+  longer CLONED into the caller's specialization with the caller's bindings
+  (which never mention the callee's variables): it is specialized at its use
+  type like any other value reference (functions/166). A generic function
+  passed to a NON-declared head (a lambda, a function-typed parameter) is
+  typed at an instantiated copy of its signature, as a composition operand
+  is. Still not covered: an UNANNOTATED lambda parameter used as a function
+  (`(lambda(f, x) -> f(x))(idg, 2.0)`) -- applying an open variable does not
+  make it an arrow (it may be an array read), so nothing links `idg`'s copy to
+  `x` and the program still dies BL6001; annotating `f` works.
+- **F5 (FIXED 2026-09-27)** Literal adaptivity stopped at the top level: a
+  tuple of literals `(1.5, 2.0)` into `(Float32, Float32)` was refused
+  BL3001. `argPairClash` now takes the argument's literal SHAPE
+  (`ArgLit`: leaf / tuple of shapes), so each component literal adapts; a
+  tuple VARIABLE still narrows and still refuses (tuples/027, /028).
+- **Kernel eta wrapper + open arguments (FIXED 2026-09-27)** The
+  named-function kernel wrapper `lambda(__k) -> f(__k)` pinned its params to
+  the DECLARATION's variables, and a call whose argument is open fell back to
+  the declared return, so `method_for(B) <@> mean` over Float64 rows bound
+  `mean` itself to Float64 (a later `mean(int_row)` was BL3001, an earlier
+  one died in g++). The wrapper now pins an instantiated copy, and an open,
+  monomorphic, non-literal argument OUTSIDE a declaration body is unified with
+  its parameter's copy (the HM application rule; §5's "binding caller
+  variables", in its narrowest form) so the call's result is its own instance
+  (functions/160). Inside a declaration body a monomorphic open argument is
+  still not bound: there it is usually tied to the declaration's own
+  signature (a `Poly` pack element), and binding it collapsed arity/024,
+  /026, /031. What IS linked there (fix/drf-p2-types) is an argument that is
+  the declaration's OWN signature variable (reachable from its signature,
+  `TypeEnv.CurrentSignature`) where parameter copy and argument already have
+  the same shape: the COPY is bound to it, never the reverse. An unshaped
+  `T^k` is deliberately NOT shaped at the call -- that re-routed every array
+  expression typed after it (a deferred binop became a zip pipeline the
+  symmetry deduction cannot see through: ad-jvp-comb/085 lost its BL4010;
+  a pack element lost its recursive tail: arity/026, /058). That shape --
+  `m2(row: T^1) -> T^0 = tot(row) / extents(row)`, tot's parameter already an
+  array -- is fixed in IR monomorphization instead: each spec learns what
+  its inner generic calls return under their now-concrete arguments
+  (`IRMono.learnFromInnerCalls`), and a module-level call learns the spec's
+  return (the `specSide` bindings), so m2 at Int and at Float is two specs
+  (it was BL6001: the result fell back to tot's declared return and m2's
+  return was unified with tot's variable; functions/164). Known residue: a
+  body whose array arithmetic stays DEFERRED over two unshaped `T^1`
+  parameters (`dot2(a: T^1, b: T^1) = tot(a * b)`) is still BL6001, and the
+  single-level `reduce(a * b, (+))` computes the product in Float64 at an
+  integer instance (Lowering's deferred-binop kernel defaults a polymorphic
+  element to Float64) -- a Lowering follow-up. (Both FIXED, fix/drf-p2-lowering:
+  the kernel keeps the element variable, so HM monomorphization clones it per
+  instance -- functions/168 -- and `IRMono.hmArgType` types a raw elementwise
+  binop argument as the array `lowerArrayBinOpsModule` will make it, so
+  `tot(a * b)` specializes tot -- functions/169. The same rewrite now reads a
+  unit-carrying `Int64<m>` element as Int64, not Float64: units/082.)
+- **Unshaped `T^k` operands, three more (FIXED, fix/drf-late)** The same
+  deferred shape had three wrong answers. A COMPARISON / logical op over two
+  unshaped carets typed a scalar Bool around a body that builds an
+  Array<bool> -- the compiled program printed `true` for an elementwise
+  result; it is now a Bool array of the caret's rank (functions/170). A
+  bracketed OUTER op (`a [*] b`) typed as `T` itself (rank 1) and emitted the
+  raw `(a * b)` on Arrays; each caret operand is now shaped by its own caret
+  and the concrete outer path applies (bracketed/017). An operand `zero` never
+  took its partner's type, so `a + zero` at an Int64 instance (or a concrete
+  Int64) was `a + 0.0`; it binds to the partner's scalar / element type, a
+  generic one stays `IRZero T` through HM substitution and becomes each
+  instance's literal after monomorphization
+  (`IRMono.resolveTypedZerosModule`; zero-combinators/009 -- including a
+  `T^0` lifted at an array, where the zero is the element's). OPEN: the
+  comparison bug's rank-0 twin -- `gt0(a: T^0, b: T^0) = a > b` called with
+  arrays only is an HM instance at the array still claiming a scalar Bool
+  (compiled lane prints `true`). Lifting every all-array call with a concrete
+  scalar return is wrong: `T^r` and a bare `T` lower to the same unpinned
+  variable as `T^0`, and `describe(x: T^r) -> Int64` (arity/051) or a lambda
+  whose parameter is rank-closed later (functions/033) legitimately return a
+  scalar from an array. Telling a declared `T^0` apart needs the caret kept
+  on the variable -- a design decision, left for the lead.
+
+## 8. Census (blade check over tests/corpus + examples + examples/physics)
+
+Against master @81cdd61b, 2215 files: examples/ and examples/physics/ are
+unchanged; three corpus pins changed verdict, each the old laxity --
+functions/128 and /131 (curried extent mismatch, now BL3016 at compile time
+instead of the BL8011 runtime abort) and func-arrays/012 (computed-row extent
+vs the annotation, now BL3016 instead of the runtime row guard).
+
+Full suite (`blade test --interp`, runner job 20260926-031234-call):
+7549 passed, 0 failed, 23 skipped, against baseline 7515 / 0 / 23.

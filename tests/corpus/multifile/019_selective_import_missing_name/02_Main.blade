@@ -1,0 +1,11 @@
+// TEST: Selective import of a name the module does not export (rejects)
+// MODULE: Main
+// ERROR: BL2001
+// ERROR-CONTAINS: has no export named 'nothere'
+// ============================================================================
+// `from Util import scale, nothere` bound `scale`, silently bound nothing for
+// `nothere`, and said nothing -- the program failed later (if at all) as an
+// unrelated unbound name.
+module Main
+from Util import scale, nothere
+let c = scale

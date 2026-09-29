@@ -604,6 +604,10 @@
     <Compile Include="tests/MpiTests.fs" />
     <Compile Include="tests/HybridTests.fs" />
     <Compile Include="tests/DiffOracle.fs" />
+    <Compile Include="tests/OptDiff.fs" />
+    <!-- `blade test docs`: every ```blade block in CLAUDE.md and docs/ checked
+         (and run, when it pins values) through the corpus pipeline (Runner). -->
+    <Compile Include="tests/DocTests.fs" />
     <Compile Include="tests/RunAll.fs" />
     <!-- The CLI, three layers in dependency order: CliCommands.fs (compile/run/
          check/emit + the REPL loop), CliSelfTests.fs (the `blade test` blocks

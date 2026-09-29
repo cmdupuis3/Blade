@@ -1,0 +1,10 @@
+// TEST: Index Cast Out Of Range (aborts)
+// The aborting twin of index-types/280: `(k : N)` of a computed integer is a
+// CHECKED conversion, so 9 into N = Idx<5> stops with the bounds code instead
+// of reading past the array.
+// ABORT: index cast out of range
+type N = Idx<5>
+let x: Array<Float64 like N> = [1.0, 2.0, 3.0, 4.0, 5.0]
+function get(k: Int64) -> Float64 = x((k : N))
+let b = get(9)
+let c = b + 1.0

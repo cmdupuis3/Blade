@@ -1,0 +1,10 @@
+// TEST: In-range literal subscript needs no untagged-integer advice
+// A literal subscript proved in range against a static extent is exactly
+// what the BL4003 advice asks the author to establish, so it no longer fires
+// (examples/07 alone drew hundreds of these notes).
+type Lat = Idx<3>
+let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
+let v = A(2)
+let w = A(0) + A(1)
+// EXPECT: v = 30
+// EXPECT: w = 30

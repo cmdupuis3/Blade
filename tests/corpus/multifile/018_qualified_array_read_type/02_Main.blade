@@ -1,0 +1,11 @@
+// TEST: Qualified array read against the wrong type (rejects)
+// MODULE: Main
+// ERROR: BL3001
+// ============================================================================
+// `Geo.w(i)` is an ARRAY READ. The qualified-application arm typed every
+// non-function callee's result as a fresh variable, so `let q: Bool = Geo.w(i)`
+// type-checked and emitted `bool q = w[1L]`. Rewritten onto the unqualified
+// path, the read goes through array indexing and yields Float64.
+module Main
+import Geo
+let q: Bool = Geo.w((1 : Cell))

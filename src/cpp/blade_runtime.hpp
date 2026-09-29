@@ -6,7 +6,8 @@
 // OpenMP) pushed/popped by an RAII Scope at each Blade function-body entry
 // (BLADE_FRAME). On failure, blade_rt::panic prints an `error[BLxxxx]:`
 // line, the failing source location (when carried), and the Blade call
-// stack (innermost first), then exits(1).
+// stack (innermost first), then ends the process with status 1 -- once, even
+// when several OpenMP workers fail together (see panic).
 //
 // __CUDA_ARCH__ is defined ONLY during nvcc's device passes: host passes get
 // the real implementation, device passes get a no-op BLADE_FRAME macro and
@@ -15,7 +16,124 @@
 #include <iostream>
 #include <cstdlib>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <atomic>
+#include <type_traits>
 #if !defined(__CUDA_ARCH__)
+// ---- libm, evaluated at RUN TIME (docs/formalism.md section 2.4) ----------
+//
+// The contract: a transcendental intrinsic's value is the PLATFORM libm's,
+// computed when the program runs -- the value the interpreter gets by
+// P/Invoking the same library (src/Interp/Numerics.fs, mathBackend). g++
+// broke that on constant arguments: `std::sin(7.35615)` is the builtin
+// `sin`, which g++ folds at compile time through MPFR (correctly rounded),
+// and ucrt's sin is 1 ulp off there, so `(sin(7.35615) - 0.87862006801244397)
+// * 1e17` printed 0 compiled and 11.1 interpreted -- and a literal disagreed
+// with the same value routed through an array inside ONE executable.
+//
+// The mechanism: each function is re-declared under a Blade-owned C name
+// whose ASSEMBLER name is the libm symbol. g++ recognizes builtins by the
+// declared identifier, so `blade_libm_sin` is never folded, sincos-combined
+// or strength-reduced -- but it is declared `const`, so the optimizer still
+// hoists a loop-invariant call and shares a repeated one, which
+// -fno-builtin-sin (the flag alternative) would have lost along with the
+// fold. `const` asserts no errno write: the same promise -fno-math-errno
+// already makes for every build. __USER_LABEL_PREFIX__ keeps the symbol
+// right where C symbols carry a leading underscore.
+//
+// Overloads fix the OPERAND domain, which libstdc++ leaves to builtins: its
+// float and integral std::sin overloads are inline wrappers over
+// __builtin_sinf / __builtin_sin, which no flag reaches. Here a Float32
+// operand is evaluated by the double function and rounded ONCE to float (the
+// interpreter rounds the same way), and an integral one widens to double.
+// sqrt/floor/ceil/fabs/fma are NOT routed here: they are correctly rounded,
+// so a compile-time fold IS the run-time value, and sqrt must stay the
+// builtin the vectorizer knows.
+//
+// MSVC (the nvcc host compiler, the ASan fallback) has no asm labels; there
+// the names forward to std::, and folding is whatever cl.exe does (the
+// documented exception). Complex intrinsics stay on std:: -- outside the
+// contract, see formalism.md.
+#if defined(__GNUC__)
+#define BLADE_LIBM_STR2(x) #x
+#define BLADE_LIBM_STR(x) BLADE_LIBM_STR2(x)
+#define BLADE_LIBM_SYM(n) BLADE_LIBM_STR(__USER_LABEL_PREFIX__) #n
+#define BLADE_LIBM_DECL1(n) \
+  extern "C" double blade_libm_##n(double) __asm__(BLADE_LIBM_SYM(n)) __attribute__((const, nothrow));
+#define BLADE_LIBM_DECL2(n) \
+  extern "C" double blade_libm_##n(double, double) __asm__(BLADE_LIBM_SYM(n)) __attribute__((const, nothrow));
+#else
+#define BLADE_LIBM_DECL1(n) inline double blade_libm_##n(double x) { return std::n(x); }
+#define BLADE_LIBM_DECL2(n) inline double blade_libm_##n(double a, double b) { return std::n(a, b); }
+#endif
+BLADE_LIBM_DECL1(exp) BLADE_LIBM_DECL1(log) BLADE_LIBM_DECL1(log10)
+BLADE_LIBM_DECL1(sin) BLADE_LIBM_DECL1(cos) BLADE_LIBM_DECL1(tan)
+BLADE_LIBM_DECL1(sinh) BLADE_LIBM_DECL1(cosh) BLADE_LIBM_DECL1(tanh)
+BLADE_LIBM_DECL1(asin) BLADE_LIBM_DECL1(acos) BLADE_LIBM_DECL1(atan)
+BLADE_LIBM_DECL2(atan2) BLADE_LIBM_DECL2(pow)
+// The emitted spelling: blade_libm::sin(x). double -> double; float ->
+// float, rounded once; any other arithmetic operand (the integral ones)
+// widens to double. A non-template exact match beats the template, so the
+// template only ever catches what the two plain overloads do not.
+namespace blade_libm {
+#define BLADE_LIBM_WRAP1(n)                                                     \
+  inline double n(double x) { return blade_libm_##n(x); }                       \
+  inline float n(float x) { return static_cast<float>(blade_libm_##n(x)); }     \
+  template <typename T> inline double n(T x) { return blade_libm_##n(static_cast<double>(x)); }
+#define BLADE_LIBM_WRAP2(n)                                                               \
+  inline double n(double a, double b) { return blade_libm_##n(a, b); }                    \
+  inline float n(float a, float b) { return static_cast<float>(blade_libm_##n(a, b)); }  \
+  template <typename A, typename B> inline double n(A a, B b) {                           \
+    return blade_libm_##n(static_cast<double>(a), static_cast<double>(b)); }
+  BLADE_LIBM_WRAP1(exp) BLADE_LIBM_WRAP1(log) BLADE_LIBM_WRAP1(log10)
+  BLADE_LIBM_WRAP1(sin) BLADE_LIBM_WRAP1(cos) BLADE_LIBM_WRAP1(tan)
+  BLADE_LIBM_WRAP1(sinh) BLADE_LIBM_WRAP1(cosh) BLADE_LIBM_WRAP1(tanh)
+  BLADE_LIBM_WRAP1(asin) BLADE_LIBM_WRAP1(acos) BLADE_LIBM_WRAP1(atan)
+  BLADE_LIBM_WRAP2(atan2)
+#undef BLADE_LIBM_WRAP1
+#undef BLADE_LIBM_WRAP2
+}
+
+// The PANIC-FREE half of the arithmetic contract (docs/formalism.md section
+// 2.4). Nothing in this namespace may reach blade_rt::panic: codegen lists
+// `blade_arith::` in panicFreeNamespaces, so a kernel that calls only these
+// keeps its shadow frame elided. The faulting forms live in blade_rt below.
+namespace blade_arith {
+  // b^e for e >= 0, exact modulo 2^w: square-and-multiply in the UNSIGNED
+  // type, whose wraparound is defined, then back to T -- the two's-complement
+  // residue every lane computes (any multiplication order gives the same
+  // residue, so the interpreter's loop need not match this one step for
+  // step). 0^0 = 1. A literal exponent constant-propagates: ipow_nn64(b, 2)
+  // inlines to b * b.
+  template <typename T> inline T ipow_nn(T b, T e) {
+    using U = std::make_unsigned_t<T>;
+    U r = 1, x = static_cast<U>(b);
+    U n = static_cast<U>(e);
+    while (n != 0) {
+      if (n & 1u) r = static_cast<U>(r * x);
+      x = static_cast<U>(x * x);
+      n >>= 1;
+    }
+    return static_cast<T>(r);
+  }
+  // Real `^`: the platform libm's pow, except that an exponent of exactly 2
+  // is x * x -- one correctly rounded multiply, and what a literal `x ^ 2`
+  // constant-propagates to, so the idiom costs no call (g++ used to get the
+  // same product by folding pow(x, 2.0) as a builtin; blade_libm_pow, which
+  // keeps every OTHER pow call honest, is not a builtin). The interpreter's
+  // Numerics.realPow runs the same test on the value, so a non-literal 2
+  // agrees too.
+  inline double fpow(double x, double e) { return e == 2.0 ? x * x : blade_libm_pow(x, e); }
+  // Rounded ONCE to float: the Float32 `^` (a double pow stored straight into a
+  // float was an implicit narrowing, -Werror=float-conversion).
+  inline float fpowf(double x, double e) { return static_cast<float>(fpow(x, e)); }
+  // NON-template entry points are what codegen emits: the shadow-frame scan
+  // (CodeGen.scanBodyCalls) reads `f<T>(` as a call through a value, which
+  // would cost the kernel its frame elision.
+  inline int64_t ipow_nn64(int64_t b, int64_t e) { return ipow_nn<int64_t>(b, e); }
+  inline int32_t ipow_nn32(int32_t b, int32_t e) { return ipow_nn<int32_t>(b, e); }
+}
 namespace blade_rt {
   struct Frame { const char* fn; const char* file; int line; };
   // 65 slots, not 64: slots 0..63 are the trace, slot 64 is a write-only
@@ -51,8 +169,31 @@ namespace blade_rt {
   // reads these at exit): empty code = the program exited normally.
   inline const char* exit_code = "";
   inline const char* exit_message = "";
+  // panic leaves through std::_Exit: no static destructors and no atexit
+  // handlers -- tearing down iostreams, the OpenMP runtime or a provider
+  // library under worker threads that are still running is what made the old
+  // std::exit unsafe. What must still happen on the way out registers here
+  // (during static initialization, which is single-threaded) and runs in
+  // registration order: the run record's writer (blade_run_record.hpp) and a
+  // netcdf program's library finalize (CodeGen.netcdfRegisterLines). A
+  // private registry rather than at_quick_exit, which not every C++ runtime
+  // Blade targets provides.
+  inline void (*failure_exit_hooks[8])() = {};
+  inline void on_failure_exit(void (*f)()) {
+    for (auto& h : failure_exit_hooks) if (!h) { h = f; return; }
+  }
+  //
+  // `panicking` is set by the FIRST panic. OpenMP workers routinely fail
+  // together (every iteration of a parallel loop dividing by the same zero),
+  // and exiting from several threads at once is undefined -- the old
+  // std::exit ran the static destructors twice, concurrently. So exactly one
+  // failure reports and exits; any other parks here until the process ends
+  // under it (the atomic load is the forward-progress side effect an empty
+  // spin would lack).
+  inline std::atomic<int> panicking{0};
   [[noreturn]] inline void panic(const char* code, const char* msg,
                                  const char* file, int line) {
+    if (panicking.exchange(1) != 0) { for (;;) (void)panicking.load(); }
     exit_code = code;
     exit_message = msg;
     std::cerr << "error[" << code << "]: " << msg << "\n";
@@ -64,8 +205,70 @@ namespace blade_rt {
         std::cerr << " (" << stack[i].file << ":" << stack[i].line << ")";
       std::cerr << "\n";
     }
-    std::exit(1);
+    // Everything printed before the failure is kept (std::exit flushed it
+    // through the static destructors _Exit skips), then the hooks.
+    std::cerr.flush();
+    std::cout.flush();
+    std::fflush(nullptr);
+    for (auto h : failure_exit_hooks) if (h) h();
+    std::fflush(nullptr);
+    std::_Exit(1);
   }
+
+  // ---- The arithmetic contract's FAULTS (docs/formalism.md section 2.4,
+  // "Arithmetic semantics"). Each is transcribed into the interpreter
+  // (src/Interp/Numerics.fs computeReal / intPow / evalCast) and the LLVM
+  // lane's shim (src/cpp/blade_llvm_shim.c blade_idiv / blade_imod /
+  // blade_ipow / blade_f2i64) with the SAME code and the SAME message: the
+  // three lanes must fail identically, not merely all fail.
+  //
+  // Codegen emits these only where a fault is possible: a nonzero literal
+  // divisor other than -1 stays a plain `/`, and a literal nonnegative
+  // exponent calls the panic-free blade_arith::ipow_nn directly (so such a
+  // kernel keeps its shadow-frame elision -- CodeGen.panicFreeNamespaces).
+  //
+  // Integer `/` and `%` truncate toward zero; a zero divisor panics BL8013.
+  // MIN / -1 WRAPS to MIN and MIN % -1 is 0, the two's-complement answers
+  // -fwrapv gives every other integer op -- in C++ both are UB, and x86's
+  // idiv traps on them, so the -1 arm is explicit rather than left to `/`.
+  template <typename T> inline T idiv(T a, T b) {
+    if (b == 0) panic("BL8013", "integer division by zero", nullptr, 0);
+    if (b == T(-1))
+      return static_cast<T>(static_cast<std::make_unsigned_t<T>>(0) -
+                            static_cast<std::make_unsigned_t<T>>(a));
+    return a / b;
+  }
+  template <typename T> inline T imod(T a, T b) {
+    if (b == 0) panic("BL8013", "integer modulo by zero", nullptr, 0);
+    if (b == T(-1)) return T(0);
+    return a % b;
+  }
+  // Integer `^`: exact (see blade_arith::ipow_nn); a negative exponent has
+  // no integer answer and panics BL8013.
+  template <typename T> inline T ipow(T b, T e) {
+    if (e < 0) panic("BL8013", "integer power with a negative exponent", nullptr, 0);
+    return blade_arith::ipow_nn<T>(b, e);
+  }
+  // Float -> integer conversion (`Int64(floor(x))`, `Int32(ceil(x))`, ...):
+  // truncation toward zero of a value the target can hold. NaN, +-inf and
+  // anything outside [-2^(w-1), 2^(w-1)) panic BL8014 -- static_cast is UB
+  // there (x86 answers the INT_MIN sentinel), and a NaN bin index is a bug
+  // the program should hear about, not a 0 or a clamp it should compute on.
+  // The comparisons are exact: both bounds are powers of two.
+  template <typename T> inline T f2i(double x) {
+    constexpr double lim = static_cast<double>(std::make_unsigned_t<T>(1) << (sizeof(T) * 8 - 1));
+    if (!(x >= -lim && x < lim))
+      panic("BL8014", "float-to-integer conversion of NaN or an out-of-range value", nullptr, 0);
+    return static_cast<T>(x);
+  }
+  inline int64_t idiv64(int64_t a, int64_t b) { return idiv<int64_t>(a, b); }
+  inline int32_t idiv32(int32_t a, int32_t b) { return idiv<int32_t>(a, b); }
+  inline int64_t imod64(int64_t a, int64_t b) { return imod<int64_t>(a, b); }
+  inline int32_t imod32(int32_t a, int32_t b) { return imod<int32_t>(a, b); }
+  inline int64_t ipow64(int64_t b, int64_t e) { return ipow<int64_t>(b, e); }
+  inline int32_t ipow32(int32_t b, int32_t e) { return ipow<int32_t>(b, e); }
+  inline int64_t f2i64(double x) { return f2i<int64_t>(x); }
+  inline int32_t f2i32(double x) { return f2i<int32_t>(x); }
 
   // ---- lgamma(x) = log Gamma(x), x > 0. Lanczos approximation, g = 7, n = 9.
   //

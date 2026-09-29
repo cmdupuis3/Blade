@@ -154,6 +154,64 @@ type CodeGenContext = {
     Warnings: string list ref
 }
 
+/// PER-PROGRAM RESETS INSTALL A FRESH REF; THEY NEVER MUTATE THE ONE THERE.
+///
+/// Every emission cell below is an `AsyncLocal<_ ref>` (or a collector
+/// object) so that each flow -- one test task, one CLI compile -- gets its
+/// own. But an ExecutionContext copy (Task.Run, Array.Parallel, a new
+/// Thread in Runtime.runOnLargeStack) copies the REFERENCE: a child flow
+/// sees the very ref object its parent installed. If the parent had touched
+/// a cell before fanning out, every child shares that one object, and a
+/// `cell.Value <- false` reset in one pipeline clears a flag another
+/// pipeline just set (a program losing its `#include
+/// "blade_packed_gemm.hpp"`). Assigning a new ref to the AsyncLocal itself
+/// only rebinds the CURRENT flow, so after a reset the flow's state is its
+/// own. `freshCell` is that assignment; `resetProgramStateCells` (end of
+/// this file) applies it to every per-program cell, and the mode setters
+/// (`setOmpTestMode`, ...) assign rather than mutate for the same reason.
+let freshCell (storage: System.Threading.AsyncLocal<'T ref>) (v: 'T) : unit =
+    storage.Value <- ref v
+
+/// Per-program table of user binding names emitted under a different C++
+/// spelling (sanitized form -> emitted form); see `installUserNameRenames`.
+let internal userNameRenamesStorage =
+    System.Threading.AsyncLocal<Map<string, string> ref>()
+
+/// The declaration currently being emitted, for attributing an unhandled node
+/// to a source position. `genModule`/`genModuleSplit` set it around each item.
+let internal currentDeclStorage = System.Threading.AsyncLocal<string ref>()
+
+let currentDeclCell () : string ref =
+    let v = currentDeclStorage.Value
+    if isNull (box v) then
+        let fresh = ref ""
+        currentDeclStorage.Value <- fresh
+        fresh
+    else v
+
+let setCurrentCodegenDecl (name: string) : unit = (currentDeclCell ()).Value <- name
+
+/// `blade plan`'s CODEGEN half. The cost-only passes record during
+/// lowering; the decisions only emission makes -- storage and iteration shape,
+/// OpenMP placement and drops, BLAS/LAPACK routes, tile-cache admissions, the
+/// jammed / packed microkernels -- record here, attributed to the declaration
+/// being emitted. A no-op unless a collector is installed
+/// (Blade.Effects.Decisions.start), so ordinary compiles pay one AsyncLocal read.
+let decisionSpan () : Blade.Ast.Span = IR.declSpanOf (currentDeclCell ()).Value
+
+let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) : unit =
+    if Blade.Effects.Decisions.active () then
+        let decl = (currentDeclCell ()).Value
+        // The subject's own declaration when it has one (a top-level binding),
+        // else the declaration being emitted (a function, a nested nest).
+        let span =
+            let s = IR.declSpanOf subject
+            if s.StartLine > 0 then s else IR.declSpanOf decl
+        Blade.Effects.Decisions.record
+            { Rule = rule; Version = 1; Span = span
+              Subject = (if subject = "" then decl else subject)
+              Outcome = outcome; Evidence = evidence }
+
 /// Module-level expression warnings collector: exprToCpp is pure (returns a
 /// string) so it can't use CodeGenContext directly; warnings sync back into
 /// CodeGenContext after. AsyncLocal (not a shared `ref []`) so each parallel
@@ -464,7 +522,7 @@ let ompTestModeCell () : bool ref =
 
 /// Set/clear OpenMP test-mode for the current async flow (called by the harness).
 let setOmpTestMode (on: bool) : unit =
-    (ompTestModeCell ()).Value <- on
+    freshCell ompTestModeStorage on
 
 /// Split-timing mode: when on, main() emits TWO timing checkpoints -- input-data
 /// setup and computation -- instead of one whole-body clock, so the differential
@@ -483,7 +541,7 @@ let splitTimingModeCell () : bool ref =
     else v
 
 let setSplitTimingMode (on: bool) : unit =
-    (splitTimingModeCell ()).Value <- on
+    freshCell splitTimingModeStorage on
 
 let splitTimingModeEnabled () : bool =
     (splitTimingModeCell ()).Value
@@ -724,7 +782,31 @@ let ompThreadsSuppressedBlockMarker () : string =
 /// order-dependent and the earliest consumer -- `renderReduceExpr`, an
 /// expression-position emitter -- sits above that function.
 let ompSuppressedPhrase (reason: string) : string =
+    // The census phrase is also the decision record: every declined `omp`
+    // passes through here exactly when its marker is emitted.
+    recordCodegenDecision "omp" "" (Blade.Effects.Declined reason) [ "[omp] requested but emitted serial" ]
     $"[omp] requested but emitted serial: {reason}"
+
+/// Record an emitted OpenMP construct for `blade plan` (rule `omp`, applied):
+/// its spelling (the macro, first line) and where it sits.
+let recordOmpConstruct (subject: string) (construct: string) (where: string) : unit =
+    let c = construct.Split('\n').[0].Trim()
+    if c <> "" then recordCodegenDecision "omp" subject Blade.Effects.Applied [ c; where ]
+
+/// The thread construct over a native intrinsic's OUTPUT-ROW loop (gram /
+/// matmul / gram_apply without a BLAS route): BLADE_OMP_PARALLEL_FOR
+/// (`_DYNAMIC` for a triangular row span), or the knob's block marker --
+/// recorded for `blade plan` either way. Rows are disjoint and every cell's
+/// summation order is unchanged, so this needs no user licence.
+let intrinsicRowThreading (subject: string) (dynamic: bool) : string =
+    let where = "output-row loop of the native intrinsic (disjoint rows, per-cell order unchanged)"
+    if ompThreadEmissionEnabled () then
+        let m = if dynamic then "BLADE_OMP_PARALLEL_FOR_DYNAMIC" else "BLADE_OMP_PARALLEL_FOR"
+        recordOmpConstruct subject m where
+        m
+    else
+        recordCodegenDecision "omp" subject (Blade.Effects.Declined (ompThreadsSuppressedReason ())) [ where ]
+        ompThreadsSuppressedBlockMarker ()
 
 /// The census marker as a BLOCK comment, for emitters whose output is a
 /// SINGLE-LINE IIFE (`[&]() { ... }()`) at an expression position, where a `//`
@@ -839,9 +921,20 @@ let tileLoopLines (ind: string) (plan: TilePlan) (loopCode: string list) : strin
             let lo = plan.LeadBounds |> List.map (fun b -> $"{b}UL") |> String.concat ", "
             [ $"{ind}static const char* {f}__tkeys[{plan.Tiles}] = {{ {keys} }};"
               $"{ind}static const size_t {f}__tlo[{plan.Tiles + 1}] = {{ {lo} }};" ]
-    let hitTest =
-        if plan.Hoisted then $"{f}__hit[__tt]"
-        else $"blade_tiles::probe({f}__tkeys[__tt], __tbytes)"
+    // The hit branch. A load validates the whole entry (blade_tilecache.hpp:
+    // header AND exact length) and a bad entry is a miss, so the
+    // at-the-binding form simply computes the tile when its load fails. The
+    // HOISTED form cannot: its probe decided which input chunks to read, and
+    // a tile that passed the probe had its chunks skipped. Entries are only
+    // ever published whole (private temp file + rename), so the one way here
+    // is an entry REMOVED between the probe and the load (a concurrent
+    // compile's eviction, a hand deletion) -- refused with that diagnosis.
+    let hitHead, hitBody =
+        if plan.Hoisted then
+            $"{f}__hit[__tt]",
+            [ $"{ind}        if (!blade_tiles::load({f}__tkeys[__tt], __tbase, __tbytes)) {{ blade_rt::panic(\"BL8005\", \"tile cache: a tile of '{f}' passed the probe but left the store before its load (a concurrent eviction?); its input chunks were never read, so this run cannot recompute it -- run again\", nullptr, 0); }}" ]
+        else
+            $"blade_tiles::load({f}__tkeys[__tt], __tbase, __tbytes)", []
     [ $"{ind}// revision reuse (docs/plans/structural/04): {f} is computed one leading-axis tile at a time;"
       $"{ind}// a tile whose key (task text + output geometry + the content identities of the chunks it reads)"
       $"{ind}// is in the tile store is loaded instead of recomputed. Values only: what prints is unchanged." ]
@@ -852,9 +945,9 @@ let tileLoopLines (ind: string) (plan: TilePlan) (loopCode: string list) : strin
         $"{ind}    size_t __blade_mpi_hi_{f} = {f}__tlo[__tt + 1];"
         $"{ind}    {plan.ElemCpp}* __tbase = pool_base({f}.data) + __blade_mpi_lo_{f} * {plan.Trailing}UL;"
         $"{ind}    std::uint64_t __tbytes = (std::uint64_t)(__blade_mpi_hi_{f} - __blade_mpi_lo_{f}) * {plan.Trailing}UL * sizeof({plan.ElemCpp});"
-        $"{ind}    if ({hitTest}) {{"
-        $"{ind}        if (!blade_tiles::load({f}__tkeys[__tt], __tbase, __tbytes)) {{ std::cerr << \"Blade tile cache error: tile \" << __tt << \" of '{f}' was present at the probe and is gone at the load\" << std::endl; std::exit(1); }}"
-        $"{ind}        {f}__loaded++;"
+        $"{ind}    if ({hitHead}) {{" ]
+    @ hitBody
+    @ [ $"{ind}        {f}__loaded++;"
         $"{ind}    }} else {{" ]
     @ (loopCode |> List.map (fun s -> "        " + s))
     @ [ $"{ind}        blade_tiles::store({f}__tkeys[__tt], __tbase, __tbytes);"
@@ -963,7 +1056,7 @@ let internal splitTimingOnlyBindingCell () : string option ref =
     else v
 
 let setSplitTimingOnlyBinding (name: string option) : unit =
-    (splitTimingOnlyBindingCell ()).Value <- name
+    freshCell splitTimingOnlyBindingStorage name
 
 let splitTimingOnlyBinding () : string option =
     (splitTimingOnlyBindingCell ()).Value
@@ -1007,7 +1100,7 @@ let cudaEmitModeCell () : bool ref =
 
 /// Enable/disable actual CUDA kernel emission (called by the CUDA test phase).
 let setCudaEmitMode (on: bool) : unit =
-    (cudaEmitModeCell ()).Value <- on
+    freshCell cudaEmitModeStorage on
 
 /// Query whether CUDA kernels should actually be emitted (vs host fallback).
 let cudaEmitModeEnabled () : bool =
@@ -1031,7 +1124,7 @@ let mpiEmitModeCell () : bool ref =
 
 /// Enable/disable MPI decomposition emission (`blade run --mpi N`, MPI tests).
 let setMpiEmitMode (on: bool) : unit =
-    (mpiEmitModeCell ()).Value <- on
+    freshCell mpiEmitModeStorage on
 
 /// Query whether MPI decomposition should actually be emitted (vs serial).
 let mpiEmitModeEnabled () : bool =
@@ -1144,20 +1237,6 @@ let unhandledNodesCell () : (string * string) list ref =
         unhandledNodesStorage.Value <- fresh
         fresh
     else v
-
-/// The declaration currently being emitted, for attributing an unhandled node
-/// to a source position. `genModule`/`genModuleSplit` set it around each item.
-let internal currentDeclStorage = System.Threading.AsyncLocal<string ref>()
-
-let currentDeclCell () : string ref =
-    let v = currentDeclStorage.Value
-    if isNull (box v) then
-        let fresh = ref ""
-        currentDeclStorage.Value <- fresh
-        fresh
-    else v
-
-let setCurrentCodegenDecl (name: string) : unit = (currentDeclCell ()).Value <- name
 
 /// Record that `nodeName` reached codegen with no arm in `position`, tagging it
 /// with the declaration being emitted. Deduplicated: one loop nest can render
@@ -1285,11 +1364,37 @@ let private streamedBindingsCell () = asyncCell streamedBindingsStorage Map.empt
 let private streamedMaskCell () = asyncCell streamedMaskStorage Set.empty
 let private streamedLeaksCell () = asyncCell streamedLeaksStorage []
 
-/// Per-program reset, beside the other codegen channels.
+/// Per-program reset, beside the other codegen channels (fresh refs: see
+/// `freshCell`).
 let resetStreamedValueState () : unit =
-    (streamedBindingsCell ()).Value <- Map.empty
-    (streamedMaskCell ()).Value <- Set.empty
-    (streamedLeaksCell ()).Value <- []
+    freshCell streamedBindingsStorage Map.empty
+    freshCell streamedMaskStorage Set.empty
+    freshCell streamedLeaksStorage []
+
+/// Every per-PROGRAM cell this file owns, reset for a new assembly by
+/// installing fresh state in the current flow (`freshCell`) -- never by
+/// mutating a ref that a parent flow, and through it a sibling pipeline,
+/// may share. The mode flags (`setOmpTestMode`, `setCudaEmitMode`, ...)
+/// are settings, not per-program state, and are not touched here.
+let resetProgramStateCells () : unit =
+    freshCell exprWarningsStorage []
+    freshCell exprSentinelsStorage []
+    freshCell unhandledNodesStorage []
+    freshCell codegenRefusalsStorage []
+    freshCell currentDeclStorage ""
+    freshCell forcedDeferredIdsStorage Set.empty
+    cudaKernelDefsStorage.Value <- DeclCollector()
+    symmDeclsStorage.Value <- DeclCollector()
+    moduleGlobalDeclsStorage.Value <- DeclCollector()
+    freshCell linalgUsedStorage false
+    freshCell tilesUsedStorage false
+    freshCell packedGemmUsedStorage false
+    freshCell cudaLinalgUsedStorage false
+    freshCell lapackUsedStorage false
+    freshCell ompApiUsedStorage false
+    freshCell mpiProgramOnStorage false
+    freshCell userNameRenamesStorage Map.empty
+    resetStreamedValueState ()
 
 /// A `.stream` binding was emitted under C++ name `name`: from here on, a
 /// render of that binding as a value is a leak unless a scope masks it.
@@ -1466,10 +1571,81 @@ let cppReservedWords = Set.ofList [
     "true"; "false"; "nullptr"; "inline"; "constexpr"; "mutable"
 ]
 
-/// Sanitize a name to avoid C++ reserved word conflicts
-let sanitizeCppName (name: string) : string =
-    if Set.contains name cppReservedWords then name + "_"
+/// The spelling rule alone: dots to `__`, reserved words `_`-suffixed.
+let private baseCppName (name: string) : string =
+    // A module member's IR name is qualified with dots (`units.SI.x`, see
+    // Lowering.qualifyModuleNames). No Blade identifier contains a dot, so
+    // `M__x` can only meet a user name spelled `M__x` itself.
+    if name.Contains '.' then name.Replace(".", "__")
+    elif Set.contains name cppReservedWords then name + "_"
     else name
+
+/// Sanitize a name to avoid C++ reserved word conflicts -- and, through the
+/// per-program rename table (`installUserNameRenames`), collisions with the
+/// names codegen DERIVES from another top-level binding (see there).
+/// Idempotent: a renamed spelling is never itself a key.
+let sanitizeCppName (name: string) : string =
+    let s = baseCppName name
+    let r = userNameRenamesStorage.Value
+    if isNull (box r) then s
+    else match Map.tryFind s r.Value with Some t -> t | None -> s
+
+/// The suffixes the emitters append to a binding's C++ name (a census of the
+/// `{name}_...` spellings in CodeGen*.fs and the provider emitters; a
+/// digit run -- `{name}_{i}`, `{v}_extent_{k}`, `{v}_fb_p{pos}` -- is stripped
+/// before the lookup). Every `__...` suffix is generated by convention.
+let private generatedSuffixes =
+    Set.ofList [
+        "_"; "_F"; "_S"; "_T"; "_a"; "_anti"; "_b"; "_begin"; "_c"; "_cbuf"; "_cell"; "_cf"
+        "_ch"; "_cidx"; "_cnt"; "_col"; "_cols"; "_comma"; "_compact"; "_count"; "_cs"
+        "_cstrict"; "_d_"; "_d_out"; "_d_src"; "_dense"; "_densepool"; "_dev"; "_dhi"; "_dim"
+        "_dimids"; "_dimlen_"; "_dlo"; "_dq"; "_dr"; "_dsp"; "_ec"; "_emptyb"; "_end"; "_ext"
+        "_extent_"; "_extents"; "_fb_p"; "_fc"; "_fiber_ext"; "_fillv"; "_flat"; "_from"; "_fseg"
+        "_g"; "_grid"; "_have"; "_hi"; "_i"; "_ib"; "_icb"; "_icfile"; "_icinl"; "_icoff"
+        "_icpath"; "_idst"; "_idx"; "_in"; "_isrc"; "_j"; "_joff"; "_key"; "_keys"; "_l"; "_lc"
+        "_len"; "_lens"; "_lim"; "_line"; "_lineno"; "_lo"; "_local"; "_log"; "_maskid"
+        "_maskraw"; "_maskvec"; "_n"; "_ncid"; "_ncstat"; "_offsets"; "_os"; "_out"; "_p"
+        "_pool"; "_pos"; "_q"; "_r"; "_row"; "_s"; "_sb"; "_sbc"; "_sbrow"; "_sbt"; "_start"
+        "_strict"; "_symm"; "_t"; "_tc"; "_to"; "_total"; "_trail"; "_val"; "_valpool"; "_varid"
+        "_vw"; "_w"; "_wbufv"; "_wc"; "_wdst"; "_whi"; "_wlo"; "_wr"; "_ws"; "_wsrc"; "_wst"
+        "_wt"; "_x"; "_z"; "_za"; "_zg"; "_zm"; "_zt" ]
+
+/// Could `suffix` (what follows a binding's name) be one codegen appends?
+let private generatedNameSuffix (suffix: string) : bool =
+    suffix.StartsWith "__"
+    || generatedSuffixes.Contains (suffix.TrimEnd([| '0'; '1'; '2'; '3'; '4'; '5'; '6'; '7'; '8'; '9' |]))
+
+/// GENERATED NAMES ARE THE BINDING'S NAME PLUS A SUFFIX: a top-level array
+/// `a` brings `a_extents`, its print loop `a__first`, a compound `a_cidx`, a
+/// provider read `a_flat` / `a_cbuf`, ... -- over a hundred such suffixes,
+/// all in main's scope beside the user's own bindings. A user binding spelled
+/// `a_extents` next to an array `a` therefore redeclared a generated name
+/// (a g++ error at best). Rather than re-spell every generated name, the
+/// USER name steps aside: a top-level binding spelled as another top-level
+/// binding's name plus a GENERATED suffix (`generatedNameSuffix`) is emitted
+/// with a trailing `_` (the reserved-word convention), lengthened until it
+/// collides with nothing. `x` beside `x_mean` is not such a pair and emits
+/// as before; programs without a pair emit byte for byte what they did.
+/// Installed per program assembly (after `resetProgramStateCells`).
+let installUserNameRenames (bindingNames: string list) : unit =
+    let names =
+        bindingNames
+        |> List.filter (fun n -> not (n.StartsWith "_"))   // `__` internals, `_(` tuple temps
+        |> List.map baseCppName
+        |> Set.ofList
+    let atRisk =
+        names |> Set.filter (fun n ->
+            names |> Set.exists (fun b -> b <> n && n.StartsWith (b + "_") && generatedNameSuffix (n.Substring b.Length)))
+    let mutable used = names
+    let renames =
+        atRisk
+        |> Seq.map (fun n ->
+            let mutable r = n + "_"
+            while used.Contains r do r <- r + "_"
+            used <- used.Add r
+            n, r)
+        |> Map.ofSeq
+    freshCell userNameRenamesStorage renames
 
 /// Identifiers the generated TU's own includes declare at GLOBAL scope. None
 /// of them is a C++ keyword, so `cppReservedWords` does not catch them, but a

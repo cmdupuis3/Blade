@@ -1,0 +1,17 @@
+// TEST: A nested function with a mut parameter (rejects)
+// ERROR: BL1001 @ 10:19
+// ERROR-CONTAINS: only a top-level `function` can
+// ============================================================================
+// A nested function is a let-bound lambda; its parameters carry no write
+// permission and its calls have no `mut` positions to judge. The parser said
+// "Expected ')' but got identifier 'a'" at the parameter name; it now names
+// the rule.
+function f(a: Array<Float64 like Idx<3>>) -> Float64 = a(1)
+function g(x: Array<Float64 like Idx<3>>) -> Float64 = {
+    function f(a: mut Array<Float64 like Idx<3>>) -> Float64 = {
+        a(0) = 99.0
+        a(0)
+    }
+    let y = x
+    f(y)
+}

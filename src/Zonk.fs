@@ -106,6 +106,8 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
             | _ ->
                 match subst.GetLiteralDefault(n) with
                 | Some et -> IRTScalar et
+                // A var only ever seen as a SUBSCRIPT is an index: Int64.
+                | None when subst.IsIndexDefault n -> IRTScalar ETInt64
                 | None -> IRTScalar ETFloat64
     | IRTScalar _ | IRTUnit | IRTNat _ | IRTNamed _ -> resolved
     | IRTTuple ts -> IRTTuple (ts |> List.map (zonkType subst))
@@ -143,6 +145,345 @@ let zonkParam (subst: Subst) (p: TypedParam) : TypedParam =
 /// Zonk a TypedVarInfo
 let zonkVarInfo (subst: Subst) (v: TypedVarInfo) : TypedVarInfo =
     { v with Type = zonkType subst v.Type }
+
+// ---------------------------------------------------------------------------
+// SUBSCRIPT POSITIONS AND GUARDS (formalism 3.10), applied while zonking --
+// the one walk that sees every node with its final type.
+//
+// POSITIONS. Arithmetic on an index value is a POSITION (a plain integer),
+// never an index value: `i + 3` with `i : Nat<X>` is not proven to lie in X.
+// An ANNOTATED operand already refuses the arithmetic (inferArithType's
+// IndexTypeArithForbidden); an unannotated kernel parameter is still an open
+// variable when its body is typed, so the node took the variable's type and
+// became `Nat<X>` once the parameter met the iteration -- the loophole that
+// let `u(i + 3)` read past u. Its type is not rewritten (the binding, the
+// kernel return and the apply output all carry the same variable); instead
+// the guard below trusts no type at all, only a closed PROVEN list.
+//
+// GUARDS. A subscript into a slot of a NAMED index type is either PROVEN or
+// CHECKED. Proven is a closed list: an integer literal (judged at compile
+// time), a bare VARIABLE of exactly that index type that is not bound to an
+// unproven value (a lambda parameter a RANGE feeds -- RangeFedParams; every
+// other lambda parameter receives data -- a function parameter -- its
+// callers are coerced, see below -- or a let of a proven value), an index
+// cast or guard already emitted, and a halo window read. EVERYTHING else --
+// a position, a plain Int64, a `Nat<_>` wildcard, an `if` / `match` / block,
+// an element read out of an index-typed array, a call -- is wrapped in a
+// BL8006 guard `0 <= k < extent`, against the static extent or, for a
+// runtime extent, `extents(A)` of the array variable. The same guard is
+// applied to an argument meeting a `Nat<I>` PARAMETER of a direct call when
+// it is not proven (a function's calls to itself are typed before its
+// parameter is pinned, so the call judgment's eager coercion misses them).
+//
+// Stand-downs: compiler-synthesized buffers and indices (`__` names: `let
+// rec` prefix buffers, reduce desugars, element-bound loops, and the AD
+// sweeps, whose `__hi + offset` walks run over loop bounds already shrunk by
+// the halo -- GradSweeps' interior loop), keyed / compact / ragged slots, and
+// an anonymous (untagged) slot, which is not guarded at all (documented).
+// ---------------------------------------------------------------------------
+
+/// Per-zonk context: a fresh-id source for guards that must bind their index
+/// (an impure one), the let-bound variables that hold UNPROVEN values, and the
+/// static extent of a named index type (for call-argument guards, where the
+/// function type carries only the tag).
+type SubscriptGuardCtx = {
+    FreshId: unit -> IRId
+    Positions: System.Collections.Generic.HashSet<IRId>
+    IndexExtent: string -> int64 option
+    /// The RUNTIME extent of a named index type whose extent is a program
+    /// binding (`type RegionIdx = Idx<nr>` over a plain `let nr = ...`): the
+    /// binding, as a variable reference the guard can compare against. The
+    /// fallback when `IndexExtent` has no static value -- the named-function
+    /// kernel's twin of a lambda kernel's `extents(A)` fallback.
+    IndexExtentVar: string -> (string * IRId * IRType) option
+    /// The kernel parameters noteDataKernelParams marked: unproven AND exempt
+    /// from the `__`-name stand-down (they carry user data).
+    DataVars: System.Collections.Generic.HashSet<IRId>
+    /// The labels of a STRING-valued EnumIdx, in declaration (= ordinal)
+    /// order; None for any other type name.
+    EnumLabels: string -> string list option
+    /// Lambda parameters a RANGE operand feeds (`method_for(range<I>) <@>
+    /// lambda(i) -> ..`), collected over the whole module before zonk
+    /// (TypeCheck.rangeFedLambdaParams). Every OTHER user lambda parameter of
+    /// an index type is unproven -- a mask predicate, a sort key, a `>>@`
+    /// stage, a kernel over a key column all receive DATA.
+    RangeFedParams: System.Collections.Generic.HashSet<IRId>
+}
+
+/// A USER index type's values (a compiler tag -- a halo window, a `__`
+/// buffer's own index -- belongs to the machinery that made it).
+let private userIndexValue (t: IRType) =
+    match t with
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed tag) -> not (tag.StartsWith "__")
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefAnon _) -> true
+    | _ -> false
+
+let subscriptGuardCtx =
+    new System.Threading.ThreadLocal<SubscriptGuardCtx option>(fun () -> None)
+
+let private taggedIndexInner (t: IRType) =
+    match t with
+    | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64) as inner, (IRefNamed _ | IRefAnon _)) -> Some inner
+    | _ -> None
+
+/// A kernel parameter carrying index-typed DATA (noteDataKernelParams) is
+/// never a compiler-owned walk, whatever its name: the eta wrapper a named
+/// kernel becomes names its parameters `__k..`.
+let private isDataVar (vid: IRId) =
+    match subscriptGuardCtx.Value with
+    | Some ctx -> ctx.DataVars.Contains vid
+    | None -> false
+
+let rec private mentionsReservedName (e: TypedExpr) : bool =
+    match e.Kind with
+    | TExprVar (name, vid, _) -> name.StartsWith "__" && not (isDataVar vid)
+    | TExprBinOp (_, _, l, r) -> mentionsReservedName l || mentionsReservedName r
+    | TExprUnaryOp (_, x) -> mentionsReservedName x
+    | TExprApp (f, args) -> mentionsReservedName f || args |> List.exists mentionsReservedName
+    | TExprIf (c, t, f) -> mentionsReservedName c || mentionsReservedName t || mentionsReservedName f
+    | TExprBlock (_, Some f) -> mentionsReservedName f
+    | _ -> false
+
+let rec private isPureIndexExpr (e: TypedExpr) : bool =
+    match e.Kind with
+    | TExprVar _ | TExprLit _ -> true
+    | TExprBinOp (Blade.Ast.Elementwise, (Blade.Ast.OpAdd | Blade.Ast.OpSub | Blade.Ast.OpMul), l, r) ->
+        isPureIndexExpr l && isPureIndexExpr r
+    | TExprUnaryOp (Blade.Ast.OpNeg, x) -> isPureIndexExpr x
+    | _ -> false
+
+let private isLiteralIndex (e: TypedExpr) =
+    match e.Kind with
+    | TExprLit (Blade.Ast.LitInt _) -> true
+    | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt _) }) -> true
+    | _ -> false
+
+let private unprovenVar (vid: IRId) =
+    match subscriptGuardCtx.Value with
+    | Some ctx -> ctx.Positions.Contains vid
+    | None -> false
+
+/// Is `e` PROVEN to be a position of the index type named `tag` (see the
+/// section note)? `tag = None` asks "proven for SOME named index type" (a let
+/// binding, whose later use decides the slot).
+let rec private isProvenIndex (tag: string option) (e: TypedExpr) : bool =
+    let tagOk (t: IRType) =
+        match t, tag with
+        | IRTIdxTagged (_, IRefNamed n), Some want -> n = want
+        | IRTIdxTagged (_, IRefNamed _), None -> true
+        | IRTIdxTagged (_, IRefAnon _), _ -> true
+        | _ -> false
+    match e.Kind with
+    | TExprLit (Blade.Ast.LitInt _) -> true
+    // A negated literal is never a position: as a subscript it is refused at
+    // compile time, and as an index-typed VALUE it is `-1`, group_by's
+    // "excluded" key -- a `let` holding it is unproven, its reads guarded.
+    | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt _) }) -> false
+    | TExprVar (_, vid, _) -> tagOk e.Type && not (unprovenVar vid)
+    // an index cast / subscript guard already emitted
+    | TExprBlock (stmts, Some _) when stmts |> List.exists (function
+                                        | TStmtExpr { Kind = TExprConstraintCheck (_, "BL8006", _) } -> true
+                                        | _ -> false) -> true
+    | TExprBlock ([], Some f) -> isProvenIndex tag f
+    | TExprApp (f, _) | TExprIndex (f, _, _) ->
+        // a halo window read `w(o)`: the halo machinery owns the position
+        (match f.Type with
+         | IRTIdxTagged (_, IRefNamed t) -> t.StartsWith haloWinTagPrefix
+         | _ -> false)
+    | _ -> false
+
+/// The BL8006 guard around one unproven index `a` against extent `ext`.
+let private guardIndex (a: TypedExpr) (ext: TypedExpr) (what: string) : TypedExpr =
+    let span = a.Span
+    let mk k ty = mkTypedSpan k ty span
+    let intTy = IRTScalar ETInt64
+    let boolTy = IRTScalar ETBool
+    let msg = $"index out of bounds: {what}"
+    let guardOn (v: TypedExpr) =
+        let cond =
+            mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAnd,
+                            mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLe, mk (TExprLit (Blade.Ast.LitInt 0L)) intTy, v)) boolTy,
+                            mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpLt, v, ext)) boolTy)) boolTy
+        TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", msg)) IRTUnit)
+    if isPureIndexExpr a then
+        mk (TExprBlock ([ guardOn a ], Some a)) a.Type
+    else
+        match subscriptGuardCtx.Value with
+        | Some ctx ->
+            let vid = ctx.FreshId ()
+            let name = $"__sub{vid}"
+            let v = mk (TExprVar (name, vid, None)) a.Type
+            let tb : TypedBinding = {
+                Name = name; VarId = vid; Type = a.Type
+                Identity = None; IsMutable = false; Value = a
+                SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+            mk (TExprBlock ([ TStmtLet tb; guardOn v ], Some v)) a.Type
+        | None ->
+            failwith "internal: an impure subscript needs a guard binding, but zonk ran without a SubscriptGuardCtx (only TypeCheck.checkModule may zonk a module)"
+
+/// A slot the guard understands: a plain, dense, one-coordinate slot of a
+/// user-NAMED index type.
+let private guardableSlot (ix: IRIndexType) : string option =
+    match ix.Tag with
+    | Some tag when not (tag.StartsWith "__") && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1 ->
+        Some tag
+    | _ -> None
+
+/// A STRING key subscripting a string-valued EnumIdx slot -- a cell of a
+/// foreign-key column `Array<RegionIdx like StationIdx>` read as
+/// `region_weight(r)` -- is mapped to its ORDINAL here, where its final type
+/// is known (the kernel parameter carrying it was still open when the
+/// subscript was typed). A literal label is folded at type-check time
+/// (TypeCheckSupport.foldEnumIdxLabels); this is its run-time twin, built
+/// from ordinary nodes both lanes already evaluate:
+///     { let __ek = key; check(__ek == l0 || ... , BL8006);
+///       if __ek == l0 then 0 else if ... else n-1 }
+/// A key outside the label set aborts (BL8006) instead of reading some cell.
+let private enumKeyOrdinal (ix: IRIndexType) (a: TypedExpr) : TypedExpr option =
+    let isStringKey =
+        match IR.stripUnits a.Type with
+        | IRTIdxTagged (IRTScalar ETString, _) | IRTScalar ETString -> true
+        | _ -> false
+    match subscriptGuardCtx.Value, ix.Tag with
+    | Some ctx, Some tag when isStringKey ->
+        match ctx.EnumLabels tag with
+        | Some labels when not labels.IsEmpty ->
+            let span = a.Span
+            let mk k ty = mkTypedSpan k ty span
+            let intTy = IRTScalar ETInt64
+            let boolTy = IRTScalar ETBool
+            let vid = ctx.FreshId ()
+            let name = $"__ek{vid}"
+            let v = mk (TExprVar (name, vid, None)) a.Type
+            let eq (s: string) =
+                mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpEq, v, mk (TExprLit (Blade.Ast.LitString s)) a.Type)) boolTy
+            let cond =
+                labels |> List.map eq
+                |> List.reduce (fun l r -> mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpOr, l, r)) boolTy)
+            let check =
+                TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", $"index out of bounds: a key that is not a label of {tag}")) IRTUnit)
+            let ordinal =
+                labels
+                |> List.mapi (fun i s -> (i, s))
+                |> List.rev
+                |> List.fold (fun (acc: TypedExpr option) (i, s) ->
+                    let lit = mk (TExprLit (Blade.Ast.LitInt (int64 i))) intTy
+                    match acc with
+                    | None -> Some lit                                   // the last label: n - 1
+                    | Some rest -> Some (mk (TExprIf (eq s, lit, rest)) intTy)) None
+                |> Option.get
+            let tb : TypedBinding = {
+                Name = name; VarId = vid; Type = a.Type
+                Identity = None; IsMutable = false; Value = a
+                SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+            Some (mk (TExprBlock ([ TStmtLet tb; check ], Some ordinal)) intTy)
+        | _ -> None
+    | _ -> None
+
+/// Wrap the unproven subscripts of one (zonked) read in their guards.
+let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+    let synthetic = match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> false
+    match arr.Type with
+    | ArrayElem at when not synthetic && idxs.Length <= at.IndexTypes.Length
+                        && not (idxs |> List.exists (fun a -> a.Kind.IsTExprTuple)) ->
+        let rank = at.IndexTypes.Length
+        List.mapi (fun k (a: TypedExpr) ->
+            let ix = at.IndexTypes.[k]
+            match enumKeyOrdinal ix a with
+            | Some ord -> ord
+            | None ->
+            match guardableSlot ix with
+            | Some tag when not a.Kind.IsTExprWildcard
+                            && not (isLiteralIndex a)
+                            && not (mentionsReservedName a)
+                            && not (isProvenIndex (Some tag) a) ->
+                let intTy = IRTScalar ETInt64
+                let mkT k ty = mkTypedSpan k ty a.Span
+                let extent =
+                    match Blade.IRPrint.tryEvalIntIR ix.Extent with
+                    | Some n -> Some (mkT (TExprLit (Blade.Ast.LitInt n)) intTy, $"0 .. {n - 1L}")
+                    | None ->
+                        match arr.Kind with
+                        | TExprVar _ ->
+                            // runtime extent: read it off the array itself
+                            let exts =
+                                if rank = 1 then mkT (TExprExtents arr) intTy
+                                else mkT (TExprTupleIndex (mkT (TExprExtents arr) (IRTTuple (List.replicate rank intTy)),
+                                                           mkT (TExprLit (Blade.Ast.LitInt (int64 k))) intTy)) intTy
+                            Some (exts, "its extent")
+                        | _ -> None
+                match extent with
+                | Some (ext, shown) -> guardIndex a ext $"a position outside {tag} ({shown})"
+                | None -> a
+            | _ -> a) idxs
+    | _ -> idxs
+
+/// The same guard on an argument meeting a `Nat<I>` PARAMETER of a direct
+/// call, when it is not proven (the call judgment coerces a CLOSED plain
+/// integer eagerly -- this catches what was open there: a function's calls to
+/// itself, typed before its parameter was pinned; eta wrappers).
+let private guardIndexArgs (f: TypedExpr) (args: TypedExpr list) : TypedExpr list =
+    match f.Type, subscriptGuardCtx.Value with
+    | FuncElem (ps, _), Some ctx ->
+        args |> List.mapi (fun k a ->
+            if k >= ps.Length then a
+            else
+                match ps.[k] with
+                | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed tag)
+                    when not (tag.StartsWith "__")
+                         && not (isLiteralIndex a)
+                         && not (mentionsReservedName a)
+                         && not (isProvenIndex (Some tag) a) ->
+                    (match ctx.IndexExtent tag with
+                     | Some n ->
+                         let ext = mkTypedSpan (TExprLit (Blade.Ast.LitInt n)) (IRTScalar ETInt64) a.Span
+                         guardIndex a ext $"an argument outside {tag} (0 .. {n - 1L})"
+                     | None ->
+                         // A RUNTIME extent (formalism 3.10's guarantee does
+                         // not depend on the extent being static): compare
+                         // against the binding the extent names, read at the
+                         // call -- the named-function kernel's eta wrapper
+                         // `lambda(__k) -> wt(__k)` over a key column included.
+                         match ctx.IndexExtentVar tag with
+                         | Some (name, vid, ty) ->
+                             let ext = mkTypedSpan (TExprVar (name, vid, None)) ty a.Span
+                             guardIndex a ext $"an argument outside {tag} (its extent, {name})"
+                         | None -> a)
+                | _ -> a)
+    | _ -> args
+
+/// A kernel parameter bound to the ELEMENTS of an index-typed DATA array (a
+/// foreign-key column: `method_for(station_region) <@> lambda(r) ->
+/// region_weight(r)`) holds whatever the column stores -- data, not an
+/// iteration index -- so it is UNPROVEN, exactly like a `let` of a read out
+/// of that column: its subscripts are guarded. Only a range operand
+/// (`range<I>`, `0..n`) hands its kernel proven positions. Must run before
+/// the kernel body is zonked (the guards are placed there). A NAMED function
+/// kernel (`method_for(station_region) <@> wt`) reaches the slot as its eta
+/// wrapper `lambda(__k) -> wt(__k)`: marking `__k` makes the call argument
+/// unproven, and guardIndexArgs guards it against `wt`'s `Nat<I>` parameter
+/// (the function body keeps trusting its parameter, as for every caller).
+let private noteDataKernelParams (subst: Subst) (info: TypedApplyInfo) : unit =
+    match subscriptGuardCtx.Value with
+    | Some ctx when not info.IsComposeApply ->
+        let operands =
+            info.Arrays |> List.collect (fun a ->
+                match a.Kind with
+                | TExprZip es -> es
+                | _ -> [ a ])
+        let isData (a: TypedExpr) =
+            match a.Kind with
+            | TExprRange _ | TExprDotDot _ -> false
+            | _ -> true
+        match info.Kernel.Kind with
+        | TExprLambda li
+        | TExprReynolds ({ Kind = TExprLambda li }, _) when operands.Length = li.Params.Length ->
+            List.iter2 (fun (p: TypedParam) (a: TypedExpr) ->
+                if isData a && userIndexValue (zonkType subst p.Type) then
+                    ctx.Positions.Add p.VarId |> ignore
+                    ctx.DataVars.Add p.VarId |> ignore) li.Params operands
+        | _ -> ()
+    | _ -> ()
 
 /// Zonk all types in a TypedExpr tree (bottom-up)
 let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
@@ -222,10 +563,14 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         // Ternary
         | TExprIf (c, t, e) -> TExprIf (z c, z t, z e)
         // Indexing
-        | TExprApp (f, args) -> TExprApp (z f, zs args)
+        | TExprApp (f, args) ->
+            let f' = z f
+            TExprApp (f', guardIndexArgs f' (zs args))
         | TExprTupleIndex (t, i) -> TExprTupleIndex (z t, z i)
         | TExprPolyTail (p, drop) -> TExprPolyTail (z p, drop)
-        | TExprIndex (arr, idxs, id) -> TExprIndex (z arr, zs idxs, id)
+        | TExprIndex (arr, idxs, id) ->
+            let arr' = z arr
+            TExprIndex (arr', guardSubscripts arr' (zs idxs), id)
         | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
         // Collections
         | TExprTuple es -> TExprTuple (zs es)
@@ -252,7 +597,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprSequence es -> TExprSequence (zs es)
         | TExprAlign (es, sp) -> TExprAlign (zs es, sp)
         // Structured
-        | TExprLet (name, vid, value, body) -> TExprLet (name, vid, z value, z body)
+        | TExprLet (name, vid, value, body) ->
+            let value' = z value
+            notePosition vid (zt value.Type) value'
+            TExprLet (name, vid, value', z body)
         | TExprMatch (scr, cases) ->
             TExprMatch (z scr, cases |> List.map (zonkMatchCase subst))
         | TExprLambda info -> TExprLambda (zonkLambdaInfo subst info)
@@ -269,6 +617,7 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprObjectFor info ->
             TExprObjectFor { info with Kernel = z info.Kernel }
         | TExprApply info ->
+            noteDataKernelParams subst info
             TExprApply { info with
                             Loop = z info.Loop
                             Kernel = z info.Kernel
@@ -288,7 +637,21 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
                                           IndexTypes = at.IndexTypes |> List.map (zonkIndexType subst) })
                             SharedIndexTypes = info.SharedIndexTypes |> List.map (zonkIndexType subst)
                             OutputType = zt info.OutputType }
+    // Types are left as inference made them: a position keeps the `Nat<X>`
+    // its open operand gave it, because the guard (guardSubscripts) trusts no
+    // type -- only the closed PROVEN list -- and retyping a value node without
+    // its binding / kernel return / apply output would only make them disagree.
     { expr with Kind = kind; Type = zt expr.Type }
+
+/// A `let` of an index type whose zonked VALUE is not PROVEN (a position, a
+/// read out of an index-typed array, a call, a branch...) holds an unproven
+/// value: its uses are guarded like the value itself would have been. (A
+/// destructured let's LEAVES are always unproven: see zonkBinding.)
+and notePosition (vid: IRId) (bindingTy: IRType) (value: TypedExpr) : unit =
+    match subscriptGuardCtx.Value with
+    | Some ctx when (taggedIndexInner bindingTy).IsSome && not (isProvenIndex None value) ->
+        ctx.Positions.Add vid |> ignore
+    | _ -> ()
 
 and zonkMatchCase (subst: Subst) (case: TypedMatchCase) : TypedMatchCase =
     { Pattern = zonkPattern subst case.Pattern
@@ -320,13 +683,33 @@ and zonkStmt (subst: Subst) (stmt: TypedStmt) : TypedStmt =
 
 and zonkBinding (subst: Subst) (b: TypedBinding) : TypedBinding =
     let zt = zonkType subst
+    let value' = zonkExpr subst b.Value
+    notePosition b.VarId (zt b.Type) value'
+    // `let (a, b) = (keys(3), keys(0))`: a leaf of an index type is a
+    // component of a value nobody proved -- unproven, whatever it holds.
+    (match subscriptGuardCtx.Value with
+     | Some ctx ->
+         for (_, id, ty) in b.SubBindings do
+             if userIndexValue (zt ty) then ctx.Positions.Add id |> ignore
+     | None -> ())
     { b with
         Type = zt b.Type
-        Value = zonkExpr subst b.Value
+        Value = value'
         SubBindings = b.SubBindings |> List.map (fun (n, id, ty) -> (n, id, zt ty))
         PostChecks = b.PostChecks |> List.map (fun (id, e) -> (id, zonkExpr subst e)) }
 
 and zonkLambdaInfo (subst: Subst) (info: TypedLambdaInfo) : TypedLambdaInfo =
+    // A user lambda parameter of an index type is PROVEN only when a range
+    // feeds it; anything else hands it data (see RangeFedParams). `__`
+    // parameters belong to the desugarers (noteDataKernelParams marks the
+    // eta wrapper's when data feeds it).
+    (match subscriptGuardCtx.Value with
+     | Some ctx ->
+         for p in info.Params do
+             if not (p.Name.StartsWith "__") && not (ctx.RangeFedParams.Contains p.VarId)
+                && userIndexValue (zonkType subst p.Type) then
+                 ctx.Positions.Add p.VarId |> ignore
+     | None -> ())
     { info with
         Params = info.Params |> List.map (zonkParam subst)
         Body = zonkExpr subst info.Body

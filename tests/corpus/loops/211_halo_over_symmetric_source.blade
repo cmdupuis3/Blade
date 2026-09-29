@@ -1,0 +1,18 @@
+// TEST: Halo Over Symmetric Source
+// ============================================================================
+// A dense halo window reading ROWS OF A SYMMETRIC (packed) array. S = x (x) x
+// under `comm` is stored triangular, so S(i, w(k)) must be canonicalized
+// (the smaller coordinate first) before it touches the packed pool. The
+// sliding-window "halo carousel" used to take exactly this shape -- its gate
+// kept it off plain dense sources only -- and seeded its ring with raw
+// `S[i][ordinal]` subscripts into the PACKED row: wrong cells below the
+// diagonal, reads past the row's end above it. The carousel is gone; the
+// ordinary window read renders every offset.
+//
+// r(i, c) = x_i * (x_{c-1} + x_c + x_{c+1}) over the 5-cell interior.
+// ============================================================================
+type I = Idx<7>
+let x: Array<Float like I> = [1.0, 2.0, 4.0, 7.0, 11.0, 16.0, 22.0]
+let S = method_for(x, x) <@> lambda(a, b) where comm(a, b) -> a * b |> compute
+let r = method_for(range<I>, halo<I, [-1, 0, 1]>) <@> lambda(i, w) -> S(i, w(-1)) + S(i, w(0)) + S(i, w(1)) |> compute
+// EXPECT: r = [[7, 13, 22, 34, 49], [14, 26, 44, 68, 98], [28, 52, 88, 136, 196], [49, 91, 154, 238, 343], [77, 143, 242, 374, 539], [112, 208, 352, 544, 784], [154, 286, 484, 748, 1078]]

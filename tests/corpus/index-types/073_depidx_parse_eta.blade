@@ -1,4 +1,5 @@
 // TEST: DepIdx Parse Eta
+// NOPINS: declaration-only -- the eta-reduced DepIdx form parses and typechecks
 // DepIdx<outer, func>: eta-reduced form. Desugars at parse time to the
 // lambda form. Round 1 lowers to a placeholder dynamic extent regardless;
 // this test only confirms the surface form parses.

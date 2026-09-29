@@ -1,0 +1,82 @@
+// TEST: AD Same-Name Let Rebinding Differentiates Each Binding
+// WARN: BL4003  (the recursive array reads a(i) with its untagged step ordinal)
+import ad as ad
+// ============================================================================
+// `let` may rebind a name in its own scope. The reverse sweep keys its
+// cotangents and its replayed forward values by NAME, so a rebinding used to
+// route the first binding's cotangent into the second and re-evaluate the
+// first binding's uses at the SECOND value -- a silently wrong gradient
+// (h below gave 1.354 at 0.7; g gave 11). The differentiator now renames each
+// rebinding to a fresh name before either sweep runs (SSA over the body's
+// statement binders), so every binding is differentiated as written.
+// ad.jvp was already right; its legs pin the same numbers.
+// ============================================================================
+
+// h(x) = sin(x)^2 + cos(x)^2 == 1, so dh/dx == 0 everywhere.
+function h(x: Float) -> Float = {
+    let t = sin(x)
+    let t2 = t * t
+    let t = cos(x)
+    t2 + t * t
+}
+let (hv, hg) = ad.grad(h)(0.7)
+// EXPECT: hv = 1.0
+// EXPECT: hg = 0.0
+let (hjv, hjt) = ad.jvp(h)(0.7, 1.0)
+// EXPECT: hjt = 0.0
+
+// g(x) = x*x + 5 with an unrelated rebinding in between: dg/dx = 2x = 6 at 3.
+function g(x: Float) -> Float = {
+    let t = x
+    let u = t * t
+    let t = 5.0
+    u + t
+}
+let (gv, gg) = ad.grad(g)(3.0)
+// EXPECT: gv = 14.0
+// EXPECT: gg = 6.0
+let (gjv, gjt) = ad.jvp(g)(3.0, 1.0)
+// EXPECT: gjt = 6.0
+
+// A parameter rebound by a let: the first read is the parameter.
+// p(x) = (2x)^2 = 4x^2 -> dp/dx = 8x = 12 at 1.5.
+function p(x: Float) -> Float = {
+    let x = 2.0 * x
+    x * x
+}
+let (pv, pg) = ad.grad(p)(1.5)
+// EXPECT: pv = 9.0
+// EXPECT: pg = 12.0
+
+// ARRAY rebinding: two eager maps bound to the same name.
+//   b = a^2 (summed), then b = 3a (summed): f = sum a^2 + 3 sum a
+//   df/da(k) = 2 a(k) + 3 = [5, 7, 9] at a = [1, 2, 3]; f = 14 + 18 = 32.
+type I = Idx<3>
+function f(a: Array<Float like I>) -> Float = {
+    let b = method_for(a) <@> lambda(x) -> x * x |> compute
+    let s = reduce(b, (+))
+    let b = method_for(a) <@> lambda(x) -> 3.0 * x |> compute
+    s + reduce(b, (+))
+}
+let a0: Array<Float like I> = [1.0, 2.0, 3.0]
+let mut da: Array<Float like I> = [0.0, 0.0, 0.0]
+let fv = ad.grad(f)(a0, da)
+// EXPECT: fv = 32.0
+// EXPECT: da = [5.0, 7.0, 9.0]
+
+// A scalar read INSIDE a recursive array, then rebound after it:
+//   y(i) = c * a(i) with c = 2 (the FIRST c); c' = sum y = 2 sum a; r = c'^2
+//   r = 4 (sum a)^2 = 144 at a = [1, 2, 3]; dr/da(k) = 8 sum a = 48.
+function r(a: Array<Float like I>) -> Float = {
+    let c = 2.0
+    let rec y: Array<Float like I> =
+        match y with
+        | zero -> zero
+        | prefix :: i -> prefix :: c * a(i)
+    let c = reduce(y, (+))
+    c * c
+}
+let mut dr: Array<Float like I> = [0.0, 0.0, 0.0]
+let rv = ad.grad(r)(a0, dr)
+// EXPECT: rv = 144.0
+// EXPECT: dr = [48.0, 48.0, 48.0]

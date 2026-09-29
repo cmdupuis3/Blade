@@ -1,0 +1,31 @@
+// TEST: AD Division Partial Does Not Overflow (Both Modes)
+import ad as ad
+// d(x/y)/dy = -x/y^2 was emitted as -(c*x)/(y*y): at x = y = 1e200 the
+// denominator y*y overflows to inf and the partial came back 0 instead of
+// -1e-200. Both sweeps now spell it -(c/y)*(x/y), which stays finite
+// wherever the quotient itself does. Ordinary magnitudes are unchanged.
+// (The pins rescale by 1e200: a bare 1e-200 pin would sit under the
+// harness's absolute tolerance and pass against 0.)
+function q(x: Float, y: Float) -> Float = x / y
+let (qv, qx, qy) = ad.grad(q)(1.0e200, 1.0e200)
+let (jv, jt) = ad.jvp(q)(1.0e200, 1.0e200, 0.0, 1.0)
+let qx_scaled = qx * 1.0e200
+let qy_scaled = qy * 1.0e200
+let jt_scaled = jt * 1.0e200
+// EXPECT: qv = 1
+// EXPECT: qx_scaled = 1
+// EXPECT: qy_scaled = -1
+// EXPECT: jt_scaled = -1
+// 1/x at 1e155: -1e-310 is representable (subnormal); x*x = 1e310 is not.
+function r(x: Float) -> Float = 1.0 / x
+let (rv, rx) = ad.grad(r)(1.0e155)
+let (rjv, rjt) = ad.jvp(r)(1.0e155, 1.0)
+let rx_scaled = rx * 1.0e155 * 1.0e155
+let rjt_scaled = rjt * 1.0e155 * 1.0e155
+let rx_close = abs(rx_scaled + 1.0) < 1.0e-9
+let rjt_close = abs(rjt_scaled + 1.0) < 1.0e-9
+// EXPECT: rx_close = true
+// EXPECT: rjt_close = true
+let (ov, ox, oy) = ad.grad(q)(3.0, 4.0)
+// EXPECT: ox = 0.25
+// EXPECT: oy = -0.1875

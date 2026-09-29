@@ -1,0 +1,6 @@
+// TEST: Chained Equality (rejects)
+// ERROR: BL1999 @ 5:16
+// ERROR-CONTAINS: Equality does not chain
+// `x == 1 == true` is refused: parenthesize to compare the Bool result.
+let x = 1
+let c = x == 1 == true

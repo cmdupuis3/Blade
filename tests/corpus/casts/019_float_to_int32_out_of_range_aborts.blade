@@ -1,0 +1,9 @@
+// TEST: Float To Int32 Out Of Range Aborts (aborts)
+// ============================================================================
+// The Int32 range is checked on the DOUBLE, not after a detour through
+// Int64: Int32(floor(3e9)) printed 2147483647 interpreted and -1294967296
+// compiled (double -> int64 -> truncated). Now BL8014 in every lane.
+
+let xs: Array<Float64 like Idx<2>> = [3.0e9, 0.25]
+let v = Int32(floor(reduce(xs, (+))))
+// ABORT: error[BL8014]

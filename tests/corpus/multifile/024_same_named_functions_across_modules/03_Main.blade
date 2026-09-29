@@ -1,0 +1,22 @@
+// TEST: Same-named functions across modules and main
+// MODULE: Main
+// ============================================================================
+// Functions were renamed `<module>__<name>` only when two modules COLLIDED;
+// a main-module function (or a main local) of the same name as a module's
+// function was still one C++ name. Every non-main function is qualified now,
+// and a module function calling its own sibling (`A.g` calls `f`) still
+// reaches A's `f`, not main's.
+module Main
+import A
+import B
+
+function f(x: Float64) -> Float64 = x - 1.0
+
+let a = A.f(3.0)
+// EXPECT: a = 6
+let b = B.f(3.0)
+// EXPECT: b = 103
+let m = f(3.0)
+// EXPECT: m = 2
+let g = A.g(3.0)
+// EXPECT: g = 7

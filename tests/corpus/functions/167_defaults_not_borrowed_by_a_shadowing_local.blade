@@ -1,0 +1,26 @@
+// TEST: A local shadowing a defaults-carrying function does not borrow its defaults
+// ============================================================================
+// Parameter defaults were keyed by NAME: the block-local lambda `f` below was
+// filled from the global `f`'s default (`f(1.0)` became `f(1.0, 2.0)`, an
+// arity error), and a nested function named `f` did the same. They are keyed
+// by the binding the call resolves to.
+// ============================================================================
+function f(x: Float64, y: Float64 = 2.0) -> Float64 = x + y
+let r = {
+    let f = lambda(x: Float64) -> x * 10.0
+    f(1.0)
+}
+// EXPECT: r = 10
+function g(a: Float64) -> Float64 = {
+    function f(z: Float64) -> Float64 = z * 3.0
+    f(a)
+}
+let s = g(2.0)
+// EXPECT: s = 6
+let t = f(1.0)
+// EXPECT: t = 3
+let u = {
+    let k = lambda(x: Float64, y: Float64 = 5.0) -> x - y
+    k(1.0)
+}
+// EXPECT: u = -4

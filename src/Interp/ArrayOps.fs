@@ -527,7 +527,7 @@ let readCompact (arr: BladeArray) (logicalCoords: int64 list) : Value =
         // check prevents.
         (match logicalCoords |> List.tryFind (fun c -> c < 0L || c >= n) with
          | Some bad ->
-             raise (InterpPanic ("BL8003",
+             raise (InterpPanic ("BL8006",
                                  $"OrbIdx{(Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix))} read: coordinate {bad} outside [0,{n})",
                                  None, 0))
          | None ->
@@ -563,7 +563,7 @@ other index slots (readCompact)"
 
 /// Plain dense random read through an index list: chained peels (row-major).
 /// A full index list yields a scalar; a partial list yields a sub-array view.
-/// Out-of-range indices panic BL8003 (matching blade_rt on the abort probes).
+/// Out-of-range indices panic BL8006, the out-of-bounds code the emitted guards use.
 /// A compact (symmetric/antisym/Hermitian) array with a FULL index list routes
 /// to the canonical reader (readCompact); a partial (sub-array) compact read is
 /// still gated (M3+).
@@ -598,9 +598,9 @@ subscripts; a partial (sub-array) read of a wreath pool has no residual class"
         | iv :: rest ->
             match cur with
             | VArray a ->
-                let i = toI64v iv
+                let i = match iv with VString _ -> raise (InterpPanic ("BL8006", "index out of bounds: a string key is not a position", None, 0)) | _ -> toI64v iv
                 if i < 0L || a.Extents.Length < 1 || i >= a.Extents.[0] then
-                    raise (InterpPanic ("BL8003", "array index out of bounds", None, 0))
+                    raise (InterpPanic ("BL8006", "index out of bounds", None, 0))
                 go (peelDim a i) rest
             | _ -> raise (InterpPanic ("BL8003", "indexing a non-array value", None, 0))
     go (VArray arr) indices
@@ -1859,13 +1859,25 @@ let buildGroupKeys (keyArrays: BladeArray list) (gkCase: GroupKeyCase) : GroupKe
     let ngroups =
         match gkCase with
         | GKPositional ng ->
+            // A key past the last bucket aborts, like the emitted counts pass
+            // (genGroupKeysBinding's Case 1 guard) -- never an index past the
+            // counts array.
             for i in 0 .. n - 1 do
-                if not dropped.[i] then buckets.[i] <- int (toI64v (readCell keyArrays.[0] [ int64 i ]))
+                if not dropped.[i] then
+                    let k = toI64v (readCell keyArrays.[0] [ int64 i ])
+                    if k >= int64 ng then
+                        raise (InterpPanic ("BL8006", $"index out of bounds: a group_keys key outside 0 .. {ng - 1}", None, 0))
+                    buckets.[i] <- int k
             ng
         | GKEnum values ->
+            // An unknown key aborts (the emitted bucket lookup's twin): it
+            // used to fall into bucket 0, silently merging with the first group.
             for i in 0 .. n - 1 do
                 let v = readCell keyArrays.[0] [ int64 i ]
-                buckets.[i] <- (match values |> Array.tryFindIndex (eqValues v) with Some p -> p | None -> 0)
+                buckets.[i] <-
+                    (match values |> Array.tryFindIndex (eqValues v) with
+                     | Some p -> p
+                     | None -> raise (InterpPanic ("BL8006", "index out of bounds: a group_keys key outside its EnumIdx", None, 0)))
             values.Length
         | GKDynamic ->
             let lookup = Dictionary<string, int>()
@@ -2067,6 +2079,16 @@ let private emitFlat (sb: StringBuilder) (name: string) (arr: BladeArray) (et: E
         sb.Append(formatCell et (readCell arr coords)) |> ignore)
     sb.Append("]").Append('\n') |> ignore
 
+/// The value text a DENSE array prints as -- emitFlat's `[...]` without the
+/// `name = ` framing or the newline. A struct's array-typed field prints this
+/// (the twin of CodeGen.genPrintFieldArray).
+let formatDenseArrayText (arr: BladeArray) (et: ElemType) : string =
+    let sb = StringBuilder()
+    emitFlat sb "" arr et
+    let s = sb.ToString()
+    // emitFlat wrote `" = " + text + "\n"` for the empty name.
+    s.Substring(3, s.Length - 4)
+
 /// Symmetric-aware print: mirrors CodeGen.genPrintArraySymAware (CodeGen.fs:9791)
 /// exactly. Iterates the compact (triangular/strict-triangular) index space in
 /// left-justified storage coordinates -- bound at group component a is
@@ -2148,13 +2170,16 @@ let printArrayBinding (b: IRBinding) (arr: BladeArray) (sb: StringBuilder) : uni
         match elemThrough arrType.ElemType with
         | Some et when isPrintableScalarEt et ->
             match arr.Data with
-            // A group_by result is SRagged too, but its auto-print is the dense
-            // flat print over Extents=[ngroups; 0] (inner extent 0 emits no
-            // cells) -- route it to the flat emitter, not the backing pool.
-            | SRagged (rows, lens, _) when (match b.Value with IRGroupBy _ -> false | _ -> true) ->
-                // A ragged / DepIdx literal prints its rows nested, like every
-                // other rank-2 array (`lens[i]` bounds each row): the row
-                // boundary is the one thing the flat pool cannot show.
+            // A ragged / DepIdx literal AND a group_by result (or a copy of
+            // one: `let h = g` shares the SRagged value) print their rows
+            // nested, like every other rank-2 array (`lens[i]` bounds each
+            // row): the row boundary is the one thing the flat pool cannot
+            // show. The compiled printer walks a grouped array's rows through
+            // the grouping's offsets (genPrintStatements' grouped arm); it
+            // used to print the placeholder inner extent 0, i.e. `[[], [], []]`,
+            // and this arm excluded IRGroupBy to match -- which made a notebook
+            // alias print real rows where `blade run` printed empty ones.
+            | SRagged (rows, lens, _) ->
                 sb.Append(b.Name).Append(" = [") |> ignore
                 rows
                 |> Array.iteri (fun i row ->

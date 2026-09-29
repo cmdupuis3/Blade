@@ -1,0 +1,9 @@
+// TEST: Int Mod By Zero Aborts (aborts)
+// ============================================================================
+// Integer `%` by zero panics BL8013 with its own message, identically in the
+// compiled, interpreted and LLVM lanes (docs/formalism.md section 2.4).
+
+let d: Array<Int64 like Idx<2>> = [5, -5]
+let z = reduce(d, (+))
+let r = 7 % z
+// ABORT: error[BL8013]: integer modulo by zero

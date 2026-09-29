@@ -1,0 +1,35 @@
+// TEST: stdlib stats over integer and Float32 rows
+// ============================================================================
+// `mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)` over an Int64 row
+// was INTEGER division: `mean([1, 2, 4])` printed 2, `variance` 1, and
+// `stddev` passed `check` and died in g++ (`T^0 = sqrt(Int)`). The stats
+// module now converts in its own body -- `Float64(reduce(row, (+)))`, a
+// GENERIC cast judged per call -- so every real row gives a Float64, a Float64
+// row computes exactly what it did (the casts are identities), and the kernel
+// form over integer rows agrees with the direct form.
+// ============================================================================
+from stats import mean, variance, stddev
+
+let xi = [1, 2, 4]
+let mi = mean(xi)
+// EXPECT: mi = 2.33333333333333
+let vi = variance(xi)
+// EXPECT: vi = 1.55555555555556
+let si = stddev(xi)
+// EXPECT: si = 1.24721912892465
+
+let xs: Array<Float32 like Idx<3>> = [1.0, 2.0, 4.0]
+let ms = mean(xs)
+// EXPECT: ms = 2.33333333333333
+let vs = variance(xs)
+// EXPECT: vs = 1.55555555555556
+
+let xf = [1.0, 2.0, 4.0]
+let mf = mean(xf)
+// EXPECT: mf = 2.33333333333333
+
+let R = [[1, 2, 4], [3, 3, 4]]
+let rowmeans = method_for(R) <@> mean |> compute
+// EXPECT: rowmeans = [2.33333333333333, 3.33333333333333]
+let again = mean([2, 3])
+// EXPECT: again = 2.5

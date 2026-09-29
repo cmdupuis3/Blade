@@ -192,8 +192,13 @@ module Codes =
             // the first signature died blaming the caller. Same-scope only --
             // nested `function`s desugar to block lets and may still shadow an
             // outer name. Refused until same-name clause dispatch exists
-            // (plan-match-statements.md §5 R1).
-            "BL2009", "duplicate function declaration"
+            // (plan-match-statements.md §5 R1). Widened to every top-level
+            // namespace: a second top-level `let`/`static` of a name (or one
+            // beside a `function` of it), a second `type`/`struct`/sum type,
+            // a second `Unit`, and -- across the modules of one program --
+            // a type or variant-constructor name declared twice (type
+            // identity is not module-qualified yet).
+            "BL2009", "duplicate declaration"
             // BL3xxx: types
             "BL3001", "type mismatch"
             "BL3002", "arity mismatch"
@@ -284,6 +289,14 @@ module Codes =
             // specialization shrink past the base arm. The condition belongs
             // INSIDE the chosen arm's body.
             "BL3021", "undecidable specialization-index match arm"
+            // BL3022 / BL3023: WARNINGS, static coverage facts about a match's
+            // arm list (TypeCheckSupport.matchCoverageWarnings). An arm after
+            // an unguarded catch-all (or after every constructor) can never
+            // be selected; a match over a variant/enum type that names
+            // neither every constructor nor a catch-all aborts at run time
+            // (BL8002) on the missing ones.
+            "BL3022", "unreachable match arm"
+            "BL3023", "non-exhaustive match over a variant type"
             "BL3999", "type error"
             // BL4xxx: constraints / static
             "BL4001", "constraint violation"
@@ -391,6 +404,13 @@ module Codes =
             "BL5700", "display elaboration error"
             // BL6xxx: IR validation
             "BL6001", "IR validation error"
+            // A construct that TYPECHECKS but sits where lowering has no rule
+            // for it (`compound(...)` / `rand.<fam>(...)` / `sparse(...)` /
+            // `fill_random` inside a function body, an array-typed `zero` as a
+            // return value, a stray `_`). Raised by Lowering's refuseLowering,
+            // spanned at the expression; `blade check` lowers, so it reports
+            // these too.
+            "BL6002", "construct not valid in this position"
             // BL7xxx: backend limits
             "BL7001", "feature not yet supported by this backend"
             "BL7002", "CUDA backend limit"
@@ -455,6 +475,19 @@ module Codes =
             // (dense, compound + mask, stream open), and mirrored by the
             // interpreter's materializeProviderRead.
             "BL8012", "provider shape mismatch"
+            // An integer operation with no integer answer: `/` or `%` by zero,
+            // or `^` with a negative exponent. The ARITHMETIC CONTRACT
+            // (docs/formalism.md section 2.4): raised identically by
+            // blade_rt::idiv / imod / ipow (blade_runtime.hpp), the LLVM shim
+            // (blade_llvm_shim.c) and the interpreter (Interp/Numerics.fs).
+            // The compiled program used to die with a silent
+            // STATUS_INTEGER_DIVIDE_BY_ZERO and the interpreter borrowed BL8007.
+            "BL8013", "integer arithmetic fault"
+            // A float -> integer cast (`Int64(floor(x))`) of NaN, an infinity,
+            // or a value outside the target width. Same three-lane contract;
+            // the compiled lane used to answer x86's INT_MIN sentinel while
+            // the interpreter saturated.
+            "BL8014", "float-to-integer conversion out of range"
             // BL9xxx: internal compiler errors
             "BL9001", "internal compiler error"
             "BL9002", "internal codegen invariant violated"

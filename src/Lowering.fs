@@ -391,6 +391,22 @@ let rec forceReturnCombinator (expr: IRExpr) : IRExpr =
 let forceCallableBody (body: IRExpr) : IRExpr =
     forceReturnCombinator (forceBareCombinatorLets body)
 
+/// A LOWERING REFUSAL: the program typechecked, but a construct sits in a
+/// position lowering has no rule for (`compound(...)` or `rand.<fam>(...)`
+/// inside a function body, an array-typed `zero` as a return value, ...).
+/// Coded BL6002 and spanned at the offending expression, so `blade check`
+/// (which lowers after typechecking) and `blade emit` report it where it is
+/// written -- it used to be a spanless message from a bare `failwith`.
+let private refuseLowering (span: Span) (message: string) : 'a =
+    raise (Blade.Diagnostics.BladeDiagnosticException
+            (Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate span message))
+
+/// An internal lowering invariant broke (a shape typecheck should already have
+/// refused reached lowering): BL9003, spanned where the span is known.
+let private loweringIce (span: Span) (message: string) : 'a =
+    raise (Blade.Diagnostics.BladeDiagnosticException
+            ({ Blade.Diagnostics.Codes.ice message with Code = "BL9003"; Span = span }))
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -401,7 +417,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // A wildcard `_` is a hole, not a value. It is only meaningful where a
         // context consumes it (a compound-index coordinate marks a free axis).
         // Reaching lowering means it was used where no context interpreted it.
-        failwith "wildcard `_` is not valid here: it can only appear as a compound-index coordinate (e.g. B((a, _, c))) or in a pattern"
+        refuseLowering texpr.Span "wildcard `_` is not valid here: it can only appear as a compound-index coordinate (e.g. B((a, _, c))) or in a pattern"
     
     | TExprVar (name, varId, identity) ->
         // Variant constructors without payload (e.g. North) have type IRTNamed
@@ -441,7 +457,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // element type here, where Types.fs is in scope.
             match Blade.Types.castTargetOf name with
             | Some et -> IRUnaryOp (IRCast et, e)
-            | None -> failwith $"internal: OpCast head '{name}' is not a numeric cast target"
+            | None -> loweringIce texpr.Span $"OpCast head '{name}' is not a numeric cast target"
     
     | TExprApp (func, args) when
         (match func.Type, args with
@@ -470,7 +486,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // walk (haloExtentClash's checkSite) refuses a non-literal
             // offset over a compound inner with a spanned diagnostic. Kept
             // as the invariant it now is.
-            | None -> failwith "internal: halo window read over a masked domain reached lowering with a non-literal offset (TypeCheck.checkSite should have refused it)"
+            | None -> loweringIce offArg.Span "halo window read over a masked domain reached lowering with a non-literal offset (TypeCheck.checkSite should have refused it)"
         else
             IRBinOp (IRElementwise, IRAdd, f, lowerTypedExpr env offArg)
 
@@ -729,25 +745,25 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         // TDeclLet intercepts it (needs the binding's array type for the
         // shape, records it in RandomInits). Reaching here means it was used
         // inline / in a nested let, which has no annotation to supply the shape.
-        failwith "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
+        refuseLowering texpr.Span "fill_random(mod) is only valid as an annotated top-level let-binding value (let A: Array<..> = fill_random(mod))"
 
     | TExprRandGen _ ->
         // Materialized only as a top-level let-binding value, where TDeclLet
         // intercepts it (records the kind/key/params in RandomInits, allocates
         // the self-typed array). Reaching here means it was used inline / nested.
-        failwith "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n))"
+        refuseLowering texpr.Span "rand.<fam>(...) is only valid as a top-level let-binding value (let A = rand.uniform(key, n)); inside a function, draw at top level and pass the array in"
 
     | TExprCompound _ ->
         // Only meaningful as a top-level let-binding value, where TDeclLet
         // intercepts it (records the lowered dense + mask in CompoundInits,
         // leaves a unit placeholder). Reaching here means it was used inline
         // or nested, which the compound-construction codegen path does not handle.
-        failwith "compound(dense, mask) is only valid as a top-level let-binding value (let B = compound(dense, mask))"
+        refuseLowering texpr.Span "compound(dense, mask) is only valid as a top-level let-binding value (let B = compound(dense, mask)); inside a function, build the compound at top level and pass it in"
 
     | TExprSparse _ ->
         // Same top-level-let-only discipline as compound(dense, mask): the
         // TDeclLet loop intercepts and records the values expr in SparseInits.
-        failwith "sparse(values, keys) is only valid as a top-level let-binding value (let S = sparse(values, keys))"
+        refuseLowering texpr.Span "sparse(values, keys) is only valid as a top-level let-binding value (let S = sparse(values, keys))"
     
     | TExprGuard (cond, body) ->
         IRGuard (lowerTypedExpr env cond, lowerTypedExpr env body)
@@ -876,20 +892,29 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     
     | TExprZero ->
         // Lower to type-appropriate zero literal based on resolved type
+        // (through a unit annotation or index tag, which erase; a complex
+        // zero is built at its own width -- the untyped `0` it used to be
+        // has no `complex + int` overload in C++ and no value in the
+        // interpreter).
+        match zeroLiteralOf texpr.Type with
+        | Some lit -> lit
+        | None ->
         match texpr.Type with
-        | IRTScalar ETInt32 | IRTScalar ETInt64 -> IRLit (IRLitInt 0L)
-        | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> IRLit (IRLitInt 0L)
-        | IRTScalar ETBool -> IRLit (IRLitBool false)
-        | IRTScalar ETFloat32 -> IRLit (IRLitFloat32 0.0f)
-        | IRTScalar ETFloat64 -> IRLit (IRLitFloat 0.0)
-        | IRTInfer _ -> IRLit (IRLitFloat 0.0)  // unresolved defaults to float
+        // A GENERIC zero (`a + zero` in `addz(a: T^0)`: inferBinOp bound
+        // the zero to T) has no literal yet -- a `0.0` here was every
+        // instance's zero, `int64 + double` at an Int64 one (g++ -Werror,
+        // BL9002). Keep the type on the node: HM monomorphization
+        // substitutes it per instance, and resolveTypedZerosModule turns it
+        // into that instance's literal (a variable still open there takes
+        // the old Float64 default).
+        | IRTInfer _ | IRTUnitAnnotated (IRTInfer _, _) -> IRZero texpr.Type
         | ArrayElem _ ->
             // An array-typed zero that reached lowering sits in a position
             // the binding-site materialization (inferLetBindingValue's zero
             // arm) does not cover -- emitting IRZero here would render as a
             // scalar `0` under an array type (a null pointer). Fail loudly.
-            failwith "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
-        | _ -> IRZero  // fallback
+            refuseLowering texpr.Span "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
+        | other -> IRZero other  // fallback (a struct / string / tuple zero)
     
     | TExprReynolds (kernel, isAntisym) ->
         IRReynolds (lowerTypedExpr env kernel, isAntisym)
@@ -1316,26 +1341,34 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
                    | OpLt -> IRLt | OpLe -> IRLe | OpGt -> IRGt | OpGe -> IRGe
                    | OpAnd -> IRAnd | OpOr -> IROr
                    | OpMath2 name -> IRMath2 name | _ -> IRAdd
-        // Lambda params for arithmetic ops require concrete scalar types;
-        // default to Float64 if the array's elem type isn't a primitive
-        // (e.g. struct or unresolved infer), since codegen would otherwise
-        // fail downstream.
-        let elemTypeL =
-            match leftExpr.Type with
+        // A kernel param takes its operand's element type: the primitive
+        // (through a unit annotation or index tag, which erase), or -- inside
+        // a generic body -- the signature's element VARIABLE, kept open so HM
+        // monomorphization clones the kernel per instance and substitutes it
+        // (IRMono.specializeHMFunction's needsClone). Defaulting that variable
+        // to Float64 computed an Int64 instance's `a * b` in double: wrong
+        // past 2^53, narrowed on the way back. Float64 remains the fallback
+        // only for a non-primitive element (a struct), which codegen refuses
+        // downstream anyway.
+        let kernelElemOf (t: IRType) : IRType =
+            match t with
             | ArrayElem a ->
-                match a.ElemType with PrimElem et -> et | _ -> ETFloat64
-            | _ -> ETFloat64
-        let elemTypeR =
-            match rightExpr.Type with
-            | ArrayElem a ->
-                match a.ElemType with PrimElem et -> et | _ -> ETFloat64
-            | _ -> ETFloat64
+                match a.ElemType with
+                | AnyPrimElem et -> IRTScalar et
+                | InferElem _ as v -> v
+                // A unit-carrying generic element (`T<m>^1`): the unit erases
+                // like a concrete element's does; the variable stays open.
+                | IRTUnitAnnotated (InferElem _ as v, _) -> v
+                | _ -> IRTScalar ETFloat64
+            | _ -> IRTScalar ETFloat64
+        let elemTypeL = kernelElemOf leftExpr.Type
+        let elemTypeR = kernelElemOf rightExpr.Type
         let aId = env.Builder.FreshId()
         let bId = env.Builder.FreshId()
-        let body = IRBinOp(IRElementwise, irOp, IRVar (aId, IRTScalar elemTypeL), IRVar (bId, IRTScalar elemTypeR))
+        let body = IRBinOp(IRElementwise, irOp, IRVar (aId, elemTypeL), IRVar (bId, elemTypeR))
         let parms : IRParam list = [
-            { Name = "__a"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
-            { Name = "__b"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId }
+            { Name = "__a"; Type = elemTypeL; Index = 0; VarId = aId }
+            { Name = "__b"; Type = elemTypeR; Index = 1; VarId = bId }
         ]
         // Comparison/logical ops produce bool; arithmetic ops keep the left
         // operand's element type (matches IRBinOp typing conventions).
@@ -1343,7 +1376,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
             match irOp with
             | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
                 IRTScalar ETBool
-            | _ -> IRTScalar elemTypeL
+            | _ -> elemTypeL
         let commGroups = if mode = Elementwise then [[0; 1]] else []
         let lambdaInfo =
             mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false
@@ -1560,7 +1593,7 @@ let lowerTypedTypeDef (env: TypedLowerEnv) (ttd: TypedTypeDef) : IRTypeDef =
     | TTDMutualGroup _ ->
         // Lowered by lowerTypedDecl's TDeclType arm into one IRTDAlias per
         // member; reaching here is an internal invariant violation.
-        failwith "TTDMutualGroup lowers via lowerTypedDecl (one alias per member)"
+        loweringIce noSpan "TTDMutualGroup lowers via lowerTypedDecl (one alias per member)"
 
 /// Lower a typed binding
 let lowerTypedBinding (env: TypedLowerEnv) (binding: TypedBinding) : IRBinding * TypedLowerEnv =
@@ -2323,6 +2356,66 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
     }
     (irModule, moduleExport)
 
+/// The C++ spelling of a module name as an identifier prefix: `units.SI` ->
+/// `units__SI`. The same function names a binding (whose IR name is the
+/// dotted `units.SI.x`, which CodeGenState.sanitizeCppName renders
+/// `units__SI__x`) and a function (`units__SI__f`), so both kinds of module
+/// member share one scheme.
+let moduleCppPrefix (moduleName: string) : string = moduleName.Replace(".", "__")
+
+/// The qualifier of the module at `index` in a multi-module program.
+let private moduleQualifier (index: int) (moduleName: string) : string =
+    if moduleName = "" then $"m{index}" else moduleName
+
+/// MODULE NAMESPACING. Every module of a program lands in ONE C++ translation
+/// unit (CodeGen merges them) and in one interpreter environment, and nothing
+/// used to qualify their names: `Util.scale + Util2.scale` passed the checker
+/// and died in g++ as a redeclaration of `double scale`, and a main-module
+/// `let scale` collided with an imported module's `scale` the same way. (Worse
+/// than a redeclaration is the silent case: a main-module FUNCTION parameter
+/// named `scale` shadowed the imported global inside that function.)
+///
+/// So every module but the LAST -- the entry (main) module, which every path
+/// that assembles a program puts last: ModuleResolve's dependency order, the
+/// multi-file corpus harness, `ide check`'s dependency prepend -- has its
+/// members renamed here, ONCE, after every lowering and optimization pass, so
+/// the C++ lane and the interpreter consume the same names:
+///   - a top-level binding `x` of module `M` becomes `M.x`: that is also its
+///     print LABEL in both lanes (`M.x = ...`) and its `--print` spelling, and
+///     sanitizeCppName renders it `M__x` in C++;
+///   - a function `f` becomes `M__f` (functions never print). Lifted lambdas
+///     (`__lambda_<id>`) are id-unique already and keep their names.
+/// Every reference is IRId-based (IRVar), and codegen's VarNames map is filled
+/// from these Name fields, so the rename is total by construction. The main
+/// module is untouched, so a single-module program emits byte-identical C++.
+///
+/// TYPES are not renamed: a type name declared by two modules of one program
+/// is refused by the checker (BL2009, TypeCheck.checkProgram) until type
+/// identity is module-qualified.
+let qualifyModuleNames (program: IRProgram) : IRProgram =
+    match program.Modules with
+    | [] | [ _ ] -> program
+    | modules ->
+        let lastIdx = modules.Length - 1
+        { program with
+            Modules =
+                modules |> List.mapi (fun i m ->
+                    if i = lastIdx then m
+                    else
+                        let q = moduleQualifier i m.Name
+                        let fp = moduleCppPrefix q
+                        { m with
+                            Functions =
+                                m.Functions |> List.map (fun f ->
+                                    if f.Name.StartsWith "__lambda_" then f
+                                    else { f with Name = $"{fp}__{f.Name}" })
+                            Bindings =
+                                m.Bindings |> List.map (fun b ->
+                                    // `_(a,b)` tuple carriers are emitted by id
+                                    // (bindingCppName) and never print.
+                                    if b.Name.StartsWith "_(" then b
+                                    else { b with Name = $"{q}.{b.Name}" }) }) }
+
 /// Lower a typed program (with optional raw program for static evaluation)
 let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (builder: IRBuilder) : IRProgram =
     // The scratch-reuse plan is keyed by let id and let ids restart per
@@ -2366,13 +2459,22 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
             | PatStruct (_, flds) -> flds |> List.collect (snd >> patNames)
             | PatVariant (_, Some inner) | PatGuarded (inner, _) | PatTyped (inner, _) -> patNames inner
             | _ -> []
-        for m in p.Modules do
+        // Keyed by the name codegen will look the declaration up under, which
+        // for a non-main module is its QUALIFIED name (qualifyModuleNames):
+        // recording the bare name would both miss the lookup and let an
+        // imported module's `x` shadow main's own `x` span.
+        let lastIdx = p.Modules.Length - 1
+        p.Modules |> List.iteri (fun i m ->
+            let modName = m.Name |> String.concat "."
+            let q = moduleQualifier i modName
+            let valueKey (n: string) = if i = lastIdx || lastIdx = 0 then n else $"{q}.{n}"
+            let funcKey (n: string) = if i = lastIdx || lastIdx = 0 then n else $"{moduleCppPrefix q}__{n}"
             for d in m.Decls do
                 match d.Value with
                 | DeclLet b | DeclStatic b ->
-                    for n in patNames b.Pattern do IR.recordDeclSpan n d.Span
-                | DeclFunction fd -> IR.recordDeclSpan fd.Name d.Span
-                | _ -> ()
+                    for n in patNames b.Pattern do IR.recordDeclSpan (valueKey n) d.Span
+                | DeclFunction fd -> IR.recordDeclSpan (funcKey fd.Name) d.Span
+                | _ -> ())
     | None -> ()
 
     for (tmod, rawDecls) in List.zip program.Modules rawModules do
@@ -2429,6 +2531,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // an array op at lowering time (its element type was an unresolved
         // var), so it gets the same elementwise-loop lowering top-level
         // `x + y` does.
+        // Generic zeros first: each specialization's `zero` becomes its own
+        // literal (so a broadcast built below carries the right scalar type).
+        let irModule = IRMono.resolveTypedZerosModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also
@@ -2440,7 +2545,12 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // shape), and in Lowering rather than a back end so codegen and the
         // interpreter consume one tree. Per-pass gates: BLADE_FUSION,
         // BLADE_FREEZE_IDIOM (the latter's recognition runs pre-lowering at
-        // inferRecArray, where the idiom's shape is still declarative).
+        // inferRecArray, where the idiom's shape is still declarative), and
+        // BLADE_CSE / BLADE_POOL_REUSE for the two passes below. Because
+        // both lanes consume the optimized tree, the interpreter differential
+        // CANNOT see an optimizer bug (both print the same wrong answer); the
+        // lane that can is `blade test opt-diff` (tests/OptDiff.fs), which
+        // compares every gate OFF against every gate ON.
         let irModule = Optimize.optimizeModule env.Builder irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
@@ -2475,7 +2585,8 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // bare ones left behind are exactly the deferred join operands it
         // must see through. Records into Types.PoolReuseTable for codegen.
         // Let-level CSE over repeatable values first (fewer lets, fewer
-        // pools), then the scratch-reuse plan over what remains.
+        // pools), then the scratch-reuse plan over what remains. Gates:
+        // BLADE_CSE, BLADE_POOL_REUSE (Optimize.cseEnabled/poolReuseEnabled).
         let irModule = Optimize.cseModule irModule
         Optimize.planPoolReuse irModule
         // mask+contains fusion always runs a linear scan; the semijoin
@@ -2489,6 +2600,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // Must run after EVERY specializing pass -- each can make a function
     // concrete or mint new references -- and before validateIR.
     IRValidate.eliminateDeadPolymorphs { Modules = irModules }
+    // Module namespacing, after every pass that could mint or specialize a
+    // member (see qualifyModuleNames).
+    |> qualifyModuleNames
 
 // Typecheck warning surfacing (shared by every CLI lane)
 
@@ -2545,7 +2659,7 @@ let lower (source: string) : Result<IRProgram, string> =
             // Lowering can THROW on a failed compile-time provider load; keep
             // this convenience entry point from surfacing an unhandled exception.
             (try Ok (lowerTypedProgram typedProgram (Some program) builder)
-             with ex -> Error ex.Message)
+             with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message)
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
@@ -2582,8 +2696,15 @@ let private lowerCheckedProgram (program: Program)
             let r = Ok (lowerTypedProgram typedProgram (Some program) builder, warnings)
             phaseMark sw "lower"
             r
-        with ex ->
-            Error [ Blade.Diagnostics.mkError "BL6002" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
+        with
+        // A phase that refuses by exception with its OWN coded diagnostic
+        // (IRMono's base-case-free recursion refusal) keeps its code.
+        | Blade.Diagnostics.BladeDiagnosticException d -> Error [ d ]
+        // Anything else (a compile-time provider load that failed, a stage
+        // outside Lowering refusing by exception) is BL6001's "a lowering
+        // stage reported a failure" -- BL6002 is the positional refusal.
+        | ex ->
+            Error [ Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message ]
 
 /// Structured-diagnostics entry: like `lower`, but errors stay as coded,
 /// spanned Diagnostics, warnings come back structured, and the retained
@@ -2722,7 +2843,7 @@ let lowerCaptured (source: string) : Result<IRProgram, string> * Blade.Diagnosti
                 // Lowering can THROW on a failed compile-time provider load; keep
                 // this convenience entry point from surfacing an unhandled exception.
                 try Ok (lowerTypedProgram typedProgram (Some program) builder)
-                with ex -> Error ex.Message
+                with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message
             result, warnings
         | Error errors ->
             let warnings = typeCheckWarningDiagnostics false
@@ -2740,7 +2861,7 @@ let lowerMultiSource (sources: (string * string) list) : Result<IRProgram, strin
             printTypeCheckWarnings false None false
             // Lowering can THROW on a failed compile-time provider load.
             (try Ok (lowerTypedProgram typedProgram (Some program) builder)
-             with ex -> Error ex.Message)
+             with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message)
         | Error errors ->
             let msgs = errors |> List.map Blade.TypeEnv.formatCompileError
             Error (String.concat "\n" msgs)
@@ -2759,7 +2880,7 @@ let lowerMultiSourceCaptured (sources: (string * string) list)
             let warnings = typeCheckWarningDiagnostics false
             let result =
                 try Ok (lowerTypedProgram typedProgram (Some program) builder)
-                with ex -> Error ex.Message
+                with Blade.Diagnostics.BladeDiagnosticException d -> Error d.Message | ex -> Error ex.Message
             result, warnings
         | Error errors ->
             let warnings = typeCheckWarningDiagnostics false

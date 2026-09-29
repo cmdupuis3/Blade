@@ -1,4 +1,5 @@
 // TEST: AntisymIdx Decl Param
+// NOPINS: declaration-only -- the AntisymIdx parameter form parses and typechecks; producers are pinned by the Reynolds-antisymmetric tests
 // Declare an antisymmetric array as a function parameter:
 // Array<T like AntisymIdx<2, n>>. Confirms the `like AntisymIdx<arity, extent>`
 // declaration form parses and type-checks in a binding position. (Usage that

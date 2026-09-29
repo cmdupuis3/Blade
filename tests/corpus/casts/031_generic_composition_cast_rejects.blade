@@ -1,0 +1,7 @@
+// TEST: A generic function composed after a float producer is judged there (rejects)
+// ERROR: BL3019
+// ERROR-CONTAINS: 'toint' casts a value of its generic parameter type
+function toint(x: T^0) -> Int64 = Int64(x)
+function sq(x: Float64) -> Float64 = x * x
+let h = sq >> toint
+let w = h(2.5)

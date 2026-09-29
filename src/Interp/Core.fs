@@ -446,6 +446,22 @@ let private groupKeysTypeInScope (id: IRId) (scope: IRExpr) : IRType option =
         | ExprShape (children, _) -> children |> List.tryPick scan
     scan scope
 
+/// A scalar the IR types Float32, carried at Float32 width. Array stores are
+/// double-backed (ArrayOps.storeOfElemType), so a Float32 element or a fold
+/// over one can reach an operator as a VFloat; the arithmetic contract's
+/// Float32 rules (libm intrinsics and `^` evaluated in double and rounded
+/// once to float -- docs/formalism.md section 2.4) key on the value's width,
+/// so the operands of those operators are narrowed to what the IR says the
+/// compiled lane holds: a `float`.
+let private asDeclaredWidth (e: IRExpr) (v: Value) : Value =
+    match v with
+    | VFloat f ->
+        (match typeOf e with
+         | IRTScalar ETFloat32 -> VFloat32 (float32 f)
+         | IRTUnitAnnotated (IRTScalar ETFloat32, _) -> VFloat32 (float32 f)
+         | _ -> v)
+    | _ -> v
+
 // The evaluator.
 
 /// Evaluate an IR expression to a runtime value. One step charged per entry;
@@ -516,8 +532,12 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         // so this arm only ever sees scalars.
         let lv = evalExpr st env l
         let rv = evalExpr st env r
-        N.evalBinOp op lv rv
+        (match op with
+         | IRCaret | IRMath2 _ -> N.evalBinOp op (asDeclaredWidth l lv) (asDeclaredWidth r rv)
+         | _ -> N.evalBinOp op lv rv)
 
+    | IRUnaryOp ((IRMath _) as op, e) ->
+        N.evalUnaryOp op (asDeclaredWidth e (evalExpr st env e))
     | IRUnaryOp (op, e) ->
         N.evalUnaryOp op (evalExpr st env e)
 
@@ -1275,7 +1295,9 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
         // too, not a silently mis-shaped array (func-arrays T12 abort probe).
         (match b.Value, value with
          | IRArrayLit (elements, arrType), VArray arr ->
-             let cppName = if b.Name.StartsWith "_(" then $"__tup_{b.Id}" else b.Name
+             // The C++ lane's own spelling (bindingCppName): a module member
+             // `M.x` is `M__x` there, and the panic text must agree.
+             let cppName = if b.Name.StartsWith "_(" then $"__tup_{b.Id}" else Blade.CodeGenState.sanitizeCppName b.Name
              checkArrayLitRowExtents cppName elements arrType arr
          | _ -> ())
         // Copy semantics for assignable top-level array bindings whose

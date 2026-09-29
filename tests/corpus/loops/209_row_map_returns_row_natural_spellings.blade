@@ -1,0 +1,41 @@
+// TEST: Row maps returning a row, in the natural spellings
+// ============================================================================
+// A row kernel whose body SHAPES its `T^1` parameter before the apply seam
+// unifies it with the row -- `r * 2.0` (the elementwise demand) or
+// `reduce(r, (+))` (the fold's own demand) -- minted an index record with a
+// compiler placeholder extent (`__elementwise_inferred_n_6`, `__inferred_n`).
+// Unify never compares extents, so the placeholder rode the kernel's return
+// into the output's T-dims and codegen allocated the result with an
+// undeclared name: a g++ error. loops/167's `r - mean(r)` passed only because
+// its partner was an unresolved var. The named-function form
+// `row / reduce(row, (+))` died earlier, BL3999 "Infinite type detected":
+// the quotient's element is the fold's element under a unit wrapper, and the
+// eta wrapper met the bare element var.
+//
+// Extents 2 x 3 (3 != 2, so a transposed extent table cannot pass).
+// ============================================================================
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 7.0]]
+
+let scaled = method_for(A) <@> lambda(r: T^1) -> r * 2.0 |> compute
+// EXPECT: scaled = [[2, 4, 6], [8, 10, 14]]
+
+let normed = method_for(A) <@> lambda(r: T^1) -> r / reduce(r, (+)) |> compute
+// EXPECT: normed = [[0.166666666666667, 0.333333333333333, 0.5], [0.25, 0.3125, 0.4375]]
+
+let normed_bare = method_for(A) <@> lambda(row) -> row / reduce(row, (+)) |> compute
+// EXPECT: normed_bare = [[0.166666666666667, 0.333333333333333, 0.5], [0.25, 0.3125, 0.4375]]
+
+function normrow(row: T^1) -> T^1 = row / reduce(row, (+))
+let normed_named = method_for(A) <@> normrow |> compute
+// EXPECT: normed_named = [[0.166666666666667, 0.333333333333333, 0.5], [0.25, 0.3125, 0.4375]]
+
+function normrow_block(row: T^1) -> T^1 = {
+    let s = reduce(row, (+))
+    row / s
+}
+let normed_block = method_for(A) <@> normrow_block |> compute
+// EXPECT: normed_block = [[0.166666666666667, 0.333333333333333, 0.5], [0.25, 0.3125, 0.4375]]
+
+function scalerow(r: T^1) -> T^1 = r * 2.0
+let scaled_named = method_for(A) <@> scalerow |> compute
+// EXPECT: scaled_named = [[2, 4, 6], [8, 10, 14]]

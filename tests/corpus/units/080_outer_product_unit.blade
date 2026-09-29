@@ -1,0 +1,10 @@
+// TEST: Outer Product Element Unit
+// `a [*] b` over meters and seconds carries meters*seconds on its ELEMENT.
+Unit meters
+Unit seconds
+Unit ms = meters * seconds
+let a: Array<Float<meters> like Idx<2>> = [1.0, 2.0]
+let b: Array<Float<seconds> like Idx<3>> = [1.0, 2.0, 3.0]
+let c = a [*] b
+let v: Float<ms> = c(1, 2)
+// EXPECT: v = 6

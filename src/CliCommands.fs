@@ -10,24 +10,67 @@ open Blade.Lowering
 
 let compilerVersion = Blade.RunRecord.bladeVersion
 
+/// The test-block keys `blade test <key>` dispatches (CliSelfTests.dispatchTest),
+/// and a sample of the corpus-category keys (one per tests/corpus/<dir>;
+/// multiword ones also accept the unhyphenated spelling). Listed for `--help`.
+let internal usageTestBlockKeys =
+    [ "access"; "alloc"; "attrs"; "cli"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
+      "docs"; "doctor"
+      "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
+      "ide-serve"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"
+      "multifile"; "netcdf"; "normalize"; "omp-coverage"; "omp-pragma"; "omp-reduce"; "optimize"
+      "oracles"; "orbrank"; "orbwreath"; "permoracle"; "permspec"; "pgoracle"; "pgspec"; "polyoracle"
+      "provider-desugar"; "rand-mirror"; "rep-check"; "rep-differential"; "rep-reject"; "run-record"
+      "setup"; "shape"; "shapespec"; "spans"; "strict-pins"; "structidx"; "structidxoracle"; "subst"
+      "surface"; "surfacing"; "sympower"; "timing"; "treerank"; "type-structure"; "unify"
+      "validate-arrow"; "validation-codes"; "zarr" ]
+
+let internal usageCorpusKeys =
+    [ "basic"; "intrinsics"; "casts"; "ad"; "ad-jvp"; "loops"; "symmetry"; "reynolds"; "arity"
+      "functions"; "structs"; "sum-types"; "interfaces"; "modules"; "guards"; "tuples"; "index-types"
+      "static"; "units"; "mutability"; "func-arrays"; "ppl"; "math"; "rand"; "display"; "spectra"
+      "sgs"; "ml-ops"; "ml-e2e"; "ml-equiv"; "sql"; "trees"; "recursive-arrays"; "segments"; "..." ]
+
 let printUsage () =
+    let wrap (indent: string) (width: int) (words: string list) =
+        let lines = ResizeArray<string>()
+        let cur = System.Text.StringBuilder(indent)
+        for w in words do
+            if cur.Length > indent.Length && cur.Length + w.Length + 1 > width then
+                lines.Add(cur.ToString())
+                cur.Clear().Append(indent) |> ignore
+            if cur.Length > indent.Length then cur.Append(' ') |> ignore
+            cur.Append(w) |> ignore
+        if cur.Length > indent.Length then lines.Add(cur.ToString())
+        for l in lines do printfn "%s" l
     printfn "Blade Compiler v%s" compilerVersion
     printfn ""
     printfn "Usage: blade <command> [options]"
     printfn ""
-    printfn "Commands:"
-    printfn "  compile <file.edgi> [-o output]   Compile to C++ (and optionally to executable)"
-    printfn "  run <file.edgi>                   Compile and run a Blade program"
-    printfn "  run <file.edgi> --mpi <N>         ... with `where mpi` kernels decomposed across"
+    printfn "Commands (flags may appear in any order around the file):"
+    printfn "  run <file.blade>                  Compile and run a Blade program. The build happens in a"
+    printfn "                                    private scratch directory; the program runs with the"
+    printfn "                                    source file's directory as its working directory"
+    printfn "      --verbose                     ... keep the build directory and report its path"
+    printfn "      --mpi <N>                     ... with `where mpi` kernels decomposed across"
     printfn "                                    N ranks (compiled -lmsmpi, run under mpiexec)"
-    printfn "  run <file.edgi> --memcheck        ... as a Debug+AddressSanitizer build that prints"
+    printfn "      --memcheck                    ... as a Debug+AddressSanitizer build that prints"
     printfn "                                    a BLADE-MEMCHECK allocator-stats line on stderr"
     printfn "                                    at exit (Windows: needs a vcvars64 environment;"
     printfn "                                    equivalently set BLADE_MEMCHECK=1)"
-    printfn "  check <file.edgi>                 Type-check only (no code generation)"
-    printfn "  plan <file.edgi> [--json]         Type-check and lower, then list every optimization"
-    printfn "                                    decision the cost-only layer took (rule, subject,"
-    printfn "                                    applied/declined with reason, evidence)"
+    printfn "      --cuda                        ... emitting `where cuda` kernels as device code"
+    printfn "      --run-record <out.json>       ... writing the JSON run record (input manifest,"
+    printfn "                                    observed identities, toolchain, status) at exit"
+    printfn "  compile <file.blade> [-o <exe>]   Compile to an executable (default: beside the source,"
+    printfn "                                    named after it); prints its path. Also --verbose,"
+    printfn "                                    --memcheck, --cuda"
+    printfn "  emit <file.blade> [-o <out.cpp>]  Emit C++ source without compiling (stdout without -o;"
+    printfn "                                    with -o the runtime headers are deployed beside it)"
+    printfn "  check <file.blade>                Type-check and lower (no code generation)"
+    printfn "  plan <file.blade> [--json]        Type-check, lower and generate (no C++ compile), then"
+    printfn "                                    list every optimization decision taken (rule, subject,"
+    printfn "                                    applied/declined with reason, evidence) and the"
+    printfn "                                    program's input manifest"
     printfn "  doctor [--json]                   Report native-toolchain health: g++/OpenMP core"
     printfn "                                    (real compile+run), BLAS/LAPACK tier, NetCDF, MPI,"
     printfn "                                    CUDA, setup tools; exit 0 iff the g++ core works"
@@ -35,7 +78,7 @@ let printUsage () =
     printfn "                                    with the doctor probes, persist it to"
     printfn "                                    blade.toolchain.json; --blas=source builds OpenBLAS"
     printfn "                                    from the deps.json pin ('blade setup --help')"
-    printfn "  ide check --json <file.edgi>      Type-check and emit JSON diagnostics + binding types"
+    printfn "  ide check [--json] <file.blade>   Type-check and emit JSON diagnostics + binding types"
     printfn "                                    (machine-readable, for editor tooling)"
     printfn "  ide serve                         Persistent editor daemon: NDJSON check requests on"
     printfn "                                    stdin, one JSON response line each on stdout"
@@ -47,76 +90,53 @@ let printUsage () =
     printfn "  repl                              Interactive session: each input recompiles and"
     printfn "                                    re-runs the accumulated program, printing new values"
     printfn "                                    with types; bare expressions evaluate and echo"
-    printfn "  emit <file.edgi> [-o output.cpp]  Emit C++ source without compiling"
-    printfn "  test                              Run full test suite (IR + C++ + run)"
-    printfn "  test --omp                        ... including the OpenMP thread-coverage block"
-    printfn "  test --cuda                       ... including the CUDA kernel block"
-    printfn "                                    (Windows: run from the x64 Native Tools prompt"
-    printfn "                                     so nvcc finds cl.exe)"
-    printfn "  test --mpi                        ... including the MPI decomposition block"
-    printfn "                                    (needs mingw msmpi + the MS-MPI runtime)"
-    printfn "  test --timing                     ... including the differential timing block (slow)"
-    printfn "  test --interp                     ... including the interpreter differential block (slow)"
-    printfn "  test --diff-oracle                ... including the pinned-oracle differential block"
-    printfn "                                    (skips cleanly without ./oracle/Blade.exe)"
-    printfn "                                    (the --omp/--cuda/--timing/--mpi/--interp/"
-    printfn "                                     --diff-oracle flags combine)"
-    printfn "  test --ir-only                    Run IR-only tests (fast, no C++ compilation)"
-    printfn "  test alloc                        Run C++ allocation-layout tests (contiguity/cardinality)"
-    printfn "  test omp-pragma                   Run the OpenMP pragma-emission block standalone"
-    printfn "  test omp-coverage                 Run the OpenMP thread-coverage block standalone"
-    printfn "  test omp-reduce                   Run the comm-licensed parallel-reduction block standalone"
-    printfn "  test linalg                       Run the blade_linalg dispatch-emission block standalone"
-    printfn "                                    (+ the BLAS tier-resolution unit block)"
-    printfn "  test doctor                       Run the `blade doctor` structural pins standalone"
-    printfn "  test setup                        Run the `blade setup` parse/persist pins standalone"
-    printfn "  test lapack                       Run the blade_lapack eigensolver-dispatch block standalone"
-    printfn "  test multifile                    Run the cross-module (multi-file) corpus standalone"
-    printfn "  test module-resolve               Run the file-based module resolver + units.SI block"
-    printfn "  test shapespec                    Run the shape-specialization reach block standalone"
-    printfn "  test flat-path                    Run the flat-elementwise reach block standalone"
-    printfn "  test cuda                         Run the CUDA kernel block standalone"
-    printfn "  test mpi                          Run the MPI decomposition block standalone"
-    printfn "  test netcdf                       Run the NetCDF provider block (needs libnetcdf + sample.nc)"
-    printfn "  test zarr                         Run the Zarr provider block (hermetic; g++ for the e2e parts)"
-    printfn "  test timing                       Run the differential timing block standalone"
-    printfn "  test strict-pins                  Run the --strict-pins CLI gate block standalone"
-    printfn "  test surfacing                    Run the warning-surfacing block standalone"
-    printfn "  test surface                      Run the `ide surface` block standalone (renderer,"
-    printfn "                                    serve arm, committed protocol/ snapshots)"
-    printfn "  test ide-serve                    Run the `ide serve` NDJSON protocol block standalone"
-    printfn "  test ide-eval                     Run the notebook session-eval block standalone"
-    printfn "  test ide-cells                    Run the notebook checkCells assembly block standalone"
-    printfn "  test ide-references               Run the `references[]` navigation payload block standalone"
-    printfn "  test gr-render                    Run the GR renderPlot block standalone (frame bytes,"
-    printfn "                                    worker protocol; the live-GR case skips without one)"
-    printfn "  test diff-oracle [category]       Diff printed values against the pinned ./oracle build"
-    printfn "  test interp [category]            Diff the tree-walking interpreter against the compiled binary"
+    printfn ""
+    printfn "Testing (from the repository root; the scratch dir ./generated_cpp_tests is relative"
+    printfn "to the working directory, so never run two suites from one directory):"
+    printfn "  test                              Run the default full suite. Missing toolchain pieces"
+    printfn "                                    SKIP rather than fail: read the ', N skipped' total"
+    printfn "  test --omp --cuda --mpi --timing --interp --diff-oracle"
+    printfn "                                    ... opting the named blocks into the full suite (any"
+    printfn "                                    combination)"
+    printfn "  test --ir-only                    IR-only tests (fast, no C++ compilation)"
+    printfn "  test <key>                        One test block or corpus category, standalone"
+    printfn "  test interp [<dir>]               Diff the tree-walking interpreter against the compiled"
+    printfn "                                    binary (<dir> = a literal tests/corpus/<dir> name)"
+    printfn "  test diff-oracle [<dir>]          Diff printed values against the pinned ./oracle build"
+    printfn "  test opt-diff [<dir>]             Diff every program with all optimizer gates OFF vs ON"
+    printfn "  test llvm [<dir>|all]             The BLADE_LLVM lane vs the C++ lane (standalone only)"
+    printfn "  test docs [<page>]                Check every ```blade block in CLAUDE.md and docs/"
+    printfn "                                    (run it when it pins values; <page> filters by path)"
+    printfn "  test --llvm-backend               The ordinary suite driven through the LLVM lane"
+    printfn "  Test-block keys:"
+    wrap "    " 96 usageTestBlockKeys
+    printfn "  Corpus-category keys (tests/corpus/<dir>):"
+    wrap "    " 96 usageCorpusKeys
     printfn ""
     printfn "Options:"
-    printfn "  -o <path>      Output file path"
-    printfn "  --verbose      Show IR and generated C++"
+    printfn "  --print <a,b>  Print only the named top-level bindings (every one by default; a name"
+    printfn "                 that is not a binding is refused). Any verb; the compiled program and"
+    printfn "                 the interpreter both honour it (equivalently BLADE_PRINT)."
     printfn "  --strict-pins  Fail the build on unpinned confirm-and-pin deductions"
     printfn "                 (BL4010, normally warnings). For CI: forces the pin"
     printfn "                 decision into source. check / compile / emit / run."
     printfn "  --no-cache     Always run g++, ignoring the content-addressed"
     printfn "                 executable cache (%%LOCALAPPDATA%%\\Blade\\exe-cache;"
     printfn "                 BLADE_EXE_CACHE=0 / a path override it). compile / run / test."
+    printfn "  --verbose      Show codegen warnings, keep build intermediates, and on an internal"
+    printfn "                 error print the raw back-end log / .NET stack trace"
     printfn "  --help         Show this help"
     printfn ""
     printfn "Examples:"
-    printfn "  blade run myprogram.edgi"
-    printfn "  blade emit myprogram.edgi -o myprogram.cpp"
-    printfn "  blade compile myprogram.edgi -o myprogram"
-    printfn "  blade check myprogram.edgi --strict-pins"
+    printfn "  blade run myprogram.blade"
+    printfn "  blade run myprogram.blade --print total,mean"
+    printfn "  blade emit myprogram.blade -o myprogram.cpp"
+    printfn "  blade compile myprogram.blade -o myprogram.exe"
+    printfn "  blade check myprogram.blade --strict-pins"
     printfn "  blade test"
-    printfn "  blade test --omp --cuda --timing"
-    printfn "  blade test --llvm-backend  (the ordinary suite, corpus driven through the LLVM"
-    printfn "                              lane and judged against its own EXPECT pins; no g++)"
-    printfn "  blade test llvm            (BLADE_LLVM lane vs the C++ lane; standalone only)"
-    printfn "  blade test llvm all        (the same differential over EVERY corpus category,"
-    printfn "                              reporting what fraction of it the lane can emit)"
-    printfn "  blade test llvm-bench      (codegen-speed and runtime tables for both lanes)"
+    printfn "  blade test --interp"
+    printfn "  blade test index-types"
+    printfn "  blade test interp index-types"
 
 /// Strict-pins mode. Confirm-and-pin SUGGESTIONS (BL4010) are warnings by
 /// default: the deduction proposes, storage stays DENSE, nothing changes
@@ -173,6 +193,71 @@ let internal usageFailure (reason: string) : int =
     printUsage ()
     1
 
+/// What a file verb's argument list parsed to.
+type internal VerbArgs =
+    { File: string option
+      Output: string option
+      Verbose: bool
+      Json: bool
+      Mpi: int option
+      Memcheck: bool
+      Cuda: bool
+      RunRecord: string option }
+
+/// The flags each file verb accepts. `--strict-pins`, `--no-cache` and
+/// `--print` are MODES stripped from argv before any verb sees it (see
+/// dispatchInner), so they are not listed here.
+let private verbFlags (verb: string) : string list =
+    match verb with
+    | "run" -> [ "--verbose"; "--mpi"; "--memcheck"; "--cuda"; "--run-record" ]
+    | "compile" -> [ "-o"; "--verbose"; "--memcheck"; "--cuda" ]
+    | "emit" -> [ "-o"; "--verbose"; "--cuda" ]
+    | "check" -> [ "--verbose" ]
+    | "plan" -> [ "--json"; "--verbose" ]
+    | "ide check" -> [ "--json" ]
+    | _ -> []
+
+/// ONE parser for every file verb: flags in any order around the single
+/// source file, each verb accepting only the flags it has a meaning for.
+/// Before this, only `run` parsed its flags; every other verb was an exact
+/// argv shape, so `check f --verbose` or `emit f --verbose -o x` fell
+/// through to "unrecognized command" -- an error that names nothing.
+let internal parseVerbArgs (verb: string) (toks: string list) : Result<VerbArgs, string> =
+    let allowed = verbFlags verb
+    let empty =
+        { File = None; Output = None; Verbose = false; Json = false
+          Mpi = None; Memcheck = false; Cuda = false; RunRecord = None }
+    let accepted () =
+        match allowed with
+        | [] -> "it takes no options"
+        | fs -> "it accepts: " + String.concat ", " fs
+    let rec go (o: VerbArgs) toks =
+        match toks with
+        | [] -> Ok o
+        | (f: string) :: _ when f.StartsWith "-" && not (List.contains f allowed) ->
+            if f = "--strict-pins" && verb = "ide check" then
+                Error "`ide check` does not take --strict-pins: its JSON payload reports every BL4010 pin suggestion as a warning for the client to promote (use `check --strict-pins` for a failing build)"
+            else
+                Error $"unknown option '{f}' for `{verb}` ({accepted ()})"
+        | "--verbose" :: tl -> go { o with Verbose = true } tl
+        | "--json" :: tl -> go { o with Json = true } tl
+        | "--memcheck" :: tl -> go { o with Memcheck = true } tl
+        | "--cuda" :: tl -> go { o with Cuda = true } tl
+        | "-o" :: p :: tl when not (p.StartsWith "-") ->
+            if o.Output.IsSome then Error $"`{verb}` takes at most one -o"
+            else go { o with Output = Some p } tl
+        | "-o" :: _ -> Error $"-o requires an output path (e.g. {verb} prog.blade -o out)"
+        | "--mpi" :: n :: tl ->
+            (match Int32.TryParse n with
+             | true, v when v > 0 -> go { o with Mpi = Some v } tl
+             | _ -> Error $"--mpi expects a positive rank count, got '{n}'")
+        | [ "--mpi" ] -> Error "--mpi requires a rank count (e.g. run prog.blade --mpi 4)"
+        | "--run-record" :: p :: tl when not (p.StartsWith "--") -> go { o with RunRecord = Some p } tl
+        | "--run-record" :: _ -> Error "--run-record requires a destination path (e.g. run prog.blade --run-record run.json)"
+        | f :: tl when o.File.IsNone -> go { o with File = Some f } tl
+        | f :: _ -> Error $"unexpected argument '{f}' for `{verb}` (it takes one source file)"
+    go empty toks
+
 /// The front half EVERY back end shares: parse, resolve file imports,
 /// typecheck, lower, validate. Split out of `compileFile` so the C++ emitter
 /// and the BLADE_LLVM lane consume ONE front-end pass -- a lane that refuses
@@ -210,9 +295,7 @@ let private frontEndToIR (filePath: string) (strictPins: bool) (mark: string -> 
         mark "validateIR"
         match validated with
         | Error errs ->
-            let ds =
-                errs |> List.map (fun s ->
-                    Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan s)
+            let ds = errs |> List.map IRValidate.diagnosticOfValidationMessage
             Error (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok ir -> Ok (ir, sm)
 
@@ -333,64 +416,128 @@ let compileArtifact (filePath: string) (verbose: bool) (strictPins: bool) : Resu
                         mark "emit-llvm"
                         Ok (LlvmArtifact ll)
 
-/// Place a produced executable at the caller's requested path (or leave it
-/// where the toolchain put it), and report it under --verbose. Shared by both
-/// back ends' arms of `compileToExe`.
-let private placeExecutable (outputPath: string option) (verbose: bool) (exePath: string) : string =
-    let finalPath =
-        match outputPath with
-        | Some out ->
-            let outFull = Path.GetFullPath(out)
-            if exePath <> outFull then
-                try File.Copy(exePath, outFull, true) with _ -> ()
-            outFull
-        | None -> exePath
-    if verbose then
-        eprintfn "[Compile] %s" finalPath
-    finalPath
+// ---------------------------------------------------------------------------
+// Where a compile happens.
+//
+// `blade run` / `blade compile` used to write the .cpp, ~15 runtime headers
+// and the executable BESIDE THE SOURCE, and to delete "the headers this
+// compile created" afterwards. Two runs in one directory therefore raced: the
+// second saw the first's headers, recorded them as not-its-own, and the first
+// then deleted them out from under the second's g++; same-named programs
+// overwrote each other's .cpp/.exe; and `blade run` left an executable behind
+// every time (hundreds accumulated in tests/corpus). Every compile now builds
+// in a PRIVATE scratch directory of its own and only ever deletes that
+// directory. The executable cache keys on the translation unit's CONTENT with
+// paths normalized out (Build.exeCacheKey), so a fresh directory per run costs
+// no cache hits.
+// ---------------------------------------------------------------------------
 
-/// Compile a .edgi file to an executable
-let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
+/// Root of the per-compile scratch directories.
+let private buildRoot () = Path.Combine(Path.GetTempPath(), "blade-build")
+
+/// Best-effort removal of scratch directories older than a day: a run that was
+/// killed never reached its own cleanup. Never throws.
+let private pruneStaleBuildDirs () =
+    try
+        let root = buildRoot ()
+        if Directory.Exists root then
+            let cutoff = DateTime.UtcNow.AddDays(-1.0)
+            for d in Directory.GetDirectories root do
+                try
+                    if Directory.GetLastWriteTimeUtc d < cutoff then Directory.Delete(d, true)
+                with _ -> ()
+    with _ -> ()
+
+/// A fresh, private build directory for one compile of `filePath`:
+/// `<temp>/blade-build/<name>-<path hash>-<pid>-<nonce>`. The path hash keeps
+/// two same-named sources apart in a listing; the pid + nonce make the
+/// directory this compile's alone even when the same file is compiled
+/// concurrently.
+let private freshBuildDir (filePath: string) : string =
+    pruneStaleBuildDirs ()
+    let full = Path.GetFullPath filePath
+    let tag =
+        use sha = System.Security.Cryptography.SHA256.Create()
+        sha.ComputeHash(Text.Encoding.UTF8.GetBytes(full.ToLowerInvariant()))
+        |> Array.take 4 |> Array.map _.ToString("x2") |> String.concat ""
+    let nonce = Guid.NewGuid().ToString("N").Substring(0, 8)
+    let name = Build.sanitizeFileName (Path.GetFileNameWithoutExtension full)
+    let dir = Path.Combine(buildRoot (), $"{name}-{tag}-{Environment.ProcessId}-{nonce}")
+    Directory.CreateDirectory dir |> ignore
+    dir
+
+let private removeBuildDir (dir: string) =
+    try Directory.Delete(dir, true) with _ -> ()
+
+/// P1-24's ICE half. A program that passed `check` and then failed to compile
+/// as C++ is a BLADE bug: the checker accepted it, so the code the back end
+/// generated for it should have compiled. That used to reach the user as a raw
+/// g++ dump -- template noise about identifiers they never wrote, which reads
+/// as a mistake in THEIR program. It is reported as BL9002 (internal codegen
+/// invariant violated) instead, naming the first g++ error and where the
+/// generated source and the full log were kept.
+///
+/// NOT every g++ failure qualifies, and the ones that do not keep their raw
+/// text: a `#error` is a DELIBERATE refusal (the BL7004 channel reports the
+/// ones codegen splices before g++ runs; a runtime header's own `#error` --
+/// e.g. the BLAS shim without its define -- is an environment mismatch whose
+/// text is the diagnosis), and a failure with no compiler error located in
+/// the generated file (a linker error, a missing library, a timeout, no g++
+/// at all) is about the toolchain, not about generated code.
+let internal backendRejection (failure: string) (srcFile: string) : string option =
+    if failure.Contains "#error" then None
+    else
+        let fileName = Path.GetFileName srcFile
+        failure.Replace("\r\n", "\n").Split('\n')
+        |> Array.tryFind (fun l ->
+            l.Contains fileName && (l.Contains ": error:" || l.Contains ": error " || l.Contains ": fatal error:"))
+        |> Option.map (fun l ->
+            // Drop the `path:line:col: ` prefix: the path is named in a note.
+            let i = l.IndexOf "error"
+            if i > 0 then l.Substring(i).Trim() else l.Trim())
+
+/// Render a back-end rejection (see backendRejection) as a BL9002 diagnostic,
+/// keeping the raw log on disk (and on stderr under --verbose).
+let internal reportBackendRejection (firstError: string) (rawLog: string) (srcFile: string) (buildDir: string) (verbose: bool) : string =
+    let logPath = Path.Combine(buildDir, "backend-errors.log")
+    (try File.WriteAllText(logPath, rawLog) with _ -> ())
+    let d =
+        Blade.Diagnostics.Codes.iceCodegen
+            $"the C++ back end rejected the code Blade generated for this program, which passed type checking: {firstError}"
+        |> Blade.Diagnostics.withNote $"generated source kept at {srcFile}; the full compiler log is {logPath} (--verbose prints it)"
+    let useColor = not Console.IsErrorRedirected
+    let rendered = Blade.Diagnostics.Render.render useColor None d
+    if verbose then rendered + "\n" + rawLog else rendered
+
+/// Compile `filePath` inside `buildDir` (a private scratch directory): the
+/// generated source, the runtime headers, and the executable all land there.
+/// Returns the executable's path in `buildDir`, or the failure text (a
+/// BL9002 diagnostic when the back end rejected generated code, see
+/// backendRejection). Nothing outside `buildDir` is written or deleted.
+let private compileInto (filePath: string) (buildDir: string) (verbose: bool) (strictPins: bool) : Result<string, string> =
+    // The generated source keeps the SOURCE's base name: it is spliced into
+    // the emitted text (program name, timing lines), so a build directory
+    // must not change what is emitted.
+    let baseName = Path.GetFileNameWithoutExtension(filePath)
     match compileArtifact filePath verbose strictPins with
     | Error e -> Error e
     | Ok (LlvmArtifact ll) ->
         // The LLVM lane's whole back half: write the .ll where the .cpp would
         // have gone, deploy the C shim beside it (the link input), and let
         // clang do IR -> executable in one step.
-        let baseName = Path.GetFileNameWithoutExtension(filePath)
-        let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
-        let dir = if String.IsNullOrEmpty dir then "." else dir
-        let llFile = Path.Combine(dir, baseName + ".ll")
+        let llFile = Path.Combine(buildDir, baseName + ".ll")
         File.WriteAllText(llFile, ll)
-        let shimPath = Path.Combine(dir, EmitLlvm.shimFileName)
-        let shimObjPath = Path.Combine(dir, Path.GetFileNameWithoutExtension EmitLlvm.shimFileName + Platforms.objExtension)
-        // Same cleanup rule the C++ lane applies to its deployed headers:
-        // remove only what THIS compile created, so a directory that already
-        // held a shim (a scratch dir building many programs) keeps it.
-        let shimWasAbsent = not (File.Exists shimPath)
-        let shimObjWasAbsent = not (File.Exists shimObjPath)
-        EmitLlvm.deployShim dir
+        EmitLlvm.deployShim buildDir
         if verbose then
             eprintfn "[Emit] %s" llFile
-        (match Build.compileLlvmProgram llFile dir with
-         | Error e -> Error $"Compilation failed:\n{e}"
-         | Ok exePath ->
-             let finalPath = placeExecutable outputPath verbose exePath
-             // verbose keeps the intermediates so the .ll can be inspected or
-             // recompiled by hand.
-             if not verbose then
-                 try File.Delete(llFile) with _ -> ()
-                 if shimWasAbsent then (try File.Delete(shimPath) with _ -> ())
-                 if shimObjWasAbsent then (try File.Delete(shimObjPath) with _ -> ())
-             Ok finalPath)
-    | Ok (CppArtifact (cppCode, warnings)) ->
-        let baseName = Path.GetFileNameWithoutExtension(filePath)
-        let dir = Path.GetDirectoryName(Path.GetFullPath(filePath))
-        let dir = if String.IsNullOrEmpty dir then "." else dir
+        match Build.compileLlvmProgram llFile buildDir with
+        | Error e -> Error $"Compilation failed:\n{e}"
+        | Ok exePath -> Ok exePath
+    | Ok (CppArtifact (cppCode, _warnings)) ->
         // Infer backend from generated source: device kernels -> .cu + nvcc.
         let backendReq = inferBackendReq cppCode
         let ext = match backendReq with RequiresCuda -> ".cu" | RequiresMpi | CpuOnly -> ".cpp"
-        let cppFile = Path.Combine(dir, baseName + ext)
+        let cppFile = Path.Combine(buildDir, baseName + ext)
         File.WriteAllText(cppFile, cppCode)
         // `blade run --cuda`: `where cuda` device kernels are collected
         // SEPARATELY from the host source (cudaKernelDefsCell), so
@@ -402,66 +549,125 @@ let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) 
         let cudaSplitFile =
             match CodeGen.getCudaFileContent () with
             | Some cu when ext = ".cpp" ->
-                let cuFile = Path.Combine(dir, baseName + "_kernels.cu")
+                let cuFile = Path.Combine(buildDir, baseName + "_kernels.cu")
                 File.WriteAllText(cuFile, cu)
                 Some cuFile
             | _ -> None
         // Runtime headers are #include'd with plain quotes and no -I, so they
-        // must sit next to the .cpp; record which ones we create so cleanup removes only our copies.
-        let deployedHeaders =
-            CodeGen.runtimeHeaderNames
-            |> List.map (fun name -> Path.Combine(dir, name))
-            |> List.filter (fun path -> not (File.Exists path))
-        CodeGen.deployRuntimeHeaders dir
+        // must sit next to the .cpp -- in THIS compile's own directory.
+        CodeGen.deployRuntimeHeaders buildDir
         if verbose then
             eprintfn "[Emit] %s" cppFile
         match (match cudaSplitFile with
-               | Some cuFile -> compileCudaSplit cuFile cppFile dir
+               | Some cuFile -> compileCudaSplit cuFile cppFile buildDir
                // cppCode is the exact text just written to cppFile; handing it
                // over spares the backend sniffs a read-back of what we wrote.
-               | None -> compileForBackendSource (Some cppCode) capabilities.Value backendReq cppFile dir) with
+               | None -> compileForBackendSource (Some cppCode) capabilities.Value backendReq cppFile buildDir) with
         | Error e ->
-            Error $"Compilation failed:\n{e}"
-        | Ok exePath ->
-            let finalPath = placeExecutable outputPath verbose exePath
-            // verbose keeps the intermediates so the source can be inspected/recompiled.
-            if not verbose then
-                try File.Delete(cppFile) with _ -> ()
-                for h in deployedHeaders do
-                    try File.Delete(h) with _ -> ()
-            Ok finalPath
+            let rejectedIn =
+                [ Some cppFile; cudaSplitFile ]
+                |> List.choose id
+                |> List.tryPick (fun f -> backendRejection e f |> Option.map (fun first -> (first, f)))
+            match rejectedIn with
+            | Some (first, f) -> Error (reportBackendRejection first e f buildDir verbose)
+            | None -> Error $"Compilation failed:\n{e}"
+        | Ok exePath -> Ok exePath
 
-/// Run a .edgi file: compile and execute. `mpiRanks = Some n` switches on the
+/// Whether a failure text is a BL9002 back-end rejection, whose build
+/// directory must outlive the command (the diagnostic points into it).
+let private isBackendRejection (failure: string) = failure.Contains "BL9002"
+
+/// Compile a .blade file to an executable. The build happens in a private
+/// scratch directory (compileInto); the executable is then placed at
+/// `outputPath`, or -- without one -- beside the source under the source's
+/// name, which is where `blade compile` has always put it (the REPL's and the
+/// notebook render lane's re-runnable binaries rely on that too). The scratch
+/// directory is removed afterwards unless `verbose` (kept for inspection, and
+/// named) or the back end rejected the generated code (BL9002 names files in
+/// it).
+let compileToExe (filePath: string) (outputPath: string option) (verbose: bool) (strictPins: bool) : Result<string, string> =
+    if not (File.Exists filePath) then Error $"File not found: {filePath}"
+    else
+    let buildDir = freshBuildDir filePath
+    let result =
+        match compileInto filePath buildDir verbose strictPins with
+        | Error e -> Error e
+        | Ok exePath ->
+            let dest =
+                match outputPath with
+                | Some out -> Path.GetFullPath out
+                | None ->
+                    let srcDir = Path.GetDirectoryName(Path.GetFullPath filePath)
+                    Path.Combine(srcDir, Path.GetFileName exePath)
+            try
+                let destDir = Path.GetDirectoryName dest
+                if not (String.IsNullOrEmpty destDir) then Directory.CreateDirectory destDir |> ignore
+                File.Copy(exePath, dest, true)
+                // Runtime DLLs the build copied beside the executable (NetCDF,
+                // OpenBLAS: Build.copyRuntimeDllBesideExe) travel with it.
+                for dll in Directory.GetFiles(buildDir, "*.dll") do
+                    let target = Path.Combine(Path.GetDirectoryName dest, Path.GetFileName dll)
+                    if not (File.Exists target) then
+                        try File.Copy(dll, target) with _ -> ()
+                if verbose then
+                    eprintfn "[Compile] %s" dest
+                Ok dest
+            with ex -> Error $"Failed to place the executable at {dest}: {ex.Message}"
+    match result with
+    | Error e when isBackendRejection e -> ()
+    | _ ->
+        if verbose then eprintfn "[Build] kept %s" buildDir
+        else removeBuildDir buildDir
+    result
+
+/// One stderr line naming an OS-level crash of the compiled program
+/// (Build.describeCrashExit); the exit code itself is passed through unchanged.
+let private reportCrash (exitCode: int) : unit =
+    match describeCrashExit exitCode with
+    | Some line -> eprintfn "%s" line
+    | None -> ()
+
+/// Run a .blade file: compile and execute. `mpiRanks = Some n` switches on the
 /// MPI emit gate (decomposed kernels + Init/Finalize + rank-0 printing),
 /// links -lmsmpi, launches under `mpiexec -n n`. None = serial path.
+///
+/// The executable is built and run from a private scratch directory
+/// (compileInto) and nothing is written beside the source; the program's
+/// working directory is the SOURCE's directory, so relative data paths
+/// resolve exactly as they did when the executable was written there.
 let runFile (filePath: string) (verbose: bool) (mpiRanks: int option) (strictPins: bool) : int =
-    match mpiRanks with
-    | None ->
-        match compileToExe filePath None verbose strictPins with
-        | Error e -> reportFailure e
-        | Ok exePath ->
-            match runExecutable exePath with
+    if not (File.Exists filePath) then reportFailure $"File not found: {filePath}"
+    else
+    let srcDir = Path.GetDirectoryName(Path.GetFullPath filePath)
+    let buildDir = freshBuildDir filePath
+    let mutable keep = verbose
+    try
+        let runIt () =
+            match compileInto filePath buildDir verbose strictPins with
             | Error e ->
-                eprintfn "Runtime error: %s" e
-                1
-            | Ok (exitCode, output) ->
-                printf "%s" output
-                exitCode
-    | Some ranks ->
-        CodeGen.setMpiEmitMode true
-        try
-            match compileToExe filePath None verbose strictPins with
-            | Error e -> reportFailure e
+                if isBackendRejection e then keep <- true
+                reportFailure e
             | Ok exePath ->
-                match runExecutableMpi ranks exePath with
+                let ran =
+                    match mpiRanks with
+                    | None -> runExecutableIn srcDir exePath
+                    | Some ranks -> runExecutableMpiIn srcDir ranks exePath
+                match ran with
                 | Error e ->
                     eprintfn "Runtime error: %s" e
                     1
                 | Ok (exitCode, output) ->
                     printf "%s" output
+                    reportCrash exitCode
                     exitCode
-        finally
-            CodeGen.setMpiEmitMode false
+        match mpiRanks with
+        | None -> runIt ()
+        | Some _ ->
+            CodeGen.setMpiEmitMode true
+            try runIt () finally CodeGen.setMpiEmitMode false
+    finally
+        if keep then eprintfn "[Build] kept %s" buildDir
+        else removeBuildDir buildDir
 
 // Interactive REPL (`blade repl`): `blade run` semantics give REPL behavior
 // for free, since every top-level binding prints its value. The REPL
@@ -728,8 +934,10 @@ let replLoop () : int =
 
 /// `blade plan <file>`: the optimization DECISION RECORD (plan-fortran-
 /// killer-2.md section 3 step 5). Installs a Blade.Effects.Decisions
-/// collector, runs the same parse -> typecheck -> lower pipeline `emit`
-/// runs (every cost-only pass fires during lowering), and prints one line
+/// collector, runs the same parse -> typecheck -> lower -> generate pipeline
+/// `emit` runs (the cost-only passes fire during lowering; storage,
+/// iteration shape, OpenMP, BLAS routing, tile-cache and microkernel choices
+/// during generation -- the C++ text is discarded), and prints one line
 /// per decision: rule and version, subject, source position when the pass
 /// had one, applied or declined with the first reason, and the evidence
 /// the pass discharged. Diagnostic data only -- nothing here is a licence
@@ -746,10 +954,29 @@ let planFile (filePath: string) (json: bool) : int =
             Blade.Effects.Decisions.drain () |> ignore
             reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
         | Ok (program, _), _ ->
-            let ds = Blade.Effects.Decisions.drain ()
             // The input manifest (docs/plans/plan-fortran-killer-2.md section 7):
             // runtime provider reads plus the inputs this compilation folded.
+            // Drained BEFORE code generation, whose run-record lines drain the
+            // same fold log.
             let inputs = Blade.RunRecord.manifestOf program.Modules (Blade.ProviderStatics.drainFoldLog ())
+            // The decisions only EMISSION makes -- packed storage and
+            // triangular iteration, OpenMP placement and drops, BLAS/LAPACK
+            // routes, tile-cache admissions, the jammed / packed microkernels
+            // -- record while the C++ is generated, so plan generates it (the
+            // same validated IR `emit` would compile) and discards the text.
+            // Honors the same environment gates `emit` does (BLADE_BLAS,
+            // BLADE_OMP_THREADS, BLADE_TILE_CACHE, ...).
+            // A plan without its emission half says so (stderr), rather than
+            // passing for a program that simply made no emission decisions.
+            (match Blade.IRValidate.validateIR program with
+             | Ok ir ->
+                 (try
+                     CodeGen.genSelfContainedProgramFromIR ir (Path.GetFileNameWithoutExtension filePath) |> ignore
+                     CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                  with ex -> eprintfn "plan: code generation failed (%s); emission decisions are missing" ex.Message)
+             | Error errs ->
+                 eprintfn "plan: IR validation failed (%s); emission decisions are missing" (String.concat "; " errs))
+            let ds = Blade.Effects.Decisions.drain ()
             if json then
                 let js = Blade.Effects.Decisions.renderJson filePath ds
                 // `{"file":..,"decisions":[..]}` -> add the manifest as a sibling.
@@ -804,7 +1031,7 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                 printTypeCheckWarnings useColor (Some sm) false
                 let ds = errors |> List.map Blade.TypeEnv.diagnosticOfCompileError
                 reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
-            | Ok _ ->
+            | Ok (typed, builder, _) ->
                 match strictPinFailure strictPins useColor (Some sm) with
                 | Some rendered ->
                     // Strict mode: the pin suggestions ARE the failure. Their
@@ -814,9 +1041,23 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                     printTypeCheckWarnings useColor (Some sm) true
                     reportFailure rendered
                 | None ->
+                    // `check` LOWERS too (no C++): a construct that typechecks
+                    // but sits where lowering has no rule for it -- `compound`
+                    // or `rand.<fam>` inside a function body -- is refused with
+                    // its spanned BL6002 HERE, not only once `emit` runs. Same
+                    // call and same exception mapping as the compile driver's
+                    // lowerCheckedProgram.
+                    let lowered =
+                        try Ok (Blade.Lowering.lowerTypedProgram typed (Some program) builder)
+                        with
+                        | Blade.Diagnostics.BladeDiagnosticException d -> Error d
+                        | ex -> Error (Blade.Diagnostics.mkError "BL6001" Blade.Diagnostics.PhIRValidate Blade.Ast.noSpan ex.Message)
                     printTypeCheckWarnings useColor (Some sm) false
-                    printfn "OK"
-                    0
+                    match lowered with
+                    | Error d -> reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
+                    | Ok _ ->
+                        printfn "OK"
+                        0
 
 /// Emit back-end source to file or stdout: C++ normally, textual LLVM IR when
 /// the BLADE_LLVM lane took the program.

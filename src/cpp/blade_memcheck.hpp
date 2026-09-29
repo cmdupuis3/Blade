@@ -33,6 +33,7 @@
 #include <cstdio>
 #include <cstddef>
 #include <atomic>
+#include "blade_runtime.hpp"   // blade_rt::on_failure_exit (the failure exit skips ~Report)
 
 // ASan detection across the three compilers that can build generated code:
 // MSVC and GCC define __SANITIZE_ADDRESS__, clang answers __has_feature.
@@ -86,6 +87,8 @@ inline void blade_mc_free_hook(const volatile void* p) {
 }
 #endif
 
+static void report_on_failure_exit();
+
 struct Report {
     long long baseline_bytes;
     long long baseline_blocks;
@@ -105,8 +108,12 @@ struct Report {
 #endif
         baseline_bytes  = g_live_bytes.load();
         baseline_blocks = g_live_blocks.load();
+        // The runtime's failure exit leaves through _Exit, which runs no static
+        // destructor: the one report line is printed by this hook instead.
+        blade_rt::on_failure_exit(report_on_failure_exit);
     }
-    ~Report() {
+    ~Report() { print(); }
+    void print() const {
         // Static destructors run in reverse construction order; this object
         // is constructed first in the TU (the header is included before any
         // generated code), so this samples LAST -- after main returned and
@@ -126,5 +133,7 @@ struct Report {
 // One generated program is one TU, so internal linkage suffices; the object
 // exists only for its constructor/destructor bracketing of main().
 static Report blade_mc_report;
+
+static void report_on_failure_exit() { blade_mc_report.print(); }
 
 } // namespace blade_memcheck

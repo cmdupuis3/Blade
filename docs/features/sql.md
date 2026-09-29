@@ -13,9 +13,11 @@ system rather than adding a second semantics.
 
 ```blade
 // SELECT temp FROM temps WHERE temp > 25 ORDER BY temp DESC
+let temps = [21.0, 30.5, 26.0, 18.0, 28.0]
 let m   = mask(temps, lambda(t) -> t > 25.0)
 let hot = compound(temps, m)
 let out = sort(hot, lambda(t) -> -t)
+// EXPECT: out = [30.5, 28, 26]
 ```
 
 | SQL | Blade |
@@ -37,7 +39,7 @@ let out = sort(hot, lambda(t) -> -t)
 
 ## 1. `mask(A, pred)` — predicate → presence array
 
-```blade
+```blade sketch
 mask : Array<T like I> × (T -> Bool) -> Array<Bool like I>
 ```
 
@@ -59,7 +61,7 @@ Tests: `sql-masks` ("Mask Basic", "SQL WHERE", "Mask Composition").
 
 ## 2. `compound(A, m)` — materialize a masked view
 
-```blade
+```blade sketch
 compound : Array<T like I...> × Array<Bool like I...> -> Compound<T>
 ```
 
@@ -94,7 +96,7 @@ carrier, now reached only from a SparseIdx head.) Tests: `sql-masks/001`,
 
 ## 2b. `sparse(values, keys)` — bundle values with an explicit key set
 
-```blade
+```blade sketch
 sparse : Array<T like Idx<n>, Rest...> × keys -> Sparse<T>
 ```
 
@@ -130,7 +132,7 @@ Tests: `index-types/171–184`.
 
 ## 3. `intersect(A, B)` / `union(A, B)` — set operations
 
-```blade
+```blade sketch
 intersect, union : Array<T> × Array<T> -> Array<T>   // rank-1, dynamic extent
 ```
 
@@ -149,7 +151,7 @@ Tests: `sql-set-ops` ("Intersect Dedups A", "Union Dedups Both",
 
 ## 4. `unique(A)` — DISTINCT
 
-```blade
+```blade sketch
 unique : Array<T> -> Array<T>   // rank-1, dynamic extent ≤ input
 ```
 
@@ -158,7 +160,7 @@ float element types. Tests: `sql-unique-contains/001–003`.
 
 ## 5. `contains(A, x)` — membership
 
-```blade
+```blade sketch
 contains : Array<T> × T -> Bool
 ```
 
@@ -170,8 +172,14 @@ Tests: `sql-unique-contains/004–007`.
 ## 6. Semijoin / antijoin — idiom, not keyword
 
 ```blade
-let semi = compound(A, mask(A, lambda(x) -> contains(B, x)))
-let anti = compound(A, mask(A, lambda(x) -> !contains(B, x)))
+let A = [1, 2, 2, 5, 7]
+let B = [2, 7]
+let semi = compound(A, mask(A, lambda(x) -> contains(B, x)))    // 2, 2, 7: duplicates kept
+let anti = compound(A, mask(A, lambda(x) -> !contains(B, x)))   // 1, 5
+let n_semi = extents(semi)
+let n_anti = extents(anti)
+// EXPECT: n_semi = 3
+// EXPECT: n_anti = 2
 ```
 
 Multiplicity-preserving (unlike `intersect`). **Performance status**: the
@@ -184,7 +192,7 @@ conjunction).
 
 ## 7. `group_keys(k₁, k₂, ...)` — grouping structure
 
-```blade
+```blade sketch
 group_keys : Array<K like I> × ... -> GroupKeys<I>
 ```
 
@@ -213,7 +221,7 @@ same CSR locals the same way.
 
 Any indirection is `BL3017`:
 
-```blade
+```blade sketch
 let gk  = group_keys(region)
 let gk2 = gk                        // BL3017: aliased
 let b   = (sums, gk)                // BL3017: tuple element (struct/array too)
@@ -245,7 +253,7 @@ The whole chain — `group_keys`, `group_by`, and both accessors — works insid
 loss function whose keys are a *parameter* needs (the grouping is derived per
 call, so there is nothing to hoist):
 
-```blade
+```blade sketch
 function mean_by(k: Array<Int64 like Row>, v: Array<Float64 like Row>) = {
     let gk = group_keys(k)
     let n  = extents(gk)
@@ -268,7 +276,7 @@ A **negative key means the row belongs to no group**: it is dropped from the
 grouping entirely rather than forming a group of its own. This is `WHERE` fused
 into `GROUP BY`, and it is what lets the key *function* do the selection:
 
-```blade
+```blade sketch
 let seg  = (t <@> lambda(x) -> floor(x / width)) |> compute  // out-of-range rows key < 0
 let gk   = group_keys(seg)
 let gt   = group_by(t, gk)                                   // dropped rows never gathered
@@ -288,7 +296,7 @@ Tests: `sql-group-by` cases "Idx Annotated", "Enum First/String",
 
 ## 7a. `group_bucket(gk)` — the row → bucket map
 
-```blade
+```blade sketch
 group_bucket : GroupKeys<I> -> Array<Int64 like I>
 ```
 
@@ -297,7 +305,7 @@ a negative key dropped. It is the inverse of the CSR (perm, offsets) pair, which
 is otherwise reachable only from inside a ragged peel, and it spans the *source*
 index space — so it co-iterates with the array that was grouped:
 
-```blade
+```blade sketch
 let gk = group_keys(region)
 let b  = group_bucket(gk)                       // Array<Int64 like StationIdx>
 let kept = (method_for(zip(b, temps)) <@> lambda(bb, t) -> if bb >= 0 then t else 0.0) |> compute
@@ -328,7 +336,7 @@ Grouping Argument", "Group Keys Alias", "Group Keys In Tuple".
 
 ## 7b. `extents(gk)` — per-group sizes, without materializing
 
-```blade
+```blade sketch
 extents : GroupKeys<I> -> Array<Int64 like GroupOuter>
 ```
 
@@ -337,9 +345,14 @@ extent. Asked of the **grouping**, the honest answer exists — one length per
 group — and that is what this returns:
 
 ```blade
+let region = [0, 1, 0, 2, 1]
+let temps  = [20.0, 25.0, 22.0, 30.0, 27.0]
 let gk    = group_keys(region)
+let sums  = method_for(group_by(temps, gk)) <@> lambda(g) -> reduce(g, (+)) |> compute
 let sizes = extents(gk)                      // Array<Int64 like GroupOuter>
-let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / n) |> compute
+let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / Float64(n)) |> compute
+// EXPECT: sizes = [2, 2, 1]
+// EXPECT: means = [21, 26, 30]
 ```
 
 Sizes are `offsets[g+1] - offsets[g]`, so **nothing is gathered** — a count-only
@@ -354,7 +367,7 @@ by exactly the dropped rows. Bare `gk` name required, as in §7a.
 read, so codegen skips the per-group allocation and the `O(n)` copy, leaving the
 row pointers null:
 
-```blade
+```blade sketch
 let sizes = method_for(group_by(v, gk)) <@> lambda(r) -> extents(r) |> compute   // no gather
 ```
 
@@ -372,7 +385,7 @@ A chunked dimension is a grouping of its axis whose keys are given by STRUCTURE
 rather than by values (docs/plans/structural/07). The surface is one type and
 three name-keyed forms:
 
-```blade
+```blade sketch
 type I  = Idx<10>
 type CI = Chunked<I, 4>                       // I segmented into runs of four: [0,4) [4,8) [8,10)
 type CX = Chunked<s.index.x, store>           // a store axis, chunked as the store chunks it
@@ -463,7 +476,7 @@ segments), 10h (elementwise consumers), 10i (rank 2: tiles and row bands).
 
 ## 8. `group_by(values, gk)` — ragged grouped view
 
-```blade
+```blade sketch
 group_by : Array<T like I> × GroupKeys<I> -> Array<T like GroupOuter, GroupMember>
 ```
 
@@ -471,9 +484,12 @@ A first-class **ragged rank-2 array** (uneven group sizes), consumed by ordinary
 loop objects:
 
 ```blade
+let region  = [0, 1, 0, 2, 1]
+let temps   = [20.0, 25.0, 22.0, 30.0, 27.0]
 let gk      = group_keys(region)
 let grouped = group_by(temps, gk)
-method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute   // SUM ... GROUP BY
+let sums = method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute   // SUM ... GROUP BY
+// EXPECT: sums = [42, 52, 30]
 ```
 
 - Each kernel argument `g` is a per-group sub-array; group size via `extents(g)`.
@@ -495,12 +511,16 @@ Grouped arrays partitioned by the **same `group_keys` binding** co-iterate: the
 rows correspond one-to-one, and the kernel receives one row per operand.
 
 ```blade
+let region = [0, 1, 0, 2, 1]
+let a = [1.0, 2.0, 3.0, 4.0, 5.0]
+let b = [1.0, 1.0, 2.0, 2.0, 3.0]
 let gk = group_keys(region)
 let ga = group_by(a, gk)
 let gb = group_by(b, gk)
-method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>,
-                                   rb: Array<Float64 like RaggedIdx<_>>)
-    -> prodsum(ra, rb) |> compute        // per-group dot product
+let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>,
+                                              rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+// per-group dot product
+// EXPECT: dots = [7, 17, 8]
 ```
 
 One offsets table drives the whole walk, so this is the ordinary ragged peel with
@@ -532,7 +552,7 @@ Tests: `sql-group-by` (25).
 
 ## 9. `sort(A, keyFn)` — ORDER BY
 
-```blade
+```blade sketch
 sort : Array<T like I> × (T -> K) -> Array<T>   // fresh anonymous rank-1 index
 ```
 
@@ -547,27 +567,35 @@ Tests: `sql-sort` (2) + type-recovery probe.
 
 ## 10. `reduce(A[, kernel[, init]][, axes = n])` — aggregation
 
-```blade
+```blade sketch
 reduce : Array<T like I₁..I_k> × (T × T -> T) -> Array<T like I₁..I_{k−n}>
 reduce(A) ≡ reduce(A, (+))
 ```
 
-Folds **right-to-left**: the **innermost axis, one axis by default**. A rank-k
-operand yields a rank-(k−n) result, so
+A **left fold in ascending storage order** (`reduce([1, 2, 3, 4], lambda(a, b)
+-> a - b)` is `((1 - 2) - 3) - 4 = -8`) over the **innermost axis, one axis by
+default**. A rank-k operand yields a rank-(k−n) result, so
 
 ```blade
-reduce([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], (+))   // [6.0, 60.0]  (rank 1)
+let rows = reduce([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], (+))   // rank 1
+let left = reduce([1, 2, 3, 4], lambda(a, b) -> a - b)
+// EXPECT: rows = [6, 60]
+// EXPECT: left = -8
 ```
 
 The axis count is the optional **named final argument** `axes = n`, with
 1 ≤ n ≤ rank(A). `n = rank(A)` is the full fold to a scalar:
 
 ```blade
-reduce(M, (+))                    // 1 axis  (default)
-reduce(M, (+), init)              // 1 axis, seeded
-reduce(M, (+), axes = 2)          // 2 axes
-reduce(M, (+), init, axes = 2)    // 2 axes, seeded
-reduce([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], (+), axes = 2)   // 66.0
+let M = [[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]]
+let r1  = reduce(M, (+))                      // 1 axis  (default)
+let r1s = reduce(M, (+), 100.0)               // 1 axis, seeded (per row)
+let r2  = reduce(M, (+), axes = 2)            // 2 axes
+let r2s = reduce(M, (+), 100.0, axes = 2)     // 2 axes, seeded (once)
+// EXPECT: r1 = [6, 60]
+// EXPECT: r1s = [106, 160]
+// EXPECT: r2 = 66
+// EXPECT: r2s = 166
 ```
 
 It is a NAMED slot, not a fourth positional one, because the third positional
@@ -579,7 +607,7 @@ result type (deferred, and refused explicitly).
 The row-wise `<@>` spelling remains exactly equivalent to the default, and is
 still the form to reach for when the row kernel does more than fold:
 
-```blade
+```blade sketch
 reduce(A, (+))  ≡  method_for(A) <@> lambda(r) -> reduce(r, (+)) |> compute
 ```
 
@@ -639,7 +667,7 @@ rank-k full fold `021`, the partial default `023`, and the seed/axes ladder
 
 ## 10a. `prodsum(A, B)` — fused dot-product reduction
 
-```blade
+```blade sketch
 prodsum : Array<T like I...> × Array<T like I...> -> T
 ```
 
@@ -663,7 +691,7 @@ Semantics pin: `tests/corpus/index-types/235_prodsum_complex_unconjugated.blade`
 
 ## 11. `extents(A)` — COUNT / dimensions
 
-```blade
+```blade sketch
 extents : Array<T like I>          -> Int64          // rank-1
 extents : Array<T like I₁,...,Iₖ>  -> (Int64, ...)   // dense rank-k, outermost first
 ```
@@ -683,9 +711,10 @@ No dedicated construct: integer (or `EnumIdx`-tagged) arrays hold key values;
 lookups are ordinary captured-array indexing.
 
 ```blade
-let region  : Array<Int64 like StationIdx> = ...    // FK: station -> region id
-let weights : Array<Float like RegionIdx>  = ...
-method_for(region) <@> lambda(r) -> weights(r) |> compute   // deref
+let region  = [0, 1, 0, 2, 1]                  // FK: station -> region id
+let weights = [5.0, 6.0, 4.0]                  // one weight per region
+let deref = method_for(region) <@> lambda(r) -> weights(r) |> compute
+// EXPECT: deref = [5, 6, 5, 4, 6]
 ```
 
 - Cross-reference (`weights(region(i))`), co-iteration via `zip`, outer products

@@ -4,3 +4,7 @@ function comoment(args: Poly<T^0>)
 where comm(args)
 -> T^0
 = args[0]
+
+// A call site, so the signature is exercised end to end: args[0] of the pack.
+let c = comoment(2.5, 4.0)
+// EXPECT: c = 2.5

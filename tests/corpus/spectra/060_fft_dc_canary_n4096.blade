@@ -1,0 +1,16 @@
+// TEST: Spectra fft: DC-bin canary at n=4096 (toolchain regression guard)
+// A toolchain canary. g++ 15.2.0 (GCC PR 124802, fixed in 15.3 / 16.1) took
+// the interleaved radix-2 butterfly's lane permute for a multiply under an
+// FMA -march with -ffp-contract=fast and emitted FMADDSUB(prod, prod, addend),
+// squaring the product: this DC bin came out ~2000 off. Any compiler that
+// miscompiles the butterfly again trips this pin. Bin 0 is the plain sum of
+// the input, so the residual is rounding noise (~3e-13); the pin is the
+// boolean, robust to any ulp drift. The draw is a top-level let (BL6002).
+import rand as r
+import spectra as sp
+let x: Array<Float64 like Idx<4096>> = r.normal(1, 4096)
+let dc_ok = {
+    let X = sp.fft(x)
+    abs(real(X(0)) - reduce(x, (+))) < 1.0e-9
+}
+// EXPECT: dc_ok = true

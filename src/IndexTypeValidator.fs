@@ -251,13 +251,47 @@ let checkIndexTypeRules (env: AliasEnv) (declName: string) (span: Span)
 
 /// Validate a TypeExpr at a given position. Handles both the position-rule
 /// check (for index types at this level) and recursion into composite types.
+/// The SHAPE of an index type's literal parameters, independent of position:
+/// an extent is a count (a non-negative INTEGER -- `Idx<3.5>` was silently
+/// truncated, and a negative literal reached g++ as a negative allocation),
+/// and a compact group has rank >= 1 (`SymIdx<0, 3>` reached g++). Only
+/// what is visible syntactically is judged here; an extent computed by a
+/// `let static` is judged where it folds (TypeCheck's index-type registration).
+let extentShapeErrors (declName: string) (span: Span) (ty: TypeExpr) : ValidationError list =
+    let mkErr msg = [{ Message = msg; Span = span; DeclName = declName }]
+    let extentErr (what: string) (e: Expr) =
+        match e.Kind with
+        | ExprLit (LitFloat v) ->
+            mkErr $"the extent of {what} must be a non-negative integer, but {v} is not an integer. An extent counts positions."
+        | ExprLit (LitInt v) when v < 0L ->
+            mkErr $"the extent of {what} must be a non-negative integer, but it is {v}."
+        | ExprUnaryOp (OpNeg, { Kind = ExprLit (LitInt v) }) when v > 0L ->
+            mkErr $"the extent of {what} must be a non-negative integer, but it is -{v}."
+        | ExprUnaryOp (OpNeg, { Kind = ExprLit (LitFloat _) }) ->
+            mkErr $"the extent of {what} must be a non-negative integer."
+        | _ -> []
+    let baseErr what b =
+        match b with
+        | SymBaseExtent e -> extentErr what e
+        | SymBaseIndex _ -> []
+    match ty with
+    | TyIdx e -> extentErr "Idx<...>" e
+    | TyHermitianIdx e -> extentErr "HermitianIdx<...>" e
+    | TySymIdx (r, _) when r < 1 -> mkErr $"SymIdx<{r}, ...> has rank {r}: a symmetric index group spans at least one coordinate (rank >= 1)."
+    | TyAntisymIdx (r, _) when r < 1 -> mkErr $"AntisymIdx<{r}, ...> has rank {r}: an antisymmetric index group spans at least one coordinate (rank >= 1)."
+    | TySymIdx (_, b) -> baseErr "SymIdx<...>" b
+    | TyAntisymIdx (_, b) -> baseErr "AntisymIdx<...>" b
+    | TyOrbIdx (_, b) -> baseErr "OrbIdx<...>" b
+    | _ -> []
+
 let rec validateTypeExpr (env: AliasEnv) (declName: string) (span: Span)
                          (pos: Position) (ty: TypeExpr) : ValidationError list =
     let positionErrs =
         if isIndexType env ty then checkIndexTypeRules env declName span pos ty
         else []
+    let shapeErrs = extentShapeErrors declName span ty
     let childErrs = validateChildren env declName span pos ty
-    positionErrs @ childErrs
+    positionErrs @ shapeErrs @ childErrs
 
 /// Recurse into composite types. Each child is validated at the appropriate
 /// position derived from `parentPos` -- most children inherit, but some types

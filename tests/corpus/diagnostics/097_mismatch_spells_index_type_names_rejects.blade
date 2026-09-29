@@ -1,0 +1,11 @@
+// TEST: A mismatch between two named index types spells the names (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: expected Array<Float64 like J>, got Array<Float64 like I>
+// ============================================================================
+// `I` and `J` are both Idx<3>, and the structural printer rendered both sides
+// "Array<Float64 like Idx<3>>" -- a message that reads as a compiler bug. When
+// the two sides render alike, the names are what differ, so they are spelled.
+type I = Idx<3>
+type J = Idx<3>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like J> = A

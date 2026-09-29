@@ -60,6 +60,51 @@ BLADE_NORETURN void blade_panic(const char *msg) {
     exit(1);
 }
 
+/* ---- the arithmetic contract ------------------------------------------- */
+
+/* docs/formalism.md section 2.4. Twins of blade_rt::idiv / imod / ipow / f2i
+ * and blade_arith::fpow (src/cpp/blade_runtime.hpp) and of the interpreter's
+ * Numerics.computeReal / intPow64 / realPow / floatToInt64: same answers,
+ * same codes, same messages. The emitter calls these only where a fault is
+ * possible (a nonzero literal divisor other than -1 stays a plain sdiv). */
+long long blade_idiv(long long a, long long b) {
+    if (b == 0) blade_panic("error[BL8013]: integer division by zero");
+    /* MIN / -1 wraps to MIN; sdiv would be UB, x86 idiv traps. */
+    if (b == -1) return (long long)(0ULL - (unsigned long long)a);
+    return a / b;
+}
+
+long long blade_imod(long long a, long long b) {
+    if (b == 0) blade_panic("error[BL8013]: integer modulo by zero");
+    if (b == -1) return 0;
+    return a % b;
+}
+
+/* Exact modulo 2^64 (square-and-multiply in unsigned arithmetic); 0^0 = 1. */
+long long blade_ipow(long long b, long long e) {
+    unsigned long long r = 1, x = (unsigned long long)b, n;
+    if (e < 0) blade_panic("error[BL8013]: integer power with a negative exponent");
+    n = (unsigned long long)e;
+    while (n != 0) {
+        if (n & 1ULL) r *= x;
+        x *= x;
+        n >>= 1;
+    }
+    return (long long)r;
+}
+
+/* Real `^`: x * x at an exponent of exactly 2, else the platform pow. */
+double blade_fpow(double x, double e) { return e == 2.0 ? x * x : pow(x, e); }
+
+/* Float -> Int64: truncation of a value the target holds; NaN / +-inf / out
+ * of [-2^63, 2^63) panics (fptosi would be poison). Exact comparisons: both
+ * bounds are powers of two. */
+long long blade_f2i64(double x) {
+    if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0))
+        blade_panic("error[BL8014]: float-to-integer conversion of NaN or an out-of-range value");
+    return (long long)x;
+}
+
 /* ---- allocation ------------------------------------------------------- */
 
 /* EVERY pool is 64-byte aligned, and that is a CONTRACT the emitted IR relies

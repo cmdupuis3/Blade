@@ -1,0 +1,16 @@
+// TEST: Spectra power: Parseval canary at n=4096 (toolchain regression guard)
+// `sp.power` is |fft|^2 per bin, so it inherits the fft's exposure to a
+// miscompiled butterfly (g++ 15.2.0, GCC PR 124802: FMA -march with
+// -ffp-contract=fast squared the product through a bad FMADDSUB). Parseval
+// for the unnormalized DFT: sum P = n * sum x^2; the relative residual is
+// rounding noise, so the pin is the boolean at a 1e-9 relative tolerance.
+// The draw is a top-level let (BL6002).
+import rand as r
+import spectra as sp
+let x: Array<Float64 like Idx<4096>> = r.normal(3, 4096)
+let power_ok = {
+    let P = sp.power(x)
+    let sx = reduce(x * x, (+))
+    abs(reduce(P, (+)) - 4096.0 * sx) < 1.0e-9 * 4096.0 * sx
+}
+// EXPECT: power_ok = true

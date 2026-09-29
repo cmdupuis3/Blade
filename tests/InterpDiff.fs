@@ -33,193 +33,45 @@ open Blade.Tests.Corpus
 open Blade.Tests.Expect
 open Blade.Tests.Runner
 
-/// M0 differential slice: the categories the interpreter must match the
-/// compiled binary on at Milestone 0. Grows as later milestones claim more of
-/// the value/printing surface (this list is the documented M0 default set).
-let m0Slice = [ "basic"; "guards"; "static"; "intrinsics" ]
-
-/// M1 differential slice: M0 plus the functions/structs/state surface. These
-/// are CORPUS DIRECTORY names (the gate loads them via Corpus.category), not
-/// the Cli.fs display aliases — e.g. "sum-types", not "sumtypes". Two of the
-/// state categories are two-directory pairs whose "-errors" half is a
-/// reject-only negative corpus (see rejectOnlyCategories):
-///   * mutability  + mutability-errors
-///   * units       + unit-errors
-/// The "modules" category here is SINGLE-file (Corpus.category "modules", 2
-/// tests); genuine multi-source tests live in the separate "multifile"
-/// category (Corpus.multiFileCategory), which is NOT part of this slice, so
-/// the gate never needs lowerMultiSource.
-let m1Slice =
-    m0Slice
-    @ [ "functions"
-        "structs"; "struct-mutual"; "struct-aborts"
-        "sum-types"; "interfaces"
-        "mutability"; "mutability-errors"
-        "modules"
-        "units"; "unit-errors" ]
-
-/// M2 differential slice: the dense-array + loop-object surface (arrays,
-/// virtual ranges, loop objects, combinator algebra, reductions, replicate,
-/// arity-poly, function arrays). These are CORPUS DIRECTORY names (Corpus.category
-/// loads them), reconciled against tests/corpus/ — ALL TWELVE of the m2-design.md
-/// §8 build-plan categories EXIST verbatim as directories, so no name corrections
-/// were needed (the imperative-removal arc deleted the for-in category — its
-/// sequential-recurrence surface is now the recursive-arrays category):
-///   loops recursive-arrays bracketed anon-ranges replicate tuple-views
-///   zero-combinators sequence-combinators guard-combinators
-///   func-arrays arity inference-probes
-/// Reject-probes ("(rejects)") and the single func-arrays abort-probe
-/// ("(aborts)") carry their name markers, so the existing isRejectProbe /
-/// isAbortProbe classification handles them — NONE of these is an unmarked
-/// reject-only corpus, so no rejectOnlyCategories entry is required.
-/// (Until the interpreter's array/loop evaluation lands, most members classify
-/// SKIP-UNSUPPORTED; this slice makes the future passes visible per checkpoint.)
-let m2Slice =
-    [ "loops"; "recursive-arrays"; "bracketed"; "anon-ranges"; "replicate"; "tuple-views"
-      "zero-combinators"; "sequence-combinators"; "guard-combinators"
-      "func-arrays"; "arity"; "inference-probes" ]
-
-/// M3 differential slice: symmetric/antisymmetric/Hermitian COMPACT storage
-/// (triangular output allocation + left-justified writes + genPrintArraySymAware
-/// print) and Reynolds KERNELS (permutation-sum evaluation). Corpus directory
-/// names. Members whose output rides the FUSED-JOINT compound-axis path (joint
-/// SymIdx over a repeated multi-dim array — symmetry/012,013,015,016 and
-/// reynolds/022,023) classify SKIP-UNSUPPORTED, as do the OpenMP/parallel/fusion
-/// members outside the default (serial) run; the compact + Reynolds value tests
-/// pass byte-for-byte.
-let m3Slice = [ "symmetry"; "reynolds" ]
-
-/// M5-prep slice: the native random-fill surface (rand.uniform / rand.normal
-/// bindings, materialized in Interp/Run.fs from IRModule.RandomInits). Dense
-/// rank-1 float arrays; 002-004 also exercise reduce / method_for (M2 layer).
-/// fill_random(mod) (FillModulus = nondeterministic C rand()) classifies
-/// SKIP-UNSUPPORTED by design.
-let randSlice = [ "rand" ]
-
-/// display: the frame lines themselves. THE point of running this category
-/// down both lanes is that Blade.Display.Frame.emit and its generated C++
-/// mirror (Frame.cppRuntime) are two hand-written copies of one byte format --
-/// the escape table, the ordinal counter, the field order. A divergence in
-/// either is invisible in one lane alone and shows up here as a stdout diff.
-let displaySlice = [ "display" ]
-
-/// M4a differential slice: the SQL-ish relational surface. CORPUS directory
-/// names (Corpus.category loads them), each VERIFIED against tests/corpus/ and
-/// Corpus.fs and — critically — RUN through the gate in isolation, each showing
-/// ZERO FAIL (passes + SKIP-UNSUPPORTED + reject-probes only). Adding only
-/// zero-fail categories preserves the gate's zero-fail invariant while making
-/// the not-yet-interpreted SQL surface VISIBLE per checkpoint (most members
-/// classify SKIP-UNSUPPORTED until the interpreter's mask/group/join/set-op
-/// evaluation lands; the reduce / foreign-key / extents value tests already pass
-/// byte-for-byte).
+/// Categories the interpreter differential deliberately does NOT walk, each
+/// with its reason. The ONLY exclusions: every other corpus directory on disk
+/// is in `currentSlice`, and the corpus-wiring block (CliSelfTests) fails the
+/// default suite if an entry here stops naming a real directory.
 ///
-/// HELD BACK — NOT added because it FAILS the gate against this snapshot (its
-/// four failures are the next wave's fix list, all in Core/Loops/ArrayOps,
-/// which this wave does not own):
-///   index-types (63 pass / 4 FAIL / 60 skip):
-///     * Ragged Tuple Form Read (018)  — interp exits 1 (BL8003 array index out
-///       of bounds) vs compiled 0
-///     * Ragged Literal Indexing (077) — interp exits 1 (BL8003 array index out
-///       of bounds) vs compiled 0
-///     * Ragged Subview Metadata (023) — interp bug: IndexOutOfRange in the
-///       ragged sub-view reader
-///     * Complex Transcendental (125)  — interp stdout diverges from the
-///       compiled binary (complex-transcendental print formatting)
-/// Add index-types once those four are fixed.
-let m4aSlice =
-    [ "sql-reduce"; "sql-foreign-keys"; "sql-sort"; "sql-set-ops"
-      "sql-unique-contains"; "sql-extents"; "sql-regressions"
-      "sql-combined"; "sql-extents-multi-rank"; "sql-group-by"
-      "sql-masks"; "sql-semijoins"; "sql-v24d-probes" ]
+/// The slice used to be a hand-grown list of milestone slices (M0 scalars ...
+/// M5 domain layers), and it silently lagged the corpus: casts, segments, sgs,
+/// trees, tuples, display-errors, diagnostics and multifile were never walked,
+/// so a drift between the twins there could not turn anything red.
+let interpExcluded : (string * string) list =
+    [ "memfree-stress",
+      "the allocation-churn MEMORY gate (~30k iterations x a 2 MiB temp): ~8e9 element ops blow the interp "
+      + "timeout ceiling and, per runInterpTimed's caveat, an abandoned walk contaminates every later timing" ]
 
-/// Fallback slice: the `<|:>` allocated-fallback corpus (the NEW `fallback`
-/// category). Verified 0 FAIL; every member currently classifies
-/// SKIP-UNSUPPORTED (the interpreter has no fallback materializer yet — lands a
-/// later wave). Added for coverage visibility per the verification-first rule.
-let fallbackSlice = [ "fallback" ]
-
-/// index-types: added once its four blockers fell (ragged-trio SRagged
-/// construction/peel fix + the Kahan complex-sqrt port) — verified 0 FAIL.
-let indexTypesSlice = [ "index-types" ]
-
-/// M5 differential slice: the DOMAIN-LAYER categories. CORPUS directory names
-/// (Corpus.category), each VERIFIED through the gate in isolation against this
-/// snapshot showing ZERO FAIL:
-///   ad       10/0/0  (8 grad() value + 2 reject) — the grad canary
-///   spectra  22/0/0  (14 bit-exact complex FFT/ifft/power/polyspec + 8 reject)
-///   math     40/0/0  (34 svd/eigh/eig/hosvd/unfold + 6 reject; the 2-D matrix
-///                     prints render byte-exact through the existing ArrayOps path)
-///   ml-ops   20/0/0  (snapshot 2026-07-27, corpus 001-019 incl. sym_spec/
-///                     sym_lift/derive_poly/perm sizing + the provider-reads
-///                     entry; the earlier "11/0/0" predated ml-ops/013-019)
-///   ml-equiv 39/0/0  (snapshot 2026-07-27, corpus 001-038 incl.
-///                     derive_sym_tp/derive_poly certificates + provider-reads)
-///   ml-e2e    2/0/0  (2 full E(3) message-passing grad-training loops)
-///   ppl      68/0/1  (53 pool/dist/jet/map value + 15 reject; ONE
-///                     SKIP-UNSUPPORTED = ppl/007 "Moments Multiaxis", whose
-///                     multiaxis moment takes the per-cell fused-joint output path
-///                     the gate holds at M3+. Not a fail; a feature-gap skip.)
-/// Why these are core surface (M5 audit): Dist ERASES to plain cumulant ARRAYS
-/// before IR (no IRTDist ever reaches the interpreter), so the ppl pool path is
-/// straight-line arithmetic over rank-1 sample-axis reduces the M0-M2 core already
-/// evaluates. spectra rides the bit-exact complex arm only (baked-float twiddles,
-/// naive complex mul = __muldc3 for finite inputs; NO complex div/exp/log/`^`).
-/// math is pure imperative REAL arithmetic (Jacobi/Francis on flat mut arrays;
-/// eig eigenvalues are real (re,im) pairs — no native Complex128). ad/ml-e2e/
-/// ml-equiv ride grad()'s core imperative reverse pass. The ppl halo formers
-/// (068,069) materialize through the general range machinery — no halo-specific
-/// interp code is needed and they PASS. ml-e2e's two 30-step training loops are
-/// the only heavy members. Their cost is BUILD-CONFIG SENSITIVE — measured idle,
-/// in isolation: 001 <5s Release / 11.36s Debug, 002 25.41s Release / 146.97s
-/// Debug. Quote BOTH configs for any timing claim here: the Release-only figures
-/// this comment used to carry made the old 120s runInterpTimed ceiling look safe,
-/// and 002 then blew it under the Debug build that `dotnet run` produces. See the
-/// interpTimeoutMs note.
-let m5Slice =
-    [ "ad"; "ad-jvp"; "ad-jvp-comb"; "spectra"; "math"; "ml-ops"; "ml-equiv"; "ml-e2e"; "ppl" ]
-    // ad-jvp verified standalone at 14/0/0 with zero skips before joining
-    // the slice (jvp emits ordinary Blade source; the interpreter needs no
-    // new arms to twin it)
-
-/// The slice the default `test interp` arm runs. Later milestones extend it
-/// (index types once its ragged/complex fixes land, ...). Kept as its own name
-/// so the Cli arm (`... runInterpDiffTests currentSlice ...`) never needs
-/// editing again as milestones land — only this binding grows.
-/// deferred-concrete: `<$>` / `<|>` / sequence / guard applied to CONCRETE arrays
-/// (a plain array operand, not a deferred computation). Regression coverage for the
-/// fix that makes these defer like `<@>` (materialize only at |> compute) instead of
-/// eagerly evaluating, plus the force-path repairs (functor wrapper actually applied,
-/// array-shaped guard). Both parity (interp == compiled) and EXPECT values verified.
-let deferredConcreteSlice = [ "deferred-concrete" ]
-
-/// stack-join: the rank-changing assembly combinators (formalism 2.6). The
-/// interpreter's ArrayOps.stackArrays / joinArrays are pinned to CodeGen's
-/// materialize{Stack,Join}Form, so every member must agree byte-for-byte.
-let stackJoinSlice = [ "stack-join" ]
-
-/// memfree: scope-exit deallocation hazards. Values must be invariant under
-/// the deterministic-free change, so the interpreter — which has no notion of
-/// frees at all — is the ideal independent witness: any divergence means the
-/// COMPILED side freed something it should not have. memfree-stress (011) is
-/// deliberately EXCLUDED: its ~8e9 element ops would blow the interp timeout
-/// ceiling and, per the runInterpTimed caveat, contaminate later timings.
-let memfreeSlice = [ "memfree" ]
-
-let currentSlice = m1Slice @ m2Slice @ m3Slice @ randSlice @ displaySlice @ m4aSlice @ fallbackSlice @ m5Slice @ indexTypesSlice @ deferredConcreteSlice @ stackJoinSlice @ memfreeSlice
+/// The slice the `test interp` arm (and `blade test --interp`) runs: EVERY
+/// corpus category on disk -- single-file and multi-file, DISCOVERED -- minus
+/// `interpExcluded`. A function, not a value: discovery reads the corpus root.
+let currentSlice () : string list =
+    let excluded = interpExcluded |> List.map fst |> Set.ofList
+    (singleFileCategories () @ multiFileCategories ())
+    |> List.filter (fun c -> not (excluded.Contains c))
 
 /// Output-line normalizer, shared in spirit with DiffOracle.normalize
 /// (DiffOracle.fs:79-85), widened for the split-timing wrapper:
 ///   * drop the "<name> completed in <t>s" compute-timing line AND the
 ///     "<name> input allocation took <t>s" setup-timing line
 ///     (CodeGen.genMainWrapper / genMainWrapperSplit) — both vary per run;
-///   * mask heap pointers 0x... -> 0xPTR (the struct printer still renders an
-///     array-typed field as its raw address, different every run);
 ///   * CRLF -> LF; trim trailing whitespace per line and the whole text.
-let private normalize (s: string) : string =
+/// Heap pointers are NOT masked any more. The mask (`0x...` -> `0xPTR`) was
+/// there because the struct printer streamed an array-typed field as its raw
+/// address, and it hid exactly that bug; the gates now fail on a pointer in
+/// output instead (Expect.rawPointerLine).
+/// Public: the optimizer differential (tests/OptDiff.fs) compares compiled
+/// outputs through this same normalizer.
+let normalize (s: string) : string =
     s.Replace("\r\n", "\n").Split('\n')
     |> Array.filter (fun l ->
         not (l.Contains "completed in") && not (l.Contains "input allocation took"))
-    |> Array.map (fun l -> Regex.Replace(l.TrimEnd(), "0x[0-9a-fA-F]+", "0xPTR"))
+    |> Array.map (fun l -> l.TrimEnd())
     |> String.concat "\n"
     |> fun t -> t.Trim()
 
@@ -287,14 +139,13 @@ let private runInterpTimed (program: IRProgram) (name: string) : Result<Run.Inte
         printfn "    WARNING: interpreter thread ABANDONED (still running); later timings in this run are contended"
         Error (sprintf "interp timed out (>%gs)" (float interpTimeoutMs / 1000.0))
 
-/// Corpus categories that are ENTIRELY negative tests: every source is meant
-/// to be refused by the compiled front-end (a type/lower/unit error), yet
-/// their test NAMES carry no "(rejects)" marker for the harness to key on
-/// (they open "// TEST: <plain name>"). These two "-errors" corpora are not
-/// referenced by the main-suite `allTests` at all — the interp gate is their
-/// first consumer — so there is no prior classification to mirror; we define
-/// the faithful one here: treat every member as a compile-reject probe.
-let private rejectOnlyCategories = Set.ofList [ "mutability-errors"; "unit-errors" ]
+/// The wholly-negative categories (every source must be refused, names carry
+/// no "(rejects)" marker): Corpus.rejectOnlyCategories, the ONE definition the
+/// default suite and the standalone keys share. The interpreter shares the
+/// front end, so on these the gate's question is the main suite's -- refused,
+/// at the pinned stage, for the pinned reason (code and message) -- asked
+/// through the main suite's classifier.
+let private rejectOnlyCategories = Blade.Tests.Corpus.rejectOnlyCategories
 
 /// Differential gate over the given corpus categories. Verdicts:
 ///   * reject-probe ("(rejects)", OR any test in a rejectOnlyCategory): judged by
@@ -401,12 +252,91 @@ let runInterpDiffTests (categories: string list) : BlockResult =
             unsupported <- unsupported + 1
             resultLine Skip name ($"SKIP-UNSUPPORTED: {feature}")
 
+        // The value verdict both arms share: exit classes first, then
+        // byte-identical NORMALIZED stdout, then the EXPECT pins against the
+        // interpreter's output.
+        let judgeRun (name: string) (expected: ExpectedValue list) (compiledExit: int) (compiledOut: string) (interp: Run.InterpResult) =
+            if interp.ExitCode = Run.ExitUnsupported then
+                skipUnsupported name (unsupportedFeature interp)
+            elif interp.ExitCode = Run.ExitInterpBug then
+                fail name ($"interp bug: {(firstLine interp.Stderr)}")
+            elif compiledExit <> 0 then
+                fail name ($"compiled binary exited {compiledExit} (non-abort test)")
+            elif interp.ExitCode <> 0 then
+                fail name ($"interp exited {interp.ExitCode}, compiled exited 0: {(firstLine interp.Stderr)}")
+            elif (rawPointerLine compiledOut).IsSome then
+                fail name ($"compiled output prints a raw pointer: {(rawPointerLine compiledOut).Value}")
+            elif (rawPointerLine interp.Stdout).IsSome then
+                fail name ($"interp output prints a raw pointer: {(rawPointerLine interp.Stdout).Value}")
+            else
+                let mine = normalize interp.Stdout
+                let theirs = normalize compiledOut
+                if mine <> theirs then
+                    fail name "stdout diverges from compiled binary"
+                    printfn "    interp:   %s"
+                        (mine.Split('\n') |> Array.truncate 3 |> String.concat " | ")
+                    printfn "    compiled: %s"
+                        (theirs.Split('\n') |> Array.truncate 3 |> String.concat " | ")
+                else
+                    // Second gate: EXPECT values vs interp output.
+                    match checkExpectedValues expected interp.Stdout with
+                    | Ok () -> pass name "values identical"
+                    | Error msgs -> fail name ($"""interp value-check: {(String.concat "; " msgs)}""")
+
+        // A MULTI-FILE test (tests/corpus/multifile/<test>/*.blade): lowered as
+        // ONE program -- the only lane that reaches lowerMultiSource, and so
+        // the only one that can see a cross-module specialization drift --
+        // then compiled + run AND interpreted, judged like a single-file value
+        // test. EXPECT pins are the UNION over the member files.
+        let runMultiFile (name: string) (files: (string * string) list) =
+            let (lowered, _) = Blade.Runtime.runOnLargeStack (fun () -> Blade.Lowering.lowerMultiSourceCaptured files)
+            if name.EndsWith "(rejects)" then
+                // The interpreter consumes the SAME lowered program, so the
+                // refusal is shared by construction; WHICH codes it carries is
+                // the Multi-File Modules block's verdict (it reads the checker's
+                // diagnostics). Here the question is only "refused?".
+                match lowered with
+                | Error _ -> pass name "refused by the shared front end"
+                | Ok _ -> fail name "reject-probe lowered: the program was expected to be refused"
+            else
+            match lowered |> Result.bind (fun ir -> validateIR ir |> Result.mapError (String.concat "; ")) with
+            | Error e -> fail name ($"front end rejected (unexpected): {(firstLine e)}")
+            | Ok ir ->
+                let stem = "mf_" + sanitizeFileName name
+                let compiled =
+                    try
+                        let (cpp, _) =
+                            Blade.Runtime.runOnLargeStack (fun () ->
+                                let r = CodeGen.genSelfContainedProgramFromIR ir stem
+                                CodeGen.takeUnhandledIRNodeDiagnostics () |> ignore
+                                r)
+                        let cppFile = Path.Combine(tmpRoot, stem + ".cpp")
+                        File.WriteAllText(cppFile, cpp)
+                        match compileCpp cppFile tmpRoot with
+                        | Error e -> Error e
+                        | Ok exe -> runExecutable exe
+                    with ex -> Error ($"codegen raised: {ex.Message}")
+                match compiled with
+                | Error e when isSkipError e -> skip name e
+                | Error e -> fail name ($"compiled side failed: {(firstLine e)}")
+                | Ok (compiledExit, compiledOut) ->
+                    match runInterpTimedRec ir name with
+                    | Error e -> fail name e
+                    | Ok interp ->
+                        let expected = files |> List.collect (snd >> parseExpectedValues)
+                        judgeRun name expected compiledExit compiledOut interp
+
+        let multiCats = Set.ofList (multiFileCategories ())
         for cat in categories do
             printSubHeader ($"category: {cat}")
+            if multiCats.Contains cat then
+                for (name, files) in multiFileCategory cat do
+                    runMultiFile name files
+            else
             // Every test in a reject-only category is a compile-reject probe,
             // even without the "(rejects)" name marker (see rejectOnlyCategories).
             let catRejectOnly = rejectOnlyCategories.Contains cat
-            for (name, source) in category cat do
+            for (name, source) in categoryTests cat do
                 // ONE locked, large-stack pipeline pass -> IRProgram + compiled run.
                 let result = runFullTest name source tmpRoot true
 
@@ -496,29 +426,7 @@ let runInterpDiffTests (categories: string list) : BlockResult =
                         | Ok program ->
                             match runInterpTimedRec program name with
                             | Error e -> fail name e
-                            | Ok interp ->
-                                if interp.ExitCode = Run.ExitUnsupported then
-                                    skipUnsupported name (unsupportedFeature interp)
-                                elif interp.ExitCode = Run.ExitInterpBug then
-                                    fail name ($"interp bug: {(firstLine interp.Stderr)}")
-                                elif compiledExit <> 0 then
-                                    fail name ($"compiled binary exited {compiledExit} (non-abort test)")
-                                elif interp.ExitCode <> 0 then
-                                    fail name ($"interp exited {interp.ExitCode}, compiled exited 0: {(firstLine interp.Stderr)}")
-                                else
-                                    let mine = normalize interp.Stdout
-                                    let theirs = normalize compiledOut
-                                    if mine <> theirs then
-                                        fail name "stdout diverges from compiled binary"
-                                        printfn "    interp:   %s"
-                                            (mine.Split('\n') |> Array.truncate 3 |> String.concat " | ")
-                                        printfn "    compiled: %s"
-                                            (theirs.Split('\n') |> Array.truncate 3 |> String.concat " | ")
-                                    else
-                                        // Second gate: EXPECT values vs interp output.
-                                        match checkExpectedValues (parseExpectedValues source) interp.Stdout with
-                                        | Ok () -> pass name "values identical"
-                                        | Error msgs -> fail name ($"""interp value-check: {(String.concat "; " msgs)}""")
+                            | Ok interp -> judgeRun name (parseExpectedValues source) compiledExit compiledOut interp
 
         // ------------------------------------------------------------------
         // Provider-read wiring verification (M6). There are NO netcdf/zarr CORPUS

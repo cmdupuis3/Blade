@@ -1,0 +1,14 @@
+// TEST: Generic Sum Of Two Units Rejects (rejects)
+// ERROR: BL3006
+// `add(x: T^0, y: T^0) = x + y` records nothing about units when its body is
+// probed -- x + y with x and y at two independent probe units is not a unit
+// the probe can express, so it used to derive NOTHING, and the call typed
+// meters + seconds as a bare value assignable to anything. The probe now
+// records the EQUATION the body imposes (unit(x) = unit(y)), and the call,
+// where the units are known, is judged against it.
+Unit meters
+Unit seconds
+let a: Float<meters> = 1.0
+let b: Float<seconds> = 2.0
+function add(x: T^0, y: T^0) = x + y
+let c = add(a, b)

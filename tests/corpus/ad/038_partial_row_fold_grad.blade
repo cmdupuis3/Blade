@@ -1,0 +1,56 @@
+// TEST: AD Partial Row Fold (Default axes = 1) Differentiates
+// WARN: BL4010  (method_for(a, a) storage suggestion; a where-clause would be refused by reverse mode)
+import ad as ad
+// ============================================================================
+// `reduce(P, (+))` over a rank-2 P is the PARTIAL fold of the innermost axis
+// (a rank-1 row-sum array), not a scalar. Bound by a `let`, it now lowers to
+// the element-accumulation loop rs(i) += P(i, j), whose adjoint is the row
+// broadcast Pbar(i, j) += rsbar(i) and whose tangent is the same fold of the
+// tangent. It used to meet a SCALAR accumulator over P's rows: a BL3001 type
+// error at user code under ad.grad and an internal BL5501 under ad.jvp.
+// ============================================================================
+type I = Idx<4>
+let w: Array<Float like I> = [1.0, 2.0, 3.0, 4.0]
+
+// f2(a) = sum_i sum_j a_i a_j = (sum a)^2 = 100 at a = [1, 2, 3, 4];
+// df2/da(k) = 2 sum a = 20.
+function f2(a: Array<Float like I>) -> Float = {
+    let p = method_for(a, a) <@> lambda(x, y) -> x * y |> compute
+    let rs: Array<Float like I> = reduce(p, (+))
+    reduce(rs, (+))
+}
+let a0: Array<Float like I> = [1.0, 2.0, 3.0, 4.0]
+let mut d2: Array<Float like I> = [0.0, 0.0, 0.0, 0.0]
+let v2 = ad.grad(f2)(a0, d2)
+// EXPECT: v2 = 100.0
+// EXPECT: d2 = [20.0, 20.0, 20.0, 20.0]
+let s0: Array<Float like I> = [1.0, 0.0, 0.0, 0.0]
+let (jv2, jt2) = ad.jvp(f2)(a0, s0)
+// EXPECT: jt2 = 20.0
+
+// The fold must be over the INNER axis: p(i, j) = a_i w_j, rs(i) = a_i W with
+// W = sum w = 10, f3 = sum_i rs(i)^2 = W^2 sum a^2 = 3000;
+// df3/da(k) = 2 W^2 a_k = [200, 400, 600, 800]. (Folding the OUTER axis would
+// give rs(j) = w_j sum a, and a different gradient.)
+function f3(a: Array<Float like I>) -> Float = {
+    let p = method_for(a, w) <@> lambda(x, y) -> x * y |> compute
+    let rs: Array<Float like I> = reduce(p, (+))
+    let sq = method_for(rs) <@> lambda(z) -> z * z |> compute
+    reduce(sq, (+))
+}
+let mut d3: Array<Float like I> = [0.0, 0.0, 0.0, 0.0]
+let v3 = ad.grad(f3)(a0, d3)
+// EXPECT: v3 = 3000.0
+// EXPECT: d3 = [200.0, 400.0, 600.0, 800.0]
+
+// An explicit full fold (axes = 2) binds a scalar: f4 = W sum a = 100,
+// df4/da(k) = W = 10.
+function f4(a: Array<Float like I>) -> Float = {
+    let p = method_for(a, w) <@> lambda(x, y) -> x * y |> compute
+    let tot = reduce(p, (+), axes = 2)
+    tot
+}
+let mut d4: Array<Float like I> = [0.0, 0.0, 0.0, 0.0]
+let v4 = ad.grad(f4)(a0, d4)
+// EXPECT: v4 = 100.0
+// EXPECT: d4 = [10.0, 10.0, 10.0, 10.0]

@@ -1,0 +1,10 @@
+// TEST: A destructured let of key cells is not a proven position (aborts)
+// The tuple twin of 305: `let (a, b) = (keys(3), keys(0))` binds column
+// DATA; a read through `a` is guarded like `let a = keys(3)` is.
+// ABORT: index out of bounds
+type StationIdx = Idx<4>
+type RegionIdx = Idx<3>
+let station_region: Array<Nat<RegionIdx> like StationIdx> = [0, 2, 0, -1]
+let region_weight: Array<Float64 like RegionIdx> = [1.0, 0.5, 2.0]
+let (a, b) = (station_region(3), station_region(0))
+let bad = region_weight(a)

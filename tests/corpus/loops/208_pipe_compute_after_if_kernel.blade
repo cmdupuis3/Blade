@@ -1,0 +1,22 @@
+// TEST: Pipe Compute After If Kernel
+// An inline lambda body extends through `<@>`-level operators only, and that
+// holds THROUGH a nested if/else at the body's own depth (formalism §15.1):
+// the trailing `|> compute` materializes the whole map. It used to bind
+// inside the else branch (`0.0 |> compute`), leaving E an unprinted deferred
+// loop object -- this program printed nothing for E.
+type I = Idx<3>
+let E = method_for(range<I, I>) <@> lambda(i, j) -> if i == j then 1.0 else 0.0 |> compute
+let xs = [1.0, -2.0, 3.0]
+let pos = method_for(xs) <@> lambda(x) -> if x > 0.0 then x else 0.0 |> compute
+let tr = reduce(pos, (+))
+// A pipe inside the condition or then-branch is fenced by `then` / `else`
+// and stays there.
+let sq = method_for(xs) <@> lambda(x) -> if (x |> abs) > 1.5 then x |> abs else 0.0 |> compute
+// A pipe in a NON-final match arm is fenced by the next `|` and stays in it.
+let ks = [0, 1, 2]
+let arm = method_for(ks) <@> lambda(k) -> match k with | 0 -> 1.0 |> sqrt | _ -> 2.0 |> compute
+// EXPECT: E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+// EXPECT: pos = [1, 0, 3]
+// EXPECT: tr = 4
+// EXPECT: sq = [0, 2, 3]
+// EXPECT: arm = [1, 2, 2]
