@@ -293,6 +293,13 @@ let runCliSmokeTests () : TH.BlockResult =
             let (code, _, err) = spawn dir [ "test"; "interp"; "no-such-category" ]
             let ok = code = 1 && err.Contains "unknown corpus category 'no-such-category'" && not (err.Contains "BL9001")
             recordCase "cli: `test interp <typo>` is a clean usage error, not BL9001" ok (if ok then "" else err)
+            // ...but the guard must not refuse a lane's RESERVED words: it once
+            // knew only `all` / `corpus` for llvm, and CI's `test llvm goldens`
+            // step died on it. The goldens themselves are CI's step; this pins
+            // only that the word gets past the guard.
+            let (_, _, err) = spawn dir [ "test"; "llvm"; "goldens" ]
+            recordCase "cli: `test llvm goldens` is not refused as an unknown category"
+                (not (err.Contains "unknown corpus category")) err
             // `check` LOWERS: a construct that typechecks but has no lowering
             // rule where it sits is refused by check itself -- coded BL6002 and
             // spanned at the expression -- not first by `emit`, spanless.
@@ -2886,14 +2893,15 @@ let internal suiteClearedKnobs =
 
 /// Whether `cat` names a corpus directory `test <lane> <cat>` can run: any
 /// single-file category, plus the lane's own extra spellings (`opt-diff`
-/// runs the multi-file corpus too; `llvm` takes `all` / `corpus`).
+/// runs the multi-file corpus too; `llvm` takes its reserved words --
+/// `all`, `goldens`, `facts`, ... -- from `LlvmTests.llvmCategoryWords`).
 let private corpusCategoryExists (lane: string) (cat: string) : bool =
     let extras =
         match lane with
         | "opt-diff" | "optdiff" -> [ "multifile" ]
-        | "llvm" -> [ "all"; "corpus" ]
         | _ -> []
     List.contains cat extras
+    || (lane = "llvm" && Blade.Tests.LlvmTests.isLlvmCategoryWord cat)
     || (try List.contains cat (Blade.Tests.Corpus.singleFileCategories ()) with _ -> false)
 
 /// Dispatch the `test` subcommand. `rest` is everything after "test".
