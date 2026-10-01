@@ -1,0 +1,23 @@
+// TEST: GroupBy Zip Through A Let-Bound Alias
+// The let-bound spelling of a same-keys grouped co-iteration:
+// `let Z = zip(ga, gb); method_for(Z)` is the same walk as
+// `method_for(zip(ga, gb))` (025), and must be held to the same rule -- every
+// operand grouped by the SAME group_keys binding. This is the ACCEPTED half:
+// one gk, aliased zip, the peel runs exactly as it does inline. The refused
+// half (two independent group_keys) is 053.
+let region = [0, 1, 0, 1, 1]
+let a = [1.0, 2.0, 3.0, 4.0, 5.0]
+let b = [10.0, 20.0, 30.0, 40.0, 50.0]
+let gk = group_keys(region)
+let ga = group_by(a, gk)
+let gb = group_by(b, gk)
+let Z = zip(ga, gb)
+// group 0 = rows 0,2   -> 1*10 + 3*30         = 100
+// group 1 = rows 1,3,4 -> 2*20 + 4*40 + 5*50  = 450
+let dots = method_for(Z) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
+// EXPECT: dots = [100, 450]
+// An alias of the alias resolves to the same grouping.
+let gb2 = gb
+let Z2 = zip(ga, gb2)
+let diffs = method_for(Z2) <@> lambda(ra: T^1, rb: U^1) -> reduce(rb, (+)) - reduce(ra, (+)) |> compute
+// EXPECT: diffs = [36, 99]

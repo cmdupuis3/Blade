@@ -683,6 +683,18 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
              | _ -> ())
             currentNames <- Map.add id varName currentNames
             [$"{indent}auto {varName} = {valStr};"]
+        // Deterministic deallocation, partial SPARSE reads: the FUNCTION-BODY
+        // twin of genScalarBinding's gather registration. `let g = S((k, _))`
+        // renders as a make_*sparse_gather* call that deep-copies into storage
+        // the binding owns outright; the teardown is that producer's own
+        // routine (CodeGenExpr.sparseGatherRoutines pairs them). Emission is
+        // the fall-through arm's `auto` line unchanged -- only the scope
+        // registration is new. Without it every call leaked the gather.
+        | IRIndex _ & GatherTeardown routine ->
+            let valStr = exprToCpp currentNames value
+            registerShapedAlloc varName routine varName
+            currentNames <- Map.add id varName currentNames
+            [$"{indent}auto {varName} = {valStr};"]
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
@@ -2474,6 +2486,25 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
         if shouldDefer then Set.add b.Id ids else ids
     ) Set.empty
 
+/// Top-level bindings that hold a FUNCTION -- a binding of function type
+/// (`let g = sq`), plus the generic-function aliases monomorphization removed
+/// (IRModule.FunctionAliasNames). Neither lane prints a function, so a
+/// `--print` selection naming one is refused (`functionPrintRefusal`). Shared
+/// with the interpreter's twin (Interp/Print.checkAmbientSelection).
+let functionValuedBindingNames (modul: IRModule) : Set<string> =
+    modul.Bindings
+    |> List.filter (fun b -> match IR.stripUnits b.Type with FuncElem _ -> true | _ -> false)
+    |> List.map (fun b -> b.Name)
+    |> Set.ofList
+    |> Set.union modul.FunctionAliasNames
+
+/// The `--print` refusal for selected function-valued bindings, one text for
+/// both lanes.
+let functionPrintRefusal (names: string list) : string =
+    let ns = String.concat ", " names
+    let what = if names.Length = 1 then $"{ns} is a function" else $"{ns} are functions"
+    $"--print: {what}, not a value, so there is nothing to print -- select a binding that applies it (e.g. `let y = {names.Head}(...)`)"
+
 let genPrintStatements (modul: IRModule) : string list =
     let deferredIds = computeDeferredIds modul.Bindings
     // `--print <names>` (BLADE_PRINT, CodeGenState.printSelection): print only
@@ -2517,8 +2548,17 @@ let genPrintStatements (modul: IRModule) : string list =
         match selection with
         | Some names ->
             let sep = ", "
-            let declared = modul.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+            // An eliminated generic-function alias is still a binding the
+            // source has; it is refused below as a function, not as a typo.
+            let declared =
+                modul.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+                |> Set.union modul.FunctionAliasNames
             let unknown = Set.difference names declared |> Set.toList
+            // A SELECTED binding holding a FUNCTION has no printed form in
+            // either lane (a non-generic alias emitted no print line and the
+            // run exited 0): asked for by name, that silence would read as
+            // "computed nothing", so it is refused by name, like the rest.
+            let functions = Set.intersect names (functionValuedBindingNames modul) |> Set.toList
             // A SELECTED binding that is a deferred loop value (or a streamed
             // read) would print nothing too: asked for by name, silence would
             // read as "computed nothing" -- same refusal, different cause.
@@ -2526,12 +2566,14 @@ let genPrintStatements (modul: IRModule) : string list =
                 modul.Bindings
                 |> List.filter (fun b -> Set.contains b.Name names && not (isPrintableBinding b))
                 |> List.map (fun b -> b.Name) |> List.distinct
-            if unknown.IsEmpty && silent.IsEmpty then []
+            if unknown.IsEmpty && functions.IsEmpty && silent.IsEmpty then []
             elif not unknown.IsEmpty then
                 let known = declared |> Set.toList |> List.filter (fun n -> not (n.StartsWith "__")) |> String.concat sep
                 let missing = String.concat sep unknown
                 let verb = if unknown.Length = 1 then "is not a top-level binding of this program" else "are not top-level bindings of this program"
                 [ refusalErrorLine "    " $"--print: {missing} {verb} -- it has: {known}" ]
+            elif not functions.IsEmpty then
+                [ refusalErrorLine "    " (functionPrintRefusal functions) ]
             else
                 let names = String.concat sep silent
                 let verb = if silent.Length = 1 then "is a deferred loop value (or streamed read) that is never materialized" else "are deferred loop values (or streamed reads) that are never materialized"
@@ -2877,6 +2919,68 @@ let private runRecordLines (modul: IRModule) (testName: string) (mpiOn: bool) (e
     let rankExpr = if mpiOn then "&__blade_mpi_rank" else "nullptr"
     Blade.RunRecord.cppLines testName Blade.RunRecord.bladeVersion usesRng rankExpr entries @ [ "" ]
 
+/// Every CUDA runtime status a generated launch wrapper used to ignore is
+/// checked: `cudaMalloc`, `cudaMemcpy`, `cudaSetDevice` and
+/// `cudaDeviceSynchronize` statements are wrapped in blade_dll::ck
+/// (blade_dll_panic.hpp), and every kernel launch is followed by a
+/// `cudaGetLastError` check. A failure is the host's BL8005 through the panic
+/// the host binds in (dllPanicBindLines) -- one report, the run record, exit
+/// 1 -- where a wrapper used to copy an uninitialised device buffer back and
+/// print it as the result. Applied to the whole .cu text in one place
+/// (getCudaFileContent), so no wrapper emitter can forget it. `cudaFree`
+/// stays unchecked (teardown), as does `cudaGetDeviceCount`, whose failure
+/// the wrappers answer with a one-device fallback and whose real error the
+/// following `cudaSetDevice` reports. Calls are matched as whole statements
+/// at line end, which is how every wrapper emitter spells them.
+let private cudaStatusCallRe =
+    System.Text.RegularExpressions.Regex(
+        @"^(?<pre>.*?)(?<call>(?<api>cudaMalloc|cudaMemcpy|cudaSetDevice|cudaDeviceSynchronize)\((?<args>.*)\));\s*$")
+let private cudaLaunchRe =
+    System.Text.RegularExpressions.Regex(@"^(?<ind>\s*)[A-Za-z_][A-Za-z0-9_]*<<<.*>>>\(.*\);\s*$")
+let checkCudaStatuses (lines: string list) : string list =
+    lines |> List.collect (fun (l: string) ->
+        let m = cudaStatusCallRe.Match l
+        if m.Success then
+            let api = m.Groups.["api"].Value
+            let label =
+                if api <> "cudaMemcpy" then api
+                elif m.Groups.["args"].Value.Contains "cudaMemcpyHostToDevice" then "cudaMemcpy H2D"
+                else "cudaMemcpy D2H"
+            let pre = m.Groups.["pre"].Value
+            let call = m.Groups.["call"].Value
+            [ $"{pre}blade_dll::ck({call}, \"{label}\");" ]
+        else
+            let k = cudaLaunchRe.Match l
+            if k.Success then
+                let ind = k.Groups.["ind"].Value
+                [ l; $"{ind}blade_dll::ck(cudaGetLastError(), \"kernel launch\");" ]
+            else [ l ])
+
+/// ONE FAILURE EXIT ACROSS A DLL BOUNDARY (src/cpp/blade_dll_panic.hpp). A
+/// DLL Blade builds with nvcc -shared is its own image: it must not carry a
+/// second copy of blade_runtime.hpp's state (its failure-exit hooks would be
+/// empty, so a failure there wrote no run record), so it exports a binder and
+/// fails through whatever panic the host binds. This is that binding, at the
+/// host's static initialization -- after the implicitly linked DLL is loaded,
+/// before main -- once per DLL the program links:
+///   the cuBLAS shim (blade_linalg_cuda.hpp, linked whenever its include is
+///     emitted: `cublasUsed`) exports `blade_cuda_bind_panic`;
+///   every generated kernels .cu (getCudaFileContent) exports
+///     CodeGenCuda.kernelsPanicBinder -- a DLL for the mpi+cuda hybrid
+///     (Build.compileCudaMpiHybrid), an object linked into the executable on
+///     the plain CUDA paths (compileCudaSplit). Binding through the same entry
+///     point either way keeps ONE failure path for the wrappers' CUDA
+///     statuses (checkCudaStatuses), whichever image they end up in.
+/// Empty for every other program, so their text is unchanged.
+let dllPanicBindLines (cudaDefs: string list) (cublasUsed: bool) : string list =
+    let binders =
+        [ if cublasUsed then yield "blade_cuda_bind_panic"
+          if not (List.isEmpty cudaDefs) then yield kernelsPanicBinder ]
+    binders
+    |> List.collect (fun b ->
+        [ $"extern \"C\" void {b}(void (*host_panic)(const char* code, const char* msg));"
+          $"[[maybe_unused]] static const bool __{b}_bound = ({b}(&blade_rt::dll_panic), true);" ])
+
 let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: string) (bodyIndented: string list) (printCode: string list) : string list =
     let header =
         if mpi then
@@ -3039,8 +3143,14 @@ let getCudaFileContent () : string option =
               "#include <cstddef>"
               "#include <cstdint>" ]
             @ (if usesComplex then ["#include <complex>"; "#include <thrust/complex.h>"] else [])
-            @ [ "" ]
-        Some ((header @ defs) |> String.concat "\n")
+            // Failure exit: the wrappers' CUDA statuses are checked
+            // (checkCudaStatuses) and fail through the panic the host binds
+            // in through this binder (dllPanicBindLines binds it whenever this
+            // .cu exists).
+            @ [ "#include \"blade_dll_panic.hpp\""
+                $"BLADE_DLL_EXPORT void {kernelsPanicBinder}(blade_dll::panic_fn host_panic) {{ blade_dll::bind(host_panic); }}"
+                "" ]
+        Some ((header @ checkCudaStatuses defs) |> String.concat "\n")
 
 /// MODULE IDENTITY SURVIVES THE MERGE. Two file modules may each declare an
 /// `f`; the checker keeps them apart (a qualified import binds `a.f` and
@@ -3202,6 +3312,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
             // the host proto imports plainly (MinGW links the DLL exports).
             let trimmed = sigLine.Replace("__declspec(dllexport) ", "").TrimEnd()
             (if trimmed.EndsWith("{") then trimmed.Substring(0, trimmed.Length - 1).TrimEnd() else trimmed) + ";")
+    let dllBinds = dllPanicBindLines (cudaKernelDefsCell ()).Value (cudaLinalgUsedCell ()).Value
 
     // Namespace-scope symm arrays hoisted out of main() (MSVC constant-address
     // requirement -- see hoistSymmDecl).
@@ -3210,7 +3321,7 @@ let private genSelfContainedProgram (modul: IRModule) (testName: string) : strin
     let moduleGlobalDecls = (moduleGlobalDeclsCell ()).Value
 
     let rrLines = runRecordLines modul testName mpiOn (funcDefs @ mainBody)
-    (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
+    (includes @ typeDefs @ [""] @ mpiDecls @ rrLines @ symmDecls @ moduleGlobalDecls @ [""] @ cudaProtos @ dllBinds @ [""] @ funcDefs @ mainBody) |> String.concat "\n"
 
 /// Every per-program emission cell, reset for a new assembly: warnings and
 /// refusal channels (back-end holes from a previous assembly must not be
@@ -3255,6 +3366,7 @@ let genSelfContainedProgramFromIR (program: IRProgram) (testName: string) : stri
                 // Ids are module-global (one builder), so the
                 // union preserves every copy's origin key.
                 DerivedFuncOrigins = modules |> List.fold (fun acc m -> Map.fold (fun a k v -> Map.add k v a) acc m.DerivedFuncOrigins) Map.empty
+                FunctionAliasNames = modules |> List.fold (fun acc m -> Set.union acc m.FunctionAliasNames) Set.empty
             }
             genSelfContainedProgram merged testName
     // Expression-position refusals become real `#error` directives. They are

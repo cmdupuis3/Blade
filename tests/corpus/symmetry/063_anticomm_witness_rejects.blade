@@ -1,0 +1,10 @@
+// TEST: anticomm claim disproved by a witness (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: provably NOT anticommutative
+// `anticomm(x, y)` claims f(y, x) = -f(x, y). For `x + 2.0 * y` that is false,
+// but the parity tables leave the body unproved (PBottom) and only the comm
+// law had a counterexample search, so the claim was trusted and the output
+// stored on a strict triangle whose mirrored reads are the NEGATION of the
+// stored value. The witness now checks the sign law too.
+let A = [1.0, 2.0, 3.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> x + 2.0 * y |> compute

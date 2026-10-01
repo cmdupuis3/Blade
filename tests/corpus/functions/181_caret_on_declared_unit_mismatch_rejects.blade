@@ -1,0 +1,14 @@
+// TEST: A declared-type caret parameter refuses another element (rejects)
+// ERROR: BL3006
+// ============================================================================
+// The teeth behind functions/180: `vs: Speed^1` is an array of Speed
+// (Float<mps>), so a seconds-valued array is a unit mismatch at the call.
+// Before, `Speed` there was a type variable and this call type-checked.
+// ============================================================================
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+type Speed = Float<mps>
+function top(vs: Speed^1) -> Speed = reduce(vs, (+))
+let w: Array<Float<seconds> like Idx<2>> = [1.0, 2.0]
+let t = top(w)

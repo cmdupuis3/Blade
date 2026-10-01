@@ -1,0 +1,7 @@
+// TEST: Three-argument anticomm claim disproved by a witness (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: `where anticomm(y, z)`
+// `(x - y) * z` flips sign under x <-> y but not under y <-> z, and
+// `anticomm(x, y, z)` claims the sign flip for every transposition.
+let A = [1.0, 2.0, 3.0, 4.0]
+let R = method_for(A, A, A) <@> lambda(x, y, z) where anticomm(x, y, z) -> (x - y) * z |> compute

@@ -1,0 +1,10 @@
+// TEST: A concrete-element caret parameter refuses another element (rejects)
+// ERROR: BL3001 @ 9:15
+// ============================================================================
+// The teeth behind functions/171: `xs: Float64^1` is an array of Float64, so
+// an Int64 array is a type mismatch at the call. Before, `Float64` there was a
+// type variable that merely shadowed the scalar's name, and this call
+// type-checked and ran on Int64 elements.
+// ============================================================================
+function total(xs: Float64^1) -> Float64 = reduce(xs, (+))
+let a = total([1, 2, 3])

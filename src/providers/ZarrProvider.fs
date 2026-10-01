@@ -1250,6 +1250,7 @@ let zarrStoreToModuleWith
         SparseInits = Map.empty
         MutableArrayLets = Set.empty
         DerivedFuncOrigins = Map.empty
+        FunctionAliasNames = Set.empty
     }
 
 /// The historical four-argument spelling: no pool-provenance hook, which is

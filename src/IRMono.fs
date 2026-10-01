@@ -165,7 +165,24 @@ let rec private rawBinOpOperandType (e: IRExpr) : IRType option =
     | CarriedType ty -> Some ty
     | IRBinOp (IRElementwise, op, l, r) ->
         match rawBinOpOperandType l, rawBinOpOperandType r with
-        | Some lt, Some rt -> arrayBinOpResultType op lt rt
+        | Some lt, Some rt ->
+            match arrayBinOpResultType op lt rt with
+            | Some t -> Some t
+            | None ->
+                // SCALAR operands. Answered only where the C++ result type is
+                // not in doubt: a comparison is Bool; equal scalars keep their
+                // type; a LITERAL beside a scalar adopts it (the checker
+                // flexed the literal into that type). The generic SELF-CALL
+                // `cd(n - 1)` in a specialized body is the case: unanswered,
+                // the call taught nothing, so it kept calling the abstract
+                // original (one instance: a silently Float64-defaulted copy;
+                // two instances: BL6001).
+                match lt, rt with
+                | IRTScalar _, IRTScalar _ when isCmpOrLogicalIROp op -> Some (IRTScalar ETBool)
+                | IRTScalar a, IRTScalar b when a = b -> Some lt
+                | IRTScalar _, IRTScalar _ when r.IsIRLit -> Some lt
+                | IRTScalar _, IRTScalar _ when l.IsIRLit -> Some rt
+                | _ -> None
         | _ -> None
     | _ -> None
 
@@ -178,7 +195,8 @@ let rec private rawBinOpOperandType (e: IRExpr) : IRType option =
 /// `tot` nothing, no spec was made, and dot2's result stayed tot's open
 /// variable (BL6001). Once the enclosing spec has substituted the operands the
 /// node's type is exactly the one that rewrite will give it, so answer that.
-/// Scalar-only binops still answer None, as before.
+/// A scalar binop answers where its result type is not in doubt (see
+/// rawBinOpOperandType): the generic self-call `cd(n - 1)`.
 let hmArgType (e: IRExpr) : IRType option =
     match exprTypeIfKnown e with
     | Some t -> Some t
@@ -466,6 +484,13 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
                 { f with Captures = f.Captures |> List.filter (fun c -> not (aliases.ContainsKey c.Id)) }
             modules |> List.map (fun m ->
                 { m with
+                    // The removed top-level names stay KNOWN: `--print g`
+                    // names a binding the source has (a function, which no
+                    // lane prints), not a typo (CodeGen.genPrintStatements).
+                    FunctionAliasNames =
+                        m.Bindings
+                        |> List.filter (fun b -> aliases.ContainsKey b.Id)
+                        |> List.fold (fun acc b -> Set.add b.Name acc) m.FunctionAliasNames
                     Functions = m.Functions |> List.map (fun f -> dropAliasCaptures { f with Body = mapIRExpr redirect f.Body })
                     Bindings =
                         m.Bindings
@@ -583,7 +608,8 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
             | _ -> ()) body
         acc
     let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>)
-                   (valueRefIds: System.Collections.Generic.HashSet<IRId>) (c: IRCallable) : bool =
+                   (valueRefIds: System.Collections.Generic.HashSet<IRId>)
+                   (enclosingRemap: Map<IRId, IRId>) (c: IRCallable) : bool =
         // (a) closures capturing one of this function's params, or (b)
         // HM-polymorphic callables referenced as first-class values (e.g. an
         // operator-section lambda passed as a `reduce` kernel): the
@@ -599,6 +625,17 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
         let viaValueRef =
             valueRefIds.Contains c.Id && (sigVars |> Set.forall (fun v -> not (bindings.ContainsKey v)))
         (c.Captures |> List.exists (fun cap -> Set.contains cap.Id origParamIds))
+        // (c) closures capturing a PARAMETER of an enclosing lambda that was
+        // itself cloned, i.e. rebound under a fresh id (`enclosingRemap`, see
+        // the worklist below). Without a clone the inner closure, which is
+        // otherwise concrete and would never be cloned, keeps capturing the
+        // original lambda's id from inside the clone's body
+        // (sql-group-by/034's zip kernel capturing the frequency lambda's `f`).
+        // Gated like (b): an inner callable that is HM-polymorphic in its OWN
+        // signature and is applied / passed as a value goes through the
+        // memoized spec path, which these bindings would not specialize.
+        || (c.Captures |> List.exists (fun cap -> enclosingRemap.ContainsKey cap.Id)
+            && not (hasTypeVarsInSignature c && (appliedIds.Contains c.Id || viaValueRef)))
         || (hasTypeVarsInSignature c && not (appliedIds.Contains c.Id) && not viaValueRef)
     // Walk bodyWithTypes to identify referenced lambdas needing clones --
     // TRANSITIVELY. A lifted kernel can reference a SECOND callable as a value
@@ -609,24 +646,45 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
     // deleted id -- BL6001 "dangling VarId reference: v48" on `functions/055`.
     // Worklist over clone bodies, terminating because `lambdaClones` is keyed
     // by ORIGINAL id and each id is cloned at most once.
-    let pendingBodies = System.Collections.Generic.Queue<IRExpr>()
-    pendingBodies.Enqueue bodyWithTypes
+    //
+    // Each queued body carries the PARAM REMAPS OF THE CLONES ENCLOSING IT
+    // (empty for the function body itself). A closure discovered inside a
+    // clone's body sits lexically inside that lambda and may capture its
+    // PARAMETER (`frs <@> lambda(f) -> { ... method_for(...) <@> lambda(w) ->
+    // B(w(0)) + f }`, loops/158): the enclosing clone rebinds `f` under a
+    // fresh id, so the inner closure must be cloned too (needsClone (c)) and
+    // its capture and body must follow the new id. Remapping through
+    // `varIdRemap` alone (the FUNCTION's params) left the inner callable
+    // capturing the ORIGINAL lambda's id -- a capture that names nothing in
+    // scope. The compiled lane forwards captures by NAME and never noticed; the
+    // interpreter resolves them by id and could not ("kernel capture 'f' not
+    // resolvable by id", BL8004 unbound variable).
+    //
+    // SCOPED to the lexical chain, never pooled across the worklist: distinct
+    // callables can share param VarIds (shape-monomorphized copies do), so a
+    // remap learned from one clone must not leak into an unrelated one -- and
+    // a callable's OWN fresh params always win over an inherited entry.
+    let pendingBodies = System.Collections.Generic.Queue<IRExpr * Map<IRId, IRId>>()
+    pendingBodies.Enqueue ((bodyWithTypes, Map.empty))
     while pendingBodies.Count > 0 do
-        let scanBody = pendingBodies.Dequeue()
+        let (scanBody, enclosingRemap) = pendingBodies.Dequeue()
         let appliedIds = appliedIdsOf scanBody
         let valueRefIds = valueRefIdsOf scanBody
         mapIRExpr (fun e ->
             (match e with
              | IRVar (id, _) when callables.ContainsKey id && not (lambdaClones.ContainsKey id) ->
                  let lam = callables.[id]
-                 if needsClone appliedIds valueRefIds lam then
+                 if needsClone appliedIds valueRefIds enclosingRemap lam then
                      let cloneId = builder.FreshId()
                      let newCaps =
                          lam.Captures |> List.map (fun cap ->
                              let newId =
                                  match Map.tryFind cap.Id varIdRemap with
                                  | Some n -> n
-                                 | None -> cap.Id
+                                 | None ->
+                                     match Map.tryFind cap.Id enclosingRemap with
+                                     | Some n -> n
+                                     | None -> cap.Id
                              { cap with Id = newId; Type = substTypeInIRType bindings cap.Type })
                      // Clone lambda's own params with fresh VarIds (independent
                      // of the parent's param remap). The combined remap
@@ -638,9 +696,13 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
                          lam.Params |> List.map (fun p ->
                              { p with VarId = paramRemap.[p.VarId]
                                       Type = substTypeInIRType bindings p.Type })
-                     let combinedRemap =
-                         varIdRemap
-                         |> Map.fold (fun acc k v -> Map.add k v acc) paramRemap
+                     // `addAll acc m`: m's entries win. This callable's own
+                     // params win over the enclosing clones'; the function's
+                     // param remap wins over both, as it always has.
+                     let addAll (acc: Map<IRId, IRId>) (m: Map<IRId, IRId>) =
+                         m |> Map.fold (fun a k v -> Map.add k v a) acc
+                     let innerRemap = addAll enclosingRemap paramRemap
+                     let combinedRemap = addAll innerRemap varIdRemap
                      let newBody =
                          lam.Body
                          |> substTypeInIRExpr bindings
@@ -659,7 +721,7 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
                              Body = newBody
                              RetType = newRet }
                      lambdaClones.[id] <- clone
-                     pendingBodies.Enqueue newBody
+                     pendingBodies.Enqueue ((newBody, innerRemap))
              | _ -> ())
             e) scanBody |> ignore
 
@@ -1184,11 +1246,15 @@ let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder)
                     |> Map.fold (fun acc k v -> Map.add k v acc) m.DerivedFuncOrigins
                 else m.DerivedFuncOrigins })
 
-/// Post-monomorphization: every generic `zero` (`IRZero ty`, lowered from a
-/// `zero` whose type was still a variable) becomes its instance's literal.
-/// HM substitution has already rewritten `ty` inside each specialization, so
-/// `addz(a: T^0) = a + zero` reads `0` in the Int64 clone, `0.0f` in the
-/// Float32 one and the complex zero in a Complex one (IR.zeroLiteralOf).
+/// Post-monomorphization: every typed `zero` (`IRZero ty` -- lowered from a
+/// `zero` whose type was still a variable, or whose type has no scalar
+/// literal) becomes its instance's value. HM substitution has already
+/// rewritten `ty` inside each specialization, so `addz(a: T^0) = a + zero`
+/// reads `0` in the Int64 clone, `0.0f` in the Float32 one and the complex
+/// zero in a Complex one (IR.zeroLiteralOf); a String instance reads "", and a
+/// struct or tuple one the composite of its parts' zeros (IR.zeroValueOf,
+/// which reads struct fields through `structFields` -- the whole program's
+/// struct declarations, since a struct may be declared in another module).
 ///
 /// A zero beside an UNSHAPED `T^k` operand kept its own variable (there was
 /// no element to bind it to at typecheck; inferBinOp marked it polymorphic so
@@ -1196,8 +1262,10 @@ let monomorphizeHMFunctionsModules (modules: IRModule list) (builder: IRBuilder)
 /// clone has made a concrete array. Runs before lowerArrayBinOpsModule, which
 /// then broadcasts a literal of the right type. A zero still open after all
 /// that (no partner, never specialized) keeps the Float64 default every
-/// unpinned zero always had; a non-scalar one (a struct) is left as it was.
-let resolveTypedZerosModule (modul: IRModule) : IRModule =
+/// unpinned zero always had. A zero with no value at all (a sum type, an
+/// array part with a runtime shape) is left as it was, for both back ends to
+/// refuse with IR.zeroHasNoValueMessage.
+let resolveTypedZerosModule (structFields: string -> (string * IRType) list option) (modul: IRModule) : IRModule =
     let isOpen (t: IRType) =
         match t with
         | IRTInfer _ | IRTUnitAnnotated (IRTInfer _, _) -> true
@@ -1212,33 +1280,48 @@ let resolveTypedZerosModule (modul: IRModule) : IRModule =
         hit
     if not hasZero then modul
     else
+    let valueOf = zeroValueOf structFields
     let partnerZero (partner: IRExpr) : IRExpr option =
         match exprTypeIfKnown partner with
         | Some (ArrayElem a) -> zeroLiteralOf a.ElemType
         | Some t -> zeroLiteralOf t
         | None -> None
+    // A `T^0` specialized at an ARRAY (the arity lift: `addz(A)` runs
+    // elementwise): the zero bound to `T` is now array-typed, but as a binop
+    // OPERAND it is the scalar that broadcasts -- the element's zero, so the
+    // binop rewrite below sees (array, scalar), not a zip over a `zero`
+    // operand. A bare array-typed zero (no binop around it) is the whole
+    // zero-filled array instead; see `bareArrayZero`.
+    let elementZero (z: IRExpr) =
+        match z with
+        | IRZero (ArrayElem a) -> valueOf a.ElemType |> Option.defaultValue z
+        | _ -> z
     let resolve (e: IRExpr) : IRExpr =
         match e with
         | IRZero ty ->
             (match zeroLiteralOf ty, ty with
              | Some lit, _ -> lit
-             // A `T^0` specialized at an ARRAY (the arity lift: `addz(A)`
-             // runs elementwise): the zero bound to `T` is now array-typed,
-             // but as an operand it is the scalar that broadcasts -- the
-             // element's zero, so the binop rewrite below sees
-             // (array, scalar), not a zip over a `zero` operand.
-             | None, ArrayElem a -> zeroLiteralOf a.ElemType |> Option.defaultValue e
-             | None, _ -> e)
+             | None, ArrayElem _ -> e   // decided by the enclosing binop, or bareArrayZero
+             | None, _ -> valueOf ty |> Option.defaultValue e)
+        | IRBinOp (mode, op, l, (IRZero (ArrayElem _) as z)) -> IRBinOp (mode, op, l, elementZero z)
+        | IRBinOp (mode, op, (IRZero (ArrayElem _) as z), r) -> IRBinOp (mode, op, elementZero z, r)
         | IRBinOp (mode, op, l, (IRZero ty as z)) when isOpen ty ->
             IRBinOp (mode, op, l, partnerZero l |> Option.defaultValue z)
         | IRBinOp (mode, op, (IRZero ty as z), r) when isOpen ty ->
             IRBinOp (mode, op, partnerZero r |> Option.defaultValue z, r)
         | _ -> e
+    let bareArrayZero (e: IRExpr) : IRExpr =
+        match e with
+        | IRZero (ArrayElem a as ty) ->
+            (match valueOf ty with
+             | Some v -> v
+             | None -> valueOf a.ElemType |> Option.defaultValue e)
+        | _ -> e
     let fallback (e: IRExpr) : IRExpr =
         match e with
         | IRZero ty when isOpen ty -> IRLit (IRLitFloat 0.0)
         | _ -> e
-    let rewrite b = b |> mapIRExpr resolve |> mapIRExpr fallback
+    let rewrite b = b |> mapIRExpr resolve |> mapIRExpr bareArrayZero |> mapIRExpr fallback
     { modul with
         Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
         Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
@@ -1249,7 +1332,7 @@ let resolveTypedZerosModule (modul: IRModule) : IRModule =
 /// synthesizes for a top-level `x + y`.
 ///
 /// Pack-element operands can't be recognized at lowering/type-check time:
-/// in `firstsum(A: Poly<Float64^1>) = A[0] + A[1]` the element type is
+/// in `firstsum(A: Poly<T^1>) = A[0] + A[1]` the element type is
 /// unresolved until Poly + HM specialization substitutes the concrete
 /// `Array<..>` in. Running here (after BOTH monomorphizers) the operand
 /// types are concrete. Without this the binop stays a raw `Array op Array`
@@ -3527,8 +3610,38 @@ let shapeMonomorphizeModules (modules: IRModule list) (builder: IRBuilder) : IRM
                 Bindings = newBindings
                 DerivedFuncOrigins = derivedOrigins })
 
+    // A COMPILER-MADE origin every call site has now left is dead. When the
+    // origin is itself a copy some earlier pass minted (an HM specialization,
+    // which a materialized caret's `__<op>_inferred_n` extents make the usual
+    // case: `rowsums(x: T^2)` -> `rowsums_HM_..._double` -> its `_shape_...`
+    // copy), nothing but this program's own call sites could ever name it,
+    // and once all of them were rewritten to the shaped copy the unshaped one
+    // was still emitted beside it -- a whole dead function in the C++, with
+    // `.extents[d]` loop bounds nobody runs. Source-declared functions are
+    // left alone, exactly as an uncalled declaration always is; so is any
+    // copy still referenced (a call this pass declined, a kernel
+    // value), since only references from OTHER definitions -- a copy that
+    // only calls itself is dead too -- and from bindings count.
+    let derivedIds =
+        modules |> List.fold (fun acc m -> m.DerivedFuncOrigins |> Map.fold (fun a k _ -> Set.add k a) acc) Set.empty
+    let deadCandidates =
+        specsByOrigin |> Map.toSeq |> Seq.map fst |> Seq.filter (fun id -> Set.contains id derivedIds) |> Set.ofSeq
+    if Set.isEmpty deadCandidates then
+        reportCensus ()
+        rewritten
+    else
+    let referenced =
+        rewritten |> List.fold (fun acc m ->
+            let fromFuncs =
+                m.Functions |> List.map (fun f -> Set.remove f.Id (collectVarRefsIR f.Body))
+            let fromBindings = m.Bindings |> List.map (fun b -> collectVarRefsIR b.Value)
+            Set.unionMany (acc :: fromFuncs @ fromBindings)) Set.empty
+    let dead = Set.difference deadCandidates referenced
     reportCensus ()
-    rewritten
+    if Set.isEmpty dead then rewritten
+    else
+        rewritten |> List.map (fun m ->
+            { m with Functions = m.Functions |> List.filter (fun f -> not (Set.contains f.Id dead)) })
 
 /// Single-module entry point, for callers that hold one `IRModule` rather than
 /// a whole program. The lowering pipeline uses the plural form -- a program's

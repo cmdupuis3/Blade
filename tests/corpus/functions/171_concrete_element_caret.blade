@@ -1,0 +1,24 @@
+// TEST: A built-in element type under the caret fixes the element
+// ============================================================================
+// `Float64^1` used to parse as a type VARIABLE named `Float64`: the name
+// shadowed the scalar type inside the signature, so the function was generic
+// and an Int64 array went through it silently (functions/172 is that refusal
+// now). It is the formalism's `T^r` with T a base type (formalism 4.1 and
+// 13.2): a dense rank-1 array of Float64 elements of ANY extent, lowered like
+// `Float<day>^1`. `Float64^0` is the scalar itself.
+// ============================================================================
+function total(xs: Float64^1) -> Float64 = reduce(xs, (+))
+let a = total([1.0, 2.0, 3.0])
+// EXPECT: a = 6
+// One function, two extents.
+let b = total([0.5, 0.5, 0.5, 0.5, 0.5])
+// EXPECT: b = 2.5
+function first_two(m: Bool^1) -> Bool = m(0) && m(1)
+let c = first_two([true, false, true])
+// EXPECT: c = false
+function row_sums(m: Int64^2) = method_for(m) <@> lambda(row: Int64^1) -> reduce(row, (+)) |> compute
+let d = row_sums([[1, 2, 3], [4, 5, 6]])
+// EXPECT: d = [6, 15]
+function twice(x: Float64^0) -> Float64^0 = x * 2.0
+let e = twice(1.25)
+// EXPECT: e = 2.5

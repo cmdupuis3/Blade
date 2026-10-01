@@ -53,8 +53,15 @@
 //
 // MSVC (the nvcc host compiler, the ASan fallback) has no asm labels; there
 // the names forward to std::, and folding is whatever cl.exe does (the
-// documented exception). Complex intrinsics stay on std:: -- outside the
-// contract, see formalism.md.
+// documented exception).
+//
+// COMPLEX intrinsics are inside the contract too (below the real ones): the
+// <complex> functions forward to __builtin_cexp & co., which g++ folds through
+// MPC on a constant operand exactly as it folds the real builtins through
+// MPFR -- measured: a constant atan(0.5i) came out 1 ulp off the library's
+// run-time value. The same asm-label barrier binds the C99 complex functions
+// (cexp, clog, csqrt, csin, ..., catan, cpow) under Blade-owned names.
+#include <complex>
 #if defined(__GNUC__)
 #define BLADE_LIBM_STR2(x) #x
 #define BLADE_LIBM_STR(x) BLADE_LIBM_STR2(x)
@@ -93,6 +100,93 @@ namespace blade_libm {
   BLADE_LIBM_WRAP2(atan2)
 #undef BLADE_LIBM_WRAP1
 #undef BLADE_LIBM_WRAP2
+}
+
+// ---- complex intrinsics, evaluated at RUN TIME (same contract) -------------
+//
+// complex<double>: the C99 function itself (cexp, clog, csqrt, csin, ccos,
+// ctan, csinh, ccosh, ctanh, casin, cacos, catan, cpow), bound by asm label
+// so g++ never sees a builtin -- the value std::exp(complex) & co. compute at
+// run time (libstdc++ forwards them to exactly these), minus the fold.
+// Marshalled through __real__/__imag__, not libstdc++'s __rep(), so libc++
+// (the clang64 memcheck profile) takes the same path.
+//
+// complex<float>: evaluated in double and each component rounded ONCE to
+// float, the rule the real Float32 overloads follow (and the interpreter's
+// complex arithmetic, which is double throughout).
+//
+// pow: the three libstdc++ overloads Blade's `^` reaches, re-spelled over the
+// barrier functions with the libstdc++ algorithm unchanged --
+//   pow(complex, complex) = cpow
+//   pow(complex, real)    = x real & > 0 ? pow(re, y)
+//                           : polar(exp(y * log(x).re), y * log(x).im)
+//   pow(real, complex)    = x > 0 ? polar(pow(x, y.re), y.im * log(x))
+//                           : cpow(complex(x), y)
+// with polar(r, t) = (r * cos(t), r * sin(t)). Codegen casts an integer
+// operand to the component type first, which is where libstdc++'s
+// __promote_2 overload sends it too.
+#if defined(__GNUC__)
+#define BLADE_CLIBM_DECL1(n) \
+  extern "C" __complex__ double blade_libm_c##n(__complex__ double) __asm__(BLADE_LIBM_SYM(c##n)) __attribute__((const, nothrow));
+BLADE_CLIBM_DECL1(exp) BLADE_CLIBM_DECL1(log) BLADE_CLIBM_DECL1(sqrt)
+BLADE_CLIBM_DECL1(sin) BLADE_CLIBM_DECL1(cos) BLADE_CLIBM_DECL1(tan)
+BLADE_CLIBM_DECL1(sinh) BLADE_CLIBM_DECL1(cosh) BLADE_CLIBM_DECL1(tanh)
+BLADE_CLIBM_DECL1(asin) BLADE_CLIBM_DECL1(acos) BLADE_CLIBM_DECL1(atan)
+extern "C" __complex__ double blade_libm_cpow(__complex__ double, __complex__ double) __asm__(BLADE_LIBM_SYM(cpow)) __attribute__((const, nothrow));
+#undef BLADE_CLIBM_DECL1
+namespace blade_libm {
+  inline __complex__ double c99_(std::complex<double> z) {
+    __complex__ double c; __real__ c = z.real(); __imag__ c = z.imag(); return c; }
+  inline std::complex<double> cxx_(__complex__ double c) {
+    return std::complex<double>(__real__ c, __imag__ c); }
+#define BLADE_CLIBM_WRAP1(n) \
+  inline std::complex<double> n(std::complex<double> z) { return cxx_(blade_libm_c##n(c99_(z))); }
+  BLADE_CLIBM_WRAP1(exp) BLADE_CLIBM_WRAP1(log) BLADE_CLIBM_WRAP1(sqrt)
+  BLADE_CLIBM_WRAP1(sin) BLADE_CLIBM_WRAP1(cos) BLADE_CLIBM_WRAP1(tan)
+  BLADE_CLIBM_WRAP1(sinh) BLADE_CLIBM_WRAP1(cosh) BLADE_CLIBM_WRAP1(tanh)
+  BLADE_CLIBM_WRAP1(asin) BLADE_CLIBM_WRAP1(acos) BLADE_CLIBM_WRAP1(atan)
+#undef BLADE_CLIBM_WRAP1
+  inline std::complex<double> pow(std::complex<double> x, std::complex<double> y) {
+    return cxx_(blade_libm_cpow(c99_(x), c99_(y))); }
+}
+#else
+namespace blade_libm {
+#define BLADE_CLIBM_WRAP1(n) \
+  inline std::complex<double> n(std::complex<double> z) { return std::n(z); }
+  BLADE_CLIBM_WRAP1(exp) BLADE_CLIBM_WRAP1(log) BLADE_CLIBM_WRAP1(sqrt)
+  BLADE_CLIBM_WRAP1(sin) BLADE_CLIBM_WRAP1(cos) BLADE_CLIBM_WRAP1(tan)
+  BLADE_CLIBM_WRAP1(sinh) BLADE_CLIBM_WRAP1(cosh) BLADE_CLIBM_WRAP1(tanh)
+  BLADE_CLIBM_WRAP1(asin) BLADE_CLIBM_WRAP1(acos) BLADE_CLIBM_WRAP1(atan)
+#undef BLADE_CLIBM_WRAP1
+  inline std::complex<double> pow(std::complex<double> x, std::complex<double> y) { return std::pow(x, y); }
+}
+#endif
+namespace blade_libm {
+  inline std::complex<double> polar_(double r, double t) {
+    return std::complex<double>(r * blade_libm_cos(t), r * blade_libm_sin(t)); }
+  inline std::complex<double> pow(std::complex<double> x, double y) {
+    if (x.imag() == 0.0 && x.real() > 0.0) return std::complex<double>(blade_libm_pow(x.real(), y));
+    std::complex<double> t = blade_libm::log(x);
+    return polar_(blade_libm_exp(y * t.real()), y * t.imag()); }
+  inline std::complex<double> pow(double x, std::complex<double> y) {
+    return x > 0.0 ? polar_(blade_libm_pow(x, y.real()), y.imag() * blade_libm_log(x))
+                   : blade_libm::pow(std::complex<double>(x), y); }
+  // complex<float>: double evaluation, each component rounded once.
+  inline std::complex<float> narrow_(std::complex<double> r) {
+    return std::complex<float>(static_cast<float>(r.real()), static_cast<float>(r.imag())); }
+#define BLADE_CLIBM_WRAPF(n) \
+  inline std::complex<float> n(std::complex<float> z) { return narrow_(n(std::complex<double>(z))); }
+  BLADE_CLIBM_WRAPF(exp) BLADE_CLIBM_WRAPF(log) BLADE_CLIBM_WRAPF(sqrt)
+  BLADE_CLIBM_WRAPF(sin) BLADE_CLIBM_WRAPF(cos) BLADE_CLIBM_WRAPF(tan)
+  BLADE_CLIBM_WRAPF(sinh) BLADE_CLIBM_WRAPF(cosh) BLADE_CLIBM_WRAPF(tanh)
+  BLADE_CLIBM_WRAPF(asin) BLADE_CLIBM_WRAPF(acos) BLADE_CLIBM_WRAPF(atan)
+#undef BLADE_CLIBM_WRAPF
+  inline std::complex<float> pow(std::complex<float> x, std::complex<float> y) {
+    return narrow_(pow(std::complex<double>(x), std::complex<double>(y))); }
+  inline std::complex<float> pow(std::complex<float> x, float y) {
+    return narrow_(pow(std::complex<double>(x), static_cast<double>(y))); }
+  inline std::complex<float> pow(float x, std::complex<float> y) {
+    return narrow_(pow(static_cast<double>(x), std::complex<double>(y))); }
 }
 
 // The PANIC-FREE half of the arithmetic contract (docs/formalism.md section
@@ -213,6 +307,16 @@ namespace blade_rt {
     for (auto h : failure_exit_hooks) if (h) h();
     std::fflush(nullptr);
     std::_Exit(1);
+  }
+  // The entry point a Blade-built DLL fails through (blade_dll_panic.hpp).
+  // The DLL is its own image and must not carry a second copy of this
+  // header's state, so the host binds this function into it at static
+  // initialization (codegen's dllPanicBindLines) and a DLL-side failure runs
+  // THIS executable's panic: its hooks, its run record, its single exit. No
+  // trace frame is lost: a body that calls into a DLL names an extern "C"
+  // symbol the shadow-frame analysis cannot follow, so it keeps its frame.
+  [[noreturn]] inline void dll_panic(const char* code, const char* msg) {
+    panic(code, msg, nullptr, 0);
   }
 
   // ---- The arithmetic contract's FAULTS (docs/formalism.md section 2.4,

@@ -1,0 +1,35 @@
+// TEST: A comparison on a value known only to be SOME array is a Bool array
+// ============================================================================
+// A variable that a call has proved to be an array -- `tot(x)` records "rank
+// at least 1" on an unannotated `x`, a plain `x: T`, or the element of a
+// non-caret `Poly<T>` pack -- but whose shape is not yet known: beside a
+// scalar, the binop repair that makes `x - mean(x)` an array (TypeCheck
+// inferBinOp, `knownArrayVar`) answered the variable itself. Right for
+// arithmetic, wrong for a comparison: `x > 0.0` was typed as `x`'s own
+// Array<double>, the Bool result was copied into it, and the program printed
+// `[1, 0, 1]` for `[true, false, true]`. The comparison keeps the shape and
+// takes a Bool element.
+// ============================================================================
+function tot(r: T^1) -> T^0 = reduce(r, (+))
+
+function pos_untyped(x) = {
+    let s = tot(x)
+    x > 0.0
+}
+let pu = pos_untyped([1.0, -2.0, 6.0])
+// EXPECT: pu = [true, false, true]
+
+function pos_generic(x: T) = {
+    let s = tot(x)
+    x > 0.0
+}
+let pg = pos_generic([1.0, -2.0, 6.0])
+// EXPECT: pg = [true, false, true]
+
+function firstpos(A: Poly<T>) = {
+    let head :: tail = A
+    let s = tot(head)
+    head > 0.0
+}
+let pp = firstpos([1.0, -2.0, 6.0], [3.0, 4.0, -2.0])
+// EXPECT: pp = [true, false, true]

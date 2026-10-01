@@ -705,7 +705,7 @@ let loopOperandArrayType (env: TypeEnv) (fallback: unit -> IRArrayType) (ty: IRT
 /// the variable) for a named operand; `object_for` degraded to a RANK-0 record,
 /// which types the whole apply SCALAR. Measured on
 ///
-///     function g(ws: Float64^1, t: Float64^1) = {
+///     function g(ws: T^1, t: T^1) = {
 ///         ws <@> lambda(w) -> { let wt = (w * t) |> compute
 ///                               let c = sin <@> wt
 ///                               reduce(c, (+)) } }
@@ -1305,6 +1305,22 @@ let internal isSynthesizedIndex (tArg: TypedExpr) : bool =
 let commWitnessText (p1: string) (p2: string) (x: float) (y: float) (u: float) (v: float) : string =
     let g (f: float) = f.ToString("G6", System.Globalization.CultureInfo.InvariantCulture)
     $"at {p1} = {g x}, {p2} = {g y} the body is {g u}, but with the two exchanged ({p1} = {g y}, {p2} = {g x}) it is {g v}"
+
+/// The arity-general rendering (Deduce.witnessSwapLawFailure): the other
+/// parameters' fixed values are named, and an anticomm witness says what the
+/// law required (the negation). `others` pairs each other parameter's NAME
+/// with its value. With no other parameters and `negate = false` this is
+/// exactly commWitnessText.
+let swapWitnessText (p1: string) (p2: string) (others: (string * float) list) (negate: bool)
+                    (x: float) (y: float) (u: float) (v: float) : string =
+    let g (f: float) = f.ToString("G6", System.Globalization.CultureInfo.InvariantCulture)
+    let fixedPart =
+        if List.isEmpty others then ""
+        else
+            let parts = others |> List.map (fun (n, c) -> $"{n} = {g c}") |> String.concat ", "
+            $" (with {parts})"
+    let required = if negate then $", not {g (-u)}" else ""
+    $"at {p1} = {g x}, {p2} = {g y}{fixedPart} the body is {g u}, but with the two exchanged ({p1} = {g y}, {p2} = {g x}) it is {g v}{required}"
 
 /// The integer value of a LITERAL subscript: `3`, `-1`, and `(3 : I)` (the
 /// ascription retypes the literal node and leaves it a literal).
@@ -3769,6 +3785,24 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                          if ppIRType pTy = ppIRType aTy || namesIndexAxis pTy || namesIndexAxis aTy then
                              ppIRTypeNominal pTy, ppIRTypeNominal aTy
                          else ppIRType pTy, ppIRType aTy
+                     // A CONCRETE-ELEMENT caret parameter (`Float64^2`) is
+                     // dense: its axes are the unnamed, unknown-extent plain
+                     // axes TypeLower's TyAbstractArray arm mints. Handed a
+                     // compact-storage argument, say so and name `T^k`
+                     // rather than leave a bare "declared X but got Y".
+                     let isAbstractDenseAxis (ix: IRIndexType) =
+                         ix.IxKind = IxKPlain && ix.Tag.IsNone && ix.Symmetry = SymNone && ix.Rank = 1
+                         && (match ix.Extent with IRParam ("?", _, _) -> true | _ -> false)
+                     let isCompactAxis (ix: IRIndexType) =
+                         ix.Rank > 1 || ix.Symmetry <> SymNone
+                         || (match ix.IxKind with IxKCompound | IxKCompoundDynamic | IxKSparse -> true | _ -> false)
+                     match IR.stripUnits pTy, IR.stripUnits aTy with
+                     | ArrayElem pa, ArrayElem aa
+                             when not pa.IndexTypes.IsEmpty
+                                  && pa.IndexTypes |> List.forall isAbstractDenseAxis
+                                  && aa.IndexTypes |> List.exists isCompactAxis ->
+                         Error (DenseCaretCompactArg (i + 1, calleeDesc, pa.IndexTypes.Length, pp1, pp2))
+                     | _ ->
                      Error (ArgTypeMismatch (i + 1, calleeDesc, pp1, pp2)))
             | None, _ ->
             // The SEVENTH check, after element class because a wrong-class
@@ -4558,6 +4592,10 @@ let internal unitSlotBases =
         [ "Int"; "Int32"; "Int64"; "Float"; "Float64"; "Double"; "Float32"
           "Complex64"; "Complex128"; "Bool"; "Nat"; "String" ]
 
+/// The refusal text for `Row^k` where `Row` is already an array type.
+let internal caretOnArrayAliasMessage (name: string) (k: int) : string =
+    $"`{name}^{k}`: `{name}` is already an array type, and a caret does not build arrays of arrays -- spell the shape you mean with `Array<Elem like I, ...>` (or `Elem^r` over the element type, with the combined rank)"
+
 let rec internal unitAnnoError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
     let quantityIn name =
         match Map.tryFind name env.Units with
@@ -4579,6 +4617,22 @@ let rec internal unitAnnoError (env: TypeEnv) (ty: TypeExpr) : TypeError option 
         | UnitOne | UnitScaleLit _ -> None
     match ty with
     | TyUnitExpr ue -> inUnitExpr ue
+    // A caret on a DECLARED type (TypeLower.isDeclaredCaretHead) builds that
+    // type's array. Two spellings have no such array, and lowering (which has
+    // no error channel) stands down on both, so they are refused here, where
+    // every annotation consumer looks: a head that is ITSELF an array type
+    // (the caret does not nest arrays), and a non-literal rank (a variable
+    // rank belongs to a type variable, as for `Float64^r`).
+    | TyVar (name, Some k) when k >= 1 && isDeclaredArrayAlias env name ->
+        Some (CaretHeadSpelling (caretOnArrayAliasMessage name k))
+    | TyAbstractArray (TyVar (name, _), rankE, _) when isDeclaredCaretHead env name ->
+        (match rankE.Kind with
+         | ExprKind.ExprLit (LitInt k) when k >= 1L && isDeclaredArrayAlias env name ->
+             Some (CaretHeadSpelling (caretOnArrayAliasMessage name (int k)))
+         | ExprKind.ExprLit (LitInt _) -> None
+         | _ ->
+             Some (CaretHeadSpelling
+                     $"`{name}^...` needs an integer literal rank: `{name}` names a declared type, so the caret builds an array of it (`{name}^1` is a rank-1 array of {name}); a variable rank belongs to a type variable -- write `T^r` for any element"))
     | TyVar (name, Some _) ->
         // `Float<speed^2>` parses as a rank-marked type var; a quantity name
         // there is the power spelling of the same terminality violation.
@@ -4634,6 +4688,23 @@ let rec internal unitAnnoError (env: TypeEnv) (ty: TypeExpr) : TypeError option 
         |> Option.orElseWith (fun () -> unitAnnoError env ret)
     | TyConstrained (inner, _) -> unitAnnoError env inner
     | TyPoly inner -> unitAnnoError env inner
+    | _ -> None
+
+/// Only the caret-on-a-declared-type refusals of `unitAnnoError`, for the
+/// annotation sites that do not run the unit checks (lambda parameters).
+let rec internal caretHeadError (env: TypeEnv) (ty: TypeExpr) : TypeError option =
+    match ty with
+    | TyVar _ | TyAbstractArray (TyVar _, _, _) ->
+        (match unitAnnoError env ty with
+         | Some (CaretHeadSpelling _ as e) -> Some e
+         | _ -> None)
+    | TyAbstractArray (e, _, _) | TyBounded (e, _, _) | TyArray (e, _) | TyDist (_, e, _)
+    | TyConstrained (e, _) | TyPoly e -> caretHeadError env e
+    | TyTuple ts -> ts |> List.tryPick (caretHeadError env)
+    | TyFunc (args, ret) ->
+        (args |> List.tryPick (caretHeadError env))
+        |> Option.orElseWith (fun () -> caretHeadError env ret)
+    | TyNamed (_, args) -> args |> List.tryPick (caretHeadError env)
     | _ -> None
 
 /// DEFAULT PARAMETER FILL (surface call-site desugar). A call omitting

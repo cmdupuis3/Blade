@@ -1,0 +1,36 @@
+// TEST: An inline tuple of array literals types, lowers and emits as named ones do
+// ============================================================================
+// `f(([1.5, 2.0], [2, 3]))` died BL7001 "code generation has no rule for
+// IRArrayLit in expression position", while binding the two arrays to names
+// first worked: a tuple component is a VALUE slot like a call argument, and
+// an inline array literal there now takes the same road (hoisted to its own
+// binding). Neighbors: a tuple literal bound by `let`, nested tuples, mixed
+// scalar/array components, a tuple as a non-first argument, and the same
+// inside a function body.
+// ============================================================================
+function firsts(p: Tuple<Float64^1, Int64^1>) -> Float64 = p[0](0) + Float64(p[1](1))
+let a = firsts(([1.5, 2.0], [2, 3]))
+// EXPECT: a = 4.5
+let fa = [1.5, 2.0]
+let ia = [2, 3]
+let a_named = firsts((fa, ia))
+// EXPECT: a_named = 4.5
+
+let t = ([1.0, 2.0, 3.0], 4)
+let t0 = t[0](2) + Float64(t[1])
+// EXPECT: t0 = 7
+
+function nested(p: Tuple<Tuple<Float64^1, Float64>, Int64^1>) -> Float64 = p[0][0](1) * p[0][1] + Float64(p[1](0))
+let b = nested((([1.0, 2.0], 3.0), [10, 20]))
+// EXPECT: b = 16
+
+function second(k: Float64, p: Tuple<Float64^1, Float64^1>) -> Float64 = k * p[0](0) + p[1](1)
+let c = second(2.0, ([1.5, 2.0], [3.0, 4.0]))
+// EXPECT: c = 7
+
+function inside(s: Float64) -> Float64 = {
+    let q = ([s, 2.0 * s], [1, 2, 3])
+    q[0](1) + Float64(q[1](2))
+}
+let d = inside(1.5)
+// EXPECT: d = 6

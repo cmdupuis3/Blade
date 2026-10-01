@@ -1,0 +1,31 @@
+// TEST: zero at a String, tuple or struct-array annotation
+// ============================================================================
+// The binding-position forms: `let s: String = zero` and
+// `let t: (Float64, Int64, String) = zero` were refused in code generation
+// (BL7001 "no rule for IRZero in binding position"); an array annotation of a
+// struct element was refused by the checker (its fill former only knew
+// numeric elements). A String is "", a tuple is componentwise, and an array
+// of structs is the static-shape array whose every cell is the struct's zero.
+// ============================================================================
+struct Pt {
+    x: Float64,
+    y: Float64,
+    tag: String
+}
+let s: String = zero
+let s_empty = s == ""
+// EXPECT: s_empty = true
+let t: (Float64, Int64, String) = zero
+let t0 = t[0]
+// EXPECT: t0 = 0
+let t1 = t[1]
+// EXPECT: t1 = 0
+let t2 = t[2] == ""
+// EXPECT: t2 = true
+let pts: Array<Pt like Idx<3>> = zero
+let px = pts[2].x
+// EXPECT: px = 0
+let py = pts[0].y
+// EXPECT: py = 0
+let ptag = pts[1].tag == ""
+// EXPECT: ptag = true

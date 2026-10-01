@@ -364,7 +364,37 @@ let m2 = method_for(A, A) <@> lambda(x, y) where comm(x, y), %s -> x * y |> comp
                                        | Ok (code, out) ->
                                            check ($"mpi+cuda: -n {ranks} runs") false
                                                ($"exit {code}: {(out.Substring(0, min 200 out.Length))}")
-                                       | Error e -> check ($"mpi+cuda: -n {ranks} runs") false e))
+                                       | Error e -> check ($"mpi+cuda: -n {ranks} runs") false e)
+                                  // ONE FAILURE EXIT ACROSS THE DLL
+                                  // (blade_dll_panic.hpp): with no visible
+                                  // device every CUDA call in the kernels DLL
+                                  // fails. The DLL used to check none of them
+                                  // (an uninitialised slab came back as the
+                                  // result); now the first failure is the
+                                  // HOST's BL8005 through the panic the host
+                                  // bound in -- one report, exit nonzero, and
+                                  // rank 0's run record carrying the code.
+                                  let recPath = Path.GetFullPath(Path.Combine(outDir, "hyb_mpicuda.record.json"))
+                                  if File.Exists recPath then File.Delete recPath
+                                  let priors =
+                                      [ "CUDA_VISIBLE_DEVICES"; "BLADE_RUN_RECORD" ]
+                                      |> List.map (fun k -> (k, Environment.GetEnvironmentVariable k))
+                                  Environment.SetEnvironmentVariable("CUDA_VISIBLE_DEVICES", "-1")
+                                  Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", recPath)
+                                  try
+                                      match runExecutableMpi 1 exe with
+                                      | Ok (code, out) ->
+                                          let reports = out.Split('\n') |> Array.filter (fun l -> l.Contains "error[BL8005]") |> Array.length
+                                          check "mpi+cuda: a device failure inside the DLL is the host's BL8005, reported once"
+                                              (code <> 0 && reports = 1 && out.Contains "CUDA runtime call")
+                                              ($"exit {code}: {(out.Substring(0, min 400 out.Length))}")
+                                          check "mpi+cuda: the run record is written on the DLL-side failure, carrying BL8005"
+                                              (File.Exists recPath
+                                               && (File.ReadAllText recPath).Contains "\"status\":{\"ok\":false,\"code\":\"BL8005\"")
+                                              (if File.Exists recPath then File.ReadAllText recPath else $"no file at {recPath}")
+                                      | Error e -> check "mpi+cuda: no-device run" false e
+                                  finally
+                                      for (k, p) in priors do Environment.SetEnvironmentVariable(k, p))
                  finally
                      CodeGen.setMpiEmitMode false
                      CodeGen.setCudaEmitMode false

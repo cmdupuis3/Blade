@@ -2866,6 +2866,21 @@ and genSolveBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuild
 
 
 and genReduceBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBuilder) (arrExpr: IRExpr) (kernelExpr: IRExpr) (initExpr: IRExpr option) : string list * CodeGenContext =
+    match arrExpr with
+    | GatherTeardown routine ->
+        // An inline partial sparse read as the operand: the fold below spells
+        // its operand at every element read, the bound and the guard, so the
+        // gather ran (and leaked) once per access. Gather once into a named
+        // temp, fold the temp, and free it right after: the fold's result is
+        // a scalar, and nothing else names the temp. Statement-level twin of
+        // CodeGenExpr.bindInlineGathers.
+        let ind = indentStr ctx
+        let gname = (bindingCppName binding) + "__gath"
+        let gatherLine = $"{ind}auto {gname} = {exprToCppCtx ctx arrExpr};"
+        let (lines, ctx') =
+            genReduceBinding ctx binding builder (IRParam (gname, 0, inferExprType arrExpr)) kernelExpr initExpr
+        ([ gatherLine ] @ lines @ [ $"{ind}nested_array_utilities::{routine}({gname});" ], ctx')
+    | _ ->
     let ind = indentStr ctx
     let name = bindingCppName binding
     // reduce(array, op): T/S reduction. Consumes the innermost dim by a

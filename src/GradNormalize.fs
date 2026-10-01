@@ -133,6 +133,8 @@ let internal haloGatherPlan (ctx: Ctx) (resolve: string -> Expr option) (value: 
                  when n - int h.Shrink >= 0
                       && (match p.Type |> Option.map (resolveTy ctx) with
                           | Some (TyVar (_, Some r)) -> r = 0
+                          // `Float64^0` (concrete-element caret) is the scalar.
+                          | Some (TyAbstractArray (_, { Kind = ExprKind.ExprLit (LitInt 0L) }, _)) -> true
                           | Some (TyAbstractArray _) | Some (TyArray _) -> false
                           | _ -> true) ->
              let w = p.Name

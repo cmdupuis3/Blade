@@ -1,0 +1,9 @@
+// TEST: A concrete-element caret needs a literal rank (rejects)
+// ERROR: BL1004 @ 7:15
+// ============================================================================
+// A variable rank belongs to a type VARIABLE (`T^r`); with the element fixed
+// there is nothing for it to range over, and the lowering would have fallen
+// back to the bare scalar. Refused at the head, with the spelling to use.
+// ============================================================================
+function f(x: Float64^r) = x
+let y = f([1.0, 2.0])

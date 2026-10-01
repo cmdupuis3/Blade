@@ -2784,6 +2784,11 @@ let runtimeHeaderNames : string list =
       // includes it by relative path (as does `blade_linalg_views.hpp`, which
       // the device arm reuses for the shared contiguity probe).
       "blade_linalg_cuda.hpp"
+      // DLL-side failure exit: a Blade-built DLL (the cuBLAS shim above, the
+      // mpi+cuda hybrid's kernels) fails through the panic its host binds in,
+      // never through a second copy of blade_runtime.hpp. Included by the
+      // DLL's own translation unit by relative path, so deployed beside it.
+      "blade_dll_panic.hpp"
       // Eigensolver dispatch: the `?spev`/`?hpev`/`?syev`/
       // `?heev` adapters. LAPACK-ONLY (its own `#ifndef BLADE_HAS_LAPACK
       // #error`) and included only by programs that emit a `blade_lapack::`
@@ -4435,6 +4440,15 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
                 && not (hasRealSymmetry (buildSymmVec resolvedTy)) ->
              registerPoolAlloc AllocDense (elemTypeToCpp at.ElemType) (arrayRank at)
                  "nullptr" (name + "_extents") name None
+         | _ -> ())
+        // Deterministic deallocation, partial SPARSE reads: `let g = S((k, _))`
+        // binds a gather that deep-copied into storage it OWNS (a fresh
+        // buffer, plus a fresh index / row table / extents per shape), so the
+        // binding owns it outright and its teardown is the producer's own
+        // routine. Escapes and `return g;` spare it exactly as they spare a
+        // pool (owner-id stamping + return-token suppression).
+        (match partialSparseGatherTeardown value with
+         | Some routine when producesWrapper -> registerShapedAlloc name routine name
          | _ -> ())
         [$"{ind}{cppType} {name} = {valueStr};"]
 

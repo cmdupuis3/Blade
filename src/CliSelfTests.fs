@@ -148,6 +148,30 @@ let runCliSmokeTests () : TH.BlockResult =
         | Ok sel ->
             recordCase "print: selecting a never-materialized loop value splices a refusal"
                 (sel.Contains "#error" && sel.Contains "deferred loop value" && sel.Contains "|> compute") "")
+    // A binding holding a FUNCTION has no printed form in either lane. A
+    // non-generic alias (`g`) printed nothing and exited 0; a generic alias
+    // (`h`, removed by monomorphization) was reported as "not a top-level
+    // binding", which it is. Both refuse by name, as a function, in both lanes.
+    let fnSrc =
+        "function sq(x: Float64) -> Float64 = x * x\n\
+         function total(x: T^1) -> T^0 = reduce(x, (+))\n\
+         let g = sq\n\
+         let h = total\n\
+         let r = g(3.0) + h([1.0, 2.0])\n"
+    for (sel, what) in [ ("g", "a non-generic function alias"); ("h", "an eliminated generic function alias") ] do
+        withPrint (Some sel) (fun () ->
+            (match cppOf ("print_fn_" + sel) fnSrc with
+             | Error e -> record $"print: selecting {what} refuses" TH.Fail e
+             | Ok cpp ->
+                 recordCase $"print: selecting {what} splices a function refusal"
+                     (cpp.Contains "#error" && cpp.Contains $"{sel} is a function"
+                      && not (cpp.Contains "not a top-level binding")) "")
+            (match Blade.Lowering.lower fnSrc with
+             | Error e -> record $"print: the interpreter refuses {what}" TH.Fail e
+             | Ok ir ->
+                 let r = Blade.Interp.Run.runProgram ir ("print_fn_interp_" + sel) Blade.Interp.Value.defaultLimits
+                 recordCase $"print: the interpreter refuses {what} the same way"
+                     (r.ExitCode <> 0 && r.Stderr.Contains $"{sel} is a function") r.Stderr))
     // The two lanes agree under one pin: the interpreter prints the same set.
     withPrint (Some "y") (fun () ->
         match Blade.Lowering.lower printSrc with
@@ -3302,6 +3326,7 @@ and internal dispatchTestClean (rest: string list) : int =
         let failed =
             (Blade.Tests.CudaTests.runCudaTests ()).Failed
             + (Blade.Tests.CudaTests.runCublasSwapTests ()).Failed
+            + (Blade.Tests.CudaTests.runCublasFailureExitTests ()).Failed
         if failed = 0 then 0 else 1
     | [ "mpi" ] ->
         // MPI decomposition block (differential vs serial oracle under

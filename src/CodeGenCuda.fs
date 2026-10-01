@@ -714,6 +714,13 @@ with a compile-time shape are forwarded to the device)" hostName)
 /// self-contained MSVC DLL that g++/-lmsmpi links directly (the netcdf.dll
 /// trick), avoiding cross-ABI object link. mpiRange=false is unaffected --
 /// identical to the plain (non-hybrid) launch.
+/// The binder every generated kernels .cu exports so the host can hand it its
+/// panic (blade_dll_panic.hpp): CodeGen.getCudaFileContent writes it and
+/// CodeGen.dllPanicBindLines binds it. Distinct from the cuBLAS shim's
+/// `blade_cuda_bind_panic`, so a program linking both resolves each binder to
+/// its own image.
+let kernelsPanicBinder = "blade_kernels_bind_panic"
+
 let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNestCodeGen) (name: string) (blockSize: int) : string list option =
     // Detect a single S-dim symmetry group of arity >= 2 (sym or antisym).
     let grpOpt =
@@ -874,11 +881,14 @@ let genCudaKernelSimplicial (mpiRange: bool) (softSplit: bool) (codeGen: LoopNes
     let wrapper =
         if mpiRange then
             // dllexport'd: the hybrid build ships the .cu as a self-contained
-            // MSVC DLL the g++ host links directly.
+            // MSVC DLL the g++ host links directly. Its CUDA statuses are
+            // checked like every wrapper's (CodeGen.checkCudaStatuses). A rank
+            // with an EMPTY cell range returns before touching the device at
+            // all, so an idle rank on a GPU-less node is not a failure.
             [ $"extern \"C\" __declspec(dllexport) void {launchName}(const {srcHostCpp}* {srcName}, {elemCpp}* __blade_host_out, size_t __blade_rlo, size_t __blade_rhi, int __blade_rank) {{"
+              "    if (__blade_rhi <= __blade_rlo) return;"
               "    int __blade_dc = 1; cudaGetDeviceCount(&__blade_dc); if (__blade_dc < 1) __blade_dc = 1;"
               "    cudaSetDevice(__blade_rank % __blade_dc);"
-              "    if (__blade_rhi <= __blade_rlo) return;"
               $"    size_t __blade_card = {card}UL;"
               $"    {srcDevCpp}* __blade_d_{srcName}; cudaMalloc(&__blade_d_{srcName}, {n}UL * sizeof({srcDevCpp}));"
               $"    cudaMemcpy(__blade_d_{srcName}, {srcName}, {n}UL * sizeof({srcDevCpp}), cudaMemcpyHostToDevice);"

@@ -1,0 +1,24 @@
+// TEST: A range passed straight to a function is materialized as its argument
+// ============================================================================
+// `tot(0..5)` was refused in code generation (BL7001 "no rule for IRRange in
+// expression position") whether `tot` was generic or concrete: a bare range
+// is virtual, and an ordinary call argument has no rendering for one. A range
+// in a call-argument slot is now hoisted to its own binding, exactly as
+// `reduce(0..n, (+))` already hoists it -- the same thing writing
+// `let xs = 0..5` by hand does. For a GENERIC callee the call additionally has
+// to type the range as the Int64 array it is (IR.exprTypeIfKnown), or the
+// callee's variable goes unlearned (BL6001).
+// ============================================================================
+type I = Idx<4>
+
+function tot(x: T^1) -> T^0 = reduce(x, (+))
+function totc(x: Array<Int64 like Idx<5>>) -> Int64 = reduce(x, (+))
+
+let a = tot(0..5)
+// EXPECT: a = 10
+let b = tot(2..6)
+// EXPECT: b = 14
+let c = tot(range<I>)
+// EXPECT: c = 6
+let d = totc(0..5)
+// EXPECT: d = 10

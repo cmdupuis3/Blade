@@ -112,6 +112,21 @@ let private emissionCases : (string * (string * string) list * string list * str
        [ "u.extents[0]" ],
        [ "vsum2_shape" ])
 
+      // ---- A compiler-made origin every call left ----
+      // A caret parameter materialized by `reduce` (`x: T^2` -> two
+      // `__method_for_inferred_n` extents) makes the HM specialization
+      // `rowsums_HM_..._double` symbolic, and its one call site moves to the
+      // `_shape_` copy. The unshaped HM copy was still emitted beside it --
+      // a whole dead function reading `x.extents[...]`. A copy an earlier pass
+      // minted, once unreferenced, is dropped; a SOURCE function never is.
+      ("caret_hm_origin_left_by_every_call_is_dropped",
+       [ ("Main",
+          "function rowsums(x: T^2) -> T^1 = reduce(x, (+))\n"
+          + "let a: Array<Float64 like Idx<3>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]\n"
+          + "let s = rowsums(a)\n") ],
+       [ "_shape___method_for_inferred_n" ],
+       [ "_double(Array<double, 2> x)"; "x.extents[" ])
+
       // ---- Recursion ----
       // Self-recursive and SHAPE-PRESERVING: `a` is forwarded to the recursive
       // call unchanged, so the signature is closed under the recursion and the

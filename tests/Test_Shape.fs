@@ -131,10 +131,19 @@ let runShapeTests () : BlockResult =
          | _ -> false) ""
     check "typeOf: sort preserves type (was lift-only rule)" (typeOf (IRSort (vA, vX)) = arrTy) ""
     check "typeOf: contains is Bool" (typeOf (IRContains (vA, vX)) = IRTScalar ETBool) ""
-    // exprTypeIfKnown stays the CarriedType tier: no reconstruction.
+    // exprTypeIfKnown answers only where the node's type is a fixed function
+    // of operand types that are THEMSELVES known (the HM call-site argument
+    // rule): a scalar binop over two known scalars, yes; anything that would
+    // need typeOf's free reconstruction (an array operand, a slice), no.
     check "exprTypeIfKnown: carried" (exprTypeIfKnown vX = Some f64) ""
-    check "exprTypeIfKnown: no reconstruction"
-        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, vY)) = None) ""
+    check "exprTypeIfKnown: scalar binop over known scalars"
+        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, vY)) = Some f64) ""
+    check "exprTypeIfKnown: array operand is not reconstructed"
+        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vA, vX)) = None) ""
+    check "exprTypeIfKnown: slice is not reconstructed"
+        (exprTypeIfKnown (IRSlice (vA, 0, lit 0, lit 1)) = None) ""
+    check "exprTypeIfKnown: unknown operand declines"
+        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, IRSlice (vA, 0, lit 0, lit 1))) = None) ""
 
     printFooter "ExprShape" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "ExprShape"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

@@ -137,7 +137,8 @@ fold refuses at compile time instead):
 | float → int cast (`Int64(floor(x))`) | truncation of a value the target can hold; NaN, ±∞, or anything outside `[-2ʷ⁻¹, 2ʷ⁻¹)` PANICS **BL8014** — never a saturated value or a platform sentinel |
 | Int64 → Int32 cast | wraps (two's complement) |
 | transcendental intrinsics (`exp log log10 sin cos tan sinh cosh tanh asin acos atan atan2`, and `pow`) | the PLATFORM libm's value, computed AT RUN TIME — never folded at compile time, so a literal argument and the same value read from an array agree. A Float32 operand is evaluated by the double function and rounded once to Float32; an integer operand widens to double |
-| `sqrt` `floor` `ceil` `abs` `fma` | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
+| complex transcendental intrinsics (`exp log sqrt sin cos tan sinh cosh tanh asin acos atan` on a complex operand) and complex `^` | the PLATFORM C library's complex functions (`cexp clog csqrt csin ccos ctan csinh ccosh ctanh casin cacos catan cpow` — libmingwex's on Windows), computed AT RUN TIME under the same barrier, so a constant operand and a run-time one agree bit for bit. Complex `^` is libstdc++'s algorithm over those functions: complex ^ complex is `cpow`; complex ^ real (an integer exponent is cast to the component type) is `pow(re, y)` for a positive real base, else `polar(exp(y · log(z).re), y · log(z).im)`; real ^ complex is `polar(pow(x, w.re), w.im · log(x))` for `x > 0`, else `cpow`. A Complex64 operand is evaluated by the Complex128 function and each component rounded once to Float32 |
+| `sqrt` `floor` `ceil` `abs` `fma` (real operand) | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
 | integer literals | exact, including array-literal leaves (never routed through a double) |
 
 A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) with
@@ -152,10 +153,14 @@ still hoisted — only the fold is gone.
 "The platform libm" is a per-platform claim: the interpreter P/Invokes the
 same library the compiled program links (ucrtbase on Windows), so the
 differential gates are byte-exact on one machine; two operating systems may
-legitimately differ in a transcendental's last ulp. Outside the contract,
-documented rather than hidden: complex transcendentals and complex `^`
-(libstdc++'s own algorithms; the interpreter declines what it cannot
-reproduce), CUDA device bodies (device libm, plain integer `/`), a host
+legitimately differ in a transcendental's last ulp. The complex functions
+are reproduced in the interpreter by porting the platform library's own
+code (libmingwex's `c*` objects, with libgcc's `__muldc3`/`__divdc3`) over
+the same P/Invoked real functions. On a platform without that port the
+interpreter keeps best-effort textbook forms for complex `exp`/`log`/`sqrt`/`^`
+(not bit-verified) and declines the rest rather than guess. Outside the
+contract, documented rather than hidden: CUDA device bodies (device libm,
+`thrust::` complex, plain integer `/`), a host
 compiler without asm labels (MSVC, the nvcc host pass: `blade_libm::`
 forwards to `std::` there), and `lgamma`/`digamma`, which are Blade's own
 series on both sides (BL8008 outside `x > 0`).
@@ -683,7 +688,23 @@ error class.
 | Index-typed | `T^(I₁, I₂, ...)` | index structure | kernel bodies, combinators |
 | Fully concrete | `Array<V like I₁, ...>` | value type, indices, extents | data declarations |
 
-`T^r ≡ T^r(1, 2, ..., r)` (dense). Transitions: symmetry inference (§11) takes
+`T^r ≡ T^r(1, 2, ..., r)` (dense).
+
+**What `^` builds is decided by its left-hand side.** A TYPE gives an array
+type; a UNIT gives a unit power (`Unit area = meters^2`, `Float<meters^2>`,
+`seconds^-1`); a VALUE -- a literal or a static, including inside an extent
+such as `Idx<N^2>` -- gives an arithmetic power. Among types, a single
+capital that names no declared type is a type VARIABLE (`T^1`, any element);
+a type that IS declared or built in fixes the element instead (§13.2's
+Array-Intro with T a base type): `Float64^1` is a dense rank-1 array of
+`Float64`, any extent, `Speed^1` (after `type Speed = Float<mps>`) one of
+`Speed`, a declared struct's name the same, and `Float64^0` is `Float64`.
+The rank must be an integer literal, and a head that is itself an array type
+(`type Row = Array<...>`, then `Row^1`) is refused rather than nested (both
+BL1004). The concrete caret is DENSE only, like `Float<day>^2`: there is no
+abstract-level symmetry spelling, so a compact argument (`SymIdx`,
+`AntisymIdx`, ...) is refused at the call (BL3001) rather than densified --
+write `T^2` to accept any symmetry class. Transitions: symmetry inference (§11) takes
 abstract → index-typed; value instantiation takes index-typed → concrete.
 Lowering table for inferred σ:
 
@@ -1446,6 +1467,25 @@ the base case; together they characterize when the two entry points coincide.
   to the operation-appropriate identity — 1 under `*`, 0 under `+` — in arity
   recursion base cases is **(planned)**: today it is the zero value, so a
   product base case is written `| 0 -> 1`.)
+- The zero VALUE `zero` denotes at a type (in value position, at an
+  annotation such as `let p: P = zero`, or as a generic `zero` once
+  monomorphization fixes its type) is defined structurally:
+  - numeric scalars: `0` at their own width (`0.0f` for Float32, the complex
+    zero for a complex type); Bool: `false`; String: the empty string `""`;
+  - a struct: the struct with EVERY field `zero`, recursively (a nested
+    struct, a String field `""`, a Bool field `false`, a complex field the
+    complex zero);
+  - a tuple: componentwise;
+  - an array: the zero-filled array of its declared shape -- at an array
+    annotation, and for an array-typed struct field or tuple component. A
+    field or component needs a STATIC shape (every axis a plain rank-1 index
+    with a literal extent, at most 65536 cells), and so does an array
+    annotation whose element is a struct, String or tuple; an array
+    annotation of a numeric element takes any nominal or static plain axes.
+  - A sum type has no zero: no rule picks a canonical zero variant, so
+    `zero` at a sum type -- or at a composite with such a part, or with an
+    array part whose shape is not static -- is refused (BL7004 in code
+    generation, the same refusal in the interpreter).
 - `guard(p, c)` — `c` if p, else zeros of c's shape; `guard(p, guard(q, c)) ≡
   guard(p && q, c)`; exhaustive guards compose to plain choice.
 - `c₁ <|> c₂` — first non-zero; associative, idempotent, `M <@> zero` is the

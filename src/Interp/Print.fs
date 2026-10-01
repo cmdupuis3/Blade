@@ -161,11 +161,19 @@ let checkAmbientSelection (forcedIds: System.Collections.Generic.HashSet<IRId>) 
               | Some spec -> spec.Streamed
               | None -> false) then false
         else printableValue b.Value
-    let declared = irModule.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+    // Same order as genPrintStatements: a name the program never bound, then
+    // a function-valued binding (incl. an eliminated generic alias, which is
+    // still a binding the source has), then a never-materialized one.
+    let declared =
+        irModule.Bindings |> List.map (fun b -> b.Name) |> Set.ofList
+        |> Set.union irModule.FunctionAliasNames
     let unknown = Set.difference names declared
     if not unknown.IsEmpty then
         let ns = String.concat ", " unknown
         raise (PrintUnsupported $"--print: {ns} not a top-level binding")
+    let functions = Set.intersect names (Blade.CodeGen.functionValuedBindingNames irModule) |> Set.toList
+    if not functions.IsEmpty then
+        raise (PrintUnsupported (Blade.CodeGen.functionPrintRefusal functions))
     let silent =
         irModule.Bindings
         |> List.filter (fun b -> Set.contains b.Name names && not (isPrintable b))

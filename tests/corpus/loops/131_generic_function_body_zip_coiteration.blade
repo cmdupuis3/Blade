@@ -29,18 +29,18 @@
 // ============================================================================
 
 // Abstract params, kernel-first over a two-way zip.
-function f(a: Float64^1, b: Float64^1) = {
+function f(a: T^1, b: T^1) = {
     object_for(lambda(x, y) -> x * y) <@> zip(a, b)
 }
 
 // Three-way: returned |A|*|B|*|C| = 27 cells as an outer product.
-function three(a: Float64^1, b: Float64^1, c: Float64^1) = {
+function three(a: T^1, b: T^1, c: T^1) = {
     object_for(lambda(x, y, z) -> x * y + z) <@> zip(a, b, c)
 }
 
 // Rank-2 abstract params: the multi-record co-iteration, where the lost shared
 // records cost the whole product space (2x3x2x3 for a 2x3 result).
-function f2(a: Float64^2, b: Float64^2) = {
+function f2(a: T^2, b: T^2) = {
     object_for(lambda(x, y) -> x * y) <@> zip(a, b)
 }
 
@@ -49,7 +49,7 @@ function f2(a: Float64^2, b: Float64^2) = {
 // the one spelling that failed loudly, with `'wt_n' was not declared in this
 // scope` from the outer-product output extents.
 //   out[k] = sum_t (w[k]*t) * t  over t = [1,2,3] -> 1*1+4*2+9*3 = 36 scaled by w
-function g(ws: Float64^1, t: Float64^1) = {
+function g(ws: T^1, t: T^1) = {
     ws <@> lambda(w) -> {
         let wt = (w * t) |> compute
         let c = object_for(lambda(p, q) -> p * q) <@> zip(wt, t)
@@ -58,7 +58,7 @@ function g(ws: Float64^1, t: Float64^1) = {
 }
 
 // The method_for orientation of `f`'s apply: the control that always worked.
-function mf(a: Float64^1, b: Float64^1) = {
+function mf(a: T^1, b: T^1) = {
     method_for(zip(a, b)) <@> lambda(x, y) -> x * y
 }
 

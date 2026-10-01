@@ -470,6 +470,10 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     let cublasSwap =
         if opts.IncludeCuda then Some (runCublasSwapTests ())
         else None
+    // The cuBLAS DLL's failure exit (blade_dll_panic.hpp): same opt-in, same gate.
+    let cublasFailureExit =
+        if opts.IncludeCuda then Some (runCublasFailureExitTests ())
+        else None
     // `where mpi` decomposition tests (differential vs serial oracle under
     // mpiexec). Opt-in; even when requested they skip cleanly if g++ /
     // -lmsmpi / mpiexec are absent.
@@ -531,6 +535,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
           yield bufType
           match cuda with Some b -> yield b | None -> ()
           match cublasSwap with Some b -> yield b | None -> ()
+          match cublasFailureExit with Some b -> yield b | None -> ()
           match mpi with Some b -> yield b | None -> ()
           yield diff; yield typeStruct
           match timing with Some b -> yield b | None -> ()

@@ -1,0 +1,78 @@
+// TEST: Memfree Sparse Gather Temps
+// ============================================================================
+// Free-hazard guard: a PARTIAL sparse read deep-copies the matching entries
+// into storage it owns, through one of three producers, each with its own
+// teardown (nested_array_types.hpp):
+//   S((k, _)) with a trailing dim  make_sparse_gather_dense_trail  deallocate_gather_dense_trail
+//   F((k, _)), no trailing dim     make_sparse_gather_dense        deallocate_gather_dense
+//   F3((k, _, _)), residual rank 2 make_partial_sparse_gather      deallocate_sparse
+// A let-bound gather inside a function body is freed at the body's exit, once
+// per call: here 299 calls of each, including an EMPTY gather (no key matches
+// prefix 7) and a gather OF a gather (h = g((1, _))). Three shapes must NOT be
+// freed while the caller can still see them: a gather returned through an
+// alias (h = g; h), a let-bound row VIEW of a gather returned to the caller
+// (r = g(1); r), and a row returned directly (g(1)); all are read after their
+// callee returns. The module-level gathers (top, topv) live for the whole program.
+// ============================================================================
+let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]
+type E = Idx<4>
+type T = Idx<2>
+let vals: Array<Float64 like E, T> = [[21.0, 21.5], [3.0, 3.5], [10.0, 10.5], [5.0, 5.5]]
+let S = sparse(vals, K)
+let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]
+let F = sparse(flat, K)
+let static K3 = [(0, 1, 2), (0, 1, 3), (1, 0, 0), (0, 2, 2)]
+let F3 = sparse(flat, K3)
+function trail_sum(k: Int64) -> Float64 = {
+    let g = S((k, _))
+    let rs = reduce(g, (+))
+    reduce(rs, (+))
+}
+function dense_sum(k: Int64) -> Float64 = {
+    let g = F((k, _))
+    reduce(g, (+))
+}
+function nested_sum(k: Int64) -> Float64 = {
+    let g = F3((k, _, _))
+    let h = g((1, _))
+    reduce(h, (+))
+}
+function empty_rows(k: Int64) -> Int64 = {
+    let g = S((k, _))
+    let (n, t) = extents(g)
+    n * 10 + t
+}
+function ret_alias(k: Int64) = {
+    let g = F((k, _))
+    let h = g
+    h
+}
+function ret_view(k: Int64) = {
+    let g = S((k, _))
+    let r = g(1)
+    r
+}
+function ret_row(k: Int64) = {
+    let g = S((k, _))
+    g(1)
+}
+type Steps = Idx<300>
+let rec acc: Array<Float64 like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + trail_sum(n % 3) + dense_sum(n % 3) + nested_sum(0) + Float64(empty_rows(7))
+let total = acc((299 : Steps))
+let ra = ret_alias(0)
+let rv = ret_view(0)
+let rr = ret_row(0)
+let top = F((0, _))
+let topv = S((0, _))
+let after = reduce(ra, (+)) + reduce(rv, (+)) + reduce(top, (+))
+// EXPECT: total = 10472
+// EXPECT: ra = [2, 4]
+// EXPECT: rv = [5, 5.5]
+// EXPECT: rr = [5, 5.5]
+// EXPECT: top = [2, 4]
+// EXPECT: topv = [[3, 3.5], [5, 5.5]]
+// EXPECT: after = 22.5

@@ -1,0 +1,11 @@
+// TEST: A caret on an alias that is already an array type is refused (rejects)
+// ERROR: BL1004
+// ERROR-CONTAINS: is already an array type
+// ============================================================================
+// `type Row = Array<Float64 like Idx<3>>` then `Row^1` would be an array of
+// arrays, which the caret does not build. Refused rather than silently nested
+// (or silently read as a type variable named Row, as before).
+// ============================================================================
+type Row = Array<Float64 like Idx<3>>
+function f(x: Row^1) = x
+let y = f([1.0, 2.0, 3.0])

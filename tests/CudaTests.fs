@@ -410,13 +410,22 @@ let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
         // symmetric group, const square extent, symmetric — not antisym — fold),
         // run on the device with the triangular unrank, and match the host
         // triangular output exactly. A kernel that DOES touch the symmetry path.
+        // The body must really BE symmetric: `where comm` is a claim the checker
+        // holds the kernel to (BL4013, CommContradictsWitness), and the old
+        // `2.0 * x + y` was refused by the host oracle for exactly that reason.
+        // Under a true comm the order inside a canonical tuple is unobservable,
+        // so a symmetric body loses no sensitivity a correct program could have;
+        // the 10.0 * (x + y) term keeps distinct tuples' values apart. The
+        // rank-3/4/5 cases below use the same shape: their weighted linear
+        // bodies made the same false claim, which the checker does not (yet)
+        // refuse at arity > 2.
         let symTriHost = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> 2.0 * x + y |> compute
+let R = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * y + 10.0 * (x + y) |> compute
 """
         let symTriCuda = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> 2.0 * x + y |> compute
+let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y + 10.0 * (x + y) |> compute
 """
         // ANTISYMMETRIC rank-2 strict-triangular DIFFERENTIAL case. reynolds(g,
         // Antisymmetric) folds to g(x,y)-g(y,x); stored on the strict triangle
@@ -441,11 +450,11 @@ let R = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
         // closed-form outer unrank + rank-2 inner unrank on device, match host.
         let sym3Host = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z) -> x + 2.0 * y + 3.0 * z |> compute
+let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z) -> x * y * z + 10.0 * (x + y + z) |> compute
 """
         let sym3Cuda = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z), cuda(block: 32) -> x + 2.0 * y + 3.0 * z |> compute
+let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z), cuda(block: 32) -> x * y * z + 10.0 * (x + y + z) |> compute
 """
         // ANTISYMMETRIC rank-3 STRICT simplex (i<j<k) DIFFERENTIAL case — the
         // strict higher-rank path (binomial outer start + sign). non-degenerate
@@ -465,11 +474,11 @@ let R = method_for(A, A, A) <@> reynolds(g, Antisymmetric) |> compute
         // = inclusive simplex, anti = strict simplex. Non-degenerate kernels.
         let sym4Host = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z) -> w + 2.0 * x + 3.0 * y + 4.0 * z |> compute
+let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z) -> w * x * y * z + 10.0 * (w + x + y + z) |> compute
 """
         let sym4Cuda = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z), cuda(block: 32) -> w + 2.0 * x + 3.0 * y + 4.0 * z |> compute
+let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z), cuda(block: 32) -> w * x * y * z + 10.0 * (w + x + y + z) |> compute
 """
         let anti4Host = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
@@ -483,11 +492,11 @@ let R = method_for(A, A, A, A) <@> reynolds(g, Antisymmetric) |> compute
 """
         let sym5Host = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> a + 2.0 * b + 3.0 * c + 4.0 * d + 5.0 * e |> compute
+let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e) -> a * b * c * d * e + 10.0 * (a + b + c + d + e) |> compute
 """
         let sym5Cuda = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
-let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e), cuda(block: 32) -> a + 2.0 * b + 3.0 * c + 4.0 * d + 5.0 * e |> compute
+let R = method_for(A, A, A, A, A) <@> lambda(a, b, c, d, e) where comm(a, b, c, d, e), cuda(block: 32) -> a * b * c * d * e + 10.0 * (a + b + c + d + e) |> compute
 """
         let anti5Host = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
@@ -1234,3 +1243,121 @@ let runCublasSwapTests () : Blade.Tests.TestHarness.BlockResult =
                 printFooter blockName ["FAILED"]
                 { Block = blockName; Passed = pPassed; Failed = max 1 (pTotal - pPassed); Skipped = 0
                   FailedNames = (if failNames.IsEmpty then [$"<exit {rCode}>"] else failNames) }
+
+/// ONE FAILURE EXIT ACROSS THE cuBLAS DLL (src/cpp/blade_dll_panic.hpp). The
+/// shim is an nvcc-built DLL, its own image: it used to fail with abort() from
+/// inside the DLL, which ran none of the executable's failure-exit hooks -- no
+/// run record was written and the exit was a crash code, not a Blade failure.
+/// The generated host now binds blade_rt::dll_panic into the DLL at static
+/// initialization, so a device failure is the HOST's BL8005: one `error[BL8005]`
+/// line, the run record carrying the code, exit 1.
+///
+/// A real program through the real build (compileCpp sniffs the shim include
+/// and builds the DLL), run twice: with the device visible it must compute
+/// gram(A, A) exactly as the host does (the binding links and is inert), and
+/// with CUDA_VISIBLE_DEVICES=-1 -- every CUDA call now fails -- it must end
+/// through the host's panic with the record written. Skips without nvcc + GPU
+/// (+ cl.exe on Windows), like the blocks above.
+let runCublasFailureExitTests () : Blade.Tests.TestHarness.BlockResult =
+    let blockName = "cuBLAS Failure Exit"
+    printHeader "cuBLAS Failure Exit (DLL-side failure -> host panic + run record)"
+    let caps = capabilities.Value
+    let onWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+    if not caps.HasNvcc || not caps.HasGpu then
+        printfn "Skipped: requires nvcc + CUDA GPU (nvcc=%b, gpu=%b)." caps.HasNvcc caps.HasGpu
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif onWindows && not caps.HasCl then
+        printfn "Skipped: nvcc needs cl.exe (MSVC) as host compiler, not found on PATH."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    elif not caps.HasGpp then
+        printfn "Skipped: g++ not found (the host half)."
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    else
+    let mutable passed = 0
+    let failedNames = ResizeArray<string>()
+    let check (name: string) (ok: bool) (detail: string) =
+        if ok then
+            passed <- passed + 1
+            resultLine Pass name ""
+        else
+            failedNames.Add name
+            resultLine Fail name detail
+    let withEnv (vars: (string * string) list) (f: unit -> 'a) : 'a =
+        let priors = vars |> List.map (fun (k, _) -> (k, Environment.GetEnvironmentVariable k))
+        for (k, v) in vars do Environment.SetEnvironmentVariable(k, v)
+        try f () finally for (k, p) in priors do Environment.SetEnvironmentVariable(k, p)
+    let outDir = Path.GetFullPath "./generated_cpp_tests/cublas_failure_exit"
+    Directory.CreateDirectory outDir |> ignore
+    let src =
+        "let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\nlet G = gram(A, A)\n"
+    let built =
+        withEnv [ ("BLADE_CUBLAS", "1"); ("BLADE_BLAS", "0") ] (fun () ->
+            match lower src with
+            | Error e -> Error ($"lower: {e}")
+            | Ok ir ->
+                let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "cublas_failure_exit"
+                if not (cpp.Contains "blade_cuda_bind_panic(&blade_rt::dll_panic)") then
+                    Error "the host does not bind its panic into the shim (emission)"
+                else
+                    CodeGen.deployRuntimeHeaders outDir
+                    let cppFile = Path.Combine(outDir, "cublas_failure_exit.cpp")
+                    File.WriteAllText(cppFile, cpp)
+                    compileCpp cppFile outDir)
+    match built with
+    | Error e when isSkipError e ->
+        printfn "Skipped: %s" e
+        { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
+    | Error e ->
+        check "cuBLAS-routed program builds (nvcc shim DLL + g++ host)" false e
+        printFooter blockName ["FAILED"]
+        { Block = blockName; Passed = passed; Failed = failedNames.Count; Skipped = 0; FailedNames = List.ofSeq failedNames }
+    | Ok exe ->
+        check "cuBLAS-routed program builds (nvcc shim DLL + g++ host)" true ""
+        let recPath = Path.Combine(outDir, "cublas_failure_exit.record.json")
+        if File.Exists recPath then File.Delete recPath
+        // Device visible: the binding is inert, the values are gram(A, A)'s.
+        // The reference is the same program on the host route (no DLL).
+        let gLine (out: string) =
+            out.Replace("\r\n", "\n").Split('\n') |> Array.tryFind (fun l -> l.StartsWith "G = ")
+        let reference =
+            withEnv [ ("BLADE_CUBLAS", "0"); ("BLADE_BLAS", "0") ] (fun () ->
+                match lower src with
+                | Error e -> Error ($"lower: {e}")
+                | Ok ir ->
+                    let (cpp, _) = CodeGen.genSelfContainedProgramFromIR ir "cublas_failure_exit_ref"
+                    let cppFile = Path.Combine(outDir, "cublas_failure_exit_ref.cpp")
+                    File.WriteAllText(cppFile, cpp)
+                    match compileCpp cppFile outDir with
+                    | Error e -> Error e
+                    | Ok refExe ->
+                        match runExecutable refExe with
+                        | Ok (0, out) -> (match gLine out with Some l -> Ok l | None -> Error ($"no `G = ` line: {out}"))
+                        | Ok (code, out) -> Error ($"exit {code}: {out}")
+                        | Error e -> Error e)
+        (match withEnv [ ("BLADE_RUN_RECORD", recPath) ] (fun () -> runExecutable exe) with
+         | Ok (0, out) ->
+             (match reference with
+              | Ok refLine ->
+                  check "device run: gram(A, A) through the bound shim equals the host route" (gLine out = Some refLine)
+                      ($"device {gLine out} vs host {refLine}")
+              | Error e -> check "host-route reference builds and runs" false e)
+             check "device run: the record reports ok"
+                 (File.Exists recPath && (File.ReadAllText recPath).Contains "\"status\":{\"ok\":true}") recPath
+         | Ok (code, out) -> check "device run exits 0" false ($"exit {code}: {out}")
+         | Error e -> check "device run" false e)
+        if File.Exists recPath then File.Delete recPath
+        // No device: the shim's first CUDA call fails INSIDE the DLL.
+        (match withEnv [ ("BLADE_RUN_RECORD", recPath); ("CUDA_VISIBLE_DEVICES", "-1") ] (fun () -> runExecutable exe) with
+         | Ok (code, out) ->
+             let reports = out.Split('\n') |> Array.filter (fun l -> l.Contains "error[BL8005]") |> Array.length
+             check "no device: the DLL-side failure is the host's BL8005, reported once, exit 1"
+                 (code = 1 && reports = 1 && out.Contains "cuBLAS dispatch failed") ($"exit {code}: {out}")
+             if not (File.Exists recPath) then
+                 check "no device: the run record is written on the DLL-side failure" false ($"no file at {recPath}: {out}")
+             else
+                 let js = File.ReadAllText recPath
+                 check "no device: the run record is written on the DLL-side failure, carrying BL8005"
+                     (js.Contains "\"status\":{\"ok\":false,\"code\":\"BL8005\"") js
+         | Error e -> check "no-device run" false e)
+        printFooter blockName [ $"{passed} passed"; $"{failedNames.Count} failed" ]
+        { Block = blockName; Passed = passed; Failed = failedNames.Count; Skipped = 0; FailedNames = List.ofSeq failedNames }

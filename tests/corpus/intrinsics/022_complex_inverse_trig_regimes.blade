@@ -1,0 +1,41 @@
+// TEST: Complex Inverse Trig Across Regimes
+// ============================================================================
+// atan/asin/acos on COMPLEX operands, one operand per branch of the code that
+// actually runs. On MSYS2 ucrt64 the compiled side's std::atan/asin/acos
+// (complex) are libmingwex's catan/casin/cacos (with their own catanh,
+// casinh, csqrt and clog), and the interpreter ports those objects operation
+// for operation (src/Interp/Numerics.fs). The operands are chosen to visit
+// each regime of the ports:
+//   3+4i, -3-4i, -0.7+1.3i  the general csqrt/clog identity (|y| >= 1 after
+//                           the -i*f(iz) rotation, or x not small)
+//   0.5+0.5i                catanh's log(n) - log(d) arm
+//   1e-20+0.3i              catanh/casinh's |x| <= eps log1p arm
+//   2e-8+0.75i              casinh's x^2 <= eps series arm
+//   1e-9-2i                 the general arm with a tiny real part
+//   1e20+i                  casinh's huge regime (clog + ln 2); catan's
+//                           log(n) - log(d) cancels to a SIGNED zero (-0)
+//
+// Every operand is scaled by `one = exp(0.0)`, a value g++ cannot see
+// through. That was NEEDED when complex intrinsics sat outside blade_libm's
+// fold barrier: g++ -O3 folded std::atan/asin/acos of a constant operand
+// through MPC at compile time, even through this array literal (measured:
+// atan(1e20 + i) printed 1e-40 folded vs the library's -0). The barrier now
+// covers them (blade_runtime.hpp; constant-vs-opaque pinned by
+// intrinsics/023), and the opaque operands stay as a cross-check that the
+// library path itself is what the interpreter reproduces. The amp_* bindings magnify the last
+// ulp of three results so the 15-digit print compares them bit for bit; they
+// are left unpinned (the value IS the platform library's) and the interpreter
+// differential compares them byte for byte against the compiled lane.
+// ============================================================================
+let one = exp(0.0)
+let zs: Array<Complex128 like Idx<8>> = [complex(3.0 * one, 4.0), complex(-3.0 * one, -4.0), complex(0.5 * one, 0.5), complex(1.0e-20 * one, 0.3), complex(1.0e-9 * one, -2.0), complex(1.0e20 * one, 1.0), complex(-0.7 * one, 1.3), complex(2.0e-8 * one, 0.75)]
+let ta = atan(zs)
+let sa = asin(zs)
+let ca = acos(zs)
+let amp_t = (imag(ta(2)) - 0.402359478108525) * 1.0e17
+let amp_s = (real(sa(0)) - 0.633983865639177) * 1.0e17
+let amp_c = (imag(ca(6)) + 1.14979944558426) * 1.0e17
+// EXPECT: one = 1
+// EXPECT: ta = [(1.44830699523146,0.158997191679999), (-1.44830699523146,-0.158997191679999), (0.553574358897045,0.402359478108525), (1.0989010989011e-20,0.309519604203112), (1.57079632646156,-0.549306144334055), (1.5707963267949,0), (-1.13556447511185,0.57478271453149), (4.57142857142856e-08,0.972955074527655)]
+// EXPECT: sa = [(0.633983865639177,2.30550903124348), (-0.633983865639177,-2.30550903124348), (0.452278447151191,0.530637530952518), (9.57826285221151e-21,0.295673047563422), (4.47213595499958e-10,-1.44363547517881), (1.5707963267949,46.7448490404409), (-0.414752607073791,1.14979944558426), (1.6e-08,0.693147180559945)]
+// EXPECT: ca = [(0.93681246115572,-2.30550903124348), (2.20478019243407,2.30550903124348), (1.11851787964371,-0.530637530952518), (1.5707963267949,-0.295673047563422), (1.57079632634768,1.44363547517881), (0,-46.7448490404409), (1.98554893386869,-1.14979944558426), (1.5707963107949,-0.693147180559945)]

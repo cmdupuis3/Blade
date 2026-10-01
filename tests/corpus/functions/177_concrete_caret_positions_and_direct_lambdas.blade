@@ -1,0 +1,38 @@
+// TEST: Concrete-element caret positions and directly applied lambda shapes
+// ============================================================================
+// Coverage beside functions/171 and 175. The concrete caret in RETURN, LET
+// annotation and TUPLE-component position, over String and Complex128
+// elements; and the shapes that now type a lambda literal from its
+// arguments: an array and a scalar meeting in one binop, the pipe
+// `xs |> lambda(a) -> ...` (which desugars to the same application), an
+// abstract `T^1` argument inside a generic body, and a `where comm` lambda.
+// ============================================================================
+function scaled(xs: Float64^1, k: Float64^0) -> Float64^1 = xs * k |> compute
+let s = scaled([1.0, 2.0], 3.0)
+// EXPECT: s = [3, 6]
+let v: Float64^1 = [4.0, 5.0]
+// EXPECT: v = [4, 5]
+function firsts(p: Tuple<Float64^1, Int64^1>) -> Float64 = p[0](0) + Float64(p[1](0))
+let fa = [1.5, 2.0]
+let ia = [2, 3]
+let f = firsts((fa, ia))
+// EXPECT: f = 3.5
+function count(ws: String^1) -> Int64 = extents(ws)
+let n = count(["a", "b", "c"])
+// EXPECT: n = 3
+function second_re(z: Complex128^1) -> Float64 = real(z(1))
+let zr = second_re([complex(1.0, 2.0), complex(3.0, 4.0)])
+// EXPECT: zr = 3
+
+let xs = [1.5, 2.5, 3.5]
+let a1 = (lambda(x, y) -> x + y)(xs, 1.0)
+// EXPECT: a1 = [2.5, 3.5, 4.5]
+let a2 = xs |> lambda(a) -> reduce(a, (+))
+// EXPECT: a2 = 7.5
+function g(w: T^1) = (lambda(a) -> reduce(a, (+)))(w)
+let a3 = g(xs)
+// EXPECT: a3 = 7.5
+let a4 = g([1, 2, 3])
+// EXPECT: a4 = 6
+let a5 = (lambda(a, b) where comm(a, b) -> a * b)(2.0, 3.0)
+// EXPECT: a5 = 6

@@ -150,6 +150,100 @@ let runRunRecordTests () : BlockResult =
          check "emission: deterministic across lowerings" (ca = cb) ""
      | _ -> check "emission: deterministic across lowerings" false "lowering failed")
 
+    // ONE FAILURE EXIT ACROSS A DLL BOUNDARY (src/cpp/blade_dll_panic.hpp).
+    // A DLL Blade builds with nvcc -shared is its own image; a failure inside
+    // it used to bypass the executable's panic (the cuBLAS shim called abort();
+    // the hybrid's kernels checked no CUDA status at all), so no run record was
+    // written. Now each such DLL exports a binder, the host binds
+    // blade_rt::dll_panic into it at static initialization, and a DLL-side
+    // failure is the host's own BL8005 -- hooks, record and all. Emission
+    // only (no toolchain); the device runs are `blade test cuda` / `hybrid`.
+    let pinned (vars: (string * string) list) (f: unit -> unit) =
+        let priors = vars |> List.map (fun (k, _) -> (k, Environment.GetEnvironmentVariable k))
+        for (k, v) in vars do Environment.SetEnvironmentVariable(k, v)
+        try f () finally for (k, p) in priors do Environment.SetEnvironmentVariable(k, p)
+    let cublasGramSource =
+        "let A: Array<Float64 like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]\nlet G = gram(A, A)\n"
+    pinned [ ("BLADE_CUBLAS", "1"); ("BLADE_BLAS", "0") ] (fun () ->
+        match Blade.Lowering.lower cublasGramSource with
+        | Error e -> check "emission: cuBLAS-routed program lowers" false e
+        | Ok ir ->
+            let (cpp, _) = genSelfContainedProgramFromIR ir "rr_cublas_bind"
+            check "emission: a cuBLAS-routed program binds its own panic into the shim DLL"
+                (cpp.Contains "#include \"blade_linalg_cuda.hpp\""
+                 && cpp.Contains "blade_cuda_bind_panic(&blade_rt::dll_panic)") cpp)
+    pinned [ ("BLADE_CUBLAS", "0"); ("BLADE_BLAS", "0") ] (fun () ->
+        match Blade.Lowering.lower cublasGramSource with
+        | Error e -> check "emission: host-routed program lowers" false e
+        | Ok ir ->
+            let (cpp, _) = genSelfContainedProgramFromIR ir "rr_host_nobind"
+            check "emission: a program linking no Blade DLL binds nothing"
+                (not (cpp.Contains "bind_panic")) "")
+    let hybridSource =
+        "type NIdx = Idx<6>\nlet A: Array<Float64 like NIdx> = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]\n"
+        + "let m2 = method_for(A, A) <@> lambda(x, y) where comm(x, y), mpi, cuda(block: 64) -> x * y |> compute\n"
+    (try
+        try
+            CodeGen.setMpiEmitMode true
+            CodeGen.setCudaEmitMode true
+            match Blade.Lowering.lower hybridSource with
+            | Error e -> check "emission: mpi+cuda hybrid lowers" false e
+            | Ok ir ->
+                let (cpp, _) = genSelfContainedProgramFromIR ir "rr_hybrid_bind"
+                match CodeGen.getCudaFileContent () with
+                | None -> check "emission: the hybrid emits its .cu" false "no cuda kernels collected"
+                | Some cu ->
+                    check "emission: the hybrid's DLL exports a panic binder and carries no runtime state of its own"
+                        (cu.Contains "#include \"blade_dll_panic.hpp\""
+                         && cu.Contains ("BLADE_DLL_EXPORT void " + CodeGenCuda.kernelsPanicBinder + "(")
+                         && not (cu.Contains "blade_runtime.hpp") && not (cu.Contains "blade_rt::")) cu
+                    check "emission: the hybrid's DLL checks every CUDA runtime status through the host's panic"
+                        (cu.Contains "blade_dll::ck(cudaSetDevice(" && cu.Contains "blade_dll::ck(cudaMalloc("
+                         && cu.Contains "blade_dll::ck(cudaGetLastError()" && cu.Contains "blade_dll::ck(cudaDeviceSynchronize()"
+                         && cu.Contains "cudaMemcpyDeviceToHost), \"cudaMemcpy D2H\")") cu
+                    check "emission: the hybrid's host binds its own panic into the kernels DLL"
+                        (cpp.Contains (CodeGenCuda.kernelsPanicBinder + "(&blade_rt::dll_panic)")) ""
+        finally
+            CodeGen.setMpiEmitMode false
+            CodeGen.setCudaEmitMode false
+     with ex -> check "emission: mpi+cuda hybrid binding" false ex.Message)
+    // The plain `where cuda` paths link their kernels into the executable
+    // (compileCudaSplit), but their wrappers used to check no CUDA status
+    // either: the same rewrite and the same binding cover them, so a device
+    // failure there is the host's BL8005 too. Both wrapper families: the
+    // rectangular map and the triangular (simplicial) comm kernel.
+    let plainCudaSource =
+        "let A = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+        + "let B = method_for(A) <@> lambda(x) where cuda(block: 32) -> x * 2.0 + 1.0 |> compute\n"
+        + "let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), cuda(block: 32) -> x * y |> compute\n"
+    (try
+        try
+            CodeGen.setCudaEmitMode true
+            match Blade.Lowering.lower plainCudaSource with
+            | Error e -> check "emission: plain cuda program lowers" false e
+            | Ok ir ->
+                let (cpp, _) = genSelfContainedProgramFromIR ir "rr_cuda_bind"
+                match CodeGen.getCudaFileContent () with
+                | None -> check "emission: the plain cuda program emits its .cu" false "no cuda kernels collected"
+                | Some cu ->
+                    let launches = System.Text.RegularExpressions.Regex.Matches(cu, @">>>\(").Count
+                    let launchChecks = System.Text.RegularExpressions.Regex.Matches(cu, @"blade_dll::ck\(cudaGetLastError\(\), ""kernel launch""\);").Count
+                    let bareCalls =
+                        cu.Split('\n')
+                        |> Array.filter (fun l ->
+                            System.Text.RegularExpressions.Regex.IsMatch(l, @"(?<!ck\()\b(cudaMalloc|cudaMemcpy|cudaDeviceSynchronize|cudaSetDevice)\("))
+                    check "emission: every plain cuda wrapper checks its CUDA statuses (no bare call, every launch checked)"
+                        (launches = 2 && launchChecks = 2 && Array.isEmpty bareCalls
+                         && cu.Contains "blade_dll::ck(cudaMalloc(" && cu.Contains "\"cudaMemcpy H2D\")"
+                         && cu.Contains "\"cudaMemcpy D2H\")")
+                        (let bare = String.concat " | " bareCalls in $"launches={launches} checks={launchChecks} bare={bare}")
+                    check "emission: the plain cuda .cu exports the binder and its host binds it"
+                        (cu.Contains ("BLADE_DLL_EXPORT void " + CodeGenCuda.kernelsPanicBinder + "(")
+                         && cpp.Contains (CodeGenCuda.kernelsPanicBinder + "(&blade_rt::dll_panic)")) ""
+        finally
+            CodeGen.setCudaEmitMode false
+     with ex -> check "emission: plain cuda binding" false ex.Message)
+
     // ---------------- 3. the record (g++) ----------------
     printfn "\n--- record (g++) ---"
     let withRecord (path: string option) (f: unit -> unit) =

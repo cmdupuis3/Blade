@@ -1,0 +1,18 @@
+// TEST: Honest three-argument comm and anticomm kernels
+// The positive half of 061-065: kernels whose claims are TRUE pass the
+// arity-general witness and keep their compact storage.
+//   sym:  x * y * z + x + y + z is fully symmetric -> inclusive simplex
+//         i <= j <= k over A = [1, 2, 3], lexicographic order.
+//   anti: (x - y) * (x - z) * (y - z) flips sign under every transposition ->
+//         strict simplex i < j < k over B = [1, 2, 3, 4].
+//   part: comm(x, z) on x * z + 5.0 * y, a true claim on a non-adjacent pair,
+//         checked through a named function's direct call.
+let A = [1.0, 2.0, 3.0]
+let sym = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z) -> x * y * z + x + y + z |> compute
+let B = [1.0, 2.0, 3.0, 4.0]
+let anti = method_for(B, B, B) <@> lambda(x, y, z) where anticomm(x, y, z) -> (x - y) * (x - z) * (y - z) |> compute
+function part(x: Float64, y: Float64, z: Float64) where comm(x, z) -> Float64 = x * z + 5.0 * y
+let p = part(2.0, 3.0, 4.0) + part(4.0, 3.0, 2.0)
+// EXPECT: sym = [4, 6, 8, 9, 12, 16, 14, 19, 26, 36]
+// EXPECT: anti = [-2, -6, -6, -2]
+// EXPECT: p = 46

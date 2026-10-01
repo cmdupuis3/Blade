@@ -1,0 +1,25 @@
+// TEST: GroupBy Result Passed As A Function Argument (rejects)
+// REJECT-AT: codegen
+// WARN-CODEGEN: a group_by result cannot be passed as a function argument
+// A group_by result is a row-pointer table whose row LENGTHS live in the
+// producing group_keys' side state (ngroups / offsets). Capturing it in a
+// lambda forwards that state (034, functions/068); passing it as an ARGUMENT
+// does not -- no function signature carries it. Through a generic `T^2`
+// parameter the HM specialization renders the parameter as a dense rank-2
+// array, so the compiled call was a C++ type error, while the interpreter
+// peeled the rows from its own store and printed an answer: the two lanes
+// disagreed about a program neither could honestly run.
+//
+// Both now refuse it: codegen at the call (BL7004 refusal), the interpreter
+// with the same reason. The supported spellings are grouping INSIDE the
+// function (sql-group-by/049, loops/150) or capturing the grouped array.
+function rowsums(g: T^2) = method_for(g) <@> lambda(r: T^1) -> reduce(r, (+)) |> compute
+function rowdots(ga: T^2, gb: U^2) = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> prodsum(ra, rb) |> compute
+let region = [0, 1, 0, 1]
+let a = [1.0, 2.0, 3.0, 4.0]
+let b = [10.0, 20.0, 30.0, 40.0]
+let gk = group_keys(region)
+let ga = group_by(a, gk)
+let gb = group_by(b, gk)
+let s = rowsums(ga)
+let d = rowdots(ga, gb)

@@ -217,7 +217,8 @@ let private printableModule (program: IRProgram) : IRModule =
             RandomInits = mergeMaps _.RandomInits
             CompoundInits = mergeMaps _.CompoundInits
             SparseInits = mergeMaps _.SparseInits
-            MutableArrayLets = many |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty }
+            MutableArrayLets = many |> List.fold (fun acc m -> Set.union acc m.MutableArrayLets) Set.empty
+            FunctionAliasNames = many |> List.fold (fun acc m -> Set.union acc m.FunctionAliasNames) Set.empty }
 
 // Random-fill bindings (rand.<fam>, RandomInits/RandGen).
 //

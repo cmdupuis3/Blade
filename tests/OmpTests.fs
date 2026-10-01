@@ -382,7 +382,7 @@ let private emissionShapeCases : (string * string * string list * string list) l
     let triSrc =
         "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
         "let L = method_for(A, A, A)\n" +
-        "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+        "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y * z + x + y + z\n" +
         "let R = L <@> k |> compute\n"
     [ // ---- matmul: i-t-j, in-place row accumulation, threaded outer ----------
       ("matmul_native_arm_reordered_i_t_j", matmulSrc,
@@ -611,7 +611,7 @@ let private ompThreadsKnobCases : (string * string * string list * string list) 
       ("knob_triangular_dynamic_suppressed",
        "let A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]\n" +
        "let L = method_for(A, A, A)\n" +
-       "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+       "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y * z + x + y + z\n" +
        "let R = L <@> k |> compute\n",
        [ marker; "for (size_t __i1 = 0; __i1 < 13 - __i0; __i1++) {" ],
        [ "#pragma omp parallel"; "schedule(dynamic)"; "omp_get_" ])
@@ -725,9 +725,9 @@ let private ompThreadsEquivalenceCases : (string * string * string) list =
       ("knob_equals_unlicensed_grouped_peel",
        grouped "where omp(g: 1) ", grouped "")
       ("knob_equals_unlicensed_triangular",
-       tri + "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y + z\n" +
+       tri + "let k = lambda(x, y, z) where comm(x, y, z), omp(x: 1) -> x * y * z + x + y + z\n" +
        "let R = L <@> k |> compute\n",
-       tri + "let k = lambda(x, y, z) where comm(x, y, z) -> x * y + z\n" +
+       tri + "let k = lambda(x, y, z) where comm(x, y, z) -> x * y * z + x + y + z\n" +
        "let R = L <@> k |> compute\n") ]
 
 /// Assert that `omp` reaches codegen as a pragma for every spelling of a

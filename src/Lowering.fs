@@ -914,7 +914,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // arm) does not cover -- emitting IRZero here would render as a
             // scalar `0` under an array type (a null pointer). Fail loudly.
             refuseLowering texpr.Span "zero at an array type is only materialized at an annotated let binding (`let A: Array<...> = zero`). In other positions (a function's return expression, a call argument), bind it first: `let z: Array<...> = zero` and use `z`."
-        | other -> IRZero other  // fallback (a struct / string / tuple zero)
+        | other -> IRZero other  // a struct / tuple zero: IRMono.resolveTypedZerosModule gives it its value (IR.zeroValueOf)
     
     | TExprReynolds (kernel, isAntisym) ->
         IRReynolds (lowerTypedExpr env kernel, isAntisym)
@@ -2353,6 +2353,7 @@ let lowerTypedModule (env: TypedLowerEnv) (modul: TypedModule) (rawDecls: Locate
         // Nothing is synthesized-from-another at lowering time; the
         // copy-producing passes (shapeMonomorphizeModule) fill this in.
         DerivedFuncOrigins = Map.empty
+        FunctionAliasNames = Set.empty
     }
     (irModule, moduleExport)
 
@@ -2523,6 +2524,16 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
     // builder mints exactly the same ids in exactly the same order as before.
     let irModules = IRMono.shapeMonomorphizeModules irModules env.Builder
 
+    // Every struct the program declares, for `zero` at a struct type
+    // (IRMono.resolveTypedZerosModule): the struct may live in another module
+    // than the zero that names it.
+    let zeroStructFields =
+        let m =
+            irModules
+            |> List.collect (fun m -> m.Types)
+            |> List.choose (fun td -> match td with IRTDStruct (n, fs) -> Some (n, fs) | _ -> None)
+            |> Map.ofList
+        fun (name: string) -> Map.tryFind name m
     let irModules =
         irModules |> List.map (fun irModule ->
         // Rewrite raw array-typed binops into object_for combinators now
@@ -2533,7 +2544,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // `x + y` does.
         // Generic zeros first: each specialization's `zero` becomes its own
         // literal (so a broadcast built below carries the right scalar type).
-        let irModule = IRMono.resolveTypedZerosModule irModule
+        let irModule = IRMono.resolveTypedZerosModule zeroStructFields irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also

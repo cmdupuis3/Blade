@@ -430,14 +430,16 @@ let private poolReuseChainSharesRoot () =
     match cppOfSource name poolReuseChainSrc with
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
-        // Both the generic and the specialized body qualify here (the
-        // extents are literal in both), so two bodies x two reusers.
+        // One body: the shape-specialized copy of `chain`'s HM spec. The
+        // unshaped HM copy its only call site left used to be emitted too
+        // (and qualified as well, for 4 aliases); shape monomorphization now
+        // drops a compiler-made origin every call left, so two reusers.
         let aliases = System.Text.RegularExpressions.Regex.Matches(cpp, @"pool reuse: __v\d+ takes __v\d+'s dead pool").Count
-        if aliases = 4 then
-            resultLine Pass name "two reusers per body take the root's pool"
+        if aliases = 2 then
+            resultLine Pass name "two reusers in the body take the root's pool"
             true
         else
-            resultLine Fail name ($"expected 4 pool-reuse aliases (2 bodies x 2 reusers); got {aliases}")
+            resultLine Fail name ($"expected 2 pool-reuse aliases (1 body x 2 reusers); got {aliases}")
             false
 
 /// The escape-analysis leak the same work found: a kernel capturing a scalar
@@ -473,10 +475,112 @@ let private scalarCaptureNoLongerPinsSource () =
             resultLine Fail name ($"expected frees = allocs - 1 and no reuse; got allocs={allocs}, frees={frees}, aliases={aliases}")
             false
 
+/// A PARTIAL sparse read is an allocating gather (three producers, each with
+/// its own teardown in nested_array_types.hpp), and none of them used to be
+/// freed: `deallocate_gather_dense_trail` was never emitted at all. A
+/// let-bound gather in a function body is now freed at the body's exit by the
+/// teardown that matches its producer, exactly once; a gather returned
+/// through an alias, or whose row VIEW is returned, is spared (the caller
+/// reads it); a module-level gather is never scope-freed.
+let private sparseGatherSrc =
+    "let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]\n"
+    + "type E = Idx<4>\n"
+    + "type T = Idx<2>\n"
+    + "let vals: Array<Float64 like E, T> = [[21.0, 21.5], [3.0, 3.5], [10.0, 10.5], [5.0, 5.5]]\n"
+    + "let S = sparse(vals, K)\n"
+    + "let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let F = sparse(flat, K)\n"
+    + "let static K3 = [(0, 1, 2), (0, 1, 3), (1, 0, 0), (0, 2, 2)]\n"
+    + "let F3 = sparse(flat, K3)\n"
+    + "function trail_rows(k: Int64) -> Int64 = {\n    let g = S((k, _))\n    let (n, t) = extents(g)\n    n * 10 + t\n}\n"
+    + "function dense_sum(k: Int64) -> Float64 = {\n    let g = F((k, _))\n    reduce(g, (+))\n}\n"
+    + "function nested_sum(k: Int64) -> Float64 = {\n    let g = F3((k, _, _))\n    let h = g((1, _))\n    reduce(h, (+))\n}\n"
+    + "function ret_alias(k: Int64) = {\n    let g = F((k, _))\n    let h = g\n    h\n}\n"
+    + "function ret_view(k: Int64) = {\n    let g = S((k, _))\n    let r = g(1)\n    r\n}\n"
+    + "let a = trail_rows(0)\n"
+    + "let b = dense_sum(0)\n"
+    + "let c = nested_sum(0)\n"
+    + "let d = ret_alias(0)\n"
+    + "let e = ret_view(0)\n"
+    + "let top = F((0, _))\n"
+
+let private sparseGatherTeardowns () =
+    let name = "sparse_gather_teardowns"
+    match cppOfSource name sparseGatherSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let rx (p: string) = System.Text.RegularExpressions.Regex.Matches(cpp, p) |> Seq.toList
+        let producers =
+            rx @"auto (__v\d+) = nested_array_utilities::(make_\w*sparse_gather\w*)<"
+            |> List.map (fun m -> (m.Groups.[1].Value, m.Groups.[2].Value))
+        let freesOf (v: string) =
+            rx (@"nested_array_utilities::(deallocate_\w+)\(" + v + @"\);")
+            |> List.map (fun m -> m.Groups.[1].Value)
+        // The pairing the runtime documents, independent of the compiler's table.
+        let teardownOf =
+            Map.ofList [ "make_partial_sparse_gather", "deallocate_sparse"
+                         "make_sparse_gather_dense", "deallocate_gather_dense"
+                         "make_sparse_gather_dense_trail", "deallocate_gather_dense_trail" ]
+        let freed = producers |> List.filter (fun (v, _) -> not (List.isEmpty (freesOf v)))
+        let spared = producers |> List.filter (fun (v, _) -> List.isEmpty (freesOf v))
+        let mismatched =
+            freed |> List.filter (fun (v, p) -> freesOf v <> [ teardownOf.[p] ])
+        let trailFreed = freed |> List.exists (fun (_, p) -> p = "make_sparse_gather_dense_trail")
+        let spareKinds = spared |> List.map snd |> List.sort
+        let topFreed = (rx @"deallocate_\w+\(top\)").Length > 0
+        if producers.Length = 6 && freed.Length = 4 && List.isEmpty mismatched && trailFreed
+           && spareKinds = [ "make_sparse_gather_dense"; "make_sparse_gather_dense_trail" ]
+           && not topFreed then
+            resultLine Pass name "4 function-body gathers freed once by their producer's teardown (incl. _dense_trail); the alias- and view-returned gathers and the module gather spared"
+            true
+        else
+            resultLine Fail name
+                ($"producers={producers}; freed={freed |> List.map (fun (v, _) -> (v, freesOf v))}; spared={spared}; topFreed={topFreed}")
+            false
+
+/// An INLINE partial sparse read as a fold's operand: the fold spells its
+/// operand at every element read, its extent test and its guard, so the
+/// gather producer used to appear four times in one expression -- run and
+/// leaked once per access. Now each site gathers ONCE (the producer appears
+/// exactly once per site) and frees the binding with its own teardown. Two
+/// sites with no statement scope -- a recursive array's arm and a function's
+/// return expression -- and the module-level statement fold, which gathers
+/// once into a temp and frees it after the fold.
+let private inlineGatherSrc =
+    "let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]\n"
+    + "type E = Idx<4>\n"
+    + "let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]\n"
+    + "let F = sparse(flat, K)\n"
+    + "type Steps = Idx<20>\n"
+    + "let rec acc: Array<Float64 like Steps> =\n"
+    + "    match acc with\n"
+    + "    | zero -> zero\n"
+    + "    | zero :: s -> zero :: 0.0\n"
+    + "    | prefix :: n -> prefix :: prefix(n - 1) + reduce(F((n % 2, _)), (+))\n"
+    + "function fsum(k: Int64) -> Float64 = reduce(F((k, _)), (+))\n"
+    + "let fv = fsum(0)\n"
+    + "let top = reduce(F((0, _)), (+))\n"
+
+let private inlineGatherBoundOnce () =
+    let name = "inline_sparse_gather_bound_once"
+    match cppOfSource name inlineGatherSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let count (p: string) = System.Text.RegularExpressions.Regex.Matches(cpp, p).Count
+        let producers = count @"nested_array_utilities::make_sparse_gather_dense<"
+        let frees = count @"nested_array_utilities::deallocate_gather_dense\("
+        if producers = 3 && frees = 3 then
+            resultLine Pass name "3 sites (rec arm, function return, module fold): each gathers once and frees once"
+            true
+        else
+            resultLine Fail name ($"expected 3 producers and 3 frees (one each per site); got producers={producers}, frees={frees}")
+            false
+
 /// Let-level CSE: `reduce(y, (+))` computed twice in one body (once for the
 /// mean, once again for the scale) runs once; the second let is dropped and
 /// its reads go to the first. Pinned as the count of scalar-fold IIFEs per
-/// program (two bodies, one fold each after CSE) plus the decision.
+/// program (one body -- the shape-specialized copy; the dead unshaped HM copy
+/// is no longer emitted -- one fold after CSE) plus the decision.
 let private cseSrc =
     "type I = Idx<1000>\n"
     + "let v = method_for(range<I>) <@> lambda(i) -> 0.01 * Float64(i) |> compute\n"
@@ -494,11 +598,11 @@ let private cseDropsRepeatedFold () =
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let folds = System.Text.RegularExpressions.Regex.Matches(cpp, @"double __r = ").Count
-        if folds = 2 then
-            resultLine Pass name "one scalar fold per body (generic + specialized); the duplicate was dropped"
+        if folds = 1 then
+            resultLine Pass name "one scalar fold in the specialized body; the duplicate was dropped"
             true
         else
-            resultLine Fail name ($"expected 2 scalar folds in the program (one per body), got {folds}")
+            resultLine Fail name ($"expected 1 scalar fold in the program (one body), got {folds}")
             false
 
 /// Run `f` with the environment variable `var` set to `value`, restoring it.
@@ -508,7 +612,7 @@ let private withGate (var: string) (value: string) (f: unit -> 'a) : 'a =
     System.Environment.SetEnvironmentVariable(var, value)
     try f () finally System.Environment.SetEnvironmentVariable(var, prior)
 
-/// BLADE_CSE=0: the same program keeps both folds in each body (4 in all),
+/// BLADE_CSE=0: the same program keeps both folds in its one body (2 in all),
 /// and the decision says why.
 let private cseGateOffKeepsFolds () =
     let name = "cse_gate_off_keeps_both_folds"
@@ -516,11 +620,11 @@ let private cseGateOffKeepsFolds () =
     | Error e -> resultLine Fail name e; false
     | Ok cpp ->
         let folds = System.Text.RegularExpressions.Regex.Matches(cpp, @"double __r = ").Count
-        if folds = 4 then
-            resultLine Pass name "two scalar folds per body with BLADE_CSE=0"
+        if folds = 2 then
+            resultLine Pass name "two scalar folds in the body with BLADE_CSE=0"
             true
         else
-            resultLine Fail name ($"expected 4 scalar folds with CSE off, got {folds}")
+            resultLine Fail name ($"expected 2 scalar folds with CSE off, got {folds}")
             false
 
 /// BLADE_POOL_REUSE=0: no alias declaration reaches the emission.
@@ -950,6 +1054,10 @@ let runOptimizeTests () =
           poolReuseReturnTakesDeadPool ()
           poolReuseChainSharesRoot ()
           scalarCaptureNoLongerPinsSource ()
+          // Partial sparse reads: every let-bound gather freed by its own
+          // producer's teardown, the escaping ones spared.
+          sparseGatherTeardowns ()
+          inlineGatherBoundOnce ()
           decisionCase "decision_pool_reuse_applied" poolReuseChainSrc "pool-reuse" applied
               "pool-reuse applied"
           // Let-level CSE over repeatable values, and its decision.

@@ -1,0 +1,22 @@
+// TEST: A generic zero specialized at a struct is the struct of zero fields
+// ============================================================================
+// `zero` is typed generically (`function z(x: T) -> T = zero`) and every
+// instance resolves to that instance's zero (IRMono.resolveTypedZerosModule).
+// A STRUCT instance used to have none: C++ received a bare `return 0;` for a
+// `P` (a g++ error) and the interpreter had no rule for the node. The zero of
+// a struct is the struct with every field `zero` (formalism 10.4), built as an
+// explicit struct literal (IR.zeroValueOf) that both lanes receive.
+// ============================================================================
+struct P {
+    a: Float64,
+    b: Int64,
+    on: Bool
+}
+function z(x: T) -> T = zero
+let p = z(P { a = 1.5, b = 2, on = true })
+let pa = p.a
+// EXPECT: pa = 0
+let pb = p.b
+// EXPECT: pb = 0
+let pon = p.on
+// EXPECT: pon = false

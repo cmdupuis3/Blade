@@ -1,0 +1,15 @@
+// TEST: zero at a sum type is refused (rejects)
+// REJECT-AT: codegen
+// ERROR-CONTAINS: zero at the named type 'Shape' has no value
+// WARN-CODEGEN: zero at the named type 'Shape' has no value
+// (No `// ERROR: BL7004` pin: the harness emits and compiles directly, and
+// BL7004 is minted by the driver's refusal drain -- `blade emit` reports this
+// program as BL7004. Same reason as loops/190.)
+// ============================================================================
+// A sum type has no zero (formalism 10.4): no rule picks a canonical zero
+// VARIANT, so a generic `zero` specialized at one keeps the refusal both
+// lanes share.
+// ============================================================================
+type Shape = Circle | Square
+function z(x: T) -> T = zero
+let s = z(Square)

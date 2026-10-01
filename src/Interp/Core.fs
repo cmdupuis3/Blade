@@ -957,6 +957,23 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
     | IREigh _ | IRLu _ | IRLuSolve _ ->
         evalArrayNode st env expr
 
+    // A typed `zero` (codegen's IRZero arm makes the same three-way decision).
+    // IRMono.resolveTypedZerosModule has already replaced every zero that has
+    // a value (IR.zeroValueOf: scalars, "", struct / tuple / array composites);
+    // `zeroLiteralOf` is consulted again only for safety. What remains with no
+    // value (a sum type, a composite with such a part) is the refusal codegen
+    // records as BL7004; anything else is codegen's untyped C++ `0` (an
+    // index-tagged integer stays one, a still-open variable takes that pass's
+    // Float64 fallback).
+    | IRZero ty ->
+        match zeroLiteralOf ty, zeroHasNoValueMessage ty with
+        | Some lit, _ -> evalExpr st env lit
+        | None, Some refusal -> raise (InterpPanic ("BL7004", refusal, None, 0))
+        | None, None ->
+            match ty with
+            | IRTIdxTagged _ -> VInt 0L
+            | _ -> VFloat 0.0
+
     | other ->
         // Anything still uninterpreted (compound / group / provider forms, ...):
         // later milestones.
@@ -993,6 +1010,18 @@ and evalApp (st: InterpState) (env: Env) (func: IRExpr) (args: IRExpr list) : Va
         // evaluation order unspecified; M0 operands are pure apart from panics,
         // so this only fixes which panic surfaces first.)
         let fv = evalExpr st env func
+        // A `group_by` result passed as an ARGUMENT to a callable: codegen
+        // refuses it (CodeGenExpr's IRApp arm -- no function signature carries
+        // the group_keys side state its row lengths live in), so decline here
+        // rather than run a shape the compiled lane gives no meaning. Keyed on
+        // the same static test (the argument's IR type is a group_by record).
+        (match fv with
+         | VClosure _ when args |> List.exists (fun a ->
+                               match typeOf a with
+                               | ArrayElem at -> Blade.TypeLower.isGroupedRaggedShape at.IndexTypes
+                               | _ -> false) ->
+             raise (InterpUnsupported "a group_by result passed as a function argument (refused by codegen: no function signature carries the group_keys side state)")
+         | _ -> ())
         let argVals = args |> List.map (evalExpr st env)
         applyValue st fv argVals
 
@@ -1188,6 +1217,10 @@ and private buildGroupKeysValue (st: InterpState) (env: Env) (keys: IRExpr list)
         keys |> List.map (fun k ->
             match forceValue st env (evalExpr st env k) with
             | VArray a -> a
+            // A compound (compact-view) key array scans its present cells in
+            // compact order -- genGroupKeys reads `keys.data[__ki]` for
+            // `__ki < keys.idx->cardinality` (sql-group-by/027).
+            | VCompound cv -> ArrayOps.compoundToDense cv
             | _ -> raise (InterpUnsupported "group_keys: key operand is not an array"))
     let gkCase =
         if List.length keys > 1 then ArrayOps.GKDynamic

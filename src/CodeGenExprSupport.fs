@@ -217,6 +217,14 @@ let libmRuntimeNames : Set<string> =
     Set.ofList [ "exp"; "log"; "log10"; "sin"; "cos"; "tan"; "sinh"; "cosh"; "tanh"
                  "asin"; "acos"; "atan" ]
 
+/// The COMPLEX intrinsics, likewise the run-time library's (blade_runtime.hpp
+/// binds each to its C99 function -- cexp, clog, csqrt, ..., catan -- behind
+/// the same no-fold barrier). sqrt is in this set although real sqrt is not:
+/// complex sqrt is not correctly rounded, so a fold is NOT the run-time value.
+let complexLibmRuntimeNames : Set<string> =
+    Set.ofList [ "exp"; "log"; "sqrt"; "sin"; "cos"; "tan"; "sinh"; "cosh"; "tanh"
+                 "asin"; "acos"; "atan" ]
+
 let private isComplexElem (et: ElemType) =
     match et with ETComplex64 | ETComplex128 -> true | _ -> false
 
@@ -251,12 +259,17 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
         // platform libm (never folded at compile time), whose overloads
         // evaluate a Float32 operand in double and round once to float and
         // widen an integral one -- the arithmetic contract (docs/formalism.md
-        // section 2.4), mirrored by Interp/Numerics.evalMath. Complex operands
-        // keep std:: (outside the contract); sqrt/floor/ceil keep std:: too:
-        // correctly rounded, so a fold is the run-time value, and sqrt must
-        // stay the vectorizable builtin.
+        // section 2.4), mirrored by Interp/Numerics.evalMath. Real sqrt/floor/
+        // ceil keep std::: correctly rounded, so a fold is the run-time value,
+        // and sqrt must stay the vectorizable builtin.
         | IRMath name, et when libmRuntimeNames.Contains name
                                && not (et |> Option.exists isComplexElem) ->
+            $"blade_libm::{name}({inner})"
+        // A transcendental on a COMPLEX operand: blade_libm::'s complex
+        // overloads, the C99 library function behind the same barrier (the
+        // contract covers complex intrinsics too; complex<float> evaluates in
+        // double and rounds each component once).
+        | IRMath name, Some et when isComplexElem et && complexLibmRuntimeNames.Contains name ->
             $"blade_libm::{name}({inner})"
         | _ -> $"{(unaryOpToCpp op)}({inner})"
 
@@ -319,9 +332,12 @@ let private intLiteralOf (e: IRExpr) : int64 option =
 ///     rounded ONCE to Float32 when that is the node's type (pow(float, long)
 ///     is a double; storing it in a float was an implicit narrowing).
 ///
-/// None = the caller's ordinary rendering. Complex `^` and the CUDA device
-/// dialect keep the old `pow(l, r)` / infix spelling: device bodies cannot
-/// reach blade_rt (host-only), and complex pow is outside the contract.
+///   * complex `^`     : blade_libm::pow, libstdc++'s algorithm over the
+///     run-time library functions (never folded at compile time).
+///
+/// None = the caller's ordinary rendering. The CUDA device dialect keeps the
+/// old `pow(l, r)` / infix spelling: device bodies cannot reach blade_rt or
+/// blade_libm (host-only).
 let renderContractBinOp
         (op: IRBinOp) (l: IRExpr) (r: IRExpr) (lStr: string) (rStr: string)
         (inferTy: IRExpr -> IRType) : string option =
@@ -342,7 +358,18 @@ let renderContractBinOp
             // integer computes in float (a literal exponent adapts, `s ^ 2`
             // over a Float32 `s` is a Float32), exactly as `s * 2` does.
             let isReal et = match et with ETFloat32 | ETFloat64 | ETInt32 | ETInt64 -> true | _ -> false
-            if not (isReal le && isReal re) then None
+            // Complex `^`: blade_libm::pow, the libstdc++ algorithm over the
+            // no-fold barrier functions (blade_runtime.hpp). A real operand
+            // is cast to the component type first -- where libstdc++'s
+            // __promote_2 overload sent an integer exponent anyway -- so the
+            // call lands on one of the three (complex|real, complex|real)
+            // overloads exactly.
+            if isComplexElem le || isComplexElem re then
+                match promoteElemType le re with
+                | Some ((ETComplex64 | ETComplex128) as resElem) ->
+                    Some $"blade_libm::pow({(coerceComplexOperand resElem le lStr)}, {(coerceComplexOperand resElem re rStr)})"
+                | _ -> None
+            elif not (isReal le && isReal re) then None
             elif le = ETFloat64 || re = ETFloat64 then Some $"blade_arith::fpow({lStr}, {rStr})"
             else Some $"blade_arith::fpowf({lStr}, {rStr})"
         | _ -> None

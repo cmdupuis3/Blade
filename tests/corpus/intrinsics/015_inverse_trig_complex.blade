@@ -6,19 +6,17 @@
 // and log10, which have no complex overload and refuse (intrinsics/013).
 // atan(0 + i/2) = i*atanh(1/2) = i*ln(3)/2 is the closed form the pin checks.
 //
-// Split out of intrinsics/010 on purpose: the INTERPRETER declines complex
-// asin/acos/atan as "not yet bit-verified", which makes any file containing one
-// a skip in the interpreter differential. Keeping the complex half here leaves
-// 010's real-valued pins under that gate.
+// Split out of intrinsics/010 because the INTERPRETER used to decline complex
+// asin/acos/atan as "not yet bit-verified" (a skip in the differential).
 //
-// This file is therefore expected to score SKIP-UNSUPPORTED, never PASS, in
-// `blade test interp intrinsics`. It scored FAIL until the decline was moved off
-// InterpPanic (BL8011, exit 1 -- a PROGRAM fault) onto the interpreter's
-// unsupported channel (Numerics.NumericsUnsupported -> exit 125), which is what
-// the runner's skip bucket keys on. If it ever reads PASS, the interpreter grew
-// a complex-trig implementation and the claim below needs re-measuring rather
-// than celebrating: Numerics.fs records why the libstdc++ closed forms do NOT
-// agree with the libm calls the compiled side actually makes.
+// On Windows it no longer does: the compiled side's catan/casin/cacos are
+// libmingwex's own objects (not ucrtbase's, and not the libstdc++ template
+// closed forms an earlier attempt ported and found to disagree), and
+// Numerics.fs now ports those objects operation for operation, calling the
+// same ucrtbase log/log1p/atan2/hypot -- so this file PASSES in
+// `blade test interp intrinsics` there. Other platforms keep the decline
+// (glibc/libSystem complex trig are different algorithms) and score
+// SKIP-UNSUPPORTED. The regime-by-regime battery is intrinsics/022.
 // ============================================================================
 let z = complex(0.0, 0.5)
 let za = atan(z)

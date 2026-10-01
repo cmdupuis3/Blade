@@ -108,6 +108,25 @@ let isUnitExprArg (tokens: Token list) : bool =
     | TokLParen :: TokIdent _ :: TokOp "^" :: _ -> true
     | _ -> false
 
+/// Built-in SCALAR element types: under a caret (`Float64^1`) the head is the
+/// array's element, not a type variable. The scalar subset of
+/// TypeLower.isConcreteTypeBaseName (which this file precedes); `Array`,
+/// `Poly` and `Void` are lexer keywords and never reach the name arm.
+let isCaretElementBaseName (name: string) : bool =
+    match name with
+    | "Int" | "Int32" | "Int64"
+    | "Float" | "Float32" | "Float64" | "Double"
+    | "Complex64" | "Complex128"
+    | "Bool" | "String" | "Char" -> true
+    | _ -> false
+
+/// Built-in type names that are not element types: a caret on them is refused
+/// rather than read as a type variable shadowing the built-in.
+let isNonElementBuiltinName (name: string) : bool =
+    match name with
+    | "Nat" | "Dist" -> true
+    | _ -> false
+
 let rec parseTypeExpr (tokens: Token list) : ParseResult<TypeExpr> =
     parseTypeAtom tokens >>= fun first rest ->
     match peek rest with
@@ -324,6 +343,36 @@ and parseTypeAtom (tokens: Token list) : ParseResult<TypeExpr> =
         // name is unaffected.
         let (name, afterName) = parseDottedTypeName name0 (advance tokens)
         match peek afterName with
+        | Some (TokOp "^") when isCaretElementBaseName name ->
+            // A BUILT-IN ELEMENT TYPE under the caret: `Float64^1` is the
+            // formalism's `T^r` with T a base type (§13.2 Array-Intro and
+            // Appendix A: "element T, rank r"; a written `T^r` is dense,
+            // §4.1) -- a rank-1 array of Float64 elements, any extent. It
+            // used to parse as a type VARIABLE that happened to be named
+            // `Float64`, so the name silently shadowed the scalar type inside
+            // the signature: an Int64 array was accepted, and the function
+            // was generic.
+            //
+            // It produces the node a real base under a caret with a unit
+            // (`Float<day>^1`, the type-application arm below) already
+            // produces, and lowers through the same TypeLower TyAbstractArray
+            // arm, so the two spellings cannot drift: that element, dense
+            // fresh axes of unknown extent, and `^0` the scalar itself.
+            //
+            // The rank must be an integer LITERAL: a variable rank belongs to
+            // a type VARIABLE (`T^r`); with a concrete element there is
+            // nothing for it to range over, and the lowering would fall back
+            // to the bare scalar.
+            let (line, col) = currentPos tokens
+            advance afterName |> parseRankExpr >>= fun rankExpr remaining ->
+            match rankExpr.Kind with
+            | ExprKind.ExprLit (LitInt _) ->
+                success (TyAbstractArray (TyNamed (name, []), rankExpr, None)) remaining
+            | _ ->
+                errorC "BL1004" $"`{name}^...` needs an integer literal rank (`{name}^1` is a rank-1 array of {name} elements): a variable rank belongs to a type variable -- write `T^r` for any element, or a literal rank for {name}" line col
+        | Some (TokOp "^") when isNonElementBuiltinName name ->
+            let (line, col) = currentPos tokens
+            errorC "BL1004" $"`{name}` is a built-in type but not an array element type, so `{name}^...` has no meaning: a caret takes a type variable (`T^1`) or a scalar element type (`Float64^1`, `Int64^2`, `Bool^1`)" line col
         | Some (TokOp "^") ->
             // Caret marks a type variable: T^0 = scalar, T^2 = rank-2 array,
             // T^r = variable-rank.

@@ -1,0 +1,13 @@
+// TEST: A caret on a declared type needs a literal rank (rejects)
+// ERROR: BL1004
+// ERROR-CONTAINS: needs an integer literal rank
+// ============================================================================
+// As for `Float64^r` (functions/173): a variable rank belongs to a type
+// variable; a declared head fixes the element and has nothing for it to range
+// over.
+// ============================================================================
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+type Speed = Float<mps>
+function f(vs: Speed^r) = vs

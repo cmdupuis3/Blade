@@ -1,0 +1,67 @@
+// TEST: A function declared in a block is generic like a top-level one
+// ============================================================================
+// `{ function idl(x: T) -> T = x; idl(2.0) }` was BL3001 "the parameter is
+// declared T but the argument is Float64": the nested-function desugar lowered
+// its return annotation in the ENCLOSING scope, where `T` is no variable, and
+// the call bound the declaration's own `T`. With `T^1` the body reached IR
+// validation open (BL6001). A nested function now records its signature
+// variables (the call judgment instantiates them per call) and lowers as a
+// named callable IR monomorphization specializes per use -- the top-level road.
+// ============================================================================
+let xs = [1.5, 2.5, 3.0]
+let ys = [1, 2, 3]
+let M = [[1.0, 2.0], [3.0, 4.0]]
+
+// Two calls at different element types in one block.
+let r1 = {
+    function idl(x: T) -> T = x
+    idl(2.5) + Float64(idl(3))
+}
+// EXPECT: r1 = 5.5
+
+// A `T^1` body at two element types.
+let r2 = {
+    function total(x: T^1) = reduce(x, (+))
+    let a = total(xs)
+    let b = total(ys)
+    a + Float64(b)
+}
+// EXPECT: r2 = 13
+
+// A rank-polymorphic `T^k` body called at two ranks.
+let r3 = {
+    function twice(x: T^k) -> T^k = x + x
+    let u = twice(xs)
+    let w = twice(M)
+    u(2) + w(1, 1)
+}
+// EXPECT: r3 = 14
+
+// Capture of a block-local value.
+let r4 = {
+    let k = 10.0
+    function addk(x: T) -> T = x + k
+    addk(2.0) + addk(3.0)
+}
+// EXPECT: r4 = 25
+
+// Self-recursion, generic.
+let r5 = {
+    function count_down(n: T) -> T = if n <= 0 then n else count_down(n - 1)
+    Float64(count_down(4)) + count_down(2.5)
+}
+// EXPECT: r5 = -0.5
+
+// Inside a function body.
+function outer(a: Float64, b: Int64) -> Float64 = {
+    function idl(x: T) -> T = x
+    idl(a) + Float64(idl(b))
+}
+let r6 = outer(1.5, 2)
+// EXPECT: r6 = 3.5
+
+// The same generic SELF-recursion at top level: the specialized body now
+// calls its own specialization (it called the abstract original before).
+function count_top(n: T) -> T = if n <= 0 then n else count_top(n - 1)
+let r7 = Float64(count_top(3)) + count_top(1.5)
+// EXPECT: r7 = -0.5

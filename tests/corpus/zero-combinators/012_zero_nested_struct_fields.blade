@@ -1,0 +1,50 @@
+// TEST: The zero of a struct is fieldwise and recursive
+// ============================================================================
+// Every field of a struct's zero is that field type's zero (formalism 10.4):
+// a nested struct recursively, a String field "", a Bool field false, a
+// complex field the complex zero, and an array field the zero-filled array of
+// its declared (static) shape. Spelled both at an annotation and through a
+// generic `zero` instance.
+// ============================================================================
+struct Inner {
+    w: Complex128,
+    flag: Bool,
+    label: String
+}
+struct Outer {
+    a: Float64,
+    n: Int64,
+    name: String,
+    inner: Inner,
+    samples: Array<Float64 like Idx<3>>,
+    grid: Array<Int64 like Idx<2>, Idx<2>>
+}
+let o: Outer = zero
+let oa = o.a
+// EXPECT: oa = 0
+let on = o.n
+// EXPECT: on = 0
+let oname = o.name == ""
+// EXPECT: oname = true
+let ow = o.inner.w
+// EXPECT: ow = (0,0)
+let oflag = o.inner.flag
+// EXPECT: oflag = false
+let olabel = o.inner.label == ""
+// EXPECT: olabel = true
+let os = o.samples
+// EXPECT: os = [0, 0, 0]
+let og = o.grid
+// EXPECT: og = [[0, 0], [0, 0]]
+
+function z(x: T) -> T = zero
+let full = Outer { a = 1.5, n = 3, name = "x", inner = Inner { w = complex(1.0, 2.0), flag = true, label = "y" }, samples = [1.0, 2.0, 3.0], grid = [[1, 2], [3, 4]] }
+let g = z(full)
+let gs = g.samples
+// EXPECT: gs = [0, 0, 0]
+let gflag = g.inner.flag
+// EXPECT: gflag = false
+let glabel = g.inner.label == ""
+// EXPECT: glabel = true
+let gn = g.n
+// EXPECT: gn = 0

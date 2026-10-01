@@ -1,0 +1,20 @@
+// TEST: GroupBy Zip Through A Let-Bound Alias Different Keys (rejects)
+// ERROR: BL3999 @ 19:23
+// ERROR-CONTAINS: grouped by the SAME group_keys binding
+// The let-bound twin of 026: `let Z = zip(ga, gb); method_for(Z)` over two
+// INDEPENDENT groupings. Identical key values are not a row correspondence --
+// gk1 and gk2 are two separate partitions -- so the same-keys rule refuses it
+// at TYPECHECK, with the same code and message as the inline zip.
+//
+// It used to skip that check: the alias arm of inferMethodForOperands ran
+// only the structural record agreement, so the program typechecked and died
+// in codegen's BL7004 multi-operand gate instead.
+let region = [0, 1, 0, 1]
+let a = [1.0, 2.0, 3.0, 4.0]
+let b = [10.0, 20.0, 30.0, 40.0]
+let gk1 = group_keys(region)
+let gk2 = group_keys(region)
+let ga = group_by(a, gk1)
+let gb = group_by(b, gk2)
+let Z = zip(ga, gb)
+let dots = method_for(Z) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute

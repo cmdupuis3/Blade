@@ -1,0 +1,13 @@
+// TEST: A concrete-element caret parameter refuses a compact array (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: declare the parameter `T^2` to accept
+// ============================================================================
+// `Float64^2` is DENSE (plain axes), exactly like `Float<day>^2`: there is no
+// abstract-level symmetry spelling. A SymIdx argument stores only its upper
+// triangle, and a call never densifies, so the call is refused -- with a
+// message naming the dense reading and the `T^2` spelling that accepts any
+// symmetry class -- rather than a bare "declared X but got Y".
+// ============================================================================
+function corner(m: Float64^2) -> Float64 = m(0, 1)
+let s: Array<Float64 like SymIdx<2, 3>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let c = corner(s)

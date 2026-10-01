@@ -1,0 +1,36 @@
+// TEST: A caret after a declared type builds that type's array
+// ============================================================================
+// The left-hand side of `^` decides what it builds: a TYPE gives an array
+// type, a UNIT gives a unit power, a VALUE gives an arithmetic power.
+// `Speed^1` with `type Speed = Float<mps>` used to become a type variable that
+// merely shared the alias's name (any element went through); it is now a dense
+// rank-1 array of Speed, as `Float64^1` is of Float64. A declared struct works
+// the same way. Unit powers (`meters^2`, `seconds^-1`) and a static power in an
+// extent (`Idx<N^2>`) are unaffected.
+// ============================================================================
+Unit meters
+Unit seconds
+Unit mps = meters / seconds
+Unit area = meters^2
+type Speed = Float<mps>
+function top(vs: Speed^1) -> Speed = reduce(vs, (+))
+let v: Array<Float<mps> like Idx<3>> = [1.0, 2.0, 3.0]
+let t = top(v)
+// EXPECT: t = 6
+
+struct P { x: Float64, y: Float64 }
+function sum_x(ps: P^1) -> Float64 = ps(0).x + ps(1).x
+let ps = [P { x = 1.0, y = 2.0 }, P { x = 3.0, y = 4.0 }]
+let sx = sum_x(ps)
+// EXPECT: sx = 4
+
+let sq: Float<area> = 4.0
+let ar: Float<meters^2> = sq
+// EXPECT: ar = 4
+let rate: Float<seconds^-1> = 2.0
+// EXPECT: rate = 2
+
+let static N = 3
+type Sq = Idx<N^2>
+let n9 = extents(range<Sq>)
+// EXPECT: n9 = 9

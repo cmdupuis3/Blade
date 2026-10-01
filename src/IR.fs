@@ -744,10 +744,11 @@ let (|AnyPrimElem|_|) (ty: IRType) =
 
 /// The literal `zero` denotes at a scalar type, read through a unit
 /// annotation or index tag (both erase): `0` for an integer, `0.0f` / `0.0`
-/// for a float of that width, `false` for Bool, and the complex zero of that
-/// width built from its own components (`std::complex<T>(0, 0)`). None for
-/// anything else -- an open variable, an array, a struct -- which the caller
-/// decides about. Shared by lowering (a concrete `zero`) and the post-
+/// for a float of that width, `false` for Bool, the complex zero of that
+/// width built from its own components (`std::complex<T>(0, 0)`), and the
+/// empty string `""` for String. None for anything else -- an open variable,
+/// an array, a struct, a tuple -- which the caller decides about (composites:
+/// `zeroValueOf`). Shared by lowering (a concrete `zero`) and the post-
 /// monomorphization resolution of a generic one, so the two cannot disagree.
 let zeroLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
     match ty with
@@ -757,6 +758,7 @@ let zeroLiteralOf (ty: IRTypeG<IRExpr>) : IRExpr option =
     | AnyPrimElem ETBool -> Some (IRLit (IRLitBool false))
     | AnyPrimElem ETComplex64 -> Some (IRComplex (IRLit (IRLitFloat32 0.0f), IRLit (IRLitFloat32 0.0f)))
     | AnyPrimElem ETComplex128 -> Some (IRComplex (IRLit (IRLitFloat 0.0), IRLit (IRLitFloat 0.0)))
+    | AnyPrimElem ETString -> Some (IRLit (IRLitString ""))
     | _ -> None
 
 /// Unit-annotated primitive: returns both the elem type and the unit
@@ -860,6 +862,80 @@ let (|ArrayElem|_|) (ty: IRType) =
         else
             None
     | _ -> None
+
+/// Largest number of cells `zeroValueOf` spells out for an array-typed
+/// component (a struct field, a tuple component, an array element of a zero):
+/// the zero is an explicit array literal, one IR node per cell, so a large
+/// static shape is refused rather than ballooning the program.
+let zeroArrayCellCap = 65536L
+
+/// `zero` at ANY type that has one: `zeroLiteralOf` for a scalar (numeric,
+/// Bool, complex, String), and for a composite the composite of its parts'
+/// zeros -- a struct is the struct with every field `zero` (recursively: a
+/// nested struct, a String field "", a Bool field false), a tuple is
+/// componentwise, and an array component is the zero-filled array of its
+/// declared shape (nested array literals, row-major) when every axis is a
+/// plain rank-1 index with a STATIC extent and the cell count is within
+/// `zeroArrayCellCap`. None when any part has no zero: a sum type (there is
+/// no canonical zero VARIANT -- no rule picks one), an array with a runtime
+/// or packed/compound shape, a function, an open variable. `structFields`
+/// names a struct's declared fields (None for a non-struct name). Shared by
+/// the post-monomorphization resolution (IRMono.resolveTypedZerosModule), so
+/// both back ends receive the same explicit value and neither invents one.
+let zeroValueOf (structFields: string -> (string * IRType) list option) (ty: IRType) : IRExpr option =
+    let rec go (fuel: int) (t: IRType) : IRExpr option =
+        if fuel <= 0 then None else
+        match zeroLiteralOf t with
+        | Some lit -> Some lit
+        | None ->
+            match t with
+            | IRTUnitAnnotated (inner, _) | IRTIdxTagged (inner, _) -> go (fuel - 1) inner
+            | IRTNamed n ->
+                structFields n |> Option.bind (fun fields ->
+                    let zs = fields |> List.map (fun (f, fty) -> go (fuel - 1) fty |> Option.map (fun z -> (f, z)))
+                    if zs |> List.forall Option.isSome then Some (IRStructLit (n, zs |> List.map Option.get))
+                    else None)
+            | IRTTuple ts ->
+                let zs = ts |> List.map (go (fuel - 1))
+                if zs |> List.forall Option.isSome then Some (IRTuple (zs |> List.map Option.get)) else None
+            | ArrayElem a ->
+                let staticExtent (ix: IRIndexType) =
+                    match ix.Extent with
+                    | IRLit (IRLitInt n) when ix.Rank = 1 && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && n >= 0L -> Some n
+                    | _ -> None
+                let extents = a.IndexTypes |> List.map staticExtent
+                if a.IndexTypes.IsEmpty || not (extents |> List.forall Option.isSome) then None else
+                let ns = extents |> List.map Option.get
+                if ns |> List.fold (fun acc n -> if acc > zeroArrayCellCap then acc else acc * n) 1L > zeroArrayCellCap then None else
+                go (fuel - 1) a.ElemType |> Option.map (fun ez ->
+                    let rec build (ixs: IRIndexType list) (ns: int64 list) =
+                        match ixs, ns with
+                        | [ ix ], [ n ] -> IRArrayLit (List.replicate (int n) ez, { a with IndexTypes = [ ix ] })
+                        | ix :: rest, n :: nrest ->
+                            IRArrayLit (List.replicate (int n) (build rest nrest), { a with IndexTypes = ix :: rest })
+                        | _ -> failwith "zeroValueOf: index/extent lists out of step"
+                    build a.IndexTypes ns)
+            | _ -> None
+    go 64 ty
+
+/// The refusal BOTH lanes give a `zero` that still reaches them after
+/// IRMono.resolveTypedZerosModule, i.e. at a type `zeroValueOf` has no value
+/// for: a sum type, a struct or tuple with such a part, an array component
+/// whose shape is not static (or is past `zeroArrayCellCap`). None for every
+/// other type (the lanes keep their old untyped `0` there: an index-tagged or
+/// still-open scalar). The text becomes a C++ sentinel identifier as well as
+/// an `#error` line (CodeGenState.exprError), so it keeps to words, spaces,
+/// commas, colons, parentheses and quotes -- a backtick reached g++ as a
+/// stray character.
+let zeroHasNoValueMessage (ty: IRTypeG<IRExpr>) : string option =
+    let what =
+        match ty with
+        | IRTNamed n | IRTUnitAnnotated (IRTNamed n, _) -> Some $"the named type '{n}'"
+        | IRTTuple _ -> Some "a tuple type"
+        | ArrayElem _ -> Some "an array type"
+        | _ -> None
+    what |> Option.map (fun w ->
+        $"zero at {w} has no value: a sum type has no zero variant, and a struct, tuple or array has one only when every part does (an array part needs a static shape of at most 65536 cells)")
 
 /// Stored-array variant of ArrayElem. Matches IRTArrow with all-SIdx slots
 /// (non-empty). Useful for codegen paths that need to allocate / read
@@ -1572,6 +1648,12 @@ type IRModule = {
     /// records a copy in the module that DEFINES its origin even when the call
     /// site that earned it lives in another module.
     DerivedFuncOrigins: Map<IRId, IRId>
+    /// NAMES of top-level bindings removed because they only aliased a
+    /// generic function (`let g = total`, IRMono.eliminateGenericAliases).
+    /// Nothing executes them; the `--print` check reads them so that a
+    /// selection naming one is refused as a FUNCTION, not as a name the
+    /// program never bound. Empty until that pass runs.
+    FunctionAliasNames: Set<string>
 }
 
 /// IR Program
@@ -3359,4 +3441,94 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
         (match exprTypeIfKnown arr with
          | Some (ArrayElem _) -> Some (typeOf expr)
          | _ -> None)
+    // ---- Scalar-valued constructions over KNOWN operands ----------------
+    // An argument WRITTEN INLINE -- `idg(complex(1.0, 2.0))`, `idg(Float32(x))`,
+    // `idg(1.0 + 2.0)`, `idg(-2.5)`, `idg(sqrt(2.0))`, `idg(a < b)`,
+    // `idg(if c then 1.0 else 2.0)` -- builds a node that carries no type, so
+    // the call site taught its callee nothing and the program died in BL6001
+    // after `blade check` passed; binding the same expression to a `let`
+    // first worked, because a binding reference is an `IRVar`. Every arm
+    // below keeps the discipline above: its operands must THEMSELVES be known
+    // here (so every leaf still comes from `CarriedType`), and it answers
+    // only where the result type is a fixed function of those operand types
+    // -- a scalar (no extent to get wrong), or an operand's own type passed
+    // through unchanged. The scalar rules are TypeCheck's (the source the
+    // call site's types came from), read on the unit-STRIPPED element: a
+    // unit annotation erases at codegen and `unifyParamWithArg` sees through
+    // it, so the binding learned is the same element either way. Where
+    // `typeOf`'s IR-level rule disagrees with TypeCheck (`abs` of an integer
+    // keeps its type; `typeOf` says Float64) the arm follows TypeCheck, since
+    // the specialization must match the value the call site actually passes.
+    | IRUnaryOp (op, x) ->
+        (match op, exprTypeIfKnown x with
+         // Sign and conjugation preserve the operand's type exactly, array
+         // or scalar, unit and all.
+         | (IRNeg | IRConj), Some t -> Some t
+         | IRCast et, Some (AnyPrimElem _) -> Some (IRTScalar et)
+         | IRNot, Some (AnyPrimElem ETBool) -> Some (IRTScalar ETBool)
+         | (IRReal | IRImag), Some (AnyPrimElem ETComplex64) -> Some (IRTScalar ETFloat32)
+         | (IRReal | IRImag), Some (AnyPrimElem ETComplex128) -> Some (IRTScalar ETFloat64)
+         | IRArg, Some (AnyPrimElem (ETComplex64 | ETComplex128)) -> Some (IRTScalar ETFloat64)
+         | IRMath "abs", Some (AnyPrimElem (ETComplex64 | ETComplex128)) -> Some (IRTScalar ETFloat64)
+         | IRMath "abs", Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 as et)) ->
+             Some (IRTScalar et)
+         | IRMath _, Some (AnyPrimElem (ETComplex64 | ETComplex128 as et)) -> Some (IRTScalar et)
+         | IRMath _, Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat32 | ETFloat64)) ->
+             Some (IRTScalar ETFloat64)
+         | _ -> None)
+    | IRBinOp (_, op, l, r) ->
+        (match exprTypeIfKnown l, exprTypeIfKnown r with
+         | Some (AnyPrimElem e1), Some (AnyPrimElem e2) ->
+             (match op with
+              | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> Some (IRTScalar ETBool)
+              | IRMath2 _ -> Some (IRTScalar ETFloat64)
+              // `^` is left alone off the all-Float64 case: an integer power's
+              // result class is not the plain promotion rule's to state.
+              | IRCaret when e1 = ETFloat64 && e2 = ETFloat64 -> Some (IRTScalar ETFloat64)
+              | IRCaret -> None
+              | IRAdd | IRSub | IRMul | IRDiv | IRMod ->
+                  promoteElemType e1 e2 |> Option.map IRTScalar)
+         | _ -> None)
+    | IRComplex (re, im) ->
+        (match exprTypeIfKnown re, exprTypeIfKnown im with
+         | Some (AnyPrimElem ETFloat32), Some (AnyPrimElem ETFloat32) -> Some (IRTScalar ETComplex64)
+         | Some (AnyPrimElem _), Some (AnyPrimElem _) -> Some (IRTScalar ETComplex128)
+         | _ -> None)
+    | IRFma (a, b, c) ->
+        (match exprTypeIfKnown a, exprTypeIfKnown b, exprTypeIfKnown c with
+         | Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64), Some (AnyPrimElem ETFloat64) ->
+             Some (IRTScalar ETFloat64)
+         | _ -> None)
+    // ---- Value-preserving wrappers --------------------------------------
+    // A block's value IS its body's; sort, whole-array negate and conjugate
+    // keep their operand's shape and element.
+    | IRLet (_, _, body) -> exprTypeIfKnown body
+    | IRArrayNegate a | IRArrayConjugate a | IRSort (a, _) -> exprTypeIfKnown a
+    // A conditional answers only when EVERY branch is a known scalar of one
+    // element type: an array-valued branch would hand shape monomorphization
+    // one branch's extents for a value the other branch may produce.
+    | IRIf (_, a, b) -> agreedScalarType [ a; b ]
+    | IRMatch (_, cases) when not cases.IsEmpty -> agreedScalarType (cases |> List.map _.Body)
+    // An anonymous or plain named RANGE (`idg(0..5)`, `idg(range<I>)`) is the
+    // rank-k Int64 array over its own index records -- the spelling IRLift's
+    // range hoist already uses. NOT `typeOf`, which answers the PEELED Int64
+    // element (the range sits in its IntValued tier). Compound, sparse and
+    // symmetric ranges enumerate something other than plain Int64 cells and
+    // stay unanswered.
+    | IRRange (ixs, _) when not ixs.IsEmpty
+                            && ixs |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone) ->
+        Some (mkArrayLike { ElemType = IRTScalar ETInt64; IndexTypes = ixs; IsVirtual = false; Identity = None })
+    | _ -> None
+
+/// The common type of several branch values when every one is a KNOWN scalar
+/// of the same element type (read through unit annotations and index tags);
+/// None otherwise. Used by `exprTypeIfKnown`'s conditional arms.
+and private agreedScalarType (branches: IRExpr list) : IRType option =
+    let elems =
+        branches |> List.map (fun b ->
+            match exprTypeIfKnown b with
+            | Some (AnyPrimElem et) -> Some et
+            | _ -> None)
+    match elems with
+    | Some e0 :: rest when rest |> List.forall (fun e -> e = Some e0) -> Some (IRTScalar e0)
     | _ -> None

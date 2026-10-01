@@ -102,6 +102,8 @@ module private Ucrt =
     [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double pow(double x, double y)
     [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double atan2(double y, double x)
     [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl, EntryPoint="hypot")>] extern double hypot(double x, double y)
+    // Only for the mingw-w64 catanh port below (its log1p call binds here).
+    [<DllImport(LibmLibrary, CallingConvention=CallingConvention.Cdecl)>] extern double log1p(double x)
 
 /// Per-intrinsic backend. `Managed` = .NET Math.* (exact/correctly-rounded and
 /// identical to ucrt for these; cheaper, no marshalling). `Ucrt` = the
@@ -580,32 +582,394 @@ let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : V
 /// like a fault in their own program.
 exception NumericsUnsupported of string
 
-// Complex transcendental intrinsics: best-effort, NOT bit-verified.
-// libstdc++ implements complex exp/log/sqrt/trig with its own algorithms; these
-// standard formulas are close but NOT guaranteed to match its exact operation
-// order. The realistic complex corpus (spectra/FFT) uses only +,-,*,/ and abs
-// (bit-exact above). Unsupported names decline loudly rather than miscompute.
+// Complex transcendental intrinsics (docs/formalism.md section 2.4): the
+// compiled side calls the PLATFORM C library's complex functions at run time,
+// behind blade_runtime.hpp's no-fold barrier (blade_libm's complex overloads
+// bind cexp, clog, csqrt, csin, ccos, ctan, csinh, ccosh, ctanh, casin, cacos,
+// catan, cpow by asm label -- the functions libstdc++'s std::exp(complex) & co.
+// forward to under _GLIBCXX_USE_C99_COMPLEX). So "bit-identical" means
+// reproducing THOSE functions, not libstdc++'s template closed forms (an
+// earlier attempt ported the templates and found asin/acos off by an ulp on
+// 7 of 10 operands and atan wrong on every signed zero: the template is not
+// what runs).
 //
-// WHY THE REST ARE NOT COMING (measured 2026-08-12, ucrt64 g++, -ffp-contract=off).
-// sqrt was portable because libstdc++'s std::sqrt(complex) really IS the inline
-// Kahan algorithm in the header. The trig families are not: under
-// _GLIBCXX_USE_C99_COMPLEX, <complex> forwards asin/acos/atan/sin/cos/tan and
-// the hyperbolics to __builtin_casin/cacos/catan/..., i.e. to the platform's
-// libm. Porting the libstdc++ TEMPLATE closed forms therefore does NOT agree
-// with what the compiled side computes -- over 10 operands, asin and acos
-// differed on 7 (last-ULP, e.g. asin(3+4i) 3fe44998882394dd vs ...e3), and even
-// atan, which matched to the ULP on the ordinary ones, differed on every signed
-// zero (atan(-1+0i): +0 vs -0). The same hex appears with a volatile operand, so
-// it is the runtime library, not constant folding.
+// On Windows (MSYS2 ucrt64, g++ 16.2.0 Rev4) the link line (`-lmingwex` before
+// `-lucrt`) binds every one of them to libmingwex's OWN objects (catan.o,
+// casin.o, cacos.o, cexp.o, csin.o, ccos.o, ctan.o, csqrt.o, clog.o, cpow.o),
+// not to ucrtbase's exports of the same names. Those objects are small and
+// closed: their external calls are ucrtbase's log, log1p, atan2, hypot, exp,
+// sin, cos (via libucrt_extra's sincos = sin then cos), sinh, cosh, pow,
+// fmod (exact) and sqrt (correctly rounded), plus libgcc's __muldc3 /
+// __divdc3. The ports below are transcribed from the objects' disassembly
+// operation for operation, special-value arms included (the generic-x86-64
+// builds have no FMA and the C sources no reassociation), and call the SAME
+// ucrtbase functions through `Ucrt` -- bit-identical by construction, and
+// pinned by a hex battery against g++ plus intrinsics/015, 022 and 023.
 //
-// Matching would mean porting mingw-w64's libm arm-for-arm -- and that port
-// would be WRONG under glibc, whose cacos differs again. Since the contract here
-// is bit-identity with whatever libm the compiled side links, declining is the
-// only answer that stays true on every platform. Revisit only if Blade ever
-// emits its own complex trig (the lgamma/digamma treatment: when no library is
-// shared, both sides can run the same hand-rolled series).
+// Every other OS keeps the earlier behavior: best-effort textbook forms for
+// exp/log/sqrt and `^` (NOT bit-verified), and a loud decline for the rest --
+// glibc/libSystem complex functions are different algorithms, and
+// bit-identity is a per-platform claim.
+
+/// mingw-w64 `catanh` (libmingwex, ucrt64), transcribed from its object code.
+/// Special-value arms first (fpclassify order: NaN/Inf/zero), then the three
+/// magnitude regimes of the real part, all sharing the imaginary part
+/// `0.5 * atan2(2y, (1 - x*x) - y*y)`.
+let private mingwCatanh (x: float) (y: float) : float * float =
+    let qnan = BitConverter.Int64BitsToDouble 0x7ff8000000000000L
+    let halfPi = BitConverter.Int64BitsToDouble 0x3ff921fb54442d18L
+    let eps = BitConverter.Int64BitsToDouble 0x3cb0000000000000L   // 2^-52
+    let poleImag () = Math.CopySign (halfPi, y)
+    if Double.IsNaN x then
+        if Double.IsInfinity y then (Math.CopySign (0.0, x), poleImag ())
+        else (qnan, qnan)
+    elif Double.IsInfinity x then
+        if Double.IsNaN y then (Math.CopySign (0.0, x), qnan)
+        else (Math.CopySign (0.0, x), poleImag ())
+    elif Double.IsNaN y then
+        if x = 0.0 then (Math.CopySign (0.0, x), qnan) else (qnan, qnan)
+    elif Double.IsInfinity y then
+        (Math.CopySign (0.0, x), poleImag ())
+    elif x = 0.0 && y = 0.0 then
+        (x, y)
+    else
+        let i2 = y * y
+        let (re, x2) =
+            if eps >= abs x then
+                (0.25 * Ucrt.log1p ((x * 4.0) / (i2 + 1.0)), x * x)
+            else
+                let x2 = x * x
+                if not (eps < x2) then
+                    let t = x / (i2 + 1.0)
+                    (0.25 * Ucrt.log1p ((t + t + 1.0) * (t * 4.0)), x2)
+                else
+                    let n = (x + 1.0) * (x + 1.0) + i2
+                    let d = (1.0 - x) * (1.0 - x) + i2
+                    (0.25 * (Ucrt.log n - Ucrt.log d), x2)
+        (re, 0.5 * Ucrt.atan2 (y + y, (1.0 - x2) - i2))
+
+/// mingw-w64 `clog` (libmingwex, ucrt64), transcribed from its object code:
+/// `(log(hypot(x, y)), atan2(y, x))` behind its own special-value arms.
+let private mingwClog (x: float) (y: float) : float * float =
+    let qnan = BitConverter.Int64BitsToDouble 0x7ff8000000000000L
+    let main () = (Ucrt.log (Ucrt.hypot (x, y)), Ucrt.atan2 (y, x))
+    if Double.IsNaN x then
+        if Double.IsInfinity y then (Double.PositiveInfinity, qnan) else (qnan, qnan)
+    elif Double.IsInfinity x then
+        if Double.IsNaN y then (Double.PositiveInfinity, qnan) else main ()
+    elif Double.IsNaN y then (qnan, qnan)
+    elif x = 0.0 && y = 0.0 then
+        // -1/|x| = -inf; the argument is +-0 for x = +0 and +-pi for x = -0.
+        let im = if BitConverter.DoubleToInt64Bits x < 0L then Math.CopySign (Math.PI, y) else Math.CopySign (0.0, y)
+        (-1.0 / abs x, im)
+    else main ()
+
+/// mingw-w64 `csqrt` (libmingwex, ucrt64), transcribed from its object code
+/// (NOT libstdc++'s inline Kahan form, which `sqrt` above ports: this is the
+/// C function casinh calls).
+let private mingwCsqrt (x: float) (y: float) : float * float =
+    let qnan = BitConverter.Int64BitsToDouble 0x7ff8000000000000L
+    let inf = Double.PositiveInfinity
+    if Double.IsNaN x then
+        if Double.IsInfinity y then (inf, y) else (qnan, qnan)
+    elif Double.IsInfinity x then
+        if Double.IsInfinity y then (inf, y)
+        elif Double.IsNaN y then
+            if 0.0 > x then (qnan, Math.CopySign (inf, y)) else (x, qnan)
+        elif 0.0 > x then (0.0, Math.CopySign (inf, y))
+        else (x, Math.CopySign (0.0, y))
+    elif y = 0.0 then
+        if 0.0 > x then (0.0, Math.CopySign (Math.Sqrt (-x), y))
+        else (abs (Math.Sqrt x), Math.CopySign (0.0, y))
+    elif Double.IsInfinity y then (inf, y)
+    elif Double.IsNaN y then (qnan, qnan)
+    elif x = 0.0 then
+        let r = Math.Sqrt (abs y * 0.5)
+        (r, Math.CopySign (r, y))
+    else
+        let t = Ucrt.hypot (x, y)
+        if x > 0.0 then
+            let r = Math.Sqrt (t * 0.5 + 0.5 * x)
+            (r, Math.CopySign ((y * 0.5) / r, y))
+        else
+            let s = Math.Sqrt (t * 0.5 - 0.5 * x)
+            (abs ((y * 0.5) / s), Math.CopySign (s, y))
+
+/// mingw-w64 `casinh` (libmingwex, ucrt64), transcribed from its object code.
+/// Works on |x|, |y| and restores both signs at the end; four magnitude
+/// regimes (huge -> clog + ln 2, |y| >= 1 or x not small -> the csqrt/clog
+/// identity, |x| <= eps and x^2 <= eps -> log1p/atan2 series forms).
+let private mingwCasinh (x: float) (y: float) : float * float =
+    let qnan = BitConverter.Int64BitsToDouble 0x7ff8000000000000L
+    let inf = Double.PositiveInfinity
+    let halfPi = BitConverter.Int64BitsToDouble 0x3ff921fb54442d18L
+    let quarterPi = BitConverter.Int64BitsToDouble 0x3fe921fb54442d18L
+    let ln2 = BitConverter.Int64BitsToDouble 0x3fe62e42fefa39efL
+    let big = BitConverter.Int64BitsToDouble 0x4330000000000000L   // 2^52
+    let eps = BitConverter.Int64BitsToDouble 0x3cb0000000000000L   // 2^-52
+    let finish (mr: float) (mi: float) = (Math.CopySign (mr, x), Math.CopySign (mi, y))
+    if Double.IsNaN x then
+        if y = 0.0 then (x, y)
+        elif Double.IsInfinity y then (Math.CopySign (inf, x), qnan)
+        else (x, qnan)
+    elif Double.IsInfinity x then
+        if Double.IsNaN y then (x, qnan)
+        elif Double.IsInfinity y then (Math.CopySign (inf, x), Math.CopySign (quarterPi, y))
+        else (x, Math.CopySign (0.0, y))
+    elif Double.IsNaN y then (qnan, qnan)
+    elif Double.IsInfinity y then (Math.CopySign (inf, x), Math.CopySign (halfPi, y))
+    elif x = 0.0 && y = 0.0 then (x, y)
+    else
+        let ax = abs x
+        let ay = abs y
+        let general () =
+            let a = (ax - ay) * (ay + ax) + 1.0
+            let b = (ax + ax) * ay
+            let (sr, si) = mingwCsqrt a b
+            let (lr, li) = mingwClog (ax + sr) (ay + si)
+            finish lr li
+        if ax >= big || ay >= big then
+            let (lr, li) = mingwClog ax ay
+            finish (ln2 + lr) li
+        elif 1.0 <= ay then general ()
+        elif eps >= ax then
+            let r = Math.Sqrt ((ay + 1.0) * (1.0 - ay))
+            finish (Ucrt.log1p (ax / r)) (Ucrt.atan2 (ay, r))
+        elif eps < x * x then general ()
+        else
+            let x2 = x * x
+            let s = (ay + 1.0) * (1.0 - ay)
+            let r = Math.Sqrt s
+            let q = (x2 * 0.5) / r
+            let re = Ucrt.log1p ((q + ax) / r)
+            let im = Ucrt.atan2 ((r + ax) * ay, q + (r * ax + s))
+            finish re im
+
+/// mingw-w64 `casin`: -i * casinh(i z), i.e. casinh(-y + i x) -> (im, -re).
+let private mingwCasin (x: float) (y: float) : float * float =
+    let (hr, hi) = mingwCasinh (-y) x
+    (hi, -hr)
+
+let private isNegBit (v: float) = BitConverter.DoubleToInt64Bits v < 0L
+let private qnanD = BitConverter.Int64BitsToDouble 0x7ff8000000000000L
+
+/// mingw-w64 `cexp` (libmingwex, ucrt64), transcribed from its object code.
+/// sincos there is ucrt's sin then cos (libucrt_extra's sincos.o).
+let private mingwCexp (x: float) (y: float) : float * float =
+    let inf = Double.PositiveInfinity
+    if Double.IsNaN x then
+        if y = 0.0 then (qnanD, y) else (qnanD, qnanD)
+    elif Double.IsInfinity x then
+        if y = 0.0 then (if x < 0.0 then (0.0, y) else (inf, y))
+        elif Double.IsInfinity y || Double.IsNaN y then
+            (if x < 0.0 then (0.0, Math.CopySign (0.0, y)) else (inf, qnanD))
+        else
+            let s = Ucrt.sin y
+            let c = Ucrt.cos y
+            let mag = if x < 0.0 then 0.0 else inf
+            (Math.CopySign (mag, c), Math.CopySign (mag, s))
+    elif y = 0.0 then
+        let e = Ucrt.exp x
+        let s = Ucrt.sin y
+        let c = Ucrt.cos y
+        if Double.IsInfinity e then (e, y) else (c * e, e * s)
+    elif Double.IsInfinity y || Double.IsNaN y then (qnanD, qnanD)
+    else
+        let e = Ucrt.exp x
+        let s = Ucrt.sin y
+        let c = Ucrt.cos y
+        if Double.IsInfinity e then (Math.CopySign (inf, c), Math.CopySign (inf, s))
+        else (c * e, e * s)
+
+/// mingw-w64 `csinh`, transcribed from its object code (csin.o).
+let private mingwCsinh (x: float) (y: float) : float * float =
+    let inf = Double.PositiveInfinity
+    let yBad = Double.IsInfinity y || Double.IsNaN y
+    if Double.IsNaN x then
+        if y = 0.0 then (qnanD, y) else (qnanD, qnanD)
+    elif Double.IsInfinity x then
+        if y = 0.0 then (x, y)
+        elif yBad then (inf, qnanD)
+        else
+            let s = Ucrt.sin y
+            let c = Ucrt.cos y
+            let re = Math.CopySign (inf, c)
+            ((if isNegBit x then -re else re), Math.CopySign (inf, s))
+    elif yBad then
+        if x = 0.0 then (Math.CopySign (0.0, x), qnanD) else (qnanD, qnanD)
+    else
+        let ax = abs x
+        let s = Ucrt.sin y
+        let c = Ucrt.cos y
+        let re = Ucrt.sinh ax * c
+        let im = Ucrt.cosh ax * s
+        ((if isNegBit x then -re else re), im)
+
+/// mingw-w64 `ccosh`, transcribed from its object code (ccos.o).
+let private mingwCcosh (x: float) (y: float) : float * float =
+    let inf = Double.PositiveInfinity
+    let yBad = Double.IsInfinity y || Double.IsNaN y
+    if Double.IsNaN x then
+        if y = 0.0 then (qnanD, y) else (qnanD, qnanD)
+    elif Double.IsInfinity x then
+        if y = 0.0 then (inf, y * Math.CopySign (1.0, x))
+        elif yBad then (inf, qnanD)
+        else
+            let s = Ucrt.sin y
+            let c = Ucrt.cos y
+            (Math.CopySign (inf, c), Math.CopySign (1.0, x) * Math.CopySign (inf, s))
+    elif yBad then
+        if x = 0.0 then (qnanD, 0.0) else (qnanD, qnanD)
+    else
+        let s = Ucrt.sin y
+        let c = Ucrt.cos y
+        (Ucrt.cosh x * c, Ucrt.sinh x * s)
+
+/// libgcc `__muldc3` (gcc 16.2, x86_64-w64-mingw32): (a + ib)(c + id) with
+/// the C99 Annex G NaN recovery. The fast path is the plain four products,
+/// x = ac - bd, y = ad + bc.
+let private libgccMuldc3 (a0: float) (b0: float) (c0: float) (d0: float) : float * float =
+    let ac = a0 * c0
+    let bd = b0 * d0
+    let ad = a0 * d0
+    let bc = b0 * c0
+    let x = ac - bd
+    let y = ad + bc
+    if Double.IsNaN x && Double.IsNaN y then
+        let box (v: float) = Math.CopySign ((if Double.IsInfinity v then 1.0 else 0.0), v)
+        let nz (v: float) = if Double.IsNaN v then Math.CopySign (0.0, v) else v
+        let mutable a = a0
+        let mutable b = b0
+        let mutable c = c0
+        let mutable d = d0
+        let mutable recalc = false
+        if Double.IsInfinity a || Double.IsInfinity b then
+            a <- box a; b <- box b; c <- nz c; d <- nz d; recalc <- true
+        if Double.IsInfinity c || Double.IsInfinity d then
+            c <- box c; d <- box d; a <- nz a; b <- nz b; recalc <- true
+        if not recalc && (Double.IsInfinity ac || Double.IsInfinity bd
+                          || Double.IsInfinity ad || Double.IsInfinity bc) then
+            a <- nz a; b <- nz b; c <- nz c; d <- nz d; recalc <- true
+        if recalc then
+            (Double.PositiveInfinity * (a * c - b * d), Double.PositiveInfinity * (a * d + b * c))
+        else (x, y)
+    else (x, y)
+
+/// libgcc `__divdc3` (gcc 16.2): (a + ib) / (c + id), Smith's method with the
+/// RBIG/RMIN scaling and the Annex G NaN recovery, transcribed from its object
+/// code (constants: RBIG = DBL_MAX/2, RMIN = DBL_MIN, RMIN2 = DBL_EPSILON,
+/// RMINSCAL = 2^52, RMAX2 = RBIG * RMIN2).
+let private libgccDivdc3 (a0: float) (b0: float) (c0: float) (d0: float) : float * float =
+    let rbig = BitConverter.Int64BitsToDouble 0x7fdfffffffffffffL
+    let rmin = BitConverter.Int64BitsToDouble 0x0010000000000000L
+    let rmin2 = BitConverter.Int64BitsToDouble 0x3cb0000000000000L
+    let rminscal = BitConverter.Int64BitsToDouble 0x4330000000000000L
+    let rmax2 = BitConverter.Int64BitsToDouble 0x7c9fffffffffffffL
+    let mutable a = a0
+    let mutable b = b0
+    let mutable c = c0
+    let mutable d = d0
+    let halve () = a <- a * 0.5; b <- b * 0.5; c <- c * 0.5; d <- d * 0.5
+    let scaleUp () = a <- a * rminscal; b <- b * rminscal; c <- c * rminscal; d <- d * rminscal
+    let mutable x = 0.0
+    let mutable y = 0.0
+    if abs c < abs d then
+        if abs d >= rbig then halve ()
+        if abs d < rmin2 then scaleUp ()
+        elif ((abs a < rmin) && (abs b < rmax2) && (abs d < rmax2))
+             || ((abs b < rmin) && (abs a < rmax2) && (abs d < rmax2)) then scaleUp ()
+        let ratio = c / d
+        let denom = (c * ratio) + d
+        if abs ratio > rmin then
+            x <- ((a * ratio) + b) / denom
+            y <- ((b * ratio) - a) / denom
+        else
+            x <- ((c * (a / d)) + b) / denom
+            y <- ((c * (b / d)) - a) / denom
+    else
+        if abs c >= rbig then halve ()
+        if abs c < rmin2 then scaleUp ()
+        elif ((abs a < rmin) && (abs b < rmax2) && (abs c < rmax2))
+             || ((abs b < rmin) && (abs a < rmax2) && (abs c < rmax2)) then scaleUp ()
+        let ratio = d / c
+        let denom = (d * ratio) + c
+        if abs ratio > rmin then
+            x <- ((b * ratio) + a) / denom
+            y <- (b - (a * ratio)) / denom
+        else
+            x <- (a + (d * (b / c))) / denom
+            y <- (b - (d * (a / c))) / denom
+    if Double.IsNaN x && Double.IsNaN y then
+        let fin (v: float) = not (Double.IsNaN v || Double.IsInfinity v)
+        let box (v: float) = Math.CopySign ((if Double.IsInfinity v then 1.0 else 0.0), v)
+        if c = 0.0 && d = 0.0 && (not (Double.IsNaN a) || not (Double.IsNaN b)) then
+            let ci = Math.CopySign (Double.PositiveInfinity, c)
+            (ci * a, ci * b)
+        elif (Double.IsInfinity a || Double.IsInfinity b) && fin c && fin d then
+            let a' = box a
+            let b' = box b
+            (Double.PositiveInfinity * (a' * c + b' * d), Double.PositiveInfinity * (b' * c - a' * d))
+        elif (Double.IsInfinity c || Double.IsInfinity d) && fin a && fin b then
+            let c' = box c
+            let d' = box d
+            (0.0 * (a * c' + b * d'), 0.0 * (b * c' - a * d'))
+        else (x, y)
+    else (x, y)
+
+/// mingw-w64 `ctanh`, transcribed from its object code (ctan.o): the
+/// sin(2y)/cosh(2x) form, falling back to (e^z - e^-z) / (e^z + e^-z) through
+/// cexp and __divdc3 when the denominator cancels to zero.
+let private mingwCtanh (x: float) (y: float) : float * float =
+    let eps = BitConverter.Int64BitsToDouble 0x3cb0000000000000L
+    let halfPi = BitConverter.Int64BitsToDouble 0x3ff921fb54442d18L
+    if Double.IsNaN x then
+        if y = 0.0 then (x, y) else (qnanD, qnanD)
+    elif Double.IsInfinity x then
+        let r = y % Math.PI
+        let im =
+            if not (isNegBit y) then (if eps < r - halfPi then -0.0 else 0.0)
+            else (if not (r + halfPi < -eps) then -0.0 else 0.0)
+        (Math.CopySign (1.0, x), im)
+    elif Double.IsInfinity y || Double.IsNaN y then (qnanD, qnanD)
+    else
+        let s = Ucrt.sin (y + y)
+        let c = Ucrt.cos (y + y)
+        let x2 = x + x
+        let d = c + Ucrt.cosh x2
+        if d = 0.0 then
+            let (a, b) = mingwCexp x y
+            let (p, q) = mingwCexp (-x) (-y)
+            libgccDivdc3 (a - p) (b - q) (a + p) (b + q)
+        else
+            (Ucrt.sinh x2 / d, s / d)
+
+/// mingw-w64 `cpow`: cexp(y * clog(x)), the product through __muldc3.
+let private mingwCpow (xr: float) (xi: float) (yr: float) (yi: float) : float * float =
+    let (lr, li) = mingwClog xr xi
+    let (pr, pi) = libgccMuldc3 lr li yr yi
+    mingwCexp pr pi
+
+/// std::polar(r, t) = (r cos t, r sin t), over ucrtbase cos/sin.
+let private polarU (r: float) (t: float) : float * float = (r * Ucrt.cos t, r * Ucrt.sin t)
+
+let private onWindows () = Blade.Platforms.os = Blade.Platforms.Windows
+
 let complexMath (name: string) (re: float) (im: float) : float * float =
     match name with
+    // Windows: the C99 library functions the compiled side calls through
+    // blade_libm's complex overloads (blade_runtime.hpp), ported above.
+    | "exp" when onWindows () -> mingwCexp re im
+    | "log" when onWindows () -> mingwClog re im
+    | "sqrt" when onWindows () -> mingwCsqrt re im
+    | "sinh" when onWindows () -> mingwCsinh re im
+    | "cosh" when onWindows () -> mingwCcosh re im
+    | "tanh" when onWindows () -> mingwCtanh re im
+    // sin/cos/tan: the -i f(iz) rotations of the hyperbolic ones (csin.o,
+    // ccos.o, ctan.o): csin = (im, -re) of csinh(-y + ix); ccos = ccosh(-y +
+    // ix) unrotated; ctan = (im, -re) of ctanh(-y + ix).
+    | "sin" when onWindows () -> let (hr, hi) = mingwCsinh (-im) re in (hi, -hr)
+    | "cos" when onWindows () -> mingwCcosh (-im) re
+    | "tan" when onWindows () -> let (hr, hi) = mingwCtanh (-im) re in (hi, -hr)
     | "exp" ->
         let e = math1 "exp" re
         (e * math1 "cos" im, e * math1 "sin" im)
@@ -628,12 +992,51 @@ let complexMath (name: string) (re: float) (im: float) : float * float =
             let u = t / 2.0
             if x > 0.0 then (u, y / t)
             else (abs y / t, (if y < 0.0 then -u else u))
+    | "atan" when Blade.Platforms.os = Blade.Platforms.Windows ->
+        // mingw-w64 catan: catanh(-y + i x), then (im, -re). See above.
+        let (hr, hi) = mingwCatanh (-im) re
+        (hi, -hr)
+    | "asin" when Blade.Platforms.os = Blade.Platforms.Windows ->
+        mingwCasin re im
+    | "acos" when Blade.Platforms.os = Blade.Platforms.Windows ->
+        // mingw-w64 cacos: (pi/2 - casin(z).re, -casin(z).im).
+        let (sr, si) = mingwCasin re im
+        (BitConverter.Int64BitsToDouble 0x3ff921fb54442d18L - sr, -si)
     | _ ->
         raise (NumericsUnsupported
                 $"complex intrinsic '{name}' is not yet bit-verified in the interpreter")
 
-/// z ^ w for complex: best-effort exp(w * log z); NOT bit-verified (see above).
+/// z ^ w for complex. On Windows, the twin of blade_libm::pow's three
+/// overloads (blade_runtime.hpp), chosen by which operand is complex exactly
+/// as the emitted call's overload resolution chooses (a real operand, integer
+/// or not, is cast to double first in both lanes):
+///   complex ^ complex = cpow
+///   complex ^ real    = re > 0 && im == 0 ? (pow(re, y), 0)
+///                       : polar(exp(y * log(z).re), y * log(z).im)
+///   real ^ complex    = x > 0 ? polar(pow(x, w.re), w.im * log(x))
+///                       : cpow((x, 0), w)
+/// Elsewhere the old best-effort exp(w * log z) (NOT bit-verified).
 let private complexCaret (l: Value) (r: Value) : Value =
+    let isC (v: Value) = match v with VComplex _ -> true | _ -> false
+    if onWindows () then
+        match isC l, isC r with
+        | true, true ->
+            let (zr, zi) = asComplex l
+            let (wr, wi) = asComplex r
+            VComplex (mingwCpow zr zi wr wi)
+        | true, false ->
+            let (zr, zi) = asComplex l
+            let y = asF64 r
+            if zi = 0.0 && zr > 0.0 then VComplex (Ucrt.pow (zr, y), 0.0)
+            else
+                let (tr, ti) = mingwClog zr zi
+                VComplex (polarU (Ucrt.exp (y * tr)) (y * ti))
+        | _ ->
+            let x = asF64 l
+            let (wr, wi) = asComplex r
+            if x > 0.0 then VComplex (polarU (Ucrt.pow (x, wr)) (wi * Ucrt.log x))
+            else VComplex (mingwCpow x 0.0 wr wi)
+    else
     let (zr, zi) = asComplex l
     let (wr, wi) = asComplex r
     let (lr, li) = complexMath "log" zr zi

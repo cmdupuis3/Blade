@@ -858,9 +858,30 @@ let deduceAdjacentPairs (resolver: IRId -> SignParity list option)
 //
 // `isInt` selects integer semantics (truncating `/` and `%`) for kernels over
 // integer elements, matching the emitted C++.
-let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
-                         : (float * float * float * float) option =
+//
+// ARITY > 2. A claim on a pair of a wider kernel (`comm(x, y, z)` is the
+// claim on every pair the group's transpositions generate) is a law for
+// EVERY value of the remaining parameters, so it is disproved by a
+// counterexample at ANY fixed values of them: `others` are bound to
+// constants that stay fixed across the swap. Without them the evaluator met
+// `z` and answered "no evaluation", so every wider kernel's false claim --
+// `x + 2.0 * y + 3.0 * z` under `comm(x, y, z)` -- passed and was stored as
+// a simplex. (Each other parameter gets its own constant, so a body cannot
+// be accidentally symmetric because two of them coincide.)
+//
+// `negate` checks the ANTICOMMUTATIVE law instead: f(y, x) = -f(x, y), so a
+// witness is a point where f(b, a) is not -f(a, b).
+//
+// The result is (a, b, u, v, others' values) -- u = f(.., a, .., b, ..),
+// v = f(.., b, .., a, ..).
+let witnessSwapLawFailure (pi: IRId) (pj: IRId) (others: IRId list) (negate: bool)
+                          (isInt: bool) (body: TypedExpr)
+                          : (float * float * float * float * (IRId * float) list) option =
     let body = flattenBindings body
+    let fixedVals =
+        let pool = if isInt then [ 3.0; 5.0; -2.0; 7.0; 4.0; 6.0; -3.0; 8.0 ] else [ 0.75; 1.25; -0.5; 2.5; 3.25; -1.75; 1.5; 4.5 ]
+        others |> List.mapi (fun k id -> (id, pool.[k % pool.Length] + float (k / pool.Length)))
+    let fixedMap = Map.ofList fixedVals
     let rec ev (x: float) (y: float) (e: TypedExpr) : float option =
         let go = ev x y
         let bool b = Some (if b then 1.0 else 0.0)
@@ -870,6 +891,7 @@ let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
         | TExprLit (LitBool b) -> bool b
         | TExprVar (_, id, _) when id = pi -> Some x
         | TExprVar (_, id, _) when id = pj -> Some y
+        | TExprVar (_, id, _) when fixedMap.ContainsKey id -> Some fixedMap.[id]
         | TExprBlock ([], Some f) -> go f
         // `|> compute` on a scalar is the identity (the parser binds a
         // trailing `|> compute` into the last branch of a kernel's `if`).
@@ -938,14 +960,25 @@ let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
         if isInt then [ (2.0, 1.0); (1.0, 3.0); (3.0, 5.0); (-2.0, 7.0); (4.0, 9.0) ]
         else [ (2.0, 1.0); (1.0, 3.0); (0.5, 4.0); (-1.5, 2.5); (3.0, 5.0) ]
     let usesPair = usesVar pi body || usesVar pj body
-    if not usesPair then None
+    // Anticommutativity is a claim even about a body that ignores the pair:
+    // a constant c != 0 has f(y, x) = c, not -c.
+    if not usesPair && not negate then None
     else
         samples |> List.tryPick (fun (a, b) ->
             match ev a b body, ev b a body with
-            | Some u, Some v when System.Double.IsFinite u && System.Double.IsFinite v
-                                  && abs (u - v) > 1e-9 * (max 1.0 (max (abs u) (abs v))) ->
-                Some (a, b, u, v)
+            | Some u, Some v when System.Double.IsFinite u && System.Double.IsFinite v ->
+                let expected = if negate then -u else u
+                if abs (v - expected) > 1e-9 * (max 1.0 (max (abs u) (abs v))) then
+                    Some (a, b, u, v, fixedVals)
+                else None
             | _ -> None)
+
+/// The original two-parameter commutativity witness (no other parameters
+/// bound): kept for callers that have only the pair.
+let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
+                         : (float * float * float * float) option =
+    witnessSwapLawFailure pi pj [] false isInt body
+    |> Option.map (fun (a, b, u, v, _) -> (a, b, u, v))
 
 // Late tier: arity-polymorphic (Poly-pack) kernels -- the all-arity
 // exchange law.

@@ -1,0 +1,12 @@
+// TEST: A generic zero specialized at a String is the empty string
+// ============================================================================
+// The String twin of 010: the bare C++ `return 0;` it used to receive
+// compiled -- `0` is a null `const char*` -- and std::string's constructor
+// from one threw at run time. The zero of a String is "" (formalism 10.4).
+// ============================================================================
+function z(x: T) -> T = zero
+let s = z("abc")
+let empty = s == ""
+// EXPECT: empty = true
+let longer = z("abc") == "abc"
+// EXPECT: longer = false

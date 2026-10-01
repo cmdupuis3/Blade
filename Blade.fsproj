@@ -776,6 +776,13 @@
       <Link>cpp/blade_linalg_cuda.hpp</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- One failure exit across a DLL boundary: the DLL-side half of the
+         host-bound panic, included by the cuBLAS shim's device arm and by the
+         mpi+cuda hybrid's .cu. -->
+    <None Include="src/cpp/blade_dll_panic.hpp">
+      <Link>cpp/blade_dll_panic.hpp</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <!-- Eigensolver dispatch (Phase 6 / Round B). LAPACK-only; included only
          by programs that emit a blade_lapack:: call. -->
     <None Include="src/cpp/blade_lapack.hpp">

@@ -42,6 +42,16 @@ let rec evalConstExpr (env: TypeEnv) (expr: Expr) : int64 option =
     | ExprKind.ExprBinOp (_, OpDiv, l, r) ->
         match evalConstExpr env l, evalConstExpr env r with
         | Some a, Some b when b <> 0L -> Some (a / b) | _ -> None
+    // A VALUE under `^` is a power (formalism 4.1: the left-hand side decides),
+    // integer and wrapping like `*`; a negative exponent folds to nothing.
+    | ExprKind.ExprBinOp (_, OpCaret, l, r) ->
+        match evalConstExpr env l, evalConstExpr env r with
+        | Some a, Some b when b >= 0L ->
+            let rec pow (acc: int64) (bse: int64) (e: int64) =
+                if e = 0L then acc
+                else pow (if e % 2L = 1L then acc * bse else acc) (bse * bse) (e / 2L)
+            Some (pow 1L a b)
+        | _ -> None
     | _ -> None
 
 /// Single-entry memo for staticEnvOf's `StaticFunctions -> StaticFuncDef`
@@ -298,6 +308,25 @@ let isUnitCarryingTypeVarHead (env: TypeEnv) (name: string) (args: TypeExpr list
     && (lookupTypeDef name env).IsNone
     && (unitOfTypeVarArgs env args).IsSome
 
+/// A caret HEAD that names a DECLARED type (an alias such as
+/// `type Speed = Float<mps>`, a struct, a variant, an index type). The left-hand
+/// side of `^` decides what it builds: a type gives an array type, so `Speed^1`
+/// is a dense rank-1 array of Speed -- exactly as a built-in head (`Float64^1`,
+/// ParserTypes) -- and never a type variable that happens to share the alias's
+/// name. The parser cannot see declarations, so this is decided here. (A unit
+/// name in a unit slot -- `Float<second^2>` -- is a unit power and never
+/// reaches this test; units are not type declarations.)
+let isDeclaredCaretHead (env: TypeEnv) (name: string) : bool =
+    (lookupTypeDef name env).IsSome && not (Map.containsKey name env.Units)
+
+/// A declared caret head that is ITSELF an array type (`type Row =
+/// Array<Float64 like Idx<3>>`): `Row^1` asks for an array of arrays, which the
+/// caret does not build -- refused by TypeCheckSupport.caretHeadError.
+let isDeclaredArrayAlias (env: TypeEnv) (name: string) : bool =
+    match lookupTypeDef name env with
+    | Some (TDIAlias t) -> (match t with ArrayElem _ -> true | _ -> false)
+    | _ -> false
+
 let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
     match ty with
     | TyInt32 -> IRTScalar ETInt32
@@ -545,6 +574,22 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
         match order with
         | Some n when n >= 1 -> IRTDist (n, elem, axes)
         | _ -> IRTDist (-1, elem, axes)
+
+    // `Speed^k` with `Speed` a DECLARED type: the concrete-element caret
+    // (isDeclaredCaretHead), routed through the same node a built-in head
+    // produces. An alias that is already an array is refused at the
+    // annotation consumers (caretHeadError); lowering stays total and yields
+    // the alias itself rather than nesting it.
+    | TyVar (name, arityOpt) when isDeclaredCaretHead env name ->
+        let k = arityOpt |> Option.defaultValue 0
+        if k = 0 || isDeclaredArrayAlias env name then lowerTypeExpr env (TyNamed (name, []))
+        else
+            lowerTypeExpr env
+                (TyAbstractArray (TyNamed (name, []),
+                                  { Kind = ExprKind.ExprLit (LitInt (int64 k)); Span = noSpan }, None))
+    | TyAbstractArray (TyVar (name, _), rankExpr, symm) when isDeclaredCaretHead env name ->
+        if isDeclaredArrayAlias env name then lowerTypeExpr env (TyNamed (name, []))
+        else lowerTypeExpr env (TyAbstractArray (TyNamed (name, []), rankExpr, symm))
 
     | TyAbstractArray (elemTy, rankExpr, _symmOpt) ->
         // `T<u>^k` -- a UNIT-CARRYING type variable (array-expression plan

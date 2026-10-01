@@ -1,0 +1,9 @@
+// TEST: Four-argument comm claim disproved by a witness (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: `where comm(x, y)`
+// `w * x + y * z` IS symmetric under w <-> x and under y <-> z, but not under
+// x <-> y, and `comm(w, x, y, z)` claims all of them. The checker tests every
+// transposition the group generates (consecutive members), with the other two
+// parameters held fixed, and refuses at the first one that fails.
+let A = [1.0, 2.0, 3.0]
+let R = method_for(A, A, A, A) <@> lambda(w, x, y, z) where comm(w, x, y, z) -> w * x + y * z |> compute

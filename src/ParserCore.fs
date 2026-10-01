@@ -732,6 +732,21 @@ and parseSimplePrimary (tokens: Token list) : ParseResult<Expr> =
         // unary-minus precedence; folds via StaticEval's OpNeg arm.
         advance tokens |> parseSimplePrimary >>= fun operand remaining ->
         success (mkExpr (mergeSpan (headSpan tokens) operand.Span) (ExprUnaryOp (OpNeg, operand))) remaining
+    | _ ->
+    // POWER over a static payload (`Idx<N^2>`): the left-hand side of `^`
+    // decides what it builds (formalism 4.1) -- a VALUE here, so an
+    // arithmetic power. Binds tighter than unary minus and right-associative,
+    // as in the full grammar (`-2^2` is -4, `2^3^2` is 2^9); the exponent is
+    // itself a prefix operand, so `2^-1` parses (and refuses at the fold).
+    parseSimpleAtom tokens >>= fun bse rest ->
+    match peek rest with
+    | Some (TokOp "^") ->
+        advance rest |> parseSimplePrimary >>= fun ex remaining ->
+        success (mkExpr (mergeSpan bse.Span ex.Span) (ExprBinOp (Elementwise, OpCaret, bse, ex))) remaining
+    | _ -> success bse rest
+
+and parseSimpleAtom (tokens: Token list) : ParseResult<Expr> =
+    match peek tokens with
     | Some (LiteralTok lit) -> success (mkExpr (headSpan tokens) (ExprLit lit)) (advance tokens)
     | Some (TokIdent name) -> success (mkExpr (headSpan tokens) (ExprVar name)) (advance tokens)
     | Some (TokKeyword KwArity) ->

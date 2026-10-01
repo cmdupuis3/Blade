@@ -2201,6 +2201,7 @@ let emptyRepoModule (moduleName: string) : IRModule = {
     SparseInits = Map.empty
     MutableArrayLets = Set.empty
     DerivedFuncOrigins = Map.empty
+    FunctionAliasNames = Set.empty
 }
 
 /// The dims/vars module for a resolved checkout. Node user data is verbatim

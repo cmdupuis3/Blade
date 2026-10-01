@@ -863,6 +863,16 @@ and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticVal
     | OpMod, SVInt _, SVInt 0L -> Error "Static evaluation: modulo by zero"
     | OpMod, SVInt _, SVInt -1L -> Ok (SVInt 0L)
     | OpMod, SVInt a, SVInt b -> Ok (SVInt (a % b))
+    // Integer power: exact and WRAPPING like `*` (square-and-multiply modulo
+    // 2^64, `0 ^ 0 = 1`), the runtime contract (formalism 2.4); a negative
+    // exponent, which panics BL8013 at run time, refuses the fold.
+    | OpCaret, SVInt _, SVInt b when b < 0L ->
+        Error "Static evaluation: integer power with a negative exponent -- convert to Float64 first for a real power"
+    | OpCaret, SVInt a, SVInt b ->
+        let rec pow (acc: int64) (bse: int64) (e: int64) =
+            if e = 0L then acc
+            else pow (if e % 2L = 1L then acc * bse else acc) (bse * bse) (e / 2L)
+        Ok (SVInt (pow 1L a b))
     // Float arithmetic
     | OpAdd, SVFloat a, SVFloat b -> Ok (SVFloat (a + b))
     | OpSub, SVFloat a, SVFloat b -> Ok (SVFloat (a - b))

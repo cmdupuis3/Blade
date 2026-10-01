@@ -1,0 +1,8 @@
+// TEST: A caret on a built-in that is no element type is refused (rejects)
+// ERROR: BL1004 @ 6:15
+// ============================================================================
+// `Nat` names the built-in type-level natural, not an array element, so
+// `Nat^1` has no meaning; it used to become a type variable named `Nat`.
+// ============================================================================
+function f(x: Nat^1) = x
+let y = f([1, 2])

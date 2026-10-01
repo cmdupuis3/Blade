@@ -206,8 +206,30 @@ let private raggedFamilyOrCompound (ix: IRIndexType) : bool =
     | IxKCompound | IxKCompoundDynamic | IxKSparse -> true
     | _ -> false
 
+/// An axis whose extent varies PER ROW -- the storage hazard the gate exists
+/// for (a placeholder inner extent the dense nest would read as a bound).
+let private variesPerRow (ix: IRIndexType) : bool =
+    match ix.IxKind with
+    | IxKRagged | IxKRaggedInline | IxKRaggedOpaque | IxKGroupMember -> true
+    | _ -> false
+
+/// Is this operand index one the dense nest cannot iterate?
+///
+/// `IxKGroupOuter` is admitted when it appears ALONE in its operand, exactly as
+/// CodeGen's `raggedStandardNestOperand` admits it: a group-DERIVED result
+/// (`method_for(zip(ga, gb)) <@> <row-consuming kernel>`, its array-valued
+/// sibling, `extents(gk)`) carries the group-outer provenance tag on axis 0 but
+/// is a flat, rectangular array -- every extent real, no per-row length to
+/// know about -- and both lanes iterate it as an ordinary dense operand. A
+/// genuine `group_by` result always carries an `IxKGroupMember` inner axis
+/// alongside, so it stays gated here (the peels take it before this point).
+let private gatedInputIndex (at: IRArrayType) (ix: IRIndexType) : bool =
+    match ix.IxKind with
+    | IxKGroupOuter -> at.IndexTypes |> List.exists variesPerRow
+    | _ -> raggedFamilyOrCompound ix
+
 let private gateInputs (info: ApplyInfo) : unit =
-    if info.ArrayTypes |> List.exists (fun at -> at.IndexTypes |> List.exists raggedFamilyOrCompound) then
+    if info.ArrayTypes |> List.exists (fun at -> at.IndexTypes |> List.exists (gatedInputIndex at)) then
         raise (InterpUnsupported "apply over ragged/grouped/compound input (M2.7)")
 
 // Binary fold resolution (reduce kernels / choice sections lower to callables).
@@ -829,10 +851,13 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
     | Some (src, leadRank) -> materializeSparseRangeMap st env info0 wrappers src leadRank
     | None ->
     if tryRowPeelMap info0 then materializeRowPeelMap st env info0 wrappers
+    elif tryGroupedZipPeel info0 then materializeGroupedZipPeel st env info0 wrappers
     else
     match tryWreathApply info0 with
     | Some tie -> materializeWreathApply st env info0 wrappers tie
     | None ->
+    if tryCompoundValueMap info0 then materializeCompoundValueMap st env info0 wrappers
+    else
     gateInputs info0
     let info = applyFunctorWrappers st info0 wrappers
     let arrayNames = info.Arrays |> List.mapi (fun i _ -> $"a{i}")
@@ -1325,11 +1350,21 @@ and private materializeCompoundHaloMap
 /// (some non-first index is ragged-family or IxKDepInner). Deliberately the
 /// SAME predicate CodeGen's `tryRaggedPeel` gates on, so the two lanes agree
 /// about which applies take the peel; the kernel receives each row as `g`.
+///
+/// "group_by result" means the outer tag WITH the per-row `IxKGroupMember`
+/// axis `group_by` always types its result with. `tryRaggedPeel` only peels
+/// an operand whose name resolves in `ctx.GroupedArrays` (a real `group_by`
+/// binding); a group-DERIVED dense grid (a grouped co-iteration's array-valued
+/// result) keeps the outer tag but not the member axis, misses that lookup,
+/// and is iterated cell by cell in the ordinary nest -- so `grid <@> twice`
+/// binds ELEMENTS there (loops/150), and must here too.
 and private tryRowPeelMap (info: ApplyInfo) : bool =
     match info.ArrayTypes with
     | [ at ] ->
         let groupedOuter =
-            match at.IndexTypes with h :: _ -> h.IxKind = IxKGroupOuter | [] -> false
+            match at.IndexTypes with
+            | h :: rest -> h.IxKind = IxKGroupOuter && rest |> List.exists (fun ix -> ix.IxKind = IxKGroupMember)
+            | [] -> false
         let raggedInner =
             at.IndexTypes.Length >= 2 &&
             at.IndexTypes |> List.skip 1 |> List.exists (fun ix ->
@@ -1432,28 +1467,7 @@ and private materializeRowPeelMap (st: InterpState) (env: Env) (info: ApplyInfo)
                 match force st kenv (Core.evalExpr st kenv cg.KernelExpr) with
                 | VArray row -> row
                 | _ -> raise (InterpUnsupported "row-peel map: array-valued kernel return produced a non-array row"))
-        // Trailing extents come off the FIRST row (self-describing, like the
-        // compiled size-on-first-row form); an empty grouping falls back to
-        // the output type's own trailing extents.
-        let trailing =
-            match rows |> Array.tryHead with
-            | Some row -> row.Extents
-            | None ->
-                outIdxTys
-                |> List.skip 1
-                |> List.map (fun ix -> toI64 (Core.evalExpr st env ix.Extent))
-                |> Array.ofList
-        let extents = Array.append [| int64 ngroups |] trailing
-        st.Cells <- st.Cells + (extents |> Array.fold (*) 1L)
-        let out = A.allocDense elemTy outIdxTys extents
-        rows |> Array.iteri (fun g row ->
-            let rec walk (dim: int) (acc: int64 list) =
-                if dim = row.Extents.Length then
-                    A.writeCell out (int64 g :: List.rev acc) (A.readCell row (List.rev acc))
-                else
-                    for j in 0L .. row.Extents.[dim] - 1L do walk (dim + 1) (j :: acc)
-            walk 0 [])
-        VArray out
+        assembleArrayValuedRows st elemTy outIdxTys rows
     else
     st.Cells <- st.Cells + int64 ngroups
     let results =
@@ -1461,6 +1475,196 @@ and private materializeRowPeelMap (st: InterpState) (env: Env) (info: ApplyInfo)
             cell.V <- A.peelDim grouped (int64 g)
             force st kenv (Core.evalExpr st kenv cg.KernelExpr))
     VArray (A.mkDenseArray elemTy [] [| int64 ngroups |] (A.storeOfValues elemTy results))
+
+/// ARRAY-VALUED KERNEL ROWS over a peeled outer axis: one dense row per outer
+/// cell, assembled into an [outer] x [kernel T-dims] array. SHARED BY BOTH
+/// PEELS (the single-operand row peel and the grouped co-iteration), as
+/// CodeGen's `emitRowValuedPeel` is shared by `tryRaggedPeel` and
+/// `tryGroupedZipPeel` -- so the two cannot drift apart on the shape rule.
+///
+/// Trailing extents come off the FIRST row (self-describing, the compiled
+/// size-on-first-row form). With no rows at all the compiled lane sizes the
+/// trailing slots from the output type when the static evaluator settles them
+/// and leaves them 0 otherwise (`emitRowValuedPeel`'s two sizing forms), and
+/// so does this.
+and private assembleArrayValuedRows
+        (st: InterpState) (elemTy: IRType) (outIdxTys: IRIndexType list) (rows: BladeArray[]) : Value =
+    let ngroups = rows.Length
+    let trailing =
+        match rows |> Array.tryHead with
+        | Some row -> row.Extents
+        | None ->
+            outIdxTys
+            |> List.skip 1
+            |> List.map (fun ix -> defaultArg (tryEvalIntIR ix.Extent) 0L)
+            |> Array.ofList
+    let extents = Array.append [| int64 ngroups |] trailing
+    st.Cells <- st.Cells + (extents |> Array.fold (*) 1L)
+    let out = A.allocDense elemTy outIdxTys extents
+    rows |> Array.iteri (fun g row ->
+        let rec walk (dim: int) (acc: int64 list) =
+            if dim = row.Extents.Length then
+                A.writeCell out (int64 g :: List.rev acc) (A.readCell row (List.rev acc))
+            else
+                for j in 0L .. row.Extents.[dim] - 1L do walk (dim + 1) (j :: acc)
+        walk 0 [])
+    VArray out
+
+/// Detect a SAME-KEYS GROUPED CO-ITERATION, `method_for(zip(g1, ..., gk)) <@>
+/// lambda(r1, ..., rk) -> ...` with every operand a `group_by` result -- the
+/// interpreter twin of CodeGen's `tryGroupedZipPeel`. A grouped operand is one
+/// whose outer axis is `IxKGroupOuter` AND which carries the per-row
+/// `IxKGroupMember` axis: that pair is what `group_by` (and the structural
+/// `segments` grouping) produce, and what the compiled lane's
+/// `ctx.GroupedArrays` lookup admits. A group-DERIVED dense result shares the
+/// outer tag but has no member axis; codegen's peel declines it (its name is
+/// not in GroupedArrays) and iterates it in the ordinary nest, so it must not
+/// be taken here either (`zip(sums, extents(gk))`, sql-group-by/044).
+/// TypeCheck has already refused operands grouped by different keys; the
+/// materializer still checks the row lengths agree before trusting that.
+and private tryGroupedZipPeel (info: ApplyInfo) : bool =
+    info.Arrays.Length >= 2
+    && info.Arrays.Length = info.ArrayTypes.Length
+    && info.ArrayTypes |> List.forall (fun at ->
+        match at.IndexTypes with
+        | outer :: rest ->
+            outer.IxKind = IxKGroupOuter
+            && rest |> List.exists (fun ix -> ix.IxKind = IxKGroupMember)
+        | [] -> false)
+
+/// Materialize a SAME-KEYS GROUPED CO-ITERATION (CodeGen `tryGroupedZipPeel`
+/// in value space): ONE outer walk over the shared partition, every operand's
+/// group `g` peeled at the same `g` and bound to its own row parameter, the
+/// kernel collapsing the rows to a scalar (rank-1 output) or a whole dense row
+/// (rank >= 2 output, the array-valued form shared with the single-operand
+/// peel). The kernel ALWAYS receives rows here -- there is no element reading
+/// of a co-iteration, exactly as the compiled peel binds a `RaggedRow` /
+/// `Array<T,1>` per parameter whatever its annotation.
+///
+/// The kernel is invoked as the lifted callable (`Core.evalCall`), its
+/// captures bound from the SITE env -- the compiled peel's `peelBodyExpr`
+/// either inlines the same body or calls the same lifted callable, and the
+/// value is the same either way. A row-SHAPED output is refused on the
+/// compiled side before either lane runs it; it is declined here with the
+/// same reason rather than given a meaning codegen does not have.
+and private materializeGroupedZipPeel (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list) : Value =
+    if not (List.isEmpty wrappers) then
+        raise (InterpUnsupported "functor-map wrapper over a grouped co-iteration")
+    let arrs =
+        info.Arrays |> List.map (fun a ->
+            match resolveArraySource st env a with
+            | SReal x -> x
+            | _ -> raise (InterpUnsupported "grouped co-iteration: operand is not a materialized array"))
+    // ONE grouping, by identity: codegen peels only when every operand's name
+    // resolves to the SAME group_keys emission (ctx.GroupedArrays); two
+    // equal-valued groupings are two names and it refuses. `A.buildGroupBy`
+    // shares the VGroupKeys value's own `Offsets` array into every result's
+    // SRagged store, so reference identity of that array is the grouping's
+    // identity here -- equal row lengths are not enough (a `let Z = zip(ga,
+    // gb)` alias over two equal-keyed group_keys passes the typechecker).
+    let offsetsOf (a: BladeArray) =
+        match a.Data with
+        | SRagged (_, _, offs) -> offs
+        | _ -> raise (InterpUnsupported "grouped co-iteration: operand is not a CSR grouped store")
+    let offs0 = offsetsOf arrs.Head
+    if arrs.Tail |> List.exists (fun a -> not (obj.ReferenceEquals (offsetsOf a, offs0))) then
+        raise (InterpUnsupported "grouped co-iteration: operands are not grouped by one group_keys binding (refused by codegen)")
+    let callable =
+        match resolveKernel info.Kernel with
+        | Some rk when rk.Callable.Params.Length = arrs.Length -> rk.Callable
+        | _ -> raise (InterpUnsupported "grouped co-iteration: kernel arity does not match the operand count")
+    let outIdxTys =
+        match info.OutputType with
+        | ArrayElem a -> a.IndexTypes
+        | _ -> []
+    let outputIsRowShaped =
+        outIdxTys.Length >= 2
+        && outIdxTys |> List.skip 1 |> List.exists (fun ix ->
+            isRaggedFamilyKind ix.IxKind || ix.IxKind = IxKGroupMember || ix.IxKind = IxKDepInner)
+    if outputIsRowShaped then
+        raise (InterpUnsupported "grouped co-iteration with a row-shaped result (refused by codegen: only row-consuming kernels)")
+    // Output element type: codegen's chain -- the carried output type, else
+    // the kernel's own return, else the first operand's element type.
+    let outElem =
+        match info.OutputType with
+        | ArrayElem a -> a.ElemType
+        | IRTScalar _ as t -> t
+        | _ ->
+            match callable.RetType with
+            | IRTScalar _ as t -> t
+            | ArrayElem a -> a.ElemType
+            | _ -> arrs.Head.ElemType
+    let outRank =
+        match info.OutputType with
+        | ArrayElem a -> a.IndexTypes |> List.sumBy _.Rank
+        | _ -> 1
+    let caps = bindCallCaptures st env callable
+    let ngroups = int arrs.Head.Extents.[0]
+    let rowAt (g: int) : Value =
+        let args = arrs |> List.map (fun a -> A.peelDim a (int64 g))
+        force st env (Core.evalCall st callable caps args)
+    if outRank >= 2 then
+        let rows =
+            Array.init ngroups (fun g ->
+                match rowAt g with
+                | VArray row -> row
+                | _ -> raise (InterpUnsupported "grouped co-iteration: array-valued kernel return produced a non-array row"))
+        assembleArrayValuedRows st outElem outIdxTys rows
+    else
+    st.Cells <- st.Cells + int64 ngroups
+    let results = Array.init ngroups rowAt
+    VArray (A.mkDenseArray outElem [] [| int64 ngroups |] (A.storeOfValues outElem results))
+
+/// Detect an elementwise map over a single compound VALUE whose output is a
+/// compound of the same index (`(tk <@> lambda(x) -> floor(x)) |> compute`,
+/// sql-group-by/027). CodeGen serves it in the general nest: the compound
+/// level walks the present cells (`for r < tk.idx->cardinality`, element
+/// `tk.data[r]`) and the output is a fresh compact buffer SHARING the input's
+/// idx and trailing_stride (genApplyCombinator's compound-output arm). Only
+/// the no-trailing-dims form is taken here -- the operand's whole type is the
+/// one compound index -- so the walk is exactly "map the compact buffer";
+/// anything wider keeps the gate.
+and private tryCompoundValueMap (info: ApplyInfo) : bool =
+    let isCompoundIx (ix: IRIndexType) =
+        ix.IxKind = IxKCompound || ix.IxKind = IxKCompoundDynamic
+    match info.Arrays, info.ArrayTypes, info.OutputType with
+    | [ IRVar _ ], [ at ], ArrayElem outAt ->
+        (match at.IndexTypes, outAt.IndexTypes with
+         | [ ix ], [ oix ] -> isCompoundIx ix && isCompoundIx oix
+         | _ -> false)
+    | _ -> false
+
+/// Materialize the compound-value map (see tryCompoundValueMap): the kernel
+/// binds each present cell's VALUE, in compact (rank) order, and the result is
+/// a Compound VALUE over the SAME present cells -- the interpreter's twin of
+/// the shared-idx output buffer.
+and private materializeCompoundValueMap (st: InterpState) (env: Env) (info: ApplyInfo) (wrappers: IRExpr list) : Value =
+    if not (List.isEmpty wrappers) then
+        raise (InterpUnsupported "functor-map wrapper over a compound-value map")
+    let cv =
+        match force st env (Core.evalExpr st env info.Arrays.Head) with
+        | VCompound cv -> cv
+        | _ -> raise (InterpUnsupported "compound-value map: operand did not evaluate to a Compound value")
+    if cv.TrailingStride <> 1L then
+        raise (InterpUnsupported "compound-value map with trailing dims (only the rank-1 compact view is interpreted)")
+    let callable =
+        match resolveKernel info.Kernel with
+        | Some rk when rk.Callable.Params.Length = 1 -> rk.Callable
+        | _ -> raise (InterpUnsupported "compound-value map: kernel is not single-parameter")
+    let outAt =
+        match info.OutputType with
+        | ArrayElem a -> a
+        | _ -> raise (InterpUnsupported "compound-value map: output is not an array type")
+    let caps = bindCallCaptures st env callable
+    let dense = A.compoundToDense cv
+    let n = int cv.Cardinality
+    st.Cells <- st.Cells + int64 n
+    let results =
+        Array.init n (fun r ->
+            force st env (Core.evalCall st callable caps [ A.readCell dense [ int64 r ] ]))
+    VCompound { cv with ElemType = outAt.ElemType
+                        IndexTypes = outAt.IndexTypes
+                        Data = A.storeOfValues outAt.ElemType results }
 
 /// Build a Compound VALUE for a `let B = compound(dense, mask)` binding (recorded
 /// in IRModule.CompoundInits). Run.fs intercepts the binding at its position in
@@ -1571,6 +1775,18 @@ and private resolveArraySource (st: InterpState) (env: Env) (arr: IRExpr) : Arra
 // refusing on it would demote passing diffs to skips. A miss that IS in the
 // callables table also stays silent: evalExpr's IRVar arm reifies it as a
 // closure.
+/// The capture map for invoking a kernel as its LIFTED CALLABLE
+/// (`Core.evalCall`), under exactly `bindKernelCaptures`' policy: captures
+/// bound from the site env, and a capture that is unresolvable by id AND read
+/// by the body is an interpreter limit (InterpUnsupported -> skip), never a
+/// mid-kernel BL8004 that would read as a fault in the program.
+and private bindCallCaptures (st: InterpState) (env: Env) (callable: IRCallable) : Map<IRId, ValueRef> =
+    let kenv = envChild env
+    bindKernelCaptures st env kenv callable.Captures callable.Body
+    callable.Captures
+    |> List.choose (fun c -> envTryFind env c.Id |> Option.map (fun cell -> (c.Id, cell)))
+    |> Map.ofList
+
 and private bindKernelCaptures (st: InterpState) (env: Env) (kenv: Env) (caps: CaptureInfo list) (kernelExpr: IRExpr) : unit =
     let mutable referenced = Unchecked.defaultof<Set<IRId>>
     let mutable referencedComputed = false

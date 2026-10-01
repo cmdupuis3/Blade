@@ -237,7 +237,7 @@ let R = method_for(A) <@> lambda(x) where mpi -> x * 2 |> compute
         // 8/7 at P=2, 4/4/4/3 at P=4. Packed-pool Allgatherv over cell ranges.
         let sym2 = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), mpi -> 2.0 * x + y |> compute
+let R = method_for(A, A) <@> lambda(x, y) where comm(x, y), mpi -> x * y + 10.0 * (x + y) |> compute
 """
         // ANTISYMMETRIC rank-2 strict simplex (i<j): C(5,2) = 10 cells;
         // reynolds(g, Antisymmetric) folds to g(x,y)-g(y,x) — pins the strict
@@ -251,7 +251,7 @@ let R = method_for(A, A) <@> reynolds(g, Antisymmetric) |> compute
         // the r=3 unrank depth.
         let sym3 = """
 let A = [1.0, 2.0, 3.0, 4.0, 5.0]
-let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z), mpi -> x + 2.0 * y + 3.0 * z |> compute
+let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, y, z), mpi -> x * y * z + 10.0 * (x + y + z) |> compute
 """
         // ANTISYMMETRIC rank-3 strict simplex (i<j<k): C(5,3) = 10 cells;
         // non-degenerate kernel so the signed fold has distinct values.

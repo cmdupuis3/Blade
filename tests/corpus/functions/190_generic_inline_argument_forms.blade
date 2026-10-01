@@ -1,0 +1,48 @@
+// TEST: A generic call learns its type variables from an argument written inline
+// ============================================================================
+// `idg(complex(1.0, 2.0))` died BL6001 "unresolved type variable" after
+// `blade check` passed, while `let c = complex(1.0, 2.0); idg(c)` worked. The
+// monomorphizer learns a callee's variables from each argument's node type
+// (IR.exprTypeIfKnown), and only a few node kinds carried one: a binding
+// reference does, an inline complex constructor, cast, arithmetic, negation,
+// math intrinsic, comparison, conditional or block did not -- so the call
+// taught the callee nothing and no specialization was made. Each of those now
+// answers from its operands' own known types. Every probe below is spelled
+// inline; the bound-first spelling never failed.
+// ============================================================================
+function idg(x: T^0) -> T^0 = x
+function twice(x: T^0) -> T^0 = x + x
+
+let c = idg(complex(1.0, 2.0))
+// EXPECT: c = (1,2)
+let c2 = twice(complex(1.5, -0.5))
+// EXPECT: c2 = (3,-1)
+let f32 = twice(Float32(1.25))
+// EXPECT: f32 = 2.5
+let i = twice(3 * 4)
+// EXPECT: i = 24
+let sum = idg(1.0 + 2.5)
+// EXPECT: sum = 3.5
+let neg = idg(-2.5)
+// EXPECT: neg = -2.5
+let root = idg(sqrt(16.0))
+// EXPECT: root = 4
+let n = 3
+let mag = twice(abs(n - 5))
+// EXPECT: mag = 4
+let re = idg(real(complex(7.0, 8.0)))
+// EXPECT: re = 7
+let lt = idg(1 < 2)
+// EXPECT: lt = true
+let pick = idg(if n > 2 then 1.5 else 2.5)
+// EXPECT: pick = 1.5
+let blk = idg({ let t = 2.0; t * 3.0 })
+// EXPECT: blk = 6
+let fused = idg(fma(2.0, 3.0, 1.0))
+// EXPECT: fused = 7
+
+// A tuple literal recursed componentwise already; a complex COMPONENT was the
+// part that went unlearned.
+function fst(p: Tuple<T^0, U^0>) -> T^0 = p[0]
+let first = fst((complex(0.5, 0.25), 3))
+// EXPECT: first = (0.5,0.25)

@@ -295,6 +295,7 @@ let loadAsModule (builder: IRBuilder) (moduleName: string) (path: string) : IRMo
         SparseInits = Map.empty
         MutableArrayLets = Set.empty
         DerivedFuncOrigins = Map.empty
+        FunctionAliasNames = Set.empty
     }
 
 // Fingerprint / version stamp (single-file provenance)

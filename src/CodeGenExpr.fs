@@ -17,6 +17,58 @@ open Blade.ReynoldsCore
 open Blade.CodeGenState
 open Blade.CodeGenExprSupport
 
+/// A PARTIAL sparse read (formalism 3.5) is always an ALLOCATING gather: the
+/// key table is insertion-ordered, so there is no window to alias and each
+/// producer below deep-copies the matching entries into storage it owns. This
+/// is the one place that pairs each producer with the teardown that frees
+/// exactly what it allocated (nested_array_types.hpp, "Wrapper-shaped teardown
+/// -- ONE routine per PRODUCER shape"; calling the wrong one is a heap error):
+///   residual rank >= 2         make_partial_sparse_gather      deallocate_sparse
+///                              (fresh buffer AND fresh sparse_index_t)
+///   rank 1, no trailing dim    make_sparse_gather_dense        deallocate_gather_dense
+///   rank 1, one trailing dim   make_sparse_gather_dense_trail  deallocate_gather_dense_trail
+/// The emitter (compoundRead below) and the scope-exit registration
+/// (genScalarBinding's let site) both read the pair from here, so a producer
+/// and its free cannot drift apart.
+let sparseGatherRoutines (residualRank: int) (hasTrail: bool) : string * string =
+    if residualRank >= 2 then ("make_partial_sparse_gather", "deallocate_sparse")
+    elif hasTrail then ("make_sparse_gather_dense_trail", "deallocate_gather_dense_trail")
+    else ("make_sparse_gather_dense", "deallocate_gather_dense")
+
+/// The teardown routine for `value` when it renders as one of the gathers
+/// above, else None. Mirrors compoundRead's partial arm decision for decision
+/// -- the rank-1 scalar-sugar normalization, the head rank, and the two shapes
+/// it REFUSES (a supplied trailing index, more than one trailing dim), which
+/// emit no producer and so must register no free.
+let partialSparseGatherTeardown (value: IRExpr) : string option =
+    match value with
+    | IRIndex (arr, indices, _) ->
+        match inferExprType arr with
+        | ArrayElem arrTy when isSparseArrayType arrTy ->
+            let headRank =
+                arrTy.IndexTypes
+                |> List.tryFind (fun ix -> ix.IxKind = IxKCompound || ix.IxKind = IxKSparse)
+                |> Option.map (_.Rank)
+            let indices =
+                match headRank, indices with
+                | Some 1, first :: rest when (not first.IsIRTuple) -> IRTuple [first] :: rest
+                | _ -> indices
+            match indices with
+            | (IRTuple coords) :: trailingIdxs ->
+                let k = headRank |> Option.defaultValue coords.Length
+                let trailingDims = match arrTy.IndexTypes with _ :: rest -> rest | [] -> []
+                match classifyCompoundIndexTuple k coords with
+                | CompoundPartial (_, freePos)
+                        when List.isEmpty trailingIdxs && trailingDims.Length <= 1 ->
+                    Some (snd (sparseGatherRoutines freePos.Length (not (List.isEmpty trailingDims))))
+                | _ -> None
+            | _ -> None
+        | _ -> None
+    | _ -> None
+
+/// Match-arm spelling of partialSparseGatherTeardown (one evaluation per arm).
+let (|GatherTeardown|_|) (value: IRExpr) : string option = partialSparseGatherTeardown value
+
 /// Convert IRExpr to C++ expression string
 let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) : string =
     match expr with
@@ -159,6 +211,24 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // -- call that by name) is called directly with the capture args
         // appended, since the lifted signature is regular params + capture
         // params.
+        // A `group_by` RESULT as an argument to a callable is refused, not
+        // rendered. Its C++ value is a row-pointer table (`Array<T*, 1>`) whose
+        // row lengths live in the producing group_keys' side state
+        // (`gk__ngroups` / `gk__offsets`), and no function signature carries
+        // that state: the callee's parameter renders as a dense `Array<T, 2>`,
+        // so the call was a g++ type error (and the callee's peels could not
+        // resolve a row length anyway). Capturing the grouped array in a
+        // lambda IS supported (the capture forwards the sidecar); passing it
+        // as an argument is not. The interpreter declines the same shape
+        // (Interp/Core.fs evalApp), so neither lane gives it a meaning.
+        let groupedArg =
+            args |> List.exists (fun a ->
+                match inferExprType a with
+                | ArrayElem at -> Blade.TypeLower.isGroupedRaggedShape at.IndexTypes
+                | _ -> false)
+        if groupedArg && (resolveCallable func).IsSome then
+            exprError "a group_by result cannot be passed as a function argument (its row lengths live in the group_keys side state, which no function signature carries) -- group inside the function from the values and keys, or capture the grouped array in a lambda instead"
+        else
         let funcStr, captureArgs =
             match func, resolveCallable func with
             | IRVar (fid, _), Some callable when callable.Id = fid && not (List.isEmpty callable.Captures) ->
@@ -199,6 +269,11 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         renderExtentExpr subst names arr dim
     | IRReduce (arrExpr, kernelExpr, initExpr) ->
         renderReduceExpr subst names arrExpr kernelExpr initExpr
+    | IRProdSum args when args |> List.exists (function GatherTeardown _ -> true | _ -> false) ->
+        // A partial sparse read as an operand: the loop below spells each
+        // operand once per element, so an inline gather would be re-gathered
+        // (and leaked) on every access. Bind it once and free it.
+        bindInlineGathers subst names args (fun args' -> exprToCppCore subst names (IRProdSum args'))
     | IRProdSum args ->
         // Fused product-sum sum_t prod_L args[L][t]: one loop, one accumulator,
         // rendered as an IIFE so it composes in any expression position --
@@ -404,7 +479,17 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
     | IRMatch (scrutinee, cases) ->
         renderMatchExpr subst names scrutinee cases
     | IRNth -> exprError "nth keyword not supported in expression position"
-    | IRZero _ -> "0"
+    // After resolveTypedZerosModule every zero that HAS a value is already that
+    // value (a scalar literal, "", or a struct / tuple / array composite --
+    // IR.zeroValueOf); what still arrives here has none (a sum type, or a
+    // composite with a part that has none: zeroHasNoValueMessage). The
+    // interpreter's IRZero arm makes the same three-way decision, so the lanes
+    // agree.
+    | IRZero ty ->
+        (match zeroLiteralOf ty, zeroHasNoValueMessage ty with
+         | Some lit, _ -> exprToCppCore subst names lit
+         | None, Some refusal -> exprError refusal
+         | None, None -> "0")
     | IRPolyIndex (pack, idx) ->
         // For static index, use std::get; otherwise runtime indexing
         match idx with
@@ -724,11 +809,11 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
                         let pinnedArr = $"""std::array<size_t, {j}>{{{(String.concat ", " pinnedVals)}}}"""
                         let posArr =
                             $"""std::array<size_t, {j}>{{{(pinned |> List.map (fst >> string) |> String.concat ", ")}}}"""
-                        if residualRank >= 2 then
-                            Some ($"nested_array_utilities::make_partial_sparse_gather<{elemStr}, {k}, {j}>({arrStr}, {pinnedArr}, {posArr})")
-                        else
-                            let fn = if hasTrail then "make_sparse_gather_dense_trail" else "make_sparse_gather_dense"
-                            Some ($"nested_array_utilities::{fn}<{elemStr}, {k}, {j}>({arrStr}, {pinnedArr}, {posArr})")
+                        // Producer paired with its teardown in ONE table
+                        // (sparseGatherRoutines); a let binding registers the
+                        // matching scope-exit free (partialSparseGatherTeardown).
+                        let (fn, _) = sparseGatherRoutines residualRank hasTrail
+                        Some ($"nested_array_utilities::{fn}<{elemStr}, {k}, {j}>({arrStr}, {pinnedArr}, {posArr})")
                 | CompoundFull ->
                     // j = k: full index. (size_t) casts are needed because an
                     // int64-typed coordinate VARIABLE (e.g. a lifted-lambda
@@ -1018,6 +1103,14 @@ and renderMatchExpr (subst: SubstMap) (names: Map<IRId, string>) scrutinee cases
 
 
 and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernelExpr (initExpr: IRExpr option) : string =
+    // An inline partial sparse read as the operand (`reduce(S((k, _)), (+))`):
+    // the fold below spells its operand at every element read, the extent
+    // test and the guard, so the gather used to run -- and leak -- once per
+    // access, O(n * cardinality). Bind it once, fold the binding, free it.
+    match arrExpr with
+    | GatherTeardown _ ->
+        bindInlineGathers subst names [ arrExpr ] (fun ops -> renderReduceExpr subst names (List.head ops) kernelExpr initExpr)
+    | _ ->
     // Inline reduction as an IIFE (mirrors genBinding's loop, wrapped in
     // `[&]() { ... }()` for expression context: kernel bodies, arithmetic).
     // Empty-array guard emits only for dynamic extents (statically-proven
@@ -1213,6 +1306,44 @@ and renderReduceExpr (subst: SubstMap) (names: Map<IRId, string>) arrExpr kernel
 
 
 
+/// INLINE PARTIAL SPARSE READS in expression position (a fold, a prodsum or
+/// an extent of `S((k, _))`). Each is an allocating gather, and the consumers
+/// above spell their operand repeatedly -- a fold at every element read -- so
+/// an inline gather ran once per ACCESS and was never freed. Bind each
+/// distinct gather once in an IIFE, render the consumer over the binding (an
+/// IRParam renders as its bare name and types as the gather), then free it
+/// with its producer's teardown (sparseGatherRoutines) before returning. The
+/// consumers routed here return a scalar or a fresh array, never a view into
+/// the gather, so the free cannot dangle. The binding's name is a hash of the
+/// gather's own text: deterministic, and distinct gathers in one IIFE (or a
+/// nested one) cannot collide; an identical operand repeated is bound once.
+and bindInlineGathers (subst: SubstMap) (names: Map<IRId, string>) (operands: IRExpr list) (render: IRExpr list -> string) : string =
+    let fnv (t: string) =
+        let mutable h = 2166136261u
+        for c in t do
+            h <- (h ^^^ uint32 c) * 16777619u
+        h.ToString("x8")
+    let bound =
+        operands |> List.map (fun e ->
+            match e with
+            | GatherTeardown routine ->
+                let text = exprToCppCore subst names e
+                let gname = "__gath" + fnv text
+                (Some (gname, text, routine), IRParam (gname, 0, inferExprType e))
+            | _ -> (None, e))
+    let binds = bound |> List.choose fst |> List.distinctBy (fun (n, _, _) -> n)
+    if List.isEmpty binds then render operands
+    else
+        let decls = binds |> List.map (fun (n, t, _) -> $"auto {n} = {t};") |> String.concat " "
+        let frees =
+            binds |> List.rev
+            |> List.map (fun (n, _, r) -> $"nested_array_utilities::{r}({n});") |> String.concat " "
+        let inner = render (bound |> List.map snd)
+        // A consumer that never reads the binding (a static extent folds to a
+        // literal) needs no gather at all.
+        if binds |> List.forall (fun (n, _, _) -> not (inner.Contains n)) then inner
+        else $$"""([&]() { {{decls}} auto __gres = {{inner}}; {{frees}} return __gres; }())"""
+
 and renderLetExpr (subst: SubstMap) (names: Map<IRId, string>) id value body : string =
     // For inline let expressions, we need statement context
     let names' = Map.add id ($"__v{id}") names
@@ -1343,6 +1474,11 @@ and renderUnitStmts (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr) 
 
 
 and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : string =
+    // `extents(S((k, _)))` inline: one gather, bound and freed (it leaked).
+    match arr with
+    | GatherTeardown _ ->
+        bindInlineGathers subst names [ arr ] (fun ops -> renderExtentExpr subst names (List.head ops) dim)
+    | _ ->
     // Statically resolved when the index type's extent expression is a
     // literal-arithmetic value (Idx<5>, Idx<n+1> with n compile-time, etc.)
     // -- emit as a compile-time literal eligible for use in static contexts.

@@ -66,6 +66,16 @@ type TypeError =
     /// `T^k` parameter is untouched. `func` names the callee for the message;
     /// `pos` is 1-based.
     | ArgTypeMismatch of pos: int * func: string * expected: string * actual: string
+    /// BL3001 too: ArgTypeMismatch's special case for a CONCRETE-ELEMENT caret
+    /// parameter (`Float64^2`, dense plain axes) handed a compact-storage
+    /// array (SymIdx, AntisymIdx, HermitianIdx, OrbIdx, CompoundIdx, ...). A
+    /// call never densifies; the message names the dense reading and `T^k`.
+    | DenseCaretCompactArg of pos: int * func: string * rank: int * expected: string * actual: string
+    /// BL1004 (the parser's ill-formed-type-spelling code, which `Float64^r`
+    /// gets): a caret on a DECLARED type that names no array -- the head is
+    /// itself an array type, or the rank is not a literal. Decided at typecheck
+    /// because only there are declarations visible.
+    | CaretHeadSpelling of message: string
     | InvalidArrayCapture of varName: string
     | InvalidApplication of funcType: IRType
     | PatternTypeMismatch of pattern: string * expected: IRType
@@ -409,6 +419,10 @@ type TypeError =
     // counterexample (Deduce.witnessSwapAsymmetry): the witness is rendered
     // "f(a, b) = u but f(b, a) = v". Same code as CommContradictsBody (BL4013).
     | CommContradictsWitness of param1: string * param2: string * witness: string
+    // `where anticomm(p1, p2)` on a body disproved the same way: a point where
+    // f(b, a) is not -f(a, b) (Deduce.witnessSwapLawFailure, negate = true).
+    // Same code (BL4013).
+    | AnticommContradictsWitness of param1: string * param2: string * witness: string
     | AntisymmContradictsBody of param1: string * param2: string
     // The Hermitian third of the pair-swap contradiction family: the body
     // provably CONJUGATES under the swap (f(y,x) = conj(f(x,y)), deduced

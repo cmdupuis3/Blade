@@ -1032,7 +1032,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__display_json_array" }, [arrE])
             when (lookupVar "__display_json_array" env).IsNone ->
         inferExpr env arrE |> Result.bind (fun tArr ->
-            // An abstract-rank parameter (`x: Float64^1`) is still an
+            // An abstract-rank parameter (`x: T^1`) is still an
             // inference var carrying only its EXACT-rank arity constraint;
             // shape the var here exactly like requireArrayArgMinRank does,
             // so the body's serializer rank is pinned at the declaration and
@@ -1262,6 +1262,72 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         | Some (Ok rewritten) -> inferExpr env rewritten
         | Some (Error e) -> Error e
         | None ->
+        // A declared GENERIC function passed as an argument to a head that is
+        // not itself a declared function is a USE: typed at an instantiated
+        // copy of its signature (see the dispatch below).
+        let instantiateGenericUses (tArgs: TypedExpr list) : TypedExpr list =
+            tArgs |> List.map (fun (a: TypedExpr) ->
+                match a.Kind with
+                | TExprVar _ ->
+                    let quantified, closed = calleeQuantifier env a
+                    if not closed then a
+                    else
+                        match instantiateOpenVars env.Subst quantified [a.Type] with
+                        | [ copy ], ids when not (Set.isEmpty ids) -> { a with Type = copy }
+                        | _ -> a
+                | _ -> a)
+        // A LAMBDA LITERAL APPLIED DIRECTLY -- `(lambda(f, x) -> f(x))(g, 2.0)`
+        // -- is typed from its ARGUMENTS first: an unannotated parameter that
+        // receives a function or an array takes the argument's type before
+        // the body is inferred, exactly as `let f = g in ...` would.
+        //
+        // In the other order the parameter is an open variable while the body
+        // is checked, and applying an open variable decides nothing (`f(x)` is
+        // a call or an array read, and dispatchAppOrIndex rightly refuses to
+        // guess), so the body's result stayed a fresh variable no use ever
+        // closed: a generic `g` reached IR validation unspecialized (BL6001),
+        // and an ARRAY argument -- `(lambda(a, i) -> a(i))(xs, 1)`, even the
+        // identity `(lambda(a) -> a)(xs)` -- had its parameter defaulted to a
+        // scalar and was refused as a rank mismatch (BL3001).
+        //
+        // Scalar arguments seed nothing: a scalar parameter is already settled
+        // by its body (`x * 2.5`), and the call judgment then coerces a literal
+        // argument against it as before. Only the shapes the body could not
+        // otherwise learn (function, array) are seeded.
+        match func.Kind with
+        | ExprKind.ExprLambda (parms, whereClause, body)
+                when parms.Length = args.Length
+                     && parms |> List.exists (fun p -> p.Type.IsNone && p.Default.IsNone)
+                     && not (args |> List.exists _.Kind.IsExprWildcard) ->
+            args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
+                // A lambda head is never a declared function.
+                let tArgs = instantiateGenericUses tArgs
+                let seeds =
+                    List.zip parms tArgs |> List.map (fun (p, a) ->
+                        if p.Type.IsSome || p.Default.IsSome then None
+                        else
+                            match env.Subst.Resolve a.Type with
+                            | FuncElem _ | ArrayElem _ -> Some a.Type
+                            // An abstract array still open inside a generic
+                            // body (`xs: T^1`): the variable itself, rank pin
+                            // and all, so the body reads it as an array.
+                            | IRTInfer id
+                            | IRTUnitAnnotated (IRTInfer id, _) ->
+                                (match env.Subst.GetArityConstraint id with
+                                 | Some k when k >= 1 -> Some a.Type
+                                 | _ -> None)
+                            | _ -> None)
+                // inferExpr's entry bookkeeping for the head node, which is
+                // typed here rather than through inferExpr.
+                if func.Span.StartLine > 0 then setCurrentExprSpan func.Span
+                inferLambdaSeeded env parms whereClause body seeds
+                |> Result.map (fun te ->
+                    if te.Span.StartLine = 0 && func.Span.StartLine > 0 then { te with Span = func.Span } else te)
+                |> Result.bind (fun tLam ->
+                    match tryArityLiftCall env func args tArgs tLam.Type with
+                    | Some synth -> inferExpr env synth
+                    | None -> dispatchAppOrIndex env tLam tArgs))
+        | _ ->
         inferExpr env func |> Result.bind (fun tFunc ->
         // Prefix partial application (formalism 6.2.3): applying an n-ary
         // FUNCTION to 0 < k < n args eta-expands to a lambda over the
@@ -1401,17 +1467,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                             | Some fid -> env.FuncSigVarRange.ContainsKey fid
                             | None -> false
                         if headIsDeclared then tArgs
-                        else
-                            tArgs |> List.map (fun (a: TypedExpr) ->
-                                match a.Kind with
-                                | TExprVar _ ->
-                                    let quantified, closed = calleeQuantifier env a
-                                    if not closed then a
-                                    else
-                                        match instantiateOpenVars env.Subst quantified [a.Type] with
-                                        | [ copy ], ids when not (Set.isEmpty ids) -> { a with Type = copy }
-                                        | _ -> a
-                                | _ -> a)
+                        else instantiateGenericUses tArgs
                     // ARITY LIFT before dispatch: a call that mixes arrays
                     // and scalars across ONE rank-0 signature variable is
                     // re-synthesized as the map it means. Declines fall
@@ -6523,8 +6579,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                             | Some k, _ | None, Some k -> Some k
                             | None, None -> None
                         else None
-                    match deferredBoolRank with
-                    | Some k ->
+                    let abstractBoolArray (k: int) =
                         let axes =
                             List.init k (fun _ ->
                                 { Id = env.Builder.FreshId(); Rank = 1
@@ -6532,6 +6587,8 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                   Symmetry = SymNone; Tag = None; IxKind = IxKPlain
                                   Kind = SDimension; Dependencies = [] })
                         mkArrayArrow axes (IRTScalar ETBool) None
+                    match deferredBoolRank with
+                    | Some k -> abstractBoolArray k
                     | None ->
                     // `zero + a` over an unshaped caret `a`: the promotion
                     // rules answer the LEFT operand, which is the zero's own
@@ -6544,7 +6601,48 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     if zeroBesideCaret then rRes
                     elif mode = Elementwise && isZipOp && isScalarTy resTy0
                        && ((knownArrayVar lRes && isScalarTy rRes) || (knownArrayVar rRes && isScalarTy lRes)) then
-                        (if knownArrayVar lRes then lRes else rRes)
+                        let arrSide = if knownArrayVar lRes then lRes else rRes
+                        // A COMPARISON keeps the var's SHAPE but not its
+                        // element. Answering the var itself typed `head > 0.0`
+                        // as the pack element's own array (Array<double>), so
+                        // the Bool result was copied into -- and printed from
+                        // -- a double array (`[1, 0, 1]` for `[true, false,
+                        // true]`); and beside a base arm that answered the Bool
+                        // array correctly, the two arms unified and re-typed
+                        // `head` itself as a Bool array (a false BL3009 on its
+                        // own `mean(head)`). Answer the Bool array the caret arm
+                        // above mints, at the rank the call judgment recorded.
+                        // A caret var never reaches here (deferredBoolRank took
+                        // it), so this is a var with only a rank LOWER BOUND,
+                        // and the bound is PINNED as the result's rank -- the
+                        // only rank known here. An instance of higher rank then
+                        // disagrees with this declared rank in the generated
+                        // code, and a static `rank(...)` of the comparison
+                        // folds to the bound.
+                        if isCmpOrLogical then
+                            match IR.stripUnits arrSide with
+                            | IRTInfer vid ->
+                                (match env.Subst.GetRankLowerBound vid with
+                                 | Some k when k >= 1 -> abstractBoolArray k
+                                 | _ -> resTy0)
+                            | _ -> resTy0
+                        else arrSide
+                    // The comparison twin of the reshape repair below: a REAL
+                    // array beside an unresolved var (a pack `head` an
+                    // intrinsic already materialized, compared with its own
+                    // `reduce` -- whose type is still the open element var).
+                    // The promotion rules answered the scalar Bool, so the
+                    // function returned `bool` while its body built an
+                    // Array<bool>. Whether the var resolves to a scalar
+                    // (broadcast) or an array (zip, which needs equal shapes),
+                    // the result is the array's shape with Bool elements.
+                    elif mode = Elementwise && isCmpOrLogical && IR.stripUnits resTy0 = IRTScalar ETBool
+                         && (match lRes, rRes with
+                             | ArrayElem _, other | other, ArrayElem _ -> unboundVar other
+                             | _ -> false) then
+                        match lRes, rRes with
+                        | ArrayElem arr, _ | _, ArrayElem arr -> mkArrayLike { arr with ElemType = IRTScalar ETBool }
+                        | _ -> resTy0
                     elif mode <> Elementwise || not isZipOp || not (unboundVar resTy0) then resTy0
                     else
                         match lRes, rRes with
@@ -8211,10 +8309,10 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 // Losing the shared records is not a compile error here -- it is
                 // a SILENT OUTER PRODUCT, since buildApplyInfo reads no shared
                 // axis and falls back to the full product grid.
-                // `function f(a: Float64^1, b: Float64^1) =
+                // `function f(a: T^1, b: T^1) =
                 //  object_for(lambda(x, y) -> x * y) <@> zip(a, b)` returned the
                 // 3x3 grid [[10,20,30],[20,40,60],[30,60,90]] where the concrete
-                // twin returns the co-iterated [10,40,90]; at `Float64^2` it
+                // twin returns the co-iterated [10,40,90]; at `T^2` it
                 // returned a 2x3x2x3 grid for a 2x3 elementwise product.
                 //
                 // Demand the arity FIRST, so these records are minted from the
@@ -8271,7 +8369,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
         // S1 SEAM 3, second half: `materializeArityVar` covers the operand that
         // still WEARS the caret-shorthand var, but an array-valued INTERMEDIATE
-        // built from one (`let wt = w * t` over a `t: Float64^1` the binop seam
+        // built from one (`let wt = w * t` over a `t: T^1` the binop seam
         // left deferred) is a plain unresolved var, so the demand is a no-op and
         // the old rank-0 fallback typed the apply scalar. Fall back exactly as
         // the method_for orientation of this same apply already does -- see
@@ -8964,20 +9062,70 @@ and buildApplyInfo (env: TypeEnv)
             | _ -> false
         [i; i + 1] |> List.exists (fun k ->
             k >= 0 && k < arrayTypes.Length && intElem arrayTypes.[k].ElemType)
-    let commWitnessError () =
-        if isReynolds || List.isEmpty commGroups || lambdaInfo.Params.Length < 2 then None
+    // WITNESSED LAW FAILURE, every claimed pair at every arity. A group
+    // `comm(p_1, ..., p_k)` claims invariance under the whole symmetric group
+    // on those slots, which the transpositions of CONSECUTIVE members (in
+    // parameter order) generate -- so checking each such pair checks the
+    // claim, adjacent in the kernel or not (`comm(x, z)` on (x, y, z) is the
+    // one pair (x, z)). `anticomm` is the same with the sign law: f is negated
+    // by each transposition. The other parameters are held at fixed values
+    // across the swap (Deduce.witnessSwapLawFailure); before, the evaluator
+    // gave up on any third parameter, so no false claim on a kernel of arity
+    // > 2 was ever refused, and the anticomm law had no witness at all. A
+    // pair the parity tables already PROVED (adjacent, PInv for comm / PNeg
+    // for anticomm) skips the search; complex pairs stay trusted (the
+    // evaluator has no complex numbers).
+    let claimedPairs (groups: int list list) =
+        groups
+        |> List.collect (fun g -> g |> List.distinct |> List.sort |> List.pairwise)
+        |> List.distinct
+    let slotElemIs (pred: IRType -> bool) (slots: int list) =
+        if lambdaInfo.Params.Length = arrayTypes.Length then
+            slots |> List.exists (fun k -> k >= 0 && k < arrayTypes.Length && pred arrayTypes.[k].ElemType)
         else
-            lambdaInfo.Params
-            |> List.pairwise
-            |> List.indexed
-            |> List.tryPick (fun (i, (a, b)) ->
-                let declared = commGroups |> List.exists (fun g -> List.contains i g && List.contains (i + 1) g)
-                let provedInv = i < stage3Pairs.Length && stage3Pairs.[i] = Blade.Deduce.PInv
-                if not declared || provedInv || pairElemIsComplex i then None
+            arrayTypes |> List.exists (fun at -> pred at.ElemType)
+    let rec complexElemT (t: IRType) =
+        match IR.stripUnits (env.Subst.Resolve t) with
+        | IRTScalar (ETComplex64 | ETComplex128) -> true
+        | ArrayElem arr -> complexElemT arr.ElemType
+        | _ -> false
+    let rec intElemT (t: IRType) =
+        match IR.stripUnits (env.Subst.Resolve t) with
+        | IRTIdxTagged (inner, _) -> intElemT inner
+        | IRTScalar (ETInt32 | ETInt64) -> true
+        | ArrayElem arr -> intElemT arr.ElemType
+        | _ -> false
+    let swapWitnessError (groups: int list list) (negate: bool) (provedLaw: Blade.Deduce.Parity)
+                         (mk: string * string * string -> TypeError) =
+        let ps = lambdaInfo.Params
+        if isReynolds || List.isEmpty groups || ps.Length < 2 then None
+        else
+            claimedPairs groups
+            |> List.tryPick (fun (p, q) ->
+                if p < 0 || q >= ps.Length || p = q then None
                 else
-                    Blade.Deduce.witnessSwapAsymmetry a.VarId b.VarId (pairElemIsInt i) lambdaInfo.Body
-                    |> Option.map (fun (x, y, u, v) ->
-                        CommContradictsWitness (a.Name, b.Name, commWitnessText a.Name b.Name x y u v)))
+                    let proved = q = p + 1 && p < stage3Pairs.Length && stage3Pairs.[p] = provedLaw
+                    // Complexity is judged per pair exactly as before (an
+                    // operand slot of the pair, or any operand when rows and
+                    // params are not 1:1); integer semantics likewise.
+                    let isComplex =
+                        if ps.Length = arrayTypes.Length then slotElemIs complexElemT [ p; q ]
+                        else slotElemIs complexElemT []
+                    if proved || isComplex then None
+                    else
+                        let (a, b) = (ps.[p], ps.[q])
+                        let others = ps |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
+                        let isInt = [ p; q ] |> List.exists (fun k -> k < arrayTypes.Length && intElemT arrayTypes.[k].ElemType)
+                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate isInt lambdaInfo.Body
+                        |> Option.map (fun (x, y, u, v, fixedVals) ->
+                            let named =
+                                fixedVals |> List.choose (fun (id, c) ->
+                                    others |> List.tryFind (fun o -> o.VarId = id) |> Option.map (fun o -> (o.Name, c)))
+                            mk (a.Name, b.Name, swapWitnessText a.Name b.Name named negate x y u v)))
+    let commWitnessError () =
+        swapWitnessError commGroups false Blade.Deduce.PInv CommContradictsWitness
+        |> Option.orElseWith (fun () ->
+            swapWitnessError lambdaInfo.AntisymGroups true Blade.Deduce.PNeg AnticommContradictsWitness)
     let contradictsIn (groups: int list list) (wanted: Blade.Deduce.Parity)
                       (needsComplexPair: bool) (mk: string -> string -> TypeError) =
         if List.isEmpty stage3Pairs || List.isEmpty groups then None
@@ -10513,6 +10661,9 @@ and buildApplyInfo (env: TypeEnv)
 and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
     let rec scan ty =
         match ty with
+        // A caret head naming a DECLARED type (`Speed^1`) is that type's
+        // array, not a variable (TypeLower.isDeclaredCaretHead).
+        | TyVar (name, _) when isDeclaredCaretHead env name -> ()
         | TyVar (name, _) ->
             env.Subst.RegisterTypeVarName(name)
         // CARET-FREE `T<u>` (owner ruling, 2026-08-09): the same head the
@@ -10558,6 +10709,23 @@ and prescanTypeVarNames (env: TypeEnv) (types: TypeExpr option list) : unit =
     types |> List.iter (Option.iter scan)
 
 and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
+    inferLambdaSeeded env parms whereClause body []
+
+/// `inferLambda` with optional SEED types for unannotated parameters (by
+/// position; None or a missing entry = a fresh inference variable, the
+/// ordinary case). Used for a lambda literal applied directly, whose argument
+/// types are known before its body is checked (ExprApp's lambda-head arm).
+and inferLambdaSeeded env parms whereClause body (seeds: IRType option list) : TypeResult<TypedExpr> =
+    inferLambdaFull env parms whereClause body seeds None
+
+/// The general lambda judgment: `inferLambdaSeeded` plus an optional declared
+/// RETURN annotation, lowered in the lambda's OWN type-variable scope (so the
+/// `T` of `-> T` is the `T` of the parameters). A nested `function f(x: T) ->
+/// T = ...` reaches here with its return type (inferLetBindingValueCore); it
+/// used to lower that annotation in the ENCLOSING scope, where a bare `T` is
+/// no variable at all -- it became the nominal type `T` and the parameter with
+/// it (BL3001 "declared T but the argument is Float64").
+and inferLambdaFull env parms whereClause body (seeds: IRType option list) (retAnnot: TypeExpr option) : TypeResult<TypedExpr> =
     let scopeEnv = enterCallableBody env
     // `repro` rides the emitted function boundary (noinline + contraction-off
     // attribute; call form everywhere) -- a lambda kernel is textually inlined
@@ -10567,6 +10735,9 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     | Some wc when wc.Repro ->
         Error (Other "`where repro` is carried by named function declarations only (`function f(...) where repro = ...`): a lambda kernel inlines into its call sites, where the reproducibility attribute cannot travel. Name the kernel and call it.")
     | _ ->
+    match parms |> List.tryPick (fun p -> p.Type |> Option.bind (caretHeadError env)) with
+    | Some e -> Error e
+    | None ->
     let commGroups = extractCommGroups parms whereClause
     let antisymGroups = extractAntisymGroups parms whereClause
 
@@ -10574,14 +10745,17 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
     let savedScope = env.Subst.PushTypeVarScope()
 
     // Pre-scan: collect type variable names from all annotations.
-    prescanTypeVarNames env (parms |> List.map (_.Type))
+    prescanTypeVarNames env ((parms |> List.map (_.Type)) @ [ retAnnot ])
 
     let mutable paramEnv = scopeEnv
     let typedParams = parms |> List.mapi (fun i p ->
         let varId = env.Builder.FreshId()
         let ty = match p.Type with
                  | Some t -> lowerTypeExpr env t
-                 | None -> env.Subst.Fresh()  // Infer from usage
+                 | None ->
+                     match List.tryItem i seeds with
+                     | Some (Some seed) -> seed
+                     | _ -> env.Subst.Fresh()  // Infer from usage
         // WIDTH SCHEMA (docs/plan-tuples-vs-arg-packs.md 6c): record the
         // WRITTEN `Tuple<k>` width before the annotation is thrown away by
         // lowering. Keyed by binder id, so the matcher at buildApplyInfo reads
@@ -10688,6 +10862,13 @@ and inferLambda env parms whereClause body : TypeResult<TypedExpr> =
                 Error (Other
                     "wildcard `_` is not a value: it cannot be a lambda's body. It is only meaningful as a compound-index coordinate (e.g. B((a, _, c))).")
             else
+            let retCheck =
+                match retAnnot with
+                | Some a -> unify env.Subst tBody.Type (lowerTypeExpr env a)
+                | None -> Ok ()
+            match retCheck with
+            | Error e -> Error e
+            | Ok () ->
             let info : TypedLambdaInfo = {
                 Params = typedParams; Body = tBody; ReturnType = tBody.Type
                 CommGroups = commGroups; AntisymGroups = antisymGroups; Captures = captures
@@ -11750,12 +11931,16 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
         // function-type annotation on a lambda still checks structurally
         // below).
         match binding.Value.Kind with
-        | ExprKind.ExprLambda _ when (match annotTy with FuncElem _ -> false | _ -> true) ->
-            inferExpr env binding.Value |> Result.bind (fun tv ->
-                (match env.Subst.Resolve tv.Type with
-                 | FuncElem (_, ret) -> unify env.Subst ret annotTy |> Result.map (fun () -> tv)
-                 | _ -> Ok tv)
-                |> Result.bind rejectEscapedWildcard)
+        | ExprKind.ExprLambda (parms, whereClause, body) when (match annotTy with FuncElem _ -> false | _ -> true) ->
+            // The return annotation is lowered in the lambda's own type-var
+            // scope (inferLambdaFull), exactly as checkFunctionDecl lowers a
+            // top-level function's: `-> T` names the parameters' `T`.
+            let lam = binding.Value
+            if lam.Span.StartLine > 0 then setCurrentExprSpan lam.Span
+            inferLambdaFull env parms whereClause body [] (Some annot)
+            |> Result.map (fun te ->
+                if te.Span.StartLine = 0 && lam.Span.StartLine > 0 then { te with Span = lam.Span } else te)
+            |> Result.bind rejectEscapedWildcard
         // Monadic zero at an array annotation: `let A: Array<Float64 like Y,
         // X> = zero [|> compute]` -- zero is the additive-identity CONCEPT
         // and the annotation supplies its shape. TExprZero's lowering only
@@ -11787,6 +11972,33 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
                     | IRLit (IRLitInt n) -> Some (TyIdx (mkExpr sp (ExprKind.ExprLit (LitInt n))))
                     | _ -> None
             let slots = arrTy.IndexTypes |> List.map slotSurface
+            // An array of a COMPOSITE element (a struct, String, tuple) has no
+            // fill-former spelling -- the former's kernel would have to return
+            // the composite -- so it is the explicit nested literal
+            // `[[zero, ...], ...]` of the annotation's static shape, each cell
+            // a `zero` the annotation types at the element; lowering and
+            // IRMono.resolveTypedZerosModule give each its value
+            // (IR.zeroValueOf), the way a struct array literal is written by
+            // hand (structs/006).
+            let staticExtents =
+                arrTy.IndexTypes |> List.map (fun idx ->
+                    match idx.Extent with
+                    | IRLit (IRLitInt n) when idx.Rank = 1 && idx.IxKind = IxKPlain && n >= 0L -> Some n
+                    | _ -> None)
+            let compositeLiteral =
+                if elemZero.IsSome || arrTy.IndexTypes.IsEmpty || not (staticExtents |> List.forall Option.isSome) then None
+                else
+                    let ns = staticExtents |> List.map Option.get
+                    if ns |> List.fold (fun acc n -> if acc > IR.zeroArrayCellCap then acc else acc * n) 1L > IR.zeroArrayCellCap then None
+                    else
+                        let rec nest (ns: int64 list) =
+                            match ns with
+                            | [] -> mkExpr sp ExprKind.ExprZero
+                            | n :: rest -> mkExpr sp (ExprKind.ExprArrayLit (List.init (int n) (fun _ -> nest rest)))
+                        Some (nest ns)
+            match compositeLiteral with
+            | Some lit -> checkExpr env annotTy lit |> Result.bind (fun tv -> rejectEscapedWildcard { tv with Type = annotTy })
+            | None ->
             (match elemZero, (if slots |> List.forall Option.isSome then Some (List.map Option.get slots) else None) with
              | Some zBody, Some idxTys ->
                  let params_ : LambdaParam list =
@@ -11797,7 +12009,7 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
                  checkExpr env annotTy synth |> Result.bind (fun tv ->
                      rejectEscapedWildcard { tv with Type = annotTy })
              | _ ->
-                 Error (Other "zero at this array annotation cannot be materialized: every axis must be a plain rank-1 index with a nominal name or a static extent, and the element type must be numeric, bool, or complex. Spell the fill explicitly (`for () in range<...> <@> lambda(...) -> <zero literal> |> compute`) for packed, ragged, or non-static shapes."))
+                 Error (Other "zero at this array annotation cannot be materialized: every axis must be a plain rank-1 index with a nominal name or a static extent, and the element type must be numeric, bool, or complex (a struct, String or tuple element needs a static shape of at most 65536 cells). Spell the fill explicitly (`for () in range<...> <@> lambda(...) -> <zero literal> |> compute`) for packed, ragged, or non-static shapes."))
         | _ ->
         // THE ascription conversion seam, and the one that makes an
         // annotation choose the magnitude: `let c: Float64<hour> = <days>`.
@@ -12847,6 +13059,22 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                 // the body actually referencing `name` (free-var scan), so
                 // the common NON-recursive case stays on the original path
                 // (no id allocation) and its lowering stays byte-identical.
+                //
+                // A NESTED FUNCTION is generic exactly as a top-level one is:
+                // every variable its declaration mints is recorded against its
+                // binder (FuncSigVarRange), so the call judgment instantiates
+                // the POLYMORPHIC ones per call (calleeQuantifier) and IR
+                // monomorphization specializes the lifted callable per use.
+                // Without the range, `{ function idl(x: T) -> T = x; idl(2.0) }`
+                // bound the declaration's `T` at its first call and left a
+                // `T^1` body open (BL6001). Only `function` / `let static`
+                // lambdas (BindConst): a plain `let f = lambda` stays
+                // monomorphic (let-polymorphism for lambdas is not adopted).
+                let nestedFunction =
+                    match binding.Mutability, binding.Pattern.Kind, binding.Value.Kind with
+                    | BindConst, PatternKind.PatVar _, ExprKind.ExprLambda _ -> true
+                    | _ -> false
+                let sigVarLo = curEnv.Subst.NextId
                 let selfInfo =
                     match binding.Mutability, binding.Pattern.Kind, binding.Value.Kind with
                     | BindConst, PatternKind.PatVar n, ExprKind.ExprLambda (lamParms, _, lamBody)
@@ -12860,6 +13088,13 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                     match selfInfo with
                     | Some (n, ty, id) -> bindVarSimple n id ty curEnv
                     | None -> curEnv
+                // Open-ended while the body is checked, as checkFunctionDecl's
+                // (a recursive call is not instantiated against an unfinished
+                // signature); closed once the binding id is known, below.
+                (match selfInfo with
+                 | Some (_, _, id) when nestedFunction ->
+                     curEnv.FuncSigVarRange.[id] <- (sigVarLo, System.Int32.MaxValue)
+                 | _ -> ())
                 match inferLetBindingValue inferEnv binding with
                 | Ok tValue0 ->
                     // Confirm the pre-bound name really surfaced as a self-capture
@@ -12882,7 +13117,33 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                                     Captures = info.Captures |> List.filter (fun c -> c.Name <> n)
                                     SelfBinding = Some (n, id) }
                             ({ tValue0 with Kind = TExprLambda info' }, id)
+                        // A GENERIC nested function (its type keeps a
+                        // polymorphic signature variable open) takes the
+                        // top-level road in lowering too: the self-binding
+                        // makes its lifted callable a NAMED function whose id
+                        // is the binder's, so every call is a direct call of an
+                        // HM function and IR monomorphization specializes it
+                        // per use, as it does a top-level declaration. Left
+                        // as a let of an anonymous lifted lambda, the calls
+                        // went through a local alias no specialization was
+                        // requested for (BL6001). Non-generic nested functions
+                        // keep their original lowering.
+                        | _, TExprLambda info
+                              when nestedFunction && info.SelfBinding.IsNone
+                                   // ITS OWN variables only: one shared with an
+                                   // enclosing generic body (a captured `T`) is
+                                   // the enclosing declaration's to specialize.
+                                   && (freeInferVars curEnv.Subst tValue0.Type
+                                       |> Set.exists (fun v -> v >= sigVarLo && curEnv.Subst.IsPolymorphicId v)) ->
+                            let id = curEnv.Builder.FreshId()
+                            let n = match binding.Pattern.Kind with PatternKind.PatVar n -> n | _ -> ""
+                            ({ tValue0 with Kind = TExprLambda { info with SelfBinding = Some (n, id) } }, id)
                         | _ -> (tValue0, curEnv.Builder.FreshId())
+                    (match selfInfo with
+                     | Some (_, _, id) when id <> varId -> curEnv.FuncSigVarRange.Remove id |> ignore
+                     | _ -> ())
+                    if nestedFunction then
+                        curEnv.FuncSigVarRange.[varId] <- (sigVarLo, curEnv.Subst.NextId)
                     // A destructuring binding's own name is synthesized from its leaves,
                     // `_(a,b)`: the interpreter's session memo is keyed by binding NAME,
                     // and the old placeholder `_` made every top-level destructure in a
@@ -13198,6 +13459,40 @@ and inferMethodFor env arrays : TypeResult<TypedExpr> =
     inferMethodForOperands env arrays |> Result.bind treeLoopOperandGuard
 
 and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
+    // GROUPED operands are the one non-dense co-iteration
+    // (zipSharedRecords' isGroupedRaggedShape arm): the rows line up
+    // one-to-one and the kernel takes one row per operand. That is only
+    // meaningful when every operand was grouped by the SAME keys -- one
+    // offsets table drives every row -- and the types cannot say so, since
+    // two independent `group_keys` calls produce structurally identical
+    // records. Discharge it on the EXPRESSIONS: chase each operand to its
+    // `group_by(vals, gk)` and require the `gk` operands to resolve (through
+    // any number of alias hops) to the same binding.
+    //
+    // Shared by BOTH zip spellings: `method_for(zip(ga, gb))` and the
+    // let-bound `let Z = zip(ga, gb); method_for(Z)`. The second used to skip
+    // it, so two independent groupings typechecked and died in codegen's
+    // BL7004 gate instead of here.
+    let groupedZipSameKeys (tOps: TypedExpr list) (arrayTypes: IRArrayType list) : TypeResult<unit> =
+        let groupKeysOperandOf (ta: TypedExpr) : TypedExpr option =
+            match (resolveTypedExprDeep env ta).Kind with
+            | TExprGroupBy (_, gkExpr) -> Some (resolveTypedExprDeep env gkExpr)
+            | _ -> None
+        let allGrouped = arrayTypes |> List.forall (fun at -> isGroupedRaggedShape at.IndexTypes)
+        let sameGroupKeysBinding () =
+            match tOps |> List.map groupKeysOperandOf with
+            | (Some g0) :: rest when rest |> List.forall Option.isSome ->
+                let nameOf (g: TypedExpr) =
+                    match g.Kind with TExprVar (n, _, _) -> Some n | _ -> None
+                rest |> List.map Option.get |> List.forall (fun g ->
+                    System.Object.ReferenceEquals(g, g0)
+                    || (match nameOf g, nameOf g0 with
+                        | Some a, Some b -> a = b
+                        | _ -> false))
+            | _ -> false
+        if allGrouped && arrayTypes.Length > 1 && not (sameGroupKeysBinding ()) then
+            Error (Other "co-iterating grouped arrays requires every operand to be grouped by the SAME group_keys binding (one offsets table drives the shared row walk). Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` to each group_by; grouping each operand with its own group_keys call gives two independent partitions with no row correspondence.")
+        else Ok ()
     // Detect method_for(zip(A, B, ...)) -- expand zip into co-iteration
     match arrays with
     | [{ Kind = ExprKind.ExprZip zipExprs }] ->
@@ -13214,37 +13509,11 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             // of records -- all operands must agree structurally and every record
             // must be plain dense. buildApplyInfo trims the co-iterated prefix
             // by the kernel's slice rank, so row-mode kernels (loops/085) keep
-            // receiving their inner-record slice.
-            //
-            // GROUPED operands are the one non-dense co-iteration
-            // (zipSharedRecords' isGroupedRaggedShape arm): the rows line up
-            // one-to-one and the kernel takes one row per operand. That is
-            // only meaningful when every operand was grouped by the SAME keys
-            // -- one offsets table drives every row -- and the types cannot
-            // say so, since two independent `group_keys` calls produce
-            // structurally identical records. Discharge it here on the
-            // EXPRESSIONS: chase each operand to its `group_by(vals, gk)` and
-            // require the `gk` operands to resolve (through any number of
-            // alias hops) to the same binding.
-            let groupKeysOperandOf (ta: TypedExpr) : TypedExpr option =
-                match (resolveTypedExprDeep env ta).Kind with
-                | TExprGroupBy (_, gkExpr) -> Some (resolveTypedExprDeep env gkExpr)
-                | _ -> None
-            let allGrouped = arrayTypes |> List.forall (fun at -> isGroupedRaggedShape at.IndexTypes)
-            let sameGroupKeysBinding () =
-                match tZipArrays |> List.map groupKeysOperandOf with
-                | (Some g0) :: rest when rest |> List.forall Option.isSome ->
-                    let nameOf (g: TypedExpr) =
-                        match g.Kind with TExprVar (n, _, _) -> Some n | _ -> None
-                    rest |> List.map Option.get |> List.forall (fun g ->
-                        System.Object.ReferenceEquals(g, g0)
-                        || (match nameOf g, nameOf g0 with
-                            | Some a, Some b -> a = b
-                            | _ -> false))
-                | _ -> false
-            if allGrouped && arrayTypes.Length > 1 && not (sameGroupKeysBinding ()) then
-                Error (Other "co-iterating grouped arrays requires every operand to be grouped by the SAME group_keys binding (one offsets table drives the shared row walk). Bind the keys once (`let gk = group_keys(...)`) and pass that same `gk` to each group_by; grouping each operand with its own group_keys call gives two independent partitions with no row correspondence.")
-            else
+            // receiving their inner-record slice. Grouped operands: see
+            // groupedZipSameKeys above.
+            match groupedZipSameKeys tZipArrays arrayTypes with
+            | Error e -> Error e
+            | Ok () ->
             match zipSharedRecords arrayTypes with
             | Error e -> Error e
             | Ok sharedRecords ->
@@ -13291,6 +13560,9 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
                     loopOperandArrayType env
                         (fun () -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
                         te.Type)
+                match groupedZipSameKeys zipExprs arrayTypes with
+                | Error e -> Error e
+                | Ok () ->
                 match zipSharedRecords arrayTypes with
                 | Error e -> Error e
                 | Ok sharedRecords ->
@@ -15399,25 +15671,42 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 // tables leave unproved, disproved by a concrete counterexample.
                 // Real elements only (the evaluator has no complex numbers);
                 // a generic/unresolved element evaluates as Float.
+                // Every claimed pair at every arity, comm AND anticomm: the
+                // lambda-kernel seam's rule (claimed pairs = consecutive
+                // members of each group; other params held fixed across the
+                // swap), see swapWitnessError there.
                 |> Option.orElseWith (fun () ->
-                    if List.isEmpty commGroups || bodyElemIsComplex then None
+                    if bodyElemIsComplex then None
                     else
                         let isIntTy (t: IRType) =
                             match IR.stripUnits (env.Subst.Resolve t) with
                             | IRTScalar (ETInt32 | ETInt64) -> true
                             | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) -> true
                             | _ -> false
-                        typedParams
-                        |> List.pairwise
-                        |> List.indexed
-                        |> List.tryPick (fun (i, (a, b)) ->
-                            let declared = commGroups |> List.exists (fun g -> List.contains i g && List.contains (i + 1) g)
-                            let provedInv = i < deducedPairs.Length && deducedPairs.[i] = Blade.Deduce.PInv
-                            if not declared || provedInv then None
-                            else
-                                Blade.Deduce.witnessSwapAsymmetry a.VarId b.VarId (isIntTy a.Type && isIntTy b.Type) tBody
-                                |> Option.map (fun (x, y, u, v) ->
-                                    CommContradictsWitness (a.Name, b.Name, commWitnessText a.Name b.Name x y u v))))
+                        let n = typedParams.Length
+                        let witness (groups: int list list) (negate: bool) (provedLaw: Blade.Deduce.Parity)
+                                    (mk: string * string * string -> TypeError) =
+                            groups
+                            |> List.collect (fun g -> g |> List.distinct |> List.sort |> List.pairwise)
+                            |> List.distinct
+                            |> List.tryPick (fun (p, q) ->
+                                if p < 0 || q >= n || p = q then None
+                                else
+                                    let proved = q = p + 1 && p < deducedPairs.Length && deducedPairs.[p] = provedLaw
+                                    if proved then None
+                                    else
+                                        let (a, b) = (typedParams.[p], typedParams.[q])
+                                        let others = typedParams |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
+                                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate
+                                            (isIntTy a.Type && isIntTy b.Type) tBody
+                                        |> Option.map (fun (x, y, u, v, fixedVals) ->
+                                            let named =
+                                                fixedVals |> List.choose (fun (id, c) ->
+                                                    others |> List.tryFind (fun o -> o.VarId = id) |> Option.map (fun o -> (o.Name, c)))
+                                            mk (a.Name, b.Name, swapWitnessText a.Name b.Name named negate x y u v)))
+                        witness commGroups false Blade.Deduce.PInv CommContradictsWitness
+                        |> Option.orElseWith (fun () ->
+                            witness antisymGroups true Blade.Deduce.PNeg AnticommContradictsWitness))
             match commContradiction with
             | Some e -> Error e
             | None ->

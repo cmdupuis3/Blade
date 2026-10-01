@@ -155,10 +155,19 @@
 // -------------------------------------------------------------------------
 // FAILURE
 // -------------------------------------------------------------------------
-// Every CUDA and cuBLAS status is checked, and a failure ABORTS with the API
-// name and the status on stderr. It is not recoverable and it must not be
-// silent: the alternative is a program that prints an uninitialised pool. A
-// build that emits these calls has already declared the device is available.
+// Every CUDA and cuBLAS status is checked, and a failure is TERMINAL, naming
+// the API and the status. It is not recoverable and it must not be silent: the
+// alternative is a program that prints an uninitialised pool. A build that
+// emits these calls has already declared the device is available.
+//
+// The shim is its own DLL, so it fails through blade_dll_panic.hpp: the Blade
+// host binds its own panic (blade_rt::dll_panic) in through `blade_cuda_bind_panic` at
+// static initialization, and a failure here is that executable's BL8005 --
+// one `error[BL8005]` line, its failure-exit hooks (the run record, the
+// memcheck report) and exit 1. It used to call abort() from inside the DLL,
+// which ran none of them: no run record was written. A standalone device
+// program with no Blade host (cublas_swap_tests.cu) never binds, and still
+// prints the line and aborts.
 
 #include <cstddef>
 #include <complex>
@@ -191,6 +200,11 @@ void blade_cuda_matmul_d(size_t m, size_t k, size_t n, double** Arows, size_t Ac
 void blade_cuda_matmul_c(size_t m, size_t k, size_t n, std::complex<float>** Arows, size_t Acells, std::complex<float>** Brows, size_t Bcells, std::complex<float>** Crows, size_t Ccells);
 void blade_cuda_matmul_z(size_t m, size_t k, size_t n, std::complex<double>** Arows, size_t Acells, std::complex<double>** Brows, size_t Bcells, std::complex<double>** Crows, size_t Ccells);
 
+// The failure-exit binding (see FAILURE above and blade_dll_panic.hpp): the
+// host hands the DLL its panic. Called by the generated program at static
+// initialization, never by hand.
+void blade_cuda_bind_panic(void (*host_panic)(const char* code, const char* msg));
+
 } // extern "C"
 
 #else
@@ -205,6 +219,7 @@ void blade_cuda_matmul_z(size_t m, size_t k, size_t n, std::complex<double>** Ar
 #include <vector>
 
 #include "blade_linalg_views.hpp"
+#include "blade_dll_panic.hpp"
 
 // Windows: the shim is built as a DLL and the host program links its export
 // table directly (MinGW reads DLL exports; the extern "C" boundary is what
@@ -215,19 +230,26 @@ void blade_cuda_matmul_z(size_t m, size_t k, size_t n, std::complex<double>** Ar
 #define BLADE_CUDA_API extern "C"
 #endif
 
+// The host's panic, bound once at its static initialization (FAILURE note).
+BLADE_CUDA_API void blade_cuda_bind_panic(blade_dll::panic_fn host_panic) {
+    blade_dll::bind(host_panic);
+}
+
 namespace blade_cuda_detail {
 
     // --------------------------------------------------------------------
-    // Failure: loud and terminal. See the header note.
+    // Failure: loud and terminal, through the HOST's panic. See the header
+    // note. The message lives in a static buffer because the host's
+    // failure-exit hooks (the run record) read it after this frame is gone.
     // --------------------------------------------------------------------
-    inline void fail(const char* api, const char* detail, int status) {
-        std::fprintf(stderr,
-                     "blade: cuBLAS dispatch failed in %s (status %d%s%s)\n",
-                     api, status,
-                     (detail && *detail) ? ": " : "",
-                     (detail && *detail) ? detail : "");
-        std::fflush(stderr);
-        std::abort();
+    [[noreturn]] inline void fail(const char* api, const char* detail, int status) {
+        static char msg[512];
+        std::snprintf(msg, sizeof msg,
+                      "cuBLAS dispatch failed in %s (status %d%s%s)",
+                      api, status,
+                      (detail && *detail) ? ": " : "",
+                      (detail && *detail) ? detail : "");
+        blade_dll::fail("BL8005", msg);
     }
 
     inline void ck(cudaError_t e, const char* api) {

@@ -1,0 +1,50 @@
+// TEST: A comparison on a pack element is a Bool array at every instance
+// ============================================================================
+// Pack elements (`head` of `let head :: tail = A`, `A[i]`) are typed at fresh
+// variables, so a comparison on one went through two inferBinOp repairs that
+// did not know a comparison's element is Bool:
+//   * once a call had recorded that the element is an array (`tot(head)`, a
+//     rank LOWER BOUND), `head > 0.0` was typed as `head`'s own element array.
+//     The function returned Array<double> and the Bool result was copied into
+//     it: `[1, 0, 1]` printed for `[true, false, true]` -- including at the
+//     bottom of a recursion (`lastpos`);
+//   * once an intrinsic had materialized the element (`reduce(head, (+))`,
+//     whose result is still the element's open variable), `head > s` was a
+//     SCALAR `bool`, printed `true` from an array's pointer.
+// A comparison keeps the array's shape and takes a Bool element.
+// ============================================================================
+function tot(r: T^1) -> T^0 = reduce(r, (+))
+
+function firstpos(A: Poly<T^1>) = {
+    let head :: tail = A
+    let s = tot(head)
+    head > 0.0
+}
+let p = firstpos([1.0, -2.0, 6.0], [3.0, 4.0, -2.0])
+// EXPECT: p = [true, false, true]
+
+function lastpos(A: Poly<T^1>) = {
+    match arity(A) with
+    | 1 -> {
+        let h = A[0]
+        let s = tot(h)
+        h > 0.0
+    }
+    | _ -> {
+        let head :: tail = A
+        let s = tot(head)
+        lastpos(tail)
+    }
+}
+let lp = lastpos([1.0, -2.0, 6.0], [3.0, 4.0, -2.0], [-1.0, 0.5, 2.0])
+// EXPECT: lp = [false, true, true]
+
+function above_total(A: Poly<T^1>) = {
+    let head :: tail = A
+    let s = reduce(head, (+))
+    head > s
+}
+let af = above_total([1.0, -2.0, 6.0], [3.0, 4.0, -2.0])
+// EXPECT: af = [false, false, true]
+let ai = above_total([9, -1, -2], [3, 4, -2])
+// EXPECT: ai = [true, false, false]

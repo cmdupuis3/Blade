@@ -1,0 +1,9 @@
+// TEST: comm claim on a non-adjacent pair disproved by a witness (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: `where comm(x, z)`
+// A partial claim on a wider kernel: `comm(x, z)` on lambda(x, y, z) names
+// slots 0 and 2. The old check only looked at ADJACENT pairs both inside a
+// group, so this pair was never examined at all. Every claimed pair is now
+// the consecutive members of its group, adjacent in the kernel or not.
+let A = [1.0, 2.0, 3.0]
+let R = method_for(A, A, A) <@> lambda(x, y, z) where comm(x, z) -> x + 2.0 * y + 3.0 * z |> compute

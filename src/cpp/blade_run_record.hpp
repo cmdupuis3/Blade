@@ -10,7 +10,7 @@
 // units, identity policy, and for compile-time-folded inputs the content
 // hash the fold was taken over) with what the RUN observed: each input's
 // existence, kind, size and modification time; the executable's own size and
-// modification time; the toolchain (GCC's __VERSION__) and the FP / library
+// modification time; the toolchain (BLADE_RR_COMPILER) and the FP / library
 // policy the build was compiled under (the BLADE_RR_* defines Build.fs
 // passes, so the emitted .cpp itself carries no environment); the RNG
 // generator when the program draws; and the completion status -- ok, or
@@ -67,6 +67,19 @@ extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void
 #endif
 #define BLADE_RR_STR_(x) #x
 #define BLADE_RR_STR(x) BLADE_RR_STR_(x)
+// The compiler identity the record names. GCC and clang spell it __VERSION__
+// (the g++ record text is that string, unchanged); MSVC -- the host compiler
+// nvcc drives for the Windows CUDA paths -- has no __VERSION__ and names
+// itself through _MSC_FULL_VER (and _MSC_BUILD, the fourth component).
+#if defined(__VERSION__)
+#define BLADE_RR_COMPILER __VERSION__
+#elif defined(_MSC_FULL_VER) && defined(_MSC_BUILD)
+#define BLADE_RR_COMPILER "MSVC " BLADE_RR_STR(_MSC_FULL_VER) "." BLADE_RR_STR(_MSC_BUILD)
+#elif defined(_MSC_FULL_VER)
+#define BLADE_RR_COMPILER "MSVC " BLADE_RR_STR(_MSC_FULL_VER)
+#else
+#define BLADE_RR_COMPILER "unknown"
+#endif
 #if defined(__GNUC__)
 #define BLADE_RR_COLD __attribute__((noinline, cold))
 #else
@@ -153,7 +166,7 @@ namespace blade_rr {
     std::fputs(",\"observed\":", f);
     observe(f, self);
     std::fputs(",\"compiler\":", f);
-    json_string(f, __VERSION__);
+    json_string(f, BLADE_RR_COMPILER);
     std::fputs(",\"blade\":", f);
     json_string(f, blade_version);
     std::fputs("},\"policy\":{\"march\":", f);

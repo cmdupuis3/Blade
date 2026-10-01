@@ -766,10 +766,26 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         // positionally by genObjectForApplication. They need the loop-form
         // Arrays hoisting rule, not the call-argument one -- see
         // `liftLoopAppOperand`.
+        // A plain RANGE in an ordinary call-argument slot (`tot(0..5)`,
+        // `tot(range<I>)`) is hoisted to its own let, as in the by-name
+        // operand slots of `liftChildIncludingLoopApp`: the callee takes an
+        // array, and a bare IRRange has no rendering as a value outside a
+        // binding (BL7001 "no rule for IRRange in expression position") --
+        // binding it by hand first was the only spelling that compiled. Same
+        // spelled array type as there, for the same reason. Compound, sparse
+        // and symmetric ranges keep their existing (loud) path.
+        let liftCallArg (a: IRExpr) =
+            match liftChildIncludingArrayLit builder a with
+            | (binds, (IRRange (ixs, _) as r))
+                when ixs |> List.forall (fun ix -> ix.IxKind = IxKPlain && ix.Symmetry = SymNone) ->
+                let id = builder.FreshId()
+                let ty = mkArrayLike { ElemType = IRTScalar ETInt64; IndexTypes = ixs; IsVirtual = false; Identity = None }
+                (binds @ [(id, ty, r)], IRVar (id, ty))
+            | res -> res
         let liftArg =
             match fn' with
             | IRObjectFor _ -> liftLoopAppOperand builder
-            | _ -> liftChildIncludingArrayLit builder
+            | _ -> liftCallArg
         let (binds, argsFinal) =
             args' |> List.fold (fun (accB, accA) a ->
                 let (b, a') = liftArg a
@@ -792,8 +808,17 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         let (binds, arrsFinal) = liftChildren builder arrs'
         wrapLets binds (IRAlign (arrsFinal, sp))
     | IRTuple es ->
+        // A tuple component is a VALUE slot, like a function argument: an
+        // inline array literal there (`f(([1.5, 2.0], [2, 3]))`, `let t =
+        // ([1.0], 2)`) has no expression rendering and reached codegen as
+        // BL7001 "no rule for IRArrayLit". Hoisted to its own let-RHS it takes
+        // the road binding the component by hand takes. A NESTED tuple's own
+        // hoists come back as a let chain, which the helper peels up here.
         let es' = es |> List.map (liftExpr builder)
-        let (binds, esFinal) = liftChildren builder es'
+        let (binds, esFinal) =
+            es' |> List.fold (fun (accB, accE) e ->
+                let (b, e') = liftChildIncludingArrayLit builder e
+                (accB @ b, accE @ [e'])) ([], [])
         wrapLets binds (IRTuple esFinal)
     | IRComplex (re, im) ->
         let re' = liftExpr builder re

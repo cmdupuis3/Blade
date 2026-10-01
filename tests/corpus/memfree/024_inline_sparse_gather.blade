@@ -1,0 +1,35 @@
+// TEST: Memfree Inline Sparse Gather
+// ============================================================================
+// A partial sparse read used INLINE -- the operand of a fold, a prodsum or an
+// extents(), with no let of its own -- is still an allocating gather. The
+// expression forms spell their operand repeatedly (a fold at every element
+// read, its extent test and its guard), so the gather used to run, and leak,
+// once per ACCESS: O(n * cardinality) work and n gathers per evaluation.
+// It is now bound once inside the consumer's IIFE and freed by its producer's
+// teardown before the IIFE returns. Exercised where no statement scope
+// exists: a recursive array's arm (199 evaluations), a method_for kernel
+// body, a function's return expression, and a prodsum naming the same gather
+// twice (bound once); and the module-level statement fold (`top`), which
+// gathers once into a temp and frees it after the fold.
+// ============================================================================
+let static K = [(2, 1), (0, 3), (1, 0), (0, 5)]
+type E = Idx<4>
+let flat: Array<Float64 like E> = [1.0, 2.0, 3.0, 4.0]
+let F = sparse(flat, K)
+type Steps = Idx<200>
+let rec acc: Array<Float64 like Steps> =
+    match acc with
+    | zero -> zero
+    | zero :: s -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + reduce(F((n % 2, _)), (+))
+let total = acc((199 : Steps))
+let per = method_for(0..3) <@> lambda(i) -> reduce(F((i, _)), (+)) + Float64(extents(F((i, _)))) |> compute
+let ps = prodsum(F((0, _)), F((0, _)))
+let top = reduce(F((0, _)), (+))
+function fsum(k: Int64) -> Float64 = reduce(F((k, _)), (+))
+let fv = fsum(0) + fsum(1)
+// EXPECT: total = 894
+// EXPECT: per = [8, 4, 2]
+// EXPECT: ps = 20
+// EXPECT: top = 6
+// EXPECT: fv = 9
