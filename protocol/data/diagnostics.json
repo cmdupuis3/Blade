@@ -52,9 +52,38 @@
       ],
       "docs": []
     },
+    "BL1003": {
+      "title": "removed loop or malformed recursive array",
+      "explanation": "Blade has no imperative loop, and this code is the steer away from one. It fires for the removed `for x in a..b { ... }` statement (at top level and inside a block alike) and for `while` / `do` written as a statement. It also guards the construct a sequential loop becomes: a `let rec` recursive array has a rigid form -- an explicit type annotation, `match <the array itself> with`, a base arm `| zero -> zero`, an optional seed arm `| zero :: n -> zero :: <slice>`, and an inductive arm `| prefix :: n -> prefix :: <slice>` -- and any departure from it is reported here. The two guards are not interchangeable: a recursive-array arm takes `while` (defined until the condition goes false, frozen after), only on the inductive arm; an ordinary match arm takes `if` (a failing guard falls through to the next arm). Each spelled on the other is this code.",
+      "fix": "Pick the declarative construct the loop was standing in for. A recurrence, time-stepping or running state is a recursive array (`let rec q: Array<T like Step> = match q with | zero -> zero | prefix :: n -> prefix :: <step>`); iterate-until-converged is that array's inductive arm with a `while` guard over a budget extent. A fold is `reduce(...)`, and a parallel map is array arithmetic or `method_for(range<...>) <@> lambda(...)`. If the `let rec` itself was refused, the message names the part of the form that is wrong.",
+      "examples": [
+        "tests/corpus/diagnostics/045_for_in_removed.blade",
+        "tests/corpus/diagnostics/078_while_loop_steer.blade",
+        "tests/corpus/diagnostics/079_while_on_ordinary_match_arm_rejects.blade",
+        "tests/corpus/recursive-arrays/014_while_guard_on_seed_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md",
+        "docs/quickstart-1.md"
+      ]
+    },
+    "BL1004": {
+      "title": "ill-formed type spelling",
+      "explanation": "The text sits where a type belongs and uses a type former, but spells no type. Two formers raise it. `Tuple<...>` is either one integer WIDTH of at least 2 (`Tuple<2>`, element types inferred) or a list of at least two component TYPES (`Tuple<Float64, Float64>`): a width of 0 or 1, a negative width, an empty `Tuple<>`, a single component type, or a width mixed with component types are all refused -- there is no 1-tuple, because `(e)` is grouping. The caret `H^r` builds a rank-r array of H elements: a concrete element type needs an integer literal rank (`Float64^1`; a variable rank belongs to a type variable, `T^r`), a builtin that is not an array element type cannot take a caret, and neither can an alias that is already an array type (that would be an array of arrays, which the caret does not build).",
+      "fix": "For a tuple, write a literal width of 2 or more, or at least two component types, never a mixture. For a caret, give a concrete element a literal rank (`Float64^1`, `Int64^2`), use a type variable when the element or the rank is generic (`T^1`, `T^r`), and name an existing array type directly instead of raising it with `^`.",
+      "examples": [
+        "tests/corpus/tuples/005_tuple_width_one_rejects.blade",
+        "tests/corpus/tuples/019_tuple_width_type_mixture_rejects.blade",
+        "tests/corpus/functions/173_concrete_element_caret_variable_rank_rejects.blade",
+        "tests/corpus/functions/182_caret_on_array_alias_rejects.blade"
+      ],
+      "docs": [
+        "docs/formalism.md"
+      ]
+    },
     "BL1999": {
       "title": "parse error",
-      "explanation": "The parser band's general failure: the token stream does not form a Blade construct here, and no more specific parse code applies. Note that removed syntax lands here at top level -- an imperative `for` loop inside a block is the dedicated BL1003 steer, but the same text at top level dies earlier, as this code.",
+      "explanation": "The parser band's general failure: the token stream does not form a Blade construct here, and no more specific parse code applies. Removed imperative syntax is not reported here: a `for` or `while` loop is the dedicated BL1003 steer, at top level and inside a block alike.",
       "fix": "Read the message, which describes the construct the parser was building. If the text is a loop, an accumulator, or another imperative shape, rewrite it as a loop object, a combinator, or a `let rec` recursive array -- see the style guide in CLAUDE.md and docs/quickstart-1.md.",
       "examples": [
         "tests/corpus/basic/044_braceless_arm_needs_value_rejects.blade",
@@ -614,7 +643,7 @@
     },
     "BL4016": {
       "title": "parallel fold needs a reorder licence",
-      "explanation": "`where ... omp` on a fold kernel with no licence to reorder it. A bare `omp` on a `reduce` kernel licenses fold reordering, which requires commutativity; nothing here is disproved (that would be BL4013) -- there is simply no commutativity/associativity claim to stand on. `reduce` folds right-to-left, innermost axis first, and that order is observable the moment the kernel is not commutative.",
+      "explanation": "`where ... omp` on a fold kernel with no licence to reorder it. A bare `omp` on a `reduce` kernel licenses fold reordering, which requires commutativity; nothing here is disproved (that would be BL4013) -- there is simply no commutativity/associativity claim to stand on. `reduce` is a LEFT fold in ascending storage order, innermost axis first (`reduce([1, 2, 3, 4], lambda(a, b) -> a - b)` is `((1 - 2) - 3) - 4 = -8`), and that order is observable the moment the kernel is not commutative.",
       "fix": "Add `comm(...)` to the kernel if it really commutes, use a builtin fold body, or drop the `omp` and keep the sequential order.",
       "examples": [
         "tests/corpus/diagnostics/049_fold_omp_needs_license.blade"

@@ -182,8 +182,9 @@ the front end has not signed."
 
 **For (F):** three arguments, and I judge them decisive.
 
-1. **`reduce` is defined over dimensions.** `docs/formalism.md:693` — "right-to-left fold
-   of the innermost `n` dimensions … `n = rank(A)` is the full fold to a scalar." A
+1. **`reduce` is defined over dimensions.** `docs/formalism.md` §6.4 (the `reduce`
+   entry) — "a LEFT fold, in ascending storage order, of the innermost `n` dimensions …
+   `n = rank(A)` is the full fold to a scalar." A
    symmetric array has `r` logical dimensions (§3.2). Reading "dimensions" as "stored
    cells" for exactly one storage class makes `reduce` storage-dependent, which is the
    opposite of every other operation in the language.

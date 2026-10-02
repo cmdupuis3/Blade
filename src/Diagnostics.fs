@@ -155,6 +155,29 @@ module Codes =
             // BL1xxx: parser
             "BL1001", "expected token"
             "BL1002", "unexpected end of file"
+            // BL1003: a REMOVED or RELOCATED construct, steered rather than
+            // left to die as a generic BL1001 far from the cause. Two families
+            // share it. The imperative loop: `for x in a..b { ... }` (top level
+            // and blocks alike), and `while` / `do` in statement position.
+            // And the recursive array, which is where a loop goes instead and
+            // whose form is rigid: `let rec` without its annotation, a
+            // scrutinee that is not the array, arms that are not
+            // `zero` / `zero :: n` / `prefix :: n`, `if` on its arm (the guard
+            // there is `while`) and `while` on an ordinary match arm (the
+            // guard there is `if`). A HARD parse error (ParserCore
+            // .isHardParseError): every site fires after its distinctive
+            // tokens are consumed, so no backtrack may swallow it.
+            "BL1003", "removed loop or malformed recursive array"
+            // BL1004: a type SPELLING that names no type -- `Tuple<N>` with a
+            // width below 2, an empty or single-component `Tuple<...>`, a
+            // width mixed with component types, and a caret on a head that
+            // cannot take one (`Float64^r` with a variable rank, a caret on a
+            // non-element builtin or on an array alias). The parser raises
+            // most of them; the checker raises the alias case, where the
+            // spelling is only known ill-formed once the alias is resolved
+            // (Unify.CaretHeadSpelling), under the same code. Also a hard
+            // parse error.
+            "BL1004", "ill-formed type spelling"
             "BL1999", "parse error"
             // BL2xxx: name resolution
             "BL2001", "unbound variable"

@@ -2842,6 +2842,37 @@ let internal runCorpusWiringTests () : TH.BlockResult =
                 (tests |> List.map fst) <> want)
     record "every single-file directory answers to blade test <its-name>" misKeyed.IsEmpty
         (if misKeyed.IsEmpty then "" else $"unresolved or mis-wired: {listed misKeyed}")
+    // Every diagnostic CODE a pin names is one the registry knows. A pin is
+    // matched against what the compiler EMITS, so a code can be raised, pinned
+    // and green for months while Diagnostics.Codes -- and with it `ide
+    // surface` and the knowledge base -- has never heard of it (BL1003 and
+    // BL1004 were). The registry-side tests cannot see that: they only walk
+    // codes that are already registered.
+    let codeRe = System.Text.RegularExpressions.Regex @"\bBL\d{4}\b"
+    let sources =
+        (single |> List.collect (fun d ->
+            Blade.Tests.Corpus.category d |> List.map (fun (n, src) -> ($"{d}: {n}", src))))
+        @ (multi |> List.collect (fun d ->
+            Blade.Tests.Corpus.multiFileCategory d
+            |> List.collect (fun (n, parts) -> parts |> List.map (fun (_, src) -> ($"{d}: {n}", src)))))
+    let unregisteredPins =
+        [ for (where, src) in sources do
+            let errorCodes = Blade.Tests.Expect.parseDiagPins src |> fst |> List.map (fun p -> p.PinCode)
+            let warnCodes = Blade.Tests.Expect.parseWarnPins src |> fst
+            let abortCodes =
+                Blade.Tests.Expect.parseAbortExpectations src
+                |> List.collect (fun s -> [ for m in codeRe.Matches s -> m.Value ])
+            for c in List.distinct (errorCodes @ warnCodes @ abortCodes) do
+                if codeRe.IsMatch c && not (Blade.Diagnostics.Codes.isRegistered c) then
+                    yield (c, where) ]
+    record "every diagnostic code a corpus pin names is registered" unregisteredPins.IsEmpty
+        (if unregisteredPins.IsEmpty then $"{sources.Length} files"
+         else
+            unregisteredPins
+            |> List.groupBy fst
+            |> List.map (fun (c, hits) -> $"{c} ({hits.Length} files, e.g. {snd hits.Head})")
+            |> String.concat "; "
+            |> fun s -> s + " -- add it to Diagnostics.Codes.registryEntries, protocol/data/diagnostics.json and regenerate protocol/surface.json")
     // The pin grammar every lane reads (the compiled run, the interpreter
     // differential, the diff oracles all go through Expect): a NESTED Bool
     // pin -- what a rank-2 comparison prints -- is an assertion, not a

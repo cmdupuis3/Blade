@@ -2658,7 +2658,8 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
 
 and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr option) : TypeResult<TypedExpr> =
     // ---- Axis count (`axes = n`, default 1) --------------------------------
-    // `reduce` folds the innermost `n` axes RIGHT-TO-LEFT: rank k in, rank k-n
+    // `reduce` folds the innermost `n` axes (each a LEFT fold in ascending
+    // storage order): rank k in, rank k-n
     // out, and n = k is the full fold to a scalar. `n` must be an integer
     // LITERAL -- the result RANK is k - n, a static property of the type, so a
     // symbolic count would make the result type depend on a runtime value.

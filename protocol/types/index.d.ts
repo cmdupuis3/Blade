@@ -47,8 +47,16 @@ export interface RenderResponse {
    *  the whole reason this command exists; false only on the first call of
    *  a session (or after an edit changed the program around the camera). */
   cached: boolean;
-  /** How many display frames the run emitted, all already published. */
+  /** How many display frames were SENT: the ones whose bytes moved since
+   *  this session's previous render, each already published as a live
+   *  display event. The program emits every plot it has on each run, but a
+   *  camera change can only alter the plots that read the camera, so the
+   *  rest are suppressed -- the first render after a build sends them all. */
   frames: number;
+  /** How many frames the run produced and did NOT send, because their bytes
+   *  matched the previous render's. `frames + unchanged` is what the
+   *  executable emitted. */
+  unchanged: number;
   elapsedMs: number;
   exitCode: number;
   stderr: string;

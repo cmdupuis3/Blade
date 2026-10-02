@@ -121,7 +121,7 @@ one.
 | `IRMethodFor(A, B)` outer product | `linalg.generic`, parallel iterators, broadcast indexing maps | output rank = sum of operand ranks, exactly the affine-map product |
 | `method_for(zip(A, B))` co-iteration | `linalg.generic` (or `linalg.map`), identity maps | the outer-vs-zip distinction becomes literally visible in the indexing maps |
 | `IRReduce` with `comm`/reassoc license | `linalg.reduce` (unordered) | licensed reordering only — see fold-order caveat below |
-| `IRReduce`, non-commutative kernel | `scf.for` sequential fold, innermost axis | Blade guarantees right-to-left innermost-first; `linalg.reduce` guarantees nothing. Unlicensed kernels MUST take the ordered lowering |
+| `IRReduce`, non-commutative kernel | `scf.for` sequential fold, innermost axis | Blade guarantees a LEFT fold in ascending storage order, innermost axis first; `linalg.reduce` guarantees nothing. Unlicensed kernels MUST take the ordered lowering |
 | `reduce(... , axes = k)` partial fold | `linalg.reduce` over the k innermost dims | rank-typed already, clean match |
 | multi-accumulator `<&!>` one-pass reduce | one multi-result `linalg.generic` | the "several statistics in ONE pass" idiom is a native concept here — a genuinely better fit than the C++ emission |
 | `object_for` pipelines, `>>@`, `IRFusion` | compose `linalg` ops on tensors; run elementwise-fusion pass | deferral-until-`compute` maps to tensors being SSA values; bufferization happens once, at the end |
@@ -135,8 +135,10 @@ one.
 | units, index provenance (`Nat<LatIdx>`) | erased | both are front-end typecheck constructs; by `IRProgram` they are already discharged |
 | `where` licenses (`comm`, `omp` depth, block size) | discardable attributes on the emitted ops | consumed by OUR pass-pipeline configuration, ignored by upstream passes |
 
-The fold-order row is the one semantic trap in the whole table. `reduce` folds
-right-to-left, innermost first, and corpus pins depend on it; `linalg.reduce`
+The fold-order row is the one semantic trap in the whole table. `reduce` is a
+left fold in ascending storage order, innermost axis first
+(`reduce([1, 2, 3, 4], lambda(a, b) -> a - b)` is `-8`), and corpus pins depend
+on it; `linalg.reduce`
 is unordered by construction. The license split (`IsCommutative` /
 `BLADE_FP_REASSOC` ⇒ unordered; otherwise ordered `scf.for`) must be enforced
 in the emitter, and byte-identity with the interpreter — the same "off unless

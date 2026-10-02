@@ -533,7 +533,8 @@ and ExprKind =
     // value -- see inferGroupBucket).
     | ExprGroupBucket of grouping: Expr
     | ExprSort of array: Expr * key: Expr          // sort(A, key) - sort array by key function (stable)
-    // reduce(A, op[, init][, axes = n]) - folds the innermost n axes RIGHT-TO-LEFT,
+    // reduce(A, op[, init][, axes = n]) - a LEFT fold, in ascending storage
+    // order, of the innermost n axes (formalism 6.4),
     // n = 1 by default: a rank-k operand yields a rank-(k-n) result, and n = rank
     // is the full fold to a scalar. `init` seeds each folded group's accumulator
     // and defines the empty-group result. `axes` is the NAMED final argument (the

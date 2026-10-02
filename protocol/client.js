@@ -518,10 +518,12 @@ function createClient(dependencies, label) {
    * camera binding names the figure's layout declared; `values` are the new
    * numbers, positionally.
    *
-   * Resolves with `{id, ok, cached, frames, elapsedMs, exitCode, stderr}`.
-   * `cached:true` is the steady state and means the executable was reused --
-   * the whole reason this command exists. The frames themselves arrive on the
-   * display bus as live events, not in the response.
+   * Resolves with `{id, ok, cached, frames, unchanged, elapsedMs, exitCode,
+   * stderr}`. `cached:true` is the steady state and means the executable was
+   * reused -- the whole reason this command exists. The frames themselves
+   * arrive on the display bus as live events, not in the response: `frames`
+   * counts the ones sent (bytes moved since the previous render), `unchanged`
+   * the ones suppressed.
    *
    * Rejects like eval(): `err.protocolError === true` means the process
    * answered LIVE but predates this command, and the caller should fall back

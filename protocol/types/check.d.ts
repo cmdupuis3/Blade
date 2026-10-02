@@ -75,9 +75,16 @@ export interface Param {
  *  `params`/`ret`/`where`/`deducedComm` appear together, on functions only. */
 export interface Binding {
   name: string;
-  /** Open string. Observed values: "function", "static function", "value",
-   *  "param", "local", "type" — derived from the source-kind channel at
-   *  src/Ide.fs:1449, so treat unknown values as opaque. */
+  /** Open string: the binding's SOURCE SPELLING, not a reference class.
+   *  Values the compiler sends: "let", "let mut", "let static", "static",
+   *  "function", "static function", "param". A block-local `let` inside a
+   *  function body is a binding too and carries the same spellings.
+   *
+   *  This is NOT the vocabulary of `Reference.kind` ("function" | "value" |
+   *  "param" | "local" | "type"): a `let` here is a "value" there, and a
+   *  named type is a reference target but never a binding. Derived from the
+   *  surface keyword (src/Ide.fs `bindingKind` / `collectSourceBindings`), so
+   *  treat unknown values as opaque. */
   kind: string;
   line: number;
   col: number;
