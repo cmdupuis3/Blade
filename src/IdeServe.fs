@@ -121,11 +121,20 @@ open System.Text.Json
 /// with the `type` beside it. A FRESH abstract renderer per binding: schemes
 /// don't share inference ids across bindings, so per-binding letter
 /// namespaces can't collide (Ide.collectTypedBindings makes the same call).
+///
+/// A binding whose IR type is UNIT is left out. Lowering erases what has no
+/// run-time value -- a provider store handle, a `let static` tuple the static
+/// evaluator already consumed -- to a unit-typed placeholder, and "Void" is
+/// not a more concrete spelling of `store` or `(Int64, Int64)`: it is the
+/// absence of one. A binding the SOURCE types as Void (`alias.write(...)`)
+/// already says so in `type`, so nothing is lost by never upgrading to it.
 let private concreteValueTypes (ir: Blade.IR.IRProgram) : Map<string, string> =
     Map.ofList
         [ for m in ir.Modules do
             for b in m.Bindings do
-                yield (b.Name, Blade.Ide.abstractRenderer [] b.Type) ]
+                match b.Type with
+                | Blade.Types.IRTUnit | Blade.Types.IRTScalar Blade.Types.ETUnit -> ()
+                | ty -> yield (b.Name, Blade.Ide.abstractRenderer [] ty) ]
 
 /// The full tier's extra pass: the same lower + validateIR chain
 /// `Interp.Repl.lowerSession` drives, but keeping failures STRUCTURED (code +
@@ -137,12 +146,14 @@ let fullTierUpgrade : Blade.Ide.FullTierUpgrade =
     fun prog typed builder ->
         match (try Ok (Blade.Lowering.lowerTypedProgram typed (Some prog) builder)
                with
-               | Blade.Diagnostics.BladeDiagnosticException d -> Error [ (d.Code, d.Message) ]
-               | ex -> Error [ ("BL6002", ex.Message) ]) with
+               | Blade.Diagnostics.BladeDiagnosticException d -> Error [ (d.Code, d.Message, d.Span) ]
+               | ex -> Error [ ("BL6002", ex.Message, Blade.Ast.noSpan) ]) with
         | Error failures -> Error failures
         | Ok ir ->
             match Blade.IRValidate.validateIR ir with
-            | Error errs -> Error (errs |> List.map (fun e -> (Blade.IRValidate.codeOfValidationMessage e, e)))
+            | Error errs ->
+                Error (errs |> List.map (fun e ->
+                    (Blade.IRValidate.codeOfValidationMessage e, e, Blade.Ast.noSpan)))
             | Ok validated -> Ok (concreteValueTypes validated)
 
 // Request decoding (System.Text.Json in, hand-rolled JSON out -- the payload
@@ -153,10 +164,64 @@ let private tryProp (root: JsonElement) (name: string) : JsonElement option =
     | true, v -> Some v
     | _ -> None
 
+/// Decode a JSON string literal's RAW text (quotes included) by hand, putting
+/// U+FFFD where an escape names half a surrogate pair. The fallback for the
+/// one input `JsonElement.GetString` refuses: `"\ud83d"` is valid JSON, and
+/// what a JavaScript client's `JSON.stringify` writes for a string holding a
+/// lone surrogate (an editor buffer cut mid-emoji), but it is not valid
+/// UTF-16, so .NET throws rather than hand back a malformed string.
+///
+/// One replacement character per bad code unit, so every later column is
+/// where the client thinks it is; the lexer then sees an ordinary character.
+let private decodeJsonStringLenient (raw: string) : string =
+    let sb = StringBuilder()
+    let body = if raw.Length >= 2 then raw.Substring(1, raw.Length - 2) else ""
+    let mutable i = 0
+    while i < body.Length do
+        let c = body.[i]
+        if c = '\\' && i + 1 < body.Length then
+            let e = body.[i + 1]
+            i <- i + 2
+            match e with
+            | 'n' -> sb.Append('\n') |> ignore
+            | 'r' -> sb.Append('\r') |> ignore
+            | 't' -> sb.Append('\t') |> ignore
+            | 'b' -> sb.Append('\b') |> ignore
+            | 'f' -> sb.Append('\012') |> ignore
+            | 'u' when i + 4 <= body.Length ->
+                (match Int32.TryParse(body.Substring(i, 4), Globalization.NumberStyles.HexNumber,
+                                      Globalization.CultureInfo.InvariantCulture) with
+                 | true, n -> sb.Append(char n) |> ignore
+                 | _ -> sb.Append('�') |> ignore)
+                i <- i + 4
+            | other -> sb.Append(other) |> ignore          // \" \\ \/
+        else
+            sb.Append(c) |> ignore
+            i <- i + 1
+    // Now repair: a high surrogate not followed by a low one, or a low one
+    // not preceded by a high one, becomes U+FFFD.
+    let s = sb.ToString()
+    let fixedUp = StringBuilder(s.Length)
+    let mutable j = 0
+    while j < s.Length do
+        let c = s.[j]
+        if Char.IsHighSurrogate c && j + 1 < s.Length && Char.IsLowSurrogate s.[j + 1] then
+            fixedUp.Append(c).Append(s.[j + 1]) |> ignore
+            j <- j + 2
+        else
+            fixedUp.Append(if Char.IsSurrogate c then '�' else c) |> ignore
+            j <- j + 1
+    fixedUp.ToString()
+
+/// The text of a JSON STRING element; never throws (see the lenient decoder).
+let private stringOf (v: JsonElement) : string =
+    try v.GetString()
+    with :? InvalidOperationException -> decodeJsonStringLenient (v.GetRawText())
+
 let private tryStr (root: JsonElement) (name: string) : string option =
     tryProp root name
     |> Option.bind (fun v ->
-        if v.ValueKind = JsonValueKind.String then Some (v.GetString()) else None)
+        if v.ValueKind = JsonValueKind.String then Some (stringOf v) else None)
 
 let private tryInt (root: JsonElement) (name: string) : int option =
     tryProp root name
@@ -176,7 +241,7 @@ let private tryStrList (root: JsonElement) (name: string) : string list option =
         else
             let items = [ for e in v.EnumerateArray() -> e ]
             if items |> List.forall (fun e -> e.ValueKind = JsonValueKind.String)
-            then Some (items |> List.map _.GetString())
+            then Some (items |> List.map stringOf)
             else None)
 
 /// A JSON array of numbers, all-or-nothing for the same reason `tryStrList`
@@ -845,7 +910,18 @@ let serveLoop (version: string) (input: TextReader) (output: TextWriter) : int =
                             match ex with
                             | :? JsonException -> eprintfn "[ide serve] bad request: %s" ex.Message
                             | _ -> eprintfn "[ide serve] %s" (ex.ToString())
-                            errorResponse (None: int option) ex.Message
+                            // Answer UNDER THE REQUEST'S ID whenever the line
+                            // parsed far enough to have one: an id-less error
+                            // cannot be correlated, so the client's request
+                            // would sit until its timeout and then take the
+                            // whole process (and every session) down with it.
+                            let failedId =
+                                try
+                                    use d = JsonDocument.Parse trimmed
+                                    if d.RootElement.ValueKind = JsonValueKind.Object
+                                    then tryInt d.RootElement "id" else None
+                                with _ -> None
+                            errorResponse failedId ex.Message
         with :? IOException ->
             // The client went away mid-write; nothing left to say.
             ()
@@ -874,5 +950,14 @@ let serve (version: string) : int =
     // buffer, in order, instead of racing a second writer onto the handle.
     Console.SetOut out
     let inp = new StreamReader(Console.OpenStandardInput(), UTF8Encoding(false))
+    // Remove the session directories dead processes left behind (a killed
+    // daemon cannot run its own Cleanup). Off the request path: the first
+    // check must not wait on a few hundred directory deletes, and nothing the
+    // sweep touches belongs to a live process.
+    System.Threading.Tasks.Task.Run(fun () ->
+        Blade.ReplSession.sweepStaleSessionDirs
+            (Path.GetTempPath()) Blade.ReplSession.processIsAlive DateTime.UtcNow
+        |> ignore)
+    |> ignore
     try serveLoop version inp out
     finally out.Flush ()

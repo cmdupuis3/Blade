@@ -2626,15 +2626,24 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
 /// AFTER the equiv channel so a file earning both reads equiv-then-galilean,
 /// each channel in its own insertion order.
 ///
-/// `skipPins` drops BL4010 for `--strict-pins`, which has already
-/// re-reported exactly those as errors. BL4011 and BL4014 are deliberately
+/// `skipPins` drops the BL4010 PIN SUGGESTIONS for `--strict-pins`, which has
+/// already re-reported exactly those as errors (every other BL4010 -- the
+/// constrained-domain advisories -- stays). BL4011 and BL4014 are deliberately
 /// NOT dropped: strict-pins owns the STORAGE decision, and a certificate
 /// owns no storage decision at all, so neither has a promoted-to-error twin
 /// a filter here would be de-duplicating.
 let typeCheckWarningDiagnostics (skipPins: bool) : Blade.Diagnostics.Diagnostic list =
+    // Only the BL4010s `--strict-pins` actually promoted: a pin suggestion is
+    // written to BOTH channels with one message and one span, so that pair is
+    // the identity. BL4010 is also the code of the constrained-domain
+    // advisories (a `range<Domain>` enumerated as a key table, or proved
+    // empty), which are not pin suggestions, have no promoted-to-error twin,
+    // and so must survive the filter.
+    let promoted =
+        if skipPins then Set.ofList (Blade.TypeCheckIde.PinSuggestions.get ()) else Set.empty
     let own =
         Blade.TypeEnv.WarningLog.get ()
-        |> List.filter (fun d -> not (skipPins && d.Code = "BL4010"))
+        |> List.filter (fun d -> not (d.Code = "BL4010" && promoted.Contains (d.Message, d.Span)))
     let certs =
         Blade.ML.Equiv.CertSuggestions.get ()
         |> List.map (fun (msg, span) ->

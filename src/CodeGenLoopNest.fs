@@ -4287,9 +4287,26 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
     // expression-statement form below deliberately produces invalid C++
     // rather than papering over it with auto-deduction -- diagnose the
     // upstream resolution bug instead.
+    // A reference to a variable that IS unit -- the result of a provider write
+    // (`let saved = csv.write(...)`), or a name bound to one. Such a variable
+    // has no C++ declaration (the write is a statement, not a value), so the
+    // expression-statement form below would name a symbol that does not exist:
+    // `let again = saved`, or a bare `saved` at top level (its `__exprN`
+    // desugar), passed typecheck and died in g++ as BL9002. There is nothing
+    // to evaluate and nothing to print, so it emits nothing.
+    //
+    // Keyed on the VARIABLE's own type, not the binding's: that keeps the
+    // deliberate tripwire below intact for the case it exists for, a binding
+    // mislabeled unit whose value is really a shape-bearing variable.
+    let isUnitVarRef =
+        match value with
+        | IRVar (_, (IRTUnit | IRTScalar ETUnit)) -> true
+        | IRVar (id, _) when Map.containsKey id ctx.ProviderWrites -> true
+        | _ -> false
     match resolvedTy with
+    | IRTUnit | IRTScalar ETUnit when isUnitVarRef -> []
     | IRTUnit ->
-        if isUnitExpr value then 
+        if isUnitExpr value then
             []
         else
             // Genuinely unit-valued: emit as expression statement

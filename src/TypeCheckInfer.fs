@@ -5098,6 +5098,24 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
             // fallback: its leaves are flat paths codegen resolves itself.
             let k = match tI.Kind with TExprLit (LitInt k) -> int k | _ -> 0
             Ok (mkTyped (TExprTupleIndex (tT, tI)) ts.[k])
+        | IRTPoly (baseTy, _)
+            when (match tI.Kind with TExprLit (LitInt _) -> false | _ -> true)
+                 && (match env.Subst.Resolve baseTy with IRTTuple _ -> false | _ -> true) ->
+            // A DYNAMIC read of a homogeneous pack -- `args[k]` under a former
+            // over `range<Idx<arity(args)>>` -- is one of the pack's elements,
+            // whichever `k` turns out to be, so it has the pack's element
+            // type. The fresh variable of the fallback below is the same
+            // defect the tuple arm above closes: nothing in `lambda(k) ->
+            // args[k]` ever constrains it, the map's element type then
+            // defaults to the LOOP INDEX's, and the body pins `T := Int64`
+            // for every caller. `polySum(1.5, 2.5)` typed as Int64 -- 3 under
+            // the interpreter, a g++ float-conversion refusal compiled -- and
+            // two calls at different element types shared one instantiation.
+            //
+            // Only the dynamic index, and only a non-tuple element: a literal
+            // index (and a pack of tuples) addresses FLAT LEAVES, which the
+            // fallback leaves for codegen to resolve by path.
+            Ok (mkTyped (TExprTupleIndex (tT, tI)) baseTy)
         | _ ->
             // Poly-pack / tuple indexing: result type is fresh -- codegen
             // resolves via std::get based on flat-leaf paths.
@@ -14438,29 +14456,31 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         // defaults (Float64), dying far downstream as a baffling
                         // type mismatch. Park BL2007 for the load site instead
                         // (surfaced right below; same idiom as patternError).
-                        // A provider that raises no store-resolution type keeps
-                        // the silent fallback for everything else (missing
-                        // file, unreadable store): Lowering.tryInvokeProvider
-                        // owns those diagnostics.
                         let parkNativeFailure (detail: string) =
                             setCurrentExprSpan binding.Value.Span
                             providerLoadError <- Some (ProviderNativeLoadFailure (pname, path, detail))
                             (env, tValue)
-                        // The STORE's own refusal, for a provider that names
-                        // one (`Types.ProviderResolutionError`). Same parking,
-                        // one condition over: the catch-all below used to
-                        // swallow every icechunk refusal (typo'd/ambiguous ref,
-                        // missing/corrupt repo, bad spec byte, Offline,
-                        // deleted-tag tombstone, virtual chunk refs, nested
-                        // groups, verifier/offset rejections), so `blade check`
-                        // and the editor reported NOTHING and the error only
-                        // surfaced under `emit`/`run` when lowering re-opened
-                        // the store.
+                        // The STORE's own refusal: BL2008 at the load site, for
+                        // EVERY provider. A provider that names its refusals
+                        // (`Types.ProviderResolutionError`: icechunk's typo'd or
+                        // ambiguous ref, missing/corrupt repo, bad spec byte,
+                        // Offline, tombstone, ...) and one that simply throws
+                        // from its metadata read (zarr / netcdf / csv: file not
+                        // found, not a store, unreadable header) land here alike.
                         //
-                        // ADDITIVE. zarr/netcdf/csv raise no such type, so the
-                        // catch-all still swallows theirs and their
-                        // missing-store diagnostics stay in
-                        // Lowering.tryInvokeProvider exactly as before.
+                        // The read below is the SAME read Lowering performs, so
+                        // a store that fails here cannot lower either: nothing
+                        // that compiled before is refused now. What changes is
+                        // WHERE the failure is reported. Falling back to the
+                        // opaque type instead left every `<store>.vars.<v>` at
+                        // a fresh variable, and the first thing to need a real
+                        // type from it (a static extent, an element type) died
+                        // with an error about ITSELF -- a BL5400 inside an FFT
+                        // kernel, a BL3999 two hundred lines down -- while the
+                        // actual cause, a path resolved from the wrong
+                        // directory, was never mentioned. A program with no
+                        // such dependent got past typecheck and the editor's
+                        // fast tier reported nothing at all.
                         let parkStoreFailure (detail: string) =
                             setCurrentExprSpan binding.Value.Span
                             providerLoadError <- Some (ProviderStoreUnresolvable (pname, path, detail))
@@ -14483,7 +14503,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                         | :? System.TypeInitializationException as tix when (tix.InnerException :? System.DllNotFoundException) ->
                             parkNativeFailure tix.InnerException.Message
                         | :? Blade.Types.ProviderResolutionError as pex -> parkStoreFailure pex.Message
-                        | _ -> (env, tValue)
+                        | ex -> parkStoreFailure ex.Message
                 | _ -> (env, tValue)
             if providerLoadError.IsSome then Error providerLoadError.Value else
             let identity = match binding.Pattern.Kind with PatternKind.PatVar n -> Some (AIDVariable n) | _ -> None

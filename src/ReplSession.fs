@@ -875,7 +875,24 @@ let private ensureFailureDiagnostic (remap: Blade.Diagnostics.Diagnostic -> Eval
             let d : Blade.Diagnostics.Diagnostic =
                 { Code = code; Severity = Blade.Diagnostics.SevError; Phase = Blade.Diagnostics.PhBackend
                   Span = span; Message = msg; Notes = []; Context = [] }
-            { r with Diagnostics = remap d :: r.Diagnostics }
+            let mapped = remap d
+            // The location line names the ASSEMBLED SESSION FILE: a temp path
+            // the user never wrote, and a line counted from the top of every
+            // cell the session holds. Say where it is in THEIR terms -- the
+            // same remap the diagnostic just went through -- so the text and
+            // the diagnostic cannot disagree, and no internal path leaks.
+            let stderr =
+                match line with
+                | None -> r.Stderr
+                | Some _ ->
+                    let here =
+                        if mapped.Message.StartsWith "elsewhere in session: "
+                        then "  --> elsewhere in session (an earlier cell, re-run by this one)"
+                        else $"  --> line {mapped.Line}"
+                    lines
+                    |> Array.map (fun l -> if panicLocRe.IsMatch l then here else l)
+                    |> String.concat "\n"
+            { r with Stderr = stderr; Diagnostics = mapped :: r.Diagnostics }
         | None ->
             { r with
                 Diagnostics =
@@ -958,13 +975,74 @@ let mutationFreeSession (prog: Blade.Ast.Program) : bool =
                 f.Params |> List.forall (fun p -> p.Mutability <> Blade.Ast.Mutable)
             | _ -> true))
 
+// Session directories and the processes that own them.
+//
+// A session's temp directory is removed by `Cleanup`, which only a process
+// that EXITS CLEANLY gets to call. A killed one -- an editor that hard-stops a
+// stuck eval, a host that dies -- leaves its directories behind for good, and
+// they used to accumulate without bound (hundreds, on a machine that had only
+// ever run notebooks). So each directory names its owner, and a starting
+// `ide serve` removes the ones whose owner is gone.
+
+/// Every session directory is `<temp>/blade-repl-<8 hex>`.
+let sessionDirPrefix = "blade-repl-"
+
+/// The marker a session directory carries: the id of the process that made it.
+let ownerMarkerName = "owner.pid"
+
+/// How old an UNMARKED directory must be before the sweep takes it. Those are
+/// from binaries that predate the marker; nothing says whether their owner is
+/// alive, so only age can -- and a day is longer than any eval.
+let unmarkedMaxAge = TimeSpan.FromHours 24.0
+
+/// Is a process with this id running? A recycled id answers yes for a
+/// stranger, which errs on the side of keeping a directory.
+let processIsAlive (pid: int) : bool =
+    try
+        use p = System.Diagnostics.Process.GetProcessById pid
+        not p.HasExited
+    with _ -> false
+
+/// Remove the session directories under `root` that no live process owns:
+/// marked ones whose owner is dead, and unmarked ones older than
+/// `unmarkedMaxAge`. Returns how many were removed. Never throws -- a
+/// directory that will not delete (a file still open) is simply left for the
+/// next sweep. `isAlive` and `now` are parameters so the rule can be tested
+/// without killing anything or waiting a day.
+let sweepStaleSessionDirs (root: string) (isAlive: int -> bool) (now: DateTime) : int =
+    let dirs =
+        try Directory.GetDirectories(root, sessionDirPrefix + "*") with _ -> [||]
+    let mutable removed = 0
+    for dir in dirs do
+        try
+            let marker = Path.Combine(dir, ownerMarkerName)
+            let stale =
+                if File.Exists marker then
+                    match Int32.TryParse((File.ReadAllText marker).Trim()) with
+                    | true, pid -> not (isAlive pid)
+                    // An unreadable marker says nothing; fall back to age.
+                    | _ -> now - Directory.GetLastWriteTimeUtc dir > unmarkedMaxAge
+                else
+                    now - Directory.GetLastWriteTimeUtc dir > unmarkedMaxAge
+            if stale then
+                Directory.Delete(dir, true)
+                removed <- removed + 1
+        with _ -> ()
+    removed
+
 /// One accumulating REPL session: the snippet list, the temp directory its
 /// assembled program is written to, and eval-once. Independent instances share
 /// nothing, which is what lets `ide serve` hold one per notebook.
 type ReplSession(runCwd: string) =
     let sessionDir =
-        Path.Combine(Path.GetTempPath(), "blade-repl-" + Guid.NewGuid().ToString("N").Substring(0, 8))
+        Path.Combine(Path.GetTempPath(), sessionDirPrefix + Guid.NewGuid().ToString("N").Substring(0, 8))
     do Directory.CreateDirectory sessionDir |> ignore
+    // Name the owner, so a later sweep can tell this directory from a dead
+    // process's (see sweepStaleSessionDirs). Best-effort: a session without
+    // its marker still works, it is merely swept by age instead.
+    do
+        try File.WriteAllText(Path.Combine(sessionDir, ownerMarkerName), string Environment.ProcessId)
+        with _ -> ()
     let srcPath = Path.Combine(sessionDir, "session.blade")
     let snippets = ResizeArray<string>()
 

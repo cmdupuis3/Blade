@@ -1885,7 +1885,27 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              // excludes compound types).
              | Some (stmts, _) -> (stmts |> List.map (fun s -> ind + s), tmpName)
              | None -> ([], exprToCpp ctx.VarNames maskExpr))
-        | _ -> ([], exprToCpp ctx.VarNames maskExpr)
+        | IRVar _ -> ([], exprToCpp ctx.VarNames maskExpr)
+        // A COMPUTED mask -- `compound(temp, qc_ok && warm)`, a conjunction or
+        // disjunction of masks written in place. It is an elementwise loop,
+        // and exprToCpp cannot run a loop in the middle of an expression: it
+        // answered with the refusal sentinel, so the program passed
+        // `blade check`, ran under the interpreter, and was refused BL7004
+        // here. Emit it as what it is -- the binding the user would have
+        // written by hand (`let keep = qc_ok && warm`) -- through the ordinary
+        // let path, immediately ahead of the index build that reads it. The
+        // temp is local to this constructor: not a module binding, so it is
+        // not printed and takes no name the program could see.
+        | computed ->
+            let tmp : IRBinding =
+                { Id = builder.FreshId()
+                  Name = $"{name}__masksrc"
+                  Type = inferExprType computed
+                  Value = computed
+                  IsConst = true
+                  IsMutable = false }
+            let (tmpLines, _) = genBinding ctx tmp builder
+            (tmpLines, bindingCppName tmp)
     (match binding.Type with
      | ArrayElem arrTy when isCompoundArrayType arrTy ->
          let leadRank =

@@ -47,6 +47,11 @@ const PING_TIMEOUT_MS = 5000;
 const DEFAULT_TIMEOUT_MS = { fast: 10000, full: 30000 };
 const BACKOFF_MS = [500, 2000, 8000];
 const MAX_ESTABLISHED_FAILURES = 3;
+// How long an idle process gets to exit after dispose() asks it to. A clean
+// exit takes a few milliseconds (delete the session directories, stop the GR
+// worker); the budget is generous because the cost of missing it is only a
+// kill that would have happened immediately before.
+const DISPOSE_GRACE_MS = 2000;
 
 /** The subcommand this client speaks. Overridable per client via `deps.args`
  *  (a test seam: a fake NDJSON server is spawned as `node fake-serve.js`). */
@@ -175,20 +180,47 @@ function createClient(dependencies, label) {
    *  deliberate dispose(), which is not a failure. Idempotent — a second call
    *  while already torn down is a no-op, so racing failure paths (e.g. a
    *  request timeout that kills the process right as it happens to exit on
-   *  its own) can't double-count. */
-  function teardown(reason, isFailure) {
+   *  its own) can't double-count.
+   *
+   *  `graceMs` > 0 DEFERS the kill: the process has just been asked to shut
+   *  down and is given that long to do it itself. Only a clean exit runs the
+   *  compiler's own cleanup (each eval session owns a temp directory, and a
+   *  killed process leaves every one of them behind), so a kill is the
+   *  fallback, not the method. This client is detached from the process
+   *  either way -- the next request spawns a fresh one immediately. */
+  function teardown(reason, isFailure, graceMs) {
     if (!proc) return;
     const p = proc;
     proc = undefined;
     p.removeAllListeners();
     if (p.stdout) p.stdout.removeAllListeners();
     if (p.stderr) p.stderr.removeAllListeners();
-    if (p.exitCode === null && p.signalCode === null) {
+    const alive = () => p.exitCode === null && p.signalCode === null;
+    const kill = () => {
+      if (!alive()) return;
       try {
         p.kill();
       } catch (_) {
         /* already gone */
       }
+    };
+    if (alive() && graceMs > 0) {
+      // The streams keep flowing so a full pipe cannot stall the exit, and
+      // late errors on them (EPIPE once the process is gone) are swallowed:
+      // nothing is listening any more, and an unhandled stream error would
+      // take the HOST down.
+      const swallow = () => {};
+      p.on("error", swallow);
+      for (const s of [p.stdin, p.stdout, p.stderr]) if (s) s.on("error", swallow);
+      if (p.stdout) p.stdout.resume();
+      if (p.stderr) p.stderr.resume();
+      // unref: a host that is itself exiting must not be held open by this.
+      // The process then sees EOF on stdin, which is a clean shutdown too.
+      const timer = setTimeout(kill, graceMs);
+      if (typeof timer.unref === "function") timer.unref();
+      p.once("exit", () => clearTimeout(timer));
+    } else {
+      kill();
     }
     rejectAllPending(reason);
     if (isFailure) recordFailure(reason);
@@ -543,22 +575,32 @@ function createClient(dependencies, label) {
       return sendRequest((id) => proto.encodeRender(id, session, bindings, values, cwd), ms);
     });
   }
-  /** Tear down the current process (best-effort clean `shutdown` first) and
-   *  reset ALL state so the next check()/eval() re-probes from scratch. Safe
-   *  to call when nothing is running. Also doubles as this client's "kill and
-   *  restart" primitive — an interrupt handler calls this directly to
-   *  hard-kill a stuck g++ eval; the shutdown write is best-effort (a busy
-   *  single-threaded compiler loop may never read it), the kill() inside
-   *  teardown() is what actually guarantees the process dies. */
+  /** Tear down the current process and reset ALL state so the next
+   *  check()/eval() re-probes from scratch. Safe to call when nothing is
+   *  running.
+   *
+   *  An IDLE process (nothing in flight) is asked to shut down and given
+   *  DISPOSE_GRACE_MS to exit by itself, because only a clean exit removes
+   *  the temp directory each of its eval sessions owns; it is killed if it
+   *  has not gone by then.
+   *
+   *  A BUSY process is killed at once. That is this client's "kill and
+   *  restart" primitive — an interrupt handler calls dispose() to stop a
+   *  stuck g++ eval, and a single-threaded compiler loop in the middle of a
+   *  request would not read the shutdown line anyway. Its session
+   *  directories are left behind; the compiler sweeps those of dead
+   *  processes the next time `ide serve` starts. */
   function dispose() {
+    const idle = pending.size === 0;
     if (proc) {
       try {
         proc.stdin.write(proto.encodeShutdown());
+        if (idle) proc.stdin.end();
       } catch (_) {
         /* pipe already gone — the kill() in teardown() below covers it */
       }
     }
-    teardown("blade ide serve disposed", false);
+    teardown("blade ide serve disposed", false, idle ? DISPOSE_GRACE_MS : 0);
     availability = "unknown";
     established = false;
     consecutiveFailures = 0;

@@ -1066,5 +1066,20 @@ let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         modul.Bindings |> List.map (fun b -> { b with Value = liftExpr builder b.Value })
     let liftedFunctions =
         modul.Functions |> List.map (fun f -> { f with Body = liftExpr builder f.Body })
-    { modul with Bindings = liftedBindings; Functions = liftedFunctions }
+    // A `compound(dense, mask)` constructor keeps its operands OUTSIDE the
+    // binding's value (which is a unit placeholder), so the map above never
+    // sees them. A COMPUTED mask -- `compound(t, a && b && c)`, or one whose
+    // operands are themselves inline `mask(...)` calls -- is emitted by the
+    // constructor as a let of its own (CodeGenBinding.genCompoundInitBinding),
+    // and that let needs the same hoisting any let-RHS gets: without it the
+    // nested forms reach the loop nest unmaterialized ('arr0' was not
+    // declared). A bare variable or a single inline mask is left exactly as
+    // it was -- the constructor reads those directly.
+    let liftedCompoundInits =
+        modul.CompoundInits
+        |> Map.map (fun _ (dense, mask) ->
+            match mask with
+            | IRVar _ | IRMask _ -> (dense, mask)
+            | computed -> (dense, liftExpr builder computed))
+    { modul with Bindings = liftedBindings; Functions = liftedFunctions; CompoundInits = liftedCompoundInits }
 

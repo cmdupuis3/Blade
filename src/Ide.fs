@@ -1858,10 +1858,12 @@ let private collectReferences (prog: Ast.Program) (tp: TypedProgram) (lines: str
 /// (IdeServe.fs, which compiles after it) hands the pass in as a function.
 /// Ok = top-level value-binding name -> concrete type, ALREADY rendered by
 /// this module's printers so spellings match the rest of the payload;
-/// Error = (BL code, message) pairs for lowering-stage failures, which are
-/// real errors a `blade run` of the same source would hit.
+/// Error = (BL code, message, span) triples for lowering-stage failures, which
+/// are real errors a `blade run` of the same source would hit. The span is
+/// the diagnostic's own when the stage raised one (`noSpan` otherwise: an IR
+/// validation message, or a bare exception, points at nothing).
 type FullTierUpgrade =
-    Ast.Program -> TypedProgram -> IRBuilder -> Result<Map<string, string>, (string * string) list>
+    Ast.Program -> TypedProgram -> IRBuilder -> Result<Map<string, string>, (string * string * Span) list>
 
 /// Attach `concreteType` where monomorphization beat the typed AST. Only
 /// top-level value bindings are candidates (an IR module binding names
@@ -1978,7 +1980,10 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             // plain strings in typeCheck's Ok payload, and as structured
             // (message, kernel-span) pairs in PinSuggestions -- emit the
             // structured form, BL4010 at the kernel's real span.
-            let pinSuggestions = Blade.TypeCheckIde.PinSuggestions.get ()
+            // De-duplicated like every CLI reader of the channel: a kernel
+            // whose application is inferred twice (an elaborator re-checking
+            // the program it generated) records its suggestion twice.
+            let pinSuggestions = Blade.TypeCheckIde.PinSuggestions.get () |> List.distinct
             // Stage-6a equivariance-certificate suggestions: BL4011 at
             // the DECL span, ghost-rendering `where ml.equiv(G)`.
             let certSuggestions = Blade.ML.Equiv.CertSuggestions.get ()
@@ -2001,11 +2006,19 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                 diags.Add { Severity = "warning"; Line = line; Col = col
                             EndLine = endLine; EndCol = endCol
                             Message = msg; Code = "BL4014" }
-            // The checker's own warnings, coded and spanned. BL4010 is
-            // skipped: PinSuggestions above already emitted exactly
-            // those (BL4011/BL4014 never ride this channel).
+            // The checker's own warnings, coded and spanned. A BL4010 that
+            // PinSuggestions above already emitted is skipped (the checker
+            // writes a pin suggestion to BOTH channels, with one message and
+            // one span) -- but ONLY that one. BL4010 is also the code of the
+            // constrained-domain advisories (a `range<Domain>` enumerated as
+            // a key table, or proved empty), which ride this channel alone;
+            // skipping the code wholesale made them vanish from the editor
+            // while `blade check` printed them. (BL4011/BL4014 never ride
+            // this channel.)
+            let alreadyPinned =
+                pinSuggestions |> List.map (fun (msg, span) -> (msg, clampSpan span)) |> Set.ofList
             for d in Blade.TypeCheckIde.WarningLog.get () |> List.distinct do
-                if d.Code <> "BL4010" then
+                if not (d.Code = "BL4010" && alreadyPinned.Contains (d.Message, clampSpan d.Span)) then
                     let (line, col, endLine, endCol) = clampSpan d.Span
                     diags.Add { Severity = "warning"; Line = line; Col = col
                                 EndLine = endLine; EndCol = endCol
@@ -2095,17 +2108,29 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                     // Monomorphization lowers, so it needs the WHOLE resolved
                     // program -- not the entry slice the payload collectors got.
                     try up checkedProgram fullTyped builder
-                    with ex -> Error [("BL9001", ex.Message)]
+                    with ex -> Error [("BL9001", ex.Message, noSpan)]
                 match outcome with
                 | Ok concrete -> bindings <- applyConcrete concrete bindings
                 | Error failures ->
                     // A file that typechecked but will not lower: these are
                     // errors `blade run` would report, so they belong in the
-                    // diagnostics the editor squiggles. No span survives the
-                    // IR stages, so they land at 1:1.
-                    for (code, msg) in failures do
-                        diags.Add { Severity = "error"; Line = 1; Col = 1; EndLine = 1; EndCol = 1
-                                    Message = msg; Code = code }
+                    // diagnostics the editor squiggles -- at the span the
+                    // lowering diagnostic carried, which is the one `blade
+                    // check` prints. A failure with no span (IR validation)
+                    // lands at 1:1, and so does one spanned in a MEMBER file,
+                    // by the same rule as the typecheck errors above: another
+                    // file's line 12 is not this buffer's line 12.
+                    for (code, msg, span) in failures do
+                        let foreign =
+                            not (List.isEmpty depModules)
+                            && (match span.File with Some f -> f <> filePath | None -> false)
+                        let (line, col, endLine, endCol) =
+                            if span.StartLine <= 0 || foreign then (1, 1, 1, 1) else clampSpan span
+                        let message =
+                            if foreign then $"""{msg} (in {(defaultArg span.File "?")})""" else msg
+                        diags.Add { Severity = "error"; Line = line; Col = col
+                                    EndLine = endLine; EndCol = endCol
+                                    Message = message; Code = code }
                     exitCode <- 1
     (renderJson env (List.ofSeq diags) bindings providers deduced calls kernels references, exitCode)
 

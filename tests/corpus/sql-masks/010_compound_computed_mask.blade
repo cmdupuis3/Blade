@@ -1,0 +1,43 @@
+// TEST: Compound Computed Mask
+// ----------------------------------------------------------------------------
+// The mask operand of compound(dense, mask) written IN PLACE as a composition
+// of masks. A conjunction is an elementwise loop, and the compound constructor
+// used to hand it to the expression renderer, which cannot run one: the
+// program passed `blade check`, ran under the interpreter, and was refused at
+// codegen (BL7004). Each form here must agree with the one that binds the
+// composed mask to a name first (`keep`).
+//
+// Covers the three shapes that reach the constructor differently: two bound
+// masks, a chain of three (a nested loop argument), and masks built inline
+// inside the composition (forms the lift pass has to hoist).
+// ----------------------------------------------------------------------------
+type I = Idx<5>
+let temp: Array<Float64 like I> = [3.0, -1.0, 4.0, -2.0, 5.0]
+let qc: Array<Int64 like I> = [0, 0, 1, 0, 0]
+let qc_ok = mask(qc, lambda(q) -> q == 0)
+let warm = mask(temp, lambda(t) -> t > 0.0)
+
+let keep = qc_ok && warm
+let bound = compound(temp, keep)
+let n_bound = extents(bound)
+let s_bound = reduce(bound, (+))
+// EXPECT: n_bound = 2
+// EXPECT: s_bound = 8.0
+
+let both = compound(temp, qc_ok && warm)
+let n_both = extents(both)
+let s_both = reduce(both, (+))
+// EXPECT: n_both = 2
+// EXPECT: s_both = 8.0
+
+let either = compound(temp, qc_ok || warm)
+let s_either = reduce(either, (+))
+// EXPECT: s_either = 9.0
+
+let chain = compound(temp, qc_ok && warm && qc_ok)
+let s_chain = reduce(chain, (+))
+// EXPECT: s_chain = 8.0
+
+let inline_masks = compound(temp, mask(qc, lambda(q) -> q == 0) && mask(temp, lambda(t) -> t > 0.0))
+let s_inline = reduce(inline_masks, (+))
+// EXPECT: s_inline = 8.0

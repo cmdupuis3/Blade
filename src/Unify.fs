@@ -107,9 +107,10 @@ type TypeError =
     /// element-type mismatch -- but here the fallback was worse: the refusal
     /// set IS the feature, and `blade check` reported none of it.
     ///
-    /// Providers signal this by raising `Types.ProviderResolutionError`;
-    /// zarr/netcdf/csv do not, so their missing-store diagnostics stay in
-    /// Lowering.tryInvokeProvider, untouched.
+    /// A provider that names its refusals raises
+    /// `Types.ProviderResolutionError`; any other failure of the compile-time
+    /// metadata read (a missing or unreadable zarr/netcdf/csv store) carries
+    /// the provider's own message here too.
     | ProviderStoreUnresolvable of provider: string * path: string * detail: string
     // FIELDS = sprintf args; formatTypeError (TypeEnv.fs) renders each verbatim.
     // Index-type violations (BL4003)

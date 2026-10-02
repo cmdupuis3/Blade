@@ -460,7 +460,74 @@ module IdePartial =
     let get () : (TypedProgram * IRBuilder) option =
         match box slot.Value with null -> None | _ -> slot.Value
 
-let typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list, CompileError list> =
+/// The stores this program loads that CANNOT BE READ at compile time, as
+/// BL2008 errors at their load sites.
+///
+/// The checker reports exactly this when it reaches `let store =
+/// alias.load("path")` -- but the elaborations run first, and they resolve
+/// `store.index.<dim>` and provider-backed statics through a reader that
+/// answers "not foldable" for a store it cannot open. So the first stage to
+/// need a static extent from a missing store refuses with an error about
+/// ITSELF (`ifft2: every axis extent ... must be statically known`), the
+/// pipeline stops there, and the load site is never reached. This is the
+/// same question asked directly, so the cause can be reported with (and
+/// ahead of) its consequence.
+///
+/// Consulted ONLY after a stage has already failed: a program that checks
+/// pays nothing, and no store is read twice on the success path. A native
+/// library that will not load is left to the checker's BL2007.
+let private unreadableStoreErrors (program: Program) : CompileError list =
+    let program = Blade.ProviderDesugar.desugarOrIdentity program
+    [ for m in program.Modules do
+        let aliases =
+            m.Decls |> List.fold (fun acc d ->
+                match d.Value with
+                | DeclImport ([pname], ImportQualified aliasOpt)
+                    when (Blade.ProviderRegistry.tryFind pname).IsSome ->
+                    Map.add (aliasOpt |> Option.defaultValue pname) pname acc
+                | _ -> acc) Map.empty
+        if not aliases.IsEmpty then
+            for d in m.Decls do
+                match d.Value with
+                | DeclLet { Pattern = { Kind = PatternKind.PatVar root }; Value = ({ Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") }, [{ Kind = ExprKind.ExprLit (LitString path) }]) } as value) }
+                | DeclStatic { Pattern = { Kind = PatternKind.PatVar root }; Value = ({ Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprField ({ Kind = ExprKind.ExprVar alias }, "load") }, [{ Kind = ExprKind.ExprLit (LitString path) }]) } as value) }
+                    when aliases.ContainsKey alias ->
+                    let pname = aliases.[alias]
+                    let failure =
+                        try
+                            (Blade.ProviderRegistry.tryFind pname).Value.LoadAsModule (IRBuilder()) root path |> ignore
+                            None
+                        with
+                        | :? System.DllNotFoundException -> None
+                        | :? System.TypeInitializationException as tix
+                            when (tix.InnerException :? System.DllNotFoundException) -> None
+                        | ex -> Some ex.Message
+                    match failure with
+                    | Some detail ->
+                        yield { Error = ProviderStoreUnresolvable (pname, path, detail)
+                                Span = (if value.Span = noSpan then d.Span else value.Span)
+                                Context = []
+                                Code = None }
+                    | None -> ()
+                | _ -> () ]
+
+let rec typeCheck (program: Program) : Result<TypedProgram * IRBuilder * string list, CompileError list> =
+    match typeCheckStages program with
+    | Ok _ as ok -> ok
+    | Error errors ->
+        let isStoreError (e: CompileError) =
+            match e.Error with
+            | ProviderStoreUnresolvable _ | ProviderNativeLoadFailure _ -> true
+            | _ -> false
+        // The checker already named a store: nothing to add.
+        if errors |> List.exists isStoreError then Error errors
+        else
+            match (try unreadableStoreErrors program with _ -> []) with
+            | [] -> Error errors
+            // Cause first, then what it broke.
+            | stores -> Error (stores @ errors)
+
+and private typeCheckStages (program: Program) : Result<TypedProgram * IRBuilder * string list, CompileError list> =
     // AST -> AST expansions, in order: ML-op elaboration first (so grad()
     // sees the generated functions as plain Blade source and can inline
     // them), then grad() expansion. Both synthesize ordinary declarations

@@ -479,6 +479,40 @@ let total = reduce(rowsums, (+))
               else check "write e2e: compiles" false e)
      | Error e -> check "write e2e: lowers" false e)
 
+    // A write's RESULT is unit: `let saved = c.write(...)` is a statement in
+    // the emitted C++, not a declared variable. A later reference to it -- a
+    // second name bound to it, a bare top-level `saved` (its `__exprN`
+    // desugar) -- used to be emitted as the expression statement `saved;`,
+    // naming a symbol that does not exist: the program passed `blade check`
+    // and died in g++ as BL9002. There is nothing to evaluate, so it emits
+    // nothing; the write itself still happens.
+    (let voidSource = sprintf """
+import csv as c
+let A = [[1.0, 2.0], [3.0, 4.0]]
+let saved = c.write("%s", A)
+let again = saved
+again
+"""
+                           (fixFile "wr_void_out.csv")
+     match lower voidSource with
+     | Ok ir ->
+         let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "csv_write_void"
+         let cppFile = Path.Combine(e2eDir, "csv_write_void.cpp")
+         File.WriteAllText(cppFile, cppCode)
+         (match compileCpp cppFile e2eDir with
+          | Ok exePath ->
+              (match runExecutable exePath with
+               | Ok (0, _) ->
+                   check "write e2e: references to a write's unit result compile, and the write still runs"
+                       (File.Exists (Path.Combine(e2eDir, fixFile "wr_void_out.csv"))) "output file missing"
+               | Ok (code, runOut) ->
+                   check "write e2e: references to a write's unit result compile and run" false ($"exit {code}: {runOut}")
+               | Error e -> check "write e2e: references to a write's unit result compile and run" false e)
+          | Error e ->
+              if isSkipError e then printfn "  SKIP csv write unit-result e2e (compile skipped): %s" e
+              else check "write e2e: references to a write's unit result compile" false e)
+     | Error e -> check "write e2e: references to a write's unit result lower" false e)
+
     // ---------------------------------------------------------------
     // 11. Unsupported surfaces rejected loudly (stream / load_compound)
     // ---------------------------------------------------------------

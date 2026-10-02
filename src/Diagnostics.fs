@@ -205,9 +205,12 @@ module Codes =
             // here the STORE) -- both are name resolution failing, not a type
             // judgment.
             //
-            // Providers opt in by raising Types.ProviderResolutionError; one
-            // that doesn't keeps the historical silent fallback at check and
-            // its own diagnostics at lowering.
+            // Raised for every provider: one that names its refusals does so
+            // through Types.ProviderResolutionError, and any other failure of
+            // the compile-time metadata read (a zarr/netcdf/csv store that is
+            // missing or unreadable) is reported the same way, at the load
+            // site, instead of surfacing as whatever first needed the store's
+            // types.
             "BL2008", "provider cannot resolve the store"
             // BL2009: a second top-level `function` declaration reusing a name
             // the same module scope already declared. Previously the later

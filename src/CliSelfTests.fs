@@ -884,21 +884,23 @@ let private runIdeServeTests () : TH.BlockResult =
         else
             record name TH.Fail $"response: {fullBody}"
 
-        // 6. A file that TYPECHECKS but will not lower. The fast half of the
-        // payload must survive intact (the editor keeps its hovers), the tier
-        // stays "full", and the lowering failure arrives as a real diagnostic
-        // -- `blade run` would report exactly this. Hermetic: the store is
-        // missing on purpose, and the message doubles as proof that the loop
-        // resolved the provider path against the REQUEST file's directory.
+        // 6. A store that is not there. The checker refuses at the LOAD SITE
+        // (BL2008, line 2 col 13) rather than leaving it for lowering to
+        // report spanless; the bindings that did check still arrive (the
+        // editor keeps its hovers), the tier stays "full", and the loop
+        // survives. Hermetic: the store is missing on purpose, and the
+        // message doubles as proof that the loop resolved the provider path
+        // against the REQUEST file's directory.
         let provPath = Path.Combine(tmpDir, "prov.blade")
         let provSource =
             "import csv as csv\nlet store = csv.load(\"no_such_store.csv\")\nlet a = 1\n"
         let (code, responses, _) =
             drive [ checkReq 15 "full" provPath provSource; pingReq 16; shutdownReq ]
-        let name = "full tier: a lowering failure joins diagnostics, payload and loop intact"
+        let name = "full tier: a missing store is refused at its load site, payload and loop intact"
         match responses with
         | [broken; pong] when code = 0 && broken.Contains "\"tier\":\"full\""
-                              && broken.Contains "\"code\":\"BL6002\""
+                              && broken.Contains "\"code\":\"BL2008\""
+                              && broken.Contains "\"line\":2,\"col\":13"
                               && broken.Contains "no_such_store.csv"
                               && broken.Contains "\"name\":\"a\""
                               && broken.Contains (Path.GetFileName tmpDir)
@@ -1163,6 +1165,137 @@ let private runIdeServeTests () : TH.BlockResult =
                            && pong.Contains "\"ok\":true" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // ---- What `blade check` reports, the editor reports ---------------
+        // Each case below is a diagnostic the CLI printed and this payload
+        // dropped, mis-placed, or could not correlate.
+        let count (needle: string) (hay: string) =
+            let mutable n = 0
+            let mutable i = hay.IndexOf(needle, StringComparison.Ordinal)
+            while i >= 0 do
+                n <- n + 1
+                i <- hay.IndexOf(needle, i + needle.Length, StringComparison.Ordinal)
+            n
+        let oneCheck (tier: string) (file: string) (source: string) =
+            match drive [checkReq 1 tier (Path.Combine(tmpDir, file)) source; shutdownReq] with
+            | (0, [r], _) -> r
+            | (code, responses, _) -> sprintf "<exit %d, responses %A>" code responses
+        let head (s: string) = if s.Length > 500 then s.Substring(0, 500) else s
+
+        // BL4010 is two things: the pin suggestion (which rides its own
+        // channel as well as the warning log) and the constrained-domain
+        // advisories (which ride the warning log alone). Skipping the code
+        // wholesale to avoid a duplicate dropped the second kind entirely.
+        let domainSource =
+            "static struct Prod { i: Int<min=0, max=6>, j: Int<min=0, max=6> } where (i * j) % 3 == 1\n"
+            + "let R = method_for(range<Prod>) <@> lambda(i, j) -> i * 10 + j |> compute\n"
+        let body = oneCheck "fast" "domain.blade" domainSource
+        let name = "a constrained-domain advisory (BL4010 off the warning log) reaches the payload, at its span"
+        if count "\"code\":\"BL4010\"" body = 1 && body.Contains "not closed-form"
+           && body.Contains "\"line\":2,\"col\":20" then record name TH.Pass ""
+        else record name TH.Fail (head body)
+        let body = oneCheck "fast" "warn.blade" warnSource
+        let name = "a pin suggestion is still reported exactly once"
+        if count "\"code\":\"BL4010\"" body = 1 then record name TH.Pass ""
+        else record name TH.Fail (sprintf "%d BL4010 in %s" (count "\"code\":\"BL4010\"" body) (head body))
+
+        // A lowering refusal carries a span, and the full tier used to throw
+        // it away: the CLI pointed at the expression, the editor at 1:1.
+        let lowerRefusal =
+            "function f(x: Array<Float like Idx<5>>) -> Float = {\n"
+            + "    let m = mask(x, lambda(q) -> q > 2.0)\n"
+            + "    let c = compound(x, m)\n"
+            + "    reduce(c, (+))\n"
+            + "}\n"
+            + "let a = [1.0, 2.0, 3.0, 4.0, 5.0]\n"
+            + "let s = f(a)\n"
+        let body = oneCheck "full" "lower.blade" lowerRefusal
+        // This is also the file that TYPECHECKS but will not lower: the fast
+        // half of the payload survives intact beside the lowering diagnostic.
+        let name = "tier=full reports a lowering refusal (BL6002) at ITS span, not 1:1, bindings intact"
+        if body.Contains "\"tier\":\"full\"" && body.Contains "\"code\":\"BL6002\""
+           && body.Contains "\"line\":3,\"col\":13"
+           && body.Contains "\"name\":\"f\"" && body.Contains "\"name\":\"s\"" then
+            record name TH.Pass ""
+        else record name TH.Fail (head body)
+
+        // "Void" is not a more concrete spelling of a static tuple's type; it
+        // is what lowering leaves behind once the static evaluator has
+        // consumed the binding.
+        let body = oneCheck "full" "statictuple.blade" "let static dims = (2, 3)\nlet n = 4\n"
+        let name = "tier=full never upgrades a binding's type to Void"
+        if body.Contains "\"name\":\"dims\"" && not (body.Contains "\"concreteType\":\"Void\"") then
+            record name TH.Pass ""
+        else record name TH.Fail (head body)
+
+        // A store that cannot be read is reported AT THE LOAD, by the tier the
+        // editor runs on every keystroke. It used to be reported nowhere on
+        // the fast tier, and as whatever first needed the store's types on
+        // the full one.
+        let body =
+            oneCheck "fast" "nostore.blade"
+                "import zarr as z\nlet s = z.load(\"definitely_absent_store\")\nlet n = 1\n"
+        let name = "a store that cannot be read is BL2008 at the load site, on the fast tier"
+        if body.Contains "\"code\":\"BL2008\"" && body.Contains "\"line\":2,\"col\":9"
+           && body.Contains "not a Zarr store" then record name TH.Pass ""
+        else record name TH.Fail (head body)
+
+        // `"\ud83d"` is valid JSON and invalid UTF-16 (what a JavaScript
+        // client writes for a buffer cut mid-emoji). The check must be
+        // ANSWERED, under its own id: an id-less error cannot be correlated,
+        // and the client's request then sits until its timeout kills the
+        // process and every session with it.
+        let surrogateReq =
+            "{\"id\":41,\"cmd\":\"check\",\"tier\":\"fast\",\"file\":\"" + esc (Path.Combine(tmpDir, "sur.blade"))
+            + "\",\"source\":\"let s = \\\"\\ud83d\\\"\\nlet t = 1\\n\"}"
+        let (code, responses, _) = drive [surrogateReq; pingReq 42; shutdownReq]
+        let name = "a lone surrogate in `source` is checked and answered under the request's id"
+        match responses with
+        | [r; pong] when code = 0 && r.Contains "\"id\":41" && r.Contains "\"name\":\"t\""
+                         && not (r.Contains "\"error\"") && pong.Contains "\"id\":42" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code (responses |> List.map head))
+
+        // ---- Session directories of dead processes -------------------------
+        // A killed daemon cannot remove its sessions' temp directories; the
+        // next one to start does. Driven against a private root with a fake
+        // liveness oracle: nothing here kills a process or waits a day.
+        let sweepRoot = Path.Combine(tmpDir, "sweep")
+        let mkSession (suffix: string) (owner: int option) (ageHours: float) =
+            let dir = Path.Combine(sweepRoot, Blade.ReplSession.sessionDirPrefix + suffix)
+            Directory.CreateDirectory dir |> ignore
+            File.WriteAllText(Path.Combine(dir, "session.blade"), "let x = 1\n")
+            (match owner with
+             | Some pid -> File.WriteAllText(Path.Combine(dir, Blade.ReplSession.ownerMarkerName), string pid)
+             | None -> ())
+            Directory.SetLastWriteTimeUtc(dir, DateTime.UtcNow.AddHours(-ageHours))
+            dir
+        let liveOwned = mkSession "live0001" (Some 111) 48.0
+        let deadOwned = mkSession "dead0001" (Some 222) 0.0
+        let oldUnmarked = mkSession "old00001" None 48.0
+        let newUnmarked = mkSession "new00001" None 1.0
+        let unrelated = Path.Combine(sweepRoot, "not-a-session")
+        Directory.CreateDirectory unrelated |> ignore
+        let removed =
+            Blade.ReplSession.sweepStaleSessionDirs sweepRoot (fun pid -> pid = 111) DateTime.UtcNow
+        let name = "the session sweep removes a dead owner's directory and an old unmarked one, nothing else"
+        if removed = 2
+           && Directory.Exists liveOwned && not (Directory.Exists deadOwned)
+           && not (Directory.Exists oldUnmarked) && Directory.Exists newUnmarked
+           && Directory.Exists unrelated then record name TH.Pass ""
+        else
+            record name TH.Fail
+                (sprintf "removed %d; live %b dead %b old %b new %b other %b" removed
+                    (Directory.Exists liveOwned) (Directory.Exists deadOwned)
+                    (Directory.Exists oldUnmarked) (Directory.Exists newUnmarked) (Directory.Exists unrelated))
+        let name = "a new session directory names this process as its owner"
+        let probe = Blade.ReplSession.ReplSession(entryDir)
+        (try
+            let marker = Path.Combine(probe.SessionDir, Blade.ReplSession.ownerMarkerName)
+            if File.Exists marker && (File.ReadAllText marker).Trim() = string Environment.ProcessId then
+                record name TH.Pass ""
+            else record name TH.Fail $"no owner marker under {probe.SessionDir}"
+         finally probe.Cleanup())
     finally
         Directory.SetCurrentDirectory entryDir
         try Directory.Delete(tmpDir, true) with _ -> ()
@@ -1774,6 +1907,20 @@ let (a, b) = pair(7.0)
                        && elsewhere.Contains "\"message\":\"elsewhere in session: Constraint violation in Pos\",\"code\":\"BL8001\"" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // 14c. ...and the STDERR text says the same thing the diagnostic does.
+        // The panic prints `  --> <session file>:<session line>`: a temp path
+        // the user never wrote and a line counted across every cell in the
+        // session. Both are internal; the client is shown the cell's line.
+        let name = "a runtime panic's stderr names the cell line, not the session file"
+        match responses with
+        | [here; _; elsewhere] when here.Contains "--> line 4"
+                                    && elsewhere.Contains "--> elsewhere in session"
+                                    && not (here.Contains "session.blade")
+                                    && not (here.Contains Blade.ReplSession.sessionDirPrefix)
+                                    && not (elsewhere.Contains "session.blade") ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "responses: %A" responses)
 
         // 15. MIXED CELLS. A notebook cell is prose-driven and routinely ends a
         // run of declarations with the expression that shows what they did.

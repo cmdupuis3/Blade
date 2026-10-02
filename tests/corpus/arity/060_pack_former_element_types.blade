@@ -1,0 +1,25 @@
+// TEST: Pack Former Element Types
+// ----------------------------------------------------------------------------
+// The pack former of arity/015 at an element type other than Int64, and at
+// two element types in one program.
+//
+// `args[k]` under a former over range<Idx<arity(args)>> is a DYNAMIC read of
+// the pack: whichever k it is, the value is one of the pack's elements. It was
+// typed as a fresh variable that nothing in `lambda(k) -> args[k]` constrains,
+// so the map's element type defaulted to the loop index's and the BODY pinned
+// T := Int64 for every caller. polySum(1.5, 2.5) then typed as Int64: 3 under
+// the interpreter (each argument truncated), and a g++ float-conversion
+// refusal (BL9002) compiled. A call at Int64 beside one at Float64 shared the
+// single Int64 instantiation.
+// ----------------------------------------------------------------------------
+function polySum(args: Poly<T^0>) -> T^0 = {
+    let terms = method_for(range<Idx<arity(args)>>) <@> lambda(k) -> args[k] |> compute
+    reduce(terms, (+))
+}
+
+let ints = polySum(10, 20, 30)
+let floats = polySum(1.5, 2.5)
+let pair = polySum(10, 20)
+// EXPECT: ints = 60
+// EXPECT: floats = 4.0
+// EXPECT: pair = 30

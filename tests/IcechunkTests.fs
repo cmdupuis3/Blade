@@ -3149,16 +3149,18 @@ let ck = repo.checkout("main")
                      (root + "_definitely_absent"))
             [ "does not exist" ]
 
-        // (d) ADDITIVE, and this is the pin that says so: zarr raises no
-        // store-resolution type, so its missing store still falls through to
-        // the historical opaque-type fallback and lowering keeps ownership of
-        // the diagnostic. A change that made BL2008 fire for every provider
-        // would be a behaviour change to three features, not one.
-        (let (zjson, _) =
+        // (d) EVERY provider, not just this one. zarr raises no
+        // store-resolution type -- its metadata read simply throws -- and its
+        // missing store used to fall through to the opaque-type fallback, so
+        // the check reported nothing here and whatever first needed the
+        // store's types reported something unrelated instead. The same BL2008,
+        // at the load site (line 3 of this program), with zarr's own text.
+        (let (zjson, zcode) =
             checkPayload "zarr_absent.blade"
                 "import zarr as z\n\nlet s = z.load(\"tests/fixtures/zarr_stores/definitely_absent\")\nlet a = 1\n"
-         check "check: a MISSING ZARR store still defers silently (other providers untouched)"
-             (not (zjson.Contains "BL2008"))
+         check "check: a MISSING ZARR store refuses AT TYPECHECK too, as BL2008 at the load site"
+             (zcode <> 0 && zjson.Contains "\"code\":\"BL2008\"" && zjson.Contains "\"line\":3"
+              && zjson.Contains "not a Zarr store")
              (if zjson.Length > 400 then zjson.Substring(0, 400) else zjson))
 
         // (e) The POSITIVE control: surfacing refusals must not make a GOOD

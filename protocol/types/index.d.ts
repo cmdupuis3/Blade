@@ -281,9 +281,12 @@ export interface BladeClient {
    *  message says which. Default timeout 30s (the worker's FIRST render pays
    *  GR's ~2.6s cold start; later ones are tens of ms). */
   renderPlot(args: RenderPlotArgs, opts?: { timeoutMs?: number }): Promise<RenderPlotResponse>;
-  /** Best-effort clean shutdown, then kill; resets ALL state so the next call
-   *  re-probes from scratch. Safe when nothing is running, and doubles as the
-   *  "kill a stuck eval" primitive. */
+  /** Shut the process down and reset ALL state so the next call re-probes
+   *  from scratch. Safe when nothing is running. An IDLE process is asked to
+   *  exit and killed only if it has not within a short grace period (a clean
+   *  exit is what removes its eval sessions' temp directories); a process
+   *  with a request in flight is killed at once, which makes this the "kill
+   *  a stuck eval" primitive. Returns immediately either way. */
   dispose(): void;
 }
 
