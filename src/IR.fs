@@ -40,6 +40,37 @@ type IRBinOpMode =
     | IRElementwise   // a + b (zip iteration)
     | IROuter         // a [+] b (cross iteration)
 
+/// WHERE IN THE SOURCE an IR node came from -- carried by the two node kinds
+/// whose evaluation can PANIC at run time with no other way to say where:
+/// `IRBinOp` (integer `/` `%` by zero, a negative integer exponent: BL8013)
+/// and `IRCast` (float->int of NaN / out of range: BL8014). The panic prints
+/// `  --> file:line` from it, exactly as IRConstraintCheck's span does.
+///
+/// NOT part of the node's identity. Equality, hashing and comparison all
+/// treat every SrcLoc as the same value, so two `a / b` written on different
+/// lines are still the same expression to every pass that compares nodes
+/// structurally -- let-level CSE (Optimize.fs, HashIdentity.Structural),
+/// fusion keys, the kernel dedup tables. Without that, carrying a location
+/// would silently cost the optimizations that depend on structural equality.
+///
+/// Zero run-time cost: the location is two constants emitted into the cold
+/// panic branch the guard already had; the hot path is unchanged.
+[<AllowNullLiteral>]
+type SrcLoc(span: Blade.Ast.Span) =
+    member _.Span = span
+    /// The anonymous location: no file, no line. Synthesized nodes (an
+    /// optimizer's rebuild, an elaborator's generated arithmetic) carry it.
+    static member Nowhere = SrcLoc(Blade.Ast.noSpan)
+    static member Of(span: Blade.Ast.Span) = SrcLoc(span)
+    override _.Equals(_: obj) = true
+    override _.GetHashCode() = 0
+    override _.ToString() =
+        match span.File with
+        | Some f when span.StartLine > 0 -> $"{f}:{span.StartLine}"
+        | _ -> if span.StartLine > 0 then $"line {span.StartLine}" else "<no location>"
+    interface System.IComparable with
+        member _.CompareTo(_: obj) = 0
+
 /// Unary operations
 type IRUnaryOp =
     | IRNeg | IRNot | IRConj
@@ -49,8 +80,10 @@ type IRUnaryOp =
                         // renders as std::<name>(arg), result Float64
                         // (complex operand preserves the complex type,
                         //  except abs which always yields the real magnitude)
-    | IRCast of ElemType  // explicit numeric cast (Float32(x)/Int64(floor(x))):
+    | IRCast of ElemType * SrcLoc  // explicit numeric cast (Float32(x)/Int64(floor(x))):
                           // result type is always the target element type.
+                          // The SrcLoc is the cast's source position, for the
+                          // BL8014 panic a float->int cast of NaN raises.
                           // Renders as static_cast<T>(arg) for real/int
                           // targets and the std::complex<T>(arg) constructor
                           // for complex targets. Legality (complex source
@@ -63,7 +96,7 @@ type IRExpr =
     | IRLit of IRLit
     | IRVar of id: IRId * ty: IRTypeG<IRExpr>
     | IRParam of name: string * idx: int * ty: IRTypeG<IRExpr>
-    | IRBinOp of IRBinOpMode * IRBinOp * IRExpr * IRExpr
+    | IRBinOp of IRBinOpMode * IRBinOp * IRExpr * IRExpr * SrcLoc
     | IRUnaryOp of IRUnaryOp * IRExpr
     | IRArrayLit of IRExpr list * IRArrayTypeG<IRExpr>
     | IRIndex of array: IRExpr * index: IRExpr list * identity: ArrayIdentity option
@@ -1038,7 +1071,7 @@ let distComponentType (k: int) (elem: IRType) (axes: IRIndexType list) : IRType 
                 rest |> List.fold (fun acc a ->
                     match acc, a.Extent with
                     | IRLit (IRLitInt m), IRLit (IRLitInt n) -> IRLit (IRLitInt (m * n))
-                    | l, r -> IRBinOp (IRElementwise, IRMul, l, r)) first.Extent
+                    | l, r -> IRBinOp (IRElementwise, IRMul, l, r, SrcLoc.Nowhere)) first.Extent
         let symIdx = {
             Id = (axes |> List.tryHead |> Option.map _.Id |> Option.defaultValue 0)
             Rank = k
@@ -2050,7 +2083,7 @@ let (|ExprShape|) (expr: IRExpr) : IRExpr list * (IRExpr list -> IRExpr) =
     | IRUnique e -> [e], (function [e'] -> IRUnique e' | _ -> badChildren "IRUnique")
 
     // -- Two children ---------------------------------------------------------
-    | IRBinOp (mode, op, l, r) -> [l; r], (function [l'; r'] -> IRBinOp (mode, op, l', r') | _ -> badChildren "IRBinOp")
+    | IRBinOp (mode, op, l, r, loc) -> [l; r], (function [l'; r'] -> IRBinOp (mode, op, l', r', loc) | _ -> badChildren "IRBinOp")
     | IRComplex (re, im) -> [re; im], (function [re'; im'] -> IRComplex (re', im') | _ -> badChildren "IRComplex")
     | IRTupleCons (h, t) -> [h; t], (function [h'; t'] -> IRTupleCons (h', t') | _ -> badChildren "IRTupleCons")
     | IRBind (c, k) -> [c; k], (function [c'; k'] -> IRBind (c', k') | _ -> badChildren "IRBind")
@@ -2285,18 +2318,18 @@ let irNodeMayAbort (e: IRExpr) : bool =
     // divisor is a literal that cannot fault -- any float, or a nonzero
     // integer (MIN / -1 wraps) -- so the `x / 2.0` and `n / 2` idioms stay
     // fusible; a float one with a computed divisor only costs a fusion.
-    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitFloat _ | IRLitFloat32 _)) -> false
-    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitInt n)) -> n = 0L
-    | IRBinOp (_, (IRDiv | IRMod), _, _) -> true
+    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitFloat _ | IRLitFloat32 _), _) -> false
+    | IRBinOp (_, (IRDiv | IRMod), _, IRLit (IRLitInt n), _) -> n = 0L
+    | IRBinOp (_, (IRDiv | IRMod), _, _, _) -> true
     // Integer `^` with a negative exponent aborts (BL8013). A literal
     // exponent that is a nonnegative integer or any float cannot, which
     // keeps the `x ^ 2` idiom fusible; anything else answers yes.
-    | IRBinOp (_, IRCaret, _, (IRLit (IRLitFloat _ | IRLitFloat32 _))) -> false
-    | IRBinOp (_, IRCaret, _, IRLit (IRLitInt n)) -> n < 0L
-    | IRBinOp (_, IRCaret, _, _) -> true
+    | IRBinOp (_, IRCaret, _, (IRLit (IRLitFloat _ | IRLitFloat32 _)), _) -> false
+    | IRBinOp (_, IRCaret, _, IRLit (IRLitInt n), _) -> n < 0L
+    | IRBinOp (_, IRCaret, _, _, _) -> true
     // A cast to an integer type aborts on a NaN / out-of-range float
     // operand (BL8014). Judged without the operand type, like `/`.
-    | IRUnaryOp (IRCast (ETInt64 | ETInt32), _) -> true
+    | IRUnaryOp (IRCast ((ETInt64 | ETInt32), _), _) -> true
     | IRBinOp _ | IRComplex _ | IRFma _ -> false
     | IRUnaryOp (IRMath ("lgamma" | "digamma"), _) -> true
     | IRUnaryOp _ -> false
@@ -2812,7 +2845,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
     // -- Index-arithmetic markers --
     | IntValued -> IRTScalar ETInt64
 
-    | IRBinOp (_, op, left, right) ->
+    | IRBinOp (_, op, left, right, _) ->
         (match op with
          | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr -> IRTScalar ETBool
          // atan2 / log_base are real-valued regardless of operand widths (the
@@ -2848,7 +2881,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
               | IRTScalar (ETComplex64 | ETComplex128) as ct -> ct
               | _ -> IRTScalar ETFloat64)
          // A cast's type is its target, whatever the operand resolved to.
-         | IRCast et -> IRTScalar et)
+         | IRCast (et, _) -> IRTScalar et)
     | IRTuple exprs -> IRTTuple (exprs |> List.map typeOf)
     | IRFma _ -> IRTScalar ETFloat64
     | IRComplex (re, _) ->
@@ -3337,7 +3370,7 @@ and private typeOfReconstruct (expr: IRExpr) : IRType =
                  | _ ->
                      match dimExtents |> List.choose id with
                      | [] -> a.IndexTypes.[dim].Extent
-                     | xs -> xs |> List.reduce (fun l r -> IRBinOp (IRElementwise, IRAdd, l, r))
+                     | xs -> xs |> List.reduce (fun l r -> IRBinOp (IRElementwise, IRAdd, l, r, SrcLoc.Nowhere))
              let joined = { a.IndexTypes.[dim] with Extent = joinedExtent; Tag = None }
              mkArrayArrow
                  (a.IndexTypes |> List.mapi (fun d ix -> if d = dim then joined else ix))
@@ -3464,7 +3497,7 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          // Sign and conjugation preserve the operand's type exactly, array
          // or scalar, unit and all.
          | (IRNeg | IRConj), Some t -> Some t
-         | IRCast et, Some (AnyPrimElem _) -> Some (IRTScalar et)
+         | IRCast (et, _), Some (AnyPrimElem _) -> Some (IRTScalar et)
          | IRNot, Some (AnyPrimElem ETBool) -> Some (IRTScalar ETBool)
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex64) -> Some (IRTScalar ETFloat32)
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex128) -> Some (IRTScalar ETFloat64)
@@ -3476,7 +3509,7 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          | IRMath _, Some (AnyPrimElem (ETInt32 | ETInt64 | ETFloat32 | ETFloat64)) ->
              Some (IRTScalar ETFloat64)
          | _ -> None)
-    | IRBinOp (_, op, l, r) ->
+    | IRBinOp (_, op, l, r, _) ->
         (match exprTypeIfKnown l, exprTypeIfKnown r with
          | Some (AnyPrimElem e1), Some (AnyPrimElem e2) ->
              (match op with

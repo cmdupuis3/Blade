@@ -886,10 +886,12 @@ let private shimTable : Map<string, ShimFn> =
           "blade_free", { Ret = "void"; RetAttrs = ""; Args = [ "ptr" ]; Group = grpShimFree }
           // The arithmetic contract (docs/formalism.md section 2.4): the twins of
           // blade_rt::idiv / imod / ipow / f2i and blade_arith::fpow.
-          "blade_idiv", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64" ]; Group = grpShimArith }
-          "blade_imod", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64" ]; Group = grpShimArith }
-          "blade_ipow", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64" ]; Group = grpShimArith }
-          "blade_f2i64", { Ret = "i64"; RetAttrs = ""; Args = [ "double" ]; Group = grpShimArith }
+          // Each takes the fault's source position (file ptr or null, line) for
+          // the panic's `--> file:line`, read only on the cold path.
+          "blade_idiv", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64"; "ptr"; "i64" ]; Group = grpShimArith }
+          "blade_imod", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64"; "ptr"; "i64" ]; Group = grpShimArith }
+          "blade_ipow", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64"; "ptr"; "i64" ]; Group = grpShimArith }
+          "blade_f2i64", { Ret = "i64"; RetAttrs = ""; Args = [ "double"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_fpow", io "double" [ "double"; "double" ]
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
@@ -1965,9 +1967,9 @@ and private emitRaw (c: Ctx) (e: IRExpr) : Val =
          | true, (slot, sc) -> loadSlot c slot sc
          | _ -> refuse ($"reference to parameter '{name}' outside a function body"))
 
-    | IRBinOp (mode, op, l, r) ->
+    | IRBinOp (mode, op, l, r, loc) ->
         if mode = IROuter then refuse "an outer-product binary operator ([+], [*])"
-        emitBinOp c op l r
+        emitBinOp c op l r loc
 
     | IRUnaryOp (op, x) -> emitUnary c op x
 
@@ -2409,7 +2411,16 @@ and private loadSlot (c: Ctx) (slot: string) (ty: Sc) : Val =
     ln c ($"{dest} = load {(llTy ty)}, ptr {slot}")
     { Reg = dest; Ty = ty }
 
-and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
+/// The two shim arguments that locate a fault for its panic's `--> file:line`:
+/// the source file as a string constant (or null) and the line, exactly the
+/// pair the C++ lane's panicSpanArgs renders.
+and private faultLocArgs (c: Ctx) (loc: SrcLoc) : (Sc * string) list =
+    let span = loc.Span
+    match span.File with
+    | Some f when f <> "" -> [ ScStr, stringGlobal c f; ScI64, (if span.StartLine > 0 then string span.StartLine else "0") ]
+    | _ -> [ ScStr, "null"; ScI64, (if span.StartLine > 0 then string span.StartLine else "0") ]
+
+and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLoc) : Val =
     match op with
     // `&&` / `||` SHORT-CIRCUIT, and that is not a micro-optimization here:
     // a plain `and i1` would evaluate a right operand C++ never runs, and the
@@ -2439,7 +2450,7 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
                         ln c (renderBin { Dest = dest; Opcode = "mul"; Flags = ""; Ty = ScI64; Lhs = acc.Reg; Rhs = a.Reg })
                         acc <- { Reg = dest; Ty = ScI64 }
                     acc
-            | _ -> callShim c "blade_ipow" ScI64 [ ScI64, a.Reg; ScI64, b.Reg ]
+            | _ -> callShim c "blade_ipow" ScI64 ([ ScI64, a.Reg; ScI64, b.Reg ] @ faultLocArgs c loc)
         else
             let a = coerce c ScF64 a0
             let b = coerce c ScF64 b0
@@ -2502,7 +2513,7 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) : Val =
             // (the arithmetic contract; blade_rt::idiv in the C++ lane). A
             // nonzero literal other than -1 can do neither: plain sdiv/srem.
             | ScI64, (IRDiv | IRMod), lit when (match lit with Some n -> n = 0L || n = -1L | None -> true) ->
-                callShim c (if op = IRDiv then "blade_idiv" else "blade_imod") ScI64 [ ScI64, a.Reg; ScI64, b.Reg ]
+                callShim c (if op = IRDiv then "blade_idiv" else "blade_imod") ScI64 ([ ScI64, a.Reg; ScI64, b.Reg ] @ faultLocArgs c loc)
             | _ ->
                 ln c (renderBin { Dest = dest; Opcode = opcode; Flags = fmfFor c common; Ty = common; Lhs = a.Reg; Rhs = b.Reg })
                 { Reg = dest; Ty = common }
@@ -2558,14 +2569,14 @@ and private emitUnary (c: Ctx) (op: IRUnaryOp) (x: IRExpr) : Val =
     // covers the Float64/Int64 targets; the widths this lane has no scalar
     // for (Float32/Int32/complex) refuse like every other Float32/complex
     // program does.
-    | IRCast ETFloat64 -> coerce c ScF64 (emitExpr c x)
+    | IRCast (ETFloat64, _) -> coerce c ScF64 (emitExpr c x)
     // Float -> Int64 is the checked conversion of the arithmetic contract:
     // NaN / out of range panics BL8014 (blade_f2i64), where fptosi is poison.
-    | IRCast ETInt64 ->
+    | IRCast (ETInt64, loc) ->
         let v = emitExpr c x
-        if v.Ty = ScF64 then callShim c "blade_f2i64" ScI64 [ ScF64, v.Reg ]
+        if v.Ty = ScF64 then callShim c "blade_f2i64" ScI64 ([ ScF64, v.Reg ] @ faultLocArgs c loc)
         else coerce c ScI64 v
-    | IRCast et -> refuse ($"a numeric cast to {(Blade.Types.castNameOf et)}")
+    | IRCast (et, _) -> refuse ($"a numeric cast to {(Blade.Types.castNameOf et)}")
 
 and private callLibm1 (c: Ctx) (fn: string) (arg: Val) : Val =
     need c ($"declare double @{fn}(double{(paramAttr ())}){(attrRef c grpExternReturns)}")

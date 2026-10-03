@@ -439,7 +439,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprBinOp (mode, op, left, right) ->
         let l = lowerTypedExpr env left
         let r = lowerTypedExpr env right
-        lowerTypedBinOp env mode op l r left right texpr.Type
+        lowerTypedBinOp env mode op l r left right texpr.Type (SrcLoc.Of texpr.Span)
     
     | TExprUnaryOp (op, operand) ->
         let e = lowerTypedExpr env operand
@@ -456,7 +456,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // TypeCheck's cast arm builds OpCast); resolve it to the target
             // element type here, where Types.fs is in scope.
             match Blade.Types.castTargetOf name with
-            | Some et -> IRUnaryOp (IRCast et, e)
+            | Some et -> IRUnaryOp (IRCast (et, SrcLoc.Of texpr.Span), e)
             | None -> loweringIce texpr.Span $"OpCast head '{name}' is not a numeric cast target"
     
     | TExprApp (func, args) when
@@ -488,7 +488,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
             // as the invariant it now is.
             | None -> loweringIce offArg.Span "halo window read over a masked domain reached lowering with a non-literal offset (TypeCheck.checkSite should have refused it)"
         else
-            IRBinOp (IRElementwise, IRAdd, f, lowerTypedExpr env offArg)
+            IRBinOp (IRElementwise, IRAdd, f, lowerTypedExpr env offArg, SrcLoc.Nowhere)
 
     | TExprApp (func, args) ->
         let f = lowerTypedExpr env func
@@ -666,7 +666,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprDotDot (lo, hi) ->
         let loIR = lowerTypedExpr env lo
         let hiIR = lowerTypedExpr env hi
-        let extentExpr = IRBinOp (IRElementwise, IRSub, hiIR, loIR)
+        let extentExpr = IRBinOp (IRElementwise, IRSub, hiIR, loIR, SrcLoc.Nowhere)
         let idx = {
             Id = env.Builder.FreshId()
             Rank = 1
@@ -1240,7 +1240,7 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
                 | SIdx _ | SIdxVirt _ -> IRTScalar ETFloat64
             (first, r)
         | _ -> (IRTScalar ETFloat64, IRTScalar ETFloat64)
-    let body = IRBinOp(IRElementwise, irOp, IRVar (aId, paramTy), IRVar (bId, paramTy))
+    let body = IRBinOp(IRElementwise, irOp, IRVar (aId, paramTy), IRVar (bId, paramTy), SrcLoc.Nowhere)
     let parms : IRParam list =
         [{ Name = "a"; Type = paramTy; Index = 0; VarId = aId }
          { Name = "b"; Type = paramTy; Index = 1; VarId = bId }]
@@ -1303,8 +1303,8 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
             (p, r)
         | _ -> (IRTScalar ETFloat64, IRTScalar ETFloat64)
     let body =
-        if isLeft then IRBinOp (IRElementwise, irOp, argExpr, IRVar (paramId, paramTy))
-        else IRBinOp (IRElementwise, irOp, IRVar (paramId, paramTy), argExpr)
+        if isLeft then IRBinOp (IRElementwise, irOp, argExpr, IRVar (paramId, paramTy), SrcLoc.Nowhere)
+        else IRBinOp (IRElementwise, irOp, IRVar (paramId, paramTy), argExpr, SrcLoc.Nowhere)
     let parms : IRParam list =
         [{ Name = "x"; Type = paramTy; Index = 0; VarId = paramId }]
     let retType =
@@ -1320,7 +1320,7 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
     IRVar (callable.Id, funcType)
 
 /// Lower typed binary operations
-and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
+and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType (loc: SrcLoc) =
     let irMode = match mode with Elementwise -> IRElementwise | Outer -> IROuter
     
     // Check if both operands are arrays -- if so, synthesize object_for loop
@@ -1365,7 +1365,7 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
         let elemTypeR = kernelElemOf rightExpr.Type
         let aId = env.Builder.FreshId()
         let bId = env.Builder.FreshId()
-        let body = IRBinOp(IRElementwise, irOp, IRVar (aId, elemTypeL), IRVar (bId, elemTypeR))
+        let body = IRBinOp(IRElementwise, irOp, IRVar (aId, elemTypeL), IRVar (bId, elemTypeR), loc)
         let parms : IRParam list = [
             { Name = "__a"; Type = elemTypeL; Index = 0; VarId = aId }
             { Name = "__b"; Type = elemTypeR; Index = 1; VarId = bId }
@@ -1456,21 +1456,21 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType =
     else
     
     match op with
-    | OpAdd -> IRBinOp (irMode, IRAdd, l, r)
-    | OpSub -> IRBinOp (irMode, IRSub, l, r)
-    | OpMul -> IRBinOp (irMode, IRMul, l, r)
-    | OpDiv -> IRBinOp (irMode, IRDiv, l, r)
-    | OpMod -> IRBinOp (irMode, IRMod, l, r)
-    | OpCaret -> IRBinOp (irMode, IRCaret, l, r)
-    | OpEq -> IRBinOp (irMode, IREq, l, r)
-    | OpNeq -> IRBinOp (irMode, IRNeq, l, r)
-    | OpLt -> IRBinOp (irMode, IRLt, l, r)
-    | OpLe -> IRBinOp (irMode, IRLe, l, r)
-    | OpGt -> IRBinOp (irMode, IRGt, l, r)
-    | OpGe -> IRBinOp (irMode, IRGe, l, r)
-    | OpAnd -> IRBinOp (irMode, IRAnd, l, r)
-    | OpOr -> IRBinOp (irMode, IROr, l, r)
-    | OpMath2 name -> IRBinOp (irMode, IRMath2 name, l, r)
+    | OpAdd -> IRBinOp (irMode, IRAdd, l, r, loc)
+    | OpSub -> IRBinOp (irMode, IRSub, l, r, loc)
+    | OpMul -> IRBinOp (irMode, IRMul, l, r, loc)
+    | OpDiv -> IRBinOp (irMode, IRDiv, l, r, loc)
+    | OpMod -> IRBinOp (irMode, IRMod, l, r, loc)
+    | OpCaret -> IRBinOp (irMode, IRCaret, l, r, loc)
+    | OpEq -> IRBinOp (irMode, IREq, l, r, loc)
+    | OpNeq -> IRBinOp (irMode, IRNeq, l, r, loc)
+    | OpLt -> IRBinOp (irMode, IRLt, l, r, loc)
+    | OpLe -> IRBinOp (irMode, IRLe, l, r, loc)
+    | OpGt -> IRBinOp (irMode, IRGt, l, r, loc)
+    | OpGe -> IRBinOp (irMode, IRGe, l, r, loc)
+    | OpAnd -> IRBinOp (irMode, IRAnd, l, r, loc)
+    | OpOr -> IRBinOp (irMode, IROr, l, r, loc)
+    | OpMath2 name -> IRBinOp (irMode, IRMath2 name, l, r, loc)
 
     | OpApply ->
         // For <@>, symmetry info should already be in TExprApply

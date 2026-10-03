@@ -1055,10 +1055,10 @@ let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, str
         | IRApp (f, args, ty) ->
             let hs = args |> List.map hoistLoopApps
             (hs |> List.collect fst, IRApp (f, hs |> List.map snd, ty))
-        | IRBinOp (m, op, l, r) ->
+        | IRBinOp (m, op, l, r, loc) ->
             let (ll, l') = hoistLoopApps l
             let (lr, r') = hoistLoopApps r
-            (ll @ lr, IRBinOp (m, op, l', r'))
+            (ll @ lr, IRBinOp (m, op, l', r', loc))
         | IRUnaryOp (op, i) ->
             let (li, i') = hoistLoopApps i
             (li, IRUnaryOp (op, i'))

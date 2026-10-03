@@ -1334,7 +1334,7 @@ let collectDeferredPositionalReads (ctx: CodeGenContext) (root: IRExpr) : IRId l
         | IRReplicate (count, body) -> walk count; walk body
         | IRGuard (c, b) -> walk c; walk b
         // Scalar / compound-expression forms.
-        | IRBinOp (_, _, l, r) -> walk l; walk r
+        | IRBinOp (_, _, l, r, _) -> walk l; walk r
         | IRUnaryOp (_, x) -> walk x
         | IRIf (c, t, el) -> walk c; walk t; walk el
         // A whole deferred array passed as a call argument (`f(A)`) renders A

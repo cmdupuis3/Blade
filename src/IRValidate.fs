@@ -272,7 +272,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     // compiling to a C++ error (complex) or a silent truncation (float).
     let rec checkCasts (ctx: string) (e: IRExpr) =
         (match e with
-         | IRUnaryOp (IRCast target, operand) ->
+         | IRUnaryOp (IRCast (target, _), operand) ->
              let src =
                  match typeOf operand with
                  | IRTScalar et | IRTUnitAnnotated (IRTScalar et, _) | IRTIdxTagged (IRTScalar et, _) -> Some et

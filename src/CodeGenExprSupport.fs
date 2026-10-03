@@ -185,8 +185,8 @@ let unaryOpToCpp = function
     // complex<float>(complex<double>) narrowing ctor); everything else is
     // static_cast. complexCppTypeName picks thrust:: in the device dialect;
     // static_cast is dialect-neutral.
-    | IRCast ((ETComplex64 | ETComplex128) as et) -> complexCppTypeName et
-    | IRCast et -> $"static_cast<{primTypeToCpp et}>"
+    | IRCast ((ETComplex64 | ETComplex128) as et, _) -> complexCppTypeName et
+    | IRCast (et, _) -> $"static_cast<{primTypeToCpp et}>"
 
 /// Namespace-qualified spelling of a <complex>-vocabulary function in the
 /// current dialect (std:: on the host, thrust:: inside CUDA device bodies).
@@ -253,8 +253,10 @@ let renderUnaryOpTyped (op: IRUnaryOp) (operandTy: IRType) (inner: string) : str
         // else a BL8014 panic (blade_rt::f2i; docs/formalism.md section 2.4).
         // A bare static_cast is UB on NaN / out-of-range (x86 answers the
         // INT_MIN sentinel) where the interpreter used to saturate.
-        | IRCast ((ETInt64 | ETInt32) as et), Some (ETFloat64 | ETFloat32) ->
-            (if et = ETInt64 then $"blade_rt::f2i64({inner})" else $"blade_rt::f2i32({inner})")
+        | IRCast ((ETInt64 | ETInt32) as et, loc), Some (ETFloat64 | ETFloat32) ->
+            // The cast's source position rides into the panic's `--> file:line`.
+            let at = panicSpanArgs loc.Span
+            (if et = ETInt64 then $"blade_rt::f2i64({inner}, {at})" else $"blade_rt::f2i32({inner}, {at})")
         // A transcendental on a REAL operand: blade_libm::, the run-time
         // platform libm (never folded at compile time), whose overloads
         // evaluate a Float32 operand in double and round once to float and
@@ -340,8 +342,11 @@ let private intLiteralOf (e: IRExpr) : int64 option =
 /// blade_libm (host-only).
 let renderContractBinOp
         (op: IRBinOp) (l: IRExpr) (r: IRExpr) (lStr: string) (rStr: string)
-        (inferTy: IRExpr -> IRType) : string option =
+        (inferTy: IRExpr -> IRType) (loc: SrcLoc) : string option =
     let isInt et = match et with ETInt32 | ETInt64 -> true | _ -> false
+    // The fault's source position, for the panic's `--> file:line`: constants
+    // the guard reads only on its cold path (blade_runtime.hpp idiv/imod/ipow).
+    let at = panicSpanArgs loc.Span
     match op with
     | IRDiv | IRMod | IRCaret when not (inCudaDeviceDialect ()) ->
         match scalarElemOf (inferTy l), scalarElemOf (inferTy r) with
@@ -349,10 +354,10 @@ let renderContractBinOp
             let w = if le = ETInt64 || re = ETInt64 then "64" else "32"
             match op, intLiteralOf r with
             | (IRDiv | IRMod), Some n when n <> 0L && n <> -1L -> None
-            | IRDiv, _ -> Some $"blade_rt::idiv{w}({lStr}, {rStr})"
-            | IRMod, _ -> Some $"blade_rt::imod{w}({lStr}, {rStr})"
+            | IRDiv, _ -> Some $"blade_rt::idiv{w}({lStr}, {rStr}, {at})"
+            | IRMod, _ -> Some $"blade_rt::imod{w}({lStr}, {rStr}, {at})"
             | _, Some n when n >= 0L -> Some $"blade_arith::ipow_nn{w}({lStr}, {rStr})"
-            | _ -> Some $"blade_rt::ipow{w}({lStr}, {rStr})"
+            | _ -> Some $"blade_rt::ipow{w}({lStr}, {rStr}, {at})"
         | Some le, Some re when op = IRCaret ->
             // The C++ EVALUATION width, not the node type: Float32 with an
             // integer computes in float (a literal exponent adapts, `s ^ 2`
@@ -432,10 +437,10 @@ let rec exprToCppSimple (names: Map<IRId, string>) (expr: IRExpr) : string =
     | IRLit IRLitUnit -> "((void)0)"
     | IRVar (id, _) -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
     | IRParam (name, _, _) -> name
-    | IRBinOp (_, op, l, r) ->
+    | IRBinOp (_, op, l, r, loc) ->
         let lStr = exprToCppSimple names l
         let rStr = exprToCppSimple names r
-        match renderContractBinOp op l r lStr rStr inferExprType, op with
+        match renderContractBinOp op l r lStr rStr inferExprType loc, op with
         | Some s, _ -> s
         | None, IRCaret -> $"pow({lStr}, {rStr})"
         | None, IRMath2 name -> renderMath2 name lStr rStr
@@ -1053,7 +1058,7 @@ let rec evalDepIdxExtent (outerId: IRId) (i: int) (expr: IRExpr) : int option =
     match expr with
     | IRLit (IRLitInt n) -> Some (int n)
     | IRVar (vid, _) when vid = outerId -> Some i
-    | IRBinOp (_, op, l, r) ->
+    | IRBinOp (_, op, l, r, _) ->
         match evalDepIdxExtent outerId i l, evalDepIdxExtent outerId i r with
         | Some a, Some b ->
             match op with
@@ -1310,7 +1315,7 @@ let isAssociativeOp (op: IRBinOp) : bool =
 /// builtin" means one thing.
 let foldKernelBuiltinOp (callable: IRCallable) : IRBinOp option =
     match callable.Params, callable.Body with
-    | [p0; p1], IRBinOp (_, op, l, r) when isCommutativeOp op && isAssociativeOp op ->
+    | [p0; p1], IRBinOp (_, op, l, r, _) when isCommutativeOp op && isAssociativeOp op ->
         // A param reference lowers as IRVar over the param's VarId; IRParam
         // (positional) is accepted too so a callable built by either convention
         // is recognised.

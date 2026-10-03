@@ -78,7 +78,7 @@ let test_binop_unions_children = {
     Name = "BinOp: free vars from both operands union"
     Run = fun () ->
         // x + y → free {x, y}
-        let e = IRBinOp (IRElementwise, IRAdd, IRVar (1, intTy), IRVar (2, intTy))
+        let e = IRBinOp (IRElementwise, IRAdd, IRVar (1, intTy), IRVar (2, intTy), SrcLoc.Nowhere)
         let actual = exprAttrs e
         let expected = mkAttrs [1; 2] [] true
         (actual, expected)
@@ -115,7 +115,7 @@ let test_let_binds_id = {
         // FreeVars: {y}; BoundVars: {x}
         let e =
             IRLet (10, IRLit (IRLitInt 1L),
-                IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (20, intTy)))
+                IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (20, intTy), SrcLoc.Nowhere))
         let actual = exprAttrs e
         let expected = mkAttrs [20] [10] true
         (actual, expected)
@@ -134,7 +134,7 @@ let test_let_shadowing = {
         //     let y20 = 5 in
         //       x10 + y20
         let inner = IRLet (20, IRLit (IRLitInt 5L),
-                        IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (20, intTy)))
+                        IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRVar (20, intTy), SrcLoc.Nowhere))
         let e = IRLet (10, IRVar (99, intTy), inner)
         let actual = exprAttrs e
         let expected = mkAttrs [99] [10; 20] true
@@ -148,7 +148,7 @@ let test_let_value_can_be_free = {
         // FreeVars: {y}; BoundVars: {x}
         let e =
             IRLet (10, IRVar (5, intTy),
-                IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRLit (IRLitInt 1L)))
+                IRBinOp (IRElementwise, IRAdd, IRVar (10, intTy), IRLit (IRLitInt 1L), SrcLoc.Nowhere))
         let actual = exprAttrs e
         let expected = mkAttrs [5] [10] true
         (actual, expected)
@@ -175,7 +175,7 @@ let test_forrange_binds_loop_var = {
     Run = fun () ->
         // for i:30 in 0..n { i + acc }
         // FreeVars: {n, acc}; BoundVars: {i (30)}
-        let body = IRBinOp (IRElementwise, IRAdd, IRVar (30, intTy), IRVar (5, intTy))
+        let body = IRBinOp (IRElementwise, IRAdd, IRVar (30, intTy), IRVar (5, intTy), SrcLoc.Nowhere)
         let e = IRForRange (30, IRLit (IRLitInt 0L), IRVar (99, intTy), body)
         let actual = exprAttrs e
         let expected = mkAttrs [99; 5] [30] true
@@ -190,7 +190,7 @@ let test_match_pattern_binds = {
         let case: IRMatchCase = {
             Pattern = IRPatVar 5
             Guard = None
-            Body = IRBinOp (IRElementwise, IRAdd, IRVar (5, intTy), IRVar (8, intTy))
+            Body = IRBinOp (IRElementwise, IRAdd, IRVar (5, intTy), IRVar (8, intTy), SrcLoc.Nowhere)
         }
         let e = IRMatch (IRVar (99, intTy), [case])
         let actual = exprAttrs e
@@ -209,8 +209,8 @@ let test_match_tuple_pattern = {
             Guard = None
             Body =
                 IRBinOp (IRElementwise, IRAdd,
-                    IRBinOp (IRElementwise, IRAdd, IRVar (5, intTy), IRVar (6, intTy)),
-                    IRVar (8, intTy))
+                    IRBinOp (IRElementwise, IRAdd, IRVar (5, intTy), IRVar (6, intTy), SrcLoc.Nowhere),
+                    IRVar (8, intTy), SrcLoc.Nowhere)
         }
         let e = IRMatch (IRVar (99, intTy), [case])
         let actual = exprAttrs e
@@ -353,7 +353,7 @@ let test_probe_in_binop = {
         // → probe with BuildOn = B_1 reaches the top
         let arrB = IRVar (1, intTy)
         let cont = IRContains (arrB, IRVar (2, intTy))
-        let e = IRBinOp (IRElementwise, IRAnd, cont, IRLit (IRLitBool true))
+        let e = IRBinOp (IRElementwise, IRAnd, cont, IRLit (IRLitBool true), SrcLoc.Nowhere)
         let actual = exprAttrs e
         let expected = mkAttrs [1; 2] [] true
         (actual, expected)
@@ -392,7 +392,7 @@ let test_multiple_probes_in_one_predicate = {
         let arrC = IRVar (2, intTy)
         let cont1 = IRContains (arrB, IRVar (3, intTy))
         let cont2 = IRContains (arrC, IRVar (3, intTy))
-        let e = IRBinOp (IRElementwise, IROr, cont1, cont2)
+        let e = IRBinOp (IRElementwise, IROr, cont1, cont2, SrcLoc.Nowhere)
         let actual = exprAttrs e
         let expected = mkAttrs [1; 2; 3] [] true
         (actual, expected)
@@ -430,7 +430,7 @@ let private crossProcCallee : IRCallable =
     let fBody =
         IRBinOp (IRElementwise, IRAdd,
             IRContains (IRVar (77, intTy), IRVar (78, intTy)),
-            IRVar (55, intTy))
+            IRVar (55, intTy), SrcLoc.Nowhere)
     { Id = 99; Name = "f"
       Params = [arrP; xP]; RetType = boolTy; Body = fBody
       IsStatic = false

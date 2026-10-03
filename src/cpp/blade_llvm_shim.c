@@ -60,6 +60,17 @@ BLADE_NORETURN void blade_panic(const char *msg) {
     exit(1);
 }
 
+/* The located twin: blade_rt::panic's `  --> file:line` second line, when the
+ * emitter knew where the faulting expression was (file null or line 0 when it
+ * did not). Byte-identical to the C++ lane's rendering. */
+BLADE_NORETURN static void blade_panic_at(const char *msg, const char *file, long long line) {
+    fputs(msg, stderr);
+    fputc('\n', stderr);
+    if (file && line > 0) fprintf(stderr, "  --> %s:%lld\n", file, line);
+    fflush(stderr);
+    exit(1);
+}
+
 /* ---- the arithmetic contract ------------------------------------------- */
 
 /* docs/formalism.md section 2.4. Twins of blade_rt::idiv / imod / ipow / f2i
@@ -67,23 +78,23 @@ BLADE_NORETURN void blade_panic(const char *msg) {
  * Numerics.computeReal / intPow64 / realPow / floatToInt64: same answers,
  * same codes, same messages. The emitter calls these only where a fault is
  * possible (a nonzero literal divisor other than -1 stays a plain sdiv). */
-long long blade_idiv(long long a, long long b) {
-    if (b == 0) blade_panic("error[BL8013]: integer division by zero");
+long long blade_idiv(long long a, long long b, const char *file, long long line) {
+    if (b == 0) blade_panic_at("error[BL8013]: integer division by zero", file, line);
     /* MIN / -1 wraps to MIN; sdiv would be UB, x86 idiv traps. */
     if (b == -1) return (long long)(0ULL - (unsigned long long)a);
     return a / b;
 }
 
-long long blade_imod(long long a, long long b) {
-    if (b == 0) blade_panic("error[BL8013]: integer modulo by zero");
+long long blade_imod(long long a, long long b, const char *file, long long line) {
+    if (b == 0) blade_panic_at("error[BL8013]: integer modulo by zero", file, line);
     if (b == -1) return 0;
     return a % b;
 }
 
 /* Exact modulo 2^64 (square-and-multiply in unsigned arithmetic); 0^0 = 1. */
-long long blade_ipow(long long b, long long e) {
+long long blade_ipow(long long b, long long e, const char *file, long long line) {
     unsigned long long r = 1, x = (unsigned long long)b, n;
-    if (e < 0) blade_panic("error[BL8013]: integer power with a negative exponent");
+    if (e < 0) blade_panic_at("error[BL8013]: integer power with a negative exponent", file, line);
     n = (unsigned long long)e;
     while (n != 0) {
         if (n & 1ULL) r *= x;
@@ -99,9 +110,9 @@ double blade_fpow(double x, double e) { return e == 2.0 ? x * x : pow(x, e); }
 /* Float -> Int64: truncation of a value the target holds; NaN / +-inf / out
  * of [-2^63, 2^63) panics (fptosi would be poison). Exact comparisons: both
  * bounds are powers of two. */
-long long blade_f2i64(double x) {
+long long blade_f2i64(double x, const char *file, long long line) {
     if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0))
-        blade_panic("error[BL8014]: float-to-integer conversion of NaN or an out-of-range value");
+        blade_panic_at("error[BL8014]: float-to-integer conversion of NaN or an out-of-range value", file, line);
     return (long long)x;
 }
 

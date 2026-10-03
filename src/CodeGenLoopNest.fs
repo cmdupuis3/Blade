@@ -976,7 +976,7 @@ let compactFlatWritePlan (codeGen: LoopNestCodeGen) (outRowName: string)
 /// E.g. (a * b) * c -> [a; b; c]
 let rec flattenAssocOp (mode: IRBinOpMode) (op: IRBinOp) (expr: IRExpr) : IRExpr list =
     match expr with
-    | IRBinOp (m, o, l, r) when o = op && m = mode ->
+    | IRBinOp (m, o, l, r, _) when o = op && m = mode ->
         flattenAssocOp mode op l @ flattenAssocOp mode op r
     | _ -> [expr]
 
@@ -1035,7 +1035,7 @@ let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
             | ArrayElem at -> isComplex at.ElemType
             | _ -> false
         match e with
-        | IRBinOp (_, _, l, r) -> (try isComplex (typeOf l) || isComplex (typeOf r) with _ -> true)
+        | IRBinOp (_, _, l, r, _) -> (try isComplex (typeOf l) || isComplex (typeOf r) with _ -> true)
         | _ -> true
     // Two array operands with the same element type and structurally equal,
     // non-opaque extents at every axis (identity records may differ: two
@@ -1055,7 +1055,7 @@ let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
     let marker (tag: string) (s: string) = IRLit (IRLitString ("\u0001" + tag + ":" + s))
     let sortOperands (xs: IRExpr list) = List.sortWith compare xs
     let rebuildChain mode op (xs: IRExpr list) =
-        xs |> List.reduce (fun l r -> IRBinOp (mode, op, l, r))
+        xs |> List.reduce (fun l r -> IRBinOp (mode, op, l, r, SrcLoc.Nowhere))
     // The name map is consulted on the ORIGINAL ids, before any rewrite, so
     // chain typing (typeOf) sees the real operands.
     let keyed =
@@ -1080,12 +1080,12 @@ let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
             | [] -> k
             | _ -> rebuild (List.map2 norm oKids kKids)
         match k' with
-        | IRBinOp (IRElementwise as mode, op, l, r) when (op = IRAdd || op = IRMul) && chainExact orig ->
+        | IRBinOp (IRElementwise as mode, op, l, r, _) when (op = IRAdd || op = IRMul) && chainExact orig ->
             flattenAssocOp mode op k' |> sortOperands |> rebuildChain mode op
-        | IRBinOp (IRElementwise as mode, op, l, r)
+        | IRBinOp (IRElementwise as mode, op, l, r, _)
             when (op = IRAdd || op = IREq || op = IRNeq || (op = IRMul && not (complexOperand orig))) ->
             (match sortOperands [l; r] with
-             | [a; b] -> IRBinOp (mode, op, a, b)
+             | [a; b] -> IRBinOp (mode, op, a, b, SrcLoc.Nowhere)
              | _ -> k')
         // fma(a, b, c) = a*b + c with ONE rounding: a*b is b*a exactly.
         | IRFma (a, b, c) ->

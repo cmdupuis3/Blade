@@ -160,7 +160,7 @@ let private applyFunctorWrappers (st: InterpState) (info: ApplyInfo) (wrappers: 
                     match expr with
                     | IRVar (id, _) when id = paramId -> body
                     | IRVar _ | IRLit _ | IRParam _ -> expr
-                    | IRBinOp (m, op, l, r) -> IRBinOp (m, op, subst l, subst r)
+                    | IRBinOp (m, op, l, r, loc) -> IRBinOp (m, op, subst l, subst r, loc)
                     | IRUnaryOp (op, e) -> IRUnaryOp (op, subst e)
                     | IRIf (c2, t, e) -> IRIf (subst c2, subst t, subst e)
                     | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)

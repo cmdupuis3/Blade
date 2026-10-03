@@ -256,7 +256,7 @@ let rec internal cudaInlineCalls (fuel: int) (expr: IRExpr) : IRExpr =
 let rec internal cudaScalarNodeOk (e: IRExpr) : bool =
     match e with
     | IRLit _ | IRVar _ -> true
-    | IRBinOp (IRElementwise, _, l, r) -> cudaScalarNodeOk l && cudaScalarNodeOk r
+    | IRBinOp (IRElementwise, _, l, r, _) -> cudaScalarNodeOk l && cudaScalarNodeOk r
     | IRUnaryOp (_, x) -> cudaScalarNodeOk x
     | IRComplex (re, im) -> cudaScalarNodeOk re && cudaScalarNodeOk im
     | IRFma (a, b, c) -> cudaScalarNodeOk a && cudaScalarNodeOk b && cudaScalarNodeOk c  // device fma()

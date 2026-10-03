@@ -452,14 +452,23 @@ let cppArithElem (le: ElemType) (re: ElemType) : ElemType =
 // three lanes fail IDENTICALLY. (Integer division by zero used to be BL8007
 // here -- the singular-matrix code -- while the compiled program died with
 // STATUS_INTEGER_DIVIDE_BY_ZERO and printed nothing.)
-let private intFault (msg: string) : 'a =
-    raise (InterpPanic("BL8013", msg, None, 0))
+/// The panic's position: the faulting node's SrcLoc, rendered exactly as
+/// Core.fs renders an IRConstraintCheck's span (file when named, line when
+/// known) so blade_rt::panic's `  --> file:line` comes out byte-identical.
+let private faultSite (loc: SrcLoc) : string option * int =
+    let span = loc.Span
+    let fileOpt = match span.File with Some f when f <> "" -> Some f | _ -> None
+    (fileOpt, (if span.StartLine > 0 then span.StartLine else 0))
+
+let private intFaultAt (loc: SrcLoc) (msg: string) : 'a =
+    let (file, line) = faultSite loc
+    raise (InterpPanic("BL8013", msg, file, line))
 
 /// b ^ e over integers: exact modulo 2^64 (two's-complement wrap, the residue
 /// blade_arith::ipow_nn computes; any multiplication order gives the same
-/// residue). 0 ^ 0 = 1; a negative exponent panics BL8013.
-let intPow64 (b: int64) (e: int64) : int64 =
-    if e < 0L then intFault "integer power with a negative exponent"
+/// residue). 0 ^ 0 = 1; a negative exponent panics BL8013 at `loc`.
+let intPow64At (loc: SrcLoc) (b: int64) (e: int64) : int64 =
+    if e < 0L then intFaultAt loc "integer power with a negative exponent"
     let mutable r = 1UL
     let mutable x = uint64 b
     let mutable n = uint64 e
@@ -470,8 +479,8 @@ let intPow64 (b: int64) (e: int64) : int64 =
     int64 r
 
 /// The Int32 twin (exact modulo 2^32).
-let intPow32 (b: int32) (e: int32) : int32 =
-    if e < 0 then intFault "integer power with a negative exponent"
+let intPow32At (loc: SrcLoc) (b: int32) (e: int32) : int32 =
+    if e < 0 then intFaultAt loc "integer power with a negative exponent"
     let mutable r = 1u
     let mutable x = uint32 b
     let mutable n = uint32 e
@@ -490,14 +499,20 @@ let realPow (b: float) (e: float) : float =
 /// Float -> integer conversion: truncation toward zero of a value the target
 /// can hold; NaN / +-inf / out of [-2^(w-1), 2^(w-1)) panics BL8014
 /// (blade_rt::f2i). Both bounds are powers of two, so the tests are exact.
-let private f2iFault () : 'a =
-    raise (InterpPanic("BL8014", "float-to-integer conversion of NaN or an out-of-range value", None, 0))
-let floatToInt64 (x: float) : int64 =
-    if not (x >= -9223372036854775808.0 && x < 9223372036854775808.0) then f2iFault ()
+let private f2iFaultAt (loc: SrcLoc) : 'a =
+    let (file, line) = faultSite loc
+    raise (InterpPanic("BL8014", "float-to-integer conversion of NaN or an out-of-range value", file, line))
+let floatToInt64At (loc: SrcLoc) (x: float) : int64 =
+    if not (x >= -9223372036854775808.0 && x < 9223372036854775808.0) then f2iFaultAt loc
     else int64 x
-let floatToInt32 (x: float) : int32 =
-    if not (x >= -2147483648.0 && x < 2147483648.0) then f2iFault ()
+let floatToInt32At (loc: SrcLoc) (x: float) : int32 =
+    if not (x >= -2147483648.0 && x < 2147483648.0) then f2iFaultAt loc
     else int32 x
+/// The anonymous forms, for arithmetic the interpreter synthesizes itself.
+let intPow64 (b: int64) (e: int64) : int64 = intPow64At SrcLoc.Nowhere b e
+let intPow32 (b: int32) (e: int32) : int32 = intPow32At SrcLoc.Nowhere b e
+let floatToInt64 (x: float) : int64 = floatToInt64At SrcLoc.Nowhere x
+let floatToInt32 (x: float) : int32 = floatToInt32At SrcLoc.Nowhere x
 
 /// Convert a computed value to a target scalar ElemType (the Blade node type).
 /// Post-arithmetic this is either identity or a Float32->Float64 widening (exact)
@@ -516,7 +531,7 @@ let private convertTo (target: ElemType) (v: Value) : Value =
 /// the C++ lane matches only because Build.optFlags passes `-fwrapv`; do not
 /// switch this file to Checked arithmetic without changing both. / and %
 /// truncate toward zero (matching C++ and F#'s int operators).
-let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : Value =
+let private computeReal (loc: SrcLoc) (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : Value =
     match comp with
     | ETInt32 ->
         let a = asI32 l
@@ -526,11 +541,11 @@ let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : V
         | IRSub -> VInt32 (a - b)
         | IRMul -> VInt32 (a * b)
         | IRDiv ->
-            if b = 0 then intFault "integer division by zero"
+            if b = 0 then intFaultAt loc "integer division by zero"
             elif b = -1 then VInt32 (0 - a)   // MIN / -1 wraps to MIN (.NET would throw)
             else VInt32 (a / b)
         | IRMod ->
-            if b = 0 then intFault "integer modulo by zero"
+            if b = 0 then intFaultAt loc "integer modulo by zero"
             elif b = -1 then VInt32 0
             else VInt32 (a % b)
         | _ -> VInt32 0
@@ -542,11 +557,11 @@ let private computeReal (op: IRBinOp) (comp: ElemType) (l: Value) (r: Value) : V
         | IRSub -> VInt (a - b)
         | IRMul -> VInt (a * b)
         | IRDiv ->
-            if b = 0L then intFault "integer division by zero"
+            if b = 0L then intFaultAt loc "integer division by zero"
             elif b = -1L then VInt (0L - a)
             else VInt (a / b)
         | IRMod ->
-            if b = 0L then intFault "integer modulo by zero"
+            if b = 0L then intFaultAt loc "integer modulo by zero"
             elif b = -1L then VInt 0L
             else VInt (a % b)
         | _ -> VInt 0L
@@ -1046,7 +1061,7 @@ let private complexCaret (l: Value) (r: Value) : Value =
 
 // Scalar binop / unaryop dispatch (mirrors CodeGen's IRBinOp / IRUnaryOp).
 
-let private evalArith (op: IRBinOp) (l: Value) (r: Value) : Value =
+let private evalArith (loc: SrcLoc) (op: IRBinOp) (l: Value) (r: Value) : Value =
     match scalarElem l, scalarElem r with
     | Some le, Some re ->
         let resElem = promoteElemType le re |> Option.defaultValue le
@@ -1096,8 +1111,8 @@ let private evalArith (op: IRBinOp) (l: Value) (r: Value) : Value =
                 // anything real is realPow in double, then rounded once to the
                 // node type (Float32 for a Float32 base).
                 (match cppArithElem le re with
-                 | ETInt64 -> VInt (intPow64 (asI64 l) (asI64 r))
-                 | ETInt32 -> VInt32 (intPow32 (asI32 l) (asI32 r))
+                 | ETInt64 -> VInt (intPow64At loc (asI64 l) (asI64 r))
+                 | ETInt32 -> VInt32 (intPow32At loc (asI32 l) (asI32 r))
                  | ETFloat32 ->
                      // Evaluated in float, like `s * 2` (blade_arith::fpowf):
                      // the double pow rounded ONCE to float, then widened to
@@ -1106,7 +1121,7 @@ let private evalArith (op: IRBinOp) (l: Value) (r: Value) : Value =
                  | _ -> convertTo resElem (VFloat (realPow (asF64 l) (asF64 r))))
             | _ ->
                 let comp = cppArithElem le re
-                convertTo resElem (computeReal op comp l r)
+                convertTo resElem (computeReal loc op comp l r)
     | _ ->
         // Non-scalar-numeric: string concatenation is the only IRBinOp Blade
         // lowers here (`(l + r)` on std::string).
@@ -1197,8 +1212,10 @@ let private evalLogical (op: IRBinOp) (l: Value) (r: Value) : Value =
     | _ -> VBool false
 
 /// Evaluate a scalar binary operator on two already-evaluated operands, matching
-/// the C++ CodeGen emits (promotion, wraparound, complex coercion).
-let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
+/// the C++ CodeGen emits (promotion, wraparound, complex coercion). `loc` is the
+/// operator's source position, named by the BL8013 panic a zero divisor or a
+/// negative integer exponent raises.
+let evalBinOpAt (loc: SrcLoc) (op: IRBinOp) (l: Value) (r: Value) : Value =
     match op with
     // String concatenation: `+` on two Strings is std::string operator+ in
     // the compiled lane -- byte-identical by construction (no formatting).
@@ -1206,7 +1223,7 @@ let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
     | IRAdd ->
         (match l, r with
          | VString a, VString b -> VString (a + b)
-         | _ -> evalArith op l r)
+         | _ -> evalArith loc op l r)
     | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe -> evalCompare op l r
     | IRAnd | IROr -> evalLogical op l r
     // Binary math intrinsics. Real-only by construction (TypeCheck rejects
@@ -1236,11 +1253,15 @@ let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value =
          | _ -> VFloat q)
     | IRMath2 name ->
         raise (InterpPanic("BL9001", $"unknown binary math intrinsic '{name}'", None, 0))
-    | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith op l r
+    | IRSub | IRMul | IRDiv | IRMod | IRCaret -> evalArith loc op l r
 
 /// abs(x): std::abs, whose C++ overload preserves the operand's numeric type
 /// (llabs->int64, fabs->double, fabsf->float, hypot->double magnitude for
 /// complex). Two's-complement wrap on INT_MIN matches C++'s llabs/abs.
+/// The anonymous form, for the interpreter's own synthesized arithmetic (folds,
+/// scales, dot products) that has no source operator to point at.
+let evalBinOp (op: IRBinOp) (l: Value) (r: Value) : Value = evalBinOpAt SrcLoc.Nowhere op l r
+
 let private evalAbs (v: Value) : Value =
     match v with
     | VInt n -> VInt (if n < 0L then 0L - n else n)
@@ -1274,7 +1295,7 @@ let evalMath (name: string) (v: Value) : Value =
 /// squeezes both components through float32 -- VComplex stores doubles (the
 /// Value DU has no width-tagged complex case), so the narrowing is applied to
 /// the components exactly where C++ stores complex<float>.
-let private evalCast (target: ElemType) (v: Value) : Value =
+let private evalCast (loc: SrcLoc) (target: ElemType) (v: Value) : Value =
     let bad () =
         raise (InterpPanic("BL9001", $"numeric cast to {castNameOf target} on an unsupported operand (typecheck licenses casts, so this is an interpreter bug)", None, 0))
     let asRealF64 () =
@@ -1299,15 +1320,15 @@ let private evalCast (target: ElemType) (v: Value) : Value =
         (match v with
          | VInt n -> VInt n
          | VInt32 n -> VInt (int64 n)
-         | VFloat f -> VInt (floatToInt64 f)
-         | VFloat32 f -> VInt (floatToInt64 (float f))
+         | VFloat f -> VInt (floatToInt64At loc f)
+         | VFloat32 f -> VInt (floatToInt64At loc (float f))
          | _ -> bad ())
     | ETInt32 ->
         (match v with
          | VInt n -> VInt32 (int32 n)
          | VInt32 n -> VInt32 n
-         | VFloat f -> VInt32 (floatToInt32 f)
-         | VFloat32 f -> VInt32 (floatToInt32 (float f))
+         | VFloat f -> VInt32 (floatToInt32At loc f)
+         | VFloat32 f -> VInt32 (floatToInt32At loc (float f))
          | _ -> bad ())
     | ETComplex128 ->
         (match v with
@@ -1343,4 +1364,4 @@ let evalUnaryOp (op: IRUnaryOp) (v: Value) : Value =
     | IRArg ->
         let (r, i) = asComplex v in VFloat (complexArg r i)
     | IRMath name -> evalMath name v
-    | IRCast target -> evalCast target v
+    | IRCast (target, loc) -> evalCast loc target v

@@ -126,10 +126,10 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // subscript overloads ambiguous.
         let wS = exprToCppCore subst names w
         $"{wS}[({off}L)][0]"
-    | IRBinOp (_, op, l, r) ->
+    | IRBinOp (_, op, l, r, loc) ->
         let lStr = exprToCppCore subst names l
         let rStr = exprToCppCore subst names r
-        match renderContractBinOp op l r lStr rStr inferExprType, op with
+        match renderContractBinOp op l r lStr rStr inferExprType loc, op with
         | Some s, _ -> s
         | None, IRCaret -> $"pow({lStr}, {rStr})"
         | None, IRMath2 name -> renderMath2 name lStr rStr

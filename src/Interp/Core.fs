@@ -518,13 +518,13 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
 
     // `&&` / `||` short-circuit exactly like the emitted C++ (CodeGen.fs:782):
     // the right operand is not evaluated when the left decides the result.
-    | IRBinOp (_, IRAnd, l, r) ->
+    | IRBinOp (_, IRAnd, l, r, _) ->
         if toBoolV (evalExpr st env l) then VBool (toBoolV (evalExpr st env r))
         else VBool false
-    | IRBinOp (_, IROr, l, r) ->
+    | IRBinOp (_, IROr, l, r, _) ->
         if toBoolV (evalExpr st env l) then VBool true
         else VBool (toBoolV (evalExpr st env r))
-    | IRBinOp (_, op, l, r) ->
+    | IRBinOp (_, op, l, r, loc) ->
         // Left-to-right operand evaluation, then Numerics' bit-exact dispatch
         // (promotion / wraparound / complex coercion / string concat). Array
         // operands never reach here: Lowering's lowerArrayBinOpsModule rewrites
@@ -533,8 +533,8 @@ let rec evalExpr (st: InterpState) (env: Env) (expr: IRExpr) : Value =
         let lv = evalExpr st env l
         let rv = evalExpr st env r
         (match op with
-         | IRCaret | IRMath2 _ -> N.evalBinOp op (asDeclaredWidth l lv) (asDeclaredWidth r rv)
-         | _ -> N.evalBinOp op lv rv)
+         | IRCaret | IRMath2 _ -> N.evalBinOpAt loc op (asDeclaredWidth l lv) (asDeclaredWidth r rv)
+         | _ -> N.evalBinOpAt loc op lv rv)
 
     | IRUnaryOp ((IRMath _) as op, e) ->
         N.evalUnaryOp op (asDeclaredWidth e (evalExpr st env e))

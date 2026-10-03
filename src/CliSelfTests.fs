@@ -1867,6 +1867,9 @@ let (a, b) = pair(7.0)
         // snippet is still not kept, and the panic reaches the client as a
         // diagnostic as well as on stderr -- a client that builds its error
         // card from the first diagnostic would otherwise have nothing to say.
+        // An arithmetic fault is POSITIONED: the panic names the operator's
+        // line (`--> line 1`, cell coordinates), and the diagnostic is rebuilt
+        // from it at that line (column 1 -- the panic carries no column).
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "let z = 1 / 0"; evalReq 2 "nb" "let ok = 6"
                     evalReq 3 "nb" "ok"; shutdownReq ]
@@ -1875,7 +1878,7 @@ let (a, b) = pair(7.0)
         | [panic; after; probe] when code = 0
                                      && panic.Contains "\"kept\":false" && panic.Contains "\"exitCode\":1"
                                      && panic.Contains "\"lane\":\"interp\"" && panic.Contains "\"bindings\":[]"
-                                     && panic.Contains "\"stderr\":\"error[BL8013]"
+                                     && panic.Contains "\"stderr\":\"error[BL8013]: integer division by zero\\n  --> line 1\""
                                      && panic.Contains "\"severity\":\"error\",\"line\":1,\"col\":1"
                                      && panic.Contains "integer division by zero"
                                      // The panic's CODE is the diagnostic's code,
@@ -1891,8 +1894,7 @@ let (a, b) = pair(7.0)
         // `  --> file:line` the panic prints is remapped onto the cell (a
         // struct constraint reports its `where` line, the cell's 4th), and a
         // span in an EARLIER cell says "elsewhere in session" rather than
-        // squiggling this one. (A guard with no span -- 1 / 0 above -- stays
-        // at 1:1, which is honest.)
+        // squiggling this one.
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "let a = 1.0\nstruct Pos {\n    v: Float64\n} where v >= 0.0\nlet p = Pos { v = a - 5.0 }"
                     evalReq 2 "nb2" "struct Pos {\n    v: Float64\n} where v >= 0.0"

@@ -21,7 +21,7 @@ let private vX = IRVar (101, f64)
 let private vY = IRVar (102, f64)
 let private vZ = IRVar (103, f64)
 let private lit n = IRLit (IRLitInt (int64 n))
-let private add a b = IRBinOp (IRElementwise, IRAdd, a, b)
+let private add a b = IRBinOp (IRElementwise, IRAdd, a, b, SrcLoc.Nowhere)
 
 /// A battery of expressions covering the structurally interesting shapes:
 /// fixed arities, head+list, lists, records-with-children, optional
@@ -121,9 +121,9 @@ let runShapeTests () : BlockResult =
     check "typeOf: let body (TypeVia)" (typeOf (IRLet (7, lit 1, vX)) = f64) ""
     check "typeOf: extent (IntValued)" (typeOf (IRExtent (vA, 0)) = IRTScalar ETInt64) ""
     check "typeOf: arithmetic promotion"
-        (typeOf (IRBinOp (IRElementwise, IRAdd, lit 1, IRLit (IRLitFloat 2.0))) = IRTScalar ETFloat64) ""
+        (typeOf (IRBinOp (IRElementwise, IRAdd, lit 1, IRLit (IRLitFloat 2.0), SrcLoc.Nowhere)) = IRTScalar ETFloat64) ""
     check "typeOf: comparison is Bool"
-        (typeOf (IRBinOp (IRElementwise, IRLt, vX, vY)) = IRTScalar ETBool) ""
+        (typeOf (IRBinOp (IRElementwise, IRLt, vX, vY, SrcLoc.Nowhere)) = IRTScalar ETBool) ""
     check "typeOf: full index peels to element" (typeOf (IRIndex (vA, [lit 0], None)) = f64) ""
     check "typeOf: mask is Bool over same index space"
         (match typeOf (IRMask (vA, vX)) with
@@ -137,13 +137,13 @@ let runShapeTests () : BlockResult =
     // need typeOf's free reconstruction (an array operand, a slice), no.
     check "exprTypeIfKnown: carried" (exprTypeIfKnown vX = Some f64) ""
     check "exprTypeIfKnown: scalar binop over known scalars"
-        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, vY)) = Some f64) ""
+        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, vY, SrcLoc.Nowhere)) = Some f64) ""
     check "exprTypeIfKnown: array operand is not reconstructed"
-        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vA, vX)) = None) ""
+        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vA, vX, SrcLoc.Nowhere)) = None) ""
     check "exprTypeIfKnown: slice is not reconstructed"
         (exprTypeIfKnown (IRSlice (vA, 0, lit 0, lit 1)) = None) ""
     check "exprTypeIfKnown: unknown operand declines"
-        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, IRSlice (vA, 0, lit 0, lit 1))) = None) ""
+        (exprTypeIfKnown (IRBinOp (IRElementwise, IRAdd, vX, IRSlice (vA, 0, lit 0, lit 1), SrcLoc.Nowhere)) = None) ""
 
     printFooter "ExprShape" [$"{passed} passed"; $"{failed} failure(s)"]
     { Block = "ExprShape"; Passed = passed; Failed = failed; Skipped = 0; FailedNames = failedNames }

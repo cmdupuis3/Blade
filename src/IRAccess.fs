@@ -52,7 +52,7 @@ let windowReadsOf (isWindow: IRExpr -> bool) (body: IRExpr) : WindowRead list =
         | IRIndex (IRVar (aid, _), idxs, _) when not (List.isEmpty idxs) ->
             idxs |> List.iteri (fun d ix ->
                 match ix with
-                | IRBinOp (IRElementwise, IRAdd, wv, offExpr) when isWindow wv ->
+                | IRBinOp (IRElementwise, IRAdd, wv, offExpr, _) when isWindow wv ->
                     found.Add
                         { Node = e; ArrayId = aid; Rank = idxs.Length; Dim = d
                           Prefix = idxs |> List.take d; Window = wv

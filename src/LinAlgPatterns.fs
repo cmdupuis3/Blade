@@ -1249,7 +1249,7 @@ let (|BlasL1|_|) ((streamedCount, facts, operandTypes, cg): int * DotFoldFacts *
                 // why a complex instance of this route must be `dotu` and
                 // never `dotc`. See `RouteDot`.
                 match cg.KernelExpr with
-                | IRBinOp (_, IRMul, IRVar (lId, _), IRVar (rId, _)) when lId <> rId ->
+                | IRBinOp (_, IRMul, IRVar (lId, _), IRVar (rId, _), _) when lId <> rId ->
                     let byParam id =
                         [ e0; e1 ] |> List.tryFind (fun e -> e.ParamVarId = id)
                     match byParam lId, byParam rId with
@@ -1400,9 +1400,9 @@ let (|ProdSumScaled|_|) (e: IRExpr) : (IRExpr list * NestScale option) option =
             | _ -> false)
     match e with
     | IRProdSum args -> Some (args, None)
-    | IRBinOp (_, IRDiv, IRProdSum args, d) when scalarOk d -> Some (args, Some (ScaleDiv d))
-    | IRBinOp (_, IRMul, IRProdSum args, s) when scalarOk s -> Some (args, Some (ScaleMul s))
-    | IRBinOp (_, IRMul, s, IRProdSum args) when scalarOk s -> Some (args, Some (ScaleMul s))
+    | IRBinOp (_, IRDiv, IRProdSum args, d, _) when scalarOk d -> Some (args, Some (ScaleDiv d))
+    | IRBinOp (_, IRMul, IRProdSum args, s, _) when scalarOk s -> Some (args, Some (ScaleMul s))
+    | IRBinOp (_, IRMul, s, IRProdSum args, _) when scalarOk s -> Some (args, Some (ScaleMul s))
     | _ -> None
 
 /// `C = method_for(A, A) <@> lambda(ri, rj) where comm(ri, rj) -> prodsum(ri, rj)`

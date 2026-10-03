@@ -141,8 +141,11 @@ fold refuses at compile time instead):
 | `sqrt` `floor` `ceil` `abs` `fma` (real operand) | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
 | integer literals | exact, including array-literal leaves (never routed through a double) |
 
-A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) with
-the call stack; nothing in the table is undefined behavior in any lane. The
+A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) that
+names the faulting operator's source position (`  --> file:line`) and the
+call stack; nothing in the table is undefined behavior in any lane. The
+position is a compile-time constant read only on the panic path, so the
+guard's hot path is unchanged by it. The
 fast paths are kept by construction: a nonzero literal divisor other than
 `-1` compiles to a plain `/`, a literal nonnegative exponent to a multiply
 chain (`x ^ 2` is one multiply in both the integer and the real case), and

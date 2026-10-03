@@ -9,3 +9,4 @@ let xs: Array<Float64 like Idx<2>> = [1.0, -1.0]
 let z = reduce(xs, (+))
 let n = Int64(floor(z / z))
 // ABORT: error[BL8014]: float-to-integer conversion of NaN or an out-of-range value
+// ABORT: -->

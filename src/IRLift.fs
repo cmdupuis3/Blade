@@ -875,13 +875,13 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     // the IRIf arm below leaves a branch's lifts.
     // (Scalar only: an ARRAY-typed `&&` is an elementwise map and has no
     // single select to become -- it keeps the ordinary binop arm below.)
-    | IRBinOp (mode, (IRAnd | IROr as op), l, r)
+    | IRBinOp (mode, (IRAnd | IROr as op), l, r, loc)
         when (match typeOf l with ArrayElem _ -> false | _ -> true) ->
         let (lBinds, lFinal) = liftChild builder (liftExpr builder l)
         let r' = liftExpr builder r
         let (rBinds, rFinal) = liftChild builder r'
         (match rBinds with
-         | [] -> wrapLets lBinds (IRBinOp (mode, op, lFinal, rFinal))
+         | [] -> wrapLets lBinds (IRBinOp (mode, op, lFinal, rFinal, loc))
          | _ ->
              let rArm = wrapLets rBinds rFinal
              let sel =
@@ -890,12 +890,12 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
                  | _ -> IRIf (lFinal, IRLit (IRLitBool true), rArm)
              wrapLets lBinds sel)
     // BinOps: array-typed binops can have inline forms on either side.
-    | IRBinOp (mode, op, l, r) ->
+    | IRBinOp (mode, op, l, r, loc) ->
         let l' = liftExpr builder l
         let r' = liftExpr builder r
         let (lBinds, lFinal) = liftChild builder l'
         let (rBinds, rFinal) = liftChild builder r'
-        wrapLets (lBinds @ rBinds) (IRBinOp (mode, op, lFinal, rFinal))
+        wrapLets (lBinds @ rBinds) (IRBinOp (mode, op, lFinal, rFinal, loc))
     | IRUnaryOp (op, e) ->
         let e' = liftExpr builder e
         let (binds, eFinal) = liftChild builder e'

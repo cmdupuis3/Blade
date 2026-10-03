@@ -239,7 +239,7 @@ let ppUnaryOp = function
     | IRImag -> "imag"
     | IRArg -> "arg"
     | IRMath name -> name
-    | IRCast et -> castNameOf et  // prints like the source spelling: Float32(x)
+    | IRCast (et, _) -> castNameOf et  // prints like the source spelling: Float32(x)
 
 /// Pretty print IR expressions with optional name mapping for variables
 let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
@@ -257,7 +257,7 @@ let rec ppIRExprWithNames (names: Map<int, string>) indent (expr: IRExpr) =
         | Some name -> name
         | None -> $"v{id}"
     | IRParam (name, _, _) -> name
-    | IRBinOp (mode, op, a, b) ->
+    | IRBinOp (mode, op, a, b, _) ->
         $"({pp a} {ppBinOpWithMode mode op} {pp b})"
     | IRUnaryOp (op, a) ->
         $"({ppUnaryOp op}{pp a})"
@@ -379,7 +379,7 @@ let ppIRExpr indent expr = ppIRExprWithNames Map.empty indent expr
 let rec tryEvalIntIR (expr: IRExpr) : int64 option =
     match expr with
     | IRLit (IRLitInt n) -> Some n
-    | IRBinOp (_, op, l, r) ->
+    | IRBinOp (_, op, l, r, _) ->
         match tryEvalIntIR l, tryEvalIntIR r with
         | Some lv, Some rv ->
             match op with

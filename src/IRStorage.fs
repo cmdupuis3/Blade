@@ -311,7 +311,7 @@ let deviceBufferCardinality (bt: DeviceBufferType) : IRExpr =
         |> List.reduce (fun a b ->
             match a, b with
             | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
-            | _ -> IRBinOp (IRElementwise, IRMul, a, b))
+            | _ -> IRBinOp (IRElementwise, IRMul, a, b, SrcLoc.Nowhere))
 
 /// True iff a symmetry vector encodes ANY actual symmetry -- two adjacent
 /// positions share a group number (a symmetric/antisymmetric block). A

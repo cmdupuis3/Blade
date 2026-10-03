@@ -4492,7 +4492,7 @@ and inferJoin (env: TypeEnv) (arrays: Expr list) (dim: int) : TypeResult<TypedEx
                     if statics |> List.forall Option.isSome then
                         IRLit (IRLitInt (statics |> List.sumBy Option.get))
                     else
-                        dimExtents |> List.reduce (fun a b -> IRBinOp (IRElementwise, IRAdd, a, b))
+                        dimExtents |> List.reduce (fun a b -> IRBinOp (IRElementwise, IRAdd, a, b, SrcLoc.Nowhere))
                 let joinedIdx =
                     { first.IndexTypes.[dim] with
                         Id = env.Builder.FreshId()

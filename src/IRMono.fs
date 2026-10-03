@@ -163,7 +163,7 @@ let rec private rawBinOpOperandType (e: IRExpr) : IRType option =
     | IRCompute inner -> rawBinOpOperandType inner
     | IRLet (_, _, body) -> rawBinOpOperandType body
     | CarriedType ty -> Some ty
-    | IRBinOp (IRElementwise, op, l, r) ->
+    | IRBinOp (IRElementwise, op, l, r, _) ->
         match rawBinOpOperandType l, rawBinOpOperandType r with
         | Some lt, Some rt ->
             match arrayBinOpResultType op lt rt with
@@ -202,7 +202,7 @@ let hmArgType (e: IRExpr) : IRType option =
     | Some t -> Some t
     | None ->
         match e with
-        | IRBinOp (IRElementwise, _, _, _) -> rawBinOpOperandType e
+        | IRBinOp (IRElementwise, _, _, _, _) -> rawBinOpOperandType e
         | _ -> None
 
 /// Collect call sites of HM-polymorphic functions.
@@ -1303,12 +1303,12 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
              | Some lit, _ -> lit
              | None, ArrayElem _ -> e   // decided by the enclosing binop, or bareArrayZero
              | None, _ -> valueOf ty |> Option.defaultValue e)
-        | IRBinOp (mode, op, l, (IRZero (ArrayElem _) as z)) -> IRBinOp (mode, op, l, elementZero z)
-        | IRBinOp (mode, op, (IRZero (ArrayElem _) as z), r) -> IRBinOp (mode, op, elementZero z, r)
-        | IRBinOp (mode, op, l, (IRZero ty as z)) when isOpen ty ->
-            IRBinOp (mode, op, l, partnerZero l |> Option.defaultValue z)
-        | IRBinOp (mode, op, (IRZero ty as z), r) when isOpen ty ->
-            IRBinOp (mode, op, partnerZero r |> Option.defaultValue z, r)
+        | IRBinOp (mode, op, l, (IRZero (ArrayElem _) as z), loc) -> IRBinOp (mode, op, l, elementZero z, loc)
+        | IRBinOp (mode, op, (IRZero (ArrayElem _) as z), r, loc) -> IRBinOp (mode, op, elementZero z, r, loc)
+        | IRBinOp (mode, op, l, (IRZero ty as z), loc) when isOpen ty ->
+            IRBinOp (mode, op, l, partnerZero l |> Option.defaultValue z, loc)
+        | IRBinOp (mode, op, (IRZero ty as z), r, loc) when isOpen ty ->
+            IRBinOp (mode, op, partnerZero r |> Option.defaultValue z, r, loc)
         | _ -> e
     let bareArrayZero (e: IRExpr) : IRExpr =
         match e with
@@ -1378,7 +1378,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // that inner one is itself a trigger in the un-rewritten tree.
     let isArrayBinOpTrigger (e: IRExpr) : bool =
         match e with
-        | IRBinOp (IRElementwise, _, l, r) ->
+        | IRBinOp (IRElementwise, _, l, r, _) ->
             (match operandType l, operandType r with
              | Some (ArrayElem _), Some _ | Some _, Some (ArrayElem _) -> true
              | _ -> false)
@@ -1409,8 +1409,8 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         let sVar = IRVar (sId, sTy)
         // Kernel `lambda(__bx) -> __bx op s` (or `s op __bx`); `s` is captured.
         let kbody =
-            if scalarOnLeft then IRBinOp (IRElementwise, op, sVar, xVar)
-            else IRBinOp (IRElementwise, op, xVar, sVar)
+            if scalarOnLeft then IRBinOp (IRElementwise, op, sVar, xVar, SrcLoc.Nowhere)
+            else IRBinOp (IRElementwise, op, xVar, sVar, SrcLoc.Nowhere)
         let parms : IRParam list =
             [ { Name = "__bx"; Type = IRTScalar arrElem; Index = 0; VarId = xId } ]
         let cap : CaptureInfo = { Id = sId; Name = $"__v{sId}"; Type = sTy; IsMutable = false }
@@ -1438,7 +1438,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         IRLet (sId, scalarE, IRCompute (IRApplyCombinator applyInfo))
     let rewrite (e: IRExpr) : IRExpr =
         match e with
-        | IRBinOp (IRElementwise, op, l, r) ->
+        | IRBinOp (IRElementwise, op, l, r, loc) ->
             match operandType l, operandType r with
             | Some ((ArrayElem la) as lt), Some ((ArrayElem ra) as rt) ->
                 let elemTypeL = arrayBinOpKernelElem la.ElemType
@@ -1451,7 +1451,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                 let kbody =
                     IRBinOp (IRElementwise, op,
                              IRVar (aId, IRTScalar elemTypeL),
-                             IRVar (bId, IRTScalar elemTypeR))
+                             IRVar (bId, IRTScalar elemTypeR), loc)
                 let parms : IRParam list =
                     [ { Name = "__zl"; Type = IRTScalar elemTypeL; Index = 0; VarId = aId }
                       { Name = "__zr"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId } ]
@@ -1645,7 +1645,7 @@ let internal occursOnlyUnconditionally (vid: IRId) (body: IRExpr) : bool =
         | IRVar (id, _) when id = vid ->
             total <- total + 1
             if isStrict then strict <- strict + 1
-        | IRBinOp (_, (IRAnd | IROr), l, r) -> walk isStrict l; walk false r
+        | IRBinOp (_, (IRAnd | IROr), l, r, _) -> walk isStrict l; walk false r
         | IRIf (c, t, f) -> walk isStrict c; walk false t; walk false f
         | IRMatch (scrut, cases) ->
             walk isStrict scrut
@@ -2745,8 +2745,8 @@ let internal (|ShapeLiteralExtent|_|) (e: IRExpr) =
 let rec internal shapeRewriteExtent (subst: Map<string, int64>) (e: IRExpr) : IRExpr =
     match e with
     | IRParam (name, _, _) when subst.ContainsKey name -> IRLit (IRLitInt subst.[name])
-    | IRBinOp (mode, op, l, r) ->
-        IRBinOp (mode, op, shapeRewriteExtent subst l, shapeRewriteExtent subst r)
+    | IRBinOp (mode, op, l, r, loc) ->
+        IRBinOp (mode, op, shapeRewriteExtent subst l, shapeRewriteExtent subst r, loc)
     | IRUnaryOp (op, x) -> IRUnaryOp (op, shapeRewriteExtent subst x)
     | IROrbitClass (levels, n) -> IROrbitClass (levels, shapeRewriteExtent subst n)
     | _ -> e

@@ -131,7 +131,7 @@ let fuseJointSLevels
         es |> List.reduce (fun a b ->
             match a, b with
             | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
-            | _ -> IRBinOp (IRElementwise, IRMul, a, b))
+            | _ -> IRBinOp (IRElementwise, IRMul, a, b, SrcLoc.Nowhere))
     let fused =
         rawLevels
         |> List.groupBy _.ArrayIndex
@@ -759,7 +759,7 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                                     |> List.reduce (fun a b ->
                                         match a, b with
                                         | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
-                                        | _ -> IRBinOp (IRElementwise, IRMul, a, b))
+                                        | _ -> IRBinOp (IRElementwise, IRMul, a, b, SrcLoc.Nowhere))
                         // The compound axis is ANONYMOUS and PLAIN: Tag =
                         // None AND IxKind = IxKPlain must BOTH be stamped,
                         // not inherited from the template factor -- IxKIrreps

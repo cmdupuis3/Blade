@@ -724,7 +724,7 @@ and genComputeBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBui
                         match expr with
                         | IRVar (id, _) when id = paramId -> body
                         | IRVar _ | IRLit _ | IRParam _ -> expr
-                        | IRBinOp (m, op, l, r) -> IRBinOp (m, op, subst l, subst r)
+                        | IRBinOp (m, op, l, r, loc) -> IRBinOp (m, op, subst l, subst r, loc)
                         | IRUnaryOp (op, e) -> IRUnaryOp (op, subst e)
                         | IRIf (c, t, e) -> IRIf (subst c, subst t, subst e)
                         | IRApp (f, args, rt) -> IRApp (subst f, args |> List.map subst, rt)

@@ -222,7 +222,7 @@ let rec substituteAndLowerExtent (env: TypeEnv) (paramName: Ident) (subst: IRExp
                     | OpMod -> Some IRMod
                     | _ -> None
                 match irOpOpt with
-                | Some irOp -> IRBinOp (IRElementwise, irOp, l', r')
+                | Some irOp -> IRBinOp (IRElementwise, irOp, l', r', SrcLoc.Nowhere)
                 | None -> IRParam ("?", 0, IRTNat None)
             | ExprKind.ExprUnaryOp (OpNeg, e) ->
                 IRUnaryOp (IRNeg, substituteAndLowerExtent env paramName subst e)
@@ -1756,7 +1756,7 @@ let haloSlotsOf (env: TypeEnv) (innerTy: TypeExpr) (offsetsExpr: Expr) : TypeRes
             let shrunkExtent =
                 match inner.Extent with
                 | IRLit (IRLitInt n) -> IRLit (IRLitInt (n - shrink))
-                | e -> IRBinOp (IRElementwise, IRSub, e, IRLit (IRLitInt shrink))
+                | e -> IRBinOp (IRElementwise, IRSub, e, IRLit (IRLitInt shrink), SrcLoc.Nowhere)
             // A `Chunked` alias adopts its inner axis's record (so it IS the
             // axis), which for a store axis carries no name: the halo was
             // declared over the ALIAS, and that is the name the segment-run

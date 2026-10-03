@@ -331,26 +331,31 @@ namespace blade_rt {
   // exponent calls the panic-free blade_arith::ipow_nn directly (so such a
   // kernel keeps its shadow-frame elision -- CodeGen.panicFreeNamespaces).
   //
+  // `file` / `line` are the SOURCE position of the `/`, `%`, `^` or cast
+  // (the IR node's SrcLoc), so the panic can say `--> file:line` like every
+  // other located guard. They cost nothing on the hot path: two constants
+  // that only the cold [[noreturn]] branch ever materializes.
+  //
   // Integer `/` and `%` truncate toward zero; a zero divisor panics BL8013.
   // MIN / -1 WRAPS to MIN and MIN % -1 is 0, the two's-complement answers
   // -fwrapv gives every other integer op -- in C++ both are UB, and x86's
   // idiv traps on them, so the -1 arm is explicit rather than left to `/`.
-  template <typename T> inline T idiv(T a, T b) {
-    if (b == 0) panic("BL8013", "integer division by zero", nullptr, 0);
+  template <typename T> inline T idiv(T a, T b, const char* file = nullptr, int line = 0) {
+    if (b == 0) panic("BL8013", "integer division by zero", file, line);
     if (b == T(-1))
       return static_cast<T>(static_cast<std::make_unsigned_t<T>>(0) -
                             static_cast<std::make_unsigned_t<T>>(a));
     return a / b;
   }
-  template <typename T> inline T imod(T a, T b) {
-    if (b == 0) panic("BL8013", "integer modulo by zero", nullptr, 0);
+  template <typename T> inline T imod(T a, T b, const char* file = nullptr, int line = 0) {
+    if (b == 0) panic("BL8013", "integer modulo by zero", file, line);
     if (b == T(-1)) return T(0);
     return a % b;
   }
   // Integer `^`: exact (see blade_arith::ipow_nn); a negative exponent has
   // no integer answer and panics BL8013.
-  template <typename T> inline T ipow(T b, T e) {
-    if (e < 0) panic("BL8013", "integer power with a negative exponent", nullptr, 0);
+  template <typename T> inline T ipow(T b, T e, const char* file = nullptr, int line = 0) {
+    if (e < 0) panic("BL8013", "integer power with a negative exponent", file, line);
     return blade_arith::ipow_nn<T>(b, e);
   }
   // Float -> integer conversion (`Int64(floor(x))`, `Int32(ceil(x))`, ...):
@@ -359,20 +364,20 @@ namespace blade_rt {
   // there (x86 answers the INT_MIN sentinel), and a NaN bin index is a bug
   // the program should hear about, not a 0 or a clamp it should compute on.
   // The comparisons are exact: both bounds are powers of two.
-  template <typename T> inline T f2i(double x) {
+  template <typename T> inline T f2i(double x, const char* file = nullptr, int line = 0) {
     constexpr double lim = static_cast<double>(std::make_unsigned_t<T>(1) << (sizeof(T) * 8 - 1));
     if (!(x >= -lim && x < lim))
-      panic("BL8014", "float-to-integer conversion of NaN or an out-of-range value", nullptr, 0);
+      panic("BL8014", "float-to-integer conversion of NaN or an out-of-range value", file, line);
     return static_cast<T>(x);
   }
-  inline int64_t idiv64(int64_t a, int64_t b) { return idiv<int64_t>(a, b); }
-  inline int32_t idiv32(int32_t a, int32_t b) { return idiv<int32_t>(a, b); }
-  inline int64_t imod64(int64_t a, int64_t b) { return imod<int64_t>(a, b); }
-  inline int32_t imod32(int32_t a, int32_t b) { return imod<int32_t>(a, b); }
-  inline int64_t ipow64(int64_t b, int64_t e) { return ipow<int64_t>(b, e); }
-  inline int32_t ipow32(int32_t b, int32_t e) { return ipow<int32_t>(b, e); }
-  inline int64_t f2i64(double x) { return f2i<int64_t>(x); }
-  inline int32_t f2i32(double x) { return f2i<int32_t>(x); }
+  inline int64_t idiv64(int64_t a, int64_t b, const char* file = nullptr, int line = 0) { return idiv<int64_t>(a, b, file, line); }
+  inline int32_t idiv32(int32_t a, int32_t b, const char* file = nullptr, int line = 0) { return idiv<int32_t>(a, b, file, line); }
+  inline int64_t imod64(int64_t a, int64_t b, const char* file = nullptr, int line = 0) { return imod<int64_t>(a, b, file, line); }
+  inline int32_t imod32(int32_t a, int32_t b, const char* file = nullptr, int line = 0) { return imod<int32_t>(a, b, file, line); }
+  inline int64_t ipow64(int64_t b, int64_t e, const char* file = nullptr, int line = 0) { return ipow<int64_t>(b, e, file, line); }
+  inline int32_t ipow32(int32_t b, int32_t e, const char* file = nullptr, int line = 0) { return ipow<int32_t>(b, e, file, line); }
+  inline int64_t f2i64(double x, const char* file = nullptr, int line = 0) { return f2i<int64_t>(x, file, line); }
+  inline int32_t f2i32(double x, const char* file = nullptr, int line = 0) { return f2i<int32_t>(x, file, line); }
 
   // ---- lgamma(x) = log Gamma(x), x > 0. Lanczos approximation, g = 7, n = 9.
   //
