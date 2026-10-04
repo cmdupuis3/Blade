@@ -1,0 +1,42 @@
+// TEST: Row Map In Generic Function Body
+// ============================================================================
+// A row map applied to a GENERIC `A: T^2` parameter allocated its output with
+// a compiler-minted extent no C++ identifier declares
+// (`out_extents[1] = __elementwise_inferred_n_32`, BL9002). Typecheck mapped a
+// row kernel's internal length placeholder onto the operand's row axis only
+// when that axis had a real extent; a generic parameter's axes are themselves
+// placeholders, so the kernel's own leaked through. It now maps onto the
+// operand's placeholder too, and the emitter reads such an extent from the
+// operand axis that carries it (`A.extents[1]`).
+from stats import mean
+type AssetIdx = Idx<3>
+type DayIdx = Idx<5>
+let R: Array<Float64 like AssetIdx, DayIdx> = [[1.0, 1.0, 1.0, 1.0, 6.0], [5.0, 0.0, 0.0, 0.0, 0.0], [7.0, 7.0, 2.0, 7.0, 7.0]]
+
+function center(x: T^1) -> T^1 = { let m = mean(x)
+    x - m }
+function unit_scale(x: T^1) -> T^1 = x / sqrt(mean(x * x))
+
+// a direct row map over the generic parameter
+function demean(A: T^2) -> T^2 = {
+    let Z = object_for(center) <@> A |> compute
+    Z
+}
+let S = demean(R)
+// EXPECT: S = [[-1, -1, -1, -1, 4], [4, -1, -1, -1, -1], [1, 1, -4, 1, 1]]
+
+// the same, staged through a block-bodied `>>@` pipeline
+function standardize(A: T^2) -> T^2 = {
+    let Z = (object_for(center) >>@ object_for(unit_scale)) <@> A |> compute
+    Z
+}
+let Zs = standardize(R)
+// EXPECT: Zs = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+
+// an annotated inline row lambda over the generic parameter
+function demean_inline(A: T^2) -> T^2 = {
+    let Z = object_for(lambda(x: T^1) -> x - mean(x)) <@> A |> compute
+    Z
+}
+let Si = demean_inline(R)
+// EXPECT: Si = [[-1, -1, -1, -1, 4], [4, -1, -1, -1, -1], [1, 1, -4, 1, 1]]

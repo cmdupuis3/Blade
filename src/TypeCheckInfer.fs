@@ -9599,6 +9599,13 @@ and buildApplyInfo (env: TypeEnv)
             // read the return's placeholder records through it. Records that
             // are not placeholders (loops/121's `fs`, a kernel returning a
             // row over a DIFFERENT index) are untouched.
+            //
+            // The fiber may be a placeholder ITSELF -- a generic `A: T^2`
+            // parameter's axes are -- and it is still the right record to map
+            // to (loops/213): it names the OPERAND's axis, which the
+            // shape-specialized clone substitutes with the real extent and
+            // the emitter reads at run time (`A.extents[1]`), where the
+            // kernel's own placeholder named nothing anywhere.
             let isMintedPlaceholder (e: IRExpr) =
                 match e with
                 | IRParam (n, _, _) -> n.StartsWith "__" && n.Contains "_inferred_n"
@@ -9615,8 +9622,7 @@ and buildApplyInfo (env: TypeEnv)
                             List.zip pArr.IndexTypes fiber
                             |> List.choose (fun (pIx, fIx) ->
                                 match pIx.Extent with
-                                | IRParam (n, _, _) when isMintedPlaceholder pIx.Extent
-                                                        && not (isMintedPlaceholder fIx.Extent) ->
+                                | IRParam (n, _, _) when isMintedPlaceholder pIx.Extent ->
                                     Some (n, fIx)
                                 | _ -> None)
                         else []

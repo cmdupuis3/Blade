@@ -2832,6 +2832,29 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     let updatedArrays = materializedArrays |> List.map snd
     let info = { info with Arrays = updatedArrays }
 
+    // A COMPILER-MINTED extent (`__<op>_inferred_n..`) names no C++ identifier.
+    // A row kernel's returned axis carries one when the operand's own fiber
+    // does -- a generic `A: T^2` parameter's axes are such placeholders, and
+    // typecheck maps the kernel's row placeholder onto that fiber record -- so
+    // the output's T-dim extent rendered as the bare placeholder
+    // (`out_extents[1] = __map_inferred_n1_51`, g++: not declared). The operand
+    // axis that carries the SAME placeholder has the answer at run time: read
+    // it from there. Only placeholders are rewritten; a declared extent
+    // (`n`, a literal) keeps its own spelling.
+    let operandAxisCarrying (extent: IRExpr) : string option =
+        match extent with
+        | IRParam (pn, _, _) when pn.StartsWith "__" && pn.Contains "_inferred_n" ->
+            info.ArrayTypes
+            |> List.mapi (fun i at -> (List.tryItem i arrayNames, at))
+            |> List.tryPick (fun (anOpt, at) ->
+                anOpt |> Option.bind (fun an ->
+                if at.IndexTypes |> List.exists (fun ix -> ix.Rank <> 1) then None
+                else
+                    at.IndexTypes
+                    |> List.tryFindIndex (fun ix -> ix.Extent = extent)
+                    |> Option.map (fun d -> $"{an}.extents[{d}]")))
+        | _ -> None
+
     // HALO-EXTENT RUNTIME GUARD (BL8009; the runtime half of TypeCheck's
     // HaloExtentMismatch/BL3016). A halo's declared inner extent is a
     // compile-time literal, but the array read through the window can have a
@@ -3344,7 +3367,10 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                 tDimEntries |> List.map (fun (ix: IRIndexType) ->
                                     match tryEvalIntIR ix.Extent with
                                     | Some n -> (string n, true)
-                                    | None -> (exprToCppCtx tempCtx ix.Extent, false))
+                                    | None ->
+                                        match operandAxisCarrying ix.Extent with
+                                        | Some read -> (read, false)
+                                        | None -> (exprToCppCtx tempCtx ix.Extent, false))
                             extentDims @ trailing
                         | None -> extentDims
                     | _ -> extentDims
