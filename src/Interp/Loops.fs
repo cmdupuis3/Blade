@@ -716,6 +716,61 @@ and private materializeComposeApply (st: InterpState) (env: Env) (cinfo: Compose
                      | ArrayElem _ | IRTUnit | IRTInfer _ -> fallback
                      | t -> t)
                 | None -> fallback
+            // ROW-MAP STAGES -- genComposeApply's twin. A stage kernel over a
+            // ROW (`center(x: T^1)`) is not a cell kernel: the walk below
+            // handed it single cells. Each stage runs instead as the direct
+            // `object_for(k) <@> X` apply it is, from the SAME ApplyInfo the
+            // compiled lane emits (buildComposeStageApplyInfo), and the
+            // trailing wrappers stay a final cellwise pass over the result, as
+            // they are on the compiled side.
+            let r1 = composeStageInputRank (kernelOf o1)
+            let r2 = composeStageInputRank (kernelOf o2)
+            if r1 > 0 || r2 > 0 then
+                let fail (what: string) : 'a = raise (InterpUnsupported $"staged `>>@` over {what}")
+                let srcAt =
+                    match typeOf arrExpr with
+                    | ArrayElem at -> at
+                    | _ -> fail "a non-array input"
+                let finalOut =
+                    match cinfo.OutputType with
+                    | ArrayElem _ -> Some cinfo.OutputType
+                    | _ -> None
+                let s1Id = st.Builder.FreshId()
+                let i1 =
+                    match buildComposeStageApplyInfo arrExpr srcAt (kernelOf o1) r1 None with
+                    | Ok i -> i
+                    | Error what -> fail what
+                let s1At =
+                    match i1.OutputType with
+                    | ArrayElem at -> at
+                    | _ -> fail "a first stage that reduces its input to a scalar"
+                let i2 =
+                    match buildComposeStageApplyInfo (IRVar (s1Id, i1.OutputType)) s1At (kernelOf o2) r2 finalOut with
+                    | Ok i -> i
+                    | Error what -> fail what
+                let s1 = materializeApply st env i1 []
+                let env2 = envChild env
+                envBind env2 s1Id s1 |> ignore
+                match wrappers, materializeApply st env2 i2 [] with
+                | [], out -> out
+                | _, VArray o ->
+                    let outElem =
+                        wrappers |> List.fold (fun acc w ->
+                            match w with
+                            | IRCompose _ -> acc
+                            | _ -> stageElemOf w acc) o.ElemType
+                    let wrapped = A.allocDense outElem o.IndexTypes o.Extents
+                    let oRank = o.Extents.Length
+                    let rec walkOut (level: int) (acc: int64 list) =
+                        if level = oRank then
+                            let coords = List.rev acc
+                            A.writeCell wrapped coords (wrapAll (A.readCell o coords))
+                        else
+                            for i in 0L .. o.Extents.[level] - 1L do walkOut (level + 1) (i :: acc)
+                    walkOut 0 []
+                    VArray wrapped
+                | _ -> fail "a stage that returned no array"
+            else
             let s1Elem = stageElemOf (kernelOf o1) a.ElemType
             let s2Elem = stageElemOf (kernelOf o2) s1Elem
             // The trailing wrappers run after stage 2 into the same store.

@@ -863,4 +863,124 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
         else
             mkArrayArrow allDims elemType None
 
+// ---------------------------------------------------------------------------
+// ROW-MAP STAGES OF A STAGED COMPOSE-APPLY
+// ---------------------------------------------------------------------------
+// `(object_for(f) >>@ object_for(g)) <@> A` reaches the back ends as an
+// IRComposeApply whenever surface fusion declines (a BLOCK-bodied stage kernel
+// is the common reason, loops/179). Its ComposeApplyInfo carries no per-stage
+// apply analysis -- the typechecker chains each stage through inferApply for
+// the TYPE but keeps only the final one -- and both staged emitters (codegen's
+// genComposeApply, the interpreter's materializeComposeApply) swept EVERY axis
+// of the input cell by cell. That is right for scalar kernels and wrong for a
+// row map: `center(x: T^1)` over a rank-2 input was handed `R[i][j]`, a double,
+// where it wants the row `R[i]` (g++: could not convert 'double' to 'Array').
+//
+// A row-map stage is exactly a direct `object_for(k) <@> X` with X = the
+// stage's input, so it is rebuilt here as the ApplyInfo that apply gets: the
+// kernel's innermost-irank fiber retagged TDimension, the leading axes the
+// iteration grid, and the kernel's returned axes its T-dims. ONE builder, both
+// lanes, so the compiled and interpreted stages cannot disagree on the shape.
+
+/// How many trailing axes a compose-apply stage kernel consumes per call: the
+/// array rank of its single parameter, 0 for a scalar (cell) kernel or one that
+/// does not resolve -- the latter keeps the historical cell sweep.
+let composeStageInputRank (kernel: IRExpr) : int =
+    match resolveKernel kernel with
+    | Some rk ->
+        (match rk.Callable.Params with
+         | [ p ] ->
+             (match p.Type with
+              | ArrayElem at -> at.IndexTypes |> List.sumBy _.Rank
+              | _ -> 0)
+         | _ -> 0)
+    | None -> 0
+
+/// The ApplyInfo of ONE stage of a staged compose-apply: `kernel` mapped over
+/// `src` (of type `srcType`), consuming `inRank` trailing axes per call.
+/// `outputType`, when the caller knows it (the LAST stage's type is the
+/// typechecker's), is taken as authoritative; otherwise the stage's result is
+/// derived the way inferApply derives it: grid axes, then the kernel's returned
+/// axes -- the return type's own when every extent is a literal, else the
+/// consumed fiber when the kernel returns the rank it was handed (the abstract
+/// `T^k -> T^k` row map, whose extents the static type never learns).
+///
+/// Error names a shape this cannot describe (a packed/compound input axis, a
+/// fiber deeper than the input, a returned rank with no extents to give it);
+/// callers refuse rather than emit a guess.
+let buildComposeStageApplyInfo
+        (src: IRExpr) (srcType: IRArrayType) (kernel: IRExpr) (inRank: int)
+        (outputType: IRType option) : Result<ApplyInfo, string> =
+    let n = srcType.IndexTypes.Length
+    if srcType.IndexTypes |> List.exists (fun ix -> ix.Rank <> 1) then
+        Error "a staged pipeline row map over a packed (symmetric/compound) input axis"
+    elif inRank > n then
+        Error $"a pipeline stage kernel consumes {inRank} axes but its input has only {n}"
+    else
+    let gridCount = n - inRank
+    let gridType =
+        { srcType with
+            IndexTypes =
+                srcType.IndexTypes |> List.mapi (fun j ix ->
+                    if j >= gridCount then { ix with Kind = TDimension } else ix) }
+    let gridIdx = srcType.IndexTypes |> List.truncate gridCount
+    let fiber = gridType.IndexTypes |> List.skip gridCount
+    let derived : Result<IRType, string> =
+        let ret =
+            match resolveKernel kernel with
+            | Some rk ->
+                (match rk.Callable.RetType with
+                 | IRTInfer _ -> typeOf rk.Callable.Body
+                 | t -> t)
+            | None -> srcType.ElemType
+        let isLiteral (ix: IRIndexType) =
+            match ix.Extent with IRLit (IRLitInt _) -> true | _ -> false
+        let tDimsAnd (elem: IRType) (tDims: IRIndexType list) =
+            let dims = gridIdx @ (tDims |> List.map (fun ix -> { ix with Kind = SDimension }))
+            if dims.IsEmpty then elem else mkArrayArrow dims elem None
+        match ret with
+        | ArrayElem rat ->
+            let rOut = rat.IndexTypes |> List.sumBy _.Rank
+            if rat.IndexTypes |> List.forall (fun ix -> ix.Rank = 1 && isLiteral ix) then
+                Ok (tDimsAnd rat.ElemType rat.IndexTypes)
+            elif rOut = inRank then
+                Ok (tDimsAnd rat.ElemType fiber)
+            else
+                Error $"a pipeline stage kernel returns rank {rOut} from a rank-{inRank} row with no static extents"
+        | t -> Ok (tDimsAnd t [])
+    let outTy =
+        match outputType with
+        | Some (ArrayElem _ as t) -> Ok t
+        | _ -> derived
+    outTy |> Result.map (fun outTy ->
+        let tDims =
+            match outTy with
+            | ArrayElem oat ->
+                oat.IndexTypes |> List.skip (min gridCount oat.IndexTypes.Length)
+                |> List.map (fun ix -> { ix with Kind = TDimension })
+            | _ -> []
+        let arrays = [ src ]
+        let identities = [ AIDLiteral 0 ]
+        let sDims = computeSDimsPerArray [ gridType ]
+        let totalSDims = List.sum sDims
+        { Loop = IRMethodFor {
+              Arrays = arrays; Identities = identities; ArrayTypes = [ gridType ]
+              SDimsPerArray = sDims; TotalSDims = totalSDims; SharedIndexTypes = [] }
+          Kernel = kernel
+          Arrays = arrays
+          Identities = identities
+          ArrayTypes = [ gridType ]
+          SharedIndexTypes = []
+          SymcomStates = List.replicate totalSDims SCNeither
+          TriangularLevels = List.replicate totalSDims false
+          SDimsPerArray = sDims
+          KernelInputRanks = [ inRank ]
+          KernelOutputRank = tDims |> List.sumBy _.Rank
+          KernelTDims = tDims
+          SpeedupFactor = 1L
+          ReynoldsSpeedup = 1L
+          HasReynolds = false
+          OutputType = outTy
+          IsCoIteration = false })
+
 

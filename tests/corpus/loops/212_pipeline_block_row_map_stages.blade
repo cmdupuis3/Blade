@@ -1,0 +1,43 @@
+// TEST: Pipeline Block Row Map Stages
+// ============================================================================
+// A `>>@` stage kernel over a ROW (`x: T^1`) is a row map, not a cell kernel.
+// Expression-bodied row stages fuse into one row kernel before the emitter
+// runs; a BLOCK-bodied stage declines fusion and reaches the staged emitter,
+// which swept every axis cell by cell -- `Z__s1[i][j] = center(R[i][j])`,
+// a double handed to a function that wants a row (g++ rejected it, BL9002).
+// Each row-map stage now runs as the direct `object_for(k) <@> X` apply it is.
+// Every pipeline below is pinned against the fused/direct spelling of the
+// same computation.
+from stats import mean
+type AssetIdx = Idx<3>
+type DayIdx = Idx<5>
+let R: Array<Float64 like AssetIdx, DayIdx> = [[1.0, 1.0, 1.0, 1.0, 6.0], [5.0, 0.0, 0.0, 0.0, 0.0], [7.0, 7.0, 2.0, 7.0, 7.0]]
+
+function center(x: T^1) -> T^1 = { let m = mean(x)
+    x - m }
+function unit_scale(x: T^1) -> T^1 = x / sqrt(mean(x * x))
+function center_expr(x: T^1) -> T^1 = x - mean(x)
+function dbl_blocky(x: Float64) -> Float64 = { x * 2.0 }
+function row_ss(x: T^1) -> T^0 = { reduce(x * x, (+)) }
+
+// both stages row maps, the first block-bodied (the reported shape)
+let Z = (object_for(center) >>@ object_for(unit_scale)) <@> R |> compute
+// EXPECT: Z = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+
+// the same pipeline with expression bodies fuses into ONE row kernel
+let fused = (object_for(center_expr) >>@ object_for(unit_scale)) <@> R |> compute
+// EXPECT: fused = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+
+// row map, then a block-bodied CELL kernel: stage 2 sweeps every cell
+let row_then_cell = (object_for(center) >>@ object_for(dbl_blocky)) <@> R |> compute
+// EXPECT: row_then_cell = [[-2, -2, -2, -2, 8], [8, -2, -2, -2, -2], [2, 2, -8, 2, 2]]
+
+// block-bodied cell kernel, then a row map: stage 1 sweeps every cell
+let cell_then_row = (object_for(dbl_blocky) >>@ object_for(center)) <@> R |> compute
+// EXPECT: cell_then_row = [[-2, -2, -2, -2, 8], [8, -2, -2, -2, -2], [2, 2, -8, 2, 2]]
+
+// a row REDUCTION as the last stage changes the rank: one value per asset
+let ss = (object_for(center) >>@ object_for(row_ss)) <@> R |> compute
+// EXPECT: ss = [20, 20, 20]
+let ss_direct = object_for(row_ss) <@> (object_for(center) <@> R |> compute) |> compute
+// EXPECT: ss_direct = [20, 20, 20]

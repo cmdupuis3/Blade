@@ -597,6 +597,47 @@ let genComposeApply
         // (the per-stage fallback arm). Anything else has no kernel to call.
         let stageEmittable (kn: string option) (k: IRExpr) : bool =
             kn.IsSome || (resolveCallable k).IsSome
+        // ROW-MAP STAGES. Every arm below sweeps the input CELL BY CELL, which
+        // is a scalar kernel's contract. A stage kernel over a ROW (`center(x:
+        // T^1)`) was handed `R[__i0][__i1]` -- a double where it wants an
+        // `Array<double, 1>` -- and g++ rejected the generated code (BL9002).
+        // Expression-bodied row stages never saw this: fusion collapses them
+        // into one row kernel before the emitter runs; a BLOCK-bodied stage
+        // declines fusion and lands here. Each stage is instead emitted as the
+        // direct `object_for(k) <@> X` apply it is, through the same
+        // genApplyCombinator row peel, from the ApplyInfo the interpreter's
+        // materializeComposeApply builds too (buildComposeStageApplyInfo).
+        let r1 = composeStageInputRank kernel1
+        let r2 = composeStageInputRank kernel2
+        match arrays with
+        | [ src ] when r1 > 0 || r2 > 0 ->
+            let s1Name = $"{name}__s1"
+            let s1Id = builder.FreshId()
+            let finalOut = match outputType with ArrayElem _ -> Some outputType | _ -> None
+            let stages =
+                match inferExprType src with
+                | ArrayElem srcAt ->
+                    buildComposeStageApplyInfo src srcAt kernel1 r1 None
+                    |> Result.bind (fun i1 ->
+                        match i1.OutputType with
+                        | ArrayElem s1At ->
+                            buildComposeStageApplyInfo (IRVar (s1Id, i1.OutputType)) s1At kernel2 r2 finalOut
+                            |> Result.map (fun i2 -> (i1, i2))
+                        | _ -> Error "a first pipeline stage that reduces its input to a scalar")
+                | _ -> Error "a pipeline over a non-array input"
+            match stages with
+            | Ok (i1, i2) ->
+                let code1 = genApplyCombinator ctx s1Name i1 builder
+                let ctx1 = addVarName s1Id s1Name ctx
+                let code2 = genApplyCombinator ctx1 name i2 builder
+                (code1 @ [""] @ code2, ctx1)
+            | Error what ->
+                let errCode =
+                    codegenError ctx ind
+                        $"staged `>>@` emission does not support {what} (v1). Force the stages separately \
+(`let s = object_for(k1) <@> A |> compute` then `object_for(k2) <@> s |> compute`)"
+                (errCode, ctx)
+        | _ ->
         match kernelName1, kernelName2 with
         | Some k1, Some k2 ->
             // Both kernels are named C++ lambdas - direct call loops.
