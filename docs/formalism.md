@@ -637,7 +637,10 @@ Iteration emits values tagged with their source index type as a **unit**:
 3. *Range.* A literal position — a subscript `3` / `-1`, a cast `(3 : I)`,
    or a literal argument to a `Nat<I>` parameter — is checked at compile time
    against the static extent (BL4003); a negative literal subscript is
-   refused on every plain slot. A literal index-typed VALUE -- a `Nat<I>`
+   refused on every plain slot. A literal SUBSCRIPT into a plain slot with no
+   static extent -- a `T^k` or `Idx<n>` parameter, a pack element, a set
+   operation's result -- is checked at run time against the array's own
+   extent instead (BL8006), named slot or anonymous alike. A literal index-typed VALUE -- a `Nat<I>`
    `let`, a cell of an index-typed foreign-key column -- is range-checked the
    same way, with one exception: `-1`, group_by's "excluded" key. A string
    `EnumIdx` literal must be one of the type's labels.

@@ -1,0 +1,34 @@
+// TEST: Pack Element Literal Index Is Typed
+// ============================================================================
+// `P[0]` over `P: Poly<T^1>` was typed with a fresh variable unrelated to
+// `T` -- right for a pack of TUPLES, whose literal index addresses flat
+// leaves, but a `T^1` element can never be a tuple. Cut off from `T`,
+// `reduce(P[0], (+))` returning `T^0` left the call's result unresolved
+// (BL6001), and `P[0](0)` was typed as a CALL (BL9002, `P_0(0L)` on an
+// array). A literal index of a pack whose element is an array or a scalar
+// now has the element's type. Every line below failed on master.
+let x = [1.0, 2.0, 3.0]
+let y = [10.0, 20.0, 30.0, 40.0, 50.0]
+let z = [100.0]
+let xi = [1, 2]
+
+function firstsum(P: Poly<T^1>) -> T^0 = P[0](0) + P[1](0)
+let fs = firstsum(x, y)
+// EXPECT: fs = 11
+let fi = firstsum(xi, xi)
+// EXPECT: fi = 2
+
+// Arity 3, three extents.
+function ends(P: Poly<T^1>) -> T^0 = P[0](0) + P[2](0)
+let en = ends(x, y, z)
+// EXPECT: en = 101
+
+// A fold of each element, extents differing (3 and 5 cells).
+function total0(P: Poly<T^1>) -> T^0 = reduce(P[0], (+)) + reduce(P[1], (+))
+let t0 = total0(x, y)
+// EXPECT: t0 = 156
+
+// Unannotated return, and an in-range read past the first element's length.
+function third_of_first(P: Poly<T^1>) = P[0](3)
+let tf = third_of_first(y, x)
+// EXPECT: tf = 40

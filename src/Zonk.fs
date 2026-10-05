@@ -387,11 +387,43 @@ let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr 
     | ArrayElem at when not synthetic && idxs.Length <= at.IndexTypes.Length
                         && not (idxs |> List.exists (fun a -> a.Kind.IsTExprTuple)) ->
         let rank = at.IndexTypes.Length
+        let mkTA (a: TypedExpr) k ty = mkTypedSpan k ty a.Span
+        // The extent of slot k read off the array itself: a variable, or a
+        // literal element of a parameter pack (`P[0]`, a variable once arity
+        // monomorphization expands the pack).
+        let runtimeExtent (a: TypedExpr) (k: int) : TypedExpr option =
+            let intTy = IRTScalar ETInt64
+            match arr.Kind with
+            | TExprVar _
+            | TExprTupleIndex ({ Kind = TExprVar _ }, { Kind = TExprLit (Blade.Ast.LitInt _) }) ->
+                Some (if rank = 1 then mkTA a (TExprExtents arr) intTy
+                      else mkTA a (TExprTupleIndex (mkTA a (TExprExtents arr) (IRTTuple (List.replicate rank intTy)),
+                                                    mkTA a (TExprLit (Blade.Ast.LitInt (int64 k))) intTy)) intTy)
+            | _ -> None
         List.mapi (fun k (a: TypedExpr) ->
             let ix = at.IndexTypes.[k]
             match enumKeyOrdinal ix a with
             | Some ord -> ord
             | None ->
+            // A LITERAL position into a plain slot with NO static extent --
+            // `m(5)` with `m: T^1`, or `m: Array<Float64 like Idx<n>>` (formalism
+            // 3.10 rule 3). Rule 3 checks a literal at compile time against the
+            // static extent; here there is none, so it was checked nowhere and a
+            // read past a short argument returned whatever lay beyond it. It is
+            // checked at run time against the array's own extent instead, named
+            // slot or anonymous alike -- rule 3 is not limited to named slots,
+            // only the guarantee for COMPUTED subscripts is. In a shape-
+            // specialized copy the extent is a literal again, and the test of
+            // an in-range literal folds away.
+            match ix.IxKind, ix.Symmetry with
+            | IxKPlain, SymNone when ix.Rank <= 1
+                                     && isLiteralIndex a
+                                     && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
+                                     && (Blade.IRPrint.tryEvalIntIR ix.Extent).IsNone
+                                     && (runtimeExtent a k).IsSome ->
+                let shown = match ix.Tag with Some t -> $"{t} (its extent)" | None -> "the array's extent"
+                guardIndex a (runtimeExtent a k).Value $"a literal position outside {shown}"
+            | _ ->
             match guardableSlot ix with
             | Some tag when not a.Kind.IsTExprWildcard
                             && not (isLiteralIndex a)
@@ -403,15 +435,8 @@ let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr 
                     match Blade.IRPrint.tryEvalIntIR ix.Extent with
                     | Some n -> Some (mkT (TExprLit (Blade.Ast.LitInt n)) intTy, $"0 .. {n - 1L}")
                     | None ->
-                        match arr.Kind with
-                        | TExprVar _ ->
-                            // runtime extent: read it off the array itself
-                            let exts =
-                                if rank = 1 then mkT (TExprExtents arr) intTy
-                                else mkT (TExprTupleIndex (mkT (TExprExtents arr) (IRTTuple (List.replicate rank intTy)),
-                                                           mkT (TExprLit (Blade.Ast.LitInt (int64 k))) intTy)) intTy
-                            Some (exts, "its extent")
-                        | _ -> None
+                        // runtime extent: read it off the array itself
+                        runtimeExtent a k |> Option.map (fun exts -> (exts, "its extent"))
                 match extent with
                 | Some (ext, shown) -> guardIndex a ext $"a position outside {tag} ({shown})"
                 | None -> a

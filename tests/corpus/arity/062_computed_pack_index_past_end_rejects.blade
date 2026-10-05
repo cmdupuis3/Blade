@@ -1,0 +1,11 @@
+// TEST: Computed pack index past the end (rejects)
+// ERROR: BL7004
+// ERROR-CONTAINS: reads element 3 of a 2-element pack
+// REJECT-AT: lower
+// arity/061's fold, past the pack's end: `arity(P) + 1` is 3 for a two-
+// element call. It used to dangle (BL6001); folded, it meets the same
+// refusal as a literal index past the end, naming the element and the arity.
+let x = [1.0, 2.0, 3.0]
+let y = [10.0, 20.0, 30.0, 40.0, 50.0]
+function past(P: Poly<T^1>) = reduce(P[arity(P) + 1], (+))
+let t = past(x, y)

@@ -5116,6 +5116,22 @@ and inferTupleIndex (env: TypeEnv) tuple index : TypeResult<TypedExpr> =
             // index (and a pack of tuples) addresses FLAT LEAVES, which the
             // fallback leaves for codegen to resolve by path.
             Ok (mkTyped (TExprTupleIndex (tT, tI)) baseTy)
+        // A LITERAL read of a pack whose element is an ARRAY or a SCALAR --
+        // `P[0]` over `P: Poly<T^1>` -- is that element, too: there are no
+        // flat leaves to resolve by path when the element is not a tuple, and
+        // a `T^k` element (k >= 1) never becomes one (the caret pins it to a
+        // rank-k array). The fresh variable of the fallback cut `P[0]` off
+        // from `T`, so `reduce(P[0], (+))` returning `T^0` left the call's
+        // result unresolved (BL6001) and `P[0](0)` was typed as a CALL
+        // (BL9002 on `P_0(0L)`). An open element variable WITHOUT a rank pin
+        // may still turn out to be a tuple, and keeps the fallback.
+        | IRTPoly (baseTy, _)
+            when (match env.Subst.Resolve baseTy with
+                  | ArrayElem _ | AnyPrimElem _ -> true
+                  | IRTInfer vid | IRTUnitAnnotated (IRTInfer vid, _) ->
+                      env.Subst.GetArityConstraint vid |> Option.exists (fun k -> k >= 1)
+                  | _ -> false) ->
+            Ok (mkTyped (TExprTupleIndex (tT, tI)) baseTy)
         | _ ->
             // Poly-pack / tuple indexing: result type is fresh -- codegen
             // resolves via std::get based on flat-leaf paths.

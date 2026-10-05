@@ -1,0 +1,31 @@
+// TEST: Computed Pack Index
+// ============================================================================
+// `P[arity(P) - 1]` is a constant in every arity specialization, but only the
+// `arity(P)` half was folded: the read was left as a DYNAMIC index on the
+// pack variable, which the specialization no longer has, and IR validation
+// reported a dangling VarId (BL6001). The arity specializer now folds a
+// constant index expression and resolves the read like a literal one.
+// (arity/062: an index that folds past the pack's end.)
+let x = [1.0, 2.0, 3.0]
+let y = [10.0, 20.0, 30.0, 40.0, 50.0]
+let z = [100.0]
+
+function scaled_last(P: Poly<T^1>) -> T^1 = P[arity(P) - 1] * 2.0
+let sl = scaled_last(x, y)
+// EXPECT: sl = [20, 40, 60, 80, 100]
+
+// One function at two arities: each specialization folds its own index.
+function last_total(P: Poly<T^1>) = reduce(P[arity(P) - 1], (+))
+let lt2 = last_total(x, y)
+// EXPECT: lt2 = 150
+let lt3 = last_total(x, y, z)
+// EXPECT: lt3 = 100
+
+function middle_total(P: Poly<T^1>) = reduce(P[arity(P) / 2], (+))
+let mt = middle_total(x, y, z)
+// EXPECT: mt = 150
+
+// A subscript of the folded element.
+function last_first(P: Poly<T^1>) -> T^0 = P[arity(P) - 1](0)
+let lf = last_first(x, y, z)
+// EXPECT: lf = 100

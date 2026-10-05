@@ -1,0 +1,9 @@
+// TEST: Literal Subscript Into Pack Element Aborts (aborts)
+// ============================================================================
+// functions/203's rule through a parameter-pack element: `P[0](3)` with a
+// 3-element first argument. The guard reads the element's own extent.
+function at3(P: Poly<T^1>) -> T^0 = P[0](3)
+let x = [1.0, 2.0, 3.0]
+let y = [10.0, 20.0, 30.0, 40.0, 50.0]
+let e = at3(x, y)
+// ABORT: BL8006

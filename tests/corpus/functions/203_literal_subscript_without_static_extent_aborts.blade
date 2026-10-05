@@ -1,0 +1,12 @@
+// TEST: Literal Subscript Without Static Extent Aborts (aborts)
+// ============================================================================
+// Formalism 3.10 rule 3 checks a literal subscript at compile time against
+// the slot's STATIC extent (BL4003: `x(5)` on a 3-array). A `T^k` parameter
+// has none, so `m(5)` into a 3-element argument was checked nowhere and read
+// whatever lay past it. It is now checked at run time against the array's
+// own extent. (functions/204: a declared `Idx<n>`; functions/205: a pack
+// element.)
+function at5(m: T^1) -> T^0 = m(5)
+let x = [1.0, 2.0, 3.0]
+let z = at5(x)
+// ABORT: BL8006

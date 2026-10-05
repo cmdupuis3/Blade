@@ -2455,8 +2455,38 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
                 let slotArity = aritiesArr.[slotIdx]
                 if idx >= 0 && idx < slotArity then slotParamVar slotIdx idx
                 else e
-            | IRPolyIndex (IRVar (id, _), _) when Map.containsKey id aliasInfo ->
-                e  // Dynamic index -- can't monomorphize, leave as-is
+            // A COMPUTED index that is a constant in this specialization --
+            // `P[arity(P) - 1]`: the bottom-up walk has already turned
+            // `arity(P)` into a literal, but nothing folded `2 - 1`, so the
+            // read was left as a dynamic index on the pack variable, which the
+            // specialization no longer has (BL6001 "dangling VarId"). Folded,
+            // it resolves like a literal index (and a fold past the pack's end
+            // reaches the past-end refusal below, as a literal one does).
+            | IRPolyIndex (IRVar (id, t), idxE) when Map.containsKey id aliasInfo ->
+                let rec constInt (x: IRExpr) : int64 option =
+                    match x with
+                    | IRLit (IRLitInt n) -> Some n
+                    | IRUnaryOp (IRNeg, a) -> constInt a |> Option.map (fun n -> -n)
+                    | IRBinOp (_, op, l, r, _) ->
+                        (match constInt l, constInt r with
+                         | Some a, Some b ->
+                             (match op with
+                              | IRAdd -> Some (a + b)
+                              | IRSub -> Some (a - b)
+                              | IRMul -> Some (a * b)
+                              | IRDiv when b <> 0L -> Some (a / b)
+                              | IRMod when b <> 0L -> Some (a % b)
+                              | _ -> None)
+                         | _ -> None)
+                    | _ -> None
+                match constInt idxE with
+                | Some k ->
+                    let lit = IRPolyIndex (IRVar (id, t), IRLit (IRLitInt k))
+                    let (slotIdx, off) = aliasInfo.[id]
+                    let idx = off + int k
+                    if idx >= 0 && idx < aritiesArr.[slotIdx] then slotParamVar slotIdx idx
+                    else lit
+                | None -> e  // Dynamic index -- can't monomorphize, leave as-is
             | IRArity (_, name) when Map.containsKey name paramNameToSlot ->
                 let slotIdx = paramNameToSlot.[name]
                 IRLit (IRLitInt (int64 aritiesArr.[slotIdx]))
@@ -2530,8 +2560,9 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
         match pastEndRead newBody with
         | Some (slotIdx, idx) ->
             let n = aritiesArr.[slotIdx]
+            let elems = if n = 0 then "the pack is empty" else $"elements 0 .. {n - 1}"
             raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
-                $"'{func.Name}' reads element {idx} of a {n}-element pack: its recursion reaches arity {n} with no arm for it (recursion without a base case is planned, not built). Add a base arm, e.g. `| {n} -> <the identity>` in the `match arity(...)`.")))
+                $"'{func.Name}' reads element {idx} of a {n}-element pack ({elems}). If the read is recursion over the pack, the recursion reaches arity {n} with no arm for it (recursion without a base case is planned, not built): add a base arm, e.g. `| {n} -> <the identity>` in the `match arity(...)`; otherwise the index itself is out of range at this call's arity.")))
         | None -> ()
 
         // Second pass: unroll IRForRange with literal bounds. This handles

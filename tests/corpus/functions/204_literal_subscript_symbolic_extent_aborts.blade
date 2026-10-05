@@ -1,0 +1,9 @@
+// TEST: Literal Subscript Into Symbolic Extent Aborts (aborts)
+// ============================================================================
+// functions/203's rule through a DECLARED symbolic extent: `Idx<n>` is
+// anonymous and has no static extent, so the literal `5` was not checked at
+// compile time and read past the 3-element argument. Run-time check, BL8006.
+function at5(m: Array<Float64 like Idx<n>>) -> Float64 = m(5)
+let x = [1.0, 2.0, 3.0]
+let z = at5(x)
+// ABORT: BL8006
