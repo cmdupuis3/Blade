@@ -1,0 +1,83 @@
+// TEST: Invariant Scalar Hoisted Out Of A Lifted Map
+// ============================================================================
+// `a - mean(a)` is `method_for(a) <@> lambda(e) -> e - mean(a) |> compute`:
+// the scalar side lives in the kernel, so it used to be evaluated once PER
+// CELL -- centering a length-T row folded it T times (O(T^2)), and
+// `x / sqrt(mean(x * x))` also allocated `x * x` per cell. The optimizer now
+// binds a value that does not read the element once, before the nest
+// (Optimize.hoistKernelInvariantsModule, BLADE_HOIST), which is what the
+// block spelling `let m = mean(a); a - m` always did.
+//
+// The values below are the ones the per-cell evaluation printed -- the
+// rewrite changes cost, never a value -- and `blade test opt-diff` compares
+// this file with the pass off and on. The EMISSION (no call left in the
+// nest) is pinned in tests/OptimizeTests.fs.
+from stats import mean
+
+type AssetIdx = Idx<4>
+type DayIdx = Idx<6>
+
+// The taught one-liner: both means leave the fused nest.
+function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 =
+    mean((a - mean(a)) * (b - mean(b)))
+let R: Array<Float64 like AssetIdx, DayIdx> = [
+    [1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6],
+    [2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]
+let C = method_for(R, R) <@> cov |> compute
+// EXPECT: C = [3.16666666666667, -0.258333333333333, -1.5, 0.625, 0.108888888888889, -0.05, -0.133333333333333, 1.66666666666667, -0.583333333333333, 1.22916666666667]
+
+function center(x: T^1) -> T^1 = x - mean(x)
+// The invariant holds a map of its own (`x * x`): it moves out whole.
+function rms_normalize(x: T^1) -> T^1 = x / sqrt(mean(x * x))
+
+let x = [1.0, 2.0, 3.0, 6.0]
+let centered = center(x)
+// EXPECT: centered = [-2, -1, 0, 3]
+let normalized = rms_normalize(x)
+// EXPECT: normalized = [0.282842712474619, 0.565685424949238, 0.848528137423857, 1.69705627484771]
+
+// An EMPTY row runs no cell, so the kernel never evaluated `mean` -- which
+// panics BL8003 on an empty fold. The hoisted value is bound under the
+// nest's own non-emptiness: still nothing evaluated, nothing raised.
+let none: Array<Float64 like Idx<0>> = []
+let centered_none = center(none)
+let normalized_none = rms_normalize(none)
+let n_centered_none = extents(centered_none)
+// EXPECT: n_centered_none = 0
+let n_normalized_none = extents(normalized_none)
+// EXPECT: n_normalized_none = 0
+
+// The same for a row whose emptiness only RUN TIME knows: the guard itself
+// runs (the `none` bodies above are specialized on the literal extent 0).
+let common = intersect(x, [100.0, 200.0])
+let n_centered_common = extents(center(common))
+// EXPECT: n_centered_common = 0
+
+// Module level, where the extent is a literal and no guard is needed.
+let top_level = x - mean(x)
+// EXPECT: top_level = [-2, -1, 0, 3]
+
+// A hand-written kernel has the same shape. The occurrence under the branch
+// reads the hoisted value too (the condition already evaluated it).
+let above = method_for(x) <@> lambda(e) -> if e > mean(x) then e - mean(x) else 0.0 |> compute
+// EXPECT: above = [0, 0, 0, 3]
+
+// A product stays in the kernel (binding it would end the multiply-add
+// adjacency g++ contracts); the call under it still moves out.
+let scaled = x - mean(x) * 0.5
+// EXPECT: scaled = [-0.5, 0.5, 1.5, 4.5]
+
+// A math intrinsic alone is work too (g++ does not move a libm call out of a
+// loop): `exp` runs once.
+let decay = 0.5
+let damped = x * exp(-decay)
+// EXPECT: damped = [0.606530659712633, 1.21306131942527, 1.8195919791379, 3.6391839582758]
+
+// The fused reduction terminal forces its apply just the same.
+let sum_sq = reduce(method_for(x) <@> lambda(e) -> (e - mean(x)) ^ 2, (+))
+// EXPECT: sum_sq = 14
+
+// A row kernel: the mean of each ROW is invariant in that row's map.
+let M: Array<Float64 like Idx<2>, Idx<4>> = [[1.0, 2.0, 3.0, 6.0], [2.0, 4.0, 6.0, 8.0]]
+let rows_centered = method_for(M) <@> lambda(row: T^1) -> row - mean(row) |> compute
+// EXPECT: rows_centered = [[-2, -1, 0, 3], [-3, -1, 1, 3]]

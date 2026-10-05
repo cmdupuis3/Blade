@@ -682,13 +682,14 @@ let gkSidecarStem (names: Map<IRId, string>) (gkId: IRId) : string =
 let groupedCaptureGks (caps: CaptureInfo list) : IRId list =
     caps |> List.choose groupedCaptureGkOf |> List.distinct
 
-/// Trailing hidden params carrying the gk side state, for genFuncDef and
-/// genForwardDecls (which must agree token for token).
-let gkSidecarParams (caps: CaptureInfo list) : string list =
+/// Trailing hidden params carrying the gk side state, as (C++ type, name)
+/// pairs -- the tail of CodeGen.captureParamDecls, which every declaration of
+/// a lifted callable's signature renders.
+let gkSidecarParams (caps: CaptureInfo list) : (string * string) list =
     groupedCaptureGks caps
     |> List.collect (fun gkId ->
-        [ $"size_t __gk{gkId}__ngroups"
-          $"const size_t* __gk{gkId}__offsets" ])
+        [ ("size_t", $"__gk{gkId}__ngroups")
+          ("const size_t*", $"__gk{gkId}__offsets") ])
 
 /// Capture ARGUMENTS at a call/wrapper site: the regular captures resolved
 /// through the active name map, then the gk side-state pairs in the same

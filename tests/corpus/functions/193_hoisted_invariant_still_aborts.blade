@@ -1,0 +1,13 @@
+// TEST: Hoisted Invariant Still Aborts (aborts)
+// ============================================================================
+// The other half of functions/192's empty-row rule. `x - mean(y)` evaluated
+// `mean(y)` at the first cell of `x`; with `x` non-empty and `y` EMPTY that
+// is BL8003, and binding the mean once before the nest must not lose it: the
+// guard is the emptiness of the array being mapped, never of what the
+// invariant itself reads.
+from stats import mean
+function shift(x: T^1, y: T^1) -> T^1 = x - mean(y)
+let x = [1.0, 2.0, 3.0]
+let none: Array<Float64 like Idx<0>> = []
+let out = shift(x, none)
+// ABORT: BL8003

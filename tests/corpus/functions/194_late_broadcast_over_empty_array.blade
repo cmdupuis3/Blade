@@ -1,0 +1,73 @@
+// TEST: Late Broadcast Over An Empty Array
+// ============================================================================
+// An array/scalar elementwise op is re-synthesized by the checker as a map
+// only when the scalar operand's type is concrete where the checker meets it.
+// `v - f(v)` with `f : T^1 -> T^0` inside a generic body is not: the scalar is
+// still an inference variable there. Two LATE rewrites pick such an op up --
+// IRMono.lowerArrayBinOpsModule after monomorphization when the array side is
+// a caret parameter (`center` below), and Lowering.lowerTypedBinOp when the
+// array side's type is already known (`shifted` below, whose array operand is
+// a call).
+//
+// Both used to bind the scalar in a `let` around the map -- evaluated once,
+// UNCONDITIONALLY -- so centering an EMPTY row raised BL8003 here while the
+// same body over a concretely typed mean (functions/192, `from stats import
+// mean`) returned `[]`: one expression, two answers. Both now build the
+// kernel the checker builds (`lambda(e) -> e - f(v)`), whose scalar is
+// evaluated per cell and so never for an empty array, and the optimizer's
+// kernel-invariant hoisting binds it once under the nest's non-emptiness.
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function center(v: T^1) -> T^1 = v - lmean(v)
+
+let none: Array<Float64 like Idx<0>> = []
+let centered_none = center(none)
+let n_centered_none = extents(centered_none)
+// EXPECT: n_centered_none = 0
+
+let x = [1.0, 2.0, 3.0, 6.0]
+let centered = center(x)
+// EXPECT: centered = [-2, -1, 0, 3]
+
+// A row whose emptiness only RUN TIME knows (no element of `x` is in `far`):
+// here the body is not specialized on a literal extent, so it is the guard
+// itself -- `if <the row has a cell> then lmean(v) else 0` -- that runs.
+let far = [100.0, 200.0]
+let common = intersect(x, far)
+let n_centered_common = extents(center(common))
+// EXPECT: n_centered_common = 0
+let some = intersect(x, [2.0, 6.0, 9.0])
+let centered_some = center(some)
+// EXPECT: centered_some = [-2, 2]
+
+// The array operand a CALL (its type is known at lowering, so this is the
+// second late rewrite): the call is bound first, the mean under ITS extent.
+function doubled(v: T^1) -> T^1 = v * 2.0
+function shifted(v: T^1) -> T^1 = doubled(v) - lmean(v)
+let n_shifted_common = extents(shifted(common))
+// EXPECT: n_shifted_common = 0
+let shifted_some = shifted(some)
+// EXPECT: shifted_some = [0, 8]
+
+// The scalar on the LEFT of the operator.
+function reflect(v: T^1) -> T^1 = lmean(v) - v
+let reflected = reflect(x)
+// EXPECT: reflected = [2, 1, 0, -3]
+let n_reflected_none = extents(reflect(none))
+// EXPECT: n_reflected_none = 0
+
+// A chain of late broadcasts: each mean leaves its own nest.
+function cov(v: T^1, u: T^1) -> T^0 = lmean((v - lmean(v)) * (u - lmean(u)))
+let w = [2.0, 0.0, 4.0, 2.0]
+let c = cov(x, w)
+// EXPECT: c = 0.5
+
+// An invariant holding a late broadcast of its own.
+function twice_centered(v: T^1) -> T^1 = v - lmean(v - lmean(v))
+let twice = twice_centered(x)
+// EXPECT: twice = [1, 2, 3, 6]
+
+// Reached through a kernel, where the row's extent is not a literal: the
+// guard is a run-time test of the row being mapped.
+let M: Array<Float64 like Idx<2>, Idx<4>> = [[1.0, 2.0, 3.0, 6.0], [2.0, 4.0, 6.0, 8.0]]
+let rows_centered = method_for(M) <@> center |> compute
+// EXPECT: rows_centered = [[-2, -1, 0, 3], [-3, -1, 1, 3]]

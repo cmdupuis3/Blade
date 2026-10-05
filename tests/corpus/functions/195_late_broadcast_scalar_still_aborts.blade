@@ -1,0 +1,13 @@
+// TEST: Late Broadcast Scalar Still Aborts (aborts)
+// ============================================================================
+// The other half of functions/194. `v - lmean(w)` evaluates `lmean(w)` at the
+// first cell of `v`; with `v` non-empty and `w` EMPTY that is BL8003, and the
+// late broadcast's guard is the emptiness of the array being MAPPED, never of
+// what the scalar itself reads. (functions/193 is the same probe on the
+// checker's path.)
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function shift(v: T^1, w: U^1) -> T^1 = v - lmean(w)
+let x = [1.0, 2.0, 3.0]
+let none: Array<Float64 like Idx<0>> = []
+let out = shift(x, none)
+// ABORT: BL8003

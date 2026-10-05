@@ -1,0 +1,11 @@
+// TEST: Shared Type Variable Empty Second Argument Aborts (aborts)
+// ============================================================================
+// The other half of functions/199. With `w` specialized as `v`'s 3-array, the
+// mean of an EMPTY `w` read three cells past its end and printed [1, 2, 3].
+// Specialized with `w`'s own extent, the fold sees an empty array: BL8003.
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function shift(v: T^1, w: T^1) -> T^1 = v - lmean(w)
+let x = [1.0, 2.0, 3.0]
+let none: Array<Float64 like Idx<0>> = []
+let out = shift(x, none)
+// ABORT: BL8003

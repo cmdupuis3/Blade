@@ -6,6 +6,37 @@ module Blade.IRMono
 open Blade.Types
 open Blade.IR
 
+/// Two arrays a type variable was bound to at ONE call site, differing in
+/// nothing but the extents of their index records: the shared array type with
+/// every disagreeing extent replaced by a symbolic placeholder, else None.
+///
+/// A caret variable stands for the whole array type, but extents are not part
+/// of a `T^r` type's identity -- `shift(v: T^1, w: T^1)` called with a 3-array
+/// and a 5-array typechecks. Keeping the FIRST argument's type for both
+/// parameters specialized `w` as a 3-array: a fold over `w` read 3 of its 5
+/// cells (a silent wrong value), or past the end of an empty one. The
+/// placeholder is the one `Idx<n>` lowers to (an `IRParam` extent), so the
+/// body reads each parameter's own `.extents` at run time, and shape
+/// monomorphization -- which bakes a symbolic extent only when every argument
+/// agrees on it -- leaves it alone. Its name is unique to the variable and
+/// axis, so it cannot alias a declared `Idx<n>`.
+let private mergeArrayExtents (varId: int) (a: IRType) (b: IRType) : IRType option =
+    match a, b with
+    | ArrayElem aa, ArrayElem ba
+        when aa.ElemType = ba.ElemType && aa.IsVirtual = ba.IsVirtual
+             && aa.IndexTypes.Length = ba.IndexTypes.Length
+             && List.forall2 (fun (x: IRIndexType) (y: IRIndexType) ->
+                    x.Rank = y.Rank && x.Symmetry = y.Symmetry && x.IxKind = y.IxKind
+                    && x.Kind = y.Kind && x.Tag = y.Tag && x.Dependencies = y.Dependencies)
+                    aa.IndexTypes ba.IndexTypes ->
+        let ixs =
+            List.mapi2 (fun d (x: IRIndexType) (y: IRIndexType) ->
+                if x.Extent = y.Extent then x
+                else { x with Extent = IRParam ($"__hm{varId}_extent{d}", 0, IRTNat None) })
+                aa.IndexTypes ba.IndexTypes
+        Some (mkArrayLike { aa with IndexTypes = ixs })
+    | _ -> None
+
 /// Unify a parameter type against an argument type, accumulating
 /// (typeVarId, concreteType) bindings. Walks pairs structurally:
 /// ArrayElem pairs ElemType, IRTTuple pairs elementwise, FuncElem
@@ -20,6 +51,9 @@ let rec unifyParamWithArg (paramTy: IRType) (argTy: IRType) (acc: Map<int, IRTyp
     | IRTInfer _, IRTInfer _ -> acc
     | IRTInfer n, t when not (acc.ContainsKey n) -> Map.add n t acc
     | IRTInfer n, t when acc.[n] = t -> acc  // Consistent reuse -- fine
+    // The same array at two extents: generalize the extents (mergeArrayExtents).
+    | IRTInfer n, t when (mergeArrayExtents n acc.[n] t).IsSome ->
+        Map.add n (mergeArrayExtents n acc.[n] t).Value acc
     | IRTInfer _, _ -> acc  // Inconsistent -- leave as-is; the IR validator will catch it
     | ArrayElem pa, ArrayElem aa ->
         unifyParamWithArg pa.ElemType aa.ElemType acc
@@ -1340,8 +1374,13 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
 ///
 /// The synthesized `lambda(a, b) -> a op b` kernel closes over nothing.
 /// Only Elementwise mode is rewritten (pack-element `A[i] + A[j]`); outer
-/// products and scalar/broadcast binops are left untouched.
-let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+/// products are left untouched. An array/scalar pair becomes the one-array
+/// map TypeCheck synthesizes for it (`broadcastScalar` below).
+///
+/// `programFuncs` is every callable of the program: a name the scalar operand
+/// reads is a CAPTURE of the synthesized kernel unless it is a callable, and
+/// a callable may live in another module.
+let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
     let newLambdas = System.Collections.Generic.List<IRCallable>()
     let isCmpOrLogical op = isCmpOrLogicalIROp op
     // Distinct identity per distinct operand var so codegen's symmetry
@@ -1362,7 +1401,21 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         // array-scalar broadcast produces) to the value it ultimately yields.
         | IRLet (_, _, body) -> operandType body
         | CarriedType ty -> Some ty
-        | _ -> None
+        // A SCALAR operand that is a construction over known operands rather
+        // than a node carrying a type -- `sqrt(lmean(v * v))` (a math
+        // intrinsic over a call), `lmean(v) * lmean(u)` (a scalar binop) --
+        // in a generic body where `lmean : T^1 -> T^0`. Its type is an
+        // inference variable when the checker meets the op, so the checker
+        // leaves the op for this pass; reading only `CarriedType` here
+        // answered None, nothing rewrote it, and the raw `Array op double`
+        // reached g++ (BL9002: "no match for 'operator/'"). exprTypeIfKnown's
+        // scalar rules are the checker's own, and every leaf still comes
+        // from a carried type. SCALARS ONLY: an array answer from it would
+        // widen which array operands this pass rewrites.
+        | e ->
+            match exprTypeIfKnown e with
+            | Some (AnyPrimElem et) -> Some (IRTScalar et)
+            | _ -> None
     // TRIGGER PRE-SCAN. `rewrite` below fires on exactly three operand-type
     // pairs -- (array, array), (array, scalar), (scalar, array) -- so a module
     // with no array-typed elementwise binop anywhere cannot be changed by this
@@ -1382,6 +1435,9 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
             (match operandType l, operandType r with
              | Some (ArrayElem _), Some _ | Some _, Some (ArrayElem _) -> true
              | _ -> false)
+        // The lowering-time broadcast's `let s = <scalar> in <map>` (see the
+        // `rewrite` arm that rebuilds it).
+        | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> true
         | _ -> false
     let hasArrayBinOp =
         let mutable hit = false
@@ -1393,51 +1449,191 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
         hit
     if not hasArrayBinOp then modul
     else
-    // Broadcast a scalar against an array (`arr op scalar` / `scalar op
-    // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
-    // for pack elements whose array type only resolves post-monomorphization
-    // (e.g. `head - mean(head)` in a Poly<T^1> kernel). The scalar is
-    // materialized into a captured local; a single-array method_for maps it.
-    let broadcastScalar op (arr: IRExpr) (arrTy: IRType) (la: IRArrayType)
-                        (scalarE: IRExpr) (sElem: ElemType) (scalarOnLeft: bool) : IRExpr =
-        let arrElem = arrayBinOpKernelElem la.ElemType
-        let kernelRet = if isCmpOrLogical op then IRTScalar ETBool else IRTScalar arrElem
-        let sId = builder.FreshId()
-        let sTy = IRTScalar sElem
-        let xId = builder.FreshId()
-        let xVar = IRVar (xId, IRTScalar arrElem)
-        let sVar = IRVar (sId, sTy)
-        // Kernel `lambda(__bx) -> __bx op s` (or `s op __bx`); `s` is captured.
-        let kbody =
-            if scalarOnLeft then IRBinOp (IRElementwise, op, sVar, xVar, SrcLoc.Nowhere)
-            else IRBinOp (IRElementwise, op, xVar, sVar, SrcLoc.Nowhere)
-        let parms : IRParam list =
-            [ { Name = "__bx"; Type = IRTScalar arrElem; Index = 0; VarId = xId } ]
-        let cap : CaptureInfo = { Id = sId; Name = $"__v{sId}"; Type = sTy; IsMutable = false }
-        let lam = mkLambdaCallable builder parms kbody kernelRet [cap] false [] [] false false 256 false
-        newLambdas.Add lam
-        let kernelFuncType = IRTArrow ([SVal (IRTScalar arrElem)], kernelRet, None)
+    // WHAT A KERNEL HOLDING `e` MUST CAPTURE -- or None when `e` cannot be
+    // moved into one. TypeCheck gets this from the surface expression (it
+    // embeds the scalar operand's source in the kernel so capture analysis
+    // sees its names); here the operand is already IR, so the free names are
+    // read off the tree: every variable not bound inside `e` is a capture,
+    // except a callable, which contributes the captures IT forwards.
+    // Over-reporting is safe (an unused capture is one more reference
+    // parameter); what is refused is a name this seam cannot vouch for --
+    // one that is neither a parameter, a capture, a module binding nor a
+    // `let` of this module (a match-pattern or loop variable, another
+    // module's binding), a deferred value, or a by-NAME node (IRParam and
+    // the pack forms), which only renders in the scope it was written in.
+    let callableOf = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in programFuncs do callableOf.[f.Id] <- f
+    for f in modul.Functions do callableOf.[f.Id] <- f
+    let sourceNames = System.Collections.Generic.Dictionary<IRId, string>()
+    let localLets = System.Collections.Generic.HashSet<IRId>()
+    let noteLets (b: IRExpr) =
+        iterIRExpr (fun n ->
+            match n with
+            | IRLet (id, _, _) -> localLets.Add id |> ignore
+            | _ -> ()) b
+    for f in modul.Functions do
+        for p in f.Params do sourceNames.[p.VarId] <- p.Name
+        for c in f.Captures do sourceNames.[c.Id] <- c.Name
+        noteLets f.Body
+    for b in modul.Bindings do
+        sourceNames.[b.Id] <- b.Name
+        noteLets b.Value
+    let isIdent (n: string) =
+        n <> "" && n <> "__bx"
+        && (System.Char.IsLetter n.[0] || n.[0] = '_')
+        && n |> Seq.forall (fun ch -> System.Char.IsLetterOrDigit ch || ch = '_')
+    let capturesOf (e: IRExpr) : CaptureInfo list option =
+        let mutable ok = true
+        let order = ResizeArray<CaptureInfo>()
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let add (c: CaptureInfo) = if seen.Add c.Id then order.Add c
+        let rec walk (bound: Set<IRId>) (e: IRExpr) =
+            if ok then
+                match e with
+                | IRParam _ | IRNth | IRArity _ | IRPolyIndex _ | IRPolyTail _ -> ok <- false
+                | IRVar (id, _) when Set.contains id bound -> ()
+                | IRVar (id, ty) ->
+                    (match callableOf.TryGetValue id with
+                     | true, g -> for c in g.Captures do add c
+                     | _ ->
+                        match ty with
+                        | IRTLoop _ | IRTComputation _ -> ok <- false
+                        | _ ->
+                            if localLets.Contains id then
+                                add { Id = id; Name = $"__v{id}"; Type = ty; IsMutable = false }
+                            else
+                                match sourceNames.TryGetValue id with
+                                | true, n -> add { Id = id; Name = (if isIdent n then n else $"__v{id}"); Type = ty; IsMutable = false }
+                                | _ -> ok <- false)
+                | BinderShape (unscoped, scopes) ->
+                    unscoped |> List.iter (walk bound)
+                    for (ids, children) in scopes do
+                        let inner = Set.union bound ids
+                        children |> List.iter (walk inner)
+                | ExprShape (children, _) -> children |> List.iter (walk bound)
+        walk Set.empty e
+        if not ok then None
+        else
+            // A capture's Name is the kernel's own parameter spelling: two
+            // captures sharing a source name (a shadowed `x`) need distinct ones.
+            let used = System.Collections.Generic.HashSet<string>()
+            Some (order |> Seq.map (fun c -> if used.Add c.Name then c else { c with Name = $"__v{c.Id}" }) |> List.ofSeq)
+    // `method_for(arr) <@> kernel |> compute` over ONE array with a scalar
+    // kernel: the map both broadcast rewrites below build.
+    let mapOneArray (arr: IRExpr) (la: IRArrayType) (kernel: IRExpr) (outputType: IRType) : IRExpr =
         let ident = identityOf arr
         let sdims = la.IndexTypes.Length
-        let outputType =
-            match arrTy with
-            | IRTArrow (slots, _, id2) -> IRTArrow (slots, kernelRet, id2)
-            | _ -> arrTy
         let mfInfo : MethodForInfo =
             { Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
               SDimsPerArray = [sdims]; TotalSDims = sdims; SharedIndexTypes = [] }
         let applyInfo : ApplyInfo =
             { Loop = IRMethodFor mfInfo
-              Kernel = IRVar (lam.Id, kernelFuncType)
+              Kernel = kernel
               Arrays = [arr]; Identities = [ident]; ArrayTypes = [la]
               SharedIndexTypes = []; SymcomStates = [SCNeither]; TriangularLevels = [false]
               SDimsPerArray = [sdims]; KernelInputRanks = [0]; KernelOutputRank = 0
               KernelTDims = []; SpeedupFactor = 1L; ReynoldsSpeedup = 1L; HasReynolds = false
               OutputType = outputType; IsCoIteration = false }
-        // Materialize the scalar once, outside the loop, as the captured local.
-        IRLet (sId, scalarE, IRCompute (IRApplyCombinator applyInfo))
+        IRCompute (IRApplyCombinator applyInfo)
+    // Broadcast a scalar against an array (`arr op scalar` / `scalar op
+    // arr`): value-space twin of TypeCheck.inferBinOp's array-scalar path,
+    // for operands whose types only resolve post-monomorphization (a pack
+    // element -- `head - mean(head)` in a Poly<T^1> kernel -- or a scalar
+    // still typed by an inference variable in a generic body, `v - f(v)`
+    // with `f : T^1 -> T^0`).
+    //
+    // The twin is the SAME SHAPE: `method_for(arr) <@> lambda(__bx) -> __bx
+    // op <scalar> |> compute`, the scalar operand's own expression in the
+    // kernel. That is the op's meaning -- the scalar is evaluated per cell,
+    // so NOT AT ALL for an empty array -- and it is what the optimizer reads:
+    // fusion splices the kernel into a chain, and kernel-invariant hoisting
+    // (Optimize.hoistKernelInvariantsModule) binds a repeatable scalar once
+    // before the nest, under the nest's non-emptiness when it may abort.
+    // (This used to bind the scalar in a `let` around the map itself:
+    // evaluated once UNCONDITIONALLY, so `v - mean(v)` over an empty `v`
+    // raised BL8003 here and returned `[]` on the TypeCheck path, and an
+    // effectful scalar ran once here and per cell there.) The `let` form
+    // survives only for an operand `capturesOf` cannot move into a kernel.
+    let broadcastScalar op (arr: IRExpr) (arrTy: IRType) (la: IRArrayType)
+                        (scalarE: IRExpr) (sElem: ElemType) (scalarOnLeft: bool) : IRExpr =
+        let arrElem = arrayBinOpKernelElem la.ElemType
+        let kernelRet = if isCmpOrLogical op then IRTScalar ETBool else IRTScalar arrElem
+        let xId = builder.FreshId()
+        let xVar = IRVar (xId, IRTScalar arrElem)
+        // The kernel's scalar operand, what the kernel captures for it, and
+        // what goes around the forced map.
+        let sOperand, caps, wrap =
+            match capturesOf scalarE with
+            | Some caps -> scalarE, caps, id
+            | None ->
+                let sId = builder.FreshId()
+                let sTy = IRTScalar sElem
+                let cap : CaptureInfo = { Id = sId; Name = $"__v{sId}"; Type = sTy; IsMutable = false }
+                IRVar (sId, sTy), [ cap ], (fun body -> IRLet (sId, scalarE, body))
+        // Kernel `lambda(__bx) -> __bx op s` (or `s op __bx`).
+        let kbody =
+            if scalarOnLeft then IRBinOp (IRElementwise, op, sOperand, xVar, SrcLoc.Nowhere)
+            else IRBinOp (IRElementwise, op, xVar, sOperand, SrcLoc.Nowhere)
+        let parms : IRParam list =
+            [ { Name = "__bx"; Type = IRTScalar arrElem; Index = 0; VarId = xId } ]
+        let lam = mkLambdaCallable builder parms kbody kernelRet caps false [] [] false false 256 false
+        newLambdas.Add lam
+        callableOf.[lam.Id] <- lam
+        let kernelFuncType = IRTArrow ([SVal (IRTScalar arrElem)], kernelRet, None)
+        let outputType =
+            match arrTy with
+            | IRTArrow (slots, _, id2) -> IRTArrow (slots, kernelRet, id2)
+            | _ -> arrTy
+        wrap (mapOneArray arr la (IRVar (lam.Id, kernelFuncType)) outputType)
+    // THE LOWERING-TIME BROADCAST, REBUILT. When the ARRAY operand's type is
+    // already known at lowering but the scalar's is not (`scale(v) - f(v)` in
+    // a generic body, `A - mymean(A)` with an unannotated `mymean`),
+    // Lowering.lowerTypedBinOp emits
+    //
+    //     let s = <scalar> in object_for(lambda(x) -> x op s)(arr)
+    //
+    // -- the same unconditional `let` `broadcastScalar` used to build, with
+    // the same consequence: the scalar ran even when `arr` was empty. Here,
+    // with every type concrete, it becomes the map `broadcastScalar` builds:
+    // the kernel is the partial application with the scalar's own expression
+    // in place of the captured `s` (parameter and return types kept, so a
+    // mixed-type op promotes exactly as it did), over the one array. The
+    // `let` is left as written when `capturesOf` cannot move the scalar into
+    // a kernel, or when the shape is not the one lowering builds (its
+    // capture is named `__bc_s<id>`).
+    let rebuildLoweredBroadcast (e: IRExpr) : IRExpr =
+        match e with
+        | IRLet (sId, scalarE, IRApp (IRObjectFor o, [ arr ], resTy)) ->
+            (match o.Kernel, resTy with
+             | IRVar (kid, kty), ArrayElem _ ->
+                (match callableOf.TryGetValue kid with
+                 | true, k when k.Params.Length = 1
+                                && (match k.Captures with
+                                    | [ c ] -> c.Id = sId && c.Name.StartsWith "__bc_s"
+                                    | _ -> false) ->
+                    (match operandType arr, capturesOf scalarE with
+                     | Some (ArrayElem la), Some caps ->
+                        let body =
+                            mapIRExpr (fun n ->
+                                match n with
+                                | IRVar (id, _) when id = sId -> scalarE
+                                | _ -> n) k.Body
+                        // The parameter takes the broadcast kernels' own
+                        // name: lowering called it `x`, which a capture of
+                        // the scalar may well be called too (`capturesOf`
+                        // keeps clear of `__bx`).
+                        let parms = k.Params |> List.map (fun p -> { p with Name = "__bx" })
+                        let lam = mkLambdaCallable builder parms body k.RetType caps false [] [] false false 256 false
+                        newLambdas.Add lam
+                        callableOf.[lam.Id] <- lam
+                        mapOneArray arr la (IRVar (lam.Id, kty)) resTy
+                     | _ -> e)
+                 | _ -> e)
+             | _ -> e)
+        | _ -> e
     let rewrite (e: IRExpr) : IRExpr =
         match e with
+        | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> rebuildLoweredBroadcast e
         | IRBinOp (IRElementwise, op, l, r, loc) ->
             match operandType l, operandType r with
             | Some ((ArrayElem la) as lt), Some ((ArrayElem ra) as rt) ->
@@ -1458,6 +1654,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                 let lam =
                     mkLambdaCallable builder parms kbody kernelRet [] false [] [] false false 256 false
                 newLambdas.Add lam
+                callableOf.[lam.Id] <- lam
                 let kernelFuncType =
                     IRTArrow ([SVal (IRTScalar elemTypeL); SVal (IRTScalar elemTypeR)], kernelRet, None)
                 // Materialize non-variable operands into let-bindings so the loop
@@ -1517,9 +1714,12 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
                 let combined = IRCompute (IRApplyCombinator applyInfo)
                 // Wrap in the hoisted operand bindings (outermost = first operand).
                 List.foldBack (fun (id, v) acc -> IRLet (id, v, acc)) prelude combined
-            | Some ((ArrayElem la) as lt), Some (IRTScalar sElem) ->
+            // The scalar read through a unit annotation or index tag (both
+            // erase at codegen): `v - lmean(v)` over `Float64<m>` cells has a
+            // `Float64<m>` scalar, which a bare IRTScalar match left raw.
+            | Some ((ArrayElem la) as lt), Some (AnyPrimElem sElem) ->
                 broadcastScalar op l lt la r sElem false
-            | Some (IRTScalar sElem), Some ((ArrayElem ra) as rt) ->
+            | Some (AnyPrimElem sElem), Some ((ArrayElem ra) as rt) ->
                 broadcastScalar op r rt ra l sElem true
             | _ -> e
         | _ -> e
@@ -1698,10 +1898,18 @@ let internal tileKernelOf (callables: System.Collections.Generic.Dictionary<IRId
         | _ -> None
     | _ -> None
 
-let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
+let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
     if not (fusionEnabled ()) then modul else
     let callables = System.Collections.Generic.Dictionary<IRId, IRCallable>()
     for f in modul.Functions do callables.[f.Id] <- f
+    // What a kernel CALLS is judged against the whole program: a generic
+    // defined in another module (`from stats import mean`) is not in this
+    // module's table, and reading it as unresolvable declined every chain
+    // that named one. Kernels themselves still resolve module-locally
+    // (`kernelOf`): only this module's lambdas are spliced.
+    let resolver = System.Collections.Generic.Dictionary<IRId, IRCallable>()
+    for f in programFuncs do resolver.[f.Id] <- f
+    for f in modul.Functions do resolver.[f.Id] <- f
     let newLambdas = System.Collections.Generic.List<IRCallable>()
 
     // Fan-in cap: register pressure grows with fused operand count; beyond
@@ -1727,11 +1935,11 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModul
             | _ -> ()) body
         n
 
-    // Purity with module-local resolution. The AsyncLocal CallablesTable is
-    // not installed yet at this point in the pipeline (it is built at
+    // Purity through `resolver`. The AsyncLocal CallablesTable is not
+    // installed yet at this point in the pipeline (it is built at
     // liftInlineFormsModule entry), so IRPrint.exprAttrs' cross-procedural
     // IRApp arm cannot be used here. Anything unresolvable declines.
-    let pureBody (visited: Set<IRId>) (e: IRExpr) : bool = tilePureBody callables visited e
+    let pureBody (visited: Set<IRId>) (e: IRExpr) : bool = tilePureBody resolver visited e
 
     let plainIx (ix: IRIndexType) =
         ix.IxKind = IxKPlain && ix.Symmetry = SymNone
@@ -1823,7 +2031,7 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModul
                     keep ()
                 | IRCompute (IRApplyCombinator inner) ->
                     (match innerEligible inner with
-                     | Some ik when tileMayAbort callables Set.empty ik.Body
+                     | Some ik when tileMayAbort resolver Set.empty ik.Body
                                     && not (occursOnlyUnconditionally hk.Params.[i].VarId body) ->
                          // Repeatable is not enough to MOVE an evaluation:
                          // an inner kernel that may abort (a checked read,
@@ -1877,6 +2085,7 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) : IRModul
                              false [] [] false false 256 false
         newLambdas.Add lam
         callables.[lam.Id] <- lam
+        resolver.[lam.Id] <- lam
         let funcTy =
             IRTArrow (newParams |> List.map (fun p -> SVal p.Type), hk.RetType, None)
         let kernelVar = IRVar (lam.Id, funcTy)

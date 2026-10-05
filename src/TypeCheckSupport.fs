@@ -3888,6 +3888,26 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 Error (ArityMismatch (expectedMin, tArgs.Length))
             else
                 Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+    // SUBSCRIPTING A `T^k` PARAMETER the body has not yet given a shape --
+    // `function first(m: T^1) -> T^0 = m(0)`. The caret is an exact rank
+    // claim, but it lives in the substitution (an arity-k var), so the head
+    // matched no array arm and fell to the catch-all below: `m(0)` was typed
+    // as a CALL with a fresh result. The emitted C++ then called an array
+    // (`m(0L)`, BL9002), and with a `T^0` return nothing tied that result to
+    // the parameter's element, so it reached IR validation unresolved
+    // (BL6001). An arity-k var (k >= 1) can bind to nothing but a rank-k
+    // array (Unify's arity invariant), so this issues the same shape demand
+    // every array intrinsic does (`extents(m)`, `reduce(m, ..)`) -- whose
+    // element var stays polymorphic, so HM specialization still makes one
+    // copy per element type -- and re-dispatches to the indexing arms.
+    | IRTInfer vid when not (List.isEmpty tArgs)
+                        && (env.Subst.GetArityConstraint vid |> Option.exists (fun k -> k >= 1)) ->
+        let k = (env.Subst.GetArityConstraint vid).Value
+        requireArrayArgMinRank env tFunc "subscript" k
+        |> Result.bind (fun _ ->
+            match env.Subst.Resolve tFunc.Type with
+            | ArrayElem _ -> dispatchAppOrIndex env tFunc tArgs
+            | t -> Error (InvalidApplication t))
     | _ ->
         match nonCallableHead env.Subst tFunc with
         | Some t when not (List.isEmpty tArgs) -> Error (InvalidApplication t)

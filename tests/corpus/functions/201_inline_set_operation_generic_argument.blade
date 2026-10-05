@@ -1,0 +1,42 @@
+// TEST: Inline Set Operation As A Generic Argument
+// ============================================================================
+// `center(intersect(x, [2.0, 6.0, 9.0]))` passed `blade check` and then died in
+// IR validation (BL6001 "unresolved type variable"): an inline intersect,
+// union or unique carries no type in the IR, so the call site taught the
+// generic `center` nothing and no specialization was minted. Binding the set
+// to a `let` first worked, because a binding reference carries the type the
+// checker gave it. The call site now reads the checker's rule off the node
+// (IR.exprTypeIfKnown): a rank-1 array of the operand's element with a
+// RUNTIME extent -- never the operand's own length, which the result does
+// not have. (functions/190 covers the argument forms that already worked;
+// an inline `mask` and `sort` are among them.)
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function center(v: T^1) -> T^1 = v - lmean(v)
+let x = [1.0, 2.0, 3.0, 6.0]
+
+// [2, 6], in x's order
+let ci = center(intersect(x, [2.0, 6.0, 9.0]))
+// EXPECT: ci = [-2, 2]
+
+// [1, 2, 3, 6, 9]: mean 4.2
+let cu = center(union(x, [9.0, 1.0]))
+// EXPECT: cu = [-3.2, -2.2, -1.2, 1.8, 4.8]
+
+// [3, 1, 5]
+let cq = center(unique([3.0, 1.0, 3.0, 5.0]))
+// EXPECT: cq = [0, -2, 2]
+
+// Nested, and an Int64 element.
+let cn = center(unique(intersect(x, [6.0, 2.0, 6.0])))
+// EXPECT: cn = [-2, 2]
+let xi = [4, 8, 8, 12]
+let ciq = center(unique(xi))
+// EXPECT: ciq = [-4, 0, 4]
+
+// Straight into the T^0 helper.
+let m = lmean(intersect(x, [2.0, 6.0, 9.0]))
+// EXPECT: m = 4
+
+// An empty result: the specialization reads the run-time length.
+let n_empty = extents(center(intersect(x, [100.0])))
+// EXPECT: n_empty = 0

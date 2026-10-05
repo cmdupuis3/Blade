@@ -1,0 +1,46 @@
+// TEST: Subscript Of A Caret Parameter
+// ============================================================================
+// `function first(m: T^1) -> T^0 = m(0)` failed for every element type:
+// BL6001 ("unresolved type variable") with the `T^0` return, and a g++
+// rejection of `m(0L)` -- a CALL on an array (BL9002) -- without it. The
+// caret pins `T^1`'s rank in the substitution, not in the type, so until
+// something else in the body gave `m` its array shape (an `extents(m)`, a
+// `reduce(m, ..)`), the application `m(0)` matched no indexing arm and was
+// typed as a function call with a fresh result. Subscripting a `T^k`
+// parameter now supplies the shape the caret declares, as every array
+// intrinsic does, and reads it as the subscript it is. The element stays
+// generic: `first` is specialized once per element type.
+let x = [1.0, 2.0, 3.0]
+let xi = [7, 8, 9]
+let A = [[1.0, 2.0], [3.0, 4.0]]
+
+function first(m: T^1) -> T^0 = m(0)
+let fx = first(x)
+// EXPECT: fx = 1
+let fi = first(xi)
+// EXPECT: fi = 7
+let fb = first([true, false])
+// EXPECT: fb = true
+
+// Unannotated return.
+function second(m: T^1) = m(1)
+let sx = second(x)
+// EXPECT: sx = 2
+
+// Rank 2: a full read, and a row view.
+function corner(m: T^2) -> T^0 = m(1, 1)
+let c = corner(A)
+// EXPECT: c = 4
+function row(m: T^2) -> T^1 = m(1)
+let r = row(A)
+// EXPECT: r = [3, 4]
+
+// A kernel parameter declared `T^1`.
+function firsts(M: T^2) -> T^1 = method_for(M) <@> lambda(rw: T^1) -> rw(0) |> compute
+let fs = firsts(A)
+// EXPECT: fs = [1, 3]
+
+// Reads as array-literal cells.
+function swap2(m: T^1) -> T^1 = [m(1), m(0)]
+let sw = swap2(x)
+// EXPECT: sw = [2, 1]

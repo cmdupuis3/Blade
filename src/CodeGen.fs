@@ -695,6 +695,17 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             registerShapedAlloc varName routine varName
             currentNames <- Map.add id varName currentNames
             [$"{indent}auto {varName} = {valStr};"]
+        // An Int64 let is declared `int64_t`, as a module-level binding is
+        // (genScalarBinding), never `auto`: a literal-folded extent renders
+        // `4L`, which `auto` makes a 32-bit `long` on LLP64 (Windows), and a
+        // lifted callable capturing the let takes it as `int64_t&` -- the call
+        // forwarding it was a g++ rejection ("cannot bind non-const lvalue
+        // reference of type 'int64_t&' to a value of type 'long'"), e.g.
+        // `reduce(x, lambda(a, b) -> a + b + Float64(n))` with `n = extents(x)`.
+        | _ when (match inferExprType value with AnyPrimElem ETInt64 -> true | _ -> false) ->
+            let valStr = exprToCpp currentNames value
+            currentNames <- Map.add id varName currentNames
+            [$"{indent}int64_t {varName} = {valStr};"]
         | _ ->
             let valStr = exprToCpp currentNames value
             currentNames <- Map.add id varName currentNames
@@ -1287,6 +1298,34 @@ let private resolveShadowFrames (buckets: string list list) : string list list =
             elif t.StartsWith frameMarkEnd then None
             else Some line))
 
+/// A lifted callable's CAPTURE PARAMETERS, as (C++ type, name) pairs, in the
+/// order every call site forwards them (`captureForwardArgs`): the captures,
+/// then the grouped captures' gk side-state pairs. ONE rendering for the
+/// three places that declare them -- a file-scope definition (genFuncDef),
+/// its forward declaration (genForwardDecls) and a main-local closure
+/// (genFuncDefAsLambda) -- so a call site cannot disagree with any of them.
+///
+/// Captures are passed by reference so mutation propagates and lifetimes tie
+/// to the wrapper's `[&]` capture at the use site: `T&` for plain types,
+/// `Array<T, N>&` for arrays. A GROUPED capture (a `group_by` result -- see
+/// the grouped-capture forwarding block) is typed as the row-pointer table it
+/// actually is, `Array<T*, 1>&`; the IR rank-2 rendering would not bind to
+/// the call site's value. Function-typed captures use `const
+/// std::function<...>&`: Blade's top-level `function name(args) = body` emits
+/// an ordinary C++ function, whose name denotes a function reference, not a
+/// std::function value -- a non-const reference param can't bind to that
+/// rvalue, but a const reference can (no mutation-through-capture for
+/// function values, which are immutable bindings in Blade).
+let private captureParamDecls (caps: CaptureInfo list) : (string * string) list =
+    let one (cap: CaptureInfo) =
+        match cap.Type with
+        | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
+            ($"Array<{(elemTypeToCpp arr.ElemType)}*, 1>&", cap.Name)
+        | ArrayElem arr -> ($"{(cppArrayTypeStr arr)}&", cap.Name)
+        | FuncElem _ -> ($"const {(irTypeToCpp cap.Type)}&", cap.Name)
+        | _ -> ($"{(irTypeToCpp cap.Type)}&", cap.Name)
+    (caps |> List.map one) @ gkSidecarParams caps
+
 let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) : string list * CodeGenContext =
     let ind = indentStr ctx
     let bodyInd = ind + "    "
@@ -1298,32 +1337,9 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
         match ty with
         | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {name}"
         | _ -> $"{(irTypeToCpp ty)} {name}"
-    let captureParamStr (cap: CaptureInfo) : string =
-        // Captures are appended after the regular params, pass-by-reference so
-        // mutation propagates and lifetimes tie to the wrapper's `[&]` capture
-        // at the use site: `T&` for plain types, `Array<T, N>&` for arrays.
-        //
-        // A GROUPED capture (a `group_by` result -- see the grouped-capture
-        // forwarding block) is typed as the row-pointer table it actually is,
-        // `Array<T*, 1>&`; the IR rank-2 rendering would not bind to the call
-        // site's value.
-        //
-        // Function-typed captures use `const std::function<...>&` instead:
-        // Blade's top-level `function name(args) = body` emits an ordinary C++
-        // function, whose name denotes a function reference, not a
-        // std::function value -- a non-const reference param can't bind to
-        // that rvalue (C++ would need a temporary std::function, which can't
-        // bind non-const), but a const reference can. Trade-off: no
-        // mutation-through-capture for function values, which is fine since
-        // they're immutable bindings in Blade.
-        match cap.Type with
-        | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
-            $"Array<{(elemTypeToCpp arr.ElemType)}*, 1>& {cap.Name}"
-        | ArrayElem arr -> $"{(cppArrayTypeStr arr)}& {cap.Name}"
-        | FuncElem _ -> $"const {(irTypeToCpp cap.Type)}& {cap.Name}"
-        | _ -> $"{(irTypeToCpp cap.Type)}& {cap.Name}"
     let regularParams = funcDef.Params |> List.map (fun p -> paramStr p.Name p.Type)
-    let captureParams = (funcDef.Captures |> List.map captureParamStr) @ gkSidecarParams funcDef.Captures
+    // Captures are appended after the regular params (captureParamDecls).
+    let captureParams = captureParamDecls funcDef.Captures |> List.map (fun (t, n) -> $"{t} {n}")
     let paramList = (regularParams @ captureParams) |> String.concat ", "
 
     // Use declared return type, or infer from body as fallback
@@ -1380,9 +1396,10 @@ let genFuncDef (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFuncDef) :
     //
     // A named function using a grouping works, because it is emitted as a
     // `[&]` closure in main() (genFuncDefAsLambda) that resolves the state by
-    // name. A lifted kernel cannot simply take that route: its call sites
-    // forward the captures as arguments and its closure would be emitted after
-    // the binding that applies it. Both steers in the message compile and run.
+    // name. A lifted kernel is main-local only when it calls something that
+    // is (computeMainLocalFuncIds); its captures, a grouping's included, are
+    // otherwise forwarded to a file-scope function, which is the case refused
+    // here. Both steers in the message compile and run.
     //
     // NOT refused here: a captured STREAMED variable. A lifted function that
     // merely receives it as `Array<T, N>& A` compiles, and is dead code
@@ -1476,20 +1493,34 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
         | ArrayElem arr -> cppArrayTypeStr arr
         | t -> irTypeToCpp t
 
+    // A source-level `function` always has Captures = [], but the
+    // main-locality fixpoint routes a LIFTED callable with captures here too,
+    // and every call site of one forwards its captures as trailing arguments
+    // (captureForwardArgs) -- the same ones a file-scope definition declares.
+    // So the closure declares them as well (captureParamDecls): a closure
+    // taking only the surface params was a g++ rejection at every such call
+    // ("no match for call to '(std::function<double(double)>) (double&,
+    // Array<double, 1>&)'"). The parameters shadow the `[&]`-captured names,
+    // which is harmless -- the caller forwards the very same objects.
+    let captureDecls = captureParamDecls funcDef.Captures
+    let paramList =
+        if captureDecls.IsEmpty then paramList
+        else
+            (if paramList = "" then [] else [ paramList ]) @ (captureDecls |> List.map (fun (t, n) -> $"{t} {n}"))
+            |> String.concat ", "
     let bodyNames = funcDef.Params |> List.fold (fun m p -> Map.add p.VarId p.Name m) ctx.VarNames
-    // Parity with genFuncDef (which folds captures in alongside params): a
-    // source-level `function` always has Captures = [], but the main-locality
-    // fixpoint can route a lifted callable with non-empty Captures here, and
-    // its body's IRVar references must resolve to the same names.
+    // Parity with genFuncDef (which folds captures in alongside params): the
+    // body's IRVar references to captures resolve to the declared names.
     let bodyNames = funcDef.Captures |> List.fold (fun m c -> Map.add c.Id c.Name m) bodyNames
     let safeName = sanitizeCppName funcDef.Name
-    // std::function type with one param type per Blade param (no companion args).
+    // std::function type: one param type per Blade param, then the captures'.
     let paramTypeList =
-        funcDef.Params
-        |> List.map (fun p ->
-            match p.Type with
-            | ArrayElem arr -> cppArrayTypeStr arr
-            | _ -> irTypeToCpp p.Type)
+        (funcDef.Params
+         |> List.map (fun p ->
+             match p.Type with
+             | ArrayElem arr -> cppArrayTypeStr arr
+             | _ -> irTypeToCpp p.Type))
+        @ (captureDecls |> List.map fst)
         |> String.concat ", "
     let funcType = $"std::function<{retType}({paramTypeList})>"
     // Statement-form body via genFuncBody -- the same renderer proper C++
@@ -1500,15 +1531,14 @@ let genFuncDefAsLambda (ctx: CodeGenContext) (builder: IRBuilder) (funcDef: IRFu
     // expression.
     let bodyInd = ind + "    "
     let bodyCtx = { ctx with VarNames = bodyNames; Indent = ctx.Indent + 1 }
-    // Grouped captures resolve by NAME here (the [&] closure sees main's
-    // locals), so only the GroupedArrays seed is needed -- the stem is the
-    // gk's emitted name in the enclosing scope, no hidden params.
+    // Grouped captures: the gk side state arrives through the declared
+    // `__gk<id>__*` params, exactly as in genFuncDef.
     let bodyCtx =
         funcDef.Captures
         |> List.fold (fun c cap ->
             match groupedCaptureGkOf cap with
             | Some gkId ->
-                { c with GroupedArrays = Map.add cap.Name (gkSidecarStem ctx.VarNames gkId) c.GroupedArrays }
+                { c with GroupedArrays = Map.add cap.Name $"__gk{gkId}" c.GroupedArrays }
             | None -> c) bodyCtx
     // `where repro` on a MAIN-LOCAL function: the routing veto scope still
     // applies (no library dispatch in this body), but a std::function lambda
@@ -1561,18 +1591,8 @@ let private genForwardDecls (fileScopeFuncs: IRFuncDef list) : string list =
                     match p.Type with
                     | ArrayElem arr -> $"{(cppArrayTypeStr arr)} {p.Name}"
                     | _ -> $"{(irTypeToCpp p.Type)} {p.Name}")
-            let captureList =
-                funcDef.Captures
-                |> List.map (fun cap ->
-                    match cap.Type with
-                    // Grouped capture: the row-pointer table form, matching
-                    // genFuncDef's captureParamStr token for token.
-                    | ArrayElem arr when (groupedCaptureGkOf cap).IsSome ->
-                        $"Array<{(elemTypeToCpp arr.ElemType)}*, 1>& {cap.Name}"
-                    | ArrayElem arr -> $"{(cppArrayTypeStr arr)}& {cap.Name}"
-                    | FuncElem _ -> $"const {(irTypeToCpp cap.Type)}& {cap.Name}"
-                    | _ -> $"{(irTypeToCpp cap.Type)}& {cap.Name}")
-            let allParams = (paramList @ captureList @ gkSidecarParams funcDef.Captures) |> String.concat ", "
+            let captureList = captureParamDecls funcDef.Captures |> List.map (fun (t, n) -> $"{t} {n}")
+            let allParams = (paramList @ captureList) |> String.concat ", "
             let retType =
                 match funcDef.RetType with
                 | IRTInfer _ -> irTypeToCpp (inferExprType funcDef.Body)
@@ -1842,7 +1862,20 @@ shape has no single `TYPE %s = ...;` definition line to split -- see tryHoistMod
 /// key plus a STABLE sort then reproduces that adjacency in the merged stream,
 /// so the copy is emitted at exactly the origin's program point and is in scope
 /// for precisely the call sites the origin was in scope for.
-let private emissionOrderedItems (modul: IRModule) : (IRId * Choice<IRBinding, IRFuncDef>) list =
+///
+/// A second correction, for MAIN-LOCAL functions only (`mainLocalFuncIds`):
+/// one is moved up to just before the earliest binding that names it,
+/// directly or through another main-local function. The case is a kernel
+/// lambda lifted out of a binding's own expression -- its fresh id sorts
+/// AFTER that binding -- that is main-local (it calls a function reading a
+/// module binding) and that the nest CALLS by name rather than inlining (its
+/// body is statement-shaped): `let z = x / sqrt(scale(x * x))` emitted `z`'s
+/// loop, then the `std::function` it calls ("'__lambda_54' was not declared in
+/// this scope"). Functions moved to the same point keep callees before
+/// callers. Nothing a moved function reads can come later: its captures and
+/// callees are named by the binding's own expression, which already follows
+/// them. A file-scope function is never moved -- it is forward-declared.
+let private emissionOrderedItems (modul: IRModule) (mainLocalFuncIds: Set<IRId>) : (IRId * Choice<IRBinding, IRFuncDef>) list =
     // TRANSITIVELY, because derivation composes: shape monomorphization
     // specializes the copies HM monomorphization produced, so a
     // `f_HM_..._shape_...` names an HM spec as its origin, and that spec's own
@@ -1862,7 +1895,61 @@ let private emissionOrderedItems (modul: IRModule) : (IRId * Choice<IRBinding, I
         follow id (Map.count modul.DerivedFuncOrigins + 1)
     let bindingItems = modul.Bindings |> List.map (fun b -> (b.Id, Choice1Of2 b))
     let funcItems = modul.Functions |> List.map (fun f -> (f.Id, Choice2Of2 f))
-    bindingItems @ funcItems |> List.sortBy (fst >> orderKey)
+    // The main-local functions each binding and each main-local function
+    // names (a function-typed capture is a name too).
+    let mainLocal = modul.Functions |> List.filter (fun f -> Set.contains f.Id mainLocalFuncIds)
+    let mainLocalRefs (e: IRExpr) = Set.intersect (collectVarRefsIR e) mainLocalFuncIds
+    let funcRefs =
+        mainLocal
+        |> List.map (fun f ->
+            let refs = Set.union (mainLocalRefs f.Body) (f.Captures |> List.map (_.Id) |> Set.ofList)
+            (f.Id, Set.remove f.Id (Set.intersect refs mainLocalFuncIds)))
+        |> Map.ofList
+    // Earliest use: the smallest key of a binding naming the function, or of
+    // the earliest use of a main-local function naming it (a fixpoint: uses
+    // only move earlier, and are bounded by the binding keys).
+    let earliest =
+        let init =
+            mainLocal |> List.map (fun f -> (f.Id, orderKey f.Id)) |> Map.ofList
+        let fromBindings =
+            modul.Bindings |> List.fold (fun (acc: Map<IRId, IRId>) b ->
+                let k = orderKey b.Id
+                mainLocalRefs b.Value |> Set.fold (fun a fid ->
+                    match Map.tryFind fid a with
+                    | Some cur when k < cur -> Map.add fid k a
+                    | _ -> a) acc) init
+        let rec settle (acc: Map<IRId, IRId>) (fuel: int) =
+            let next =
+                funcRefs |> Map.fold (fun (a: Map<IRId, IRId>) gid callees ->
+                    let kg = a.[gid]
+                    callees |> Set.fold (fun a2 fid ->
+                        match Map.tryFind fid a2 with
+                        | Some cur when kg < cur -> Map.add fid kg a2
+                        | _ -> a2) a) acc
+            if next = acc || fuel <= 0 then next else settle next (fuel - 1)
+        settle fromBindings (mainLocal.Length + 1)
+    // Callee-before-caller among functions moved to one point: a function's
+    // height is 1 + the largest height of a main-local function it names.
+    let height =
+        let memo = System.Collections.Generic.Dictionary<IRId, int>()
+        let rec h (visiting: Set<IRId>) (id: IRId) : int =
+            match memo.TryGetValue id with
+            | true, v -> v
+            | _ ->
+                if Set.contains id visiting then 0
+                else
+                    let callees = Map.tryFind id funcRefs |> Option.defaultValue Set.empty
+                    let v = 1 + (callees |> Seq.fold (fun m c -> max m (h (Set.add id visiting) c)) 0)
+                    memo.[id] <- v
+                    v
+        h Set.empty
+    let sortKey (id: IRId, item: Choice<IRBinding, IRFuncDef>) =
+        let k = orderKey id
+        match item with
+        | Choice2Of2 f when Set.contains f.Id mainLocalFuncIds && earliest.[f.Id] < k ->
+            (earliest.[f.Id], 0, height f.Id)
+        | _ -> (k, 1, 0)
+    bindingItems @ funcItems |> List.sortBy sortKey
 
 let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list =
     // Companion-array gap: populate the codegen-side struct fields
@@ -1912,7 +1999,9 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // IRVar(callable.Id) and call it through a thin wrapper closure
     // (genCallableWrapper) that hides the capture parameters from
     // consumers expecting the callable's surface arity.
-    let allItems = emissionOrderedItems modul
+    // Main-locality first: the emission order reads it (emissionOrderedItems).
+    let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
+    let allItems = emissionOrderedItems modul mainLocalFuncIds
 
     // Generate in ID order (approximates source order).
     // First, collect file-scope functions to generate forward declarations.
@@ -1935,8 +2024,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     // Main-locality is TRANSITIVE (computeMainLocalFuncIds): a function
     // whose body references a main-local function is itself main-local,
     // since its free-function form couldn't name the main()-scoped
-    // std::function it calls.
-    let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
+    // std::function it calls. (Computed above, before the emission order.)
 
     let fileScopeFuncs =
         allItems |> List.choose (fun (_, item) ->
@@ -2023,11 +2111,11 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
         modul.Bindings |> List.fold (fun c b -> addVarName b.Id b.Name c) ctx0
     let ctx0 =
         modul.Functions |> List.fold (fun c f -> addVarName f.Id f.Name c) ctx0
-    // Same emission order as genModule, from the same definition.
-    let allItems = emissionOrderedItems modul
     // Transitive main-locality -- same rule as genModule; see
     // computeMainLocalFuncIds.
     let mainLocalFuncIds = computeMainLocalFuncIds modul ctx0
+    // Same emission order as genModule, from the same definition.
+    let allItems = emissionOrderedItems modul mainLocalFuncIds
     let fileScopeFuncs =
         allItems |> List.choose (fun (_, item) ->
             match item with

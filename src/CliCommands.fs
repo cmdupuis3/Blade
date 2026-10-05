@@ -1055,6 +1055,16 @@ let checkFile (filePath: string) (strictPins: bool) : int =
                     printTypeCheckWarnings useColor (Some sm) false
                     match lowered with
                     | Error d -> reportFailure (Blade.Diagnostics.Render.render useColor (Some sm) d)
+                    | Ok ir ->
+                    // ...and VALIDATES what it lowered, as the compile driver
+                    // does before code generation: an unresolved type variable
+                    // left by monomorphization (BL6001) is a lowering failure,
+                    // and `check` used to print OK for a program `run` then
+                    // refused with it.
+                    match Blade.IRValidate.validateIR ir with
+                    | Error errs ->
+                        let ds = errs |> List.map Blade.IRValidate.diagnosticOfValidationMessage
+                        reportFailure (Blade.Diagnostics.Render.renderAll useColor (Some sm) ds)
                     | Ok _ ->
                         printfn "OK"
                         0

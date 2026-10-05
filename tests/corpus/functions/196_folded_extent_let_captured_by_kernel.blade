@@ -1,0 +1,24 @@
+// TEST: Folded Extent Let Captured By A Kernel
+// ============================================================================
+// `let n = extents(x)` in a body specialized on a literal extent folds to the
+// literal `4L`. A function-body let used to be declared `auto`, which makes
+// `4L` a 32-bit `long` on LLP64 (Windows), while a lifted kernel capturing
+// the let takes it as `int64_t&`: forwarding it was a g++ rejection (BL9002,
+// "cannot bind non-const lvalue reference of type 'int64_t&' to a value of
+// type 'long'"). An Int64 let is now declared `int64_t`, as a module-level
+// binding always was.
+function fold_plus_n(x: T^1) -> Float64 = {
+    let n = extents(x)
+    reduce(x, lambda(a, b) -> a + b + Float64(n))
+}
+let r = fold_plus_n([1.0, 2.0, 3.0, 4.0])
+// EXPECT: r = 22
+
+// The same capture reached through a centered map (functions/055's shape),
+// where the mean's fold leaves the nest in a helper that captures `n`.
+function centered_sum_sq(x: T^1) = {
+    let n = extents(x)
+    prodsum(x - reduce(x, (+)) / n, x - reduce(x, (+)) / n)
+}
+let ss = centered_sum_sq([1.0, 2.0, 3.0, 4.0])
+// EXPECT: ss = 5

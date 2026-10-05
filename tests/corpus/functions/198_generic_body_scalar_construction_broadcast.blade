@@ -1,0 +1,66 @@
+// TEST: Generic Body Scalar Construction Broadcast
+// ============================================================================
+// `lmean` returns `T^0`, so inside a generic body its result is still an
+// inference variable when the checker meets `v / sqrt(lmean(v * v))`, and
+// the array/scalar op is left raw for IRMono.lowerArrayBinOpsModule to
+// rewrite once monomorphization has made every type concrete. That rewrite
+// read an operand's type only off a node that CARRIES one (a variable, a
+// call, a literal); a scalar CONSTRUCTED over known operands -- `sqrt(..)`,
+// `lmean(v) * lmean(u)`, `-lmean(v)`, an `if` -- carries none, so nothing
+// rewrote the op and the raw `Array / double` reached g++ (BL9002: "no match
+// for 'operator/'"). The rewrite now types such a scalar by the checker's
+// own rules (IR.exprTypeIfKnown), read through a unit annotation too. Every
+// spelling below was BL9002 before.
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function lsum(row: T^1) -> T^0 = reduce(row, (+))
+let x = [1.0, 2.0, 3.0, 6.0]
+
+// mean(x * x) = 12.5
+function rms_normalize(v: T^1) -> T^1 = v / sqrt(lmean(v * v))
+let rx = rms_normalize(x)
+// EXPECT: rx = [0.282842712474619, 0.565685424949238, 0.848528137423857, 1.69705627484771]
+
+// A scalar binop between two late-typed calls: (x - 3)^2 + 9.
+function centered_square_plus(v: T^1, u: T^1) -> T^1 = (v - lmean(v)) * (u - lmean(u)) + lmean(v) * lmean(u)
+let tx = centered_square_plus(x, x)
+// EXPECT: tx = [13, 10, 9, 18]
+
+// The scalar on the LEFT.
+function scaled(v: T^1) -> T^1 = sqrt(lmean(v * v)) * v
+let sx = scaled(x)
+// EXPECT: sx = [3.53553390593274, 7.07106781186548, 10.6066017177982, 21.2132034355964]
+
+// A negation, at two element types.
+function negmean(v: T^1) -> T^1 = v * (-lmean(v))
+let xf: Array<Float32 like Idx<3>> = [Float32(1.0), Float32(2.0), Float32(3.0)]
+let nf = negmean(xf)
+// EXPECT: nf = [-2, -4, -6]
+let nx = negmean(x)
+// EXPECT: nx = [-3, -6, -9, -18]
+
+// An integer instance: `lmean` divides as Int64 (10 / 4 = 2), `abs` of an
+// Int64 stays Int64 -- the value hoisted out of the loop keeps that type.
+function shifted(v: T^1) -> T^1 = v + abs(lmean(v) - lsum(v))
+let xi = [1, 2, 3, 4]
+let si = shifted(xi)
+// EXPECT: si = [9, 10, 11, 12]
+let sf = shifted(x)
+// EXPECT: sf = [10, 11, 12, 15]
+
+// A conditional scalar.
+function pick(v: T^1, c: Bool) -> T^1 = v - (if c then lmean(v) else lsum(v))
+let px = pick(x, true)
+// EXPECT: px = [-2, -1, 0, 3]
+
+// A unit-carrying element: the scalar is `Float64<m>`.
+Unit m
+let d: Array<Float64<m> like Idx<3>> = [1.0, 2.0, 6.0]
+function center(v: T^1) -> T^1 = v - lmean(v)
+let cd = center(d)
+// EXPECT: cd = [-2, -1, 3]
+
+// A row empty only at run time: the scalar is never evaluated (its fold of an
+// empty row would be BL8003), as for every array/scalar map.
+let none = intersect(x, [100.0])
+let n_none = extents(rms_normalize(none))
+// EXPECT: n_none = 0

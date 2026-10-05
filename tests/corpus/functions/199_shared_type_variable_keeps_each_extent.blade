@@ -1,0 +1,47 @@
+// TEST: Shared Type Variable Keeps Each Extent
+// ============================================================================
+// `shift(v: T^1, w: T^1)` names ONE type variable for both parameters, and a
+// caret variable stands for the whole array type -- but extents are not part
+// of a `T^r` type's identity, so a 3-array and a 5-array is a legal call.
+// HM specialization kept the FIRST argument's type for both: `w` was
+// specialized as a 3-array, and `lmean(w)` -- shape-specialized from that --
+// folded 3 of `y`'s 5 cells (`shift(x, y)` printed [-19, -18, -17]), or read
+// past the end of a shorter second argument (`both(y, x)` printed 3.8e135).
+// Now a variable bound to the same array at two extents is specialized with
+// those extents symbolic (IRMono.mergeArrayExtents): each parameter reads its
+// own length at run time. Calls whose arguments agree still get the literal
+// extent baked in.
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+let x = [1.0, 2.0, 3.0]
+let y = [10.0, 20.0, 30.0, 40.0, 50.0]
+
+// mean(y) = 30
+function shift(v: T^1, w: T^1) -> T^1 = v - lmean(w)
+let out = shift(x, y)
+// EXPECT: out = [-29, -28, -27]
+
+// Both orders, and the agreeing call (mean 2 + mean 2).
+function both(v: T^1, w: T^1) -> T^0 = lmean(v) + lmean(w)
+let a = both(x, y)
+// EXPECT: a = 32
+let b = both(y, x)
+// EXPECT: b = 32
+let c = both(x, x)
+// EXPECT: c = 4
+
+// Three parameters, three extents.
+function weighted(p: T^1, q: T^1, r: T^1) -> T^0 = lmean(p) + lmean(q) * 10.0 + lmean(r) * 100.0
+let wsum = weighted(x, y, [7.0])
+// EXPECT: wsum = 1002
+
+// The result shaped like the SECOND parameter.
+function doubled_second(v: T^1, w: T^1) -> T^1 = w * 2.0
+let ds = doubled_second(x, y)
+// EXPECT: ds = [20, 40, 60, 80, 100]
+
+// Rank 2, disagreeing on the inner axis only.
+function total2(A: T^2, B: T^2) -> T^0 = reduce(reduce(A, (+)), (+)) + reduce(reduce(B, (+)), (+))
+let P = [[1.0, 2.0], [3.0, 4.0]]
+let Q = [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
+let t2 = total2(P, Q)
+// EXPECT: t2 = 19

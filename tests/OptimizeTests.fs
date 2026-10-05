@@ -640,6 +640,150 @@ let private poolReuseGateOffEmitsNoAlias () =
             resultLine Pass name "no pool alias with BLADE_POOL_REUSE=0"
             true
 
+/// KERNEL-INVARIANT HOISTING (Blade.Optimize.hoistKernelInvariantsModule).
+/// `x - avg(x)` is `method_for(x) <@> lambda(e) -> e - avg(x) |> compute`,
+/// so the fold of `x` used to run once PER CELL -- O(T^2) for a length-T
+/// row. The call is bound once, before the nest, and the nest subtracts a
+/// name. tests/corpus/functions/192 proves the VALUES (and opt-diff compares
+/// them off against on); only an emission pin can tell O(T) from O(T^2).
+let private hoistSrc =
+    "function avg(row: T^1) -> Float64 = Float64(reduce(row, (+))) / Float64(extents(row))\n"
+    + "function center(x: T^1) -> T^1 = x - avg(x)\n"
+    + "type I = Idx<1000>\n"
+    + "let v = method_for(range<I>) <@> lambda(i) -> 0.01 * Float64(i) |> compute\n"
+    + "let c = center(v)\n"
+
+/// The same body reached through a kernel, where the row's extent is not a
+/// literal: `avg` of an EMPTY row is BL8003 and an empty map evaluated
+/// nothing, so the hoisted value is bound under the nest's non-emptiness.
+/// Both means leave the one fused nest.
+let private hoistGuardedSrc =
+    "function avg(row: T^1) -> Float64 = Float64(reduce(row, (+))) / Float64(extents(row))\n"
+    + "function cov(a: T^1, b: T^1) where comm(a, b) -> Float64 = avg((a - avg(a)) * (b - avg(b)))\n"
+    + "let R: Array<Float64 like Idx<3>, Idx<4>> = [[1.0, 2.0, 3.0, 6.0], [2.0, 4.0, 6.0, 8.0], [0.0, 1.0, 0.0, 1.0]]\n"
+    + "let C = method_for(R, R) <@> cov |> compute\n"
+
+/// An invariant-LOOKING call that writes: `tick` bumps its `mut` argument, so
+/// it is not repeatable and runs once per cell exactly as written.
+let private hoistEffectfulSrc =
+    "type C = Idx<1>\n"
+    + "function tick(c: mut Array<Float like C>) -> Float = {\n"
+    + "    c((0 : C)) += 1.0\n"
+    + "    c((0 : C))\n"
+    + "}\n"
+    + "let mut counter: Array<Float like C> = [0.0]\n"
+    + "let x = [1.0, 2.0, 3.0]\n"
+    + "let y = method_for(x) <@> lambda(e) -> e + tick(counter) |> compute\n"
+
+/// A call that may abort, read only under the kernel's branch: the kernel
+/// does not evaluate it on every cell, so binding it before the nest could
+/// raise a BL8003 the program never raised. It stays in the kernel.
+let private hoistConditionalSrc =
+    "function avg(row: T^1) -> Float64 = Float64(reduce(row, (+))) / Float64(extents(row))\n"
+    + "let x = [1.0, 2.0, 3.0]\n"
+    + "let y = method_for(x) <@> lambda(e) -> if e > 1.5 then e - avg(x) else 0.0 |> compute\n"
+
+/// The LATE array/scalar broadcast (IRMono.lowerArrayBinOpsModule). `lmean`
+/// returns `T^0`, so inside the generic `center` the scalar operand is still
+/// an inference variable when the checker meets `v - lmean(v)`, and the op is
+/// rewritten after monomorphization instead. That rewrite builds the kernel
+/// the checker builds (`lambda(e) -> e - lmean(v)`); it used to bind the
+/// scalar in a `let` around the map, evaluated even for an empty `v` (BL8003
+/// where the checker's path returns `[]`). Hoisting then binds it under the
+/// nest's non-emptiness. `intersect` gives the row an extent only run time
+/// knows, so the guard is a run-time test (tests/corpus/functions/194 runs it
+/// on an empty one).
+let private lateBroadcastSrc =
+    "function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)\n"
+    + "function center(v: T^1) -> T^1 = v - lmean(v)\n"
+    + "let x = [1.0, 2.0, 3.0, 6.0]\n"
+    + "let common = intersect(x, [2.0, 6.0, 9.0])\n"
+    + "let c = center(common)\n"
+
+/// Nest store statements (`name[__i0] = ...` / `__fp_name[__fk] = ...`) that
+/// still call a function whose name starts with `callee`. The ORIGINAL kernel
+/// lambda stays in the emission as an unreferenced function whose `return`
+/// holds the call; this pattern is the loop body only.
+let private perCellCalls (callee: string) (cpp: string) =
+    System.Text.RegularExpressions.Regex.Matches(cpp, @"\[__\w+\] = [^\n]*" + callee).Count
+let private perCellAvgCalls (cpp: string) = perCellCalls "avg" cpp
+
+let private hoistMovesCallOutOfNest () =
+    let name = "hoist_moves_invariant_call_out_of_nest"
+    match cppOfSource name hoistSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let inNest = perCellAvgCalls cpp
+        let bound = System.Text.RegularExpressions.Regex.Matches(cpp, @"auto __v\d+ = avg").Count
+        if inNest = 0 && bound >= 1 then
+            resultLine Pass name ($"no `avg` call in a nest; bound once before it ({bound} let(s))")
+            true
+        else
+            resultLine Fail name ($"expected 0 per-cell `avg` calls and >= 1 hoisted let, got {inNest} and {bound}")
+            false
+
+/// The guarded form, and both invariants out of the ONE fused nest.
+let private hoistGuardsOnNonEmptyNest () =
+    let name = "hoist_guards_on_non_empty_nest"
+    match cppOfSource name hoistGuardedSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let inNest = perCellAvgCalls cpp
+        let guarded = System.Text.RegularExpressions.Regex.Matches(cpp, @"extents\[0\]\) > 0L\)\) \? avg").Count
+        if inNest = 0 && guarded = 2 then
+            resultLine Pass name "two guarded lets (`<non-empty> ? avg(..) : 0.0`), no `avg` call in the nest"
+            true
+        else
+            resultLine Fail name ($"expected 0 per-cell `avg` calls and 2 guarded lets, got {inNest} and {guarded}")
+            false
+
+/// BLADE_HOIST=0: the call stays in the nest, as written.
+let private hoistGateOffKeepsPerCellCall () =
+    let name = "hoist_gate_off_keeps_per_cell_call"
+    match withGate "BLADE_HOIST" "0" (fun () -> cppOfSource name hoistSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let inNest = perCellAvgCalls cpp
+        if inNest >= 1 then
+            resultLine Pass name ($"{inNest} per-cell `avg` call(s) with BLADE_HOIST=0")
+            true
+        else
+            resultLine Fail name "no per-cell `avg` call with BLADE_HOIST=0: the gate does not reach the pass"
+            false
+
+/// The late broadcast, hoisted: one guarded let, no call left in the nest.
+let private lateBroadcastGuardedOnNonEmptyNest () =
+    let name = "late_broadcast_guarded_on_non_empty_nest"
+    match cppOfSource name lateBroadcastSrc with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let inNest = perCellCalls "lmean" cpp
+        let guarded = System.Text.RegularExpressions.Regex.Matches(cpp, @"extents\[0\]\) > 0L\) \? lmean").Count
+        let unconditional = System.Text.RegularExpressions.Regex.Matches(cpp, @"auto __v\d+ = lmean").Count
+        if inNest = 0 && guarded = 1 && unconditional = 0 then
+            resultLine Pass name "one guarded let (`<non-empty> ? lmean(v) : 0.0`), no unconditional one, no `lmean` call in the nest"
+            true
+        else
+            resultLine Fail name ($"expected 0 per-cell calls, 1 guarded let, 0 unconditional lets; got {inNest}, {guarded}, {unconditional}")
+            false
+
+/// BLADE_HOIST=0 shows what the late rewrite itself builds: the scalar is IN
+/// the kernel (evaluated per cell, so never for an empty row), not in a `let`
+/// in front of the map.
+let private lateBroadcastEmbedsScalarInKernel () =
+    let name = "late_broadcast_embeds_scalar_in_kernel"
+    match withGate "BLADE_HOIST" "0" (fun () -> cppOfSource name lateBroadcastSrc) with
+    | Error e -> resultLine Fail name e; false
+    | Ok cpp ->
+        let inNest = perCellCalls "lmean" cpp
+        let bound = System.Text.RegularExpressions.Regex.Matches(cpp, @"auto __v\d+ = [^\n]*lmean").Count
+        if inNest >= 1 && bound = 0 then
+            resultLine Pass name ($"{inNest} per-cell `lmean` call(s), no `let` in front of the map, with BLADE_HOIST=0")
+            true
+        else
+            resultLine Fail name ($"expected the scalar in the kernel (>= 1 per-cell call, 0 lets), got {inNest} and {bound}")
+            false
+
 /// No `rule` decision may be APPLIED for this source (the barrier cases).
 let private notAppliedCase (name: string) (src: string) (rule: string) (why: string) =
     match decisionsOf src with
@@ -1091,6 +1235,30 @@ let runOptimizeTests () =
           withGate "BLADE_POOL_REUSE" "0" (fun () ->
               decisionCase "decision_pool_reuse_disabled" poolReuseChainSrc "pool-reuse"
                   (declinedMentioning "disabled by BLADE_POOL_REUSE") "pool-reuse declined, disabled by BLADE_POOL_REUSE")
+          // Kernel-invariant hoisting: the emission, the guard, the decision,
+          // the two refusals (a writing callee; a may-abort value the kernel
+          // reads only under a branch) and the escape hatch.
+          hoistMovesCallOutOfNest ()
+          hoistGuardsOnNonEmptyNest ()
+          decisionCase "decision_hoist_applied" hoistSrc "invariant-hoist" applied "invariant-hoist applied"
+          decisionCase "decision_hoist_guarded" hoistGuardedSrc "invariant-hoist"
+              (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "when the iteration space is non-empty"))
+              "applied, bound under the nest's non-emptiness"
+          notAppliedCase "hoist_declines_writing_callee" hoistEffectfulSrc "invariant-hoist"
+              "the call writes through a mut parameter: once per cell, as written"
+          notAppliedCase "hoist_declines_conditional_may_abort" hoistConditionalSrc "invariant-hoist"
+              "the may-abort call is read only under the kernel's branch"
+          hoistGateOffKeepsPerCellCall ()
+          // The late (post-monomorphization) array/scalar broadcast takes the
+          // same road: scalar in the kernel, hoisted under the guard.
+          lateBroadcastGuardedOnNonEmptyNest ()
+          lateBroadcastEmbedsScalarInKernel ()
+          decisionCase "decision_hoist_late_broadcast_guarded" lateBroadcastSrc "invariant-hoist"
+              (fun d -> applied d && d.Evidence |> List.exists (fun e -> e.Contains "when the iteration space is non-empty"))
+              "applied to the late broadcast, bound under the nest's non-emptiness"
+          withGate "BLADE_HOIST" "0" (fun () ->
+              decisionCase "decision_hoist_disabled" hoistSrc "invariant-hoist"
+                  (declinedMentioning "disabled by BLADE_HOIST") "invariant-hoist declined, disabled by BLADE_HOIST")
           // The gram_apply advisory: left as written, spelled in the evidence.
           decisionCase "decision_gram_apply_advisory" gramAdvisorySrc "gram-apply-advisory"
               (declinedMentioning "gram_apply(A, A, v)") "advisory names gram_apply(A, A, v)" ]

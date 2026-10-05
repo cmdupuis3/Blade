@@ -2758,6 +2758,8 @@ let (|IntValued|_|) (expr: IRExpr) : bool =
 let synthSlotIdOuter : IRId = -1
 let synthSlotIdMember : IRId = -2
 let synthSlotIdCompoundResidual : IRId = -3
+/// The result axis of an inline intersect / union / unique (exprTypeIfKnown).
+let synthSlotIdSetResult : IRId = -4
 
 // Compound partial-index classification (formalism 4.5)
 //
@@ -3537,6 +3539,31 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
     // keep their operand's shape and element.
     | IRLet (_, _, body) -> exprTypeIfKnown body
     | IRArrayNegate a | IRArrayConjugate a | IRSort (a, _) -> exprTypeIfKnown a
+    // SET OPERATIONS written inline -- `center(intersect(x, [2.0, 6.0]))` --
+    // carry no type, so the call site taught its generic callee nothing and
+    // the program died in BL6001 after `blade check` passed; binding the
+    // result to a `let` first worked (a binding reference is an `IRVar`).
+    // The rule is TypeCheck's (ExprIntersect / ExprUnion / ExprUnique): a
+    // rank-1 array of the operand's ELEMENT whose extent is a RUNTIME
+    // placeholder, the same `__isect` / `__union` / `__unique` the let-bound
+    // spelling's binding carries -- never the operand's own extent, which is
+    // what `typeOf`'s TypeVia rule answers and which would specialize the
+    // callee on a length the result does not have.
+    | IRIntersect (a, _) | IRUnion (a, _) | IRUnique a ->
+        (match exprTypeIfKnown a with
+         | Some (ArrayElem at) ->
+             let name =
+                 match expr with
+                 | IRIntersect _ -> "__isect"
+                 | IRUnion _ -> "__union"
+                 | _ -> "__unique"
+             let resultIdx =
+                 { Id = synthSlotIdSetResult; Rank = 1
+                   Extent = IRParam (name, 0, IRTNat None)
+                   Symmetry = SymNone; Tag = None; IxKind = IxKPlain
+                   Kind = SDimension; Dependencies = [] }
+             Some (mkArrayLike { ElemType = at.ElemType; IndexTypes = [ resultIdx ]; IsVirtual = false; Identity = None })
+         | _ -> None)
     // A conditional answers only when EVERY branch is a known scalar of one
     // element type: an array-valued branch would hand shape monomorphization
     // one branch's extents for a value the other branch may produce.

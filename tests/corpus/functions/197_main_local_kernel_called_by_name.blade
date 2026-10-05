@@ -1,0 +1,48 @@
+// TEST: Main-Local Kernel Called By Name
+// ============================================================================
+// `scale` reads the module binding `two`, so it is emitted as a
+// `std::function` local inside main() (CodeGen.computeMainLocalFuncIds), and
+// every kernel that calls it is main-local too. A kernel whose body is
+// statement-shaped (it holds a map like `x * x`, or a block) is CALLED by name
+// from its nest rather than inlined into it, and two things broke that call:
+//
+//   * ORDER. The kernel is lifted out of the binding's own expression, so its
+//     fresh id sorted after that binding: the nest called a std::function
+//     declared further down ("'__lambda_54' was not declared in this scope").
+//     A main-local function is now emitted just before the first binding that
+//     names it (CodeGen.emissionOrderedItems), callees before callers.
+//   * ARITY. Every call site forwards the kernel's captures as trailing
+//     arguments, but the main-local closure declared only the surface
+//     parameters ("no match for call to '(std::function<double(double)>)
+//     (double&, Array<double, 1>&)'"). It now declares the same capture
+//     parameters a file-scope definition does (CodeGen.captureParamDecls).
+//
+// All five spellings below were BL9002 before.
+from stats import mean
+let x = [1.0, 2.0, 3.0, 6.0]
+let two = 2.0
+function scale(v: Array<Float64 like Idx<4>>) -> Float64 = mean(v) * two
+
+// scale(x * x) = mean([1, 4, 9, 36]) * 2 = 25.
+let z = x / sqrt(scale(x * x))
+// EXPECT: z = [0.2, 0.4, 0.6, 1.2]
+
+let blocked = method_for(x) <@> lambda(e) -> {
+    let s = scale(x * x)
+    e / sqrt(s)
+} |> compute
+// EXPECT: blocked = [0.2, 0.4, 0.6, 1.2]
+
+// A fold kernel is called through a wrapper closure: ((1 + 2*6) + 3*6) + 6*6.
+let folded = reduce(x, lambda(a, b) -> a + b * scale(x))
+// EXPECT: folded = 67
+
+// Two main-local callees in one kernel.
+function bump(e: Float64) -> Float64 = e * two
+let bumped = method_for(x) <@> lambda(e) -> bump(e) + scale(x * x) |> compute
+// EXPECT: bumped = [27, 29, 31, 37]
+
+// The kernel bound to a name first.
+let k = lambda(e) -> e / scale(x * x)
+let named = method_for(x) <@> k |> compute
+// EXPECT: named = [0.04, 0.08, 0.12, 0.24]

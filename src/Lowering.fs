@@ -2534,6 +2534,10 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
             |> List.choose (fun td -> match td with IRTDStruct (n, fs) -> Some (n, fs) | _ -> None)
             |> Map.ofList
         fun (name: string) -> Map.tryFind name m
+    // Every callable of the program, as the monomorphizers left it: the
+    // optimizer resolves a callee defined in ANOTHER module here (a callee's
+    // effect summary does not change under the per-module rewrites below).
+    let programFuncs = irModules |> List.collect (fun m -> m.Functions)
     let irModules =
         irModules |> List.map (fun irModule ->
         // Rewrite raw array-typed binops into object_for combinators now
@@ -2545,11 +2549,13 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // Generic zeros first: each specialization's `zero` becomes its own
         // literal (so a broadcast built below carries the right scalar type).
         let irModule = IRMono.resolveTypedZerosModule zeroStructFields irModule
-        let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder
+        let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also
-        // resolves symbolic ranks per specialization) and elementwise-chain
-        // fusion, in that order. Runs after the monomorphizers and the
+        // resolves symbolic ranks per specialization), elementwise-chain
+        // fusion and kernel-invariant hoisting (BLADE_HOIST; its callee
+        // facts resolve through `programFuncs`, the whole program's
+        // callables), in that order. Runs after the monomorphizers and the
         // binop rewrite (so specialized literals and late-minted
         // pack-element combinators are candidates), before
         // liftInlineFormsModule (so lifted forms inherit the optimized
@@ -2562,7 +2568,7 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // CANNOT see an optimizer bug (both print the same wrong answer); the
         // lane that can is `blade test opt-diff` (tests/OptDiff.fs), which
         // compares every gate OFF against every gate ON.
-        let irModule = Optimize.optimizeModule env.Builder irModule
+        let irModule = Optimize.optimizeModule env.Builder programFuncs irModule
         // Lift inline forms (mask/sort/intersect/union/group_by/group_keys
         // appearing in non-let-RHS positions) into auto-let bindings so
         // codegen sees the canonical "let-bound" pattern uniformly.
