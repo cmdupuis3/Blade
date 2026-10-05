@@ -1,0 +1,14 @@
+// TEST: Diag CoIter Param vs Body Named Array (rejects)
+// The ONE-SIDED nominal obligation (077's extent case, by name): `wdot` zips
+// its parameter with `day_w`, a DayIdx array the body fixes. The zip inside
+// the body had an unnamed side and could not object; the DayIdx record now
+// rides the obligation, and an HourIdx argument of the same extent is refused
+// at the call as `H(1) * day_w` is at top level.
+// ERROR: BL3999 @ 13:16
+// ERROR-CONTAINS: argument 1 of 'wdot' and an array its body fixes
+type DayIdx = Idx<3>
+type HourIdx = Idx<3>
+let day_w: Array<Float64 like DayIdx> = [0.5, 0.25, 0.25]
+function wdot(a: T^1) -> T^0 = reduce(a * day_w, (+))
+let h: Array<Float64 like HourIdx> = [3.0, 1.0, 2.0]
+let bad = wdot(h)

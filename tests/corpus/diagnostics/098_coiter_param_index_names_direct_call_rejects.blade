@@ -1,0 +1,27 @@
+// TEST: Diag CoIter Param Index Names Direct Call (rejects)
+// The NOMINAL half of the co-iteration obligation 075-077 pin for extents.
+//
+// `cov` co-iterates its two `T^1` parameters -- not directly, but through the
+// centered fibers: `a - ma` re-synthesizes as an elementwise map over `a`, and
+// the product zips two of those. The obligation walker read only BARE
+// parameters as zip operands, so nothing was recorded, and the parameters'
+// records are unnamed, so the call judgment had no names to compare. A
+// DayIdx fiber and an HourIdx fiber of equal extent were walked as one index
+// space and `direct` printed -0.333, where the top-level `R(0) * H(0)` is
+// refused (BL3999). The call now refuses with the same diagnostic, blamed on
+// the second argument.
+// ERROR: BL3999 @ 26:24
+// ERROR-CONTAINS: DIFFERENT index types: arguments 1 and 2 of 'cov'
+// stats' `mean`, inlined: this runner does not resolve stdlib imports.
+function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
+type AssetIdx = Idx<2>
+type DayIdx = Idx<3>
+type HourIdx = Idx<3>
+function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 = {
+    let ma = mean(a)
+    let mb = mean(b)
+    mean((a - ma) * (b - mb))
+}
+let R: Array<Float64 like AssetIdx, DayIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 9.0]]
+let H: Array<Float64 like AssetIdx, HourIdx> = [[3.0, 1.0, 2.0], [0.0, 5.0, 6.0]]
+let direct = cov(R(0), H(0))

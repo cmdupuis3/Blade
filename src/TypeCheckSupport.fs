@@ -2753,6 +2753,78 @@ let internal nonCallableHead (subst: Subst) (f: TypedExpr) : IRType option =
         | IRTIdxTagged (_, IRefNamed tag) when not (tag.StartsWith "__") -> Some t
         | _ -> None
 
+/// What discharging a body's co-iteration obligations found wrong. Positions
+/// are DECLARED parameter positions, 0-based.
+type internal CoIterVerdict =
+    /// Two parameters' literal extents disagree on the shared axis.
+    | CoIterExtentArgs of posA: int * posB: int * extA: int64 * extB: int64
+    /// A parameter's literal extent disagrees with an array the body fixes.
+    | CoIterExtentBody of pos: int * ext: int64 * bodyExt: int64
+    /// Two parameters are handed fibers over different NAMED index types.
+    | CoIterNameArgs of posA: int * posB: int * headA: IRIndexType * headB: IRIndexType
+    /// A parameter's fiber is named differently from an array the body fixes.
+    | CoIterNameBody of pos: int * head: IRIndexType * bodyHead: IRIndexType
+
+/// Discharge `FuncCoIterObligations` entries against the types the
+/// parameters are actually handed -- a call's arguments, or (buildApplyInfo)
+/// the fibers a kernel application binds. ONE judgment for both seams, so a
+/// body over `T^1` parameters refuses `cov(R(0), H(0))` and
+/// `method_for(R, H) <@> cov` for the same reason.
+///
+/// The two halves mirror `TypeLower.zipHeadClash`, the check the same zip
+/// gets when its operands are concrete where it is written, in its order:
+/// a literal-vs-literal EXTENT disagreement first (BL3016: the walk is out of
+/// bounds), then NOMINAL identity on the leading record
+/// (`indexNamesCoIterable`, BL3999: in bounds, but two different index
+/// spaces walked as one). Every obligation's extent half is judged before any
+/// name half, so the memory error is the one reported when both exist. A
+/// position whose type is not (yet) an array is not judged -- the status quo,
+/// never an invented refusal.
+let internal coIterVerdict (env: TypeEnv) (obs: CoIterObligation list)
+                           (typeAt: int -> IRType option) : CoIterVerdict option =
+    let headAt (i: int) =
+        typeAt i |> Option.bind (fun t ->
+            match env.Subst.Resolve t with
+            | ArrayElem aa -> List.tryHead aa.IndexTypes
+            | _ -> None)
+    let extentVerdict (ob: CoIterObligation) =
+        let known =
+            ob.Positions |> List.choose (fun i ->
+                headAt i |> Option.bind (fun h -> tryEvalIntIR h.Extent) |> Option.map (fun e -> (i, e)))
+        match known with
+        | [] -> None
+        | (i0, e0) :: rest ->
+            // Argument vs ARGUMENT first: both sides are call-site positions,
+            // the more actionable report.
+            match rest |> List.tryFind (fun (_, e) -> e <> e0) with
+            | Some (j, ej) -> Some (CoIterExtentArgs (i0, j, e0, ej))
+            | None ->
+                ob.BodyExtents |> List.tryFind (fun l -> l <> e0)
+                |> Option.map (fun l -> CoIterExtentBody (i0, e0, l))
+    let nameVerdict (ob: CoIterObligation) =
+        let heads = ob.Positions |> List.choose (fun i -> headAt i |> Option.map (fun h -> (i, h)))
+        // EVERY pair, not each against the first: an unnamed first argument
+        // co-iterates with either name, which says nothing about the other two.
+        let pairs =
+            heads |> List.mapi (fun k (i, hi) ->
+                heads |> List.skip (k + 1) |> List.map (fun (j, hj) -> (i, hi, j, hj)))
+            |> List.concat
+        match pairs |> List.tryFind (fun (_, hi, _, hj) -> not (indexNamesCoIterable hi hj)) with
+        | Some (i, hi, j, hj) -> Some (CoIterNameArgs (i, j, hi, hj))
+        | None ->
+            heads |> List.tryPick (fun (i, h) ->
+                ob.BodyHeads
+                |> List.tryFind (fun b -> not (indexNamesCoIterable h b))
+                |> Option.map (fun b -> CoIterNameBody (i, h, b)))
+    match obs |> List.tryPick extentVerdict with
+    | Some v -> Some v
+    | None -> obs |> List.tryPick nameVerdict
+
+/// The display name of a leading record in a co-iteration refusal (the same
+/// decoding `zipHeadClash` prints with).
+let internal coIterHeadName (h: IRIndexType) : string =
+    displayTagName (defaultArg h.Tag "<unnamed>")
+
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
     //
@@ -3432,6 +3504,12 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // the SHARED (leading) axis, matching every sibling extent check on
         // this ladder: a symbolic extent reads `.extents[d]` at runtime and
         // keeps the historical looseness.
+        //
+        // The same obligation carries the NOMINAL half (BL3999,
+        // `coIterVerdict`): `cov(R(0), H(0))` over a DayIdx and an HourIdx row
+        // of equal extent is in bounds, but walks two index spaces as one --
+        // the refusal `R(0) * H(0)` gets at top level. buildApplyInfo
+        // discharges the same verdict for `method_for(R, H) <@> cov`.
         let coIterClash =
             match appRootAndOffset tFunc with
             | Some (fname, offset) ->
@@ -3455,35 +3533,29 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                          | TExprApp (f, args) -> spineArgs f @ args
                          | _ -> []
                      let allArgs = spineArgs tFunc @ tArgs
-                     // Leading-axis extent of an argument, when it is a literal.
-                     let leadExtent (i: int) =
-                         match env.Subst.Resolve (List.item i allArgs).Type with
-                         | ArrayElem aa ->
-                             aa.IndexTypes |> List.tryHead |> Option.bind (fun ix -> tryEvalIntIR ix.Extent)
-                         | _ -> None
                      // The span to blame is an argument of THIS group; a
                      // clash partner in an earlier group is named by its
                      // declared position in the message only.
                      let hereIdx (declPos: int) = max 0 (declPos - offset)
-                     obs |> List.tryPick (fun (ps, lits) ->
-                         let known =
-                             ps |> List.filter (fun declPos -> declPos >= 0 && declPos < allArgs.Length)
-                                |> List.choose (fun i -> leadExtent i |> Option.map (fun e -> (i, e)))
-                         match known with
-                         | [] -> None
-                         | (i0, e0) :: rest ->
-                             // Argument vs ARGUMENT first: both sides can be
-                             // named as call-site positions, which is the more
-                             // actionable report.
-                             match rest |> List.tryFind (fun (_, e) -> e <> e0) with
-                             | Some (j, ej) -> Some (hereIdx j, fname, i0 + 1, Some (j + 1), e0, ej)
-                             | None ->
-                                 // Then argument vs a literal extent the BODY
-                                 // fixes (a parameter zipped with a concrete
-                                 // array), which has no second position.
-                                 match lits |> List.tryFind (fun l -> l <> e0) with
-                                 | Some l -> Some (hereIdx i0, fname, i0 + 1, None, e0, l)
-                                 | None -> None)
+                     // (blamed argument, refusal, is-the-EXTENT-half): the
+                     // extent half outranks the judgment's own type clash
+                     // below, the name half does not.
+                     coIterVerdict env obs (fun i -> List.tryItem i allArgs |> Option.map (_.Type))
+                     |> Option.map (function
+                         | CoIterExtentArgs (a, b, ea, eb) ->
+                             (hereIdx b, CoIterArgExtentMismatch (fname, a + 1, b + 1, ea, eb), true)
+                         | CoIterExtentBody (a, ea, l) ->
+                             (hereIdx a, CoIterBodyExtentMismatch (fname, a + 1, ea, l), true)
+                         | CoIterNameArgs (a, b, ha, hb) ->
+                             (hereIdx b,
+                              CoIterIndexMismatch ($"arguments {a + 1} and {b + 1} of '{fname}'", $"'{fname}'",
+                                                   coIterHeadName ha, coIterHeadName hb, ppExtentOf ha.Extent),
+                              false)
+                         | CoIterNameBody (a, h, bh) ->
+                             (hereIdx a,
+                              CoIterIndexMismatch ($"argument {a + 1} of '{fname}' and an array its body fixes", $"'{fname}'",
+                                                   coIterHeadName h, coIterHeadName bh, ppExtentOf h.Extent),
+                              false))
                  | _ -> None)
             | None -> None
         // Consumed ahead of the type clashes: a write-permission violation is
@@ -3755,13 +3827,13 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             // A co-iteration extent disagreement is the more specific story
             // when both fire (two arguments over different named axes walked
             // as one index space): report it, as before the judgment existed.
-            | Some _, Some (i, fname, posA, Some posB, eA, eB) ->
+            // The NAME half does not outrank the judgment: a body whose
+            // parameters share one signature variable is already told
+            // "declared DayIdx, got HourIdx" there.
+            | Some _, Some (i, err, true) ->
                 atArg i
-                Error (CoIterArgExtentMismatch (fname, posA, posB, eA, eB))
-            | Some _, Some (i, fname, posA, None, eA, bodyExt) ->
-                atArg i
-                Error (CoIterBodyExtentMismatch (fname, posA, eA, bodyExt))
-            | Some (i, e), None ->
+                Error err
+            | Some (i, e), _ ->
                 atArg i
                 (match e with
                  | IndexRankMismatch (site, pTy, pr, aTy, ar) ->
@@ -3816,12 +3888,9 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             // the second (shorter or longer) argument, since the walk takes its
             // bound from the first.
             match coIterClash with
-            | Some (i, fname, posA, Some posB, eA, eB) ->
+            | Some (i, err, _) ->
                 atArg i
-                Error (CoIterArgExtentMismatch (fname, posA, posB, eA, eB))
-            | Some (i, fname, posA, None, eA, bodyExt) ->
-                atArg i
-                Error (CoIterBodyExtentMismatch (fname, posA, eA, bodyExt))
+                Error err
             | None ->
             // Rank propagation (the INFERENCE half of argRankClash's
             // CHECKING): impose the callee param's rank as a LOWER BOUND on
@@ -4159,22 +4228,31 @@ let checkOmpInternalLoop (env: TypeEnv) (paramNames: string list)
 ///     forward pass suffices: a body sees only names bound before it, and
 ///     mutual recursion is rejected (BL2001).
 ///
-/// Each entry is (parameter positions walked, literal leading extents of the
-/// co-iteration's other operands): all of those must end up equal. An entry
+/// Each entry is the parameter positions walked plus the literal leading
+/// extents and NAMED leading records of the co-iteration's other operands:
+/// all of those must end up agreeing (`coIterVerdict`). An entry
 /// needs at least one PARAMETER -- nothing else defers to the call site -- and
 /// a second operand to disagree with, so `zip(a, a)` records nothing (it agrees
 /// with itself). Both rules make this under-report rather than over-report: a
 /// missed obligation is the status quo, an invented one is a false refusal.
-let coIterObligations (env: TypeEnv) (paramNames: string list)
-                      (body: TypedExpr) : (int list * int64 list) list =
+let coIterObligations (env: TypeEnv) (paramIds: IRId list)
+                      (body: TypedExpr) : CoIterObligation list =
     let posOf (e: TypedExpr) =
         match e.Kind with
-        | TExprVar (n, _, _) -> List.tryFindIndex ((=) n) paramNames
+        | TExprVar (_, vid, _) -> List.tryFindIndex ((=) vid) paramIds
         | _ -> None
-    let litExtentOfType (t: IRType) =
+    let resolvedArray (t: IRType) =
         match env.Subst.Resolve t with
-        | ArrayElem aa -> aa.IndexTypes |> List.tryHead |> Option.bind (fun ix -> tryEvalIntIR ix.Extent)
+        | ArrayElem aa -> Some aa
         | _ -> None
+    let isArray (e: TypedExpr) = (resolvedArray e.Type).IsSome
+    // The operators an ELEMENTWISE binop re-synthesizes as a zip over when
+    // both operands are arrays (the elementwise arm of inferBinOp).
+    let isZipOp (op: BinOp) =
+        match op with
+        | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+        | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr -> true
+        | _ -> false
     // The obligation is "the walk takes its bound from OPERAND 1, so a shorter
     // later operand is read past its end". That is true of a zip, where
     // `zipSharedRecords` returns operand 1's OWN head record -- and false of
@@ -4184,42 +4262,108 @@ let coIterObligations (env: TypeEnv) (paramNames: string list)
     // shapes build the same node, so tell them apart by whether the shared head
     // IS operand 1's head; claiming an out-of-bounds read for the range form
     // would be a refusal whose stated reason is untrue.
-    let boundByFirstOperand (mfi: TypedMethodForInfo) =
-        match mfi.SharedIndexTypes, mfi.ArrayTypes with
-        | shared :: _, at0 :: _ ->
+    let boundByFirstOperand (shared: IRIndexType list) (types: IRArrayType list) =
+        match shared, types with
+        | s :: _, at0 :: _ ->
             (match at0.IndexTypes with
-             | h0 :: _ -> h0.Id = shared.Id
+             | h0 :: _ -> h0.Id = s.Id
              | [] -> false)
         | _ -> false
+    // The body's lets, by binder id, so a co-iterated operand named through
+    // one (`let c = a - ma; mean(c * d)`) still traces to its parameter. A
+    // binder that is ever ASSIGNED is left out: its value at the zip is not
+    // the one it was bound to. (`IsMutable` cannot say this: a block `let` is
+    // reassignable in its own scope, so every one of them carries it.)
+    let lets = System.Collections.Generic.Dictionary<IRId, TypedExpr>()
+    let assigned = System.Collections.Generic.HashSet<IRId>()
+    let rec collect (e: TypedExpr) =
+        (match e.Kind with
+         | TExprLet (_, vid, v, _) -> lets.[vid] <- v
+         | TExprAssign ({ Kind = TExprVar (_, vid, _) }, _) -> assigned.Add vid |> ignore
+         | TExprBlock (stmts, _) ->
+             stmts |> List.iter (fun s ->
+                 match s with
+                 | TStmtLet b when List.isEmpty b.SubBindings -> lets.[b.VarId] <- b.Value
+                 | TStmtAssign ({ Kind = TExprVar (_, vid, _) }, _) -> assigned.Add vid |> ignore
+                 | _ -> ())
+         | _ -> ())
+        typedExprChildren e |> List.iter collect
+    collect body
+    // The parameters whose LEADING AXIS this operand's leading axis is. A
+    // parameter is its own; an elementwise map keeps its operand's -- `a - ma`
+    // re-synthesizes as `compute(method_for(a) <@> lambda(__bx) -> __bx - ma)`,
+    // a covariance body zips two of THOSE, and reading bare parameters only
+    // let `mean((a - ma) * (b - mb))` co-iterate a DayIdx fiber with an
+    // HourIdx one, at a call and as a kernel alike. A zip's result keeps the
+    // axis all its operands share. Anything else (a reduction, a slice, a
+    // reshape, a call) answers [] -- under-reporting is the status quo, an
+    // invented origin would be a false refusal.
+    let rec originsOf (fuel: int) (e: TypedExpr) : int list =
+        if fuel <= 0 then [] else
+        let go = originsOf (fuel - 1)
+        match e.Kind with
+        | TExprVar (_, vid, _) ->
+            (match posOf e with
+             | Some k -> [k]
+             | None ->
+                 match lets.TryGetValue vid with
+                 | true, v when not (assigned.Contains vid) -> go v
+                 | _ -> [])
+        | TExprCompute x | TExprArrayNegate x | TExprArrayConjugate x -> go x
+        | TExprLet (_, _, _, b) -> go b
+        | TExprBlock (_, Some fin) -> go fin
+        | TExprMethodFor mfi ->
+            loopOrigins go mfi.Arrays mfi.ArrayTypes mfi.SharedIndexTypes mfi.SDimsPerArray
+        | TExprApply ai when not ai.IsComposeApply ->
+            loopOrigins go ai.Arrays ai.ArrayTypes ai.SharedIndexTypes ai.SDimsPerArray
+        | TExprBinOp (Elementwise, op, l, r) when isZipOp op && isArray e ->
+            (if isArray l then go l else []) @ (if isArray r then go r else [])
+        | _ -> []
+    and loopOrigins (go: TypedExpr -> int list) (arrays: TypedExpr list) (types: IRArrayType list)
+                    (shared: IRIndexType list) (sDims: int list) : int list =
+        match arrays, sDims with
+        // A single-operand map iterating at least its leading axis: the
+        // result's leading axis IS the operand's (S-dims come first).
+        | [a], [s] when s >= 1 && List.isEmpty shared -> go a
+        | _ :: _ :: _, _ when boundByFirstOperand shared types -> arrays |> List.collect go
+        | _ -> []
+    let originsOfOperand = originsOf 16
     // One co-iteration, split into the PARAMETER positions it walks and the
-    // literal leading extents of its other operands. A parameter zipped against
-    // a CONCRETE array is the same hole with one side already known --
-    // `function wsum(a: T^1) = reduce(zip(a, weights3) <@> (*), (+))` walked
-    // `a`'s extent over `weights3` and summed three doubles past its end -- so
-    // the body's own literals travel with the obligation.
-    let obligationOf (operands: TypedExpr list) (types: IRArrayType list) =
-        if List.length operands <> List.length types then None else
-        let ps = operands |> List.choose posOf |> List.distinct |> List.sort
-        let lits =
-            List.zip operands types
-            |> List.choose (fun (o, t) ->
-                match posOf o with
-                // A parameter has nothing concrete here -- that is the whole
-                // point; it is what defers to the call site.
-                | Some _ -> None
-                | None -> t.IndexTypes |> List.tryHead |> Option.bind (fun ix -> tryEvalIntIR ix.Extent))
-            |> List.distinct
+    // literal leading extents / leading records of its other operands. A
+    // parameter zipped against a CONCRETE array is the same hole with one side
+    // already known -- `function wsum(a: T^1) = reduce(zip(a, weights3) <@>
+    // (*), (+))` walked `a`'s extent over `weights3` and summed three doubles
+    // past its end -- so the body's own literals travel with the obligation,
+    // and so do its NAMED records (a `DayIdx` array the body fixes refuses an
+    // `HourIdx` argument). Only named records ride: an unnamed one co-iterates
+    // with anything (`indexNamesCoIterable`).
+    let obligationOf (operands: (TypedExpr * IRArrayType option) list) =
+        let withOrigins = operands |> List.map (fun (o, t) -> (originsOfOperand o, t))
+        let ps = withOrigins |> List.collect fst |> List.distinct |> List.sort
+        let others = withOrigins |> List.filter (fst >> List.isEmpty) |> List.choose snd
+        let heads = others |> List.choose (fun t -> List.tryHead t.IndexTypes)
+        let lits = heads |> List.choose (fun ix -> tryEvalIntIR ix.Extent) |> List.distinct
+        let named = heads |> List.filter (fun ix -> ix.Tag.IsSome) |> List.distinctBy (fun ix -> ix.Tag, ix.IxKind)
         // Needs a PARAMETER (nothing else defers) and a second walked operand
-        // for it to disagree with. `zip(a, a)` gives one position and no
-        // literal, and agrees with itself.
-        if List.isEmpty ps || List.length ps + List.length lits < 2 then None
-        else Some (ps, lits)
+        // for it to disagree with. `zip(a, a)` -- or `zip(a, a - mean(a))` --
+        // gives one position and nothing else, and agrees with itself.
+        if List.isEmpty ps || List.length ps + List.length lits + List.length named < 2 then None
+        else Some { Positions = ps; BodyExtents = lits; BodyHeads = named }
     let atNode (e: TypedExpr) =
         match e.Kind with
         | TExprMethodFor mfi when not (List.isEmpty mfi.SharedIndexTypes)
                                   && mfi.Arrays.Length >= 2
-                                  && boundByFirstOperand mfi ->
-            obligationOf mfi.Arrays mfi.ArrayTypes |> Option.toList
+                                  && mfi.Arrays.Length = mfi.ArrayTypes.Length
+                                  && boundByFirstOperand mfi.SharedIndexTypes mfi.ArrayTypes ->
+            obligationOf (List.zip mfi.Arrays (mfi.ArrayTypes |> List.map Some)) |> Option.toList
+        // An elementwise binop over two ARRAYS that is still a binop node: a
+        // kernel body inferred while its parameters were open (`lambda(a, b)
+        // -> reduce(a * b, (+))`) keeps the node and is lowered as the zip it
+        // is once the application binds them. Judged on the RESOLVED operand
+        // types, which is why this table is also derived after a kernel's
+        // parameters meet their operands (buildApplyInfo).
+        | TExprBinOp (Elementwise, op, l, r) when isZipOp op && isArray l && isArray r ->
+            obligationOf [ (l, resolvedArray l.Type); (r, resolvedArray r.Type) ] |> Option.toList
         // Forwarding. Only the DIRECT `f(a, b)` head is read: a curried head
         // would need the declared position rebased by the earlier groups'
         // width (mutClash's appRootAndOffset), and guessing it wrong would
@@ -4229,22 +4373,27 @@ let coIterObligations (env: TypeEnv) (paramNames: string list)
              | TExprVar _ ->
                  (match env.FuncCoIterObligations.TryGetValue (calleeDeclId env f |> Option.defaultValue -1) with
                   | true, obs ->
-                      obs |> List.choose (fun (ps, lits) ->
-                          let mapped = ps |> List.choose (fun k -> List.tryItem k args)
-                          // An argument that is one of OUR parameters keeps
-                          // deferring; one whose extent is already concrete
-                          // DISCHARGES into a literal every other operand of
-                          // that co-iteration must match.
-                          let ps' = mapped |> List.choose posOf |> List.distinct |> List.sort
-                          let lits' =
-                              mapped
-                              |> List.choose (fun a ->
-                                  match posOf a with
-                                  | Some _ -> None
-                                  | None -> litExtentOfType a.Type)
-                          let allLits = (lits @ lits') |> List.distinct
-                          if List.isEmpty ps' || List.length ps' + List.length allLits < 2 then None
-                          else Some (ps', allLits))
+                      obs |> List.choose (fun ob ->
+                          let mapped = ob.Positions |> List.choose (fun k -> List.tryItem k args)
+                          // An argument that traces to one of OUR parameters
+                          // keeps deferring; one whose type is already
+                          // concrete DISCHARGES into a literal / named record
+                          // every other operand of that co-iteration must
+                          // match.
+                          let withOrigins = mapped |> List.map (fun a -> (originsOfOperand a, a))
+                          let ps' = withOrigins |> List.collect fst |> List.distinct |> List.sort
+                          let concreteHeads =
+                              withOrigins
+                              |> List.filter (fst >> List.isEmpty)
+                              |> List.choose (fun (_, a) -> resolvedArray a.Type |> Option.bind (fun t -> List.tryHead t.IndexTypes))
+                          let allLits =
+                              (ob.BodyExtents @ (concreteHeads |> List.choose (fun ix -> tryEvalIntIR ix.Extent)))
+                              |> List.distinct
+                          let allNamed =
+                              (ob.BodyHeads @ (concreteHeads |> List.filter (fun ix -> ix.Tag.IsSome)))
+                              |> List.distinctBy (fun ix -> ix.Tag, ix.IxKind)
+                          if List.isEmpty ps' || List.length ps' + List.length allLits + List.length allNamed < 2 then None
+                          else Some { Positions = ps'; BodyExtents = allLits; BodyHeads = allNamed })
                   | _ -> [])
              | _ -> [])
         | _ -> []

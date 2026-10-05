@@ -1,0 +1,15 @@
+// TEST: Diag CoIter Lambda Kernel Index Names (rejects)
+// 099 with the kernel written inline. A lambda body is inferred while its
+// parameters are open, so the zip inside `(a - mean(a)) * (b - mean(b))` had
+// no names to compare either; the judgment runs after the parameters meet
+// the rows, for a lambda exactly as for a named kernel.
+// ERROR: BL3999
+// ERROR-CONTAINS: DIFFERENT index types: kernel operands 1 and 2 are CO-ITERATED by the body of this kernel
+// stats' `mean`, inlined: this runner does not resolve stdlib imports.
+function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
+type AssetIdx = Idx<2>
+type DayIdx = Idx<3>
+type HourIdx = Idx<3>
+let R: Array<Float64 like AssetIdx, DayIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 9.0]]
+let H: Array<Float64 like AssetIdx, HourIdx> = [[3.0, 1.0, 2.0], [0.0, 5.0, 6.0]]
+let X = method_for(R, H) <@> lambda(a, b) -> mean((a - mean(a)) * (b - mean(b))) |> compute

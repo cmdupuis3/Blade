@@ -1,0 +1,27 @@
+// TEST: Diag CoIter Param Index Names Kernel (rejects)
+// The KERNEL-APPLICATION twin of 098. `method_for(R, H) <@> cov` binds each
+// (row of R, row of H) pair to cov's parameters: a DayIdx fiber and an
+// HourIdx fiber. The named kernel is eta-wrapped as
+// `lambda(__k0, __k1) -> cov(__k0, __k1)`, whose inner call is judged while
+// its arguments are still OPEN, so the call ladder's co-iteration check never
+// saw the fibers, and the apply seam's unification compares neither names
+// (permissive against cov's unnamed records) nor extents. X printed
+// [[-0.333, 2], [-0.333, 4.333]]. The obligation is now discharged at the
+// application against the rows it binds, with the same BL3999 the
+// top-level `R(0) * H(0)` gets.
+// ERROR: BL3999
+// ERROR-CONTAINS: DIFFERENT index types: kernel operands 1 and 2
+// ERROR-CONTAINS: the kernel 'cov'
+// stats' `mean`, inlined: this runner does not resolve stdlib imports.
+function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
+type AssetIdx = Idx<2>
+type DayIdx = Idx<3>
+type HourIdx = Idx<3>
+function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 = {
+    let ma = mean(a)
+    let mb = mean(b)
+    mean((a - ma) * (b - mb))
+}
+let R: Array<Float64 like AssetIdx, DayIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 9.0]]
+let H: Array<Float64 like AssetIdx, HourIdx> = [[3.0, 1.0, 2.0], [0.0, 5.0, 6.0]]
+let X = method_for(R, H) <@> cov |> compute

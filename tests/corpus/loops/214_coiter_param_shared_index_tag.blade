@@ -1,0 +1,50 @@
+// TEST: CoIter Param Shared Index Tag
+// The GREEN companion to diagnostics/098-100: the NOMINAL half of the
+// co-iteration obligation must refuse only fibers over two DIFFERENT named
+// index types, never the agreeing program.
+//
+// `cov` co-iterates its parameters through their centered fibers (`a - ma`
+// is an elementwise map over `a`), so it carries the obligation. Every use
+// below satisfies it, in both lanes:
+//   direct : one DayIdx row against another               -> -1/3
+//   X      : the kernel application over two DayIdx grids -> [[-1/3, 2], [-1/3, 13/3]]
+//   S      : the same array in both commuting positions (packed symmetric)
+//   anon   : an UNNAMED literal co-iterates with either name, as at the zip
+//   fwd    : the centered fiber named through a `let` and handed onward
+//   wdot   : a parameter zipped with a DayIdx array the body fixes, given a
+//            DayIdx argument
+from stats import mean
+type AssetIdx = Idx<2>
+type DayIdx = Idx<3>
+
+function cov(a: T^1, b: T^1) where comm(a, b) -> T^0 = {
+    let ma = mean(a)
+    let mb = mean(b)
+    mean((a - ma) * (b - mb))
+}
+function cov_named(a: T^1, b: T^1) -> T^0 = {
+    let ca = a - mean(a)
+    let cb = b - mean(b)
+    mean(ca * cb)
+}
+function fwd_cov(x: T^1, y: T^1) -> T^0 = cov_named(x, y)
+
+let R: Array<Float64 like AssetIdx, DayIdx> = [[1.0, 2.0, 3.0], [4.0, 5.0, 9.0]]
+let H: Array<Float64 like AssetIdx, DayIdx> = [[3.0, 1.0, 2.0], [0.0, 5.0, 6.0]]
+
+let direct = cov(R(0), H(0))
+let X = method_for(R, H) <@> cov |> compute
+let S = method_for(R, R) <@> cov |> compute
+let anon = cov([1.0, 2.0, 3.0], H(1))
+let fwd = fwd_cov(R(1), H(1))
+
+let day_w: Array<Float64 like DayIdx> = [0.5, 0.25, 0.25]
+function wdot(a: T^1) -> T^0 = reduce(a * day_w, (+))
+let wdot_r = wdot(R(1))
+
+// EXPECT: direct = -0.333333333333333
+// EXPECT: X = [[-0.333333333333333, 2], [-0.333333333333333, 4.33333333333333]]
+// EXPECT: S = [[0.666666666666667, 1.66666666666667], [4.66666666666667]]
+// EXPECT: anon = 2
+// EXPECT: fwd = 4.33333333333333
+// EXPECT: wdot_r = 5.5

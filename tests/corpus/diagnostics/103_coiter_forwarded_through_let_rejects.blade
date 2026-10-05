@@ -1,0 +1,22 @@
+// TEST: Diag CoIter Forwarded Through Let (rejects)
+// 098 through two more hops: the centered fibers are named by `let`s before
+// the product, and the obligation travels up a forwarding call whose
+// arguments are themselves elementwise maps of its parameters. Both hops
+// must trace the operand back to the parameter (a let-bound or forwarded
+// elementwise map keeps its operand's leading axis), or the refusal is one
+// level deep.
+// ERROR: BL3999
+// ERROR-CONTAINS: arguments 1 and 2 of 'fwd_cov'
+// stats' `mean`, inlined: this runner does not resolve stdlib imports.
+function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
+type DayIdx = Idx<3>
+type HourIdx = Idx<3>
+function cov_named(a: T^1, b: T^1) -> T^0 = {
+    let ca = a - mean(a)
+    let cb = b - mean(b)
+    mean(ca * cb)
+}
+function fwd_cov(x: T^1, y: T^1) -> T^0 = cov_named(2.0 * x, y + 1.0)
+let d: Array<Float64 like DayIdx> = [1.0, 2.0, 3.0]
+let h: Array<Float64 like HourIdx> = [3.0, 1.0, 2.0]
+let bad = fwd_cov(d, h)

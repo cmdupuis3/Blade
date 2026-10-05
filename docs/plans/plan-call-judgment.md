@@ -137,7 +137,7 @@ literal-vs-literal rule has nothing to compare.
 | direct app (`dispatchAppOrIndex` FuncElem) | hand checks | `judgeCall` |
 | qualified app `M.f(..)` | own node + 2 checks | rewritten to the unqualified path (`ExprVar "M.f"`), so defaults, eta-expansion, arity lift, constraint discharge, dispatch and `judgeCall` are the SAME code; side tables (mut positions, co-iteration obligations, unit transforms, where-constraints) are snapshotted per module and re-registered under `alias.name` at import, like `Defaults` |
 | qualified array read `Geo.w(i)` | fresh-var result | ArrayElem arm of `dispatchAppOrIndex` (tag checks, residual views) |
-| kernel app (`buildApplyInfo`) | real unify, per element | unchanged: its pairing is element-of-iteration vs parameter and it already binds (the kernel is a lambda or an eta wrapper); listed as a follow-up to share `staticExtentClash` for baked kernel params |
+| kernel app (`buildApplyInfo`) | real unify, per element | unify unchanged: its pairing is element-of-iteration vs parameter and it already binds (the kernel is a lambda or an eta wrapper); listed as a follow-up to share `staticExtentClash` for baked kernel params. The co-iteration verdict (step 7, extent AND name) IS shared since 2026-10-05 -- see the co-iteration entry in §9 |
 | let / return / block / match-arm ascription | `checkExpr` default arm unify | + `staticExtentClash` |
 | `if` / inferred `match` | branch unify | + branch extent agreement |
 | `checkMatch` | swallow + lenient retry | one `matchWith` function parameterized by the arm judgment; `checkExpr`'s error propagates |
@@ -153,7 +153,8 @@ literal-vs-literal rule has nothing to compare.
 - Binding CALLER variables from callee signatures (arguments open at the call
   head): an inference change with its own blast radius; the post-zonk sweep
   keeps catching rank.
-- Kernel application rerouting (see table).
+- Kernel application rerouting (see table) -- except the co-iteration
+  verdict, which kernel application now shares (§9, co-iteration names).
 - The KERNEL-position name-keyed tables (`FuncCommGroups`,
   `FuncAntisymGroups`, `FuncParallel`, `FuncFoldBuiltin`, `FuncDeducedPairs`,
   `PackDeducedComm`, `MutualReturnFuncs`, `JoinLegLists`) are not snapshotted
@@ -337,6 +338,29 @@ Verdict: SOUND-WITH-CHANGES. §1.1 verified (functions bind with no scheme;
   whose parameter is rank-closed later (functions/033) legitimately return a
   scalar from an array. Telling a declared `T^0` apart needs the caret kept
   on the variable -- a design decision, left for the lead.
+
+- **Co-iteration names + kernel application (FIXED 2026-10-05)** Step 7
+  checked only EXTENTS, only operands that were BARE parameters, and only at
+  calls. `cov(a: T^1, b: T^1) = mean((a - mean(a)) * (b - mean(b)))` zips
+  two elementwise MAPS of its parameters (`a - ma` re-synthesizes as
+  `compute(method_for(a) <@> ...)`), so no obligation was recorded, and the
+  parameters' records are unnamed, so step 4 had no names to compare:
+  `cov(R(0), H(0))` over a DayIdx and an HourIdx row printed a value where
+  the top-level `R(0) * H(0)` is BL3999. `method_for(R, H) <@> cov` escaped
+  even a recorded obligation (the eta wrapper's inner call is judged with its
+  arguments open), and with unequal literal extents read past the shorter
+  fiber. Now: `coIterObligations` traces an operand to the parameter whose
+  leading axis it keeps (through single-operand maps, zips, `compute`,
+  negation and body lets) and also records a still-binop elementwise
+  co-iteration over two arrays; an obligation carries the body's NAMED
+  leading records beside its literal extents; ONE verdict (`coIterVerdict`:
+  extents first, then `indexNamesCoIterable` on every pair) is discharged on
+  the call ladder (BL3016 / BL3999 `CoIterIndexMismatch`) and in
+  `buildApplyInfo` against the ROWS the application binds (a kernel's own
+  parameter types are the body's unnamed materialization and say nothing
+  about the fibers). The name half does not outrank step 4's own BL3001 (a
+  body that unifies its two parameters is already told "declared DayIdx, got
+  HourIdx"). diagnostics/098-103, loops/214.
 
 ## 8. Census (blade check over tests/corpus + examples + examples/physics)
 

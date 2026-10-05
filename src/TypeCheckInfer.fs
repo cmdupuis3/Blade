@@ -10159,6 +10159,51 @@ and buildApplyInfo (env: TypeEnv)
         match appliedParam lambdaInfo.Body with
         | Some err -> Error err
         | None ->
+        // KERNEL CO-ITERATION AGREEMENT (BL3016 extent / BL3999 name), the
+        // `<@>` twin of the call-site ladder's coIterClash. A kernel body that
+        // zips its parameters -- directly, through elementwise maps, or by
+        // forwarding them to a function that does (the eta wrapper of a named
+        // kernel is `lambda(__k0, __k1) -> cov(__k0, __k1)`) -- was inferred
+        // while those parameters were open, so the zip had no extents and no
+        // names to compare, and the call inside the wrapper saw open
+        // arguments. Only HERE, after the parameters met their operands, are
+        // the fibers known: `method_for(R, H) <@> cov` walked a DayIdx fiber
+        // with an HourIdx one (and, with unequal literal extents, ran off the
+        // shorter one's end) while `cov(R(0), H(0))` was refused. Derived now
+        // rather than read from FuncCoIterObligations so a plain lambda kernel
+        // gets the same judgment as a named one.
+        let kernelCoIterClash =
+            let obs = coIterObligations env (lambdaInfo.Params |> List.map (_.VarId)) lambdaInfo.Body
+            if List.isEmpty obs then None
+            else
+                let owner =
+                    match lambdaInfo.Body.Kind with
+                    | TExprApp ({ Kind = TExprVar (fname, _, _) }, _)
+                            when lambdaInfo.Params |> List.forall (fun p -> p.Name.StartsWith "__k") ->
+                        $"the kernel '{fname}'"
+                    | _ -> "this kernel"
+                // Judged on the ROWS this application hands each parameter,
+                // not on the parameters' own types: a body that materialized
+                // `a` and `b` while they were open gave them one UNNAMED type
+                // (and unify is name-permissive and blind to extents), so after
+                // the bind they still say nothing about the fibers.
+                let typeAt (i: int) =
+                    match schemaRows with
+                    | Some rows -> List.tryItem i rows
+                    | None -> List.tryItem i lambdaInfo.Params |> Option.map (_.Type)
+                coIterVerdict env obs typeAt
+                |> Option.map (function
+                    | CoIterExtentArgs (a, b, ea, eb) -> CoIterKernelExtentMismatch (owner, a + 1, Some (b + 1), ea, eb)
+                    | CoIterExtentBody (a, ea, l) -> CoIterKernelExtentMismatch (owner, a + 1, None, ea, l)
+                    | CoIterNameArgs (a, b, ha, hb) ->
+                        CoIterIndexMismatch ($"kernel operands {a + 1} and {b + 1}", owner,
+                                             coIterHeadName ha, coIterHeadName hb, ppExtentOf ha.Extent)
+                    | CoIterNameBody (a, h, bh) ->
+                        CoIterIndexMismatch ($"kernel operand {a + 1} and an array the kernel body fixes", owner,
+                                             coIterHeadName h, coIterHeadName bh, ppExtentOf h.Extent))
+        match kernelCoIterClash with
+        | Some err -> Error err
+        | None ->
         // HALO-EXTENT AGREEMENT (BL3016, the halo twin of kernelExtentClash).
         // A halo's declared inner extent is written by hand while the array it
         // windows over has its own extent; nothing else ever compares them.
@@ -15549,7 +15594,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // needs can only be checked where the arguments are concrete.
             // Consumed by the call-site ladder's coIterClash.
             let coIterObs =
-                coIterObligations env (funcDecl.Params |> List.map (_.Name)) tBody
+                coIterObligations env (typedParams |> List.map (_.VarId)) tBody
             if not (List.isEmpty coIterObs) then
                 env.FuncCoIterObligations.[funcVarId] <- coIterObs
             // Register the function's parallel strategies for the same reason,

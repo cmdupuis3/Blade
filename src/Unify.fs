@@ -304,6 +304,21 @@ type TypeError =
     /// body's literal rides `FuncCoIterObligations` alongside the parameter
     /// positions; `pos` is the 1-based ARGUMENT position in this call.
     | CoIterBodyExtentMismatch of callee: string * pos: int * argExt: int64 * bodyExt: int64
+    /// BL3016 (the KERNEL-APPLICATION twin of the two cases above): a kernel's
+    /// body co-iterates its parameters and the operands this `<@>` hands them
+    /// have different literal extents on the shared axis. `owner` is already
+    /// quoted/described (`the kernel 'cov'`, `this kernel`); `posB = None` means the
+    /// partner is an array the body fixes, of extent `extB`.
+    | CoIterKernelExtentMismatch of owner: string * posA: int * posB: int option * extA: int64 * extB: int64
+    /// BL3999 (the NOMINAL half of the co-iteration obligation, the call-site
+    /// twin of `TypeLower.zipHeadClash`'s "DIFFERENT index types" refusal): a
+    /// body co-iterates two of its parameters (or one with an array it fixes)
+    /// and the call -- or the kernel application -- hands them fibers over two
+    /// different NAMED index types of equal extent. The extent obligation
+    /// cannot see it (the walk is in bounds), and the parameters' own records
+    /// are unnamed, so nothing else compares the names. `what` names the two
+    /// sides (`arguments 1 and 2 of 'cov'`), `owner` the body.
+    | CoIterIndexMismatch of what: string * owner: string * tagA: string * tagB: string * extent: string
     /// BL3016 (same family, the provider-ascription twin): a `let` annotation
     /// or `:` ascription on a PROVIDER READ names a compile-time-literal
     /// extent on some index slot and the read's own type names a different

@@ -1,0 +1,14 @@
+// TEST: Diag CoIter Kernel Fiber Extents (rejects)
+// The EXTENT half of 099, which was a memory error rather than a naming one.
+// `addup(Q(0), P(0))` is refused by the call ladder (075's BL3016), but the
+// same pairing as a kernel application -- each 5-wide row of Q zipped with a
+// 3-wide row of P inside addup -- typechecked clean, and the walk took its
+// bound from operand 1: five cells read over a three-cell row.
+// ERROR: BL3016
+// ERROR-CONTAINS: the body of the kernel 'addup' CO-ITERATES its parameters
+function addup(a: T^1, b: T^1) -> T^0 =
+    reduce(method_for(zip(a, b)) <@> lambda(x, y) -> x + y, (+))
+type Rows = Idx<2>
+let Q: Array<Float64 like Rows, Idx<5>> = [[1.0, 2.0, 3.0, 4.0, 5.0], [6.0, 7.0, 8.0, 9.0, 10.0]]
+let P: Array<Float64 like Rows, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let X = method_for(Q, P) <@> addup |> compute

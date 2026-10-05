@@ -214,6 +214,22 @@ type GenericObligation =
     /// integer-typed result a Float64 value (a silent truncation).
     | GOFractionalMath of var: int * name: string
 
+/// One co-iteration a function body performs over its own PARAMETERS
+/// (`TypeEnv.FuncCoIterObligations`): every operand it walks as one index
+/// space must agree, and the call site -- or the kernel application, for a
+/// body used as a `<@>` kernel -- is the first place the parameters' side of
+/// that is known.
+type CoIterObligation = {
+    /// Declared parameter positions (0-based) the co-iteration walks.
+    Positions: int list
+    /// Literal leading extents of its OTHER operands (arrays the body fixes).
+    BodyExtents: int64 list
+    /// Leading index records of those other operands, for the NOMINAL half
+    /// (`TypeLower.indexNamesCoIterable`): a parameter zipped with a
+    /// `DayIdx` array the body fixes refuses an `HourIdx` argument.
+    BodyHeads: IRIndexType list
+}
+
 /// Type checking environment
 type TypeEnv = {
     Variables: Map<string, VarInfo>
@@ -372,8 +388,10 @@ type TypeEnv = {
     /// Shared by reference.
     MutParamPositions: System.Collections.Generic.Dictionary<IRId, int list>
     /// Callee BINDER ID -> the co-iterations its body performs over its own
-    /// PARAMETERS: each entry is (parameter positions walked, literal leading
-    /// extents of that co-iteration's other operands), all of which must agree.
+    /// PARAMETERS: each entry names the parameter positions walked plus the
+    /// literal leading extents and leading index records of that
+    /// co-iteration's other operands, all of which must agree -- in extent
+    /// (BL3016) and in index NAME (BL3999, the top-level zip's nominal rule).
     ///
     /// The agreement obligation a zip carries is discharged AT the zip
     /// (`TypeLower.zipHeadClash`, BL3016) only when both extents are literals
@@ -393,7 +411,7 @@ type TypeEnv = {
     /// is rejected (BL2001).
     ///
     /// Keyed by binder id like MutParamPositions. Shared by reference.
-    FuncCoIterObligations: System.Collections.Generic.Dictionary<IRId, (int list * int64 list) list>
+    FuncCoIterObligations: System.Collections.Generic.Dictionary<IRId, CoIterObligation list>
     /// Callee BINDER ID -> how its return's UNIT is built from its arguments':
     /// `(exponents, residual)` means the result measures
     /// `residual * PROD_i (unit of argument i) ^ exponents[i]`.
@@ -595,7 +613,7 @@ let emptyEnv () = {
     MutualMembers = Map.empty
     MutualReturnFuncs = System.Collections.Generic.Dictionary<string, string>()
     MutParamPositions = System.Collections.Generic.Dictionary<IRId, int list>()
-    FuncCoIterObligations = System.Collections.Generic.Dictionary<IRId, (int list * int64 list) list>()
+    FuncCoIterObligations = System.Collections.Generic.Dictionary<IRId, CoIterObligation list>()
     FuncUnitTransform = System.Collections.Generic.Dictionary<IRId, int list * UnitSig>()
     FuncUnitEqualities = System.Collections.Generic.Dictionary<IRId, (UnitSig * UnitSig) list>()
     FuncCommGroups = System.Collections.Generic.Dictionary<string, int list list>()
@@ -935,6 +953,14 @@ class IS implemented, and the dense result folds like any other array." op level
         $"arguments {posA} and {posB} of '{callee}': the body of '{callee}' CO-ITERATES these two parameters (an elementwise zip walks them as one index space), but argument {posA} has extent {extA} on the shared axis and argument {posB} has extent {extB}. The walk takes its bound from the first operand, so the longer one runs off the end of the shorter one's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). Because '{callee}' declares those parameters abstractly (`T^1`), the body has no extents to compare and this call is the first place the disagreement is visible. Pass arrays of equal extent, or slice the longer one to the shorter one's index space first."
     | CoIterBodyExtentMismatch (callee, pos, argExt, bodyExt) ->
         $"argument {pos} of '{callee}': the body of '{callee}' CO-ITERATES this parameter with an array of extent {bodyExt} (an elementwise zip walks them as one index space), but this argument has extent {argExt} on the shared axis. The walk takes its bound from the first operand, so whichever is longer runs off the end of the shorter one's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). The zip has one concrete side and one abstract (`T^1`) side, so the body could not compare them and this call is the first place both are known. Pass an array of extent {bodyExt}, or slice this one to that index space first."
+    | CoIterKernelExtentMismatch (owner, posA, posB, extA, extB) ->
+        let partner =
+            match posB with
+            | Some b -> $"kernel operand {b} has extent {extB}"
+            | None -> $"the array the body co-iterates it with has extent {extB}"
+        $"kernel operand {posA}: the body of {owner} CO-ITERATES its parameters (an elementwise zip walks them as one index space), and this application hands parameter {posA} a fiber of extent {extA} on the shared axis while {partner}. The walk takes its bound from the first operand, so the longer one runs off the end of the shorter one's allocation -- silent out-of-bounds, not a broadcast (Blade does not broadcast mismatched extents). The kernel's parameters are abstract, so its body had no extents to compare and this application is the first place both are known. Iterate operands of equal extent on that axis, or slice the longer one first."
+    | CoIterIndexMismatch (what, owner, tagA, tagB, extent) ->
+        $"co-iteration operands are over DIFFERENT index types: {what} are CO-ITERATED by the body of {owner} (an elementwise zip walks them as one index space), but the first is indexed by '{tagA}' and the second by '{tagB}'. A named index type carries provenance, so two of them do not interoperate merely by having the same extent ({extent}) -- that is what makes a subscript bounds-safe by construction. The body declares those parameters abstractly, so it had no names to compare and this is the first place both are known. Index one of them through the other's space, or drop the annotation on one operand if they really are the same axis (an UNNAMED index co-iterates with either)."
     | ProviderReadExtentMismatch (provider, dim, annotated, actual) ->
         $"provider read: the annotation declares extent {annotated} on index slot {dim}, but the read's own type has extent {actual}. A provider read is typed BY THE STORE -- the annotation cannot reshape it -- while codegen allocates the store's true shape and compiles every later subscript against the ANNOTATED one, so a disagreement here is an out-of-bounds read with no runtime symptom, not a naming quarrel. Correct the annotation to the {provider} store's shape, or drop it and let the read supply the type (slice or reshape the value afterwards if a different shape is what you want)."
     | HaloExtentMismatch (declared, dim, targetName, actual) ->
@@ -1231,7 +1257,9 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | UnitMismatch _ -> "BL3006"
             | QuantityArgMismatch _ -> "BL3010"
             | ExtentArgMismatch _ | HaloExtentMismatch _ | ZipExtentMismatch _
-            | CoIterArgExtentMismatch _ | CoIterBodyExtentMismatch _ -> "BL3016"
+            | CoIterArgExtentMismatch _ | CoIterBodyExtentMismatch _
+            | CoIterKernelExtentMismatch _ -> "BL3016"
+            | CoIterIndexMismatch _ -> "BL3999"
             | ProviderReadExtentMismatch _ | ExtentAscribeMismatch _ -> "BL3016"
             | QuantityTerminal _ -> "BL3011"
             | DefaultParamOrder _ | DefaultParamScope _ | DefaultParamShadowed _ -> "BL3012"
