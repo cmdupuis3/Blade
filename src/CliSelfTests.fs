@@ -2848,6 +2848,95 @@ let private runIdeReferencesTests () : TH.BlockResult =
     else
         record name TH.Fail json
 
+    // 13. bindings[] types read as the program would SPELL them. A deduced
+    // symmetric result over a NAMED index printed as the bare base name
+    // (`Array<Float64 like AssetIdx>`, class and rank dropped: a compact
+    // record's Tag names its COMPONENT space, not the class), a named dense
+    // slot as `Idx<AssetIdx>`, an arity-polymorphic former as `Void` (its
+    // binding is emitted inert), and a `Poly<T^1>` parameter lost its rank.
+    let typesOf (source: string) : Map<string, string> =
+        let (json, _) = Blade.Ide.ideCheckSource "types.blade" source
+        use doc = System.Text.Json.JsonDocument.Parse json
+        [ for b in doc.RootElement.GetProperty("bindings").EnumerateArray() do
+            if b.GetProperty("kind").GetString() <> "param" then
+                yield (b.GetProperty("name").GetString(),
+                       b.GetProperty("type").GetString().Replace("\n", "").Replace("    ", "")) ]
+        |> Map.ofList
+    let comomentSrc =
+        String.concat "
+"
+            [ "type AssetIdx = Idx<4>"
+              "type DayIdx = Idx<6>"
+              "let R: Array<Float64 like AssetIdx, DayIdx> = ["
+              "    [1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6],"
+              "    [2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]"
+              "function mymean(row: T^1) -> T^0 = reduce(row, (+)) / Float64(extents(row))"
+              "function centered_prod(xs: Poly<T^1>) -> T^1 = {"
+              "    match arity(xs) with"
+              "    | 1 ->"
+              "        let head :: tail = xs"
+              "        head - mymean(head)"
+              "    | _ ->"
+              "        let head :: tail = xs"
+              "        (head - mymean(head)) * centered_prod(tail)"
+              "}"
+              "function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mymean(centered_prod(xs))"
+              "let M = object_for(comoment)"
+              "let C2 = M <@> (R, R) |> compute"
+              "let C3 = M <@> (R, R, R) |> compute"
+              "" ]
+    let types = typesOf comomentSrc
+    let expectType name binding (expected: string) =
+        match Map.tryFind binding types with
+        | Some t when t = expected -> record name TH.Pass ""
+        | other -> record name TH.Fail (sprintf "%s: got %A, want %s" binding other expected)
+    expectType "bindings[]: a deduced SymIdx over a named index keeps its class and rank"
+        "C2" "Array<Float64 like SymIdx<2, AssetIdx>>"
+    expectType "bindings[]: ...at every pack width" "C3" "Array<Float64 like SymIdx<3, AssetIdx>>"
+    expectType "bindings[]: a named dense slot prints as its alias, not Idx<Alias>"
+        "R" "Array<Float64 like AssetIdx, DayIdx>"
+    expectType "bindings[]: an arity-polymorphic former is a loop object, not Void" "M" "ObjectLoop<_>"
+    (match Map.tryFind "comoment" types with
+     | Some t when t.StartsWith "(xs: Poly<T^1, " -> record "bindings[]: a Poly<T^1> parameter keeps its rank" TH.Pass ""
+     | other -> record "bindings[]: a Poly<T^1> parameter keeps its rank" TH.Fail (sprintf "got %A" other))
+    // ...and the spelling the display shows is one the checker accepts.
+    let (json, code) =
+        Blade.Ide.ideCheckSource "types.blade"
+            (comomentSrc + "let D2: Array<Float64 like SymIdx<2, AssetIdx>> = C2\n")
+    let name = "the displayed SymIdx<2, AssetIdx> spelling is accepted as an ascription"
+    if code = 0 && json.Contains "\"diagnostics\":[]" then record name TH.Pass ""
+    else record name TH.Fail json
+    // Diagnostics share the printer: a mismatch names both index types.
+    let (json, _) =
+        Blade.Ide.ideCheckSource "types.blade"
+            (comomentSrc + "let D3: Array<Float64 like SymIdx<2, DayIdx>> = C2\n")
+    let name = "a type mismatch spells a named compact class, not its numeric extent"
+    if json.Contains "expected Array<Float64 like SymIdx<2, DayIdx>>, got Array<Float64 like SymIdx<2, AssetIdx>>" then
+        record name TH.Pass ""
+    else record name TH.Fail json
+
+    // 14. The printer's three readings of a `names` entry (IRPrint.ppIndexTypeIn):
+    // extent text fills the extent slot, the record's own (component) name
+    // fills it on a compact class, and any other name on a compact class is a
+    // WHOLE-class alias (indexNameMap's `type MySym = SymIdx<2, 4>`).
+    let symRec : Blade.IR.IRIndexType =
+        { Id = 9001; Rank = 2; Extent = Blade.IR.IRLit (Blade.IR.IRLitInt 4L)
+          Symmetry = Blade.Types.SymSymmetric; Tag = Some "AssetIdx"; IxKind = Blade.Types.IxKPlain
+          Kind = Blade.Types.SDimension; Dependencies = [] }
+    let pin name (actual: string) (expected: string) =
+        if actual = expected then record name TH.Pass "" else record name TH.Fail $"got {actual}, want {expected}"
+    pin "ppIndexType: a compact record's tag fills its extent slot"
+        (Blade.IRPrint.ppIndexType symRec) "SymIdx<2, AssetIdx>"
+    pin "ppIndexTypeIn: the record's own name fills the extent slot"
+        (Blade.IRPrint.ppIndexTypeIn (Map.ofList [9001, "AssetIdx"]) symRec) "SymIdx<2, AssetIdx>"
+    pin "ppIndexTypeIn: a whole-class alias prints bare"
+        (Blade.IRPrint.ppIndexTypeIn (Map.ofList [9001, "MySym"]) symRec) "MySym"
+    pin "ppIndexTypeIn: extent text stays in the extent slot"
+        (Blade.IRPrint.ppIndexTypeIn (Map.ofList [9001, "_"]) { symRec with Tag = None }) "SymIdx<2, _>"
+    pin "ppIndexTypeIn: extent text on a dense slot keeps the Idx<> form"
+        (Blade.IRPrint.ppIndexTypeIn (Map.ofList [9001, "4"])
+            { symRec with Rank = 1; Symmetry = Blade.Types.SymNone; Tag = None }) "Idx<4>"
+
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq

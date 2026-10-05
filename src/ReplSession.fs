@@ -102,7 +102,13 @@ module ReplTypes =
             for d in m.Decls do
                 match d with
                 | TDeclLet b | TDeclStatic b ->
-                    acc <- Map.add b.Name (RVal (valTy b.Name b.Type)) acc
+                    // An inert deferred former lowers to a unit binding;
+                    // its real (loop) type rides ErasedType.
+                    let ty =
+                        match b.ErasedType with
+                        | Some t -> t
+                        | None -> valTy b.Name b.Type
+                    acc <- Map.add b.Name (RVal ty) acc
                     for (n, _, t) in b.SubBindings do
                         acc <- Map.add n (RVal (valTy n t)) acc
                 | TDeclFunction f ->

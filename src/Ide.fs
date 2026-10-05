@@ -509,7 +509,7 @@ let deducedJsonForTests () : string =
 // Type rendering
 
 /// Collect Id -> nominal-name entries from the index types embedded in a
-/// type, so ppIRTypeIn renders `Idx<Lat>` instead of a raw extent (internal
+/// type, so ppIRTypeIn renders `Lat` instead of a raw extent (internal
 /// structural tags like `__raggedidx` are excluded).
 let rec private indexNamesOf (t: IRType) : (IRId * string) list =
     match t with
@@ -541,16 +541,14 @@ let rec private indexNamesOf (t: IRType) : (IRId * string) list =
 /// rule one level down, on the extent expression a nameless slot falls back to
 /// printing. They render as the `_` wildcard `concreteNames` already uses for
 /// exactly these slots in `calls[]`, so both surfaces read the same way.
-///
-/// PLAIN slots only: `ppIndexTypeIn` treats a nominal name on a COMPACT class as
-/// the whole class's surface spelling, so naming one `_` would print a bare `_`
-/// instead of `SymIdx<2, _>`.
+/// `_` is EXTENT text to `ppIndexTypeIn`, so it fills the extent slot of a
+/// compact class too (`SymIdx<2, _>`); a slot's real name, when it has one,
+/// still wins (see ppType).
 let rec private internalExtentNames (t: IRType) : (IRId * string) list =
     let isInternal (idx: IRIndexType) =
-        idx.Symmetry = SymNone
-        && (match idx.Extent with
-            | IRParam (n, _, _) -> n.StartsWith "__"
-            | _ -> false)
+        match orbitBaseExtent idx with
+        | IRParam (n, _, _) -> n.StartsWith "__"
+        | _ -> false
     match t with
     | ArrayElem arr ->
         (arr.IndexTypes |> List.choose (fun idx ->
@@ -637,6 +635,11 @@ let rec collectVarNames (ann: TypeExpr) (t: IRType) : (int * string) list =
          else [])
         @ collectVarNames ret res
     | TyArray (elem, _), ArrayElem arr -> collectVarNames elem arr.ElemType
+    // A pack parameter: the element annotation (`T^1` in `Poly<T^1>`) names
+    // the element variable. Without this arm the element took a fresh pool
+    // letter (`Poly<T, r41>`) unless some OTHER annotation happened to share
+    // its id, and the rank the source wrote was lost from the signature.
+    | (TyPoly inner | TyNamed ("Poly", [inner])), IRTPoly (elem, _) -> collectVarNames inner elem
     | _ -> []
 
 /// Fresh-letter pool for inference vars no source annotation names.
@@ -1263,6 +1266,9 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
     // Each value binding names its own abstract vars: schemes don't share
     // ids across bindings, so per-binding namespaces can't collide.
     let ppVal (t: IRType) = abstractRenderer [] t
+    // An inert binding (a deferred former) displays its REAL type, not the
+    // `IRTUnit` placeholder the checker emitted for it.
+    let bindingType (b: TypedBinding) = b.ErasedType |> Option.defaultValue b.Type
     let add scope name kind tyStr =
         acc.Add { Scope = scope; EName = name; EKind = kind; ETypeStr = tyStr
                   EParams = []; ERet = None; EWhere = []; EDeducedComm = [] }
@@ -1270,7 +1276,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
         for s in stmts do
             match s with
             | TStmtLet b ->
-                add scope b.Name "let" (ppVal b.Type)
+                add scope b.Name "let" (ppVal (bindingType b))
                 for (n, _, t) in b.SubBindings do add scope n "let" (ppVal t)
             | TStmtForIn (v, _, _, _, body) ->
                 add scope v "for" (ppType (IRTScalar ETInt64))
@@ -1343,7 +1349,7 @@ let private collectTypedBindings (srcFuncs: Map<string, FunctionDecl>) (tp: Type
         for d in m.Decls do
             match d with
             | TDeclLet b ->
-                add "" b.Name "let" (ppVal b.Type)
+                add "" b.Name "let" (ppVal (bindingType b))
                 moduleLets.[b.Name] <- b.Type
                 for (n, _, t) in b.SubBindings do add "" n "let" (ppVal t)
             | TDeclStatic b ->

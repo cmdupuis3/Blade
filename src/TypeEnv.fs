@@ -741,16 +741,13 @@ let unitAnnoContext = "<type annotation>"
 
 /// The extra line a TYPE MISMATCH earns when its two sides RENDER IDENTICALLY.
 ///
-/// `ppIndexType` prints an index record from its extent and symmetry and reads
-/// no Tag at all, so `expected Array<Float64 like Idx<5>>, got Array<Float64
-/// like Idx<5>>` is exactly what a user sees when two DIFFERENT provider axis
-/// identities meet -- two checkouts whose `lat` diverged, or two repos' `lat`.
-/// The message is then not merely unhelpful, it reads as a compiler bug.
-///
-/// Fixed HERE and not in the printer on purpose: many corpus categories pin
-/// `Idx<n>` in error text, and teaching the global type printer about tags
-/// would rewrite all of them. This is one appended line, so every
-/// ERROR-CONTAINS pin on the sentence above it keeps matching.
+/// `ppIndexType` spells a user-named record by its name but prints a PROVIDER
+/// axis (a `__`-prefixed identity tag no program can write) from its extent,
+/// so `expected Array<Float64 like Idx<5>>, got Array<Float64 like Idx<5>>` is
+/// exactly what a user sees when two DIFFERENT provider axis identities meet --
+/// two checkouts whose `lat` diverged, or two repos' `lat`. The message is then
+/// not merely unhelpful, it reads as a compiler bug. This appends one line, so
+/// every ERROR-CONTAINS pin on the sentence above it keeps matching.
 ///
 /// Scoped to PROVIDER tags (`isProviderAxisTag`) for the same containment
 /// reason: `__`-prefixed KIND sentinels also vanish from the render, and a note
@@ -775,44 +772,6 @@ let private indexIdentityNote (exp: IRType) (act: IRType) : string =
                 Some $"\nnote: the index types differ by identity: '{(displayTagName tx)}' vs '{(displayTagName ty)}'{clause}"
             | _ -> None)
         |> Option.defaultValue ""
-
-/// A type as the program SPELLS it: `ppIRType`, except that an index slot of a
-/// user-NAMED index type renders as that name (`Array<Float64 like Lat>`, the
-/// surface spelling of the annotation), recursively through tuples, units and
-/// function types. An index NAME is part of the type -- `Nat<Lat>` and
-/// `Nat<Lon>` do not unify at equal extent -- but not of `ppIRType`'s rendering
-/// (`Idx<3>` for any `type Lat = Idx<3>`), so a mismatch between two named
-/// axes read "expected Array<Float64 like Idx<3>>, got Array<Float64 like
-/// Idx<3>>". Compiler tags (`__`) and provider axis identities (which
-/// `indexIdentityNote` explains) keep the structural form.
-let rec ppIRTypeNominal (t: IRType) : string =
-    let slot (ix: IRIndexType) =
-        match ix.Tag with
-        | Some tg when not (tg.StartsWith "__") && not (isProviderAxisTag tg) -> tg
-        | _ -> ppIndexType ix
-    match t with
-    | ArrayElem at ->
-        let slots = at.IndexTypes |> List.map slot |> String.concat ", "
-        $"Array<{ppIRTypeNominal at.ElemType} like {slots}>"
-    | IRTTuple ts -> $"""({(ts |> List.map ppIRTypeNominal |> String.concat ", ")})"""
-    | IRTUnitAnnotated (inner, units) -> $"{ppIRTypeNominal inner}<{ppUnitSigType units}>"
-    | FuncElem (ps, r) ->
-        $"""({(ps |> List.map ppIRTypeNominal |> String.concat ", ")}) -> {ppIRTypeNominal r}"""
-    | _ -> ppIRType t
-
-/// Does the type mention a user-NAMED index slot anywhere (see ppIRTypeNominal)?
-let rec namesIndexAxis (t: IRType) : bool =
-    match t with
-    | ArrayElem at ->
-        at.IndexTypes |> List.exists (fun ix ->
-            match ix.Tag with
-            | Some tg -> not (tg.StartsWith "__") && not (isProviderAxisTag tg)
-            | None -> false)
-        || namesIndexAxis at.ElemType
-    | IRTTuple ts -> ts |> List.exists namesIndexAxis
-    | IRTUnitAnnotated (inner, _) -> namesIndexAxis inner
-    | FuncElem (ps, r) -> ps |> List.exists namesIndexAxis || namesIndexAxis r
-    | _ -> false
 
 /// Format a TypeError as a human-readable string (raw: before
 /// `humanizeTypeText`; see formatTypeError).
@@ -847,13 +806,11 @@ let private formatTypeErrorRaw (err: TypeError) : string =
     | DuplicateFunctionDecl (name, firstSite) ->
         $"duplicate declaration of function '{name}': this scope already declares it at {firstSite}. A function name may be declared only once per scope -- without this refusal the later declaration silently shadows the earlier one, and calls matching the first signature fail blaming the call site. Rename one of the declarations. (Dispatching one name across several signatures -- function clauses -- is a planned feature, not yet supported.)"
     | TypeMismatch (exp, act) ->
-        // Two sides that RENDER alike differ in something the structural
-        // printer drops -- an index type's NAME, typically: spell the names.
-        // (Only then: every other mismatch keeps the structural wording its
-        // pins read.)
-        let e, a =
-            if ppIRType exp = ppIRType act then ppIRTypeNominal exp, ppIRTypeNominal act
-            else ppIRType exp, ppIRType act
+        // `ppIRType` spells a user-NAMED index slot by its name (IRPrint's
+        // userIndexName), so two axes that differ only by name already read
+        // apart; sides that still render alike differ by a provider identity,
+        // which indexIdentityNote explains.
+        let e, a = ppIRType exp, ppIRType act
         let rendered = $"Type mismatch: expected {e}, got {a}"
         if e = a then rendered + indexIdentityNote exp act else rendered
     | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"

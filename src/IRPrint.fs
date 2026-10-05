@@ -20,9 +20,14 @@ let rec ppIRType = function
     | IRTTuple ts ->
         $"""({(ts |> List.map ppIRType |> String.concat ", ")})"""
     | IRTLoop lt ->
+        // Arity None is an arity-POLYMORPHIC former (`object_for(f)` over a
+        // `Poly<...>` kernel: the pack width is fixed per `<@>` use). `_`, the
+        // wildcard every other display surface uses for "not fixed here" --
+        // printing 0 claimed a nullary loop.
+        let arity = lt.Arity |> Option.map string |> Option.defaultValue "_"
         match lt.Kind with
-        | LKMethod -> $"MethodLoop<{lt.Arity |> Option.defaultValue 0}>"
-        | LKObject -> $"ObjectLoop<{lt.Arity |> Option.defaultValue 0}>"
+        | LKMethod -> $"MethodLoop<{arity}>"
+        | LKObject -> $"ObjectLoop<{arity}>"
     | IRTComputation t -> $"Computation<{ppIRType t}>"
     | IRTUnit -> "Void"
     | IRTPoly (base', var) -> $"Poly<{ppIRType base'}, {var}>"
@@ -96,13 +101,17 @@ let rec ppIRType = function
             $"Arrow<{slotStr} -> {ppIRType result}>{idStr}"
 
 and ppIndexType (idx: IRIndexType) =
-    // Inline extent printing since ppIRExpr is defined later
+    // Inline extent printing since ppIRExpr is defined later. A user-NAMED
+    // record prints as the program spells it (see userIndexName): the name
+    // stands for the whole slot when the record is dense, and fills the
+    // extent slot of a compact class, whose Tag names its COMPONENT space.
     let extentStr =
-        match idx.Extent with
-        | IRLit (IRLitInt n) -> string n
-        | IRVar (id, _) -> $"v{id}"
-        | IRParam (name, _, _) -> name
-        | _ -> "?"
+        match userIndexName idx, idx.Extent with
+        | Some name, _ -> name
+        | None, IRLit (IRLitInt n) -> string n
+        | None, IRVar (id, _) -> $"v{id}"
+        | None, IRParam (name, _, _) -> name
+        | None, _ -> "?"
     match idx with
     | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
@@ -112,6 +121,7 @@ and ppIndexType (idx: IRIndexType) =
     | TreeIdxLike rendered -> rendered
     | _ ->
         match idx.Symmetry with
+        | SymNone when (userIndexName idx).IsSome -> extentStr
         | SymNone -> $"Idx<{extentStr}>"
         | SymSymmetric -> $"SymIdx<{idx.Rank}, {extentStr}>"
         | SymAntisymmetric -> $"AntisymIdx<{idx.Rank}, {extentStr}>"
@@ -119,6 +129,25 @@ and ppIndexType (idx: IRIndexType) =
         // Round-trippable surface spelling: the level list IS the type, so a
         // diagnostic that showed only the rank would name a different class.
         | SymWreath -> $"OrbIdx<{ppOrbitLevels (orbitLevelsOf idx)}, {ppExtentOf (orbitBaseExtent idx)}>"
+
+/// The source-level NAME an index record carries, if any: its Tag, unless the
+/// Tag is a compiler KIND sentinel or a provider identity (both `__`-prefixed:
+/// `__raggedidx`, `__orbidx`, `__icaxis|...`), which no program can spell.
+///
+/// What the name denotes depends on the record's class, and that is the whole
+/// reason this is one function. A DENSE record's Tag is the alias of the slot
+/// itself (`type AssetIdx = Idx<4>` stamps `AssetIdx`), so the name IS the
+/// surface spelling. A COMPACT (multi-rank) record's Tag is the name of its
+/// COMPONENT space -- TypeCheckInfer's alias arm keeps it rather than
+/// overwriting it with a class alias, because every component param is typed
+/// from it -- so `SymIdx<2, AssetIdx>` (written, or DEDUCED for a `comm`
+/// kernel over two AssetIdx rows) carries `AssetIdx`, and the name belongs in
+/// the class's extent slot. Printing it bare (`Array<Float64 like AssetIdx>`)
+/// dropped both the class and its rank.
+and userIndexName (idx: IRIndexType) : string option =
+    match idx.Tag with
+    | Some t when t <> "" && not (t.StartsWith "__") -> Some t
+    | _ -> None
 
 /// The extent-slot rendering shared by both index printers: the small set of
 /// extent shapes a diagnostic can name, "?" for everything else. Factored out
@@ -169,8 +198,21 @@ let rec ppIRTypeIn (names: Map<IRId, string>) = function
         $"Array<{ppIRTypeIn names arr.ElemType} like {indices}>"
     | other -> ppIRType other
 
+/// `names` maps a record Id to ONE of three kinds of text, told apart here:
+///   * EXTENT text -- `_` or a literal (Ide's `concreteNames` /
+///     `internalExtentNames` fallbacks for a slot with no name): it fills the
+///     extent slot, so a dense slot still reads `Idx<4>` / `Idx<_>`;
+///   * the record's OWN name (`userIndexName`: Ide's tag-derived map, a dense
+///     alias in `indexNameMap`, a provider dim name): the whole spelling of a
+///     dense slot, the COMPONENT name of a compact one (`SymIdx<2, AssetIdx>`);
+///   * any other name on a compact record is an alias of the WHOLE class
+///     (`indexNameMap`'s `type MySym = SymIdx<2, 4>` entry), which fills no
+///     argument slot -- `SymIdx<2, MySym>` would read "extent = MySym" -- so
+///     it prints bare (`Array<Int32 like MySym>`, the annotation's spelling).
 and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
-    let nominal = Map.tryFind idx.Id names
+    let isExtentText (s: string) = s = "_" || (s <> "" && s |> Seq.forall System.Char.IsDigit)
+    let ownName = userIndexName idx
+    let nominal = Map.tryFind idx.Id names |> Option.orElse ownName
     let extentStr =
         match nominal with
         | Some name -> name
@@ -187,15 +229,16 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
     | TreeIdxLike rendered -> rendered
     | _ ->
         match idx.Symmetry with
-        // A plain alias keeps the documented `Idx<Lat>` form: that type's one
-        // slot IS the extent, and the alias stands for exactly that extent.
-        | SymNone -> $"Idx<{extentStr}>"
-        // An alias of a COMPACT class names the WHOLE class, whose argument
-        // slots are (rank, extent) -- slots a name does not fill. Routing it
-        // through the extent slot produced `SymIdx<2, MySym>`, which reads as
-        // "extent = MySym" and does not parse. The bare name IS the surface
-        // spelling of this type (`Array<Int32 like MySym>`), so print that.
-        | _ when nominal.IsSome -> nominal.Value
+        // A NAMED dense slot prints as its name -- `Array<Float64 like
+        // AssetIdx, DayIdx>`, the annotation that declared it. `Idx<AssetIdx>`
+        // read as "an Idx whose extent is AssetIdx", which is not this type.
+        | SymNone ->
+            match nominal with
+            | Some name when not (isExtentText name) -> name
+            | _ -> $"Idx<{extentStr}>"
+        | _ when (match nominal with
+                  | Some name -> not (isExtentText name) && Some name <> ownName
+                  | None -> false) -> nominal.Value
         | SymSymmetric -> $"SymIdx<{idx.Rank}, {extentStr}>"
         | SymAntisymmetric -> $"AntisymIdx<{idx.Rank}, {extentStr}>"
         | SymHermitian -> $"HermitianIdx<{extentStr}>"

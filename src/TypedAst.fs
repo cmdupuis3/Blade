@@ -435,6 +435,13 @@ and TypedBinding = {
     /// checks). IRIds are allocated directly after the SubBinding ids, since
     /// module emission is IRId-ordered and later fresh ids would run too late.
     PostChecks: (IRId * TypedExpr) list
+    /// The binding's REAL type when the checker emitted it INERT (`Type` =
+    /// `IRTUnit`, `Value` a unit literal) -- today only a DEFERRED former,
+    /// `object_for(f)` over a `Poly<...>` kernel, which has no standalone
+    /// runtime value (every `<@>` use rebuilds it inline). Display surfaces
+    /// only (`ide check` bindings, the REPL echo): nothing downstream of the
+    /// checker reads it, so its unresolved pack element type never reaches IR.
+    ErasedType: IRType option
 }
 
 /// How a TypedBinding's SubBindings relate to its value. Lives on the binding

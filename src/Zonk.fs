@@ -316,7 +316,7 @@ let private guardIndex (a: TypedExpr) (ext: TypedExpr) (what: string) : TypedExp
             let tb : TypedBinding = {
                 Name = name; VarId = vid; Type = a.Type
                 Identity = None; IsMutable = false; Value = a
-                SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
             mk (TExprBlock ([ TStmtLet tb; guardOn v ], Some v)) a.Type
         | None ->
             failwith "internal: an impure subscript needs a guard binding, but zonk ran without a SubscriptGuardCtx (only TypeCheck.checkModule may zonk a module)"
@@ -375,7 +375,7 @@ let private enumKeyOrdinal (ix: IRIndexType) (a: TypedExpr) : TypedExpr option =
             let tb : TypedBinding = {
                 Name = name; VarId = vid; Type = a.Type
                 Identity = None; IsMutable = false; Value = a
-                SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
             Some (mk (TExprBlock ([ TStmtLet tb; check ], Some ordinal)) intTy)
         | _ -> None
     | _ -> None

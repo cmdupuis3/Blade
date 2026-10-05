@@ -1448,7 +1448,7 @@ let internal checkedIndexConversion (env: TypeEnv) (tE: TypedExpr) (annoTy: IRTy
     let tb : TypedBinding = {
         Name = ckName; VarId = ckId; Type = tE.Type
         Identity = None; IsMutable = false; Value = tE
-        SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+        SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
     mk (TExprBlock ([ TStmtLet tb; TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", msg)) IRTUnit) ],
                     Some (mk (TExprVar (ckName, ckId, None)) annoTy)))
        annoTy
@@ -3776,15 +3776,10 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                          | IRTInfer _, _ when i < judgedCopies.Length -> env.Subst.Resolve (List.item i judgedCopies)
                          | declared, _ -> declared
                      let aTy = env.Subst.Resolve (List.item i tArgs).Type
-                     // An index NAME is part of the type but not of its
-                     // rendering (`Idx<3>` for any `type Lat = Idx<3>`); when
-                     // either side names an axis, spell the names, or the
-                     // message hides the reason (or reads "declared X but got X").
-                     // (TypeEnv.ppIRTypeNominal, shared with every TypeMismatch.)
-                     let pp1, pp2 =
-                         if ppIRType pTy = ppIRType aTy || namesIndexAxis pTy || namesIndexAxis aTy then
-                             ppIRTypeNominal pTy, ppIRTypeNominal aTy
-                         else ppIRType pTy, ppIRType aTy
+                     // An index NAME is part of the type, and `ppIRType`
+                     // spells it (`Lat`, not `Idx<3>`), so two axes that differ
+                     // only by name never read "declared X but got X".
+                     let pp1, pp2 = ppIRType pTy, ppIRType aTy
                      // A CONCRETE-ELEMENT caret parameter (`Float64^2`) is
                      // dense: its axes are the unnamed, unknown-extent plain
                      // axes TypeLower's TyAbstractArray arm mints. Handed a

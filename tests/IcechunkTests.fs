@@ -2053,7 +2053,7 @@ let total = reduce(A, (+), axes = 2)
         // nothing here depends on it.
         let aType = bindingTypeOf ideJson "A"
         check "ide: the checkout array's type renders the store's own dim names"
-            (aType = Some "Array<Float64 like Idx<lat>, Idx<lon>>") $"%A{aType}"
+            (aType = Some "Array<Float64 like lat, lon>") $"%A{aType}"
         check "ide: no raw axis tag leaks into the payload"
             (not (ideJson.Contains axisTagPrefix)) ideHead
      with ex -> check "ide: icechunk payload" false ex.Message)

@@ -2117,7 +2117,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     let tb : TypedBinding = {
                         Name = ascName; VarId = ascId; Type = annoTy
                         Identity = None; IsMutable = false; Value = tE
-                        SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                        SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
                     mkTypedSpan (TExprBlock (TStmtLet tb :: (checks |> List.map TStmtExpr),
                                              Some (mkTypedSpan (TExprVar (ascName, ascId, None)) annoTy span)))
                                 annoTy span))
@@ -13268,6 +13268,7 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                         SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, curEnv.Subst.Resolve ty))
                         Destructure = destructure
                         PostChecks = postChecks
+                        ErasedType = (if isDeferredFormer then Some (curEnv.Subst.Resolve tValue.Type) else None)
                     }
                     typedStmts.Add (TStmtLet tb)
                 | Error e -> err <- Some e
@@ -13441,7 +13442,7 @@ and inferForIn (env: TypeEnv) (varName: string) (rangeExpr: Expr) (bodyStmts: St
                                 Name = bName; VarId = bId; Type = tValue.Type
                                 Identity = None; IsMutable = (assign <> ReadOnly); Value = tValue
                                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, bodyEnv.Subst.Resolve ty))
-                                Destructure = destructure; PostChecks = []
+                                Destructure = destructure; PostChecks = []; ErasedType = None
                             }
                             typedBodyStmts.Add (TStmtLet tb)
                         | Error e -> bodyErr <- Some e
@@ -14079,7 +14080,7 @@ and internal wrapBoundedSignatureChecks (bodyEnv: TypeEnv) (funcDecl: FunctionDe
                     let tb : TypedBinding = {
                         Name = retName; VarId = retId; Type = tBody.Type
                         Identity = None; IsMutable = false; Value = tBody
-                        SubBindings = []; Destructure = DSPositional; PostChecks = [] }
+                        SubBindings = []; Destructure = DSPositional; PostChecks = []; ErasedType = None }
                     mkTypedSpan (TExprBlock (TStmtLet tb :: (rChecks |> List.map TStmtExpr),
                                              Some (mkTypedSpan (TExprVar (retName, retId, None)) tBody.Type span)))
                                 tBody.Type span
@@ -14685,6 +14686,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
                 Destructure = destructure
                 PostChecks = postChecks
+                ErasedType = (if isDeferredFormer then Some (env.Subst.Resolve tValue.Type) else None)
             }
             (TDeclLet tb, env')))))
 
@@ -14859,7 +14861,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                 Identity = None; IsMutable = false; Value = tValue
                 SubBindings = subBindings |> List.map (fun (n, id, ty) -> (n, id, env.Subst.Resolve ty))
                 Destructure = destructure
-                PostChecks = []
+                PostChecks = []; ErasedType = None
             }
             Ok (TDeclStatic tb, env''))
 
