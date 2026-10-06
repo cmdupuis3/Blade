@@ -1,0 +1,9 @@
+// TEST: The read of an applied unannotated parameter is typed (rejects)
+// ERROR: BL3001 @ 8:20
+// ============================================================================
+// Vacuity probe: the catch-all typed `c(0)` at a fresh variable, which
+// unified with anything. The read is now the element of the argument's
+// array, Int64 here, so a Bool annotation is refused.
+function head(c) = c(0)
+let iv = [4, 5, 6]
+let x: Bool = head(iv)

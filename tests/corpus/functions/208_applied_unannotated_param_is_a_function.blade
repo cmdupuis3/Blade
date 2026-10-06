@@ -1,0 +1,15 @@
+// TEST: An unannotated parameter applied to non-index arguments is a function
+// ============================================================================
+// The function half of functions/207. `function hh(f) = f(2.0) + 1.0` typed
+// `f` as Float64 (the application added no evidence), so `hh(lambda ...)`
+// emitted `double hh(double f)` and g++ refused `f(2.0)` (BL9002) -- the
+// interpreter alone ran it. A Float64 argument cannot be an index, so the
+// parameter is the function `(Float64) -> r`, exactly the arrow an
+// `f: (Float64) -> Float64` annotation spells.
+function hh(f) = f(2.0) + 1.0
+let q = hh(lambda(x) -> x * 3.0)
+// EXPECT: q = 7
+
+function ap(f) = f(2.0, 3.0)
+let a = ap(lambda(x, y) -> x * y)
+// EXPECT: a = 6

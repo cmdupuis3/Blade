@@ -1,0 +1,10 @@
+// TEST: A rank-2 array passed where the body takes one subscript (rejects)
+// ERROR: BL3001 @ 9:15
+// ============================================================================
+// The body's evidence decides the rank: `c(0)` is one subscript, so `c` is
+// rank 1, like `reduce(x, ..)` on an unannotated parameter. A matrix is
+// refused at the call -- a call site neither broadcasts nor reduces rank.
+// Annotate `c: T^2` to read rows.
+let m = [[1.0, 2.0], [3.0, 4.0]]
+function first(c) = c(0) + 1.0
+let d = first(m)

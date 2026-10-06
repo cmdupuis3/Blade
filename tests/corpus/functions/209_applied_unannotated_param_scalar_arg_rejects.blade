@@ -1,0 +1,8 @@
+// TEST: A scalar passed where the body subscripts the parameter (rejects)
+// ERROR: BL3001 @ 7:15
+// ============================================================================
+// The program that used to be ACCEPTED: `c` was typed Float64, `first(2.0)`
+// checked clean, and g++ refused to call a double (BL9002, an ICE). The body
+// subscripts `c`, so it is an array, and a scalar is refused at the argument.
+function first(c) = c(0) + 1.0
+let a = first(2.0)

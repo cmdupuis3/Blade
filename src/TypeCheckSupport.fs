@@ -3982,6 +3982,86 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             match env.Subst.Resolve tFunc.Type with
             | ArrayElem _ -> dispatchAppOrIndex env tFunc tArgs
             | t -> Error (InvalidApplication t))
+    // APPLYING AN UNANNOTATED PARAMETER of the declaration being checked --
+    // `function first(c) = c(0) + 1.0`. Such a parameter is a plain
+    // (non-generic) var whose type the BODY alone decides: nothing at a call
+    // site binds it, and zonk defaults whatever the body left open to a
+    // SCALAR. So this application used to fall to the catch-all below, which
+    // added no evidence at all: `c` became Float64, `first(v)` on an array was
+    // refused (BL3001, "expects a scalar"), and `first(2.0)` was accepted and
+    // died in g++ calling a double (BL9002). The application IS the evidence:
+    // only arrays and functions take arguments (formalism 4.3), so decide
+    // which one here and re-dispatch to the arm that types it properly.
+    //
+    //   * every argument index-like (an integer, an index value, `_`, or a
+    //     still-open var -- a parameter used only as a subscript is an index,
+    //     pinSubscriptParams) -> an array of rank = the argument count, via
+    //     the same shape demand an array intrinsic issues on an unannotated
+    //     parameter (`reduce(x, ..)`); `c(0)` then reads the element.
+    //   * any argument that cannot be an index (a Float, a tuple, an array, a
+    //     function, ...) -> a function from the argument types to a fresh
+    //     result, the arrow a `f: (Float64) -> Float64` annotation spells.
+    //
+    // One parameter SHAPE per declaration, because the body is emitted once
+    // per element type, not once per shape: a function of one integer
+    // argument is NOT also accepted
+    // where the body subscripts (an index-like application decides "array"),
+    // and the call judgment refuses it at the argument -- as it refuses a
+    // scalar (`first(2.0)`, BL3001 at the call site, never a backend ICE).
+    //
+    // NARROW ON PURPOSE: only a var that IS one of the current declaration's
+    // parameters (`CurrentSignature`, which a named function's body sets) and
+    // is not generic. A LAMBDA parameter is typed later by its context --
+    // buildApplyInfo unifies a kernel parameter with the row or halo window it
+    // iterates after the body is inferred -- so shaping it here would fight
+    // that unification; it keeps the catch-all. The guard only ROUTES (which
+    // heads this arm owns); every validity verdict is an Error from the body.
+    | IRTInfer vid when not (List.isEmpty tArgs)
+                        && not (env.Subst.IsPolymorphicId vid)
+                        && (env.Subst.GetArityConstraint vid).IsNone
+                        && (match List.rev env.CurrentSignature with
+                            | _ret :: ps ->
+                                ps |> List.exists (fun p ->
+                                    match env.Subst.Resolve p with
+                                    | IRTInfer pid -> pid = vid
+                                    | _ -> false)
+                            | [] -> false) ->
+        let isIntElem (et: ElemType) =
+            match et with
+            | ETInt32 | ETInt64 -> true
+            | _ -> false
+        let indexLike (a: TypedExpr) =
+            match a.Kind with
+            | TExprWildcard -> true
+            | _ ->
+                match IR.stripUnits (env.Subst.Resolve a.Type) with
+                | IRTScalar et -> isIntElem et
+                | IRTIdxTagged _ | IRTNat _ -> true
+                | IRTInfer aid ->
+                    (match env.Subst.GetLiteralDefault aid with
+                     | Some et -> isIntElem et
+                     | None -> true)
+                | _ -> false
+        if tArgs |> List.forall indexLike then
+            // Generic in its ELEMENT, like a `T^k` parameter: marking the var
+            // first makes requireArrayArgMinRank mint the element in the
+            // signature's id space, so IR monomorphization emits one copy per
+            // element type. Left plain, zonk defaulted the element to Float64
+            // and an Int64 array argument died in g++ ("could not convert
+            // Array<long long> to Array<double>").
+            env.Subst.MarkPolymorphic vid
+            requireArrayArgMinRank env tFunc "subscript" tArgs.Length
+            |> Result.bind (fun _ ->
+                match env.Subst.Resolve tFunc.Type with
+                | ArrayElem _ -> dispatchAppOrIndex env tFunc tArgs
+                | t -> Error (InvalidApplication t))
+        else
+            let arrow = mkFuncArrow (tArgs |> List.map (_.Type)) (env.Subst.Fresh())
+            unify env.Subst tFunc.Type arrow
+            |> Result.bind (fun () ->
+                match env.Subst.Resolve tFunc.Type with
+                | FuncElem _ -> dispatchAppOrIndex env tFunc tArgs
+                | t -> Error (InvalidApplication t))
     | _ ->
         match nonCallableHead env.Subst tFunc with
         | Some t when not (List.isEmpty tArgs) -> Error (InvalidApplication t)
