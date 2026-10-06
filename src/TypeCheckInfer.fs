@@ -11705,14 +11705,20 @@ and internal indexCastTarget (env: TypeEnv) (annoTy: IRType) : (string * int64 o
 /// space, and the ONE place a plain integer becomes an index value:
 ///   * a LITERAL is a known position: range-checked against I's static
 ///     extent at compile time (`(7 : Lat)` over Idx<3> is refused);
-///   * an index value of I already, or a still-open variable (an
-///     unannotated kernel parameter the ascription pins), unifies as before;
-///   * a plain INTEGER value is a CHECKED conversion: the value is bound
-///     once and guarded `0 <= v < extent(I)` at run time (BL8006), in both
-///     lanes -- the guard is an ordinary constraint check, so codegen and the
-///     interpreter need nothing new. It needs I's extent at compile time;
-///     without one the cast is refused rather than left unchecked.
-/// Everything else (a DIFFERENT index type, a float) is the mismatch it was.
+///   * an index value of I already unifies as before (no guard);
+///   * a plain INTEGER value -- or a position, arithmetic on an index -- is
+///     a CHECKED conversion: the value is bound once and guarded
+///     `0 <= v < extent(I)` at run time (BL8006), in both lanes -- the guard
+///     is an ordinary constraint check, so codegen and the interpreter need
+///     nothing new. It needs I's extent at compile time; without one the
+///     cast is refused rather than left unchecked;
+///   * a still-OPEN operand (an unannotated kernel parameter) is NOT pinned
+///     to I: it gets the checked conversion, and its final type is judged
+///     after inference (Zonk elides the guard for a proven index of I; the
+///     post-zonk sweep refuses a foreign index or a non-integer). Without a
+///     static extent it still unifies (the old pin) -- no guard is possible.
+/// An index value of a DIFFERENT named index type is refused
+/// (IndexCastForeignTag, BL4003); a float is the mismatch it was.
 and internal inferIndexCast (env: TypeEnv) (e: Expr) (annoTy: IRType) (tag: string) (ext: int64 option) : TypeResult<TypedExpr> =
     let litVal =
         match e.Kind with
@@ -11734,6 +11740,32 @@ and internal inferIndexCast (env: TypeEnv) (e: Expr) (annoTy: IRType) (tag: stri
             | None ->
                 Error (Other $"a cast of a computed integer to the index type '{tag}' is a checked conversion, and checking it needs '{tag}'s extent at compile time, which is not known here. Iterate with range<{tag}> to produce '{tag}' values, or give '{tag}' a static extent.")
             | Some n -> Ok (checkedIndexConversion env tE annoTy tag n span)
+        // A position (arithmetic on an index value) typed by its operand is
+        // an integer all the same.
+        | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed src)
+            when src <> tag && isIndexPositionExpr tE && ext.IsSome ->
+            Ok (checkedIndexConversion env tE annoTy tag ext.Value span)
+        | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed src)
+            when src <> tag && not (src.StartsWith "__") ->
+            Error (IndexCastForeignTag (tag, src))
+        // An OPEN operand -- an unannotated kernel or function parameter, or
+        // arithmetic on one -- is not yet known to be an integer, an index of
+        // I, or something else. The cast must NOT decide it by unifying the
+        // operand with Nat<I>: that pinned the parameter itself to I, so a
+        // kernel `lambda(k) -> s((k : State))` fed by `range<Idx<91>>` (or
+        // `0..91`) was refused at the RANGE ("expected Nat<State>, got
+        // Int64") -- the very cast the BL4003 untagged-integer advice
+        // recommends. A conversion constrains its result, never its operand:
+        // emit the checked conversion now (the operand defaults to an
+        // integer, as a subscript's does), and let the operand's FINAL type
+        // decide after inference -- Zonk drops the guard when the operand
+        // turns out to be a proven index of I already, and the post-zonk
+        // subscript sweep (collectSubscriptErrors) refuses an index of a
+        // different named type or a non-integer, exactly as this eager
+        // judgment would have.
+        | IRTInfer vid when ext.IsSome ->
+            if (env.Subst.GetArityConstraint vid).IsNone then env.Subst.MarkIndexDefault vid
+            Ok (checkedIndexConversion env tE annoTy tag ext.Value span)
         | _ ->
             match unify env.Subst tE.Type annoTy with
             | Ok () -> Ok { tE with Type = annoTy }

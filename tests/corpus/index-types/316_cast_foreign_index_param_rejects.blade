@@ -1,0 +1,11 @@
+// TEST: Index cast of a parameter of another index type (rejects)
+// ERROR: BL4003 @ 9:37
+// The eager twin of index-types/315: `j` is declared `Nat<W>`, so the cast
+// judges it at once. It used to be a bare BL3001 type mismatch with no word
+// on what spelling converts; it is the nominal refusal now, naming
+// `(Int64(j) : State)`.
+type State = Idx<6>
+type W = Idx<3>
+let s: Array<Float like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+function g(j: Nat<W>) -> Float = s((j : State))
+let v = g((1 : W))

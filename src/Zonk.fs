@@ -666,7 +666,18 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
     // its open operand gave it, because the guard (guardSubscripts) trusts no
     // type -- only the closed PROVEN list -- and retyping a value node without
     // its binding / kernel return / apply output would only make them disagree.
-    { expr with Kind = kind; Type = zt expr.Type }
+    let zonked = { expr with Kind = kind; Type = zt expr.Type }
+    // An index cast `(e : I)` whose operand was still OPEN when it was typed
+    // got the checked conversion (TypeCheckInfer.inferIndexCast); when the
+    // operand turned out to be a PROVEN index of I itself (a same-tag
+    // ascription on a range-fed kernel parameter), the guard proves nothing
+    // and is dropped -- the cast is the operand, retyped.
+    match zonked.Kind, zonked.Type with
+    | TExprBlock ([ TStmtLet tb; TStmtExpr { Kind = TExprConstraintCheck (_, "BL8006", _) } ], Some _),
+      IRTIdxTagged (_, IRefNamed tag)
+        when tb.Name.StartsWith indexCastBindingPrefix && isProvenIndex (Some tag) tb.Value ->
+        { tb.Value with Type = zonked.Type }
+    | _ -> zonked
 
 /// A `let` of an index type whose zonked VALUE is not PROVEN (a position, a
 /// read out of an index-typed array, a call, a branch...) holds an unproven

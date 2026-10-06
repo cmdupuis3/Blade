@@ -1434,7 +1434,7 @@ let internal subscriptClassOrRangeError (env: TypeEnv) (synthetic: bool) (ix: IR
 /// judgment's integer-into-index-parameter coercion.
 let internal checkedIndexConversion (env: TypeEnv) (tE: TypedExpr) (annoTy: IRType)
                                     (tag: string) (n: int64) (span: Span) : TypedExpr =
-    let ckName = $"__idxcast{env.Builder.FreshId()}"
+    let ckName = $"{indexCastBindingPrefix}{env.Builder.FreshId()}"
     let ckId = env.Builder.FreshId()
     let intTy = IRTScalar ETInt64
     let boolTy = IRTScalar ETBool
@@ -1452,6 +1452,16 @@ let internal checkedIndexConversion (env: TypeEnv) (tE: TypedExpr) (annoTy: IRTy
     mk (TExprBlock ([ TStmtLet tb; TStmtExpr (mk (TExprConstraintCheck (cond, "BL8006", msg)) IRTUnit) ],
                     Some (mk (TExprVar (ckName, ckId, None)) annoTy)))
        annoTy
+
+/// Arithmetic on an index value is a POSITION -- a plain integer, whatever
+/// type the node took from an open operand (formalism 3.10, "Positions and
+/// casts") -- so an index cast of one is the integer conversion, never the
+/// foreign-tag refusal.
+let internal isIndexPositionExpr (t: TypedExpr) : bool =
+    match t.Kind with
+    | TExprBinOp (_, (OpAdd | OpSub | OpMul | OpDiv | OpMod), _, _)
+    | TExprUnaryOp (OpNeg, _) -> true
+    | _ -> false
 
 /// The named integer index type a parameter type demands, with its static
 /// extent: `Nat<I>` / `I` where I is a registered plain dense index type.

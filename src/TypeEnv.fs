@@ -880,6 +880,8 @@ let private formatTypeErrorRaw (err: TypeError) : string =
     // Promoted variants (Stage 5): text reproduced verbatim.
     | IndexTagMismatchNamed (expected, actual) -> $"Array index tag mismatch: slot expects '{expected}' but argument has type '{actual}'."
     | IndexTagMismatchAnon expected -> $"Array index tag mismatch: slot expects named tag '{expected}' but argument is an anonymous index value."
+    | IndexCastForeignTag (target, source) ->
+        $"cannot cast a '{source}' index value to the index type '{target}': index types are nominal, and `(e : {target})` converts INTEGERS into '{target}', not the values of another index type. If this '{source}' position really is meant as a '{target}' position, convert it to an integer first -- `(Int64(e) : {target})` is a checked conversion (BL8006 outside '{target}'); if the two spaces are the same space, give them one index type."
     | SubscriptNotIntegral actual -> $"an array subscript must be an integer or an index value, but this one is {actual}. Subscripts are positions: convert explicitly (`Int64(floor(x))`) if a computed number is meant as a position, or index with a value produced by iteration (`range<I>`)."
     | SubscriptOutOfRange (v, Some n, slot) -> $"the literal position {v} is out of range for {slot}, whose extent is {n} (valid positions are 0 .. {n - 1L}). A literal position is checked at compile time."
     | SubscriptOutOfRange (v, None, slot) -> $"the literal position {v} is out of range for {slot}: a position is never negative."
@@ -1367,7 +1369,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | PplConstraintNeedsImport _
             | UnknownWhereConstraint _ -> "BL4001"
             | DistOrderCompileTime _ -> "BL4002"
-            | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | CrossNominalIndexArith _
+            | IndexTagMismatchNamed _ | IndexTagMismatchAnon _ | IndexCastForeignTag _ | CrossNominalIndexArith _
             | SubscriptNotIntegral _ | SubscriptOutOfRange _ | SubscriptTupleForm _
             | CrossAnonIndexArith _ | IndexTypeArithForbidden _ | IrrepsIdxArgMismatch _
             | BlockSpecArgMismatch _

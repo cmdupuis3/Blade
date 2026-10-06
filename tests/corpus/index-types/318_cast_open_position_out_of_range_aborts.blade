@@ -1,0 +1,9 @@
+// TEST: Index cast of an open position out of range (aborts)
+// ABORT: index cast out of range
+// The aborting twin of index-types/314: the cast of a kernel parameter's
+// position is a CHECKED conversion, so `k + 3` reaching 6 in State = Idx<6>
+// stops with BL8006 instead of reading past the array.
+type State = Idx<6>
+let s: Array<Float like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+let bad = method_for(0..4) <@> lambda(k) -> s((k + 3 : State)) |> compute
+let total = reduce(bad, (+))

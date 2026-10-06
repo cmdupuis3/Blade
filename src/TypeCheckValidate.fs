@@ -576,6 +576,21 @@ let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : Compi
         |> Option.toList
     let here =
         match expr.Kind with
+        // The index cast's late half: an operand that was OPEN when
+        // `(e : I)` was typed got the checked conversion without being
+        // judged (TypeCheckInfer.inferIndexCast); judged now on its final
+        // type, by the eager judgment's rules -- an index of a different
+        // named type is refused (a position is an integer), and so is a
+        // non-integer.
+        | TExprBlock ([ TStmtLet tb; TStmtExpr { Kind = TExprConstraintCheck (_, "BL8006", _) } ], Some _)
+            when tb.Name.StartsWith indexCastBindingPrefix ->
+            (match IR.stripUnits (subst.Resolve expr.Type), IR.stripUnits (subst.Resolve tb.Value.Type) with
+             | IRTIdxTagged (_, IRefNamed tag), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), IRefNamed src)
+                 when src <> tag && not (src.StartsWith "__") && not (isIndexPositionExpr tb.Value) ->
+                 [ mkErr tb.Value.Span (IndexCastForeignTag (tag, src)) ]
+             | target, (IRTScalar (ETFloat32 | ETFloat64 | ETBool | ETComplex64 | ETComplex128 | ETString) as actual) ->
+                 [ mkErr tb.Value.Span (TypeMismatch (target, actual)) ]
+             | _ -> [])
         | TExprIndex (arr, args, _) ->
             (match subst.Resolve arr.Type with
              | ArrayElem at -> judgeSubscripts arr at args

@@ -652,7 +652,13 @@ kernel parameter's arithmetic (`lambda(i) -> u(i + 3)`) is a position.
 `(e : I)` is the one door from integers into `I`: a literal is range-checked
 at compile time, a computed integer is a CHECKED conversion (run-time guard
 `0 <= e < extent(I)`, BL8006; it needs `I`'s static extent). A plain integer
-passed to a `Nat<I>` parameter goes through the same door.
+passed to a `Nat<I>` parameter goes through the same door. The cast
+constrains its RESULT, never its operand: an unannotated kernel parameter
+keeps the type its feed gives it, so `lambda(k) -> s((k : State))` over
+`range<Idx<91>>` or `0..91` converts `k`, and `(W1 + k : State)` converts a
+position. An index value of a DIFFERENT named index type is not an integer
+and is refused (BL4003, nominal); a deliberate re-tagging says so,
+`(Int64(j) : I)`, and is checked like any other integer.
 
 **What is guaranteed.** A read or write of a slot whose index type is NAMED
 is bounds-safe: its subscript is either PROVEN or CHECKED at run time

@@ -116,6 +116,10 @@ type TypeError =
     // Index-type violations (BL4003)
     | IndexTagMismatchNamed of expected: string * actual: string
     | IndexTagMismatchAnon of expected: string
+    /// `(e : I)` whose operand is an index value of a DIFFERENT named index
+    /// type J: the cast is the door from INTEGERS into I (formalism 3.10), not
+    /// a re-tagging of another index space's values.
+    | IndexCastForeignTag of target: string * source: string
     /// A subscript whose value is not an index at all (Float, Bool, Complex,
     /// String): formalism 3.10, the subscript judgment's class rule.
     | SubscriptNotIntegral of actual: string

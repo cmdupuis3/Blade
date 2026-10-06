@@ -1,0 +1,36 @@
+// TEST: Index cast of an unannotated kernel parameter converts, never pins
+// ============================================================================
+// BL4003's untagged-integer advice says "cast with `(k : State)`", and the
+// cast used to refuse exactly that on a kernel parameter: `k` was still an
+// open variable when the body was typed, so the cast UNIFIED it with
+// Nat<State> -- pinning the parameter -- and the program died at the range
+// feeding it ("expected Nat<State>, got Int64"). A cast constrains its
+// result, never its operand (formalism 3.10: `(e : I)` is the one door from
+// integers into I): an open operand gets the checked conversion, and its
+// final type is judged after inference. This is examples/07's state-vector
+// unpacking, which spelled 91 literal subscripts by hand for want of it.
+let static W1 = 4
+let static W2 = 2
+type State = Idx<7>
+type Part = Idx<3>
+let s: Array<Float like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+// unpack: a cast of the parameter and of a position computed from it
+let w1 = method_for(range<Idx<W1>>) <@> lambda(k) -> s((k : State)) |> compute
+let w2 = method_for(range<Idx<W2>>) <@> lambda(k) -> s((W1 + k : State)) |> compute
+// repack over the whole state, reading the parts back by position
+let packed = method_for(range<State>) <@> lambda(k) -> if k < W1 then w1(k) else if k < W1 + W2 then w2(k - W1) else 0.5 |> compute
+// an anonymous range's integers, and a named range's positions
+let r = method_for(0..3) <@> lambda(k) -> s((k : State)) |> compute
+let tail = method_for(range<Part>) <@> lambda(k) -> s((k + 4 : State)) |> compute
+// a named range's index VALUE converts through an integer (the spelling the
+// foreign-tag refusal names, index-types/315)
+let viaint = method_for(range<Part>) <@> lambda(k) -> s((Int64(k) : State)) |> compute
+// a same-tag ascription still type-checks, and its guard is elided
+let same = method_for(range<State>) <@> lambda(k) -> s((k : State)) * 2.0 |> compute
+// EXPECT: w1 = [10, 11, 12, 13]
+// EXPECT: w2 = [14, 15]
+// EXPECT: packed = [10, 11, 12, 13, 14, 15, 0.5]
+// EXPECT: r = [10, 11, 12]
+// EXPECT: tail = [14, 15, 16]
+// EXPECT: viaint = [10, 11, 12]
+// EXPECT: same = [20, 22, 24, 26, 28, 30, 32]

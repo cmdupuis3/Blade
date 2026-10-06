@@ -1,0 +1,9 @@
+// TEST: Index cast of a Float kernel parameter (rejects)
+// ERROR: BL3001 @ 8:46
+// The open-operand cast (index-types/314) defers its judgment, but not its
+// class rule: a kernel over Float64 data hands the cast a float, which is no
+// position.
+type State = Idx<6>
+let s: Array<Float like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+let xs = [0.5, 1.5]
+let bad = method_for(xs) <@> lambda(x) -> s((x : State)) |> compute

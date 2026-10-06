@@ -327,6 +327,12 @@ let (|TreeTag|_|) (tag: string) : (string option * int list) option =
 
 let haloWinTagPrefix = "__halowin|"
 
+/// The binding an index cast `(e : I)` emits for its CHECKED CONVERSION
+/// (TypeCheckSupport.checkedIndexConversion): `{ let __idxcastN = e;
+/// check(0 <= __idxcastN < n, BL8006); __idxcastN : Nat<I> }`. Zonk and the
+/// post-zonk subscript sweep recognize the cast by this name (formalism 3.10).
+let indexCastBindingPrefix = "__idxcast"
+
 /// Parse a halo window Tag into (isCompound, inner alias name, offset list).
 /// Total: any string not shaped like a halo tag yields None.
 let (|HaloWinTag|_|) (tag: string) : (bool * string * int list) option =

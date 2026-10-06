@@ -1,0 +1,11 @@
+// TEST: Index cast of a kernel parameter of another index type (rejects)
+// ERROR: BL4003 @ 10:52
+// ERROR-CONTAINS: `(Int64(e) : State)` is a checked conversion
+// The open-operand cast (index-types/314) is judged once the parameter's type
+// is known: `k` iterates `range<W>`, so it is a W index VALUE, and `(e : I)`
+// converts integers into I, not another index space's values (formalism
+// 3.10's nominal rule). The refusal names the spelling that converts.
+type State = Idx<6>
+type W = Idx<3>
+let s: Array<Float like State> = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+let bad = method_for(range<W>) <@> lambda(k) -> s((k : State)) |> compute
