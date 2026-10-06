@@ -9645,11 +9645,64 @@ and buildApplyInfo (env: TypeEnv)
                     | _ -> [])
                 |> List.concat
                 |> Map.ofList
+            // A placeholder NO parameter carries: the return is a CALL of a
+            // length-preserving callee (`lambda(x) -> unit_scale(center(x))`).
+            // Plain application does not unify a callee's parameter into the
+            // argument, so `x` stays unpinned and the return carries the
+            // CALLEE's placeholder (`__elementwise_inferred_n_31`) -- emitted
+            // as an undeclared `out_extents[1]`, at top level as much as in a
+            // generic body. The callee's own signature says where that length
+            // comes from: a parameter axis carrying the SAME record as the
+            // returned axis. Follow it down the return spine to a kernel
+            // parameter and read that operand's fiber axis. A callee whose
+            // returned axis is not one of its parameter's (a different length)
+            // stops the walk, and the record stays as it was.
+            let paramFiberAxis (pname: string) (axis: int) : IRIndexType option =
+                lambdaInfo.Params
+                |> List.tryFindIndex (fun p -> p.Name = pname)
+                |> Option.bind (fun i ->
+                    if i < arrayTypes.Length && i < kernelInputRanks.Length then
+                        let irank = kernelInputRanks.[i]
+                        let at = arrayTypes.[i]
+                        if irank > 0 && axis < irank && at.IndexTypes.Length >= irank then
+                            List.tryItem (at.IndexTypes.Length - irank + axis) at.IndexTypes
+                        else None
+                    else None)
+            let rec spineFiber (e: TypedExpr) (axis: int) (depth: int) : IRIndexType option =
+                if depth > 32 then None else
+                match e.Kind with
+                | TExprVar (pn, _, _) -> paramFiberAxis pn axis
+                | TExprBlock (_, Some fe) -> spineFiber fe axis (depth + 1)
+                | TExprLet (_, _, _, b) -> spineFiber b axis (depth + 1)
+                | TExprApp (f, args) ->
+                    (match env.Subst.Resolve f.Type with
+                     | FuncElem (paramTys, retTy) ->
+                         (match IR.stripUnits (env.Subst.Resolve retTy) with
+                          | ArrayElem rArr when axis < rArr.IndexTypes.Length ->
+                              let rec_ = rArr.IndexTypes.[axis]
+                              if not (isMintedPlaceholder rec_.Extent) then None
+                              else
+                                  paramTys
+                                  |> List.mapi (fun pi pt -> (pi, pt))
+                                  |> List.tryPick (fun (pi, pt) ->
+                                      match IR.stripUnits (env.Subst.Resolve pt) with
+                                      | ArrayElem pArr when pi < args.Length ->
+                                          pArr.IndexTypes
+                                          |> List.tryFindIndex (fun ix -> ix.Extent = rec_.Extent)
+                                          |> Option.bind (fun pAxis -> spineFiber args.[pi] pAxis (depth + 1))
+                                      | _ -> None)
+                          | _ -> None)
+                     | _ -> None)
+                | _ -> None
             let tDims =
-                arr.IndexTypes |> List.map (fun idx ->
+                arr.IndexTypes |> List.mapi (fun j idx -> (j, idx)) |> List.map (fun (j, idx) ->
                     match idx.Extent with
                     | IRParam (n, _, _) when placeholderFibers.ContainsKey n ->
                         { placeholderFibers.[n] with Kind = TDimension }
+                    | IRParam _ when isMintedPlaceholder idx.Extent ->
+                        (match spineFiber lambdaInfo.Body j 0 with
+                         | Some f -> { f with Kind = TDimension }
+                         | None -> { idx with Kind = TDimension })
                     | _ -> { idx with Kind = TDimension })
             (tDims, tDims.Length)
         | _ ->
@@ -9674,12 +9727,37 @@ and buildApplyInfo (env: TypeEnv)
             // (loops/121's `fs`, rank 1 over Idx<4> from a row over Idx<3>)
             // resolves to `ArrayElem` and takes the arm above, which stays
             // authoritative.
+            //
+            // THE RETURN IS A PARAMETER. With no arity constraint the return
+            // var can still BE a row parameter's own var: in a generic body
+            // (`function f(A: T^2) = object_for(lambda(x) -> x - mean(x)) <@>
+            // A`) nothing pins `x` to an array while the body is checked --
+            // plain application does not unify `mean`'s `T^1` into it -- so
+            // `x - m` simply returns `x`'s type, and the row's axis was
+            // dropped (BL3001: the output came out rank 1). The parameter's
+            // rank is known (kernelInputRanks, here from `mean`'s signature),
+            // and a return that IS the parameter is a row over exactly the
+            // fiber that parameter consumes -- so that operand's fiber, not
+            // merely the first deep-enough one, supplies the T-dims.
+            let returnIsParam : (int * int) option =
+                match IR.stripUnits resolved with
+                | IRTInfer id ->
+                    resolvedParamTypes
+                    |> List.mapi (fun i pt -> (i, pt))
+                    |> List.tryPick (fun (i, pt) ->
+                        match IR.stripUnits (env.Subst.Resolve pt) with
+                        | IRTInfer pid when pid = id
+                                            && i < kernelInputRanks.Length
+                                            && kernelInputRanks.[i] >= 1 ->
+                            Some (kernelInputRanks.[i], i)
+                        | _ -> None)
+                | _ -> None
             let abstractRank =
                 match IR.stripUnits resolved with
                 | IRTInfer id ->
                     match env.Subst.GetArityConstraint id with
                     | Some k when k >= 1 -> Some k
-                    | _ -> None
+                    | _ -> returnIsParam |> Option.map fst
                 | _ -> None
             match abstractRank with
             | None -> ([], 0)
@@ -9687,17 +9765,24 @@ and buildApplyInfo (env: TypeEnv)
                 // First operand whose kernel actually consumes k or more dims;
                 // its innermost k are the fiber. Indexed rather than zipped:
                 // a Poly pack makes kernelInputRanks and arrayTypes differ in
-                // length.
+                // length. A return that IS a parameter reads that parameter's
+                // operand first.
+                let fiberAt (i: int) (at: IRArrayType) =
+                    let irank =
+                        if i < kernelInputRanks.Length then kernelInputRanks.[i] else 0
+                    if irank >= k && at.IndexTypes.Length >= k then
+                        Some (at.IndexTypes
+                              |> List.skip (at.IndexTypes.Length - k)
+                              |> List.map (fun idx -> { idx with Kind = TDimension }))
+                    else None
                 let fiberOf =
-                    arrayTypes |> List.mapi (fun i at ->
-                        let irank =
-                            if i < kernelInputRanks.Length then kernelInputRanks.[i] else 0
-                        if irank >= k && at.IndexTypes.Length >= k then
-                            Some (at.IndexTypes
-                                  |> List.skip (at.IndexTypes.Length - k)
-                                  |> List.map (fun idx -> { idx with Kind = TDimension }))
-                        else None)
-                    |> List.tryPick id
+                    let preferred =
+                        match returnIsParam with
+                        | Some (_, i) when i < arrayTypes.Length -> fiberAt i arrayTypes.[i]
+                        | _ -> None
+                    match preferred with
+                    | Some _ -> preferred
+                    | None -> arrayTypes |> List.mapi fiberAt |> List.tryPick id
                 match fiberOf with
                 | Some tDims -> (tDims, k)
                 // No operand supplies a k-deep fiber: leave it alone rather

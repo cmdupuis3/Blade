@@ -1,0 +1,64 @@
+// TEST: Row Lambda Return Extent From Param
+// ============================================================================
+// Two ways a row kernel's returned axis lost its extent:
+//
+// 1. An UNANNOTATED row lambda over a generic `A: T^2` parameter
+//    (`lambda(x) -> x - mean(x)`): nothing pins `x` to an array while the body
+//    is checked, so the return IS `x`'s inference var, with no arity
+//    constraint -- the row axis was dropped and the output came out rank 1
+//    (BL3001). Fusion of a block-free `>>@` pipeline produces exactly this
+//    lambda, so the fused pipeline failed the same way.
+// 2. A lambda whose return is a CALL of a length-preserving generic function
+//    (`lambda(x) -> unit_scale(center_e(x))`) carried the callee's own length
+//    placeholder into the output (`out_extents[1] = __elementwise_inferred_n_31`,
+//    BL9002) -- at top level too. The callee's signature carries the same
+//    record on its parameter and its return; that is followed down the return
+//    spine to the kernel parameter's row axis.
+//
+// A callee that CHANGES the length (`stats2: T^1 -> U^1`, a literal of two)
+// keeps its own extent: the walk only follows a returned axis its parameter
+// also carries.
+from stats import mean
+type AssetIdx = Idx<3>
+type DayIdx = Idx<5>
+let R: Array<Float64 like AssetIdx, DayIdx> = [[1.0, 1.0, 1.0, 1.0, 6.0], [5.0, 0.0, 0.0, 0.0, 0.0], [7.0, 7.0, 2.0, 7.0, 7.0]]
+
+function center_e(x: T^1) -> T^1 = x - mean(x)
+function unit_scale(x: T^1) -> T^1 = x / sqrt(mean(x * x))
+function stats2(x: T^1) -> U^1 = {
+    let a = mean(x)
+    let b = mean(x * x)
+    [a, b]
+}
+
+// (1) unannotated inline row lambda over a generic parameter
+function demean(A: T^2) -> T^2 = {
+    let Z = object_for(lambda(x) -> x - mean(x)) <@> A |> compute
+    Z
+}
+let D = demean(R)
+// EXPECT: D = [[-1, -1, -1, -1, 4], [4, -1, -1, -1, -1], [1, 1, -4, 1, 1]]
+
+// (1) the fused expression-bodied pipeline over a generic parameter
+function standardize(A: T^2) -> T^2 = {
+    let Z = (object_for(center_e) >>@ object_for(unit_scale)) <@> A |> compute
+    Z
+}
+let Zs = standardize(R)
+// EXPECT: Zs = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+
+// (2) a lambda over calls of length-preserving generics, at top level
+let W = object_for(lambda(x) -> unit_scale(center_e(x))) <@> R |> compute
+// EXPECT: W = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+
+// (2) the same, inside a generic body
+function standardize_calls(A: T^2) -> T^2 = {
+    let Z = object_for(lambda(x) -> unit_scale(center_e(x))) <@> A |> compute
+    Z
+}
+let Wg = standardize_calls(R)
+// EXPECT: Wg = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+
+// a length-CHANGING callee keeps its own extent (2, not the row's 5)
+let M = object_for(lambda(x) -> stats2(center_e(x))) <@> R |> compute
+// EXPECT: M = [[0, 4], [0, 4], [0, 4]]
