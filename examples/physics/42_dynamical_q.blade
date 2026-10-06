@@ -60,9 +60,8 @@
 
 // ---- certified eigenfactors (emitted by the untrusted oracle; certified below) ----
 // CSV-backed since 2026-07-19: the eigenfactors live in data/42_*.csv
-// (bit-identical extraction of the former inline literals). Run from THIS
-// directory so the relative paths resolve: `cd examples/physics && blade
-// run 42_dynamical_q.blade` — see providers/CsvProviderSpec.md. The 1-D
+// (bit-identical extraction of the former inline literals), by paths
+// relative to this file -- see providers/CsvProviderSpec.md. The 1-D
 // payloads are stored as one CSV row; `(0)` peels the vector off the
 // 1 x 64 load.
 import csv as csvd

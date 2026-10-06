@@ -193,8 +193,15 @@ module private NcQuery =
 
 /// Loads all metadata from a NetCDF file (opens read-only, extracts dims/vars, closes).
 let load (path: string) : NcFile =
+    // Relative to the compiling program's source directory when the CLI
+    // scoped one (ProviderRegistry.SourceBase); the emitters still bake the
+    // path as given.
+    let given = path
+    let path = Blade.ProviderRegistry.SourceBase.resolve path
     if not (System.IO.File.Exists path) then
-        failwith $"NetCDF file not found: '{path}' (resolved against cwd '{(System.IO.Directory.GetCurrentDirectory())}')"
+        let full = System.IO.Path.GetFullPath path
+        failwith (if given = path || given = full then $"NetCDF file not found: '{full}'"
+                  else $"NetCDF file not found: '{full}' (written as '{given}')")
     let fileId = NcQuery.openFile path 0  // NC_NOWRITE = 0
     try
         let dimIds = NcQuery.getDimIds fileId
@@ -221,6 +228,7 @@ and NcPayload =
 /// Reads a variable's full payload at compile time. Float-coded variables
 /// arrive as doubles; every integer coding arrives as int64 (mirrors ncTypeToElemType's collapse).
 let readVarData (path: string) (varName: string) : Result<NcVarData, string> =
+    let path = Blade.ProviderRegistry.SourceBase.resolve path
     try
         let fileId = NcQuery.openFile path 0  // NC_NOWRITE
         try

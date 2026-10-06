@@ -398,6 +398,72 @@ let runCliSmokeTests () : TH.BlockResult =
         finally
             try Directory.Delete(dir, true) with _ -> ()
 
+    // --- Provider store paths resolve against the SOURCE directory ---
+    //
+    // `blade run` executes the program with the source file's directory as its
+    // working directory, but the compile-time metadata read opened a relative
+    // store path against the COMPILER's cwd: `blade run examples/09_...` from
+    // the repo root died BL2008 while the same program run from examples/
+    // worked. Every verb now resolves a relative store path against the source
+    // file's directory at compile time (ProviderRegistry.SourceBase), and the
+    // emitted C++ still carries the path as the program wrote it.
+    if selfExe.IsNone then
+        record "provider paths: check from another directory" TH.Skip "no Blade executable beside the test assembly"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_srcrel_" + Guid.NewGuid().ToString("N"))
+        let sub = Path.Combine(dir, "sub")
+        Directory.CreateDirectory sub |> ignore
+        try
+            File.WriteAllText(Path.Combine(sub, "data.csv"), "1.0,2.0\n3.0,4.0\n")
+            let prog (path: string) =
+                "import csv as csvd\n"
+                + $"let h = csvd.load(\"{path}\")\n"
+                + "let M: Array<Float64 like Idx<2>, Idx<2>> = h.vars.data |> csvd.read\n"
+                + "let s = reduce(reduce(M, (+)), (+))\n"
+            File.WriteAllText(Path.Combine(sub, "p.blade"), prog "data.csv")
+            File.WriteAllText(Path.Combine(sub, "q.blade"), prog "no_such_store.csv")
+            File.WriteAllText(Path.Combine(sub, "r.blade"), prog (Path.Combine(sub, "data.csv").Replace('\\', '/')))
+            // From the PARENT directory: the relative store is found beside the source.
+            let (code, out, err) = spawn dir [ "check"; Path.Combine("sub", "p.blade") ]
+            recordCase "provider paths: `check` resolves a relative store against the source directory"
+                (code = 0 && out.Contains "OK" && not (err.Contains "BL2008")) (out + err)
+            let (code, out, err) = spawn dir [ "plan"; Path.Combine("sub", "p.blade") ]
+            recordCase "provider paths: `plan` resolves it too" (code = 0 && not (err.Contains "BL2008")) (out + err)
+            // The C++ names the store exactly as written: run time resolves it
+            // against the executable's working directory, as it always did.
+            let (code, out, err) = spawn dir [ "emit"; Path.Combine("sub", "p.blade") ]
+            let asWritten =
+                out.Contains "\"data.csv\""
+                && not (out.Contains "sub/data.csv" || out.Contains "sub\\data.csv" || out.Contains "sub\\\\data.csv")
+            recordCase "provider paths: `emit` compiles and bakes the path as written"
+                (code = 0 && asWritten)
+                (if code <> 0 then out + err elif not asWritten then "the C++ does not name the store as written" else "")
+            // An absolute store path is untouched.
+            let (code, out, err) = spawn dir [ "check"; Path.Combine("sub", "r.blade") ]
+            recordCase "provider paths: an absolute store path still resolves" (code = 0 && out.Contains "OK") (out + err)
+            // A store that is not there is still BL2008 at the load site, and
+            // the message names where it was looked for.
+            let (code, out, err) = spawn dir [ "check"; Path.Combine("sub", "q.blade") ]
+            recordCase "provider paths: a missing store is still BL2008, naming the resolved path"
+                (code <> 0 && err.Contains "BL2008" && err.Contains "no_such_store.csv"
+                 && err.Contains (Path.Combine(Path.GetFullPath sub, "no_such_store.csv")))
+                (out + err)
+            // With no source scope (the harness compiling a string), resolution
+            // is the process working directory, as before.
+            recordCase "provider paths: no scope leaves a relative path untouched"
+                (Blade.ProviderRegistry.SourceBase.resolve "data/x.csv" = "data/x.csv"
+                 && Blade.ProviderRegistry.SourceBase.within (Some sub) (fun () ->
+                        Blade.ProviderRegistry.SourceBase.resolve "data.csv" = Path.Combine(Path.GetFullPath sub, "data.csv")
+                        && Blade.ProviderRegistry.SourceBase.resolve "s3://bucket/x" = "s3://bucket/x")
+                 && Blade.ProviderRegistry.SourceBase.current () = None)
+                ""
+            if capabilities.Value.HasGpp then
+                let (code, out, err) = spawn dir [ "run"; Path.Combine("sub", "p.blade") ]
+                recordCase "provider paths: `run` from another directory folds and runs"
+                    (code = 0 && out.Contains "s = 10") (out + err)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+
     // --- REPL / notebook: re-running a declaration cell replaces it ---
     //
     // The rebind key had no `struct` / `interface` / `impl` arm, so re-running

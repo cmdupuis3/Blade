@@ -26,7 +26,7 @@ import ppl as ppl
 type TimeIdx = Idx<310>
 // CSV-backed since 2026-07-19: the two 4 x 310 lag-track matrices live in
 // data/17_{REG,CHA}.csv (bit-identical extraction of the former inline
-// literals). Run from THIS directory so the relative paths resolve — see
+// literals), by paths relative to this file -- see
 // providers/CsvProviderSpec.md.
 import csv as csvd
 let REG_h = csvd.load("data/17_REG.csv")

@@ -110,15 +110,20 @@ groups rejected; literal extents required):
 
 The `c.load` path is a compile-time string literal, resolved **twice**:
 
-1. At compile time against the **compiler process cwd** (metadata + folds).
-2. At runtime against the **executable's cwd** (`blade run` places the exe
-   next to the `.blade` file and pins its cwd there).
+1. At compile time (metadata + folds) against the **source file's
+   directory** under the CLI verbs (`check` / `emit` / `compile` / `run` /
+   `plan`; `ProviderRegistry.SourceBase`), and against the process cwd
+   where no source file scopes the compilation (the test harness, the REPL
+   and notebook lanes; `ide serve` moves its cwd to the request file's
+   folder).
+2. At runtime against the **executable's cwd** (`blade run` pins it to the
+   `.blade` file's directory). The C++ bakes the path as written.
 
-The two agree when you run from the source file's directory with relative
-paths (`cd examples/physics && blade run 42_dynamical_q.blade` with
-`data/...` paths). The runtime reader re-validates the baked shape: row or
-column drift between compile and run aborts with `CSV error: ...` and a
-nonzero exit.
+So under `blade run` the two agree wherever the compiler is launched from:
+`blade run examples/physics/42_dynamical_q.blade` from the repo root opens
+`examples/physics/data/42_EC.csv` both times. An absolute path is used as
+is. The runtime reader re-validates the baked shape: row or column drift
+between compile and run aborts with `CSV error: ...` and a nonzero exit.
 
 ## Fold and interpreter
 

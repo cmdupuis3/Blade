@@ -1395,6 +1395,10 @@ let private loadUncached (key: RepoKey) : Result<Loaded, string> =
 /// folds, lowering and codegen all resolve through here and see the same
 /// snapshot even when a writer commits mid-compilation.
 let load (path: string) : Result<Loaded, string> =
+    // Relative to the compiling program's source directory when the CLI
+    // scoped one (ProviderRegistry.SourceBase); the emitters still bake the
+    // path as given.
+    let path = Blade.ProviderRegistry.SourceBase.resolve path
     match parseKey path with
     | Error e -> Error e
     | Ok key ->

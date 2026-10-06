@@ -153,8 +153,15 @@ let parseCells (path: string) (text: string) : Result<string[][], string> =
 /// Parse + classify: sniffing rule, label validation, dtype inference.
 /// Returns the metadata plus the full cell grid.
 let parseFile (path: string) : Result<CsvFile * string[][], string> =
+    // Relative to the compiling program's source directory when the CLI
+    // scoped one (ProviderRegistry.SourceBase); the emitters still bake the
+    // path as given.
+    let given = path
+    let path = Blade.ProviderRegistry.SourceBase.resolve path
     if not (File.Exists path) then
-        Error $"CSV file not found: '{path}' (resolved against cwd '{Directory.GetCurrentDirectory()}')"
+        let full = Path.GetFullPath path
+        Error (if given = path || given = full then $"CSV file not found: '{full}'"
+               else $"CSV file not found: '{full}' (written as '{given}')")
     else
     parseCells path (File.ReadAllText path) |> Result.bind (fun cells ->
         let headered = not (cells.[0] |> Array.forall isNumericCell)

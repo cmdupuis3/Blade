@@ -113,12 +113,72 @@ type ProviderSpec = {
     LinkNeeds: string
 }
 
+/// The directory a program's RELATIVE store paths resolve against at
+/// COMPILE time. `blade run` executes the compiled program with the SOURCE
+/// file's directory as its working directory, so a `let s =
+/// csv.load("data/x.csv")` opens `<source dir>/data/x.csv` at run time; the
+/// compile-time metadata and fold reads must open the same file, wherever the
+/// compiler was launched from. The CLI verbs (check / emit / compile / run /
+/// plan) scope a compilation with `within (Some <source dir>)`; with no scope
+/// a relative path resolves against the process working directory as before
+/// (the test harness, the REPL and notebook lanes, and `ide serve`, which
+/// moves its own working directory to the request file's folder).
+///
+/// Only the compile-time READERS see the resolved path (`resolving` below):
+/// the IR keeps the path the program wrote (Lowering stamps `FilePath` from
+/// the source literal), so the emitted C++ and the run record name it as
+/// written and resolve it at run time exactly as before. AsyncLocal, like the
+/// side channels below, since the test suite compiles programs in parallel.
+module SourceBase =
+    let private slot = new System.Threading.AsyncLocal<string>()
+
+    /// The scoped base directory, if a compilation set one.
+    let current () : string option =
+        match slot.Value with
+        | null | "" -> None
+        | d -> Some d
+
+    /// Run `f` with `dir` as the base (None clears it), restoring the
+    /// previous base afterwards.
+    let within (dir: string option) (f: unit -> 'a) : 'a =
+        let saved = slot.Value
+        slot.Value <- (match dir with Some d -> System.IO.Path.GetFullPath d | None -> null)
+        try f () finally slot.Value <- saved
+
+    /// A store path as the compile-time readers must open it: a relative path
+    /// joined to the scoped base; an absolute path, a URL-like `scheme://`
+    /// location, an empty path, or any path with no scope set, untouched. A
+    /// suffix the path carries (icechunk's `@branch:main`) rides along.
+    let resolve (path: string) : string =
+        match current () with
+        | None -> path
+        | Some dir ->
+            if System.String.IsNullOrEmpty path || path.Contains "://"
+               || System.IO.Path.IsPathRooted path then path
+            else System.IO.Path.Combine(dir, path)
+
+/// The spec as registered: every compile-time reader opens the store at
+/// `SourceBase.resolve path`. The runtime emitters (`Gen*`) and `Includes`
+/// are untouched -- they render the path the program wrote into the C++.
+let private resolving (spec: ProviderSpec) : ProviderSpec =
+    let r = SourceBase.resolve
+    { spec with
+        LoadAsModule = fun builder moduleName path -> spec.LoadAsModule builder moduleName (r path)
+        ReadVarData = fun path varName -> spec.ReadVarData (r path) varName
+        ReadWreathPool = spec.ReadWreathPool |> Option.map (fun f -> fun path varName -> f (r path) varName)
+        StreamRowsBlock = spec.StreamRowsBlock |> Option.map (fun f -> fun path varName -> f (r path) varName)
+        VarDimNames = fun path varName -> spec.VarDimNames (r path) varName
+        Fingerprint = fun path -> spec.Fingerprint (r path)
+        VersionStamp = fun path -> spec.VersionStamp (r path) }
+
 let private registry =
     System.Collections.Concurrent.ConcurrentDictionary<string, ProviderSpec>()
 
-/// Idempotent registration (last write wins), mirroring StaticEval's builtin registry convention.
+/// Idempotent registration (last write wins), mirroring StaticEval's builtin
+/// registry convention. The stored spec resolves relative store paths for its
+/// compile-time readers (`resolving`).
 let register (spec: ProviderSpec) : unit =
-    registry.[spec.Name] <- spec
+    registry.[spec.Name] <- resolving spec
 
 let tryFind (name: string) : ProviderSpec option =
     match registry.TryGetValue name with
@@ -154,7 +214,7 @@ module DimChunks =
     let record (binding: string) (provider: string) (path: string) =
         match readers.TryGetValue provider with
         | true, f ->
-            let edges = try f path with _ -> Map.empty
+            let edges = try f (SourceBase.resolve path) with _ -> Map.empty
             table.Value <- Map.add binding edges (entries ())
         | _ -> ()
 

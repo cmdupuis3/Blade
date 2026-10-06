@@ -12,10 +12,6 @@ dotnet run -- run examples/01_weather_stations.blade
 dotnet run -- check examples/01_weather_stations.blade   # typecheck only
 ```
 
-(Exception: `09_qg_atmosphere.blade` reads a committed zarr store by a
-relative path, so run it from this directory —
-`cd examples && dotnet run --project .. -- run 09_qg_atmosphere.blade`.)
-
 Each file keeps the corpus conventions — a unique `// TEST:` first line and
 `// EXPECT: name = value` comments documenting the verified output — so any
 of them can be promoted into a suite category unchanged. Expected values

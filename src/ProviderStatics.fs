@@ -153,7 +153,9 @@ let private readAndFold (provider: string) (path: string) (varName: string) : Re
         match Blade.ProviderRegistry.tryFind provider with
         | Some spec -> spec.VersionStamp path
         | None -> 0L
-    let key = (provider, path, varName, stamp)
+    // Keyed on the RESOLVED path: one relative path names different stores
+    // under different source directories in a long-lived process.
+    let key = (provider, Blade.ProviderRegistry.SourceBase.resolve path, varName, stamp)
     let r = foldCache.GetOrAdd(key, fun _ -> readAndFoldUncached provider path varName key)
     (match r, foldHashes.TryGetValue key with
      | Ok _, (true, h) -> logFold (provider, path, varName, h)
@@ -190,7 +192,7 @@ let private axisExtent (provider: string) (path: string) (root: string) (dim: st
         match Blade.ProviderRegistry.tryFind provider with
         | Some spec -> spec.VersionStamp path
         | None -> 0L
-    axisCache.GetOrAdd((provider, path, root, stamp), fun _ -> storeAxesUncached provider path root)
+    axisCache.GetOrAdd((provider, Blade.ProviderRegistry.SourceBase.resolve path, root, stamp), fun _ -> storeAxesUncached provider path root)
     |> Map.tryFind dim
 
 /// Idempotent installation: register every provider spec, then bridge the

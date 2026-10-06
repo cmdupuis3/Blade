@@ -144,8 +144,9 @@ let runCsvTests () =
         (isError (parseFile (tmpFile "empty.csv" "")) "empty") ""
     check "format: non-numeric data cell rejected (strings deferred)"
         (isError (parseFile (tmpFile "strdata.csv" "a,b\n1.0,x\n")) "non-numeric cell 'x'") ""
-    check "format: missing file error carries path and cwd"
-        (isError (parseFile (Path.Combine(tmp, "nope.csv"))) "resolved against cwd") ""
+    let nope = Path.GetFullPath(Path.Combine(tmp, "nope.csv"))
+    check "format: missing file error names the full path it looked for"
+        (isError (parseFile nope) $"CSV file not found: '{nope}'") ""
 
     // ---------------------------------------------------------------
     // 4. readVarData payloads (fold + interpreter source of truth)

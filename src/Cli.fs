@@ -129,16 +129,25 @@ let private dispatchInner (args: string[]) : int =
             // directory, not necessarily the caller's.
             o.RunRecord |> Option.iter (fun p ->
                 System.Environment.SetEnvironmentVariable("BLADE_RUN_RECORD", System.IO.Path.GetFullPath p))
+            // A relative provider store path resolves against the SOURCE
+            // file's directory at compile time, as it does at run time (the
+            // program runs there): see ProviderRegistry.SourceBase.
+            let inSourceDir (f: string) (body: unit -> int) : int =
+                let dir =
+                    try Some (System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath f))
+                    with _ -> None
+                Blade.ProviderRegistry.SourceBase.within dir body
             match verb, o.File with
             | _, None -> usageFailure $"{verb} needs a source file (e.g. {verb} prog.blade)"
-            | "run", Some f -> runFile f o.Verbose o.Mpi strictPins
+            | "run", Some f -> inSourceDir f (fun () -> runFile f o.Verbose o.Mpi strictPins)
             | "compile", Some f ->
-                match compileToExe f o.Output o.Verbose strictPins with
-                | Ok path -> printfn "%s" path; 0
-                | Error e -> reportFailure e
-            | "emit", Some f -> emitFile f o.Output o.Verbose strictPins
-            | "check", Some f -> checkFile f strictPins
-            | _, Some f -> planFile f o.Json
+                inSourceDir f (fun () ->
+                    match compileToExe f o.Output o.Verbose strictPins with
+                    | Ok path -> printfn "%s" path; 0
+                    | Error e -> reportFailure e)
+            | "emit", Some f -> inSourceDir f (fun () -> emitFile f o.Output o.Verbose strictPins)
+            | "check", Some f -> inSourceDir f (fun () -> checkFile f strictPins)
+            | _, Some f -> inSourceDir f (fun () -> planFile f o.Json)
 
     // Native-toolchain health report (docs/plans/plan-toolchain-packaging.md).
     | [| "doctor" |] -> Blade.Doctor.runDoctor false

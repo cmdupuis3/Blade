@@ -42,9 +42,8 @@
 // carries no annotation, so its transform ascribes the shape in place
 // (`sp.ifft2((QHT_B : CF))`).
 //
-// Initial fields / filter load from the committed zarr store (import zarr).
-// Run from the examples/ directory:
-//   cd examples && dotnet run --project .. -- run 09_qg_atmosphere.blade
+// Initial fields / filter load from the committed zarr store (import zarr),
+// by a path relative to this file.
 // ============================================================================
 import spectra as sp
 import zarr as z

@@ -817,7 +817,10 @@ let private loadArrayV3 (name: string) (arrayDir: string) : ZarrArrayMeta =
 /// (`zarr.json` group or single array), v2 group (`.zgroup` + array
 /// subdirectories), v2 single array (`.zarray`). Array names must be valid Blade identifiers; one level of nesting only.
 let load (path: string) : ZarrStore =
-    let full = Path.GetFullPath path
+    // Relative to the compiling program's source directory when the CLI
+    // scoped one (ProviderRegistry.SourceBase); the emitters still bake the
+    // path as given.
+    let full = Path.GetFullPath (Blade.ProviderRegistry.SourceBase.resolve path)
     let checkName (n: string) =
         if not (isValidIdent n) then
             failwith $"Zarr store '{path}': array name '{n}' is not a valid identifier (it becomes a struct field)"

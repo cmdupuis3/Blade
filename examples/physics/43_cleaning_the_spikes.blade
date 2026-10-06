@@ -52,8 +52,8 @@ import math as m
 
 // CSV-backed since 2026-07-19: the 40 x 160 spiked tracks and 4 x 160
 // ground truth live in data/43_{ZT,GT}.csv (bit-identical extraction of
-// the former inline literals). Run from THIS directory so the relative
-// paths resolve — see providers/CsvProviderSpec.md.
+// the former inline literals), by paths relative to this file -- see
+// providers/CsvProviderSpec.md.
 import csv as csvd
 let ZT_h = csvd.load("data/43_ZT.csv")
 let ZT: Array<Float64 like Idx<40>, Idx<160>> = ZT_h.vars.data |> csvd.read

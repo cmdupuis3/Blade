@@ -152,7 +152,7 @@ let planTiles (modul: IRModule) : Map<string, TilePlan> * Map<IRId, TilePlan> =
                 // every input resolves, and all share the output's shape and one chunk grid
                 let resolved =
                     inputs |> List.map (fun (id, rb, spec) ->
-                        match Blade.IcechunkProvider.resolveArray spec.FilePath spec.VarName with
+                        match Blade.IcechunkProvider.resolveArray (Blade.ProviderRegistry.SourceBase.resolve spec.FilePath) spec.VarName with
                         | Ok ra -> Some (id, rb, spec, ra)
                         | Error _ -> None)
                 if not (resolved |> List.forall Option.isSome) then decline b "an input variable did not resolve"
@@ -195,7 +195,7 @@ let planTiles (modul: IRModule) : Map<string, TilePlan> * Map<IRId, TilePlan> =
                         let inputLines (t: int) =
                             resolved |> List.mapi (fun kx (_, _, spec, ra) ->
                                 let repo =
-                                    match Blade.IcechunkProvider.parseKey spec.FilePath with
+                                    match Blade.IcechunkProvider.parseKey (Blade.ProviderRegistry.SourceBase.resolve spec.FilePath) with
                                     | Ok key -> Blade.IcechunkProvider.canonicalRepoPath key.RepoPath
                                     | Error _ -> spec.FilePath
                                 let node = Blade.IcechunkProvider.base32Encode ra.Node.Id

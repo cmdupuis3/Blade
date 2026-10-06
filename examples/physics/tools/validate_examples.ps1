@@ -26,10 +26,10 @@ function Num-Match([double]$got, [double]$want) {
 
 $grandPass = 0; $grandFail = 0; $badFiles = 0
 $bladeFiles = @(Get-ChildItem (Join-Path $physDir "*.blade") | Where-Object { $_.Name -like "$Filter*" } | Sort-Object Name)
-# Run from the examples directory: CSV-backed examples (42, 30, 31, 43, 17)
-# load data with paths relative to it ("data/42_EC.csv"), and the compiler
-# resolves those against ITS cwd at compile time (see CsvProviderSpec.md's
-# resolution contract).
+# CSV-backed examples (42, 30, 31, 43, 17) load data by paths relative to
+# their own directory ("data/42_EC.csv"); `blade run` resolves those against
+# the source directory at compile and run time alike (CsvProviderSpec.md's
+# resolution contract), so the Push-Location below is a convenience.
 Push-Location $physDir
 try {
 foreach ($bfile in $bladeFiles) {

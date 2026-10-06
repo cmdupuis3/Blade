@@ -58,8 +58,8 @@
 // ============================================================================
 // CSV-backed since 2026-07-19: the 192 x 97 integer digit table lives in
 // data/31_DIG.csv (bit-identical extraction of the former inline literal;
-// all-integer cells load as Int64). Run from THIS directory so the
-// relative path resolves — see providers/CsvProviderSpec.md.
+// all-integer cells load as Int64), by a path relative to this file --
+// see providers/CsvProviderSpec.md.
 import csv as csvd
 let DIG_h = csvd.load("data/31_DIG.csv")
 let DIG: Array<Int64 like Idx<192>, Idx<97>> = DIG_h.vars.data |> csvd.read

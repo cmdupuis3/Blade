@@ -94,8 +94,9 @@ blade test docs               # every `blade` code block in CLAUDE.md + docs/ (t
 
 Bare `blade` (no verb) prints the usage, which lists every `blade test` key. `blade run` /
 `compile` build in a private `%TEMP%\blade-build\<name>-<path hash>-<pid>-<nonce>` directory and
-run the program with the SOURCE's directory as its working directory; `--verbose` keeps the
-build directory. A g++ rejection of generated code is an internal error, BL9002.
+run the program with the SOURCE's directory as its working directory; every verb also resolves
+a relative provider store path (`csv.load("data/x.csv")`) against that directory at compile
+time, while the C++ keeps the path as written. `--verbose` keeps the build directory. A g++ rejection of generated code is an internal error, BL9002.
 
 `--strict-pins` (valid on `check`/`emit`/`compile`/`run`) promotes BL4010 pin suggestions to
 errors; it also has its own test block, `blade test strict-pins`.
