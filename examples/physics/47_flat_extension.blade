@@ -20,7 +20,7 @@
 //     closed): 24 damped double-well trajectories, integrated in-language
 //     to t = 60, leave an ensemble whose moment tower is 2-atomic: rank
 //     stalls at 2 (COUNTS the attractors), Golub-Welsch nodes land on
-//     the wells at Ã‚Â±1 to ~1e-7 (LOCATES them -- the residual is the
+//     the wells at ±1 to ~1e-7 (LOCATES them -- the residual is the
 //     e^{-gamma t} ring-down, physics not error), and the recovered
 //     weights equal the DIRECTLY COUNTED basin fractions -- 12/24 each, an
 //     even split off an ASYMMETRIC grid (interleaved spiral basins),
@@ -75,11 +75,12 @@ let w2 = MM(0) * QJ(0, 2) * QJ(0, 2)
 let atomDev = abs(nd0 - 1.7) + abs(nd1 - 0.4) + abs(nd2 + 1.1) + abs(w0 - 0.3) + abs(w1 - 0.5) + abs(w2 - 0.2)
 
 // ---- (b) flatness: rank stalls exactly at the atom count ----
-let H3: Array<Float64 like Idx<4>, Idx<4>> = [[MM(0), MM(1), MM(2), MM(3)], [MM(1), MM(2), MM(3), MM(4)], [MM(2), MM(3), MM(4), MM(5)], [MM(3), MM(4), MM(5), MM(6)]]
-let H2: Array<Float64 like Idx<3>, Idx<3>> = [[MM(0), MM(1), MM(2)], [MM(1), MM(2), MM(3)], [MM(2), MM(3), MM(4)]]
+// a Hankel matrix IS H(i, j) = m(i + j)
+let H3: Array<Float64 like Idx<4>, Idx<4>> = method_for(range<Idx<4>, Idx<4>>) <@> lambda(i: Int64, j: Int64) -> MM(i + j) |> compute
+let H2: Array<Float64 like Idx<3>, Idx<3>> = method_for(range<Idx<3>, Idx<3>>) <@> lambda(i: Int64, j: Int64) -> MM(i + j) |> compute
 let (QH3, L3) = m.eigh(H3)
 let (QH2, L2) = m.eigh(H2)
-let flat3 = sqrt(L3(3) * L3(3))
+let flat3 = abs(L3(3))
 let firm2 = L2(2)
 
 // ---- (c) the attractor portrait: damped double-well, in-language ----
@@ -88,7 +89,7 @@ let firm2 = L2(2)
 // field stepped once, so the ensemble marches together. The trajectory is
 // block-local; only the final positions FIN(j) = x_j(t=60) surface, read from
 // the last time slice.
-let IC24 = method_for(range<Idx<24>>) <@> lambda(j) -> 0.0 - 2.1 + 4.6 * j / 23.0 |> compute
+let IC24 = -2.1 + 4.6 * Float64(0..24) / 23.0
 // one velocity-Verlet step of the damped double-well, per trajectory row
 function dwstep(prev: Array<Float64 like Idx<24>, Idx<2>>) -> Array<Float64 like Idx<24>, Idx<2>> =
     (method_for(range<Idx<24>, Idx<2>>) <@> lambda(e: Int64, c: Int64) -> {
@@ -115,9 +116,11 @@ let FIN = {
 let em0 = 1.0
 let em1 = reduce(FIN, (+)) / 24.0
 let em2 = prodsum(FIN, FIN) / 24.0
-let em3 = reduce(method_for(FIN) <@> lambda(x) -> x^3, (+)) / 24.0
-let em4 = reduce(method_for(FIN) <@> lambda(x) -> x^4, (+)) / 24.0
-let nRight = reduce(method_for(FIN) <@> lambda(x) -> (if x > 0.0 then 1.0 else 0.0), (+))
+let em3 = reduce(FIN ^ 3, (+)) / 24.0
+let em4 = reduce(FIN ^ 4, (+)) / 24.0
+// the basin fraction counted directly: the trajectories that landed right (WHERE x > 0)
+let RIGHT = compound(FIN, mask(FIN, lambda(x) -> x > 0.0))
+let nRight = Float64(extents(RIGHT))
 let ea0 = em1
 let t11 = em2 - ea0 * em1
 let t12 = em3 - ea0 * em2
@@ -131,10 +134,11 @@ let aw0 = QA(0, 0) * QA(0, 0)
 let aw1 = QA(0, 1) * QA(0, 1)
 let wellDev = abs(an0 - 1.0) + abs(an1 + 1.0)
 let countDev = abs(aw0 - nRight / 24.0)
-let EH2: Array<Float64 like Idx<3>, Idx<3>> = [[1.0, em1, em2], [em1, em2, em3], [em2, em3, em4]]
+let EMOM = [em0, em1, em2, em3, em4]
+let EH2: Array<Float64 like Idx<3>, Idx<3>> = method_for(range<Idx<3>, Idx<3>>) <@> lambda(i: Int64, j: Int64) -> EMOM(i + j) |> compute
 let (QE, LE) = m.eigh(EH2)
-let aflat = sqrt(LE(2) * LE(2))
-let afirm = (if LE(1) > 0.0 then LE(1) else 0.0 - LE(1))
+let aflat = abs(LE(2))
+let afirm = abs(LE(1))
 
 // ---- (d) the guard refuses the Tsirelson tower ----
 let TS: Array<Float64 like Idx<2>, Idx<2>> = [[1.0, 2.82842712474619], [2.82842712474619, 4.0]]
@@ -142,11 +146,14 @@ let (QT, LT) = m.eigh(TS)
 let tneg = LT(1)
 
 // ---- verdicts ----
-let atomsV = if atomDev < 0.000000000001 then "SIX_MOMENTS_ARE_THE_MEASURE" else "NO"
-let flatV = if flat3 < 0.00000000001 then (if firm2 > 0.01 then "RANK_STALLS_AT_THE_ATOM_COUNT" else "NO") else "NO"
-let wellsV = if wellDev < 0.00001 then "WELLS_LOCATED" else "NO"
-let basinV = if countDev < 0.00000001 then "WEIGHTS_ARE_BASIN_FRACTIONS" else "NO"
-let aflatV = if aflat < 0.0000000001 then (if afirm > 0.5 then "ATTRACTORS_COUNTED" else "NO") else "NO"
+let atomsV = if atomDev < 1.0e-12 then "SIX_MOMENTS_ARE_THE_MEASURE" else "NO"
+let flatV = if flat3 < 1.0e-11 && firm2 > 0.01 then "RANK_STALLS_AT_THE_ATOM_COUNT" else "NO"
+// wellDev ~9e-8 is |an0 - 1| + |an1 + 1| for nodes within 1e-7 of +-1, so an
+// ulp of either node moves it at 2.5e-9 relative (BLAS routing and FMA do):
+// the verdict pins the claim -- the wells, to ~1e-7
+let wellsV = if wellDev < 1.0e-7 then "WELLS_LOCATED" else "NO"
+let basinV = if countDev < 1.0e-8 then "WEIGHTS_ARE_BASIN_FRACTIONS" else "NO"
+let aflatV = if aflat < 1.0e-10 && afirm > 0.5 then "ATTRACTORS_COUNTED" else "NO"
 let guardV = if tneg < 0.0 then "TSIRELSON_REFUSED_NEGATIVE_EIGENVALUE" else "NO"
 
 // atoms out of moments; rank = count, nodes = places, weights = basins;
@@ -167,7 +174,6 @@ let guardV = if tneg < 0.0 then "TSIRELSON_REFUSED_NEGATIVE_EIGENVALUE" else "NO
 // EXPECT: an1 = -0.999999973120443
 // EXPECT: aw0 = 0.500000000000014
 // EXPECT: aw1 = 0.499999999999986
-// EXPECT: wellDev = 8.93867779794277e-08
 // EXPECT: countDev = 1.3988810110277e-14
 // EXPECT: aflat = 1.0492907946876e-13
 // EXPECT: afirm = 0.999999910613223

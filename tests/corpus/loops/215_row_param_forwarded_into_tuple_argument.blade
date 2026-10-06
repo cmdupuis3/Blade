@@ -1,0 +1,27 @@
+// TEST: A Row Parameter Forwarded Into A Tuple Argument Stays A Row
+// ============================================================================
+// `lambda(row: R^1)` over a DENSE rank-2 operand declares a row. When the
+// body only forwards the row inside a pack argument -- `f((row, tt))`, the
+// shape of `method_for(F) <@> lambda(row: R^1) -> lsdft((row, ts), omegas)`
+// -- nothing in the body pins the row to an array (a pack argument is not a
+// direct argument, and plain application does not unify a callee's
+// parameter into it), and the structural rank scan saw a dense operand whose
+// every axis is iterated: the param was bound one ELEMENT and the apply
+// refused the program (BL3999 "a ^1 type variable is a rank-1 array, but
+// this position supplies Float64"). The written rank is the row depth.
+// Hand values: tt = [0, 1, 2]; rows [1, 2, 3] -> 0 + 2 + 6 = 8 and
+// [4, 5, 6] -> 0 + 5 + 12 = 17.
+// ============================================================================
+function f(st: Tuple<U^1, V^1>) = {
+    let s, t = st
+    prodsum(s, t)
+}
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let tt = [0.0, 1.0, 2.0]
+let direct = method_for(A) <@> lambda(row: R^1) -> f((row, tt)) |> compute
+// EXPECT: direct = [8.0, 17.0]
+let via_let = method_for(A) <@> lambda(row: R^1) -> {
+    let p = (row, tt)
+    f(p)
+} |> compute
+// EXPECT: via_let = [8.0, 17.0]

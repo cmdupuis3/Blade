@@ -37,14 +37,19 @@
 // 1/mu_t = 3(1/m1 + 1/m2); dw_i = 2 J_t / (m_i R_i).
 // ============================================================================
 import ppl as ppl
-let M2 = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5]
-let SP = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
+type Real = Idx<14>
+let M2: Array<Float64 like Real> = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5]
+let SP: Array<Float64 like Real> = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0]
+// the two spin sub-ensembles, as masks over the realization axis
+let spinless = mask(SP, lambda(w) -> w < 0.5)
+let spinning = mask(SP, lambda(w) -> w > 0.5)
 
 // --- staged geometry and collision columns: pseudo-native positional
-//     operator lifting carries the whole formula chain -- no zip+kernel ---
+//     operator lifting (sqrt included) carries the whole formula chain --
+//     no zip+kernel ---
 let R2C = 0.5 * M2 ^ (1.0 / 3.0)
 let SFC = 0.55 / (0.5 + R2C)
-let CFC = method_for(SFC) <@> lambda(s) -> sqrt(1.0 - s ^ 2.0) |> compute
+let CFC = sqrt(1.0 - SFC ^ 2.0)
 let Q1N = (1.0 - M2) * CFC / (1.0 + M2)
 let Q2N = 2.0 * CFC / (1.0 + M2)
 let S0C = 0.0 - SFC + R2C * SP
@@ -90,7 +95,7 @@ let test0_v2 = t_q2n * t_cf - (0.0 - t_jt / 1.0) * t_sf
 // --- the new variant: the translational/rotational partition is fuzzy ---
 // ETR is already one realization column over the 14-point sample axis, so
 // its tower is a straight former read: k1 raw, k2 central.
-let ETRV: Array<Float64 like Idx<1>, Idx<14>> = [ETR]
+let ETRV: Array<Float64 like Idx<1>, Real> = [ETR]
 let etr_m1 = ppl.moments(ETRV, 1)
 let etr_c2 = ppl.comoments(ETRV, 2)
 let ETR_k1 = etr_m1(0)
@@ -98,19 +103,22 @@ let ETR_k2 = etr_c2(0)
 let trans_V = if ETR_k2 > 0.0001 then "VARIANT" else "INVARIANT"
 
 // --- circular tower of the deflection (spinless sub-ensemble) ---
-let SIN1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ay / sqrt((ax ^ 2.0) + (ay ^ 2.0)) |> compute
-let COS1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> ax / sqrt((ax ^ 2.0) + (ay ^ 2.0)) |> compute
-let S0n = reduce(method_for(SP) <@> lambda(w) -> (if w < 0.5 then 1.0 else 0.0), (+))
-let Ssin0 = reduce(method_for(zip(SIN1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
-let Scos0 = reduce(method_for(zip(COS1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
-let sin0_mean = Ssin0 / S0n
-let cos0_mean = Scos0 / S0n
+// speed and direction of ball 1, lifted over the realization columns; each
+// sub-ensemble statistic is a WHERE: compound the column to the spin mask
+let SPD1 = sqrt((V1X ^ 2.0) + (V1Y ^ 2.0))
+let SIN1 = V1Y / SPD1
+let COS1 = V1X / SPD1
+let SIN0 = compound(SIN1, spinless)
+let COS0 = compound(COS1, spinless)
+let S0n = Float64(extents(SIN0))
+let sin0_mean = reduce(SIN0, (+)) / S0n
+let cos0_mean = reduce(COS0, (+)) / S0n
 let rho0 = sqrt((sin0_mean ^ 2.0) + (cos0_mean ^ 2.0))
 
 // --- spin-orbit correlation manufactured from nothing (spinless rows) ---
-let Sw0 = reduce(method_for(zip(W2C, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
-let Sws = reduce(method_for(zip(W2C, SIN1, SP)) <@> lambda(x, y, w) -> (if w < 0.5 then x * y else 0.0), (+))
-let so_cov = Sws / S0n - (Sw0 / S0n) * sin0_mean
+let W20 = compound(W2C, spinless)
+let WS0 = compound(W2C * SIN1, spinless)
+let so_cov = reduce(WS0, (+)) / S0n - (reduce(W20, (+)) / S0n) * sin0_mean
 let so_V = if abs(so_cov) > 0.0001 then "CORRELATED" else "UNCORRELATED"
 
 // --- the hidden register: spin is invisible until touch, decisive at it.
@@ -118,14 +126,14 @@ let so_V = if abs(so_cov) > 0.0001 then "CORRELATED" else "UNCORRELATED"
 // spin-blind (the direction depends on the velocity ratio, which cancels
 // the spin) -- the register shouts in the SPEED channel instead. Which
 // observables an internal register couples to is itself structured. ---
-let Ssin4 = reduce(method_for(zip(SIN1, SP)) <@> lambda(x, w) -> (if w > 0.5 then x else 0.0), (+))
-let sin4_mean = Ssin4 / (14.0 - S0n)
+let SIN4 = compound(SIN1, spinning)
+let S4n = Float64(extents(SIN4))
+let sin4_mean = reduce(SIN4, (+)) / S4n
 let reg_ang = sin4_mean - sin0_mean
-let SPD1 = method_for(zip(V1X, V1Y)) <@> lambda(ax, ay) -> sqrt((ax ^ 2.0) + (ay ^ 2.0)) |> compute
-let Sspd0 = reduce(method_for(zip(SPD1, SP)) <@> lambda(x, w) -> (if w < 0.5 then x else 0.0), (+))
-let Sspd4 = reduce(method_for(zip(SPD1, SP)) <@> lambda(x, w) -> (if w > 0.5 then x else 0.0), (+))
-let spd0_mean = Sspd0 / S0n
-let spd4_mean = Sspd4 / (14.0 - S0n)
+let SPD0 = compound(SPD1, spinless)
+let SPD4 = compound(SPD1, spinning)
+let spd0_mean = reduce(SPD0, (+)) / S0n
+let spd4_mean = reduce(SPD4, (+)) / S4n
 let reg_spd = spd4_mean - spd0_mean
 let reg_V = if abs(reg_spd) > 0.05 then "TOUCH_REVEALS_SPIN" else "REGISTER_SILENT"
 let ang_V = if abs(reg_ang) < 0.05 then "ANGLE_NEARLY_BLIND" else "ANGLE_SEES_SPIN"

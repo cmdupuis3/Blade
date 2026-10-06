@@ -22,38 +22,44 @@ type TimeIdx = Idx<7>
 let PHI: Array<Float64 like Idx<1>, TimeIdx> = [[0.856967028599, 1.15259015823, 1.33932953124, 1.5, 1.66067046876, 1.84740984177, 2.1430329714]]
 let d = ppl.dist(PHI, 6)
 
-// vx(phi), vy(phi) as reusable sub-expressions (1/r = (1+0.5 cos k phi)/0.9,
-// vphi = 1/r, vr = 0.527046276695 sin(k phi), k = 0.948683298051):
-//   vx = 0.527046276695 sin(k t) cos t - ((1+0.5 cos k t)/0.9) sin t
-//   vy = 0.527046276695 sin(k t) sin t + ((1+0.5 cos k t)/0.9) cos t
+// --- the detector of 09/10, written once ---
+function dispersion(k1: Float64, k2: Float64) -> Float64 = abs(k2) / (abs(k1) + 0.000000001)
+function verdict(k2: Float64, disp: Float64) -> String = if abs(k2) < 1.0e-20 then "INVARIANT" else (if disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- the precessing orbit at angle t (k = 0.948683298051, e/Ltilde =
+//     0.527046276695): 1/r, vr, and the Cartesian velocity built from them ---
+function inv_r(t) = (1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9
+function vr(t) = 0.527046276695 * sin(0.948683298051 * t)
+function vx(t) = vr(t) * cos(t) - inv_r(t) * sin(t)
+function vy(t) = vr(t) * sin(t) + inv_r(t) * cos(t)
 
 // --- TRUE energy E_pert = 1/2 v^2 - 1/r - beta/r^2  (INVARIANT) ---
-let Ep_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) * (0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) + (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t)) * (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t))) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) - 0.05 * ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9))
+let Ep_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * (vx(t) * vx(t) + vy(t) * vy(t)) - inv_r(t) - 0.05 * inv_r(t) * inv_r(t))
 let Ep_k1 = ppl.cumulant(Ep_d, 1)
 let Ep_k2 = ppl.cumulant(Ep_d, 2)
-let Ep_disp = sqrt(Ep_k2(0) * Ep_k2(0)) / (sqrt(Ep_k1(0) * Ep_k1(0)) + 0.000000001)
-let Ep_V = if sqrt(Ep_k2(0) * Ep_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ep_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Ep_disp = dispersion(Ep_k1(0), Ep_k2(0))
+let Ep_V = verdict(Ep_k2(0), Ep_disp)
 
 // --- NAIVE Kepler energy E_kepler = 1/2 v^2 - 1/r  (VARIANT: not conserved) ---
-let Ek_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) * (0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t)) + (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t)) * (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t))) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9))
+let Ek_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * (vx(t) * vx(t) + vy(t) * vy(t)) - inv_r(t))
 let Ek_k1 = ppl.cumulant(Ek_d, 1)
 let Ek_k2 = ppl.cumulant(Ek_d, 2)
-let Ek_disp = sqrt(Ek_k2(0) * Ek_k2(0)) / (sqrt(Ek_k1(0) * Ek_k1(0)) + 0.000000001)
-let Ek_V = if sqrt(Ek_k2(0) * Ek_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ek_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Ek_disp = dispersion(Ek_k1(0), Ek_k2(0))
+let Ek_V = verdict(Ek_k2(0), Ek_disp)
 
 // --- LRL x-component A_x = vy*Lz - x/r = vy - cos t  (Lz = 1 here)  (VARIANT: precesses) ---
-let Ax_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (0.527046276695 * sin(0.948683298051 * t) * sin(t) + ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * cos(t)) - cos(t))
+let Ax_d  = ppl.dist_map(d, 2, 3, lambda(t) -> vy(t) - cos(t))
 let Ax_k1 = ppl.cumulant(Ax_d, 1)
 let Ax_k2 = ppl.cumulant(Ax_d, 2)
-let Ax_disp = sqrt(Ax_k2(0) * Ax_k2(0)) / (sqrt(Ax_k1(0) * Ax_k1(0)) + 0.000000001)
-let Ax_V = if sqrt(Ax_k2(0) * Ax_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ax_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Ax_disp = dispersion(Ax_k1(0), Ax_k2(0))
+let Ax_V = verdict(Ax_k2(0), Ax_disp)
 
 // --- LRL y-component A_y = -vx*Lz - y/r = -vx - sin t  (VARIANT: precesses) ---
-let Ay_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (0.0 - (0.527046276695 * sin(0.948683298051 * t) * cos(t) - ((1.0 + 0.5 * cos(0.948683298051 * t)) / 0.9) * sin(t))) - sin(t))
+let Ay_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.0 - vx(t) - sin(t))
 let Ay_k1 = ppl.cumulant(Ay_d, 1)
 let Ay_k2 = ppl.cumulant(Ay_d, 2)
-let Ay_disp = sqrt(Ay_k2(0) * Ay_k2(0)) / (sqrt(Ay_k1(0) * Ay_k1(0)) + 0.000000001)
-let Ay_V = if sqrt(Ay_k2(0) * Ay_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ay_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Ay_disp = dispersion(Ay_k1(0), Ay_k2(0))
+let Ay_V = verdict(Ay_k2(0), Ay_disp)
 
 // energy and angular momentum survive; the LRL vector precesses:
 // EXPECT: Ep_k1 = [-0.416666666667]

@@ -1,0 +1,31 @@
+// TEST: A Fused Multi-Statistic Sweep Folds Each Leg At Its Own Unit
+// ============================================================================
+// The single-pass idiom -- one loop object, one kernel per statistic, the
+// legs `<&!>`-fused under ONE `(+)` -- over a Float<meters> column. The legs
+// fold meters, meters^2 and a bare count. The shared section is polymorphic,
+// so each leg folds at its own unit (the Fusion rule types the tree
+// alpha x beta, formalism 10.2), and the result takes the reduction-join
+// encoding the `object_for(<&!>) <@> (...)` spelling of the same legs builds.
+// It used to unify every leg with the first and refuse the sweep (BL3006
+// "meters^2 vs meters"). The annotations below are CHECKED: a wrong unit on
+// any derived statistic would not compile.
+// Hand values: x = [1, 2, 3, 4] m -> sum 10 m, sum of squares 30 m^2,
+// count 4; mean 2.5 m; population variance 30/4 - 2.5^2 = 1.25 m^2.
+// ============================================================================
+Unit meters
+let x: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(x)
+let (s, ss, n) = reduce((L <@> lambda(t) -> t) <&!> (L <@> lambda(t) -> t * t) <&!> (L <@> lambda(t) -> 1.0), (+))
+let mean: Float<meters> = s / n
+let var: Float<meters^2> = ss / n - mean * mean
+// EXPECT: s = 10.0
+// EXPECT: ss = 30.0
+// EXPECT: n = 4.0
+// EXPECT: mean = 2.5
+// EXPECT: var = 1.25
+
+
+// Two legs, destructured as a pair.
+let (s2, ss2) = reduce((L <@> lambda(t) -> t) <&!> (L <@> lambda(t) -> t * t), (+))
+// EXPECT: s2 = 10.0
+// EXPECT: ss2 = 30.0

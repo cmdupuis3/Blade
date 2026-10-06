@@ -20,19 +20,29 @@ type TimeIdx = Idx<7>
 let PHI: Array<Float64 like Idx<1>, TimeIdx> = [[0.517725271449, 0.739442618673, 0.879497148429, 1.0, 1.12050285157, 1.26055738133, 1.48227472855]]
 let d = ppl.dist(PHI, 6)
 
+// the detector of 09/10, written once
+function dispersion(k1: Float64, k2: Float64) -> Float64 = abs(k2) / (abs(k1) + 0.000000001)
+function verdict(disp: Float64) -> String = if disp < 0.000001 then "INVARIANT" else "VARIANT"
+
+// the orbit state at anomaly p, in the generator's monomial variables
+function x(p) = cos(p) / (1.0 + 0.6 * cos(p))
+function y(p) = sin(p) / (1.0 + 0.6 * cos(p))
+function vx(p) = 0.0 - sin(p)
+function vy(p) = 0.6 + cos(p)
+
 // a raw constituent monomial x vy^2 -- expected VARIANT
-let mono_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) * (0.6 + cos(p)))
+let mono_d  = ppl.dist_map(d, 2, 3, lambda(p) -> x(p) * vy(p) * vy(p))
 let mono_k1 = ppl.cumulant(mono_d, 1)
 let mono_k2 = ppl.cumulant(mono_d, 2)
-let mono_disp = sqrt(mono_k2(0) * mono_k2(0)) / (sqrt(mono_k1(0) * mono_k1(0)) + 0.000000001)
-let mono_V = if mono_disp < 0.000001 then "INVARIANT" else "VARIANT"
+let mono_disp = dispersion(mono_k1(0), mono_k2(0))
+let mono_V = verdict(mono_disp)
 
 // the DISCOVERED combination x vy^2 - y vx vy - x/r -- expected INVARIANT (= e = 0.6)
-let lrl_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p)) * (0.6 + cos(p)) - cos(p))
+let lrl_d  = ppl.dist_map(d, 2, 3, lambda(p) -> x(p) * vy(p) * vy(p) - y(p) * vx(p) * vy(p) - cos(p))
 let lrl_k1 = ppl.cumulant(lrl_d, 1)
 let lrl_k2 = ppl.cumulant(lrl_d, 2)
-let lrl_disp = sqrt(lrl_k2(0) * lrl_k2(0)) / (sqrt(lrl_k1(0) * lrl_k1(0)) + 0.000000001)
-let lrl_V = if lrl_disp < 0.000001 then "INVARIANT" else "VARIANT"
+let lrl_disp = dispersion(lrl_k1(0), lrl_k2(0))
+let lrl_V = verdict(lrl_disp)
 
 // the discovered invariant equals the eccentricity e = 0.6:
 // EXPECT: lrl_k1 = [0.6]

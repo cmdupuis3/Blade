@@ -47,7 +47,8 @@
 //     2 < s <= 2 sqrt 2 is exactly "deep-2 legal, depth-4 impossible" --
 //     the supra-classical shell mapped from inside the type.
 // No data, no generator: the tower is a literal, the certificates are
-// scalar arithmetic, the hypercube identity is a 16-point exact ensemble.
+// dot products of explicit realization vectors, the hypercube identity is
+// a 16-point exact ensemble.
 // ============================================================================
 
 // ---- the tower (degree-2 cells; q = 1/sqrt2 exact) ----
@@ -55,32 +56,44 @@ let q = sqrt(0.5)
 let c_a0b0 = q
 let c_a0b1 = q
 let c_a1b0 = q
-let c_a1b1 = 0.0 - q
+let c_a1b1 = -q
 let c_a0a1 = 0.0
 let c_b0b1 = 0.0
 let chsh = c_a0b0 + c_a0b1 + c_a1b0 - c_a1b1
 
 // ---- constructive depth-2 certificate: rank-2 realization ----
-// a0 = (1,0), a1 = (0,1), b0 = (q,q), b1 = (q,-q)
-let n_a0 = 1.0 * 1.0 + 0.0 * 0.0
-let n_a1 = 0.0 * 0.0 + 1.0 * 1.0
-let n_b0 = q * q + q * q
-let n_b1 = q * q + q * q
-let g_a0b0 = 1.0 * q + 0.0 * q
-let g_a0b1 = 1.0 * q + 0.0 * (0.0 - q)
-let g_a1b0 = 0.0 * q + 1.0 * q
-let g_a1b1 = 0.0 * q + 1.0 * (0.0 - q)
-let g_a0a1 = 1.0 * 0.0 + 0.0 * 1.0
-let g_b0b1 = q * q + q * (0.0 - q)
+// four vectors in R^2 whose dot products (the Gram matrix) are the cells
+let A0 = [1.0, 0.0]
+let A1 = [0.0, 1.0]
+let B0 = [q, q]
+let B1 = [q, -q]
+let n_a0 = prodsum(A0, A0)
+let n_a1 = prodsum(A1, A1)
+let n_b0 = prodsum(B0, B0)
+let n_b1 = prodsum(B1, B1)
+let g_a0b0 = prodsum(A0, B0)
+let g_a0b1 = prodsum(A0, B1)
+let g_a1b0 = prodsum(A1, B0)
+let g_a1b1 = prodsum(A1, B1)
+let g_a0a1 = prodsum(A0, A1)
+let g_b0b1 = prodsum(B0, B1)
 let cert2 = abs(g_a0b0 - c_a0b0) + abs(g_a0b1 - c_a0b1) + abs(g_a1b0 - c_a1b0) + abs(g_a1b1 - c_a1b1) + abs(g_a0a1 - c_a0a1) + abs(g_b0b1 - c_b0b1) + abs(n_a0 - 1.0) + abs(n_a1 - 1.0) + abs(n_b0 - 1.0) + abs(n_b1 - 1.0)
-let depth2_V = if cert2 < 0.000000000001 then "DEGREE2_REALIZABLE_RANK2" else "CELLS_MISMATCH"
+let depth2_V = if cert2 < 1.0e-12 then "DEGREE2_REALIZABLE_RANK2" else "CELLS_MISMATCH"
 
 // ---- the hypercube identity: B^2 = 4 on all 16 sign assignments ----
+// grid point g's four binary digits are the signs of (a0, a1, b0, b1)
 let SGN = [-1.0, 1.0]
-let BSQ = method_for(range<Idx<16>>) <@> lambda(g: Int64) -> (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8)) * (SGN(g % 2) * SGN((g / 4) % 2) + SGN(g % 2) * SGN(g / 8) + SGN((g / 2) % 2) * SGN((g / 4) % 2) - SGN((g / 2) % 2) * SGN(g / 8)) |> compute
+let BSQ = method_for(range<Idx<16>>) <@> lambda(g: Int64) -> {
+    let a0 = SGN(g % 2)
+    let a1 = SGN((g / 2) % 2)
+    let b0 = SGN((g / 4) % 2)
+    let b1 = SGN(g / 8)
+    let bell = a0 * b0 + a0 * b1 + a1 * b0 - a1 * b1
+    bell * bell
+} |> compute
 let bsq_sum = reduce(BSQ, (+))
-let bsq_dev = reduce(method_for(BSQ) <@> lambda(x) -> abs(x - 4.0), (+))
-let cube_V = if bsq_dev < 0.000000000001 then "IDENTITY_ON_THE_HYPERCUBE" else "NOT_AN_IDENTITY"
+let bsq_dev = reduce(abs(BSQ - 4.0), (+))
+let cube_V = if bsq_dev < 1.0e-12 then "IDENTITY_ON_THE_HYPERCUBE" else "NOT_AN_IDENTITY"
 
 // ---- the obstruction: any extension must give Var(B) = 4 - chsh^2 ----
 let var_needed = 4.0 - chsh * chsh
@@ -90,25 +103,29 @@ let ext_V = if var_needed < 0.0 then "EXTENSION_NEEDS_NEGATIVE_VARIANCE" else "E
 let var_at_1 = 4.0 - 1.0
 let var_at_2 = 4.0 - 4.0
 let var_at_24 = 4.0 - 2.4 * 2.4
-let wall_V = if var_at_2 < 0.000000000001 then (if var_at_2 > 0.0 - 0.000000000001 then "CLASSICAL_BOUND_IS_VARIANCE_POSITIVITY" else "NO") else "NO"
+let wall_V = if abs(var_at_2) < 1.0e-12 then "CLASSICAL_BOUND_IS_VARIANCE_POSITIVITY" else "NO"
 // quantum rescue: B^2 = 4 + K, |K| <= 4 => |s| <= sqrt 8; at the top the
 // state is a B-eigenstate (variance exactly zero)
 let tsirelson = sqrt(8.0)
 let var_q_at_max = 4.0 + 4.0 - tsirelson * tsirelson
-let rescue_V = if abs(tsirelson - chsh) < 0.000000000001 then "PHASES_RESCUE_THE_VARIANCE" else "NO"
+let rescue_V = if abs(tsirelson - chsh) < 1.0e-12 then "PHASES_RESCUE_THE_VARIANCE" else "NO"
 
 // ---- the gap zone at s = 2.4: rank-4 realization vs no extension ----
 // a0 = e1, a1 = e2, b0 = (t, t, p, 0), b1 = (t, -t, 0, p), t = s/4,
 // p = sqrt(1 - s^2/8)
 let t = 2.4 / 4.0
 let p = sqrt(1.0 - 2.4 * 2.4 / 8.0)
-let z_b0 = t * t + t * t + p * p
-let z_b1 = t * t + t * t + p * p
-let z_b0b1 = t * t - t * t + 0.0 + 0.0
-let z_a0b0 = t
-let z_a1b1 = 0.0 - t
+let ZA0 = [1.0, 0.0, 0.0, 0.0]
+let ZA1 = [0.0, 1.0, 0.0, 0.0]
+let ZB0 = [t, t, p, 0.0]
+let ZB1 = [t, -t, 0.0, p]
+let z_b0 = prodsum(ZB0, ZB0)
+let z_b1 = prodsum(ZB1, ZB1)
+let z_b0b1 = prodsum(ZB0, ZB1)
+let z_a0b0 = prodsum(ZA0, ZB0)
+let z_a1b1 = prodsum(ZA1, ZB1)
 let gap_cert = abs(z_b0 - 1.0) + abs(z_b1 - 1.0) + abs(z_b0b1) + abs(z_a0b0 - 0.6) + abs(z_a1b1 + 0.6)
-let gap2_V = if gap_cert < 0.000000000001 then "GAP_ZONE_DEGREE2_REALIZABLE" else "NO"
+let gap2_V = if gap_cert < 1.0e-12 then "GAP_ZONE_DEGREE2_REALIZABLE" else "NO"
 let gap4_V = if var_at_24 < 0.0 then "GAP_ZONE_NOT_EXTENDABLE" else "NO"
 
 // depth-2 legal, depth-4 impossible; both bounds from Var(B) >= 0:

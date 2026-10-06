@@ -1,4 +1,5 @@
 import units.SI
+from stats import mean
 
 // Welch's overlapped segment averaging (WOSA) over the generalized
 // Lomb-Scargle DFT, for unevenly sampled series. Same estimator as the dask
@@ -45,14 +46,14 @@ type Est = EnumIdx<["power", "cos_arg", "sin_arg"]>
 let i = complex(0.0, 1.0)
 let two_pi = 6.283185307179586
 
-// Blade has no min/max/mean over an array; these are the folds.
-function mean(x: T^1) = reduce(x, (+)) / extents(x)
+// `mean` is stdlib (`from stats import mean`, above); an array's min and max
+// are lambda folds.
 function min(x: T^1) = reduce(x, lambda(a, b) -> if a < b then a else b)
 function max(x: T^1) = reduce(x, lambda(a, b) -> if a > b then a else b)
 
 function variance(x: T^1) = {
     let d = x - mean(x)
-    prodsum(d, d) / extents(d)
+    prodsum(d, d) / Float64(extents(d))
 }
 
 /// Hamming-family taper (alpha = 0.53836) for the whole series at once: the
@@ -106,7 +107,7 @@ where omp(st: 1) = {
             let k = floor(t / h)
             let kmax = Float64(n_segments)
             if k > kmax then kmax else k
-        } else 0.0 - 1.0) |> compute
+        } else -1.0) |> compute
     let gk  = group_keys(keys)
     let gt  = group_by(ts, gk)
     let gu  = group_by(uu, gk)

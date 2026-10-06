@@ -1,0 +1,19 @@
+// TEST: A Row Kernel's Returned Row Can Take Its Extent From A Captured Array
+// ============================================================================
+// `scaled(v, w)` returns a row as long as its SECOND argument. Called from a
+// row kernel with a captured array there -- `lambda(row: R^1) ->
+// scaled(row, ws)` -- the output's column axis is `ws`'s. The T-dim seam
+// follows the callee's returned placeholder down to the argument that
+// carries it, but only ever accepted a kernel PARAMETER at the end of that
+// walk; a captured array stopped it, the output kept the callee's minted
+// placeholder, and g++ rejected the emitted `__method_for_inferred_n_k`
+// (BL9002). A captured array's own type names its extent.
+// Hand values: row sums 6 and 15, times ws = [1, 2, 3, 4].
+// ============================================================================
+function scaled(v: T^1, w: U^1) = w <@> lambda(x) -> x * reduce(v, (+))
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let ws: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let r = method_for(A) <@> lambda(row: R^1) -> scaled(row, ws) |> compute
+// EXPECT: r = [[6.0, 12.0, 18.0, 24.0], [15.0, 30.0, 45.0, 60.0]]
+let corner = r(1, 3)
+// EXPECT: corner = 60.0

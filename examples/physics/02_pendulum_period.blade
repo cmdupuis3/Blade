@@ -13,13 +13,16 @@ type TimeIdx = Idx<3>
 let LD: Array<Float64 like Idx<1>, TimeIdx> = [[0.877525512861, 1.0, 1.12247448714]]
 let d = ppl.dist(LD, 6)
 
-let dT = ppl.dist_map(d, 3, 2, lambda(l) -> 6.28318530718 * sqrt(l / 9.81))
+// the period map T(L), named once and pushed through at two jet degrees
+function period(l) = 6.28318530718 * sqrt(l / 9.81)
+
+let dT = ppl.dist_map(d, 3, 2, period)
 let t1 = ppl.cumulant(dT, 1)
 let t2 = ppl.cumulant(dT, 2)
 let t3 = ppl.cumulant(dT, 3)
 
 // deeper jet for the refined variance
-let dTb = ppl.dist_map(d, 2, 3, lambda(l) -> 6.28318530718 * sqrt(l / 9.81))
+let dTb = ppl.dist_map(d, 2, 3, period)
 let u2 = ppl.cumulant(dTb, 2)
 
 // exact route: empirical cumulants of the 3 transformed periods

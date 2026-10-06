@@ -40,14 +40,17 @@ import ml as ml
 // sequentiality is DERIVED from the prefix dependence with no imperative
 // loop and no double buffer. Periodic stencils wrap their neighbour
 // positions arithmetically (`(i + 1) % 64`, `(i + 63) % 64` -- the `+ n - 1`
-// keeps the operand non-negative, so `%` is the mathematical modulus); the
-// spatial statistics -- box filter, subgrid stress, Smagorinsky shape, and
-// the least-squares folds -- are pure formers and reduces.
+// keeps the operand non-negative, so `%` is the mathematical modulus -- a
+// `halo` window would shrink the traversal to the interior instead of
+// wrapping); the spatial statistics -- box filter, subgrid stress,
+// Smagorinsky shape, and the least-squares folds -- are pure formers and
+// reduces.
 // ============================================================================
 type XD = Idx<64>
 type L = Idx<16>
-type Blk = Idx<9>
-type LT = Idx<81>
+type Tile = Chunked<XD, 4>              // XD in runs of 4: one run per L cell
+type DT = Idx<81>                       // DNS time levels 0..80
+type LT = Idx<81>                       // LES time levels 0..80
 
 let pi = 3.141592653589793
 let hd = 2.0 * pi / 64.0
@@ -70,42 +73,29 @@ function burgers_step(u: Array<Float like XD>, h: Float) -> Array<Float like XD>
         u(i) + 0.01 * (0.05 * ((u(ip) - 2.0 * u(i) + u(im)) / (h * h)) - u(i) * ((u(ip) - u(im)) / (2.0 * h)))
     }) |> compute
 
-// ten DNS steps = one sampling block
-function dns10(u: Array<Float like XD>, h: Float) -> Array<Float like XD> = {
-    let u1 = burgers_step(u, h)
-    let u2 = burgers_step(u1, h)
-    let u3 = burgers_step(u2, h)
-    let u4 = burgers_step(u3, h)
-    let u5 = burgers_step(u4, h)
-    let u6 = burgers_step(u5, h)
-    let u7 = burgers_step(u6, h)
-    let u8 = burgers_step(u7, h)
-    let u9 = burgers_step(u8, h)
-    burgers_step(u9, h)
-}
-
-// W=4 box filter, 64 -> 16
+// W=4 box filter, 64 -> 16: `Chunked<XD, 4>` segments the fine axis into its
+// 16 runs of four, `group_by` views a field as 16 runs, and the bare `reduce`
+// folds each run (the default innermost-axis partial fold) -- no 4j + k
+// index arithmetic, and the 16 run sums come out on the coarse axis L.
+let tiles = segments(Tile)
 function filter16(f: Array<Float like XD>) -> Array<Float like L> =
-    (method_for(range<L>) <@> lambda(j) ->
-        (f(4 * j + 0) + f(4 * j + 1) + f(4 * j + 2) + f(4 * j + 3)) / 4.0
-    ) |> compute
+    reduce(group_by(f, tiles), (+)) / 4.0
 
-// Smagorinsky-form shape g = -2 Delta^2 |S| S, S = d(ubar)/dx (central)
-function smag_g(ub: Array<Float like L>, h: Float) -> Array<Float like L> =
+// Smagorinsky-form shape g = -2 Delta^2 |S| S, S = d(ubar)/dx (central).
+// The shape reads ubar only through a DIFFERENCE, so it is certified
+// Galilean-invariant too (the compiler's own judgment: BL4014 suggests the
+// clause for exactly this body).
+function smag_g(ub: Array<Float like L>, h: Float) where ml.galilean(ub) -> Array<Float like L> =
     (method_for(range<L>) <@> lambda(j) -> {
         let sb = (ub((j + 1) % 16) - ub((j + 15) % 16)) / (2.0 * h)
-        let gv = -2.0 * h * h * abs(sb) * sb
-        gv
+        (-2.0 * h * h * abs(sb) * sb)
     }) |> compute
 
 // per-sample a-priori regression contribution [sum_j tau*g, sum_j g*g]:
 // tau = mean(u^2 | tile) - ubar^2 is the exact subgrid stress (a comoment)
 function contrib(f: Array<Float like XD>, h: Float) -> Array<Float like Idx<2>> = {
     let ub = filter16(f)
-    let fsq = f * f
-    let msq = filter16(fsq)
-    let ub2 = ub * ub
-    let tau = msq - ub2
+    let tau = filter16(f * f) - ub * ub
     let g = smag_g(ub, h)
     [prodsum(tau, g), prodsum(g, g)]
 }
@@ -127,70 +117,39 @@ function les_step(v: Array<Float like L>, h: Float, c: Float) -> Array<Float lik
         v(j) + 0.01 * (0.05 * ((v(jp) - 2.0 * v(j) + v(jm)) / (h * h)) - v(j) * ((v(jp) - v(jm)) / (2.0 * h)) - (tp - tm) / (2.0 * h))
     }) |> compute
 
-// ---- DNS as a recursive array: blk(b) is the field after 10b steps, so the
-// a-priori samples are blk(0..7) (t = 0, 10, ..., 70) and the final field is
-// blk(8). C = <tau g>/<g g> folds the 8 per-sample contributions. ----
-let c_learned = {
-    let rec blk: Array<Float like Blk, XD> =
-        match blk with
+// ---- DNS as ONE recursive array over the 81 time levels: dns(n) is the
+// field after n steps, so the a-priori samples are dns(0), dns(10), ...,
+// dns(70) (t = 0, 10, ..., 70) and dns(80) is the final field. C = <tau g>/<g g>
+// folds the 8 per-sample contributions, and the filtered final field is the
+// a-posteriori reference; the run is block-local and hands out both. ----
+let (c_learned, dns_bar) = {
+    let rec dns: Array<Float like DT, XD> =
+        match dns with
         | zero -> zero
         | zero :: s -> zero :: u0
-        | prefix :: n -> prefix :: dns10(prefix(n - 1), hd)
-    let s0 = blk(0)
-    let s1 = blk(1)
-    let s2 = blk(2)
-    let s3 = blk(3)
-    let s4 = blk(4)
-    let s5 = blk(5)
-    let s6 = blk(6)
-    let s7 = blk(7)
-    let c0 = contrib(s0, hl)
-    let c1 = contrib(s1, hl)
-    let c2 = contrib(s2, hl)
-    let c3 = contrib(s3, hl)
-    let c4 = contrib(s4, hl)
-    let c5 = contrib(s5, hl)
-    let c6 = contrib(s6, hl)
-    let c7 = contrib(s7, hl)
-    let reg = c0 + c1 + c2 + c3 + c4 + c5 + c6 + c7
-    reg(0) / reg(1)
+        | prefix :: n -> prefix :: burgers_step(prefix(n - 1), hd)
+    let reg = contrib(dns(0), hl) + contrib(dns(10), hl) + contrib(dns(20), hl) + contrib(dns(30), hl)
+        + contrib(dns(40), hl) + contrib(dns(50), hl) + contrib(dns(60), hl) + contrib(dns(70), hl)
+    (reg(0) / reg(1), filter16(dns(80)))
 }
 // EXPECT: c_learned = 0.10247926333564443
-
-// filtered final DNS field, the a-posteriori reference
-let dns_bar = {
-    let rec blk: Array<Float like Blk, XD> =
-        match blk with
-        | zero -> zero
-        | zero :: s -> zero :: u0
-        | prefix :: n -> prefix :: dns10(prefix(n - 1), hd)
-    let uf = blk(8)
-    filter16(uf)
-}
 // EXPECT: dns_bar = [0.3106288260701199, 0.42367258478749803, 0.4448532433129827, 0.4420370390195009, 0.5019661852184347, 0.6250871517093046, 0.773738281648543, 0.8977721610505398, -0.09129081277855333, -1.330026444654224, -1.1329260848315503, -0.8881521955334666, -0.6268948443326589, -0.36350955740184915, -0.10929060699123225, 0.12233507370660954]
 
-// ---- a-posteriori LES: each field is a recursive array over 80 coarse steps,
-// lm with the learned closure, ln with none (c = 0) ----
-let lm = {
-    let lm0 = filter16(u0)
-    let rec lm_traj: Array<Float like LT, L> =
-        match lm_traj with
+// ---- a-posteriori LES: one run is a recursive array over 80 coarse steps
+// from the filtered initial field; lm with the learned closure, ln with none
+// (c = 0) ----
+function les_run(c: Float) -> Array<Float like L> = {
+    let rec traj: Array<Float like LT, L> =
+        match traj with
         | zero -> zero
-        | zero :: s -> zero :: lm0
-        | prefix :: n -> prefix :: les_step(prefix(n - 1), hl, c_learned)
-    lm_traj(80)
+        | zero :: s -> zero :: filter16(u0)
+        | prefix :: n -> prefix :: les_step(prefix(n - 1), hl, c)
+    traj(80)
 }
+let lm = les_run(c_learned)
 // EXPECT: lm = [0.2954861658488696, 0.40729845563967637, 0.42471230456899406, 0.43702055106048715, 0.5119473544509064, 0.6391857818138728, 0.7889572339057705, 0.9410133520417426, 0.38956225292345326, -1.830598668172149, -1.08810109158179, -0.8929099991910181, -0.6317145724729729, -0.3735970349403537, -0.12375186423936332, 0.10548977834387468]
 
-let ln = {
-    let ln0 = filter16(u0)
-    let rec ln_traj: Array<Float like LT, L> =
-        match ln_traj with
-        | zero -> zero
-        | zero :: s -> zero :: ln0
-        | prefix :: n -> prefix :: les_step(prefix(n - 1), hl, 0.0)
-    ln_traj(80)
-}
+let ln = les_run(0.0)
 // EXPECT: ln = [0.3097274068829204, 0.41547636738827926, 0.4264237453126189, 0.4340005024029604, 0.5073117764753461, 0.6383743464064993, 0.77521705584994, 1.0839214967466042, 0.7854856081425711, -2.4219683793696634, -1.0610010872224989, -0.8952179583706537, -0.6355824185021679, -0.3690477359769344, -0.11327765437803439, 0.12015692821221231]
 
 let err_model = {

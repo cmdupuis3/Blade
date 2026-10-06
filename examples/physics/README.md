@@ -29,7 +29,7 @@ empirical cumulants).
 | `15_lagged_cumulant_former` | The lagged-cumulant former built from the tower: C(τ) = Cov(x(t), x(t+τ)) of a sine recovers its frequency (autocovariance = spectrum by cross-covariance theorem). |
 | `16_galilean_boost_tenth_invariant` | Conservation laws **linear in time**: G = m₁x₁ + m₂x₂ − Pt, invisible to every state-only detector, verified sharp by fused zip/reduce towers while X_cm spreads. |
 | `17_spectral_persistence_torus_vs_chaos` | Regular vs chaotic Hénon–Heiles through one `cumulants` call on strided pair samples: discrete spectrum persists (torus), continuous decays (mixing). |
-| `18_bohr_spectroscopy` | Quantum ⟨x⟩(t) towers: the harmonic ladder is a **rank-1** Hankel matrix (one Bohr gap), anharmonicity splits it; in-language Prony + Newton-arccos reads the gaps. |
+| `18_bohr_spectroscopy` | Quantum ⟨x⟩(t) towers: the harmonic ladder is a **rank-1** Hankel matrix (one Bohr gap), anharmonicity splits it; in-language Prony + `acos` reads the gaps. |
 | `19_kramers_moyal_pawula` | Stochastic generators: drift/diffusion are conditional increment cumulants, and κ₄/κ₂² is the **Pawula verdict** — jet order 2 (diffusion) vs ∞ (jumps). |
 | `20_fuzzy_geometry_contact` | Known density leaks the mass jet into **geometry**: fuzzy radii shift the mean contact plane (concavity bias) and anti-correlate timing with recoil — a 33% variance credit no independent-error budget sees. |
 | `21_collision_time_ambiguity` | Both radii fuzzy: the COM tower **cannot tell the collision happened** (Noether immunity), while "has it happened yet?" becomes a fuzzy proposition — a skew spike exactly inside the contact band. |
@@ -114,7 +114,8 @@ trajectory data.
 The polynomial null space is blind to non-polynomial invariants — but the fix
 is a richer *dictionary*, not deeper machinery. `15_lagged_cumulant_former`
 builds the lagged cumulant `C(τ) = Cov(x(t), x(t+τ))` from the existing tower
-(the cross term of `cumulants(·,2)` on the signal paired with its shift); by the
+(the `(0, τ)` cross terms of ONE `cumulants(·,2)` call on a lag battery of the
+signal's shifts, built through a `halo` window); by the
 cross-covariance theorem its Fourier transform is the power spectrum, and for a
 sine it recovers the frequency. `tools/nonpoly_discovery.ps1` then shows the
 payoff on the pendulum `x'' = −sin x`, whose energy `½x'² − cos x` is
@@ -192,7 +193,7 @@ intensities (isolated lines to machine precision), and the harmonic ladder
 collapses to a **rank-1** spectral measure (β₁ ~ 1e-16) — all gaps equal,
 which is simultaneously why classical SHM has one frequency. Anharmonicity is
 the Hankel rank climbing above 1. Example `18` runs the moment arithmetic
-(rank verdicts 13 orders apart, 2-atom Prony, Newton-arccos) in-language;
+(rank verdicts 13 orders apart, 2-atom Prony, arccos) in-language;
 example `17` gets the torus-vs-chaos persistence verdict from real
 Hénon–Heiles trajectories through one former call — including the honest
 subtlety that at E ≈ 0.13 many "chaotic-energy" trajectories are sticky, so
@@ -317,7 +318,10 @@ surfaces (the **rind**, built from the small ball's *own* size uncertainty)
 is wider than the ball itself. Per realization the gap is always ≥ 0: joint
 overlap probability exactly 0. Decorrelate position from size (the
 product-of-marginals any independent-error treatment uses) and the forbidden
-region revives: overlap 15/49. **Impenetrability is a correlation law**,
+region revives: overlap 15/49. In the file the two ensembles differ in one
+word: the joint one co-iterates position and size realizations
+(`method_for(zip(XG, RS))`), the decorrelated one is their outer product
+(`method_for(XG, RS)`). **Impenetrability is a correlation law**,
 invisible in marginals — and the tower can prove a description illegal:
 a gap law must be a Stieltjes moment sequence (support [0,∞)); the joint and
 decorrelated towers share the same mean, but the shifted Hankel m₁m₃−m₂² is
@@ -332,7 +336,9 @@ jointly-measured gap is the discriminator.
 
 ## The collision that wasn't: sampling, identity, and gauge
 
-Example `24`: both masses drawn from the same overlapping jet, fast head-on
+Example `24`: both masses drawn from the same overlapping jet (the 49 pairs
+are its outer product with itself, `method_for(M, M)`; the equal-mass gauge
+locus is its co-iteration, `method_for(zip(M, M))`), fast head-on
 approach, stroboscopic observation. Across a frame gap containing the
 collision, the record admits two worlds — bounce, or pass-through with
 swapped identities — whose unordered velocity records differ by
@@ -388,7 +394,8 @@ measurement, and it can measure what the record forgot.
 ## Rough spin: the hidden register
 
 Example `28` (the first fully Blade-only experiment: closed-form rough-disk
-collision staged through `|> compute` kernel columns, embedded literals, and
+collision staged as lifted whole-column arithmetic over embedded literals,
+spin sub-ensembles as `mask`/`compound` WHERE clauses, and
 **conservation as the oracle** — total momentum, energy, and angular momentum
 deviation towers pinned at ~1e-31, plus an in-file analytic limit test).
 Rotation changes the fuzzy world in four ways: (1) total J joins the
@@ -435,8 +442,9 @@ are a hallmark of the *dynamics*; classically that signature simply is not
 available without phases. That claim is tested, and confirmed, in
 example 42.)
 
-Example `30` (the observer; ±1 LCG tables as embedded literals, matrix
-algebra as chained row-fiber `prodsum` products — `T = XXᵀ` exact in
+Example `30` (the observer; ±1 LCG tables as CSV data files, matrix
+algebra as chained row-fiber `prodsum` products through one `dot` row
+kernel — `T = XXᵀ` exact in
 integers, powers `M₂ = T·T`, `M₃ = M₂·T`, traces as Frobenius zips): the
 internal observer estimating a d = 48-register covariance tower from N
 samples. The estimate's *spectral* noise is where q lives, and its law is
@@ -594,16 +602,18 @@ conditional state (conditioning on the last-struck mass *is* the branch
 representation — the hypothesis bank was already in the state), exact vs
 3⁴ grids to 7e-16; the likelihood of each noisy read is an *expectation
 under the predictive tower* (jet-smeared instrument: σ_eff² = σ² + κ₂ +
-non-Gaussian corrections), matching exact grid likelihoods **19,216×**
+non-Gaussian corrections), matching exact grid likelihoods **~1.9×10⁴×**
 closer than the spread-blind mean-field — towers make better observers,
 not just better predictions; and Bayes on the 3-point latent is *exact* by
-`dist_reweight` with Lagrange-interpolated runtime coefficients.
+`dist_reweight` with Lagrange-interpolated runtime coefficients (pinned:
+the readout reproduces the direct normalization of the same likelihoods to
+~1e-10, its own rounding).
 **Conditioning spends stochastic order**: the depth-6 prior affords
 exactly two quadratic observations (6 → 4 → 2), and the surviving order-2
 posterior is spent whole on the categorical readout (`dist_expect` of the
 degree-2 Lagrange indicators, partitioning unity exactly). Result: the
-true hypothesis at 83.3%, posterior mean 1.0666 ± 0.030, within **1e-7**
-of the exact all-ensemble Bayes posterior. A third shot would need order
+true hypothesis at 83.3%, posterior mean 1.0666 ± 0.030, **~1e-7** from
+the exact all-ensemble Bayes posterior (the jets' truncation). A third shot would need order
 the tower no longer has — the elaborator refuses (ppl/048): an observer's
 evidence budget is the depth of their tower.
 
@@ -752,16 +762,18 @@ Example `41` retires the arc's last trusted constant. An untrusted
 external solve (alternating projections; `scratchpad` F# script) produced
 a dual certificate for the NPA level-1+AB relaxation of I3322; the file
 embeds only its **Gram factor G** and proves everything else from
-scratch. The certificate matrix Λ = GGᵀ is computed in-language by one
-row-fiber prodsum — **PSD by construction**, nothing to eliminate or
-eigensolve. A 58×256 histogram values-product collapses Λ's cells into
-its 58 moment-label sums (LBL tags which cells share a moment: basis
+scratch. The certificate matrix Λ = GGᵀ is computed in-language as
+`gram(G, G)` — **PSD by construction**, nothing to eliminate or
+eigensolve. A GROUP BY over the 256 cells' moment labels collapses Λ
+into its 58 moment-label sums (LBL tags which cells share a moment: basis
 words reduced by involution, symmetrized by joint reversal), and the
 measured deviation from the targets (t′, −Bell, 0, …) is **absorbed into
 the bound, not waved away**: since every non-identity word is a product
 of ±1 observables, |⟨W⟩| ≤ 1, so quantum I3322 ≤ (t′ + Σ|dev|)/4 − 1.
-Pinned: t′ = 5.08000000025, Σ|dev| = 1.7e-9 (matching the external
-oracle's residual exactly), **ceiling 0.2700000005** — strictly below
+Pinned: t′ = 5.08000000025, Σ|dev| = 1.7e-9 (the external oracle's
+residual; exact rational arithmetic on G gives 1.7032478e-9, and the
+pin asserts < 1e-8, since one rounding ulp of an O(1) label sum moves
+it at 1e-7), **ceiling 0.2700000005** — strictly below
 ex 38's constructed tower point 0.3409 (recomputed here; margin 0.0709).
 The sandwich classical (0.25) < quantum (≤ 0.27) < tower (0.3409) is now
 self-contained: every wall in the arc is checked in-language, none
@@ -896,7 +908,7 @@ operator returns e^{±i·gap·δ} — the **Bohr gaps, on the unit circle**,
 matching cos(gap·δ) from the same file's certified eigenvalues to 5e-4.
 The anharmonic ladder's unevenness (gap₁₂ − gap₀₁ = 0.0998) is resolved
 at 400× the instrument precision, and the Δn = 3 satellite line — 250×
-weaker, ex 18's forbidden-line territory — appears within 6e-4 of its
+weaker, ex 18's forbidden-line territory — appears within 8e-4 of its
 certified position (two instruments, one spectrum: ex 18 read these gaps
 from moment towers). The classical twin — a 32-trajectory Verlet
 ensemble's ⟨x(t)⟩ — dephases (ex 05), and its fitted operator has every
@@ -939,4 +951,4 @@ powershell examples/physics/tools/validate_examples.ps1   # all EXPECT pins
 
 Run on the Release build (`bin/Release`); the deep `dist_map` chains overflow
 the Debug stack. `tools/validate_examples.ps1` checks every example against
-its pins (710 EXPECTs across 47 files).
+its pins (694 EXPECTs across 47 files).

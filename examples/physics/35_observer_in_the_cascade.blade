@@ -46,96 +46,103 @@
 //             OBSERVER'S EVIDENCE BUDGET IS THE DEPTH OF THEIR TOWER.
 // FINDINGS (pinned): channel = grid to 1e-15; jet likelihoods beat
 // mean-field by ~19,000x against the exact grid likelihoods; the two-shot
-// posterior lands on the true hypothesis (1.08) at 83.3%, within 1e-7 of
-// the exact all-ensemble Bayes posterior; posterior mean 1.0666,
+// posterior lands on the true hypothesis (1.08) at 83.3%, ~1e-7 from
+// the exact all-ensemble Bayes posterior (the jet likelihoods' own
+// truncation -- the update itself reproduces the direct normalization of
+// the same likelihoods to rounding); posterior mean 1.0666,
 // posterior sd 0.030 -- the hidden ball, weighed through four layers of
 // fuzz by an observer whose entire pipeline is towers.
 // ============================================================================
 
+import math as m
+
 let MVAL = [0.92, 1.0, 1.08]
+type Chan = Array<Float64 like Idx<12>, Idx<12>>
 
 // ---- the kick: example 34's block channel (orders 1..4), powered to U^4 ----
-let U1 = method_for(range<Idx<12>>) <*> method_for(range<Idx<12>>) <@> lambda(J: Int64, I: Int64) -> (if J / 3 < I / 3 + 1 then (if I / 3 < J / 3 + 1 then (if J / 3 < 1 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) else (if J / 3 < 2 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) else (if J / 3 < 3 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) else 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)))))) / 3.0 else 0.0) else 0.0) |> compute
-let U1T = method_for(range<Idx<12>>) <*> method_for(range<Idx<12>>) <@> lambda(J: Int64, I: Int64) -> (if J / 3 < I / 3 + 1 then (if I / 3 < J / 3 + 1 then (if J / 3 < 1 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) else (if J / 3 < 2 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) else (if J / 3 < 3 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) else 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)))))) / 3.0 else 0.0) else 0.0) |> compute
-let U2 = method_for(U1, U1T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U2T = method_for(U1T, U1) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U4 = method_for(U2, U2T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+// one collision's transfer factor: the front leaves mass i into mass j
+function rho(i: Int64, j: Int64) -> Float64 = 2.0 * MVAL(i) / (MVAL(i) + MVAL(j))
+// x^p as the explicit product chain x * x * ... * x (p factors)
+function pow_chain(x: Float64, p: Int64) -> Float64 = if p < 2 then x else pow_chain(x, p - 1) * x
+let U1: Chan = method_for(range<Idx<12>, Idx<12>>) <@> lambda(J: Int64, I: Int64) -> if J / 3 == I / 3 then pow_chain(rho(I % 3, J % 3), J / 3 + 1) / 3.0 else 0.0 |> compute
+let U2: Chan = m.matmul(U1, U1)
+let U4: Chan = m.matmul(U2, U2)
 
 // ---- the interior case (the pinned negative): target struck FIRST, read
 //      at the far end. Concentrated starts, four medium collisions after. ----
-let W1H = method_for(range<Idx<3>>) <*> method_for(range<Idx<12>>) <@> lambda(h: Int64, J: Int64) -> (if J % 3 < h + 1 then (if h < J % 3 + 1 then (if J / 3 < 1 then 2.0 / (1.0 + MVAL(h)) else (if J / 3 < 2 then 2.0 / (1.0 + MVAL(h)) * (2.0 / (1.0 + MVAL(h))) else (if J / 3 < 3 then 2.0 / (1.0 + MVAL(h)) * (2.0 / (1.0 + MVAL(h))) * (2.0 / (1.0 + MVAL(h))) else 2.0 / (1.0 + MVAL(h)) * (2.0 / (1.0 + MVAL(h))) * (2.0 / (1.0 + MVAL(h))) * (2.0 / (1.0 + MVAL(h)))))) else 0.0) else 0.0) |> compute
+let W1H = method_for(range<Idx<3>, Idx<12>>) <@> lambda(h: Int64, J: Int64) -> if J % 3 == h then pow_chain(2.0 / (1.0 + MVAL(h)), J / 3 + 1) else 0.0 |> compute
 let SINT = method_for(W1H, U4) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let MK1: Array<Float64 like Idx<1>, Idx<12>> = [[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
-let IM1 = method_for(SINT, MK1) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let int_sep = sqrt((IM1(0, 0) - IM1(2, 0)) * (IM1(0, 0) - IM1(2, 0)))
+// each hypothesis's far-end mean: its state's order-1 cells, summed
+let IM1 = reduce(method_for(range<Idx<3>, Idx<3>>) <@> lambda(h: Int64, j: Int64) -> SINT(h, j), (+))
+let int_sep = abs(IM1(0) - IM1(2))
 
 // ---- the endpoint case: target struck LAST. The channel's conditional
-//      state IS the hypothesis bank: E[v5^p | m5 = A_j] = S5E cell (3(p-1)+j)
+//      state IS the hypothesis bank: E[v5^p | m5 = A_j] = S5E(3(p-1)+j)
 //      (uniform chain, the last-mass branches read off directly). ----
-let M1R = method_for(range<Idx<1>>) <*> method_for(range<Idx<12>>) <@> lambda(z: Int64, J: Int64) -> (if J / 3 < 1 then 2.0 / (1.0 + MVAL(J % 3)) else (if J / 3 < 2 then 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) else (if J / 3 < 3 then 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3))) else 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3)))))) |> compute
-let S5E = method_for(M1R, U4) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let mu0 = S5E(0, 0)
-let mu1 = S5E(0, 1)
-let mu2 = S5E(0, 2)
+let M1 = method_for(range<Idx<12>>) <@> lambda(J: Int64) -> pow_chain(2.0 / (1.0 + MVAL(J % 3)), J / 3 + 1) |> compute
+let S5E = method_for(U4) <@> lambda(row: Array<Float64 like Idx<12>>) -> prodsum(M1, row) |> compute
+let mu0 = S5E(0)
+let mu1 = S5E(1)
+let mu2 = S5E(2)
 let end_sep = abs(mu0 - mu2)
 let pos_ratio = end_sep / int_sep
 let pos_V = if pos_ratio > 20.0 then "INTERIOR_IS_GAUGE_ENDPOINT_IS_VISIBLE" else "NO"
-let cm2_0 = S5E(0, 3) - mu0 * mu0
-let cm2_1 = S5E(0, 4) - mu1 * mu1
-let cm2_2 = S5E(0, 5) - mu2 * mu2
-let cm3_0 = S5E(0, 6) - 3.0 * mu0 * S5E(0, 3) + 2.0 * mu0 * mu0 * mu0
-let cm3_1 = S5E(0, 7) - 3.0 * mu1 * S5E(0, 4) + 2.0 * mu1 * mu1 * mu1
-let cm3_2 = S5E(0, 8) - 3.0 * mu2 * S5E(0, 5) + 2.0 * mu2 * mu2 * mu2
-let cm4_0 = S5E(0, 9) - 4.0 * mu0 * S5E(0, 6) + 6.0 * mu0 * mu0 * S5E(0, 3) - 3.0 * mu0 * mu0 * mu0 * mu0
-let cm4_1 = S5E(0, 10) - 4.0 * mu1 * S5E(0, 7) + 6.0 * mu1 * mu1 * S5E(0, 4) - 3.0 * mu1 * mu1 * mu1 * mu1
-let cm4_2 = S5E(0, 11) - 4.0 * mu2 * S5E(0, 8) + 6.0 * mu2 * mu2 * S5E(0, 5) - 3.0 * mu2 * mu2 * mu2 * mu2
 
-// ---- grid oracles (3^4 medium per hypothesis; target m5 = A_j fixed) ----
-let GA = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> 2.0 / (1.0 + MVAL(r % 3)) * (2.0 * MVAL(r % 3) / (MVAL(r % 3) + MVAL((r / 3) % 3))) * (2.0 * MVAL((r / 3) % 3) / (MVAL((r / 3) % 3) + MVAL((r / 9) % 3))) * (2.0 * MVAL((r / 9) % 3) / (MVAL((r / 9) % 3) + MVAL(r / 27))) * (2.0 * MVAL(r / 27) / (MVAL(r / 27) + MVAL(0))) |> compute
-let GB = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> 2.0 / (1.0 + MVAL(r % 3)) * (2.0 * MVAL(r % 3) / (MVAL(r % 3) + MVAL((r / 3) % 3))) * (2.0 * MVAL((r / 3) % 3) / (MVAL((r / 3) % 3) + MVAL((r / 9) % 3))) * (2.0 * MVAL((r / 9) % 3) / (MVAL((r / 9) % 3) + MVAL(r / 27))) * (2.0 * MVAL(r / 27) / (MVAL(r / 27) + MVAL(1))) |> compute
-let GC = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> 2.0 / (1.0 + MVAL(r % 3)) * (2.0 * MVAL(r % 3) / (MVAL(r % 3) + MVAL((r / 3) % 3))) * (2.0 * MVAL((r / 3) % 3) / (MVAL((r / 3) % 3) + MVAL((r / 9) % 3))) * (2.0 * MVAL((r / 9) % 3) / (MVAL((r / 9) % 3) + MVAL(r / 27))) * (2.0 * MVAL(r / 27) / (MVAL(r / 27) + MVAL(2))) |> compute
-let gmu0 = reduce(GA, (+)) / 81.0
-let gmu2 = reduce(GC, (+)) / 81.0
+// ---- grid oracles (3^4 medium per hypothesis h; target m5 = A_h fixed):
+//      path r's four medium masses are its base-3 digits ----
+function grid_front(r: Int64, h: Int64) -> Float64 =
+    2.0 / (1.0 + MVAL(r % 3)) * rho(r % 3, (r / 3) % 3) * rho((r / 3) % 3, (r / 9) % 3) * rho((r / 9) % 3, r / 27) * rho(r / 27, h)
+let GRID = method_for(range<Idx<3>, Idx<81>>) <@> lambda(h: Int64, r: Int64) -> grid_front(r, h) |> compute
+let GMU = reduce(GRID, (+)) / 81.0
+let gmu0 = GMU(0)
+let gmu2 = GMU(2)
 let chan_gap = abs(mu0 - gmu0) + abs(mu2 - gmu2)
-let chan_V = if chan_gap < 0.000000000001 then "CHANNEL_MATCHES_GRID" else "NO"
+let chan_V = if chan_gap < 1.0e-12 then "CHANNEL_MATCHES_GRID" else "NO"
 
 // ---- the observations (two shots, fresh medium; sigma = 0.03, so
 //      2 s^2 = 0.0018; the hidden truth behind these reads is 1.08) ----
 let vh1 = 0.951
 let vh2 = 0.964
 
-// exact likelihoods from the grids (the oracle side)
-let La1 = reduce(method_for(GA) <@> lambda(x) -> exp(0.0 - (0.951 - x) * (0.951 - x) / 0.0018), (+)) / 81.0
-let Lb1 = reduce(method_for(GB) <@> lambda(x) -> exp(0.0 - (0.951 - x) * (0.951 - x) / 0.0018), (+)) / 81.0
-let Lc1 = reduce(method_for(GC) <@> lambda(x) -> exp(0.0 - (0.951 - x) * (0.951 - x) / 0.0018), (+)) / 81.0
-let La2 = reduce(method_for(GA) <@> lambda(x) -> exp(0.0 - (0.964 - x) * (0.964 - x) / 0.0018), (+)) / 81.0
-let Lb2 = reduce(method_for(GB) <@> lambda(x) -> exp(0.0 - (0.964 - x) * (0.964 - x) / 0.0018), (+)) / 81.0
-let Lc2 = reduce(method_for(GC) <@> lambda(x) -> exp(0.0 - (0.964 - x) * (0.964 - x) / 0.0018), (+)) / 81.0
+// exact likelihoods from the grids (the oracle side): the instrument kernel
+// averaged over each hypothesis's 81 medium paths, all three rows at once
+let L1G = reduce(exp(0.0 - (vh1 - GRID) * (vh1 - GRID) / 0.0018), (+)) / 81.0
+let L2G = reduce(exp(0.0 - (vh2 - GRID) * (vh2 - GRID) / 0.0018), (+)) / 81.0
+let La1 = L1G(0)
+let Lb1 = L1G(1)
+let Lc1 = L1G(2)
+let La2 = L2G(0)
+let Lb2 = L2G(1)
+let Lc2 = L2G(2)
 
-// ---- the tower likelihoods: jet-smeared instrument, no ensemble.
+// ---- the tower likelihoods: jet-smeared instrument, no ensemble. Hypothesis
+//      j's predictive moments are S5E's branch-j cells; the kernel's
+//      expectation is expanded to 4th order in their central moments.
 //      s^2 = 0.0009, s^4 = 8.1e-7, s^6 = 7.29e-10, s^8 = 6.561e-13 ----
-let e10 = vh1 - mu0
-let e11 = vh1 - mu1
-let e12 = vh1 - mu2
-let e20 = vh2 - mu0
-let e21 = vh2 - mu1
-let e22 = vh2 - mu2
-let g10 = exp(0.0 - e10 * e10 / 0.0018)
-let g11 = exp(0.0 - e11 * e11 / 0.0018)
-let g12 = exp(0.0 - e12 * e12 / 0.0018)
-let g20 = exp(0.0 - e20 * e20 / 0.0018)
-let g21 = exp(0.0 - e21 * e21 / 0.0018)
-let g22 = exp(0.0 - e22 * e22 / 0.0018)
-let T10 = g10 * (1.0 + (e10 * e10 / 0.00000081 - 1.0 / 0.0009) * cm2_0 / 2.0 - (0.0 - e10 * e10 * e10 / 0.000000000729 + 3.0 * e10 / 0.00000081) * cm3_0 / 6.0 + (e10 * e10 * e10 * e10 / 0.0000000000006561 - 6.0 * e10 * e10 / 0.000000000729 + 3.0 / 0.00000081) * cm4_0 / 24.0)
-let T11 = g11 * (1.0 + (e11 * e11 / 0.00000081 - 1.0 / 0.0009) * cm2_1 / 2.0 - (0.0 - e11 * e11 * e11 / 0.000000000729 + 3.0 * e11 / 0.00000081) * cm3_1 / 6.0 + (e11 * e11 * e11 * e11 / 0.0000000000006561 - 6.0 * e11 * e11 / 0.000000000729 + 3.0 / 0.00000081) * cm4_1 / 24.0)
-let T12 = g12 * (1.0 + (e12 * e12 / 0.00000081 - 1.0 / 0.0009) * cm2_2 / 2.0 - (0.0 - e12 * e12 * e12 / 0.000000000729 + 3.0 * e12 / 0.00000081) * cm3_2 / 6.0 + (e12 * e12 * e12 * e12 / 0.0000000000006561 - 6.0 * e12 * e12 / 0.000000000729 + 3.0 / 0.00000081) * cm4_2 / 24.0)
-let T20 = g20 * (1.0 + (e20 * e20 / 0.00000081 - 1.0 / 0.0009) * cm2_0 / 2.0 - (0.0 - e20 * e20 * e20 / 0.000000000729 + 3.0 * e20 / 0.00000081) * cm3_0 / 6.0 + (e20 * e20 * e20 * e20 / 0.0000000000006561 - 6.0 * e20 * e20 / 0.000000000729 + 3.0 / 0.00000081) * cm4_0 / 24.0)
-let T21 = g21 * (1.0 + (e21 * e21 / 0.00000081 - 1.0 / 0.0009) * cm2_1 / 2.0 - (0.0 - e21 * e21 * e21 / 0.000000000729 + 3.0 * e21 / 0.00000081) * cm3_1 / 6.0 + (e21 * e21 * e21 * e21 / 0.0000000000006561 - 6.0 * e21 * e21 / 0.000000000729 + 3.0 / 0.00000081) * cm4_1 / 24.0)
-let T22 = g22 * (1.0 + (e22 * e22 / 0.00000081 - 1.0 / 0.0009) * cm2_2 / 2.0 - (0.0 - e22 * e22 * e22 / 0.000000000729 + 3.0 * e22 / 0.00000081) * cm3_2 / 6.0 + (e22 * e22 * e22 * e22 / 0.0000000000006561 - 6.0 * e22 * e22 / 0.000000000729 + 3.0 / 0.00000081) * cm4_2 / 24.0)
+// the spread-blind (mean-field) likelihood: the kernel at the predictive mean
+function mf_lik(vh: Float64, j: Int64) -> Float64 = exp(0.0 - (vh - S5E(j)) * (vh - S5E(j)) / 0.0018)
+function jet_lik(vh: Float64, j: Int64) -> Float64 = {
+    let mu = S5E(j)
+    let c2 = S5E(3 + j) - mu * mu
+    let c3 = S5E(6 + j) - 3.0 * mu * S5E(3 + j) + 2.0 * mu * mu * mu
+    let c4 = S5E(9 + j) - 4.0 * mu * S5E(6 + j) + 6.0 * mu * mu * S5E(3 + j) - 3.0 * mu * mu * mu * mu
+    let e = vh - mu
+    mf_lik(vh, j) * (1.0 + (e * e / 8.1e-7 - 1.0 / 0.0009) * c2 / 2.0 - (0.0 - e * e * e / 7.29e-10 + 3.0 * e / 8.1e-7) * c3 / 6.0 + (e * e * e * e / 6.561e-13 - 6.0 * e * e / 7.29e-10 + 3.0 / 8.1e-7) * c4 / 24.0)
+}
+let T10 = jet_lik(vh1, 0)
+let T11 = jet_lik(vh1, 1)
+let T12 = jet_lik(vh1, 2)
+let T20 = jet_lik(vh2, 0)
+let T21 = jet_lik(vh2, 1)
+let T22 = jet_lik(vh2, 2)
 let jet_err = abs(T10 / La1 - 1.0) + abs(T11 / Lb1 - 1.0) + abs(T12 / Lc1 - 1.0)
-let mf_err = abs(g10 / La1 - 1.0) + abs(g11 / Lb1 - 1.0) + abs(g12 / Lc1 - 1.0)
+let mf_err = abs(mf_lik(vh1, 0) / La1 - 1.0) + abs(mf_lik(vh1, 1) / Lb1 - 1.0) + abs(mf_lik(vh1, 2) / Lc1 - 1.0)
 let dial_ratio = mf_err / jet_err
-let dial_V = if dial_ratio > 10.0 then "TOWER_MAKES_BETTER_OBSERVERS" else "NO"
+// jet_err ~ 2e-6 sits where the order-4 moment cancellation leaves the jet
+// likelihood ~1e-10 of rounding (its last 3 digits move with FMA
+// contraction), so the verdict pins the CLAIM: within 1e-5 of exact, four
+// orders of magnitude better than mean-field
+let dial_V = if jet_err < 1.0e-5 && dial_ratio > 1.0e4 then "TOWER_MAKES_BETTER_OBSERVERS" else "NO"
 
 // ---- the bookkeeping: exact Bayes on the latent by Lagrange reweight.
 //      Any likelihood on support {0.92, 1.0, 1.08} IS the quadratic
@@ -146,8 +153,8 @@ let dial_V = if dial_ratio > 10.0 then "TOWER_MAKES_BETTER_OBSERVERS" else "NO"
 import ppl as ppl
 let MD: Array<Float64 like Idx<1>, Idx<3>> = [[0.92, 1.0, 1.08]]
 let prior = ppl.dist(MD, 6)
-let post1 = ppl.dist_reweight(prior, T10 * 84.375 + T11 * (0.0 - 155.25) + T12 * 71.875, T10 * (0.0 - 162.5) + T11 * 312.5 + T12 * (0.0 - 150.0), T10 * 78.125 + T11 * (0.0 - 156.25) + T12 * 78.125)
-let post2 = ppl.dist_reweight(post1, T20 * 84.375 + T21 * (0.0 - 155.25) + T22 * 71.875, T20 * (0.0 - 162.5) + T21 * 312.5 + T22 * (0.0 - 150.0), T20 * 78.125 + T21 * (0.0 - 156.25) + T22 * 78.125)
+let post1 = ppl.dist_reweight(prior, T10 * 84.375 + T11 * -155.25 + T12 * 71.875, T10 * -162.5 + T11 * 312.5 + T12 * -150.0, T10 * 78.125 + T11 * -156.25 + T12 * 78.125)
+let post2 = ppl.dist_reweight(post1, T20 * 84.375 + T21 * -155.25 + T22 * 71.875, T20 * -162.5 + T21 * 312.5 + T22 * -150.0, T20 * 78.125 + T21 * -156.25 + T22 * 78.125)
 let pmean = ppl.cumulant(post2, 1)
 let pvar = ppl.cumulant(post2, 2)
 // categorical readout: posterior probabilities = expectations of the
@@ -156,14 +163,26 @@ let p_092 = ppl.dist_expect(post2, 84.375, -162.5, 78.125)
 let p_100 = ppl.dist_expect(post2, -155.25, 312.5, -156.25)
 let p_108 = ppl.dist_expect(post2, 71.875, -150.0, 78.125)
 let psum = p_092 + p_100 + p_108
+// the SAME two likelihood rows multiplied and normalized directly -- what an
+// exact Bayes update on the 3-point latent must reproduce. The tower readout
+// spends Lagrange coefficients of size ~150 on moments of size ~1, so it
+// carries ~1e-10 of rounding: pinned as agreement, not as digits.
+let zdir = T10 * T20 + T11 * T21 + T12 * T22
+let PDIR = [T10 * T20, T11 * T21, T12 * T22] / zdir
+let dmean = prodsum(PDIR, MVAL)
+let dvar = prodsum(PDIR, MVAL * MVAL) - dmean * dmean
+let readout_err = abs(p_092 - PDIR(0)) + abs(p_100 - PDIR(1)) + abs(p_108 - PDIR(2)) + abs(pmean(0) - dmean) + abs(pvar(0) - dvar)
+let exact_V = if readout_err < 1.0e-8 then "TOWER_BAYES_IS_EXACT" else "NO"
 
 // ---- the oracle Bayes: exact grid likelihoods, hand-normalized ----
 let oz = La1 * La2 + Lb1 * Lb2 + Lc1 * Lc2
 let o_108 = Lc1 * Lc2 / oz
+// the tower's likelihoods are jets (truncated at order 4), so the posterior
+// differs from the all-ensemble one by ~1e-7 -- the claim, with 2x margin
 let bayes_gap = abs(p_108 - o_108)
-let bayes_V = if bayes_gap < 0.002 then "TOWER_BAYES_MATCHES_ORACLE" else "NO"
-let win_V = if p_108 > p_100 then (if p_108 > p_092 then (if p_108 > 0.5 then "TRUE_HYPOTHESIS_WINS" else "NO") else "NO") else "NO"
-let unity_V = if abs(psum - 1.0) < 0.0000000001 then "INDICATORS_PARTITION_UNITY" else "NO"
+let bayes_V = if bayes_gap < 2.0e-7 then "TOWER_BAYES_MATCHES_ORACLE" else "NO"
+let win_V = if p_108 > p_100 && p_108 > p_092 && p_108 > 0.5 then "TRUE_HYPOTHESIS_WINS" else "NO"
+let unity_V = if abs(psum - 1.0) < 1.0e-10 then "INDICATORS_PARTITION_UNITY" else "NO"
 
 // positional identifiability; channel exactness; the likelihood dial;
 // tower Bayes vs the all-ensemble oracle; the budget spent to the last
@@ -178,18 +197,12 @@ let unity_V = if abs(psum - 1.0) < 0.0000000001 then "INDICATORS_PARTITION_UNITY
 // EXPECT: chan_V = "CHANNEL_MATCHES_GRID"
 // EXPECT: La1 = 0.0165531037804856
 // EXPECT: T12 = 0.973959217155912
-// EXPECT: jet_err = 2.07096052540212e-06
 // EXPECT: mf_err = 0.0397962072820295
-// EXPECT: dial_ratio = 19216.3041226014
 // EXPECT: dial_V = "TOWER_MAKES_BETTER_OBSERVERS"
 // EXPECT: pmean = [1.06658807503739]
-// EXPECT: pvar = [0.000902733673945999]
-// EXPECT: p_092 = 0.000754641260925837
-// EXPECT: p_100 = 0.166139779510843
-// EXPECT: p_108 = 0.83310557922826
 // EXPECT: psum = 1.00000000000003
+// EXPECT: exact_V = "TOWER_BAYES_IS_EXACT"
 // EXPECT: o_108 = 0.833105472825543
-// EXPECT: bayes_gap = 1.06402717192644e-07
 // EXPECT: bayes_V = "TOWER_BAYES_MATCHES_ORACLE"
 // EXPECT: win_V = "TRUE_HYPOTHESIS_WINS"
 // EXPECT: unity_V = "INDICATORS_PARTITION_UNITY"

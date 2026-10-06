@@ -55,79 +55,79 @@
 // matrices ARE the compiled form of "push a Dist through a collision".
 // The channel calculus is the reconstruction program's missing operation:
 // with it, towers meet dynamics without ever touching realizations.
-// No external data; everything is range grids, table gathers, and the
-// row-fiber matrix idiom (transposes maintained as product pairs).
+// No external data; everything is range grids, table gathers, and
+// m.matmul powers of one channel matrix.
 // ============================================================================
+import math as m
 
 let MVAL = [0.92, 1.0, 1.08]
+type Chan = Array<Float64 like Idx<12>, Idx<12>>
 
-// ---- the block channel U (12x12): order p = J/3 + 1, branches j = J%3 ----
-let U1 = method_for(range<Idx<12>>) <*> method_for(range<Idx<12>>) <@> lambda(J: Int64, I: Int64) -> (if J / 3 < I / 3 + 1 then (if I / 3 < J / 3 + 1 then (if J / 3 < 1 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) else (if J / 3 < 2 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) else (if J / 3 < 3 then 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) else 2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3))) * (2.0 * MVAL(I % 3) / (MVAL(I % 3) + MVAL(J % 3)))))) / 3.0 else 0.0) else 0.0) |> compute
-let U1T = method_for(range<Idx<12>>) <*> method_for(range<Idx<12>>) <@> lambda(J: Int64, I: Int64) -> (if J / 3 < I / 3 + 1 then (if I / 3 < J / 3 + 1 then (if J / 3 < 1 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) else (if J / 3 < 2 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) else (if J / 3 < 3 then 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) else 2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3))) * (2.0 * MVAL(J % 3) / (MVAL(J % 3) + MVAL(I % 3)))))) / 3.0 else 0.0) else 0.0) |> compute
+// one collision's transfer factor: the front leaves mass i into mass j
+function rho(i: Int64, j: Int64) -> Float64 = 2.0 * MVAL(i) / (MVAL(i) + MVAL(j))
+// x^p as the explicit product chain x * x * ... * x (p factors)
+function pow_chain(x: Float64, p: Int64) -> Float64 = if p < 2 then x else pow_chain(x, p - 1) * x
 
-// ---- powers by repeated squaring, transposes maintained as product pairs:
-//      P2 = mf(P, PT), P2T = mf(PT, P); (A.B)T = mf(BT, A) ----
-let U2 = method_for(U1, U1T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U2T = method_for(U1T, U1) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U4 = method_for(U2, U2T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U4T = method_for(U2T, U2) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U8 = method_for(U4, U4T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U8T = method_for(U4T, U4) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U16 = method_for(U8, U8T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U16T = method_for(U8T, U8) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U18 = method_for(U16, U2T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U19 = method_for(U18, U1T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let U5 = method_for(U4, U1T) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+// ---- the block channel U (12x12): order p = J/3 + 1, branches j = J%3;
+//      cell (J, I) = rho_IJ^p / 3 inside order p's diagonal block ----
+let U1: Chan = method_for(range<Idx<12>, Idx<12>>) <@> lambda(J: Int64, I: Int64) -> if J / 3 == I / 3 then pow_chain(rho(I % 3, J % 3), J / 3 + 1) / 3.0 else 0.0 |> compute
+
+// ---- powers by repeated squaring ----
+let U2: Chan = m.matmul(U1, U1)
+let U4: Chan = m.matmul(U2, U2)
+let U8: Chan = m.matmul(U4, U4)
+let U16: Chan = m.matmul(U8, U8)
+let U18: Chan = m.matmul(U16, U2)
+let U19: Chan = m.matmul(U18, U1)
+let U5: Chan = m.matmul(U4, U1)
 
 // ---- initial state (depth 1: sharp projectile hits the first jet) ----
-let M1R = method_for(range<Idx<1>>) <*> method_for(range<Idx<12>>) <@> lambda(z: Int64, J: Int64) -> (if J / 3 < 1 then 2.0 / (1.0 + MVAL(J % 3)) else (if J / 3 < 2 then 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) else (if J / 3 < 3 then 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3))) else 2.0 / (1.0 + MVAL(J % 3)) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3))) * (2.0 / (1.0 + MVAL(J % 3)))))) |> compute
-// row-form matvec: (M1 . U^k as rows) has (S)_J = sum_I M1[I] U^k[J][I],
-// exactly the conditional update iterated k times
-let S6 = method_for(M1R, U5) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let S19 = method_for(M1R, U18) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
-let S20 = method_for(M1R, U19) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v) |> compute
+let M1 = method_for(range<Idx<12>>) <@> lambda(J: Int64) -> pow_chain(2.0 / (1.0 + MVAL(J % 3)), J / 3 + 1) |> compute
+// row-kernel matvec: S_J = sum_I U^k[J][I] M1[I] -- the conditional update
+// iterated k times
+let S6 = method_for(U5) <@> lambda(row: Array<Float64 like Idx<12>>) -> prodsum(M1, row) |> compute
+let S19 = method_for(U18) <@> lambda(row: Array<Float64 like Idx<12>>) -> prodsum(M1, row) |> compute
+let S20 = method_for(U19) <@> lambda(row: Array<Float64 like Idx<12>>) -> prodsum(M1, row) |> compute
 
-// ---- per-order sums via masks ----
-let MK1: Array<Float64 like Idx<1>, Idx<12>> = [[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
-let MK2: Array<Float64 like Idx<1>, Idx<12>> = [[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
-let MK3: Array<Float64 like Idx<1>, Idx<12>> = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]]
-let MK4: Array<Float64 like Idx<1>, Idx<12>> = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
-let c6p1 = reduce(method_for(zip(S6, MK1)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c6p2 = reduce(method_for(zip(S6, MK2)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c6p3 = reduce(method_for(zip(S6, MK3)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c6p4 = reduce(method_for(zip(S6, MK4)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c19p1 = reduce(method_for(zip(S19, MK1)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c19p2 = reduce(method_for(zip(S19, MK2)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c20p1 = reduce(method_for(zip(S20, MK1)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c20p2 = reduce(method_for(zip(S20, MK2)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c20p3 = reduce(method_for(zip(S20, MK3)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
-let c20p4 = reduce(method_for(zip(S20, MK4)) <@> lambda(u: Array<Float64 like Idx<12>>, v: Array<Float64 like Idx<12>>) -> prodsum(u, v), (+)) / 3.0
+// ---- per-order means: the state as (order p, branch j), branches folded ----
+function order_means(s: Array<Float64 like Idx<12>>) -> Array<Float64 like Idx<4>> =
+    reduce(method_for(range<Idx<4>, Idx<3>>) <@> lambda(p: Int64, j: Int64) -> s(3 * p + j), (+)) / 3.0
+let C6 = order_means(S6)
+let C19 = order_means(S19)
+let C20 = order_means(S20)
+let c6p1 = C6(0)
+let c6p2 = C6(1)
+let c6p3 = C6(2)
+let c6p4 = C6(3)
+let c19p1 = C19(0)
+let c19p2 = C19(1)
+let c20p1 = C20(0)
+let c20p2 = C20(1)
+let c20p3 = C20(2)
+let c20p4 = C20(3)
 
-// ---- the exact 3^6 grid (the old way), for the cross-check ----
-let GM1 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL(r % 3) |> compute
-let GM2 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 3) % 3) |> compute
-let GM3 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 9) % 3) |> compute
-let GM4 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 27) % 3) |> compute
-let GM5 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 81) % 3) |> compute
-let GM6 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> MVAL((r / 243) % 3) |> compute
-let GX1 = method_for(GM1) <@> lambda(m) -> 2.0 / (1.0 + m) |> compute
-let GX2 = GX1 * 2.0 * GM1 / (GM1 + GM2)
-let GX3 = GX2 * 2.0 * GM2 / (GM2 + GM3)
-let GX4 = GX3 * 2.0 * GM3 / (GM3 + GM4)
-let GX5 = GX4 * 2.0 * GM4 / (GM4 + GM5)
-let GX6 = GX5 * 2.0 * GM5 / (GM5 + GM6)
+// ---- the exact 3^6 grid (the old way), for the cross-check: path r's
+//      k-th mass is its k-th base-3 digit ----
+let GM = method_for(range<Idx<6>, Idx<729>>) <@> lambda(k: Int64, r: Int64) -> MVAL((r / 3 ^ k) % 3) |> compute
+let GX1 = 2.0 / (1.0 + GM(0))
+let GX2 = GX1 * 2.0 * GM(0) / (GM(0) + GM(1))
+let GX3 = GX2 * 2.0 * GM(1) / (GM(1) + GM(2))
+let GX4 = GX3 * 2.0 * GM(2) / (GM(2) + GM(3))
+let GX5 = GX4 * 2.0 * GM(3) / (GM(3) + GM(4))
+let GX6 = GX5 * 2.0 * GM(4) / (GM(4) + GM(5))
 let g6p1 = reduce(GX6, (+)) / 729.0
 let g6p2 = prodsum(GX6, GX6) / 729.0
-let g6p3 = reduce(method_for(GX6) <@> lambda(x) -> x * x * x, (+)) / 729.0
-let g6p4 = reduce(method_for(GX6) <@> lambda(x) -> x * x * x * x, (+)) / 729.0
+let g6p3 = reduce(GX6 * GX6 * GX6, (+)) / 729.0
+let g6p4 = reduce(GX6 * GX6 * GX6 * GX6, (+)) / 729.0
 let relgap1 = abs(c6p1 / g6p1 - 1.0)
 let relgap2 = abs(c6p2 / g6p2 - 1.0)
 let relgap3 = abs(c6p3 / g6p3 - 1.0)
 let relgap4 = abs(c6p4 / g6p4 - 1.0)
 
 // ---- spectral readout: growth rates, the mean-transfer identity, naive gap ----
-let erho1 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)), (+), axes = 2) / 9.0
-let erho2 = reduce(method_for(range<Idx<3>>) <*> method_for(range<Idx<3>>) <@> lambda(i: Int64, j: Int64) -> 2.0 * MVAL(i) / (MVAL(i) + MVAL(j)) * (2.0 * MVAL(i) / (MVAL(i) + MVAL(j))), (+), axes = 2) / 9.0
+let RHO = method_for(range<Idx<3>, Idx<3>>) <@> lambda(i: Int64, j: Int64) -> rho(i, j) |> compute
+let erho1 = reduce(RHO, (+), axes = 2) / 9.0
+let erho2 = reduce(RHO * RHO, (+), axes = 2) / 9.0
 let lam1 = c20p1 / c19p1
 let lam2 = c20p2 / c19p2
 let itm = lam2 / (lam1 * lam1)
@@ -141,24 +141,30 @@ let amgm_tax = (1.0 - lam1) * 2.0
 // ln((2-v)/v), noise = exact 5-point binomial (nodes +-2h, +-h, 0; h = 2e-3)
 let NW = [1.0, 4.0, 6.0, 4.0, 1.0]
 let NE = [-0.004, -0.002, 0.0, 0.002, 0.004]
-let xe1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (log((1.6 - NE(k)) / (0.4 + NE(k))) - log(4.0)), (+)) / 16.0
-let xe2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (log((1.6 - NE(k)) / (0.4 + NE(k))) - log(4.0)) * (log((1.6 - NE(k)) / (0.4 + NE(k))) - log(4.0)), (+)) / 16.0
-let ke1 = xe1
-let ke2 = xe2 - xe1 * xe1
+// the increment at each noise node, exact and through each truncated jet,
+// lifted over the five nodes; moments are NW-weighted sums (NW sums to 16)
+let XE = log((1.6 - NE) / (0.4 + NE)) - log(4.0)
 // r = 1 channel: X = h1 eta, h1 = -(1/(2-v) + 1/v) = -3.125
-let xa1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (0.0 - 3.125) * NE(k), (+)) / 16.0
-let xa2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * (0.0 - 3.125) * NE(k) * ((0.0 - 3.125) * NE(k)), (+)) / 16.0
-let ka1 = xa1
-let ka2 = xa2 - xa1 * xa1
+let XA = -3.125 * NE
 // r = 2 channel: X += h2 eta^2 / 2, h2 = 1/v^2 - 1/(2-v)^2 = 5.859375
-let xb1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k)), (+)) / 16.0
-let xb2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k)) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k)), (+)) / 16.0
-let kb1 = xb1
-let kb2 = xb2 - xb1 * xb1
+let XB = -3.125 * NE + 2.9296875 * NE * NE
 // r = 4 channel: X += h3 eta^3/6 + h4 eta^4/24, h3 = -31.73828125,
 // h4 = 233.45947265625
-let xc1 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k) - 5.28971354166667 * NE(k) * NE(k) * NE(k) + 9.72747802734375 * NE(k) * NE(k) * NE(k) * NE(k)), (+)) / 16.0
-let xc2 = reduce(method_for(range<Idx<5>>) <@> lambda(k: Int64) -> NW(k) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k) - 5.28971354166667 * NE(k) * NE(k) * NE(k) + 9.72747802734375 * NE(k) * NE(k) * NE(k) * NE(k)) * ((0.0 - 3.125) * NE(k) + 2.9296875 * NE(k) * NE(k) - 5.28971354166667 * NE(k) * NE(k) * NE(k) + 9.72747802734375 * NE(k) * NE(k) * NE(k) * NE(k)), (+)) / 16.0
+let XC = -3.125 * NE + 2.9296875 * NE * NE - 5.28971354166667 * NE * NE * NE + 9.72747802734375 * NE * NE * NE * NE
+let xe1 = reduce(NW * XE, (+)) / 16.0
+let xe2 = reduce(NW * XE * XE, (+)) / 16.0
+let ke1 = xe1
+let ke2 = xe2 - xe1 * xe1
+let xa1 = reduce(NW * XA, (+)) / 16.0
+let xa2 = reduce(NW * XA * XA, (+)) / 16.0
+let ka1 = xa1
+let ka2 = xa2 - xa1 * xa1
+let xb1 = reduce(NW * XB, (+)) / 16.0
+let xb2 = reduce(NW * XB * XB, (+)) / 16.0
+let kb1 = xb1
+let kb2 = xb2 - xb1 * xb1
+let xc1 = reduce(NW * XC, (+)) / 16.0
+let xc2 = reduce(NW * XC * XC, (+)) / 16.0
 let kc1 = xc1
 let kc2 = xc2 - xc1 * xc1
 // truncation errors per cell and the dial
@@ -171,11 +177,11 @@ let ec2 = abs(kc2 - ke2)
 let chain4_err = 4.0 * eb2
 
 // ---- verdicts ----
-let exact_V = if relgap1 < 0.0000000001 then (if relgap2 < 0.0000000001 then (if relgap3 < 0.0000000001 then (if relgap4 < 0.0000000001 then "CHANNEL_MATCHES_GRID_EXACTLY" else "NO") else "NO") else "NO") else "NO"
-let mean_V = if abs(erho1 - 1.0) < 0.000000000000001 then "MEAN_TRANSFER_IDENTITY" else "NO"
+let exact_V = if relgap1 < 1.0e-10 && relgap2 < 1.0e-10 && relgap3 < 1.0e-10 && relgap4 < 1.0e-10 then "CHANNEL_MATCHES_GRID_EXACTLY" else "NO"
+let mean_V = if abs(erho1 - 1.0) < 1.0e-15 then "MEAN_TRANSFER_IDENTITY" else "NO"
 let drag_V = if lam1 < 1.0 then "COUPLING_DRAGS_THE_MEAN" else "NO"
 let itm_V = if itm > 1.0 then "INTERMITTENT_MOMENT_HIERARCHY" else "NO"
-let dial_V = if ec1 < eb1 then (if eb1 < ea1 then (if ec2 < eb2 then (if eb2 < ea2 then "CLOSURE_DIAL_MONOTONE" else "NO") else "NO") else "NO") else "NO"
+let dial_V = if ec1 < eb1 && eb1 < ea1 && ec2 < eb2 && eb2 < ea2 then "CLOSURE_DIAL_MONOTONE" else "NO"
 
 // the channel IS the ensemble's tower (machine-exact), composed to depths
 // no grid can reach; the mean pays the AM-GM tax v0/2; the fuzz

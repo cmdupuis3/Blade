@@ -1,0 +1,37 @@
+// TEST: Compound Inline Mask Over A Computed Source
+// ----------------------------------------------------------------------------
+// The inline mask of compound(dense, mask(src, p)) whose SOURCE is itself a
+// computation written in place -- mask(MB - MA, p), the natural spelling of
+// "where B is the heavier one". The compound constructor materialized the
+// inline mask but rendered its source with the expression renderer, which
+// cannot run the difference's loop: the program passed `blade check`, ran
+// under the interpreter, and was refused at codegen (BL7004 "array-valued
+// elementwise kernel body not supported inside a kernel"). The let-bound mask
+// always forced its source first; the inline one now does the same. Each
+// inline form must agree with the bound one.
+// ----------------------------------------------------------------------------
+type I = Idx<6>
+let MA: Array<Float64 like I> = [0.5, 1.0, 1.8, 0.5, 1.0, 1.8]
+let MB: Array<Float64 like I> = [1.0, 1.0, 1.0, 1.8, 1.8, 0.5]
+let V: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+// bound: B is heavier at cells 0, 3, 4
+let heavier_b = mask(MB - MA, lambda(g) -> g > 0.001)
+let bound = compound(V, heavier_b)
+let n_bound = extents(bound)
+let s_bound = reduce(bound, (+))
+// EXPECT: n_bound = 3
+// EXPECT: s_bound = 10.0
+
+// the same mask written inline over the elementwise difference
+let inline_diff = compound(V, mask(MB - MA, lambda(g) -> g > 0.001))
+let n_inline = extents(inline_diff)
+let s_inline = reduce(inline_diff, (+))
+// EXPECT: n_inline = 3
+// EXPECT: s_inline = 10.0
+
+// an inline mask over a lifted affine expression of the dense column itself:
+// 2 V - 7 = [-5, -3, -1, 1, 3, 5] is positive at cells 3, 4, 5
+let inline_affine = compound(V, mask(2.0 * V - 7.0, lambda(x) -> x > 0.0))
+let s_affine = reduce(inline_affine, (+))
+// EXPECT: s_affine = 15.0

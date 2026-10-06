@@ -692,6 +692,31 @@ module DeducedFacts =
     let recordZonkClosedRank (varId: IRId) (rank: int) =
         add (DeducedRank ("<zonk>", $"?{varId}", -1, rank)) noSpan
 
+/// The `<@>` applies that are the DIRECT operand of a `reduce` -- the fused
+/// fold's leaves, seen through `<&!>` fusion trees and an anonymous
+/// `|> compute` -- keyed by the source spans of their loop and kernel
+/// operands. Their output is folded, never stored, so the BL4010
+/// confirm-and-pin STORAGE suggestion ("output storage is DENSE today; pin
+/// `where comm`") has nothing to say about them, and following it is a hard
+/// refusal: `reduce` over a compact symmetric computation is BL3999 (folding
+/// the canonical cells and the logical cells differ). `inferReduce` scopes the
+/// set around the whole reduce inference (`within`) -- the operand is inferred
+/// more than once there -- and the BL4010 sites skip a span found here. Spans are unique source positions, so an apply OUTSIDE the
+/// operand (a materialized `let D = ... |> compute` elsewhere, or a kernel body
+/// nested inside the operand) is never matched; `noSpan` is never recorded.
+module FoldOperandApplies =
+    let private slot = new System.Threading.AsyncLocal<Set<Span>>()
+    let private current () : Set<Span> =
+        match box slot.Value with
+        | null -> Set.empty
+        | _ -> slot.Value
+    let contains (s: Span) : bool = s <> noSpan && (current ()).Contains s
+    /// Run `f` with `spans` added to the set, restoring the previous set after.
+    let within (spans: Span list) (f: unit -> 'a) : 'a =
+        let saved = current ()
+        slot.Value <- Set.union saved (spans |> List.filter (fun s -> s <> noSpan) |> Set.ofList)
+        try f () finally slot.Value <- saved
+
 /// Append a non-fatal diagnostic to BOTH warning channels: the plain
 /// string list (`typeCheck`'s Ok payload, kept exact for Repl.fs and the
 /// provider tests) and the structured WarningLog (BLxxxx code + span,

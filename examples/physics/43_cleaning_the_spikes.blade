@@ -60,7 +60,7 @@ let ZT: Array<Float64 like Idx<40>, Idx<160>> = ZT_h.vars.data |> csvd.read
 let GT_h = csvd.load("data/43_GT.csv")
 let GT: Array<Float64 like Idx<4>, Idx<160>> = GT_h.vars.data |> csvd.read
 // ---- the chain's normal modes, in-language (DST: exactly orthogonal) ----
-function eqInd(a: Int64, b: Int64) -> Float64 = if a + 1 > b then (if a < b + 1 then 1.0 else 0.0) else 0.0
+function eqInd(a: Int64, b: Int64) -> Float64 = if a == b then 1.0 else 0.0
 // The mode shapes are arithmetic in the site ordinal: lift over one shared
 // half-offset axis instead of four identical range loops.
 let uax = Float64(0..40) + 0.5
@@ -70,11 +70,11 @@ let U3 = 0.223606797749979 * sin(3.14159265358979 * 3.0 * uax / 40.0)
 let U4 = 0.223606797749979 * sin(3.14159265358979 * 4.0 * uax / 40.0)
 
 // ---- data: X = white fuzz + sqrt(l_k - 1) u_k g_k ; estimate E = X X^T / N ----
-let X = method_for(range<Idx<40>>) <*> method_for(range<Idx<160>>) <@> lambda(i: Int64, t: Int64) -> ZT(i, t) + 3.0 * U1(i) * GT(0, t) + 2.0 * U2(i) * GT(1, t) + 1.22474487139159 * U3(i) * GT(2, t) + 0.547722557505166 * U4(i) * GT(3, t) |> compute
+let X = method_for(range<Idx<40>, Idx<160>>) <@> lambda(i: Int64, t: Int64) -> ZT(i, t) + 3.0 * U1(i) * GT(0, t) + 2.0 * U2(i) * GT(1, t) + 1.22474487139159 * U3(i) * GT(2, t) + 0.547722557505166 * U4(i) * GT(3, t) |> compute
 let ES: Array<Float64 like Idx<40>, Idx<40>> = method_for(X, X) <@> lambda(x: Array<Float64 like Idx<160>>, y: Array<Float64 like Idx<160>>) -> prodsum(x, y) / 160.0 |> compute
 
 // ---- truth ----
-let SIG = method_for(range<Idx<40>>) <*> method_for(range<Idx<40>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) + 9.0 * U1(i) * U1(j) + 4.0 * U2(i) * U2(j) + 1.5 * U3(i) * U3(j) + 0.3 * U4(i) * U4(j) |> compute
+let SIG = method_for(range<Idx<40>, Idx<40>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) + 9.0 * U1(i) * U1(j) + 4.0 * U2(i) * U2(j) + 1.5 * U3(i) * U3(j) + 0.3 * U4(i) * U4(j) |> compute
 
 // ---- the eigensolve ----
 let (Q, LAM) = m.eigh(ES)
@@ -85,115 +85,73 @@ let lam4 = LAM(3)
 
 // eigenvectors as rows: QT(c) is column c of Q (the c-th eigenvector);
 // used by the overlap sweeps here and the oracle bound below.
-let QT = method_for(range<Idx<40>>) <*> method_for(range<Idx<40>>) <@> lambda(i: Int64, j: Int64) -> Q(j, i) |> compute
+let QT = method_for(range<Idx<40>, Idx<40>>) <@> lambda(i: Int64, j: Int64) -> Q(j, i) |> compute
 
-// ---- overlaps with the true modes (squared; sign-immune) ----
-// each overlap is an eigenvector-column * true-mode inner product, squared:
-// materialize column c of Q in index order, then prodsum reproduces the
-// by-hand dot product exactly (same summation order).
-let o1 = {
-    let c = method_for(range<Idx<40>>) <@> lambda(i) -> Q(i, 0) |> compute
-    let v = prodsum(c, U1)
-    v * v
-}
-let o2 = {
-    let c = method_for(range<Idx<40>>) <@> lambda(i) -> Q(i, 1) |> compute
-    let v = prodsum(c, U2)
-    v * v
-}
-let o3 = {
-    let c = method_for(range<Idx<40>>) <@> lambda(i) -> Q(i, 2) |> compute
-    let v = prodsum(c, U3)
-    v * v
-}
+// ---- overlaps with the true modes (squared; sign-immune): the c-th
+//      eigenvector against the c-th true mode ----
+let o1 = prodsum(QT(0), U1) ^ 2.0
+let o2 = prodsum(QT(1), U2) ^ 2.0
+let o3 = prodsum(QT(2), U3) ^ 2.0
 // sub-threshold mode: best overlap with ANY sample eigenvector -- the
 // per-eigenvector squared overlaps as one row sweep, then a max fold
 let OV4 = method_for(QT) <@> lambda(row: Array<Float64 like Idx<40>>) -> prodsum(row, U4) ^ 2.0 |> compute
 let omax4 = reduce(OV4, lambda(a, b) -> if a > b then a else b)
 
-// ---- invert the BBP map on the visible spikes: l^ from lam^ ----
-let b1 = lam1 + 0.75
-let lh1 = (b1 + sqrt(b1 * b1 - 4.0 * lam1)) / 2.0
-let b2 = lam2 + 0.75
-let lh2 = (b2 + sqrt(b2 * b2 - 4.0 * lam2)) / 2.0
-let b3 = lam3 + 0.75
-let lh3 = (b3 + sqrt(b3 * b3 - 4.0 * lam3)) / 2.0
+// ---- invert the BBP map on the visible spikes: l^ from lam^ (the larger
+//      root of l^2 - (lam + 3/4) l + lam = 0, gamma = 1/4) ----
+function bbp_inverse(lam: Float64) -> Float64 = {
+    let b = lam + 0.75
+    let d0 = b * b - 4.0 * lam
+    (b + sqrt(if d0 > 0.0 then d0 else 0.0)) / 2.0
+}
+let lh1 = bbp_inverse(lam1)
+let lh2 = bbp_inverse(lam2)
+let lh3 = bbp_inverse(lam3)
 
 // ---- cleaned eigenvalue vectors ----
 // RIE: spike -> 1 + (l^ - 1) * overlap-law(l^); bulk -> 1 (white bulk)
-let DRIE = method_for(range<Idx<40>>) <@> lambda(k: Int64) -> {
-    let x = LAM(k)
-    let b = x + 0.75
-    let d0 = b * b - 4.0 * x
-    let dsc = if d0 > 0.0 then d0 else 0.0
-    let lh = (b + sqrt(dsc)) / 2.0
+let DRIE = method_for(LAM) <@> lambda(x) -> {
+    let lh = bbp_inverse(x)
     let oh = (1.0 - 0.25 / ((lh - 1.0) * (lh - 1.0))) / (1.0 + 0.25 / (lh - 1.0))
     if x > 2.250001 then 1.0 + (lh - 1.0) * oh else 1.0
 } |> compute
 // naive: the TRUE strengths on the top three, 1 on the rest
-let DNAI = method_for(range<Idx<40>>) <@> lambda(k: Int64) -> (if k < 1 then 10.0 else (if k < 2 then 5.0 else (if k < 3 then 2.5 else 1.0))) |> compute
+let TOP3 = [10.0, 5.0, 2.5]
+let DNAI = method_for(range<Idx<40>>) <@> lambda(k: Int64) -> if k < 3 then TOP3(k) else 1.0 |> compute
 
 // ---- the ladder: Frobenius error to truth. Each cleaned matrix is the
 // eigenbasis reconstruction Q diag(d) Q^T -- a row-pair prodsum sweep of
-// the eigenvalue-scaled rows against Q -- and each Frobenius error is a
-// flat-raveled squared-deviation fold (i-major, j-inner: the exact scalar
-// accumulation order, so the pins are bit-for-bit stable) ----
-let DRW = method_for(range<Idx<1600>>) <@> lambda(u) -> {
-    let i = u / 40
-    let j = u - 40 * i
-    (ES(i, j) - SIG(i, j)) ^ 2.0
-} |> compute
-let errRaw = reduce(DRW, (+))
-let QDN = method_for(range<Idx<40>>) <*> method_for(range<Idx<40>>) <@> lambda(i: Int64, k: Int64) -> Q(i, k) * DNAI(k) |> compute
-let RCN = method_for(QDN, Q) <@> lambda(ua: Array<Float64 like Idx<40>>, ub: Array<Float64 like Idx<40>>) -> prodsum(ua, ub) |> compute
-let DNV = method_for(range<Idx<1600>>) <@> lambda(u) -> {
-    let i = u / 40
-    let j = u - 40 * i
-    (RCN(i, j) - SIG(i, j)) ^ 2.0
-} |> compute
-let errNaive = reduce(DNV, (+))
-let QDR = method_for(range<Idx<40>>) <*> method_for(range<Idx<40>>) <@> lambda(i: Int64, k: Int64) -> Q(i, k) * DRIE(k) |> compute
-let RCR = method_for(QDR, Q) <@> lambda(ua: Array<Float64 like Idx<40>>, ub: Array<Float64 like Idx<40>>) -> prodsum(ua, ub) |> compute
-let DRV = method_for(range<Idx<1600>>) <@> lambda(u) -> {
-    let i = u / 40
-    let j = u - 40 * i
-    (RCR(i, j) - SIG(i, j)) ^ 2.0
-} |> compute
-let errRIE = reduce(DRV, (+))
+// the eigenvalue-scaled rows against Q ----
+function rebuild(d: Array<Float64 like Idx<40>>) -> Array<Float64 like Idx<40>, Idx<40>> = {
+    let qd = method_for(range<Idx<40>, Idx<40>>) <@> lambda(i: Int64, k: Int64) -> Q(i, k) * d(k) |> compute
+    method_for(qd, Q) <@> lambda(ua: Array<Float64 like Idx<40>>, ub: Array<Float64 like Idx<40>>) -> prodsum(ua, ub) |> compute
+}
+function frob_err(mat: Array<Float64 like Idx<40>, Idx<40>>) -> Float64 = reduce((mat - SIG) ^ 2.0, (+), axes = 2)
+let errRaw = frob_err(ES)
+let errNaive = frob_err(rebuild(DNAI))
+let errRIE = frob_err(rebuild(DRIE))
 // oracle bound: eigenvalue k -> v_k^T Sigma v_k, best possible in this basis
-// (QT, the eigenvector-row matrix, is defined by the overlap block above)
 let M1 = method_for(QT, SIG) <@> lambda(x: Array<Float64 like Idx<40>>, y: Array<Float64 like Idx<40>>) -> prodsum(x, y) |> compute
 let MOR = method_for(M1, QT) <@> lambda(x: Array<Float64 like Idx<40>>, y: Array<Float64 like Idx<40>>) -> prodsum(x, y) |> compute
-let QDO = method_for(range<Idx<40>>) <*> method_for(range<Idx<40>>) <@> lambda(i: Int64, k: Int64) -> Q(i, k) * MOR(k, k) |> compute
-let RCO = method_for(QDO, Q) <@> lambda(ua: Array<Float64 like Idx<40>>, ub: Array<Float64 like Idx<40>>) -> prodsum(ua, ub) |> compute
-let DOV = method_for(range<Idx<1600>>) <@> lambda(u) -> {
-    let i = u / 40
-    let j = u - 40 * i
-    (RCO(i, j) - SIG(i, j)) ^ 2.0
-} |> compute
-let errORC = reduce(DOV, (+))
+let DORC = method_for(range<Idx<40>>) <@> lambda(k: Int64) -> MOR(k, k) |> compute
+let errORC = frob_err(rebuild(DORC))
 let impF = errRaw / errRIE
 
 // ---- ex 31's route, for contrast: moments clean fine, the matrix does not move ----
 let em1 = reduce(LAM, (+)) / 40.0
 let em2 = prodsum(LAM, LAM) / 40.0
 let dm2 = em2 - 0.25 * em1 * em1
-let SQ2 = method_for(range<Idx<1600>>) <@> lambda(u) -> {
-    let i = u / 40
-    let j = u - 40 * i
-    SIG(i, j) ^ 2.0
-} |> compute
-let tm2 = reduce(SQ2, (+)) / 40.0
+let tm2 = reduce(SIG ^ 2.0, (+), axes = 2) / 40.0
 let m2errRaw = abs(em2 - tm2) / tm2
 let m2errDec = abs(dm2 - tm2) / tm2
 
 // ---- verdicts ----
-let wallV = if omax4 < 0.3 then (if lam4 < 2.25 then "MODE4_BEHIND_THE_BBP_WALL" else "NO") else "NO"
-let recV = if abs(lh1 - 10.0) < 0.5 then (if abs(lh2 - 5.0) < 0.25 then (if abs(lh3 - 2.5) < 0.125 then "SPIKES_RECOVERED_TO_5PCT" else "NO") else "NO") else "NO"
-let ladderV = if errRaw > errNaive then (if errNaive > errRIE then (if errRIE > errORC then "LADDER_RAW_NAIVE_RIE_ORACLE" else "NO") else "NO") else "NO"
+let wallV = if omax4 < 0.3 && lam4 < 2.25 then "MODE4_BEHIND_THE_BBP_WALL" else "NO"
+let recV = if abs(lh1 - 10.0) < 0.5 && abs(lh2 - 5.0) < 0.25 && abs(lh3 - 2.5) < 0.125 then "SPIKES_RECOVERED_TO_5PCT" else "NO"
+let ladderV = if errRaw > errNaive && errNaive > errRIE && errRIE > errORC then "LADDER_RAW_NAIVE_RIE_ORACLE" else "NO"
 let moralV = if errRIE < errNaive then "SHRINKAGE_BEATS_TRUE_STRENGTHS" else "NO"
 let boundV = if errRIE / errORC < 1.05 then "WITHIN_5PCT_OF_INFORMATION_BOUND" else "NO"
-let momentV = if m2errRaw > 0.1 then (if m2errDec < 0.05 then "MOMENTS_CLEAN_MATRIX_UNMOVED" else "NO") else "NO"
+let momentV = if m2errRaw > 0.1 && m2errDec < 0.05 then "MOMENTS_CLEAN_MATRIX_UNMOVED" else "NO"
 
 // the wall, the bias, the rotation, the inversion, the ladder, the moral:
 // EXPECT: lam1 = 10.4162049054318

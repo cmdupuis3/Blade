@@ -1,0 +1,29 @@
+// TEST: Lifted Binding Chain Typechecks In Linear Time
+// ----------------------------------------------------------------------------
+// A chain of lifted array bindings, each reading the previous one through a
+// few elementwise operators: Y_k = Y_(k-1) * 2.0 * D / (D + D). Every
+// elementwise apply used to evaluate its unit-deferral guard EAGERLY, and
+// the guard (typedExprHasProvisionalUnits) chases each let-bound operand into
+// its definition along EVERY path -- an apply's operands are children twice,
+// once as its arrays and once inside its loop former -- so the walk grew 8x
+// per link (examples/physics/29, whose lifted front chain is this shape,
+// spent ~210 s typechecking -- nearly its whole run). The guard is now lazy (it only
+// matters on the unit-rejection path) and its let chase memoized: these ten
+// links (~1e9 resolutions before) typecheck in well under a second.
+// The values are exact: 2 D / (D + D) = 1 at powers of two.
+// ----------------------------------------------------------------------------
+let D = [1.0, 2.0, 4.0, 8.0]
+let Y0 = D * 1.5
+let Y1 = Y0 * 2.0 * D / (D + D)
+let Y2 = Y1 * 2.0 * D / (D + D)
+let Y3 = Y2 * 2.0 * D / (D + D)
+let Y4 = Y3 * 2.0 * D / (D + D)
+let Y5 = Y4 * 2.0 * D / (D + D)
+let Y6 = Y5 * 2.0 * D / (D + D)
+let Y7 = Y6 * 2.0 * D / (D + D)
+let Y8 = Y7 * 2.0 * D / (D + D)
+let Y9 = Y8 * 2.0 * D / (D + D)
+let Y10 = Y9 * 2.0 * D / (D + D)
+let total = reduce(Y10, (+))
+// EXPECT: Y10 = [1.5, 3.0, 6.0, 12.0]
+// EXPECT: total = 22.5

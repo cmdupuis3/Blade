@@ -78,12 +78,12 @@ let rec ts_days: Array<Float64 like Time> = match ts_days with
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: {
-        let jf = 1.0 * n
+        let jf = Float64(n)
         let burst = if sin(937.11 * jf + 0.3) > 0.8 then 6.0 else 1.0
         prefix(n - 1) + 0.125 * burst * (1.0 + 0.4 * sin(5.7 * jf + 0.9))
     }
 
-let ts: Array<Float64<time> like Time> = (ts_days <@> lambda(d) -> one_day * d) |> compute
+let ts: Array<Float64<time> like Time> = one_day * ts_days
 
 let span_days = reduce(ts_days, lambda(a, b) -> if a > b then a else b)
 // %%
@@ -102,10 +102,10 @@ span_days
 // unchanged.
 //
 // %%
-let lon_count = 1.0 * n_lon
-let lat_count = 1.0 * n_lat
+let lon_count = Float64(n_lon)
+let lat_count = Float64(n_lat)
 let F: Array<Float64<flux> like Space, Time> = method_for(range<Space, Time>) <@> lambda(p, j) -> {
-    let pf = 1.0 * p
+    let pf = Float64(p)
     let yr = floor(pf / lon_count) / (lat_count - 1.0)
     let xr = (pf - lon_count * floor(pf / lon_count)) / (lon_count - 1.0)
     let td = ts_days(j)
@@ -136,7 +136,7 @@ let F: Array<Float64<flux> like Space, Time> = method_for(range<Space, Time>) <@
 // is worth doing when the band is wide; it is not needed here.)
 //
 // %%
-function variance(x: Array<T like Idx<n>>) = {
+function variance(x: T^1) = {
     let n = extents(x)
     let d = x - reduce(x, (+)) / n
     prodsum(d, d) / n
@@ -155,14 +155,14 @@ where omp(st_raw: 1) = {
         let Z1 = prodsum(s, e)
         let Z2 = prodsum(e, e)
         let P = Z1 * exp(-i * arg(Z2) / 2)
-        let a = real(P) / sqrt((n + abs(Z2)) / 2)
-        let b = imag(P) / sqrt((n - abs(Z2)) / 2)
+        let a = real(P) / sqrt((Float64(n) + abs(Z2)) / 2)
+        let b = imag(P) / sqrt((Float64(n) - abs(Z2)) / 2)
         complex(a, b) * exp(i * w * t_zero) / sqrt(2.0 * s_var)
     }
 }
 
-let freqs_cpd: Array<Float64 like Freq> = method_for(range<Freq>) <@> lambda(k) -> (1.0 + 1.0 * k) / 12.0 |> compute
-let omegas: Array<Float64<angular_frequency> like Freq> = (freqs_cpd <@> lambda(f) -> w_d * f) |> compute
+let freqs_cpd: Array<Float64 like Freq> = (1.0 + Float64(range<Freq>)) / 12.0
+let omegas: Array<Float64<angular_frequency> like Freq> = w_d * freqs_cpd
 let k_diurnal = (11 : Freq)
 
 // %% [markdown]
@@ -179,27 +179,27 @@ let k_diurnal = (11 : Freq)
 // `lsdft` per point. (On per-point time bases — truly porous data — the hoist
 // is unavailable; that is the price of ragged sampling.)
 //
-// Two spellings are deliberate, measured against the current compiler: the map
-// returns scalars via `range<Space, Freq>` (a kernel returning `lsdft`'s whole
-// row leaves the column extent unresolved at codegen), and no generic helper
-// is shared with `lsdft` (a helper called from both a generic and a concrete
-// function currently loses one of its two monomorphizations).
+// The phase table is the outer product of the frequency and time axes,
+// exponentiated: `exp(i * (omegas [*] ts))`. Per-row statistics are row
+// folds -- `reduce(F, (+))` peels the time axis, one sum per point -- and
+// `ls_project` is `lsdft`'s per-frequency body with Z₂ and the variance
+// passed in, so the map returns one scalar per `(point, frequency)` cell.
 //
 // %%
-let E: Array<Complex128 like Freq, Time> = method_for(range<Freq, Time>) <@> lambda(k, j) -> exp(i * omegas(k) * ts(j)) |> compute
-let Z2s: Array<Complex128 like Freq> = method_for(range<Freq>) <@> lambda(k) -> prodsum(E(k), E(k)) |> compute
+let E: Array<Complex128 like Freq, Time> = exp(i * (omegas [*] ts))
+let Z2s: Array<Complex128 like Freq> = method_for(E) <@> lambda(row: T^1) -> prodsum(row, row) |> compute
 
-let s_mean: Array<Float64<flux> like Space> = method_for(range<Space>) <@> lambda(p) -> reduce(F(p), (+)) / (1.0 * n_t) |> compute
+let s_mean: Array<Float64<flux> like Space> = reduce(F, (+)) / Float64(n_t)
 let Fc: Array<Float64<flux> like Space, Time> = method_for(range<Space, Time>) <@> lambda(p, j) -> F(p, j) - s_mean(p) |> compute
-let s_var: Array<Float64 like Space> = method_for(range<Space>) <@> lambda(p) -> prodsum(Fc(p), Fc(p)) / (f0 * f0 * n_t) |> compute
+let s_var: Array<Float64 like Space> = method_for(Fc) <@> lambda(row: T^1) -> prodsum(row, row) / (f0 * f0 * Float64(n_t)) |> compute
 
 function ls_project(sc: Array<Float64<flux> like Idx<n>>, e: Array<Complex128 like Idx<n>>,
                     Z2: Complex128, v: Float64) = {
     let n = extents(sc)
     let Z1 = prodsum(sc, e)
     let P = Z1 * exp(-i * arg(Z2) / 2)
-    let a = real(P) / sqrt((n + abs(Z2)) / 2)
-    let b = imag(P) / sqrt((n - abs(Z2)) / 2)
+    let a = real(P) / sqrt((Float64(n) + abs(Z2)) / 2)
+    let b = imag(P) / sqrt((Float64(n) - abs(Z2)) / 2)
     complex(a, b) / sqrt(2.0 * v)
 }
 
@@ -213,9 +213,9 @@ let spec: Array<Complex128 like Space, Freq> = method_for(range<Space, Freq>) <@
 //
 // %%
 let p_probe = (20 : Space)
-let s_probe: Array<Float64<flux> like Time> = method_for(range<Time>) <@> lambda(j) -> F(p_probe, j) |> compute
+let s_probe: Array<Float64<flux> like Time> = F(p_probe)
 let spec_probe = lsdft((s_probe, ts), omegas) |> compute
-let power_probe = (spec_probe <@> lambda(z) -> real(abs(z) * abs(z))) |> compute
+let power_probe = abs(spec_probe) * abs(spec_probe)
 
 // %%
 plot.line(freqs_cpd, power_probe, "LSDFT spectrum at p = 20": title, "frequency (cycles/day)": xlabel, "power": ylabel)
@@ -223,20 +223,20 @@ plot.line(freqs_cpd, power_probe, "LSDFT spectrum at p = 20": title, "frequency 
 // ## Diurnal amplitude and phase maps
 //
 // Modulus and argument of the transform at the diurnal bin, reshaped from the
-// flat `Space` axis to the `(Lat, Lon)` grid for plotting. The reshape is an
-// untagged gather — index provenance can't be minted by arithmetic, so the
-// compiler flags the subscript (BL4003); that warning is the documented escape
-// hatch here, not an accident.
+// flat `Space` axis to the `(Lat, Lon)` grid for plotting. The reshape is a
+// gather through computed positions — index provenance can't be minted by
+// arithmetic, so the flat position is CAST to `Space` (`(… : Space)`): the
+// compiler checks that subscript at run time instead of proving it.
 //
 // %%
 function flatpos(iy: Int64, ix: Int64, width: Int64) -> Int64 = iy * width + ix
-function to_grid(v: Array<Float64 like Space>) = method_for(range<Lat, Lon>) <@> lambda(iy, ix) -> v[flatpos(iy, ix, n_lon)] |> compute
+function to_grid(v: Array<Float64 like Space>) = method_for(range<Lat, Lon>) <@> lambda(iy, ix) -> v((flatpos(iy, ix, n_lon) : Space)) |> compute
 
 let amp_flat = method_for(range<Space>) <@> lambda(p) -> abs(spec(p, k_diurnal)) |> compute
 let phase_flat = method_for(range<Space>) <@> lambda(p) -> arg(spec(p, k_diurnal)) |> compute
 
-let lons = method_for(range<Lon>) <@> lambda(ix) -> 1.0 * ix |> compute
-let lats = method_for(range<Lat>) <@> lambda(iy) -> 1.0 * iy |> compute
+let lons = Float64(range<Lon>)
+let lats = Float64(range<Lat>)
 
 // %%
 plot.heatmap(lons, lats, to_grid(amp_flat), "LSDFT diurnal amplitude": title)
@@ -294,15 +294,13 @@ plot.heatmap(lons, lats, to_grid(phase_flat), 4: cmap, "LSDFT diurnal phase": ti
 // are unaffected.
 //
 // %%
-let ST: Array<Complex128 like Freq, Space> = method_for(range<Freq, Space>) <@> lambda(k, p) -> spec(p, k) |> compute
+let ST: Array<Complex128 like Freq, Space> = transpose(spec, [0, 1])
 let Hd = gram(ST, ST)
 let Gd = decompact(Hd, 0)
 
 let M: Array<Float64 like Dual, Dual> = method_for(range<Dual, Dual>) <@> lambda(a, b) -> {
-    let ar = if a < n_freq then a + 0 else a - n_freq
-    let br = if b < n_freq then b + 0 else b - n_freq
-    let z = Gd[ar][br]
-    if a < n_freq then { if b < n_freq then real(z) else 0.0 - imag(z) } else { if b < n_freq then imag(z) else real(z) }
+    let z = Gd(a % n_freq, b % n_freq)
+    if a < n_freq then { if b < n_freq then real(z) else -imag(z) } else { if b < n_freq then imag(z) else real(z) }
 } |> compute
 
 let (Q, LAM) = m.eigh(M)
@@ -315,12 +313,12 @@ let (Q, LAM) = m.eigh(M)
 // zero tail to discard. North's rule of thumb (paper Eq. 13): Δλ² = λ²·√(2/N).
 //
 // %%
-let ev = method_for(range<Freq>) <@> lambda(k) -> LAM[2 * k] |> compute
+let ev = method_for(range<Freq>) <@> lambda(k) -> LAM(2 * k) |> compute
 let ev_total = reduce(ev, (+))
-let ev_frac = method_for(range<Freq>) <@> lambda(k) -> ev(k) / ev_total |> compute
-let north = (ev_frac <@> lambda(v) -> v * sqrt(2.0 / (1.0 * n_t))) |> compute
+let ev_frac = ev / ev_total
+let north = ev_frac * sqrt(2.0 / Float64(n_t))
 
-let mode_idx = method_for(range<Freq>) <@> lambda(k) -> 1.0 * k |> compute
+let mode_idx = Float64(range<Freq>)
 // %%
 plot.line(mode_idx, ev_frac, "explained variance by mode": title, "mode": xlabel, "fraction": ylabel)
 // %%
@@ -341,21 +339,21 @@ lead_pm
 //
 // %%
 function eof(col: Int64) = {
-    let lam = LAM[col]
-    let v = method_for(range<Freq>) <@> lambda(k) -> complex(Q[k][col], 0.0 - Q[k + n_freq][col]) |> compute
+    let lam = LAM(col)
+    let v = method_for(range<Freq>) <@> lambda(k) -> complex(Q(k, col), -Q(k + n_freq, col)) |> compute
     method_for(range<Space>) <@> lambda(p) -> prodsum(spec(p), v) / sqrt(lam) |> compute
 }
 
 let eof1 = eof(0)
-let eof1_amp = method_for(range<Space>) <@> lambda(p) -> abs(eof1(p)) |> compute
-let eof1_phase = method_for(range<Space>) <@> lambda(p) -> arg(eof1(p)) |> compute
+let eof1_amp = abs(eof1)
+let eof1_phase = arg(eof1)
 plot.heatmap(lons, lats, to_grid(eof1_amp), "EOF 1 amplitude": title)
 plot.heatmap(lons, lats, to_grid(eof1_phase), 4: cmap, "EOF 1 phase": title)
 
 // %%
 let eof2 = eof(2)
-let eof2_amp = method_for(range<Space>) <@> lambda(p) -> abs(eof2(p)) |> compute
-let eof2_phase = method_for(range<Space>) <@> lambda(p) -> arg(eof2(p)) |> compute
+let eof2_amp = abs(eof2)
+let eof2_phase = arg(eof2)
 plot.heatmap(lons, lats, to_grid(eof2_amp), "EOF 2 amplitude": title)
 plot.heatmap(lons, lats, to_grid(eof2_phase), 4: cmap, "EOF 2 phase": title)
 

@@ -53,77 +53,82 @@ let s = 0.25
 let r = sqrt(0.9375)
 
 // ---- the classical wall: all 64 deterministic strategies ----
+// strategy g's six binary digits are the outcomes (a1, a2, a3, b1, b2, b3)
 let SGN = [-1.0, 1.0]
-let POS = reduce(method_for(range<Idx<64>>) <@> lambda(g: Int64) -> (if 0.0 - 1.0 + (SGN(g % 2) + SGN((g / 2) % 2)) / 4.0 - (SGN((g / 8) % 2) + SGN((g / 16) % 2)) / 4.0 + (SGN(g % 2) * SGN((g / 8) % 2) + SGN(g % 2) * SGN((g / 16) % 2) + SGN(g % 2) * SGN(g / 32) + SGN((g / 2) % 2) * SGN((g / 8) % 2) + SGN((g / 2) % 2) * SGN((g / 16) % 2) - SGN((g / 2) % 2) * SGN(g / 32) + SGN((g / 4) % 2) * SGN((g / 8) % 2) - SGN((g / 4) % 2) * SGN((g / 16) % 2)) / 4.0 > 0.000000001 then 1.0 else 0.0), (+))
-let SAT = reduce(method_for(range<Idx<64>>) <@> lambda(g: Int64) -> (if sqrt((0.0 - 1.0 + (SGN(g % 2) + SGN((g / 2) % 2)) / 4.0 - (SGN((g / 8) % 2) + SGN((g / 16) % 2)) / 4.0 + (SGN(g % 2) * SGN((g / 8) % 2) + SGN(g % 2) * SGN((g / 16) % 2) + SGN(g % 2) * SGN(g / 32) + SGN((g / 2) % 2) * SGN((g / 8) % 2) + SGN((g / 2) % 2) * SGN((g / 16) % 2) - SGN((g / 2) % 2) * SGN(g / 32) + SGN((g / 4) % 2) * SGN((g / 8) % 2) - SGN((g / 4) % 2) * SGN((g / 16) % 2)) / 4.0) * (0.0 - 1.0 + (SGN(g % 2) + SGN((g / 2) % 2)) / 4.0 - (SGN((g / 8) % 2) + SGN((g / 16) % 2)) / 4.0 + (SGN(g % 2) * SGN((g / 8) % 2) + SGN(g % 2) * SGN((g / 16) % 2) + SGN(g % 2) * SGN(g / 32) + SGN((g / 2) % 2) * SGN((g / 8) % 2) + SGN((g / 2) % 2) * SGN((g / 16) % 2) - SGN((g / 2) % 2) * SGN(g / 32) + SGN((g / 4) % 2) * SGN((g / 8) % 2) - SGN((g / 4) % 2) * SGN((g / 16) % 2)) / 4.0)) < 0.000000001 then 1.0 else 0.0), (+))
-let local_V = if POS < 0.5 then "LOCAL_BOUND_ZERO_CERTIFIED" else "NO"
+let I_DET = method_for(range<Idx<64>>) <@> lambda(g: Int64) -> {
+    let a1 = SGN(g % 2)
+    let a2 = SGN((g / 2) % 2)
+    let a3 = SGN((g / 4) % 2)
+    let b1 = SGN((g / 8) % 2)
+    let b2 = SGN((g / 16) % 2)
+    let b3 = SGN(g / 32)
+    0.0 - 1.0 + (a1 + a2) / 4.0 - (b1 + b2) / 4.0 + (a1 * b1 + a1 * b2 + a1 * b3 + a2 * b1 + a2 * b2 - a2 * b3 + a3 * b1 - a3 * b2) / 4.0
+} |> compute
+// the strategies ABOVE the bound (none) and the ones ON it, as WHERE filters
+let ABOVE = compound(I_DET, mask(I_DET, lambda(v) -> v > 1.0e-9))
+let ON_BOUND = compound(I_DET, mask(I_DET, lambda(v) -> abs(v) < 1.0e-9))
+let POS = extents(ABOVE)
+let SAT = extents(ON_BOUND)
+let local_V = if POS == 0 then "LOCAL_BOUND_ZERO_CERTIFIED" else "NO"
 
 // ---- the quantum point: singlet Bloch frames, zero marginals ----
 // a1 = (h, 1/2, 1/2), a2 = (h, -1/2, -1/2), a3 = (0, h, -h);
-// b_j = a_j with third coordinate negated
-let qc11 = h * h + 0.5 * 0.5 - 0.5 * 0.5
-let qc12 = h * h - 0.25 + 0.25
-let qc13 = 0.5 * h + 0.5 * h
-let qc21 = h * h - 0.25 + 0.25
-let qc22 = h * h + 0.25 - 0.25
-let qc23 = 0.0 - 0.5 * h - 0.5 * h
-let qc31 = h * 0.5 + h * 0.5
-let qc32 = 0.0 - h * 0.5 - h * 0.5
+// b_j = a_j with third coordinate negated; c_ij = a_i . b_j
+let QA1 = [h, 0.5, 0.5]
+let QA2 = [h, -0.5, -0.5]
+let QA3 = [0.0, h, -h]
+let QB1 = [h, 0.5, -0.5]
+let QB2 = [h, -0.5, 0.5]
+let QB3 = [0.0, h, h]
+let qc11 = prodsum(QA1, QB1)
+let qc12 = prodsum(QA1, QB2)
+let qc13 = prodsum(QA1, QB3)
+let qc21 = prodsum(QA2, QB1)
+let qc22 = prodsum(QA2, QB2)
+let qc23 = prodsum(QA2, QB3)
+let qc31 = prodsum(QA3, QB1)
+let qc32 = prodsum(QA3, QB2)
 let qval = 0.0 - 1.0 + (qc11 + qc12 + qc13 + qc21 + qc22 - qc23 + qc31 - qc32) / 4.0
 
 // ---- the tower point: seven explicit unit vectors in R^4 ----
 // u = e0; alpha_i = s e0 + r a_i; beta_j = -s e0 + r b_j (i, j = 1, 2);
-// alpha_3 = (0, a_3), beta_3 = (0, b_3)
-let a1x = s
-let a1p = r * h
-let a1q = r * 0.5
-let a1s = r * 0.5
-let a2x = s
-let a2p = r * h
-let a2q = 0.0 - r * 0.5
-let a2s = 0.0 - r * 0.5
-let a3q = h
-let a3s = 0.0 - h
-let b1x = 0.0 - s
-let b1p = r * h
-let b1q = r * 0.5
-let b1s = 0.0 - r * 0.5
-let b2x = 0.0 - s
-let b2p = r * h
-let b2q = 0.0 - r * 0.5
-let b2s = r * 0.5
-let b3q = h
-let b3s = h
+// alpha_3 = (0, a_3), beta_3 = (0, b_3); marginals are dot products
+// with u (the first coordinate), correlations with each other
+let TA1 = [s, r * h, r * 0.5, r * 0.5]
+let TA2 = [s, r * h, -(r * 0.5), -(r * 0.5)]
+let TA3 = [0.0, 0.0, h, -h]
+let TB1 = [-s, r * h, r * 0.5, -(r * 0.5)]
+let TB2 = [-s, r * h, -(r * 0.5), r * 0.5]
+let TB3 = [0.0, 0.0, h, h]
 // unit norms (the PSD certificate is the realization itself)
-let n_a1 = a1x * a1x + a1p * a1p + a1q * a1q + a1s * a1s
-let n_a3 = a3q * a3q + a3s * a3s
-let n_b2 = b2x * b2x + b2p * b2p + b2q * b2q + b2s * b2s
-// marginals and correlations from the dot products
-let tm_a1 = a1x
-let tm_b1 = b1x
-let tc11 = a1x * b1x + a1p * b1p + a1q * b1q + a1s * b1s
-let tc12 = a1x * b2x + a1p * b2p + a1q * b2q + a1s * b2s
-let tc13 = a1q * b3q + a1s * b3s
-let tc21 = a2x * b1x + a2p * b1p + a2q * b1q + a2s * b1s
-let tc22 = a2x * b2x + a2p * b2p + a2q * b2q + a2s * b2s
-let tc23 = a2q * b3q + a2s * b3s
-let tc31 = a3q * b1q + a3s * b1s
-let tc32 = a3q * b2q + a3s * b2s
-let tval = 0.0 - 1.0 + (a1x + a2x) / 4.0 - (b1x + b2x) / 4.0 + (tc11 + tc12 + tc13 + tc21 + tc22 - tc23 + tc31 - tc32) / 4.0
+let n_a1 = prodsum(TA1, TA1)
+let n_a3 = prodsum(TA3, TA3)
+let n_b2 = prodsum(TB2, TB2)
+let tm_a1 = TA1(0)
+let tm_b1 = TB1(0)
+let tc11 = prodsum(TA1, TB1)
+let tc12 = prodsum(TA1, TB2)
+let tc13 = prodsum(TA1, TB3)
+let tc21 = prodsum(TA2, TB1)
+let tc22 = prodsum(TA2, TB2)
+let tc23 = prodsum(TA2, TB3)
+let tc31 = prodsum(TA3, TB1)
+let tc32 = prodsum(TA3, TB2)
+let tval = 0.0 - 1.0 + (TA1(0) + TA2(0)) / 4.0 - (TB1(0) + TB2(0)) / 4.0 + (tc11 + tc12 + tc13 + tc21 + tc22 - tc23 + tc31 - tc32) / 4.0
 
 // ---- the imported anchor and the strata verdicts ----
 // quantum supremum for I3322: 0.2508754 (Pal-Vertesi 2010; the one
 // number this file does not derive)
 let q_sup = 0.2508754
-let strata_V = if qval > 0.0 then (if q_sup > qval then (if tval > q_sup then "STRICT_SANDWICH_EXHIBITED" else "NO") else "NO") else "NO"
+let strata_V = if qval > 0.0 && q_sup > qval && tval > q_sup then "STRICT_SANDWICH_EXHIBITED" else "NO"
 let gap = tval - q_sup
 
 // ---- the tilt dial: how far off the quantum slice is the wall? ----
 let SGRID = [0.0, 0.0482, 0.1, 0.18, 0.25]
-let IS = method_for(SGRID) <@> lambda(t) -> 0.0 - 1.0 + t - t * t + (1.0 - t * t) / 2.0 + 0.707106781186548 * sqrt(1.0 - t * t) |> compute
-let exit_V = if IS(0) < q_sup then (if IS(1) > q_sup then "QUANTUM_CEILING_EXITS_AT_5PC_TILT" else "NO") else "NO"
-let dial_match0 = sqrt((IS(0) - qval) * (IS(0) - qval))
-let dial_match4 = sqrt((IS(4) - tval) * (IS(4) - tval))
+let IS = 0.0 - 1.0 + SGRID - SGRID * SGRID + (1.0 - SGRID * SGRID) / 2.0 + 0.707106781186548 * sqrt(1.0 - SGRID * SGRID)
+let exit_V = if IS(0) < q_sup && IS(1) > q_sup then "QUANTUM_CEILING_EXITS_AT_5PC_TILT" else "NO"
+let dial_match0 = abs(IS(0) - qval)
+let dial_match4 = abs(IS(4) - tval)
 
 // the classical wall by exhaustion; the quantum point by construction;
 // the tower point by realization; the strict sandwich; the shallow exit:

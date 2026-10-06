@@ -17,47 +17,57 @@ type TimeIdx = Idx<7>
 let T: Array<Float64 like Idx<1>, TimeIdx> = [[0.237346150024, 0.496016388451, 0.659413339833, 0.8, 0.940586660167, 1.10398361155, 1.36265384998]]
 let d = ppl.dist(T, 6)
 
+// --- the detector of 09/10, written once ---
+function dispersion(k1: Float64, k2: Float64) -> Float64 = abs(k2) / (abs(k1) + 0.000000001)
+function verdict(k2: Float64, disp: Float64) -> String = if abs(k2) < 1.0e-20 then "INVARIANT" else (if disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- the orbit state at phase t: every candidate is built from these ---
+function x(t) = cos(t) + 0.3 * sin(t)
+function y(t) = 0.4 * cos(t) + 0.9 * sin(t)
+function vx(t) = 0.0 - sin(t) + 0.3 * cos(t)
+function vy(t) = 0.0 - 0.4 * sin(t) + 0.9 * cos(t)
+
 // --- position x -- expected VARIANT ---
-let x_d  = ppl.dist_map(d, 2, 3, lambda(t) -> cos(t) + 0.3 * sin(t))
+let x_d  = ppl.dist_map(d, 2, 3, x)
 let x_k1 = ppl.cumulant(x_d, 1)
 let x_k2 = ppl.cumulant(x_d, 2)
-let x_disp = sqrt(x_k2(0) * x_k2(0)) / (sqrt(x_k1(0) * x_k1(0)) + 0.000000001)
-let x_V = if sqrt(x_k2(0) * x_k2(0)) < 1.0e-20 then "INVARIANT" else (if x_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let x_disp = dispersion(x_k1(0), x_k2(0))
+let x_V = verdict(x_k2(0), x_disp)
 
 // --- velocity vx -- expected VARIANT ---
-let vx_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.0 - sin(t) + 0.3 * cos(t))
+let vx_d  = ppl.dist_map(d, 2, 3, vx)
 let vx_k1 = ppl.cumulant(vx_d, 1)
 let vx_k2 = ppl.cumulant(vx_d, 2)
-let vx_disp = sqrt(vx_k2(0) * vx_k2(0)) / (sqrt(vx_k1(0) * vx_k1(0)) + 0.000000001)
-let vx_V = if sqrt(vx_k2(0) * vx_k2(0)) < 1.0e-20 then "INVARIANT" else (if vx_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let vx_disp = dispersion(vx_k1(0), vx_k2(0))
+let vx_V = verdict(vx_k2(0), vx_disp)
 
 // --- ENERGY E = 1/2 v^2 + 1/2 r^2 ---
-let E_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.0 - sin(t) + 0.3 * cos(t)) * (0.0 - sin(t) + 0.3 * cos(t)) + (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t))) + 0.5 * ((cos(t) + 0.3 * sin(t)) * (cos(t) + 0.3 * sin(t)) + (0.4 * cos(t) + 0.9 * sin(t)) * (0.4 * cos(t) + 0.9 * sin(t))))
+let E_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * (vx(t) * vx(t) + vy(t) * vy(t)) + 0.5 * (x(t) * x(t) + y(t) * y(t)))
 let E_k1 = ppl.cumulant(E_d, 1)
 let E_k2 = ppl.cumulant(E_d, 2)
-let E_disp = sqrt(E_k2(0) * E_k2(0)) / (sqrt(E_k1(0) * E_k1(0)) + 0.000000001)
-let E_V = if sqrt(E_k2(0) * E_k2(0)) < 1.0e-20 then "INVARIANT" else (if E_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let E_disp = dispersion(E_k1(0), E_k2(0))
+let E_V = verdict(E_k2(0), E_disp)
 
 // --- ANGULAR MOMENTUM Lz = x vy - y vx ---
-let Lz_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (cos(t) + 0.3 * sin(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) - (0.4 * cos(t) + 0.9 * sin(t)) * (0.0 - sin(t) + 0.3 * cos(t)))
+let Lz_d  = ppl.dist_map(d, 2, 3, lambda(t) -> x(t) * vy(t) - y(t) * vx(t))
 let Lz_k1 = ppl.cumulant(Lz_d, 1)
 let Lz_k2 = ppl.cumulant(Lz_d, 2)
-let Lz_disp = sqrt(Lz_k2(0) * Lz_k2(0)) / (sqrt(Lz_k1(0) * Lz_k1(0)) + 0.000000001)
-let Lz_V = if sqrt(Lz_k2(0) * Lz_k2(0)) < 1.0e-20 then "INVARIANT" else (if Lz_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Lz_disp = dispersion(Lz_k1(0), Lz_k2(0))
+let Lz_V = verdict(Lz_k2(0), Lz_disp)
 
 // --- FRADKIN T1 = 1/2(vx^2 - vy^2) + 1/2(x^2 - y^2) ---
-let T1_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * ((0.0 - sin(t) + 0.3 * cos(t)) * (0.0 - sin(t) + 0.3 * cos(t)) - (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t))) + 0.5 * ((cos(t) + 0.3 * sin(t)) * (cos(t) + 0.3 * sin(t)) - (0.4 * cos(t) + 0.9 * sin(t)) * (0.4 * cos(t) + 0.9 * sin(t))))
+let T1_d  = ppl.dist_map(d, 2, 3, lambda(t) -> 0.5 * (vx(t) * vx(t) - vy(t) * vy(t)) + 0.5 * (x(t) * x(t) - y(t) * y(t)))
 let T1_k1 = ppl.cumulant(T1_d, 1)
 let T1_k2 = ppl.cumulant(T1_d, 2)
-let T1_disp = sqrt(T1_k2(0) * T1_k2(0)) / (sqrt(T1_k1(0) * T1_k1(0)) + 0.000000001)
-let T1_V = if sqrt(T1_k2(0) * T1_k2(0)) < 1.0e-20 then "INVARIANT" else (if T1_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let T1_disp = dispersion(T1_k1(0), T1_k2(0))
+let T1_V = verdict(T1_k2(0), T1_disp)
 
 // --- FRADKIN T2 = vx vy + x y ---
-let T2_d  = ppl.dist_map(d, 2, 3, lambda(t) -> (0.0 - sin(t) + 0.3 * cos(t)) * (0.0 - 0.4 * sin(t) + 0.9 * cos(t)) + (cos(t) + 0.3 * sin(t)) * (0.4 * cos(t) + 0.9 * sin(t)))
+let T2_d  = ppl.dist_map(d, 2, 3, lambda(t) -> vx(t) * vy(t) + x(t) * y(t))
 let T2_k1 = ppl.cumulant(T2_d, 1)
 let T2_k2 = ppl.cumulant(T2_d, 2)
-let T2_disp = sqrt(T2_k2(0) * T2_k2(0)) / (sqrt(T2_k1(0) * T2_k1(0)) + 0.000000001)
-let T2_V = if sqrt(T2_k2(0) * T2_k2(0)) < 1.0e-20 then "INVARIANT" else (if T2_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let T2_disp = dispersion(T2_k1(0), T2_k2(0))
+let T2_V = verdict(T2_k2(0), T2_disp)
 
 // invariants are pinned to their constant values; verdicts confirm the split:
 // EXPECT: E_k1 = [1.03]

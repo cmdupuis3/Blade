@@ -443,6 +443,16 @@ let liftDeferredOperand (builder: IRBuilder) (child: IRExpr) : (IRId * IRType * 
         let id = builder.FreshId()
         let ty = typeOf inner
         (peeled @ [(id, ty, inner)], IRVar (id, ty))
+    // An INLINE ARRAY LITERAL operand (`prodsum([p0, p1, p2], X)`) has no name
+    // for the IIFE to subscript either, and exprToCpp has no inline rendering
+    // for a literal: it died BL7001 "no rule for IRArrayLit in expression
+    // position". Hoist it to its own let-RHS -- the ordinary array-literal
+    // emission, exactly what binding it by hand does. (reduce's slot needs no
+    // arm: its emitter already materializes an inline literal.)
+    | IRArrayLit (_, arrTy) ->
+        let id = builder.FreshId()
+        let ty = mkArrayLike arrTy
+        (peeled @ [(id, ty, inner)], IRVar (id, ty))
     | _ ->
         let (b, e) = liftChildIncludingLoopApp builder inner
         (peeled @ b, e)
@@ -1073,13 +1083,24 @@ let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     // constructor as a let of its own (CodeGenBinding.genCompoundInitBinding),
     // and that let needs the same hoisting any let-RHS gets: without it the
     // nested forms reach the loop nest unmaterialized ('arr0' was not
-    // declared). A bare variable or a single inline mask is left exactly as
-    // it was -- the constructor reads those directly.
+    // declared). A bare variable, or a single inline mask over a plain
+    // variable, is left exactly as it was -- the constructor reads those
+    // directly. An inline mask whose SOURCE is itself computed --
+    // `compound(V, mask(2.0 * V - 7.0, p))` -- is lifted like the let-bound
+    // `let m = mask(2.0 * V - 7.0, p)` it spells: its nested forms become
+    // lets and the constructor emits it through the computed arm. A DENSE
+    // operand computed in place (`compound(W * S, m)`) gets the same hoisting
+    // for the constructor's own computed-dense arm.
     let liftedCompoundInits =
         modul.CompoundInits
         |> Map.map (fun _ (dense, mask) ->
+            let dense' =
+                match dense with
+                | IRVar _ | IRParam _ -> dense
+                | computed -> liftExpr builder computed
             match mask with
-            | IRVar _ | IRMask _ -> (dense, mask)
-            | computed -> (dense, liftExpr builder computed))
+            | IRVar _ -> (dense', mask)
+            | IRMask ((IRVar _ | IRParam _), _) -> (dense', mask)
+            | computed -> (dense', liftExpr builder computed))
     { modul with Bindings = liftedBindings; Functions = liftedFunctions; CompoundInits = liftedCompoundInits }
 

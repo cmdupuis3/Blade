@@ -35,16 +35,22 @@ import ppl as ppl
 let XS = [11.2, 11.2, 11.2, 11.2, 11.583916725, 12.6863910271, 14.169446307]
 let XB = [0.0, 0.0, 0.0, 0.0, -0.00103657515753, -0.0109992936009, -0.059388926141]
 let RS = [0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659]
-let XP = [11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.2, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 11.583916725, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 12.6863910271, 14.169446307, 14.169446307, 14.169446307, 14.169446307, 14.169446307, 14.169446307, 14.169446307]
-let BP = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.00103657515753, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.0109992936009, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141, -0.059388926141]
-let RP = [0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659, 0.368403149864, 0.531329284591, 0.736806299728, 1.0, 1.39247665008, 1.94869516037, 2.71441761659]
+
+// Each realization's gap is g = x_s - x_B - R_B - R_s: the position part
+// x_s - x_B - R_B belongs to the position realization, R_s to the size one.
+// The two ensembles then differ in ONE word. JOINT: realization k's position
+// with realization k's own size -- co-iteration, zip. PRODUCT OF MARGINALS:
+// every position realization with every size realization -- the outer
+// product, 7 x 7 = 49 pairs.
+let XG = XS - XB - 10.0
+let GJ = method_for(zip(XG, RS)) <@> lambda(g, r) -> g - r |> compute
+let GP = method_for(XG, RS) <@> lambda(g, r) -> g - r |> compute
 
 // --- joint ensemble: overlap count and gap moments ---
-let CJ = reduce(method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 1.0 else 0.0), (+))
+let CJ = reduce(method_for(GJ) <@> lambda(g) -> (if g < 0.0 then 1.0 else 0.0), (+))
 let P_joint = CJ / 7.0
-// materialize the gap once, then read its raw moment tower off the former:
-// the Stieltjes test below needs orders 1..3 of the SAME derived quantity.
-let GJ = method_for(zip(XS, XB, RS)) <@> lambda(x, b, r) -> x - b - 10.0 - r |> compute
+// read the gap's raw moment tower off the former: the Stieltjes test below
+// needs orders 1..3 of the SAME derived quantity.
 let GJV: Array<Float64 like Idx<1>, Idx<7>> = [GJ]
 let gj1 = ppl.moments(GJV, 1)
 let gj2 = ppl.moments(GJV, 2)
@@ -57,19 +63,18 @@ let joint_V = if P_joint < 0.001 then "EXCLUDED" else "OVERLAPS"
 let lawJ_V = if sHJ > 0.0 then "STIELTJES_OK" else "STIELTJES_VIOLATED"
 
 // --- product of marginals: position-realization i paired with size-realization j ---
-let CP = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 1.0 else 0.0), (+))
+let CP = reduce(method_for(GP) <@> lambda(g) -> (if g < 0.0 then 1.0 else 0.0), (+), axes = 2)
 let P_prod = CP / 49.0
-let DP = reduce(method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> (if x - b - 10.0 - r < 0.0 then 0.0 - (x - b - 10.0 - r) else 0.0), (+))
+let DP = reduce(method_for(GP) <@> lambda(g) -> (if g < 0.0 then 0.0 - g else 0.0), (+), axes = 2)
 let meanDepth = DP / CP
-// the decorrelated gap, same three raw orders off the same former
-let GP = method_for(zip(XP, BP, RP)) <@> lambda(x, b, r) -> x - b - 10.0 - r |> compute
-let GPV: Array<Float64 like Idx<1>, Idx<49>> = [GP]
-let gp1 = ppl.moments(GPV, 1)
-let gp2 = ppl.moments(GPV, 2)
-let gp3 = ppl.moments(GPV, 3)
-let Pm1 = gp1(0)
-let Pm2 = gp2(0)
-let Pm3 = gp3(0)
+// the decorrelated gap, same three raw orders. Its sample fiber is 2-D
+// (7 positions x 7 sizes) and a former reads a 1-D one, so the three power
+// sums come from one <&!>-fused sweep of the grid instead.
+let LP = method_for(GP)
+let (PR1, PR2, PR3) = reduce((LP <@> lambda(g) -> g) <&!> (LP <@> lambda(g) -> g * g) <&!> (LP <@> lambda(g) -> g * g * g), (+))
+let Pm1 = PR1 / 49.0
+let Pm2 = PR2 / 49.0
+let Pm3 = PR3 / 49.0
 let sHP = Pm1 * Pm3 - Pm2 * Pm2
 let prod_V = if P_prod < 0.001 then "EXCLUDED" else "OVERLAPS"
 let lawP_V = if sHP > 0.0 then "STIELTJES_OK" else "STIELTJES_VIOLATED"

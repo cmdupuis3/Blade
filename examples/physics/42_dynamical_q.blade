@@ -78,420 +78,191 @@ let VI_h = csvd.load("data/42_VI.csv")
 let VI: Array<Float64 like Idx<64>, Idx<64>> = VI_h.vars.data |> csvd.read
 // ---- Int64 bit algebra (all quantities non-negative: the signed-promotion
 //      hazard never arises; spins/indicators exit through if-else) ----
-function eqInd(a: Int64, b: Int64) -> Float64 = if a + 1 > b then (if a < b + 1 then 1.0 else 0.0) else 0.0
-function spn(i: Int64, p: Int64) -> Float64 = if (i / p) % 2 < 1 then 1.0 else 0.0 - 1.0
+function eqInd(a: Int64, b: Int64) -> Float64 = if a == b then 1.0 else 0.0
+function spn(i: Int64, p: Int64) -> Float64 = if (i / p) % 2 == 0 then 1.0 else -1.0
 function xorbit(i: Int64, p: Int64) -> Int64 = i + p - 2 * p * ((i / p) % 2)
+// the five nearest-neighbour sz sz bonds of basis state i, and the six
+// single-spin flips connecting i to j (the sx sum)
+function bonds(i: Int64) -> Float64 = spn(i, 1) * spn(i, 2) + spn(i, 2) * spn(i, 4) + spn(i, 4) * spn(i, 8) + spn(i, 8) * spn(i, 16) + spn(i, 16) * spn(i, 32)
+function flips(i: Int64, j: Int64) -> Float64 = eqInd(j, xorbit(i, 1)) + eqInd(j, xorbit(i, 2)) + eqInd(j, xorbit(i, 4)) + eqInd(j, xorbit(i, 8)) + eqInd(j, xorbit(i, 16)) + eqInd(j, xorbit(i, 32))
 
 // ---- H, A, B in-language ----
-let HC = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * (spn(i, 1) * spn(i, 2) + spn(i, 2) * spn(i, 4) + spn(i, 4) * spn(i, 8) + spn(i, 8) * spn(i, 16) + spn(i, 16) * spn(i, 32) + 0.55 * spn(i, 1) + 0.71 * spn(i, 2) + 0.44 * spn(i, 4) + 0.68 * spn(i, 8) + 0.50 * spn(i, 16) + 0.62 * spn(i, 32)) - 1.05 * (eqInd(j, xorbit(i, 1)) + eqInd(j, xorbit(i, 2)) + eqInd(j, xorbit(i, 4)) + eqInd(j, xorbit(i, 8)) + eqInd(j, xorbit(i, 16)) + eqInd(j, xorbit(i, 32))) |> compute
-let HI = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * (spn(i, 1) * spn(i, 2) + spn(i, 2) * spn(i, 4) + spn(i, 4) * spn(i, 8) + spn(i, 8) * spn(i, 16) + spn(i, 16) * spn(i, 32)) - 1.05 * (eqInd(j, xorbit(i, 1)) + eqInd(j, xorbit(i, 2)) + eqInd(j, xorbit(i, 4)) + eqInd(j, xorbit(i, 8)) + eqInd(j, xorbit(i, 16)) + eqInd(j, xorbit(i, 32))) |> compute
-let AX = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(j, xorbit(i, 1)) |> compute
-let BZ = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * spn(i, 32) |> compute
+let HC = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * (bonds(i) + 0.55 * spn(i, 1) + 0.71 * spn(i, 2) + 0.44 * spn(i, 4) + 0.68 * spn(i, 8) + 0.50 * spn(i, 16) + 0.62 * spn(i, 32)) - 1.05 * flips(i, j) |> compute
+let HI = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * bonds(i) - 1.05 * flips(i, j) |> compute
+let AX = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(j, xorbit(i, 1)) |> compute
+let BZ = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * spn(i, 32) |> compute
 
-// ---- model C: certification + eigenbasis observables + gap statistics ----
-let VTC = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> VC(j, i) |> compute
-let HVC = method_for(HC, VTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let RSC = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> HVC(i, j) - VC(i, j) * EC(j) |> compute
-let certC = reduce(method_for(zip(RSC, RSC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let GOC = method_for(VC, VC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let DOC = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> GOC(i, j) - eqInd(i, j) |> compute
-let orthC = reduce(method_for(zip(DOC, DOC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let monoC = reduce(method_for(range<Idx<63>>) <@> lambda(k: Int64) -> (if EC(k + 1) < EC(k) then 1.0 else 0.0), (+))
-let TAC = method_for(VTC, AX) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let ATC = method_for(TAC, VTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TBC = method_for(VTC, BZ) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let BTC = method_for(TBC, VTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let GPC = method_for(range<Idx<39>>) <@> lambda(k: Int64) -> EC(k + 13) - EC(k + 12) |> compute
-let RQC = method_for(range<Idx<38>>) <@> lambda(k: Int64) -> (if GPC(k) < GPC(k + 1) then (if GPC(k + 1) < 0.000000000001 then 0.0 else GPC(k) / GPC(k + 1)) else (if GPC(k) < 0.000000000001 then 0.0 else GPC(k + 1) / GPC(k))) |> compute
-let rstatC = reduce(method_for(RQC) <@> lambda(x) -> x, (+)) / 38.0
+// ---- the per-model machinery, written once ----
+// M N^T as the row-fiber product (rows of M against rows of N)
+function mnt(m: Array<Float64 like Idx<64>, Idx<64>>, n: Array<Float64 like Idx<64>, Idx<64>>) -> Array<Float64 like Idx<64>, Idx<64>> =
+    method_for(m, n) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
+function transposed(m: Array<Float64 like Idx<64>, Idx<64>>) -> Array<Float64 like Idx<64>, Idx<64>> =
+    method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> m(j, i) |> compute
+// the Frobenius pairing sum_ij M_ij N_ij
+function frob(m: Array<Float64 like Idx<64>, Idx<64>>, n: Array<Float64 like Idx<64>, Idx<64>>) -> Float64 =
+    reduce(method_for(zip(m, n)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
+// certification of an embedded eigenfactor (V, E) of h: |HV - VE|^2 and
+// |V V^T - I|^2 (the eigenvectors are V's columns)
+function eig_residual(h: Array<Float64 like Idx<64>, Idx<64>>, v: Array<Float64 like Idx<64>, Idx<64>>, e: Array<Float64 like Idx<64>>) -> Float64 = {
+    let hv = mnt(h, transposed(v))
+    let rs = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> hv(i, j) - v(i, j) * e(j) |> compute
+    frob(rs, rs)
+}
+function orth_residual(v: Array<Float64 like Idx<64>, Idx<64>>) -> Float64 = {
+    let go = mnt(v, v)
+    let dev = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> go(i, j) - eqInd(i, j) |> compute
+    frob(dev, dev)
+}
+// an operator in the eigenbasis: V^T O V
+function in_eigenbasis(o: Array<Float64 like Idx<64>, Idx<64>>, vt: Array<Float64 like Idx<64>, Idx<64>>) -> Array<Float64 like Idx<64>, Idx<64>> =
+    mnt(mnt(vt, o), vt)
+// the bulk consecutive-gap ratio <min(g_k, g_k+1) / max(g_k, g_k+1)> over
+// levels 12..51 (degenerate gaps count 0)
+function gap_ratio(e: Array<Float64 like Idx<64>>) -> Float64 = {
+    let gp = method_for(range<Idx<39>>) <@> lambda(k: Int64) -> e(k + 13) - e(k + 12) |> compute
+    let rq = method_for(range<Idx<38>>) <@> lambda(k: Int64) -> (if gp(k) < gp(k + 1) then (if gp(k + 1) < 1.0e-12 then 0.0 else gp(k) / gp(k + 1)) else (if gp(k) < 1.0e-12 then 0.0 else gp(k + 1) / gp(k))) |> compute
+    reduce(rq, (+)) / 38.0
+}
+// out-of-order steps in an ascending spectrum (0 for a sorted one)
+function descents(e: Array<Float64 like Idx<64>>) -> Float64 =
+    reduce(method_for(range<Idx<63>>) <@> lambda(k: Int64) -> if e(k + 1) < e(k) then 1.0 else 0.0, (+))
 
-// ---- model I: certification + eigenbasis observables + gap statistics ----
-let VTI = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> VI(j, i) |> compute
-let HVI = method_for(HI, VTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let RSI = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> HVI(i, j) - VI(i, j) * EI(j) |> compute
-let certI = reduce(method_for(zip(RSI, RSI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let GOI = method_for(VI, VI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let DOI = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> GOI(i, j) - eqInd(i, j) |> compute
-let orthI = reduce(method_for(zip(DOI, DOI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let monoI = reduce(method_for(range<Idx<63>>) <@> lambda(k: Int64) -> (if EI(k + 1) < EI(k) then 1.0 else 0.0), (+))
-let TAI = method_for(VTI, AX) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let ATI = method_for(TAI, VTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TBI = method_for(VTI, BZ) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let BTI = method_for(TBI, VTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let GPI = method_for(range<Idx<39>>) <@> lambda(k: Int64) -> EI(k + 13) - EI(k + 12) |> compute
-let RQI = method_for(range<Idx<38>>) <@> lambda(k: Int64) -> (if GPI(k) < GPI(k + 1) then (if GPI(k + 1) < 0.000000000001 then 0.0 else GPI(k) / GPI(k + 1)) else (if GPI(k) < 0.000000000001 then 0.0 else GPI(k + 1) / GPI(k))) |> compute
-let rstatI = reduce(method_for(RQI) <@> lambda(x) -> x, (+)) / 38.0
+// ---- the estimator: ex 29's crossing channel at time t, infinite
+//      temperature. In the eigenbasis A(t) = X + iY with X_ij =
+//      A~_ij cos((E_i - E_j) t) and Y_ij = A~_ij sin(...); X and B~ are
+//      symmetric, Y antisymmetric, so every trace is real:
+//      qhat = tr(XBXB - YBYB)/64 - 2 (tr(XB)/64)^2 (unit normalizers) ----
+function qhat(at: Array<Float64 like Idx<64>, Idx<64>>, bt: Array<Float64 like Idx<64>, Idx<64>>, e: Array<Float64 like Idx<64>>, t: Float64) -> Float64 = {
+    let x = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> at(i, j) * cos((e(i) - e(j)) * t) |> compute
+    let y = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> at(i, j) * sin((e(i) - e(j)) * t) |> compute
+    let px = mnt(x, bt)
+    let py = mnt(y, bt)
+    let pa = frob(px, transposed(px))
+    let pb = frob(py, transposed(py))
+    let cb = frob(x, bt)
+    (pa - pb) / 64.0 - 2.0 * (cb / 64.0) * (cb / 64.0)
+}
+
+// ---- model C (chaotic) and model I (integrable): certification,
+//      eigenbasis observables, gap statistics ----
+let VTC = transposed(VC)
+let certC = eig_residual(HC, VC, EC)
+let orthC = orth_residual(VC)
+let monoC = descents(EC)
+let ATC = in_eigenbasis(AX, VTC)
+let BTC = in_eigenbasis(BZ, VTC)
+let rstatC = gap_ratio(EC)
+let VTI = transposed(VI)
+let certI = eig_residual(HI, VI, EI)
+let orthI = orth_residual(VI)
+let monoI = descents(EI)
+let ATI = in_eigenbasis(AX, VTI)
+let BTI = in_eigenbasis(BZ, VTI)
+let rstatI = gap_ratio(EI)
 
 // ---- t = 0: the estimator opens at exactly 1 (commuting A, B) ----
-let P0C = method_for(ATC, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let T0C = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> P0C(j, i) |> compute
-let pa0C = reduce(method_for(zip(P0C, T0C)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cb0C = reduce(method_for(zip(ATC, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let q0C = pa0C / 64.0 - 2.0 * (cb0C / 64.0) * (cb0C / 64.0)
-let P0I = method_for(ATI, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let T0I = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> P0I(j, i) |> compute
-let pa0I = reduce(method_for(zip(P0I, T0I)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cb0I = reduce(method_for(zip(ATI, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let q0I = pa0I / 64.0 - 2.0 * (cb0I / 64.0) * (cb0I / 64.0)
+let q0C = qhat(ATC, BTC, EC, 0.0)
+let q0I = qhat(ATI, BTI, EI, 0.0)
 
 // ---- chaotic sweep: light cone, arrival, collapse ----
-let Xc05 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 0.5) |> compute
-let Yc05 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 0.5) |> compute
-let PXc05 = method_for(Xc05, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYc05 = method_for(Yc05, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXc05 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXc05(j, i) |> compute
-let TYc05 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYc05(j, i) |> compute
-let pac05 = reduce(method_for(zip(PXc05, TXc05)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbc05 = reduce(method_for(zip(PYc05, TYc05)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbc05 = reduce(method_for(zip(Xc05, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qc05 = (pac05 - pbc05) / 64.0 - 2.0 * (cbc05 / 64.0) * (cbc05 / 64.0)
-let Xc1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 1.0) |> compute
-let Yc1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 1.0) |> compute
-let PXc1 = method_for(Xc1, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYc1 = method_for(Yc1, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXc1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXc1(j, i) |> compute
-let TYc1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYc1(j, i) |> compute
-let pac1 = reduce(method_for(zip(PXc1, TXc1)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbc1 = reduce(method_for(zip(PYc1, TYc1)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbc1 = reduce(method_for(zip(Xc1, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qc1 = (pac1 - pbc1) / 64.0 - 2.0 * (cbc1 / 64.0) * (cbc1 / 64.0)
-let Xc2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 2.0) |> compute
-let Yc2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 2.0) |> compute
-let PXc2 = method_for(Xc2, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYc2 = method_for(Yc2, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXc2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXc2(j, i) |> compute
-let TYc2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYc2(j, i) |> compute
-let pac2 = reduce(method_for(zip(PXc2, TXc2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbc2 = reduce(method_for(zip(PYc2, TYc2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbc2 = reduce(method_for(zip(Xc2, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qc2 = (pac2 - pbc2) / 64.0 - 2.0 * (cbc2 / 64.0) * (cbc2 / 64.0)
-let Xc3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 3.0) |> compute
-let Yc3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 3.0) |> compute
-let PXc3 = method_for(Xc3, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYc3 = method_for(Yc3, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXc3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXc3(j, i) |> compute
-let TYc3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYc3(j, i) |> compute
-let pac3 = reduce(method_for(zip(PXc3, TXc3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbc3 = reduce(method_for(zip(PYc3, TYc3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbc3 = reduce(method_for(zip(Xc3, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qc3 = (pac3 - pbc3) / 64.0 - 2.0 * (cbc3 / 64.0) * (cbc3 / 64.0)
-let Xc5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 5.0) |> compute
-let Yc5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 5.0) |> compute
-let PXc5 = method_for(Xc5, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYc5 = method_for(Yc5, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXc5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXc5(j, i) |> compute
-let TYc5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYc5(j, i) |> compute
-let pac5 = reduce(method_for(zip(PXc5, TXc5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbc5 = reduce(method_for(zip(PYc5, TYc5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbc5 = reduce(method_for(zip(Xc5, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qc5 = (pac5 - pbc5) / 64.0 - 2.0 * (cbc5 / 64.0) * (cbc5 / 64.0)
+let qc05 = qhat(ATC, BTC, EC, 0.5)
+let qc1 = qhat(ATC, BTC, EC, 1.0)
+let qc2 = qhat(ATC, BTC, EC, 2.0)
+let qc3 = qhat(ATC, BTC, EC, 3.0)
+let qc5 = qhat(ATC, BTC, EC, 5.0)
 
-// ---- chaotic late-time comb (six incommensurate times) ----
-let Xk1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 20.0) |> compute
-let Yk1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 20.0) |> compute
-let PXk1 = method_for(Xk1, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYk1 = method_for(Yk1, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXk1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXk1(j, i) |> compute
-let TYk1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYk1(j, i) |> compute
-let pak1 = reduce(method_for(zip(PXk1, TXk1)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbk1 = reduce(method_for(zip(PYk1, TYk1)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbk1 = reduce(method_for(zip(Xk1, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qk1 = (pak1 - pbk1) / 64.0 - 2.0 * (cbk1 / 64.0) * (cbk1 / 64.0)
-let Xk2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 23.7) |> compute
-let Yk2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 23.7) |> compute
-let PXk2 = method_for(Xk2, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYk2 = method_for(Yk2, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXk2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXk2(j, i) |> compute
-let TYk2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYk2(j, i) |> compute
-let pak2 = reduce(method_for(zip(PXk2, TXk2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbk2 = reduce(method_for(zip(PYk2, TYk2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbk2 = reduce(method_for(zip(Xk2, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qk2 = (pak2 - pbk2) / 64.0 - 2.0 * (cbk2 / 64.0) * (cbk2 / 64.0)
-let Xk3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 27.9) |> compute
-let Yk3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 27.9) |> compute
-let PXk3 = method_for(Xk3, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYk3 = method_for(Yk3, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXk3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXk3(j, i) |> compute
-let TYk3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYk3(j, i) |> compute
-let pak3 = reduce(method_for(zip(PXk3, TXk3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbk3 = reduce(method_for(zip(PYk3, TYk3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbk3 = reduce(method_for(zip(Xk3, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qk3 = (pak3 - pbk3) / 64.0 - 2.0 * (cbk3 / 64.0) * (cbk3 / 64.0)
-let Xk4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 31.3) |> compute
-let Yk4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 31.3) |> compute
-let PXk4 = method_for(Xk4, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYk4 = method_for(Yk4, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXk4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXk4(j, i) |> compute
-let TYk4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYk4(j, i) |> compute
-let pak4 = reduce(method_for(zip(PXk4, TXk4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbk4 = reduce(method_for(zip(PYk4, TYk4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbk4 = reduce(method_for(zip(Xk4, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qk4 = (pak4 - pbk4) / 64.0 - 2.0 * (cbk4 / 64.0) * (cbk4 / 64.0)
-let Xk5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 35.1) |> compute
-let Yk5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 35.1) |> compute
-let PXk5 = method_for(Xk5, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYk5 = method_for(Yk5, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXk5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXk5(j, i) |> compute
-let TYk5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYk5(j, i) |> compute
-let pak5 = reduce(method_for(zip(PXk5, TXk5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbk5 = reduce(method_for(zip(PYk5, TYk5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbk5 = reduce(method_for(zip(Xk5, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qk5 = (pak5 - pbk5) / 64.0 - 2.0 * (cbk5 / 64.0) * (cbk5 / 64.0)
-let Xk6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 38.6) |> compute
-let Yk6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 38.6) |> compute
-let PXk6 = method_for(Xk6, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYk6 = method_for(Yk6, BTC) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXk6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXk6(j, i) |> compute
-let TYk6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYk6(j, i) |> compute
-let pak6 = reduce(method_for(zip(PXk6, TXk6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbk6 = reduce(method_for(zip(PYk6, TYk6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbk6 = reduce(method_for(zip(Xk6, BTC)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qk6 = (pak6 - pbk6) / 64.0 - 2.0 * (cbk6 / 64.0) * (cbk6 / 64.0)
+// ---- the late-time comb: six incommensurate times, chaotic and integrable ----
+let qk1 = qhat(ATC, BTC, EC, 20.0)
+let qk2 = qhat(ATC, BTC, EC, 23.7)
+let qk3 = qhat(ATC, BTC, EC, 27.9)
+let qk4 = qhat(ATC, BTC, EC, 31.3)
+let qk5 = qhat(ATC, BTC, EC, 35.1)
+let qk6 = qhat(ATC, BTC, EC, 38.6)
 
 // ---- integrable twin: same estimator, same times ----
-let Xi2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 2.0) |> compute
-let Yi2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 2.0) |> compute
-let PXi2 = method_for(Xi2, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYi2 = method_for(Yi2, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXi2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXi2(j, i) |> compute
-let TYi2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYi2(j, i) |> compute
-let pai2 = reduce(method_for(zip(PXi2, TXi2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbi2 = reduce(method_for(zip(PYi2, TYi2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbi2 = reduce(method_for(zip(Xi2, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qi2 = (pai2 - pbi2) / 64.0 - 2.0 * (cbi2 / 64.0) * (cbi2 / 64.0)
-let Xi3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 3.0) |> compute
-let Yi3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 3.0) |> compute
-let PXi3 = method_for(Xi3, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYi3 = method_for(Yi3, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXi3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXi3(j, i) |> compute
-let TYi3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYi3(j, i) |> compute
-let pai3 = reduce(method_for(zip(PXi3, TXi3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbi3 = reduce(method_for(zip(PYi3, TYi3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbi3 = reduce(method_for(zip(Xi3, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qi3 = (pai3 - pbi3) / 64.0 - 2.0 * (cbi3 / 64.0) * (cbi3 / 64.0)
-let Xi5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 5.0) |> compute
-let Yi5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 5.0) |> compute
-let PXi5 = method_for(Xi5, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYi5 = method_for(Yi5, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXi5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXi5(j, i) |> compute
-let TYi5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYi5(j, i) |> compute
-let pai5 = reduce(method_for(zip(PXi5, TXi5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbi5 = reduce(method_for(zip(PYi5, TYi5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbi5 = reduce(method_for(zip(Xi5, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qi5 = (pai5 - pbi5) / 64.0 - 2.0 * (cbi5 / 64.0) * (cbi5 / 64.0)
-let Xm1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 20.0) |> compute
-let Ym1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 20.0) |> compute
-let PXm1 = method_for(Xm1, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYm1 = method_for(Ym1, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXm1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXm1(j, i) |> compute
-let TYm1 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYm1(j, i) |> compute
-let pam1 = reduce(method_for(zip(PXm1, TXm1)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbm1 = reduce(method_for(zip(PYm1, TYm1)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbm1 = reduce(method_for(zip(Xm1, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qm1 = (pam1 - pbm1) / 64.0 - 2.0 * (cbm1 / 64.0) * (cbm1 / 64.0)
-let Xm2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 23.7) |> compute
-let Ym2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 23.7) |> compute
-let PXm2 = method_for(Xm2, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYm2 = method_for(Ym2, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXm2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXm2(j, i) |> compute
-let TYm2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYm2(j, i) |> compute
-let pam2 = reduce(method_for(zip(PXm2, TXm2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbm2 = reduce(method_for(zip(PYm2, TYm2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbm2 = reduce(method_for(zip(Xm2, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qm2 = (pam2 - pbm2) / 64.0 - 2.0 * (cbm2 / 64.0) * (cbm2 / 64.0)
-let Xm3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 27.9) |> compute
-let Ym3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 27.9) |> compute
-let PXm3 = method_for(Xm3, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYm3 = method_for(Ym3, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXm3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXm3(j, i) |> compute
-let TYm3 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYm3(j, i) |> compute
-let pam3 = reduce(method_for(zip(PXm3, TXm3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbm3 = reduce(method_for(zip(PYm3, TYm3)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbm3 = reduce(method_for(zip(Xm3, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qm3 = (pam3 - pbm3) / 64.0 - 2.0 * (cbm3 / 64.0) * (cbm3 / 64.0)
-let Xm4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 31.3) |> compute
-let Ym4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 31.3) |> compute
-let PXm4 = method_for(Xm4, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYm4 = method_for(Ym4, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXm4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXm4(j, i) |> compute
-let TYm4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYm4(j, i) |> compute
-let pam4 = reduce(method_for(zip(PXm4, TXm4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbm4 = reduce(method_for(zip(PYm4, TYm4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbm4 = reduce(method_for(zip(Xm4, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qm4 = (pam4 - pbm4) / 64.0 - 2.0 * (cbm4 / 64.0) * (cbm4 / 64.0)
-let Xm5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 35.1) |> compute
-let Ym5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 35.1) |> compute
-let PXm5 = method_for(Xm5, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYm5 = method_for(Ym5, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXm5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXm5(j, i) |> compute
-let TYm5 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYm5(j, i) |> compute
-let pam5 = reduce(method_for(zip(PXm5, TXm5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbm5 = reduce(method_for(zip(PYm5, TYm5)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbm5 = reduce(method_for(zip(Xm5, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qm5 = (pam5 - pbm5) / 64.0 - 2.0 * (cbm5 / 64.0) * (cbm5 / 64.0)
-let Xm6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * cos((EI(i) - EI(j)) * 38.6) |> compute
-let Ym6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATI(i, j) * sin((EI(i) - EI(j)) * 38.6) |> compute
-let PXm6 = method_for(Xm6, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PYm6 = method_for(Ym6, BTI) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let TXm6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PXm6(j, i) |> compute
-let TYm6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> PYm6(j, i) |> compute
-let pam6 = reduce(method_for(zip(PXm6, TXm6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let pbm6 = reduce(method_for(zip(PYm6, TYm6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cbm6 = reduce(method_for(zip(Xm6, BTI)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let qm6 = (pam6 - pbm6) / 64.0 - 2.0 * (cbm6 / 64.0) * (cbm6 / 64.0)
+let qi2 = qhat(ATI, BTI, EI, 2.0)
+let qi3 = qhat(ATI, BTI, EI, 3.0)
+let qi5 = qhat(ATI, BTI, EI, 5.0)
+let qm1 = qhat(ATI, BTI, EI, 20.0)
+let qm2 = qhat(ATI, BTI, EI, 23.7)
+let qm3 = qhat(ATI, BTI, EI, 27.9)
+let qm4 = qhat(ATI, BTI, EI, 31.3)
+let qm5 = qhat(ATI, BTI, EI, 35.1)
+let qm6 = qhat(ATI, BTI, EI, 38.6)
 
 // ---- comb statistics: floor + equilibration vs ringing ----
-let meanK = (qk1 + qk2 + qk3 + qk4 + qk5 + qk6) / 6.0
-let varK = ((qk1 - meanK) * (qk1 - meanK) + (qk2 - meanK) * (qk2 - meanK) + (qk3 - meanK) * (qk3 - meanK) + (qk4 - meanK) * (qk4 - meanK) + (qk5 - meanK) * (qk5 - meanK) + (qk6 - meanK) * (qk6 - meanK)) / 6.0
-let meanM = (qm1 + qm2 + qm3 + qm4 + qm5 + qm6) / 6.0
-let varM = ((qm1 - meanM) * (qm1 - meanM) + (qm2 - meanM) * (qm2 - meanM) + (qm3 - meanM) * (qm3 - meanM) + (qm4 - meanM) * (qm4 - meanM) + (qm5 - meanM) * (qm5 - meanM) + (qm6 - meanM) * (qm6 - meanM)) / 6.0
+let QK = [qk1, qk2, qk3, qk4, qk5, qk6]
+let QM = [qm1, qm2, qm3, qm4, qm5, qm6]
+let meanK = reduce(QK, (+)) / 6.0
+let varK = reduce((QK - meanK) * (QK - meanK), (+)) / 6.0
+let meanM = reduce(QM, (+)) / 6.0
+let varM = reduce((QM - meanM) * (QM - meanM), (+)) / 6.0
 
 // ---- THE MIRRORED CONTROL: deform the state's shape (ex 29's reweighting
 //      move), weights computed in-language from the certified spectrum ----
-let WT0 = method_for(EC) <@> lambda(x) -> exp(0.0 - 0.3 * x) |> compute
-let zTH = reduce(method_for(WT0) <@> lambda(x) -> x, (+))
-let WTH = method_for(WT0) <@> lambda(x) -> x / zTH |> compute
-let eMean = reduce(method_for(EC) <@> lambda(x) -> x, (+)) / 64.0
-let eVar = reduce(method_for(EC) <@> lambda(x) -> (x - eMean) * (x - eMean), (+)) / 64.0
-let WL0 = method_for(EC) <@> lambda(x) -> 1.0 + 3.0 * (x - eMean) * (x - eMean) / eVar |> compute
-let zLP = reduce(method_for(WL0) <@> lambda(x) -> x, (+))
-let WLP = method_for(WL0) <@> lambda(x) -> x / zLP |> compute
+let WT0 = exp(0.0 - 0.3 * EC)
+let WTH = WT0 / reduce(WT0, (+))
+let eMean = reduce(EC, (+)) / 64.0
+let eVar = reduce((EC - eMean) * (EC - eMean), (+)) / 64.0
+let WL0 = 1.0 + 3.0 * (EC - eMean) * (EC - eMean) / eVar
+let WLP = WL0 / reduce(WL0, (+))
 
-let aMT = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WTH(k) * ATC(k, k), (+))
-let bMT = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WTH(k) * BTC(k, k), (+))
-let BCT = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> BTC(i, j) - bMT * eqInd(i, j) |> compute
-let WBT = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * BCT(i, j) |> compute
-let cBBT = reduce(method_for(zip(WBT, BCT)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let aML = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WLP(k) * ATC(k, k), (+))
-let bML = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WLP(k) * BTC(k, k), (+))
-let BCL = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> BTC(i, j) - bML * eqInd(i, j) |> compute
-let WBL = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * BCL(i, j) |> compute
-let cBBL = reduce(method_for(zip(WBL, BCL)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
+// the weighted (state w) mean of a diagonal operator, its centered form,
+// and the crossing channel with every trace taken in the state w
+function wmean(w: Array<Float64 like Idx<64>>, o: Array<Float64 like Idx<64>, Idx<64>>) -> Float64 =
+    reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> w(k) * o(k, k), (+))
+function centered(o: Array<Float64 like Idx<64>, Idx<64>>, m: Float64) -> Array<Float64 like Idx<64>, Idx<64>> =
+    method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> o(i, j) - m * eqInd(i, j) |> compute
+function row_weighted(w: Array<Float64 like Idx<64>>, o: Array<Float64 like Idx<64>, Idx<64>>) -> Array<Float64 like Idx<64>, Idx<64>> =
+    method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> w(i) * o(i, j) |> compute
+// kappa4 of the time-ordered quadruple (A(t), B, A(t), B) in state w, with
+// A(t) centered by its w-mean am and B centered (bc, its w-variance cbb):
+// (kappa4, qhat) as a pair
+function kappa_w(w: Array<Float64 like Idx<64>>, am: Float64, bc: Array<Float64 like Idx<64>, Idx<64>>, cbb: Float64, t: Float64) -> (Float64, Float64) = {
+    let xc = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * t) - am * eqInd(i, j) |> compute
+    let yc = method_for(range<Idx<64>, Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * t) |> compute
+    let pc = mnt(xc, bc)
+    let p2 = mnt(yc, bc)
+    let caa = frob(row_weighted(w, xc), xc) + frob(row_weighted(w, yc), yc)
+    let p1 = frob(row_weighted(w, pc), mnt(bc, xc))
+    let p2t = frob(row_weighted(w, p2), mnt(bc, yc))
+    let cab = wmean(w, pc)
+    let kap = (p1 - p2t) - 2.0 * cab * cab - caa * cbb
+    (kap, 1.0 + kap / (caa * cbb))
+}
 
-let XCt2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 23.7) - aMT * eqInd(i, j) |> compute
-let YCt2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 23.7) |> compute
-let WXt2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * XCt2(i, j) |> compute
-let WYt2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * YCt2(i, j) |> compute
-let PCt2 = method_for(XCt2, BCT) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PDt2 = method_for(BCT, XCt2) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let WPt2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * PCt2(i, j) |> compute
-let P2t2 = method_for(YCt2, BCT) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let P2Tt2 = method_for(BCT, YCt2) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let W2t2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * P2t2(i, j) |> compute
-let ca1t2 = reduce(method_for(zip(WXt2, XCt2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let ca2t2 = reduce(method_for(zip(WYt2, YCt2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cAAt2 = ca1t2 + ca2t2
-let p1t2 = reduce(method_for(zip(WPt2, PDt2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let p2t2 = reduce(method_for(zip(W2t2, P2Tt2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cabt2 = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WTH(k) * PCt2(k, k), (+))
-let kapt2 = (p1t2 - p2t2) - 2.0 * cabt2 * cabt2 - cAAt2 * cBBT
-let qt2 = 1.0 + kapt2 / (cAAt2 * cBBT)
-let XCt4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 31.3) - aMT * eqInd(i, j) |> compute
-let YCt4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 31.3) |> compute
-let WXt4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * XCt4(i, j) |> compute
-let WYt4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * YCt4(i, j) |> compute
-let PCt4 = method_for(XCt4, BCT) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PDt4 = method_for(BCT, XCt4) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let WPt4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * PCt4(i, j) |> compute
-let P2t4 = method_for(YCt4, BCT) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let P2Tt4 = method_for(BCT, YCt4) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let W2t4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * P2t4(i, j) |> compute
-let ca1t4 = reduce(method_for(zip(WXt4, XCt4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let ca2t4 = reduce(method_for(zip(WYt4, YCt4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cAAt4 = ca1t4 + ca2t4
-let p1t4 = reduce(method_for(zip(WPt4, PDt4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let p2t4 = reduce(method_for(zip(W2t4, P2Tt4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cabt4 = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WTH(k) * PCt4(k, k), (+))
-let kapt4 = (p1t4 - p2t4) - 2.0 * cabt4 * cabt4 - cAAt4 * cBBT
-let qt4 = 1.0 + kapt4 / (cAAt4 * cBBT)
-let XCt6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 38.6) - aMT * eqInd(i, j) |> compute
-let YCt6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 38.6) |> compute
-let WXt6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * XCt6(i, j) |> compute
-let WYt6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * YCt6(i, j) |> compute
-let PCt6 = method_for(XCt6, BCT) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PDt6 = method_for(BCT, XCt6) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let WPt6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * PCt6(i, j) |> compute
-let P2t6 = method_for(YCt6, BCT) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let P2Tt6 = method_for(BCT, YCt6) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let W2t6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WTH(i) * P2t6(i, j) |> compute
-let ca1t6 = reduce(method_for(zip(WXt6, XCt6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let ca2t6 = reduce(method_for(zip(WYt6, YCt6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cAAt6 = ca1t6 + ca2t6
-let p1t6 = reduce(method_for(zip(WPt6, PDt6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let p2t6 = reduce(method_for(zip(W2t6, P2Tt6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cabt6 = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WTH(k) * PCt6(k, k), (+))
-let kapt6 = (p1t6 - p2t6) - 2.0 * cabt6 * cabt6 - cAAt6 * cBBT
-let qt6 = 1.0 + kapt6 / (cAAt6 * cBBT)
-let XCl2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 23.7) - aML * eqInd(i, j) |> compute
-let YCl2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 23.7) |> compute
-let WXl2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * XCl2(i, j) |> compute
-let WYl2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * YCl2(i, j) |> compute
-let PCl2 = method_for(XCl2, BCL) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PDl2 = method_for(BCL, XCl2) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let WPl2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * PCl2(i, j) |> compute
-let P2l2 = method_for(YCl2, BCL) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let P2Tl2 = method_for(BCL, YCl2) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let W2l2 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * P2l2(i, j) |> compute
-let ca1l2 = reduce(method_for(zip(WXl2, XCl2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let ca2l2 = reduce(method_for(zip(WYl2, YCl2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cAAl2 = ca1l2 + ca2l2
-let p1l2 = reduce(method_for(zip(WPl2, PDl2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let p2l2 = reduce(method_for(zip(W2l2, P2Tl2)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cabl2 = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WLP(k) * PCl2(k, k), (+))
-let kapl2 = (p1l2 - p2l2) - 2.0 * cabl2 * cabl2 - cAAl2 * cBBL
-let ql2 = 1.0 + kapl2 / (cAAl2 * cBBL)
-let XCl4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 31.3) - aML * eqInd(i, j) |> compute
-let YCl4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 31.3) |> compute
-let WXl4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * XCl4(i, j) |> compute
-let WYl4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * YCl4(i, j) |> compute
-let PCl4 = method_for(XCl4, BCL) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PDl4 = method_for(BCL, XCl4) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let WPl4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * PCl4(i, j) |> compute
-let P2l4 = method_for(YCl4, BCL) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let P2Tl4 = method_for(BCL, YCl4) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let W2l4 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * P2l4(i, j) |> compute
-let ca1l4 = reduce(method_for(zip(WXl4, XCl4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let ca2l4 = reduce(method_for(zip(WYl4, YCl4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cAAl4 = ca1l4 + ca2l4
-let p1l4 = reduce(method_for(zip(WPl4, PDl4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let p2l4 = reduce(method_for(zip(W2l4, P2Tl4)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cabl4 = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WLP(k) * PCl4(k, k), (+))
-let kapl4 = (p1l4 - p2l4) - 2.0 * cabl4 * cabl4 - cAAl4 * cBBL
-let ql4 = 1.0 + kapl4 / (cAAl4 * cBBL)
-let XCl6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * cos((EC(i) - EC(j)) * 38.6) - aML * eqInd(i, j) |> compute
-let YCl6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> ATC(i, j) * sin((EC(i) - EC(j)) * 38.6) |> compute
-let WXl6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * XCl6(i, j) |> compute
-let WYl6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * YCl6(i, j) |> compute
-let PCl6 = method_for(XCl6, BCL) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let PDl6 = method_for(BCL, XCl6) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let WPl6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * PCl6(i, j) |> compute
-let P2l6 = method_for(YCl6, BCL) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let P2Tl6 = method_for(BCL, YCl6) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y) |> compute
-let W2l6 = method_for(range<Idx<64>>) <*> method_for(range<Idx<64>>) <@> lambda(i: Int64, j: Int64) -> WLP(i) * P2l6(i, j) |> compute
-let ca1l6 = reduce(method_for(zip(WXl6, XCl6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let ca2l6 = reduce(method_for(zip(WYl6, YCl6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cAAl6 = ca1l6 + ca2l6
-let p1l6 = reduce(method_for(zip(WPl6, PDl6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let p2l6 = reduce(method_for(zip(W2l6, P2Tl6)) <@> lambda(x: Array<Float64 like Idx<64>>, y: Array<Float64 like Idx<64>>) -> prodsum(x, y), (+))
-let cabl6 = reduce(method_for(range<Idx<64>>) <@> lambda(k: Int64) -> WLP(k) * PCl6(k, k), (+))
-let kapl6 = (p1l6 - p2l6) - 2.0 * cabl6 * cabl6 - cAAl6 * cBBL
-let ql6 = 1.0 + kapl6 / (cAAl6 * cBBL)
+let aMT = wmean(WTH, ATC)
+let bMT = wmean(WTH, BTC)
+let BCT = centered(BTC, bMT)
+let cBBT = frob(row_weighted(WTH, BCT), BCT)
+let aML = wmean(WLP, ATC)
+let bML = wmean(WLP, BTC)
+let BCL = centered(BTC, bML)
+let cBBL = frob(row_weighted(WLP, BCL), BCL)
+
+let (kapt2, qt2) = kappa_w(WTH, aMT, BCT, cBBT, 23.7)
+let (kapt4, qt4) = kappa_w(WTH, aMT, BCT, cBBT, 31.3)
+let (kapt6, qt6) = kappa_w(WTH, aMT, BCT, cBBT, 38.6)
+let (kapl2, ql2) = kappa_w(WLP, aML, BCL, cBBL, 23.7)
+let (kapl4, ql4) = kappa_w(WLP, aML, BCL, cBBL, 31.3)
+let (kapl6, ql6) = kappa_w(WLP, aML, BCL, cBBL, 38.6)
 
 let meanTH = (qt2 + qt4 + qt6) / 3.0
 let meanLP = (ql2 + ql4 + ql6) / 3.0
 
 // ---- verdicts ----
-let certV = if certC < 0.0000000000000001 then (if orthC < 0.0000000000000001 then (if certI < 0.0000000000000001 then (if orthI < 0.0000000000000001 then (if monoC < 0.5 then (if monoI < 0.5 then "EIGENFACTORS_CERTIFIED" else "NO") else "NO") else "NO") else "NO") else "NO") else "NO"
-let rstatV = if rstatC > 0.44 then (if rstatI < 0.35 then "GOE_VS_DEGENERATE_POISSON" else "NO") else "NO"
-let openV = if sqrt((q0C - 1.0) * (q0C - 1.0)) < 0.000000001 then (if sqrt((q0I - 1.0) * (q0I - 1.0)) < 0.000000001 then "OPENS_AT_WICK" else "NO") else "NO"
-let coneV = if sqrt((qc05 - 1.0) * (qc05 - 1.0)) < 0.000000001 then "SUPPRESSION_WAITS_FOR_THE_FRONT" else "NO"
-let floorV = if varK < 0.01 then (if meanK < 0.15 then "FLOOR_EQUILIBRATED" else "NO") else "NO"
+let certV = if certC < 1.0e-16 && orthC < 1.0e-16 && certI < 1.0e-16 && orthI < 1.0e-16 && monoC < 0.5 && monoI < 0.5 then "EIGENFACTORS_CERTIFIED" else "NO"
+let rstatV = if rstatC > 0.44 && rstatI < 0.35 then "GOE_VS_DEGENERATE_POISSON" else "NO"
+let openV = if abs(q0C - 1.0) < 1.0e-9 && abs(q0I - 1.0) < 1.0e-9 then "OPENS_AT_WICK" else "NO"
+let coneV = if abs(qc05 - 1.0) < 1.0e-9 then "SUPPRESSION_WAITS_FOR_THE_FRONT" else "NO"
+let floorV = if varK < 0.01 && meanK < 0.15 then "FLOOR_EQUILIBRATED" else "NO"
 let ringV = if varM > 0.01 then "INTEGRABLE_STILL_RINGING" else "NO"
 // kappa4 sign census across the deformed states (the ex-29 flip test):
 // at infinite temperature kappa4 = qhat - 1 (unit normalizer)
-let nnegK = (if qk1 < 1.0 then 1.0 else 0.0) + (if qk2 < 1.0 then 1.0 else 0.0) + (if qk3 < 1.0 then 1.0 else 0.0) + (if qk4 < 1.0 then 1.0 else 0.0) + (if qk5 < 1.0 then 1.0 else 0.0) + (if qk6 < 1.0 then 1.0 else 0.0)
-let nnegW = (if kapt2 < 0.0 then 1.0 else 0.0) + (if kapt4 < 0.0 then 1.0 else 0.0) + (if kapt6 < 0.0 then 1.0 else 0.0) + (if kapl2 < 0.0 then 1.0 else 0.0) + (if kapl4 < 0.0 then 1.0 else 0.0) + (if kapl6 < 0.0 then 1.0 else 0.0)
-let robustV = if nnegK > 5.5 then (if nnegW > 5.5 then "K4_SIGN_ROBUST" else "PARTIAL_FLIP") else "PARTIAL_FLIP"
+let KAPW = [kapt2, kapt4, kapt6, kapl2, kapl4, kapl6]
+let nnegK = reduce(method_for(QK) <@> lambda(q) -> if q < 1.0 then 1.0 else 0.0, (+))
+let nnegW = reduce(method_for(KAPW) <@> lambda(k) -> if k < 0.0 then 1.0 else 0.0, (+))
+let robustV = if nnegK > 5.5 && nnegW > 5.5 then "K4_SIGN_ROBUST" else "PARTIAL_FLIP"
 let verdictV = if nnegW > 5.5 then (if varK < 0.01 then "DYNAMICAL_NOT_INHERITED" else "NO") else "INHERITED"
 
 // qhat(0) = 1 exactly; the front gates the collapse; the chaotic comb sits

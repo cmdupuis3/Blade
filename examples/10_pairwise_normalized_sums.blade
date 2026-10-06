@@ -1,4 +1,4 @@
-// 10_pairwise_normalized_sums.blade
+// TEST: Example Pairwise Normalized Sums
 // ============================================================================
 // Normalized pairwise sums without the pairwise array.
 //
@@ -29,9 +29,12 @@
 type I = Idx<23>      // query positions (rows of the output)
 type J = Idx<37>      // sample positions (the summed-over axis)
 
-let x = method_for(range<I>) <@> lambda(i) -> 0.25 * Float64(i) - 2.0 |> compute
-let xs = method_for(range<J>) <@> lambda(j) -> 0.17 * Float64(j) - 3.0 |> compute
-let ys = method_for(range<J>) <@> lambda(j) -> sin(0.5 * Float64(j)) |> compute
+// Coordinate axes are arithmetic lifted over the ranges (no kernels); the
+// named range carries its tag into the result, so x is indexed by I and
+// xs / ys by J.
+let x = 0.25 * Float64(range<I>) - 2.0
+let xs = 0.17 * Float64(range<J>) - 3.0
+let ys = sin(0.5 * Float64(range<J>))
 let h = 0.6
 
 // ---------------------------------------------------------------------------
@@ -51,7 +54,7 @@ let W = (method_for(x, xs) <@> lambda(a, b) -> exp(-(a - b) * (a - b) / (2.0 * h
 let z_ref = reduce(W, (+))
 let u_ref = method_for(range<I>) <@> lambda(i) -> prodsum(W(i), ys) |> compute
 let smoothed_ref = u_ref / z_ref
-let dev1 = method_for(zip(smoothed, smoothed_ref)) <@> lambda(a, b) -> abs(a - b) |> compute
+let dev1 = abs(smoothed - smoothed_ref)
 let agrees_smoothing = reduce(dev1, lambda(a, b) -> if a > b then a else b, 0.0) < 1.0e-12
 // EXPECT: agrees_smoothing = true
 
@@ -91,7 +94,7 @@ let attended_online = (method_for(range<I>) <@> lambda(i) -> {
     s[2] / s[1]
 }) |> compute
 
-let dev2 = method_for(zip(attended, attended_online)) <@> lambda(a, b) -> abs(a - b) |> compute
+let dev2 = abs(attended - attended_online)
 let agrees_online = reduce(dev2, lambda(a, b) -> if a > b then a else b, 0.0) < 1.0e-12
 // EXPECT: agrees_online = true
 

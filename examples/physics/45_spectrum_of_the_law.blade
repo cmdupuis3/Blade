@@ -37,103 +37,62 @@ import math as m
 
 let AMPI: Array<Float64 like Idx<3>> = [0.0, 1.0, 2.0]
 
-// ---- dictionary time series as FORMERS, Gram/cross-Gram as prodsum sweeps ----
-// The old imperative scatter-add (accumulating st(i*9+j) += d(i)*d(j) over the
-// sampled trajectory) becomes: build the 9 monomial time series d_i(s) as the
-// rows of a rank-2 table, then the Gram G(i,j) = sum_s d_i(s) d_j(s) and the
-// cross-Gram A(i,j) = sum_s dd_i(s) d_j(s) are row-pair prodsum folds over the
-// sample axis -- the physics/44 Gram idiom. The sample tables are block-local
-// so they do not surface. Conservative run: 3 amplitudes x 500 steps = 1500
-// closed-form samples (sample s -> amplitude s/500, phase 0.05*(s mod 500)).
+// ---- the dictionary and the samples, written once ----
+// The 9 monomials of degree <= 3 in (x, p), entry i, and their exact time
+// derivatives along a flow x' = p, p' = f (the chain rule, so the cross-Gram
+// needs no finite differences).
+function mono(i: Int64, x: Float64, p: Float64) -> Float64 = {
+    if i < 1 then x else if i < 2 then p else if i < 3 then x * x
+    else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
+    else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
+}
+function dmono(i: Int64, x: Float64, p: Float64, f: Float64) -> Float64 = {
+    if i < 1 then p else if i < 2 then f else if i < 3 then 2.0 * x * p
+    else if i < 4 then p * p + x * f else if i < 5 then 2.0 * p * f else if i < 6 then 3.0 * x * x * p
+    else if i < 7 then 2.0 * x * p * p + x * x * f else if i < 8 then p * p * p + 2.0 * x * p * f else 3.0 * p * p * f
+}
+// conservative run: 3 amplitudes x 500 steps = 1500 closed-form samples
+// (sample s -> amplitude 0.8 + 0.2 (s / 500), phase 0.05 (s mod 500))
+function cons_x(s: Int64) -> Float64 = (0.8 + 0.2 * AMPI(s / 500)) * cos(0.05 * Float64(s - 500 * (s / 500)))
+function cons_p(s: Int64) -> Float64 = 0.0 - (0.8 + 0.2 * AMPI(s / 500)) * sin(0.05 * Float64(s - 500 * (s / 500)))
+// damped run (gamma = 0.15): 240 closed-form samples at phase 0.05 k
+function damp_x(k: Int64) -> Float64 = 1.2 * exp(0.0 - 0.15 * (0.05 * Float64(k))) * (cos(0.98868599666425949 * (0.05 * Float64(k))) + 0.15171652122725207 * sin(0.98868599666425949 * (0.05 * Float64(k))))
+function damp_p(k: Int64) -> Float64 = 0.0 - 1.2 * exp(0.0 - 0.15 * (0.05 * Float64(k))) * sin(0.98868599666425949 * (0.05 * Float64(k))) / 0.98868599666425949
 
-// ---- Gram matrices, conservative ----
+// ---- Gram G(i,j) = sum_s d_i(s) d_j(s) and cross-Gram A(i,j) =
+//      sum_s d'_i(s) d_j(s): the monomial time series are the rows of a
+//      block-local table (so they do not surface), and both Grams are
+//      row-pair prodsum folds over the sample axis (the physics/44 idiom) ----
 let GMC: Array<Float64 like Idx<9>, Idx<9>> = {
-    let D = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> {
-        let a = s / 500
-        let kk = s - 500 * a
-        let amp = 0.8 + 0.2 * AMPI(a)
-        let tf = 0.05 * Float64(kk)
-        let x = amp * cos(tf)
-        let p = 0.0 - amp * sin(tf)
-        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
-        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
-        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
-    } |> compute
+    let D = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> mono(i, cons_x(s), cons_p(s)) |> compute
     method_for(D, D) <@> lambda(ua: Array<Float64 like Idx<1500>>, ub: Array<Float64 like Idx<1500>>) -> prodsum(ua, ub) |> compute
 }
 let AMC = {
-    let D = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> {
-        let a = s / 500
-        let kk = s - 500 * a
-        let amp = 0.8 + 0.2 * AMPI(a)
-        let tf = 0.05 * Float64(kk)
-        let x = amp * cos(tf)
-        let p = 0.0 - amp * sin(tf)
-        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
-        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
-        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
-    } |> compute
-    let DD = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> {
-        let a = s / 500
-        let kk = s - 500 * a
-        let amp = 0.8 + 0.2 * AMPI(a)
-        let tf = 0.05 * Float64(kk)
-        let x = amp * cos(tf)
-        let p = 0.0 - amp * sin(tf)
-        let f = 0.0 - x
-        if i < 1 then p else if i < 2 then f else if i < 3 then 2.0 * x * p
-        else if i < 4 then p * p + x * f else if i < 5 then 2.0 * p * f else if i < 6 then 3.0 * x * x * p
-        else if i < 7 then 2.0 * x * p * p + x * x * f else if i < 8 then p * p * p + 2.0 * x * p * f else 3.0 * p * p * f
-    } |> compute
+    let D = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> mono(i, cons_x(s), cons_p(s)) |> compute
+    let DD = method_for(range<Idx<9>, Idx<1500>>) <@> lambda(i: Int64, s: Int64) -> dmono(i, cons_x(s), cons_p(s), 0.0 - cons_x(s)) |> compute
     method_for(DD, D) <@> lambda(ua: Array<Float64 like Idx<1500>>, ub: Array<Float64 like Idx<1500>>) -> prodsum(ua, ub) |> compute
 }
-
-// ---- fit L and read the spectrum, conservative ----
-let (QGC, LGC) = m.eigh(GMC)
-let QDC = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, k: Int64) -> QGC(i, k) / LGC(k) |> compute
-let GIC = method_for(QDC, QGC) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
-let LKC: Array<Float64 like Idx<9>, Idx<9>> = method_for(AMC, GIC) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
-let (REC, IMC) = m.eig(LKC)
-
-// ---- Gram matrices, damped (240 closed-form samples, phase 0.05*k) ----
 let GMD: Array<Float64 like Idx<9>, Idx<9>> = {
-    let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
-        let tf = 0.05 * Float64(k)
-        let e = exp(0.0 - 0.15 * tf)
-        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
-        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
-        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
-        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
-        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
-    } |> compute
+    let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> mono(i, damp_x(k), damp_p(k)) |> compute
     method_for(D, D) <@> lambda(ua: Array<Float64 like Idx<240>>, ub: Array<Float64 like Idx<240>>) -> prodsum(ua, ub) |> compute
 }
 let AMD = {
-    let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
-        let tf = 0.05 * Float64(k)
-        let e = exp(0.0 - 0.15 * tf)
-        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
-        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
-        if i < 1 then x else if i < 2 then p else if i < 3 then x * x
-        else if i < 4 then x * p else if i < 5 then p * p else if i < 6 then x * x * x
-        else if i < 7 then x * x * p else if i < 8 then x * p * p else p * p * p
-    } |> compute
-    let DD = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> {
-        let tf = 0.05 * Float64(k)
-        let e = exp(0.0 - 0.15 * tf)
-        let x = 1.2 * e * (cos(0.98868599666425949 * tf) + 0.15171652122725207 * sin(0.98868599666425949 * tf))
-        let p = 0.0 - 1.2 * e * sin(0.98868599666425949 * tf) / 0.98868599666425949
-        let f = 0.0 - x - 0.3 * p
-        if i < 1 then p else if i < 2 then f else if i < 3 then 2.0 * x * p
-        else if i < 4 then p * p + x * f else if i < 5 then 2.0 * p * f else if i < 6 then 3.0 * x * x * p
-        else if i < 7 then 2.0 * x * p * p + x * x * f else if i < 8 then p * p * p + 2.0 * x * p * f else 3.0 * p * p * f
-    } |> compute
+    let D = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> mono(i, damp_x(k), damp_p(k)) |> compute
+    let DD = method_for(range<Idx<9>, Idx<240>>) <@> lambda(i: Int64, k: Int64) -> dmono(i, damp_x(k), damp_p(k), 0.0 - damp_x(k) - 0.3 * damp_p(k)) |> compute
     method_for(DD, D) <@> lambda(ua: Array<Float64 like Idx<240>>, ub: Array<Float64 like Idx<240>>) -> prodsum(ua, ub) |> compute
 }
-let (QGD, LGD) = m.eigh(GMD)
-let QDD = method_for(range<Idx<9>>) <*> method_for(range<Idx<9>>) <@> lambda(i: Int64, k: Int64) -> QGD(i, k) / LGD(k) |> compute
-let GID = method_for(QDD, QGD) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
-let LKD: Array<Float64 like Idx<9>, Idx<9>> = method_for(AMD, GID) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
+
+// ---- fit the generator L = A G^{-1} (G inverted through its eigenfactor)
+//      and read the spectrum ----
+function fit_generator(a: Array<Float64 like Idx<9>, Idx<9>>, g: Array<Float64 like Idx<9>, Idx<9>>) -> Array<Float64 like Idx<9>, Idx<9>> = {
+    let (q, l) = m.eigh(g)
+    let qd = method_for(range<Idx<9>, Idx<9>>) <@> lambda(i: Int64, k: Int64) -> q(i, k) / l(k) |> compute
+    let gi = method_for(qd, q) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
+    method_for(a, gi) <@> lambda(u: Array<Float64 like Idx<9>>, v: Array<Float64 like Idx<9>>) -> prodsum(u, v) |> compute
+}
+let LKC: Array<Float64 like Idx<9>, Idx<9>> = fit_generator(AMC, GMC)
+let (REC, IMC) = m.eig(LKC)
+let LKD: Array<Float64 like Idx<9>, Idx<9>> = fit_generator(AMD, GMD)
 let (RED, IMD) = m.eig(LKD)
 
 // ---- the ladder and the lattice, read off ----
@@ -143,8 +102,8 @@ let imc4 = IMC(4)
 let imc6 = IMC(6)
 let rec8 = REC(8)
 let imc8 = IMC(8)
-let maxreC = reduce(method_for(range<Idx<9>>) <@> lambda(k) -> sqrt(REC(k) * REC(k)), lambda(a, b) -> if a > b then a else b, 0.0)
-let devL = sqrt((IMC(0) - 3.0) * (IMC(0) - 3.0)) + sqrt((IMC(2) - 2.0) * (IMC(2) - 2.0)) + sqrt((IMC(4) - 1.0) * (IMC(4) - 1.0)) + sqrt((IMC(6) - 1.0) * (IMC(6) - 1.0))
+let maxreC = reduce(abs(REC), lambda(a, b) -> if a > b then a else b, 0.0)
+let devL = abs(IMC(0) - 3.0) + abs(IMC(2) - 2.0) + abs(IMC(4) - 1.0) + abs(IMC(6) - 1.0)
 let red0 = RED(0)
 let imd0 = IMD(0)
 let red2 = RED(2)
@@ -153,13 +112,13 @@ let red6 = RED(6)
 let imd6 = IMD(6)
 let red8 = RED(8)
 let imd8 = IMD(8)
-let devD = sqrt((RED(0) + 0.45) * (RED(0) + 0.45)) + sqrt((IMD(0) - 2.9660579899927786) * (IMD(0) - 2.9660579899927786)) + sqrt((RED(2) + 0.3) * (RED(2) + 0.3)) + sqrt((IMD(2) - 1.977371993328519) * (IMD(2) - 1.977371993328519)) + sqrt((RED(6) + 0.15) * (RED(6) + 0.15)) + sqrt((IMD(6) - 0.98868599666425949) * (IMD(6) - 0.98868599666425949))
+let devD = abs(RED(0) + 0.45) + abs(IMD(0) - 2.9660579899927786) + abs(RED(2) + 0.3) + abs(IMD(2) - 1.977371993328519) + abs(RED(6) + 0.15) + abs(IMD(6) - 0.98868599666425949)
 
 // ---- verdicts ----
-let ladderV = if maxreC < 0.000000000001 then (if devL < 0.000000000001 then "IMAGINARY_LADDER_MEASURED" else "NO") else "NO"
-let invV = if abs(rec8) < 0.000000000001 then (if abs(imc8) < 0.000000000001 then "INVARIANT_AT_ZERO" else "NO") else "NO"
-let lattV = if devD < 0.0000000001 then "DAMPED_LATTICE_EXACT" else "NO"
-let dispV = if abs(red8 + 0.3) < 0.0000000001 then (if abs(imd8) < 0.000000000001 then "INVARIANT_DISPLACED_TO_MINUS_2GAMMA" else "NO") else "NO"
+let ladderV = if maxreC < 1.0e-12 && devL < 1.0e-12 then "IMAGINARY_LADDER_MEASURED" else "NO"
+let invV = if abs(rec8) < 1.0e-12 && abs(imc8) < 1.0e-12 then "INVARIANT_AT_ZERO" else "NO"
+let lattV = if devD < 1.0e-10 then "DAMPED_LATTICE_EXACT" else "NO"
+let dispV = if abs(red8 + 0.3) < 1.0e-10 && abs(imd8) < 1.0e-12 then "INVARIANT_DISPLACED_TO_MINUS_2GAMMA" else "NO"
 
 // the ladder, the kernel, the lattice, the displacement:
 // EXPECT: imc0 = 3

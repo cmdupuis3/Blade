@@ -1,0 +1,28 @@
+// TEST: abs(w) * abs(w) Over A Complex Kernel Parameter Is Real
+// ============================================================================
+// `abs` of a complex is its real magnitude. Inside an unannotated kernel the
+// scalar `abs` rule types `abs(w)` AT w's own type variable (w is not yet
+// unified with the array's Complex128), and the post-unification re-stamp
+// corrects each abs node to Float64. A PRODUCT of two such nodes unified the
+// two aliases of w, so the product -- and the map -- resolved to Complex128:
+// `abs(w) * abs(w)` printed (25,0) where 25 is meant (the lseof notebook
+// wrapped it in `real(...)` to cope). Real arithmetic on two real operands is
+// real; the same holds through negation and division.
+// Hand values: |3+4i| = 5, |1| = 1, |-2i| = 2.
+// ============================================================================
+let zs = [complex(3.0, 4.0), complex(1.0, 0.0), complex(0.0, -2.0)]
+let power = (zs <@> lambda(w) -> abs(w) * abs(w)) |> compute
+// EXPECT: power = [25.0, 1.0, 4.0]
+let power_m = method_for(zs) <@> lambda(w) -> abs(w) * abs(w) |> compute
+// EXPECT: power_m = [25.0, 1.0, 4.0]
+let neg = (zs <@> lambda(w) -> -abs(w)) |> compute
+// EXPECT: neg = [-5.0, -1.0, -2.0]
+let ratio = (zs <@> lambda(w) -> abs(w) / abs(w)) |> compute
+// EXPECT: ratio = [1.0, 1.0, 1.0]
+// A real total of the real powers: 25 + 1 + 4.
+let total = reduce(power, (+))
+// EXPECT: total = 30.0
+// The complex square is untouched: (3+4i)^2 = -7+24i.
+let sq = (zs <@> lambda(w) -> w * w) |> compute
+let sq0 = sq(0)
+// EXPECT: sq0 = (-7,24)

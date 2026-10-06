@@ -3,8 +3,9 @@ import ppl as ppl
 // ============================================================================
 // The invariant detector: fuzz ONE parameter into a moment jet, push each
 // candidate quantity through as a tower, and read the normalized dispersion
-// sqrt(k2)/(|k1| + eps). Below tolerance the quantity refused to spread ->
-// INVARIANT; otherwise VARIANT. The verdict is computed in-language.
+// |k2|/(|k1| + eps). Below tolerance the quantity refused to spread ->
+// INVARIANT; otherwise VARIANT. The verdict is computed in-language, by ONE
+// detector function applied to every candidate.
 //
 // This file is the validation case with a KNOWN answer: an elastic collision
 // with the target mass fuzzed. The detector must flag the relative velocity,
@@ -16,40 +17,49 @@ type TimeIdx = Idx<7>
 let M2: Array<Float64 like Idx<1>, TimeIdx> = [[0.356967028599, 0.65259015823, 0.839329531238, 1.0, 1.16067046876, 1.34740984177, 1.6430329714]]
 let d = ppl.dist(M2, 6)
 
+// --- the detector, written once: a tower's normalized dispersion
+//     |k2| / (|k1| + eps), and the verdict it reads off ---
+function dispersion(k1: Float64, k2: Float64) -> Float64 = abs(k2) / (abs(k1) + 0.000000001)
+function verdict(disp: Float64) -> String = if disp < 0.000001 then "INVARIANT" else "VARIANT"
+
+// --- the outgoing velocities (m1 = 1, u1 = 1, target mass m at rest) ---
+function v1(m) = (1.0 - m) / (1.0 + m)
+function v2(m) = 2.0 / (1.0 + m)
+
 // --- candidate: our recoil v1 ---
-let v1_d  = ppl.dist_map(d, 2, 2, lambda(m) -> (1.0 - m) / (1.0 + m))
+let v1_d  = ppl.dist_map(d, 2, 2, v1)
 let v1_k1 = ppl.cumulant(v1_d, 1)
 let v1_k2 = ppl.cumulant(v1_d, 2)
-let v1_disp = sqrt(v1_k2(0) * v1_k2(0)) / (sqrt(v1_k1(0) * v1_k1(0)) + 0.000000001)
-let v1_V = if v1_disp < 0.000001 then "INVARIANT" else "VARIANT"
+let v1_disp = dispersion(v1_k1(0), v1_k2(0))
+let v1_V = verdict(v1_disp)
 
 // --- candidate: target recoil v2 ---
-let v2_d  = ppl.dist_map(d, 2, 2, lambda(m) -> 2.0 / (1.0 + m))
+let v2_d  = ppl.dist_map(d, 2, 2, v2)
 let v2_k1 = ppl.cumulant(v2_d, 1)
 let v2_k2 = ppl.cumulant(v2_d, 2)
-let v2_disp = sqrt(v2_k2(0) * v2_k2(0)) / (sqrt(v2_k1(0) * v2_k1(0)) + 0.000000001)
-let v2_V = if v2_disp < 0.000001 then "INVARIANT" else "VARIANT"
+let v2_disp = dispersion(v2_k1(0), v2_k2(0))
+let v2_V = verdict(v2_disp)
 
 // --- candidate: relative velocity v1 - v2 ---
-let rel_d  = ppl.dist_map(d, 2, 2, lambda(m) -> (1.0 - m) / (1.0 + m) - 2.0 / (1.0 + m))
+let rel_d  = ppl.dist_map(d, 2, 2, lambda(m) -> v1(m) - v2(m))
 let rel_k1 = ppl.cumulant(rel_d, 1)
 let rel_k2 = ppl.cumulant(rel_d, 2)
-let rel_disp = sqrt(rel_k2(0) * rel_k2(0)) / (sqrt(rel_k1(0) * rel_k1(0)) + 0.000000001)
-let rel_V = if rel_disp < 0.000001 then "INVARIANT" else "VARIANT"
+let rel_disp = dispersion(rel_k1(0), rel_k2(0))
+let rel_V = verdict(rel_disp)
 
 // --- candidate: total momentum m1 v1 + m2 v2 ---
-let mom_d  = ppl.dist_map(d, 2, 2, lambda(m) -> (1.0 - m) / (1.0 + m) + m * 2.0 / (1.0 + m))
+let mom_d  = ppl.dist_map(d, 2, 2, lambda(m) -> v1(m) + m * v2(m))
 let mom_k1 = ppl.cumulant(mom_d, 1)
 let mom_k2 = ppl.cumulant(mom_d, 2)
-let mom_disp = sqrt(mom_k2(0) * mom_k2(0)) / (sqrt(mom_k1(0) * mom_k1(0)) + 0.000000001)
-let mom_V = if mom_disp < 0.000001 then "INVARIANT" else "VARIANT"
+let mom_disp = dispersion(mom_k1(0), mom_k2(0))
+let mom_V = verdict(mom_disp)
 
 // --- candidate: total kinetic energy x2  v1^2 + m2 v2^2 ---
-let en_d  = ppl.dist_map(d, 2, 2, lambda(m) -> ((1.0 - m) / (1.0 + m)) * ((1.0 - m) / (1.0 + m)) + m * ((2.0 / (1.0 + m)) * (2.0 / (1.0 + m))))
+let en_d  = ppl.dist_map(d, 2, 2, lambda(m) -> v1(m) * v1(m) + m * (v2(m) * v2(m)))
 let en_k1 = ppl.cumulant(en_d, 1)
 let en_k2 = ppl.cumulant(en_d, 2)
-let en_disp = sqrt(en_k2(0) * en_k2(0)) / (sqrt(en_k1(0) * en_k1(0)) + 0.000000001)
-let en_V = if en_disp < 0.000001 then "INVARIANT" else "VARIANT"
+let en_disp = dispersion(en_k1(0), en_k2(0))
+let en_V = verdict(en_disp)
 
 // EXPECT: v1_V = "VARIANT"
 // EXPECT: v2_V = "VARIANT"

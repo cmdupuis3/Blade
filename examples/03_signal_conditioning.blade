@@ -27,9 +27,8 @@ let r2 = A(2)
 // ---- conditioning kernels (plain scalar lambdas, reusable everywhere) ------
 let calibrate = lambda(x) -> 2.0 * x + 0.1
 let square = lambda(x) -> x * x
-let k_abs = lambda(x) -> if x < 0.0 then -x else x
-// |x| < 0.1 gate written as x^2 < 0.01 so the kernel stays a single branch
-let deadband = lambda(x) -> if x * x < 0.01 then 0.0 else x
+let k_abs = lambda(x) -> abs(x)
+let deadband = lambda(x) -> if abs(x) < 0.1 then 0.0 else x
 let k_id = lambda(x) -> x
 let k_one = lambda(x) -> 1.0
 
@@ -88,7 +87,7 @@ let peak_abs0 = reduce(L0 <@> k_abs, lambda(a, b) -> if a > b then a else b, 0.0
 // The map itself is deferrable -- db_trace0 below is built from an unforced
 // pipeline and only materializes at |> compute.
 // ============================================================================
-let to_db = lambda(p) -> 10.0 * log(p) / log(10.0)
+let to_db = lambda(p) -> 10.0 * log10(p)
 let power_c = L0 <@> square
 let db_trace0 = to_db <$> power_c |> compute
 // 10*log10 of [0.25, 2.25, 4, 6.25, 1, 0.25, 2.25, 0.25]
@@ -169,7 +168,8 @@ let reference = replicate(2, L0 <@> calibrate) |> compute
 // ============================================================================
 // (i) Virtual index arrays: the time axis is arithmetic on an anonymous range
 // (sample period 0.25 s) -- an affine body needs no loop, the range lifts
-// elementwise -- and reverse<> yields the countdown view via a mapped range.
+// elementwise -- and reverse<> is a virtual array of the same kind, so the
+// countdown is the same cast lifted over it, with no kernel at all.
 // The axis is a physical quantity, so its element type says so: the range
 // arithmetic computes bare floats and the binding annotation stamps
 // Float<seconds> on the elements (bare-to-annotated adoption -- the reverse
@@ -177,6 +177,6 @@ let reference = replicate(2, L0 <@> calibrate) |> compute
 // ============================================================================
 Unit seconds
 let t_axis: Array<Float<seconds> like Idx<8>> = 0.25 * Float64(0..8)
-let countdown = method_for(reverse<Idx<8>>) <@> lambda(i) -> 1.0 * i |> compute
+let countdown = Float64(reverse<Idx<8>>)
 // EXPECT: t_axis = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
 // EXPECT: countdown = [7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0]

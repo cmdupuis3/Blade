@@ -22,6 +22,10 @@ import ppl as ppl
 // ============================================================================
 type TimeIdx = Idx<24>
 
+// the detector of 09/10, written once, at the symplectic conservation floor
+function dispersion(k1: Float64, k2: Float64) -> Float64 = abs(k2) / (abs(k1) + 0.000000001)
+function verdict(k2: Float64, disp: Float64) -> String = if abs(k2) < 1.0e-12 then "INVARIANT" else (if disp < 0.0001 then "INVARIANT" else "VARIANT")
+
 // ---------- (A) SEPARABLE QUARTIC (integrable) ----------
 let qE: Array<Float64 like Idx<1>, TimeIdx> = [[0.383770000084, 0.383770025804, 0.383770008775, 0.383769971435, 0.383769949042, 0.383769961638, 0.383770001375, 0.383770024556, 0.383770007047, 0.383769970951, 0.383769949597, 0.383769963367, 0.383770002551, 0.383770023192, 0.383770005372, 0.383769970532, 0.383769950219, 0.383769965142, 0.383770003601, 0.383770021722, 0.383770003755, 0.383769970177, 0.38376995091, 0.383769966957]]
 let qD: Array<Float64 like Idx<1>, TimeIdx> = [[0.0421500000125, 0.0421499794445, 0.0421499368207, 0.0421499329311, 0.0421499542262, 0.0421499803616, 0.0421500013693, 0.0421499782852, 0.0421499350832, 0.0421499323548, 0.042149954726, 0.0421499820943, 0.0421500026101, 0.0421499770095, 0.0421499333982, 0.0421499318437, 0.0421499552925, 0.0421499838736, 0.042150003726, 0.0421499756273, 0.0421499317709, 0.0421499313963, 0.0421499559271, 0.0421499856929]]
@@ -29,18 +33,18 @@ let qL: Array<Float64 like Idx<1>, TimeIdx> = [[0.240019457251, 0.250584212476, 
 
 let qE1 = ppl.cumulants(qE, 1)
 let qE2 = ppl.cumulants(qE, 2)
-let qE_disp = sqrt(qE2(0) * qE2(0)) / (sqrt(qE1(0) * qE1(0)) + 0.000000001)
-let qE_V = if sqrt(qE2(0) * qE2(0)) < 1.0e-12 then "INVARIANT" else (if qE_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let qE_disp = dispersion(qE1(0), qE2(0))
+let qE_V = verdict(qE2(0), qE_disp)
 
 let qD1 = ppl.cumulants(qD, 1)
 let qD2 = ppl.cumulants(qD, 2)
-let qD_disp = sqrt(qD2(0) * qD2(0)) / (sqrt(qD1(0) * qD1(0)) + 0.000000001)
-let qD_V = if sqrt(qD2(0) * qD2(0)) < 1.0e-12 then "INVARIANT" else (if qD_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let qD_disp = dispersion(qD1(0), qD2(0))
+let qD_V = verdict(qD2(0), qD_disp)
 
 let qL1 = ppl.cumulants(qL, 1)
 let qL2 = ppl.cumulants(qL, 2)
-let qL_disp = sqrt(qL2(0) * qL2(0)) / (sqrt(qL1(0) * qL1(0)) + 0.000000001)
-let qL_V = if sqrt(qL2(0) * qL2(0)) < 1.0e-12 then "INVARIANT" else (if qL_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let qL_disp = dispersion(qL1(0), qL2(0))
+let qL_V = verdict(qL2(0), qL_disp)
 
 // ---------- (B) HENON-HEILES (chaotic) ----------
 let hE: Array<Float64 like Idx<1>, TimeIdx> = [[0.127399999979, 0.127400001944, 0.127400028267, 0.127400035713, 0.127400009775, 0.127399997735, 0.127400009239, 0.127400020266, 0.127400023251, 0.127400023689, 0.127400023862, 0.12740002323, 0.127400023298, 0.127400022705, 0.127400014916, 0.127400000694, 0.127400000971, 0.127400026865, 0.127400036395, 0.127400011007, 0.127399997293, 0.127400008335, 0.127400020456, 0.127400023723]]
@@ -49,18 +53,18 @@ let hL: Array<Float64 like Idx<1>, TimeIdx> = [[0.0000000000000123480056475, 0.0
 
 let hE1 = ppl.cumulants(hE, 1)
 let hE2 = ppl.cumulants(hE, 2)
-let hE_disp = sqrt(hE2(0) * hE2(0)) / (sqrt(hE1(0) * hE1(0)) + 0.000000001)
-let hE_V = if sqrt(hE2(0) * hE2(0)) < 1.0e-12 then "INVARIANT" else (if hE_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let hE_disp = dispersion(hE1(0), hE2(0))
+let hE_V = verdict(hE2(0), hE_disp)
 
 let hD1 = ppl.cumulants(hD, 1)
 let hD2 = ppl.cumulants(hD, 2)
-let hD_disp = sqrt(hD2(0) * hD2(0)) / (sqrt(hD1(0) * hD1(0)) + 0.000000001)
-let hD_V = if sqrt(hD2(0) * hD2(0)) < 1.0e-12 then "INVARIANT" else (if hD_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let hD_disp = dispersion(hD1(0), hD2(0))
+let hD_V = verdict(hD2(0), hD_disp)
 
 let hL1 = ppl.cumulants(hL, 1)
 let hL2 = ppl.cumulants(hL, 2)
-let hL_disp = sqrt(hL2(0) * hL2(0)) / (sqrt(hL1(0) * hL1(0)) + 0.000000001)
-let hL_V = if sqrt(hL2(0) * hL2(0)) < 1.0e-12 then "INVARIANT" else (if hL_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let hL_disp = dispersion(hL1(0), hL2(0))
+let hL_V = verdict(hL2(0), hL_disp)
 
 // integrable: E and E_x-E_y conserved, Lz not.  chaotic: only E conserved.
 // EXPECT: qE_V = "INVARIANT"

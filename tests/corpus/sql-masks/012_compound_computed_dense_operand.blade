@@ -1,0 +1,37 @@
+// TEST: Compound Computed Dense Operand
+// ----------------------------------------------------------------------------
+// The DENSE operand of compound(dense, mask) written in place -- an
+// elementwise product compounded down to a sub-ensemble, the shape of a
+// conditional cross moment: sum over the selected cells of W * S. The
+// compound constructor rendered the dense operand with the expression
+// renderer, which cannot run the product's loop: the program passed
+// `blade check`, ran under the interpreter, and was refused at codegen
+// (BL7004 "array-valued elementwise kernel body not supported inside a
+// kernel"). The constructor now emits a computed dense operand as the
+// binding the user would have written, like its computed-mask arm (010).
+// Each inline form must agree with the one bound to a name first.
+// ----------------------------------------------------------------------------
+type I = Idx<6>
+let W: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+let S: Array<Float64 like I> = [0.5, -1.0, 2.0, 0.25, -0.5, 1.0]
+let SP: Array<Float64 like I> = [0.0, 4.0, 0.0, 4.0, 0.0, 4.0]
+let spinless = mask(SP, lambda(w) -> w < 0.5)
+
+// bound: W * S = [0.5, -2, 6, 1, -2.5, 6]; spinless cells 0, 2, 4
+let WS = W * S
+let bound = compound(WS, spinless)
+let s_bound = reduce(bound, (+))
+// EXPECT: s_bound = 4.0
+
+// the product written in place
+let inline_prod = compound(W * S, spinless)
+let n_inline = extents(inline_prod)
+let s_inline = reduce(inline_prod, (+))
+// EXPECT: n_inline = 3
+// EXPECT: s_inline = 4.0
+
+// a nested in-place operand (2 W - S) with an in-place mask over it too:
+// 2 W - S = [1.5, 5, 4, 7.75, 10.5, 11], positive-S cells 0, 2, 3, 5
+let nested = compound(2.0 * W - S, mask(S, lambda(x) -> x > 0.0))
+let s_nested = reduce(nested, (+))
+// EXPECT: s_nested = 24.25

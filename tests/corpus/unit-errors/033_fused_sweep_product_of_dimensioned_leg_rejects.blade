@@ -1,0 +1,14 @@
+// TEST: A Fused Product Fold Over A Dimensioned Leg Is Refused (rejects)
+// ERROR: BL3006
+// ERROR-CONTAINS: reduce kernel
+// ============================================================================
+// Each `<&!>` leg folds at its own unit under a shared operator section
+// (units/083), but every leg's fold must still PRESERVE its unit: `*` does
+// not -- folding n meters yields meters^n, a grade that depends on the
+// extent -- so a product fold over a Float<meters> leg is refused, exactly as
+// `reduce(x, (*))` over the array is.
+// ============================================================================
+Unit meters
+let x: Array<Float<meters> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let L = method_for(x)
+let (p, q) = reduce((L <@> lambda(t) -> t) <&!> (L <@> lambda(t) -> t * t), (*))

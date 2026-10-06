@@ -49,40 +49,46 @@ let q0 = ppl.dist_atoms(4, -2.0, 0.7, 0.0, 0.5, 2.0, -0.2)
 let n0 = ppl.dist_negativity(q0, -2.0, 0.0, 2.0)
 
 // ---- the physical channel: stochastic kernel K (columns sum to 1) ----
-// K = [[0.8, 0.1, 0.05], [0.15, 0.8, 0.15], [0.05, 0.1, 0.8]]
+let KER: Array<Float64 like Idx<3>, Idx<3>> = [[0.8, 0.1, 0.05], [0.15, 0.8, 0.15], [0.05, 0.1, 0.8]]
+// one step of the flow acts on the cell vector (the Lagrange reads of the
+// tower on -2, 0, 2): a row-kernel matvec, c' = K c
+function kick(c: Array<Float64 like Idx<3>>) -> Array<Float64 like Idx<3>> =
+    method_for(KER) <@> lambda(row: Array<Float64 like Idx<3>>) -> prodsum(row, c) |> compute
 let c0m = ppl.dist_expect(q0, 0.0, -0.25, 0.125)
 let c0z = ppl.dist_expect(q0, 1.0, 0.0, -0.25)
 let c0p = ppl.dist_expect(q0, 0.0, 0.25, 0.125)
-let c1m = 0.8 * c0m + 0.1 * c0z + 0.05 * c0p
-let c1z = 0.15 * c0m + 0.8 * c0z + 0.15 * c0p
-let c1p = 0.05 * c0m + 0.1 * c0z + 0.8 * c0p
-let q1 = ppl.dist_atoms(4, -2.0, c1m, 0.0, c1z, 2.0, c1p)
+let C0 = [c0m, c0z, c0p]
+// the flow is a recurrence over steps: row k is the cell vector after k kicks
+let rec FLOW: Array<Float64 like Idx<4>, Idx<3>> =
+    match FLOW with
+    | zero -> zero
+    | zero :: s -> zero :: C0
+    | prefix :: n -> prefix :: kick(prefix(n - 1))
+// rebuild each step's tower from its cells and re-meter it
+let q1 = ppl.dist_atoms(4, -2.0, FLOW(1, 0), 0.0, FLOW(1, 1), 2.0, FLOW(1, 2))
 let n1 = ppl.dist_negativity(q1, -2.0, 0.0, 2.0)
-let c2m = 0.8 * c1m + 0.1 * c1z + 0.05 * c1p
-let c2z = 0.15 * c1m + 0.8 * c1z + 0.15 * c1p
-let c2p = 0.05 * c1m + 0.1 * c1z + 0.8 * c1p
-let q2 = ppl.dist_atoms(4, -2.0, c2m, 0.0, c2z, 2.0, c2p)
+let q2 = ppl.dist_atoms(4, -2.0, FLOW(2, 0), 0.0, FLOW(2, 1), 2.0, FLOW(2, 2))
 let n2 = ppl.dist_negativity(q2, -2.0, 0.0, 2.0)
-let c3m = 0.8 * c2m + 0.1 * c2z + 0.05 * c2p
-let c3z = 0.15 * c2m + 0.8 * c2z + 0.15 * c2p
-let c3p = 0.05 * c2m + 0.1 * c2z + 0.8 * c2p
-let q3 = ppl.dist_atoms(4, -2.0, c3m, 0.0, c3z, 2.0, c3p)
+let q3 = ppl.dist_atoms(4, -2.0, FLOW(3, 0), 0.0, FLOW(3, 1), 2.0, FLOW(3, 2))
 let n3 = ppl.dist_negativity(q3, -2.0, 0.0, 2.0)
-let mono_V = if n1 < n0 then (if n2 < n1 then (if n3 < 0.000000000001 then "PHYSICAL_CHANNELS_DESTROY_NEGATIVITY" else "NO") else "NO") else "NO"
+let mono_V = if n1 < n0 && n2 < n1 && n3 < 1.0e-12 then "PHYSICAL_CHANNELS_DESTROY_NEGATIVITY" else "NO"
+let c1m = FLOW(1, 0)
+let c3m = FLOW(3, 0)
+let c3p = FLOW(3, 2)
 // mass preservation along the flow (columns sum to 1)
-let mass3 = c3m + c3z + c3p
+let mass3 = reduce(FLOW(3), (+))
 
 // ---- the unlawful kernel: signed column manufactures nonclassicality ----
 // S column for the +2 atom: (-0.1, 0.0, 1.1); apply to the CLASSICAL
 // point tower at +2
 let pt = ppl.dist_atoms(4, -2.0, 0.0, 0.0, 0.0, 2.0, 1.0)
 let ptn = ppl.dist_negativity(pt, -2.0, 0.0, 2.0)
-let bm = 0.0 - 0.1
+let bm = -0.1
 let bz = 0.0
 let bp = 1.1
 let qb = ppl.dist_atoms(4, -2.0, bm, 0.0, bz, 2.0, bp)
 let nb = ppl.dist_negativity(qb, -2.0, 0.0, 2.0)
-let unlawful_V = if ptn < 0.000000000001 then (if nb > 0.09 then "SIGNED_KERNELS_MANUFACTURE_NONCLASSICALITY" else "NO") else "NO"
+let unlawful_V = if ptn < 1.0e-12 && nb > 0.09 then "SIGNED_KERNELS_MANUFACTURE_NONCLASSICALITY" else "NO"
 
 // ---- observation: Bayes amplifies (post-selection distillation) ----
 // likelihood w(x) = 0.2 + 0.2 x + 0.1 x^2: values (0.2, 0.2, 1.0) on the

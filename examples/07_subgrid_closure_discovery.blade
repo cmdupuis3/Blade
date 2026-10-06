@@ -17,8 +17,8 @@ import sgs as sgs
 // B. THE DATA HALF. sgs.stress computes tau_ij = mean(u_i u_j|tile) -
 //    mean_i mean_j -- the second central comoment of velocity under the
 //    filter-cell measure (corpus sgs/009 pins it equal to ppl.comoments to
-//    the last bit). sgs.grad + tile means give the filtered gradient (box
-//    filter and central difference commute on a periodic uniform grid).
+//    the last bit). sgs.grad + sgs.box_filter give the filtered gradient
+//    (box filter and central difference commute on a periodic uniform grid).
 // C. THE BRIDGE. ml.tensor_to_irreps / ml.sym_to_irreps carry Cartesian
 //    tensors into irreps space: gradient -> l=0 (+) l=1 (+) l=2 (dim 9,
 //    all parity-even; the l=1 block is the vorticity pseudovector), stress
@@ -49,15 +49,13 @@ let G = sgs.grad(U, dx)
 let S = sgs.stress(U, 2)
 
 // the field is divergence-free BY the op's own difference operator: the
-// squared discrete divergence summed over the 4x4x4 grid is an additive
-// reduce over a former (no imperative loop) reading the module-level
-// gradient field G in row-major (i, j, k) order.
+// discrete divergence is the trace of the gradient -- G(c, c) is the 4x4x4
+// field d_c u_c (partial indexing peels the two component axes), so the
+// trace is plain whole-array addition -- and its square is folded over all
+// three grid axes in row-major (i, j, k) order.
 let dvsq = {
-    let div2 = (method_for(range<Idx<4>>, range<Idx<4>>, range<Idx<4>>) <@> lambda(i, j, k) -> {
-        let d = G(0, 0, i, j, k) + G(1, 1, i, j, k) + G(2, 2, i, j, k)
-        d * d
-    }) |> compute
-    reduce(div2, (+), axes = 3)
+    let div = G(0, 0) + G(1, 1) + G(2, 2)
+    reduce(div * div, (+), axes = 3)
 }
 let field_is_divergence_free = if dvsq < 0.00000000000000000000000001 then 1.0 else 0.0
 // EXPECT: field_is_divergence_free = 1.0
@@ -65,25 +63,25 @@ let field_is_divergence_free = if dvsq < 0.00000000000000000000000001 then 1.0 e
 // ---- B + C. filtered gradients and exact stresses of the 4 distinct
 // tiles (the 8 tiles come in near-duplicate pairs), bridged into irreps.
 // The tile mean of the pointwise gradient IS the filtered gradient (box
-// filter and central difference commute on a periodic uniform grid).
-// mean of one gradient component (c,d) over the 2x2x2 coarse tile whose low
-// corner is (bi,bj,bk): the 8 subcells summed in (di,dj,dk) row-major order
-// then divided by 8 -- the box filter of the pointwise gradient. A plain
-// function reading the module-level G; no imperative loop, no scatter buffer.
-function tile_cell_mean(c: Int, d: Int, bi: Int, bj: Int, bk: Int) -> Float =
-    (G(c, d, bi, bj, bk) + G(c, d, bi, bj, bk + 1)
-     + G(c, d, bi, bj + 1, bk) + G(c, d, bi, bj + 1, bk + 1)
-     + G(c, d, bi + 1, bj, bk) + G(c, d, bi + 1, bj, bk + 1)
-     + G(c, d, bi + 1, bj + 1, bk) + G(c, d, bi + 1, bj + 1, bk + 1)) / 8.0
-
-function tile_gradient(ti: Int, tj: Int, tk: Int) -> Array<Float like Idx<9>> = {
-    let bi = ti * 2
-    let bj = tj * 2
-    let bk = tk * 2
-    [tile_cell_mean(0, 0, bi, bj, bk), tile_cell_mean(0, 1, bi, bj, bk), tile_cell_mean(0, 2, bi, bj, bk),
-     tile_cell_mean(1, 0, bi, bj, bk), tile_cell_mean(1, 1, bi, bj, bk), tile_cell_mean(1, 2, bi, bj, bk),
-     tile_cell_mean(2, 0, bi, bj, bk), tile_cell_mean(2, 1, bi, bj, bk), tile_cell_mean(2, 2, bi, bj, bk)]
+// filter and central difference commute on a periodic uniform grid), and
+// the tile mean is sgs.box_filter: each gradient row G(c) is itself a
+// component-first field (d_d u_c over the grid), so filtering the three rows
+// and stacking them gives GF(c, d, tile) -- the 8 subcells of each tile
+// summed in (di, dj, dk) row-major order, then divided by 8. The sgs formers
+// read their argument's DECLARED shape, hence the annotated rows.
+type Field = Array<Float like Idx<3>, Idx<4>, Idx<4>, Idx<4>>
+let GF = {
+    let G0: Field = G(0)
+    let G1: Field = G(1)
+    let G2: Field = G(2)
+    stack(sgs.box_filter(G0, 2), sgs.box_filter(G1, 2), sgs.box_filter(G2, 2))
 }
+
+// one tile's filtered gradient, flattened row-major for the bridge
+function tile_gradient(ti: Int, tj: Int, tk: Int) -> Array<Float like Idx<9>> =
+    [GF(0, 0, ti, tj, tk), GF(0, 1, ti, tj, tk), GF(0, 2, ti, tj, tk),
+     GF(1, 0, ti, tj, tk), GF(1, 1, ti, tj, tk), GF(1, 2, ti, tj, tk),
+     GF(2, 0, ti, tj, tk), GF(2, 1, ti, tj, tk), GF(2, 2, ti, tj, tk)]
 function tile_stress(ti: Int, tj: Int, tk: Int) -> Array<Float like Idx<6>> =
     [S(0, ti, tj, tk), S(1, ti, tj, tk), S(2, ti, tj, tk), S(3, ti, tj, tk), S(4, ti, tj, tk), S(5, ti, tj, tk)]
 
@@ -113,84 +111,76 @@ function model(w1: Array<Float like Idx<W1>>, w2: Array<Float like Idx<W2>>, g: 
     ml.derive_linear(HSPEC, TAUSPEC, w2, a)
 }
 
+// one component's squared residual (a same-module helper: grad inlines it)
+function sq(r: Float) -> Float = r * r
+
+// The residual is summed per component, as a reduce over an inline literal of
+// scalar terms -- the reduction form grad v1 differentiates; lifted array
+// arithmetic over the rep (`p - t`) is not yet differentiable.
 function sq6(w1: Array<Float like Idx<W1>>, w2: Array<Float like Idx<W2>>, g: Array<Float like IrrepsIdx<GSPEC>>, t: Array<Float like Idx<6>>) -> Float = {
     let p = model(w1, w2, g)
-    reduce([(p(0) - t(0)) * (p(0) - t(0)), (p(1) - t(1)) * (p(1) - t(1)), (p(2) - t(2)) * (p(2) - t(2)), (p(3) - t(3)) * (p(3) - t(3)), (p(4) - t(4)) * (p(4) - t(4)), (p(5) - t(5)) * (p(5) - t(5))], (+))
+    reduce([sq(p(0) - t(0)), sq(p(1) - t(1)), sq(p(2) - t(2)),
+            sq(p(3) - t(3)), sq(p(4) - t(4)), sq(p(5) - t(5))], (+))
 }
 
 function loss(w1: Array<Float like Idx<W1>>, w2: Array<Float like Idx<W2>>) -> Float =
     sq6(w1, w2, g0, t0) + sq6(w1, w2, g1, t1) + sq6(w1, w2, g2, t2) + sq6(w1, w2, g3, t3)
 
 // ---- SGD as a recursive array over epochs (no imperative for-in). Each
-// state row stacks [w1(91), w2(9), loss]; sgd_step allocates its own zeroed
-// grad buffers, runs ad.grad(loss), and returns the descended weights with
-// the loss it just measured. The loss trace is the loss column; the trained
-// weights are the final row (each extracted in its own block so the big
-// trajectory never auto-prints). lr 0.05, 6 steps. ----
+// state row stacks [w1(91), w2(9), loss] -- the state-vector idiom: Blade has
+// no slice/concat, so the row is read and written slot by slot with literal
+// subscripts, each proven against State's static extent at compile time.
+// sgd_step allocates its own zeroed grad buffers, runs ad.grad(loss), and
+// returns the descended weights with the loss it just measured. ONE block
+// runs the descent once and hands out the loss column and the trained
+// weights (the final row) as a tuple, so the big trajectory never
+// auto-prints. lr 0.05, 6 steps. ----
 type Epochs = Idx<7>
 type State = Idx<101>
 function sgd_step(s: Array<Float like State>) -> Array<Float like State> = {
     let w1 = [s(0), s(1), s(2), s(3), s(4), s(5), s(6), s(7), s(8), s(9), s(10), s(11), s(12), s(13), s(14), s(15), s(16), s(17), s(18), s(19), s(20), s(21), s(22), s(23), s(24), s(25), s(26), s(27), s(28), s(29), s(30), s(31), s(32), s(33), s(34), s(35), s(36), s(37), s(38), s(39), s(40), s(41), s(42), s(43), s(44), s(45), s(46), s(47), s(48), s(49), s(50), s(51), s(52), s(53), s(54), s(55), s(56), s(57), s(58), s(59), s(60), s(61), s(62), s(63), s(64), s(65), s(66), s(67), s(68), s(69), s(70), s(71), s(72), s(73), s(74), s(75), s(76), s(77), s(78), s(79), s(80), s(81), s(82), s(83), s(84), s(85), s(86), s(87), s(88), s(89), s(90)]
     let w2 = [s(91), s(92), s(93), s(94), s(95), s(96), s(97), s(98), s(99)]
-    let mut dw1 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    let mut dw2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mut dw1: Array<Float like Idx<W1>> = zero |> compute
+    let mut dw2: Array<Float like Idx<W2>> = zero |> compute
     let lv = ad.grad(loss)(w1, w2, dw1, dw2)
     let wn1 = w1 - 0.05 * dw1
     let wn2 = w2 - 0.05 * dw2
     [wn1(0), wn1(1), wn1(2), wn1(3), wn1(4), wn1(5), wn1(6), wn1(7), wn1(8), wn1(9), wn1(10), wn1(11), wn1(12), wn1(13), wn1(14), wn1(15), wn1(16), wn1(17), wn1(18), wn1(19), wn1(20), wn1(21), wn1(22), wn1(23), wn1(24), wn1(25), wn1(26), wn1(27), wn1(28), wn1(29), wn1(30), wn1(31), wn1(32), wn1(33), wn1(34), wn1(35), wn1(36), wn1(37), wn1(38), wn1(39), wn1(40), wn1(41), wn1(42), wn1(43), wn1(44), wn1(45), wn1(46), wn1(47), wn1(48), wn1(49), wn1(50), wn1(51), wn1(52), wn1(53), wn1(54), wn1(55), wn1(56), wn1(57), wn1(58), wn1(59), wn1(60), wn1(61), wn1(62), wn1(63), wn1(64), wn1(65), wn1(66), wn1(67), wn1(68), wn1(69), wn1(70), wn1(71), wn1(72), wn1(73), wn1(74), wn1(75), wn1(76), wn1(77), wn1(78), wn1(79), wn1(80), wn1(81), wn1(82), wn1(83), wn1(84), wn1(85), wn1(86), wn1(87), wn1(88), wn1(89), wn1(90), wn2(0), wn2(1), wn2(2), wn2(3), wn2(4), wn2(5), wn2(6), wn2(7), wn2(8), lv]
 }
 
-let losses = {
+let (losses, w2v, w1v) = {
     let rec wtraj: Array<Float like Epochs, State> =
         match wtraj with
         | zero -> zero
         | zero :: s -> zero :: [0.03, -0.06, 0.09, -0.12, 0.15, -0.18, 0.21, -0.24, 0.27, -0.3, 0.32999999999999996, -0.36, 0.39, -0.42, 0.44999999999999996, -0.48, 0.51, -0.54, 0.57, -0.6, 0.63, -0.6599999999999999, 0.69, -0.72, 0.75, -0.78, 0.8099999999999999, -0.84, 0.87, -0.8999999999999999, 0.9299999999999999, -0.96, 0.99, -1.02, 1.05, -1.08, 1.1099999999999999, -1.14, 1.17, -1.2, 1.23, -1.26, 1.29, -1.3199999999999998, 1.3499999999999999, -1.38, 1.41, -1.44, 1.47, -1.5, 1.53, -1.56, 1.5899999999999999, -1.6199999999999999, 1.65, -1.68, 1.71, -1.74, 1.77, -1.7999999999999998, 1.8299999999999998, -1.8599999999999999, 1.89, -1.92, 1.95, -1.98, 2.01, -2.04, 2.07, -2.1, 2.13, -2.16, 2.19, -2.2199999999999998, 2.25, -2.28, 2.31, -2.34, 2.37, -2.4, 2.4299999999999997, -2.46, 2.4899999999999998, -2.52, 2.55, -2.58, 2.61, -2.6399999999999997, 2.67, -2.6999999999999997, 2.73, 0.1, -0.2, 0.30000000000000004, -0.4, 0.5, -0.6000000000000001, 0.7000000000000001, -0.8, 0.9, 0.0]
         | prefix :: n -> prefix :: sgd_step(prefix(n - 1))
-    let r1 = wtraj(1)
-    let r2 = wtraj(2)
-    let r3 = wtraj(3)
-    let r4 = wtraj(4)
-    let r5 = wtraj(5)
-    let r6 = wtraj(6)
-    [r1(100), r2(100), r3(100), r4(100), r5(100), r6(100)]
+    let wf = wtraj(6)
+    ([wtraj(1, 100), wtraj(2, 100), wtraj(3, 100), wtraj(4, 100), wtraj(5, 100), wtraj(6, 100)],
+     [wf(91), wf(92), wf(93), wf(94), wf(95), wf(96), wf(97), wf(98), wf(99)],
+     [wf(0), wf(1), wf(2), wf(3), wf(4), wf(5), wf(6), wf(7), wf(8), wf(9), wf(10), wf(11), wf(12), wf(13), wf(14), wf(15), wf(16), wf(17), wf(18), wf(19), wf(20), wf(21), wf(22), wf(23), wf(24), wf(25), wf(26), wf(27), wf(28), wf(29), wf(30), wf(31), wf(32), wf(33), wf(34), wf(35), wf(36), wf(37), wf(38), wf(39), wf(40), wf(41), wf(42), wf(43), wf(44), wf(45), wf(46), wf(47), wf(48), wf(49), wf(50), wf(51), wf(52), wf(53), wf(54), wf(55), wf(56), wf(57), wf(58), wf(59), wf(60), wf(61), wf(62), wf(63), wf(64), wf(65), wf(66), wf(67), wf(68), wf(69), wf(70), wf(71), wf(72), wf(73), wf(74), wf(75), wf(76), wf(77), wf(78), wf(79), wf(80), wf(81), wf(82), wf(83), wf(84), wf(85), wf(86), wf(87), wf(88), wf(89), wf(90)])
 }
 // EXPECT: losses = [25.54827813552241, 9.932954614414264, 5.794025304877055, 4.340611759027515, 3.6975033893435114, 3.3204523316411887]
-
-let w2v = {
-    let rec wtraj: Array<Float like Epochs, State> =
-        match wtraj with
-        | zero -> zero
-        | zero :: s -> zero :: [0.03, -0.06, 0.09, -0.12, 0.15, -0.18, 0.21, -0.24, 0.27, -0.3, 0.32999999999999996, -0.36, 0.39, -0.42, 0.44999999999999996, -0.48, 0.51, -0.54, 0.57, -0.6, 0.63, -0.6599999999999999, 0.69, -0.72, 0.75, -0.78, 0.8099999999999999, -0.84, 0.87, -0.8999999999999999, 0.9299999999999999, -0.96, 0.99, -1.02, 1.05, -1.08, 1.1099999999999999, -1.14, 1.17, -1.2, 1.23, -1.26, 1.29, -1.3199999999999998, 1.3499999999999999, -1.38, 1.41, -1.44, 1.47, -1.5, 1.53, -1.56, 1.5899999999999999, -1.6199999999999999, 1.65, -1.68, 1.71, -1.74, 1.77, -1.7999999999999998, 1.8299999999999998, -1.8599999999999999, 1.89, -1.92, 1.95, -1.98, 2.01, -2.04, 2.07, -2.1, 2.13, -2.16, 2.19, -2.2199999999999998, 2.25, -2.28, 2.31, -2.34, 2.37, -2.4, 2.4299999999999997, -2.46, 2.4899999999999998, -2.52, 2.55, -2.58, 2.61, -2.6399999999999997, 2.67, -2.6999999999999997, 2.73, 0.1, -0.2, 0.30000000000000004, -0.4, 0.5, -0.6000000000000001, 0.7000000000000001, -0.8, 0.9, 0.0]
-        | prefix :: n -> prefix :: sgd_step(prefix(n - 1))
-    let wf = wtraj(6)
-    [wf(91), wf(92), wf(93), wf(94), wf(95), wf(96), wf(97), wf(98), wf(99)]
-}
 // EXPECT: w2v = [0.5535435316984045, -0.4971397950778106, 0.7806307178612995, 0.5052548994721346, -0.06241325352169922, 0.3314147534425853, -0.23252413628286503, -0.21728930831050014, -0.058772505564877967]
-
-let w1v = {
-    let rec wtraj: Array<Float like Epochs, State> =
-        match wtraj with
-        | zero -> zero
-        | zero :: s -> zero :: [0.03, -0.06, 0.09, -0.12, 0.15, -0.18, 0.21, -0.24, 0.27, -0.3, 0.32999999999999996, -0.36, 0.39, -0.42, 0.44999999999999996, -0.48, 0.51, -0.54, 0.57, -0.6, 0.63, -0.6599999999999999, 0.69, -0.72, 0.75, -0.78, 0.8099999999999999, -0.84, 0.87, -0.8999999999999999, 0.9299999999999999, -0.96, 0.99, -1.02, 1.05, -1.08, 1.1099999999999999, -1.14, 1.17, -1.2, 1.23, -1.26, 1.29, -1.3199999999999998, 1.3499999999999999, -1.38, 1.41, -1.44, 1.47, -1.5, 1.53, -1.56, 1.5899999999999999, -1.6199999999999999, 1.65, -1.68, 1.71, -1.74, 1.77, -1.7999999999999998, 1.8299999999999998, -1.8599999999999999, 1.89, -1.92, 1.95, -1.98, 2.01, -2.04, 2.07, -2.1, 2.13, -2.16, 2.19, -2.2199999999999998, 2.25, -2.28, 2.31, -2.34, 2.37, -2.4, 2.4299999999999997, -2.46, 2.4899999999999998, -2.52, 2.55, -2.58, 2.61, -2.6399999999999997, 2.67, -2.6999999999999997, 2.73, 0.1, -0.2, 0.30000000000000004, -0.4, 0.5, -0.6000000000000001, 0.7000000000000001, -0.8, 0.9, 0.0]
-        | prefix :: n -> prefix :: sgd_step(prefix(n - 1))
-    let wf = wtraj(6)
-    [wf(0), wf(1), wf(2), wf(3), wf(4), wf(5), wf(6), wf(7), wf(8), wf(9), wf(10), wf(11), wf(12), wf(13), wf(14), wf(15), wf(16), wf(17), wf(18), wf(19), wf(20), wf(21), wf(22), wf(23), wf(24), wf(25), wf(26), wf(27), wf(28), wf(29), wf(30), wf(31), wf(32), wf(33), wf(34), wf(35), wf(36), wf(37), wf(38), wf(39), wf(40), wf(41), wf(42), wf(43), wf(44), wf(45), wf(46), wf(47), wf(48), wf(49), wf(50), wf(51), wf(52), wf(53), wf(54), wf(55), wf(56), wf(57), wf(58), wf(59), wf(60), wf(61), wf(62), wf(63), wf(64), wf(65), wf(66), wf(67), wf(68), wf(69), wf(70), wf(71), wf(72), wf(73), wf(74), wf(75), wf(76), wf(77), wf(78), wf(79), wf(80), wf(81), wf(82), wf(83), wf(84), wf(85), wf(86), wf(87), wf(88), wf(89), wf(90)]
-}
 
 // ---- E. the trained closure's rotation certificate, both routes ----
 // (rotated input and D_tau baked from the oracle; R = Rz(0.7)*Ry(1.1))
 let g0r = [1.3877787807814457e-17, -0.6633155599755689, 0.32419047647654897, -0.03692617197126133, -0.13074113478716334, 0.2589364772375941, -0.2854364664265984, -0.21632193130101668, 0.2826372379941266]
-let d_tau = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.07709643678933609, 0.15147596872130908, 0.6778328861277059, 0.3983662814203284, 0.594102730717048, 0.0, -0.6816329865934229, 0.34692944965489897, 0.4510673253341625, -0.37912282869503605, -0.26042384170432337, 0.0, -8.326672684688674e-17, -3.3306690738754696e-16, -0.19137583794150892, -0.7001784245761277, 0.687841160741547, 0.0, 0.5741315443479862, -0.2922146442847727, 0.5355259977422124, -0.45011048174094404, -0.309186078954509, 0.0, -0.4469961753826479, -0.87824005233627, 0.11691039686042598, 0.06870891190116774, 0.1024688938018079]
+let d_tau: Array<Float like Idx<6>, Idx<6>> = [
+    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [0.0, 0.07709643678933609, 0.15147596872130908, 0.6778328861277059, 0.3983662814203284, 0.594102730717048],
+    [0.0, -0.6816329865934229, 0.34692944965489897, 0.4510673253341625, -0.37912282869503605, -0.26042384170432337],
+    [0.0, -8.326672684688674e-17, -3.3306690738754696e-16, -0.19137583794150892, -0.7001784245761277, 0.687841160741547],
+    [0.0, 0.5741315443479862, -0.2922146442847727, 0.5355259977422124, -0.45011048174094404, -0.309186078954509],
+    [0.0, -0.4469961753826479, -0.87824005233627, 0.11691039686042598, 0.06870891190116774, 0.1024688938018079]]
 
 let p = model(w1v, w2v, g0)
 let p_rot = model(w1v, w2v, g0r)
-// D_tau . p as a matrix-vector former over the output index i (no imperative
-// loop): each row is the length-6 dot of the flat 6x6 d_tau row with p,
-// summed in j order to match the old accumulation bit-for-bit.
-let p_dtau = (method_for(range<Idx<6>>) <@> lambda(i) -> {
-    d_tau(i * 6 + 0) * p(0) + d_tau(i * 6 + 1) * p(1) + d_tau(i * 6 + 2) * p(2) + d_tau(i * 6 + 3) * p(3) + d_tau(i * 6 + 4) * p(4) + d_tau(i * 6 + 5) * p(5)
-}) |> compute
-// squared mismatch between the two routes = an additive reduce
-let dd = reduce([(p_rot(0) - p_dtau(0)) * (p_rot(0) - p_dtau(0)), (p_rot(1) - p_dtau(1)) * (p_rot(1) - p_dtau(1)), (p_rot(2) - p_dtau(2)) * (p_rot(2) - p_dtau(2)), (p_rot(3) - p_dtau(3)) * (p_rot(3) - p_dtau(3)), (p_rot(4) - p_dtau(4)) * (p_rot(4) - p_dtau(4)), (p_rot(5) - p_dtau(5)) * (p_rot(5) - p_dtau(5))], (+))
+// D_tau . p as a row kernel over the matrix: each row's length-6 dot with p
+let p_dtau = method_for(d_tau) <@> lambda(row: T^1) -> prodsum(row, p) |> compute
+// squared mismatch between the two routes
+let dd = {
+    let e = p_rot - p_dtau
+    prodsum(e, e)
+}
 let trained_closure_is_equivariant = if dd < 0.0000000000000000000000000001 then 1.0 else 0.0
 // EXPECT: trained_closure_is_equivariant = 1.0

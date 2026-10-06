@@ -10,14 +10,14 @@
 // (ex 42's move). A low wavepacket's <x(t)> is generated in-language from
 // the certified spectrum (400 samples at delta = 0.35), delay-embedded
 // (D = 10), and the transfer operator K = C1 C0^{-1} is fitted and
-// diagonalized: its eigenvalues are e^{Â±i (E_m - E_n) delta} -- the BOHR
+// diagonalized: its eigenvalues are e^{±i (E_m - E_n) delta} -- the BOHR
 // GAPS, on the unit circle.
 // FINDINGS (pinned):
 //   * THE BOHR LINES, ON THE CIRCLE. The two dominant eigenvalue pairs
 //     sit within 1e-3 of the unit circle (the signal's line tail is
 //     infinite; rank 8 is what 400 samples resolve -- the residual tail
 //     is the honest limit) and their real parts match cos(gap x delta)
-//     computed from the CERTIFIED spectrum in-file to 4 parts in 1e4 --
+//     computed from the CERTIFIED spectrum in-file to 5e-4 --
 //     spectroscopy from expectation dynamics, no FFT, the reference
 //     being the same file's certified eigenvalues.
 //   * THE ANHARMONIC LADDER IS UNEVEN, AND THE DATA RESOLVES IT: gap(1-2)
@@ -25,7 +25,7 @@
 //     harmonic degeneracy) -- 400x the instrument's gap precision. And
 //     the Delta-n = 3 SATELLITE line (amplitude 250x below the dominant
 //     rungs; ex 18's forbidden-line territory) appears in the spectrum
-//     within 6e-4 of its certified position. Ex 18 read these gaps from
+//     within 8e-4 of its certified position. Ex 18 read these gaps from
 //     lagged-cumulant towers; here the SAME numbers emerge as eigenvalue
 //     phases of a fitted operator -- two instruments, one spectrum.
 //   * THE CLASSICAL TWIN DEPHASES INTO THE DISK. The ensemble-mean <x(t)>
@@ -69,33 +69,34 @@ let VV: Array<Float64 like Idx<16>, Idx<16>> = [
 ]
 
 // ---- H, X in-language: ladder formulas + matrix products ----
-function eqInd(a: Int64, b: Int64) -> Float64 = if a + 1 > b then (if a < b + 1 then 1.0 else 0.0) else 0.0
-let SQH = method_for(range<Idx<16>>) <@> lambda(n) -> sqrt((n + 1.0) / 2.0) |> compute
-let NHALF = method_for(range<Idx<16>>) <@> lambda(n) -> n + 0.5 |> compute
-let XL = method_for(range<Idx<16>>) <*> method_for(range<Idx<16>>) <@> lambda(i: Int64, j: Int64) -> eqInd(j, i + 1) * SQH(i) + eqInd(i, j + 1) * SQH(j) |> compute
-let X2 = method_for(XL, XL) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
-let X4 = method_for(X2, X2) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
-let HM = method_for(range<Idx<16>>) <*> method_for(range<Idx<16>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * NHALF(i) + 0.05 * X4(i, j) |> compute
+function eqInd(a: Int64, b: Int64) -> Float64 = if a == b then 1.0 else 0.0
+// A B^T for 16 x 16 matrices (rows of A against rows of B)
+function mnt16(a: Array<Float64 like Idx<16>, Idx<16>>, b: Array<Float64 like Idx<16>, Idx<16>>) -> Array<Float64 like Idx<16>, Idx<16>> =
+    method_for(a, b) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
+let SQH = sqrt((Float64(0..16) + 1.0) / 2.0)
+let NHALF = Float64(0..16) + 0.5
+let XL = method_for(range<Idx<16>, Idx<16>>) <@> lambda(i: Int64, j: Int64) -> eqInd(j, i + 1) * SQH(i) + eqInd(i, j + 1) * SQH(j) |> compute
+let X2 = mnt16(XL, XL)
+let X4 = mnt16(X2, X2)
+let HM = method_for(range<Idx<16>, Idx<16>>) <@> lambda(i: Int64, j: Int64) -> eqInd(i, j) * NHALF(i) + 0.05 * X4(i, j) |> compute
 // certification: residual and orthonormality of the embedded factor
-let VT = method_for(range<Idx<16>>) <*> method_for(range<Idx<16>>) <@> lambda(i: Int64, j: Int64) -> VV(j, i) |> compute
-let HV = method_for(HM, VT) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
-let RS = method_for(range<Idx<16>>) <*> method_for(range<Idx<16>>) <@> lambda(i: Int64, j: Int64) -> HV(i, j) - VV(i, j) * EV(j) |> compute
+let VT = method_for(range<Idx<16>, Idx<16>>) <@> lambda(i: Int64, j: Int64) -> VV(j, i) |> compute
+let HV = mnt16(HM, VT)
+let RS = method_for(range<Idx<16>, Idx<16>>) <@> lambda(i: Int64, j: Int64) -> HV(i, j) - VV(i, j) * EV(j) |> compute
 let certQ = reduce(method_for(zip(RS, RS)) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v), (+))
-let GO = method_for(VV, VV) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
-let DO = method_for(range<Idx<16>>) <*> method_for(range<Idx<16>>) <@> lambda(i: Int64, j: Int64) -> GO(i, j) - eqInd(i, j) |> compute
+let GO = mnt16(VV, VV)
+let DO = method_for(range<Idx<16>, Idx<16>>) <@> lambda(i: Int64, j: Int64) -> GO(i, j) - eqInd(i, j) |> compute
 let orthQ = reduce(method_for(zip(DO, DO)) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v), (+))
 
 // ---- the signal: <x(t)> from the certified spectrum ----
 let CW: Array<Float64 like Idx<16>> = [1.0, 1.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 let CT = method_for(VT) <@> lambda(row: Array<Float64 like Idx<16>>) -> prodsum(row, CW) |> compute
-let XE1 = method_for(VT, XL) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
-let XE = method_for(XE1, VT) <@> lambda(u: Array<Float64 like Idx<16>>, v: Array<Float64 like Idx<16>>) -> prodsum(u, v) |> compute
-let AMPM = method_for(range<Idx<16>>) <*> method_for(range<Idx<16>>) <@> lambda(i: Int64, j: Int64) -> CT(i) * CT(j) * XE(i, j) |> compute
-// <x(t_k)> = sum_{i,j} AMPM(i,j) cos((E_i - E_j) t_k) at t_k = 0.35 k, k = 0..399.
-// The old double-loop scatter becomes a former: a block-local weighted-cosine
-// table WCOS(k, 16i+j) = AMPM(i,j) cos((E_i - E_j) t_k), then the signal is a
-// per-row reduce over the 256 (i,j) pairs (i-major, j-inner -- the original
-// accumulation order). No imperative loop, no mutable running sum.
+let XE = mnt16(mnt16(VT, XL), VT)
+let AMPM = method_for(range<Idx<16>, Idx<16>>) <@> lambda(i: Int64, j: Int64) -> CT(i) * CT(j) * XE(i, j) |> compute
+// <x(t_k)> = sum_{i,j} AMPM(i,j) cos((E_i - E_j) t_k) at t_k = 0.35 k, k = 0..399:
+// a block-local weighted-cosine table WCOS(k, 16i+j) = AMPM(i,j)
+// cos((E_i - E_j) t_k), then the signal is a per-row reduce over the 256
+// (i,j) pairs (i-major, j-inner).
 let SIGQ = {
     let WCOS = method_for(range<Idx<400>, Idx<256>>) <@> lambda(k: Int64, u: Int64) -> {
         let i = u / 16
@@ -106,7 +107,7 @@ let SIGQ = {
 }
 
 // ---- the classical twin: Verlet ensemble mean, in-language ----
-let AMPS = method_for(range<Idx<32>>) <@> lambda(j) -> 1.0 + j / 31.0 |> compute
+let AMPS = 1.0 + Float64(0..32) / 31.0
 // one anharmonic velocity-Verlet step over the packed 32-trajectory state
 // (packed index u = 2j + c: slot 2j holds x_j, slot 2j+1 holds p_j)
 function vstepE(prev: Array<Float64 like Idx<64>>) -> Array<Float64 like Idx<64>> =
@@ -126,9 +127,9 @@ function vstepE(prev: Array<Float64 like Idx<64>>) -> Array<Float64 like Idx<64>
 // The ensemble mean <x(t)> is a RECURSIVE ARRAY whose leading axis is the 400
 // bins (one every 35 steps): each super-step advances the whole 32-trajectory
 // ensemble 35 Verlet sub-steps via a nested recursive array, so super-state b
-// is the state at t = 35 b -- exactly the sampled instants the old scatter
-// s(t/35) += x/32 wrote. The binning is then a per-bin ensemble mean; the
-// trajectory is block-local, only the 400-sample signal surfaces.
+// is the state at t = 35 b. The binning is then a per-bin ensemble mean over
+// the 32 position slots; the trajectory is block-local, only the 400-sample
+// signal surfaces.
 let SIGC = {
     let initE = method_for(range<Idx<64>>) <@> lambda(u: Int64) -> {
         let j = u / 2
@@ -148,37 +149,29 @@ let SIGC = {
                 | pre2 :: m -> pre2 :: vstepE(pre2(m - 1))
             inner(35)
         }
-    method_for(superT) <@> lambda(row: Array<Float64 like Idx<64>>) -> (row(0) + row(2) + row(4) + row(6) + row(8) + row(10) + row(12) + row(14) + row(16) + row(18) + row(20) + row(22) + row(24) + row(26) + row(28) + row(30) + row(32) + row(34) + row(36) + row(38) + row(40) + row(42) + row(44) + row(46) + row(48) + row(50) + row(52) + row(54) + row(56) + row(58) + row(60) + row(62)) / 32.0 |> compute
+    method_for(superT) <@> lambda(row: Array<Float64 like Idx<64>>) -> reduce(method_for(range<Idx<32>>) <@> lambda(j: Int64) -> row(2 * j), (+)) / 32.0 |> compute
 }
 
-// ---- delay-embedded EDMD, quantum ----
+// ---- delay-embedded EDMD, one routine for both signals ----
 // The 10-delay embedding is a halo view: reach [-9, +1] shrinks the 400-sample
-// signal to its 390-cell interior (t = 9..398, exactly the old hand-loop
-// bounds), and embedding row i reads the window at offset -i (the one-step
-// lead copy at 1 - i). The Gram and cross-Gram are then row-pair prodsum
-// sweeps -- no flat stat vector, no ring reads, no pack/unpack offsets.
-let EQ = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGQ(w(0 - i)) |> compute
-let E1Q = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGQ(w(1 - i)) |> compute
-let GQ: Array<Float64 like Idx<10>, Idx<10>> = method_for(EQ, EQ) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
-let AQ = method_for(E1Q, EQ) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
-let (QGQ, LGQ) = m.eigh(GQ)
-// spectrally truncated inverse: directions below resolution go to zero, not leakage
-let QDQ = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, k: Int64) -> QGQ(i, k) * (if LGQ(k) > LGQ(0) * 0.000000001 then 1.0 / LGQ(k) else 0.0) |> compute
-let GIQ = method_for(QDQ, QGQ) <@> lambda(u: Array<Float64 like Idx<10>>, v: Array<Float64 like Idx<10>>) -> prodsum(u, v) |> compute
-let KMQ: Array<Float64 like Idx<10>, Idx<10>> = method_for(AQ, GIQ) <@> lambda(u: Array<Float64 like Idx<10>>, v: Array<Float64 like Idx<10>>) -> prodsum(u, v) |> compute
+// signal to its 390-cell interior (t = 9..398), and embedding row i reads the
+// window at offset -i (the one-step lead copy at 1 - i). The Gram and
+// cross-Gram are row-pair prodsum sweeps, and the transfer operator
+// K = C1 C0^{-1} uses a spectrally truncated inverse: directions below
+// resolution go to zero, not leakage.
+function edmd(sig: Array<Float64 like Idx<400>>) -> Array<Float64 like Idx<10>, Idx<10>> = {
+    let e0 = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> sig(w(0 - i)) |> compute
+    let e1 = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> sig(w(1 - i)) |> compute
+    let g: Array<Float64 like Idx<10>, Idx<10>> = method_for(e0, e0) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
+    let a = method_for(e1, e0) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
+    let (q, l) = m.eigh(g)
+    let qd = method_for(range<Idx<10>, Idx<10>>) <@> lambda(i: Int64, k: Int64) -> q(i, k) * (if l(k) > l(0) * 1.0e-9 then 1.0 / l(k) else 0.0) |> compute
+    let gi = method_for(qd, q) <@> lambda(u: Array<Float64 like Idx<10>>, v: Array<Float64 like Idx<10>>) -> prodsum(u, v) |> compute
+    method_for(a, gi) <@> lambda(u: Array<Float64 like Idx<10>>, v: Array<Float64 like Idx<10>>) -> prodsum(u, v) |> compute
+}
+let KMQ: Array<Float64 like Idx<10>, Idx<10>> = edmd(SIGQ)
 let (REQ, IMQ) = m.eig(KMQ)
-
-// ---- delay-embedded EDMD, classical ----
-// Same halo embedding over the classical ensemble mean.
-let EC = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGC(w(0 - i)) |> compute
-let E1C = method_for(range<Idx<10>, halo<Idx<400>, [-9, 1]>>) <@> lambda(i, w) -> SIGC(w(1 - i)) |> compute
-let GC: Array<Float64 like Idx<10>, Idx<10>> = method_for(EC, EC) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
-let AC = method_for(E1C, EC) <@> lambda(u: Array<Float64 like Idx<390>>, v: Array<Float64 like Idx<390>>) -> prodsum(u, v) |> compute
-let (QGC, LGC) = m.eigh(GC)
-// spectrally truncated inverse: directions below resolution go to zero, not leakage
-let QDC = method_for(range<Idx<10>>) <*> method_for(range<Idx<10>>) <@> lambda(i: Int64, k: Int64) -> QGC(i, k) * (if LGC(k) > LGC(0) * 0.000000001 then 1.0 / LGC(k) else 0.0) |> compute
-let GIC = method_for(QDC, QGC) <@> lambda(u: Array<Float64 like Idx<10>>, v: Array<Float64 like Idx<10>>) -> prodsum(u, v) |> compute
-let KMC: Array<Float64 like Idx<10>, Idx<10>> = method_for(AC, GIC) <@> lambda(u: Array<Float64 like Idx<10>>, v: Array<Float64 like Idx<10>>) -> prodsum(u, v) |> compute
+let KMC: Array<Float64 like Idx<10>, Idx<10>> = edmd(SIGC)
 let (REC, IMC) = m.eig(KMC)
 
 // ---- meters: unitarity + gap match vs the certified spectrum ----
@@ -225,16 +218,17 @@ let hitS = reduce(method_for(zip(REQ, IMQ)) <@> lambda(reqk, imqk) -> {
 let maxModC = reduce(method_for(zip(REC, IMC)) <@> lambda(reck, imck) -> sqrt(reck^2 + imck^2), lambda(a: Float64, b: Float64) -> if a > b then a else b, 0.0)
 
 // ---- verdicts ----
-let certV = if certQ < 0.0000000000000001 then (if orthQ < 0.0000000000000001 then "EIGENFACTOR_CERTIFIED" else "NO") else "NO"
-let circleV = if devMod < 0.002 then "BOHR_LINES_ON_UNIT_CIRCLE" else "NO"
-let gapsV = if devCos < 0.001 then "GAPS_MATCH_CERTIFIED_SPECTRUM" else "NO"
-let satV = if hitS < 0.002 then "DELTA3_SATELLITE_RESOLVED" else "NO"
+// The fitted operators invert delay-embedding Grams whose spectra span
+// 4e3 .. 4e-7 (condition ~1e10), so their eigenvalues carry ~1e-7 of
+// rounding: they move at that level with FMA contraction and summation
+// order, and no digit past the 7th is a property of the physics. The
+// verdicts therefore pin the FINDINGS' own claims, each with its margin.
+let certV = if certQ < 1.0e-16 && orthQ < 1.0e-16 then "EIGENFACTOR_CERTIFIED" else "NO"
+let circleV = if devMod < 1.0e-3 then "BOHR_LINES_ON_UNIT_CIRCLE" else "NO"
+let gapsV = if devCos < 5.0e-4 then "GAPS_MATCH_CERTIFIED_SPECTRUM" else "NO"
+let satV = if hitS < 1.0e-3 then "DELTA3_SATELLITE_RESOLVED" else "NO"
 let unevenV = if agap > 0.05 then "ANHARMONIC_LADDER_UNEVEN" else "NO"
-let dephV = if maxModC < 0.999 then "CLASSICAL_MEAN_DEPHASES_INSIDE_DISK" else "NO"
-let req0 = REQ(0)
-let imq0 = IMQ(0)
-let req2 = REQ(2)
-let imq2 = IMQ(2)
+let dephV = if maxModC > 0.990 && maxModC < 0.993 then "CLASSICAL_MEAN_DEPHASES_INSIDE_DISK" else "NO"
 
 // certified spectrum in, Bohr gaps out; the classical twin leaks into the disk:
 // EXPECT: certQ = 2.70241458014453e-25
@@ -244,14 +238,6 @@ let imq2 = IMQ(2)
 // EXPECT: cg2 = 0.910133438195426
 // EXPECT: cgB = 0.205771409687602
 // EXPECT: agap = 0.0997504841086803
-// EXPECT: req0 = 0.923650642976152
-// EXPECT: imq0 = 0.383208045201399
-// EXPECT: req2 = 0.90877355177104
-// EXPECT: imq2 = 0.4149660518969
-// EXPECT: devCos = 0.000479913446734703
-// EXPECT: devMod = 0.000967371591171995
-// EXPECT: hitS = 0.000769164633241143
-// EXPECT: maxModC = 0.991380338109228
 // EXPECT: circleV = "BOHR_LINES_ON_UNIT_CIRCLE"
 // EXPECT: gapsV = "GAPS_MATCH_CERTIFIED_SPECTRUM"
 // EXPECT: satV = "DELTA3_SATELLITE_RESOLVED"

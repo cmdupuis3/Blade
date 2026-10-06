@@ -64,7 +64,7 @@ import csv as csvd
 let DIG_h = csvd.load("data/31_DIG.csv")
 let DIG: Array<Int64 like Idx<192>, Idx<97>> = DIG_h.vars.data |> csvd.read
 // ============================ machinery ====================================
-// Registers: the 24 bond-transmission ratios rt_j = 2 m_j / (m_j + m_(j+1))
+// Registers: the 96 bond-transmission ratios rt_j = 2 m_j / (m_j + m_(j+1))
 // of a 97-ball fuzzy chain, every mass an iid 3-point jet {0.92, 1.0, 1.08}.
 // Bond-locality makes the TRUE covariance exactly tridiagonal Toeplitz
 // (only neighboring bonds share a mass), so the true spectrum is analytic:
@@ -72,40 +72,52 @@ let DIG: Array<Int64 like Idx<192>, Idx<97>> = DIG_h.vars.data |> csvd.read
 // 27-term sums over the digit combinations -- the whole truth side is
 // computed in-language, no matrix needed.
 let MVAL = [0.92, 1.0, 1.08]
-let DVAL = [0.0, 1.0, 2.0]
-let digmean = reduce(method_for(range<Idx<192>>) <*> method_for(range<Idx<97>>) <@> lambda(s: Int64, k: Int64) -> DVAL(DIG(s, k)), (+), axes = 2) / 18624.0
-let e0 = reduce(method_for(range<Idx<9>>) <@> lambda(g: Int64) -> 2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL(g / 3)), (+)) / 9.0
-let r20 = reduce(method_for(range<Idx<9>>) <@> lambda(g: Int64) -> 2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL(g / 3)) * (2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL(g / 3))), (+)) / 9.0
-let r11 = reduce(method_for(range<Idx<27>>) <@> lambda(g: Int64) -> 2.0 * MVAL(g % 3) / (MVAL(g % 3) + MVAL((g / 3) % 3)) * (2.0 * MVAL((g / 3) % 3) / (MVAL((g / 3) % 3) + MVAL(g / 9))), (+)) / 27.0
+// the transfer kernel: bond j transmits rt(m_j, m_(j+1))
+function rt(mj: Float64, mk: Float64) -> Float64 = 2.0 * mj / (mj + mk)
+let digmean = reduce(Float64(DIG), (+), axes = 2) / 18624.0
+// one bond's two masses range over the 3 x 3 outer product of the jet with
+// itself, two neighbouring bonds' three masses over the 3 x 3 x 3 one
+// (outermost slot = the highest ball index)
+let e0 = reduce(method_for(MVAL, MVAL) <@> lambda(mk, mj) -> rt(mj, mk), (+), axes = 2) / 9.0
+let r20 = reduce(method_for(MVAL, MVAL) <@> lambda(mk, mj) -> rt(mj, mk) * rt(mj, mk), (+), axes = 2) / 9.0
+let r11 = reduce(method_for(MVAL, MVAL, MVAL) <@> lambda(ml, mk, mj) -> rt(mj, mk) * rt(mk, ml), (+), axes = 3) / 27.0
 let v0 = r20 - e0 * e0
 let v1 = r11 - e0 * e0
 
 // exact spectral moments of the true covariance (path-graph cosine bands)
-let tm1 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0), (+)) / 96.0
-let tm2 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)), (+)) / 96.0
-let tm3 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)), (+)) / 96.0
-let tm4 = reduce(method_for(range<Idx<96>>) <@> lambda(k: Int64) -> (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)) * (v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(k + 1)  / 97.0)), (+)) / 96.0
+// the 96 path-graph cosine bands lambda_k, k = 1..96, lifted over the range;
+// one <&!>-fused sweep carries their first four power sums
+let LAM = v0 + 2.0 * v1 * cos(3.14159265358979 * Float64(1..97) / 97.0)
+let LL = method_for(LAM)
+let (tp1, tp2, tp3, tp4) = reduce((LL <@> lambda(l) -> l) <&!> (LL <@> lambda(l) -> l * l) <&!> (LL <@> lambda(l) -> l * l * l) <&!> (LL <@> lambda(l) -> l * l * l * l), (+))
+let tm1 = tp1 / 96.0
+let tm2 = tp2 / 96.0
+let tm3 = tp3 / 96.0
+let tm4 = tp4 / 96.0
 let tvar_spec = tm2 - tm1 * tm1
 let v1r = v1 / v0
 
 // --- THE OBSERVER: N = 192 chain realizations (digit table emitted,
-//     data-only). Sample matrix rows carry 1/sqrt(48); sample-mean
+//     data-only). Sample matrix rows carry 1/sqrt(192); sample-mean
 //     centering by exact rank-one downdate. ---
-let REGW = method_for(range<Idx<96>>) <*> method_for(range<Idx<192>>) <@> lambda(i: Int64, a: Int64) -> (2.0 * MVAL(DIG(a, i)) / (MVAL(DIG(a, i)) + MVAL(DIG(a, i + 1))) - e0) / sqrt(192.0) |> compute
+// ONE row kernel for every product below: (X Y^T)(i, j) = dot(row i of X,
+// row j of Y), and tr(A B) = sum_i dot(row i of A, row i of B) for symmetric B
+function dot(x: Float64^1, y: Float64^1) -> Float64 = prodsum(x, y)
+let REGW = method_for(range<Idx<96>>) <*> method_for(range<Idx<192>>) <@> lambda(i: Int64, a: Int64) -> (rt(MVAL(DIG(a, i)), MVAL(DIG(a, i + 1))) - e0) / sqrt(192.0) |> compute
 let SQW = method_for(range<Idx<1>>) <*> method_for(range<Idx<192>>) <@> lambda(i: Int64, a: Int64) -> 1.0 / sqrt(192.0) |> compute
-let MUW = method_for(REGW, SQW) <@> lambda(u: Array<Float64 like Idx<192>>, o: Array<Float64 like Idx<192>>) -> prodsum(u, o) |> compute
-let AW = method_for(REGW, REGW) <@> lambda(u: Array<Float64 like Idx<192>>, v: Array<Float64 like Idx<192>>) -> prodsum(u, v) |> compute
-let AW2 = method_for(AW, AW) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v) |> compute
-let AW3 = method_for(AW2, AW) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v) |> compute
-let PW = method_for(MUW, MUW) <@> lambda(u: Array<Float64 like Idx<1>>, v: Array<Float64 like Idx<1>>) -> prodsum(u, v) |> compute
-let trAW = reduce(method_for(REGW) <@> lambda(x: Array<Float64 like Idx<192>>) -> prodsum(x, x), (+))
-let sw = reduce(method_for(MUW) <@> lambda(x: Array<Float64 like Idx<1>>) -> prodsum(x, x), (+))
-let trAW2 = reduce(method_for(zip(AW, AW)) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v), (+))
-let trAW3 = reduce(method_for(zip(AW, AW2)) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v), (+))
-let trAW4 = reduce(method_for(zip(AW2, AW2)) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v), (+))
-let FrWP = reduce(method_for(zip(AW, PW)) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v), (+))
-let FrW2P = reduce(method_for(zip(AW2, PW)) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v), (+))
-let FrW3P = reduce(method_for(zip(AW3, PW)) <@> lambda(u: Array<Float64 like Idx<96>>, v: Array<Float64 like Idx<96>>) -> prodsum(u, v), (+))
+let MUW = method_for(REGW, SQW) <@> dot |> compute
+let AW = method_for(REGW, REGW) <@> dot |> compute
+let AW2 = method_for(AW, AW) <@> dot |> compute
+let AW3 = method_for(AW2, AW) <@> dot |> compute
+let PW = method_for(MUW, MUW) <@> dot |> compute
+let trAW = reduce(method_for(REGW) <@> lambda(x: Float64^1) -> dot(x, x), (+))
+let sw = reduce(method_for(MUW) <@> lambda(x: Float64^1) -> dot(x, x), (+))
+let trAW2 = reduce(method_for(zip(AW, AW)) <@> dot, (+))
+let trAW3 = reduce(method_for(zip(AW, AW2)) <@> dot, (+))
+let trAW4 = reduce(method_for(zip(AW2, AW2)) <@> dot, (+))
+let FrWP = reduce(method_for(zip(AW, PW)) <@> dot, (+))
+let FrW2P = reduce(method_for(zip(AW2, PW)) <@> dot, (+))
+let FrW3P = reduce(method_for(zip(AW3, PW)) <@> dot, (+))
 let em1 = (trAW - sw) / 96.0
 let em2 = (trAW2 - 2.0 * FrWP + sw * sw) / 96.0
 let em3 = (trAW3 - 3.0 * FrW2P + 3.0 * FrWP * sw - sw * sw * sw) / 96.0

@@ -19,8 +19,9 @@ import ad as ad
 //      triangular scatter-add.)
 //   C. The TRUE dynamics with drag, as a RECURSIVE ARRAY over time -- an
 //      Euler recurrence whose each slice steps the whole packed state
-//      vector once. Landing is handled by gating each update with an
-//      airborne indicator (no break statement needed).
+//      vector once. Landing is the recurrence's `while` guard: slices are
+//      built while the projectile is airborne and FROZEN at touchdown, so
+//      no break statement and no per-update gating is needed.
 //
 // EXPECT values verified against an independent PowerShell implementation
 // of the same quadrature and simulation, plus the in-file FD self-checks.
@@ -71,14 +72,23 @@ let heights: Array<Float<meters> like TIdx> = vy0 * ts - 0.5 * grav * ts * ts
 // integrand(n-1), read at the final ordinal -- the additive-carry shape grad()
 // differentiates (it re-expresses the prefix sum as a triangular scatter-add).
 // The integrand is closed-form per step (built from the step ordinal and the
-// parameters), so no state is mutated in the recurrence the reverse pass reads.
+// parameters), so no state is mutated in the recurrence the reverse pass reads;
+// it is a named helper, which grad() inlines and differentiates through.
+// (The same sum written as lifted range arithmetic -- `reduce` over
+// `Float64(0..40)` -- computes the identical value, but grad v1 does not yet
+// differentiate lifted array intrinsics, so the quadrature stays a recurrence.)
 // ============================================================================
+// one midpoint panel: |v|^3 * h at speed (ux, vy), h the panel width
+function drag_panel(ux: Float, vy: Float, h: Float) -> Float =
+    sqrt(ux * ux + vy * vy) * (ux * ux + vy * vy) * h
+
 function drag_loss(ux: Float, uy: Float) -> Float = {
+    let h = 2.0 * uy / (9.81 * 40.0)   // time of flight / 40 panels
     let rec s: Array<Float like Idx<41>> =
         match s with
         | zero -> zero
         | zero :: n -> zero :: 0.0
-        | prefix :: n -> prefix :: prefix(n - 1) + sqrt(ux * ux + (uy - 9.81 * ((Float64(n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0)))) * (uy - 9.81 * ((Float64(n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0))))) * (ux * ux + (uy - 9.81 * ((Float64(n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0)))) * (uy - 9.81 * ((Float64(n - 1) + 0.5) * (2.0 * uy / (9.81 * 40.0))))) * (2.0 * uy / (9.81 * 40.0))
+        | prefix :: n -> prefix :: prefix(n - 1) + drag_panel(ux, uy - 9.81 * ((Float64(n - 1) + 0.5) * h), h)
     0.02 * s(40)
 }
 
@@ -101,9 +111,14 @@ let fd_vy = (drag_loss(15.0, 19.62001) - drag_loss(15.0, 19.61999)) / 0.00002
 // drag-coupled equations is a genuine recurrence (each velocity update reads
 // the current velocity), so the state trajectory is a recursive array: the
 // leading axis is time, each slice is the whole (x, y, vx, vy, ft) state
-// vector stepped once from the prior slice. The airborne indicator gates every
-// update, freezing the state at touchdown without control flow. The trajectory
-// is block-local -- only the extracted landing quantities surface.
+// vector stepped once from the prior slice. Touchdown is the inductive arm's
+// `while` guard: a slice is stepped only while the PREVIOUS one is airborne
+// (rising, or above ground), and once the guard fails the array is frozen --
+// every later slice repeats the landing state -- so the 451-slice extent is a
+// BUDGET (exhausting it while still airborne would abort, BL8010, rather than
+// report a mid-flight state as the landing). The step itself is pure physics.
+// The trajectory is block-local -- only the extracted landing quantities
+// surface, both read from one run.
 //
 // The state is packed into one Float64 component vector (recursion needs a
 // homogeneous element type), so the per-component unit checking of the scalar
@@ -118,44 +133,30 @@ let c_d: Float<per_meter> = 0.002
 let dt: Float<seconds> = 0.01
 
 // one Euler step of the packed state [x, y, vx, vy, ft]
-function estep(prev: Array<Float64 like Idx<5>>) -> Array<Float64 like Idx<5>> =
-    (method_for(range<Idx<5>>) <@> lambda(c: Int64) -> {
-        let x = prev(0)
-        let y = prev(1)
-        let vx = prev(2)
-        let vy = prev(3)
-        let ft = prev(4)
-        let airborne = if vy > 0.0 || y > 0.0 then 1.0 else 0.0
-        let speed = sqrt(vx * vx + vy * vy)
-        let ax = 0.0 - 0.002 * vx * speed
-        let ay = 0.0 - 9.81 - 0.002 * vy * speed
-        if c < 1 then x + airborne * vx * 0.01
-        else if c < 2 then y + airborne * vy * 0.01
-        else if c < 3 then vx + airborne * ax * 0.01
-        else if c < 4 then vy + airborne * ay * 0.01
-        else ft + airborne * 0.01
-    }) |> compute
+function estep(prev: Array<Float64 like Idx<5>>) -> Array<Float64 like Idx<5>> = {
+    let x = prev(0)
+    let y = prev(1)
+    let vx = prev(2)
+    let vy = prev(3)
+    let ft = prev(4)
+    let speed = sqrt(vx * vx + vy * vy)
+    let ax = -0.002 * vx * speed
+    let ay = -9.81 - 0.002 * vy * speed
+    [x + vx * 0.01, y + vy * 0.01, vx + ax * 0.01, vy + ay * 0.01, ft + 0.01]
+}
 
-let sim: Float<meters> = {
+// The landing state's position and clock, re-stamped with their units (the
+// packed state is bare Float64; the ascriptions say what each component is).
+let (sim, sim_time) = {
     let rec traj: Array<Float64 like Idx<451>, Idx<5>> =
         match traj with
         | zero -> zero
         | zero :: s -> zero :: [0.0, 0.0, 15.0, 19.62, 0.0]
-        | prefix :: n -> prefix :: estep(prefix(n - 1))
+        | prefix :: n while prefix(n - 1, 3) > 0.0 || prefix(n - 1, 1) > 0.0 -> prefix :: estep(prefix(n - 1))
     let landing = traj(450)
-    landing(0)
+    ((landing(0) : Float<meters>), (landing(4) : Float<seconds>))
 }
-// Drag shortens the vacuum range (60 m) by about nine percent.
+// Drag shortens the vacuum range (60 m) by about nine percent...
 // EXPECT: sim = 54.7425173674639
-
-let sim_time: Float<seconds> = {
-    let rec traj: Array<Float64 like Idx<451>, Idx<5>> =
-        match traj with
-        | zero -> zero
-        | zero :: s -> zero :: [0.0, 0.0, 15.0, 19.62, 0.0]
-        | prefix :: n -> prefix :: estep(prefix(n - 1))
-    let landing = traj(450)
-    landing(4)
-}
 // ...and the flight time (4.0 s in vacuum) accordingly.
 // EXPECT: sim_time = 3.90999999999996

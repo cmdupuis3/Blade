@@ -72,9 +72,12 @@ let TwomW = 2.0 - W
 let cmargin = if Wm1 < TwomW then Wm1 else TwomW
 
 // --- verdicts: per-pair skeleton, polytope membership, causal witness
-let V12 = if P12 < 0.001 then "DEFINITE" else (if P12 > 0.999 then "DEFINITE" else "AMBIGUOUS")
-let V23 = if P23 < 0.001 then "DEFINITE" else (if P23 > 0.999 then "DEFINITE" else "AMBIGUOUS")
-let V13 = if P13 < 0.001 then "DEFINITE" else (if P13 > 0.999 then "DEFINITE" else "AMBIGUOUS")
+// an order proposition is in the skeleton when its probability is DEGENERATE
+// (0 or 1) -- the invariant detector of 09-16 applied to the causal relation
+function skeleton(p: Float64) -> String = if p < 0.001 then "DEFINITE" else (if p > 0.999 then "DEFINITE" else "AMBIGUOUS")
+let V12 = skeleton(P12)
+let V23 = skeleton(P23)
+let V13 = skeleton(P13)
 let facet_V = if f123 < 0.0 then "NONCAUSAL" else (if f123 > 1.0 then "NONCAUSAL" else "INSIDE")
 let witness_V = if W < 1.0 then "NONCAUSAL" else (if W > 2.0 then "NONCAUSAL" else "CAUSAL")
 

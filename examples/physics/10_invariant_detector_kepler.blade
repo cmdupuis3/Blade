@@ -19,67 +19,81 @@ import ppl as ppl
 // test, so a zero-mean invariant cannot be misread when the margin thins
 // (e.g. under measurement noise).
 // State at anomaly p:  vx = -sin p, vy = 0.6 + cos p, r = 1/(1 + 0.6 cos p),
-// position direction (cos p, sin p).
+// position direction (cos p, sin p) -- named once below; every candidate is
+// written in those state functions, the way the physics spells it.
 // ============================================================================
 type TimeIdx = Idx<7>
 let PHI: Array<Float64 like Idx<1>, TimeIdx> = [[0.517725271449, 0.739442618673, 0.879497148429, 1.0, 1.12050285157, 1.26055738133, 1.48227472855]]
 let d = ppl.dist(PHI, 6)
 
+// --- the detector, written once (shared with 09): normalized dispersion
+//     |k2| / (|k1| + eps); absolute degeneracy accepted first (see NOTE) ---
+function dispersion(k1: Float64, k2: Float64) -> Float64 = abs(k2) / (abs(k1) + 0.000000001)
+function verdict(k2: Float64, disp: Float64) -> String = if abs(k2) < 1.0e-20 then "INVARIANT" else (if disp < 0.000001 then "INVARIANT" else "VARIANT")
+
+// --- the orbit state at anomaly p: every candidate is built from these ---
+function inv_r(p) = 1.0 + 0.6 * cos(p)
+function x(p) = cos(p) / inv_r(p)
+function y(p) = sin(p) / inv_r(p)
+function vx(p) = 0.0 - sin(p)
+function vy(p) = 0.6 + cos(p)
+function lz(p) = x(p) * vy(p) - y(p) * vx(p)
+
 // --- radius r ---
-let r_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 1.0 / (1.0 + 0.6 * cos(p)))
+let r_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 1.0 / inv_r(p))
 let r_k1 = ppl.cumulant(r_d, 1)
 let r_k2 = ppl.cumulant(r_d, 2)
-let r_disp = sqrt(r_k2(0) * r_k2(0)) / (sqrt(r_k1(0) * r_k1(0)) + 0.000000001)
-let r_V = if sqrt(r_k2(0) * r_k2(0)) < 1.0e-20 then "INVARIANT" else (if r_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let r_disp = dispersion(r_k1(0), r_k2(0))
+let r_V = verdict(r_k2(0), r_disp)
 
 // --- speed ---
-let sp_d  = ppl.dist_map(d, 2, 3, lambda(p) -> sqrt(sin(p) * sin(p) + (0.6 + cos(p)) * (0.6 + cos(p))))
+let sp_d  = ppl.dist_map(d, 2, 3, lambda(p) -> sqrt(vx(p) * vx(p) + vy(p) * vy(p)))
 let sp_k1 = ppl.cumulant(sp_d, 1)
 let sp_k2 = ppl.cumulant(sp_d, 2)
-let sp_disp = sqrt(sp_k2(0) * sp_k2(0)) / (sqrt(sp_k1(0) * sp_k1(0)) + 0.000000001)
-let sp_V = if sqrt(sp_k2(0) * sp_k2(0)) < 1.0e-20 then "INVARIANT" else (if sp_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let sp_disp = dispersion(sp_k1(0), sp_k2(0))
+let sp_V = verdict(sp_k2(0), sp_disp)
 
 // --- position x ---
-let x_d  = ppl.dist_map(d, 2, 3, lambda(p) -> cos(p) / (1.0 + 0.6 * cos(p)))
+let x_d  = ppl.dist_map(d, 2, 3, x)
 let x_k1 = ppl.cumulant(x_d, 1)
 let x_k2 = ppl.cumulant(x_d, 2)
-let x_disp = sqrt(x_k2(0) * x_k2(0)) / (sqrt(x_k1(0) * x_k1(0)) + 0.000000001)
-let x_V = if sqrt(x_k2(0) * x_k2(0)) < 1.0e-20 then "INVARIANT" else (if x_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let x_disp = dispersion(x_k1(0), x_k2(0))
+let x_V = verdict(x_k2(0), x_disp)
 
 // --- velocity vx ---
-let vx_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 0.0 - sin(p))
+let vx_d  = ppl.dist_map(d, 2, 3, vx)
 let vx_k1 = ppl.cumulant(vx_d, 1)
 let vx_k2 = ppl.cumulant(vx_d, 2)
-let vx_disp = sqrt(vx_k2(0) * vx_k2(0)) / (sqrt(vx_k1(0) * vx_k1(0)) + 0.000000001)
-let vx_V = if sqrt(vx_k2(0) * vx_k2(0)) < 1.0e-20 then "INVARIANT" else (if vx_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let vx_disp = dispersion(vx_k1(0), vx_k2(0))
+let vx_V = verdict(vx_k2(0), vx_disp)
 
 // --- ENERGY E = 1/2 v^2 - 1/r ---
-let E_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 0.5 * (sin(p) * sin(p) + (0.6 + cos(p)) * (0.6 + cos(p))) - (1.0 + 0.6 * cos(p)))
+let E_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 0.5 * (vx(p) * vx(p) + vy(p) * vy(p)) - inv_r(p))
 let E_k1 = ppl.cumulant(E_d, 1)
 let E_k2 = ppl.cumulant(E_d, 2)
-let E_disp = sqrt(E_k2(0) * E_k2(0)) / (sqrt(E_k1(0) * E_k1(0)) + 0.000000001)
-let E_V = if sqrt(E_k2(0) * E_k2(0)) < 1.0e-20 then "INVARIANT" else (if E_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let E_disp = dispersion(E_k1(0), E_k2(0))
+let E_V = verdict(E_k2(0), E_disp)
 
 // --- ANGULAR MOMENTUM Lz = x vy - y vx ---
-let Lz_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p)))
+let Lz_d  = ppl.dist_map(d, 2, 3, lz)
 let Lz_k1 = ppl.cumulant(Lz_d, 1)
 let Lz_k2 = ppl.cumulant(Lz_d, 2)
-let Lz_disp = sqrt(Lz_k2(0) * Lz_k2(0)) / (sqrt(Lz_k1(0) * Lz_k1(0)) + 0.000000001)
-let Lz_V = if sqrt(Lz_k2(0) * Lz_k2(0)) < 1.0e-20 then "INVARIANT" else (if Lz_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Lz_disp = dispersion(Lz_k1(0), Lz_k2(0))
+let Lz_V = verdict(Lz_k2(0), Lz_disp)
 
 // --- LRL_x = vy*Lz - x/r  (x/r = cos p) : the NON-OBVIOUS candidate ---
-let Ax_d  = ppl.dist_map(d, 2, 3, lambda(p) -> (0.6 + cos(p)) * ((cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p))) - cos(p))
+let Ax_d  = ppl.dist_map(d, 2, 3, lambda(p) -> vy(p) * lz(p) - cos(p))
 let Ax_k1 = ppl.cumulant(Ax_d, 1)
 let Ax_k2 = ppl.cumulant(Ax_d, 2)
-let Ax_disp = sqrt(Ax_k2(0) * Ax_k2(0)) / (sqrt(Ax_k1(0) * Ax_k1(0)) + 0.000000001)
-let Ax_V = if sqrt(Ax_k2(0) * Ax_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ax_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Ax_disp = dispersion(Ax_k1(0), Ax_k2(0))
+let Ax_V = verdict(Ax_k2(0), Ax_disp)
 
-// --- LRL_y = -vx*Lz - y/r  (-vx = sin p, y/r = sin p) ---
-let Ay_d  = ppl.dist_map(d, 2, 3, lambda(p) -> sin(p) * ((cos(p) / (1.0 + 0.6 * cos(p))) * (0.6 + cos(p)) - (sin(p) / (1.0 + 0.6 * cos(p))) * (0.0 - sin(p))) - sin(p))
+// --- LRL_y = -vx*Lz - y/r  (y/r = sin p) ---
+let Ay_d  = ppl.dist_map(d, 2, 3, lambda(p) -> 0.0 - vx(p) * lz(p) - sin(p))
 let Ay_k1 = ppl.cumulant(Ay_d, 1)
 let Ay_k2 = ppl.cumulant(Ay_d, 2)
-let Ay_disp = sqrt(Ay_k2(0) * Ay_k2(0)) / (sqrt(Ay_k1(0) * Ay_k1(0)) + 0.000000001)
-let Ay_V = if sqrt(Ay_k2(0) * Ay_k2(0)) < 1.0e-20 then "INVARIANT" else (if Ay_disp < 0.000001 then "INVARIANT" else "VARIANT")
+let Ay_disp = dispersion(Ay_k1(0), Ay_k2(0))
+let Ay_V = verdict(Ay_k2(0), Ay_disp)
 
 // EXPECT: r_V = "VARIANT"
 // EXPECT: sp_V = "VARIANT"

@@ -1,4 +1,5 @@
 // TEST: Example Weather Station QC And Aggregation
+from stats import mean
 // ============================================================================
 // A realistic sensor-network workload on Blade's SQL surface: a station
 // catalog and a readings log held as parallel-array tables, quality-
@@ -69,20 +70,19 @@ let mean_audited = sum_audited / Float64(n_audited)
 
 // ============================================================================
 // (c) GROUP BY station -- per-station mean over the full log.
-// group_by peels the readings into ragged per-station sub-arrays; the kernel
-// param must carry the opaque RaggedIdx<_> annotation because reduce inspects
-// (but does not infer) its argument's type. Group order = first occurrence
-// of each key, and stations are pre-numbered 0..5 in log order, so the
-// output lines up with the station catalog by construction.
+// group_by peels the readings into ragged per-station sub-arrays -- a rank-2
+// array whose inner axis is each group's run -- so the per-group SUM is the
+// bare partial fold: `reduce` folds the innermost axis by default, one total
+// per group, no row kernel. The per-group MEAN is stdlib `mean` applied per
+// row (a `T^1 -> T^0` function is a row kernel as it stands). Both keep the
+// celsius unit of the column they fold. Group order = first occurrence of
+// each key, and stations are pre-numbered 0..5 in log order, so the output
+// lines up with the station catalog by construction.
 // ============================================================================
 let gk = group_keys(r_station)
 let by_station = group_by(r_temp, gk)
-let station_sums = method_for(by_station)
-    <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+))
-    |> compute
-let station_means = method_for(by_station)
-    <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) / Float64(extents(g))
-    |> compute
+let station_sums = reduce(by_station, (+))
+let station_means = method_for(by_station) <@> mean |> compute
 let grand_total = reduce(station_sums, (+))
 // EXPECT: station_sums = [48.0, 36.0, 12.0, 51.0, 36.0, -3.0]
 // EXPECT: station_means = [16.0, 12.0, 4.0, 17.0, 12.0, -1.0]
@@ -146,9 +146,7 @@ let sum_review = reduce(review_temps, (+))
 // dedup/set operators consume dense arrays).
 // ============================================================================
 let by_station_qc = group_by(r_qc, gk)
-let station_qc_score = method_for(by_station_qc)
-    <@> lambda(g: Array<Int like RaggedIdx<_>>) -> reduce(g, (+))
-    |> compute
+let station_qc_score = reduce(by_station_qc, (+))
 // EXPECT: station_qc_score = [0, 1, 0, 2, 1, 0]
 
 let uniq_stations = unique(r_station)

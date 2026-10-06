@@ -4441,7 +4441,17 @@ let rec typedExprHasUnresolvedType (env: TypeEnv) (expr: TypedExpr) : bool =
 /// provisional and must keep rejecting where it is written, because a lambda
 /// that is never `<@>`-applied never runs a second pass to catch it.
 let typedExprHasProvisionalUnits (env: TypeEnv) (expr: TypedExpr) : bool =
-    let rec go (fuel: int) (seen: Set<IRId>) (e: TypedExpr) : bool =
+    // A let-bound var's defining expression is chased at most once per walk
+    // (re-chased only with MORE fuel than it was explored with, so the fuel
+    // cut answers exactly as before). Without the memo every PATH to a
+    // binding re-walked its whole definition, and a chain of lifted bindings
+    // (`X2 = X1 * 2.0 * M1 / (M1 + M2)`, `X3 = X2 * ...`) reaches the root
+    // along exponentially many paths: an apply's operands are children twice
+    // (the apply's arrays and its loop former's). Let definitions form a DAG
+    // -- a body sees only names bound before it -- so no path revisits its own
+    // var and the per-path `seen` set the walk used to carry is subsumed.
+    let explored = System.Collections.Generic.Dictionary<IRId, int>()
+    let rec go (fuel: int) (e: TypedExpr) : bool =
         if fuel <= 0 then false
         else
             let rec tyUnresolved (t: IRType) =
@@ -4451,16 +4461,20 @@ let typedExprHasProvisionalUnits (env: TypeEnv) (expr: TypedExpr) : bool =
                 | _ -> false
             tyUnresolved e.Type
             || (match e.Kind with
-                | TExprVar (name, varId, _) when not (Set.contains varId seen) ->
-                    (match lookupVar name env with
-                     | Some info when info.VarId = varId ->
-                         (match info.TypedValue with
-                          | Some v -> go (fuel - 1) (Set.add varId seen) v
-                          | None -> false)
-                     | _ -> false)
+                | TExprVar (name, varId, _) ->
+                    (match explored.TryGetValue varId with
+                     | true, f when f >= fuel - 1 -> false
+                     | _ ->
+                         explored.[varId] <- fuel - 1
+                         match lookupVar name env with
+                         | Some info when info.VarId = varId ->
+                             (match info.TypedValue with
+                              | Some v -> go (fuel - 1) v
+                              | None -> false)
+                         | _ -> false)
                 | _ -> false)
-            || (typedExprChildren e |> List.exists (go (fuel - 1) seen))
-    go 64 Set.empty expr
+            || (typedExprChildren e |> List.exists (go (fuel - 1)))
+    go 64 expr
 
 /// True if the typed expression contains an unconsumed wildcard hole anywhere
 /// in its subtree. A wildcard is legitimate only as a compound-index coordinate,

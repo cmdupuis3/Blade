@@ -23,14 +23,17 @@ let B: Array<Float64 like Idx<2>, TimeIdx> = [
   [0.742646502392, 0.785398163397, 0.828149824403, 0.742646502392, 0.785398163397, 0.828149824403, 0.742646502392, 0.785398163397, 0.828149824403]]
 let d = ppl.dist(B, 6)
 
+// the range map, named once and pushed through at two jet degrees
+function landing_range(v, th) = v * v * sin(2.0 * th) / 9.81
+
 // tower route, degree-2 jet: mean / variance / skew of the range
-let dR = ppl.dist_map(d, 3, 2, lambda(v, th) -> v * v * sin(2.0 * th) / 9.81)
+let dR = ppl.dist_map(d, 3, 2, landing_range)
 let r1 = ppl.cumulant(dR, 1)
 let r2 = ppl.cumulant(dR, 2)
 let r3 = ppl.cumulant(dR, 3)
 
 // tower route, degree-3 jet: refined variance
-let dRb = ppl.dist_map(d, 2, 3, lambda(v, th) -> v * v * sin(2.0 * th) / 9.81)
+let dRb = ppl.dist_map(d, 2, 3, landing_range)
 let s2 = ppl.cumulant(dRb, 2)
 
 // exact route: empirical cumulants of the 9 transformed ranges

@@ -1,0 +1,24 @@
+// TEST: Prodsum Takes An Inline Array Literal Operand
+// `prodsum([p0, p1, p2], X)` -- a weight row written in place, e.g. the
+// posterior expectation E[ln M] = prodsum([q0, q1, q2], log(NODES)) -- died
+// in the C++ back end with BL7001 "no rule for IRArrayLit in expression
+// position": prodsum's fused loop reads every operand BY NAME, and the lift
+// pass hoisted deferred combinators out of its slots but not literals. The
+// literal is now hoisted to its own binding, exactly as writing
+// `let W = [p0, p1, p2]` by hand does; reduce's slot already handled it.
+let a = sqrt(2.0)
+let X = [1.0, 2.0, 3.0]
+// literal of runtime scalars, in either operand slot
+let s1 = prodsum([a, 1.0, a], X)
+let s2 = prodsum(X, [a, 1.0, a])
+// all-literal operands, and an operand that is itself lifted arithmetic
+let s3 = prodsum([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
+let s4 = prodsum([0.5, 0.25, 0.25], log(X))
+// the same shape inside a function body
+function weighted(w0: Float64, w1: Float64, v: Array<Float64 like Idx<3>>) -> Float64 = prodsum([w0, w1, 1.0], v)
+let s5 = weighted(a, 2.0, X)
+// EXPECT: s1 = 7.65685424949238
+// EXPECT: s2 = 7.65685424949238
+// EXPECT: s3 = 32.0
+// EXPECT: s4 = 0.447939867307014
+// EXPECT: s5 = 8.41421356237310

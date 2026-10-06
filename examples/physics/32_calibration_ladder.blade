@@ -34,7 +34,7 @@
 //     probe (pedigree) component stays put -- var(mean) -> floor. The
 //     floor is set by the calibration CHAIN, not the apparatus: the
 //     classical, resource-shaped shadow of a quantum limit (WAY-flavored:
-//     there the conserved-charge floor is Ä§-priced and irreducible; here
+//     there the conserved-charge floor is ħ-priced and irreducible; here
 //     it is priced in anchor pedigree and collisions, and vanishes only
 //     as the whole CHAIN is refined -- you can always buy more looks,
 //     but every look is through the same inherited fuzz).
@@ -46,8 +46,10 @@
 //     0.3333333333 with three reads -- the multiplicative pedigree makes
 //     between/within variance splitting exact, not approximate.
 // Everything below is in-language: noise ensembles are exact 3^K digit
-// grids (range + integer index algebra), rung formulas are staged columns,
-// verdicts are tower arithmetic. No external data, no generator.
+// grids (range + integer index algebra -- grid point r's k-th base-3 digit
+// is rung k's noise draw), a ladder is the PRODUCT FOLD of its rung
+// factors over a (grid point, rung) nest, and verdicts are tower
+// arithmetic. No external data, no generator.
 // ============================================================================
 import ppl as ppl
 
@@ -55,22 +57,20 @@ import ppl as ppl
 let NTAB = [-0.002, 0.0, 0.002]
 let PTAB = [-0.005, 0.0, 0.005]
 
+// one rung of a ladder with step rho (true rung velocity v = 2/(1+rho)),
+// read through the noise draw that is digit k of grid point r: the
+// per-rung mass ratio F/rho with F = (2 - v_hat)/v_hat
+function rung(v: Float64, rho: Float64, r: Int64, k: Int64) -> Float64 = {
+    let v_hat = v + NTAB((r / 3 ^ k) % 3)
+    (2.0 - v_hat) / v_hat / rho
+}
+
 // ---- D1: the rho = 4, K = 6 ladder over the full 3^6 grid ----
-// true rung velocity v = 2/(1+rho) = 0.4; per-rung ratio F/rho with
-// F = (2 - v_hat)/v_hat
-let AF1 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB(r % 3))) / (0.4 + NTAB(r % 3)) / 4.0 |> compute
-let AF2 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 3) % 3))) / (0.4 + NTAB((r / 3) % 3)) / 4.0 |> compute
-let AF3 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 9) % 3))) / (0.4 + NTAB((r / 9) % 3)) / 4.0 |> compute
-let AF4 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 27) % 3))) / (0.4 + NTAB((r / 27) % 3)) / 4.0 |> compute
-let AF5 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 81) % 3))) / (0.4 + NTAB((r / 81) % 3)) / 4.0 |> compute
-let AF6 = method_for(range<Idx<729>>) <@> lambda(r: Int64) -> (2.0 - (0.4 + NTAB((r / 243) % 3))) / (0.4 + NTAB((r / 243) % 3)) / 4.0 |> compute
-let AP2 = AF1 * AF2
-let AP3 = AP2 * AF3
-let AP4 = AP3 * AF4
-let AP5 = AP4 * AF5
-let ARM = AP5 * AF6
-// the ladder estimate is one column over the 729-point noise grid: its mean
-// and relative variance are a raw/central former pair.
+// (v = 0.4). The estimate multiplies its six rung factors -- a product
+// fold over the inner (rung) axis, leaving one column over the 729-point
+// noise grid.
+let ARM = reduce(method_for(range<Idx<729>, Idx<6>>) <@> lambda(r: Int64, k: Int64) -> rung(0.4, 4.0, r, k), (*))
+// its mean and relative variance are a raw/central former pair.
 let ARMV: Array<Float64 like Idx<1>, Idx<729>> = [ARM]
 let a_m1 = ppl.moments(ARMV, 1)
 let a_c2 = ppl.comoments(ARMV, 2)
@@ -81,32 +81,19 @@ let r_lin = 6.0 * (25.0 / 8.0) * (25.0 / 8.0) * (2.0 * 0.002 * 0.002 / 3.0)
 let add_gap = (avar - r_lin) / r_lin
 
 // ---- the sweep: one-read ladders to M = 4096 at rho = 8, 16, 64 ----
-let BF1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB(r % 3))) / (2.0 / 9.0 + NTAB(r % 3)) / 8.0 |> compute
-let BF2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB((r / 3) % 3))) / (2.0 / 9.0 + NTAB((r / 3) % 3)) / 8.0 |> compute
-let BF3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB((r / 9) % 3))) / (2.0 / 9.0 + NTAB((r / 9) % 3)) / 8.0 |> compute
-let BF4 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 9.0 + NTAB((r / 27) % 3))) / (2.0 / 9.0 + NTAB((r / 27) % 3)) / 8.0 |> compute
-let BP2 = BF1 * BF2
-let BP3 = BP2 * BF3
-let BRM = BP3 * BF4
+// (K = 4, 3, 2 rungs over their own 3^K grids; same fold, same former)
+let BRM = reduce(method_for(range<Idx<81>, Idx<4>>) <@> lambda(r: Int64, k: Int64) -> rung(2.0 / 9.0, 8.0, r, k), (*))
 let BRMV: Array<Float64 like Idx<1>, Idx<81>> = [BRM]
 let b_c2 = ppl.comoments(BRMV, 2)
 let bvar = b_c2(0)
-let CF1 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB(r % 3))) / (2.0 / 17.0 + NTAB(r % 3)) / 16.0 |> compute
-let CF2 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 3) % 3))) / (2.0 / 17.0 + NTAB((r / 3) % 3)) / 16.0 |> compute
-let CF3 = method_for(range<Idx<27>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 17.0 + NTAB((r / 9) % 3))) / (2.0 / 17.0 + NTAB((r / 9) % 3)) / 16.0 |> compute
-let CP2 = CF1 * CF2
-let CRM = CP2 * CF3
+let CRM = reduce(method_for(range<Idx<27>, Idx<3>>) <@> lambda(r: Int64, k: Int64) -> rung(2.0 / 17.0, 16.0, r, k), (*))
 let CRMV: Array<Float64 like Idx<1>, Idx<27>> = [CRM]
 let c_c2 = ppl.comoments(CRMV, 2)
 let cvar = c_c2(0)
-let DF1 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB(r % 3))) / (2.0 / 65.0 + NTAB(r % 3)) / 64.0 |> compute
-let DF2 = method_for(range<Idx<9>>) <@> lambda(r: Int64) -> (2.0 - (2.0 / 65.0 + NTAB((r / 3) % 3))) / (2.0 / 65.0 + NTAB((r / 3) % 3)) / 64.0 |> compute
-let DRM = DF1 * DF2
-// (the rho = 64 rung stays hand-rolled: on this 9-point grid the former's
-// power-sum fold shifts the last digits of dvar, and rfix64 is pinned)
-let DS1 = reduce(DRM, (+))
-let DS2 = prodsum(DRM, DRM)
-let dvar = DS2 / 9.0 - (DS1 / 9.0) * (DS1 / 9.0)
+let DRM = reduce(method_for(range<Idx<9>, Idx<2>>) <@> lambda(r: Int64, k: Int64) -> rung(2.0 / 65.0, 64.0, r, k), (*))
+let DRMV: Array<Float64 like Idx<1>, Idx<9>> = [DRM]
+let d_c2 = ppl.comoments(DRMV, 2)
+let dvar = d_c2(0)
 
 // fixed-budget projection (N = 12 collisions, N/K reads averaged per rung):
 // r_fixed = r_one_read * K / N
@@ -114,62 +101,75 @@ let rfix4 = avar * 6.0 / 12.0
 let rfix8 = bvar * 4.0 / 12.0
 let rfix16 = cvar * 3.0 / 12.0
 let rfix64 = dvar * 2.0 / 12.0
-// analytic K^2 g^2 ladder costs (units of 2 sigma^2/(3N)), incl. the two
-// un-simulatable ends: rho = 2 (K = 12) and the single jump rho = 4096
-let kg2_2 = 144.0 * (9.0 / 4.0) * (9.0 / 4.0)
-let kg2_4 = 36.0 * (25.0 / 8.0) * (25.0 / 8.0)
-let kg2_8 = 16.0 * (81.0 / 16.0) * (81.0 / 16.0)
-let kg2_16 = 9.0 * (289.0 / 32.0) * (289.0 / 32.0)
-let kg2_64 = 4.0 * (4225.0 / 128.0) * (4225.0 / 128.0)
-let kg2_jump = (16785409.0 / 8192.0) * (16785409.0 / 8192.0)
-let jump_ratio = kg2_jump / kg2_4
-// the universal optimum: h(rho) = g/ln(rho) stationary at rho* (in-language
-// golden-ish scan refined by the analytic stationarity g'/g = 1/(rho ln rho))
-let h44 = (5.4 * 5.4 / (2.0 * 4.4)) / log(4.4)
-let h46 = (5.6 * 5.6 / (2.0 * 4.6)) / log(4.6)
-let h468 = (5.68 * 5.68 / (2.0 * 4.68)) / log(4.68)
-let h48 = (5.8 * 5.8 / (2.0 * 4.8)) / log(4.8)
-let h50 = (6.0 * 6.0 / (2.0 * 5.0)) / log(5.0)
+// analytic K^2 g(rho)^2 ladder costs to M = 4096 (units of 2 sigma^2/(3N)),
+// incl. the two un-simulatable ends: rho = 2 (K = 12) and the single jump
+// rho = 4096 (K = 1). The law is lifted over the table: no hand fractions.
+let RHO_L = [2.0, 4.0, 8.0, 16.0, 64.0, 4096.0]
+let K_L = [12.0, 6.0, 4.0, 3.0, 2.0, 1.0]
+let G_L = (1.0 + RHO_L) * (1.0 + RHO_L) / (2.0 * RHO_L)
+let KG2 = K_L * K_L * G_L * G_L
+let kg2_2 = KG2(0)
+let kg2_4 = KG2(1)
+let kg2_8 = KG2(2)
+let jump_ratio = KG2(5) / kg2_4
+// the universal optimum: h(rho) = g(rho)/ln(rho) is stationary at rho*
+// (analytic stationarity g'/g = 1/(rho ln rho)); an in-language scan
+// across it, lifted over the scan points, bottoms out at rho = 4.68
+let RHO_SCAN = [4.4, 4.6, 4.68, 4.8, 5.0]
+let G_SCAN = (1.0 + RHO_SCAN) * (1.0 + RHO_SCAN) / (2.0 * RHO_SCAN)
+let H_SCAN = G_SCAN / log(RHO_SCAN)
+let h468 = H_SCAN(2)
 let Astar = h468 * h468
 
 // ---- D2: the pedigree floor -- same probe, repeated reads ----
-// probe p carries its own calibration fuzz (relative, PTAB); three fresh
-// instrument reads of the same target m = 4 (v = 0.4); grid 3^4 = 81
-let G1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 3) % 3))) / (0.4 + NTAB((r / 3) % 3)) / 4.0 |> compute
-let G2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 9) % 3))) / (0.4 + NTAB((r / 9) % 3)) / 4.0 |> compute
-let G3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> (1.0 + PTAB(r % 3)) * (2.0 - (0.4 + NTAB((r / 27) % 3))) / (0.4 + NTAB((r / 27) % 3)) / 4.0 |> compute
+// probe p carries its own calibration fuzz (relative, PTAB: digit 0 of the
+// grid point); read j is a fresh instrument draw (digit j) of the same
+// target m = 4 (v = 0.4); grid 3^4 = 81
+function probe_read(r: Int64, j: Int64) -> Float64 = {
+    let v_hat = 0.4 + NTAB((r / 3 ^ j) % 3)
+    (1.0 + PTAB(r % 3)) * (2.0 - v_hat) / v_hat / 4.0
+}
+let G1 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> probe_read(r, 1) |> compute
+let G2 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> probe_read(r, 2) |> compute
+let G3 = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> probe_read(r, 3) |> compute
 let GB = (G1 + G2 + G3) / 3.0
 // single read and 3-read average are two variables over the same 81-point
 // grid, so one central former call carries both variances (cells (0,0) and
-// (1,1); (0,1) is their shared-probe covariance). The between-probe floor
-// below is a group decomposition no former computes -- it stays hand-rolled.
+// (1,1); (0,1) is their shared-probe covariance).
 let READS: Array<Float64 like Idx<2>, Idx<81>> = [G1, GB]
 let reads_c2 = ppl.comoments(READS, 2)
 let var1 = reads_c2(0)
 let var3 = reads_c2(2)
-// pedigree (between-probe) component: variance of the probe-conditional mean
-let g0 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 < 1 then x else 0.0), (+)) / 27.0
-let g1 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 < 2 then (if r % 3 > 0 then x else 0.0) else 0.0), (+)) / 27.0
-let g2 = reduce(method_for(zip(GB, range<Idx<81>>)) <@> lambda(x, r: Int64) -> (if r % 3 > 1 then x else 0.0), (+)) / 27.0
-let gm = (g0 + g1 + g2) / 3.0
-let floor_var = (g0 * g0 + g1 * g1 + g2 * g2) / 3.0 - gm * gm
+// pedigree (between-probe) component: the variance of the probe-conditional
+// means -- GROUP BY the probe digit, one mean per probe
+let PROBE = method_for(range<Idx<81>>) <@> lambda(r: Int64) -> r % 3 |> compute
+let probe_keys = group_keys(PROBE)
+let by_probe = group_by(GB, probe_keys)
+let probe_means = method_for(by_probe)
+    <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) / Float64(extents(g))
+    |> compute
+let gm = reduce(probe_means, (+)) / 3.0
+let floor_var = prodsum(probe_means, probe_means) / 3.0 - gm * gm
 let shrink = (var3 - floor_var) / (var1 - floor_var)
 let floor_share = floor_var / var3
 
 // ---- verdicts ----
 let add_V = if abs(add_gap) < 0.1 then "LINEAR_ADDITIVITY_CONFIRMED" else "NONLINEAR"
-let valley_V = if rfix4 < rfix8 then (if rfix8 < rfix16 then (if rfix16 < rfix64 then "MEASURED_VALLEY_CONFIRMS" else "NO") else "NO") else "NO"
-let interior_V = if kg2_4 < kg2_2 then (if kg2_4 < kg2_8 then "OPTIMAL_STEP_INTERIOR" else "NO") else "NO"
-let hmin_V = if h468 < h44 then (if h468 < h46 then (if h468 < h48 then (if h468 < h50 then "RHO_STAR_4P68" else "NO") else "NO") else "NO") else "NO"
+let valley_V = if rfix4 < rfix8 && rfix8 < rfix16 && rfix16 < rfix64 then "MEASURED_VALLEY_CONFIRMS" else "NO"
+let interior_V = if kg2_4 < kg2_2 && kg2_4 < kg2_8 then "OPTIMAL_STEP_INTERIOR" else "NO"
+let hmin_V = if reduce(H_SCAN, lambda(a, b) -> if a < b then a else b) == h468 then "RHO_STAR_4P68" else "NO"
 let jump_V = if jump_ratio > 1000.0 then "LADDER_BEATS_JUMP_BY_1E4" else "NO"
-let floor_V = if shrink < 0.4 then (if floor_share > 0.3 then "AVERAGING_HITS_PEDIGREE_FLOOR" else "NO") else "NO"
+let floor_V = if shrink < 0.4 && floor_share > 0.3 then "AVERAGING_HITS_PEDIGREE_FLOOR" else "NO"
 
 // pedigree additivity, the ladder law with its interior optimum, the
 // jump catastrophe, and the floor no averaging removes:
 // EXPECT: amean = 1.000125009636
 // EXPECT: avar = 0.000156301848544427
 // EXPECT: r_lin = 0.00015625
-// EXPECT: add_gap = 0.000331830684331333
+// (add_gap is a 3.3e-4 difference of nearly equal variances, so it carries
+// avar's rounding x3000; pinned to the 10 digits that survives -- exact
+// rational arithmetic over the same 729 inputs gives 3.318307318658e-4)
+// EXPECT: add_gap = 0.0003318307319
 // EXPECT: rfix4 = 7.81509242722134e-05
 // EXPECT: rfix8 = 9.11848018612845e-05
 // EXPECT: rfix16 = 0.000163406294212576

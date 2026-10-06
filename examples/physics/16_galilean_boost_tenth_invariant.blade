@@ -17,8 +17,9 @@
 // measured from the symmetry algebra alone.
 // Here the Blade tower verifies the split on the emitted trajectory: the
 // candidate series are built IN-LANGUAGE from the raw (t, x1, p1, x2, p2)
-// samples with fused zip/reduce folds (one loop, scalar accumulators), and
-// the time-dependent combination G is degenerate while X_cm spreads.
+// samples with fused zip/reduce folds (one loop per candidate, its sum and
+// sum of squares as scalar accumulators), and the time-dependent
+// combination G is degenerate while X_cm spreads.
 // Verdicts accept absolute degeneracy first (|k2| < 1e-12, the symplectic
 // floor) -- see the zero-mean-invariant note in 10_invariant_detector_kepler:
 // G's own mean here (-0.1) is small, exactly the regime that trap lives in.
@@ -29,37 +30,48 @@ let P1 = [0.7983988024, 0.349977917988, -0.0802635945496, -0.335964381635, -0.32
 let X2 = [-0.2995992, -0.144560226999, 0.123877723145, 0.480842456074, 0.869288760228, 1.22073017315, 1.48012880654, 1.62589759721, 1.67774562725, 1.68951531282, 1.72961461989, 1.85615576694, 2.09583567966, 2.43423360903, 2.82105201999, 3.18839607031, 3.47544842493, 3.65057191357, 3.72280733046, 3.73858776625, 3.76486357227, 3.86477079961, 4.0746858577, 4.39100534739]
 let P2 = [0.4016011976, 0.850022082012, 1.28026359455, 1.53596438164, 1.52419589032, 1.24923510731, 0.811010186817, 0.368783867894, 0.0832731055491, 0.0582402006314, 0.302782785012, 0.728027497133, 1.17942895527, 1.4929357117, 1.5546109673, 1.34204027304, 0.932477544507, 0.47476890821, 0.135258010291, 0.0373322552789, 0.216580500031, 0.607859104617, 1.06896688562, 1.43232485616]
 
+// --- the detector of 09-14, written once, at the symplectic floor ---
+function dispersion(k1: Float64, k2: Float64) -> Float64 = abs(k2) / (abs(k1) + 0.000000001)
+function verdict(k2: Float64, disp: Float64) -> String = if abs(k2) < 1.0e-12 then "INVARIANT" else (if disp < 0.0001 then "INVARIANT" else "VARIANT")
+
+// Each candidate is a kernel over the zipped raw columns; ONE sweep per
+// candidate carries both power sums (<&!>-fused: sum and sum of squares).
+
 // --- total momentum P = p1 + p2  (in ker L: INVARIANT) ---
-let P_s1 = reduce(P1 + P2, (+))
-let P_s2 = reduce(method_for(zip(P1, P2)) <@> lambda(b, d) -> (b + d) ^ 2.0, (+))
+let LP = method_for(zip(P1, P2))
+let mom = lambda(b, d) -> b + d
+let (P_s1, P_s2) = reduce((LP <@> mom) <&!> (LP <@> lambda(b, d) -> mom(b, d) ^ 2.0), (+))
 let P_k1 = P_s1 / 24.0
 let P_k2 = P_s2 / 24.0 - P_k1 * P_k1
-let P_disp = abs(P_k2) / (abs(P_k1) + 0.000000001)
-let P_V = if abs(P_k2) < 1.0e-12 then "INVARIANT" else (if P_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let P_disp = dispersion(P_k1, P_k2)
+let P_V = verdict(P_k2, P_disp)
 
 // --- energy E = p1^2/2m1 + p2^2/2m2 + k/2 (x1-x2)^2  (in ker L: INVARIANT) ---
-let E_s1 = reduce(method_for(zip(X1, P1, X2, P2)) <@> lambda(a, b, c, d) -> 0.5 * b * b + 0.25 * d * d + 0.5 * (a - c) * (a - c), (+))
-let E_s2 = reduce(method_for(zip(X1, P1, X2, P2)) <@> lambda(a, b, c, d) -> (0.5 * b * b + 0.25 * d * d + 0.5 * (a - c) * (a - c)) ^ 2.0, (+))
+let LE = method_for(zip(X1, P1, X2, P2))
+let energy = lambda(a, b, c, d) -> 0.5 * b * b + 0.25 * d * d + 0.5 * (a - c) * (a - c)
+let (E_s1, E_s2) = reduce((LE <@> energy) <&!> (LE <@> lambda(a, b, c, d) -> energy(a, b, c, d) ^ 2.0), (+))
 let E_k1 = E_s1 / 24.0
 let E_k2 = E_s2 / 24.0 - E_k1 * E_k1
-let E_disp = abs(E_k2) / (abs(E_k1) + 0.000000001)
-let E_V = if abs(E_k2) < 1.0e-12 then "INVARIANT" else (if E_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let E_disp = dispersion(E_k1, E_k2)
+let E_V = verdict(E_k2, E_disp)
 
 // --- center of mass X_cm = (m1 x1 + m2 x2)/M  (generalized eigenvector: VARIANT) ---
-let X_s1 = reduce(method_for(zip(X1, X2)) <@> lambda(a, c) -> (a + 2.0 * c) / 3.0, (+))
-let X_s2 = reduce(method_for(zip(X1, X2)) <@> lambda(a, c) -> ((a + 2.0 * c) / 3.0) ^ 2.0, (+))
+let LX = method_for(zip(X1, X2))
+let xcm = lambda(a, c) -> (a + 2.0 * c) / 3.0
+let (X_s1, X_s2) = reduce((LX <@> xcm) <&!> (LX <@> lambda(a, c) -> xcm(a, c) ^ 2.0), (+))
 let X_k1 = X_s1 / 24.0
 let X_k2 = X_s2 / 24.0 - X_k1 * X_k1
-let X_disp = abs(X_k2) / (abs(X_k1) + 0.000000001)
-let X_V = if abs(X_k2) < 1.0e-12 then "INVARIANT" else (if X_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let X_disp = dispersion(X_k1, X_k2)
+let X_V = verdict(X_k2, X_disp)
 
 // --- G = (m1 x1 + m2 x2) - P t : needs the TIME atom  (INVARIANT) ---
-let G_s1 = reduce(method_for(zip(T, X1, P1, X2, P2)) <@> lambda(t, a, b, c, d) -> (a + 2.0 * c) - (b + d) * t, (+))
-let G_s2 = reduce(method_for(zip(T, X1, P1, X2, P2)) <@> lambda(t, a, b, c, d) -> ((a + 2.0 * c) - (b + d) * t) ^ 2.0, (+))
+let LG = method_for(zip(T, X1, P1, X2, P2))
+let boost = lambda(t, a, b, c, d) -> (a + 2.0 * c) - (b + d) * t
+let (G_s1, G_s2) = reduce((LG <@> boost) <&!> (LG <@> lambda(t, a, b, c, d) -> boost(t, a, b, c, d) ^ 2.0), (+))
 let G_k1 = G_s1 / 24.0
 let G_k2 = G_s2 / 24.0 - G_k1 * G_k1
-let G_disp = abs(G_k2) / (abs(G_k1) + 0.000000001)
-let G_V = if abs(G_k2) < 1.0e-12 then "INVARIANT" else (if G_disp < 0.0001 then "INVARIANT" else "VARIANT")
+let G_disp = dispersion(G_k1, G_k2)
+let G_V = verdict(G_k2, G_disp)
 
 // P and E sharp; X_cm spreads; the time-linear G is sharp -- the boost law:
 // EXPECT: P_k1 = 1.2

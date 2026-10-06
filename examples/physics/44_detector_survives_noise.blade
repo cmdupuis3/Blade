@@ -12,16 +12,10 @@
 // oscillator (1500 symplectic steps, h = 0.05) step together as a rank-3
 // trajectory TRC(t, k, c); the exact-double LCG observation channel is a
 // second recursive array (LCGS), and the noisy record TRN is the clean field
-// plus each cell's own draw. EVERY statistic is a pure sweep over that record:
-//   * interior + lagged coordinate views via halo<Idx<1500>, [-12, -24]>
-//     -- the reach shrinks each collision to its 1476-step interior
-//     (t = 24..1499, the old hand-gate g and ring buffer, now in the type);
-//   * the 14 linear+quadratic monomial features from pa/pb pair tables;
-//   * Gram / lagged cross-Gram matrices as row-pair prodsum sweeps;
-//   * per-collision energy stats as halo row reduces;
-//   * Rayleigh quotients and the dispersion maximum as flat-raveled
-//     reduce folds (accumulation order identical to the old scalar loops,
-//     so every pin below is bit-for-bit unchanged).
+// plus each cell's own draw. The whole detector -- halo lag views,
+// features, Grams, whitening, both lagged spectra, the Rayleigh probes and
+// the energy-dispersion meter -- is ONE function, vac_detector, run on both
+// records; every statistic in it is a pure sweep over the record.
 // Dictionary: all 14 linear+quadratic monomials of (x, y, px, py).
 // The clean VAC spectrum of this system is EXACTLY {1 x4, cos(tau) x4,
 // cos(2 tau) x6}: the eigenvalue-1 subspace is the u(2) invariant algebra
@@ -102,120 +96,100 @@ let rec TRC: Array<Float64 like Idx<1500>, Idx<8>, Idx<4>> =
     | zero :: s -> zero :: vstep8(ICS)
     | prefix :: n -> prefix :: vstep8(prefix(n - 1))
 
-// ---- interior + lagged coordinate views, sigma = 0.0: per-collision
-//      boundary by halo construction (390-free: 1500 - 24 = 1476 cells) ----
-let XAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 0) |> compute
-let YAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 1) |> compute
-let PAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 2) |> compute
-let QAC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(0), k, 3) |> compute
-let XLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 0) |> compute
-let YLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 1) |> compute
-let PLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 2) |> compute
-let QLC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-12), k, 3) |> compute
-let XMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 0) |> compute
-let YMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 1) |> compute
-let PMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 2) |> compute
-let QMC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRC(w(-24), k, 3) |> compute
+// ---- the VAC detector, written once and run on both records. Every
+//      statistic is a pure sweep over the record:
+//   * interior + lagged phase-space views via halo<Idx<1500>, [-12, -24]>
+//     -- the reach shrinks each collision to its 1476-step interior
+//     (t = 24..1499, the old hand-gate and ring buffer, now in the type);
+//   * the 14 linear+quadratic monomial features from the pa/pb pair tables;
+//   * Gram / lagged cross-Gram matrices as row-pair prodsum sweeps;
+//   * whitening by C(0)'s eigenfactor, both lagged spectra, and the two
+//     probe directions' Rayleigh quotients;
+//   * per-collision energy dispersion as a CENTERED row kernel over each
+//     trajectory's energy series (the raw-moment form loses 7 digits to
+//     cancellation on the clean record), max-folded. ----
+// A B^T for 14 x 14 matrices (rows of A against rows of B)
+function mnt14(a: Array<Float64 like Idx<14>, Idx<14>>, b: Array<Float64 like Idx<14>, Idx<14>>) -> Array<Float64 like Idx<14>, Idx<14>> =
+    method_for(a, b) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
+// the Rayleigh quotient v'Mv / v'v, its double sum folded i-major, j-inner
+function rayleigh(v: Array<Float64 like Idx<14>>, mat: Array<Float64 like Idx<14>, Idx<14>>) -> Float64 =
+    reduce(method_for(range<Idx<14>, Idx<14>>) <@> lambda(i: Int64, j: Int64) -> v(i) * mat(i, j) * v(j), (+), axes = 2) / prodsum(v, v)
+// one trajectory's relative E dispersion, CENTERED before squaring: the
+// raw-moment form E[E^2] - E[E]^2 cancels to 5e-8 of E^2 on the clean
+// record and hands its rounding to the result amplified 2e7-fold
+function rel_dispersion(r: Array<Float64 like Idx<1476>>) -> Float64 = {
+    let em = reduce(r, (+)) / 1476.0
+    let d = r - em
+    sqrt(prodsum(d, d) / 1476.0) / em
+}
+// returns (lag-12 spectrum, lag-24 spectrum, energy-direction Rayleigh
+// quotients at the two lags, oscillating-probe quotients at the two lags,
+// the largest per-collision relative E dispersion)
+function vac_detector(tr: Array<Float64 like Idx<1500>, Idx<8>, Idx<4>>) -> (Array<Float64 like Idx<14>>, Array<Float64 like Idx<14>>, Float64, Float64, Float64, Float64, Float64) = {
+    let va = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>, Idx<4>>) <@> lambda(k, w, c) -> tr(w(0), k, c) |> compute
+    let vl = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>, Idx<4>>) <@> lambda(k, w, c) -> tr(w(-12), k, c) |> compute
+    let vm = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>, Idx<4>>) <@> lambda(k, w, c) -> tr(w(-24), k, c) |> compute
+    // feature f is coordinate pa(f) for f < 4, else the product pa(f) x pb(f);
+    // the flat column u ravels (collision, interior step)
+    let ji = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+        let k = u / 1476
+        let t = u - 1476 * k
+        if pb(f) < 0 then va(k, t, pa(f)) else va(k, t, pa(f)) * va(k, t, pb(f))
+    } |> compute
+    let jl = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+        let k = u / 1476
+        let t = u - 1476 * k
+        if pb(f) < 0 then vl(k, t, pa(f)) else vl(k, t, pa(f)) * vl(k, t, pb(f))
+    } |> compute
+    let jm = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
+        let k = u / 1476
+        let t = u - 1476 * k
+        if pb(f) < 0 then vm(k, t, pa(f)) else vm(k, t, pa(f)) * vm(k, t, pb(f))
+    } |> compute
+    // feature means, the Gram and the two lagged cross-Grams (symmetrized)
+    let mu = method_for(ji) <@> lambda(r: Array<Float64 like Idx<11808>>) -> reduce(r, (+)) / 11808.0 |> compute
+    let s0 = method_for(ji, ji) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+    let sl = method_for(jl, ji) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+    let sm = method_for(jm, ji) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
+    let c0: Array<Float64 like Idx<14>, Idx<14>> = method_for(range<Idx<14>, Idx<14>>) <@> lambda(i: Int64, j: Int64) -> s0(i, j) / 11808.0 - mu(i) * mu(j) |> compute
+    let c12 = method_for(range<Idx<14>, Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (sl(i, j) + sl(j, i)) / 2.0 / 11808.0 - mu(i) * mu(j) |> compute
+    let c24 = method_for(range<Idx<14>, Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (sm(i, j) + sm(j, i)) / 2.0 / 11808.0 - mu(i) * mu(j) |> compute
+    // whiten by C(0): W = C(0)^(-1/2), M(tau) = W C(tau) W
+    let (q0, l0) = m.eigh(c0)
+    let qs = method_for(range<Idx<14>, Idx<14>>) <@> lambda(i: Int64, k: Int64) -> q0(i, k) / sqrt(l0(k)) |> compute
+    let wh = mnt14(qs, q0)
+    let m12: Array<Float64 like Idx<14>, Idx<14>> = mnt14(mnt14(wh, c12), wh)
+    let m24: Array<Float64 like Idx<14>, Idx<14>> = mnt14(mnt14(wh, c24), wh)
+    let (u12, lt12) = m.eigh(m12)
+    let (u24, lt24) = m.eigh(m24)
+    // the probe directions in whitened coordinates (W^-1 = C(0)^(1/2)):
+    // energy E_x + E_y, and the oscillating x^2 - px^2
+    let qt = method_for(range<Idx<14>, Idx<14>>) <@> lambda(i: Int64, k: Int64) -> q0(i, k) * sqrt(l0(k)) |> compute
+    let w1 = mnt14(qt, q0)
+    let ve = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> 0.5 * (w1(i, 4) + w1(i, 5) + w1(i, 6) + w1(i, 7)) |> compute
+    let vo = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> w1(i, 4) - w1(i, 6) |> compute
+    // per-collision energy series (half the squared phase-space norm) and
+    // their relative dispersions
+    let eo = 0.5 * reduce(va ^ 2.0, (+))
+    let rel = method_for(eo) <@> lambda(r: Array<Float64 like Idx<1476>>) -> rel_dispersion(r) |> compute
+    (lt12, lt24, rayleigh(ve, m12), rayleigh(ve, m24), rayleigh(vo, m12), rayleigh(vo, m24), reduce(rel, lambda(a, b) -> if a > b then a else b))
+}
 
-// ---- feature matrices (14 x 11808), sigma = 0.0: current, lag-12, lag-24 ----
-let JIC = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
-    let k = u / 1476
-    let t = u - 1476 * k
-    let va = if pa(f) < 1 then XAC(k, t) else (if pa(f) < 2 then YAC(k, t) else (if pa(f) < 3 then PAC(k, t) else QAC(k, t)))
-    let vb = if pb(f) < 1 then XAC(k, t) else (if pb(f) < 2 then YAC(k, t) else (if pb(f) < 3 then PAC(k, t) else QAC(k, t)))
-    if pb(f) < 0 then va else va * vb
-} |> compute
-let JLC = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
-    let k = u / 1476
-    let t = u - 1476 * k
-    let va = if pa(f) < 1 then XLC(k, t) else (if pa(f) < 2 then YLC(k, t) else (if pa(f) < 3 then PLC(k, t) else QLC(k, t)))
-    let vb = if pb(f) < 1 then XLC(k, t) else (if pb(f) < 2 then YLC(k, t) else (if pb(f) < 3 then PLC(k, t) else QLC(k, t)))
-    if pb(f) < 0 then va else va * vb
-} |> compute
-let JMC = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
-    let k = u / 1476
-    let t = u - 1476 * k
-    let va = if pa(f) < 1 then XMC(k, t) else (if pa(f) < 2 then YMC(k, t) else (if pa(f) < 3 then PMC(k, t) else QMC(k, t)))
-    let vb = if pb(f) < 1 then XMC(k, t) else (if pb(f) < 2 then YMC(k, t) else (if pb(f) < 3 then PMC(k, t) else QMC(k, t)))
-    if pb(f) < 0 then va else va * vb
-} |> compute
-
-// ---- raw stat sweeps, sigma = 0.0: feature sums, Gram, lagged cross-Grams ----
-let SUC = method_for(JIC) <@> lambda(r: Array<Float64 like Idx<11808>>) -> reduce(r, (+)) |> compute
-let S0C = method_for(JIC, JIC) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
-let SLC = method_for(JLC, JIC) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
-let SMC = method_for(JMC, JIC) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
-
-// ---- per-collision energy stats, sigma = 0.0 (halo row reduces) ----
-let EOC = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> {
-    0.5 * ((TRC(w(0), k, 0) ^ 2.0) + (TRC(w(0), k, 1) ^ 2.0) + (TRC(w(0), k, 2) ^ 2.0) + (TRC(w(0), k, 3) ^ 2.0))
-} |> compute
-let ESC = method_for(EOC) <@> lambda(r: Array<Float64 like Idx<1476>>) -> reduce(r, (+)) |> compute
-let EQC = method_for(EOC) <@> lambda(r: Array<Float64 like Idx<1476>>) -> prodsum(r, r) |> compute
-
-// ---- TICA pipeline, clean ----
-let MUC = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> SUC(i) / 11808.0 |> compute
-let C0C: Array<Float64 like Idx<14>, Idx<14>> = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> S0C(i, j) / 11808.0 - MUC(i) * MUC(j) |> compute
-let CT12C = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SLC(i, j) + SLC(j, i)) / 2.0 / 11808.0 - MUC(i) * MUC(j) |> compute
-let CT24C = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SMC(i, j) + SMC(j, i)) / 2.0 / 11808.0 - MUC(i) * MUC(j) |> compute
-let (Q0C, L0C) = m.eigh(C0C)
-let QSC = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0C(i, k) / sqrt(L0C(k)) |> compute
-let WHC = method_for(QSC, Q0C) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let T12C = method_for(WHC, CT12C) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let M12C: Array<Float64 like Idx<14>, Idx<14>> = method_for(T12C, WHC) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let T24C = method_for(WHC, CT24C) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let M24C: Array<Float64 like Idx<14>, Idx<14>> = method_for(T24C, WHC) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let (U12C, LT12C) = m.eigh(M12C)
-let (U24C, LT24C) = m.eigh(M24C)
-let plC = sqrt((LT12C(0) - LT24C(0)) ^ 2.0) + sqrt((LT12C(1) - LT24C(1)) ^ 2.0) + sqrt((LT12C(2) - LT24C(2)) ^ 2.0) + sqrt((LT12C(3) - LT24C(3)) ^ 2.0)
-let omC = sqrt((LT12C(4) - LT24C(4)) ^ 2.0)
-let QTC = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0C(i, k) * sqrt(L0C(k)) |> compute
-let W1C = method_for(QTC, Q0C) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let VEC = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> 0.5 * (W1C(i, 4) + W1C(i, 5) + W1C(i, 6) + W1C(i, 7)) |> compute
-let VOC = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> W1C(i, 4) - W1C(i, 6) |> compute
-// Rayleigh quotients as flat-raveled triple-product folds (i-major,
-// j-inner -- the exact scalar accumulation order, no imperative loop)
-let WE12C = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VEC(i) * M12C(i, j) * VEC(j)
-} |> compute
-let rE12C = reduce(WE12C, (+)) / prodsum(VEC, VEC)
-let WE24C = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VEC(i) * M24C(i, j) * VEC(j)
-} |> compute
-let rE24C = reduce(WE24C, (+)) / prodsum(VEC, VEC)
-let WO12C = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VOC(i) * M12C(i, j) * VOC(j)
-} |> compute
-let rO12C = reduce(WO12C, (+)) / prodsum(VOC, VOC)
-let WO24C = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VOC(i) * M24C(i, j) * VOC(j)
-} |> compute
-let rO24C = reduce(WO24C, (+)) / prodsum(VOC, VOC)
-// per-collision relative E dispersion, max-folded (no imperative scan)
-let RELC = method_for(range<Idx<8>>) <@> lambda(k: Int64) -> {
-    let em = ESC(k) / 1476.0
-    let ev = EQC(k) / 1476.0 - (em ^ 2.0)
-    sqrt(abs(ev)) / em
-} |> compute
-let dmaxC = reduce(RELC, lambda(a, b) -> if a > b then a else b)
+// ---- sigma = 0.0: the clean record ----
+let (LT12C, LT24C, rE12C, rE24C, rO12C, rO24C, dmaxC) = vac_detector(TRC)
 let lt12aC = LT12C(0)
 let lt12dC = LT12C(3)
 let lt12eC = LT12C(4)
 let lt12iC = LT12C(8)
 let lt24eC = LT24C(4)
+// the invariant quartet's lag drift (top four) vs the 5th eigenvalue's
+let plC = reduce(method_for(range<Idx<4>>) <@> lambda(k: Int64) -> abs(LT12C(k) - LT24C(k)), (+))
+let omC = abs(LT12C(4) - LT24C(4))
 
-// ---- integrate + emit, sigma = 0.1: the SAME clean field plus an LCG noise
-//      channel. The observation-noise LCG (physics/44's serial recurrence) is
-//      itself a RECURSIVE ARRAY over the emitted-cell index: LCGS(v) is the
-//      (v+1)-th draw from seed 20260717 (cell 4*(1500 k + t) + c uses draw
+// ---- sigma = 0.1: the SAME clean field plus an LCG noise channel. The
+//      observation-noise LCG (physics/44's serial recurrence) is itself a
+//      RECURSIVE ARRAY over the emitted-cell index: LCGS(v) is the (v+1)-th
+//      draw from seed 20260717 (cell 4*(1500 k + t) + c uses draw
 //      4*(1500 k + t) + c, matching the old in-order advance). ----
 let rec LCGS: Array<Float64 like Idx<48000>> =
     match LCGS with
@@ -224,119 +198,21 @@ let rec LCGS: Array<Float64 like Idx<48000>> =
     | prefix :: n -> prefix :: prefix(n - 1) * 48271.0 - floor(prefix(n - 1) * 48271.0 / 2147483647.0) * 2147483647.0
 // the noisy record: clean coordinate + this cell's own scaled LCG draw
 let TRN: Array<Float64 like Idx<1500>, Idx<8>, Idx<4>> = method_for(range<Idx<1500>, Idx<8>, Idx<4>>) <@> lambda(t: Int64, k: Int64, c: Int64) -> TRC(t, k, c) + (LCGS(4 * (1500 * k + t) + c) / 2147483647.0 - 0.5) * 3.46410161513775 * 0.1 |> compute
-
-// ---- interior + lagged coordinate views, sigma = 0.1 ----
-let XAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 0) |> compute
-let YAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 1) |> compute
-let PAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 2) |> compute
-let QAN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(0), k, 3) |> compute
-let XLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 0) |> compute
-let YLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 1) |> compute
-let PLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 2) |> compute
-let QLN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-12), k, 3) |> compute
-let XMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 0) |> compute
-let YMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 1) |> compute
-let PMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 2) |> compute
-let QMN = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> TRN(w(-24), k, 3) |> compute
-
-// ---- feature matrices, sigma = 0.1 ----
-let JIN = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
-    let k = u / 1476
-    let t = u - 1476 * k
-    let va = if pa(f) < 1 then XAN(k, t) else (if pa(f) < 2 then YAN(k, t) else (if pa(f) < 3 then PAN(k, t) else QAN(k, t)))
-    let vb = if pb(f) < 1 then XAN(k, t) else (if pb(f) < 2 then YAN(k, t) else (if pb(f) < 3 then PAN(k, t) else QAN(k, t)))
-    if pb(f) < 0 then va else va * vb
-} |> compute
-let JLN = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
-    let k = u / 1476
-    let t = u - 1476 * k
-    let va = if pa(f) < 1 then XLN(k, t) else (if pa(f) < 2 then YLN(k, t) else (if pa(f) < 3 then PLN(k, t) else QLN(k, t)))
-    let vb = if pb(f) < 1 then XLN(k, t) else (if pb(f) < 2 then YLN(k, t) else (if pb(f) < 3 then PLN(k, t) else QLN(k, t)))
-    if pb(f) < 0 then va else va * vb
-} |> compute
-let JMN = method_for(range<Idx<14>, Idx<11808>>) <@> lambda(f, u) -> {
-    let k = u / 1476
-    let t = u - 1476 * k
-    let va = if pa(f) < 1 then XMN(k, t) else (if pa(f) < 2 then YMN(k, t) else (if pa(f) < 3 then PMN(k, t) else QMN(k, t)))
-    let vb = if pb(f) < 1 then XMN(k, t) else (if pb(f) < 2 then YMN(k, t) else (if pb(f) < 3 then PMN(k, t) else QMN(k, t)))
-    if pb(f) < 0 then va else va * vb
-} |> compute
-
-// ---- raw stat sweeps, sigma = 0.1 ----
-let SUN = method_for(JIN) <@> lambda(r: Array<Float64 like Idx<11808>>) -> reduce(r, (+)) |> compute
-let S0N = method_for(JIN, JIN) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
-let SLN = method_for(JLN, JIN) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
-let SMN = method_for(JMN, JIN) <@> lambda(ua: Array<Float64 like Idx<11808>>, ub: Array<Float64 like Idx<11808>>) -> prodsum(ua, ub) |> compute
-
-// ---- per-collision energy stats, sigma = 0.1 ----
-let EON = method_for(range<Idx<8>, halo<Idx<1500>, [-12, -24]>>) <@> lambda(k, w) -> {
-    0.5 * ((TRN(w(0), k, 0) ^ 2.0) + (TRN(w(0), k, 1) ^ 2.0) + (TRN(w(0), k, 2) ^ 2.0) + (TRN(w(0), k, 3) ^ 2.0))
-} |> compute
-let ESN = method_for(EON) <@> lambda(r: Array<Float64 like Idx<1476>>) -> reduce(r, (+)) |> compute
-let EQN = method_for(EON) <@> lambda(r: Array<Float64 like Idx<1476>>) -> prodsum(r, r) |> compute
-
-// ---- TICA pipeline, noisy ----
-let MUN = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> SUN(i) / 11808.0 |> compute
-let C0N: Array<Float64 like Idx<14>, Idx<14>> = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> S0N(i, j) / 11808.0 - MUN(i) * MUN(j) |> compute
-let CT12N = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SLN(i, j) + SLN(j, i)) / 2.0 / 11808.0 - MUN(i) * MUN(j) |> compute
-let CT24N = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, j: Int64) -> (SMN(i, j) + SMN(j, i)) / 2.0 / 11808.0 - MUN(i) * MUN(j) |> compute
-let (Q0N, L0N) = m.eigh(C0N)
-let QSN = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0N(i, k) / sqrt(L0N(k)) |> compute
-let WHN = method_for(QSN, Q0N) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let T12N = method_for(WHN, CT12N) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let M12N: Array<Float64 like Idx<14>, Idx<14>> = method_for(T12N, WHN) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let T24N = method_for(WHN, CT24N) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let M24N: Array<Float64 like Idx<14>, Idx<14>> = method_for(T24N, WHN) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let (U12N, LT12N) = m.eigh(M12N)
-let (U24N, LT24N) = m.eigh(M24N)
-let plN = sqrt((LT12N(0) - LT24N(0)) ^ 2.0) + sqrt((LT12N(1) - LT24N(1)) ^ 2.0) + sqrt((LT12N(2) - LT24N(2)) ^ 2.0) + sqrt((LT12N(3) - LT24N(3)) ^ 2.0)
-let omN = sqrt((LT12N(4) - LT24N(4)) ^ 2.0)
-let QTN = method_for(range<Idx<14>>) <*> method_for(range<Idx<14>>) <@> lambda(i: Int64, k: Int64) -> Q0N(i, k) * sqrt(L0N(k)) |> compute
-let W1N = method_for(QTN, Q0N) <@> lambda(u: Array<Float64 like Idx<14>>, v: Array<Float64 like Idx<14>>) -> prodsum(u, v) |> compute
-let VEN = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> 0.5 * (W1N(i, 4) + W1N(i, 5) + W1N(i, 6) + W1N(i, 7)) |> compute
-let VON = method_for(range<Idx<14>>) <@> lambda(i: Int64) -> W1N(i, 4) - W1N(i, 6) |> compute
-let WE12N = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VEN(i) * M12N(i, j) * VEN(j)
-} |> compute
-let rE12N = reduce(WE12N, (+)) / prodsum(VEN, VEN)
-let WE24N = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VEN(i) * M24N(i, j) * VEN(j)
-} |> compute
-let rE24N = reduce(WE24N, (+)) / prodsum(VEN, VEN)
-let WO12N = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VON(i) * M12N(i, j) * VON(j)
-} |> compute
-let rO12N = reduce(WO12N, (+)) / prodsum(VON, VON)
-let WO24N = method_for(range<Idx<196>>) <@> lambda(u) -> {
-    let i = u / 14
-    let j = u - 14 * i
-    VON(i) * M24N(i, j) * VON(j)
-} |> compute
-let rO24N = reduce(WO24N, (+)) / prodsum(VON, VON)
-let RELN = method_for(range<Idx<8>>) <@> lambda(k: Int64) -> {
-    let em = ESN(k) / 1476.0
-    let ev = EQN(k) / 1476.0 - (em ^ 2.0)
-    sqrt(abs(ev)) / em
-} |> compute
-let dmaxN = reduce(RELN, lambda(a, b) -> if a > b then a else b)
+let (LT12N, LT24N, rE12N, rE24N, rO12N, rO24N, dmaxN) = vac_detector(TRN)
 let lt12aN = LT12N(0)
 let lt12dN = LT12N(3)
 let lt12eN = LT12N(4)
 let lt12iN = LT12N(8)
 let lt24eN = LT24N(4)
+let plN = reduce(method_for(range<Idx<4>>) <@> lambda(k: Int64) -> abs(LT12N(k) - LT24N(k)), (+))
+let omN = abs(LT12N(4) - LT24N(4))
 
 // ---- verdicts ----
-let cleanV = if lt12dC > 0.99 then (if lt12eC < 0.9 then "FOUR_INVARIANTS_AT_ONE" else "NO") else "NO"
-let cosV = if abs(lt12eC - 0.825336) < 0.05 then (if abs(lt12iC - 0.362358) < 0.08 then "COS_CLUSTERS_AS_PREDICTED" else "NO") else "NO"
-let killV = if dmaxC < 0.001 then (if dmaxN > 0.05 then "ZERO_VARIANCE_DETECTOR_KILLED" else "NO") else "NO"
-let plateauV = if plN < 0.05 then (if omN > 0.1 then "INVARIANTS_PLATEAU_UNDER_NOISE" else "NO") else "NO"
-let rayV = if abs(rE12N - rE24N) < 0.02 then (if rE12N > 0.8 then (if abs(rO12N - rO24N) > 0.5 then "ENERGY_PLATEAUS_OSCILLATOR_MOVES" else "NO") else "NO") else "NO"
+let cleanV = if lt12dC > 0.99 && lt12eC < 0.9 then "FOUR_INVARIANTS_AT_ONE" else "NO"
+let cosV = if abs(lt12eC - 0.825336) < 0.05 && abs(lt12iC - 0.362358) < 0.08 then "COS_CLUSTERS_AS_PREDICTED" else "NO"
+let killV = if dmaxC < 0.001 && dmaxN > 0.05 then "ZERO_VARIANCE_DETECTOR_KILLED" else "NO"
+let plateauV = if plN < 0.05 && omN > 0.1 then "INVARIANTS_PLATEAU_UNDER_NOISE" else "NO"
+let rayV = if abs(rE12N - rE24N) < 0.02 && rE12N > 0.8 && abs(rO12N - rO24N) > 0.5 then "ENERGY_PLATEAUS_OSCILLATOR_MOVES" else "NO"
 
 // the spectrum, the kill, the plateau, the recovery:
 // EXPECT: lt12aC = 1.00636317473505
@@ -352,7 +228,7 @@ let rayV = if abs(rE12N - rE24N) < 0.02 then (if rE12N > 0.8 then (if abs(rO12N 
 // EXPECT: rE24C = 1.00000642780998
 // EXPECT: rO12C = 0.362274679654077
 // EXPECT: rO24C = -0.737624341874798
-// EXPECT: dmaxC = 0.000220805419249497
+// EXPECT: dmaxC = 0.000220805423860011
 // EXPECT: dmaxN = 0.11991037124116
 // EXPECT: killV = "ZERO_VARIANCE_DETECTOR_KILLED"
 // EXPECT: lt12aN = 0.986011029932157

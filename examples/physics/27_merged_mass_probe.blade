@@ -27,16 +27,20 @@
 //     (ex 06), and it can recover information the record lost.
 // ============================================================================
 import ppl as ppl
-let MA = [0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8]
-let MB = [0.5, 0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.75, 0.75, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.35, 1.35, 1.35, 1.35, 1.35, 1.8, 1.8, 1.8, 1.8, 1.8]
-let VF = [0.222222222222, -0.133333333333, -0.37037037037, -0.594594594595, -0.782608695652, 0.285714285714, 0.0408163265306, -0.239067055394, -0.518950437318, -0.765906362545, 0.0, 0.0, 0.0, -0.297872340426, -0.571428571429, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429]
-let NC = [2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+type Real = Idx<25>
+let MA: Array<Float64 like Real> = [0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8, 0.5, 0.75, 1.0, 1.35, 1.8]
+let MB: Array<Float64 like Real> = [0.5, 0.5, 0.5, 0.5, 0.5, 0.75, 0.75, 0.75, 0.75, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.35, 1.35, 1.35, 1.35, 1.35, 1.8, 1.8, 1.8, 1.8, 1.8]
+let VF: Array<Float64 like Real> = [0.222222222222, -0.133333333333, -0.37037037037, -0.594594594595, -0.782608695652, 0.285714285714, 0.0408163265306, -0.239067055394, -0.518950437318, -0.765906362545, 0.0, 0.0, 0.0, -0.297872340426, -0.571428571429, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.297872340426, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429, -0.571428571429]
+let NC: Array<Float64 like Real> = [2.0, 2.0, 2.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
 // --- m_eff tower from the probe's recoil ---
-// invert the recoil once per realization, then let the formers carry the
-// tower: mean off the raw block, variance off the central one.
-let MEFF = method_for(VF) <@> lambda(v) -> 1.0 * (2.0 - v) / (2.0 + v) |> compute
-let MEFFV: Array<Float64 like Idx<1>, Idx<25>> = [MEFF]
+// invert the recoil once per realization -- the single-scatter formula lifted
+// over the whole recoil column -- then let the formers carry the tower: mean
+// off the raw block, variance off the central one.
+let m_C = 1.0
+let u = 2.0
+let MEFF = m_C * (u - VF) / (u + VF)
+let MEFFV: Array<Float64 like Idx<1>, Real> = [MEFF]
 let meff_m1 = ppl.moments(MEFFV, 1)
 let meff_c2 = ppl.comoments(MEFFV, 2)
 let meff_k1 = meff_m1(0)
@@ -46,7 +50,7 @@ let meff_k2 = meff_c2(0)
 // both naive models are variables over the same 25-realization sample axis,
 // so one former call reports both means.
 let SUMAB = MA + MB
-let NAIVE: Array<Float64 like Idx<2>, Idx<25>> = [MB, SUMAB]
+let NAIVE: Array<Float64 like Idx<2>, Real> = [MB, SUMAB]
 let naive_m1 = ppl.moments(NAIVE, 1)
 let near_k1 = naive_m1(0)
 let sum_k1 = naive_m1(1)
@@ -59,13 +63,12 @@ let near_V = if abs(gap_near) > 0.3 then "NOT_ONE_BALL" else "SINGLE_HIT_LIKE"
 let R2 = reduce(method_for(NC) <@> lambda(n) -> (if n > 1.5 then 1.0 else 0.0), (+))
 let P_rattle = R2 / 25.0
 
-// --- the probe re-measures which-is-where ---
-let Hs = reduce(method_for(zip(VF, MA, MB)) <@> lambda(v, a, b) -> (if b - a > 0.001 then 1.0 * (2.0 - v) / (2.0 + v) else 0.0), (+))
-let Hn = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if b - a > 0.001 then 1.0 else 0.0), (+))
-let Ls = reduce(method_for(zip(VF, MA, MB)) <@> lambda(v, a, b) -> (if a - b > 0.001 then 1.0 * (2.0 - v) / (2.0 + v) else 0.0), (+))
-let Ln = reduce(method_for(zip(MA, MB)) <@> lambda(a, b) -> (if a - b > 0.001 then 1.0 else 0.0), (+))
-let meff_heavyNear = Hs / Hn
-let meff_lightNear = Ls / Ln
+// --- the probe re-measures which-is-where: m_eff WHERE the near ball (B)
+//     is the heavier one, and WHERE it is the lighter one ---
+let heavy_near = compound(MEFF, mask(MB - MA, lambda(g) -> g > 0.001))
+let light_near = compound(MEFF, mask(MA - MB, lambda(g) -> g > 0.001))
+let meff_heavyNear = reduce(heavy_near, (+)) / Float64(extents(heavy_near))
+let meff_lightNear = reduce(light_near, (+)) / Float64(extents(light_near))
 let resharpen = meff_lightNear - meff_heavyNear
 let id_V = if abs(resharpen) > 0.05 then "PROBE_RESHARPENS_IDENTITY" else "IDENTITY_STAYS_MERGED"
 

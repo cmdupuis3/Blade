@@ -86,18 +86,22 @@ let XC_h = csvd.load("data/30_XC.csv")
 let XC: Array<Float64 like Idx<48>, Idx<192>> = XC_h.vars.data |> csvd.read
 // ============================ machinery ====================================
 // T = X X^T exact (integer-valued for +-1 data); matrix powers by chained
-// row-fiber prodsums; spectral moments m_k = tr(T^k) / (d N^k).
+// row-fiber prodsums; spectral moments m_k = tr(T^k) / (d N^k). ONE row
+// kernel does all three: T(i, j) = dot(row i of X, row j of X); since T and
+// its powers are symmetric, (M T)(i, j) = dot(row i of M, row j of T); and
+// tr(A B) = sum_i dot(row i of A, row i of B) -- the same kernel over a zip.
+function dot(x: Float64^1, y: Float64^1) -> Float64 = prodsum(x, y)
 
 // --- block A: the observer at N = 96 (gamma = 1/2) ---
-let TA = method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) |> compute
-let MA2 = method_for(TA, TA) <@> lambda(u: Array<Float64 like Idx<48>>, v: Array<Float64 like Idx<48>>) -> prodsum(u, v) |> compute
-let MA3 = method_for(MA2, TA) <@> lambda(u: Array<Float64 like Idx<48>>, v: Array<Float64 like Idx<48>>) -> prodsum(u, v) |> compute
-let SA1 = reduce(method_for(XA) <@> lambda(x: Array<Float64 like Idx<96>>) -> prodsum(x, x), (+))
-let SA2 = reduce(method_for(zip(TA, TA)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SA3 = reduce(method_for(zip(TA, MA2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SA4 = reduce(method_for(zip(MA2, MA2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SA5 = reduce(method_for(zip(MA2, MA3)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SA6 = reduce(method_for(zip(MA3, MA3)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
+let TA = method_for(XA, XA) <@> dot |> compute
+let MA2 = method_for(TA, TA) <@> dot |> compute
+let MA3 = method_for(MA2, TA) <@> dot |> compute
+let SA1 = reduce(method_for(XA) <@> lambda(x: Float64^1) -> dot(x, x), (+))
+let SA2 = reduce(method_for(zip(TA, TA)) <@> dot, (+))
+let SA3 = reduce(method_for(zip(TA, MA2)) <@> dot, (+))
+let SA4 = reduce(method_for(zip(MA2, MA2)) <@> dot, (+))
+let SA5 = reduce(method_for(zip(MA2, MA3)) <@> dot, (+))
+let SA6 = reduce(method_for(zip(MA3, MA3)) <@> dot, (+))
 let am1 = SA1 / (48.0 * 96.0)
 let am2 = SA2 / (48.0 * 96.0 * 96.0)
 let am3 = SA3 / (48.0 * 96.0 * 96.0 * 96.0)
@@ -117,11 +121,11 @@ let e6_freepoisson = 5.0 + 9.0 * 0.5 + 0.5 * 0.5
 let e6_qgaussian = 5.0 + 6.0 * a_qspec + 3.0 * a_qspec * a_qspec + a_qspec * a_qspec * a_qspec
 
 // --- block A entries (the basis-aware reading of the SAME matrix) ---
-let EA1 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y), (+), axes = 2)
-let EA2 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) * prodsum(x, y), (+), axes = 2)
-let EA4 = reduce(method_for(XA, XA) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) * prodsum(x, y) * prodsum(x, y) * prodsum(x, y), (+), axes = 2)
-let DA2 = reduce(method_for(XA) <@> lambda(x: Array<Float64 like Idx<96>>) -> prodsum(x, x) * prodsum(x, x), (+))
-let DA4 = reduce(method_for(XA) <@> lambda(x: Array<Float64 like Idx<96>>) -> prodsum(x, x) * prodsum(x, x) * prodsum(x, x) * prodsum(x, x), (+))
+// one <&!>-fused sweep of T's cells carries the three entry power sums
+let LTA = method_for(TA)
+let (EA1, EA2, EA4) = reduce((LTA <@> lambda(t) -> t) <&!> (LTA <@> lambda(t) -> t * t) <&!> (LTA <@> lambda(t) -> t * t * t * t), (+))
+let DA2 = reduce(method_for(XA) <@> lambda(x: Float64^1) -> dot(x, x) * dot(x, x), (+))
+let DA4 = reduce(method_for(XA) <@> lambda(x: Float64^1) -> dot(x, x) * dot(x, x) * dot(x, x) * dot(x, x), (+))
 let noA = 48.0 * 48.0 - 48.0
 let ea1 = (EA1 - SA1) / (noA * 96.0)
 let ea2 = (EA2 - DA2) / (noA * 96.0 * 96.0)
@@ -129,12 +133,12 @@ let ea4 = (EA4 - DA4) / (noA * 96.0 * 96.0 * 96.0 * 96.0)
 let q_entries = ea4 / (ea2 * ea2) - 2.0
 
 // --- block H: the SAME registers, HALF the samples (N = 48, gamma = 1) ---
-let TH = method_for(XH, XH) <@> lambda(x: Array<Float64 like Idx<48>>, y: Array<Float64 like Idx<48>>) -> prodsum(x, y) |> compute
-let MH2 = method_for(TH, TH) <@> lambda(u: Array<Float64 like Idx<48>>, v: Array<Float64 like Idx<48>>) -> prodsum(u, v) |> compute
-let SH1 = reduce(method_for(XH) <@> lambda(x: Array<Float64 like Idx<48>>) -> prodsum(x, x), (+))
-let SH2 = reduce(method_for(zip(TH, TH)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SH3 = reduce(method_for(zip(TH, MH2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SH4 = reduce(method_for(zip(MH2, MH2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
+let TH = method_for(XH, XH) <@> dot |> compute
+let MH2 = method_for(TH, TH) <@> dot |> compute
+let SH1 = reduce(method_for(XH) <@> lambda(x: Float64^1) -> dot(x, x), (+))
+let SH2 = reduce(method_for(zip(TH, TH)) <@> dot, (+))
+let SH3 = reduce(method_for(zip(TH, MH2)) <@> dot, (+))
+let SH4 = reduce(method_for(zip(MH2, MH2)) <@> dot, (+))
 let hm1 = SH1 / (48.0 * 48.0)
 let hm2 = SH2 / (48.0 * 48.0 * 48.0)
 let hm3 = SH3 / (48.0 * 48.0 * 48.0 * 48.0)
@@ -145,12 +149,12 @@ let hb4 = hm4 - 4.0 * hm1 * hm3 + 6.0 * hm1 * hm1 * hm2 - 3.0 * hm1 * hm1 * hm1 
 let h_qspec = hb4 / (hb2 * hb2) - 2.0
 
 // --- block B: the independent second noise (for the freeness test) ---
-let TB = method_for(XB, XB) <@> lambda(x: Array<Float64 like Idx<96>>, y: Array<Float64 like Idx<96>>) -> prodsum(x, y) |> compute
-let MB2 = method_for(TB, TB) <@> lambda(u: Array<Float64 like Idx<48>>, v: Array<Float64 like Idx<48>>) -> prodsum(u, v) |> compute
-let SB1 = reduce(method_for(XB) <@> lambda(x: Array<Float64 like Idx<96>>) -> prodsum(x, x), (+))
-let SB2 = reduce(method_for(zip(TB, TB)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SB3 = reduce(method_for(zip(TB, MB2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SB4 = reduce(method_for(zip(MB2, MB2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
+let TB = method_for(XB, XB) <@> dot |> compute
+let MB2 = method_for(TB, TB) <@> dot |> compute
+let SB1 = reduce(method_for(XB) <@> lambda(x: Float64^1) -> dot(x, x), (+))
+let SB2 = reduce(method_for(zip(TB, TB)) <@> dot, (+))
+let SB3 = reduce(method_for(zip(TB, MB2)) <@> dot, (+))
+let SB4 = reduce(method_for(zip(MB2, MB2)) <@> dot, (+))
 let bm1 = SB1 / (48.0 * 96.0)
 let bm2 = SB2 / (48.0 * 96.0 * 96.0)
 let bm3 = SB3 / (48.0 * 96.0 * 96.0 * 96.0)
@@ -164,12 +168,12 @@ let bkc4 = bb4 - 3.0 * bb2 * bb2
 // --- block C: T_C = T_A + T_B by sample concatenation. Read TWICE: as the
 //     SUM of two independent noises (/96, the freeness test) and as ONE
 //     estimate from the pooled budget (/192, gamma = 1/4) ---
-let TC = method_for(XC, XC) <@> lambda(x: Array<Float64 like Idx<192>>, y: Array<Float64 like Idx<192>>) -> prodsum(x, y) |> compute
-let MC2 = method_for(TC, TC) <@> lambda(u: Array<Float64 like Idx<48>>, v: Array<Float64 like Idx<48>>) -> prodsum(u, v) |> compute
-let SC1 = reduce(method_for(XC) <@> lambda(x: Array<Float64 like Idx<192>>) -> prodsum(x, x), (+))
-let SC2 = reduce(method_for(zip(TC, TC)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SC3 = reduce(method_for(zip(TC, MC2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
-let SC4 = reduce(method_for(zip(MC2, MC2)) <@> lambda(a: Array<Float64 like Idx<48>>, b: Array<Float64 like Idx<48>>) -> prodsum(a, b), (+))
+let TC = method_for(XC, XC) <@> dot |> compute
+let MC2 = method_for(TC, TC) <@> dot |> compute
+let SC1 = reduce(method_for(XC) <@> lambda(x: Float64^1) -> dot(x, x), (+))
+let SC2 = reduce(method_for(zip(TC, TC)) <@> dot, (+))
+let SC3 = reduce(method_for(zip(TC, MC2)) <@> dot, (+))
+let SC4 = reduce(method_for(zip(MC2, MC2)) <@> dot, (+))
 let cm1 = SC1 / (48.0 * 96.0)
 let cm2 = SC2 / (48.0 * 96.0 * 96.0)
 let cm3 = SC3 / (48.0 * 96.0 * 96.0 * 96.0)

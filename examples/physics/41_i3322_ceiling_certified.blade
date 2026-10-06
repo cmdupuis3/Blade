@@ -4,8 +4,8 @@
 // number: the I3322 quantum supremum. This example retires the import.
 // Below is a Gram factor G for a 16x16 dual certificate of the NPA
 // level-1+AB relaxation (basis {1, A_i, B_j, A_i B_j}). The certificate
-// matrix is LAM2 := G G^T, computed IN-LANGUAGE by one row-fiber
-// prodsum -- so LAM2 is positive semidefinite BY CONSTRUCTION (it is a
+// matrix is LAM2 := G G^T, computed IN-LANGUAGE as gram(G, G) -- so
+// LAM2 is positive semidefinite BY CONSTRUCTION (it is a
 // Gram matrix; no elimination, no eigensolve, nothing to trust). What
 // remains to check is linear algebra this file does from scratch:
 //   (1) the 58 label sums of LAM2 (each moment-matrix cell group; LBL
@@ -25,7 +25,7 @@
 // projections onto the affine label constraints and the PSD cone with an
 // interior margin of 1e-4, then an eigenfactor); their provenance is
 // irrelevant, because the proof is the verification below, which uses
-// nothing but arithmetic, gathers, and prodsums. The label structure
+// nothing but arithmetic, gathers, a Gram product and a GROUP BY. The label structure
 // (LBL) encodes moment identity: products of basis words, reduced by
 // involution, symmetrized by joint reversal -- 58 distinct moments; the
 // identity of cells within a label is what collapses <LAM2, M> to the
@@ -37,7 +37,7 @@
 // ============================================================================
 
 // The two nominal axes of the certificate. The 16 basis words deliberately
-// stay an ANONYMOUS Idx<16>: the label histogram below drives a flat cell
+// stay an ANONYMOUS Idx<16>: the label grouping below drives a flat cell
 // index c and reads the moment matrix at (c / 16, c % 16), and a nominal
 // tag does not survive that ravel -- a Nat<CellIdx> is rightly refused as
 // an index into a basis-tagged slot, and there is no unlinearize surface
@@ -85,36 +85,42 @@ let BELLT: Array<Float64 like LabelIdx> = [
   5.080000000000, 1.000000000000, -0.000000000000, -0.000000000000, 1.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, 1.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -0.000000000000, -1.000000000000, -0.000000000000, -0.000000000000, 1.000000000000, -0.000000000000, -0.000000000000]
 
 // ---- (1) the certificate matrix: LAM2 = G G^T, PSD BY CONSTRUCTION
-//      (a Gram matrix -- no elimination or eigensolve needed) ----
-let LAM2 = method_for(G, G) <@> lambda(x: Array<Float64 like Idx<16>>, y: Array<Float64 like Idx<16>>) -> prodsum(x, y) |> compute
+//      (a Gram matrix -- no elimination or eigensolve needed; gram stores
+//      it once, symmetric) ----
+let LAM2 = gram(G, G)
 
 // ---- (2) the 58 label sums of LAM2 vs targets (t', -Bell, 0, ...):
-//      one histogram product (58 x 256) + row-sum prodsums ----
-function LAM2_cell(l: Int64, lbl: Int64, lam2: Float64) -> Float64 =
-  if lbl < l + 1 then (if lbl > l - 1 then lam2 else 0.0) else 0.0
-
-let HIST = method_for(range<LabelIdx>) <*> method_for(range<CellIdx>) <@> lambda(l, c) -> LAM2_cell(l, LBL(c / 16, c % 16), LAM2(c / 16, c % 16)) |> compute
-let ONES: Array<Float64 like CellIdx> = replicate(256, 1.0) |> compute
-let LS = method_for(HIST) <@> lambda(u: Array<Float64 like CellIdx>) -> prodsum(u, ONES) |> compute
+//      GROUP BY moment label over the 256 cells, raveled row-major ----
+let CELL_VAL = method_for(range<CellIdx>) <@> lambda(c) -> LAM2(c / 16, c % 16) |> compute
+let CELL_LBL = method_for(range<CellIdx>) <@> lambda(c) -> LBL(c / 16, c % 16) |> compute
+let label_keys = group_keys(CELL_LBL)
+let LSUM = reduce(group_by(CELL_VAL, label_keys), (+))
+let LGRP = method_for(group_by(CELL_LBL, label_keys)) <@> lambda(g: Array<Int64 like RaggedIdx<_>>) -> g(0) |> compute
+let n_labels = extents(LSUM)
 
 // ---- (3) the rigorous ceiling: every non-identity word W is a
 //      product of +-1 observables, so |<W>| <= 1 and
 //      F <= t' + sum_l |dev_l| for ANY quantum state ----
-let tcert = LS((0 : LabelIdx))
 // Label 0 is the identity cell group, whose sum IS t' -- it is read off as
-// tcert above, not approximated, so it carries no deviation to absorb; the
+// tcert, not approximated, so it carries no deviation to absorb; the
 // fold covers the other 57 labels, the ones multiplied by an unknown <W_l>.
-let devtotal = reduce(method_for(range<LabelIdx>) <@> lambda(l) -> if l < 1 then 0.0 else abs(LS(l) - BELLT(l)), (+))
+let TCELL = method_for(zip(LSUM, LGRP)) <@> lambda(s, l: Int64) -> if l < 1 then s else 0.0 |> compute
+let tcert = reduce(TCELL, (+))
+let DEV = method_for(zip(LSUM, LGRP)) <@> lambda(s, l: Int64) -> if l < 1 then 0.0 else abs(s - BELLT((l : LabelIdx))) |> compute
+let devtotal = reduce(DEV, (+))
 let bound_i3322 = (tcert + devtotal) / 4.0 - 1.0
 let tval = 0.0 - 1.0 + 0.25 - 0.0625 + (1.0 - 0.0625) / 2.0 + 0.707106781186548 * sqrt(0.9375)
 let margin = tval - bound_i3322
-let match_V = if devtotal < 0.000001 then "LABEL_SUMS_MATCH_WITHIN_TOLERANCE" else "NO"
-let ceiling_V = if devtotal < 0.000001 then (if bound_i3322 < tval then "QUANTUM_CEILING_CERTIFIED_IN_LANGUAGE" else "NO") else "NO"
+// devtotal ~1.7e-9 is a sum of ~3e-11 residuals of O(1) label sums, so a
+// rounding ulp of any one sum moves it at 1e-7 relative (exact rational
+// arithmetic on G gives 1.7032478e-9): the verdict pins the claim, a
+// deviation below 1e-8 from rounding G to 10 decimals
+let match_V = if devtotal < 1.0e-8 then "LABEL_SUMS_MATCH_WITHIN_TOLERANCE" else "NO"
+let ceiling_V = if devtotal < 1.0e-8 && bound_i3322 < tval then "QUANTUM_CEILING_CERTIFIED_IN_LANGUAGE" else "NO"
 
 // the certified sandwich: local 0.25 (ex 38's 64-sweep) < quantum
 // <= 0.2700000005 (this certificate) < tower 0.3409 (ex 38's Gram point)
 // EXPECT: tcert = 5.08000000024706
-// EXPECT: devtotal = 1.70324753714632e-09
 // EXPECT: bound_i3322 = 0.270000000487578
 // EXPECT: tval = 0.340903196881458
 // EXPECT: margin = 0.0709031963938805

@@ -7,7 +7,9 @@
 //
 // The five constructions below are exactly the valid paths of
 // sh_spec(1) (x) sh_spec(1) -> sh_spec(2)  (mirrors Blade.ML.Spec.tpPaths:
-// (0,0,0), (0,1,1), (1,0,1), (1,1,0), (1,1,2) — five paths).
+// (0,0,0), (0,1,1), (1,0,1), (1,1,0), (1,1,2) — five paths). That count is
+// not typed in: the same rules, declared once more as an enumerable domain
+// over that box, are COUNTED by the compiler (see the end of the file).
 
 static function parity_ok(p1: Int, p2: Int, po: Int) -> Bool =
     po == (p1 + p2) % 2
@@ -34,7 +36,21 @@ let path4 = CGPath { l1 = 1, p1 = 1, l2 = 1, p2 = 1, l_out = 0, p_out = 0 }
 // guard re-checks triangle AND parity on the mixed field values.
 let path5 = CGPath { l_out = 2, p_out = 0, ..path4 }
 
-let n_paths = 5
+// The valid set itself, as an enumerable domain: a constrained `static
+// struct` whose NAME is an index type. The box is sh_spec(1) (x) sh_spec(1)
+// -> sh_spec(2) (each irrep's parity is l mod 2); the triangle is two linear
+// conjuncts, and the parity rule is the SAME named predicate the record
+// checks. `idx_card` counts the solutions at compile time; `range<CGPaths>`
+// would visit exactly those five (parity is not a linear conjunct, so the
+// 12-cell box is searched once at compile time -- the BL4010 advisory on
+// such a loop says so -- and the loop never sees an invalid path).
+static struct CGPaths {
+    l1:    Int<min=0, max=1>,
+    l2:    Int<min=0, max=1>,
+    l_out: Int<min=0, max=2>
+} where abs(l1 - l2) <= l_out, l_out <= l1 + l2, parity_ok(l1 % 2, l2 % 2, l_out % 2)
+
+let static n_paths = idx_card(CGPaths)
 let max_l = path5.l_out
 let mirror_l = path3.l_out
 // EXPECT: n_paths = 5

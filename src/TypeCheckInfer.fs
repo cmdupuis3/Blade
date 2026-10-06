@@ -2367,8 +2367,66 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                 | _ -> Error (Other "reduce(): internal -- fusion leaf is not an apply")
             leaves |> List.map leafElem |> sequenceResults |> Result.bind (fun elems ->
             let elem0 = elems.Head
-            elems.Tail
-            |> List.fold (fun acc e -> acc |> Result.bind (fun () -> unify env.Subst e elem0)) (Ok ())
+            // LEGS THAT DIFFER ONLY IN UNIT. A shared fold kernel is ONE typed
+            // node, so the chain below unifies every leaf's element with the
+            // first -- right for one element type, wrong for the multi-
+            // statistic sweep over a unit-carrying array: `reduce((L <@> id)
+            // <&!> (L <@> sq) <&!> (L <@> one), (+))` folds meters, meters^2
+            // and a bare count, and the unify refused it (BL3006) although
+            // the Fusion rule types the tree alpha x beta (formalism 10.2) and
+            // the reduction-JOIN spelling of the same three legs was already
+            // admitted. An operator section is polymorphic, so a per-leg
+            // instance of it is the same fold: when the unify fails and the
+            // legs are concrete scalars of ONE element type, the node takes
+            // the join encoding (k kernels, k seeds, flat Tuple<k> result,
+            // see IRReduceCompute) -- exactly what the join form builds.
+            // Only on that failure, so every chain that typed before is
+            // untouched; a lambda kernel (one typed body) still needs one
+            // element type. Each leg's fold must still preserve its unit
+            // (`*` does not: reduceKernelUnitCheck, as the array form).
+            let unitOnlyLegs () =
+                elems.Length >= 2 && tInitOpt.IsNone
+                && (match tKernel.Kind with
+                    | TExprSection (OpAdd | OpMul) -> true
+                    | _ -> false)
+                && (let rs = elems |> List.map env.Subst.Resolve
+                    rs |> List.forall (fun r ->
+                        Set.isEmpty (freeInferVars env.Subst r)
+                        && (match IR.stripUnits r with IRTScalar _ -> true | _ -> false))
+                    && (rs |> List.map IR.stripUnits |> List.distinct |> List.length) = 1)
+            let perLegJoin () : TypeResult<TypedExpr> =
+                let op = match tKernel.Kind with TExprSection op -> op | _ -> OpAdd
+                let rs = elems |> List.map env.Subst.Resolve
+                let kernels = rs |> List.map (fun e -> mkTyped (TExprSection op) (mkFuncArrow [e; e] e))
+                List.zip kernels rs
+                |> List.fold (fun acc (k, e) -> acc |> Result.bind (fun () -> reduceKernelUnitCheck env k e)) (Ok ())
+                |> Result.map (fun () ->
+                    let seeds =
+                        rs |> List.map (fun e ->
+                            let et = match e with AnyPrimElem x -> x | _ -> ETFloat64
+                            let lit =
+                                match op, et with
+                                | OpMul, (ETInt32 | ETInt64) -> LitInt 1L
+                                | OpMul, _ -> LitFloat 1.0
+                                | _, (ETInt32 | ETInt64) -> LitInt 0L
+                                | _ -> LitFloat 0.0
+                            mkTyped (TExprLit lit) e)
+                    let tree =
+                        match leaves with
+                        | first :: rest ->
+                            rest |> List.fold (fun acc leaf ->
+                                mkTyped (TExprFusion (acc, leaf)) (IRTTuple [acc.Type; leaf.Type])) first
+                        | [] -> tArr
+                    let kCarrier = mkTyped (TExprTuple kernels) (IRTTuple (kernels |> List.map (_.Type)))
+                    let sCarrier = mkTyped (TExprTuple seeds) (IRTTuple (seeds |> List.map (_.Type)))
+                    mkTyped (TExprReduce (tree, kCarrier, Some sCarrier)) (IRTTuple rs))
+            let legsUnified =
+                elems.Tail
+                |> List.fold (fun acc e -> acc |> Result.bind (fun () -> unify env.Subst e elem0)) (Ok ())
+            match legsUnified with
+            | Error _ when unitOnlyLegs () -> perLegJoin ()
+            | _ ->
+            legsUnified
             |> Result.bind (fun () ->
             // Fold-kernel params and init share the leaves' element type
             // (same unification the array form performs).
@@ -2656,7 +2714,24 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
         mkTyped (TExprReduce (tree, kCarrier, Some sCarrier)) resultType
     | [] -> mkTyped (TExprReduce (List.head tLeaves, List.head tKernels, Some (List.head seeds))) elem0))))))
 
+/// The operand's `<@>` leaves (through `<&!>` trees and an anonymous
+/// `|> compute`) are folded, never stored, so the WHOLE reduce inference runs
+/// inside `FoldOperandApplies.within` their spans: the BL4010 storage
+/// suggestion stands down for exactly those applies (pinning `where comm` on a
+/// fold leaf is the BL3999 compact-fold refusal, or the `axes = n` rank
+/// refusal, not a storage choice). The whole body and not just the first
+/// operand inference, because the operand is inferred again on the main path
+/// and inside the rank-k desugar's synthesized block -- same Expr, same spans.
 and inferReduce (env: TypeEnv) array kernel (init: Expr option) (axes: Expr option) : TypeResult<TypedExpr> =
+    let rec foldLeafSpans (e: Expr) : Span list =
+        match e.Kind with
+        | ExprCompute inner -> foldLeafSpans inner
+        | ExprBinOp (_, OpFusion, l, r) -> foldLeafSpans l @ foldLeafSpans r
+        | ExprBinOp (_, OpApply, l, r) -> [ l.Span; r.Span ]
+        | _ -> []
+    FoldOperandApplies.within (foldLeafSpans array) (fun () -> inferReduceCore env array kernel init axes)
+
+and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr option) : TypeResult<TypedExpr> =
     // ---- Axis count (`axes = n`, default 1) --------------------------------
     // `reduce` folds the innermost `n` axes (each a LEFT fold in ascending
     // storage order): rank k in, rank k-n
@@ -8533,7 +8608,11 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                                      match identities with
                                      | [] -> false
                                      | first :: rest -> rest |> List.forall (fun i -> i = first)
-                                 if allSame then
+                                 // A fold leaf stores nothing (see the pair-site
+                                 // note in buildApplyInfo and FoldOperandApplies).
+                                 let isFoldLeaf =
+                                     FoldOperandApplies.contains tLeft.Span || FoldOperandApplies.contains tRight.Span
+                                 if allSame && not isFoldLeaf then
                                      let msg =
                                          $"kernel `{fnName}` deduces commutative over its argument pack `{packName}` (at every arity) and all {n} positions receive the same array: output storage is DENSE today. Pin `where comm({packName})` on `{fnName}` to opt into compact symmetric (triangular) storage."
                                      // BL4010 -- the confirm-and-pin storage
@@ -9208,7 +9287,13 @@ and buildApplyInfo (env: TypeEnv)
     // so this gate cannot reach a real square. Note `A * A` desugars to a zip
     // too, and is likewise co-iteration, not a suppressed true positive.
     let isCoIterApply = not (List.isEmpty sharedIndexTypes)
-    if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) && not isCoIterApply then
+    // FOLD LEAVES STORE NOTHING. An apply that is the direct operand of a
+    // `reduce` (see `FoldOperandApplies`) has no output storage to compact, and
+    // pinning `where comm` there is refused (BL3999, reduce over a compact
+    // computation) -- the suggestion would be both false ("DENSE today") and
+    // unactionable (an unfixable build break under --strict-pins).
+    let isFoldLeaf = FoldOperandApplies.contains tLoop.Span || FoldOperandApplies.contains tKernel.Span
+    if List.isEmpty iterGroups && not (List.isEmpty stage3Pairs) && not isCoIterApply && not isFoldLeaf then
         List.indexed stage3Pairs
         |> List.iter (fun (i, par) ->
             if (par = Blade.Deduce.PInv || par = Blade.Deduce.PNeg)
@@ -9562,7 +9647,25 @@ and buildApplyInfo (env: TypeEnv)
                     0
                 else
                     let trueIteratedDims = max 0 (sDims - raggedInnerCount)
-                    max 0 (arrTy.IndexTypes.Length - trueIteratedDims)
+                    let structural = max 0 (arrTy.IndexTypes.Length - trueIteratedDims)
+                    // ...and over a DENSE operand too. There every axis is an
+                    // S-dim, so the structural count above is 0, and a `R^k`
+                    // row param whose body only forwards the row into a tuple
+                    // (`lambda(row: R^1) -> f((row, tt))`, `lsdft((row, ts),
+                    // omegas)` -- a pack argument is not a direct argument,
+                    // and plain application does not unify a callee's
+                    // parameter into it) was bound one ELEMENT: the apply
+                    // then unified the rank-1 claim with Float64 and refused
+                    // the program (BL3999). The written rank is the row
+                    // depth: honour it when it names a proper fiber of a
+                    // scalar-element operand.
+                    match annotatedRank with
+                    | Some k when structural = 0 && raggedInnerCount = 0
+                                  && k < arrTy.IndexTypes.Length
+                                  && (match IR.stripUnits (env.Subst.Resolve arrTy.ElemType) with
+                                      | IRTScalar _ -> true
+                                      | _ -> false) -> k
+                    | _ -> structural
             | _ -> 0)
 
     // MIXED ROW/ELEMENT ANNOTATIONS over an ALL-ragged operand pack.
@@ -9668,10 +9771,28 @@ and buildApplyInfo (env: TypeEnv)
                             List.tryItem (at.IndexTypes.Length - irank + axis) at.IndexTypes
                         else None
                     else None)
+            // The spine can also end at a CAPTURED array rather than a kernel
+            // parameter: `lambda(row: R^1) -> scaled(row, ws)` with
+            // `scaled(v: T^1, w: U^1) = w <@> ...` returns a row as long as
+            // `ws`. The walk used to stop there and the output kept the
+            // callee's placeholder, which reached g++ as an undeclared
+            // `__method_for_inferred_n_k` (BL9002). A captured array's own
+            // type names its extent outright -- read it when it is a literal.
+            let capturedAxis (e: TypedExpr) (axis: int) : IRIndexType option =
+                match IR.stripUnits (env.Subst.Resolve e.Type) with
+                | ArrayElem a when axis < a.IndexTypes.Length ->
+                    let ix = a.IndexTypes.[axis]
+                    (match ix.Extent with
+                     | IRLit (IRLitInt _) -> Some ix
+                     | _ -> None)
+                | _ -> None
             let rec spineFiber (e: TypedExpr) (axis: int) (depth: int) : IRIndexType option =
                 if depth > 32 then None else
                 match e.Kind with
-                | TExprVar (pn, _, _) -> paramFiberAxis pn axis
+                | TExprVar (pn, _, _) ->
+                    (match paramFiberAxis pn axis with
+                     | Some f -> Some f
+                     | None -> capturedAxis e axis)
                 | TExprBlock (_, Some fe) -> spineFiber fe axis (depth + 1)
                 | TExprLet (_, _, _, b) -> spineFiber b axis (depth + 1)
                 | TExprApp (f, args) ->
@@ -10485,11 +10606,17 @@ and buildApplyInfo (env: TypeEnv)
             match kernelLambda tKernel with
             | Some li -> li.Params.Length = arrays.Length
             | None -> false
+        // LAZY, and asked last: the predicate chases every let-bound operand
+        // into its defining expression, so evaluating it eagerly at EVERY apply
+        // (each elementwise `A op B` is one) walked the whole history of a
+        // chain of lifted bindings per binding -- exponential in the chain's
+        // depth (examples/physics/29 spent 210 s here). It only matters on the
+        // rejection path.
         let operandsProvisional =
-            (arrays |> List.exists (typedExprHasProvisionalUnits env))
-            || typedExprHasProvisionalUnits env lambdaInfo.Body
+            lazy ((arrays |> List.exists (typedExprHasProvisionalUnits env))
+                  || typedExprHasProvisionalUnits env lambdaInfo.Body)
         (match kernelBodyUnits env Map.empty lambdaInfo.Body with
-         | Error _ when env.InLambdaBody && pass2CanRemodel && operandsProvisional -> Ok None
+         | Error _ when env.InLambdaBody && pass2CanRemodel && operandsProvisional.Value -> Ok None
          | r -> r)
         |> Result.bind (fun bodyUnits ->
         // Infer output element type from kernel return type, falling back to input arrays.
@@ -10538,12 +10665,28 @@ and buildApplyInfo (env: TypeEnv)
                     | Some le, Some re ->
                         match IR.promoteElemType le re with
                         | Some pe when isComplexElem pe -> maybeUpgrade node (Some pe)
+                        // BOTH operands real after the re-stamp, node stamped
+                        // complex: the stamp is a deferred ALIAS, not a
+                        // promotion. `abs(w) * abs(w)` over a complex `w`
+                        // types each `abs` at w's own variable (the deferred
+                        // arm of the scalar `abs` rule), so the product
+                        // unified two aliases of w and resolved to w's
+                        // Complex128 -- while the abs arm below corrects both
+                        // operands to Float64. Arithmetic on two real
+                        // operands is real: adopt the promotion.
+                        | Some pe when (match elemOfType node.Type with
+                                        | Some ne -> isComplexElem ne
+                                        | None -> false) -> withElem node pe
                         | _ -> node
                     | _ -> node
                 | TExprUnaryOp (((OpNeg | OpConj) as uop), e) ->
                     let e2 = walk e
                     let node = { t with Kind = TExprUnaryOp (uop, e2) }
-                    maybeUpgrade node (elemOfType e2.Type)
+                    match uop, elemOfType e2.Type, elemOfType node.Type with
+                    // The same alias through a negation: `-abs(w)`.
+                    | OpNeg, Some ee, Some ne when not (isComplexElem ee) && isComplexElem ne ->
+                        withElem node ee
+                    | _ -> maybeUpgrade node (elemOfType e2.Type)
                 | TExprUnaryOp (OpMath name, e) ->
                     let e2 = walk e
                     let node = { t with Kind = TExprUnaryOp (OpMath name, e2) }
@@ -10608,15 +10751,29 @@ and buildApplyInfo (env: TypeEnv)
         //     propagated into every downstream binding. The walk above already
         //     corrected the body node to its real answer; adopt it. Narrow on
         //     purpose: only when the body's TOP node is one of those four
-        //     intrinsics applied to a complex operand.
+        //     intrinsics applied to a complex operand, or real arithmetic /
+        //     negation over one (two aliased `abs` stamps multiplied together
+        //     resolved complex the same way: `abs(w) * abs(w)`).
         let adoptBodyElem (r: IRType) =
-            let bodyIsComplexToReal =
-                match restampedBody.Kind with
+            let isRealStamp (t: TypedExpr) =
+                match IR.stripUnits (env.Subst.Resolve t.Type) with
+                | IRTScalar (ETFloat32 | ETFloat64 | ETInt32 | ETInt64) -> true
+                | _ -> false
+            // One of the four complex -> real intrinsics over a complex
+            // operand, or real arithmetic over one (the walk's alias arms:
+            // `abs(w) * abs(w)`, `-abs(w)`), whose re-stamp is real.
+            let rec complexToReal (t: TypedExpr) =
+                match t.Kind with
                 | TExprUnaryOp ((OpMath "abs" | OpReal | OpImag | OpArg), operand) ->
                     (match IR.stripUnits (env.Subst.Resolve operand.Type) with
                      | IRTScalar (ETComplex64 | ETComplex128) -> true
                      | _ -> false)
+                | TExprBinOp (_, (OpAdd | OpSub | OpMul | OpDiv | OpCaret), l, rr) ->
+                    isRealStamp t && isRealStamp l && isRealStamp rr
+                    && (complexToReal l || complexToReal rr)
+                | TExprUnaryOp (OpNeg, e) -> isRealStamp t && complexToReal e
                 | _ -> false
+            let bodyIsComplexToReal = complexToReal restampedBody
             match IR.stripUnits r, IR.stripUnits restampedBody.Type with
             | IRTScalar (ETFloat32 | ETFloat64 | ETInt32 | ETInt64), (IRTScalar (ETComplex64 | ETComplex128) as ct) -> ct
             | IRTScalar (ETComplex64 | ETComplex128), (IRTScalar (ETFloat32 | ETFloat64) as rt) when bodyIsComplexToReal -> rt

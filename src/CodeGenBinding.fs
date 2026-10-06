@@ -1863,7 +1863,29 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
     // wrappers, so .data is the nested pointer and pool_base flattens to the
     // contiguous row-major pool the scatter walks.
     let (denseExpr, maskExpr) = ctx.CompoundInits.[binding.Id]
-    let denseName = exprToCpp ctx.VarNames denseExpr
+    // The DENSE operand may be computed in place too -- `compound(W * S, m)`,
+    // an elementwise product compounded to a sub-ensemble. exprToCpp cannot
+    // run that loop mid-expression (the BL7004 "array-valued elementwise
+    // kernel body" refusal; the interpreter evaluated it). Emit it as the
+    // binding the user would have written (`let ws = W * S`) ahead of the
+    // scatter, exactly like the computed-mask arm below; a let-bound deferred
+    // computation is forced the way genMaskBinding forces its source.
+    let (densePre, denseName, ctx) =
+        match denseExpr with
+        | IRVar _ ->
+            let (forceCode, ctxF, dExpr) = forceDeferredArrayInput ctx builder ($"{name}__dense") denseExpr
+            (forceCode, exprToCpp ctxF.VarNames dExpr, ctxF)
+        | IRParam _ -> ([], exprToCpp ctx.VarNames denseExpr, ctx)
+        | computed ->
+            let tmp : IRBinding =
+                { Id = builder.FreshId()
+                  Name = $"{name}__dense"
+                  Type = inferExprType computed
+                  Value = computed
+                  IsConst = true
+                  IsMutable = false }
+            let (tmpLines, _) = genBinding ctx tmp builder
+            (tmpLines, bindingCppName tmp, ctx)
     // The mask operand may be written INLINE inside compound(...) --
     // `compound(A, mask(A, p))` -- in which case it lowers to a bare
     // IRMask node. exprToCpp cannot render a mask inline (it needs a
@@ -1874,18 +1896,28 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
     // name to the index builder. A let-bound mask
     // (`let m = mask(...); compound(A, m)`) arrives as an IRVar and skips
     // this. maskPre is prepended to the emitted lines below.
-    let (maskPre, maskName) =
+    //
+    // The inline mask's SOURCE can itself be a computation written in place
+    // -- `compound(V, mask(A - B, p))`, a mask over an elementwise difference.
+    // materializeMaskForm renders its source with exprToCpp, which cannot run
+    // a loop mid-expression (an apply in expression position is the BL7004
+    // "array-valued elementwise kernel body" refusal), so the program passed
+    // `blade check`, ran under the interpreter, and was refused here. Force
+    // the source to a temp first, exactly as the let-bound genMaskBinding
+    // does (forceDeferredArrayInput: a no-op for a plain array).
+    let (maskPre, maskName, ctx) =
         match maskExpr with
-        | IRMask _ ->
+        | IRMask (srcExpr, predExpr) ->
             let tmpName = $"{name}__masksrc"
-            (match materializeInlineForm emptySubst ctx.VarNames tmpName (lazy "bool") maskExpr with
+            let (forceCode, ctxF, srcExpr') = forceDeferredArrayInput ctx builder ($"{tmpName}__arr") srcExpr
+            (match materializeInlineForm emptySubst ctxF.VarNames tmpName (lazy "bool") (IRMask (srcExpr', predExpr)) with
              // Deliberately NOT registered: this temp feeds the COMPOUND index
              // construction below, and compound storage / ownership is owned by
              // a separate workstream (the same reason isFreeableDenseArrayType
              // excludes compound types).
-             | Some (stmts, _) -> (stmts |> List.map (fun s -> ind + s), tmpName)
-             | None -> ([], exprToCpp ctx.VarNames maskExpr))
-        | IRVar _ -> ([], exprToCpp ctx.VarNames maskExpr)
+             | Some (stmts, _) -> (forceCode @ (stmts |> List.map (fun s -> ind + s)), tmpName, ctxF)
+             | None -> (forceCode, exprToCpp ctxF.VarNames maskExpr, ctxF))
+        | IRVar _ -> ([], exprToCpp ctx.VarNames maskExpr, ctx)
         // A COMPUTED mask -- `compound(temp, qc_ok && warm)`, a conjunction or
         // disjunction of masks written in place. It is an elementwise loop,
         // and exprToCpp cannot run a loop in the middle of an expression: it
@@ -1905,7 +1937,7 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
                   IsConst = true
                   IsMutable = false }
             let (tmpLines, _) = genBinding ctx tmp builder
-            (tmpLines, bindingCppName tmp)
+            (tmpLines, bindingCppName tmp, ctx)
     (match binding.Type with
      | ArrayElem arrTy when isCompoundArrayType arrTy ->
          let leadRank =
@@ -1924,7 +1956,8 @@ and genCompoundInitBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: 
              [ for d in 0 .. trailingDimCount - 1 -> $"{denseName}.extents[{leadRank + d}]" ]
          let trailExpr = match trailTerms with | [] -> "1" | xs -> String.concat " * " xs
          let lines =
-             maskPre
+             densePre
+             @ maskPre
              @ (idxLines |> List.map (fun l -> ind + l))
              @ [ $"{ind}size_t {name}_trail = {trailExpr};"
                  $"{ind}{elemCpp}* {name}_densepool = nested_array_utilities::pool_base({denseName}.data);"

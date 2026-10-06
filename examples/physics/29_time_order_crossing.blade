@@ -54,24 +54,26 @@
 // ============================================================================
 import ppl as ppl
 
-// --- the 3^6 product grid from digits (uniform 3-point jets per mass) ---
-let D1 = method_for(range<Idx<729>>) <@> lambda(r) -> r - 3.0 * floor(r / 3.0) |> compute
-let D2 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 3.0) - 3.0 * floor(r / 9.0) |> compute
-let D3 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 9.0) - 3.0 * floor(r / 27.0) |> compute
-let D4 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 27.0) - 3.0 * floor(r / 81.0) |> compute
-let D5 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 81.0) - 3.0 * floor(r / 243.0) |> compute
-let D6 = method_for(range<Idx<729>>) <@> lambda(r) -> floor(r / 243.0) - 3.0 * floor(r / 729.0) |> compute
+// --- the 3^6 product grid from digits (uniform 3-point jets per mass):
+//     realization r's six base-3 digits, lifted over the range 0..729 ---
+let R = Float64(0..729)
+let D1 = R - 3.0 * floor(R / 3.0)
+let D2 = floor(R / 3.0) - 3.0 * floor(R / 9.0)
+let D3 = floor(R / 9.0) - 3.0 * floor(R / 27.0)
+let D4 = floor(R / 27.0) - 3.0 * floor(R / 81.0)
+let D5 = floor(R / 81.0) - 3.0 * floor(R / 243.0)
+let D6 = floor(R / 243.0) - 3.0 * floor(R / 729.0)
 
 // --- masses: centers ~1, ALTERNATING wide/tight jets (all within [0.85,1.15]) ---
-let M1 = method_for(D1) <@> lambda(d) -> 1.05 + 0.10 * (d - 1.0) |> compute
-let M2 = method_for(D2) <@> lambda(d) -> 0.94 + 0.025 * (d - 1.0) |> compute
-let M3 = method_for(D3) <@> lambda(d) -> 1.07 + 0.08 * (d - 1.0) |> compute
-let M4 = method_for(D4) <@> lambda(d) -> 0.96 + 0.03 * (d - 1.0) |> compute
-let M5 = method_for(D5) <@> lambda(d) -> 1.04 + 0.11 * (d - 1.0) |> compute
-let M6 = method_for(D6) <@> lambda(d) -> 0.93 + 0.02 * (d - 1.0) |> compute
+let M1 = 1.05 + 0.10 * (D1 - 1.0)
+let M2 = 0.94 + 0.025 * (D2 - 1.0)
+let M3 = 1.07 + 0.08 * (D3 - 1.0)
+let M4 = 0.96 + 0.03 * (D4 - 1.0)
+let M5 = 1.04 + 0.11 * (D5 - 1.0)
+let M6 = 0.93 + 0.02 * (D6 - 1.0)
 
 // --- transmitted-front chain: X_k = X_{k-1} * 2 m_{k-1} / (m_{k-1} + m_k) ---
-let X1 = method_for(M1) <@> lambda(m) -> 2.0 / (1.0 + m) |> compute
+let X1 = 2.0 / (1.0 + M1)
 let X2 = X1 * 2.0 * M1 / (M1 + M2)
 let X3 = X2 * 2.0 * M2 / (M2 + M3)
 let X4 = X3 * 2.0 * M3 / (M3 + M4)
@@ -80,17 +82,19 @@ let X6 = X5 * 2.0 * M5 / (M5 + M6)
 
 // --- followers F_k = X_{k-1} (m_{k-1} - m_k)/(m_{k-1} + m_k); guard: the
 //     front outruns every follower in every realization (X_k exact) ---
-let F1 = method_for(M1) <@> lambda(m) -> (1.0 - m) / (1.0 + m) |> compute
+let F1 = (1.0 - M1) / (1.0 + M1)
 let F2 = X1 * (M1 - M2) / (M1 + M2)
 let F3 = X2 * (M2 - M3) / (M2 + M3)
 let F4 = X3 * (M3 - M4) / (M3 + M4)
 let F5 = X4 * (M4 - M5) / (M4 + M5)
 let F6 = X5 * (M5 - M6) / (M5 + M6)
 let W2 = method_for(zip(F1, F2)) <@> lambda(a, b) -> (if abs(a) > abs(b) then abs(a) else abs(b)) |> compute
-let W3 = method_for(zip(W2, F3)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
-let W4 = method_for(zip(W3, F4)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
-let W5 = method_for(zip(W4, F5)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
-let W6 = method_for(zip(W5, F6)) <@> lambda(a, b) -> (if a > abs(b) then a else abs(b)) |> compute
+// running max of |F_k|: the same kernel folds each further follower in
+let widen = lambda(a, b) -> (if a > abs(b) then a else abs(b))
+let W3 = method_for(zip(W2, F3)) <@> widen |> compute
+let W4 = method_for(zip(W3, F4)) <@> widen |> compute
+let W5 = method_for(zip(W4, F5)) <@> widen |> compute
+let W6 = method_for(zip(W5, F6)) <@> widen |> compute
 let GUARD = reduce(method_for(zip(W6, X6)) <@> lambda(w, x) -> (if w < x then 0.0 else 1.0), (+))
 let guard_V = if GUARD < 0.5 then "FRONT_OUTRUNS_ALL" else "ITINERARY_AT_RISK"
 
@@ -106,12 +110,12 @@ let mu3 = x_m1(2)
 let mu4 = x_m1(3)
 let mu5 = x_m1(4)
 let mu6 = x_m1(5)
-let Y1 = method_for(X1) <@> lambda(x) -> x - mu1 |> compute
-let Y2 = method_for(X2) <@> lambda(x) -> x - mu2 |> compute
-let Y3 = method_for(X3) <@> lambda(x) -> x - mu3 |> compute
-let Y4 = method_for(X4) <@> lambda(x) -> x - mu4 |> compute
-let Y5 = method_for(X5) <@> lambda(x) -> x - mu5 |> compute
-let Y6 = method_for(X6) <@> lambda(x) -> x - mu6 |> compute
+let Y1 = X1 - mu1
+let Y2 = X2 - mu2
+let Y3 = X3 - mu3
+let Y4 = X4 - mu4
+let Y5 = X5 - mu5
+let Y6 = X6 - mu6
 
 // --- the 15 pair covariances (exact ensemble sums) ---
 let c12 = prodsum(Y1, Y2) / 729.0
@@ -199,43 +203,22 @@ let h2456 = k2456 / (c26 * c45)
 let h3456 = k3456 / (c36 * c45)
 
 // --- collapse statistics: is there ONE q? which channel collapses tighter? ---
-let gbar = (g1234 + g1235 + g1236 + g1245 + g1246 + g1256 + g1345 + g1346 + g1356 + g1456 + g2345 + g2346 + g2356 + g2456 + g3456) / 15.0
-let gvar = ((g1234 - gbar) * (g1234 - gbar) + (g1235 - gbar) * (g1235 - gbar) + (g1236 - gbar) * (g1236 - gbar) + (g1245 - gbar) * (g1245 - gbar) + (g1246 - gbar) * (g1246 - gbar) + (g1256 - gbar) * (g1256 - gbar) + (g1345 - gbar) * (g1345 - gbar) + (g1346 - gbar) * (g1346 - gbar) + (g1356 - gbar) * (g1356 - gbar) + (g1456 - gbar) * (g1456 - gbar) + (g2345 - gbar) * (g2345 - gbar) + (g2346 - gbar) * (g2346 - gbar) + (g2356 - gbar) * (g2356 - gbar) + (g2456 - gbar) * (g2456 - gbar) + (g3456 - gbar) * (g3456 - gbar)) / 15.0
+// the fifteen per-quadruple values as arrays (time-ordered, lexicographic):
+// every statistic below is a fold over them
+let G = [g1234, g1235, g1236, g1245, g1246, g1256, g1345, g1346, g1356, g1456, g2345, g2346, g2356, g2456, g3456]
+let H = [h1234, h1235, h1236, h1245, h1246, h1256, h1345, h1346, h1356, h1456, h2345, h2346, h2356, h2456, h3456]
+let K4 = [k1234, k1235, k1236, k1245, k1246, k1256, k1345, k1346, k1356, k1456, k2345, k2346, k2356, k2456, k3456]
+let gbar = reduce(G, (+)) / 15.0
+let gvar = reduce((G - gbar) * (G - gbar), (+)) / 15.0
 let g_rsd = sqrt(gvar) / abs(gbar)
-let hbar = (h1234 + h1235 + h1236 + h1245 + h1246 + h1256 + h1345 + h1346 + h1356 + h1456 + h2345 + h2346 + h2356 + h2456 + h3456) / 15.0
-let hvar = ((h1234 - hbar) * (h1234 - hbar) + (h1235 - hbar) * (h1235 - hbar) + (h1236 - hbar) * (h1236 - hbar) + (h1245 - hbar) * (h1245 - hbar) + (h1246 - hbar) * (h1246 - hbar) + (h1256 - hbar) * (h1256 - hbar) + (h1345 - hbar) * (h1345 - hbar) + (h1346 - hbar) * (h1346 - hbar) + (h1356 - hbar) * (h1356 - hbar) + (h1456 - hbar) * (h1456 - hbar) + (h2345 - hbar) * (h2345 - hbar) + (h2346 - hbar) * (h2346 - hbar) + (h2356 - hbar) * (h2356 - hbar) + (h2456 - hbar) * (h2456 - hbar) + (h3456 - hbar) * (h3456 - hbar)) / 15.0
+let hbar = reduce(H, (+)) / 15.0
+let hvar = reduce((H - hbar) * (H - hbar), (+)) / 15.0
 let h_rsd = sqrt(hvar) / abs(hbar)
 
 // --- sign census and extremes of q_hat = 1 + g ---
-let npos = (if k1234 > 0.0 then 1.0 else 0.0) + (if k1235 > 0.0 then 1.0 else 0.0) + (if k1236 > 0.0 then 1.0 else 0.0) + (if k1245 > 0.0 then 1.0 else 0.0) + (if k1246 > 0.0 then 1.0 else 0.0) + (if k1256 > 0.0 then 1.0 else 0.0) + (if k1345 > 0.0 then 1.0 else 0.0) + (if k1346 > 0.0 then 1.0 else 0.0) + (if k1356 > 0.0 then 1.0 else 0.0) + (if k1456 > 0.0 then 1.0 else 0.0) + (if k2345 > 0.0 then 1.0 else 0.0) + (if k2346 > 0.0 then 1.0 else 0.0) + (if k2356 > 0.0 then 1.0 else 0.0) + (if k2456 > 0.0 then 1.0 else 0.0) + (if k3456 > 0.0 then 1.0 else 0.0)
-let gmin1 = (if g1234 < g1235 then g1234 else g1235)
-let gmin2 = (if gmin1 < g1236 then gmin1 else g1236)
-let gmin3 = (if gmin2 < g1245 then gmin2 else g1245)
-let gmin4 = (if gmin3 < g1246 then gmin3 else g1246)
-let gmin5 = (if gmin4 < g1256 then gmin4 else g1256)
-let gmin6 = (if gmin5 < g1345 then gmin5 else g1345)
-let gmin7 = (if gmin6 < g1346 then gmin6 else g1346)
-let gmin8 = (if gmin7 < g1356 then gmin7 else g1356)
-let gmin9 = (if gmin8 < g1456 then gmin8 else g1456)
-let gmin10 = (if gmin9 < g2345 then gmin9 else g2345)
-let gmin11 = (if gmin10 < g2346 then gmin10 else g2346)
-let gmin12 = (if gmin11 < g2356 then gmin11 else g2356)
-let gmin13 = (if gmin12 < g2456 then gmin12 else g2456)
-let g_min = (if gmin13 < g3456 then gmin13 else g3456)
-let gmax1 = (if g1234 > g1235 then g1234 else g1235)
-let gmax2 = (if gmax1 > g1236 then gmax1 else g1236)
-let gmax3 = (if gmax2 > g1245 then gmax2 else g1245)
-let gmax4 = (if gmax3 > g1246 then gmax3 else g1246)
-let gmax5 = (if gmax4 > g1256 then gmax4 else g1256)
-let gmax6 = (if gmax5 > g1345 then gmax5 else g1345)
-let gmax7 = (if gmax6 > g1346 then gmax6 else g1346)
-let gmax8 = (if gmax7 > g1356 then gmax7 else g1356)
-let gmax9 = (if gmax8 > g1456 then gmax8 else g1456)
-let gmax10 = (if gmax9 > g2345 then gmax9 else g2345)
-let gmax11 = (if gmax10 > g2346 then gmax10 else g2346)
-let gmax12 = (if gmax11 > g2356 then gmax11 else g2356)
-let gmax13 = (if gmax12 > g2456 then gmax12 else g2456)
-let g_max = (if gmax13 > g3456 then gmax13 else g3456)
+let npos = reduce(method_for(K4) <@> lambda(k) -> (if k > 0.0 then 1.0 else 0.0), (+))
+let g_min = reduce(G, lambda(a, b) -> if a < b then a else b)
+let g_max = reduce(G, lambda(a, b) -> if a > b then a else b)
 let qhat_min = 1.0 + g_min
 let qhat_max = 1.0 + g_max
 
@@ -247,22 +230,24 @@ let r2456 = (c25 * c46) / (c26 * c45)
 let r3456 = (c35 * c46) / (c36 * c45)
 
 // --- clean-family statistics (quadruples avoiding the near-null ball-2 channels) ---
-let gcbar = (g1345 + g1346 + g1356 + g1456 + g3456) / 5.0
-let gcvar = ((g1345 - gcbar) * (g1345 - gcbar) + (g1346 - gcbar) * (g1346 - gcbar) + (g1356 - gcbar) * (g1356 - gcbar) + (g1456 - gcbar) * (g1456 - gcbar) + (g3456 - gcbar) * (g3456 - gcbar)) / 5.0
+let GC = [g1345, g1346, g1356, g1456, g3456]
+let gcbar = reduce(GC, (+)) / 5.0
+let gcvar = reduce((GC - gcbar) * (GC - gcbar), (+)) / 5.0
 let gc_rsd = sqrt(gcvar) / abs(gcbar)
-let n_below_free = (if g1345 < -1.0 then 1.0 else 0.0) + (if g1346 < -1.0 then 1.0 else 0.0) + (if g1356 < -1.0 then 1.0 else 0.0) + (if g1456 < -1.0 then 1.0 else 0.0) + (if g3456 < -1.0 then 1.0 else 0.0)
+let n_below_free = reduce(method_for(GC) <@> lambda(g) -> (if g < -1.0 then 1.0 else 0.0), (+))
 
 // --- THE CONTROL: same grid, same dynamics, LEPTOKURTIC jet weights.
 //     Reweight each digit (p, 1-2p, p) with p = 1/12: per-digit kurtosis
 //     flips from -2/3 (uniform, platykurtic) to +1/12 (leptokurtic).
 //     If the kappa4 tower flips sign wholesale, the 4-cumulant structure is
 //     INPUT-INHERITED -- transported jet shape -- not dynamical deformation. ---
-let U1 = method_for(D1) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
-let U2 = method_for(D2) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
-let U3 = method_for(D3) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
-let U4 = method_for(D4) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
-let U5 = method_for(D5) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
-let U6 = method_for(D6) <@> lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25) |> compute
+let lepto = lambda(d) -> (if d > 0.5 then (if d < 1.5 then 2.5 else 0.25) else 0.25)
+let U1 = method_for(D1) <@> lepto |> compute
+let U2 = method_for(D2) <@> lepto |> compute
+let U3 = method_for(D3) <@> lepto |> compute
+let U4 = method_for(D4) <@> lepto |> compute
+let U5 = method_for(D5) <@> lepto |> compute
+let U6 = method_for(D6) <@> lepto |> compute
 let WA = U1 * U2 * U3
 let WB = U4 * U5 * U6
 let WT = WA * WB
@@ -274,12 +259,12 @@ let mw3 = prodsum(WT, X3) / 729.0
 let mw4 = prodsum(WT, X4) / 729.0
 let mw5 = prodsum(WT, X5) / 729.0
 let mw6 = prodsum(WT, X6) / 729.0
-let Z1 = method_for(X1) <@> lambda(x) -> x - mw1 |> compute
-let Z2 = method_for(X2) <@> lambda(x) -> x - mw2 |> compute
-let Z3 = method_for(X3) <@> lambda(x) -> x - mw3 |> compute
-let Z4 = method_for(X4) <@> lambda(x) -> x - mw4 |> compute
-let Z5 = method_for(X5) <@> lambda(x) -> x - mw5 |> compute
-let Z6 = method_for(X6) <@> lambda(x) -> x - mw6 |> compute
+let Z1 = X1 - mw1
+let Z2 = X2 - mw2
+let Z3 = X3 - mw3
+let Z4 = X4 - mw4
+let Z5 = X5 - mw5
+let Z6 = X6 - mw6
 
 let w12 = reduce(WT * Z1 * Z2, (+)) / 729.0
 let w13 = reduce(WT * Z1 * Z3, (+)) / 729.0
@@ -328,7 +313,8 @@ let kw2346 = s2346 - w23 * w46 - w24 * w36 - w26 * w34
 let kw2356 = s2356 - w23 * w56 - w25 * w36 - w26 * w35
 let kw2456 = s2456 - w24 * w56 - w25 * w46 - w26 * w45
 let kw3456 = s3456 - w34 * w56 - w35 * w46 - w36 * w45
-let nposW = (if kw1234 > 0.0 then 1.0 else 0.0) + (if kw1235 > 0.0 then 1.0 else 0.0) + (if kw1236 > 0.0 then 1.0 else 0.0) + (if kw1245 > 0.0 then 1.0 else 0.0) + (if kw1246 > 0.0 then 1.0 else 0.0) + (if kw1256 > 0.0 then 1.0 else 0.0) + (if kw1345 > 0.0 then 1.0 else 0.0) + (if kw1346 > 0.0 then 1.0 else 0.0) + (if kw1356 > 0.0 then 1.0 else 0.0) + (if kw1456 > 0.0 then 1.0 else 0.0) + (if kw2345 > 0.0 then 1.0 else 0.0) + (if kw2346 > 0.0 then 1.0 else 0.0) + (if kw2356 > 0.0 then 1.0 else 0.0) + (if kw2456 > 0.0 then 1.0 else 0.0) + (if kw3456 > 0.0 then 1.0 else 0.0)
+let KW = [kw1234, kw1235, kw1236, kw1245, kw1246, kw1256, kw1345, kw1346, kw1356, kw1456, kw2345, kw2346, kw2356, kw2456, kw3456]
+let nposW = reduce(method_for(KW) <@> lambda(k) -> (if k > 0.0 then 1.0 else 0.0), (+))
 
 // --- verdicts ---
 let sign_V = if npos < 0.5 then "ALL_K4_NEGATIVE" else (if npos > 14.5 then "ALL_K4_POSITIVE" else "MIXED_SIGNS")
