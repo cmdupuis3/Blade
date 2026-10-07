@@ -1,0 +1,51 @@
+// TEST: An unannotated parameter is typed by each call, never defaulted to Float64
+// ============================================================================
+// `1` is an Int64 and `1.0` a Float64 (the decimal point is the difference),
+// and an unannotated parameter is an anonymous type variable -- `x` is `x: T`
+// -- so each call's argument decides it and IR monomorphization emits one
+// body per instance. `inc(6)` is the Int64 7, and `7 / 4` is integer division.
+//
+// It used to be one Float64 body: zonk defaulted the open `x` to Float64, so
+// the compiled program printed 1.75 while the interpreter computed with
+// integers under the checker's Float64 type. The ascriptions below pin each
+// result's TYPE (an Int64 into a Float64 binding is refused, functions/260).
+// ============================================================================
+function inc(x) = x + 1
+let a: Int64 = inc(6) / 4
+let b: Float64 = inc(2.5)
+let fv = 2.5
+let c: Float64 = inc(fv)
+let d = inc([1, 2])
+// EXPECT: a = 1
+// EXPECT: b = 3.5
+// EXPECT: c = 3.5
+// EXPECT: d = [2, 3]
+
+// No literal at all: the argument alone decides.
+function idf(x) = x
+let i1: Int64 = idf(3)
+let i2: Float64 = idf(2.5)
+// EXPECT: i1 = 3
+// EXPECT: i2 = 2.5
+
+// Integer arithmetic stays integer per instance; a Float64 instance divides
+// in Float64.
+function half(x) = x / 2
+let h1: Int64 = half(7)
+let h2: Float64 = half(7.0)
+// EXPECT: h1 = 3
+// EXPECT: h2 = 3.5
+
+// Two parameters mixed by arithmetic are one type variable (functions/264).
+function avg2(p, q) = (p + q) / 2
+let v: Int64 = avg2(3, 6)
+let w: Float64 = avg2(3.0, 6.0)
+// EXPECT: v = 4
+// EXPECT: w = 4.5
+
+// A static function used at compile time and at run time.
+static function twice(x) = x * 2
+let static ct = twice(21)
+let rt: Int64 = twice(ct)
+// EXPECT: ct = 42
+// EXPECT: rt = 84

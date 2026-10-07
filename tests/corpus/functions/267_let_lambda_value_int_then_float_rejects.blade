@@ -1,0 +1,13 @@
+// TEST: A one-body lambda an Int64 call decided refuses a Float64 argument (rejects)
+// ERROR: BL3001 @ 12:11
+// ============================================================================
+// `f` is also used as a value, so it is ONE body and its first call decides
+// its parameter (functions/266): the Int64 `n`. A Float64 variable passed
+// later would have to narrow into it, which a call never does -- refused, not
+// truncated.
+let f = lambda(x) -> x + 1
+let h = f
+let n = 6
+let fv = 2.5
+let a = f(n)
+let b = f(fv)

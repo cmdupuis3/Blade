@@ -6647,6 +6647,38 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     | _ -> lit
             let tL = adaptFloatLit tL tR
             let tR = adaptFloatLit tR tL
+            // TWO GENERIC VARIABLES MIXED BY ARITHMETIC are ONE variable
+            // (formalism 2.4: there is no promotion type in signatures, so
+            // the signature names one variable and the caller converts).
+            // The promotion rules below answer the LEFT variable for `x + y`
+            // over `x: T, y: U` (or two unannotated parameters), so an
+            // instance `T = Int64, U = Float64` typed the Float64 sum Int64
+            // (g++ refused the narrowing, BL9002, or the value truncated).
+            // Unifying them makes each call give both operands one type: a
+            // later literal argument adapts (`add(2.5, 1)` is 3.5), two typed
+            // arguments of different types are refused at the call. Only
+            // bare generic variables that an instance makes scalars or
+            // arrays alike (no caret, no rank bound -- those are shaped by
+            // the paths above) and no literal's own variable; a comparison
+            // mixes nothing into its Bool result.
+            (if mode = Elementwise then
+                let isArithOp =
+                    match op with
+                    | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret -> true
+                    | _ -> false
+                let genVar (t: IRType) =
+                    match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
+                    | IRTInfer vid when env.Subst.IsPolymorphicId vid
+                                        && (env.Subst.GetLiteralDefault vid).IsNone
+                                        && (env.Subst.GetArityConstraint vid).IsNone
+                                        && (match env.Subst.GetRankLowerBound vid with
+                                            | Some k -> k < 1
+                                            | None -> true) -> Some vid
+                    | _ -> None
+                if isArithOp then
+                    match genVar tL.Type, genVar tR.Type with
+                    | Some a, Some b when a <> b -> unify env.Subst (IRTInfer a) (IRTInfer b) |> ignore
+                    | _ -> ())
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
             // uses for the method_for output type).
@@ -15699,8 +15731,20 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
         @ [funcDecl.ReturnType]
     prescanTypeVarNames env allAnnotations
 
+    // An UNANNOTATED parameter is an anonymous type variable -- exactly a
+    // `x: T` with a name nobody wrote (formalism 4.3): generic, its type
+    // decided per call by the argument (calleeQuantifier instantiates it,
+    // IR monomorphization emits one body per instance), never defaulted.
+    // So `function inc(x) = x + 1` is `inc(6) = 7` (Int64) and
+    // `inc(2.5) = 3.5`; a body demand an instance would truncate (`x + 1.0`
+    // at an Int64 argument) is refused at that call, as for `x: T`.
     let paramTypes = funcDecl.Params |> List.map (fun p ->
-        match p.Type with Some t -> lowerTypeExpr env t | None -> env.Subst.Fresh())
+        match p.Type with
+        | Some t -> lowerTypeExpr env t
+        | None ->
+            let v = env.Subst.Fresh()
+            (match v with IRTInfer id -> env.Subst.MarkPolymorphic id | _ -> ())
+            v)
     let retType = match funcDecl.ReturnType with
                   | Some t -> lowerTypeExpr env t
                   | None -> env.Subst.Fresh()

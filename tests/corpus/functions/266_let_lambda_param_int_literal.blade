@@ -1,0 +1,30 @@
+// TEST: A let-bound lambda's parameter is typed by its uses, never defaulted to Float64
+// ============================================================================
+// A top-level `let inc = lambda(x) -> x + 1` that is only ever applied IS
+// `function inc(x) = x + 1` (TypeCheck.generalizeArrowLetLambdas), whose
+// unannotated parameter is generic (functions/259): each call decides.
+// ============================================================================
+let inc = lambda(x) -> x + 1
+let a: Int64 = inc(6) / 4
+let b: Float64 = inc(2.5)
+// EXPECT: a = 1
+// EXPECT: b = 3.5
+
+// A lambda also used as a VALUE (the alias `h`) stays ONE body, and its first
+// call decides its parameter: an Int64 here. Before, a direct call bound
+// nothing and the parameter fell to the Float64 default (`f(6) / 4` = 1.75).
+let f = lambda(x) -> x + 1
+let h = f
+let c: Int64 = f(6) / 4
+let d: Int64 = h(10)
+// EXPECT: c = 1
+// EXPECT: d = 11
+
+// A Float64 first call decides Float64, and a later integer LITERAL adapts
+// to it as a literal does.
+let k = lambda(x) -> x * 2
+let k2 = k
+let e: Float64 = k(1.25)
+let g: Float64 = k(3)
+// EXPECT: e = 2.5
+// EXPECT: g = 6

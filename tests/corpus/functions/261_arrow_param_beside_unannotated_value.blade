@@ -1,0 +1,15 @@
+// TEST: An arrow parameter's read beside an unannotated value parameter
+// ============================================================================
+// `c(0) + x` mixes the arrow's read with `x`, so the two are ONE type
+// variable (formalism 2.4: where two type variables would mix, the signature
+// names one). Each call decides it: `[1, 2]` makes it Int64 and the `7` meets
+// it, so `g([1, 2], 7)` is the Int64 8 -- it used to die in g++ (BL9002),
+// `c(0)` an Int64 at the array instance while `x` had defaulted to Float64.
+// ============================================================================
+function g(c, x) = c(0) + x
+let r: Int64 = g([1, 2], 7)
+let rf: Float64 = g([1.0, 2.0], 7.0)
+let rl: Int64 = g(lambda(i) -> i * 10 + 3, 7)
+// EXPECT: r = 8
+// EXPECT: rf = 8
+// EXPECT: rl = 10

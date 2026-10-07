@@ -138,10 +138,12 @@ let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashS
 ///   * a plain, unannotated, top-level `let NAME = lambda(...) -> body`: not
 ///     `let mut`, no `where` clause (kernel metadata -- comm/omp -- that rides
 ///     the lambda VALUE into a loop), no parameter defaults, not
-///     self-referencing; some unannotated parameter is APPLIED in the body
-///     (nothing else is generic in a declaration that is not generic in the
-///     lambda: an unannotated SCALAR parameter is one Float64-defaulted body
-///     either way, functions/207 and TypeCheckSupport.calleeQuantifier);
+///     self-referencing; some parameter is unannotated (a declaration's
+///     unannotated parameter is GENERIC whatever its use -- an arrow, or a
+///     value each call types, so `let inc = lambda(x) -> x + 1` is
+///     `inc(6) = 7`, an Int64, exactly as `function inc(x) = x + 1` is;
+///     the lambda's call judgment binds nothing, so its parameter would
+///     fall to zonk's Float64 default);
 ///   * every later use of NAME is an ordinary APPLICATION `NAME(args)`. A
 ///     use as a VALUE -- a kernel (`method_for(A) <@> u`, `object_for(u)`,
 ///     `reduce(A, u)`), an argument, an alias, a reassignment -- needs ONE
@@ -198,14 +200,6 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
                 Some (inheritSpan x (ExprKind.ExprTuple (args |> List.map (mapPre dropCalls))))
             | _ -> None
         Set.contains name (collectFreeVars bound (mapPre dropCalls e))
-    let appliesParam (p: string) (body: Expr) =
-        let mutable found = false
-        mapPre (fun x ->
-            (match x.Kind with
-             | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, args) when n = p && not args.IsEmpty -> found <- true
-             | _ -> ())
-            None) body |> ignore
-        found
     let arr = List.toArray decls
     arr |> Array.mapi (fun i ld ->
         match ld.Value with
@@ -214,7 +208,7 @@ let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl
             | PatternKind.PatVar name, ExprKind.ExprLambda (parms, None, body)
                     when not parms.IsEmpty
                          && parms |> List.forall (fun p -> p.Default.IsNone)
-                         && parms |> List.exists (fun p -> p.Type.IsNone && appliesParam p.Name body) ->
+                         && parms |> List.exists (fun p -> p.Type.IsNone) ->
                 let captured = collectFreeVars (parms |> List.map (_.Name) |> Set.ofList) body
                 let later = arr |> Array.skip (i + 1)
                 let ok =

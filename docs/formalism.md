@@ -192,7 +192,9 @@ Complex128).
 Type variables (single capitals) are universally quantified within a
 signature; the same letter denotes the same type. There is no promotion TYPE
 in signatures: where two type variables would mix, the caller converts one
-with the target type in call position, so the signature names one variable:
+with the target type in call position, so the signature names one variable
+(arithmetic between two bare variables -- `x + y` over `x: T, y: U` -- makes
+them that one variable, §5.1, rather than typing the result as the left one):
 
 ```blade sketch
 function add(a: A^0, b: A^0) -> A^0
@@ -900,6 +902,34 @@ where comm(xᵢ, xⱼ), omp(x₁: 2), tdim({ extent: e, symm: k, name: "freq" })
 Return type follows `where` because it may depend on constraints (`comm` can
 produce `SymIdx` outputs). Nested `function` declarations desugar to
 immutable lambda bindings (internally the same marker `let static` uses).
+
+**Unannotated parameters.** A parameter written without a type is an
+anonymous type variable -- `function inc(x) = x + 1` is `function inc(x: T) =
+x + 1` -- so each call's argument decides its type (one monomorphized body per
+instance), never a default. A literal's type is its spelling (`1` is an Int64,
+`1.0` a Float64), so `inc(6)` is the Int64 7 and `inc(6) / 4` is the integer
+quotient 1, while `inc(2.5)` is 3.5. Everything §2.4 says of `x: T` holds:
+beside a float (`x + 1.0`) an Int64 argument is refused at that argument
+(BL3019; the caller writes `3.0` or `Float64(n)`). Two generic variables mixed
+by arithmetic are ONE variable -- there is no promotion type -- so `function
+add(x, y) = x + y` takes one type per call, decided by its first argument: a
+later literal adapts to it (`add(2.5, 1)` is 3.5) but never narrows it
+(`add(1, 2.5)` is refused, as is an Int64 and a Float64 variable). A
+parameter the body uses as a subscript is pinned to that index (§3.10), one it
+applies is an arrow (§4.3); a top-level `let` of a lambda that is only applied
+is the declaration, and a lambda used as a value is one body whose first call
+decides its open parameters.
+
+```blade
+function inc(x) = x + 1
+let a = inc(6) / 4
+let b = inc(2.5)
+function add(x, y) = x + y
+let c = add(2.5, 1)
+// EXPECT: a = 1
+// EXPECT: b = 3.5
+// EXPECT: c = 3.5
+```
 
 ### 5.2 Lambdas
 

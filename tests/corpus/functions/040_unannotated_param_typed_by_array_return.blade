@@ -1,0 +1,21 @@
+// TEST: Unannotated param typed by the declared array return
+// ============================================================================
+// An unannotated parameter is an anonymous type variable -- `x` here is
+// exactly `x: T` -- so `x * s` beside the Float `s` is typed `T`
+// (functions/228), and the declared ARRAY return meets that `T`: the
+// declaration's own annotation says `x` is the Idx<4> array. Nothing about
+// the call order decides it; the declaration does, before any call is seen.
+//
+// This file used to pin the opposite: `x` was a plain variable zonk
+// defaulted to a Float64 SCALAR (`double f(double, double)`), the array
+// argument below was refused, and the scalar body was broadcast into the
+// array return (041's old positive half). A parameter's type no longer falls
+// to a silent Float64 default; the signature decides it, or each call does.
+// 042 spells the same parameter annotated.
+// ============================================================================
+function f(x, s: Float) -> Array<Float like Idx<4>> =
+    x * s
+
+let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
+let r = f(xv, 2.0)
+// EXPECT: r = [2, 8, -4, 12]

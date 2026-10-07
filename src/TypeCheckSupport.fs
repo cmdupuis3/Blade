@@ -2298,12 +2298,12 @@ let internal instantiateOpenVars (subst: Subst) (quantified: int -> bool) (tys: 
 /// whose signature is still being inferred.
 ///
 /// Only POLYMORPHIC-marked variables are quantified: they are the ones zonk
-/// keeps open and IR-phase monomorphization specializes per call site. An
-/// unannotated parameter's plain variable is not generic at all -- zonk
-/// defaults it (Float64) and ONE body is emitted -- so a per-call instance of
-/// it would type the call (`Int64`) differently from the callable it invokes
-/// (`double twice(double)`, static/011). Those stay uninstantiated and
-/// unbound, exactly as before.
+/// keeps open and IR-phase monomorphization specializes per call site. A
+/// declaration's UNANNOTATED parameter is one of them (checkFunctionDeclWith
+/// marks it: an anonymous `x: T`), so `inc(6)` over `inc(x) = x + 1` is an
+/// Int64 call of an Int64 instance. A plain variable that is not marked (a
+/// literal's, a local's) is never instantiated -- a per-call copy of it would
+/// type the call differently from the one body emitted for it.
 ///
 /// The key a callable's DEFAULTS and where-conjuncts are recorded under
 /// (TypeEnv.FuncDefaults / FuncDefaultCaptures / FuncConstraints): a declared
@@ -2443,15 +2443,33 @@ let internal concreteElemOf (subst: Subst) (t: IRType) : ElemType option =
 /// argument open at the call, an eta-wrapped kernel) is left to the
 /// post-zonk sweep (TypeCheckValidate.collectGenericObligationErrors) and,
 /// for casts, the post-monomorphization one (IRValidate).
-let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (mapping: Map<int, int>) : TypeError option =
+///
+/// Located at the ARGUMENT whose parameter carries the refused obligation's
+/// variable (`paramTys`, the declaration's own parameter types): in
+/// `g(c, x) = c(0) + x` the instance `g([1.0, 2.0], 7)` is refused at the `7`
+/// that made `x` an Int64, not at the first argument.
+let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list)
+                                    (mapping: Map<int, int>) : (int * TypeError) option =
     match calleeDeclId env tFunc with
     | None -> None
     | Some fid ->
         match env.FuncGenericObligations.TryGetValue fid with
         | true, obs ->
             let fname = match tFunc.Kind with TExprVar (n, _, _) -> n | _ -> "the callee"
-            judgeGenericObligations env fname obs (fun r ->
-                Map.tryFind r mapping |> Option.bind (fun copy -> concreteElemOf env.Subst (IRTInfer copy)))
+            let instanceOf r =
+                Map.tryFind r mapping |> Option.bind (fun copy -> concreteElemOf env.Subst (IRTInfer copy))
+            obs |> List.tryPick (fun ob ->
+                judgeGenericObligations env fname [ob] instanceOf
+                |> Option.map (fun e ->
+                    let vid = match ob with GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) -> v
+                    let pos =
+                        match env.Subst.Resolve (IRTInfer vid) |> IR.stripUnits with
+                        | IRTInfer root ->
+                            paramTys
+                            |> List.tryFindIndex (fun p -> (freeInferVars env.Subst (env.Subst.Resolve p)).Contains root)
+                            |> Option.defaultValue 0
+                        | _ -> 0
+                    (pos, e)))
         | _ -> None
 
 /// A declared generic function named as a VALUE -- an argument to a
@@ -4508,6 +4526,39 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     let copied, copyIds, copyMap = instantiateOpenVarsWithMap env.Subst quantified (paramTys @ [retTy])
                     let pCopies = List.truncate paramTys.Length copied
                     let retCopy = List.last copied
+                    // A LET-BOUND LAMBDA CALLED DIRECTLY is one body whose
+                    // first use decides (formalism 4.3): a parameter its body
+                    // left open is bound by the first call that passes a
+                    // SCALAR (a later integer literal adapts to a Float64 it
+                    // decided, as a literal does). It used to stay open and fall
+                    // to zonk's Float64 default, so `let f = lambda(x) -> x + 1`
+                    // (kept a lambda by a value use) typed `f(6) / 4` as the
+                    // Float64 1.75 where `6 + 1` is the Int64 7 and `7 / 4` is 1.
+                    // Only a plain variable (never a signature variable, a
+                    // literal's or a subscript's), and only a scalar argument:
+                    // an array would re-shape a body already typed as a value.
+                    let lambdaHead =
+                        match tFunc.Kind with
+                        | TExprVar (name, _, _) ->
+                            (match lookupVar name env with
+                             | Some { TypedValue = Some { Kind = TExprLambda _ } } -> true
+                             | _ -> false)
+                        | _ -> false
+                    if lambdaHead then
+                        for (_, pTy, aTy) in appArgPairs pCopies (tArgs |> List.map (_.Type)) do
+                            match IR.stripUnits (env.Subst.Resolve pTy) with
+                            | IRTInfer pid when not (env.Subst.IsPolymorphicId pid)
+                                                && (env.Subst.GetLiteralDefault pid).IsNone
+                                                && not (env.Subst.IsIndexDefault pid)
+                                                && (env.Subst.GetArityConstraint pid).IsNone
+                                                && (env.Subst.GetRankLowerBound pid).IsNone ->
+                                (match IR.stripUnits (env.Subst.Resolve aTy) with
+                                 | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) as s ->
+                                     unify env.Subst (IRTInfer pid) s |> ignore
+                                 | IRTInfer aid when (env.Subst.GetLiteralDefault aid).IsSome ->
+                                     unify env.Subst (IRTInfer pid) (IRTInfer aid) |> ignore
+                                 | _ -> ())
+                            | _ -> ()
                     // A FUNCTION ARGUMENT'S OPEN PARAMETER MEETS ITS DECLARED
                     // SLOT -- `let g = lambda(v) -> v(0) * 2.0; ap(g, xs)` with
                     // `ap(f: (Float64^1) -> Float64, ..)`. A lambda literal
@@ -4617,7 +4668,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             |> Option.map (fun e -> (i, e)))
                         // The callee's GENERIC CASTS, judged against the
                         // instance the arguments just built.
-                        |> Option.orElse (genericObligationClash env tFunc copyMap |> Option.map (fun e -> (0, e)))
+                        |> Option.orElse (genericObligationClash env tFunc paramTys copyMap)
                         // The callee's ARROW PARAMETERS, decided by the
                         // arguments the judgment just bound their copies to:
                         // an array or a function (or still open), each
@@ -5246,16 +5297,17 @@ let internal retargetArrowCalls (env: TypeEnv) (roots: TypedExpr list) : (Span *
 ///   * the uses disagree on the tag  ->  `Int64` (the untagged-integer
 ///     advice at each use still applies).
 /// Pinned AFTER the body so arithmetic on the parameter inside it was typed
-/// while it was open, exactly as today. Only a plain open variable is pinned:
-/// a `T^k`, a polymorphic signature variable, or one with a rank bound (it
-/// is an array somewhere) is left alone.
+/// while it was open, exactly as today. Only a variable the parameter's own
+/// missing annotation minted is pinned (generic, as every unannotated
+/// parameter is: an index use is what decides it): a `T^k`, a declared
+/// signature variable, or one with a rank bound (it is an array somewhere) is
+/// left alone.
 let internal pinSubscriptParams (env: TypeEnv) (unannotated: bool list) (parms: TypedParam list) (body: TypedExpr) : unit =
     let candidates =
         List.zip unannotated parms
         |> List.choose (fun (un, p) ->
             match un, env.Subst.Resolve p.Type with
             | true, IRTInfer vid when (env.Subst.GetArityConstraint vid).IsNone
-                                      && not (env.Subst.IsPolymorphicId vid)
                                       && (env.Subst.GetRankLowerBound vid).IsNone -> Some (p.VarId, vid)
             | _ -> None)
     if not candidates.IsEmpty then

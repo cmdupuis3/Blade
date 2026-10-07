@@ -1,0 +1,16 @@
+// TEST: Unannotated param an array return types, passed a scalar (rejects)
+// ERROR: BL3001 @ 15:11
+// REJECT-AT: lower
+// ============================================================================
+// The other half of 040: `f`'s declared array return types its unannotated
+// `x` (an anonymous `T`, and `x * s` is typed `T`) as the Idx<4> array, so a
+// scalar argument is the rank mismatch it is, refused at the argument.
+//
+// It used to compute [6, 6, 6, 6]: `x` defaulted to a Float64 scalar and the
+// scalar body was broadcast into the array return. Filling an array return
+// from a SCALAR body is still a feature -- when the parameter says it is a
+// scalar (`x: Float`), which is the spelling for that program.
+// ============================================================================
+function f(x, s: Float) -> Array<Float like Idx<4>> =
+    x * s
+let r = f(3.0, 2.0)

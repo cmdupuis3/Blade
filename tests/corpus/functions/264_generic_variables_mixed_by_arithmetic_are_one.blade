@@ -1,0 +1,30 @@
+// TEST: Two generic variables mixed by arithmetic are one variable
+// ============================================================================
+// `x + y` over `x: T, y: U` answered `T`, so `add(1, 2.5)` typed the Float64
+// sum as an Int64 (g++ refused the narrowing, BL9002). There is no promotion
+// type in a signature (formalism 2.4): where two variables would mix, the
+// signature names one, and the caller converts. So arithmetic between two
+// bare generic variables -- declared or unannotated -- makes them one: a
+// literal argument adapts to the other (`add(2.5, 1)`), two different typed
+// arguments are refused (functions/265).
+// ============================================================================
+function add(x: T, y: U) = x + y
+let s: Float64 = add(2.5, 1)
+let si: Int64 = add(3, 4)
+// EXPECT: s = 3.5
+// EXPECT: si = 7
+
+function addu(x, y) = x + y
+let u: Float64 = addu(2.5, 1)
+let ui: Int64 = addu(3, 4)
+let ua = addu([1.0, 2.0], [0.5, 0.5])
+// EXPECT: u = 3.5
+// EXPECT: ui = 7
+// EXPECT: ua = [1.5, 2.5]
+
+// `^` too: an integer power stays exact, a real one is real.
+function pw(x, n) = x ^ n
+let p1: Int64 = pw(2, 10)
+let p2: Float64 = pw(2.0, 3)
+// EXPECT: p1 = 1024
+// EXPECT: p2 = 8

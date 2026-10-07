@@ -1,0 +1,10 @@
+// TEST: A Float64 arrow read beside an Int64 argument is refused at that argument (rejects)
+// ERROR: BL3019 @ 9:23
+// ERROR-CONTAINS: Int64 + Float64 is Float64
+// ============================================================================
+// At the array instance `g([1.0, 2.0], ..)` the read `c(0)` is a Float64 and
+// `x` is still the generic parameter: an Int64 `x` would make the T-typed sum
+// truncate, exactly as `addone(3)` over `x: T` (functions/229). Refused at the
+// `7` that made `x` an Int64 -- convert it: `g([1.0, 2.0], 7.0)`.
+function g(c, x) = c(0) + x
+let r = g([1.0, 2.0], 7)
