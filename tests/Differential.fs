@@ -152,7 +152,9 @@ let private diffCaseAntisymReynolds (outputDir: string) : bool =
         // random integer-valued A (keeps float printing exact)
         let a = [| for _ in 1 .. n -> float (rng.Next(1, 7)) |]
         let expected = oracleAntisymReynolds a r kFs
-        let aLit = a |> Array.map (sprintf "%g") |> String.concat ", "
+        // FLOAT spelling (`2.0`, not `2`): a bare `2` is an Int64 literal, which
+        // would make A an Int64 array and the kernels Int64 (or Int/Float mixes).
+        let aLit = a |> Array.map floatPin |> String.concat ", "
         let paramList = (["x"; "y"; "z"; "w"; "u"] |> List.take r) |> String.concat ", "
         let arrArgs = List.replicate r "A" |> String.concat ", "
         let expectedLit = expected |> List.map floatPin |> String.concat ", "
@@ -207,7 +209,9 @@ let private diffCaseDecompact (outputDir: string) : bool =
     // --- symmetric & antisym (real), several random A ---
     for n in [ 3; 4; 5 ] do
         let a = [| for _ in 1 .. n -> float (rng.Next(1, 7)) |]
-        let aLit = a |> Array.map (sprintf "%g") |> String.concat ", "
+        // FLOAT spelling (`2.0`, not `2`): a bare `2` is an Int64 literal, which
+        // would make A an Int64 array and the kernels Int64 (or Int/Float mixes).
+        let aLit = a |> Array.map floatPin |> String.concat ", "
         let g = fun (v: float[]) -> 2.0*v.[0] + v.[1]
         // SYMMETRIC: dense[i][j] = src[min,max]
         let symSrc = oracleSymReynolds2 a g
