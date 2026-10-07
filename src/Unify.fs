@@ -578,6 +578,12 @@ type TypeError =
     /// permission that parameter implies (formalism 2.7: only `let mut`
     /// is mut-passable). `got` renders what was actually passed.
     | MutArgNotPassable of func: string * argIndex: int * got: string
+    /// A closure that shares a REBOUND local binding with the scope defining
+    /// it (by reference: copying it would split one variable into two) used
+    /// where it could outlive that scope. `what` names the closure, `captured`
+    /// the rebound binding, `pos` completes "... cannot be used <pos>".
+    /// TypeCheckValidate.collectMutCaptureEscapes.
+    | MutCaptureEscapes of what: string * captured: string * pos: string
     // Mutual-group binding / constraint violations (BL4006)
     | MutualBindJointly of typeName: string * describe: string * lowerNames: string
     | MutualDirectElementsOnly of describe: string

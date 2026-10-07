@@ -1216,6 +1216,8 @@ complex half)." where_
     | MutArgNotPassable (func, argIndex, got) ->
         $"function '{func}': argument {argIndex} is passed to a `mut` parameter, which writes back into the caller's array, but {got}. Only a `let mut` binding (or another `mut` parameter being forwarded) may be passed there -- declare it `let mut`, or drop `mut` from the parameter if the callee does not write to it."
     | MutParamNotArray (func, param) -> $"function '{func}': parameter '{param}' is `mut` but not array-typed. Only array parameters can be mutated in place (scalars pass by value); return the new scalar instead."
+    | MutCaptureEscapes (what, captured, pos) ->
+        $"{what} cannot be used {pos}: it captures '{captured}', which is reassigned, so the closure shares that variable with the scope that defines it rather than holding a copy -- and that scope ends while the closure could still be called. Call it, or use it as a kernel, inside the scope that defines '{captured}'; to carry state out, return the updated value (or a tuple of values) instead of a closure that updates it."
     | MutualBindJointly (typeName, describe, lowerNames) -> $"type '{typeName}' belongs to mutual group ({describe}); bind the group jointly: let ({lowerNames}): ({describe}) = ..."
     | MutualDirectElementsOnly describe -> $"mutual member types (group {describe}) may appear only as direct elements of a joint tuple annotation"
     | MutualMixedGroups -> "annotation mixes members of different mutual groups"
@@ -1505,7 +1507,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             | StackNeedsArrays _ | StackShapeMismatch _ | JoinNeedsArrays _
             | JoinDimRange _ | JoinShapeMismatch _ | StackJoinCompactSlot _ -> "BL4004"
             | ImmutableStaticAssign _ | MutParamNotArray _ | MutAssignRefused _
-            | MutArgNotPassable _ | MutArgAliased _ -> "BL4005"
+            | MutArgNotPassable _ | MutArgAliased _ | MutCaptureEscapes _ -> "BL4005"
             | MutualBindJointly _ | MutualDirectElementsOnly _ | MutualMixedGroups
             | MutualDuplicateMember _ | MutualIncompleteAnnotation _ | MutualJointAnnotationOnly _
             | MutualParamMemberType _ | MutualBindTuple _ | MutualReturnTupleElements _

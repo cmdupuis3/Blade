@@ -1,0 +1,20 @@
+// TEST: a closure returned through two function frames
+// `outer` returns what `inner` returned; `wrap` returns a closure that
+// captures a closure; `nest` returns a nested named function. Every frame
+// that made a capture is gone by the time the closure is called.
+function inner(a: Int64) = lambda(x: Int64) -> x + a
+function outer(b: Int64) = inner(b * 2)
+function wrap(b: Int64) = {
+    let f = inner(b)
+    lambda(x: Int64) -> f(x) * 10
+}
+function nest(a: Int64) = {
+    function scaled(x: Int64) -> Int64 = x * 100 + a
+    scaled
+}
+let r1 = outer(5)(1)
+let r2 = wrap(3)(4)
+let r3 = nest(7)(3)
+// EXPECT: r1 = 11
+// EXPECT: r2 = 70
+// EXPECT: r3 = 307

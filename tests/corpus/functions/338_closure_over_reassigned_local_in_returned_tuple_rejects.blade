@@ -1,0 +1,10 @@
+// TEST: a closure over a reassigned local stored in a returned tuple (rejects)
+// ERROR: BL4005 @ 7:6
+// Storing the closure is as much an escape as returning it: the tuple leaves
+// the frame that owns `n`.
+function counter(start: Int64) = {
+    let mut n = start
+    n = n + 1
+    (lambda(k: Int64) -> n + k, 0)
+}
+let t = counter(10)

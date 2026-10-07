@@ -1,0 +1,15 @@
+// TEST: a returned closure that reassigns a captured local (rejects)
+// ERROR: BL4005 @ 11:5
+// `bump` shares `n` with counter's frame -- it writes it, so it cannot hold
+// a copy -- and that frame ends when `bump` is returned. The compiled lane
+// used to return a closure over a dead `n`.
+function counter(start: Int64) = {
+    let mut n = start
+    let bump = lambda(k: Int64) -> {
+        n = n + k
+        n
+    }
+    bump
+}
+let c = counter(10)
+let r = c(1)

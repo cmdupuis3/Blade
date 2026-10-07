@@ -367,6 +367,12 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // std::function/partial-application residue. Pure codegen string checks
     // — no toolchain — so it runs unconditionally.
     let factoryFlat = Blade.Tests.Functions.runFactoryFlattenTests ()
+    // Closure capture emission: a closure VALUE copies its captures, a
+    // consumer-local kernel wrapper and a closure over a reassigned binding
+    // keep `[&]`. The corpus pins the values; only the emitted text shows the
+    // capture each site chose. Pure codegen string checks -- no toolchain.
+    // (Also `blade test closure-capture`.)
+    let closureCapture = Blade.Tests.Functions.runClosureCaptureEmissionTests ()
     // Gather elision: a group_by whose every consumer reads only extents(row)
     // skips the per-group allocation and the O(n) copy. The corpus pins the
     // values on both sides of that decision; only an emission-shape check can
@@ -529,7 +535,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield treeRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield gatherElision; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

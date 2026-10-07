@@ -1,0 +1,12 @@
+// TEST: a returned closure reading a local its scope reassigns (rejects)
+// ERROR: BL4005 @ 9:5
+// The closure only READS `n`, but the scope writes it after the closure is
+// made, so the closure must see the write -- it shares `n` rather than
+// copying it, and so cannot outlive the frame that owns `n`.
+function reader(start: Int64) = {
+    let mut n = start
+    let peek = lambda(k: Int64) -> n + k
+    n = n * 2
+    peek
+}
+let p = reader(10)

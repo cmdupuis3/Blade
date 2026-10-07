@@ -93,3 +93,82 @@ let runFactoryFlattenTests () : BlockResult =
       Failed = failed
       Skipped = 0
       FailedNames = failedNames }
+
+// ============================================================================
+// Closure capture emission (pure codegen string checks; no toolchain)
+// ============================================================================
+//
+// A closure VALUE copies its captures (`[=] ... mutable`) so it can outlive
+// the frame that made it; a consumer-local kernel wrapper keeps `[&]`; a
+// closure sharing a REBOUND binding keeps `[&]` (the type checker keeps it from
+// escaping). The corpus pins the values (functions/330-340); only the emitted
+// text shows which capture each site chose -- a `[&]` closure over a live
+// frame prints the same numbers as a `[=]` one.
+let runClosureCaptureEmissionTests () : BlockResult =
+    printHeader "Closure Capture Emission"
+    let mutable passed = 0
+    let mutable failed = 0
+    let mutable failedNames : string list = []
+    let check name cond detail =
+        if cond then
+            passed <- passed + 1
+            resultLine Pass name detail
+        else
+            failed <- failed + 1
+            failedNames <- failedNames @ [name]
+            resultLine Fail name detail
+    let src =
+        "function mk(i: Int64) = lambda(j: Int64) -> Float64(i * 10 + j)\n"
+        + "function relay(i: Int64) = {\n"
+        + "    let f = lambda(j: Int64) -> i + j\n"
+        + "    f\n"
+        + "}\n"
+        + "function weighted(v: Array<Float64 like Idx<4>>, s: Float64) = reduce(v, lambda(a, b) -> a + b * s)\n"
+        + "function tally(x: Float64) = {\n"
+        + "    let mut seen = 0.0\n"
+        + "    let bump = lambda(d: Float64) -> {\n"
+        + "        seen = seen + d\n"
+        + "        seen\n"
+        + "    }\n"
+        + "    bump(x) + bump(x)\n"
+        + "}\n"
+        + "let r = mk(2)(3)\n"
+        + "let r2 = relay(4)(5)\n"
+        + "let r3 = weighted([1.0, 2.0, 3.0, 4.0], 0.5)\n"
+        + "let r4 = tally(1.5)\n"
+    match cppOf "closure_capture" src with
+    | Ok cpp ->
+        let lines = cpp.Split('\n') |> Array.map (fun l -> l.Trim())
+        let lineWith (needle: string) = lines |> Array.tryFind (fun l -> l.Contains needle)
+        let show = function Some (l: string) -> l | None -> "<no such line>"
+        // The returned closure: its own copy of `i`.
+        let ret = lineWith "return __lambda_" |> Option.filter (fun l -> l.StartsWith "return [")
+        check "a returned closure copies its captures ([=] ... mutable)"
+            (match ret with Some l -> l.StartsWith "return [=](int64_t j) mutable {" | None -> false)
+            (show ret)
+        // The let-bound closure that is then returned: same rule.
+        let letBound = lines |> Array.tryFind (fun l -> l.Contains "= [" && l.Contains "(int64_t j)" && not (l.StartsWith "return"))
+        check "a let-bound closure value copies its captures"
+            (match letBound with Some l -> l.Contains "= [=](int64_t j) mutable {" | None -> false)
+            (show letBound)
+        // The reduce kernel: consumer-local, by reference.
+        let wrap = lineWith "auto __wrap_" |> Option.filter (fun l -> l.Contains ", s)")
+        check "a non-escaping kernel wrapper keeps [&]"
+            (match wrap with Some l -> l.Contains "= [&](double a, double b) { return __lambda_" | None -> false)
+            (show (lineWith "auto __wrap_"))
+        // The closure sharing the reassigned `seen`: by reference.
+        let shared = lines |> Array.tryFind (fun l -> l.Contains "(double d)" && l.Contains "= [")
+        check "a closure over a reassigned binding keeps [&]"
+            (match shared with Some l -> l.Contains "= [&](double d) {" | None -> false)
+            (show shared)
+        check "no closure value captures by reference except the shared one"
+            (lines |> Array.filter (fun l -> l.Contains "[&](" && l.Contains "return __lambda_" && not (l.Contains "__wrap_"))
+                   |> Array.length = 1)
+            ""
+    | Error e ->
+        check "closure capture source lowers + generates" false e
+    { Block = "Closure Capture Emission"
+      Passed = passed
+      Failed = failed
+      Skipped = 0
+      FailedNames = failedNames }

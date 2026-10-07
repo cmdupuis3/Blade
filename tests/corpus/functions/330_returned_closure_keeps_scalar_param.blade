@@ -1,0 +1,15 @@
+// TEST: a closure returned from a function keeps its captured parameter
+// The closure outlives mk's frame, so it holds its own copy of `i`. The
+// compiled lane used to capture the parameter by reference and read it after
+// mk had returned: `mk(2)(3)` printed 3 there and 23 in the interpreter.
+function mk(i: Int64) = lambda(j: Int64) -> Float64(i * 10 + j)
+function mk_half(i: Int64) = lambda(j: Int64) -> Float64(i * 10 + j) + 0.5
+let r = mk(2)(3)
+let f = mk(4)
+let g = mk_half(7)
+// Two closures from separate calls each keep their own `i`.
+let r2 = f(1) + g(5)
+let r3 = mk(9)(9) - f(0)
+// EXPECT: r = 23
+// EXPECT: r2 = 116.5
+// EXPECT: r3 = 59

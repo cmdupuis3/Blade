@@ -1,0 +1,15 @@
+// TEST: a closure returned from a function keeps reading its captured array
+// The closure copies the array's wrapper, not its cells; the storage it reads
+// must outlive every frame the closure leaves. `build` makes the array as a
+// temporary of its OWN frame, hands it to `scaler`, and returns the closure:
+// both frames are gone before `g` is called.
+function scaler(v: Array<Float64 like Idx<3>>) = lambda(k: Float64) -> reduce(v, (+)) * k
+function build(n: Float64) = scaler([1.0, 2.0, 3.0] * n)
+let f = scaler([1.0, 2.0, 3.5])
+let g = build(2.0)
+let r1 = f(2.0)
+let r2 = g(0.5)
+let r3 = build(3.0)(1.0) + g(1.0)
+// EXPECT: r1 = 13
+// EXPECT: r2 = 6
+// EXPECT: r3 = 30

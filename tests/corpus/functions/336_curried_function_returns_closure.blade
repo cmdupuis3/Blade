@@ -1,0 +1,18 @@
+// TEST: a curried function returns a closure over its first argument
+// `add(a)` is the textbook curried adder, unannotated; `add_to(k)` returns a
+// partial application of a two-argument function, which is a closure over
+// `k` too; `pipeline` returns a composition of two closures.
+function add(a) = lambda(b) -> a + b
+function add2(a: Float64, b: Float64) = a + b
+function add_to(k: Float64) = add2(k)
+function pipeline(a: Float64, b: Float64) = (lambda(x: Float64) -> x + a) >> (lambda(y: Float64) -> y * b)
+let add3 = add(3.0)
+let r1 = add3(4.0)
+let r2 = add(1.5)(2.0)
+let r3 = add_to(0.25)(1.0)
+let h = pipeline(1.0, 3.0)
+let r4 = h(2.0)
+// EXPECT: r1 = 7
+// EXPECT: r2 = 3.5
+// EXPECT: r3 = 1.25
+// EXPECT: r4 = 9

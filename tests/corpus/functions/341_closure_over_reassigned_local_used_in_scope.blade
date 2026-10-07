@@ -1,0 +1,38 @@
+// TEST: a closure over a reassigned local, used where it is defined
+// A closure that writes a captured binding SHARES it with its scope, so it is
+// called (or used as a kernel) inside that scope -- all legal, and the writes
+// land. At module level the scope is the whole program, so a block may hand
+// such a closure to a module binding.
+function tally(v: Array<Float64 like Idx<4>>) = {
+    let mut seen = 0.0
+    let bump = lambda(x: Float64) -> {
+        seen = seen + x
+        seen
+    }
+    let a = bump(v(0))
+    let b = bump(v(1))
+    seen + a + b
+}
+function ksum(v: Array<Float64 like Idx<4>>) = {
+    let mut acc = 0.0
+    let w = method_for(v) <@> lambda(x) -> {
+        acc = acc + x
+        x * 2.0
+    } |> compute
+    acc + reduce(w, (+))
+}
+let r1 = tally([1.0, 2.0, 3.0, 4.0])
+let r2 = ksum([1.0, 2.0, 3.0, 4.0])
+let c = {
+    let mut n = 10
+    lambda(k: Int64) -> {
+        n = n + k
+        n
+    }
+}
+let r3 = c(1)
+let r4 = c(5)
+// EXPECT: r1 = 7
+// EXPECT: r2 = 30
+// EXPECT: r3 = 11
+// EXPECT: r4 = 16

@@ -1976,6 +1976,7 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
     freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
+    freshCell reboundVarIdsStorage (computeReboundVarIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()
@@ -2103,6 +2104,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
     freshCell freshReturnFactsStorage (computeFreshReturnFacts modul)
     freshCell copyInPlaceMutsStorage (computeCopyInPlaceMuts modul)
     freshCell groupedCaptureFactsStorage (computeGroupedCaptureFacts modul)
+    freshCell reboundVarIdsStorage (computeReboundVarIds modul)
     // Also after the callables table: kernel bodies are resolved through it.
     freshCell extentsOnlyGroupBysStorage (computeExtentsOnlyGroupBys modul)
     resetAllocScopeStack ()

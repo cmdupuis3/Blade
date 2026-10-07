@@ -593,7 +593,12 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let groupKeysErrors =
         zonked.Decls |> List.collect declGroupKeysRoots
                      |> List.collect (fun (pos, e) -> collectGroupKeysEscapes currentEnv.Subst pos e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ writeErrors @ groupKeysErrors)
+    // Escaping closures that share a reassigned local (collectMutCaptureEscapes):
+    // structural, so it runs even when the module already has errors.
+    let mutCaptureErrors =
+        zonked.Decls |> List.collect declMutCaptureRoots
+                     |> List.collect (fun (pos, e) -> collectMutCaptureEscapes currentEnv.Subst pos e)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ writeErrors @ groupKeysErrors @ mutCaptureErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

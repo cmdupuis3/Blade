@@ -1,0 +1,28 @@
+// TEST: a closure returned from a function keeps its captured local bindings
+// A scalar `let` and an array computed inside the function body: the closure
+// copies the scalar and the array's wrapper, and the array's storage is not
+// freed when the frame exits (the closure still reads it). `relay` names the
+// closure with a `let` before returning it -- the same rule.
+function mk(i: Int64) = {
+    let base = i * 100
+    lambda(j: Int64) -> base + j
+}
+function summer(n: Float64) = {
+    let v = [1.0, 2.0, 3.0] * n
+    lambda(k: Float64) -> reduce(v, (+)) + k
+}
+function relay(n: Float64) = {
+    let w = [4.0, 5.0] * n
+    let f = lambda(k: Float64) -> reduce(w, (+)) * k
+    f
+}
+let r1 = mk(4)(5)
+let s = summer(2.0)
+let t = relay(1.5)
+let r2 = s(0.5)
+let r3 = t(2.0)
+let r4 = summer(3.0)(1.0) + s(0.0)
+// EXPECT: r1 = 405
+// EXPECT: r2 = 12.5
+// EXPECT: r3 = 27
+// EXPECT: r4 = 31

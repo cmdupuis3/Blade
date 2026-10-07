@@ -1,0 +1,15 @@
+// TEST: two closures returned from one call share nothing they must not
+// Both closures capture the same parameter `a`, and the first also a local;
+// each holds its own copy, so both still read 3.0 after `pair` has returned.
+function pair(a: Float64) = {
+    let lo = a - 1.0
+    (lambda(x: Float64) -> x + lo, lambda(x: Float64) -> x * a)
+}
+let (p, q) = pair(3.0)
+let r1 = p(0.25)
+let r2 = q(0.5)
+let (u, v) = pair(10.0)
+let r3 = p(1.0) + u(1.0) + q(1.0) + v(1.0)
+// EXPECT: r1 = 2.25
+// EXPECT: r2 = 1.5
+// EXPECT: r3 = 26

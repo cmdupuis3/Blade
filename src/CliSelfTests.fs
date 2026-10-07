@@ -3493,6 +3493,12 @@ and internal dispatchTestClean (rest: string list) : int =
         // run for real but machine-dependent statuses are not asserted.
         let failed = (Blade.Tests.DoctorTests.runDoctorTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "closure-capture" ] ->
+        // Which capture each closure site emits: a closure VALUE copies
+        // (`[=] ... mutable`), a kernel wrapper and a closure over a
+        // reassigned binding keep `[&]`. Pure codegen string checks.
+        let failed = (Blade.Tests.Functions.runClosureCaptureEmissionTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "setup" ] ->
         // `blade setup`'s pure halves: argument parsing + the toolchain-file
         // merge/remove roundtrip. No network, no git, no make.

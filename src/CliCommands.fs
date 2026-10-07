@@ -14,7 +14,7 @@ let compilerVersion = Blade.RunRecord.bladeVersion
 /// and a sample of the corpus-category keys (one per tests/corpus/<dir>;
 /// multiword ones also accept the unhyphenated spelling). Listed for `--help`.
 let internal usageTestBlockKeys =
-    [ "access"; "alloc"; "attrs"; "cli"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
+    [ "access"; "alloc"; "attrs"; "cli"; "closure-capture"; "corpus-wiring"; "csv"; "cuda"; "diagnostics"; "display-frames"
       "docs"; "doctor"
       "flatpath"; "gr-render"; "hybrid"; "icechunk"; "ide-cells"; "ide-eval"; "ide-references"
       "ide-serve"; "lapack"; "lietables"; "linalg"; "llvm"; "llvm-bench"; "module-resolve"; "mpi"

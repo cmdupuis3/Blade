@@ -3388,8 +3388,27 @@ let computeScopeEscapes (ctx: CodeGenContext) (kind: ScopeKind) (scopeLets: (IRI
     // Seed 2 -- captures. A step function's `[&]` capture of an outer mut (and
     // any kernel lambda's captures) keeps reading that storage after the scope's
     // own use of it ends.
+    // The RETURN expression counts too: a closure returned from the function
+    // (`function mk(n) = { let v = ...; lambda(k) -> reduce(v, (+)) + k }`)
+    // copies v's wrapper and keeps reading v's pool after the frame is gone
+    // (CodeGenExprSupport, "CLOSURE VALUES CAPTURE BY VALUE"); the return
+    // seed below only sees the callable's id, not what it captured. Only a
+    // return whose TYPE can hold a function can carry a closure out: a kernel
+    // lambda inside a scalar or array-of-scalars return is dead when the
+    // frame ends, and pinning its captures would leak per call.
+    let rec carriesFn (t: IRType) =
+        match t with
+        | IRTScalar _ | IRTUnit | IRTIdxTagged _ -> false
+        | IRTUnitAnnotated (inner, _) -> carriesFn inner
+        | ArrayElem at -> carriesFn at.ElemType
+        | IRTTuple ts -> ts |> List.exists carriesFn
+        | _ -> true
+    let retSubs =
+        match kind with
+        | FuncScope (Some retExpr) when carriesFn (inferExprType retExpr) -> allSubExprs retExpr
+        | _ -> []
     let captureSeeds =
-        subs |> List.collect (fun e ->
+        subs @ retSubs |> List.collect (fun e ->
             match resolveCallable e with
             | Some c -> c.Captures |> List.map (_.Id)
             | None -> [])

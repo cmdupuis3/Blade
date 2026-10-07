@@ -83,6 +83,9 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // in any scope where the captured locals are visible (i.e. wherever
         // the lambda literal / partial application appeared). Capture-free
         // callables keep the bare name (a plain function converts fine).
+        // The closure is a VALUE that may outlive this frame (returned,
+        // stored in a tuple, passed on), so it copies its captures unless
+        // one is rebound (closureValueCapture).
         // The `callable.Id = id` guard matters: resolveCallable also sees
         // THROUGH let-aliases, but an alias var is already a std::function
         // of the surface arity with captures closed (genVarAliasBinding) --
@@ -102,7 +105,8 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
                 (callable.Params |> List.map (_.Name))
                 @ (captureForwardArgs names callable.Captures)
                 |> String.concat ", "
-            $$"""[&]({{paramSig}}) { return {{safeName}}({{allArgs}}); }"""
+            let (clause, spec) = closureValueCapture callable.Captures
+            $$"""{{clause}}({{paramSig}}){{spec}} { return {{safeName}}({{allArgs}}); }"""
         | _ ->
             match Map.tryFind id names with
             | Some name ->
@@ -522,10 +526,25 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
             | _ -> "0.0"
         $"({condStr} ? {bodyStr} : {zeroStr})"
     | IRCompose (f, g) ->
-        // f >> g = [&](auto... args) { return g(f(args...)); }
+        // f >> g = [=](auto... args) mutable { return g(f(args...)); }
+        // A composition is a closure VALUE like any other (it may be
+        // returned), so it copies what its operands name -- unless one of
+        // them shares a REBOUND binding, which must stay one variable
+        // (closureValueCapture; the type checker keeps such a composition
+        // from escaping). The operands' own captures count: an operand
+        // closure rendered inside the body reads the names it forwards.
         let fStr = exprToCppCore subst names f
         let gStr = exprToCppCore subst names g
-        $$"""[&](auto... __args) { return {{gStr}}({{fStr}}(__args...)); }"""
+        let named =
+            [f; g] |> List.collect (fun op ->
+                let caps = ResizeArray<IRId>()
+                iterIRExpr (fun e ->
+                    match resolveCallable e with
+                    | Some c -> c.Captures |> List.iter (fun cap -> caps.Add cap.Id)
+                    | None -> ()) op
+                (collectVarRefsIR op |> Set.toList) @ List.ofSeq caps)
+        let (clause, spec) = closureValueCaptureOf named
+        $$"""{{clause}}(auto... __args){{spec}} { return {{gStr}}({{fStr}}(__args...)); }"""
     | IRComposeObj (f, g) ->
         exprError "compose_obj in expression position"
     | IRComposeMeth (f, g) ->

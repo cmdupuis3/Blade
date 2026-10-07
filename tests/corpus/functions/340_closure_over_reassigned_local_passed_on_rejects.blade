@@ -1,0 +1,14 @@
+// TEST: a closure over a reassigned local passed where it can be kept (rejects)
+// ERROR: BL4005 @ 11:10
+// `keep` returns the function it is given, so an argument whose call result
+// can hold a function is an escape route like any other.
+function keep(f: Int64 -> Int64) = f
+function counter(start: Int64) = {
+    let mut n = start
+    let bump = lambda(k: Int64) -> {
+        n = n + k
+        n
+    }
+    keep(bump)
+}
+let c = counter(1)

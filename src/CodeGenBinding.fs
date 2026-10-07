@@ -4240,7 +4240,11 @@ and genVarAliasBinding (ctx: CodeGenContext) (binding: IRBinding) (builder: IRBu
                 | t -> irTypeToCpp t
             let funcTypeStr =
                 $"""std::function<{retTypeStr}({(String.concat ", " paramTypes)})>"""
-            let code = [$$"""{{ind}}{{funcTypeStr}} {{name}} = [&]({{paramSig}}) { return {{safeName}}({{allArgs}}); };"""]
+            // The binding is a closure VALUE (it may be returned or stored),
+            // so it copies its captures unless one is rebound
+            // (closureValueCapture, "CLOSURE VALUES CAPTURE BY VALUE").
+            let (clause, spec) = closureValueCapture callable.Captures
+            let code = [$$"""{{ind}}{{funcTypeStr}} {{name}} = {{clause}}({{paramSig}}){{spec}} { return {{safeName}}({{allArgs}}); };"""]
             let ctx' = addVarName binding.Id name ctx
             (capForceCode @ code, ctx')
         | None ->

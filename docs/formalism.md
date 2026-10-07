@@ -962,6 +962,23 @@ would be a data race (BL4005). A serial body's write to a captured `let mut`
 ordered side effect; the optimizer treats such calls as barriers (CSE never
 merges across them).
 
+A lambda is a value that may outlive the scope that made it: returned from a
+function (`function mk(i) = lambda(j) -> i * 10 + j`), stored in a tuple, array
+or struct, passed on. Its captures therefore have VALUE semantics -- the
+closure holds the captured bindings' values, so `mk(2)(3)` is 23 after `mk`
+has returned -- with one exception: a captured binding that is REASSIGNED (by
+the lambda or by its scope; an element store into an array is not a
+reassignment) is SHARED between the lambda and its scope, so each sees the
+other's writes. A lambda sharing a binding lives only as long as the scope
+that defines the binding: it may be called, used as a kernel, or named by a
+`let` used that way, but any use through which it could leave the scope --
+a function's result, a tuple/array/struct element, an argument to a call whose
+result can hold a function, an assigned value, a capture of another such
+lambda -- is refused (BL4005). Module scope lives as long as the program:
+sharing a module-level binding never limits a lambda, and a module-level
+`let`'s own value (`let c = { let mut n = 0; lambda(k) -> ... }`) is not an
+escape.
+
 A `where comm(x, y)` clause is TRUSTED when the body's symmetry cannot be
 decided, and REFUSED (BL4013) when it is refuted: by a proved sign law
 (antisymmetric body) or by a concrete counterexample -- the body evaluated at

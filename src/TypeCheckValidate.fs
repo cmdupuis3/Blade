@@ -546,6 +546,191 @@ let internal declGroupKeysRoots (decl: TypedDecl) : (string option * TypedExpr) 
     | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
     | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
 
+/// POST-ZONK SWEEP FOR ESCAPING SHARED-STATE CLOSURES (BL4005).
+///
+/// A closure VALUE copies what it captures (CodeGenExprSupport, "CLOSURE
+/// VALUES CAPTURE BY VALUE"), which is what lets `function mk(i) = lambda(j)
+/// -> i * 10 + j` outlive `mk`. The one capture it cannot copy is a binding
+/// that is REASSIGNED (`n = n + k`, by the closure or by its scope): the
+/// closure and the scope share that one variable -- the interpreter's shared
+/// cell, the compiled lane's `[&]` -- and a copy would silently split it in
+/// two. So such a closure lives exactly as long as the scope defining the
+/// variable, and this sweep refuses every use that could let it outlive that
+/// scope: returned (from a function or a block), placed in a tuple, array or
+/// struct, passed to a function whose result could carry it back, assigned,
+/// or captured in turn by a closure that escapes.
+///
+/// What stays legal is everything that runs the closure where it is defined:
+/// calling it, using it as a kernel (a combinator's result is an array or a
+/// scalar, which cannot carry a function), and naming it with a `let` that is
+/// itself only used that way. Positions are judged by TYPE: a node whose type
+/// cannot carry a function value (a scalar, an array of scalars, a tuple of
+/// those) cannot carry the closure out, so everything beneath it is blessed;
+/// any other node passes its position down.
+///
+/// "Reassigned" is the same predicate codegen keys `[&]` on
+/// (computeReboundVarIds): an assignment whose target bottoms out in the
+/// binding, except a store into an ARRAY element (a copied wrapper shares the
+/// cells, so it is still copyable). Only bindings LOCAL to the root are judged:
+/// a module-level binding lives as long as the program.
+let internal collectMutCaptureEscapes (subst: Subst) (rootPos: string option) (root: TypedExpr) : CompileError list =
+    // A type that may hold a function value somewhere inside it. Unknown and
+    // nominal shapes (structs, loop objects, computations) answer yes.
+    let rec carriesFn (t: IRType) =
+        match IR.stripUnits (subst.Resolve t) with
+        | IRTScalar _ | IRTUnit | IRTIdxTagged _ -> false
+        | ArrayElem at -> carriesFn at.ElemType
+        | IRTTuple ts -> ts |> List.exists carriesFn
+        | _ -> true
+    // Every expression and statement-carried expression, depth first.
+    let rec allExprs (e: TypedExpr) : TypedExpr seq =
+        seq { yield e
+              for c in typedExprChildren e do yield! allExprs c }
+    let all = allExprs root |> Seq.toList
+    let blockStmts =
+        all |> List.collect (fun e ->
+            match e.Kind with
+            | TExprBlock (stmts, _) ->
+                let rec flat (s: TypedStmt) =
+                    match s with
+                    | TStmtForIn (_, _, _, _, body) -> s :: (body |> List.collect flat)
+                    | _ -> [s]
+                stmts |> List.collect flat
+            | _ -> [])
+    // Bindings introduced inside the root.
+    let locals =
+        let fromExprs =
+            all |> List.collect (fun e ->
+                match e.Kind with
+                | TExprLet (_, id, _, _) -> [id]
+                | TExprLambda li -> li.Params |> List.map (_.VarId)
+                | TExprMatch (_, cases) ->
+                    cases |> List.collect (fun c -> c.Pattern.Bindings |> List.map (fun (_, id, _) -> id))
+                | _ -> [])
+        let fromStmts =
+            blockStmts |> List.collect (fun s ->
+                match s with
+                | TStmtLet b -> b.VarId :: (b.SubBindings |> List.map (fun (_, id, _) -> id))
+                | TStmtForIn (_, id, _, _, _) -> [id]
+                | _ -> [])
+        Set.ofList (fromExprs @ fromStmts)
+    // Bindings some assignment inside the root REBINDS.
+    let rec storeRoot (e: TypedExpr) : IRId option =
+        match e.Kind with
+        | TExprVar (_, id, _) -> Some id
+        | TExprField (b, _, _) | TExprTupleIndex (b, _) -> storeRoot b
+        | TExprIndex (b, _, _) | TExprApp (b, _) ->
+            (match subst.Resolve b.Type with
+             | ArrayElem _ -> None
+             | _ -> storeRoot b)
+        | _ -> None
+    let assignTargets =
+        (all |> List.choose (fun e -> match e.Kind with TExprAssign (l, _) -> Some l | _ -> None))
+        @ (blockStmts |> List.choose (fun s -> match s with TStmtAssign (l, _) -> Some l | _ -> None))
+    let shared =
+        assignTargets |> List.choose storeRoot |> Set.ofList |> Set.intersect locals
+    if Set.isEmpty shared then [] else
+    // Closures that share one of those bindings: a lambda capturing one, or
+    // capturing a let-bound closure that does (fixpoint over the let chain).
+    // Maps the closure's binding id to the shared variable's name.
+    let lets =
+        (all |> List.choose (fun e -> match e.Kind with TExprLet (_, id, v, _) -> Some (id, v) | _ -> None))
+        @ (blockStmts |> List.choose (fun s ->
+               match s with
+               | TStmtLet b when List.isEmpty b.SubBindings -> Some (b.VarId, b.Value)
+               | _ -> None))
+    let sharedNameOf (li: TypedLambdaInfo) (closures: Map<IRId, string>) : string option =
+        li.Captures |> List.tryPick (fun c ->
+            if Set.contains c.VarId shared then Some c.Name
+            else Map.tryFind c.VarId closures)
+    let rec viaValue (closures: Map<IRId, string>) (v: TypedExpr) : string option =
+        match v.Kind with
+        | TExprLambda li -> sharedNameOf li closures
+        | TExprVar (_, id, _) -> Map.tryFind id closures
+        // `f >> g` is a closure over its operands: it shares whatever they
+        // share, and it reads a reassigned function-typed operand by
+        // reference too (CodeGenExpr's IRCompose arm).
+        | TExprCompose (_, l, r) ->
+            [l; r] |> List.tryPick (fun op ->
+                match op.Kind with
+                | TExprVar (n, id, _) when Set.contains id shared -> Some n
+                | _ -> viaValue closures op)
+        // A loop object carries its kernel.
+        | TExprObjectFor info -> viaValue closures info.Kernel
+        | _ -> None
+    let rec fix (closures: Map<IRId, string>) =
+        let next =
+            lets |> List.fold (fun m (id, v) ->
+                if Map.containsKey id m then m
+                else match viaValue m v with Some n -> Map.add id n m | None -> m) closures
+        if next.Count = closures.Count then closures else fix next
+    let closures = fix Map.empty
+    let describe (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) -> $"the closure '{n}'"
+        | _ -> "this closure"
+    let rec walk (pos: string option) (e: TypedExpr) : CompileError list =
+        match pos, viaValue closures e with
+        | Some phrase, Some captured ->
+            [ { Error = MutCaptureEscapes (describe e, captured, phrase); Span = e.Span; Context = []; Code = None } ]
+        | _ ->
+        // Below a node that cannot carry a function, nothing can escape.
+        let down (phrase: string) (t: IRType) = if carriesFn t then Some phrase else None
+        // A `let` may NAME a closure (the closure map tracks the name from
+        // then on); any other function-carrying value is judged as escaping
+        // into the binding, since the map cannot follow it through a block,
+        // a branch or a call.
+        let letPos (v: TypedExpr) =
+            match v.Kind with
+            | TExprLambda _ | TExprVar _ | TExprCompose _ | TExprObjectFor _ -> None
+            | _ -> down "as another binding's value" v.Type
+        let kids : (string option * TypedExpr) list =
+            match e.Kind with
+            | TExprApp (f, args) ->
+                (None, f) :: (args |> List.map (fun a -> (down "as a function argument" e.Type, a)))
+            | TExprLambda li ->
+                [ (down "as a closure's result value" li.Body.Type, li.Body) ]
+            // Closure-carrying values the map tracks as a whole (viaValue):
+            // their operands are judged through the value itself.
+            | TExprCompose (_, l, r) -> [ (None, l); (None, r) ]
+            | TExprObjectFor info -> [ (None, info.Kernel) ]
+            | TExprLet (_, _, v, b) -> [ (letPos v, v); (pos, b) ]
+            | TExprIf (c, t, f) -> [ (None, c); (pos, t); (pos, f) ]
+            | TExprMatch (s, cases) ->
+                (None, s) :: (cases |> List.collect (fun c ->
+                    (pos, c.Body) :: (c.Guard |> Option.toList |> List.map (fun g -> (None, g)))))
+            | TExprAssign (l, r) -> [ (None, l); (Some "as an assigned value", r) ]
+            | TExprTuple es -> es |> List.map (fun x -> (Some "as a tuple element", x))
+            | TExprArrayLit (es, _) -> es |> List.map (fun x -> (Some "as an array element", x))
+            | TExprStruct (_, fields) -> fields |> List.map (fun (_, x) -> (Some "as a struct field", x))
+            | TExprBlock (stmts, final) ->
+                let rec ofStmt (s: TypedStmt) : (string option * TypedExpr) list =
+                    match s with
+                    | TStmtLet b when List.isEmpty b.SubBindings -> [ (letPos b.Value, b.Value) ]
+                    | TStmtLet b -> [ (down "as another binding's value" b.Value.Type, b.Value) ]
+                    | TStmtAssign (l, r) -> [ (None, l); (Some "as an assigned value", r) ]
+                    | TStmtExpr x -> [ (None, x) ]
+                    | TStmtForIn (_, _, lo, hi, body) ->
+                        (None, lo) :: (None, hi) :: (body |> List.collect ofStmt)
+                (stmts |> List.collect ofStmt) @ (final |> Option.toList |> List.map (fun x -> (pos, x)))
+            | _ -> typedExprChildren e |> List.map (fun x -> (down "in this position" e.Type, x))
+        kids |> List.collect (fun (p, x) -> walk p x)
+    walk rootPos root
+
+/// Declaration entry points for the sweep above: a function body (or method)
+/// is a returning position. A module-level `let`'s value is NOT: its block is
+/// flattened into main()'s own scope (genLetChainBinding), which lives as long
+/// as the program, so `let c = { let mut n = 0; lambda(k) -> ... }` shares a
+/// variable that never dies. Positions INSIDE it are still judged (a closure
+/// in a tuple, an argument, a nested function body).
+let internal declMutCaptureRoots (decl: TypedDecl) : (string option * TypedExpr) list =
+    let ofFunc (f: TypedFunctionDecl) = [(Some "as a function's return value", f.Body)]
+    match decl with
+    | TDeclLet b | TDeclStatic b -> [(None, b.Value)]
+    | TDeclFunction f -> ofFunc f
+    | TDeclImpl impl -> impl.Methods |> List.collect ofFunc
+    | TDeclType _ | TDeclInterface _ | TDeclUnit _ | TDeclImport _ -> []
+
 /// POST-ZONK SUBSCRIPT SWEEP -- the late half of the subscript judgment
 /// (formalism 3.10), whose eager half is `checkArrayIndexTags`. The eager
 /// half sees a kernel parameter or an unannotated function parameter while it
