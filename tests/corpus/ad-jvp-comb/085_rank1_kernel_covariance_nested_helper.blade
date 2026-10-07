@@ -22,7 +22,10 @@ import ad as ad
 type R = Idx<2>
 type C = Idx<3>
 
-function mean(row: T^1) -> T^0 = reduce(row, (+)) / Float64(extents(row))
+// The count in the row's own class (`row ^ 0` is a row of ones of its element
+// type): the mean stays the row's element type, as `/ extents(row)` typed it
+// before formalism 2.4 refused the Int64 divisor.
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 
 function covariance(x: T^1, y: T^1) -> T^0 = mean((x - mean(x)) * (y - mean(y)))
 

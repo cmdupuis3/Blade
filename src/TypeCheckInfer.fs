@@ -7109,27 +7109,6 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                 List.exists isTop paramTys
                                 && sigTys |> List.forall (fun t ->
                                     isTop t || not ((freeInferVars env.Subst t).Contains vid))
-                            // ...or a parameter array's ELEMENT variable (the
-                            // `reduce(xs, (+))` of an `xs: T^1`): a scalar at
-                            // every instance, and under the mixing rule
-                            // (formalism 2.4) beside a real scalar it computes
-                            // in its own type at every instance a call admits
-                            // (GOPromotion refuses the rest) -- the promotion
-                            // table's Float64 answer was wrong at a complex
-                            // row (`reduce(zs, (+)) / Float64(n)`).
-                            let paramElem (vid: int) =
-                                let sigTys =
-                                    env.CurrentSignature
-                                    |> List.map (fun t -> env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits)
-                                let paramTys =
-                                    if sigTys.IsEmpty then [] else List.take (sigTys.Length - 1) sigTys
-                                paramTys |> List.exists (fun t ->
-                                    match t with
-                                    | ArrayElem arr ->
-                                        (match env.Subst.Resolve (IR.stripUnits arr.ElemType) |> IR.stripUnits with
-                                         | IRTInfer r -> r = vid
-                                         | _ -> false)
-                                    | _ -> false)
                             let sigVar (t: IRType) =
                                 match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
                                 | IRTInfer vid when env.Subst.IsPolymorphicId vid
@@ -7141,8 +7120,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                                     // (`Float64(x) * 0.5`): the
                                                     // same open shape, its element
                                                     // the cast's target.
-                                                    && (sigTop vid || (env.Subst.GetElemCast vid).IsSome
-                                                        || paramElem vid) -> Some vid
+                                                    && (sigTop vid || (env.Subst.GetElemCast vid).IsSome) -> Some vid
                                 | _ -> None
                             let realScalar (te: TypedExpr) =
                                 match IR.stripUnits (env.Subst.Resolve te.Type) with
@@ -7231,6 +7209,31 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         | ArrayElem arr, other when unboundVar other -> reshape arr
                         | other, ArrayElem arr when unboundVar other -> reshape arr
                         | _ -> resTy0
+                // A generic ELEMENT variable (an array parameter's cell, the
+                // `reduce(row, (+))` of a `row: T^1`) beside a concrete real
+                // scalar keeps the promotion rules' SCALAR result (`/ 2.0`
+                // types Float64). That is exact only at the instances whose
+                // element promotes to that scalar -- a complex row's quotient
+                // is complex, and would reach g++ as a Complex128 in a
+                // Float64 slot (BL9002) -- so record what each call must keep
+                // true (GOBroadcastElem, judged per instance); the mixing
+                // rule's own GOPromotion refuses the integer instances.
+                (if mode = Elementwise && not env.InLambdaBody then
+                    match env.CurrentGenericObligations, binOpMixName op, IR.stripUnits (env.Subst.Resolve resTy) with
+                    | Some acc, Some opName, IRTScalar result when op <> OpCaret && result <> ETBool ->
+                        let elemVar (t: IRType) =
+                            match IR.stripUnits (env.Subst.Resolve t) with
+                            | IRTInfer v when env.Subst.IsPolymorphicId v && (env.Subst.GetElemCast v).IsNone
+                                              && (env.Subst.GetLiteralDefault v).IsNone -> Some v
+                            | _ -> None
+                        let partner (t: IRType) =
+                            match IR.stripUnits (env.Subst.Resolve t) with
+                            | IRTScalar et when et <> ETBool && et <> ETString -> Some et
+                            | _ -> None
+                        (match elemVar tL.Type, partner tR.Type, elemVar tR.Type, partner tL.Type with
+                         | Some v, Some p, _, _ | _, _, Some v, Some p -> acc.Add(GOBroadcastElem (v, opName, p, result))
+                         | _ -> ())
+                    | _ -> ())
                 // THE conversion seam. `*` and `/` need nothing: unitMul and
                 // unitDiv fold the magnitudes into the result TYPE, so the
                 // emitted code is untouched. Only the ops that require two

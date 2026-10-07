@@ -729,7 +729,7 @@ let private runStrictPinTests () : TH.BlockResult =
         TH.resultLine outcome name detail
         results.Add((name, outcome))
     let unpinned =
-        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+        "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
          let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
@@ -885,7 +885,7 @@ let private runSurfacingTests () : TH.BlockResult =
         results.Add((name, outcome))
     // The strict-pins `unpinned` twin (earns a BL4010 storage suggestion).
     let unpinned =
-        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+        "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
          let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
@@ -1086,7 +1086,7 @@ let private runIdeServeTests () : TH.BlockResult =
     // Earns a BL4010 pin suggestion plus a `covariance` binding -- the marks
     // whose ABSENCE proves the next request started clean.
     let warnSource =
-        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+        "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
          let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"
@@ -3038,7 +3038,7 @@ let private runIdeReferencesTests () : TH.BlockResult =
     // up as a span wider than its own identifier -- the check below is exactly
     // that: every span is one line and exactly as wide as the name.
     let broadSource =
-        "function mymean(row) = reduce(row, (+)) / extents(row)\n\
+        "function mymean(row) = reduce(row, (+)) / Float64(extents(row))\n\
          function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))\n\
          let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]\n\
          let result = object_for(covariance) <@> (data, data) |> compute\n"

@@ -452,9 +452,9 @@ add "plot: json_num of a non-finite scalar slot is null too" (fun () ->
 /// only ever read extents off it.
 let private gridPrelude =
     "import plot\n\
-     let gx = method_for(range<Idx<40>>) <@> lambda(i) -> 1.0 * i |> compute\n\
-     let gy = method_for(range<Idx<24>>) <@> lambda(i) -> 1.0 * i |> compute\n\
-     let gz = method_for(range<Idx<24>, Idx<40>>) <@> lambda(i, j) -> 1.0 * (i * 40 + j) |> compute\n"
+     let gx = method_for(range<Idx<40>>) <@> lambda(i) -> Float64(i) |> compute\n\
+     let gy = method_for(range<Idx<24>>) <@> lambda(i) -> Float64(i) |> compute\n\
+     let gz = method_for(range<Idx<24>, Idx<40>>) <@> lambda(i, j) -> Float64(i * 40 + j) |> compute\n"
 
 /// The one trace of a one-trace figure.
 let private traceOf (doc: System.Text.Json.JsonDocument) =

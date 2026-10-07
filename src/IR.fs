@@ -3618,15 +3618,6 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
          // or scalar, unit and all.
          | (IRNeg | IRConj), Some t -> Some t
          | IRCast (et, _), Some (AnyPrimElem _) -> Some (IRTScalar et)
-         // A cast converts the VALUE TYPE only (formalism 2.4): over an
-         // array it is the same array of the target element, unit kept --
-         // `Float64(x)` in a generic body whose instance made `x` a matrix.
-         | IRCast (et, _), Some (ArrayElem at) ->
-             let elem =
-                 match getUnits at.ElemType with
-                 | Some u -> IRTUnitAnnotated (IRTScalar et, u)
-                 | None -> IRTScalar et
-             Some (mkArrayLike { at with ElemType = elem; Identity = None; IsVirtual = false })
          | IRNot, Some (AnyPrimElem ETBool) -> Some (IRTScalar ETBool)
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex64) -> Some (IRTScalar ETFloat32)
          | (IRReal | IRImag), Some (AnyPrimElem ETComplex128) -> Some (IRTScalar ETFloat64)
@@ -3657,15 +3648,6 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
               | IRCaret -> None
               | IRAdd | IRSub | IRMul | IRDiv | IRMod ->
                   promoteElemType e1 e2 |> Option.map IRTScalar)
-         // An array beside a scalar OF ITS OWN ELEMENT (the only mix the
-         // mixing rule admits, formalism 2.4): the broadcast is the array's
-         // shape and element.
-         | Some ((ArrayElem at) as aty), Some (AnyPrimElem e)
-         | Some (AnyPrimElem e), Some ((ArrayElem at) as aty)
-                when (match at.ElemType with AnyPrimElem ae -> ae = e | _ -> false) ->
-             (match op with
-              | IRAdd | IRSub | IRMul | IRDiv | IRMod -> Some aty
-              | _ -> None)
          | _ -> None)
     | IRComplex (re, im) ->
         (match exprTypeIfKnown re, exprTypeIfKnown im with

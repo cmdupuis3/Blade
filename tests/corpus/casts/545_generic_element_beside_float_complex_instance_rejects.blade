@@ -1,0 +1,11 @@
+// TEST: a generic row's sum beside a Float64, at a complex row, is refused (rejects)
+// ERROR: BL3019
+// ============================================================================
+// `reduce(row, (+)) / 2.0` over a `row: T^1` types the quotient Float64 --
+// exact at a Float64 row -- but a complex row's quotient is complex, which a
+// Float64-typed result cannot hold. The call is refused (it used to reach g++).
+// Count in the row's own class instead: `reduce(row, (+)) /
+// reduce(row ^ 0, (+))` is the mean at every element type.
+// ============================================================================
+function halfsum(row: T^1) = reduce(row, (+)) / 2.0
+let z = halfsum([complex(1.0, 2.0), complex(3.0, 4.0)])

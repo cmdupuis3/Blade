@@ -694,7 +694,7 @@ let private hoistConditionalSrc =
 /// knows, so the guard is a run-time test (tests/corpus/functions/194 runs it
 /// on an empty one).
 let private lateBroadcastSrc =
-    "function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)\n"
+    "function lmean(row: T^1) -> T^0 = reduce(row, (+)) / Float64(extents(row))\n"
     + "function center(v: T^1) -> T^1 = v - lmean(v)\n"
     + "let x = [1.0, 2.0, 3.0, 6.0]\n"
     + "let common = intersect(x, [2.0, 6.0, 9.0])\n"

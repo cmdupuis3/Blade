@@ -646,9 +646,36 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
         // make the value's type known (exprTypeIfKnown: a cast of a known
         // array is that array of the target), the variable is that type.
         let bodyNow = substTypeInIRExpr acc func.Body
+        // exprTypeIfKnown plus the two shapes a generic body's element cast
+        // builds once its operand is an array: the cast itself (the operand's
+        // array with the target element, formalism 2.4) and that array beside
+        // a scalar of its own element (`Float64(x) * 0.5`, the only array /
+        // scalar mix the mixing rule admits). LOCAL to this learning step on
+        // purpose: exprTypeIfKnown's HM call-site argument rule declines array
+        // reconstruction (tests/Test_Shape.fs), and these answers are only
+        // used to name a body-only variable, never to type an argument.
+        let rec bodyTypeIfKnown (e: IRExpr) : IRType option =
+            match e with
+            | IRUnaryOp (IRCast (et, _), x) ->
+                (match bodyTypeIfKnown x with
+                 | Some (ArrayElem at) ->
+                     let elem =
+                         match getUnits at.ElemType with
+                         | Some u -> IRTUnitAnnotated (IRTScalar et, u)
+                         | None -> IRTScalar et
+                     Some (mkArrayLike { at with ElemType = elem; Identity = None; IsVirtual = false })
+                 | _ -> exprTypeIfKnown e)
+            | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod), l, r, _) ->
+                (match bodyTypeIfKnown l, bodyTypeIfKnown r with
+                 | Some ((ArrayElem at) as aty), Some (AnyPrimElem e)
+                 | Some (AnyPrimElem e), Some ((ArrayElem at) as aty)
+                        when (match at.ElemType with AnyPrimElem ae -> ae = e | _ -> false) -> Some aty
+                 | _ -> exprTypeIfKnown e)
+            | IRLet (_, _, body) -> bodyTypeIfKnown body
+            | _ -> exprTypeIfKnown e
         let learnFrom (declTy: IRType) (value: IRExpr) =
             if not (concrete declTy) then
-                match exprTypeIfKnown value with
+                match bodyTypeIfKnown value with
                 | Some t when concrete t ->
                     unifyParamWithArg declTy t Map.empty
                     |> Map.iter (fun k v ->

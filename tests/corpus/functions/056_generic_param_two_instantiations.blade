@@ -47,8 +47,11 @@ let e = sumOf([1.0, 2.0, 3.0])
 // is not convertible at all, so a regression in either half is a hard g++
 // error, and a regression in the VALUES shows up in the imaginary parts below.
 function centre(xs: T^1) = {
-    let n = extents(xs)
-    let m = reduce(xs, (+)) / Float64(n)
+    // The count in the row's OWN class (`xs ^ 0` is a row of ones of its
+    // element type): a complex row divides by a complex count, a Float64 row
+    // by a Float64 one -- formalism 2.4 converts nothing implicitly, and a
+    // Float64 divisor would type a complex mean Float64.
+    let m = reduce(xs, (+)) / reduce(xs ^ 0, (+))
     (xs <@> lambda(x) -> x - m) |> compute
 }
 let cre: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
