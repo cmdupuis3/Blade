@@ -1,0 +1,21 @@
+// TEST: Two Unit-Carrying Caret Parameters Still Co-Iterate
+// ============================================================================
+// Each axis of a `T<u>^k` annotation is an unknown that now carries its own
+// identity (so a row kernel can trace a returned axis back to the parameter
+// it came from -- loops/218). That identity is PROVENANCE, not a shape
+// claim: two such parameters are read at run time and never disagree
+// statically, so a multi-axis elementwise operator or zip over two of them
+// -- same type variable or different ones -- still typechecks, as it did
+// when every abstract axis was the same anonymous `?`.
+// ============================================================================
+Unit u
+function add_same(a: T<u>^2, b: T<u>^2) = a + b
+function add_diff(a: T<u>^2, b: U<u>^2) = a + b
+function mul_zip(a: T<u>^2, b: U<u>^2) = method_for(zip(a, b)) <@> lambda(x, y) -> x * y
+let M: Array<Float64<u> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let s1 = add_same(M, M) |> compute
+// EXPECT: s1 = [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]]
+let s2 = add_diff(M, M) |> compute
+// EXPECT: s2 = [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]]
+let p = mul_zip(M, M) |> compute
+// EXPECT: p = [[1.0, 4.0, 9.0], [16.0, 25.0, 36.0]]

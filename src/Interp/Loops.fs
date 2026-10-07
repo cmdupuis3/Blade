@@ -1024,6 +1024,26 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
         // missing dims. Identical to the old `List.skip` on an all-rank-1
         // output, so the dense path is untouched.
         let outerExtents = cg.Bindings |> List.map levelExtent
+        // A T-dim whose extent names no value -- a compiler-minted placeholder
+        // or an abstract annotation axis (`A: T<u>^2`'s unknown, carrying an
+        // identity: IR.mkAbstractAxisExtent) -- is read from the operand axis
+        // carrying the SAME extent, at run time. The twin of CodeGenCuda's
+        // `operandAxisCarrying`; evaluating the bare `?` was unsupported.
+        let operandAxisExtent (extent: IRExpr) : int64 option =
+            match extent with
+            | IRParam (pn, _, _) when (pn.StartsWith "__" && pn.Contains "_inferred_n") || isAbstractAxisExtent extent ->
+                info.ArrayTypes
+                |> List.mapi (fun i at -> (i, at))
+                |> List.tryPick (fun (i, at) ->
+                    if at.IndexTypes |> List.exists (fun ix -> ix.Rank <> 1) then None
+                    else
+                        at.IndexTypes
+                        |> List.tryFindIndex (fun ix -> ix.Extent = extent)
+                        |> Option.bind (fun d ->
+                            match inputs.TryGetValue i with
+                            | true, SReal a when d < a.Extents.Length -> Some a.Extents.[d]
+                            | _ -> None))
+            | _ -> None
         let trailingExtents =
             let flatRank = arr.IndexTypes |> List.sumBy _.Rank
             let missing = flatRank - outerExtents.Length
@@ -1040,7 +1060,9 @@ and private materializeApply (st: InterpState) (env: Env) (info0: ApplyInfo) (wr
                 match peel [] 0 (List.rev arr.IndexTypes) with
                 | Some tDimEntries ->
                     tDimEntries |> List.map (fun (ix: IRIndexType) ->
-                        toI64 (Core.evalExpr st env ix.Extent))
+                        match operandAxisExtent ix.Extent with
+                        | Some n -> n
+                        | None -> toI64 (Core.evalExpr st env ix.Extent))
                 // Boundary falls INSIDE a compound index: not a shape this
                 // describes, so leave the allocation as it was.
                 | None -> []

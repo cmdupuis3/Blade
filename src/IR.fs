@@ -687,6 +687,43 @@ let mkTreeErrorRecord (id: IRId) (detail: string) : IRIndexType =
       Symmetry = SymNone; Tag = Some "__error_tree_bad_shape"
       IxKind = IxKErrorTreeBadShape; Kind = SDimension; Dependencies = [] }
 
+/// THE AXIS OF AN ABSTRACT ARRAY ANNOTATION. A `T<u>^k` (or concrete-element
+/// `Float64^k`) annotation is a real array type whose axes are genuinely
+/// UNKNOWN, spelled with `lowerExtentExpr`'s unknown-extent name `"?"`. That
+/// name says nothing about WHICH axis it is, and a row kernel needs exactly
+/// that: `lambda(row: R^1) -> scaled_u(row, ws)` with `scaled_u(v: T^1, w:
+/// U<u>^1) = w <@> ...` returns a row as long as `ws`, and the only link from
+/// the callee's returned axis back to its `w` parameter is that the two carry
+/// the same extent -- the link a bare `U^1` parameter gets from its minted
+/// `__..._inferred_n..` placeholder. Every axis TypeLower's TyAbstractArray arm
+/// mints therefore carries a positive identity in the IRParam's index slot
+/// (`IRParam ("?", k, _)`, k >= 1); the anonymous unknown (`lowerExtentExpr`'s
+/// give-up) keeps 0. The NAME stays `"?"`, so every reading that goes by name
+/// -- printing, shape specialization's bake test, the `"?"` guards -- is
+/// unchanged; the identity is visible only to an Extent EQUALITY.
+let mkAbstractAxisExtent (identity: int) : IRExpr =
+    IRParam ("?", identity + 1, IRTNat None)
+
+/// An abstract annotation axis's extent (see mkAbstractAxisExtent): an
+/// unknown that names one axis, so the axis carrying the same extent is the
+/// same axis.
+let isAbstractAxisExtent (e: IRExpr) : bool =
+    match e with
+    | IRParam ("?", k, _) -> k > 0
+    | _ -> false
+
+/// Do two extents make the same SHAPE claim? Structural equality, except that
+/// two unknowns always agree: an unknown is read from the operand at run time,
+/// so two of them never disagree statically -- exactly as they compared before
+/// abstract axes carried an identity. A shape comparison (co-iteration
+/// agreement, HM extent merging, same-extent fast paths) asks THIS; only a
+/// PROVENANCE question (which parameter axis did this returned axis come
+/// from) compares the identity itself.
+let extentsAgree (a: IRExpr) (b: IRExpr) : bool =
+    match a, b with
+    | IRParam ("?", _, _), IRParam ("?", _, _) -> true
+    | _ -> a = b
+
 /// Level-1 placement classification of a full index type. Today this derives
 /// purely from the symmetry class (placementClassOf); it is the seam where
 /// tabulated detection (CompoundIdx / SparseIdx, from the index type's typedef)

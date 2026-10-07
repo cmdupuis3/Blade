@@ -1,0 +1,26 @@
+// TEST: A Unit-Carrying Caret Row Takes Its Returned Extent From The Row Itself
+// ============================================================================
+// The row kernel's own parameter is `row: R<u>^1`: an abstract array type
+// whose axis is an unknown. Three returns carry that axis back out, and each
+// must come out as the operand's fiber (Idx<3>), not as the bare `?` that
+// was emitted as `r_extents[1] = ?` (BL9002):
+//   * the row itself, scaled (`row * 2.0`) -- the kernel parameter's axis;
+//   * a callee whose unit caret parameter IS the row (`twice_u(row)`);
+//   * a callee that returns its unit caret argument's axis while folding a
+//     DIFFERENT-length captured array (`scaled_u(vs, row)`): the length is
+//     the row's 3, not vs's 4.
+// ============================================================================
+Unit u
+function twice_u(w: U<u>^1) = w <@> lambda(x) -> x * 2.0
+function scaled_u(v: T^1, w: U<u>^1) = w <@> lambda(x) -> x * reduce(v, (+))
+let Au: Array<Float64<u> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let vs: Array<Float64 like Idx<4>> = [1.0, 1.0, 1.0, 2.0]
+let doubled = method_for(Au) <@> lambda(row: R<u>^1) -> row * 2.0 |> compute
+// EXPECT: doubled = [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]]
+let via_callee = method_for(Au) <@> lambda(row: R<u>^1) -> twice_u(row) |> compute
+// EXPECT: via_callee = [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]]
+let scaled = method_for(Au) <@> lambda(row: R<u>^1) -> scaled_u(vs, row) |> compute
+// EXPECT: scaled = [[5.0, 10.0, 15.0], [20.0, 25.0, 30.0]]
+let typed: Array<Float64<u> like Idx<2>, Idx<3>> = scaled
+let corner = typed(1, 2)
+// EXPECT: corner = 30.0

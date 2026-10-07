@@ -1478,7 +1478,7 @@ let (|BlasL3|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
              // number, which is what makes the result square.
              && l0.ExtentArrayRef = l1.ExtentArrayRef
              && l0.ExtentDimRef = l1.ExtentDimRef
-             && l0.Extent = l1.Extent ->
+             && extentsAgree l0.Extent l1.Extent ->
         match denseBlasArrayOfRank 2 aTy, denseBlasArrayOfRank 2 bTy with
         // `PrecD` and nothing else (see the two notes above): complex is a
         // DIFFERENT operation here, and f32 is an unexercised widening.
@@ -1505,7 +1505,7 @@ let (|BlasL3|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
                             // Deduction gives this today; checking it makes
                             // "square" a fact rather than an assumption, and a
                             // spurious decline costs only the optimisation.
-                            && ix.Extent = l0.Extent
+                            && extentsAgree ix.Extent l0.Extent
                             && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
                         | _ -> false)
                 | _ -> false

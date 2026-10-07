@@ -660,9 +660,18 @@ let rec lowerTypeExpr (env: TypeEnv) (ty: TypeExpr) : IRType =
                     // consumes it: extents are never compared in `unify`, and
                     // codegen bakes only LITERAL extents, falling back to the
                     // runtime `.extents[dim]` read for everything else.
+                    //
+                    // Each axis still carries an IDENTITY (mkAbstractAxisExtent,
+                    // the record's own fresh id): a returned axis copied from
+                    // this one -- `w <@> lambda(x) -> ..` hands `w`'s record
+                    // through -- has to be traceable back to this parameter,
+                    // which is how a row kernel calling the function learns
+                    // the row's length. Shape comparisons (`extentsAgree`)
+                    // ignore it, so two such axes still never disagree.
                     let indices = [0 .. r - 1] |> List.map (fun _ ->
-                        { Id = env.Builder.FreshId(); Rank = 1
-                          Extent = IRParam ("?", 0, IRTNat None)
+                        let axisId = env.Builder.FreshId()
+                        { Id = axisId; Rank = 1
+                          Extent = mkAbstractAxisExtent axisId
                           Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] })
                     mkArrayArrow indices elem None
         | None ->
@@ -1459,7 +1468,7 @@ let isPlainDenseIx (ix: IRIndexType) : bool =
 /// Lat, Lon> annotations must agree.
 let indexRecordsAgree (a: IRIndexType) (b: IRIndexType) : bool =
     a.Rank = b.Rank && a.Symmetry = b.Symmetry && a.IxKind = b.IxKind
-    && a.Kind = b.Kind && a.Tag = b.Tag && a.Extent = b.Extent
+    && a.Kind = b.Kind && a.Tag = b.Tag && extentsAgree a.Extent b.Extent
 
 /// Whole-shape agreement: same record count, records pairwise agree.
 let indexShapesAgree (xs: IRIndexType list) (ys: IRIndexType list) : bool =

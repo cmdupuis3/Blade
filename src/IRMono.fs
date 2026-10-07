@@ -31,7 +31,7 @@ let private mergeArrayExtents (varId: int) (a: IRType) (b: IRType) : IRType opti
                     aa.IndexTypes ba.IndexTypes ->
         let ixs =
             List.mapi2 (fun d (x: IRIndexType) (y: IRIndexType) ->
-                if x.Extent = y.Extent then x
+                if extentsAgree x.Extent y.Extent then x
                 else { x with Extent = IRParam ($"__hm{varId}_extent{d}", 0, IRTNat None) })
                 aa.IndexTypes ba.IndexTypes
         Some (mkArrayLike { aa with IndexTypes = ixs })

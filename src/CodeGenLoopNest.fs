@@ -1047,7 +1047,7 @@ let canonicalKey (nameMap: Map<int, string>) (expr: IRExpr) : IRExpr =
                 at.ElemType = bt.ElemType
                 && at.IndexTypes.Length = bt.IndexTypes.Length
                 && List.forall2 (fun (ia: IRIndexType) (ib: IRIndexType) ->
-                        ia.Extent = ib.Extent
+                        extentsAgree ia.Extent ib.Extent
                         && (match ia.Extent with IROpaqueExtent -> false | _ -> true))
                        at.IndexTypes bt.IndexTypes
             | _ -> false

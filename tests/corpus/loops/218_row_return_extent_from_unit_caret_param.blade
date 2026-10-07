@@ -1,0 +1,22 @@
+// TEST: A Row Kernel's Returned Row Can Take Its Extent Through A Unit-Carrying Caret Parameter
+// ============================================================================
+// loops/216 with the callee's second parameter written `w: U<u>^1`. A
+// unit-carrying caret is not the arity variable a bare `U^1` is: it lowers
+// to a real array type whose axis is UNKNOWN (`?`), and that `?` named no
+// axis in particular -- so the T-dim seam, which follows the callee's
+// returned axis back to the parameter axis carrying the same extent, had
+// nothing to follow, and the output was allocated as `r_extents[1] = ?`
+// (BL9002). An abstract annotation axis now carries an identity, so the
+// returned axis traces to `w`, then to the captured `ws`: 4 columns, unit u.
+// Hand values: row sums 6 and 15, times ws = [1, 2, 3, 4].
+// ============================================================================
+Unit u
+function scaled_u(v: T^1, w: U<u>^1) = w <@> lambda(x) -> x * reduce(v, (+))
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let ws: Array<Float64<u> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let r = method_for(A) <@> lambda(row: R^1) -> scaled_u(row, ws) |> compute
+// EXPECT: r = [[6.0, 12.0, 18.0, 24.0], [15.0, 30.0, 45.0, 60.0]]
+// The deduced type is the captured array's axis and unit, not a placeholder.
+let typed: Array<Float64<u> like Idx<2>, Idx<4>> = r
+let total: Float64<u> = reduce(reduce(typed, (+)), (+))
+// EXPECT: total = 210.0

@@ -2840,10 +2840,13 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
     // (`out_extents[1] = __map_inferred_n1_51`, g++: not declared). The operand
     // axis that carries the SAME placeholder has the answer at run time: read
     // it from there. Only placeholders are rewritten; a declared extent
-    // (`n`, a literal) keeps its own spelling.
+    // (`n`, a literal) keeps its own spelling. An abstract annotation axis
+    // (`A: T<u>^2`, whose axes are unknowns carrying an identity -- see
+    // IR.mkAbstractAxisExtent) is the same situation: it renders as a bare
+    // `?`, and the operand axis carrying that same identity has the answer.
     let operandAxisCarrying (extent: IRExpr) : string option =
         match extent with
-        | IRParam (pn, _, _) when pn.StartsWith "__" && pn.Contains "_inferred_n" ->
+        | IRParam (pn, _, _) when (pn.StartsWith "__" && pn.Contains "_inferred_n") || isAbstractAxisExtent extent ->
             info.ArrayTypes
             |> List.mapi (fun i at -> (List.tryItem i arrayNames, at))
             |> List.tryPick (fun (anOpt, at) ->
@@ -3370,7 +3373,26 @@ provably sign-odd in tied argument %d; typecheck should have refused this applic
                                     | None ->
                                         match operandAxisCarrying ix.Extent with
                                         | Some read -> (read, false)
-                                        | None -> (exprToCppCtx tempCtx ix.Extent, false))
+                                        | None ->
+                                        match ix.Extent with
+                                        | IRParam ("?", _, _) ->
+                                            // An UNKNOWN no operand carries: the
+                                            // kernel returns a row whose length
+                                            // nothing here names (a callee's
+                                            // `-> V<u>^1` return annotation is
+                                            // a rank and a unit, not a length).
+                                            // Rendering the bare `?` reached g++
+                                            // as an internal error (BL9002);
+                                            // refuse it by name instead.
+                                            let msg =
+                                                "the row kernel returns an array whose length cannot be known before the loop runs: "
+                                                + "its axis is an abstract annotation axis (T<u>^k) that no operand of the loop carries, "
+                                                + "such as a callee's declared return type V<u>^1, which names a rank and a unit but no length. "
+                                                + "Drop that return annotation (the length is then traced to the argument it comes from) "
+                                                + "or declare it over a concrete index type (Array<Float64<u> like I>)"
+                                            let errLine = codegenError ctx "" msg |> String.concat "\n"
+                                            ($"0\n{errLine}\n", false)
+                                        | _ -> (exprToCppCtx tempCtx ix.Extent, false))
                             extentDims @ trailing
                         | None -> extentDims
                     | _ -> extentDims

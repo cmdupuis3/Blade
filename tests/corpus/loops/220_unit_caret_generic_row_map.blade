@@ -1,0 +1,17 @@
+// TEST: A Generic Row Map Over A Unit-Carrying Caret Parameter Reads Its Extent At Run Time
+// ============================================================================
+// Inside `twice_rows(A: T<u>^2)` the operand's axes are unknowns, so the
+// row kernel's returned axis maps onto `A`'s column axis -- an unknown too.
+// The emitter reads such an axis from the operand that carries it
+// (`A.extents[1]`), as it already did for a bare `A: T^2`'s minted
+// placeholder; before the abstract axis carried an identity, nothing tied
+// the output's axis to `A`'s and it was emitted as a bare `?` (BL9002).
+// ============================================================================
+Unit u
+function twice_rows(A: T<u>^2) = method_for(A) <@> lambda(row: R<u>^1) -> row * 2.0
+let Au: Array<Float64<u> like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let r = twice_rows(Au) |> compute
+// EXPECT: r = [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]]
+let Bu: Array<Float64<u> like Idx<3>, Idx<5>> = [[1.0, 1.0, 1.0, 1.0, 1.0], [2.0, 2.0, 2.0, 2.0, 2.0], [3.0, 3.0, 3.0, 3.0, 3.0]]
+let r2 = twice_rows(Bu) |> compute
+// EXPECT: r2 = [[2.0, 2.0, 2.0, 2.0, 2.0], [4.0, 4.0, 4.0, 4.0, 4.0], [6.0, 6.0, 6.0, 6.0, 6.0]]

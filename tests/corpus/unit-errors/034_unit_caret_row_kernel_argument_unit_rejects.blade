@@ -1,0 +1,14 @@
+// TEST: A Row Kernel's Argument To A Unit-Carrying Caret Parameter Must Carry That Unit (rejects)
+// ERROR: BL3006 @ 13:20
+// ERROR-CONTAINS: Unit mismatch in argument 2: u vs v
+// ============================================================================
+// loops/218's callee, handed a captured array in unit v where its `w:
+// U<u>^1` parameter demands u. Tracing the returned row's extent through
+// that parameter must not loosen the parameter's unit check.
+// ============================================================================
+Unit u
+Unit v
+function scaled_u(v: T^1, w: U<u>^1) = w <@> lambda(x) -> x * reduce(v, (+))
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let wv: Array<Float64<v> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let r = method_for(A) <@> lambda(row: R^1) -> scaled_u(row, wv) |> compute

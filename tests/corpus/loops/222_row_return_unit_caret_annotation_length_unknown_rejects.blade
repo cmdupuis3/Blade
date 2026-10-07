@@ -1,0 +1,22 @@
+// TEST: A Row Return Through A Unit-Carrying Caret Return Annotation Has No Known Length (rejects)
+// REJECT-AT: codegen
+// ERROR-CONTAINS: whose length cannot be known before the loop runs
+// WARN-CODEGEN: whose length cannot be known before the loop runs
+// (No `// ERROR: BL7004` pin: the harness emits and compiles directly, and
+// BL7004 is minted by the driver's refusal drain -- `blade run` reports this
+// program as BL7004. Same reason as loops/190.)
+// ============================================================================
+// loops/218's callee with its return DECLARED `-> V<u>^1`. That annotation
+// is a rank and a unit: its axis is an unknown of its own, tied to no
+// parameter, so the row kernel's output column count has nothing to come
+// from (a bare `-> V^1`, an arity variable, is bound to the body's type and
+// works). The emitter allocated it as `r_extents[1] = ?`, which g++ rejected
+// as an internal error (BL9002); it is now refused by name. Dropping the
+// annotation (loops/218) or declaring it over `Array<Float64<u> like
+// Idx<4>>` compiles.
+// ============================================================================
+Unit u
+function relabel(v: T^1, w: U<u>^1) -> V<u>^1 = w <@> lambda(x) -> x * reduce(v, (+))
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let ws: Array<Float64<u> like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
+let r = method_for(A) <@> lambda(row: R^1) -> relabel(row, ws) |> compute

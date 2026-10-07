@@ -4811,7 +4811,7 @@ and inferGroupKeys (env: TypeEnv) keys : TypeResult<TypedExpr> =
             let allShareOuter =
                 pairs |> List.forall (fun (_, ty) ->
                     ty.IndexTypes.Length = 1
-                    && ty.IndexTypes.[0].Extent = firstSource.Extent)
+                    && extentsAgree ty.IndexTypes.[0].Extent firstSource.Extent)
             if not allShareOuter then
                 Error (GroupKeysRank1)
             else
@@ -9725,10 +9725,21 @@ and buildApplyInfo (env: TypeEnv)
             // shape-specialized clone substitutes with the real extent and
             // the emitter reads at run time (`A.extents[1]`), where the
             // kernel's own placeholder named nothing anywhere.
-            let isMintedPlaceholder (e: IRExpr) =
+            //
+            // An ABSTRACT annotation axis (`row: R<u>^1`, `w: U<u>^1` -- the
+            // unit-carrying caret builds a real array type whose axes are
+            // unknown, rather than the arity var a bare `R^1` is) is the same
+            // kind of record: it names one parameter axis and no length, via
+            // the identity mkAbstractAxisExtent gives it. It is mapped and
+            // followed exactly like a minted placeholder, keyed by that
+            // identity; before it was, its `?` reached the output as
+            // `out_extents[1] = ?` (BL9002).
+            let placeholderKey (e: IRExpr) : string option =
                 match e with
-                | IRParam (n, _, _) -> n.StartsWith "__" && n.Contains "_inferred_n"
-                | _ -> false
+                | IRParam (n, _, _) when n.StartsWith "__" && n.Contains "_inferred_n" -> Some n
+                | IRParam ("?", k, _) when isAbstractAxisExtent e -> Some $"?#{k}"
+                | _ -> None
+            let isMintedPlaceholder (e: IRExpr) = (placeholderKey e).IsSome
             let placeholderFibers : Map<string, IRIndexType> =
                 lambdaInfo.Params
                 |> List.mapi (fun i p ->
@@ -9740,10 +9751,7 @@ and buildApplyInfo (env: TypeEnv)
                             let fiber = at.IndexTypes |> List.skip (at.IndexTypes.Length - irank)
                             List.zip pArr.IndexTypes fiber
                             |> List.choose (fun (pIx, fIx) ->
-                                match pIx.Extent with
-                                | IRParam (n, _, _) when isMintedPlaceholder pIx.Extent ->
-                                    Some (n, fIx)
-                                | _ -> None)
+                                placeholderKey pIx.Extent |> Option.map (fun key -> (key, fIx)))
                         else []
                     | _ -> [])
                 |> List.concat
@@ -9817,10 +9825,10 @@ and buildApplyInfo (env: TypeEnv)
                 | _ -> None
             let tDims =
                 arr.IndexTypes |> List.mapi (fun j idx -> (j, idx)) |> List.map (fun (j, idx) ->
-                    match idx.Extent with
-                    | IRParam (n, _, _) when placeholderFibers.ContainsKey n ->
-                        { placeholderFibers.[n] with Kind = TDimension }
-                    | IRParam _ when isMintedPlaceholder idx.Extent ->
+                    match placeholderKey idx.Extent with
+                    | Some key when placeholderFibers.ContainsKey key ->
+                        { placeholderFibers.[key] with Kind = TDimension }
+                    | Some _ ->
                         (match spineFiber lambdaInfo.Body j 0 with
                          | Some f -> { f with Kind = TDimension }
                          | None -> { idx with Kind = TDimension })
