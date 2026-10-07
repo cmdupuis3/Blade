@@ -4,7 +4,7 @@
 // f64 (formalism 3.10), where the position carrying Half meets a Src slot:
 // the nominal refusal, as written directly (index-types/338). functions/121
 // spells the conversion, `a(((k * na) / 4 : Src))`.
-// ERROR: BL4003 @ 10:17
+// ERROR: BL4003 @ 10:49
 type Half = Idx<4>
 type Src = Idx<8>
 function stride2(a: Array<T like Idx<n>>, na: Int64) -> Array<T like Half> =

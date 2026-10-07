@@ -4,7 +4,7 @@
 // (formalism 3.10, BL4003) whether or not arithmetic intervened -- as for the
 // bare `f64(k)`. The conversion is spelled: `f64(((k * 8) / 4 : Src))`
 // (index-types/400; past the extent it aborts, 339).
-// ERROR: BL4003 @ 10:21
+// ERROR: BL4003 @ 10:55
 type Half = Idx<4>
 type Src = Idx<8>
 let f64: Array<Float64 like Src> = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
