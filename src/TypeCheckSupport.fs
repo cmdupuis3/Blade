@@ -3160,6 +3160,15 @@ let internal lambdaParamOnlyApplied (pv: IRId) (body: TypedExpr) : bool =
 /// application's result, when the body consumes it) get copies of their own;
 /// a declaration variable that is not generic (an integer literal's) is read at
 /// its default, never bound by a call. Returns the refusal's argument position.
+/// The number of subscripts that read ONE element of an array: one per slot,
+/// except a rank-k compact group (SymIdx / AntisymIdx / HermitianIdx), which
+/// takes its k flat coordinates.
+let internal arrayCoordCount (a: IRArrayType) : int =
+    a.IndexTypes |> List.sumBy (fun ix ->
+        match ix.Symmetry with
+        | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 -> ix.Rank
+        | _ -> 1)
+
 let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list)
                                   (tArgs: TypedExpr list) (quantified: int -> bool)
                                   (copyMap: Map<int, int>) : (int * TypeError) option =
@@ -3267,11 +3276,7 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                       Written = false }
                 None
             | ArrayElem a ->
-                let coords =
-                    a.IndexTypes |> List.sumBy (fun ix ->
-                        match ix.Symmetry with
-                        | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 -> ix.Rank
-                        | _ -> 1)
+                let coords = arrayCoordCount a
                 // A link with more of the chain below it reads a VIEW (the
                 // records after its coordinates) for the next link; the chain
                 // as a whole reads one element.
@@ -3876,6 +3881,26 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 | Ok remaining ->
                     Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
                                 (mkArrayLike { arrTy with IndexTypes = remaining })))))
+    // OVER-INDEXING: more subscripts than the array has coordinates. Every
+    // array arm above guards on a coordinate count, so `xs(0, 1)` on a rank-1
+    // array matched none of them and reached the fresh-var catch-all: `check`
+    // passed and g++ was handed `double[...]` (BL9002). Dimensional currying
+    // reads the excess as an application of the ELEMENT, `xs(0)(1)`: an
+    // element that takes arguments (a function or an array, formalism 4.3's
+    // `models(lat, lon)(params)`) consumes them; any other element is refused
+    // here, at the first excess subscript. An element still OPEN is refused
+    // too: it is a `T^k` parameter's element variable, which stands for a
+    // single value, and re-dispatching it would only re-enter the catch-all.
+    | ArrayElem arrTy when not (List.isEmpty tArgs) && tArgs.Length > arrayCoordCount arrTy ->
+        let coords = arrayCoordCount arrTy
+        match IR.stripUnits (env.Subst.Resolve arrTy.ElemType) with
+        | ArrayElem _ | FuncElem _ | IRTArrow _ ->
+            let now, rest = List.splitAt coords tArgs
+            dispatchAppOrIndex env tFunc now
+            |> Result.bind (fun head -> dispatchAppOrIndex env head rest)
+        | _ ->
+            if tArgs.[coords].Span.StartLine > 0 then setCurrentExprSpan tArgs.[coords].Span
+            Error (IndexOverApplied (ppIRType headTy, coords, tArgs.Length))
     | FuncElem (paramTys, retTy) ->
         // WIDTH SCHEMA first, so every check below (and the arity accounting,
         // and the emitted TExprApp) sees the regrouped list: `g(b, c)` against
@@ -4747,7 +4772,32 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                     List.fold2 (fun acc x y -> linkOwn x y || acc) false ps xs
                                 | _ -> false
                             let linked =
-                                if Set.isEmpty copyIds then false
+                                if Set.isEmpty copyIds then
+                                    // A CLOSED signature: nothing to link. But an
+                                    // open argument meeting a CONCRETE SCALAR
+                                    // parameter -- the residual `__pa` of a
+                                    // partial application (`pick(v)` reaching the
+                                    // array instance's `i: Int64`), a one-body
+                                    // lambda's parameter passed on (`lambda(k) ->
+                                    // f(k)`) -- zonk-defaulted to Float64, and
+                                    // g++ was handed a double for an `int64_t`
+                                    // parameter (BL9002). It is not BOUND here (a
+                                    // kernel's row may still bring `Nat<I>`,
+                                    // which an Int64 binding would refuse); the
+                                    // parameter's type becomes its DEFAULT
+                                    // (Subst.paramDefaults), what zonk gives it
+                                    // if nothing else does.
+                                    appArgPairs pCopies (tArgs |> List.map (_.Type))
+                                    |> List.iter (fun (_, pTy, aTy) ->
+                                        match env.Subst.Resolve aTy, IR.stripUnits (env.Subst.Resolve pTy) with
+                                        | IRTInfer aid, IRTScalar et
+                                                when not (env.Subst.IsPolymorphicId aid)
+                                                     && (env.Subst.GetLiteralDefault aid).IsNone
+                                                     && (env.Subst.GetArityConstraint aid).IsNone
+                                                     && (env.Subst.GetRankLowerBound aid).IsNone ->
+                                            env.Subst.MarkParamDefault(aid, et)
+                                        | _ -> ())
+                                    false
                                 elif env.CurrentGenericObligations.IsSome then
                                     appArgPairs pCopies (tArgs |> List.map (_.Type))
                                     |> List.fold (fun acc (_, pTy, aTy) ->
@@ -5059,8 +5109,17 @@ and internal dischargeArrowApp (env: TypeEnv) (app: ArrowApplication) : TypeResu
     // synthesized `__` head -- a kernel's eta parameter.)
     | IRTScalar _ | IRTNat _ | IRTTuple _ as t -> Error (InvalidApplication t)
     | IRTIdxTagged (_, IRefNamed tag) as t when not (tag.StartsWith "__") -> Error (InvalidApplication t)
-    // Anything else (a halo window read `w(o)`, which Lowering owns) keeps
-    // what the application was typed with while open.
+    // A halo window reaching a DECLARATION's applied parameter: the
+    // application was re-recorded on the caller's argument by
+    // arrowObligationClash (not written: its head is the synthesized
+    // `__arrow`), and the window arrived. The declaration's body was typed and
+    // is emitted with that application as a call or a subscript, never a
+    // window read -- refused at the argument (formalism 4.3).
+    | IRTIdxTagged (_, IRefNamed tag) when not app.Written && tag.StartsWith haloWinTagPrefix ->
+        Error HaloWindowEscapes
+    // Anything else (a halo window read `w(o)` written in the kernel's own
+    // body, which Lowering owns) keeps what the application was typed with
+    // while open.
     | _ -> Ok ()
 
 /// Discharge every pending arrow application whose head is no longer open
@@ -5079,6 +5138,14 @@ let internal settleArrowApps (env: TypeEnv) (all: bool) : (Span * TypeError) lis
         match dischargeArrowApp env app with
         | Ok () -> None
         | Error e -> Some (app.Span, e))
+    // One window refusal per argument: every read the callee's body makes
+    // (`w(1)`, `w(-1)`) was re-recorded at the same argument.
+    |> List.indexed
+    |> List.distinctBy (fun (i, (s, e)) ->
+        match e with
+        | HaloWindowEscapes -> (-1, s)
+        | _ -> (i, s))
+    |> List.map snd
 
 /// The END OF A DECLARATION's body: its pending applications whose head is
 /// still one of its own parameters become that parameter's ARROW OBLIGATIONS

@@ -1,0 +1,14 @@
+// TEST: A Halo Window Passed To A Function That Applies It Is Refused (rejects)
+// ERROR: BL3001 @ 13:60
+// ERROR-CONTAINS: a halo window is passed to a function whose body applies it
+// ============================================================================
+// A window is read (`w(o)`) only in the body of the halo kernel that binds it:
+// there Lowering turns the read into a neighbour position and the reach check
+// (BL4019) judges its offset. It is neither an array nor a function, the only
+// values an applied parameter takes (formalism 4.3), so handing it to `d`
+// is refused at the argument. It used to fail IR validation (BL6001).
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+function d(w) = a(w(1)) - a(w(-1))
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> d(w) |> compute

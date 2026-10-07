@@ -1,0 +1,29 @@
+// TEST: Partial Application Of A Function With An Arrow Parameter
+// ============================================================================
+// Formalism 5.2: a function applied to fewer arguments than it declares is
+// curried. `pick(v)` is `lambda(i) -> pick(v, i)`, and `pick(v, i)` calls the
+// ARRAY INSTANCE of `pick`, whose `i` is an Int64 subscript. The residual
+// parameter used to stay open and zonk-default to Float64, and g++ refused
+// the double handed to `int64_t i` (BL9002). An open argument meeting a
+// concrete scalar parameter now takes that parameter's type as its default --
+// a default, not a binding (a kernel row may still bring `Nat<I>`, `s`).
+// ============================================================================
+type I = Idx<4>
+function pick(c, i) = c(i)
+let v = [1.0, 2.0, 3.0]
+let p = pick(v)
+let q = p(1)
+let p2 = pick(v, _)
+let q2 = p2(2)
+let pf = pick(lambda(j) -> 10.0 * Float64(j))
+let qf = pf(3)
+function twice(i: Int64) = Float64(i) * 2.0
+let k = lambda(n) -> twice(n)
+let k_alias = k
+let r = k(3)
+let s = method_for(range<I>) <@> lambda(i) -> twice(i) |> compute
+// EXPECT: q = 2
+// EXPECT: q2 = 3
+// EXPECT: qf = 30
+// EXPECT: r = 6
+// EXPECT: s = [0, 2, 4, 6]

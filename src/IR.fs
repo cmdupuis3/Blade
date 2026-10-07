@@ -1447,6 +1447,28 @@ let getUnits (ty: IRType) : UnitSig option =
     | IRTUnitAnnotated (_, units) -> Some units
     | _ -> None
 
+/// Put a unit on a type, where a unit can live. A unit measures a VALUE, so
+/// on an ARRAY it belongs to the element: `Array<Float64<meters> like I>`,
+/// never `IRTUnitAnnotated (Array<..>, meters)`. The wrapped form arises when
+/// a unit-carrying type variable (`x: T<meters>`) is bound to an array --
+/// unify drops the wrapper and binds `T` to the whole argument -- and it
+/// matches no `ArrayElem` pattern anywhere downstream: codegen emitted the
+/// parameter as the raw `promote<double, 1>::type` pointer (BL9002).
+/// Substitution, resolution and zonk rebuild through here, so the array
+/// reading is the only one that survives. An element that already carries a
+/// unit keeps it (the call judgment compared the two).
+let rec unitAnnotate (inner: IRType) (units: UnitSig) : IRType =
+    match inner with
+    | IRTArrow (slots, result, identity)
+        when not slots.IsEmpty
+             && slots |> List.forall (function SIdx _ | SIdxVirt _ -> true | SVal _ -> false) ->
+        let elem =
+            match result with
+            | IRTUnitAnnotated _ -> result
+            | _ -> unitAnnotate result units
+        IRTArrow (slots, elem, identity)
+    | _ -> IRTUnitAnnotated (inner, units)
+
 /// Flatten nested tuple types: ((a, b), c) -> (a, b, c)
 /// Makes left-folded tuples syntactically equivalent to flat tuples.
 let rec flattenTupleType (ty: IRType) : IRType =
@@ -2515,7 +2537,7 @@ let rec substTypeInIRType (bindings: Map<int, IRType>) (ty: IRType) : IRType =
     | IRTTuple ts -> IRTTuple (ts |> List.map (substTypeInIRType bindings))
     | IRTComputation t -> IRTComputation (substTypeInIRType bindings t)
     | IRTPoly (base', var) -> IRTPoly (substTypeInIRType bindings base', var)
-    | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (substTypeInIRType bindings inner, units)
+    | IRTUnitAnnotated (inner, units) -> unitAnnotate (substTypeInIRType bindings inner) units
     | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (substTypeInIRType bindings inner, idxRef)
     | IRTDist (order, elem, axes) -> IRTDist (order, substTypeInIRType bindings elem, axes)
     | IRTArrow (slots, result, identity) ->

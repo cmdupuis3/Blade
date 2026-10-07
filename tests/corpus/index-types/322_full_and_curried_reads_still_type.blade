@@ -1,0 +1,13 @@
+// TEST: Full And Curried Reads Still Type After The Over-Indexing Refusal
+// ============================================================================
+// index-types/319-321 refuse subscripts beyond an array's coordinates. A read
+// of exactly its coordinates, spelled flat or curried, is untouched, as is a
+// partial read (a lower-rank view).
+// ============================================================================
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let a = m(1, 0)
+let b = m(1)(0)
+let r = m(0)
+// EXPECT: a = 3
+// EXPECT: b = 3
+// EXPECT: r = [1, 2]

@@ -1,0 +1,12 @@
+// TEST: A Named Function Over A Halo Window Is Refused As Its Kernel (rejects)
+// ERROR: BL3001 @ 11:45
+// ERROR-CONTAINS: a halo window is passed to a function whose body applies it
+// ============================================================================
+// loops/223 spelled as a named kernel: `<@> d` passes each window to `d`
+// (the eta wrapper `lambda(w) -> d(w)`), the same refusal. A LAMBDA over the
+// window is the kernel itself and stays legal (loops/078, loops/226).
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+function d(w) = a(w(1)) - a(w(-1))
+let g = method_for(halo<I, [-1, 0, 1]>) <@> d |> compute

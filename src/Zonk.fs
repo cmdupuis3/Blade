@@ -106,6 +106,8 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
             | _ ->
                 match subst.GetLiteralDefault(n) with
                 | Some et -> IRTScalar et
+                // A var passed to a concrete scalar PARAMETER takes its type.
+                | None when (subst.GetParamDefault n).IsSome -> IRTScalar (subst.GetParamDefault n).Value
                 // A var only ever seen as a SUBSCRIPT is an index: Int64.
                 | None when subst.IsIndexDefault n -> IRTScalar ETInt64
                 | None -> IRTScalar ETFloat64
@@ -117,7 +119,7 @@ let rec zonkType (subst: Subst) (ty: IRType) : IRType =
                     ArrayTypes = lt.ArrayTypes |> List.map (zonkType subst)
                     KernelType = lt.KernelType |> Option.map (zonkType subst) }
     | IRTPoly (base', var) -> IRTPoly (zonkType subst base', var)
-    | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (zonkType subst inner, units)
+    | IRTUnitAnnotated (inner, units) -> IR.unitAnnotate (zonkType subst inner) units
     | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (zonkType subst inner, idxRef)
     | IRTDist (order, elem, axes) ->
         // ERASURE POINT: Dist<r, T> is a typecheck-time invariant. All

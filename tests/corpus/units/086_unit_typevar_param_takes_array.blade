@@ -1,0 +1,31 @@
+// TEST: A Unit-Carrying Type Variable Parameter Takes An Array
+// ============================================================================
+// `x: T<meters>` is a type variable wearing a unit, and a type variable takes
+// an array as readily as a scalar. The unit measures the VALUES, so on an
+// array it belongs to the element: the instance's parameter is
+// `Array<Float64<meters> like Idx<3>>`, not a unit wrapped around the array
+// (which matched no array shape downstream and was emitted as a raw
+// `promote<double, 1>::type` pointer -- BL9002). The ascriptions pin that
+// the results still carry meters; a scalar of meters keeps working.
+// ============================================================================
+Unit meters
+function idm(x: T<meters>) = x
+function dbl(x: T<meters>) = x * 2.0
+let d: Array<Float64<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let e: Array<Float64<meters> like Idx<3>> = idm(d)
+let f: Array<Float64<meters> like Idx<3>> = dbl(d)
+let m: Array<Float64<meters> like Idx<2>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0]]
+let mm = idm(m)
+let row = dbl(m(1))
+let s: Float64<meters> = 4.0
+let t: Float64<meters> = dbl(s)
+let u: Float64<meters> = e(1) + f(2)
+// EXPECT: d = [1, 2, 3]
+// EXPECT: e = [1, 2, 3]
+// EXPECT: f = [2, 4, 6]
+// EXPECT: m = [[1, 2], [3, 4]]
+// EXPECT: mm = [[1, 2], [3, 4]]
+// EXPECT: row = [6, 8]
+// EXPECT: s = 4
+// EXPECT: t = 8
+// EXPECT: u = 8

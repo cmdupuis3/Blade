@@ -10559,6 +10559,54 @@ and buildApplyInfo (env: TypeEnv)
         match appliedParam lambdaInfo.Body with
         | Some err -> Error err
         | None ->
+        // A HALO WINDOW PASSED ON, now that apply-site unification has bound
+        // the kernel's parameter to it: `lambda(w) -> d(w)` with a LAMBDA `d`
+        // whose body applies its parameter (`d = lambda(w) -> A(w(1)) - ..`).
+        // That call was judged while `w` was open, so nothing compared the
+        // window with `d`'s parameter, which settled as a function of Int64
+        // and g++ was handed the window's integer for it (BL9002). A window is
+        // read only in the kernel that binds it (TypeEnv HaloWindowEscapes);
+        // a declared callee is refused by dischargeArrowApp instead.
+        let windowParams =
+            lambdaInfo.Params
+            |> List.filter (fun p ->
+                match IR.stripUnits (env.Subst.Resolve p.Type) with
+                | IRTIdxTagged (_, IRefNamed t) -> t.StartsWith haloWinTagPrefix
+                | _ -> false)
+            |> List.map (_.VarId)
+            |> Set.ofList
+        let rec windowEscape (e: TypedExpr) : TypedExpr option =
+            let here =
+                match e.Kind with
+                | TExprApp (f, args) ->
+                    (match IR.stripUnits (env.Subst.Resolve f.Type) with
+                     | FuncElem (slots, _) ->
+                         let n = min slots.Length args.Length
+                         List.zip (List.truncate n args) (List.truncate n slots)
+                         |> List.tryPick (fun (a, s) ->
+                             match a.Kind with
+                             | TExprVar (_, vid, _) when windowParams.Contains vid ->
+                                 (match IR.stripUnits (env.Subst.Resolve s) with
+                                  | IRTInfer sid ->
+                                      let applied =
+                                          env.PendingArrowApps.Exists(fun app ->
+                                              match IR.stripUnits (env.Subst.Resolve app.Head.Type) with
+                                              | IRTInfer h -> h = sid
+                                              | _ -> false)
+                                      if applied then Some a else None
+                                  | ArrayElem _ | IRTArrow _ -> Some a
+                                  | _ -> None)
+                             | _ -> None)
+                     | _ -> None)
+                | _ -> None
+            match here with
+            | Some a -> Some a
+            | None -> typedExprChildren e |> List.tryPick windowEscape
+        match (if windowParams.IsEmpty then None else windowEscape lambdaInfo.Body) with
+        | Some a ->
+            if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
+            Error HaloWindowEscapes
+        | None ->
         // KERNEL CO-ITERATION AGREEMENT (BL3016 extent / BL3999 name), the
         // `<@>` twin of the call-site ladder's coIterClash. A kernel body that
         // zips its parameters -- directly, through elementwise maps, or by

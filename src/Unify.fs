@@ -52,6 +52,22 @@ type TypeError =
     /// `else Ok ()` that promised the check was "handled elsewhere" and made
     /// under-arity a silent operand drop (3.4, M2). Payload = whole message.
     | KernelPackArity of message: string
+    /// BL3002, subscript seam. More subscripts than the array has coordinates
+    /// (`xs(0, 1)` on a rank-1 array), and its element takes no arguments.
+    /// dispatchAppOrIndex's array arms each guard on a coordinate count, so
+    /// this shape matched none of them and reached the fresh-var catch-all:
+    /// `check` passed and g++ was handed `double[...]`. `coords` counts a
+    /// rank-k compact group as k.
+    | IndexOverApplied of arrayTy: string * coords: int * supplied: int
+    /// BL3001, at the argument. A HALO WINDOW handed to a function (named or
+    /// a lambda) whose body applies it (`d(w)` with `d(w) = A(w(1)) -
+    /// A(w(-1))`, or `<@> d` for a named `d`). A window is neither an array
+    /// nor a function (formalism 4.3: only those may reach an applied
+    /// parameter); its read `w(o)` exists only in the halo kernel's own body,
+    /// where Lowering turns it into a neighbour position and the reach check
+    /// (BL4019) judges its offset. Passed on, the read was typed against
+    /// nothing (BL6001) or emitted as a call of an integer (BL9002).
+    | HaloWindowEscapes
     /// Rank disagreement between a declared parameter and the argument
     /// supplied at a DIRECT application. Raised by dispatchAppOrIndex's
     /// FuncElem arm, which does not unify args against params (see the
@@ -644,6 +660,15 @@ type Subst() =
     /// subscript sweep judges whatever it finally became. Travels on
     /// var-to-var binds like the polymorphic mark.
     let mutable indexDefaults : Set<int> = Set.empty
+    /// Inference vars passed as an ARGUMENT to a parameter of a concrete
+    /// scalar type (`f(k)` with `f(i: Int64)`, the residual `__pa` of a
+    /// partial application reaching an array instance's `i: Int64`): if
+    /// nothing else pins such a var, zonk defaults it to that parameter's type
+    /// rather than Float64 (which handed g++ a `double` for an `int64_t`
+    /// parameter). A DEFAULT, not a binding, for the indexDefaults reason: a
+    /// kernel's row may still bind the var to `Nat<I>` later. The first
+    /// parameter met wins; travels on var-to-var binds.
+    let mutable paramDefaults : Map<int, ElemType> = Map.empty
 
     member _.Fresh() =
         let id = nextId
@@ -672,10 +697,21 @@ type Subst() =
          | IRTInfer id2 when Set.contains id indexDefaults ->
              indexDefaults <- Set.add id2 indexDefaults
          | _ -> ())
+        (match ty, Map.tryFind id paramDefaults with
+         | IRTInfer id2, Some et when not (Map.containsKey id2 paramDefaults) ->
+             paramDefaults <- Map.add id2 et paramDefaults
+         | _ -> ())
         map <- Map.add id ty map
 
     member _.MarkIndexDefault(id: int) =
         indexDefaults <- Set.add id indexDefaults
+
+    member _.MarkParamDefault(id: int, et: ElemType) =
+        if not (Map.containsKey id paramDefaults) then
+            paramDefaults <- Map.add id et paramDefaults
+
+    member _.GetParamDefault(id: int) : ElemType option =
+        Map.tryFind id paramDefaults
 
     member _.IsIndexDefault(id: int) : bool =
         Set.contains id indexDefaults
@@ -835,7 +871,7 @@ type Subst() =
                         ArrayTypes = lt.ArrayTypes |> List.map this.Resolve
                         KernelType = lt.KernelType |> Option.map this.Resolve }
         | IRTPoly (base', var) -> IRTPoly (this.Resolve base', var)
-        | IRTUnitAnnotated (inner, units) -> IRTUnitAnnotated (this.Resolve inner, units)
+        | IRTUnitAnnotated (inner, units) -> IR.unitAnnotate (this.Resolve inner) units
         | IRTIdxTagged (inner, idxRef) -> IRTIdxTagged (this.Resolve inner, idxRef)
         | IRTDist (order, elem, axes) -> IRTDist (order, this.Resolve elem, axes)
         | IRTArrow (slots, result, identity) ->

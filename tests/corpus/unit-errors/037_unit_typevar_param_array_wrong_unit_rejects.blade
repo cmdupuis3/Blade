@@ -1,0 +1,11 @@
+// TEST: An Array In Another Unit Is Refused By A Unit-Carrying Type Variable (rejects)
+// ERROR: BL3006 @ 10:13
+// ============================================================================
+// The unit on `x: T<meters>` is checked against the argument's ELEMENT unit,
+// for an array exactly as for a scalar.
+// ============================================================================
+Unit meters
+Unit seconds
+function idm(x: T<meters>) = x
+let d: Array<Float64<seconds> like Idx<3>> = [1.0, 2.0, 3.0]
+let e = idm(d)

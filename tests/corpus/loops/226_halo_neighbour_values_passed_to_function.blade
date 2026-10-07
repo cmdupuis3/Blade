@@ -1,0 +1,14 @@
+// TEST: Halo Neighbour Values Passed To A Function
+// ============================================================================
+// The legal spelling loops/223-225 point at: the kernel reads the neighbours
+// and passes their VALUES on; and a let-bound lambda over the window used as
+// the kernel itself.
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+function central(lo, hi) = (hi - lo) / 2.0
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> central(a(w(-1)), a(w(1))) |> compute
+let d = lambda(w) -> a(w(1)) - a(w(-1))
+let h = method_for(halo<I, [-1, 0, 1]>) <@> d |> compute
+// EXPECT: g = [1.5, 3, 6]
+// EXPECT: h = [3, 6, 12]

@@ -1,0 +1,12 @@
+// TEST: A Unit-Carrying Type Variable's Array Result Keeps Its Unit (rejects)
+// ERROR: BL3001 @ 11:50
+// ERROR-CONTAINS: got Array<Float64<meters> like Idx<3>>
+// ============================================================================
+// units/086: an array handed to `x: T<meters>` comes back as an array OF
+// meters. Ascribing it in another unit is refused.
+// ============================================================================
+Unit meters
+Unit seconds
+function idm(x: T<meters>) = x
+let d: Array<Float64<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let e: Array<Float64<seconds> like Idx<3>> = idm(d)

@@ -1,0 +1,11 @@
+// TEST: Over-Indexing A Matrix And A Caret Parameter Is Refused (rejects)
+// ERROR: BL3002 @ 8:32
+// ERROR: BL3002 @ 10:17
+// ============================================================================
+// Three subscripts into a rank-2 array, and two into a `T^1` parameter (whose
+// element variable stands for a single value): both refused at the first
+// excess subscript, never typed at a fresh variable.
+// ============================================================================
+function second(x: T^1) = x(0, 1)
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let y = m(0, 1, 0)

@@ -1,0 +1,10 @@
+// TEST: Over-Indexing A Rank-1 Array Is Refused At The Subscript (rejects)
+// ERROR: BL3002 @ 9:15
+// ERROR-CONTAINS: too many subscripts
+// ============================================================================
+// Two subscripts into a rank-1 array of Float64: the element takes no
+// arguments, so there is nothing for the second to read. It used to type at a
+// fresh variable (dispatchAppOrIndex's catch-all) and die in g++ (BL9002).
+// ============================================================================
+let xs = [1.0, 2.0, 3.0]
+let y = xs(0, 1)

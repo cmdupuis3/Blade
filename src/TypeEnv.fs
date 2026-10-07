@@ -967,6 +967,11 @@ let private formatTypeErrorRaw (err: TypeError) : string =
         if e = a then rendered + indexIdentityNote exp act else rendered
     | ArityMismatch (exp, act) -> $"Arity mismatch: expected {exp} args, got {act}"
     | KernelPackArity msg -> msg
+    | HaloWindowEscapes ->
+        "a halo window is passed to a function whose body applies it, but a window is read (`w(o)`) only in the body of the halo kernel that binds it: it is neither an array nor a function, the only values an applied parameter takes. Read the neighbours in the kernel and pass the values (`lambda(w) -> f(A(w(-1)), A(w(1)))`), or write the kernel as a lambda over the window (`<@> lambda(w) -> A(w(1)) - A(w(-1))`)."
+    | IndexOverApplied (arrTy, coords, supplied) ->
+        let plural n = if n = 1 then "" else "s"
+        $"too many subscripts: {arrTy} takes {coords} subscript{plural coords} (one per coordinate) but {supplied} were supplied, and its element is a single value that takes no arguments. Read an element with exactly {coords} subscript{plural coords}, or fewer for a lower-rank view."
     | ArgRankMismatch (pos, expRank, actRank, expTy, actTy) ->
         let describe rank ty =
             if rank = 0 then $"a scalar ({ty})"
@@ -1383,9 +1388,9 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // resolve, so no name it binds can. BL2007's sibling, one condition
             // over (library vs store).
             | ProviderStoreUnresolvable _ -> "BL2008"
-            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ | DenseCaretCompactArg _ -> "BL3001"
+            | TypeMismatch _ | ArgRankMismatch _ | ArgTypeMismatch _ | DenseCaretCompactArg _ | HaloWindowEscapes -> "BL3001"
             | CaretHeadSpelling _ -> "BL1004"
-            | ArityMismatch _ | KernelPackArity _ -> "BL3002"
+            | ArityMismatch _ | KernelPackArity _ | IndexOverApplied _ -> "BL3002"
             | InvalidApplication _ -> "BL3003"
             | PatternTypeMismatch _ | UnknownConstructorPattern _ -> "BL3004"
             | InvalidArrayCapture _ -> "BL3005"

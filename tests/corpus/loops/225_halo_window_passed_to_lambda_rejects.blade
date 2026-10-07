@@ -1,0 +1,14 @@
+// TEST: A Halo Window Passed To A Lambda That Applies It Is Refused (rejects)
+// ERROR: BL3001 @ 13:60
+// ERROR-CONTAINS: a halo window is passed to a function whose body applies it
+// ============================================================================
+// loops/223 with a one-body lambda (`d_alias` keeps it a lambda value rather
+// than a generic function): the call `d(w)` was judged while the kernel's `w`
+// was open, `d`'s parameter settled as a function of Int64, and g++ was handed
+// the window's integer for it (BL9002). Refused at the argument.
+// ============================================================================
+type I = Idx<5>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0]
+let d = lambda(w) -> a(w(1)) - a(w(-1))
+let d_alias = d
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> d(w) |> compute
