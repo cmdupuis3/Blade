@@ -507,7 +507,7 @@ let runCliSmokeTests () : TH.BlockResult =
     // the program wrote (formalism 4.3: the instance IS the declaration), so no
     // user-facing surface shows one: a panic's frames in either lane, `blade
     // plan`, the editor payload, the REPL's session names. The corpus pins the
-    // frame by substring (functions/259-260, `// ABORT: at walk`), which
+    // frame by substring (functions/279-280, `// ABORT: at walk`), which
     // `at walk__arrow1` contains too -- the absence is asserted here.
     // The detail (a whole JSON payload, a panic) is shown only on failure.
     let expectCase name cond (detail: string) = recordCase name cond (if cond then "" else detail)
