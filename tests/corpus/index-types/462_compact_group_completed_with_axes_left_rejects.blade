@@ -1,0 +1,15 @@
+// TEST: A Read Completing A Symmetric Group With Axes Left Over (rejects)
+// ERROR: BL3999 @ 14:17
+// ERROR-CONTAINS: completes a compact (SymIdx / AntisymIdx / HermitianIdx) group but leaves the 1 index slot(s) after it unread
+// ============================================================================
+// `S` is `SymIdx<3, 3>, Idx<2>`. Three subscripts lie between the RECORD count
+// (2) and the COORDINATE count (4): they complete the group and leave `Idx<2>`
+// unread. No arm took that count, so it reached the fresh-var catch-all and
+// was accepted with no real type. The group's cell is folded per read, so
+// what stands behind it is not a slice either back end can hand out (the
+// C++ lane emitted a row pointer where an array was bound, BL9002): refused.
+// ============================================================================
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0]
+let S = method_for(A, A, A, B) <@> (lambda(x, y, z, w) where comm(x, y, z) -> x * y * z * w) |> compute
+let v = S(0, 1, 2)

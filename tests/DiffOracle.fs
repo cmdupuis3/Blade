@@ -23,7 +23,17 @@ open Blade.Tests.Corpus
 /// compute, printing. Categories grow as later phases claim more surface.
 /// (The 2026-07-21 re-pin absorbed recursive-arrays and stack-join: the
 /// oracle now parses `let rec` and compiles stack/join, so their former
-/// capability-skips diff for real.)
+/// capability-skips diff for real.) The 2026-10-07 re-pin (master eabafca6)
+/// absorbed 8accf580's printer change -- a Float64 prints with its decimal
+/// point (`2.0`, not `2`) in every lane -- which diverged every float-printing
+/// program (204 of 243 compared against the 2026-08-23 pin). The mask that
+/// would have hidden it was deliberately NOT added to `normalize`: a printer
+/// change is a behaviour change, and the oracle is re-pinned for it. The seven
+/// divergences that were not the decimal point were corrections already pinned
+/// by corpus EXPECTs (Int64 literals exact past 2^53, `-x^2` = `-(x^2)`, match
+/// tuple-guard binding, grouped row-map literal kernels, named-kernel capture
+/// hygiene, rec-array prefix-alias zero history) or a corpus program that
+/// changed since the pin (loops "Pipe Compute After If Kernel").
 let denseSlice = [ "basic"; "loops"; "guards"; "recursive-arrays"; "stack-join" ]
 
 /// Corrected-semantics slice: corpus tests whose values INTENTIONALLY

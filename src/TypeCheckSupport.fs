@@ -1522,9 +1522,10 @@ let internal subscriptSlotPairs (arrTy: IRArrayType) (args: TypedExpr list) : (T
             && (match ix.Symmetry with
                 | SymSymmetric | SymAntisymmetric | SymHermitian -> true
                 | SymNone | SymWreath -> false)
-        let flatCompact =
-            args.Length > ixs.Length
-            && args.Length = (ixs |> List.sumBy (fun ix -> max 1 ix.Rank))
+        // More subscripts than records: they are coordinates, a compact group
+        // taking k of them -- for a full read and for a read that stops at a
+        // record boundary inside the coordinate count alike.
+        let flatCompact = args.Length > ixs.Length
         let slots =
             ixs |> List.collect (fun ix ->
                 if ix.IxKind = IxKCompound then List.replicate (max 1 ix.Rank) ix
@@ -3199,6 +3200,46 @@ let internal arrayCoordCount (a: IRArrayType) : int =
         | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 -> ix.Rank
         | _ -> 1)
 
+/// COORDINATES, NOT RECORDS. A compact group (`SymIdx<2, n>`, AntisymIdx,
+/// HermitianIdx) is ONE record spanning `Rank` coordinates, so `n` subscripts
+/// are walked through the records in flat coordinate order rather than one per
+/// record (`S(1)` over a rank-2 symmetric result used to count one argument
+/// against one record, answer "scalar", and emit a row pointer as a double).
+/// Ok = the records after the supplied coordinates (the read's view). Refused:
+///   * a count that lands INSIDE a group -- a partially-read compact group has
+///     no residual class (the wildcard arm's refusal);
+///   * a count that COMPLETES a group but leaves later records unread
+///     (`S(i, j, k)` of `SymIdx<3, n>, Idx<m>`). The group's cell is folded
+///     per read -- canonicalized, and for an antisymmetric or Hermitian group
+///     sign- or conjugate-transformed -- so what stands behind it is not a
+///     slice of storage either back end can hand out as a view (the C++ lane
+///     emitted a raw row pointer where an array was bound, BL9002).
+/// Records before a group (`S(i)` of `Idx<m>, SymIdx<2, n>`) stay a view: the
+/// group survives whole. Only a compact group spans several coordinates here;
+/// every other record takes one (a wreath group has its own arm).
+let internal compactCoordWalk (a: IRArrayType) (n: int) : Result<IRIndexType list, TypeError> =
+    let isCompact (ix: IRIndexType) =
+        ix.Rank >= 2 &&
+        (match ix.Symmetry with
+         | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+         | SymNone | SymWreath -> false)
+    let rec walk (coords: int) (recs: IRIndexType list) (consumed: IRIndexType option)
+                 : Result<IRIndexType list * IRIndexType option, IRIndexType * int> =
+        match recs with
+        | [] -> Ok ([], consumed)
+        | _ when coords = 0 -> Ok (recs, consumed)
+        | ix :: rest ->
+            let span = if isCompact ix then ix.Rank else 1
+            if coords >= span then
+                walk (coords - span) rest (if isCompact ix then Some ix else consumed)
+            else Error (ix, coords)
+    match walk n a.IndexTypes None with
+    | Error (ix, inside) ->
+        Error (Other (sprintf "a partial read of a compact (SymIdx / AntisymIdx / HermitianIdx) group has no residual class: the subscripts supply %d of the group's %d coordinates. Supply every coordinate of the group, or decompact(A, d) first and read the freed axis there." inside ix.Rank))
+    | Ok (remaining, Some group) when not remaining.IsEmpty ->
+        Error (Other (sprintf "a read that completes a compact (SymIdx / AntisymIdx / HermitianIdx) group but leaves the %d index slot(s) after it unread has no view: the group's cell is folded per read (canonicalized, and sign- or conjugate-transformed for an antisymmetric or Hermitian group), so the rest of the array behind it is not a slice of storage. Supply all %d coordinates (the group takes %d), or decompact(A, d) first." remaining.Length (arrayCoordCount a) group.Rank))
+    | Ok (remaining, _) -> Ok remaining
+
 let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list)
                                   (tArgs: TypedExpr list) (quantified: int -> bool)
                                   (copyMap: Map<int, int>) : (int * TypeError) option =
@@ -3649,6 +3690,87 @@ let internal arrowArrayArgs (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr 
         if arrays.IsEmpty || unsettled then None
         else Some (fid, Map.ofList arrays)
 
+/// The type of a halo WINDOW READ `w(o)` over a DENSE inner index: a position
+/// of that index (Lowering emits it as `w + o`, and BndShrink keeps it in
+/// bounds), so `Nat<I>` for a named inner `I` -- usable wherever a position of
+/// `I` is, a subscript `a(w(o))` or an argument `f(w(o))` -- and a plain
+/// Int64 for an anonymous one. None for a masked (CompoundIdx) inner, whose
+/// read yields the present cell's COORDINATE through IRHaloUnhash; that read
+/// keeps the type it was given while open.
+/// A `Chunked` alias names the halo but IS its source axis (TypeLower
+/// haloSlotsOf), so the position is the source's: its user tag, or untagged.
+let internal haloWindowReadType (env: TypeEnv) (tag: string) : IRType option =
+    let positionOf (name: string) =
+        if name = "" || name.StartsWith "__" then IRTScalar ETInt64
+        else IRTIdxTagged (IRTScalar ETInt64, IRefNamed name)
+    match tag with
+    | HaloWinTag (false, inner, _) ->
+        match Map.tryFind inner env.Segmentations with
+        | Some seg -> Some (positionOf (defaultArg seg.Source.Tag ""))
+        | None -> Some (positionOf inner)
+    | _ -> None
+
+/// The call shape of a function with a `Poly<T^k>` pack parameter: the
+/// parameter each argument meets (so the positional checks pair a trailing
+/// argument with its own parameter), or the refusal and the argument it is
+/// located at (-1: the call). The shapes are the ones monomorphization reads
+/// (IRMono.computePolyArity):
+///   * a lone pack: every argument is an element (`f(a, b, c)`);
+///   * ONE pack beside fixed parameters: as many arguments as parameters,
+///     the pack slot holding a parenthesized group or a lone element
+///     (`pk((a, b), k)`, `pk(a, k)`), or more, the pack's elements written
+///     flat in its place (`pk(a, b, k)`: the surplus is the pack);
+///   * several packs: one argument per parameter, each pack a group or a
+///     lone element (with two packs, a flat list has no split).
+/// A pack written as a tuple-typed VARIABLE (`let t = (a, b); pk(t, k)`) has
+/// no elements monomorphization can see, and a group among flat elements is
+/// both spellings at once; both are refused. Anything else reached
+/// monomorphization unread and surfaced as an internal BL6001.
+let internal polyCallShape (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list) (tArgs: TypedExpr list)
+                           : Result<IRType list, int * TypeError> =
+    let isPoly (t: IRType) = (env.Subst.Resolve t).IsIRTPoly
+    let polyIdx = paramTys |> List.indexed |> List.filter (snd >> isPoly) |> List.map fst
+    let nP = paramTys.Length
+    let name = match tFunc.Kind with TExprVar (n, _, _) -> $"'{n}'" | _ -> "this function"
+    let isTupleValue (a: TypedExpr) = (env.Subst.Resolve a.Type).IsIRTTuple
+    // A pack slot's argument: a written group, or a lone (non-tuple) element.
+    let groupSlotError (i: int) =
+        let a = List.item i tArgs
+        if isTupleValue a && not a.Kind.IsTExprTuple then
+            Some (i, KernelPackArity $"argument {i + 1} of {name} fills a Poly pack with a tuple-typed value: a pack's elements are written at the call, as a parenthesized group in the pack's place or (for a lone pack beside fixed parameters) flat, so monomorphization can see each one. Write the group out, as in ((a, b), ...).")
+        else None
+    match polyIdx with
+    | [] -> Ok paramTys
+    | [ _ ] when nP = 1 -> Ok paramTys
+    | [ p ] ->
+        let fixedCount = nP - 1
+        if tArgs.Length < nP then
+            Error (-1, KernelPackArity $"too few arguments: {name} takes a Poly pack and {fixedCount} more parameter(s), so a call passes at least {nP} argument(s) -- the pack (its elements, or one parenthesized group) plus one per remaining parameter -- but {tArgs.Length} were supplied.")
+        elif tArgs.Length = nP then
+            match groupSlotError p with
+            | Some err -> Error err
+            | None -> Ok paramTys
+        else
+            let packLen = tArgs.Length - fixedCount
+            let flatTuple =
+                tArgs |> List.indexed |> List.skip p |> List.truncate packLen
+                |> List.tryFind (fun (_, a) -> isTupleValue a)
+            match flatTuple with
+            | Some (i, _) ->
+                Error (i, KernelPackArity $"argument {i + 1} of {name} is a tuple among the Poly pack's flat elements: the pack is written EITHER as one parenthesized group in its place or as plain elements, not both.")
+            | None ->
+                Ok (List.truncate p paramTys
+                    @ List.replicate packLen (List.item p paramTys)
+                    @ List.skip (p + 1) paramTys)
+    | _ ->
+        if tArgs.Length <> nP then
+            Error ((if tArgs.Length > nP then nP else -1),
+                   KernelPackArity $"{name} declares {polyIdx.Length} Poly packs, so each pack is written as ONE parenthesized group in its own place (as in f((a, b), (c, d))) and a call passes exactly {nP} argument(s); {tArgs.Length} were supplied.")
+        else
+            match polyIdx |> List.tryPick groupSlotError with
+            | Some err -> Error err
+            | None -> Ok paramTys
+
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
     //
@@ -3854,10 +3976,22 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // trailing dim), so its arg budget exceeds the slot count -- and it
         // ALWAYS routes here so validateTabulatedIndex owns the flat-count
         // accounting (no silent fresh-var fallthrough for compound heads).
+        // Otherwise COORDINATES, not slots: a rank-k compact group takes k of
+        // them, so a count between the slot count and the coordinate count
+        // (3 subscripts of `SymIdx<3, n>, Idx<m>`) is a read too -- the walk
+        // below judges it. (It used to fall to the fresh-var catch-all and be
+        // accepted with no real type.)
         (match arrTy.IndexTypes with
          | h :: _ when h.IxKind = IxKCompound -> true
-         | _ -> tArgs.Length <= arrTy.IndexTypes.Length) ->
-        validateTabulatedIndex env arrTy tArgs
+         | _ -> tArgs.Length <= arrayCoordCount arrTy) ->
+        // The coordinate walk's refusals FIRST: a read with no residual class
+        // must not be reported as a tag clash of a subscript paired with the
+        // wrong record.
+        (match arrTy.IndexTypes with
+         | h :: _ when h.IxKind = IxKCompound || h.IxKind = IxKSparse -> Ok ()
+         | _ -> compactCoordWalk arrTy tArgs.Length |> Result.map ignore)
+        |> Result.bind (fun () ->
+        validateTabulatedIndex env arrTy tArgs)
         |> Result.bind (fun () ->
         foldEnumIdxLabels env arrTy tArgs
         |> Result.bind (fun tArgs ->
@@ -3978,36 +4112,11 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     Ok (mkTyped (TExprIndex (tFunc, tArgs, identity))
                                 (mkArrayLike { arrTy with IndexTypes = finalSlots }))
             else
-                // COORDINATES, NOT RECORDS. A compact group (`SymIdx<2, n>`,
-                // AntisymIdx, HermitianIdx) is ONE record spanning `Rank`
-                // coordinates, so the supplied count is walked through the
-                // records in flat coordinate order rather than one per
-                // record: `S(1)` over a rank-2 symmetric result used to count
-                // one argument against one record and answer "scalar", and
-                // the emitted `double x = S[1L]` was a row pointer. A count
-                // that lands INSIDE a group has no residual class (the same
-                // refusal the wildcard arm above gives); one that lands on a
-                // record boundary keeps the records after it as the view.
-                let rec walk (coords: int) (recs: IRIndexType list) : Result<IRIndexType list, IRIndexType> =
-                    match recs with
-                    | [] -> Ok []
-                    | _ when coords = 0 -> Ok recs
-                    | ix :: rest ->
-                        let compact =
-                            ix.Rank >= 2 &&
-                            (match ix.Symmetry with
-                             | SymSymmetric | SymAntisymmetric | SymHermitian -> true
-                             | SymNone | SymWreath -> false)
-                        // Only a compact group spans several coordinates
-                        // here; every other record keeps the one-argument-
-                        // per-record accounting it always had (wreath
-                        // partial reads are refused by their own arm above).
-                        let span = if compact then ix.Rank else 1
-                        if coords >= span then walk (coords - span) rest
-                        else Error ix
-                match walk tArgs.Length arrTy.IndexTypes with
-                | Error ix ->
-                    Error (Other (sprintf "a partial read of a compact (SymIdx / AntisymIdx / HermitianIdx) group has no residual class: %d coordinate(s) were supplied but the group spans %d. Supply every coordinate of the group, or decompact(A, d) first and read the freed axis there." tArgs.Length ix.Rank))
+                // COORDINATES, NOT RECORDS (compactCoordWalk, already judged
+                // above): the records after the supplied coordinates are the
+                // view.
+                match compactCoordWalk arrTy tArgs.Length with
+                | Error e -> Error e
                 | Ok [] ->
                     Ok (mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType)
                 | Ok remaining ->
@@ -4032,7 +4141,14 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             |> Result.bind (fun head -> dispatchAppOrIndex env head rest)
         | _ ->
             if tArgs.[coords].Span.StartLine > 0 then setCurrentExprSpan tArgs.[coords].Span
-            Error (IndexOverApplied (ppIRType headTy, coords, tArgs.Length))
+            // Named as the program spells it: a `T^k` parameter's type is
+            // `T^k`, not the array shape its use synthesized
+            // (`Array<'a like Idx<n>>`).
+            let shown =
+                match env.Subst.CaretSpellingOf headTy with
+                | Some caret -> caret
+                | None -> ppIRType headTy
+            Error (IndexOverApplied (shown, coords, tArgs.Length))
     | FuncElem (paramTys, retTy) ->
         // WIDTH SCHEMA first, so every check below (and the arity accounting,
         // and the emitted TExprApp) sees the regrouped list: `g(b, c)` against
@@ -5088,7 +5204,16 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 unitStampedReturnOnto env
                     (calleeDeclId env tFunc)
                     tArgs retTy (judgedRet |> Option.defaultValue retTy)
-            match coerceIndexArgs env paramTys tArgs with
+            // A `Poly` pack's call shape (IRMono.computePolyArity reads it):
+            // refused here, at the call, when monomorphization cannot read it,
+            // and otherwise the parameter each argument meets.
+            match (if isVariadic then polyCallShape env tFunc paramTys tArgs else Ok paramTys) with
+            | Error (i, e) ->
+                if i >= 0 && i < tArgs.Length && (List.item i tArgs).Span.StartLine > 0 then
+                    setCurrentExprSpan (List.item i tArgs).Span
+                Error e
+            | Ok argParamTys ->
+            match coerceIndexArgs env argParamTys tArgs with
             | Error e -> Error e
             | Ok tArgs ->
             if isVariadic then
@@ -5142,6 +5267,12 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
     // every array intrinsic does (`extents(m)`, `reduce(m, ..)`) -- whose
     // element var stays polymorphic, so HM specialization still makes one
     // copy per element type -- and re-dispatches to the indexing arms.
+    // A HALO WINDOW READ `w(o)` whose window is already known (a seeded
+    // kernel parameter): the neighbour's position (haloWindowReadType). A
+    // window still open when its read was typed is settled the same way when
+    // it is bound (dischargeArrowApp).
+    | IRTIdxTagged (_, IRefNamed tag) when tArgs.Length = 1 && (haloWindowReadType env tag).IsSome ->
+        Ok (mkTyped (TExprApp (tFunc, tArgs)) (haloWindowReadType env tag).Value)
     | IRTInfer vid when not (List.isEmpty tArgs)
                         && (env.Subst.GetArityConstraint vid |> Option.exists (fun k -> k >= 1)) ->
         let k = (env.Subst.GetArityConstraint vid).Value
@@ -5282,9 +5413,15 @@ and internal dischargeArrowApp (env: TypeEnv) (app: ArrowApplication) : TypeResu
     // window read -- refused at the argument (formalism 4.3).
     | IRTIdxTagged (_, IRefNamed tag) when not app.Written && tag.StartsWith haloWinTagPrefix ->
         Error HaloWindowEscapes
-    // Anything else (a halo window read `w(o)` written in the kernel's own
-    // body, which Lowering owns) keeps what the application was typed with
-    // while open.
+    // A halo window read `w(o)` written in the kernel's own body, typed while
+    // the window was open: Lowering owns the read (`w + o`), and its result is
+    // the neighbour's POSITION (haloWindowReadType) -- which it meets here, so
+    // `f(w(1))` passes a position of I to `f`, as `a(w(1))` reads one. (Left
+    // open it zonked to Float64.) A masked inner keeps its open result.
+    | IRTIdxTagged (_, IRefNamed tag) when app.Written && app.Args.Length = 1 && (haloWindowReadType env tag).IsSome ->
+        unify env.Subst app.Result (haloWindowReadType env tag).Value
+    // Anything else (a masked-inner window read, which Lowering owns) keeps
+    // what the application was typed with while open.
     | _ -> Ok ()
 
 /// Discharge every pending arrow application whose head is no longer open
@@ -5843,6 +5980,17 @@ let rec internal revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : Type
             match env.Subst.Resolve arr.Type with
             | ArrayElem at when args.Length <= at.IndexTypes.Length ->
                 checkArrayIndexTags env arr at args
+                |> Result.mapError (fun e ->
+                    // Located at the subscript, as the eager check would
+                    // have been: this runs after the kernel's operands were
+                    // inferred, so the ambient expression span is the LAST
+                    // operand's (`range<I>`), not the read in the body.
+                    let at =
+                        match args with
+                        | [ a ] when a.Span.StartLine > 0 -> a.Span
+                        | _ -> expr.Span
+                    if at.StartLine > 0 then setCurrentExprSpan at
+                    e)
             | _ -> Ok ()
         | _ -> Ok ())
 

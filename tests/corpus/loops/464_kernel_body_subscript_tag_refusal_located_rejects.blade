@@ -1,0 +1,13 @@
+// TEST: A Subscript Refused Inside A Kernel Body Is Located At Its Index (rejects)
+// ERROR: BL4003 @ 12:56
+// ============================================================================
+// The kernel body's `B(i)` is judged again once `i` is bound to `Nat<I>`
+// (revalidateBodyTagChecks): B is over J, so the read is refused. That
+// re-check runs after the operands were typed, and the refusal was located
+// at the last operand (`xs`); it is located at the index it names.
+// ============================================================================
+type I = Idx<4>
+type J = Idx<5>
+let B: Array<Float64 like J> = [1.0, 2.0, 3.0, 4.0, 5.0]
+let xs: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+let r = method_for(range<I>, xs) <@> lambda(i, x) -> B(i) + x |> compute

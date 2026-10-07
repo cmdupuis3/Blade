@@ -5913,8 +5913,22 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                  | TExprLambda _ | TExprSection _ | TExprReynolds _ | TExprZero -> true
                  | _ -> false)
             | Error _ -> false
+        // The RIGHT operand is inferred FIRST, so a refusal inside it (a call
+        // in a kernel lambda's body) was located where its inference stopped
+        // -- and then the left operand's inference re-stamped the expression
+        // span (TypeEnv.locateError takes the LAST stamp), which put the
+        // refusal on `range<I>` / the arrays instead of the offending
+        // argument. Keep the right's own location for its error.
+        let rightErrSpan =
+            match rightResult with
+            | Error _ -> Some (currentExprSpan ())
+            | Ok _ -> None
         let applyWith (tL: TypedExpr) =
-            rightResult |> Result.bind (fun tR -> inferApply env tL tR)
+            match rightResult, rightErrSpan with
+            | Error e, Some s ->
+                if s.StartLine > 0 then setCurrentExprSpan s
+                Error e
+            | _ -> rightResult |> Result.bind (fun tR -> inferApply env tL tR)
         // A bare NAMED function on the LEFT is a kernel too -- `covariance <@>
         // (data, data)`. It can never resolve to a TExprLambda (a top-level
         // `function` binds with TypedValue = None), so without this arm the
@@ -10638,6 +10652,45 @@ and buildApplyInfo (env: TypeEnv)
         | Some a ->
             if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
             Error HaloWindowEscapes
+        | None ->
+        // A KERNEL PARAMETER PASSED TO A DECLARED INDEX PARAMETER of another
+        // index type: `method_for(range<I>) <@> lambda(i) -> g(A, i)` with
+        // `g(.., i: Nat<J>)`. The call was judged while `i` was open, so the
+        // judgment compared nothing, and the kernel's binding of `i` to
+        // `Nat<I>` (above) never met `g`'s declared `Nat<J>` -- the call
+        // `g(A, (1 : I))` refuses was accepted here. Judged now, located at
+        // the argument, with the same refusal (BL3001). Only a NAMED index on
+        // both sides, and only a bare kernel parameter as the argument (the
+        // one argument the judgment saw open).
+        let kernelParamIds = lambdaInfo.Params |> List.map (_.VarId) |> Set.ofList
+        let rec kernelIndexArgClash (e: TypedExpr) : (TypedExpr * TypeError) option =
+            let here =
+                match e.Kind with
+                | TExprApp (f, args) ->
+                    (match IR.stripUnits (env.Subst.Resolve f.Type) with
+                     | FuncElem (slots, _) when not (slots |> List.exists (fun s -> (env.Subst.Resolve s).IsIRTPoly)) ->
+                         let n = min slots.Length args.Length
+                         List.zip (List.truncate n args) (List.truncate n slots)
+                         |> List.indexed
+                         |> List.tryPick (fun (i, (a, s)) ->
+                             match a.Kind with
+                             | TExprVar (_, vid, _) when kernelParamIds.Contains vid ->
+                                 (match IR.stripUnits (env.Subst.Resolve a.Type), IR.stripUnits (env.Subst.Resolve s) with
+                                  | (IRTIdxTagged (_, IRefNamed an) as aTy), (IRTIdxTagged (_, IRefNamed sn) as sTy)
+                                      when an <> sn && not (an.StartsWith "__") && not (sn.StartsWith "__") ->
+                                      let desc = match f.Kind with TExprVar (nm, _, _) -> $"'{nm}'" | _ -> "this function"
+                                      Some (a, ArgTypeMismatch (i + 1, desc, ppIRType sTy, ppIRType aTy))
+                                  | _ -> None)
+                             | _ -> None)
+                     | _ -> None)
+                | _ -> None
+            match here with
+            | Some r -> Some r
+            | None -> typedExprChildren e |> List.tryPick kernelIndexArgClash
+        match kernelIndexArgClash lambdaInfo.Body with
+        | Some (a, err) ->
+            if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
+            Error err
         | None ->
         // KERNEL CO-ITERATION AGREEMENT (BL3016 extent / BL3999 name), the
         // `<@>` twin of the call-site ladder's coIterClash. A kernel body that

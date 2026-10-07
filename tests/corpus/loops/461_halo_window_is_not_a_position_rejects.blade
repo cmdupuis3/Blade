@@ -1,0 +1,13 @@
+// TEST: A Halo Window Itself Is Not A Position (rejects)
+// ERROR: BL3001 @ 12:61
+// ERROR-CONTAINS: the argument is halo<I, [-1, 0, 1]> window
+// ============================================================================
+// The window `w` is not a position -- its READS are (loops/460). Passing the
+// window where a position of I is declared is refused at the argument, and
+// the refusal names the window as the program declared it: the internal
+// `__halowin|d:I|-1,0,1` tag the window rides on used to be printed.
+// ============================================================================
+type I = Idx<6>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+function at(i) = a(i)
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> at(w) |> compute

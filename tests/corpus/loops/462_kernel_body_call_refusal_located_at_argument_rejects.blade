@@ -1,0 +1,14 @@
+// TEST: A Call Refused Inside A Kernel Body Is Located At Its Argument (rejects)
+// ERROR: BL3001 @ 13:52
+// ERROR-CONTAINS: argument 2 of 'h'
+// ============================================================================
+// The kernel (the right operand of `<@>`) is typed BEFORE the operands, so
+// the refusal of `h(A, true)` was raised first -- and then the operand
+// `range<I>` was typed, re-stamping the location the diagnostic reports. It
+// pointed at `range<I>`; it is located at the argument it names, as the same
+// call outside a kernel is.
+// ============================================================================
+type I = Idx<4>
+let A: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
+function h(x: Array<Float64 like I>, s: Float64) -> Float64 = x(0) + s
+let r = method_for(range<I>) <@> lambda(i) -> h(A, true) |> compute

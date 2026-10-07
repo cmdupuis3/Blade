@@ -1,0 +1,12 @@
+// TEST: A Pack Filled From A Tuple-Typed Variable Is Refused (rejects)
+// ERROR: BL3002 @ 11:18
+// ERROR-CONTAINS: fills a Poly pack with a tuple-typed value
+// ============================================================================
+// A pack's elements are written at the call so monomorphization can see each
+// one; a tuple-typed variable in the pack's place hides them (it used to fail
+// IR validation, BL6001). Write the group out: `first_at((x, y), 1)`.
+// ============================================================================
+function first_at(P: Poly<T^1>, k: Int64) = P[0](k)
+let x = [1.0, 2.0, 3.0]
+let t = (x, [4.0, 5.0, 6.0])
+let r = first_at(t, 1)

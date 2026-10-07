@@ -33,6 +33,16 @@ let rec ppIRType = function
     | IRTPoly (base', var) -> $"Poly<{ppIRType base'}, {var}>"
     | IRTNat (Some n) -> $"Nat<{n}>"
     | IRTNat None -> "Nat<?>"
+    // A halo WINDOW (the kernel parameter `w` of `halo<I, offs>`): its tag is
+    // the internal "__halowin|..." encoding, never shown -- spell the window
+    // as the program declared it.
+    | IRTIdxTagged (_, IRefNamed (HaloWinTag (compound, inner, offs))) ->
+        let innerStr =
+            if compound then "CompoundIdx<_>"
+            elif inner = "" || inner.StartsWith "__" then "Idx<_>"
+            else inner
+        let offStr = offs |> List.map string |> String.concat ", "
+        $"halo<{innerStr}, [{offStr}]> window"
     | IRTIdxTagged (inner, idxRef) ->
         // Conventional form: when the inner is the typical int64 backing,
         // render compactly as "Nat<I>" (parallel to "Float<meters>"); for

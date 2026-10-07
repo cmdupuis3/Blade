@@ -1,0 +1,10 @@
+// TEST: A Pack Beside A Parameter Called With Too Few Arguments (rejects)
+// ERROR: BL3002
+// ERROR-CONTAINS: too few arguments: 'first_at' takes a Poly pack and 1 more parameter(s)
+// ============================================================================
+// The pack needs at least one element and `k` its own argument: one argument
+// cannot be both. Refused at the call (it used to fail IR validation, BL6001).
+// ============================================================================
+function first_at(P: Poly<T^1>, k: Int64) = P[0](k)
+let x = [1.0, 2.0, 3.0]
+let r = first_at(x)

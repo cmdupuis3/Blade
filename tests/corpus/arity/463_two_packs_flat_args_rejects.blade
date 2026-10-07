@@ -1,0 +1,9 @@
+// TEST: Two Packs Called With A Flat Argument List (rejects)
+// ERROR: BL3002 @ 8:28
+// ERROR-CONTAINS: declares 2 Poly packs
+// ============================================================================
+// With two packs a flat list has no split: each pack is one argument, a
+// group or a lone element. Refused at the first surplus argument.
+// ============================================================================
+function pair_sum(xs: Poly<T^0>, ys: Poly<T^0>) -> T^0 = xs[0] + ys[0]
+let r = pair_sum(1.0, 2.0, 3.0)

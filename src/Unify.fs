@@ -756,6 +756,17 @@ type Subst() =
                 | _ -> ()
             tv
 
+    /// The `T^k` spelling of a type, when it IS the current signature's caret
+    /// variable (`x: T^1` reads back as `T^1`, not as the array shape the
+    /// body's use synthesized for it). Display only: diagnostics name the
+    /// parameter's type as the program wrote it.
+    member this.CaretSpellingOf(ty: IRType) : string option =
+        let target = this.Resolve ty
+        typeVarScope
+        |> Map.toSeq
+        |> Seq.tryPick (fun (key, (tv, arity)) ->
+            if arity > 0 && this.Resolve tv = target then Some key else None)
+
     member _.IsPolymorphicId(id: int) : bool =
         Set.contains id polymorphicIds
 

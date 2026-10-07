@@ -1,0 +1,18 @@
+// TEST: A Halo Window Read Is A Position Of Its Index
+// ============================================================================
+// Inside a kernel over `halo<I, [-1, 0, 1]>`, the window read `w(o)` is the
+// neighbour's POSITION of I (Lowering emits it as `w + o`, the interior shrink
+// keeps it in bounds), so it goes wherever a position of I goes: a subscript
+// `a(w(1))`, and equally an argument `f(w(1))` of a function over I -- a
+// generic one whose parameter its body made `Nat<I>`, or a declared
+// `Nat<I>` one. The read used to be left untyped while the window was open
+// and zonked to Float64, so the call was refused "the argument is Float64".
+// ============================================================================
+type I = Idx<6>
+let a: Array<Float64 like I> = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+function at(i) = a(i)
+function at_decl(i: Nat<I>) -> Float64 = a(i)
+let g = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> at(w(1)) - at_decl(w(-1)) |> compute
+let h = method_for(halo<I, [-1, 0, 1]>) <@> lambda(w) -> a(w(1)) - a(w(-1)) |> compute
+// EXPECT: g = [3.0, 6.0, 12.0, 24.0]
+// EXPECT: h = [3.0, 6.0, 12.0, 24.0]

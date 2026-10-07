@@ -1,0 +1,11 @@
+// TEST: A Read Splitting A Symmetric Group Beside Another Axis (rejects)
+// ERROR: BL3999 @ 10:14
+// ERROR-CONTAINS: the subscripts supply 2 of the group's 3 coordinates
+// ============================================================================
+// Two subscripts of `SymIdx<3, 3>, Idx<2>` land INSIDE the group: a partially
+// read compact group has no residual class (index-types/257's refusal, here
+// beside another axis).
+// ============================================================================
+let A = [1.0, 2.0, 3.0]
+let S = method_for(A, A, A, [4.0, 5.0]) <@> (lambda(x, y, z, w) where comm(x, y, z) -> x * y * z * w) |> compute
+let p = S(0, 1)

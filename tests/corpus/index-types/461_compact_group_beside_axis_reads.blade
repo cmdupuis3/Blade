@@ -1,0 +1,17 @@
+// TEST: A Rank-3 Symmetric Group Beside Another Axis Reads By Coordinates
+// ============================================================================
+// `S` is `SymIdx<3, 3>, Idx<2>`: two index RECORDS, four COORDINATES (the
+// group takes three). A full read supplies all four, the group's three in
+// any order (the cell is canonicalized). index-types/462-463 pin the counts
+// that land between the record count and the coordinate count.
+// ============================================================================
+let A = [1.0, 2.0, 3.0]
+let B = [4.0, 5.0]
+let f = lambda(x, y, z, w) where comm(x, y, z) -> x * y * z * w
+let S = method_for(A, A, A, B) <@> f |> compute
+let e = S(0, 1, 2, 1)
+let e2 = S(2, 0, 1, 1)
+let e3 = S(1, 1, 2, 0)
+// EXPECT: e = 30.0
+// EXPECT: e2 = 30.0
+// EXPECT: e3 = 48.0

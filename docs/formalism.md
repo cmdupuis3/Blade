@@ -1486,6 +1486,17 @@ actual tuple *of arrays* there is refused (`BL3002`): pass the components as
 separate operands, or use a kernel whose parameter there is annotated
 `Tuple<k>` instead of folded into the `Poly` pack.
 
+A DIRECT call of a function with a pack parameter reads the pack off the
+argument list: a lone pack takes every argument (`f(a, b, c)`); one pack beside
+fixed parameters takes either the argument in its place -- a parenthesized group
+`pk((a, b), k)` or a lone element `pk(a, k)` (a one-element pack) -- or, when
+there are more arguments than parameters, the surplus written flat in its place
+(`pk(a, b, k)`); several packs take one argument each, a group or a lone
+element. Anything else is refused at the call (`BL3002`): a group among flat
+elements, too few arguments, a flat list against two packs, and a pack passed as
+a tuple-typed variable (`let t = (a, b); pk(t, k)`) -- write the group out at
+the call.
+
 ### 8.3 Identity groups
 
 At a call site, **neighboring identical arguments** form identity groups

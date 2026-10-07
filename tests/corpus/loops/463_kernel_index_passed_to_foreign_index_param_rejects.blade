@@ -1,0 +1,16 @@
+// TEST: A Kernel Index Passed To Another Index Type's Parameter Is Refused (rejects)
+// ERROR: BL3001 @ 15:52
+// ERROR-CONTAINS: the parameter is declared Nat<J> but the argument is Nat<I>
+// ============================================================================
+// `k(B, (1 : I))` is refused at the call (a position of I is not one of J).
+// Inside a kernel over `range<I>` the same call was judged while the kernel's
+// `i` was still open, so nothing compared it with `k`'s `Nat<J>`, and binding
+// `i` to `Nat<I>` afterwards never met the call: it was accepted and read B
+// at positions of I. Judged once the kernel's parameters are bound, and
+// located at the argument.
+// ============================================================================
+type I = Idx<4>
+type J = Idx<5>
+let B: Array<Float64 like J> = [1.0, 2.0, 3.0, 4.0, 5.0]
+function k(x: Array<Float64 like J>, j: Nat<J>) -> Float64 = x(j)
+let r = method_for(range<I>) <@> lambda(i) -> k(B, i) |> compute

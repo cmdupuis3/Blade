@@ -1,0 +1,11 @@
+// TEST: A Pack Written Both As A Group And Flat Is Refused (rejects)
+// ERROR: BL3002 @ 10:18
+// ERROR-CONTAINS: is a tuple among the Poly pack's flat elements
+// ============================================================================
+// `first_at((x, y), x, 1)` has a surplus argument, so the pack is written
+// flat -- and its first element is a group. Both spellings at once has no
+// reading; refused at the group.
+// ============================================================================
+function first_at(P: Poly<T^1>, k: Int64) = P[0](k)
+let x = [1.0, 2.0, 3.0]
+let r = first_at((x, [4.0, 5.0, 6.0]), x, 1)

@@ -2444,12 +2444,15 @@ let findPolyParamIndices (func: IRFuncDef) : int list =
 /// valid call with arities [2; 3]. Three call shapes are recognized:
 /// (a) Variadic -- single Poly param, no free params: every positional arg
 ///     is a pack element, returns [args.Length].
-/// (b) Single-Poly tuple-as-pack -- single Poly param plus free params: the
-///     pack is a tuple at the Poly slot, returns [tuple.Length].
-/// (c) Multi-Poly tuple-as-pack -- every Poly slot gets its own tuple,
-///     returns [size_slot_0; size_slot_1; ...].
-/// Returns None for unsupported shapes (mismatched arg count, non-tuple at
-/// a required Poly slot).
+/// (b) Single-Poly beside free params: the pack is a tuple at the Poly slot
+///     (returns [tuple.Length]), a lone element there (a one-element pack,
+///     [1]), or its elements written flat in its place (the surplus over the
+///     free params, [args.Length - free]).
+/// (c) Multi-Poly tuple-as-pack -- every Poly slot gets its own tuple (or a
+///     lone element), returns [size_slot_0; size_slot_1; ...].
+/// Returns None for unsupported shapes (mismatched arg count, the pack itself
+/// passed on unspecialized); TypeCheck.polyCallShape refuses at the call
+/// every user-written shape this cannot read.
 let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
     let polyIndices = findPolyParamIndices func
     // A call passing a symbolic pack tail (`f(tail)` inside an un-specialized
@@ -2467,6 +2470,23 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
     | [pidx] when func.Params.Length = 1 ->
         // Variadic -- args are the pack elements directly
         Some [args.Length]
+    | [pidx] ->
+        // ONE pack beside fixed parameters. The fixed parameters pin how many
+        // arguments are NOT the pack, so the split is determined by the count:
+        //   * as many args as params: the pack slot holds a parenthesized
+        //     group `pk((a, b), k)` -- or a lone element, a one-element pack
+        //     `pk(a, k)` (there is no 1-tuple to write);
+        //   * more: the pack's elements are written flat in its place,
+        //     `pk(a, b, k)` -- the surplus is the pack.
+        // TypeCheck (polyCallShape) refuses the shapes this cannot read.
+        let fixedCount = func.Params.Length - 1
+        if args.Length = func.Params.Length then
+            match List.item pidx args with
+            | IRTuple elems -> Some [elems.Length]
+            | IRVar (_, IRTPoly _) -> None
+            | _ -> Some [1]
+        elif args.Length > func.Params.Length then Some [args.Length - fixedCount]
+        else None
     | _ ->
         // Tuple-as-pack at every Poly slot. args.Length must equal the
         // formal arity (no variadic spreading when free params or multiple
@@ -2477,7 +2497,8 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
                 polyIndices |> List.map (fun pidx ->
                     match List.item pidx args with
                     | IRTuple elems -> Some elems.Length
-                    | _ -> None)
+                    | IRVar (_, IRTPoly _) -> None
+                    | _ -> Some 1)
             if perSlot |> List.forall Option.isSome then
                 Some (perSlot |> List.map Option.get)
             else None
@@ -2491,6 +2512,9 @@ let flattenAtPolyPosition (func: IRFuncDef) (args: IRExpr list) : IRExpr list =
     match polyIndices with
     | [] -> args
     | [_] when func.Params.Length = 1 -> args  // variadic -- already flat
+    // One pack written FLAT beside fixed params (computePolyArity): its
+    // elements already sit in the pack's place, in the specialized order.
+    | [_] when args.Length > func.Params.Length -> args
     | _ ->
         if args.Length <> func.Params.Length then args
         else

@@ -1,0 +1,9 @@
+// TEST: Over-Indexing A Caret Parameter Names It As Written (rejects)
+// ERROR: BL3002 @ 8:34
+// ERROR-CONTAINS: too many subscripts: T^1 takes 1 subscript
+// ============================================================================
+// `x: T^1` is subscripted twice. The refusal used to name the array shape the
+// body's use synthesized for the caret variable (`Array<'a like Idx<n>>`);
+// it names the parameter's type as the program spells it.
+// ============================================================================
+function f(x: T^1) -> T^0 = x(0, 1)
