@@ -11,5 +11,9 @@
 type L = Idx<3>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
 let u = lambda(c, n: Int64) -> c(n) * 2.0
+// `u_alias` is a VALUE use, so `u` stays one lambda body (the first-use rule)
+// rather than being generalized into a declaration (functions/246-250): this
+// test covers the lambda's own subscript replacement.
+let u_alias = u
 let w = u(A, 4)
 // ABORT: BL8006
