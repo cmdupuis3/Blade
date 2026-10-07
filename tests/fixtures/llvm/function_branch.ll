@@ -12,7 +12,7 @@ declare double @blade_now() #3
 declare void @blade_print_completed(ptr noundef, double noundef) #3
 declare void @blade_print_f64(ptr noundef, double noundef) #3
 
-define internal double @bl_classify_0(double noundef %a0) #0 {
+define internal double @bl_classify_HM_10000_double_6(double noundef %a0) #0 {
 entry:
   %r11 = alloca double
   %r14 = alloca double
@@ -40,10 +40,10 @@ entry:
   %r3 = alloca double
   %r6 = alloca double
   %r1 = call double @blade_now()
-  %r2 = call double @bl_classify_0(double 0x400C000000000000)
+  %r2 = call double @bl_classify_HM_10000_double_6(double 0x400C000000000000)
   store double %r2, ptr %r3
   %r4 = fsub double 0x0000000000000000, 0x4002000000000000
-  %r5 = call double @bl_classify_0(double %r4)
+  %r5 = call double @bl_classify_HM_10000_double_6(double %r4)
   store double %r5, ptr %r6
   %r7 = call double @blade_now()
   %r8 = fsub double %r7, %r1
