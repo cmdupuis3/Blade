@@ -156,6 +156,12 @@ fold refuses at compile time instead):
 A panic is an ordinary runtime failure (`error[BL8013]: ...`, exit 1) that
 names the faulting operator's source position (`  --> file:line`) and the
 call stack; nothing in the table is undefined behavior in any lane. The
+stack's frames (`  at <name>`, innermost first) say only names the program
+wrote: a function its declaration's name; a lambda bound directly by a `let`
+that binding's name; any other lambda `lambda in <s>`, where `<s>` is the
+nearest enclosing binding or function (`lambda in mk` for a closure `mk`
+returns, `lambda in r` for a kernel passed in `let r = ...`), or plain
+`lambda` where there is none; an operator section `(/) in <s>`. The
 position is a compile-time constant read only on the panic path, so the
 guard's hot path is unchanged by it. The
 fast paths are kept by construction: a nonzero literal divisor other than

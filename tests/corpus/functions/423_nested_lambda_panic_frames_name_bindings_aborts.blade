@@ -1,0 +1,13 @@
+// TEST: A panic inside a nested let-bound lambda names both bindings (aborts)
+// ABORT: BL8013
+// ABORT: at inner
+// ABORT: at outer
+// ============================================================================
+// Each lambda is bound by a `let` (the inner one inside the outer's body), so
+// each frame says its binding: `at inner`, then `at outer`, in both lanes.
+let z: Int64 = 0
+let outer = lambda(x: Int64) -> {
+    let inner = lambda(y: Int64) -> y / z
+    inner(x) + 1
+}
+let r = outer(5)

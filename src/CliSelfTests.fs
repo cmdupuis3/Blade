@@ -511,7 +511,13 @@ let runCliSmokeTests () : TH.BlockResult =
     // `at walk__arrow1` contains too -- the absence is asserted here.
     // The detail (a whole JSON payload, a panic) is shown only on failure.
     let expectCase name cond (detail: string) = recordCase name cond (if cond then "" else detail)
-    let internalName (s: string) = s.Contains "__arrow" || s.Contains "_HM_"
+    // A lifted lambda's emitted `__lambda_<id>` (and the call-site wrappers
+    // `__wrap_<id>` / partial-application parameters `__pa<id>`) are no name
+    // the program wrote either: a lambda prints as the `let` binding it is
+    // bound to, else `lambda in <scope>`; an operator function as its
+    // section, `(/) in <scope>` (IR.anonymousCallableName).
+    let internalName (s: string) =
+        s.Contains "__arrow" || s.Contains "_HM_" || s.Contains "__lambda" || s.Contains "__wrap" || s.Contains "__pa"
     let frameLines (s: string) =
         s.Replace("\r\n", "\n").Split('\n')
         |> Array.filter (fun l -> l.StartsWith "  at ")
@@ -529,7 +535,54 @@ let runCliSmokeTests () : TH.BlockResult =
         + "let i: Int64 = 1\n"
         + "let z: Int64 = 0\n"
         + "let b = divide(i, z)\n"
-    let expectedFrames = [ ("arrow", arrowAbort, [ "  at walk"; "  at outer" ]); ("hm", hmAbort, [ "  at divide" ]) ]
+    // Lambdas: bound by a `let` (top level, nested, block-local), unbound
+    // (a reduce kernel, a returned closure), an operator section, a partial
+    // application bound by a `let`.
+    let lambdaAborts =
+        [ ("let-lambda",
+           "let z: Int64 = 0\n"
+           + "let f = lambda(x: Int64) -> x / z\n"
+           + "function call_it(n: Int64) -> Int64 = f(n) + 1\n"
+           + "let r = call_it(4)\n",
+           [ "  at f"; "  at call_it" ])
+          ("kernel-lambda",
+           "let xs = [4, 2, 0]\n"
+           + "let r = reduce(xs, lambda(a, b) -> a / b)\n",
+           [ "  at lambda in r" ])
+          ("returned-closure",
+           "function mk(i: Int64) = lambda(j: Int64) -> j / i\n"
+           + "let g = mk(0)\n"
+           + "let r = g(3)\n",
+           [ "  at lambda in mk" ])
+          ("nested-lambda",
+           "let z: Int64 = 0\n"
+           + "let outer = lambda(x: Int64) -> {\n"
+           + "    let inner = lambda(y: Int64) -> y / z\n"
+           + "    inner(x) + 1\n"
+           + "}\n"
+           + "let r = outer(5)\n",
+           [ "  at inner"; "  at outer" ])
+          ("block-lambda",
+           "type L = Idx<3>\n"
+           + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
+           + "function h(n: Int64) -> Float64 = {\n"
+           + "    let pick = lambda(i: Int64) -> A(i)\n"
+           + "    pick(n) + 1.0\n"
+           + "}\n"
+           + "let v = h(7)\n",
+           [ "  at pick"; "  at h" ])
+          ("section",
+           "let xs = [4, 2, 0]\n"
+           + "let r = reduce(xs, (/))\n",
+           [ "  at (/) in r" ])
+          ("partial-application",
+           "function divide(a: Int64, b: Int64) -> Int64 = a / b\n"
+           + "let g = divide(4)\n"
+           + "let r = g(0)\n",
+           [ "  at divide"; "  at g" ]) ]
+    let expectedFrames =
+        [ ("arrow", arrowAbort, [ "  at walk"; "  at outer" ]); ("hm", hmAbort, [ "  at divide" ]) ]
+        @ lambdaAborts
     for (tag, src, frames) in expectedFrames do
         let shown = frames |> List.map (fun l -> l.Trim()) |> String.concat "; "
         let label = $"names: the interpreter's {tag} panic frames name the declaration ({shown})"
@@ -572,6 +625,28 @@ let runCliSmokeTests () : TH.BlockResult =
             let (code, out, err) = spawn dir [ "plan"; "p.blade" ]
             expectCase "names: a plan decision inside an array instance names the declaration"
                 (code = 0 && out.Contains "[cse v2] centered:" && not (internalName (out + err))) (out + err)
+            // Lambdas: a let-bound one is its binding (`k`), an unbound one
+            // `lambda in e`, the checker's operator lifting of `a - mymean(a)`
+            // the operator's function `(-) in c`; the hoist evidence names
+            // the callee as written (`mymean`, not its specialization).
+            File.WriteAllText(Path.Combine(dir, "l.blade"),
+                "function mymean(row: Float64^1) -> Float64 = reduce(row, (+)) / Float64(extents(row))\n"
+                + "let a = [1.0, 2.0, 3.0, 4.0]\n"
+                + "let c = a - mymean(a)\n"
+                + "let e = method_for(a) <@> lambda(x) -> x - mymean(a) |> compute\n"
+                + "let k = lambda(x: Float64) -> {\n"
+                + "    let p = x * 2.0 + 1.0\n"
+                + "    let q = x * 2.0 + 1.0\n"
+                + "    p + q\n"
+                + "}\n"
+                + "let kk = k(1.0)\n")
+            let (code, out, err) = spawn dir [ "plan"; "l.blade" ]
+            expectCase "names: plan subjects name a lambda by its binding, its scope, or its operator"
+                (code = 0
+                 && out.Contains "[invariant-hoist v1] (-) in c: applied [`mymean(a)` does not read the element"
+                 && out.Contains "[invariant-hoist v1] lambda in e: applied [`mymean(a)` does not read the element"
+                 && out.Contains "[cse v2] k: applied"
+                 && not (internalName (out + err))) (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
     // The editor payload and the REPL: the instance is the same declaration,
@@ -606,6 +681,28 @@ let runCliSmokeTests () : TH.BlockResult =
      let session = Blade.ReplSession.ReplTypes.sessionInfo src
      expectCase "names: the REPL's session names are the declarations, no array instance"
          (session.ContainsKey "walk" && session.ContainsKey "twice"
+          && not (session |> Map.exists (fun k _ -> internalName k)))
+         (session |> Map.toList |> List.map fst |> String.concat ", "))
+    // Lambdas in the editor payload and the REPL's names: what the program
+    // bound, never a lifted callable or a desugaring's parameter.
+    (let src =
+        "let z: Int64 = 2\n"
+        + "let f = lambda(x: Int64) -> x / z\n"
+        + "function mk(i: Int64) = lambda(j: Int64) -> j / i\n"
+        + "let g = mk(2)\n"
+        + "let xs = [4, 2, 1]\n"
+        + "let r = reduce(xs, lambda(a, b) -> a / b)\n"
+        + "let s = reduce(xs, (/))\n"
+        + "function add(a: Int64, b: Int64) -> Int64 = a + b\n"
+        + "let h = add(4)\n"
+        + "let q = add(_, 1)\n"
+        + "let w = 10 / xs\n"
+     let (json, code) = Blade.Ide.ideCheckSource (Path.Combine(Path.GetTempPath(), "names_ide_lambdas.blade")) src
+     expectCase "names: ide check of lambdas lists no internal name (`__lambda`, `__wrap`, `__pa`)"
+         (code = 0 && not (internalName json)) json
+     let session = Blade.ReplSession.ReplTypes.sessionInfo src
+     expectCase "names: the REPL's session names for lambdas are their bindings"
+         (session.ContainsKey "f" && session.ContainsKey "g" && session.ContainsKey "h" && session.ContainsKey "q"
           && not (session |> Map.exists (fun k _ -> internalName k)))
          (session |> Map.toList |> List.map fst |> String.concat ", "))
 

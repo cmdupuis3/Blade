@@ -127,6 +127,12 @@ type TypedLowerEnv = {
     /// give such bindings copy, not alias, semantics. Mutable shared state
     /// like LiftedCallables; reset per-module.
     MutableArrayLets: ResizeArray<IRId>
+    /// The name of the nearest enclosing binding or function the program
+    /// wrote -- what an ANONYMOUS lambda or operator function lowered here
+    /// prints as being `in` (IR.anonymousCallableName: `lambda in r`,
+    /// `(/) in mk`). Set by every binding, function and named lambda around
+    /// the expression being lowered (withLambdaScope); None at top level.
+    LambdaScope: string option
 }
 
 let emptyTypedEnv () : TypedLowerEnv = {
@@ -152,10 +158,51 @@ let emptyTypedEnv () : TypedLowerEnv = {
     SparseInits = Map.empty
     LiftedCallables = ResizeArray<IRCallable>()
     MutableArrayLets = ResizeArray<IRId>()
+    LambdaScope = None
 }
 
 let bindTypedVar name id (env: TypedLowerEnv) : TypedLowerEnv =
     { env with Variables = Map.add name id env.Variables }
+
+/// Lower inside the binding or function `name`: the anonymous functions in it
+/// print as `lambda in <name>`. A name the program did not write (a bare
+/// top-level expression's `__expr<n>`, a desugaring's carrier) is no scope --
+/// the enclosing one stays.
+let withLambdaScope (name: string) (env: TypedLowerEnv) : TypedLowerEnv =
+    if isSynthesizedName name then env else { env with LambdaScope = Some name }
+
+/// The operator function `op` as an anonymous callable here: `(/) in r`.
+let operatorCallableName (env: TypedLowerEnv) (op: IRBinOp) : string =
+    anonymousCallableName env.LambdaScope (operatorFunctionName op)
+
+/// What an unbound lambda is, before `in <scope>`: `lambda` -- unless the
+/// CHECKER wrote it (every parameter a synthesized `__` name) to lift an
+/// operator over arrays (`a - mean(a)` is `method_for(zip(..)) <@>
+/// lambda(__zl, __zr) -> __zl - __zr`, a broadcast's `lambda(__bx)`, a cast's
+/// `lambda(__castv)`): then it is that operator's function, `(-)` / `sqrt` /
+/// `Float32`, as Lowering's own operator kernels are.
+let private unboundLambdaWhat (info: TypedLambdaInfo) : string =
+    let checkerWritten =
+        not info.Params.IsEmpty && info.Params |> List.forall (fun p -> isSynthesizedName p.Name)
+    if not checkerWritten then "lambda" else
+    match info.Body.Kind with
+    | TExprBinOp (_, op, _, _) ->
+        match op with
+        | OpAdd -> operatorFunctionName IRAdd | OpSub -> operatorFunctionName IRSub
+        | OpMul -> operatorFunctionName IRMul | OpDiv -> operatorFunctionName IRDiv
+        | OpMod -> operatorFunctionName IRMod | OpCaret -> operatorFunctionName IRCaret
+        | OpEq -> operatorFunctionName IREq | OpNeq -> operatorFunctionName IRNeq
+        | OpLt -> operatorFunctionName IRLt | OpLe -> operatorFunctionName IRLe
+        | OpGt -> operatorFunctionName IRGt | OpGe -> operatorFunctionName IRGe
+        | OpAnd -> operatorFunctionName IRAnd | OpOr -> operatorFunctionName IROr
+        | OpMath2 name -> name
+        | _ -> "lambda"
+    | TExprUnaryOp (op, _) ->
+        match op with
+        | OpNeg -> "(-)" | OpNot -> "(!)" | OpConj -> "conj"
+        | OpReal -> "real" | OpImag -> "imag" | OpArg -> "arg"
+        | OpMath name | OpCast name -> name
+    | _ -> "lambda"
 
 /// Flat-vs-structural projection mode for a destructuring binding, plus the
 /// slot each sub-binding reads.
@@ -531,7 +578,7 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         lowerTypedLambda env info
     
     | TExprLet (name, varId, value, body) ->
-        let v = lowerTypedExpr env value
+        let v = lowerBoundValue env name value
         let env' = bindTypedVar name varId env
         let b = lowerTypedExpr env' body
         IRLet (varId, v, b)
@@ -988,9 +1035,34 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprPartialApp (op, arg, isLeft) ->
         lowerTypedPartialApp env op (lowerTypedExpr env arg) isLeft texpr.Type
 
+/// Lower the value of the binding `name` (a top-level or block `let`, an
+/// expression `let`): a lambda bound directly is no longer anonymous -- it
+/// prints as `name` -- and the anonymous functions anywhere else in the value
+/// print as `lambda in name`.
+and lowerBoundValue env (name: string) (value: TypedExpr) : IRExpr =
+    match value.Kind with
+    | TExprLambda info when not (isSynthesizedName name) -> lowerTypedLambdaAs env (Some name) info
+    | _ -> lowerTypedExpr (withLambdaScope name env) value
+
 /// Lower a typed lambda
 and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
-    let mutable paramEnv = env
+    lowerTypedLambdaAs env None info
+
+/// Lower a typed lambda that `boundTo` names, when a `let` binds it directly.
+/// What it prints as (IRCallable.SourceName -- both lanes' panic frames, plan
+/// subjects, diagnostics): that binding's name; a self-bound lambda's own
+/// name; otherwise `lambda in <scope>` (the nearest enclosing binding or
+/// function), or `lambda` where there is none -- `(-) in <scope>` for the
+/// checker's operator-lifting lambdas (unboundLambdaWhat). Never its emitted
+/// `__lambda_<id>`. The lambda's own name is the scope of the anonymous
+/// functions in its body.
+and lowerTypedLambdaAs env (boundTo: string option) (info: TypedLambdaInfo) : IRExpr =
+    let shownName =
+        match boundTo, info.SelfBinding with
+        | Some n, _ -> n
+        | None, Some (selfName, _) when not (isSynthesizedName selfName) -> selfName
+        | None, _ -> anonymousCallableName env.LambdaScope (unboundLambdaWhat info)
+    let mutable paramEnv = { env with LambdaScope = Some shownName }
     let paramInfos = info.Params |> List.map (fun p ->
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
@@ -1045,7 +1117,8 @@ and lowerTypedLambda env (info: TypedLambdaInfo) : IRExpr =
                  // The apply seam's per-parameter sign summary rides along
                  // the same way, so codegen and the interpreter can hand
                  // IRLoopStructure.deduceWreathTie the values typecheck judged from.
-                 SignParities = info.SignParities }
+                 SignParities = info.SignParities
+                 SourceName = shownName }
     // Emit IRVar(callable.Id, funcType): the callable lives in
     // LiftedCallables -> module.Functions, and the IRVar carries just the
     // function type for type-inference and consumer dispatch. Consumers use
@@ -1126,7 +1199,7 @@ and lowerTypedBlock env (stmts: TypedStmt list) (finalExpr: TypedExpr option) : 
     | stmt :: rest, _ ->
         match stmt with
         | TStmtLet binding ->
-            let value = lowerTypedExpr env binding.Value
+            let value = lowerBoundValue env binding.Name binding.Value
             // A named, recursive lambda binding (`let const f = lambda ... f
             // ...`, incl. the nested-`function` desugar) lifts to a
             // module-level callable whose id IS binding.VarId, so `f`
@@ -1254,7 +1327,9 @@ and lowerTypedSection env (op: BinOp) (funcTy: IRType) : IRExpr =
             IRTScalar ETBool
         | _ -> retTy
     let commGroups = if isComm then [[0; 1]] else []
-    let callable = mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256 false
+    let callable =
+        { mkLambdaCallable env.Builder parms body retType [] isComm commGroups [] false false 256 false
+            with SourceName = operatorCallableName env irOp }
     env.LiftedCallables.Add(callable)
     let funcType =
         let paramTypes = callable.Params |> List.map _.Type
@@ -1312,7 +1387,9 @@ and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (f
         | IREq | IRNeq | IRLt | IRLe | IRGt | IRGe | IRAnd | IROr ->
             IRTScalar ETBool
         | _ -> retTy
-    let callable = mkLambdaCallable env.Builder parms body retType captures false [] [] false false 256 false
+    let callable =
+        { mkLambdaCallable env.Builder parms body retType captures false [] [] false false 256 false
+            with SourceName = operatorCallableName env irOp }
     env.LiftedCallables.Add(callable)
     let funcType =
         let paramTypes = callable.Params |> List.map _.Type
@@ -1379,7 +1456,8 @@ and lowerTypedBinOp env mode op l r leftExpr rightExpr resultType (loc: SrcLoc) 
             | _ -> elemTypeL
         let commGroups = if mode = Elementwise then [[0; 1]] else []
         let lambdaInfo =
-            mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false
+            { mkLambdaCallable env.Builder parms body kernelRetType [] false commGroups [] false false 256 false
+                with SourceName = operatorCallableName env irOp }
         env.LiftedCallables.Add(lambdaInfo)
         // Kernel slot references the lifted callable via IRVar;
         // genObjectForApplication uses resolveCallable + wrapper to consume it.
@@ -1533,7 +1611,8 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
         extractParallelism declParallel (decl.Params |> List.map _.Name)
 
     // Bind parameters in environment for body lowering
-    let mutable paramEnv = { env with PolyParamNames = polyParamNames }
+    // The anonymous functions in the body print as `lambda in <name>`.
+    let mutable paramEnv = withLambdaScope decl.SourceName { env with PolyParamNames = polyParamNames }
     let irParams = decl.Params |> List.map (fun p ->
         paramEnv <- bindTypedVar p.Name p.VarId paramEnv
         { Name = p.Name; Type = p.Type; Index = p.Index; VarId = p.VarId } : IRParam)
@@ -1600,7 +1679,7 @@ let lowerTypedTypeDef (env: TypedLowerEnv) (ttd: TypedTypeDef) : IRTypeDef =
 
 /// Lower a typed binding
 let lowerTypedBinding (env: TypedLowerEnv) (binding: TypedBinding) : IRBinding * TypedLowerEnv =
-    let value = lowerTypedExpr env binding.Value
+    let value = lowerBoundValue env binding.Name binding.Value
     let env' = bindTypedVar binding.Name binding.VarId env
     let irBinding = {
         Id = binding.VarId

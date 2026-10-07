@@ -1160,7 +1160,9 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
             | Some c -> c.Name
             | None ->
                 match Map.tryFind id funcs with
-                | Some f -> f.Name
+                // The callee as the program wrote it, not its emitted
+                // specialization (`mean`, not `mean_HM_<id>_double`).
+                | Some f -> f.SourceName
                 | None -> $"__v{id}"
         let rec go (depth: int) (e: IRExpr) : string =
             if depth > 3 then ".." else
@@ -1343,7 +1345,9 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                                          | None -> ())
                                     | _ -> ()) s
                                 let used = k.Captures |> List.filter (fun c -> needed.Contains c.Id)
-                                let helper = mkLambdaCallable builder [] (rw s) sTy used false [] [] false false 256 false
+                                // The hoisted part of kernel `k`: it prints as `k`.
+                                let helper = { mkLambdaCallable builder [] (rw s) sTy used false [] [] false false 256 false
+                                                 with SourceName = k.SourceName }
                                 mint kid helper
                                 IRApp (IRVar (helper.Id, mkFuncArrow [] sTy), [], sTy)
                         let value, how =

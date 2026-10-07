@@ -10,3 +10,7 @@ function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, 
 let g = lambda(c) -> walk(c, 4) * 10.0
 let gw = g(A)
 // ABORT: BL8006
+// The frames name what the program wrote: the instance as `walk`, the lambda
+// as the binding it is bound to, `g` (it used to print `at __lambda_15`).
+// ABORT: at walk
+// ABORT: at g

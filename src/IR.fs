@@ -371,7 +371,9 @@ and IRCallable = {
     /// declaration (TypedFunctionDecl.SourceName, which names an array
     /// instance by its origin) or the callable's own name, and never touched
     /// again: every renaming above is a `{ f with Name = .. }` copy, so it
-    /// keeps this.
+    /// keeps this. A lambda's is the `let` binding it is bound to, else
+    /// `lambda in <scope>` (anonymousCallableName); an operator function's is
+    /// its section, `(/) in <scope>`. An emitted `__lambda_<id>` never is.
     SourceName: string
     Params: IRParam list
     RetType: IRTypeG<IRExpr>
@@ -1860,8 +1862,12 @@ let mkCallable
         Id = id
         Name = name
         // A source function's (an array instance's origin's) is grafted by
-        // Lowering.lowerTypedFuncDecl; everything else prints as it is named.
-        SourceName = name
+        // Lowering.lowerTypedFuncDecl, a lambda's by Lowering.lowerTypedLambda
+        // (the binding it is bound to, else `lambda in <scope>`), an operator
+        // function's by its construction site (anonymousCallableName). A
+        // named callable prints as it is named; an anonymous one that no site
+        // names prints as `lambda` -- never as its `__lambda_<id>`.
+        SourceName = (match opts.NameOverride with Some n -> n | None -> "lambda")
         Params = parms
         RetType = retType
         Body = body
@@ -1912,6 +1918,44 @@ let mkLambdaCallable
     mkCallable builder defaultLambdaOptions parms body retType captures
                isCommutative commGroups parallelism isOmpParallel
                isCudaKernel cudaBlockSize isMpiParallel
+
+/// A name the program did not write: a desugaring's binding (`__expr<n>` for
+/// a bare top-level expression, `__mg_check<i>`, ...) or a synthesized
+/// callable's emitted name. It never names anything a user sees.
+let isSynthesizedName (n: string) : bool =
+    System.String.IsNullOrEmpty n || n.StartsWith "__"
+
+/// What a function the program did not NAME prints as (IRCallable.SourceName
+/// -- a run-time panic's `at ...` frame in both lanes, `blade plan` subjects,
+/// diagnostics): `what` -- `lambda`, or an operator function's own spelling
+/// (`(/)`) -- followed by `in <scope>`, the name of the nearest enclosing
+/// binding or function, when there is one the program wrote. A lambda bound
+/// directly by a `let` is not anonymous: it prints as the binding's name.
+let anonymousCallableName (scope: string option) (what: string) : string =
+    match scope with
+    | Some s when not (isSynthesizedName s) -> $"{what} in {s}"
+    | _ -> what
+
+/// An operator's function as the program spells it: the section `(/)`, or a
+/// binary intrinsic's own name (`atan2`).
+let operatorFunctionName (op: IRBinOp) : string =
+    let section (tok: string) = $"({tok})"
+    match op with
+    | IRAdd -> section "+" | IRSub -> section "-" | IRMul -> section "*"
+    | IRDiv -> section "/" | IRMod -> section "%" | IRCaret -> section "^"
+    | IREq -> section "==" | IRNeq -> section "!=" | IRLt -> section "<"
+    | IRLe -> section "<=" | IRGt -> section ">" | IRGe -> section ">="
+    | IRAnd -> section "&&" | IROr -> section "||"
+    | IRMath2 name -> name
+
+/// A unary operator's function as the program spells it: `(-)`, `conj`,
+/// `sqrt`, `Float32`.
+let unaryFunctionName (op: IRUnaryOp) : string =
+    match op with
+    | IRNeg -> "(-)" | IRNot -> "(!)" | IRConj -> "conj"
+    | IRReal -> "real" | IRImag -> "imag" | IRArg -> "arg"
+    | IRMath name -> name
+    | IRCast (et, _) -> castNameOf et
 
 // The deduced WREATH TIE (docs/plan-orbit-index-types.md section 7 / section 9 step 4)
 //

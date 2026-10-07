@@ -1,0 +1,10 @@
+// TEST: A panic inside a returned closure names the function that made it (aborts)
+// ABORT: BL8013
+// ABORT: at lambda in mk
+// ============================================================================
+// `mk(0)` returns an anonymous lambda; by the time `g(3)` calls it, `mk` has
+// returned and is no frame. The closure itself prints as `lambda in mk` --
+// the function whose body wrote it -- in both lanes.
+function mk(i: Int64) = lambda(j: Int64) -> j / i
+let g = mk(0)
+let r = g(3)

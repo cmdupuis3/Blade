@@ -1,0 +1,9 @@
+// TEST: A panic inside an operator section names the operator and its binding (aborts)
+// ABORT: BL8013
+// ABORT: at (/) in r
+// ============================================================================
+// The section `(/)` is a function the program wrote but did not name: it
+// prints as its own spelling in the enclosing binding, `(/) in r`, in both
+// lanes -- never as its emitted `__lambda_<id>`.
+let xs = [4, 2, 0]
+let r = reduce(xs, (/))

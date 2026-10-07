@@ -1,0 +1,9 @@
+// TEST: A panic inside an unbound kernel lambda names its enclosing binding (aborts)
+// ABORT: BL8013
+// ABORT: at lambda in r
+// ============================================================================
+// A lambda passed straight to `reduce` has no binding of its own. It prints
+// as `lambda in <the nearest enclosing binding or function>` -- here `r` --
+// never as its emitted `__lambda_<id>`, in both lanes.
+let xs = [4, 2, 0]
+let r = reduce(xs, lambda(a, b) -> a / b)

@@ -1,0 +1,15 @@
+// TEST: An out-of-range read inside a block-local let-bound lambda names the binding (aborts)
+// ABORT: BL8006
+// ABORT: at pick
+// ABORT: at h
+// WARN: BL4003
+// ============================================================================
+// A lambda bound by a `let` inside a function body prints as that binding:
+// the checked read `A(7)` fails with frames `at pick`, then `at h`.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function h(n: Int64) -> Float64 = {
+    let pick = lambda(i: Int64) -> A(i)
+    pick(n) + 1.0
+}
+let v = h(7)

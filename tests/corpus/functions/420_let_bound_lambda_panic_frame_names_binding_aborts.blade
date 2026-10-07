@@ -1,0 +1,14 @@
+// TEST: A panic inside a let-bound lambda names the binding (aborts)
+// ABORT: BL8013
+// ABORT: at f
+// ABORT: at call_it
+// ============================================================================
+// A lambda is lifted to a callable the C++ names `__lambda_<id>`; that name is
+// the compiler's, not the program's. A lambda bound directly by a `let` prints
+// as the binding: the Int64 division by zero's frame trace is `at f` then
+// `at call_it`, in both lanes. (A pin is a substring; `blade test cli` asserts
+// the frame lines exactly and that no `__lambda` appears.)
+let z: Int64 = 0
+let f = lambda(x: Int64) -> x / z
+function call_it(n: Int64) -> Int64 = f(n) + 1
+let r = call_it(4)

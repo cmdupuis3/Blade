@@ -1502,6 +1502,12 @@ let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
 /// a callable may live in another module.
 let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs: IRCallable list) : IRModule =
     let newLambdas = System.Collections.Generic.List<IRCallable>()
+    // The function or binding being rewritten: an operator kernel minted here
+    // prints as its operator's function in it (`(/) in r`), as Lowering's own
+    // operator kernels do -- never as its emitted `__lambda_<id>`.
+    let mutable scope : string option = None
+    let shownAs (what: string) (lam: IRCallable) : IRCallable =
+        { lam with SourceName = anonymousCallableName scope what }
     let isCmpOrLogical op = isCmpOrLogicalIROp op
     // Distinct identity per distinct operand var so codegen's symmetry
     // deduction treats `A_0 + A_1` as two different arrays (and `A_0 + A_0` as
@@ -1714,6 +1720,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
         let parms : IRParam list =
             [ { Name = "__bx"; Type = IRTScalar arrElem; Index = 0; VarId = xId } ]
         let lam = mkLambdaCallable builder parms kbody kernelRet caps false [] [] false false 256 false
+                  |> shownAs (operatorFunctionName op)
         newLambdas.Add lam
         callableOf.[lam.Id] <- lam
         let kernelFuncType = IRTArrow ([SVal (IRTScalar arrElem)], kernelRet, None)
@@ -1760,7 +1767,9 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
                         // the scalar may well be called too (`capturesOf`
                         // keeps clear of `__bx`).
                         let parms = k.Params |> List.map (fun p -> { p with Name = "__bx" })
-                        let lam = mkLambdaCallable builder parms body k.RetType caps false [] [] false false 256 false
+                        // The same operator function lowering named.
+                        let lam = { mkLambdaCallable builder parms body k.RetType caps false [] [] false false 256 false
+                                      with SourceName = k.SourceName }
                         newLambdas.Add lam
                         callableOf.[lam.Id] <- lam
                         mapOneArray arr la (IRVar (lam.Id, kty)) resTy
@@ -1784,6 +1793,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
             let parms : IRParam list =
                 [ { Name = "__bx"; Type = IRTScalar elem; Index = 0; VarId = xId } ]
             let lam = mkLambdaCallable builder parms kbody kernelRet [] false [] [] false false 256 false
+                      |> shownAs (unaryFunctionName uop)
             newLambdas.Add lam
             callableOf.[lam.Id] <- lam
             let kernelFuncType = IRTArrow ([SVal (IRTScalar elem)], kernelRet, None)
@@ -1818,6 +1828,7 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
                       { Name = "__zr"; Type = IRTScalar elemTypeR; Index = 1; VarId = bId } ]
                 let lam =
                     mkLambdaCallable builder parms kbody kernelRet [] false [] [] false false 256 false
+                    |> shownAs (operatorFunctionName op)
                 newLambdas.Add lam
                 callableOf.[lam.Id] <- lam
                 let kernelFuncType =
@@ -1890,9 +1901,13 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
         | _ -> e
     let rewriteExpr expr = mapIRExpr rewrite expr
     let newFunctions =
-        modul.Functions |> List.map (fun f -> { f with Body = rewriteExpr f.Body })
+        modul.Functions |> List.map (fun f ->
+            scope <- Some f.SourceName
+            { f with Body = rewriteExpr f.Body })
     let newBindings =
-        modul.Bindings |> List.map (fun b -> { b with Value = rewriteExpr b.Value })
+        modul.Bindings |> List.map (fun b ->
+            scope <- Some b.Name
+            { b with Value = rewriteExpr b.Value })
     { modul with
         Functions = newFunctions @ (newLambdas |> List.ofSeq)
         Bindings = newBindings }
@@ -2245,9 +2260,12 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
                 if Set.contains c.Id seen then (seen, acc)
                 else (Set.add c.Id seen, c :: acc)) (Set.empty, [])
             |> snd |> List.rev
+        // The fused kernel is the host's, with its operands' bodies spliced
+        // in: it prints as the host does.
         let lam =
-            mkLambdaCallable builder newParams body hk.RetType captures
-                             false [] [] false false 256 false
+            { mkLambdaCallable builder newParams body hk.RetType captures
+                               false [] [] false false 256 false
+                with SourceName = hk.SourceName }
         newLambdas.Add lam
         callables.[lam.Id] <- lam
         resolver.[lam.Id] <- lam
