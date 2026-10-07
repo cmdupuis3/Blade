@@ -9,7 +9,7 @@
 // peel (tryGroupedZipPeel), whose lifted-callable routing and row copy accept
 // a single operand.
 // ============================================================================
-let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> Float64(k)) |> compute
 
 let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
 let gk = group_keys(keys)

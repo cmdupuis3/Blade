@@ -16,7 +16,7 @@
 function dot(a: T^1, b: T^1) = prodsum(a, b)
 function selfDot(a: T^1) = prodsum(a, a)
 function covariance(x: T^1, y: T^1) where comm(x, y) = {
-    let n = extents(x)
+    let n = Float64(extents(x))
     prodsum(x - reduce(x, (+)) / n, y - reduce(y, (+)) / n) / n
 }
 

@@ -76,7 +76,7 @@ let br_init = [0.0]
 let rot = [0.34692944965489897, -0.644217687237691, 0.681632986593423, 0.29221464428477228, 0.7648421872844885, 0.57413154434798608, -0.89120736006143542, 0.0, 0.45359612142557731]
 
 // edge-vector buffer: ev(s*60+e*3+c) = pos(src) - pos(tgt), built per flat slot.
-function evslot(i: Int) -> Float = {
+function evslot(i: Int64) -> Float = {
     let s = i / ev_len
     let rem = i - s * ev_len
     let ed = rem / 3
@@ -96,7 +96,7 @@ let all_ev = {
 // conv1: gather source scalar per incoming edge, expand the edge vector in Y<=2,
 // tensor-product into a 13-dim message. Slot j (node j/dh, component c=j%dh) is
 // the sum over the node's incoming edges of the elaborated-TP message(c).
-function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int, j: Int) -> Float = {
+function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int64, j: Int64) -> Float = {
     let node = j / dh
     let c = j - node * dh
     let vb = s * ev_len
@@ -119,7 +119,7 @@ function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>
     let m3 = ml.tensor_product(cfg1, xf3, sh3, w)
     m0(c) + m1(c) + m2(c) + m3(c)
 }
-function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int) -> Array<Float like Idx<65>> = {
+function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int64) -> Array<Float like Idx<65>> = {
     let rec out: Array<Float like Idx<65>> =
         match out with
         | zero -> zero
@@ -129,7 +129,7 @@ function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: 
 
 // the source node's 13-dim feature block, built by construction so grad's
 // cotangent flows back into h (an array literal would not carry it).
-function hblock(h: Array<Float like Idx<65>>, sb: Int) -> Array<Float like Idx<13>> = {
+function hblock(h: Array<Float like Idx<65>>, sb: Int64) -> Array<Float like Idx<13>> = {
     let rec r: Array<Float like Idx<13>> =
         match r with
         | zero -> zero
@@ -139,7 +139,7 @@ function hblock(h: Array<Float like Idx<65>>, sb: Int) -> Array<Float like Idx<1
 // conv2: specH (x) Y<=2 -> specOut, gathered per node. Slot k (node k/dout,
 // component mo=k%dout) is the sum over incoming edges of the elaborated-TP
 // message(mo) built from the source node's h-block.
-function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int, kk: Int) -> Float = {
+function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int64, kk: Int64) -> Float = {
     let node = kk / dout
     let mo = kk - node * dout
     let vb = s * ev_len
@@ -161,7 +161,7 @@ function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>
     let m3 = ml.tensor_product(cfg2, xf3, sh3, w)
     m0(mo) + m1(mo) + m2(mo) + m3(mo)
 }
-function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int) -> Array<Float like Idx<10>> = {
+function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int64) -> Array<Float like Idx<10>> = {
     let rec out: Array<Float like Idx<10>> =
         match out with
         | zero -> zero
@@ -174,7 +174,7 @@ function readout(wr: Array<Float like Idx<2>>, br: Float, g2: Array<Float like I
     br + wr(0) * g2(0) + wr(1) * g2(1) + wr(0) * g2(2) + wr(1) * g2(3) + wr(0) * g2(4) + wr(1) * g2(5) + wr(0) * g2(6) + wr(1) * g2(7) + wr(0) * g2(8) + wr(1) * g2(9)
 
 // per-graph squared error: the full elaborated pipeline for graph s.
-function graph_sqerr(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>, s: Int) -> Float = {
+function graph_sqerr(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>, s: Int64) -> Float = {
     let f1 = conv1(evs, w1, s)
     let g1 = ml.gated_rows(spec_h, nn, f1)
     let h = ml.linear_rows(spec_h, spec_h, nn, w2, g1)
@@ -286,7 +286,7 @@ let wrv = [train_out(55), train_out(56)]
 let brv = [train_out(57)]
 
 // ---- equivariance: rotate the geometry by R = Rz(0.7) . Ry(1.1) ------------
-function rotslot(evsrc: Array<Float like Idx<240>>, i: Int) -> Float = {
+function rotslot(evsrc: Array<Float like Idx<240>>, i: Int64) -> Float = {
     let kk = i / 3
     let r = i - kk * 3
     rot(r * 3 + 0) * evsrc(kk * 3 + 0) + rot(r * 3 + 1) * evsrc(kk * 3 + 1) + rot(r * 3 + 2) * evsrc(kk * 3 + 2)

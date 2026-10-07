@@ -5,7 +5,7 @@
 // proper CAPTURE via the block-local forwarding machinery — the historical
 // inline shape left any function-local VarIds inside the fixed operand
 // dangling (BL6001).
-function mymean(row) = reduce(row, (+)) / extents(row)
+function mymean(row) = reduce(row, (+)) / Float64(extents(row))
 let A = [1.0, 2.0, 3.0]
 let centered = A - mymean(A)
 // EXPECT: centered = [-1.0, 0.0, 1.0]

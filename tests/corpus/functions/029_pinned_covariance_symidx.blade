@@ -6,7 +6,7 @@
 // covariance to the SymIdx<2,2> triangle [var(x), cov, var(y)] — 3 canonical
 // cells, not dense 4. Same math as arity/028's Poly pipeline, as plain
 // fixed-arity functions.
-function mymean(row) = reduce(row, (+)) / extents(row)
+function mymean(row) = reduce(row, (+)) / Float64(extents(row))
 function covariance(a, b) where comm(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))
 let data = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
 let result = object_for(covariance) <@> (data, data) |> compute

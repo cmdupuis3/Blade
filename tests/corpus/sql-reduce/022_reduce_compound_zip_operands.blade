@@ -18,14 +18,14 @@
 // Shapes are now resolved through Subst before they are read, so naming an
 // operand is no longer load-bearing.
 function covariance(x: T^1, y: T^1) = {
-    let n = extents(x)
+    let n = Float64(extents(x))
     let xbar = reduce(x, (+)) / n
     let ybar = reduce(y, (+)) / n
     reduce((x - xbar) * (y - ybar), (+)) / n
 }
 // naming the two differences must agree with leaving them inline
 function covariance_named(x: T^1, y: T^1) = {
-    let n = extents(x)
+    let n = Float64(extents(x))
     let xbar = reduce(x, (+)) / n
     let ybar = reduce(y, (+)) / n
     let dx = x - xbar

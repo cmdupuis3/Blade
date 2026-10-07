@@ -10,7 +10,8 @@
 // an ARROW the call decides (functions/213): given an array, one of rank = the
 // argument count, read element-wise like a `T^k` parameter, and its element
 // stays generic -- one specialization per element type, so an Int64 array is
-// not handed to a Float64 body.
+// not handed to a Float64 body. (`c(0) + 1.0` over an Int64 array would be an
+// implicit conversion, formalism 2.4: that call converts the array first.)
 let v = [1.0, 2.0, 3.0]
 let iv = [4, 5, 6]
 let mm = [[1.0, 2.0], [3.0, 4.0]]
@@ -18,7 +19,7 @@ let mm = [[1.0, 2.0], [3.0, 4.0]]
 function first(c) = c(0) + 1.0
 let a1 = first(v)
 // EXPECT: a1 = 2.0
-let a2 = first(iv)
+let a2 = first(Float64(iv))
 // EXPECT: a2 = 5.0
 
 // The element flows out unchanged, per element type.

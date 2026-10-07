@@ -5,8 +5,9 @@
 // unannotated parameter is generic (functions/269): each call decides.
 // ============================================================================
 let inc = lambda(x) -> x + 1
+let incf = lambda(x) -> x + 1.0
 let a: Int64 = inc(6) / 4
-let b: Float64 = inc(2.5)
+let b: Float64 = incf(2.5)
 // EXPECT: a = 1
 // EXPECT: b = 3.5
 
@@ -20,11 +21,11 @@ let d: Int64 = h(10)
 // EXPECT: c = 1
 // EXPECT: d = 11
 
-// A Float64 first call decides Float64, and a later integer LITERAL adapts
-// to it as a literal does.
-let k = lambda(x) -> x * 2
+// A Float64 first call decides Float64; a later integer argument converts
+// explicitly (an integer literal never means a float, formalism 2.4).
+let k = lambda(x) -> x + x
 let k2 = k
 let e: Float64 = k(1.25)
-let g: Float64 = k(3)
+let g: Float64 = k(Float64(3))
 // EXPECT: e = 2.5
 // EXPECT: g = 6.0

@@ -4,9 +4,11 @@
 // function's signature per call and unifies the COPY against the arguments,
 // under the coercions a call licenses. These are the calls it must keep
 // accepting: one generic at two element types (the copy, never the
-// declaration, is what a call binds), scalar widening, a literal meaning a
-// narrower numeric parameter, an untagged integer into a `Nat<I>` parameter,
-// a tagged one into a plain `Int64`, and prefix partial application.
+// declaration, is what a call binds), an explicitly converted argument (an
+// Int64 into a Float64 parameter is BL3020 -- formalism 2.4 converts nothing
+// implicitly, casts/526-527), a literal meaning a narrower parameter of its
+// own class, an untagged integer into a `Nat<I>` parameter, a tagged one into
+// a plain `Int64`, and prefix partial application.
 // (Variadic `Poly` packs, the other stand-down, are pinned by arity/.)
 // ============================================================================
 type Lat = Idx<3>
@@ -20,9 +22,9 @@ let ti = total([1, 2, 3])
 
 function half(x: Float64) -> Float64 = x / 2.0
 let n: Int64 = 7
-let h = half(n)
+let h = half(Float64(n))
 // EXPECT: h = 3.5
-let hl = half(3)
+let hl = half(3.0)
 // EXPECT: hl = 1.5
 
 function ident32(x: Int32) -> Int32 = x

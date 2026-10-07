@@ -97,7 +97,7 @@ function y_to2(x: Float, y: Float, z: Float) -> Array<Float like Idx<9>> = {
 }
 
 // edge-vector buffer: ev(s*60+e*3+c) = pos(src) - pos(tgt), built per flat slot.
-function evslot(i: Int) -> Float = {
+function evslot(i: Int64) -> Float = {
     let s = i / 60
     let rem = i - s * 60
     let ed = rem / 3
@@ -115,7 +115,7 @@ let all_ev = {
 // conv1: one 13-dim message per edge, gathered onto each node from its incoming
 // edges. Slot j (node j/13, component c=j%13): out(j) = shcoef(c)*w(wsel(c)) *
 // sum over incoming edges of feat(src(e)) * y_to2(ev(e))(shsel(c)).
-function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int, j: Int) -> Float = {
+function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int64, j: Int64) -> Float = {
     let node = j / 13
     let c = j - node * 13
     let vb = s * 60
@@ -136,7 +136,7 @@ function conv1_slot(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>
     let t3 = wv * all_feat(fb + edge_src(e3)) * sh3(k)
     t0 + t1 + t2 + t3
 }
-function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int) -> Array<Float like Idx<65>> = {
+function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: Int64) -> Array<Float like Idx<65>> = {
     let rec out: Array<Float like Idx<65>> =
         match out with
         | zero -> zero
@@ -146,7 +146,7 @@ function conv1(evs: Array<Float like Idx<240>>, w: Array<Float like Idx<5>>, s: 
 
 // gated activation on specH: silu on block scalars, reused as gates on the
 // higher-L blocks. Slot j gate source is f(node*13 + gsel(c)).
-function gated_slot(f: Array<Float like Idx<65>>, j: Int) -> Float = {
+function gated_slot(f: Array<Float like Idx<65>>, j: Int64) -> Float = {
     let node = j / 13
     let c = j - node * 13
     f(j) * sigmoid(f(node * 13 + gsel(c)))
@@ -161,7 +161,7 @@ function gated_all(f: Array<Float like Idx<65>>) -> Array<Float like Idx<65>> = 
 
 // equivariant linear on specH: block-diagonal multiplicity mixing, per-slot as
 // a 2-term (or masked 1-term) combination selected by static tables.
-function linear_slot(w: Array<Float like Idx<9>>, f: Array<Float like Idx<65>>, j: Int) -> Float = {
+function linear_slot(w: Array<Float like Idx<9>>, f: Array<Float like Idx<65>>, j: Int64) -> Float = {
     let node = j / 13
     let c = j - node * 13
     let b = node * 13
@@ -177,9 +177,9 @@ function linear_all(w: Array<Float like Idx<9>>, f: Array<Float like Idx<65>>) -
 
 // conv2: specH (x) Y<=2 -> specOut (two even scalars per node). The per-edge
 // message component (mo) is the 13-term tensor-product sum, in original order.
-function edge_msg2(h: Array<Float like Idx<65>>, w: Array<Float like Idx<10>>, mo: Int, sb: Int, sh: Array<Float like Idx<9>>) -> Float =
+function edge_msg2(h: Array<Float like Idx<65>>, w: Array<Float like Idx<10>>, mo: Int64, sb: Int64, sh: Array<Float like Idx<9>>) -> Float =
     coefT(0) * w(wbase(0) + mo * wmofac(0)) * h(sb + 0) * sh(shidx(0)) + coefT(1) * w(wbase(1) + mo * wmofac(1)) * h(sb + 1) * sh(shidx(1)) + coefT(2) * w(wbase(2) + mo * wmofac(2)) * h(sb + 2) * sh(shidx(2)) + coefT(3) * w(wbase(3) + mo * wmofac(3)) * h(sb + 3) * sh(shidx(3)) + coefT(4) * w(wbase(4) + mo * wmofac(4)) * h(sb + 4) * sh(shidx(4)) + coefT(5) * w(wbase(5) + mo * wmofac(5)) * h(sb + 5) * sh(shidx(5)) + coefT(6) * w(wbase(6) + mo * wmofac(6)) * h(sb + 6) * sh(shidx(6)) + coefT(7) * w(wbase(7) + mo * wmofac(7)) * h(sb + 7) * sh(shidx(7)) + coefT(8) * w(wbase(8) + mo * wmofac(8)) * h(sb + 8) * sh(shidx(8)) + coefT(9) * w(wbase(9) + mo * wmofac(9)) * h(sb + 9) * sh(shidx(9)) + coefT(10) * w(wbase(10) + mo * wmofac(10)) * h(sb + 10) * sh(shidx(10)) + coefT(11) * w(wbase(11) + mo * wmofac(11)) * h(sb + 11) * sh(shidx(11)) + coefT(12) * w(wbase(12) + mo * wmofac(12)) * h(sb + 12) * sh(shidx(12))
-function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int, kk: Int) -> Float = {
+function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int64, kk: Int64) -> Float = {
     let node = kk / 2
     let mo = kk - node * 2
     let vb = s * 60
@@ -197,7 +197,7 @@ function conv2_slot(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>
     let m3 = edge_msg2(h, w, mo, edge_src(e3) * 13, sh3)
     m0 + m1 + m2 + m3
 }
-function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int) -> Array<Float like Idx<10>> = {
+function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w: Array<Float like Idx<10>>, s: Int64) -> Array<Float like Idx<10>> = {
     let rec out: Array<Float like Idx<10>> =
         match out with
         | zero -> zero
@@ -206,7 +206,7 @@ function conv2(h: Array<Float like Idx<65>>, evs: Array<Float like Idx<240>>, w:
 }
 
 // output gate: specOut is all scalars, so gated == silu elementwise.
-function gate2_slot(f: Array<Float like Idx<10>>, k: Int) -> Float = f(k) * sigmoid(f(k))
+function gate2_slot(f: Array<Float like Idx<10>>, k: Int64) -> Float = f(k) * sigmoid(f(k))
 function gate2_all(f: Array<Float like Idx<10>>) -> Array<Float like Idx<10>> = {
     let rec out: Array<Float like Idx<10>> =
         match out with
@@ -220,7 +220,7 @@ function readout(wr: Array<Float like Idx<2>>, br: Float, g2: Array<Float like I
     br + wr(0) * g2(0) + wr(1) * g2(1) + wr(0) * g2(2) + wr(1) * g2(3) + wr(0) * g2(4) + wr(1) * g2(5) + wr(0) * g2(6) + wr(1) * g2(7) + wr(0) * g2(8) + wr(1) * g2(9)
 
 // per-graph squared error: the full pipeline for graph s.
-function graph_sqerr(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>, s: Int) -> Float = {
+function graph_sqerr(w1: Array<Float like Idx<5>>, w2: Array<Float like Idx<9>>, w3: Array<Float like Idx<10>>, wr: Array<Float like Idx<2>>, brA: Array<Float like Idx<1>>, evs: Array<Float like Idx<240>>, s: Int64) -> Float = {
     let f1 = conv1(evs, w1, s)
     let g1 = gated_all(f1)
     let h = linear_all(w2, g1)
@@ -334,7 +334,7 @@ let brv = [train_out(57)]
 // ---- equivariance: rotate the geometry by R = Rz(0.7) . Ry(1.1) ------------
 // Rotating the edge vectors == rotating the positions; the readout is invariant,
 // so the initial-weight loss must reproduce step0_loss.
-function rotslot(evsrc: Array<Float like Idx<240>>, i: Int) -> Float = {
+function rotslot(evsrc: Array<Float like Idx<240>>, i: Int64) -> Float = {
     let kk = i / 3
     let r = i - kk * 3
     rot(r * 3 + 0) * evsrc(kk * 3 + 0) + rot(r * 3 + 1) * evsrc(kk * 3 + 1) + rot(r * 3 + 2) * evsrc(kk * 3 + 2)

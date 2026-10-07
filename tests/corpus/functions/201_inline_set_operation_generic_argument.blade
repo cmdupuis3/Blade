@@ -10,7 +10,11 @@
 // RUNTIME extent -- never the operand's own length, which the result does
 // not have. (functions/190 covers the argument forms that already worked;
 // an inline `mask` and `sort` are among them.)
-function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+// The count in the ROW'S OWN class -- `row ^ 0` is a row of ones of its
+// element type -- so one body divides an Int64 row (integer division) and a
+// Float64 row alike: formalism 2.4 converts nothing implicitly, and
+// `/ extents(row)` would put an Int64 beside a Float64 element.
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 function center(v: T^1) -> T^1 = v - lmean(v)
 let x = [1.0, 2.0, 3.0, 6.0]
 

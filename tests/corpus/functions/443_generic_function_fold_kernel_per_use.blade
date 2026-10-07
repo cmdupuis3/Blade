@@ -5,7 +5,7 @@
 // were retyped. Also inside a generic body, over rank 2 (row folds), the
 // fused terminal, and next to `<@>` / `object_for` kernel uses at two types.
 function add(a, b) = a + b
-function dbl(x) = x * 2
+function dbl(x) = x + x
 function total(xs) = reduce(xs, add)
 let s1 = reduce([1, 2, 3], add)
 let s2 = reduce([1.5, 2.5], add)

@@ -37,11 +37,11 @@ function grid(ts: Array<Float64 like Sample>, vals: Array<Float64 like Sample>) 
     let gt = group_by(ts, gk)
     let gv = group_by(vals, gk)
     method_for(zip(gt, gv)) <@> lambda(trow: T^1, vrow: U^1) ->
-        (method_for(range<Idx<3>>) <@> lambda(f) -> prodsum(trow, vrow) * (1.0 + 1.0 * f)) |> compute
+        (method_for(range<Idx<3>>) <@> lambda(f) -> prodsum(trow, vrow) * (1.0 + Float64(f))) |> compute
 }
 
-let tim = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i) |> compute
-let vv  = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i + 1.0) |> compute
+let tim = (method_for(range<Sample>) <@> lambda(i) -> Float64(i)) |> compute
+let vv  = (method_for(range<Sample>) <@> lambda(i) -> Float64(i) + 1.0) |> compute
 let cells = grid(tim, vv) |> compute
 // EXPECT: cells = [[20.0, 40.0, 60.0], [148.0, 296.0, 444.0]]
 

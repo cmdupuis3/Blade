@@ -18,7 +18,7 @@ type CellIdx = Idx<n_seg + 1>
 let n_cells = extents(range<CellIdx>)
 // EXPECT: n_cells = 11
 
-let base_sig = (method_for(range<Idx<11>>) <@> lambda(i) -> 1.0 * i) |> compute
+let base_sig = (method_for(range<Idx<11>>) <@> lambda(i) -> Float64(i)) |> compute
 
 // Top level: the ALIAS spelling.
 let wins = method_for(halo<CellIdx, [0, 1]>) <@> lambda(w) -> base_sig(w(0)) + base_sig(w(1)) |> compute

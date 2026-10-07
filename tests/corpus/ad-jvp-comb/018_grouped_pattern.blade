@@ -26,7 +26,7 @@ function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
     let rec t: Array<Float like R> =
         match t with
         | zero -> zero
-        | prefix :: i -> prefix :: (cw(b(i)) / ns(b(i))) * v(i)
+        | prefix :: i -> prefix :: (cw(b(i)) / Float64(ns(b(i)))) * v(i)
     reduce(t, (+))
 }
 
@@ -60,7 +60,7 @@ function loss_k(v: Array<Float like R>, cw: Array<Float like Idx<2>>,
     let rec t: Array<Float like R> =
         match t with
         | zero -> zero
-        | prefix :: i -> prefix :: (cw(b2(i)) / ns2(b2(i))) * v(i)
+        | prefix :: i -> prefix :: (cw(b2(i)) / Float64(ns2(b2(i)))) * v(i)
     reduce(t, (+))
 }
 
@@ -86,4 +86,3 @@ let gv3 = ad.grad(loss_k)(v0, c0, kk2, dv3, dc3)
 // EXPECT: gv3 = 265.0
 // EXPECT: dv3 = [0.666666666666667, 0.666666666666667, 0.666666666666667, 2.5, 2.5]
 // EXPECT: dc3 = [20.0, 45.0]
-// WARN: BL3020  (the implicit int->float promotion here is deliberate)

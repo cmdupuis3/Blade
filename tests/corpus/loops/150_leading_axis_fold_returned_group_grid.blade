@@ -43,7 +43,7 @@ function family_grid(ts: T^1, vals: U^1) = {
     let gt = group_by(ts, gk)
     let gv = group_by(vals, gk)
     method_for(zip(gt, gv)) <@> lambda(trow: T^1, srow: U^1) ->
-        (method_for(range<Idx<4>>) <@> lambda(f) -> prodsum(srow, srow) * (1.0 + 1.0 * f)) |> compute
+        (method_for(range<Idx<4>>) <@> lambda(f) -> prodsum(srow, srow) * (1.0 + Float64(f))) |> compute
 }
 
 function family_grid_agnostic(ts: T^1, vals: U^1, ks: T^1) = {
@@ -83,9 +83,9 @@ function fold_cols_agnostic(ts: T^1, vals: U^1, ks: T^1) = {
     reduce((grid <@> twice) |> compute, lambda(a: T^1, b: T^1) -> a + b)
 }
 
-let tim = (method_for(range<Idx<9>>) <@> lambda(i) -> 1.0 * i) |> compute
-let vv = (method_for(range<Idx<9>>) <@> lambda(i) -> 1.0 * i + 1.0) |> compute
-let kk = (method_for(range<Idx<4>>) <@> lambda(f) -> 1.0 * f) |> compute
+let tim = (method_for(range<Idx<9>>) <@> lambda(i) -> Float64(i)) |> compute
+let vv = (method_for(range<Idx<9>>) <@> lambda(i) -> Float64(i) + 1.0) |> compute
+let kk = (method_for(range<Idx<4>>) <@> lambda(f) -> Float64(f)) |> compute
 
 // The fold's loop bound and its output allocation both read the RETURNED
 // grid's extents. Pre-fix this is where the crash landed.

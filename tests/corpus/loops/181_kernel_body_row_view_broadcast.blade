@@ -24,7 +24,7 @@
 type R = Idx<3>
 type C = Idx<4>
 
-function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / Float64(extents(row))
 
 let A: Array<Float64 like R, C> = [[1.0, 2.0, 3.0, 4.0],
                                    [2.0, 4.0, 6.0, 8.0],

@@ -10,7 +10,10 @@
 // parameter's copy (the HM application rule), so the call has its own
 // instance and the declaration stays open for monomorphization.
 // ============================================================================
-function imean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+// The count is taken in the row's own class (`row ^ 0` is a row of ones of
+// its element type), so the one body serves Int64 and Float64 rows without an
+// implicit conversion (formalism 2.4).
+function imean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 let xi = [1, 2, 4]
 let a = imean(xi)
 // EXPECT: a = 2

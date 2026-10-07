@@ -15,5 +15,5 @@
 //   10  -> (0,1,1)      101 -> (1,1,2)
 //
 // EXPECT is FLAT: a rank-3 packed result prints as one flat run.
-let S3 = method_for(range<SymIdx<3, 3>>) <@> lambda(p0, p1, p2) -> 100.0 * p0 + 10.0 * p1 + 1.0 * p2 |> compute
+let S3 = method_for(range<SymIdx<3, 3>>) <@> lambda(p0, p1, p2) -> 100.0 * Float64(p0) + 10.0 * Float64(p1) + 1.0 * Float64(p2) |> compute
 // EXPECT: S3 = [0.0, 1.0, 2.0, 10.0, 11.0, 20.0, 100.0, 101.0, 110.0, 200.0]

@@ -25,7 +25,7 @@
 // in BOTH windows -- that overlap is the point of the decomposition, and a
 // halo that silently dropped a window would show up here as 28, 140, 8.
 // ============================================================================
-let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> Float64(k)) |> compute
 
 let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
 let gk = group_keys(keys)

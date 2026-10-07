@@ -5,7 +5,7 @@
 // and the array-array product materialize as loops inside the function body
 // (stage 2b), with the centered arrays passed onward as call arguments.
 // cov(x, y) = mean([2, 0, 2]) = 4/3.
-function mymean(row) = reduce(row, (+)) / extents(row)
+function mymean(row) = reduce(row, (+)) / Float64(extents(row))
 function covariance(a, b) = mymean((a - mymean(a)) * (b - mymean(b)))
 let x = [1.0, 2.0, 3.0]
 let y = [2.0, 4.0, 6.0]

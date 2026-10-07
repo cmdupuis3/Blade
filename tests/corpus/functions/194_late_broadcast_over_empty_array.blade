@@ -16,7 +16,7 @@
 // kernel the checker builds (`lambda(e) -> e - f(v)`), whose scalar is
 // evaluated per cell and so never for an empty array, and the optimizer's
 // kernel-invariant hoisting binds it once under the nest's non-emptiness.
-function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / Float64(extents(row))
 function center(v: T^1) -> T^1 = v - lmean(v)
 
 let none: Array<Float64 like Idx<0>> = []

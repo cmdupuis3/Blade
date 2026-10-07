@@ -2,6 +2,6 @@
 // Mix range with a real array
 let A = [10.0, 20.0, 30.0]
 let L = method_for(A, range<Idx<3>>)
-let f = lambda(a, i) -> a + i
+let f = lambda(a, i) -> a + Float64(i)
 let result = L <@> f |> compute
 // EXPECT: result = [10.0, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0, 32.0]

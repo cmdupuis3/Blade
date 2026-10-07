@@ -22,5 +22,5 @@
 // 172 for the worked computation that gets the values right under this
 // convention, and docs/formalism.md 7.3 for the assessment of whether the
 // convention is intended.
-let S = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> 10.0 * p0 + 1.0 * p1 |> compute
+let S = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> 10.0 * Float64(p0) + 1.0 * Float64(p1) |> compute
 // EXPECT: S = [[0.0, 1.0, 2.0], [10.0, 11.0], [20.0]]

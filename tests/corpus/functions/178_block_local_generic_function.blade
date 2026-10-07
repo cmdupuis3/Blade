@@ -62,6 +62,9 @@ let r6 = outer(1.5, 2)
 
 // The same generic SELF-recursion at top level: the specialized body now
 // calls its own specialization (it called the abstract original before).
-function count_top(n: T) -> T = if n <= 0 then n else count_top(n - 1)
+// The body names no literal of either class -- `zero` is the instance's zero
+// and `n ^ 0` its one -- so the Int64 and the Float64 instance each compute
+// in their own type (formalism 2.4 converts nothing implicitly).
+function count_top(n: T) -> T = if n <= zero then n else count_top(n - n ^ 0)
 let r7 = Float64(count_top(3)) + count_top(1.5)
 // EXPECT: r7 = -0.5

@@ -18,7 +18,7 @@
 // flip a green program's answer. The lambda spelling had no prior meaning.
 // ============================================================================
 let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
-          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r * 10.0 + 1.0 * c)) |> compute
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(r) * 10.0 + Float64(c))) |> compute
 // EXPECT: g = [[0.0, 1.0, 2.0], [10.0, 11.0, 12.0], [20.0, 21.0, 22.0], [30.0, 31.0, 32.0]]
 
 // Column sums: fold the leading (row) axis.
@@ -34,13 +34,13 @@ let s2 = reduce(g, lambda(a: T^1, b: T^1) -> a + b, seed)
 // row, exactly the scalar fold's order one slice up ((10-1)-100 = -91).
 let h = (method_for(range<Idx<3>>) <@> lambda(r) ->
           (method_for(range<Idx<2>>) <@> lambda(c) ->
-            (if r == 0 then 10.0 else (if r == 1 then 1.0 else 100.0)) + 1.0 * c)) |> compute
+            (if r == 0 then 10.0 else (if r == 1 then 1.0 else 100.0)) + Float64(c))) |> compute
 // EXPECT: h = [[10.0, 11.0], [1.0, 2.0], [100.0, 101.0]]
 let d = reduce(h, lambda(a: T^1, b: T^1) -> a - b)
 // EXPECT: d = [-91.0, -92.0]
 
 // Complex elements ride the same arm.
 let cg = (method_for(range<Idx<4>>) <@> lambda(r) ->
-          (method_for(range<Idx<3>>) <@> lambda(c) -> complex(1.0 * r + 1.0 * c, 1.0))) |> compute
+          (method_for(range<Idx<3>>) <@> lambda(c) -> complex(Float64(r) + Float64(c), 1.0))) |> compute
 let s3 = reduce(cg, lambda(a: T^1, b: T^1) -> a + b)
 // EXPECT: s3 = [(6.0,4.0), (10.0,4.0), (14.0,4.0)]

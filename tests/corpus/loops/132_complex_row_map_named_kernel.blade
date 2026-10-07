@@ -23,7 +23,7 @@
 function sq(z: Complex128) = z * z
 function pk(z: Complex128) = complex(real(z)^2 + imag(z)^2, 0.0)
 let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
-          (method_for(range<Idx<3>>) <@> lambda(c) -> complex(1.0 * r + 1.0 * c, 1.0))) |> compute
+          (method_for(range<Idx<3>>) <@> lambda(c) -> complex(Float64(r) + Float64(c), 1.0))) |> compute
 // EXPECT: g = [[(0.0,1.0), (1.0,1.0), (2.0,1.0)], [(1.0,1.0), (2.0,1.0), (3.0,1.0)], [(2.0,1.0), (3.0,1.0), (4.0,1.0)], [(3.0,1.0), (4.0,1.0), (5.0,1.0)]]
 
 // Eta-expanded named kernel, omp-licensed row map (the p_d repro).
@@ -42,6 +42,6 @@ let o3 = (g <@> lambda(row: T^1) -> reduce(row <@> lambda(z) -> z * z, (+))) |> 
 // Float64 twin stays exactly as it always was.
 function sqf(x: Float64) = x * x
 let h = (method_for(range<Idx<4>>) <@> lambda(r) ->
-          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r + 1.0 * c)) |> compute
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(r) + Float64(c))) |> compute
 let o4 = (h <@> lambda(row: T^1) where omp(row: 1) -> reduce(row <@> sqf, (+))) |> compute
 // EXPECT: o4 = [5.0, 14.0, 29.0, 50.0]

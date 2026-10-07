@@ -27,27 +27,27 @@ let u0 = method_for(range<Idx<64>>) <@> lambda(t) -> {
     let i = t / 16
     let j = (t / 4) % 4
     let k = t % 4
-    let x = i * h
-    let y = j * h
-    let z = k * h
+    let x = Float64(i) * h
+    let y = Float64(j) * h
+    let z = Float64(k) * h
     0.7 * cos(y + 1.1) + 0.6 * cos(x + 3.0 * y + 2.0) + 0.5 * cos(z + 0.7)
 } |> compute
 let u1 = method_for(range<Idx<64>>) <@> lambda(t) -> {
     let i = t / 16
     let j = (t / 4) % 4
     let k = t % 4
-    let x = i * h
-    let y = j * h
-    let z = k * h
+    let x = Float64(i) * h
+    let y = Float64(j) * h
+    let z = Float64(k) * h
     0.8 * cos(x + 0.3) + 0.6 * cos(x + 3.0 * y + 2.0) - 0.6 * cos(z + 0.7)
 } |> compute
 let u2 = method_for(range<Idx<64>>) <@> lambda(t) -> {
     let i = t / 16
     let j = (t / 4) % 4
     let k = t % 4
-    let x = i * h
-    let y = j * h
-    let z = k * h
+    let x = Float64(i) * h
+    let y = Float64(j) * h
+    let z = Float64(k) * h
     0.0 - 0.5 * cos(x + 0.3) + 0.4 * cos(y + 1.1) - 0.9 * cos(x + 3.0 * y + 2.0)
 } |> compute
 let build_done = 0.0
@@ -97,7 +97,7 @@ let ctrl_done = {
     let s_dv1 = reduce(method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j, k) -> {
         let ip = (i + 1) % 4
         let im = (i + 3) % 4
-        let d = (cos(ip * h + 0.15) - cos(im * h + 0.15)) / (2.0 * h)
+        let d = (cos(Float64(ip) * h + 0.15) - cos(Float64(im) * h + 0.15)) / (2.0 * h)
         d * d
     }, (+), 0.0, axes = 3)
     dv(1) = s_dv1

@@ -18,7 +18,7 @@ type C = Idx<3>
 function f(a: Array<Float like R, C>) -> Float = {
     let s = method_for(a) <@>
         lambda(row: T^1) ->
-            reduce((row - reduce(row, (+)) / extents(row)) * (row - reduce(row, (+)) / extents(row)), (+)) / extents(row)
+            reduce((row - reduce(row, (+)) / Float64(extents(row))) * (row - reduce(row, (+)) / Float64(extents(row))), (+)) / Float64(extents(row))
         |> compute
     s(0) + 2.0 * s(1)
 }
@@ -27,4 +27,3 @@ let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
                        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 // EXPECT: v = 2.0
 // EXPECT: t = -0.6666666666666666
-// WARN: BL3020  (the implicit int->float promotion here is deliberate)

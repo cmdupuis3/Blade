@@ -1,17 +1,16 @@
-// TEST: implicit numeric conversion warns
+// TEST: an explicit conversion is the only numeric conversion
 // ============================================================================
-// Mixed-elem-type arithmetic still promotes (Int64 beside Float64 goes to
-// float; Float32 beside Float64 drags the op wide) but a converted
-// NON-literal operand now warns BL3020, naming the explicit cast. Literal
-// adaptation stays silent: `5.0 * cast` carries no warning at all.
+// Mixed-elem-type arithmetic used to promote (Int64 beside Float64 went to
+// float, Float32 beside Float64 dragged the op wide) with a BL3020 warning.
+// It is now an error (formalism 2.4; casts/520-531), so each mix converts
+// explicitly, with the type in call position, and computes the same values.
 // ============================================================================
 let a: Int64 = 5
-let w = 5.0 * a
+let w = 5.0 * Float64(a)
 let s: Float32 = 1.5
 let t: Float64 = 2.0
-let u = s * t
+let u = Float64(s) * t
 let clean = 5.0 * Float64(a)
-// WARN: BL3020
 // EXPECT: w = 25.0
 // EXPECT: u = 3.0
 // EXPECT: clean = 25.0

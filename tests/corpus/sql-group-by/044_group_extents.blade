@@ -30,7 +30,7 @@ let peeled = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> ex
 // traversal.
 let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
 // EXPECT: sums = [100.0, 70.0, 40.0]
-let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / n) |> compute
+let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / Float64(n)) |> compute
 // EXPECT: means = [33.3333333333333, 35.0, 40.0]
 
 // Rows a negative key dropped belong to no group, so they are counted nowhere:

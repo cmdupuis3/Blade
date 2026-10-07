@@ -14,7 +14,7 @@
 // ============================================================================
 function rsum(x: T^1) = reduce(x, (+))
 let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
-          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r * 10.0 + 1.0 * c)) |> compute
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(r) * 10.0 + Float64(c))) |> compute
 // EXPECT: g = [[0.0, 1.0, 2.0], [10.0, 11.0, 12.0], [20.0, 21.0, 22.0], [30.0, 31.0, 32.0]]
 
 // Direct call argument.

@@ -64,12 +64,14 @@ function mean(row: T^1) = Float64(reduce(row, (+))) / Float64(extents(row))
 /// Divides by n, not n-1 (see the module note). Written as one centering pass
 /// plus one fold rather than as `mean((row - mean(row)) ^ 2)` so it does not
 /// depend on cross-module monomorphization of a generic calling a generic.
-/// The centering `row - m` computes in Float64 (`m` is one), whatever the
-/// row's element type.
+/// The centering computes in Float64 whatever the row's element type: the
+/// row is converted first, `Float64(row) - m` -- a cast converts the element
+/// only and keeps the row's shape (formalism 2.4: nothing converts
+/// implicitly, so `row - m` over an Int64 row would be refused).
 function variance(row: T^1) = {
     let n = Float64(extents(row))
     let m = Float64(reduce(row, (+))) / n
-    let centered = row - m
+    let centered = Float64(row) - m
     reduce(centered * centered, (+)) / n
 }
 

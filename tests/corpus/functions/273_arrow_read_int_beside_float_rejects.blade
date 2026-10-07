@@ -1,5 +1,5 @@
 // TEST: An Int64 arrow read beside a Float64 argument is refused, never truncated (rejects)
-// ERROR: BL3001 @ 8:19
+// ERROR: BL3019 @ 8:19
 // ============================================================================
 // `c(0) + x` makes the read and `x` one type variable (functions/271), and the
 // Int64 array decides it first: the Float64 `2.5` would have to narrow into

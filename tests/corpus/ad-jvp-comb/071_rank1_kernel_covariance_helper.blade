@@ -18,7 +18,7 @@ type R = Idx<2>
 type C = Idx<3>
 
 function covariance(x: T^1, y: T^1) -> T^0 =
-    reduce((x - reduce(x, (+)) / extents(x)) * (y - reduce(y, (+)) / extents(y)), (+)) / extents(x)
+    reduce((x - reduce(x, (+)) / Float64(extents(x))) * (y - reduce(y, (+)) / Float64(extents(y))), (+)) / Float64(extents(x))
 
 function f(a: Array<Float like R, C>) -> Float = {
     let cov = method_for(a, a) <@> lambda(x: T^1, y: T^1) -> covariance(x, y) |> compute
@@ -29,4 +29,3 @@ let (v, t) = ad.jvp(f)([[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]],
                        [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
 // EXPECT: v = 4.666666666666667
 // EXPECT: t = -2.6666666666666665
-// WARN: BL3020  (the implicit int->float promotion here is deliberate)

@@ -12,7 +12,7 @@
 // always worked — so the wrapper is self-describing across the call boundary
 // and no caller-side extents plumbing is needed. Previously pinned as a
 // codegen-stage reject-probe.
-function center(a: T^1) -> T^1 = a - (reduce(a, (+)) / extents(a))
+function center(a: T^1) -> T^1 = a - (reduce(a, (+)) / Float64(extents(a)))
 let x = [1.0, 2.0, 3.0]
 let c = center(x)
 // EXPECT: c = [-1.0, 0.0, 1.0]

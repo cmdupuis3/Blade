@@ -5,6 +5,6 @@
 // real array plus one per range slot (a, i, j).
 let A: Array<Float64 like Idx<2>> = [1.0, 2.0]
 let L = method_for(A, range<Idx<2>, Idx<3>>)
-let f = lambda(a, i, j) -> a * 100.0 + i * 10 + j
+let f = lambda(a, i, j) -> a * 100.0 + Float64(i * 10 + j)
 let result = L <@> f |> compute
 // EXPECT: result = [100.0, 101.0, 102.0, 110.0, 111.0, 112.0, 200.0, 201.0, 202.0, 210.0, 211.0, 212.0]

@@ -9,12 +9,16 @@
 // the compiled program printed 1.75 while the interpreter computed with
 // integers under the checker's Float64 type. The ascriptions below pin each
 // result's TYPE (an Int64 into a Float64 binding is refused, functions/270).
+// A body's literal is judged at every instance: `x + 1` is the Int64
+// increment (a Float64 argument there is refused, casts/532), `x + 1.0` the
+// Float64 one.
 // ============================================================================
 function inc(x) = x + 1
+function incf(x) = x + 1.0
 let a: Int64 = inc(6) / 4
-let b: Float64 = inc(2.5)
+let b: Float64 = incf(2.5)
 let fv = 2.5
-let c: Float64 = inc(fv)
+let c: Float64 = incf(fv)
 let d = inc([1, 2])
 // EXPECT: a = 1
 // EXPECT: b = 3.5
@@ -31,15 +35,17 @@ let i2: Float64 = idf(2.5)
 // Integer arithmetic stays integer per instance; a Float64 instance divides
 // in Float64.
 function half(x) = x / 2
+function halff(x) = x / 2.0
 let h1: Int64 = half(7)
-let h2: Float64 = half(7.0)
+let h2: Float64 = halff(7.0)
 // EXPECT: h1 = 3
 // EXPECT: h2 = 3.5
 
 // Two parameters mixed by arithmetic are one type variable (functions/274).
 function avg2(p, q) = (p + q) / 2
+function avg2f(p, q) = (p + q) / 2.0
 let v: Int64 = avg2(3, 6)
-let w: Float64 = avg2(3.0, 6.0)
+let w: Float64 = avg2f(3.0, 6.0)
 // EXPECT: v = 4
 // EXPECT: w = 4.5
 

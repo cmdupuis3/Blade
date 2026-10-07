@@ -10,12 +10,14 @@
 // APPLICATION. That form has no inline rendering, so an unlifted operand
 // used to reach codegen as the LOOP_OBJECT_USED_AS_VALUE sentinel. Both
 // consumers lift their operands evaluated-once, so either spelling of the
-// mean divisor compiles to the same numbers.
+// mean divisor compiles to the same numbers. (The Int64 count is converted
+// where it meets the Float64 sum -- formalism 2.4 converts nothing
+// implicitly.)
 //
 // n = 4, mean = 2.5, deviations = [-1.5, -0.5, 0.5, 1.5]
 function covariance(x: T^1, y: T^1) = {
     let n = extents(x)          // Int64
-    prodsum(x - reduce(x, (+)) / n, y - reduce(y, (+)) / n) / n
+    prodsum(x - reduce(x, (+)) / Float64(n), y - reduce(y, (+)) / Float64(n)) / Float64(n)
 }
 // (2.25 + 0.25 + 0.25 + 2.25) / 4
 let v = covariance([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
@@ -23,7 +25,7 @@ let v = covariance([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
 
 // The Float64 divisor spelling of the same function must agree.
 function covarianceF(x: T^1, y: T^1) = {
-    let n = 1.0 * extents(x)    // Float64
+    let n = Float64(extents(x)) // Float64
     prodsum(x - reduce(x, (+)) / n, y - reduce(y, (+)) / n) / n
 }
 let vf = covarianceF([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
@@ -32,7 +34,7 @@ let vf = covarianceF([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
 // Same broadcast in a let-bound scalar, feeding prodsum twice.
 function sumsq(x: T^1) = {
     let n = extents(x)
-    let m = reduce(x, (+)) / n
+    let m = reduce(x, (+)) / Float64(n)
     prodsum(x - m, x - m)
 }
 let s = sumsq([1.0, 2.0, 3.0, 4.0])
@@ -41,9 +43,8 @@ let s = sumsq([1.0, 2.0, 3.0, 4.0])
 // The reduce operand slot has the same shape; deviations sum to zero.
 function devsum(x: T^1) = {
     let n = extents(x)
-    let m = reduce(x, (+)) / n
+    let m = reduce(x, (+)) / Float64(n)
     reduce(x - m, (+))
 }
 let d = devsum([1.0, 2.0, 3.0, 4.0])
 // EXPECT: d = 0.0
-// WARN: BL3020  (the implicit int->float promotion here is deliberate)

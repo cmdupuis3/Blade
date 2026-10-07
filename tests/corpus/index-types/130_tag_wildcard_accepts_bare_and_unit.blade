@@ -13,7 +13,7 @@
 Unit charge
 type Tagged = Idx<3>
 
-function twice(m: Nat<_>) -> Float64 = 2.0 * m
+function twice(m: Nat<_>) -> Float64 = 2.0 * Float64(m)
 
 // 1. named tag
 let a = method_for(range<Tagged>) <@> twice |> compute

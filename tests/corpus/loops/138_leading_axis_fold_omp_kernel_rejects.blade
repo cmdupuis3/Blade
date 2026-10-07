@@ -6,5 +6,5 @@
 // nothing and be dropped silently -- the exact silent drop the omp-census
 // invariant forbids -- so it is refused with steering instead.
 let g = (method_for(range<Idx<4>>) <@> lambda(r) ->
-          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r + 1.0 * c)) |> compute
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(r) + Float64(c))) |> compute
 let s = reduce(g, lambda(a: T^1, b: T^1) where omp(a: 1) -> a + b)

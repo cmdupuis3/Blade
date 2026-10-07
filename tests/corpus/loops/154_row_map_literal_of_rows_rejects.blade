@@ -25,7 +25,7 @@
 // Deliberate codegen refusals -- the ones carrying a sentence that says what
 // to write instead -- are unaffected and keep their own wording.
 // ============================================================================
-let ts = (method_for(range<Idx<6>>) <@> lambda(i) -> 1.0 * i) |> compute
-let r0 = (method_for(range<Idx<3>>) <@> lambda(k) -> 1.0 * k) |> compute
-let r1 = (method_for(range<Idx<3>>) <@> lambda(k) -> 2.0 * k) |> compute
+let ts = (method_for(range<Idx<6>>) <@> lambda(i) -> Float64(i)) |> compute
+let r0 = (method_for(range<Idx<3>>) <@> lambda(k) -> Float64(k)) |> compute
+let r1 = (method_for(range<Idx<3>>) <@> lambda(k) -> 2.0 * Float64(k)) |> compute
 let g = (ts <@> lambda(t) -> [r0, r1]) |> compute

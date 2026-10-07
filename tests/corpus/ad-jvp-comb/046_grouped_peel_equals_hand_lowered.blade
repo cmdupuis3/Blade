@@ -18,7 +18,7 @@ let mgk = group_keys(k0)
 
 function loss(v: Array<Float like R>, cw: Array<Float like Idx<2>>) -> Float = {
     let g = group_by(v, mgk)
-    let m = method_for(g) <@> lambda(r: Array<Float like RaggedIdx<_>>) -> reduce(r, (+)) / extents(r) |> compute
+    let m = method_for(g) <@> lambda(r: Array<Float like RaggedIdx<_>>) -> reduce(r, (+)) / Float64(extents(r)) |> compute
     reduce(m * cw, (+))
 }
 
@@ -37,4 +37,3 @@ let dot = reduce(dv * [1.0, 0.0, -2.0, 3.0, 0.5], (+))
 let resid = jt - dot
 // EXPECT: jp = 228.333333333333
 // EXPECT: resid = 0.0
-// WARN: BL3020  (the implicit int->float promotion here is deliberate)

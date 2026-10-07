@@ -138,8 +138,8 @@ let F: Array<Float64<flux> like Space, Time> = method_for(range<Space, Time>) <@
 // %%
 function variance(x: T^1) = {
     let n = extents(x)
-    let d = x - reduce(x, (+)) / n
-    prodsum(d, d) / n
+    let d = x - reduce(x, (+)) / Float64(n)
+    prodsum(d, d) / Float64(n)
 }
 
 function lsdft(st_raw: Tuple<U^1, T<time>^1>,
@@ -147,16 +147,16 @@ function lsdft(st_raw: Tuple<U^1, T<time>^1>,
 where omp(st_raw: 1) = {
     let s_raw, t_raw = st_raw
     let n = extents(t_raw)
-    let s = s_raw - reduce(s_raw, (+)) / n
+    let s = s_raw - reduce(s_raw, (+)) / Float64(n)
     let s_var = variance(s)
     let ts = t_raw - t_zero
     omegas <@> lambda(w) where omp(w: 1) -> {
         let e = exp <@> (i * w * ts)
         let Z1 = prodsum(s, e)
         let Z2 = prodsum(e, e)
-        let P = Z1 * exp(-i * arg(Z2) / 2)
-        let a = real(P) / sqrt((Float64(n) + abs(Z2)) / 2)
-        let b = imag(P) / sqrt((Float64(n) - abs(Z2)) / 2)
+        let P = Z1 * exp(-i * arg(Z2) / 2.0)
+        let a = real(P) / sqrt((Float64(n) + abs(Z2)) / 2.0)
+        let b = imag(P) / sqrt((Float64(n) - abs(Z2)) / 2.0)
         complex(a, b) * exp(i * w * t_zero) / sqrt(2.0 * s_var)
     }
 }
@@ -197,9 +197,9 @@ function ls_project(sc: Array<Float64<flux> like Idx<n>>, e: Array<Complex128 li
                     Z2: Complex128, v: Float64) = {
     let n = extents(sc)
     let Z1 = prodsum(sc, e)
-    let P = Z1 * exp(-i * arg(Z2) / 2)
-    let a = real(P) / sqrt((Float64(n) + abs(Z2)) / 2)
-    let b = imag(P) / sqrt((Float64(n) - abs(Z2)) / 2)
+    let P = Z1 * exp(-i * arg(Z2) / 2.0)
+    let a = real(P) / sqrt((Float64(n) + abs(Z2)) / 2.0)
+    let b = imag(P) / sqrt((Float64(n) - abs(Z2)) / 2.0)
     complex(a, b) / sqrt(2.0 * v)
 }
 

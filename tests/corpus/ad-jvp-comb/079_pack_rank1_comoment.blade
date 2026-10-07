@@ -27,14 +27,14 @@ type C = Idx<3>
 function cprod(a: Poly<T^1>) -> T^1 = {
     match arity(a) with
     | 1 -> { let h :: t = a
-             h - reduce(h, (+)) / extents(h) }
+             h - reduce(h, (+)) / Float64(extents(h)) }
     | _ -> { let h :: t = a
-             (h - reduce(h, (+)) / extents(h)) * cprod(t) }
+             (h - reduce(h, (+)) / Float64(extents(h))) * cprod(t) }
 }
 
 function comoment(a: Poly<T^1>) where comm(a) -> T^0 = {
     let h :: t = a
-    reduce(cprod(a), (+)) / extents(h)
+    reduce(cprod(a), (+)) / Float64(extents(h))
 }
 
 function f(a: Array<Float like R, C>) -> Float = {
@@ -54,4 +54,3 @@ let agree = abs(fd - t) < 0.000001 * (abs(t) + 1.0)
 // EXPECT: t = -2.6666666666666665
 // EXPECT: presid = 0.0
 // EXPECT: agree = true
-// WARN: BL3020  (the implicit int->float promotion here is deliberate)

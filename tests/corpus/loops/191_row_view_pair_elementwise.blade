@@ -29,7 +29,7 @@
 // test is about the peel, not about tag flow.
 // ============================================================================
 let g = (method_for(range<Idx<6>>) <@> lambda(r) ->
-          (method_for(range<Idx<3>>) <@> lambda(c) -> 1.0 * r * 10.0 + 1.0 * c)) |> compute
+          (method_for(range<Idx<3>>) <@> lambda(c) -> Float64(r) * 10.0 + Float64(c))) |> compute
 
 // Module-level binding site, literal indices.
 let pair0 = (g(0) + g(1)) |> compute

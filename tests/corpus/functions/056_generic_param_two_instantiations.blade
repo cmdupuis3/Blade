@@ -48,7 +48,7 @@ let e = sumOf([1.0, 2.0, 3.0])
 // error, and a regression in the VALUES shows up in the imaginary parts below.
 function centre(xs: T^1) = {
     let n = extents(xs)
-    let m = reduce(xs, (+)) / n
+    let m = reduce(xs, (+)) / Float64(n)
     (xs <@> lambda(x) -> x - m) |> compute
 }
 let cre: Array<Float64 like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
@@ -68,8 +68,8 @@ let ddc = dbl(ccx)
 // EXPECT: ddr = [2.0, 4.0, 6.0, 8.0]
 // EXPECT: ddc = [(2.0,2.0), (4.0,0.0), (6.0,-2.0), (8.0,0.0)]
 
-// The numeric tower is ONE class: an Int64 literal in a Float64 slot stays
-// legal, which is the coarseness the check depends on.
+// A Float64 slot takes a float literal (an integer literal there is BL3020,
+// casts/527: formalism 2.4 converts nothing implicitly).
 function addOne(x: Float64) -> Float64 = x + 1.0
-let d = addOne(4)
+let d = addOne(4.0)
 // EXPECT: d = 5.0

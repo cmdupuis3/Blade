@@ -60,10 +60,11 @@ let d: Float<meters> = 1.5
 let dd: Float<meters> = dbl(d)
 // EXPECT: dd = 3.0
 
-// An array's ELEMENT variable is never an array, so it keeps the promotion
-// rules' scalar result: an Int64 row's sum plus 0.5 is still the Float64 it
-// always was. (Only a parameter's own variable -- x: T, which is x: T^0,
-// the arity-liftable scalar an array can instantiate -- is typed T.)
-function rowsum_up(row: T^1) = reduce(row, (+)) + 0.5
+// An array's ELEMENT variable is never an array, so it keeps a scalar
+// result. Its sum beside 0.5 is judged per instance like any mix (formalism
+// 2.4): over an Int64 row the body converts the sum first, and the result is
+// the Float64 it always was. (Only a parameter's own variable -- x: T, which
+// is x: T^0, the arity-liftable scalar an array can instantiate -- is typed T.)
+function rowsum_up(row: T^1) = Float64(reduce(row, (+))) + 0.5
 let ri = rowsum_up([1, 2, 3])
 // EXPECT: ri = 6.5

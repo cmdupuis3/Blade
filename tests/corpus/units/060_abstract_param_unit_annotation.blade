@@ -18,9 +18,9 @@
 Unit second
 Unit hertz
 function total(x: T<second>^1) = reduce(x, (+))
-function meanOf(x: T<second>^1) = reduce(x, (+)) / extents(x)
+function meanOf(x: T<second>^1) = reduce(x, (+)) / Float64(extents(x))
 function ratio(t: T<second>^1, w: T<hertz>^1) =
-  (reduce(t, (+)) / extents(t)) * (reduce(w, (+)) / extents(w))
+  (reduce(t, (+)) / Float64(extents(t))) * (reduce(w, (+)) / Float64(extents(w)))
 let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
 let ws: Array<Float<hertz> like Idx<5>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let sum = total(ts)

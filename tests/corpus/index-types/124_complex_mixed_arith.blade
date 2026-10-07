@@ -3,12 +3,13 @@
 // inserting the casts std::complex's same-type operators require:
 //   2.0 * z   (double * complex)      -> passthrough
 //   z + 1.0   (complex + double)      -> passthrough
-//   3 * z     (int  * complex)        -> (double) cast on the int
+//   Float64(3) * z                    -> an integer converts explicitly
+//                                        (`3 * z` is BL3020, casts/530)
 //   z * z     (complex * complex)     -> same type
 let z = complex(1.0, 2.0)
 let dz = 2.0 * z
 let zp = z + 1.0
-let iz = 3 * z
+let iz = Float64(3) * z
 let z2 = z * z
 // EXPECT: dz = (2.0,4.0)
 // EXPECT: zp = (2.0,2.0)

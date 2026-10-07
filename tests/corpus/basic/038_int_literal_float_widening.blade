@@ -1,11 +1,11 @@
 // TEST: Int Literal Float Widening
-// F#-style type-directed widening: an int LITERAL in an explicitly
-// float-typed position adopts the float type (let x: Float64 = 3 is
-// 3.0; complex(1, 0) is complex(1.0, 0.0)). Only literals widen -- an
-// int-typed VALUE in a float position still rejects (index-types/127).
-let a: Float64 = 3
-let b: Float32 = 2
-let z = complex(1, 0)
+// As in F#, an integer literal is an Int64 and never means a float: a
+// float-typed position takes the float literal or an explicit conversion
+// (formalism 2.4; `let x: Float64 = 3` is BL3020, casts/528). The
+// conversion of an integer literal is exact.
+let a: Float64 = Float64(3)
+let b: Float32 = Float32(2)
+let z = complex(Float64(1), Float64(0))
 let s = a + 0.5
 // EXPECT: a = 3.0
 // EXPECT: b = 2.0

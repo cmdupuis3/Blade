@@ -11,7 +11,7 @@
 // 12 samples in 3 groups of 4; the halo claims 2 cells (would emit 1 window
 // instead of 2).
 // ============================================================================
-let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> 1.0 * k) |> compute
+let ts = (method_for(range<Idx<12>>) <@> lambda(k) -> Float64(k)) |> compute
 let keys = (ts <@> lambda(t) -> floor(t / 4.0)) |> compute
 let gk = group_keys(keys)
 let gt = group_by(ts, gk)

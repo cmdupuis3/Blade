@@ -15,7 +15,7 @@ function mean_by(k: Array<Int64 like Row>, v: Array<Float64 like Row>) = {
     let g = group_by(v, gk)
     let n = extents(gk)
     let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
-    let means = method_for(zip(sums, n)) <@> lambda(t, c) -> t / c |> compute
+    let means = method_for(zip(sums, n)) <@> lambda(t, c) -> t / Float64(c) |> compute
     means
 }
 

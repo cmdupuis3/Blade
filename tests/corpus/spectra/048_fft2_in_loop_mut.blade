@@ -13,7 +13,7 @@ import spectra as sp
 type Steps = Idx<4>
 type RF4 = Array<Float64 like Idx<4>, Idx<4>>
 type CF4 = Array<Complex128 like Idx<4>, Idx<4>>
-let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> 1.0 * (i * 4 + j) |> compute
+let f: RF4 = method_for(range<Idx<4>>) <*> method_for(range<Idx<4>>) <@> lambda(i, j) -> Float64(i * 4 + j) |> compute
 function scaled(g: RF4, s: Float64) -> RF4 = g * s
 function dcbin(X: CF4) -> Float64 = real(X(0, 0)) + imag(X(2, 1))
 let acc = {

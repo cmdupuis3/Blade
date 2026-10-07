@@ -18,7 +18,7 @@ let r = fold_plus_n([1.0, 2.0, 3.0, 4.0])
 // where the mean's fold leaves the nest in a helper that captures `n`.
 function centered_sum_sq(x: T^1) = {
     let n = extents(x)
-    prodsum(x - reduce(x, (+)) / n, x - reduce(x, (+)) / n)
+    prodsum(x - reduce(x, (+)) / Float64(n), x - reduce(x, (+)) / Float64(n))
 }
 let ss = centered_sum_sq([1.0, 2.0, 3.0, 4.0])
 // EXPECT: ss = 5.0
