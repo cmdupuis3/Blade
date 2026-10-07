@@ -1995,13 +1995,14 @@ let (a, b) = pair(7.0)
         // 11. A function declaration is silent like any declaration; a bare
         // reference to it still carries the signature the REPL would have
         // echoed, answered from the declaration's own binding.
+        // (`p` is unannotated, so generic: the signature is `(T) -> T`.)
         let (code, responses, _) =
             drive [ evalReq 1 "nb" "function twice(p) = p * 2"; evalReq 2 "nb" "twice"; shutdownReq ]
         let name = "a bare function reference reports its signature and no value"
         match responses with
         | [decl; probe] when code = 0
                              && decl.Contains "\"kept\":true" && decl.Contains "\"bindings\":[]"
-                             && probe.Contains "{\"name\":\"twice\",\"type\":\"(Float64) -> Float64\",\"value\":\"\"}" ->
+                             && probe.Contains "{\"name\":\"twice\",\"type\":\"(T) -> T\",\"value\":\"\"}" ->
             record name TH.Pass ""
         | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
 
