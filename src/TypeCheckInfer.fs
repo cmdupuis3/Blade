@@ -6708,6 +6708,93 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                         mode = Elementwise && not isCmpOrLogical
                         && (match tL.Kind with TExprZero -> true | _ -> false)
                         && (caretRank rRes).IsSome
+                    // A GENERIC operand beside a REAL scalar, in a named
+                    // generic body: `function addone(x: T) = x + 1.0`. The
+                    // promotion rules answered the scalar (`_, Float64 ->
+                    // Float64`) and left `T` open, so the deduced signature
+                    // read `(x: T) -> Float64` while the body, monomorphized
+                    // at an array instance, built an array: `addone([1.0,
+                    // 2.0])` checked clean and g++ refused `return` of an
+                    // Array<double,1> as a double (the same for a complex
+                    // instance), and the `-> T` spelling bound `T` to
+                    // Float64 and refused the array outright. `T` admits
+                    // arrays (a scalar broadcasts against one, formalism
+                    // 2.5's elementwise lifting), and for every element class
+                    // the partner promotes INTO -- Float64, complex, and
+                    // Float32 beside a literal -- the result is exactly `T`.
+                    // So answer `T`, carrying the op's unit, and record the
+                    // demand: an instance whose element the partner would
+                    // promote AWAY (an integer, or Float32 beside a typed
+                    // Float64) is refused at its call
+                    // (TypeCheckSupport.judgeGenericObligations), where the
+                    // T-typed result would otherwise truncate (a result type
+                    // that promotes per instance, formalism 2.4's sketched
+                    // `cast<A,B>`, does not exist yet). Only a bare PARAMETER
+                    // variable (see sigTop; `x: T` and `x: T^0` are one
+                    // variable, the arity-liftable scalar): not a caret array
+                    // var (`T^1` is shaped against the partner above), not a
+                    // var a call already proved an array (the knownArrayVar
+                    // arm below), and not a lambda's own parameter (not a
+                    // signature variable; apply-site unification types it).
+                    let genericBesideReal =
+                        let isArithOp =
+                            match op with
+                            | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret -> true
+                            | _ -> false
+                        if mode <> Elementwise || not isArithOp || env.InLambdaBody
+                           || env.CurrentGenericObligations.IsNone then None
+                        else
+                            // Only a variable a PARAMETER is declared as,
+                            // bare (`x: T` = `x: T^0`, `x: T<u>`): the one kind
+                            // of variable an array can instantiate (the arity
+                            // lift). An array's ELEMENT var (the
+                            // `reduce(row, (+))` of a `row: T^1`) and an arrow
+                            // application's result (functions/207: one value)
+                            // are scalars whatever the instance, and keep the
+                            // promotion rules' scalar answer -- an Int64
+                            // element plus 1.0 is a Float64 there.
+                            let sigTop (vid: int) =
+                                let sigTys =
+                                    env.CurrentSignature
+                                    |> List.map (fun t -> env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits)
+                                let isTop t = match t with IRTInfer r -> r = vid | _ -> false
+                                List.exists isTop sigTys
+                                && sigTys |> List.forall (fun t ->
+                                    isTop t || not ((freeInferVars env.Subst t).Contains vid))
+                            let sigVar (t: IRType) =
+                                match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
+                                | IRTInfer vid when env.Subst.IsPolymorphicId vid
+                                                    && (env.Subst.GetArityConstraint vid).IsNone
+                                                    && (match env.Subst.GetRankLowerBound vid with
+                                                        | Some k -> k < 1
+                                                        | None -> true)
+                                                    && sigTop vid -> Some vid
+                                | _ -> None
+                            let realScalar (te: TypedExpr) =
+                                match IR.stripUnits (env.Subst.Resolve te.Type) with
+                                | IRTScalar (ETFloat64 | ETFloat32 as et) -> Some et
+                                | _ -> None
+                            let isFloatLit (te: TypedExpr) =
+                                match te.Kind with
+                                | TExprLit (LitFloat _)
+                                | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitFloat _) }) -> true
+                                | _ -> false
+                            match sigVar lRes, realScalar tR, sigVar rRes, realScalar tL with
+                            | Some vid, Some et, _, _ -> Some (vid, et, isFloatLit tR)
+                            | _, _, Some vid, Some et -> Some (vid, et, isFloatLit tL)
+                            | _ -> None
+                    match genericBesideReal with
+                    | Some (vid, partner, literal) ->
+                        let opName =
+                            match op with
+                            | OpAdd -> "+" | OpSub -> "-" | OpMul -> "*" | OpDiv -> "/"
+                            | OpMod -> "%" | _ -> "^"
+                        env.CurrentGenericObligations
+                        |> Option.iter (fun acc -> acc.Add(GOPromotion (vid, opName, partner, literal)))
+                        match IR.getUnits resTy0 with
+                        | Some u -> IRTUnitAnnotated (IRTInfer vid, u)
+                        | None -> IRTInfer vid
+                    | None ->
                     if zeroBesideCaret then rRes
                     elif mode = Elementwise && isZipOp && isScalarTy resTy0
                        && ((knownArrayVar lRes && isScalarTy rRes) || (knownArrayVar rRes && isScalarTy lRes)) then
@@ -16179,6 +16266,14 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 |> Seq.filter (fun ob ->
                     match ob with
                     | GOCast _ -> true
+                    // A promotion demand matters wherever the T-typed value
+                    // lands, not only at the return: `let y = x + 1.0` is a
+                    // T-typed local an integer instance would truncate. Kept
+                    // while the variable is still open.
+                    | GOPromotion (v, _, _, _) ->
+                        (match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
+                         | IRTInfer _ -> true
+                         | _ -> false)
                     | GOFractionalMath (v, _) ->
                         match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
                         | IRTInfer r -> retVars.Contains r || not retVars.IsEmpty

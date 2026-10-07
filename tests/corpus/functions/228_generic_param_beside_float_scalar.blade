@@ -1,0 +1,69 @@
+// TEST: A generic parameter beside a real scalar keeps the parameter's type
+// ============================================================================
+// `function addone(x: T) = x + 1.0` deduced `(x: T) -> Float64`: the
+// promotion rules answered the scalar for `T + Float64` and left `T` open, so
+// `addone([1.0, 2.0])` checked clean and its array instance returned an
+// Array<double,1> as a `double` (g++, BL9002); a complex instance failed the
+// same way, and the `-> T` spelling bound `T` to Float64 and refused the
+// array. `T` admits arrays, and the scalar broadcasts against one, so the op
+// is typed `T` and each call's instance decides the shape: an array in, an
+// array out; a scalar in, a scalar out. The unary ops a generic body applies
+// to `x` (`-x`, `sqrt(x)`) lift over an array instance the same way.
+// ============================================================================
+function addone(x: T) = x + 1.0
+let a = addone([1.0, 2.0])
+let s = addone(3.0)
+// EXPECT: a = [2, 3]
+// EXPECT: s = 4
+
+// The declared spelling, with the scalar on the LEFT, at a rank-2 instance.
+function flip(x: T) -> T = 1.0 - x
+let fm = flip([[1.0, 2.0], [3.0, 4.0]])
+let fs = flip(0.25)
+// EXPECT: fm = [[0, -1], [-2, -3]]
+// EXPECT: fs = 0.75
+
+// Two ops in a row, and a generic caller passing its own `T` on.
+function half_up(x: T) = x / 2.0 + 0.5
+function twice_up(x: T) = addone(x) * 2.0
+let hv = half_up([1.0, 3.0])
+let tv = twice_up([1.0, 2.0])
+let ts = twice_up(0.5)
+// EXPECT: hv = [1, 2]
+// EXPECT: tv = [4, 6]
+// EXPECT: ts = 3
+
+// The partner promotes INTO complex and Float32 (a float literal adapts to
+// the narrow width, as `a32 * 1.0` does), so those instances keep `T` too.
+let z = addone(complex(1.0, 2.0))
+let w = addone(Float32(2.5))
+let w1 = twice_up(Float32([1.0, 2.0]))
+// EXPECT: z = (2,2)
+// EXPECT: w = 3.5
+// EXPECT: w1 = [4, 6]
+
+// Unary ops and a same-typed partner over an array instance.
+function neg(x: T) = -x
+function root(x: T) = sqrt(x)
+function add(x: T, y: T) = x + y
+let n = neg([1.0, 2.0])
+let r = root([4.0, 9.0])
+let ad = add([1.0, 2.0], [3.0, 4.0])
+// EXPECT: n = [-1, -2]
+// EXPECT: r = [2, 3]
+// EXPECT: ad = [4, 6]
+
+// A unit-carrying parameter: the op's unit rides on the `T` result.
+Unit meters
+function dbl(x: T<meters>) = x * 2.0
+let d: Float<meters> = 1.5
+let dd: Float<meters> = dbl(d)
+// EXPECT: dd = 3
+
+// An array's ELEMENT variable is never an array, so it keeps the promotion
+// rules' scalar result: an Int64 row's sum plus 0.5 is still the Float64 it
+// always was. (Only a parameter's own variable -- x: T, which is x: T^0,
+// the arity-liftable scalar an array can instantiate -- is typed T.)
+function rowsum_up(row: T^1) = reduce(row, (+)) + 0.5
+let ri = rowsum_up([1, 2, 3])
+// EXPECT: ri = 6.5

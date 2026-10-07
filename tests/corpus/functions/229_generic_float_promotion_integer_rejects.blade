@@ -1,0 +1,9 @@
+// TEST: Generic parameter beside a float at an integer instance (rejects)
+// ERROR: BL3019 @ 8:16
+// ERROR-CONTAINS: Int64 + Float64 is Float64
+// ============================================================================
+// `x + 1.0` over `x: T` is typed `T` (functions/228). At an Int64 instance the
+// value is a Float64, which the Int64-typed result would truncate, so the
+// call is refused at its argument -- convert it first, `addone(Float64(3))`.
+function addone(x: T) = x + 1.0
+let n = addone(3)

@@ -2549,6 +2549,9 @@ let lowerTypedProgram (program: TypedProgram) (rawProgram: Program option) (buil
         // Generic zeros first: each specialization's `zero` becomes its own
         // literal (so a broadcast built below carries the right scalar type).
         let irModule = IRMono.resolveTypedZerosModule zeroStructFields irModule
+        // Float literals beside a generic operand a clone made Float32 /
+        // Complex64 adapt now, as the checker adapts them beside a concrete one.
+        let irModule = IRMono.adaptFloatLiteralsModule irModule
         let irModule = IRMono.lowerArrayBinOpsModule irModule env.Builder programFuncs
         // The semantic-equivalence optimization stage (Blade.Optimize --
         // see its charter): constant-scrutinee match folding (which also

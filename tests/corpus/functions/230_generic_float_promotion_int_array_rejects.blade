@@ -1,0 +1,8 @@
+// TEST: Generic parameter beside a float at an integer ARRAY instance (rejects)
+// ERROR: BL3019 @ 7:16
+// ERROR-CONTAINS: Int64 + Float64 is Float64
+// ============================================================================
+// The judgment reads the element an array instance gives `T`: Int64 cells
+// plus a Float64 are Float64 cells, which an Array<Int64> result truncates.
+function addone(x: T) = x + 1.0
+let n = addone([1, 2])

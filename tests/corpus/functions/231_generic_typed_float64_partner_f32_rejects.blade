@@ -1,0 +1,10 @@
+// TEST: Generic parameter beside a typed Float64 at a Float32 instance (rejects)
+// ERROR: BL3019 @ 9:14
+// ERROR-CONTAINS: Float32 + Float64 is Float64
+// ============================================================================
+// Only a float LITERAL adapts to a Float32 partner (functions/228's `w`). A
+// Float64 VALUE promotes the sum to Float64, which the Float32-typed result
+// cannot hold.
+let k = 1.0
+function addk(x: T) = x + k
+let a = addk(Float32(2.0))

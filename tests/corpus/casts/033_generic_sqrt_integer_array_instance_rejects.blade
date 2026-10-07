@@ -1,0 +1,9 @@
+// TEST: Generic sqrt returned at an integer ARRAY instance (rejects)
+// ERROR: BL3019 @ 8:11
+// ERROR-CONTAINS: sqrt of an integer is a Float64
+// ============================================================================
+// casts/025 at an array instance: the obligation is judged against the
+// ELEMENT the array gives `T` -- Int64 cells under sqrt are Float64 cells,
+// which an Array<Int64> result would truncate.
+function r(x: T) -> T = sqrt(x)
+let a = r([4, 9])

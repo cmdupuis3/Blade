@@ -213,6 +213,16 @@ type GenericObligation =
     /// Float64 / complex instances, but an integer instance would hand an
     /// integer-typed result a Float64 value (a silent truncation).
     | GOFractionalMath of var: int * name: string
+    /// `x + 1.0` (any arithmetic op) between a value of a bare parameter
+    /// variable's type (`x: T`, which an array can instantiate) and a REAL
+    /// scalar (`partner`, Float64 or Float32; `literal` when it is a float
+    /// literal, which adapts to a Float32 / Complex64 partner), typed AS
+    /// the variable's type -- so an array instance broadcasts and keeps its
+    /// shape. Exact wherever promoting the instance's element with the partner
+    /// gives that element back (Float64 / complex, and Float32 beside a
+    /// literal); an integer instance would hand a T-typed result a Float64
+    /// value (a silent truncation), so it is refused at the call.
+    | GOPromotion of var: int * op: string * partner: ElemType * literal: bool
 
 /// AN ARROW APPLICATION (formalism 4.3): `c(0)` whose head `c` was a still-open
 /// variable when the application was typed -- an unannotated parameter of a

@@ -1,0 +1,9 @@
+// TEST: A generic caller inherits the float-promotion demand (rejects)
+// ERROR: BL3019 @ 8:18
+// ERROR-CONTAINS: Int64 + Float64 is Float64
+// ============================================================================
+// `twice_up` passes its own `T` to `addone`, so `addone`'s demand is
+// `twice_up`'s too, and its Int64 call is refused at the argument.
+function addone(x: T) = x + 1.0
+function twice_up(x: T) = addone(x) * 2.0
+let n = twice_up(3)

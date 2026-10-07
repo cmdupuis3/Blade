@@ -120,7 +120,18 @@ monomorphization) -- `stats.mean` casts this way, so an Int64 row averages in
 Float64 and a complex row is refused at the call. Likewise a generic body that
 returns `sqrt(x)` (or another complex-preserving math intrinsic) AS `x`'s own
 type is refused at an integer instance, where the Float64 result would be
-truncated.
+truncated. Arithmetic between a bare parameter variable and a real scalar
+(`function addone(x: T) = x + 1.0`) is typed `T`: `T` may be an array, which
+the scalar broadcasts against, so `addone([1.0, 2.0])` is `[2.0, 3.0]` and
+`addone(3.0)` is `4.0`. That is exact for every instance whose element the
+scalar promotes into (Float64, complex, Float32 beside a float literal); an
+instance it would promote away (an integer element, or Float32 beside a
+Float64 value) is refused at the call (BL3019), since there is no
+per-instance promotion type yet -- convert the argument (`Float64(xs)`).
+(`x: T^0` is the same variable as `x: T`.) A variable that is only ever a
+scalar -- an array's element, the `reduce(row, (+))` of a `row: T^1` --
+keeps the promotion rules' scalar result, so an Int64 row's sum plus `0.5`
+is a Float64.
 
 **Arithmetic semantics — one contract, every lane.** The compiled program
 (g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane

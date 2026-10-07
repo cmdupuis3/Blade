@@ -2387,7 +2387,7 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
         | _ -> None
     let isInt = function ETInt32 | ETInt64 -> true | _ -> false
     obligations |> List.tryPick (fun ob ->
-        let vid = match ob with GOCast (v, _, _, _) | GOFractionalMath (v, _) -> v
+        let vid = match ob with GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) -> v
         match rootOf vid |> Option.bind instanceOf with
         | None -> None
         | Some src ->
@@ -2403,15 +2403,39 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                                    + $"{name} of an integer is a Float64, which an {ppIRType (IRTScalar src)} result "
                                    + "would truncate. Convert the argument first -- Float64(x), or Float64(xs) "
                                    + "for an array."))
-            | GOFractionalMath _ -> None)
+            | GOFractionalMath _ -> None
+            | GOPromotion (_, opName, partner, literal) ->
+                // A float LITERAL adapts to a narrow partner (inferBinOp's
+                // adaptFloatLit): `x32 + 1.0` stays Float32, `z64 * 2.0`
+                // stays Complex64. A typed partner promotes as written.
+                let partner' =
+                    if literal && (src = ETFloat32 || src = ETComplex64) then ETFloat32 else partner
+                match IR.promoteElemType src partner' with
+                | Some r when r = src -> None
+                | r ->
+                    let srcS = ppIRType (IRTScalar src)
+                    let what =
+                        match r with
+                        | Some r -> $"{srcS} {opName} {ppIRType (IRTScalar partner')} is {ppIRType (IRTScalar r)}, which the {srcS}-typed result would truncate"
+                        | None -> $"{opName} is not defined between {srcS} and {ppIRType (IRTScalar partner')}"
+                    Some (InvalidCast ($"'{fname}' applies {opName} between a value of its generic parameter type and a "
+                                       + $"{ppIRType (IRTScalar partner)}, typing the result as the parameter's type, and this "
+                                       + $"call makes that type {srcS}: {what}. Convert the argument first -- Float64(x), or "
+                                       + "Float64(xs) for an array.")))
 
-/// The element a (resolved) type carries, when it is concrete.
+/// The element a (resolved) type carries, when it is concrete -- an array's
+/// own element included: a generic obligation on `x: T` judges the ELEMENT an
+/// array instance gives `T` (`sqrt(xs)` over Int64 elements truncates just as
+/// `sqrt(n)` does).
 let internal concreteElemOf (subst: Subst) (t: IRType) : ElemType option =
-    match IR.stripUnits (subst.Resolve t) with
-    | IRTScalar et -> Some et
-    | IRTIdxTagged (inner, _) ->
-        (match IR.stripUnits inner with IRTScalar et -> Some et | _ -> None)
-    | _ -> None
+    let rec go (t: IRType) =
+        match IR.stripUnits (subst.Resolve t) with
+        | IRTScalar et -> Some et
+        | IRTIdxTagged (inner, _) ->
+            (match IR.stripUnits (subst.Resolve inner) with IRTScalar et -> Some et | _ -> None)
+        | ArrayElem arr -> go arr.ElemType
+        | _ -> None
+    go t
 
 /// GENERIC OBLIGATIONS at a call, judged against the call judgment's
 /// instantiation: `mapping` is its declaration-variable -> copy map, and a
@@ -2497,6 +2521,8 @@ let internal propagateGenericObligations (env: TypeEnv) (tFunc: TypedExpr)
                      callerVar v |> Option.iter (fun c -> acc.Add(GOCast (c, h, t, rd)))
                  | GOFractionalMath (v, nm) ->
                      callerVar v |> Option.iter (fun c -> acc.Add(GOFractionalMath (c, nm)))
+                 | GOPromotion (v, o, p, lit) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GOPromotion (c, o, p, lit)))
          | _ -> ())
     | _ -> ()
 

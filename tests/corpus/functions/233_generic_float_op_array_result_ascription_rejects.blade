@@ -1,0 +1,8 @@
+// TEST: The array result of a generic float op is not a scalar (rejects)
+// ERROR: BL3001
+// ERROR-CONTAINS: expected Bool, got Array<Float64
+// ============================================================================
+// The result follows `T`: at an array instance it IS an array, so a wrong
+// ascription is refused rather than reaching the back end.
+function addone(x: T) = x + 1.0
+let b: Bool = addone([1.0, 2.0])

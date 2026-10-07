@@ -1422,6 +1422,57 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
         Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
         Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
 
+/// Post-monomorphization: FLOAT LITERALS ARE WIDTH-POLYMORPHIC (formalism
+/// 2.4: `a32 * 1.0` stays Float32), and the checker adapts a literal to a
+/// Float32 / Complex64 partner when it types the op (inferBinOp's
+/// adaptFloatLit). In a GENERIC body the partner is still a signature
+/// variable then (`function addone(x: T) = x + 1.0`, typed `T`), so the
+/// literal stayed Float64 -- and a Float32 clone computed `x + 1.0` in double
+/// and returned it as the float `T` (g++ -Werror=float-conversion, BL9002).
+/// The clone's operand types are concrete here: the same adaptation, once
+/// the partner is known. An elementwise op over a Float32 / Complex64 operand
+/// (scalar, or an array of them that lowerArrayBinOpsModule broadcasts next)
+/// and a bare Float64 literal (or its negation) takes the literal at Float32.
+let adaptFloatLiteralsModule (modul: IRModule) : IRModule =
+    let isNarrow (t: IRType option) =
+        let narrowElem (t: IRType) =
+            match IR.stripUnits t with
+            | IRTScalar (ETFloat32 | ETComplex64) -> true
+            | IRTIdxTagged (inner, _) ->
+                (match IR.stripUnits inner with IRTScalar (ETFloat32 | ETComplex64) -> true | _ -> false)
+            | _ -> false
+        match t with
+        | Some (ArrayElem a) -> narrowElem a.ElemType
+        | Some t -> narrowElem t
+        | None -> false
+    let narrowLit (e: IRExpr) : IRExpr option =
+        match e with
+        | IRLit (IRLitFloat v) -> Some (IRLit (IRLitFloat32 (float32 v)))
+        | IRUnaryOp (IRNeg, IRLit (IRLitFloat v)) -> Some (IRUnaryOp (IRNeg, IRLit (IRLitFloat32 (float32 v))))
+        | _ -> None
+    let adapt (e: IRExpr) : IRExpr option =
+        match e with
+        | IRBinOp (IRElementwise, op, l, r, loc) when (match op with IRMath2 _ -> false | _ -> true) ->
+            (match narrowLit r, narrowLit l with
+             | Some r', _ when isNarrow (exprTypeIfKnown l) -> Some (IRBinOp (IRElementwise, op, l, r', loc))
+             | _, Some l' when isNarrow (exprTypeIfKnown r) -> Some (IRBinOp (IRElementwise, op, l', r, loc))
+             | _ -> None)
+        | _ -> None
+    let hit =
+        let mutable hit = false
+        let scan (b: IRExpr) =
+            if not hit then
+                iterIRExpr (fun e -> if not hit && (adapt e).IsSome then hit <- true) b
+        modul.Functions |> List.iter (fun f -> scan f.Body)
+        modul.Bindings |> List.iter (fun b -> scan b.Value)
+        hit
+    if not hit then modul
+    else
+    let rewrite b = b |> mapIRExpr (fun e -> adapt e |> Option.defaultValue e)
+    { modul with
+        Functions = modul.Functions |> List.map (fun f -> { f with Body = rewrite f.Body })
+        Bindings = modul.Bindings |> List.map (fun b -> { b with Value = rewrite b.Value }) }
+
 /// Post-monomorphization rewrite: a raw *elementwise* `IRBinOp` whose
 /// operands are BOTH arrays becomes the `method_for(zip ..) <@> kernel |>
 /// compute` co-iteration combinator -- the same shape TypeCheck.inferBinOp
@@ -1478,6 +1529,17 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
             match exprTypeIfKnown e with
             | Some (AnyPrimElem et) -> Some (IRTScalar et)
             | _ -> None
+    // The scalar unary ops a generic body applies to a value of its own
+    // signature type (`-x`, `sqrt(x)`, `Float64(x)`, `real(x)` over `x: T`):
+    // the checker typed each as a SCALAR op on an open variable, and a clone
+    // that makes `T` an array must lift it the way the checker lifts the op
+    // over a concrete array (TExprArrayNegate / TExprArrayConjugate, the
+    // `cos <@> A` map). Left raw, `-arr` and `std::sqrt(arr)` reached g++
+    // (BL9002) and the interpreter refused them.
+    let isLiftableUnary (uop: IRUnaryOp) =
+        match uop with
+        | IRNeg | IRConj | IRReal | IRImag | IRArg | IRMath _ | IRCast _ -> true
+        | IRNot -> false
     // TRIGGER PRE-SCAN. `rewrite` below fires on exactly three operand-type
     // pairs -- (array, array), (array, scalar), (scalar, array) -- so a module
     // with no array-typed elementwise binop anywhere cannot be changed by this
@@ -1500,6 +1562,12 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
         // The lowering-time broadcast's `let s = <scalar> in <map>` (see the
         // `rewrite` arm that rebuilds it).
         | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> true
+        // A scalar unary op over an operand the clone made an array (see the
+        // `rewrite` arm `liftUnary`).
+        | IRUnaryOp (uop, x) when isLiftableUnary uop ->
+            (match operandType x with
+             | Some (ArrayElem _) -> true
+             | _ -> false)
         | _ -> false
     let hasArrayBinOp =
         let mutable hit = false
@@ -1693,9 +1761,37 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
                  | _ -> e)
              | _ -> e)
         | _ -> e
+    // A scalar unary op over an array operand, lifted (see isLiftableUnary):
+    // negation and conjugation take the checker's whole-array nodes; the
+    // rest map a `lambda(__bx) -> op(__bx)` kernel over the one array, its
+    // result element the scalar op's own type.
+    let liftUnary (uop: IRUnaryOp) (x: IRExpr) (xt: IRType) (la: IRArrayType) : IRExpr =
+        match uop with
+        | IRNeg -> IRArrayNegate x
+        | IRConj -> IRArrayConjugate x
+        | _ ->
+            let elem = arrayBinOpKernelElem la.ElemType
+            let xId = builder.FreshId()
+            let kbody = IRUnaryOp (uop, IRVar (xId, IRTScalar elem))
+            let kernelRet = typeOf kbody
+            let parms : IRParam list =
+                [ { Name = "__bx"; Type = IRTScalar elem; Index = 0; VarId = xId } ]
+            let lam = mkLambdaCallable builder parms kbody kernelRet [] false [] [] false false 256 false
+            newLambdas.Add lam
+            callableOf.[lam.Id] <- lam
+            let kernelFuncType = IRTArrow ([SVal (IRTScalar elem)], kernelRet, None)
+            let outputType =
+                match xt with
+                | IRTArrow (slots, _, id2) -> IRTArrow (slots, kernelRet, id2)
+                | _ -> xt
+            mapOneArray x la (IRVar (lam.Id, kernelFuncType)) outputType
     let rewrite (e: IRExpr) : IRExpr =
         match e with
         | IRLet (_, _, IRApp (IRObjectFor _, [ _ ], _)) -> rebuildLoweredBroadcast e
+        | IRUnaryOp (uop, x) when isLiftableUnary uop ->
+            (match operandType x with
+             | Some ((ArrayElem la) as xt) -> liftUnary uop x xt la
+             | _ -> e)
         | IRBinOp (IRElementwise, op, l, r, loc) ->
             match operandType l, operandType r with
             | Some ((ArrayElem la) as lt), Some ((ArrayElem ra) as rt) ->
