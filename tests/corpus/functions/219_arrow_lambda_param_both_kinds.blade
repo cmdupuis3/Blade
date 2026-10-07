@@ -1,0 +1,17 @@
+// TEST: One let-bound lambda used with an array and with a function
+// ============================================================================
+// Was functions/219_..._rejects: a lambda was ONE emitted body, so its first
+// use decided its arrow parameter was an array and the function argument was
+// refused (BL3001). A top-level `let` of a lambda that applies an unannotated
+// parameter, used only by APPLICATION, is now checked as the `function`
+// declaration it is equivalent to (TypeCheck.generalizeArrowLetLambdas): the
+// parameter is generic, each call decides its kind, and one body is emitted
+// per kind (functions/213), in both lanes.
+let u = lambda(c) -> c(0) + 1.0
+let w = u([5.0, 6.0])
+// EXPECT: w = 6
+let w2 = u(lambda(i) -> Float64(i))
+// EXPECT: w2 = 1
+// A third call, an array of another length: the array instance again.
+let w3 = u([7.0, 8.0, 9.0])
+// EXPECT: w3 = 8

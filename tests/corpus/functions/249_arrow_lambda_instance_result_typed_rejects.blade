@@ -1,0 +1,10 @@
+// TEST: The read of a generalized let-bound lambda's parameter is typed per call (rejects)
+// ERROR: BL3001 @ 9:17
+// ============================================================================
+// Vacuity probe for functions/246: the function instance reads a Float64, and
+// the array instance at the Bool-annotated binding reads the passed array's
+// element, Int64 -- refused, the instance did not inherit the first call's.
+let u = lambda(c) -> c(0)
+let iv = [4, 5, 6]
+let a = u(lambda(i) -> Float64(i))
+let x: Bool = u(iv)

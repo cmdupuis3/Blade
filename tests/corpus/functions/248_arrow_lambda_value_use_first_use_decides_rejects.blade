@@ -1,0 +1,11 @@
+// TEST: A let-bound lambda also used as a value keeps the first-use rule (rejects)
+// ERROR: BL3001 @ 10:11
+// ============================================================================
+// An alias is a use as a VALUE, which needs one lambda: the binding is not
+// generalized, so the array call through the alias decides the parameter and
+// the function argument below is refused at the argument (functions/219 is the
+// same program without the alias, and runs).
+let u = lambda(c) -> c(0) + 1.0
+let g = u
+let a = g([5.0, 6.0])
+let b = u(lambda(i) -> Float64(i))

@@ -123,7 +123,127 @@ let rangeFedLambdaParams (modul: TypedModule) : System.Collections.Generic.HashS
         for e in declExprs d do walk e
     fed
 
+/// LET-POLYMORPHISM FOR A LAMBDA'S ARROW PARAMETER (formalism 4.3).
+///
+/// `let u = lambda(c) -> c(0) + 1.0` applies its unannotated parameter, so `c`
+/// is an ARROW whose kind -- array or function -- only a use can decide. A
+/// lambda is ONE emitted body (a lifted callable behind a `std::function` in
+/// main), so its first use used to decide for every later one, and
+/// `u([5.0, 6.0]); u(lambda(i) -> Float64(i))` was refused at the second.
+/// A `function` declaration's arrow parameter is GENERIC instead: each call
+/// decides (TypeCheckSupport.arrowObligationClash) and IR monomorphization
+/// emits one body per kind. Such a binding IS that declaration whenever
+/// nothing observes the difference, so it is checked as one -- the value
+/// restriction, stated for this language:
+///   * a plain, unannotated, top-level `let NAME = lambda(...) -> body`: not
+///     `let mut`, no `where` clause (kernel metadata -- comm/omp -- that rides
+///     the lambda VALUE into a loop), no parameter defaults, not
+///     self-referencing; some unannotated parameter is APPLIED in the body
+///     (nothing else is generic in a declaration that is not generic in the
+///     lambda: an unannotated SCALAR parameter is one Float64-defaulted body
+///     either way, functions/207 and TypeCheckSupport.calleeQuantifier);
+///   * every later use of NAME is an ordinary APPLICATION `NAME(args)`. A
+///     use as a VALUE -- a kernel (`method_for(A) <@> u`, `object_for(u)`,
+///     `reduce(A, u)`), an argument, an alias, a reassignment -- needs ONE
+///     value, and keeps the lambda (and its first-use rule);
+///   * no variable the lambda captures is ever assigned: a lambda captures at
+///     its creation, a declaration reads the module binding when called.
+/// Anything else stays a lambda, exactly as before.
+let private generalizeArrowLetLambdas (decls: Located<Decl> list) : Located<Decl> list =
+    let mapPre = Blade.Unfold.mapExprPre
+    // Every expression a declaration holds, with the names its own binders
+    // bind around it (a function's parameters shadow a module name).
+    let declScopes (d: Decl) : (Set<string> * Expr) list =
+        let fnScopes (f: FunctionDecl) =
+            let ps = f.Params |> List.map (_.Name) |> Set.ofList
+            (ps, f.Body) :: (f.Params |> List.choose (_.Default) |> List.map (fun e -> (ps, e)))
+        match d with
+        | DeclLet b | DeclStatic b -> [ (Set.empty, b.Value) ]
+        | DeclFunction f -> fnScopes f
+        | DeclImpl impl -> impl.Methods |> List.collect fnScopes
+        | DeclType (TyDeclStruct (_, _, _, cs, _)) | DeclType (TyDeclMutualGroup (_, cs)) ->
+            cs |> List.map (fun e -> (Set.empty, e))
+        | DeclType _ | DeclInterface _ | DeclUnit _ | DeclImport _ -> []
+    // Names written anywhere in the module: `x = ..`, `A(i) = ..`, `p.f = ..`.
+    let assigned =
+        let acc = System.Collections.Generic.HashSet<string>()
+        let rec root (e: Expr) =
+            match e.Kind with
+            | ExprKind.ExprVar n -> Some n
+            | ExprKind.ExprApp (f, _) -> root f
+            | ExprKind.ExprField (x, _) | ExprKind.ExprTupleIndex (x, _) | ExprKind.ExprTyped (x, _) -> root x
+            | _ -> None
+        let rec stmts (ss: Stmt list) =
+            for s in ss do
+                match unwrapStmt s with
+                | StmtAssign (l, _, _) -> root l |> Option.iter (acc.Add >> ignore)
+                | StmtForIn (_, _, body) -> stmts body
+                | _ -> ()
+        for d in decls do
+            for (_, e) in declScopes d.Value do
+                mapPre (fun x ->
+                    (match x.Kind with
+                     | ExprKind.ExprAssign (l, _) -> root l |> Option.iter (acc.Add >> ignore)
+                     | ExprKind.ExprBlock (ss, _) -> stmts ss
+                     | _ -> ())
+                    None) e |> ignore
+        acc
+    // Does NAME occur free in `e` other than as the head of an application?
+    let usedAsValue (name: string) (bound: Set<string>) (e: Expr) =
+        let rec dropCalls (x: Expr) : Expr option =
+            match x.Kind with
+            | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, args)
+                    when n = name && not args.IsEmpty
+                         && args |> List.forall (fun a -> match a.Kind with ExprKind.ExprWildcard -> false | _ -> true) ->
+                Some (inheritSpan x (ExprKind.ExprTuple (args |> List.map (mapPre dropCalls))))
+            | _ -> None
+        Set.contains name (collectFreeVars bound (mapPre dropCalls e))
+    let appliesParam (p: string) (body: Expr) =
+        let mutable found = false
+        mapPre (fun x ->
+            (match x.Kind with
+             | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar n }, args) when n = p && not args.IsEmpty -> found <- true
+             | _ -> ())
+            None) body |> ignore
+        found
+    let arr = List.toArray decls
+    arr |> Array.mapi (fun i ld ->
+        match ld.Value with
+        | DeclLet b when b.Mutability = BindLet && b.Type.IsNone ->
+            match b.Pattern.Kind, b.Value.Kind with
+            | PatternKind.PatVar name, ExprKind.ExprLambda (parms, None, body)
+                    when not parms.IsEmpty
+                         && parms |> List.forall (fun p -> p.Default.IsNone)
+                         && parms |> List.exists (fun p -> p.Type.IsNone && appliesParam p.Name body) ->
+                let captured = collectFreeVars (parms |> List.map (_.Name) |> Set.ofList) body
+                let later = arr |> Array.skip (i + 1)
+                let ok =
+                    not (captured.Contains name)
+                    && not (captured |> Set.exists assigned.Contains)
+                    && not (assigned.Contains name)
+                    && later |> Array.forall (fun d ->
+                        declScopes d.Value |> List.forall (fun (bound, e) -> not (usedAsValue name bound e)))
+                if not ok then ld
+                else
+                    let fd : FunctionDecl =
+                        { Name = name
+                          TypeParams = []
+                          Params =
+                              parms |> List.map (fun p ->
+                                  { Name = p.Name; Type = p.Type; Mutability = Immutable
+                                    Default = None; NameSpan = p.NameSpan } : ParamDecl)
+                          WhereClause = None
+                          ReturnType = None
+                          Body = body
+                          IsStatic = false
+                          NameSpan = b.Pattern.Span }
+                    { ld with Value = DeclFunction fd }
+            | _ -> ld
+        | _ -> ld)
+    |> List.ofArray
+
 let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * CompileError list =
+    let modul = { modul with Decls = generalizeArrowLetLambdas modul.Decls }
     // Fresh module: drop any span the PREVIOUS module's decl loop left in the
     // side-channel. The static-assertion errors below are raised before this
     // module's first `checkDecl` (which is where the per-decl reset lives), so

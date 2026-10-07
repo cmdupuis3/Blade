@@ -1,9 +1,0 @@
-// TEST: One lambda used with an array and then with a function (rejects)
-// ERROR: BL3001 @ 8:12
-// ============================================================================
-// A lambda is ONE emitted body, not a generic one: its first use decides its
-// arrow parameter is an array, and the later function argument meets that
-// type. (A `function` declaration is generic and takes both: functions/213.)
-let u = lambda(c) -> c(0) + 1.0
-let w = u([5.0, 6.0])
-let w2 = u(lambda(i) -> Float64(i))

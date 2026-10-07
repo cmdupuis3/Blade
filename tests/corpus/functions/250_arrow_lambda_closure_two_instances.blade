@@ -1,0 +1,12 @@
+// TEST: A generalized let-bound lambda that captures outer bindings, at two instances
+// ============================================================================
+// The lambda reads two module bindings (a scalar and an array) and applies its
+// parameter; used only by application it is checked as the equivalent
+// `function`, which reads the same bindings, and both instances see them.
+let k = 2.0
+let v = [5.0, 6.0, 7.0]
+let scale = lambda(c) -> c(1) * k + v(0)
+let a = scale([1.0, 2.0])
+// EXPECT: a = 9
+let b = scale(lambda(i) -> Float64(i) * 10.0)
+// EXPECT: b = 25

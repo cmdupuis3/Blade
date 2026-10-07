@@ -1,0 +1,12 @@
+// TEST: A let-bound lambda used as a halo kernel stays one body (rejects)
+// ERROR: BL3001 @ 11:11
+// ============================================================================
+// Used as a VALUE -- here the kernel of a halo map, which binds its parameter
+// to the window -- the lambda is ONE body (TypeCheck.generalizeArrowLetLambdas
+// keeps it a lambda), so its kernel use decides its parameter and an array
+// applied later is refused at the argument.
+type I = Idx<5>
+let A: Array<Float64 like I> = [1.0, 4.0, 9.0, 16.0, 25.0]
+let d = lambda(w) -> A(w(1)) - A(w(-1))
+let D = method_for(halo<I, [-1, 0, 1]>) <@> d |> compute
+let x = d([1, 2, 3])

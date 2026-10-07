@@ -13611,8 +13611,10 @@ and inferBlock env stmts finalExpr (expectedFinal: IRType option) : TypeResult<T
                 // Without the range, `{ function idl(x: T) -> T = x; idl(2.0) }`
                 // bound the declaration's `T` at its first call and left a
                 // `T^1` body open (BL6001). Only `function` / `let static`
-                // lambdas (BindConst): a plain `let f = lambda` stays
-                // monomorphic (let-polymorphism for lambdas is not adopted).
+                // lambdas (BindConst): a plain `let f = lambda` in a block stays
+                // monomorphic. (At TOP level, one that applies an unannotated
+                // parameter and is only ever applied is checked as a `function`
+                // declaration: TypeCheck.generalizeArrowLetLambdas.)
                 let nestedFunction =
                     match binding.Mutability, binding.Pattern.Kind, binding.Value.Kind with
                     | BindConst, PatternKind.PatVar _, ExprKind.ExprLambda _ -> true

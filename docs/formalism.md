@@ -771,8 +771,13 @@ arguments admits both readings -- an array whose rank is the argument count,
 read element-wise, or a function of integers -- and an application to any
 other argument (`f(2.0)`) only the function. A `function` declaration's such
 parameter is generic: each call decides, and one body is emitted per kind (a
-subscript for an array, a call for a function). A `let`-bound lambda is one
-body, so its first use decides for every later one. Either way the body reads
+subscript for an array, a call for a function). A top-level `let` of a lambda
+that applies such a parameter IS that declaration when nothing can tell them
+apart -- the program only ever APPLIES it, and it has no `mut`, annotation,
+`where` clause or parameter defaults, and captures no binding that is ever
+assigned -- and is generic likewise. Any other lambda (one used as a VALUE: a
+kernel, an argument, an alias) is one body, so its first use decides for every
+later one. Either way the body reads
 ONE value from the application: a higher-rank array (a partial read) or a
 function returning an array is refused at the argument, as is a scalar, or a
 function whose parameter is not an integer where the body passes one. An
@@ -784,6 +789,14 @@ let a = first([1.0, 2.0, 3.0])
 let b = first(lambda(i) -> 10.0 * Float64(i))
 // EXPECT: a = 2
 // EXPECT: b = 1
+```
+
+```blade
+let u = lambda(c) -> c(0) + 1.0
+let ua = u([1.0, 2.0, 3.0])
+let ub = u(lambda(i) -> 10.0 * Float64(i))
+// EXPECT: ua = 2
+// EXPECT: ub = 1
 ```
 
 **Lambda arguments.** A lambda literal passed where the callee DECLARES a
