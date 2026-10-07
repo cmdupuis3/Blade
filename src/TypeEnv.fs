@@ -214,6 +214,39 @@ type GenericObligation =
     /// integer-typed result a Float64 value (a silent truncation).
     | GOFractionalMath of var: int * name: string
 
+/// AN ARROW APPLICATION (formalism 4.3): `c(0)` whose head `c` was a still-open
+/// variable when the application was typed -- an unannotated parameter of a
+/// lambda or of the declaration being checked. Only arrays and functions take
+/// arguments, and an array IS a function of its indices (dimensional
+/// currying), so the application says `c` is an ARROW without saying which
+/// kind: a stored array (index slots) or a function (value slots). That is
+/// decided by what actually reaches `c` -- the argument at a call, a kernel's
+/// row, a body demand like `reduce(c, ..)` -- and the application is then
+/// typed against it (TypeCheckSupport.dischargeArrowApp). `Result` is the type
+/// the application was given while the head was open; discharging unifies it
+/// with the real one. Nothing ever reaching the head reads it as a function.
+type ArrowApplication = {
+    Head: TypedExpr
+    Args: TypedExpr list
+    Result: IRType
+    Span: Span
+}
+
+/// A declaration's ARROW PARAMETER: an unannotated parameter its body applies
+/// to index-like arguments (`function first(c) = c(0) + 1.0`) and nothing in
+/// the body shaped. The parameter stays a generic variable; each CALL decides
+/// the arrow kind from its argument (TypeCheckSupport.arrowObligationClash) --
+/// an array of rank = the argument count, read element-wise, or a function of
+/// those arguments -- and IR monomorphization emits one body per kind (the
+/// application lowers to a call, and is rewritten to a subscript in an array
+/// instance: IRMono.indexArrayApps). `Head`, `Args` and `Result` are in the
+/// declaration's variables, instantiated per call like its signature.
+type ArrowObligation = {
+    Head: int
+    Args: IRType list
+    Result: IRType
+}
+
 /// One co-iteration a function body performs over its own PARAMETERS
 /// (`TypeEnv.FuncCoIterObligations`): every operand it walks as one index
 /// space must agree, and the call site -- or the kernel application, for a
@@ -510,6 +543,15 @@ type TypeEnv = {
     /// The accumulator the function declaration being checked collects its
     /// generic casts into (None outside a declaration body).
     CurrentGenericObligations: ResizeArray<GenericObligation> option
+    /// ARROW APPLICATIONS (ArrowApplication) whose head is still open, in the
+    /// order they were typed. Discharged when the head meets what is passed
+    /// to it (a call's argument), at the end of the declaration whose body
+    /// typed them, and -- whatever is left -- before zonk. Shared by reference.
+    PendingArrowApps: ResizeArray<ArrowApplication>
+    /// Function BINDER ID -> its ARROW PARAMETERS' applications
+    /// (ArrowObligation), judged and typed per call. Keyed by id like
+    /// FuncSigVarRange. Shared by reference.
+    FuncArrowObligations: System.Collections.Generic.Dictionary<IRId, ArrowObligation list>
     /// The declaration being checked: its (declared or fresh) parameter and
     /// return types; [] outside a declaration body. The call judgment links a
     /// callee's instantiated copy only to variables REACHABLE from these (the
@@ -625,6 +667,8 @@ let emptyEnv () = {
     FuncEffects = System.Collections.Generic.Dictionary<IRId, Blade.Effects.EffectSummary>()
     FuncGenericObligations = System.Collections.Generic.Dictionary<IRId, GenericObligation list>()
     CurrentGenericObligations = None
+    PendingArrowApps = ResizeArray<ArrowApplication>()
+    FuncArrowObligations = System.Collections.Generic.Dictionary<IRId, ArrowObligation list>()
     CurrentSignature = []
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()

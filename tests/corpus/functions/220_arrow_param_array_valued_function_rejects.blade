@@ -1,0 +1,9 @@
+// TEST: A function returning an array passed where the body reads one value (rejects)
+// ERROR: BL3001 @ 8:15
+// ============================================================================
+// The body reads ONE value from `c(0)` (its arithmetic is typed so), as from an
+// array of rank 1 -- whose rank-2 twin functions/211 refuses. A function
+// returning an array would hand the emitted body a shape it was not typed for.
+function first(c) = c(0) + 1.0
+let g = lambda(i) -> [1.0, 2.0] * Float64(i)
+let d = first(g)

@@ -1,0 +1,19 @@
+// TEST: An arrow parameter over a named index type, and through recursion
+// ============================================================================
+// The array instance of an arrow parameter takes a named-index array, read
+// with a literal or with a value of that index type; a self-recursive body
+// passes its arrow parameter on, and both instances (array, function) run.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function first(c) = c(0) + 1.0
+let a = first(A)
+// EXPECT: a = 2
+let l: Nat<L> = 2
+function pick(c, i) = c(i)
+let b = pick(A, l)
+// EXPECT: b = 3
+function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)
+let s = walk(A, 2)
+// EXPECT: s = 6
+let s2 = walk(lambda(i) -> Float64(i), 3)
+// EXPECT: s2 = 6

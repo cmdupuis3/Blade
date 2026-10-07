@@ -1,0 +1,11 @@
+// TEST: An array instance of an arrow parameter subscripted with another axis's index (rejects)
+// ERROR: BL3001 @ 10:14
+// ============================================================================
+// The nominal rule (formalism 3.10) at an arrow parameter's array instance: a
+// `Nat<K>` value does not index an axis named L, even at equal extent.
+type L = Idx<3>
+type K = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function pick(c, i) = c(i)
+let k: Nat<K> = 1
+let b = pick(A, k)

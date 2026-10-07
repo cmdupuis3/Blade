@@ -324,6 +324,18 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                 let varId = currentEnv.Builder.FreshId()
                 currentEnv <- bindVarSimple n varId (currentEnv.Subst.Fresh()) currentEnv
 
+    // ARROW APPLICATIONS still pending (TypeEnv.ArrowApplication): a head bound
+    // since (a kernel's row, a later call's argument) types its application
+    // now, and a head nothing ever reached is read as a FUNCTION of its
+    // arguments -- the safer bet, and never a zonk-defaulted scalar applied in
+    // g++. A refusal is located at the application; it is reported only on an
+    // otherwise clean module (after an earlier error the heads may be the
+    // recovery's fresh variables, and the refusal would be a cascade).
+    let arrowErrors = settleArrowApps currentEnv true
+    if List.isEmpty errors then
+        for (span, err) in arrowErrors do
+            resetCurrentStmtSpan ()
+            errors <- locateError span currentEnv err :: errors
     let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
     // The zonk walk also retypes index POSITIONS and guards unproven

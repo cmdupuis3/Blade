@@ -1,0 +1,12 @@
+// TEST: A let-bound lambda's applied parameter is typed by the array passed to it
+// ============================================================================
+// `lambda(c) -> c(0) + 1.0` applied `c` while it was open, which the dispatch
+// catch-all typed at a fresh variable and zonk then defaulted to a scalar:
+// `u([5.0, 6.0])` was refused ("the parameter expects a scalar"). The
+// application now says `c` is an ARROW, and the context the lambda is used in
+// decides which: here an array, so the application is a subscript.
+let u = lambda(c) -> c(0) + 1.0
+let w = u([5.0, 6.0])
+// EXPECT: w = 6
+let w2 = u([7.0, 8.0, 9.0])
+// EXPECT: w2 = 8

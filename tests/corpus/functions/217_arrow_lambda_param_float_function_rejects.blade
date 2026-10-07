@@ -1,0 +1,6 @@
+// TEST: A function of a Float64 handed to a lambda that applies its parameter to an index (rejects)
+// ERROR: BL3001 @ 5:11
+// ============================================================================
+// functions/216's rule for a let-bound lambda, refused at the argument.
+let u = lambda(c) -> c(0) + 1.0
+let w = u(lambda(x: Float64) -> x)

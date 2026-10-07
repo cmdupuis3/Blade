@@ -1,0 +1,8 @@
+// TEST: An unannotated lambda passed where the body applies it to an array (rejects)
+// ERROR: BL3001 @ 7:12
+// ============================================================================
+// `f(x)` with `x` an array at this call: the passed lambda's unannotated
+// parameter was typed as a single value (its body's arithmetic is), so it is
+// not made an array here. Annotate it (`lambda(v: Float64^1) -> ..`).
+function ap(f, x) = f(x)
+let t = ap(lambda(v) -> v * 2.0, [1.0, 2.0])

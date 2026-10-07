@@ -1,0 +1,14 @@
+// TEST: A function of an index passed where the body applies the parameter
+// ============================================================================
+// Was a refusal (BL3001 at the argument): `c(0)` decided `c` was an ARRAY the
+// moment the body applied it, so a function of an index could not be passed.
+// Now LEGAL. An array is a function of its indices (dimensional currying), so
+// applying an unannotated parameter to an integer says only that it is an
+// ARROW -- the argument decides the kind: here a function of an Int64, so the
+// application is a call and the lambda's parameter is typed Int64.
+let g = lambda(i) -> 10.0 * Float64(i)
+function first(c) = c(0) + 1.0
+let d = first(g)
+// EXPECT: d = 1
+let e = first(lambda(i) -> 10.0 * Float64(i + 2))
+// EXPECT: e = 21

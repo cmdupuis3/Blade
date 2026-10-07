@@ -1,0 +1,7 @@
+// TEST: A scalar handed to a lambda that applies its parameter (rejects)
+// ERROR: BL3001 @ 6:11
+// ============================================================================
+// Only arrays and functions take arguments: a scalar is refused at the
+// argument, not lowered to a call of a double.
+let u = lambda(c) -> c(0) + 1.0
+let w = u(2.0)

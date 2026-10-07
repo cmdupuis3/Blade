@@ -2835,6 +2835,273 @@ let internal coIterVerdict (env: TypeEnv) (obs: CoIterObligation list)
 let internal coIterHeadName (h: IRIndexType) : string =
     displayTagName (defaultArg h.Tag "<unnamed>")
 
+// ---------------------------------------------------------------------------
+// ARROW APPLICATIONS -- applying a still-open variable (TypeEnv.ArrowApplication)
+// ---------------------------------------------------------------------------
+
+/// Is the variable `vid` one of the parameters of the declaration whose body is
+/// being checked (TypeEnv.CurrentSignature)?
+let internal isCurrentDeclParam (env: TypeEnv) (vid: int) : bool =
+    match List.rev env.CurrentSignature with
+    | _ret :: ps ->
+        ps |> List.exists (fun p ->
+            match env.Subst.Resolve p with
+            | IRTInfer pid -> pid = vid
+            | _ -> false)
+    | [] -> false
+
+/// Could this argument be an INDEX -- an integer, an index value, `_`, or a
+/// still-open variable (a parameter used only as a subscript is an index,
+/// pinSubscriptParams)? An application whose arguments all could is an ARROW
+/// application: the head may be an array or a function. Any other argument
+/// (a Float, a tuple, an array, a function) can only be a function's.
+let internal arrowArgIndexLike (env: TypeEnv) (a: TypedExpr) : bool =
+    let isIntElem (et: ElemType) =
+        match et with
+        | ETInt32 | ETInt64 -> true
+        | _ -> false
+    match a.Kind with
+    | TExprWildcard -> true
+    | _ ->
+        match IR.stripUnits (env.Subst.Resolve a.Type) with
+        | IRTScalar et -> isIntElem et
+        | IRTIdxTagged _ | IRTNat _ -> true
+        | IRTInfer aid ->
+            (match env.Subst.GetLiteralDefault aid with
+             | Some et -> isIntElem et
+             | None -> true)
+        | _ -> false
+
+/// Is this (argument) type INT-VALUED -- an integer, an index value, or an
+/// integer literal still open? Such an argument is a subscript in an array
+/// reading, and in a function reading needs a slot that takes an integer.
+let internal arrowIntValued (subst: Subst) (t: IRType) : bool =
+    let isInt (t: IRType) =
+        match IR.stripUnits t with
+        | IRTScalar (ETInt32 | ETInt64) -> true
+        | _ -> false
+    match IR.stripUnits (subst.Resolve t) with
+    | IRTScalar (ETInt32 | ETInt64) -> true
+    | IRTIdxTagged (inner, _) -> isInt inner
+    | IRTNat _ -> true
+    | IRTInfer aid ->
+        (match subst.GetLiteralDefault aid with
+         | Some (ETInt32 | ETInt64) -> true
+         | _ -> false)
+    | _ -> false
+
+/// The FUNCTION reading of an arrow application: "`c` can be either, as long as
+/// its argument is int-valued". Each int-valued argument needs a slot that takes
+/// an integer: an OPEN slot (an unannotated lambda parameter) is made one --
+/// the argument's own integer type, Int64 for a literal -- and a slot of any
+/// other concrete type is refused: a function of a Float64 is not an arrow over
+/// an index, and the call would silently convert. Returns the offending
+/// argument position and the slot's type.
+let internal arrowFuncSlotClash (subst: Subst) (slots: IRType list) (argTys: IRType list) : (int * IRType) option =
+    List.zip slots argTys
+    |> List.indexed
+    |> List.tryPick (fun (j, (slot, argTy)) ->
+        if not (arrowIntValued subst argTy) then None
+        else
+            match IR.stripUnits (subst.Resolve slot) with
+            | IRTInfer _ ->
+                let target =
+                    match IR.stripUnits (subst.Resolve argTy) with
+                    | IRTInfer _ -> IRTScalar ETInt64
+                    | t -> t
+                (match unify subst slot target with
+                 | Ok () -> None
+                 | Error _ -> Some (j, subst.Resolve slot))
+            | t when arrowIntValued subst t -> None
+            | t -> Some (j, t))
+
+/// The wording of what an arrow parameter must be, for a refusal at the call.
+let internal arrowExpectation (n: int) : string =
+    let args = if n = 1 then "an integer index" else $"{n} integer indices"
+    $"an array of rank {n} or a function of {args} (the body applies it to {args})"
+
+/// AN ARROW PARAMETER AT A CALL: the callee's ArrowObligations
+/// (TypeEnv.FuncArrowObligations), typed against the call judgment's
+/// instantiation (`copyMap`, declaration variable -> copy). The argument decides
+/// the arrow's kind:
+///   * an ARRAY whose coordinate count is the argument count (the body reads an
+///     element -- a call site neither broadcasts nor reduces rank), subscripted
+///     by int-valued instances: the application's result is its element;
+///   * a FUNCTION of that many arguments, each int-valued argument met by a slot
+///     that takes an integer (arrowFuncSlotClash): the result is its return;
+///   * still OPEN (the caller's own parameter, a kernel's eta parameter): the
+///     application is re-recorded on it (PendingArrowApps), so whatever reaches
+///     the caller's variable decides -- and a caller's parameter becomes an arrow
+///     parameter of the caller in turn;
+///   * anything else (a scalar, a tuple, ...) is refused at the argument.
+/// Variables of the obligations the signature does not mention (the
+/// application's result, when the body consumes it) get copies of their own;
+/// a declaration variable that is not generic (an integer literal's) is read at
+/// its default, never bound by a call. Returns the refusal's argument position.
+let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list)
+                                  (tArgs: TypedExpr list) (quantified: int -> bool)
+                                  (copyMap: Map<int, int>) : (int * TypeError) option =
+    match calleeDeclId env tFunc with
+    | None -> None
+    | Some fid ->
+    match env.FuncArrowObligations.TryGetValue fid with
+    | true, obs when not obs.IsEmpty ->
+        let subst = env.Subst
+        let calleeDesc =
+            match tFunc.Kind with
+            | TExprVar (name, _, _) -> $"'{name}'"
+            | _ -> "this function"
+        let mutable mapping = copyMap |> Map.map (fun _ c -> IRTInfer c)
+        let obVars =
+            obs
+            |> List.collect (fun ob -> IRTInfer ob.Head :: ob.Result :: ob.Args)
+            |> List.map (freeInferVars subst)
+            |> Set.unionMany
+            |> Set.filter quantified
+        for v in obVars do
+            if not (mapping.ContainsKey v) then
+                match subst.Fresh() with
+                | IRTInfer c ->
+                    subst.CopyArityConstraint(v, c)
+                    subst.CopyRankLowerBound(v, c)
+                    subst.CopyLiteralDefault(v, c)
+                    mapping <- Map.add v (IRTInfer c) mapping
+                | _ -> ()
+        let inst (t: IRType) = substInferVars mapping (subst.Resolve t)
+        // An instance argument still open as a declaration literal: read at its
+        // default (an integer literal subscript is an Int64).
+        let atDefault (t: IRType) =
+            match IR.stripUnits (subst.Resolve t) with
+            | IRTInfer aid ->
+                (match subst.GetLiteralDefault aid with
+                 | Some et -> IRTScalar et
+                 | None -> subst.Resolve t)
+            | r -> r
+        let rootOf (t: IRType) =
+            match subst.Resolve t with
+            | IRTInfer r -> Some r
+            | _ -> None
+        obs |> List.tryPick (fun ob ->
+            let headRoot = rootOf (IRTInfer ob.Head)
+            let pos =
+                paramTys
+                |> List.tryFindIndex (fun p -> headRoot.IsSome && rootOf p = headRoot)
+                |> Option.defaultValue 0
+            let n = ob.Args.Length
+            let headInst = inst (IRTInfer ob.Head)
+            let argInsts = ob.Args |> List.map inst
+            let resInst = inst ob.Result
+            let refuse (actual: IRType) =
+                Some (pos, ArgTypeMismatch (pos + 1, calleeDesc, arrowExpectation n, ppIRType (subst.Resolve actual)))
+            match IR.stripUnits (subst.Resolve headInst) with
+            | IRTInfer aid ->
+                // Open at the call. Link the copy to the argument that reaches it
+                // and leave the application pending on it.
+                (if pos < tArgs.Length then
+                     match subst.Resolve (List.item pos tArgs).Type with
+                     | IRTInfer argId when argId <> aid ->
+                         if isCurrentDeclParam env argId then subst.MarkPolymorphic argId
+                         unify subst (IRTInfer aid) (IRTInfer argId) |> ignore
+                     | _ -> ())
+                let span = if pos < tArgs.Length then (List.item pos tArgs).Span else tFunc.Span
+                let synth (name: string) (t: IRType) = mkTypedSpan (TExprVar (name, 0, None)) t span
+                env.PendingArrowApps.Add
+                    { Head = synth "__arrow" headInst
+                      Args = argInsts |> List.map (synth "__arrow_arg")
+                      Result = resInst
+                      Span = span }
+                None
+            | ArrayElem a ->
+                let coords =
+                    a.IndexTypes |> List.sumBy (fun ix ->
+                        match ix.Symmetry with
+                        | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 -> ix.Rank
+                        | _ -> 1)
+                if coords <> n then
+                    Some (pos, ArgRankMismatch (pos + 1, n, coords,
+                                                $"read element-wise by the body, which applies it to {n} index argument(s)",
+                                                ppIRType (subst.Resolve headInst)))
+                else
+                    // Each subscript must be an index: an integer (any open
+                    // instance is read so), and a NAMED index value only into
+                    // an axis of that name (the nominal rule, formalism 3.10).
+                    let plainAxes =
+                        a.IndexTypes |> List.forall (fun ix -> ix.Rank <= 1)
+                    let badArg =
+                        argInsts |> List.indexed |> List.tryPick (fun (j, t) ->
+                            match IR.stripUnits (subst.Resolve t) with
+                            | IRTInfer _ -> None
+                            | IRTIdxTagged (_, IRefNamed nm) when plainAxes && not (nm.StartsWith "__") ->
+                                (match (List.item j a.IndexTypes).Tag with
+                                 | Some tag when not (tag.StartsWith "__") && tag <> nm -> Some t
+                                 | _ -> None)
+                            | _ when not (arrowIntValued subst t) -> Some t
+                            | _ -> None)
+                    match badArg with
+                    | Some bad ->
+                        Some (pos, ArgTypeMismatch (pos + 1, calleeDesc,
+                                                    $"an array the body can subscript with what it passes at this call ({ppIRType (subst.Resolve bad)}) -- "
+                                                    + "a subscript is an integer index, and a named index value only indexes an axis of its own name",
+                                                    ppIRType (subst.Resolve headInst)))
+                    | None ->
+                        match unify subst resInst a.ElemType with
+                        | Ok () -> None
+                        | Error e -> Some (pos, e)
+            | FuncElem (slots, ret) ->
+                if slots.Length <> n then refuse headInst
+                else
+                    match arrowFuncSlotClash subst slots argInsts with
+                    | Some _ -> refuse headInst
+                    | None ->
+                        let copyIds =
+                            mapping |> Map.toSeq |> Seq.choose (fun (_, t) -> match t with IRTInfer c -> Some c | _ -> None) |> Set.ofSeq
+                        let slotErr =
+                            List.zip slots argInsts |> List.tryPick (fun (slot, argTy) ->
+                                match IR.stripUnits (subst.Resolve argTy) with
+                                // Neither this call's copy nor a literal: the
+                                // declaration's own, never bound by a call.
+                                | IRTInfer aid when (subst.GetLiteralDefault aid).IsNone && not (copyIds.Contains aid) -> None
+                                // An OPEN slot (an unannotated lambda parameter)
+                                // is never made an array or a function here: the
+                                // lambda's body was typed while it was open, as
+                                // a value, and would not be re-typed.
+                                | ArrayElem _ | IRTArrow _ as a when (match IR.stripUnits (subst.Resolve slot) with
+                                                                      | IRTInfer _ -> true
+                                                                      | _ -> false) ->
+                                    Some ($"a function whose parameter is declared {ppIRType a} (it is applied to "
+                                          + $"one here; annotate the passed function's parameter -- an unannotated one is typed as a single value)")
+                                | _ ->
+                                    match unify subst (IR.stripUnits (subst.Resolve slot)) (IR.stripUnits (atDefault argTy)) with
+                                    | Ok () -> None
+                                    | Error _ ->
+                                        if argInsts |> List.forall (arrowIntValued subst) then Some (arrowExpectation n)
+                                        else
+                                            let passed = argInsts |> List.map (atDefault >> ppIRType) |> String.concat ", "
+                                            Some $"a function taking what the body passes it at this call ({passed})")
+                        match slotErr with
+                        | Some expectation ->
+                            Some (pos, ArgTypeMismatch (pos + 1, calleeDesc, expectation, ppIRType (subst.Resolve headInst)))
+                        | None ->
+                            match unify subst resInst ret with
+                            | Error e -> Some (pos, e)
+                            | Ok () ->
+                                // The body was typed reading ONE VALUE from the
+                                // application -- an array instance's element --
+                                // and is emitted once per instance with that
+                                // reading (its arithmetic on the result is
+                                // scalar). A function returning an array or a
+                                // function would hand that body a different
+                                // shape: refused, exactly as the array reading
+                                // refuses a rank above the argument count.
+                                match IR.stripUnits (subst.Resolve resInst) with
+                                | ArrayElem _ | IRTArrow _ ->
+                                    Some (pos, ArgTypeMismatch (pos + 1, calleeDesc,
+                                                                $"a function returning a single value (the body reads one value from it, as from an array of rank {n})",
+                                                                ppIRType (subst.Resolve headInst)))
+                                | _ -> None
+            | t -> refuse t)
+    | _ -> None
+
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
     //
@@ -3206,6 +3473,104 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
         // declares a tuple parameter AND the flat pairing does not fit, so the
         // ordinary call path is untouched.
         let tArgs = regroupArgsByWidth env paramTys tArgs
+        // AN ARROW PARAMETER MEETS ITS ARGUMENT. A parameter the callee's body
+        // applied while it was open (`let u = lambda(c) -> c(0) + 1.0`; see
+        // TypeEnv.ArrowApplication) is still an open, non-generic variable:
+        // the CONTEXT decides it, and this argument is that context. An array
+        // or a function is bound to it and the body's applications are typed
+        // against it now (dischargeArrowApp), so the call's result is the real
+        // one; anything else cannot be applied and is refused here, at the
+        // argument. A lambda is ONE body (not generic), so its first such call
+        // decides for every later one -- a later argument of the other kind
+        // meets the ordinary judgment below and is refused. (A DECLARATION's
+        // arrow parameter is generic and judged per call: arrowObligationClash.)
+        let arrowBindErr =
+            let n = min paramTys.Length tArgs.Length
+            List.zip (List.truncate n paramTys) (List.truncate n tArgs)
+            |> List.indexed
+            |> List.tryPick (fun (i, (pTy, arg)) ->
+                match env.Subst.Resolve pTy with
+                | IRTInfer pid when not (env.Subst.IsPolymorphicId pid) ->
+                    let apps =
+                        env.PendingArrowApps |> List.ofSeq |> List.filter (fun a ->
+                            match env.Subst.Resolve a.Head.Type with
+                            | IRTInfer h -> h = pid
+                            | _ -> false)
+                    if apps.IsEmpty then None
+                    else
+                        let desc =
+                            match tFunc.Kind with
+                            | TExprVar (name, _, _) -> $"'{name}'"
+                            | _ -> "this function"
+                        let nArgs = apps |> List.map (fun a -> a.Args.Length) |> List.max
+                        let indexShaped = apps |> List.forall (fun a -> a.Args |> List.forall (arrowArgIndexLike env))
+                        // The function reading's int-valued rule, said at the
+                        // argument that brought the function.
+                        let slotClash =
+                            match IR.stripUnits (env.Subst.Resolve arg.Type) with
+                            | FuncElem (slots, _) ->
+                                apps |> List.exists (fun a ->
+                                    slots.Length = a.Args.Length
+                                    && (arrowFuncSlotClash env.Subst slots (a.Args |> List.map (_.Type))).IsSome)
+                            | _ -> false
+                        match IR.stripUnits (env.Subst.Resolve arg.Type) with
+                        | IRTInfer _ -> None
+                        | FuncElem _ as t when slotClash ->
+                            Some (i, ArgTypeMismatch (i + 1, desc, arrowExpectation nArgs, ppIRType t))
+                        | ArrayElem _ | FuncElem _ ->
+                            // An array binds at its SHAPE, not its length: the
+                            // lambda is one body, and a later call with another
+                            // length is as legal as it is for a `Float64^1`
+                            // parameter (an unnamed literal axis becomes an
+                            // unknown one, read from the argument at run time;
+                            // a NAMED index type keeps its extent -- it is part
+                            // of the name's identity).
+                            let bound =
+                                match env.Subst.Resolve arg.Type with
+                                | ArrayElem at ->
+                                    let ixs =
+                                        at.IndexTypes |> List.map (fun ix ->
+                                            match ix.Tag, ix.Extent with
+                                            | None, IRLit (IRLitInt _) when ix.IxKind = IxKPlain && ix.Symmetry = SymNone ->
+                                                { ix with Extent = mkAbstractAxisExtent (env.Builder.FreshId()) }
+                                            | _ -> ix)
+                                    mkArrayLike { at with IndexTypes = ixs }
+                                | t -> t
+                            match unify env.Subst pTy bound with
+                            | Error e -> Some (i, e)
+                            | Ok () ->
+                                for a in apps do
+                                    env.PendingArrowApps.RemoveAll(fun x -> obj.ReferenceEquals(x, a)) |> ignore
+                                apps |> List.tryPick (fun a ->
+                                    match dischargeArrowApp env a with
+                                    | Error e -> Some (i, e)
+                                    | Ok () ->
+                                        // The body consumed the application as
+                                        // ONE VALUE while the head was open (its
+                                        // arithmetic was typed scalar): a partial
+                                        // read of a higher-rank array, or a
+                                        // function returning an array, would hand
+                                        // that body a shape it was not typed for.
+                                        match IR.stripUnits (env.Subst.Resolve a.Result) with
+                                        | ArrayElem _ | IRTArrow _ ->
+                                            let expectation =
+                                                if indexShaped then
+                                                    arrowExpectation nArgs + " and reading a single value from it"
+                                                else "a function returning a single value"
+                                            Some (i, ArgTypeMismatch (i + 1, desc, expectation, ppIRType (env.Subst.Resolve arg.Type)))
+                                        | _ -> None)
+                        | t ->
+                            let expectation =
+                                if indexShaped then arrowExpectation nArgs
+                                else "a function (the body applies it to arguments)"
+                            Some (i, ArgTypeMismatch (i + 1, desc, expectation, ppIRType t))
+                | _ -> None)
+        match arrowBindErr with
+        | Some (i, e) ->
+            if i < tArgs.Length && (List.item i tArgs).Span.StartLine > 0 then
+                setCurrentExprSpan (List.item i tArgs).Span
+            Error e
+        | None ->
         // THE CALL JUDGMENT's ladder (docs/plans/plan-call-judgment.md). The
         // core step -- instantiate the signature, unify the copy against the
         // arguments -- is the SIXTH check below; the checks ahead of it exist
@@ -3704,6 +4069,11 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         // The callee's GENERIC CASTS, judged against the
                         // instance the arguments just built.
                         |> Option.orElse (genericObligationClash env tFunc copyMap |> Option.map (fun e -> (0, e)))
+                        // The callee's ARROW PARAMETERS, decided by the
+                        // arguments the judgment just bound their copies to:
+                        // an array or a function (or still open), each
+                        // application's result typed against it.
+                        |> Option.orElse (arrowObligationClash env tFunc paramTys tArgs quantified copyMap)
                         // ...and those of a generic function passed AS an
                         // argument, at the parameter type it meets.
                         |> Option.orElse (
@@ -3848,7 +4218,9 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 (match e with
                  | IndexRankMismatch (site, pTy, pr, aTy, ar) ->
                      Error (IndexRankMismatch ($"argument {i + 1}, {site}", pTy, pr, aTy, ar))
-                 | ExtentArgMismatch _ | InvalidCast _ -> Error e
+                 // ...and an arrow parameter's refusal (arrowObligationClash),
+                 // which already names the argument and what it had to be.
+                 | ExtentArgMismatch _ | InvalidCast _ | ArgTypeMismatch _ | ArgRankMismatch _ -> Error e
                  | _ ->
                      // An open declared parameter (`T^1`) reads as a
                      // variable id; show what THIS call's instance of it was
@@ -3982,92 +4354,156 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
             match env.Subst.Resolve tFunc.Type with
             | ArrayElem _ -> dispatchAppOrIndex env tFunc tArgs
             | t -> Error (InvalidApplication t))
-    // APPLYING AN UNANNOTATED PARAMETER of the declaration being checked --
-    // `function first(c) = c(0) + 1.0`. Such a parameter is a plain
-    // (non-generic) var whose type the BODY alone decides: nothing at a call
-    // site binds it, and zonk defaults whatever the body left open to a
-    // SCALAR. So this application used to fall to the catch-all below, which
-    // added no evidence at all: `c` became Float64, `first(v)` on an array was
-    // refused (BL3001, "expects a scalar"), and `first(2.0)` was accepted and
-    // died in g++ calling a double (BL9002). The application IS the evidence:
-    // only arrays and functions take arguments (formalism 4.3), so decide
-    // which one here and re-dispatch to the arm that types it properly.
+    // APPLYING A STILL-OPEN VARIABLE -- `function first(c) = c(0) + 1.0`,
+    // `let u = lambda(c) -> c(0) + 1.0`. Only arrays and functions take
+    // arguments (formalism 4.3), and an array IS a function of its indices
+    // (dimensional currying), so the application says the head is an ARROW --
+    // not which kind. That is decided by what reaches the head, which the body
+    // does not see: the argument a call passes, the row a kernel iterates.
+    // So the application is RECORDED (TypeEnv.ArrowApplication) with a fresh
+    // result, and typed once the head is known (dischargeArrowApp): at a call
+    // that passes it (the FuncElem arm's arrow-parameter binding), at the end
+    // of the declaration whose body typed it, and before zonk.
     //
-    //   * every argument index-like (an integer, an index value, `_`, or a
-    //     still-open var -- a parameter used only as a subscript is an index,
-    //     pinSubscriptParams) -> an array of rank = the argument count, via
-    //     the same shape demand an array intrinsic issues on an unannotated
-    //     parameter (`reduce(x, ..)`); `c(0)` then reads the element.
-    //   * any argument that cannot be an index (a Float, a tuple, an array, a
-    //     function, ...) -> a function from the argument types to a fresh
-    //     result, the arrow a `f: (Float64) -> Float64` annotation spells.
+    //   * A parameter of the DECLARATION being checked, applied to index-like
+    //     arguments (an integer, an index value, `_`, an open var): it becomes
+    //     an ARROW PARAMETER -- a generic variable, like `T`, whose kind each
+    //     call decides (arrowObligationClash), and IR monomorphization emits
+    //     one body per kind: a subscript for an array, a call for a function.
+    //     Its result is generic too, and so is an open parameter used as the
+    //     argument (`pick(c, i) = c(i)`: an Int64 at an array instance, the
+    //     function's slot type at a function instance).
+    //   * The same parameter applied to an argument that cannot be an index (a
+    //     Float, a tuple, an array, a function) can only be a function: it is
+    //     the function from the argument types to a fresh result, at once.
+    //   * Any other open variable -- a lambda's parameter, a kernel's row
+    //     before buildApplyInfo binds it: recorded, discharged when bound.
     //
-    // One parameter SHAPE per declaration, because the body is emitted once
-    // per element type, not once per shape: a function of one integer
-    // argument is NOT also accepted
-    // where the body subscripts (an index-like application decides "array"),
-    // and the call judgment refuses it at the argument -- as it refuses a
-    // scalar (`first(2.0)`, BL3001 at the call site, never a backend ICE).
-    //
-    // NARROW ON PURPOSE: only a var that IS one of the current declaration's
-    // parameters (`CurrentSignature`, which a named function's body sets) and
-    // is not generic. A LAMBDA parameter is typed later by its context --
-    // buildApplyInfo unifies a kernel parameter with the row or halo window it
-    // iterates after the body is inferred -- so shaping it here would fight
-    // that unification; it keeps the catch-all. The guard only ROUTES (which
-    // heads this arm owns); every validity verdict is an Error from the body.
+    // This used to fall to the catch-all below, which added no evidence: the
+    // head zonked to Float64, so an array argument was refused ("expects a
+    // scalar") and a scalar one died in g++ calling a double (BL9002).
     | IRTInfer vid when not (List.isEmpty tArgs)
-                        && not (env.Subst.IsPolymorphicId vid)
                         && (env.Subst.GetArityConstraint vid).IsNone
-                        && (match List.rev env.CurrentSignature with
-                            | _ret :: ps ->
-                                ps |> List.exists (fun p ->
-                                    match env.Subst.Resolve p with
-                                    | IRTInfer pid -> pid = vid
-                                    | _ -> false)
-                            | [] -> false) ->
-        let isIntElem (et: ElemType) =
-            match et with
-            | ETInt32 | ETInt64 -> true
-            | _ -> false
-        let indexLike (a: TypedExpr) =
-            match a.Kind with
-            | TExprWildcard -> true
-            | _ ->
-                match IR.stripUnits (env.Subst.Resolve a.Type) with
-                | IRTScalar et -> isIntElem et
-                | IRTIdxTagged _ | IRTNat _ -> true
-                | IRTInfer aid ->
-                    (match env.Subst.GetLiteralDefault aid with
-                     | Some et -> isIntElem et
-                     | None -> true)
-                | _ -> false
-        if tArgs |> List.forall indexLike then
-            // Generic in its ELEMENT, like a `T^k` parameter: marking the var
-            // first makes requireArrayArgMinRank mint the element in the
-            // signature's id space, so IR monomorphization emits one copy per
-            // element type. Left plain, zonk defaulted the element to Float64
-            // and an Int64 array argument died in g++ ("could not convert
-            // Array<long long> to Array<double>").
-            env.Subst.MarkPolymorphic vid
-            requireArrayArgMinRank env tFunc "subscript" tArgs.Length
-            |> Result.bind (fun _ ->
-                match env.Subst.Resolve tFunc.Type with
-                | ArrayElem _ -> dispatchAppOrIndex env tFunc tArgs
-                | t -> Error (InvalidApplication t))
-        else
+                        && (isCurrentDeclParam env vid || not (env.Subst.IsPolymorphicId vid)) ->
+        let ownParam = isCurrentDeclParam env vid
+        let indexLike = tArgs |> List.forall (arrowArgIndexLike env)
+        if ownParam && not indexLike then
             let arrow = mkFuncArrow (tArgs |> List.map (_.Type)) (env.Subst.Fresh())
             unify env.Subst tFunc.Type arrow
             |> Result.bind (fun () ->
                 match env.Subst.Resolve tFunc.Type with
                 | FuncElem _ -> dispatchAppOrIndex env tFunc tArgs
                 | t -> Error (InvalidApplication t))
+        else
+            let r = env.Subst.Fresh()
+            if ownParam then
+                // Generic: kept open by zonk and instantiated per call.
+                env.Subst.MarkPolymorphic vid
+                (match r with IRTInfer rid -> env.Subst.MarkPolymorphic rid | _ -> ())
+            if indexLike then
+                for a in tArgs do
+                    match env.Subst.Resolve a.Type with
+                    | IRTInfer aid when ownParam && isCurrentDeclParam env aid ->
+                        env.Subst.MarkPolymorphic aid
+                    | IRTInfer aid when (env.Subst.GetLiteralDefault aid).IsNone
+                                        && not (env.Subst.IsPolymorphicId aid) ->
+                        // A subscript if nothing else pins it (formalism 3.10).
+                        env.Subst.MarkIndexDefault aid
+                    | _ -> ()
+            env.PendingArrowApps.Add { Head = tFunc; Args = tArgs; Result = r; Span = tFunc.Span }
+            Ok (mkTyped (TExprApp (tFunc, tArgs)) r)
     | _ ->
         match nonCallableHead env.Subst tFunc with
         | Some t when not (List.isEmpty tArgs) -> Error (InvalidApplication t)
         | _ ->
         let retTy = env.Subst.Fresh()
         Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+
+/// Type a recorded ARROW APPLICATION (TypeEnv.ArrowApplication) against what its
+/// head has become. A head nothing ever reached is read as a FUNCTION of the
+/// argument types ("`c` as a function is generally a safer bet"); an array or a
+/// function head types the application exactly as if it had been known when it
+/// was written -- the same dispatch, partial reads and call judgment included --
+/// after the function reading's int-valued rule (arrowFuncSlotClash); and the
+/// application's recorded result meets the real one. Anything else is the
+/// refusal a known head would have met (InvalidApplication).
+and internal dischargeArrowApp (env: TypeEnv) (app: ArrowApplication) : TypeResult<unit> =
+    let argTys = app.Args |> List.map (_.Type)
+    match IR.stripUnits (env.Subst.Resolve app.Head.Type) with
+    | IRTInfer _ ->
+        unify env.Subst app.Head.Type (mkFuncArrow argTys app.Result)
+    | FuncElem (slots, _) when slots.Length = argTys.Length
+                               && (arrowFuncSlotClash env.Subst slots argTys).IsSome ->
+        let (j, slot) = (arrowFuncSlotClash env.Subst slots argTys).Value
+        Error (ArgTypeMismatch (j + 1, "the applied function", ppIRType slot,
+                                "an integer index (an applied parameter read with an integer index is an array, "
+                                + "or a function OF AN INTEGER: a call never converts an index to another type)"))
+    | ArrayElem _ | IRTArrow _ ->
+        dispatchAppOrIndex env app.Head app.Args
+        |> Result.bind (fun t -> unify env.Subst t.Type app.Result)
+    // A scalar, a tuple, a user index value: nothing to apply. (Said here
+    // rather than left to dispatch, whose catch-all does not judge a
+    // synthesized `__` head -- a kernel's eta parameter.)
+    | IRTScalar _ | IRTNat _ | IRTTuple _ as t -> Error (InvalidApplication t)
+    | IRTIdxTagged (_, IRefNamed tag) as t when not (tag.StartsWith "__") -> Error (InvalidApplication t)
+    // Anything else (a halo window read `w(o)`, which Lowering owns) keeps
+    // what the application was typed with while open.
+    | _ -> Ok ()
+
+/// Discharge every pending arrow application whose head is no longer open
+/// (or, with `all`, every one -- an open head then takes the function reading),
+/// each refusal located at its application. Returns the refusals.
+let internal settleArrowApps (env: TypeEnv) (all: bool) : (Span * TypeError) list =
+    let pending = env.PendingArrowApps |> List.ofSeq
+    let ready =
+        pending |> List.filter (fun app ->
+            all || (match IR.stripUnits (env.Subst.Resolve app.Head.Type) with
+                    | IRTInfer _ -> false
+                    | _ -> true))
+    for app in ready do
+        env.PendingArrowApps.RemoveAll(fun a -> obj.ReferenceEquals(a, app)) |> ignore
+    ready |> List.choose (fun app ->
+        match dischargeArrowApp env app with
+        | Ok () -> None
+        | Error e -> Some (app.Span, e))
+
+/// The END OF A DECLARATION's body: its pending applications whose head is
+/// still one of its own parameters become that parameter's ARROW OBLIGATIONS
+/// (TypeEnv.FuncArrowObligations) -- the parameter, the application's result,
+/// and an open parameter used as its argument stay generic and are judged per
+/// call; every pending application whose head is known now is typed. The
+/// first refusal is returned, with its span stamped for locateError.
+let internal settleDeclArrowApps (env: TypeEnv) (funcVarId: IRId) (paramTypes: IRType list) : TypeResult<unit> =
+    let rootOf (t: IRType) =
+        match env.Subst.Resolve t with
+        | IRTInfer r -> Some r
+        | _ -> None
+    let paramRoots = paramTypes |> List.choose rootOf |> Set.ofList
+    let mine =
+        env.PendingArrowApps |> List.ofSeq |> List.filter (fun app ->
+            match rootOf app.Head.Type with
+            | Some h -> paramRoots.Contains h
+            | None -> false)
+    for app in mine do
+        env.PendingArrowApps.RemoveAll(fun a -> obj.ReferenceEquals(a, app)) |> ignore
+    let obligations =
+        mine |> List.map (fun app ->
+            let h = (rootOf app.Head.Type).Value
+            env.Subst.MarkPolymorphic h
+            rootOf app.Result |> Option.iter env.Subst.MarkPolymorphic
+            for a in app.Args do
+                match rootOf a.Type with
+                | Some aid when paramRoots.Contains aid -> env.Subst.MarkPolymorphic aid
+                | _ -> ()
+            { Head = h; Args = app.Args |> List.map (_.Type); Result = app.Result })
+    env.FuncArrowObligations.Remove funcVarId |> ignore
+    if not obligations.IsEmpty then
+        env.FuncArrowObligations.[funcVarId] <- obligations
+    match settleArrowApps env false with
+    | [] -> Ok ()
+    | (span, e) :: _ ->
+        setCurrentExprSpan span
+        Error e
 
 /// Structural child enumerator for a typed expression: the immediate
 /// sub-expressions of a node, total over TExpr kinds. Shared by the

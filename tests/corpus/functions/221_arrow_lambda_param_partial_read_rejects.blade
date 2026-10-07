@@ -1,0 +1,8 @@
+// TEST: A matrix handed to a lambda that reads one value with one index (rejects)
+// ERROR: BL3001 @ 7:11
+// ============================================================================
+// `c(0)` on a matrix is a row, but the lambda's body was typed reading one
+// value from it: refused at the argument, like functions/211 for a function.
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let u = lambda(c) -> c(0) + 1.0
+let w = u(m)

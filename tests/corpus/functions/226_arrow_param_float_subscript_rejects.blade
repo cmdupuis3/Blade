@@ -1,0 +1,8 @@
+// TEST: An array instance of an arrow parameter subscripted with a Float64 (rejects)
+// ERROR: BL3001 @ 7:14
+// ============================================================================
+// `pick(c, i) = c(i)`: at this call `c` is an array, and the body would
+// subscript it with the Float64 passed as `i`. A subscript is an integer.
+function pick(c, i) = c(i)
+let v = [1.0, 2.0, 3.0]
+let p = pick(v, 2.5)

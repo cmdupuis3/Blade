@@ -1,0 +1,8 @@
+// TEST: The read of a lambda's applied parameter is typed (rejects)
+// ERROR: BL3001 @ 7:17
+// ============================================================================
+// Vacuity probe for functions/214: the application's result is the passed
+// array's element, Int64 here, so a Bool annotation is refused.
+let u = lambda(c) -> c(0)
+let iv = [4, 5, 6]
+let x: Bool = u(iv)

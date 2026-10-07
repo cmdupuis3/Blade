@@ -1,0 +1,18 @@
+// TEST: A let-bound lambda's applied parameter is typed by the function passed to it
+// ============================================================================
+// The function half of functions/214: the lambda is used with a function of
+// an integer, so `c` is that function and the application a call (the passed
+// lambda's own parameter is typed Int64 by it). A lambda is ONE body, so its
+// first such use decides for all later ones (functions/219).
+let u = lambda(c) -> c(0) + 1.0
+let w = u(lambda(i) -> Float64(i))
+// EXPECT: w = 1
+
+// Applied to a Float64, which cannot be an index: only a function fits.
+let hh = lambda(f) -> f(2.0) + 1.0
+let q = hh(lambda(x) -> x * 3.0)
+// EXPECT: q = 7
+
+// Never used: nothing reaches `c`, so it is read as a function of an Int64
+// (the safer bet) -- emitted and compiled as one, never a double applied.
+let never = lambda(c) -> c(2) * 3.0

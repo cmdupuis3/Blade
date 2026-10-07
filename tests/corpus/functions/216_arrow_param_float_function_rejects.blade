@@ -1,0 +1,8 @@
+// TEST: A function of a Float64 passed where the body applies the parameter to an index (rejects)
+// ERROR: BL3001 @ 7:15
+// ============================================================================
+// An applied parameter read with an integer is an array, or a function OF AN
+// INTEGER. A function of a Float64 would take the index only by a conversion
+// the call never performs: refused at the argument.
+function first(c) = c(0) + 1.0
+let a = first(lambda(x: Float64) -> x * 2.0)

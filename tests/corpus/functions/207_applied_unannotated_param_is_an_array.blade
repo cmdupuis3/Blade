@@ -7,9 +7,10 @@
 // while `first(2.0)` was accepted and died in g++ calling a double (BL9002).
 // Applying the parameter IS the evidence: only arrays and functions take
 // arguments (formalism 4.3). With every argument index-like the parameter is
-// an array of rank = the argument count, read element-wise like a `T^k`
-// parameter, and its element stays generic -- one specialization per element
-// type, so an Int64 array is not handed to a Float64 body.
+// an ARROW the call decides (functions/213): given an array, one of rank = the
+// argument count, read element-wise like a `T^k` parameter, and its element
+// stays generic -- one specialization per element type, so an Int64 array is
+// not handed to a Float64 body.
 let v = [1.0, 2.0, 3.0]
 let iv = [4, 5, 6]
 let mm = [[1.0, 2.0], [3.0, 4.0]]

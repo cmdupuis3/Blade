@@ -1,0 +1,48 @@
+// TEST: An applied unannotated parameter takes an array OR a function, per call
+// ============================================================================
+// `c(0)` says `c` is an ARROW -- an array of rank 1 (dimensional currying: the
+// array IS the function of its index) or a function of an integer -- and the
+// argument at each call decides which. The parameter stays generic, so IR
+// monomorphization emits one body per kind (a subscript for an array, a call
+// for a function) and per element type, in ONE program.
+let v = [1.0, 2.0, 3.0]
+let iv = [4, 5, 6]
+
+function first(c) = c(0) + 1.0
+let a1 = first(v)
+// EXPECT: a1 = 2
+let a2 = first(iv)
+// EXPECT: a2 = 5
+let a3 = first(lambda(i) -> 10.0 * Float64(i))
+// EXPECT: a3 = 1
+
+// A parameter used only as the argument is generic too: an Int64 subscript
+// at the array instance, the function's own parameter type otherwise.
+function pick(c, i) = c(i)
+let p1 = pick(v, 2)
+// EXPECT: p1 = 3
+let p2 = pick(lambda(k) -> Float64(k) * 3.0, 2)
+// EXPECT: p2 = 6
+
+// Applied to its own result: no index-like evidence decides `f`, so the call
+// does -- here a function of a Float64.
+function twice(f, x) = f(f(x))
+let t1 = twice(lambda(y) -> y * 2.0, 3.0)
+// EXPECT: t1 = 12
+
+// Applied inside a kernel the body builds: the closure is specialized with it.
+function dbl(c) = method_for(0..3) <@> lambda(i) -> c(i) * 2.0 |> compute
+let d1 = dbl(v)
+// EXPECT: d1 = [2, 4, 6]
+let d2 = dbl(lambda(i) -> Float64(i))
+// EXPECT: d2 = [0, 2, 4]
+
+// Passed on by another generic function: its parameter becomes an arrow too.
+function g(c) = first(c) * 2.0
+let gv = g([1.0, 2.0])
+// EXPECT: gv = 4
+let gf = g(lambda(i) -> Float64(i) + 4.0)
+// EXPECT: gf = 10
+
+// Never called: nothing is emitted for it, and nothing fails.
+function unused(c) = c(1) * 3.0

@@ -753,6 +753,28 @@ let models: Array<(Params → TimeSeries) like LatIdx, LonIdx>
 models(lat, lon)(params)(t) : Float
 ```
 
+**Applied unannotated parameters.** Applying a parameter the program never
+annotated (`c(0)`) says only that it is an ARROW; whether it is an array or a
+function is decided by what is passed to it. An application to integer-valued
+arguments admits both readings -- an array whose rank is the argument count,
+read element-wise, or a function of integers -- and an application to any
+other argument (`f(2.0)`) only the function. A `function` declaration's such
+parameter is generic: each call decides, and one body is emitted per kind (a
+subscript for an array, a call for a function). A `let`-bound lambda is one
+body, so its first use decides for every later one. Either way the body reads
+ONE value from the application: a higher-rank array (a partial read) or a
+function returning an array is refused at the argument, as is a scalar, or a
+function whose parameter is not an integer where the body passes one. An
+application nothing ever reaches is read as a function.
+
+```blade
+function first(c) = c(0) + 1.0
+let a = first([1.0, 2.0, 3.0])
+let b = first(lambda(i) -> 10.0 * Float64(i))
+// EXPECT: a = 2
+// EXPECT: b = 1
+```
+
 **Poly-indexing** **(planned)**: `A(indices)` with a tuple of length rank(A);
 `all_indices(A)` iterates all valid tuples respecting structure. Use for rank-polymorphic
 operations (trace, sum-all); for standard arrays prefer curried/loop access to

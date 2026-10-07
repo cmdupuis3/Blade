@@ -353,6 +353,11 @@ let rec canonTypeKey (ty: IRType) : string =
                 | _ -> "d", ""
             $"r{idx.Rank}s{symTag idx.Symmetry}{levelTag}e{ext}"
         $"""arr_{(canonTypeKey arr.ElemType)}__{(arr.IndexTypes |> List.map idxKey |> String.concat "_")}"""
+    // A FUNCTION bound to a variable (an arrow parameter's function instance,
+    // TypeEnv.ArrowObligation): keyed by its signature, so two instances
+    // taking different functions do not share a specialization.
+    | FuncElem (args, ret) ->
+        $"""fn_{(args |> List.map canonTypeKey |> String.concat "_")}__to_{(canonTypeKey ret)}"""
     | IRTInfer id -> $"v{id}"
     | _ -> "T"
 
@@ -551,9 +556,53 @@ let eliminateGenericAliases (modules: IRModule list) : IRModule list =
 let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallable>)
                                 (bindings: Map<int, IRType>) : Map<int, IRType> =
     let concrete (t: IRType) = Set.isEmpty (collectInferIds t)
+    // The closures the body builds over its own parameters (and, transitively,
+    // over theirs): an ARROW PARAMETER may be applied inside one
+    // (`method_for(0..3) <@> lambda(i) -> c(i) * 2.0`), and its result
+    // variable is then visible only in that callable's body.
+    let closures =
+        let paramIds = func.Params |> List.map _.VarId |> Set.ofList
+        let found = System.Collections.Generic.List<IRCallable>()
+        let seen = System.Collections.Generic.HashSet<IRId>()
+        let rec scan (owners: Set<IRId>) (body: IRExpr) =
+            iterIRExpr (fun e ->
+                match e with
+                | IRVar (id, _) when id <> func.Id && not (seen.Contains id) ->
+                    (match Map.tryFind id callables with
+                     | Some c when c.Captures |> List.exists (fun cap -> owners.Contains cap.Id) ->
+                         seen.Add id |> ignore
+                         found.Add c
+                         scan (Set.union owners (c.Params |> List.map _.VarId |> Set.ofList)) c.Body
+                     | _ -> ())
+                | _ -> ()) body
+        scan paramIds func.Body
+        List.ofSeq found
     let pass (b: Map<int, IRType>) =
         let mutable acc = b
+        // AN ARROW PARAMETER'S APPLICATION (TypeEnv.ArrowObligation): lowered as
+        // a call while the parameter was generic, its result typed by a
+        // variable no argument mentions. Once the parameter's instance is known
+        // the result is: an array's element (the body reads one element), or a
+        // function's return.
+        let learnArrowApp (e: IRExpr) =
+            match e with
+            | IRApp (IRVar (_, headTy), args, retTy) when not (concrete retTy) ->
+                let res =
+                    match headTy with
+                    | ArrayElem a when a.IndexTypes.Length = args.Length -> Some a.ElemType
+                    | FuncElem (ps, ret) when ps.Length = args.Length -> Some ret
+                    | _ -> None
+                match res with
+                | Some r when concrete r ->
+                    unifyParamWithArg retTy r Map.empty
+                    |> Map.iter (fun k v ->
+                        if not (acc.ContainsKey k) && concrete v then acc <- Map.add k v acc)
+                | _ -> ()
+            | _ -> ()
+        for c in closures do
+            iterIRExpr learnArrowApp (substTypeInIRExpr acc c.Body)
         iterIRExpr (fun e ->
+            learnArrowApp e
             match e with
             | IRApp (IRVar (fid, _), args, retTy) when fid <> func.Id ->
                 (match Map.tryFind fid callables with
@@ -577,6 +626,18 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
         if fuel <= 0 || b'.Count = b.Count then b' else fix b' (fuel - 1)
     fix bindings 8
 
+/// AN ARROW PARAMETER'S APPLICATION in an ARRAY instance is a subscript.
+/// TypeCheck leaves an applied parameter generic (TypeEnv.ArrowObligation) and
+/// Lowering -- which picks index vs call from the head's type -- emitted a call
+/// while that type was a variable; once a specialization substitutes an array
+/// for it, the application reads an element (dimensional currying: the array
+/// IS the function of its indices). A function instance keeps the call.
+let internal indexArrayApps (e: IRExpr) : IRExpr =
+    mapIRExpr (fun e ->
+        match e with
+        | IRApp (IRVar (_, ArrayElem _) as head, args, _) -> IRIndex (head, args, None)
+        | _ -> e) e
+
 let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (builder: IRBuilder) (callables: Map<IRId, IRCallable>) : IRFuncDef * IRCallable list =
     // The spec is KEYED and NAMED by the call site's bindings; it is
     // SUBSTITUTED with those plus what its inner generic calls teach.
@@ -591,7 +652,7 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
         List.zip func.Params newParams
         |> List.map (fun (oldP, newP) -> (oldP.VarId, newP.VarId))
         |> Map.ofList
-    let bodyWithTypes = substTypeInIRExpr bindings func.Body
+    let bodyWithTypes = substTypeInIRExpr bindings func.Body |> indexArrayApps
 
     // Lifted lambdas capturing HM-polymorphic params must be cloned-and-
     // specialized alongside their enclosing function: the lambda lives in
@@ -740,6 +801,7 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
                      let newBody =
                          lam.Body
                          |> substTypeInIRExpr bindings
+                         |> indexArrayApps
                          |> mapIRExpr (fun e2 ->
                              match e2 with
                              | IRVar (id2, ty) when combinedRemap.ContainsKey id2 ->

@@ -15824,6 +15824,11 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             //
             // An UNANNOTATED parameter the body uses as a SUBSCRIPT is an
             // index: see pinSubscriptParams (formalism 3.10).
+            //
+            // ARROW PARAMETERS (TypeEnv.ArrowObligation): applications of a
+            // parameter the body left open become its per-call obligations;
+            // every other application whose head is known by now is typed.
+            settleDeclArrowApps env funcVarId paramTypes |> Result.bind (fun () ->
             pinSubscriptParams env (funcDecl.Params |> List.map (fun p -> p.Type.IsNone)) typedParams tBody
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
             // The wreath gate again, on the RESOLVED return type. The one at
@@ -16197,7 +16202,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
                 NameSpan = funcDecl.NameSpan
                 Effects = effects
             }
-            Ok (TDeclFunction tf, envWithFunc))))
+            Ok (TDeclFunction tf, envWithFunc)))))
 
     // Close the license scope (error paths included -- `result` has
     // materialized either way by this point).
