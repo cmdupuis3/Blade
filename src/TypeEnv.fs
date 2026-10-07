@@ -235,11 +235,32 @@ type GenericObligation =
 /// typed against it (TypeCheckSupport.dischargeArrowApp). `Result` is the type
 /// the application was given while the head was open; discharging unifies it
 /// with the real one. Nothing ever reaching the head reads it as a function.
+/// `Written` says the application is a node of the program (false for one
+/// re-recorded on a caller's variable at a call): once its head is known to
+/// be an ARRAY, the node is replaced by the subscript dischargeArrowApp typed
+/// (TypeEnv.ArrowSubscripts), so it is guarded and lowered as the subscript
+/// it is.
 type ArrowApplication = {
     Head: TypedExpr
     Args: TypedExpr list
     Result: IRType
     Span: Span
+    Written: bool
+}
+
+/// An ARRAY INSTANCE of a declaration's arrow parameters (ArrowObligation): the
+/// declaration re-checked with those parameters typed as the arrays a call
+/// passes (TypeCheckInfer.checkArrowVariant), so its applications of them are
+/// ordinary subscripts -- typed, checked, guarded and lowered as subscripts --
+/// and a call passing such an array is a call of this declaration instead.
+/// `DeclName` is the emitted declaration's (unique) name; a call names it by
+/// the ORIGIN's name (`Origin`, the original declaration's binder), so
+/// diagnostics read as the source does.
+type ArrowVariant = {
+    DeclName: string
+    VarId: IRId
+    FuncType: IRType
+    Origin: IRId
 }
 
 /// A declaration's ARROW PARAMETER: an unannotated parameter its body applies
@@ -247,10 +268,12 @@ type ArrowApplication = {
 /// the body shaped. The parameter stays a generic variable; each CALL decides
 /// the arrow kind from its argument (TypeCheckSupport.arrowObligationClash) --
 /// an array of rank = the argument count, read element-wise, or a function of
-/// those arguments -- and IR monomorphization emits one body per kind (the
-/// application lowers to a call, and is rewritten to a subscript in an array
-/// instance: IRMono.indexArrayApps). `Head`, `Args` and `Result` are in the
-/// declaration's variables, instantiated per call like its signature.
+/// those arguments. A function (or a still-open argument) keeps this generic
+/// declaration, whose application is a call; an array is handed to an ARRAY
+/// INSTANCE of it (ArrowVariant), checked with the parameter typed as that
+/// array, so the application is a subscript from the start. `Head`, `Args`
+/// and `Result` are in the declaration's variables, instantiated per call like
+/// its signature.
 type ArrowObligation = {
     Head: int
     Args: IRType list
@@ -562,6 +585,33 @@ type TypeEnv = {
     /// (ArrowObligation), judged and typed per call. Keyed by id like
     /// FuncSigVarRange. Shared by reference.
     FuncArrowObligations: System.Collections.Generic.Dictionary<IRId, ArrowObligation list>
+    /// Function BINDER ID (of a declaration with ArrowObligations) -> what its
+    /// array instances are checked from: the SOURCE declaration, the
+    /// environment it was checked in (its own name bound), the parameter types
+    /// already fixed (an array instance's own instances keep its arrays), and
+    /// the ORIGIN binder (the original declaration). Shared by reference.
+    ArrowDeclSources: System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * Map<int, IRType> * IRId>
+    /// The array instances made so far (ArrowVariant), keyed by origin and the
+    /// parameter types fixed. Registered before the instance's body is checked,
+    /// so its recursive calls reach it. Shared by reference.
+    ArrowVariants: System.Collections.Generic.Dictionary<string, ArrowVariant>
+    /// The checked array-instance declarations not yet placed in a module, with
+    /// their origin binder (TypeCheck.checkModule places each after its
+    /// origin). Shared by reference.
+    ArrowVariantDecls: ResizeArray<IRId * TypedDecl>
+    /// Typed CALLS to be REPLACED before zonk (keyed by the node, by
+    /// reference): a call that handed an arrow parameter a value open when it
+    /// was judged, and an array since, by the call of the declaration's array
+    /// instance (TypeCheckSupport.retargetArrowCalls). Consumed by Zonk
+    /// (SubscriptGuardCtx.Retargets), so the replacement is what the guards
+    /// see. Shared by reference.
+    ArrowRetargets: System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>
+    /// ARROW APPLICATIONS whose head turned out an ARRAY, keyed by their HEAD
+    /// node (by reference -- each written application has its own; the
+    /// application node itself may be rebuilt around it after typing): the
+    /// subscript dischargeArrowApp typed, which Zonk puts in the
+    /// application's place (SubscriptGuardCtx.Subscripts). Shared by reference.
+    ArrowSubscripts: System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>
     /// The declaration being checked: its (declared or fresh) parameter and
     /// return types; [] outside a declaration body. The call judgment links a
     /// callee's instantiated copy only to variables REACHABLE from these (the
@@ -679,6 +729,11 @@ let emptyEnv () = {
     CurrentGenericObligations = None
     PendingArrowApps = ResizeArray<ArrowApplication>()
     FuncArrowObligations = System.Collections.Generic.Dictionary<IRId, ArrowObligation list>()
+    ArrowDeclSources = System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * Map<int, IRType> * IRId>()
+    ArrowVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
+    ArrowVariantDecls = ResizeArray<IRId * TypedDecl>()
+    ArrowRetargets = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
+    ArrowSubscripts = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
     CurrentSignature = []
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()
     FuncRepSpec = Blade.DeduceRep.RepSpecTable()

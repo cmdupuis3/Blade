@@ -1,0 +1,15 @@
+// TEST: Cross-module arrow parameter: array and function instances
+// MODULE: Main
+module Main
+from Arrows import first, walk
+
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+let a = first(A)
+let b = first(lambda(i) -> Float64(i) + 5.0)
+let s = walk(A, 2)
+let t = walk([1.0, 2.0], 1)
+// EXPECT: a = 2
+// EXPECT: b = 6
+// EXPECT: s = 6
+// EXPECT: t = 3

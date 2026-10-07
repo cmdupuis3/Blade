@@ -15617,6 +15617,15 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         Ok (TDeclImport (qname, style), env')
 
 and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
+    checkFunctionDeclWith Map.empty (fun _ _ -> ()) env funcDecl
+
+/// checkFunctionDecl, with some parameters' types FIXED (`fixedParams`,
+/// position -> type) -- an ARRAY INSTANCE of an arrow-parameter declaration
+/// (TypeEnv.ArrowVariant, checkArrowVariant) -- and `onBound` told the binder
+/// id and function type once they exist, before the body is checked (so the
+/// instance is reachable from its own recursive calls).
+and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRType -> unit)
+                          (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
     // Fresh type variable scope for this function's type annotations.
     let savedScope = env.Subst.PushTypeVarScope()
     // Every inference variable minted from here on is THIS declaration's
@@ -15636,7 +15645,36 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     let retType = match funcDecl.ReturnType with
                   | Some t -> lowerTypeExpr env t
                   | None -> env.Subst.Fresh()
-    if (paramTypes |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior retType then
+    // A FIXED parameter meets its type. The caller's generic variables in it
+    // are re-minted as this declaration's own (generic, minted after
+    // sigVarLo), so the instance is generic in them exactly as a `T^k`
+    // parameter is.
+    let fixedErr =
+        fixedParams |> Map.toList |> List.tryPick (fun (i, t) ->
+            if i >= paramTypes.Length then None
+            else
+                let t = env.Subst.Resolve t
+                let mapping =
+                    freeInferVars env.Subst t |> Set.toList
+                    |> List.filter env.Subst.IsPolymorphicId
+                    |> List.map (fun v ->
+                        let f = env.Subst.Fresh()
+                        (match f with
+                         | IRTInfer fid ->
+                             env.Subst.CopyArityConstraint(v, fid)
+                             env.Subst.CopyRankLowerBound(v, fid)
+                             env.Subst.CopyLiteralDefault(v, fid)
+                             env.Subst.MarkPolymorphic fid
+                         | _ -> ())
+                        (v, f))
+                    |> Map.ofList
+                match unify env.Subst paramTypes.[i] (substInferVars mapping t) with
+                | Ok () -> None
+                | Error e -> Some e)
+    if fixedErr.IsSome then
+        env.Subst.PopTypeVarScope(savedScope)
+        Error fixedErr.Value
+    elif (paramTypes |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior retType then
         Error (RaggedIdxNeedsPrior funcDecl.Name)
     elif (paramTypes |> List.exists irTypeHasBadDistOrder) || irTypeHasBadDistOrder retType then
         Error (DistOrderCompileTime funcDecl.Name)
@@ -15720,6 +15758,7 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
     // Open-ended while the body is checked (a recursive call instantiates
     // whatever the declaration has minted so far); closed below.
     env.FuncSigVarRange.[funcVarId] <- (sigVarLo, System.Int32.MaxValue)
+    onBound funcVarId funcType
     // ...and record the binder as a named function, so a lambda that calls it
     // does not drag it onto its capture list (see DeclaredFuncIds).
     env.DeclaredFuncIds.Add funcVarId |> ignore
@@ -16006,6 +16045,12 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
             // parameter the body left open become its per-call obligations;
             // every other application whose head is known by now is typed.
             settleDeclArrowApps env funcVarId paramTypes |> Result.bind (fun () ->
+            // ...and its ARRAY INSTANCES are checked from this source, in
+            // this environment (checkArrowVariant); an instance's own entry
+            // is re-pointed at its origin there.
+            env.ArrowDeclSources.Remove funcVarId |> ignore
+            if env.FuncArrowObligations.ContainsKey funcVarId then
+                env.ArrowDeclSources.[funcVarId] <- (funcDecl, envWithFunc, fixedParams, funcVarId)
             pinSubscriptParams env (funcDecl.Params |> List.map (fun p -> p.Type.IsNone)) typedParams tBody
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->
             // The wreath gate again, on the RESOLVED return type. The one at
@@ -16396,6 +16441,68 @@ and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<Typed
 
     env.Subst.PopTypeVarScope(savedScope)
     result
+
+/// THE ARRAY INSTANCE of an arrow-parameter declaration (TypeEnv.ArrowVariant;
+/// the section note above TypeCheckSupport.arrowVariantHook): the declaration
+/// `fid` (or the instance `fid` is, whose fixed parameters it keeps) checked
+/// again from its source, in the environment it was checked in, with the
+/// parameters in `arrays` FIXED to the arrays a call passes (an unknown axis
+/// and the caller's generic variables re-minted as the instance's own).
+/// Made once per key (TypeCheckSupport.arrowInstanceKey) and registered before
+/// its body is checked, so its recursive calls reach it. Its warnings were the
+/// source's to give (the declaration's own check gave them); a refusal is
+/// returned. The checked declaration waits in TypeEnv.ArrowVariantDecls for
+/// TypeCheck.checkModule to place it after its origin. Returns the head that
+/// names it -- spelled with the origin's name, so diagnostics read as the
+/// source does.
+and checkArrowVariant (env: TypeEnv) (fid: IRId) (arrays: Map<int, IRType>) : TypeResult<TypedExpr> =
+    match env.ArrowDeclSources.TryGetValue fid with
+    | false, _ -> Error (Other "internal: an arrow-parameter declaration's array instance was asked for, but its source was not recorded")
+    | true, (srcDecl, srcEnv, baseFixed, origin) ->
+    let fixedTys =
+        arrays |> Map.fold (fun acc i t ->
+            Map.add i (arrowInstanceParamType (fun () -> env.Builder.FreshId()) (env.Subst.Resolve t)) acc) baseFixed
+    let key = arrowInstanceKey env.Subst origin fixedTys
+    let head (v: ArrowVariant) = mkTyped (TExprVar (srcDecl.Name, v.VarId, None)) v.FuncType
+    match env.ArrowVariants.TryGetValue key with
+    | true, v -> Ok (head v)
+    | _ ->
+    let n = (env.ArrowVariants.Values |> Seq.filter (fun v -> v.Origin = origin) |> Seq.length) + 1
+    let declName = $"{srcDecl.Name}__arrow{n}"
+    // The caller's error location: the instance's check stamps spans inside
+    // the source body, and a refusal of the CALL (re-judged against the
+    // instance) must point where it would against any declaration.
+    let exprSpan0 = currentExprSpan ()
+    let stmtSpan0 = currentStmtSpan ()
+    let warnings0 = env.Warnings.Count
+    let warningLog0 = Blade.TypeEnv.WarningLog.get ()
+    let pins0 = Blade.TypeCheckIde.PinSuggestions.get ()
+    let facts0 = Blade.TypeEnv.DeducedFacts.get ()
+    let checkedR =
+        checkFunctionDeclWith fixedTys
+            (fun vid fty ->
+                env.ArrowVariants.[key] <- { DeclName = declName; VarId = vid; FuncType = fty; Origin = origin })
+            srcEnv { srcDecl with Name = declName }
+    env.Warnings.RemoveRange(warnings0, env.Warnings.Count - warnings0)
+    Blade.TypeEnv.WarningLog.reset ()
+    for d in warningLog0 do Blade.TypeEnv.WarningLog.add d
+    Blade.TypeCheckIde.PinSuggestions.reset ()
+    for (m, sp) in pins0 do Blade.TypeCheckIde.PinSuggestions.add m sp
+    Blade.TypeEnv.DeducedFacts.reset ()
+    for (f, sp) in facts0 do Blade.TypeEnv.DeducedFacts.add f sp
+    match checkedR with
+    | Error e ->
+        env.ArrowVariants.Remove key |> ignore
+        Error e
+    | Ok (decl, _) ->
+        setCurrentStmtSpan stmtSpan0
+        setCurrentExprSpan exprSpan0
+        let v = env.ArrowVariants.[key]
+        (match env.ArrowDeclSources.TryGetValue v.VarId with
+         | true, _ -> env.ArrowDeclSources.[v.VarId] <- (srcDecl, srcEnv, fixedTys, origin)
+         | _ -> ())
+        env.ArrowVariantDecls.Add((origin, decl))
+        Ok (head v)
 
 /// Where-clause predicate contract: a static function called from a
 /// struct/mutual where-conjunct must have fully annotated params + return.

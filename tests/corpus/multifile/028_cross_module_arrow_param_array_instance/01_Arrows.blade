@@ -1,0 +1,9 @@
+// TEST: Cross-module arrow parameter: array and function instances
+// MODULE: Arrows
+module Arrows
+
+// `c` is an arrow parameter (formalism 4.3): each call decides array or
+// function. An array call is a call of an ARRAY INSTANCE of the declaration,
+// made where the call is -- here, in the importing module.
+function first(c) = c(0) + 1.0
+function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)

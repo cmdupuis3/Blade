@@ -251,6 +251,10 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     // `typeCheck` resets on entry too; this covers module-to-module inside one
     // compilation, and callers that reach checkProgram by another route.
     resetCurrentStmtSpan ()
+    // The checker of arrow parameters' ARRAY INSTANCES, which the call
+    // judgment reaches through a forward reference (it re-checks a
+    // declaration). Installed here, at the one entry every check passes.
+    arrowVariantHook.Value <- checkArrowVariant
     // (The callee-fact tables -- defaults, where-conjuncts, `mut` positions,
     // co-iteration, units -- are keyed by binder id, program-unique, and
     // shared by reference across the program's modules: a module's entries
@@ -456,7 +460,62 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
         for (span, err) in arrowErrors do
             resetCurrentStmtSpan ()
             errors <- locateError span currentEnv err :: errors
-    let typedModule = { Name = Some modul.Name; Decls = List.rev decls }
+    // ARRAY INSTANCES of arrow parameters (TypeEnv.ArrowVariant). A call whose
+    // arrow argument was still open when it was judged and is an array now is
+    // re-targeted at its declaration's array instance (retargetArrowCalls),
+    // over this module's declarations and every instance made meanwhile --
+    // whose own bodies may hold such calls. Then each instance is placed right
+    // after its ORIGIN declaration (before every use of it, since a use
+    // follows the origin), or -- an origin of an earlier module -- after this
+    // module's imports.
+    let decls =
+        let ordered = List.rev decls
+        if List.isEmpty errors then
+            let walked = System.Collections.Generic.HashSet<IRId>(HashIdentity.Structural)
+            let found = ResizeArray<Span * TypeError>()
+            let rec settle (roots: TypedExpr list) (fuel: int) =
+                found.AddRange (retargetArrowCalls currentEnv roots)
+                let fresh =
+                    currentEnv.ArrowVariantDecls
+                    |> Seq.choose (fun (_, d) ->
+                        match d with
+                        | TDeclFunction f when walked.Add f.FuncId -> Some f.Body
+                        | _ -> None)
+                    |> List.ofSeq
+                if not fresh.IsEmpty && fuel > 0 then settle fresh (fuel - 1)
+            // Every instance made so far is walked from the module's
+            // declarations or below; one made by the walk is walked in turn.
+            let preexisting =
+                currentEnv.ArrowVariantDecls
+                |> Seq.choose (fun (_, d) ->
+                    match d with
+                    | TDeclFunction f when walked.Add f.FuncId -> Some f.Body
+                    | _ -> None)
+                |> List.ofSeq
+            settle ((ordered |> List.collect declExprs) @ preexisting) 64
+            for (span, err) in found do
+                resetCurrentStmtSpan ()
+                errors <- locateError span currentEnv err :: errors
+        let variants = List.ofSeq currentEnv.ArrowVariantDecls
+        currentEnv.ArrowVariantDecls.Clear()
+        if variants.IsEmpty then ordered
+        else
+            let ofOrigin (fid: IRId) = variants |> List.filter (fun (o, _) -> o = fid) |> List.map snd
+            let here =
+                ordered |> List.choose (fun d -> match d with TDeclFunction f -> Some f.FuncId | _ -> None) |> Set.ofList
+            let foreign = variants |> List.filter (fun (o, _) -> not (here.Contains o)) |> List.map snd
+            let placed =
+                ordered |> List.collect (fun d ->
+                    match d with
+                    | TDeclFunction f -> d :: ofOrigin f.FuncId
+                    | _ -> [ d ])
+            let lastImport = placed |> List.tryFindIndexBack (fun d -> match d with TDeclImport _ -> true | _ -> false)
+            match lastImport with
+            | Some k ->
+                let before, after = List.splitAt (k + 1) placed
+                before @ foreign @ after
+            | None -> foreign @ placed
+    let typedModule = { Name = Some modul.Name; Decls = decls }
     // Zonk: resolve all IRTInfer through the substitution, default unsolved to Float64
     // The zonk walk also retypes index POSITIONS and guards unproven
     // subscripts into named index types (Zonk.fs, SUBSCRIPT POSITIONS AND
@@ -468,6 +527,8 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
                    Positions = System.Collections.Generic.HashSet<IRId>()
                    DataVars = System.Collections.Generic.HashSet<IRId>()
                    RangeFedParams = rangeFedLambdaParams typedModule
+                   Retargets = currentEnv.ArrowRetargets
+                   Subscripts = currentEnv.ArrowSubscripts
                    EnumLabels = fun tag ->
                        match Map.tryFind tag currentEnv.TypeDefs with
                        | Some (TDIEnumIdx (_, _, values, _)) when EnumValue.allString values ->

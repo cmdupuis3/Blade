@@ -1,0 +1,44 @@
+// TEST: An arrow parameter's array instance reads like a declared array parameter
+// ============================================================================
+// The in-range half of functions/251-253. A call handing an arrow parameter an
+// array is a call of the declaration's ARRAY INSTANCE, where the application is
+// an ordinary subscript: a `Nat<L>` value (a variable of that type, a
+// `range<L>` iteration index) is proven and read unguarded, a literal is
+// judged at compile time, and an Int64 position is checked. The function
+// instance is untouched -- the same declaration, called with a function, is
+// still a call of it.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+let v = [10.0, 20.0, 30.0, 40.0]
+
+function pick(c, i) = c(i)
+let l: Nat<L> = 2
+let b = pick(A, l)
+// EXPECT: b = 3
+let tot = reduce(method_for(range<L>) <@> lambda(j) -> pick(A, j), (+))
+// EXPECT: tot = 6
+let p = pick(v, 3)
+// EXPECT: p = 40
+let f = pick(lambda(k) -> Float64(k) * 3.0, 2)
+// EXPECT: f = 6
+
+function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)
+let s = walk(A, 2)
+// EXPECT: s = 6
+let sv = walk(v, 3)
+// EXPECT: sv = 100
+let sf = walk(lambda(i) -> Float64(i), 3)
+// EXPECT: sf = 6
+
+// An argument still open where the call is written (a lambda's parameter)
+// is an array once the lambda is called: the call is re-targeted then.
+let g = lambda(c) -> walk(c, 2) * 10.0
+let gw = g(A)
+// EXPECT: gw = 60
+
+// An instance's own instances: the generic `twice` passes its parameter on.
+function twice(c) = walk(c, 1) * 2.0
+let tw = twice(A)
+// EXPECT: tw = 6
+let tf = twice(lambda(i) -> Float64(i) + 1.0)
+// EXPECT: tf = 6

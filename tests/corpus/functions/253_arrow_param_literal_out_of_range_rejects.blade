@@ -1,0 +1,10 @@
+// TEST: A literal out of an arrow parameter's named axis is refused at the call (rejects)
+// ERROR: BL4003 @ 9:17
+// ============================================================================
+// `pick(A, 5)` with A over a 3-element L: the literal subscript the array
+// instance receives is judged at compile time against L's extent, exactly as
+// it is for a declaration whose parameter is spelled `Array<Float64 like L>`.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function pick(c, i) = c(i)
+let b = pick(A, 5)

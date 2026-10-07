@@ -1,0 +1,12 @@
+// TEST: A call whose arrow argument becomes an array later is checked too (aborts)
+// ============================================================================
+// functions/251 through a lambda: `walk(c, 4)` is judged while the lambda's
+// `c` is still open, so the call cannot pick the array instance there. The
+// lambda's call `g(A)` makes `c` an L array, and the module-end pass then
+// re-targets `walk(c, 4)` at walk's array instance, whose `c(n)` is guarded.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)
+let g = lambda(c) -> walk(c, 4) * 10.0
+let gw = g(A)
+// ABORT: BL8006

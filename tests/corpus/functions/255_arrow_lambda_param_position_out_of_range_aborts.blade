@@ -1,0 +1,15 @@
+// TEST: A lambda's applied parameter read past its named axis aborts (aborts)
+// WARN: BL4003
+// ============================================================================
+// functions/251 for a let-bound lambda. `c(n)` was typed while `c` was open,
+// so it stayed an APPLICATION node after the call made `c` an array: Lowering
+// read it as a subscript, but zonk -- which guards subscripts -- had seen an
+// application, and `u(A, 4)` read past A. The application is now replaced by
+// the subscript it was typed as once the array reached it, and guarded like
+// one: an Int64 position into L (the BL4003 advice is the one any untagged
+// subscript into a named axis gets).
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+let u = lambda(c, n: Int64) -> c(n) * 2.0
+let w = u(A, 4)
+// ABORT: BL8006

@@ -1,0 +1,16 @@
+// TEST: An arrow parameter's array instance read past its named axis aborts (aborts)
+// ============================================================================
+// `walk(c, n)` applies its unannotated `c` to an Int64 position. Handed a
+// `Float64 like L` array, `c(n)` read A's memory past its 3 cells and summed
+// garbage: the application was typed as a CALL of the generic parameter and
+// rewritten into a subscript only during IR monomorphization -- after zonk had
+// placed every subscript guard -- so this subscript into a NAMED index type
+// was checked nowhere. The call now targets the declaration's ARRAY INSTANCE,
+// checked with `c` typed as the array, where `c(n)` is an ordinary subscript:
+// an Int64 position into L is unproven and guarded (formalism 3.10), in both
+// lanes.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)
+let s = walk(A, 5)
+// ABORT: BL8006

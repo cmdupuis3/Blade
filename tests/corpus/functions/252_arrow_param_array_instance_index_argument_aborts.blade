@@ -1,0 +1,13 @@
+// TEST: An out-of-range position passed as an arrow parameter's subscript aborts (aborts)
+// ============================================================================
+// `pick(c, i) = c(i)` handed a `Float64 like L` array and a run-time Int64 7
+// read past A. In the array instance `i` is the subscript of an L axis, so it
+// is pinned to `Nat<L>` like any unannotated parameter a body uses as a
+// subscript (formalism 3.10), and the call converts the Int64 to it with the
+// checked conversion: BL8006, before the read.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function pick(c, i) = c(i)
+let k = 7
+let b = pick(A, k)
+// ABORT: BL8006

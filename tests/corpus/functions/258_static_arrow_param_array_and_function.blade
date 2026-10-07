@@ -1,0 +1,11 @@
+// TEST: A static function's applied parameter takes an array or a function at run time
+// ============================================================================
+// A `static function` is also emitted for run-time calls, and its arrow
+// parameter is decided per call like any declaration's: an array call is a
+// call of its array instance, a function call a call of it.
+static function first(c) = c(0) + 1.0
+let v = [1.0, 2.0]
+let a = first(v)
+// EXPECT: a = 2
+let b = first(lambda(i) -> Float64(i) + 3.0)
+// EXPECT: b = 4

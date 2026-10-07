@@ -770,14 +770,20 @@ function is decided by what is passed to it. An application to integer-valued
 arguments admits both readings -- an array whose rank is the argument count,
 read element-wise, or a function of integers -- and an application to any
 other argument (`f(2.0)`) only the function. A `function` declaration's such
-parameter is generic: each call decides, and one body is emitted per kind (a
-subscript for an array, a call for a function). A top-level `let` of a lambda
-that applies such a parameter IS that declaration when nothing can tell them
-apart -- the program only ever APPLIES it, and it has no `mut`, annotation,
-`where` clause or parameter defaults, and captures no binding that is ever
-assigned -- and is generic likewise. Any other lambda (one used as a VALUE: a
-kernel, an argument, an alias) is one body, so its first use decides for every
-later one. Either way the body reads
+parameter is generic: each call decides. A call passing a function calls the
+declaration, whose application is a call; a call passing an array calls an
+ARRAY INSTANCE of it -- the declaration checked with the parameter typed as
+that array -- whose application is an ordinary subscript, checked like any
+other (section 3.10): an unproven position into a named axis is guarded
+(BL8006), a literal is judged against a known extent, and an unannotated
+parameter used as the subscript is pinned to the axis's index type. A
+top-level `let` of a lambda that applies such a parameter IS that declaration
+when nothing can tell them apart -- the program only ever APPLIES it, and it
+has no `mut`, annotation, `where` clause or parameter defaults, and captures no
+binding that is ever assigned -- and is generic likewise. Any other lambda (one
+used as a VALUE: a kernel, an argument, an alias) is one body, so its first use
+decides for every later one; an array makes its application a subscript,
+checked the same way. Either way the body reads
 ONE value from the application: a higher-rank array (a partial read) or a
 function returning an array is refused at the argument, as is a scalar, or a
 function whose parameter is not an integer where the body passes one. An

@@ -579,17 +579,16 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
         List.ofSeq found
     let pass (b: Map<int, IRType>) =
         let mutable acc = b
-        // AN ARROW PARAMETER'S APPLICATION (TypeEnv.ArrowObligation): lowered as
-        // a call while the parameter was generic, its result typed by a
-        // variable no argument mentions. Once the parameter's instance is known
-        // the result is: an array's element (the body reads one element), or a
-        // function's return.
+        // AN ARROW PARAMETER'S APPLICATION (TypeEnv.ArrowObligation): a call
+        // in the generic declaration, its result typed by a variable no
+        // argument mentions. Once the parameter's instance (a function -- an
+        // array is handed to the declaration's array instance, TypeEnv.
+        // ArrowVariant) is known, the result is the function's return.
         let learnArrowApp (e: IRExpr) =
             match e with
             | IRApp (IRVar (_, headTy), args, retTy) when not (concrete retTy) ->
                 let res =
                     match headTy with
-                    | ArrayElem a when a.IndexTypes.Length = args.Length -> Some a.ElemType
                     | FuncElem (ps, ret) when ps.Length = args.Length -> Some ret
                     | _ -> None
                 match res with
@@ -626,17 +625,22 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
         if fuel <= 0 || b'.Count = b.Count then b' else fix b' (fuel - 1)
     fix bindings 8
 
-/// AN ARROW PARAMETER'S APPLICATION in an ARRAY instance is a subscript.
-/// TypeCheck leaves an applied parameter generic (TypeEnv.ArrowObligation) and
-/// Lowering -- which picks index vs call from the head's type -- emitted a call
-/// while that type was a variable; once a specialization substitutes an array
-/// for it, the application reads an element (dimensional currying: the array
-/// IS the function of its indices). A function instance keeps the call.
-let internal indexArrayApps (e: IRExpr) : IRExpr =
-    mapIRExpr (fun e ->
+/// AN ARROW PARAMETER'S APPLICATION never meets an array here. TypeCheck leaves
+/// an applied parameter generic (TypeEnv.ArrowObligation), and its application
+/// is a CALL in the generic declaration; a call that hands it an array is a
+/// call of the declaration's ARRAY INSTANCE instead (TypeEnv.ArrowVariant),
+/// checked with the parameter typed as that array, so the application there
+/// is a subscript from the start -- guarded, judged and lowered as one. A
+/// specialization substituting an array for a still-applied variable would
+/// be a call of an array (and an unchecked read if it were rewritten into a
+/// subscript this late): refused as the internal error it is.
+let internal refuseArrayApps (funcName: string) (e: IRExpr) : unit =
+    iterIRExpr (fun e ->
         match e with
-        | IRApp (IRVar (_, ArrayElem _) as head, args, _) -> IRIndex (head, args, None)
-        | _ -> e) e
+        | IRApp (IRVar (_, ArrayElem _), _, _) ->
+            raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.ice (
+                $"'{funcName}': a specialization applies an array as a function -- an arrow parameter's array instance was not made at type checking (TypeEnv.ArrowVariant)")))
+        | _ -> ()) e
 
 let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (builder: IRBuilder) (callables: Map<IRId, IRCallable>) : IRFuncDef * IRCallable list =
     // The spec is KEYED and NAMED by the call site's bindings; it is
@@ -652,7 +656,8 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
         List.zip func.Params newParams
         |> List.map (fun (oldP, newP) -> (oldP.VarId, newP.VarId))
         |> Map.ofList
-    let bodyWithTypes = substTypeInIRExpr bindings func.Body |> indexArrayApps
+    let bodyWithTypes = substTypeInIRExpr bindings func.Body
+    refuseArrayApps func.Name bodyWithTypes
 
     // Lifted lambdas capturing HM-polymorphic params must be cloned-and-
     // specialized alongside their enclosing function: the lambda lives in
@@ -798,10 +803,10 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
                          m |> Map.fold (fun a k v -> Map.add k v a) acc
                      let innerRemap = addAll enclosingRemap paramRemap
                      let combinedRemap = addAll innerRemap varIdRemap
+                     let substBody = substTypeInIRExpr bindings lam.Body
+                     refuseArrayApps lam.Name substBody
                      let newBody =
-                         lam.Body
-                         |> substTypeInIRExpr bindings
-                         |> indexArrayApps
+                         substBody
                          |> mapIRExpr (fun e2 ->
                              match e2 with
                              | IRVar (id2, ty) when combinedRemap.ContainsKey id2 ->

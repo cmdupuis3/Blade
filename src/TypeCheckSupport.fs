@@ -3151,7 +3151,8 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                     { Head = synth "__arrow" headInst
                       Args = argInsts |> List.map (synth "__arrow_arg")
                       Result = resInst
-                      Span = span }
+                      Span = span
+                      Written = false }
                 None
             | ArrayElem a ->
                 let coords =
@@ -3271,6 +3272,115 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                                                                 ppIRType (subst.Resolve headInst)))
                                 | _ -> None
             | t -> refuse t)
+    | _ -> None
+
+// ---------------------------------------------------------------------------
+// ARRAY INSTANCES of arrow parameters (TypeEnv.ArrowVariant)
+//
+// arrowObligationClash judges a call against the GENERIC declaration, whose
+// application of an arrow parameter is a call. When the call hands that
+// parameter an ARRAY, the call is re-targeted at an ARRAY INSTANCE: the same
+// declaration checked again with the parameter typed as that array, so the
+// application is an ordinary subscript in it -- typed as one (pinSubscriptParams
+// pins an index parameter to the array's index type), guarded as one by zonk
+// (an unproven position into a named axis, a literal past an unknown extent:
+// BL8006), judged as one by the post-zonk sweeps, lowered as one. Nothing is
+// rewritten after zonk. A function, or a still-open argument, keeps the generic
+// declaration.
+// ---------------------------------------------------------------------------
+
+/// The checker of array instances (TypeCheckInfer.checkArrowVariant): given the
+/// callee binder and the parameter types a call fixes, the head naming the
+/// instance. A forward reference -- an instance is a declaration re-checked,
+/// which the checker's rec-chain owns -- installed by TypeCheck.checkModule
+/// before any declaration is checked.
+let internal arrowVariantHook : (TypeEnv -> IRId -> Map<int, IRType> -> TypeResult<TypedExpr>) ref =
+    ref (fun _ _ _ -> Error (Other "internal: the arrow-instance checker is not installed (TypeCheck.checkModule installs it)"))
+
+/// An array argument's type as an ARRAY INSTANCE's parameter type: the
+/// argument's own type -- its element, index names and extents, so a literal
+/// subscript is judged at compile time against a known extent exactly as in
+/// the IR specialization it replaces -- except that an UNKNOWN axis (an
+/// abstract annotation's, mkAbstractAxisExtent) is a fresh unknown of the
+/// instance's own: the caller's axis identity names the CALLER's axis, and
+/// one instance serves every caller. `identity` mints the fresh identities.
+let rec internal arrowInstanceParamType (identity: unit -> int) (t: IRType) : IRType =
+    match t with
+    | IRTUnitAnnotated (inner, u) -> IRTUnitAnnotated (arrowInstanceParamType identity inner, u)
+    | ArrayElem at ->
+        let ixs =
+            at.IndexTypes |> List.map (fun ix ->
+                if isAbstractAxisExtent ix.Extent then { ix with Extent = mkAbstractAxisExtent (identity ()) }
+                else ix)
+        mkArrayLike { at with IndexTypes = ixs }
+    | t -> t
+
+/// The key an array instance is cached under (TypeEnv.ArrowVariants): the
+/// origin binder and each fixed parameter's type, with every unknown axis and
+/// every generic variable of the caller's spelled alike -- the instance is
+/// generic in them (checkArrowVariant re-mints them as its own).
+let internal arrowInstanceKey (subst: Subst) (origin: IRId) (fixedTys: Map<int, IRType>) : string =
+    let norm (t: IRType) =
+        let t = subst.Resolve t
+        let mapping =
+            freeInferVars subst t |> Set.toList
+            |> List.choose (fun v -> if subst.IsPolymorphicId v then Some (v, IRTInfer -1) else None)
+            |> Map.ofList
+        // An unnamed axis's own identity names the ARGUMENT's axis, not a
+        // shape: two arrays of one shape share an instance.
+        let rec anonAxes (t: IRType) =
+            match t with
+            | IRTUnitAnnotated (inner, u) -> IRTUnitAnnotated (anonAxes inner, u)
+            | ArrayElem at ->
+                mkArrayLike { at with
+                                IndexTypes = at.IndexTypes |> List.map (fun ix -> if ix.Tag.IsNone then { ix with Id = 0 } else ix) }
+            | t -> t
+        substInferVars mapping t |> arrowInstanceParamType (fun () -> 0) |> anonAxes
+    let parts = fixedTys |> Map.toList |> List.map (fun (i, t) -> $"{i}=%A{norm t}")
+    $"""{origin}|{String.concat ";" parts}"""
+
+/// The ARRAY INSTANCE a call needs: the callee's arrow parameters
+/// (TypeEnv.FuncArrowObligations) this call hands an ARRAY, each with its
+/// argument's type. None when there is none, or -- with `settled` -- when such
+/// an argument still holds a variable that is neither the caller's generic one
+/// nor an open literal's: what binds it later decides the instance, and the
+/// module-end pass (TypeCheck.checkModule) re-targets the call then.
+let internal arrowArrayArgs (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) (settled: bool)
+                            : (IRId * Map<int, IRType>) option =
+    match calleeDeclId env tFunc with
+    | None -> None
+    | Some fid ->
+    match env.FuncArrowObligations.TryGetValue fid with
+    | true, obs when not obs.IsEmpty && env.ArrowDeclSources.ContainsKey fid ->
+        let subst = env.Subst
+        let rootOf (t: IRType) =
+            match subst.Resolve t with
+            | IRTInfer r -> Some r
+            | _ -> None
+        let paramTys =
+            match IR.stripUnits (subst.Resolve tFunc.Type) with
+            | FuncElem (ps, _) -> ps
+            | _ -> []
+        let positions =
+            obs
+            |> List.choose (fun ob ->
+                let h = rootOf (IRTInfer ob.Head)
+                paramTys |> List.tryFindIndex (fun p -> h.IsSome && rootOf p = h))
+            |> List.distinct
+            |> List.filter (fun i -> i < tArgs.Length)
+        let arrays =
+            positions |> List.choose (fun i ->
+                let t = subst.Resolve (List.item i tArgs).Type
+                match IR.stripUnits t with
+                | ArrayElem _ -> Some (i, t)
+                | _ -> None)
+        let unsettled =
+            settled
+            && arrays |> List.exists (fun (_, t) ->
+                freeInferVars subst t
+                |> Set.exists (fun v -> not (subst.IsPolymorphicId v) && (subst.GetLiteralDefault v).IsNone))
+        if arrays.IsEmpty || unsettled then None
+        else Some (fid, Map.ofList arrays)
     | _ -> None
 
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
@@ -4384,6 +4494,34 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     let extentsDisagree =
                         appArgPairs pCopies (tArgs |> List.map (_.Type))
                         |> List.exists (fun (_, pTy, aTy) -> (staticExtentClash env.Subst pTy aTy).IsSome)
+                    // An ARROW PARAMETER of the callee still OPEN at this call
+                    // (the caller's own parameter: arrowObligationClash
+                    // re-recorded the application on it, so the caller's
+                    // parameter becomes an arrow parameter in turn). The
+                    // call's result is the INSTANCE's -- the copy, which the
+                    // re-recorded application's result is part of and which
+                    // the caller's settlement makes the caller's generic
+                    // variable. The declared return would tie the CALLER's
+                    // result to the callee's own signature variable, which
+                    // every instance of the caller then binds (a second
+                    // element type was refused, or left unresolved).
+                    let arrowOpen =
+                        match calleeDeclId env tFunc with
+                        | Some fid ->
+                            (match env.FuncArrowObligations.TryGetValue fid with
+                             | true, obs ->
+                                 obs |> List.exists (fun ob ->
+                                     match env.Subst.Resolve (IRTInfer ob.Head) with
+                                     | IRTInfer h ->
+                                         (match Map.tryFind h copyMap with
+                                          | Some c ->
+                                              (match env.Subst.Resolve (IRTInfer c) with
+                                               | IRTInfer _ -> true
+                                               | _ -> false)
+                                          | None -> false)
+                                     | _ -> false)
+                             | _ -> false)
+                        | None -> false
                     // The call's RESULT is the instantiated return when the
                     // arguments determined it completely (no copy left open);
                     // otherwise the declared return, as before -- a return the
@@ -4393,9 +4531,11 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     // body the declaration is still being inferred, and a
                     // concrete result there would flow back into its own
                     // signature through the body/return unify.
+                    // (An arrow parameter still open: the instance's, above.)
                     let instRet =
                         match clash with
                         | Some _ -> None
+                        | None when closedDecl && arrowOpen -> Some (env.Subst.Resolve retCopy)
                         | None when not closedDecl && not (Set.isEmpty copyIds) -> None
                         // ...so the result keeps the declared (symbolic)
                         // return rather than claim the first argument's
@@ -4624,7 +4764,15 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     | _ -> paramTys.Length
                 Error (ArityMismatch (expectedMin, tArgs.Length))
             else
-                Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+                // An ARRAY handed to an arrow parameter: the call is the call
+                // of the declaration's ARRAY INSTANCE (see the section note
+                // above arrowVariantHook), judged as an ordinary call of it.
+                match arrowArrayArgs env tFunc tArgs true with
+                | None -> Ok (mkTyped (TExprApp (tFunc, tArgs)) retTy)
+                | Some (fid, arrays) ->
+                    arrowVariantHook.Value env fid arrays
+                    |> Result.bind (fun head -> dispatchAppOrIndex env { head with Span = tFunc.Span } tArgs)
+                    |> Result.bind (fun t -> unify env.Subst t.Type retTy |> Result.map (fun () -> t))
     // SUBSCRIPTING A `T^k` PARAMETER the body has not yet given a shape --
     // `function first(m: T^1) -> T^0 = m(0)`. The caret is an exact rank
     // claim, but it lives in the substitution (an arity-k var), so the head
@@ -4659,11 +4807,13 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
     //   * A parameter of the DECLARATION being checked, applied to index-like
     //     arguments (an integer, an index value, `_`, an open var): it becomes
     //     an ARROW PARAMETER -- a generic variable, like `T`, whose kind each
-    //     call decides (arrowObligationClash), and IR monomorphization emits
-    //     one body per kind: a subscript for an array, a call for a function.
-    //     Its result is generic too, and so is an open parameter used as the
-    //     argument (`pick(c, i) = c(i)`: an Int64 at an array instance, the
-    //     function's slot type at a function instance).
+    //     call decides (arrowObligationClash). A function keeps this
+    //     declaration, whose application is a call; an array is handed to
+    //     its ARRAY INSTANCE (arrowVariantHook), checked with the parameter
+    //     typed as that array, where the application is a subscript. Its
+    //     result is generic too, and so is an open parameter used as the
+    //     argument (`pick(c, i) = c(i)`: the array's index type at an array
+    //     instance, the function's slot type at a function instance).
     //   * The same parameter applied to an argument that cannot be an index (a
     //     Float, a tuple, an array, a function) can only be a function: it is
     //     the function from the argument types to a fresh result, at once.
@@ -4701,7 +4851,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         // A subscript if nothing else pins it (formalism 3.10).
                         env.Subst.MarkIndexDefault aid
                     | _ -> ()
-            env.PendingArrowApps.Add { Head = tFunc; Args = tArgs; Result = r; Span = tFunc.Span }
+            env.PendingArrowApps.Add { Head = tFunc; Args = tArgs; Result = r; Span = tFunc.Span; Written = true }
             Ok (mkTyped (TExprApp (tFunc, tArgs)) r)
     | _ ->
         match nonCallableHead env.Subst tFunc with
@@ -4729,7 +4879,23 @@ and internal dischargeArrowApp (env: TypeEnv) (app: ArrowApplication) : TypeResu
         Error (ArgTypeMismatch (j + 1, "the applied function", ppIRType slot,
                                 "an integer index (an applied parameter read with an integer index is an array, "
                                 + "or a function OF AN INTEGER: a call never converts an index to another type)"))
-    | ArrayElem _ | IRTArrow _ ->
+    | ArrayElem _ ->
+        // An ARRAY: the application IS a subscript (dimensional currying), and
+        // the application the body holds is replaced by the subscript typed
+        // here (TypeEnv.ArrowSubscripts) -- so zonk guards it, the post-zonk
+        // subscript judgment checks it, and Lowering lowers it, exactly like a
+        // subscript the program spelled against a known array.
+        dispatchAppOrIndex env app.Head app.Args
+        |> Result.bind (fun t ->
+            // (Not when the typed form is still an application of this head
+            // -- nothing to put in its place.)
+            let selfApp =
+                match t.Kind with
+                | TExprApp (h, _) -> obj.ReferenceEquals(h, app.Head)
+                | _ -> false
+            if app.Written && not selfApp then env.ArrowSubscripts.[app.Head] <- t
+            unify env.Subst t.Type app.Result)
+    | IRTArrow _ ->
         dispatchAppOrIndex env app.Head app.Args
         |> Result.bind (fun t -> unify env.Subst t.Type app.Result)
     // A scalar, a tuple, a user index value: nothing to apply. (Said here
@@ -4795,6 +4961,40 @@ let internal settleDeclArrowApps (env: TypeEnv) (funcVarId: IRId) (paramTypes: I
     | (span, e) :: _ ->
         setCurrentExprSpan span
         Error e
+
+/// THE MODULE-END PASS of array instances (the section note above
+/// arrowVariantHook). A call that handed an arrow parameter a value still OPEN
+/// when it was judged -- a lambda's parameter, a kernel's eta parameter -- that
+/// an ARRAY reached since (the lambda's call, the kernel's row) is re-targeted
+/// now: the declaration's array instance, re-judged in the module's
+/// environment, REPLACES the call before zonk (TypeEnv.ArrowRetargets). Walks
+/// `roots` (and nothing a replacement already covers); returns the refusals,
+/// each located at its call.
+let internal retargetArrowCalls (env: TypeEnv) (roots: TypedExpr list) : (Span * TypeError) list =
+    let errors = ResizeArray<Span * TypeError>()
+    let rec walk (e: TypedExpr) =
+        (match e.Kind with
+         | TExprApp (f, args) when not (env.ArrowRetargets.ContainsKey e) ->
+             (match arrowArrayArgs env f args false with
+              | Some (fid, arrays) ->
+                  // Located as the judgment at the call would be: its last
+                  // argument is the last expression it typed.
+                  resetCurrentStmtSpan ()
+                  setCurrentExprSpan (match List.tryLast args with Some a -> a.Span | None -> e.Span)
+                  let r =
+                      arrowVariantHook.Value env fid arrays
+                      |> Result.bind (fun head -> dispatchAppOrIndex env { head with Span = f.Span } args)
+                      |> Result.bind (fun t -> unify env.Subst t.Type e.Type |> Result.map (fun () -> t))
+                  match r with
+                  | Ok t -> env.ArrowRetargets.[e] <- t
+                  | Error err ->
+                      let at = currentExprSpan ()
+                      errors.Add((if at.StartLine > 0 then at else e.Span), err)
+              | None -> ())
+         | _ -> ())
+        typedExprChildren e |> List.iter walk
+    roots |> List.iter walk
+    List.ofSeq errors
 
 /// An UNANNOTATED function parameter that its body uses directly as a
 /// SUBSCRIPT (`function g(i) = A(i)`) and that nothing else pinned is an

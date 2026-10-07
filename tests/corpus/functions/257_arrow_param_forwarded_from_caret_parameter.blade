@@ -1,0 +1,16 @@
+// TEST: A caret parameter forwarded to an arrow parameter, at two element types
+// ============================================================================
+// `h(m: T^1) = head(m)`: inside h, `m` is still open when `head(m)` is judged,
+// so head's application is re-recorded on it and `m` becomes an arrow
+// parameter of h. The call's result was head's DECLARED return -- head's own
+// signature variable -- so h's result was tied to it, and this program died in
+// IR validation (BL6001, an unresolved variable). The result is now the call's
+// instance, generic in h; each call of h makes h's array instance, whose
+// `head(m)` is a call of head's array instance.
+function head(c) = c(0)
+function h(m: T^1) = head(m)
+let h1 = h([1.0, 2.0])
+// EXPECT: h1 = 1
+let iv = [4, 5]
+let h2 = h(iv)
+// EXPECT: h2 = 4

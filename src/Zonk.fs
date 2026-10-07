@@ -208,6 +208,14 @@ type SubscriptGuardCtx = {
     /// an index type is unproven -- a mask predicate, a sort key, a `>>@`
     /// stage, a kernel over a key column all receive DATA.
     RangeFedParams: System.Collections.Generic.HashSet<IRId>
+    /// Calls the checker REPLACED after typing them (TypeEnv.ArrowRetargets,
+    /// by node): a call handing an array to an arrow parameter is the call of
+    /// that declaration's array instance. Zonked in place of the original.
+    Retargets: System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>
+    /// Arrow applications whose head turned out an array (TypeEnv.
+    /// ArrowSubscripts, by HEAD node): the subscript each is, zonked -- and
+    /// guarded -- in place of the application.
+    Subscripts: System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>
 }
 
 /// A USER index type's values (a compiler tag -- a halo window, a `__`
@@ -512,6 +520,12 @@ let private noteDataKernelParams (subst: Subst) (info: TypedApplyInfo) : unit =
 
 /// Zonk all types in a TypedExpr tree (bottom-up)
 let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
+    match subscriptGuardCtx.Value, expr.Kind with
+    | Some ctx, _ when ctx.Retargets.Count > 0 && ctx.Retargets.ContainsKey expr ->
+        zonkExpr subst ctx.Retargets.[expr]
+    | Some ctx, TExprApp (f, _) when ctx.Subscripts.Count > 0 && ctx.Subscripts.ContainsKey f ->
+        zonkExpr subst ctx.Subscripts.[f]
+    | _ ->
     let z = zonkExpr subst
     let zs = List.map z
     let zt = zonkType subst
