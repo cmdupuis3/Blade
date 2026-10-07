@@ -6815,9 +6815,9 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     // promote AWAY (an integer, or Float32 beside a typed
                     // Float64) is refused at its call
                     // (TypeCheckSupport.judgeGenericObligations), where the
-                    // T-typed result would otherwise truncate (a result type
-                    // that promotes per instance, formalism 2.4's sketched
-                    // `cast<A,B>`, does not exist yet). Only a bare PARAMETER
+                    // T-typed result would otherwise truncate; the caller
+                    // converts the argument instead (`Float64(x)`, formalism
+                    // 2.4 -- there is no promotion type). Only a bare PARAMETER
                     // variable (see sigTop; `x: T` and `x: T^0` are one
                     // variable, the arity-liftable scalar): not a caret array
                     // var (`T^1` is shaped against the partner above), not a

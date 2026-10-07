@@ -126,8 +126,9 @@ the scalar broadcasts against, so `addone([1.0, 2.0])` is `[2.0, 3.0]` and
 `addone(3.0)` is `4.0`. That is exact for every instance whose element the
 scalar promotes into (Float64, complex, Float32 beside a float literal); an
 instance it would promote away (an integer element, or Float32 beside a
-Float64 value) is refused at the call (BL3019), since there is no
-per-instance promotion type yet -- convert the argument (`Float64(xs)`).
+Float64 value) is refused at the call (BL3019): the conversion is the
+caller's to spell, with the type in call position (`addone(Float64(n))`,
+`addone(Float64(xs))`).
 (`x: T^0` is the same variable as `x: T`.) A variable that is only ever a
 scalar -- an array's element, the `reduce(row, (+))` of a `row: T^1` --
 keeps the promotion rules' scalar result, so an Int64 row's sum plus `0.5`
@@ -189,12 +190,13 @@ same-component-width real→complex embedding (`w * z` over Float64 and
 Complex128).
 
 Type variables (single capitals) are universally quantified within a
-signature; the same letter denotes the same type; `cast<A,B>` is the promotion
-result:
+signature; the same letter denotes the same type. There is no promotion TYPE
+in signatures: where two type variables would mix, the caller converts one
+with the target type in call position, so the signature names one variable:
 
 ```blade sketch
 function add(a: A^0, b: A^0) -> A^0
-function scale(s: A^0, v: B^1) -> cast<A,B>^1
+function scale(s: B^0, v: B^1) -> B^1      // scale(Float64(k), v) for an Int64 k
 ```
 
 Complex values support literals and `conj(x)`; `conj` is the identity on real
