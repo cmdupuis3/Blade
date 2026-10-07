@@ -1,9 +1,11 @@
 # Validates examples/physics/*.blade against their // EXPECT: pins.
 #   powershell -File validate_examples.ps1            # all examples
 #   powershell -File validate_examples.ps1 -Filter 16 # just 16_*
-# Pins: numbers (1e-9 relative tol, 1e-12 absolute floor), quoted strings
-# (exact), arrays (elementwise numeric). Run on the RELEASE build; Debug
-# overflows its stack on the deep dist_map chains.
+# Pins: numbers (1e-9 relative tol, 1e-12 absolute floor, AND the same
+# spelling class: an int pin `2` matches only an int `2`, a float pin `2.0`
+# only a float -- the decimal point tells them apart in output as in source,
+# docs/formalism.md 3.9), quoted strings (exact), arrays (elementwise numeric).
+# Run on the RELEASE build; Debug overflows its stack on the deep dist_map chains.
 param(
     [string]$Filter = "*",
     [string]$BladeExe = ""
@@ -22,6 +24,17 @@ function Parse-Num([string]$txt) {
 function Num-Match([double]$got, [double]$want) {
     $tol = [Math]::Max(1e-12, 1e-9 * [Math]::Abs($want))
     return ([Math]::Abs($got - $want) -le $tol)
+}
+function Is-FloatSpelled([string]$txt) { return ($txt.Trim() -match '[.eE]|nan|inf') }
+# One pinned token against its printed twin: "" when they match, else the reason.
+function Token-Verdict([string]$gotTxt, [string]$wantTxt) {
+    if (-not (Num-Match (Parse-Num $gotTxt) (Parse-Num $wantTxt))) { return "value" }
+    $wf = Is-FloatSpelled $wantTxt; $gf = Is-FloatSpelled $gotTxt
+    if ($wf -ne $gf) {
+        $w = if ($wf) { "a float" } else { "an int" }; $g = if ($gf) { "a float" } else { "an int" }
+        return "spelling: pin writes $w, program printed $g"
+    }
+    return ""
 }
 
 $grandPass = 0; $grandFail = 0; $badFiles = 0
@@ -60,6 +73,7 @@ foreach ($bfile in $bladeFiles) {
         }
         $got = $outMap[$pname]
         $ok = $false
+        $why = ""
         if ($pval.StartsWith('"')) {
             $ok = ($got.Trim('"') -ceq $pval.Trim('"'))
         }
@@ -69,15 +83,18 @@ foreach ($bfile in $bladeFiles) {
             if ($wantArr.Count -eq $gotArr.Count) {
                 $ok = $true
                 for ($ii = 0; $ii -lt $wantArr.Count; $ii++) {
-                    if (-not (Num-Match (Parse-Num $gotArr[$ii]) (Parse-Num $wantArr[$ii]))) { $ok = $false; break }
+                    $v = Token-Verdict $gotArr[$ii] $wantArr[$ii]
+                    if ($v -ne "") { $ok = $false; if ($v -ne "value") { $why = " ($v, element $ii)" }; break }
                 }
             }
         }
         else {
-            $ok = Num-Match (Parse-Num $got) (Parse-Num $pval)
+            $v = Token-Verdict $got $pval
+            $ok = ($v -eq "")
+            if ($v -ne "" -and $v -ne "value") { $why = " ($v)" }
         }
         if ($ok) { $nPass++ }
-        else { Write-Host ("  FAIL {0}: want {1} got {2}" -f $pname, $pval, $got); $nFail++ }
+        else { Write-Host ("  FAIL {0}: want {1} got {2}{3}" -f $pname, $pval, $got, $why); $nFail++ }
     }
     $grandPass += $nPass; $grandFail += $nFail
     if ($nFail -eq 0) { Write-Host ("{0}: PASS {1}/{1}" -f $bfile.Name, $nPass) }

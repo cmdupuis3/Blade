@@ -127,6 +127,13 @@ let private runDiffCase (outputDir: string) (caseName: string) (edgiSrc: string)
         printfn "    [diff:%s] EXCEPTION: %s" caseName ex.Message
         false
 
+/// A FLOAT oracle value spelled as a pin: `%g`, plus `.0` when that reads as an
+/// integer. The pins are type-faithful (tests/Expect.fs numVerdict): a Float64
+/// result prints `14.0`, and the pin must say so, not `14`.
+let private floatPin (x: float) : string =
+    let s = sprintf "%g" x
+    if s.IndexOfAny([| '.'; 'e'; 'n'; 'i' |]) >= 0 then s else s + ".0"
+
 /// CASE 1: antisymmetric Reynolds, ranks 2/3, several random A. The rank-3 path
 /// is exactly where the strict-offset under-shift bug lived; this would have
 /// caught it (the buggy iteration visits non-canonical tuples -> values diverge
@@ -148,7 +155,7 @@ let private diffCaseAntisymReynolds (outputDir: string) : bool =
         let aLit = a |> Array.map (sprintf "%g") |> String.concat ", "
         let paramList = (["x"; "y"; "z"; "w"; "u"] |> List.take r) |> String.concat ", "
         let arrArgs = List.replicate r "A" |> String.concat ", "
-        let expectedLit = expected |> List.map (sprintf "%g") |> String.concat ", "
+        let expectedLit = expected |> List.map floatPin |> String.concat ", "
         let src =
             $"let A = [{aLit}]\n" +
             $"let L = method_for({arrArgs})\n" +
@@ -179,7 +186,7 @@ let private diffCaseGramHermitian (outputDir: string) : bool =
         let arrLit =
             [ for i in 0 .. m-1 -> $"    [{(rowLit i)}]" ] |> String.concat ",\n"
         let expectedLit =
-            expected |> List.map (fun (r,i) -> sprintf "(%g, %g)" r i) |> String.concat ", "
+            expected |> List.map (fun (r,i) -> $"({floatPin r}, {floatPin i})") |> String.concat ", "
         let src =
             $"let A: Array<Complex128 like Idx<{m}>, Idx<{k}>> = [\n{arrLit}\n]\n" +
             "let result = gram(A, A)\n" +
@@ -208,7 +215,7 @@ let private diffCaseDecompact (outputDir: string) : bool =
             [ for i in 0 .. n-1 do
                 for j in 0 .. n-1 do
                     yield symSrc.[(min i j, max i j)] ]
-        let symExpect = symDense |> List.map (sprintf "%g") |> String.concat ", "
+        let symExpect = symDense |> List.map floatPin |> String.concat ", "
         let symSrcEdgi =
             $"let A = [{aLit}]\n" +
             "let L = method_for(A, A)\n" +
@@ -225,7 +232,7 @@ let private diffCaseDecompact (outputDir: string) : bool =
                     if i < j then yield antiSrc.[(i, j)]
                     elif i > j then yield -antiSrc.[(j, i)]
                     else yield 0.0 ]
-        let antiExpect = antiDense |> List.map (sprintf "%g") |> String.concat ", "
+        let antiExpect = antiDense |> List.map floatPin |> String.concat ", "
         let antiSrcEdgi =
             $"let A = [{aLit}]\n" +
             "let L = method_for(A, A)\n" +
@@ -258,7 +265,7 @@ let private diffCaseDecompact (outputDir: string) : bool =
         let fl (x: float) = sprintf "%.1f" x
         let rowLit i = [ for j in 0 .. k-1 -> $"complex({(fl re.[i,j])}, {(fl im.[i,j])})" ] |> String.concat ", "
         let arrLit = [ for i in 0 .. m-1 -> $"    [{(rowLit i)}]" ] |> String.concat ",\n"
-        let expectLit = dense |> List.map (fun (r,i) -> sprintf "(%g, %g)" r i) |> String.concat ", "
+        let expectLit = dense |> List.map (fun (r,i) -> $"({floatPin r}, {floatPin i})") |> String.concat ", "
         let src =
             $"let A: Array<Complex128 like Idx<{m}>, Idx<{k}>> = [\n{arrLit}\n]\n" +
             "let H = gram(A, A)\n" +

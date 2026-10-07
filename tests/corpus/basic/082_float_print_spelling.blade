@@ -3,9 +3,9 @@
 // The decimal point tells a float from an integer in OUTPUT as in source
 // (docs/formalism.md 3.9): a whole-valued Float64/Float32, and each component
 // of a complex, prints with ".0"; an Int64 prints bare. Exponent forms and
-// nan/inf already read as floats and print unmarked. The numeric EXPECT
-// comparison cannot see a spelling, so these pins are QUOTED: a quoted pin
-// compares the printed text byte for byte.
+// nan/inf already read as floats and print unmarked. A numeric EXPECT pin
+// checks only the int/float spelling CLASS; these pins are QUOTED, so each
+// compares the printed text byte for byte (`2.0`, not `2.00`).
 // ============================================================================
 function addone(a: T^1) -> T^1 = a + 1.0
 let y = 2.0

@@ -82,15 +82,38 @@ let parseRejectStage (source: string) : RejectStage =
     | many ->
         failwith $"""conflicting // REJECT-AT: directives in one test: {(String.concat ", " many)}"""
 
+/// One numeric token of a pin or of program output: its value AND the text it
+/// was written as. The text matters because the spelling is part of the value:
+/// as in source, the decimal point is what tells a float from an integer
+/// (docs/formalism.md 3.9 -- every lane prints a Float64 `2.0`, an Int64 `2`),
+/// so a pin is type-faithful only if it is spelled the way its value prints.
+type Num = { Value: float; Text: string }
+
+/// Is this numeric token FLOAT-spelled? A decimal point or an exponent (`2.0`,
+/// `.5`, `1e+20`), or one of the non-finite words (`nan`, `-nan`, `inf`,
+/// `Infinity`) -- the forms a floating value prints as. Anything else (`2`,
+/// `-3`) is INT-spelled.
+let internal isFloatSpelled (text: string) : bool =
+    let t = text.Trim().ToLowerInvariant()
+    t.IndexOfAny([| '.'; 'e' |]) >= 0 || t.Contains "nan" || t.Contains "inf"
+
+/// The spelling class of a token, for the failure message.
+let private spellingClass (n: Num) : string =
+    if isFloatSpelled n.Text then "a float" else "an int"
+
+/// Parse one numeric token, keeping its (trimmed) text.
+let internal tryParseNum (s: string) : Num option =
+    tryParseInvariant s |> Option.map (fun v -> { Value = v; Text = s.Trim() })
+
 /// Expected value for a variable
 type ExpectedValue =
-    | ExpectedScalar of string * float
+    | ExpectedScalar of string * Num
     | ExpectedBool of string * bool
-    | ExpectedArray1D of string * float list
+    | ExpectedArray1D of string * Num list
     | ExpectedArray1DBool of string * bool list
-    | ExpectedArray2D of string * float list list
-    | ExpectedComplex of string * float * float
-    | ExpectedArray1DComplex of string * (float * float) list
+    | ExpectedArray2D of string * Num list list
+    | ExpectedComplex of string * Num * Num
+    | ExpectedArray1DComplex of string * (Num * Num) list
     | ExpectedString of string * string
     | ExpectedArray1DString of string * string list
 
@@ -139,21 +162,21 @@ let private splitTopLevelCommas (inner: string) : string list =
 /// turned a typo into a silent expectation of zero: `// EXPECT: v = [1, x, 3]`
 /// became "the middle element must be 0". A pin either parses in full or is
 /// reported as malformed; there is no third, quietly-weakened state.
-let private tryParseFloatList (s: string) : float list option =
+let private tryParseFloatList (s: string) : Num list option =
     let t = s.Trim()
     if not (t.StartsWith("[") && t.EndsWith("]")) then None
     else
         let inner = t.Substring(1, t.Length - 2).Trim()
         if String.IsNullOrWhiteSpace(inner) then Some []
         else
-            let parsed = splitTopLevelCommas inner |> List.map tryParseInvariant
+            let parsed = splitTopLevelCommas inner |> List.map tryParseNum
             if parsed |> List.forall Option.isSome then Some (parsed |> List.map Option.get)
             else None
 
 /// Parse a nested float list `[[a, b], [c, d]]`. Bracket-aware (rows are
 /// split on depth-0 commas, not on a literal "], [" spelling) and strict in
 /// the same sense as tryParseFloatList: one bad element fails the whole pin.
-let internal tryParse2DList (s: string) : float list list option =
+let internal tryParse2DList (s: string) : Num list list option =
     let t = s.Trim()
     if not (t.StartsWith("[") && t.EndsWith("]")) then None
     else
@@ -165,15 +188,15 @@ let internal tryParse2DList (s: string) : float list list option =
             else None
 
 /// Parse a single complex pair `(re, im)` returning (re, im) on success.
-/// Tolerates surrounding whitespace and accepts both `1` and `1.0` for
-/// each component (see tryParseInvariant for the parse convention).
-let private parseComplexPair (s: string) : (float * float) option =
+/// Tolerates surrounding whitespace; each component keeps its spelling, so a
+/// complex value's pin is written `(1.0, -2.0)`, as it prints.
+let private parseComplexPair (s: string) : (Num * Num) option =
     let t = s.Trim()
     if t.StartsWith("(") && t.EndsWith(")") then
         let inner = t.Substring(1, t.Length - 2)
         match inner.Split([|','|], 2) with
         | [| reStr; imStr |] ->
-            match tryParseInvariant reStr, tryParseInvariant imStr with
+            match tryParseNum reStr, tryParseNum imStr with
             | Some re, Some im -> Some (re, im)
             | _ -> None
         | _ -> None
@@ -187,7 +210,7 @@ let private parseComplexPair (s: string) : (float * float) option =
 /// row-major here. Same rule, and same reason, as tryParse1DBoolArray's
 /// flattening and the ExpectedArray2D matcher's flat fallback — whether a
 /// printer emits row brackets is not the pin author's choice.
-let rec private parseComplexArray (s: string) : (float * float) list option =
+let rec private parseComplexArray (s: string) : (Num * Num) list option =
     let t = s.Trim()
     if t.StartsWith("[") && t.EndsWith("]") then
         let inner = t.Substring(1, t.Length - 2).Trim()
@@ -423,7 +446,7 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
         elif value.ToLowerInvariant() = "false" then
             Some (ExpectedBool (name, false))
         else
-            match tryParseInvariant value with
+            match tryParseNum value with
             | Some v -> Some (ExpectedScalar (name, v))
             | None -> None
     | _ -> None
@@ -438,6 +461,11 @@ let private tryParseExpectPin (payload: string) : ExpectedValue option =
 /// Format: // EXPECT: varname = ["a", "b", "c"]                   (String array — quotes around each element)
 /// Format: // EXPECT: varname = [true, false, true]               (Bool array — literal true/false per element)
 /// Format: // EXPECT: varname = [[true, false], [false, true]]    (rank-2 Bool array — compared flattened, row-major)
+///
+/// Numbers are SPELLED as their type prints (formalism 3.9): a float with a
+/// decimal point or exponent (`2.0`, `1e+20`, `nan`), an integer bare (`2`).
+/// A numeric pin token matches only a printed token of the same spelling class
+/// (numVerdict), so `x = 2` fails against a printed `x = 2.0`.
 let parseExpectedValues (source: string) : ExpectedValue list =
     expectLines source |> List.choose (snd >> tryParseExpectPin)
 
@@ -607,6 +635,42 @@ let floatEquals (expected: float) (actual: float) (tolerance: float) : bool =
 /// Parse a float from string
 let tryParseFloat (s: string) : float option = tryParseInvariant s
 
+/// The verdict on one pinned numeric token against its printed twin.
+type private NumVerdict =
+    | NumSame
+    | NumValueDiffers
+    | NumSpellingDiffers
+
+/// A pinned token matches a printed one only if BOTH agree: the numbers within
+/// the tolerance, AND the spelling class -- both int-spelled or both
+/// float-spelled (isFloatSpelled). The second half is what makes a pin
+/// type-faithful: the decimal point is the float/int differentiator in output
+/// as in source (formalism 3.9), so `// EXPECT: y = 2` against a printed
+/// `y = 2.0` claims an integer the program does not have, and fails. Before,
+/// the comparison was numeric only and a pin could not see the spelling at all.
+let private numVerdict (tolerance: float) (e: Num) (a: Num) : NumVerdict =
+    if not (floatEquals e.Value a.Value tolerance) then NumValueDiffers
+    elif isFloatSpelled e.Text <> isFloatSpelled a.Text then NumSpellingDiffers
+    else NumSame
+
+/// The self-explaining message for a spelling-only mismatch. `where` is the
+/// pin name plus, for an array, the element's position.
+let private spellingMessage (where: string) (e: Num) (a: Num) : string =
+    $"{where}: spelling: pin writes {spellingClass e}, program printed {spellingClass a} (pin '{e.Text}', printed '{a.Text}' -- spell the pin as the value prints, formalism 3.9)"
+
+/// The first VALUE mismatch over aligned (label, pin, printed) triples, else
+/// the first SPELLING mismatch, else None. Value errors win: a wrong number
+/// with a right spelling is the more important news.
+let private firstNumIssue
+        (tolerance: float)
+        (valueMessage: string -> Num -> Num -> string)
+        (items: (string * Num * Num) list) : string option =
+    match items |> List.tryFind (fun (_, e, a) -> numVerdict tolerance e a = NumValueDiffers) with
+    | Some (label, e, a) -> Some (valueMessage label e a)
+    | None ->
+        items |> List.tryPick (fun (label, e, a) ->
+            if numVerdict tolerance e a = NumSpellingDiffers then Some (spellingMessage label e a) else None)
+
 /// Parse a 1D array from PROGRAM OUTPUT, e.g. "[1.0, 2.0, 3.0]".
 ///
 /// The brackets are REQUIRED, and that is the whole point. The previous version
@@ -622,14 +686,14 @@ let tryParseFloat (s: string) : float option = tryParseInvariant s
 /// non-flat array instead of being shredded into unparseable fragments — same
 /// verdict, an honest reason. One unparseable element fails the whole parse;
 /// there is no element-level fallback (see tryParseFloatList).
-let tryParse1DArray (s: string) : float list option =
+let tryParse1DArray (s: string) : Num list option =
     let t = s.Trim()
     if not (t.Length >= 2 && t.StartsWith("[") && t.EndsWith("]")) then None
     else
         let inner = t.Substring(1, t.Length - 2).Trim()
         if String.IsNullOrWhiteSpace(inner) then Some []
         else
-            let parsed = splitTopLevelCommas inner |> List.map tryParseInvariant
+            let parsed = splitTopLevelCommas inner |> List.map tryParseNum
             if parsed |> List.forall Option.isSome then Some (parsed |> List.map Option.get)
             else None
 
@@ -698,13 +762,20 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
         let errors = 
             expected |> List.choose (fun exp ->
                 match exp with
-                | ExpectedScalar (name, expectedVal) ->
+                | ExpectedScalar (name, expectedNum) ->
+                    let expectedVal = expectedNum.Value
                     match actual.TryFind name with
                     | Some actualStr ->
-                        match tryParseFloat actualStr with
-                        | Some actualVal when floatEquals expectedVal actualVal tolerance -> None
-                        | Some actualVal -> Some (sprintf "%s: expected %.17g, got %.17g (diff=%.3e)" name expectedVal actualVal (abs(expectedVal - actualVal)))
+                        match tryParseNum actualStr with
+                        | Some actualNum ->
+                            firstNumIssue tolerance
+                                (fun _ e a -> sprintf "%s: expected %.17g, got %.17g (diff=%.3e)" name e.Value a.Value (abs (e.Value - a.Value)))
+                                [ (name, expectedNum, actualNum) ]
                         | None ->
+                            // A Bool printed for a numeric pin: the `1`/`0`
+                            // tolerance below is about the BOOL spelling (word or
+                            // digit, a printer detail), not the int/float one,
+                            // so it is left as it was.
                             // boolalpha: true→1, false→0
                             match actualStr.Trim().ToLowerInvariant() with
                             | "true" when floatEquals expectedVal 1.0 tolerance -> None
@@ -747,12 +818,16 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     // below only fires for text that parses as a full 2D nest.
                     match actual.TryFind name with
                     | Some actualStr ->
+                        let values (ns: Num list) = ns |> List.map _.Value
                         match (match tryParse1DArray actualStr with
                                | Some vs -> Some vs
                                | None -> tryParse2DList actualStr |> Option.map List.concat) with
-                        | Some actualVals when actualVals.Length = expectedVals.Length &&
-                                               List.forall2 (fun e a -> floatEquals e a tolerance) expectedVals actualVals -> None
-                        | Some actualVals -> Some (sprintf "%s: expected %A, got %A" name expectedVals actualVals)
+                        | Some actualVals when actualVals.Length = expectedVals.Length ->
+                            List.zip expectedVals actualVals
+                            |> List.mapi (fun i (e, a) -> ($"{name}: element {i}", e, a))
+                            |> firstNumIssue tolerance
+                                (fun _ _ _ -> sprintf "%s: expected %A, got %A" name (values expectedVals) (values actualVals))
+                        | Some actualVals -> Some (sprintf "%s: expected %A, got %A" name (values expectedVals) (values actualVals))
                         | None -> Some ($"{name}: could not parse '{actualStr}' as array")
                     | None -> Some ($"{name}: not found in output")
 
@@ -799,24 +874,20 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                     // without a single element ever being compared.
                     match actual.TryFind name with
                     | Some actualStr ->
-                        let compareRows (actualRows: float list list) =
+                        let compareRows (actualRows: Num list list) =
                             if actualRows.Length <> expectedRows.Length then
                                 Some ($"{name}: expected {expectedRows.Length} rows, got {actualRows.Length}")
                             else
-                                let rowIssue =
-                                    List.zip expectedRows actualRows
-                                    |> List.mapi (fun i (e, a) -> (i, e, a))
-                                    |> List.tryPick (fun (i, e, a) ->
-                                        if e.Length <> a.Length then
-                                            Some ($"{name}: row {i} expected {e.Length} elements, got {a.Length}")
-                                        else
-                                            List.zip e a
-                                            |> List.mapi (fun j (ev, av) -> (j, ev, av))
-                                            |> List.tryPick (fun (j, ev, av) ->
-                                                if floatEquals ev av tolerance then None
-                                                else Some (sprintf "%s: [%d][%d] expected %.17g, got %.17g (diff=%.3e)"
-                                                                   name i j ev av (abs (ev - av)))))
-                                rowIssue
+                                let pairedRows = List.zip expectedRows actualRows |> List.mapi (fun i (e, a) -> (i, e, a))
+                                match pairedRows |> List.tryFind (fun (_, e, a) -> e.Length <> a.Length) with
+                                | Some (i, e, a) -> Some ($"{name}: row {i} expected {e.Length} elements, got {a.Length}")
+                                | None ->
+                                    pairedRows
+                                    |> List.collect (fun (i, e, a) ->
+                                        List.zip e a |> List.mapi (fun j (ev, av) -> ($"{name}: [{i}][{j}]", ev, av)))
+                                    |> firstNumIssue tolerance (fun label ev av ->
+                                        sprintf "%s expected %.17g, got %.17g (diff=%.3e)"
+                                                label ev.Value av.Value (abs (ev.Value - av.Value)))
                         match tryParse2DList actualStr with
                         | Some actualRows -> compareRows actualRows
                         | None ->
@@ -828,15 +899,15 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                                   name flatExpected.Length expectedRows.Length flatActual.Length)
                                 else
                                     List.zip flatExpected flatActual
-                                    |> List.mapi (fun k (ev, av) -> (k, ev, av))
-                                    |> List.tryPick (fun (k, ev, av) ->
-                                        if floatEquals ev av tolerance then None
-                                        else Some (sprintf "%s: element %d (row-major) expected %.17g, got %.17g (diff=%.3e)"
-                                                           name k ev av (abs (ev - av))))
+                                    |> List.mapi (fun k (ev, av) -> ($"{name}: element {k} (row-major)", ev, av))
+                                    |> firstNumIssue tolerance (fun label ev av ->
+                                        sprintf "%s expected %.17g, got %.17g (diff=%.3e)"
+                                                label ev.Value av.Value (abs (ev.Value - av.Value)))
                             | None -> Some ($"{name}: could not parse '{actualStr}' as a 2D array")
                     | None -> Some ($"{name}: not found in output")
 
-                | ExpectedComplex (name, expectedRe, expectedIm) ->
+                | ExpectedComplex (name, expectedReNum, expectedImNum) ->
+                    let expectedRe, expectedIm = expectedReNum.Value, expectedImNum.Value
                     match actual.TryFind name with
                     | Some actualStr ->
                         let t = actualStr.Trim()
@@ -844,12 +915,11 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                             let inner = t.Substring(1, t.Length - 2)
                             match inner.Split([|','|], 2) with
                             | [| reStr; imStr |] ->
-                                match tryParseInvariant reStr, tryParseInvariant imStr with
-                                | Some re, Some im
-                                    when floatEquals expectedRe re tolerance &&
-                                         floatEquals expectedIm im tolerance -> None
+                                match tryParseNum reStr, tryParseNum imStr with
                                 | Some re, Some im ->
-                                    Some (sprintf "%s: expected (%g, %g), got (%g, %g)" name expectedRe expectedIm re im)
+                                    [ ($"{name}: real part", expectedReNum, re); ($"{name}: imaginary part", expectedImNum, im) ]
+                                    |> firstNumIssue tolerance (fun _ _ _ ->
+                                        sprintf "%s: expected (%g, %g), got (%g, %g)" name expectedRe expectedIm re.Value im.Value)
                                 | _ -> Some ($"{name}: could not parse complex components from '{actualStr}'")
                             | _ -> Some ($"{name}: malformed complex output '{actualStr}'")
                         else Some (sprintf "%s: expected complex (%g, %g) but output '%s' isn't in (re,im) form" name expectedRe expectedIm actualStr)
@@ -874,14 +944,20 @@ let checkExpectedValues (expected: ExpectedValue list) (output: string) : Result
                                     if actualPairs.Length <> expectedPairs.Length then
                                         Some ($"{name}: expected {expectedPairs.Length} complex elements, got {actualPairs.Length}")
                                     else
-                                        let mismatch =
-                                            List.zip expectedPairs actualPairs
+                                        let paired = List.zip expectedPairs actualPairs
+                                        let valueMismatch =
+                                            paired
                                             |> List.tryFind (fun ((eRe, eIm), (aRe, aIm)) ->
-                                                not (floatEquals eRe aRe tolerance && floatEquals eIm aIm tolerance))
-                                        match mismatch with
-                                        | None -> None
+                                                not (floatEquals eRe.Value aRe.Value tolerance && floatEquals eIm.Value aIm.Value tolerance))
+                                        match valueMismatch with
                                         | Some ((eRe, eIm), (aRe, aIm)) ->
-                                            Some (sprintf "%s: expected element (%g, %g), got (%g, %g)" name eRe eIm aRe aIm)
+                                            Some (sprintf "%s: expected element (%g, %g), got (%g, %g)" name eRe.Value eIm.Value aRe.Value aIm.Value)
+                                        | None ->
+                                            paired
+                                            |> List.mapi (fun i ((eRe, eIm), (aRe, aIm)) ->
+                                                [ ($"{name}: element {i} real part", eRe, aRe); ($"{name}: element {i} imaginary part", eIm, aIm) ])
+                                            |> List.concat
+                                            |> firstNumIssue tolerance (fun label _ _ -> $"{label}: value mismatch")
                                 | None ->
                                     Some ($"{name}: could not parse complex array from '{actualStr}'")
                         else Some ($"{name}: expected complex array but output '{actualStr}' isn't in [(re,im),...] form")

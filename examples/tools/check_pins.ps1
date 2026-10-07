@@ -7,10 +7,13 @@
 # but they keep the corpus pin conventions. This script runs `blade run <file>`
 # FROM THE FILE'S DIRECTORY and checks every `// EXPECT: name = value` line against
 # the printed `name = value` lines with the harness's own rule (tests/Expect.fs):
-# numbers at 1e-9 relative tolerance (absolute below 1e-12), arrays flattened and
-# compared element-wise, bools true/false ~ 1/0, quoted strings against the
-# unquoted printed text, everything else exact. A name printed twice with
-# different values fails its pin, as in the harness.
+# numbers at 1e-9 relative tolerance (absolute below 1e-12) AND in the same
+# spelling class -- int-spelled (`2`) or float-spelled (`2.0`, `1e+20`, `nan`),
+# since the decimal point is what tells a float from an integer in output as in
+# source (docs/formalism.md 3.9) -- arrays flattened and compared element-wise,
+# bools true/false ~ 1/0, quoted strings against the unquoted printed text,
+# everything else exact. A name printed twice with different values fails its
+# pin, as in the harness.
 #
 # Output: one PASS/FAIL/MISSING line per pin (FAIL/MISSING only under -Quiet),
 # then `PINS: p passed, f failed, m missing (n pins); exit=<code>; <secs>; <file>`.
@@ -46,6 +49,8 @@ function FEq([double]$e, [double]$a) {
   $d = [math]::Abs($e - $a); $scale = [math]::Max([math]::Abs($e), [math]::Abs($a))
   if ($scale -lt 1e-12) { return $d -le $tol } else { return ($d / $scale) -le $tol }
 }
+function IsFloatSpelled([string]$s) { return ($s.Trim() -match '[.eE]|nan|inf') }
+$script:IgnoreSpelling = $false
 function Flatten([string]$s) {
   $inner = ($s -replace '[\[\]\(\)]', ' ')
   return ,@($inner.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
@@ -55,7 +60,10 @@ function Same([string]$exp, [string]$act) {
   if ($e -ceq $a) { return $true }
   if ($e.Length -ge 2 -and $e.StartsWith('"') -and $e.EndsWith('"')) { return ($e.Substring(1, $e.Length - 2) -ceq $a) }
   $ef = ParseF $e; $af = ParseF $a
-  if ($null -ne $ef -and $null -ne $af) { return FEq $ef $af }
+  if ($null -ne $ef -and $null -ne $af) {
+    if (-not (FEq $ef $af)) { return $false }
+    return ($script:IgnoreSpelling -or ((IsFloatSpelled $e) -eq (IsFloatSpelled $a)))
+  }
   if ($null -ne $ef -and ($a -eq 'true' -or $a -eq 'false')) { return FEq $ef $(if ($a -eq 'true') {1.0} else {0.0}) }
   if ($null -ne $af -and ($e -eq 'true' -or $e -eq 'false')) { return FEq $(if ($e -eq 'true') {1.0} else {0.0}) $af }
   if (($e.StartsWith('[') -or $e.StartsWith('(')) -and ($a.StartsWith('[') -or $a.StartsWith('('))) {
@@ -95,7 +103,16 @@ foreach ($p in $pins) {
   if (-not $actual.ContainsKey($n)) { $missing++; Write-Output "MISSING $n (expected $e)"; continue }
   if ($collapsed.ContainsKey($n)) { $fail++; Write-Output "FAIL $n printed twice with different values"; continue }
   if (Same $e $actual[$n]) { $pass++; if (-not $Quiet) { Write-Output "PASS $n" } }
-  else { $fail++; Write-Output "FAIL $n`n   expected: $e`n   actual:   $($actual[$n])" }
+  else {
+    $fail++
+    $script:IgnoreSpelling = $true; $spellingOnly = Same $e $actual[$n]; $script:IgnoreSpelling = $false
+    $why = ""
+    if ($spellingOnly) {
+      $why = if ($e.StartsWith('[') -or $e.StartsWith('(')) { " (spelling: an element is spelled int where the program printed a float, or the reverse)" }
+             elseif (IsFloatSpelled $e) { " (spelling: pin writes a float, program printed an int)" } else { " (spelling: pin writes an int, program printed a float)" }
+    }
+    Write-Output "FAIL $n$why`n   expected: $e`n   actual:   $($actual[$n])"
+  }
 }
 if ($code -ne 0) {
   Write-Output "RUN EXIT CODE $code"

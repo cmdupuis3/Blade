@@ -21,6 +21,13 @@ them as assets: edit deliberately, never regenerate mechanically.
 - `// EXPECT: <var> = <value>` lines are parsed by tests/Expect.fs and checked
   against the program's printed output. Scalars, 1-D arrays, 2-D `[[..]]`
   arrays, complex pairs `(re, im)`, and quoted strings are all checked.
+- **Numbers are spelled as their type prints** (docs/formalism.md 3.9): a
+  float with a decimal point or exponent (`2.0`, `[1.0, 0.5]`, `(1.0, -2.0)`,
+  `1e+20`, `nan`), an integer bare (`2`, `[1, 2]`). A numeric pin token matches
+  only a printed token of the same spelling class AND value (1e-9 relative), so
+  `// EXPECT: y = 2` FAILS against a printed `y = 2.0` ("spelling: pin writes
+  an int, program printed a float"). Bool pins keep `true`/`false` (a printed
+  `1`/`0` Bool is still accepted).
 - **2-D `[[..]]` expectations** are compared against nested actual output
   (`[[0, 1], [20, 21]]`) row count first, then per-row length, then elements.
   If the printer instead emits a flat run — `genPrintArrayFlat` /
