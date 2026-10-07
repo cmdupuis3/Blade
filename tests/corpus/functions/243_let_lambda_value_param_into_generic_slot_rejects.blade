@@ -1,7 +1,7 @@
 // TEST: A let-bound lambda whose open parameter its body used as a value meets a T^1 slot (rejects)
 // ERROR: BL3001 @ 6:13
 // ============================================================================
-// The generic twin of functions/236: `T^1` is an array of rank 1 whatever `T`.
+// The generic twin of functions/242: `T^1` is an array of rank 1 whatever `T`.
 function apg(f: (T^1) -> T, x: T^1) -> T = f(x)
 let g = lambda(v) -> v * 2.0
 let r = apg(g, [1.0, 2.0])
