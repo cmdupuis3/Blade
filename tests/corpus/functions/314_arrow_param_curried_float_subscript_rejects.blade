@@ -1,0 +1,6 @@
+// TEST: A matrix handed to a parameter whose second application is not an index (rejects)
+// ERROR: BL3001 @ 5:12
+// ============================================================================
+function cx(c) = c(0)(2.5)
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let r = cx(m)

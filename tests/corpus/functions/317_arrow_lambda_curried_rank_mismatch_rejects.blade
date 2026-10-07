@@ -1,0 +1,9 @@
+// TEST: A lambda used as a value, applying its parameter twice, handed a vector (rejects)
+// ERROR: BL3001 @ 7:11
+// ============================================================================
+// One body: its first use binds the parameter, and the whole chain is typed
+// against it.
+let k = lambda(c) -> c(0)(1)
+let v = [1.0, 2.0]
+let r = k(v)
+let k2 = k

@@ -584,9 +584,11 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
         // argument mentions. Once the parameter's instance (a function -- an
         // array is handed to the declaration's array instance, TypeEnv.
         // ArrowVariant) is known, the result is the function's return.
+        // A CHAINED application (`c(0)(1)`) is headed by the previous one,
+        // whose result this same iteration learns first (fix re-substitutes).
         let learnArrowApp (e: IRExpr) =
             match e with
-            | IRApp (IRVar (_, headTy), args, retTy) when not (concrete retTy) ->
+            | IRApp ((IRVar (_, headTy) | IRApp (_, _, headTy)), args, retTy) when not (concrete retTy) ->
                 let res =
                     match headTy with
                     | FuncElem (ps, ret) when ps.Length = args.Length -> Some ret

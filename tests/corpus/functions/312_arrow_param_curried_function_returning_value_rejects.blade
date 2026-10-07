@@ -1,0 +1,6 @@
+// TEST: A function returning a value handed to a parameter applied twice (rejects)
+// ERROR: BL3001 @ 5:12
+// ============================================================================
+function cc(c) = c(0)(1)
+function f0(i: Int64) = Float64(i)
+let r = cc(f0)

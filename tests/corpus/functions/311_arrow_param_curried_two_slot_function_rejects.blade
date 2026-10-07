@@ -1,0 +1,9 @@
+// TEST: A two-parameter function handed to a parameter applied one index at a time (rejects)
+// ERROR: BL3001 @ 8:12
+// ============================================================================
+// The body calls `c(0)` with ONE argument and applies what it returns: a
+// function of two parameters is not that (the generic body is one call per
+// application). Write `c(0, 1)` to take it.
+function cc(c) = c(0)(1)
+function f2(i: Int64, j: Int64) = Float64(i + j)
+let r = cc(f2)

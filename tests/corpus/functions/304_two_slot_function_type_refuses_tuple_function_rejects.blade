@@ -1,0 +1,8 @@
+// TEST: A function of one tuple does not fill a two-argument slot (rejects)
+// ERROR: BL3001 @ 7:13
+// ============================================================================
+// A direct call never splices (formalism 2.8): `f(x, y)` is two arguments,
+// and `sum2` takes one pair.
+function ap2(f: (Float64, Float64) -> Float64, x: Float64, y: Float64) = f(x, y)
+function sum2(p: (Float64, Float64)) = p[0] + p[1]
+let r = ap2(sum2, 1.0, 2.0)

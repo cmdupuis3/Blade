@@ -1,0 +1,7 @@
+// TEST: A two-parameter function does not fill a function-of-a-tuple slot (rejects)
+// ERROR: BL3001 @ 6:13
+// ============================================================================
+// The converse of functions/304: `((A, B)) -> C` takes one tuple.
+function apt(f: ((Float64, Float64)) -> Float64, p: (Float64, Float64)) = f(p)
+function add2(x: Float64, y: Float64) = x + y
+let r = apt(add2, (1.0, 2.0))

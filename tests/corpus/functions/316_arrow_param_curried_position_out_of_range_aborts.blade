@@ -1,0 +1,11 @@
+// TEST: A chained arrow application's run-time position past its named axis aborts (aborts)
+// ============================================================================
+// The array instance reads `c(i)(j)` as an ordinary subscript: `j` is pinned
+// to C, so the Int64 the caller passes is converted with the checked cast.
+type R = Idx<2>
+type C = Idx<3>
+let G: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+function at2(c, i, j) = c(i)(j)
+let n = Int64(floor(reduce([1.0, 2.0], (+))))
+let p = at2(G, 1, n)
+// ABORT: BL8006

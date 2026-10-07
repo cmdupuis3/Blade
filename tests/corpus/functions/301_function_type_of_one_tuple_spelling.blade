@@ -1,0 +1,19 @@
+// TEST: A function of one tuple writes the tuple as its one parameter
+// ============================================================================
+// `(A, B) -> C` takes two arguments (functions/300); a function of ONE tuple
+// argument writes the tuple inside the parameter list -- `((A, B)) -> C` -- or
+// with the component spelling, `Tuple<A, B> -> C` (formalism 2.8: the same
+// type as `(A, B)`, one node). A `Tuple<N>` parameter still takes the whole
+// tuple.
+function sum2(p: (Float64, Float64)) = p[0] + p[1]
+function apt(f: ((Float64, Float64)) -> Float64, p: (Float64, Float64)) = f(p)
+let a = apt(sum2, (1.0, 2.0))
+// EXPECT: a = 3
+function apw(f: Tuple<Float64, Float64> -> Float64, p: (Float64, Float64)) = f(p) * 10.0
+let b = apw(sum2, (3.0, 4.0))
+// EXPECT: b = 70
+function widthOnly(p: Tuple<2>) = p[0] * p[1]
+let c = apt(widthOnly, (5.0, 6.0))
+// EXPECT: c = 30
+let d = apt(lambda(p: Tuple<2>) -> p[0] - p[1], (9.0, 4.0))
+// EXPECT: d = 5

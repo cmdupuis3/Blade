@@ -1,0 +1,82 @@
+// TEST: A chained application of an arrow parameter reads by dimensional currying
+// ============================================================================
+// `c(0)(1)` applies the result of `c(0)`. That second application's head was
+// neither a parameter nor open -- the first's result is generic -- so it fell
+// to dispatch's catch-all and got a fresh result nothing ever typed (a `Bool`
+// ascription checked). It is now part of `c`'s arrow obligation, ONE CHAIN
+// judged per call (formalism 4.3): an array of the chain's total rank, read
+// `A(i)(j)` = `A(i, j)`, or a function returning a function, called twice.
+let m = [[1.0, 2.0], [3.0, 4.0]]
+function f0(j: Int64) = Float64(j)
+function f1(j: Int64) = 10.0 + Float64(j)
+function pick(i: Int64) = if i == 0 then f0 else f1
+
+function cc(c) = c(0)(1)
+let a = cc(m)
+// EXPECT: a = 2
+let b = cc(pick)
+// EXPECT: b = 1
+let w = lambda(i: Int64) -> lambda(j: Int64) -> Float64(j) * 100.0
+let bw = cc(w)
+// EXPECT: bw = 100
+
+// Two chains on one parameter; a caller forwarding its own parameter.
+function cc2(c) = c(1)(0) + c(0)(1)
+let e = cc2(m)
+// EXPECT: e = 5
+let f = cc2(pick)
+// EXPECT: f = 11
+function g(c) = cc(c) * 2.0
+let h = g(m)
+// EXPECT: h = 4
+let h2 = g(pick)
+// EXPECT: h2 = 2
+
+// Named axes, run-time positions, a closure over the parameter.
+type R = Idx<2>
+type C = Idx<3>
+let G: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+function at2(c, i, j) = c(i)(j)
+let p = at2(G, 1, 2)
+// EXPECT: p = 6
+let p2 = at2(pick, 1, 2)
+// EXPECT: p2 = 12
+function rowsum(c) = reduce(method_for(0..3) <@> lambda(j) -> c(1)(j), (+))
+let q = rowsum(G)
+// EXPECT: q = 15
+let q2 = rowsum(pick)
+// EXPECT: q2 = 33
+
+// A top-level let lambda (generic: only applied) and one used as a value
+// (one body, its first use decides).
+let u = lambda(c) -> c(1)(0) * 2.0
+let ua = u(G)
+// EXPECT: ua = 8
+let ub = u(pick)
+// EXPECT: ub = 20
+let k = lambda(c) -> c(0)(1)
+let kd = k(m)
+// EXPECT: kd = 2
+let k2 = k
+
+// A chain through a let, longer chains, a mixed spelling.
+function viaRow(c) = { let row = c(1); row(0) * 10.0 + row(1) }
+let vr = viaRow(m)
+// EXPECT: vr = 34
+let vp = viaRow(pick)
+// EXPECT: vp = 111
+let m3 = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
+function c3(c) = c(0)(1)(1)
+let t3 = c3(m3)
+// EXPECT: t3 = 4
+function cmix(c) = c(1, 0)(1)
+let tm = cmix(m3)
+// EXPECT: tm = 6
+
+// The second application need not be an index: then only a function fits.
+function g0(x: Float64) = x
+function g1(x: Float64) = x + 1.0
+function pickx(i: Int64) = if i == 0 then g0 else g1
+function cx(c) = c(1)(2.5)
+let x = cx(pickx)
+// EXPECT: x = 3.5

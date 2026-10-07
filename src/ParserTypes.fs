@@ -128,6 +128,26 @@ let isNonElementBuiltinName (name: string) : bool =
     | _ -> false
 
 let rec parseTypeExpr (tokens: Token list) : ParseResult<TypeExpr> =
+    match peek tokens with
+    | Some TokLParen ->
+        // A parenthesized list directly before `->` is the function type's
+        // PARAMETER LIST: `(A, B) -> R` takes TWO arguments (a two-slot
+        // arrow, the type a two-parameter function has as a value), not one
+        // tuple. A function of one tuple writes the tuple as the one
+        // parameter: `((A, B)) -> R` or `Tuple<A, B> -> R`. Anywhere else the
+        // parenthesized list is the tuple type (or a grouping), as in
+        // parseTypeAtom.
+        advance tokens |> sepBy parseTypeExpr TokComma >>= fun types afterTypes ->
+        expect TokRParen afterTypes >>= fun _ afterParen ->
+        match peek afterParen with
+        | Some (TokOp "->") ->
+            advance afterParen |> parseTypeExpr >>= fun ret remaining ->
+            success (TyFunc (types, ret)) remaining
+        | _ ->
+            match types with
+            | [single] -> success single afterParen
+            | _ -> success (TyTuple types) afterParen
+    | _ ->
     parseTypeAtom tokens >>= fun first rest ->
     match peek rest with
     | Some (TokOp "->") ->

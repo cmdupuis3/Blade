@@ -2946,6 +2946,86 @@ let internal arrowExpectation (n: int) : string =
     let args = if n = 1 then "an integer index" else $"{n} integer indices"
     $"an array of rank {n} or a function of {args} (the body applies it to {args})"
 
+/// The same, for a CHAIN of applications (`c(i)(j)`: `groups` = the argument
+/// count of each application, outermost head first). Dimensional currying makes
+/// `A(i)(j)` the read `A(i, j)`, so the array reading's rank is the total; the
+/// function reading is a function returning a function, one per application.
+let internal arrowChainExpectation (groups: int list) : string =
+    match groups with
+    | [n] -> arrowExpectation n
+    | _ ->
+        let total = List.sum groups
+        let fn k = if k = 1 then "a function of an integer index" else $"a function of {k} integer indices"
+        let funcs = groups |> List.map fn |> String.concat " returning "
+        $"an array of rank {total} or {funcs} (the body applies it {groups.Length} times in a row, "
+        + $"to {total} integer indices in all, and reads a single value)"
+
+/// The records an array has left after a CHAINED arrow application reads `n`
+/// leading coordinates of it (`c(i)` in `c(i)(j)`): the view the next
+/// application reads -- the same accounting as dispatch's partial read (a
+/// compact group spans its rank in coordinates, and a count landing inside one
+/// has no residual). None when the reading is not that simple partial read: a
+/// record other than a plain or compact one (compound, sparse, ragged, ...), or
+/// a count inside a compact group, or no record left.
+let internal arrowChainView (a: IRArrayType) (n: int) : IRType option =
+    let rec walk (coords: int) (recs: IRIndexType list) =
+        match recs with
+        | _ when coords = 0 -> Some recs
+        | [] -> None
+        | ix :: rest ->
+            let span =
+                match ix.Symmetry with
+                | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 -> ix.Rank
+                | _ -> 1
+            if coords >= span then walk (coords - span) rest else None
+    if a.IndexTypes |> List.exists (fun ix -> ix.IxKind <> IxKPlain) then None
+    else
+        match walk n a.IndexTypes with
+        | Some (_ :: _ as remaining) -> Some (mkArrayLike { a with IndexTypes = remaining })
+        | _ -> None
+
+/// The pending arrow applications whose head is the RESULT of `app` (`c(i)(j)`:
+/// the application `(..)(j)` whose head is `c(i)`) -- the rest of the chain.
+let internal arrowChainChildren (env: TypeEnv) (app: ArrowApplication) : ArrowApplication list =
+    match IR.stripUnits (env.Subst.Resolve app.Result) with
+    | IRTInfer r ->
+        env.PendingArrowApps
+        |> Seq.filter (fun a ->
+            not (obj.ReferenceEquals(a, app))
+            && (match IR.stripUnits (env.Subst.Resolve a.Head.Type) with
+                | IRTInfer h -> h = r
+                | _ -> false))
+        |> List.ofSeq
+    | _ -> []
+
+/// The argument counts of an arrow application and the chain below it
+/// (arrowChainChildren, first child each step), outermost first.
+let internal arrowChainGroups (env: TypeEnv) (app: ArrowApplication) : int list =
+    let rec go depth (a: ArrowApplication) =
+        a.Args.Length
+        :: (if depth >= 16 then []
+            else
+                match arrowChainChildren env a with
+                | c :: _ -> go (depth + 1) c
+                | [] -> [])
+    go 0 app
+
+/// Is the open variable `vid` the RESULT of a written arrow application whose
+/// head is (through any chain of such applications) a parameter of the
+/// declaration being checked? `c(0)(1)` in `function cc(c) = c(0)(1)`: the
+/// second application's head is `c(0)`, whose result is that variable -- it is
+/// part of `c`'s arrow obligation, not a value of its own.
+let rec internal isOwnArrowChainResult (env: TypeEnv) (depth: int) (vid: int) : bool =
+    depth < 16
+    && env.PendingArrowApps |> Seq.exists (fun a ->
+        a.Written
+        && (match IR.stripUnits (env.Subst.Resolve a.Result) with
+            | IRTInfer r -> r = vid
+            | _ -> false)
+        && (match IR.stripUnits (env.Subst.Resolve a.Head.Type) with
+            | IRTInfer h -> h <> vid && (isCurrentDeclParam env h || isOwnArrowChainResult env (depth + 1) h)
+            | _ -> false))
+
 /// Structural child enumerator for a typed expression: the immediate
 /// sub-expressions of a node, total over TExpr kinds. Shared by the
 /// tag-check revalidation walk and the wildcard-escape scan so the two
@@ -3123,23 +3203,55 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
             match subst.Resolve t with
             | IRTInfer r -> Some r
             | _ -> None
+        // CHAINS: `c(i)(j)` is two obligations, the second's head the first's
+        // result (settleDeclArrowApps keeps them parent first). The argument
+        // is judged against the whole chain -- dimensional currying, formalism
+        // 4.3: an array of the chain's total rank, read a view at a time, or a
+        // function returning a function -- and every refusal names the
+        // parameter at the chain's root and what the whole chain needs.
+        let resRoot (ob: ArrowObligation) = rootOf ob.Result
+        let headRootOf (ob: ArrowObligation) = rootOf (IRTInfer ob.Head)
+        let childrenOf (ob: ArrowObligation) =
+            match resRoot ob with
+            | Some r -> obs |> List.filter (fun o -> not (obj.ReferenceEquals(o, ob)) && headRootOf o = Some r)
+            | None -> []
+        let parentOf (ob: ArrowObligation) =
+            match headRootOf ob with
+            | Some h -> obs |> List.tryFind (fun o -> not (obj.ReferenceEquals(o, ob)) && resRoot o = Some h)
+            | None -> None
+        let rec chainRoot depth (ob: ArrowObligation) =
+            match parentOf ob with
+            | Some p when depth < 16 -> chainRoot (depth + 1) p
+            | _ -> ob
+        let rec groupsOf depth (ob: ArrowObligation) =
+            ob.Args.Length
+            :: (match childrenOf ob with
+                | c :: _ when depth < 16 -> groupsOf (depth + 1) c
+                | _ -> [])
         obs |> List.tryPick (fun ob ->
-            let headRoot = rootOf (IRTInfer ob.Head)
+            let rootOb = chainRoot 0 ob
+            let isRoot = obj.ReferenceEquals(rootOb, ob)
+            let chained = not (childrenOf ob).IsEmpty
+            let headRoot = rootOf (IRTInfer rootOb.Head)
             let pos =
                 paramTys
                 |> List.tryFindIndex (fun p -> headRoot.IsSome && rootOf p = headRoot)
                 |> Option.defaultValue 0
             let n = ob.Args.Length
+            let groups = groupsOf 0 rootOb
             let headInst = inst (IRTInfer ob.Head)
+            let rootInst = inst (IRTInfer rootOb.Head)
             let argInsts = ob.Args |> List.map inst
             let resInst = inst ob.Result
-            let refuse (actual: IRType) =
-                Some (pos, ArgTypeMismatch (pos + 1, calleeDesc, arrowExpectation n, ppIRType (subst.Resolve actual)))
+            let refuse (_: IRType) =
+                Some (pos, ArgTypeMismatch (pos + 1, calleeDesc, arrowChainExpectation groups, ppIRType (subst.Resolve rootInst)))
             match IR.stripUnits (subst.Resolve headInst) with
             | IRTInfer aid ->
                 // Open at the call. Link the copy to the argument that reaches it
-                // and leave the application pending on it.
-                (if pos < tArgs.Length then
+                // and leave the application pending on it. (A link of a chain
+                // is headed by the previous link's result, not by an argument:
+                // it is re-recorded as it is, the rest of the caller's chain.)
+                (if isRoot && pos < tArgs.Length then
                      match subst.Resolve (List.item pos tArgs).Type with
                      | IRTInfer argId when argId <> aid ->
                          if isCurrentDeclParam env argId then subst.MarkPolymorphic argId
@@ -3160,10 +3272,19 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                         match ix.Symmetry with
                         | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 -> ix.Rank
                         | _ -> 1)
-                if coords <> n then
-                    Some (pos, ArgRankMismatch (pos + 1, n, coords,
-                                                $"read element-wise by the body, which applies it to {n} index argument(s)",
-                                                ppIRType (subst.Resolve headInst)))
+                // A link with more of the chain below it reads a VIEW (the
+                // records after its coordinates) for the next link; the chain
+                // as a whole reads one element.
+                let chainTotal = List.sum (groupsOf 0 ob)
+                let view = if chained then arrowChainView a n else None
+                if coords <> chainTotal then
+                    if isRoot then
+                        let reading =
+                            if groups.Length = 1 then $"read element-wise by the body, which applies it to {n} index argument(s)"
+                            else $"read element-wise by the body, which applies it {groups.Length} times in a row, to {chainTotal} index arguments in all"
+                        Some (pos, ArgRankMismatch (pos + 1, chainTotal, coords, reading, ppIRType (subst.Resolve headInst)))
+                    else refuse headInst
+                elif chained && view.IsNone then refuse headInst
                 else
                     // Each subscript must be an index: an integer (any open
                     // instance is read so), and a NAMED index value only into
@@ -3185,9 +3306,9 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                         Some (pos, ArgTypeMismatch (pos + 1, calleeDesc,
                                                     $"an array the body can subscript with what it passes at this call ({ppIRType (subst.Resolve bad)}) -- "
                                                     + "a subscript is an integer index, and a named index value only indexes an axis of its own name",
-                                                    ppIRType (subst.Resolve headInst)))
+                                                    ppIRType (subst.Resolve rootInst)))
                     | None ->
-                        match unify subst resInst a.ElemType with
+                        match unify subst resInst (defaultArg view a.ElemType) with
                         | Ok () -> None
                         | Error e -> Some (pos, e)
             | FuncElem (slots, ret) ->
@@ -3198,8 +3319,10 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                     | None ->
                         let copyIds =
                             mapping |> Map.toSeq |> Seq.choose (fun (_, t) -> match t with IRTInfer c -> Some c | _ -> None) |> Set.ofSeq
+                        // (The passed lambda is the function at the chain's
+                        // ROOT; a later link's function is what it returns.)
                         let lambdaArg =
-                            if pos < tArgs.Length then argLambdaInfo env (List.item pos tArgs) else None
+                            if isRoot && pos < tArgs.Length then argLambdaInfo env (List.item pos tArgs) else None
                         let slotErr =
                             List.zip slots argInsts |> List.indexed |> List.tryPick (fun (j, (slot, argTy)) ->
                                 match IR.stripUnits (subst.Resolve argTy) with
@@ -3251,11 +3374,16 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                                             let passed = argInsts |> List.map (atDefault >> ppIRType) |> String.concat ", "
                                             Some $"a function taking what the body passes it at this call ({passed})")
                         match slotErr with
+                        | Some _ when not isRoot -> refuse headInst
                         | Some expectation ->
                             Some (pos, ArgTypeMismatch (pos + 1, calleeDesc, expectation, ppIRType (subst.Resolve headInst)))
                         | None ->
                             match unify subst resInst ret with
+                            | Error _ when chained -> refuse headInst
                             | Error e -> Some (pos, e)
+                            // A link with more of the chain below it returns the
+                            // function the next link applies.
+                            | Ok () when chained -> None
                             | Ok () ->
                                 // The body was typed reading ONE VALUE from the
                                 // application -- an array instance's element --
@@ -3266,6 +3394,7 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                                 // shape: refused, exactly as the array reading
                                 // refuses a rank above the argument count.
                                 match IR.stripUnits (subst.Resolve resInst) with
+                                | ArrayElem _ | IRTArrow _ when not isRoot -> refuse headInst
                                 | ArrayElem _ | IRTArrow _ ->
                                     Some (pos, ArgTypeMismatch (pos + 1, calleeDesc,
                                                                 $"a function returning a single value (the body reads one value from it, as from an array of rank {n})",
@@ -3784,6 +3913,9 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             | TExprVar (name, _, _) -> $"'{name}'"
                             | _ -> "this function"
                         let nArgs = apps |> List.map (fun a -> a.Args.Length) |> List.max
+                        // A chain (`c(0)(1)`) needs what the WHOLE chain reads.
+                        let groups = apps |> List.map (arrowChainGroups env) |> List.maxBy List.sum
+                        let expectArrow = if groups.Length > 1 then arrowChainExpectation groups else arrowExpectation nArgs
                         let indexShaped = apps |> List.forall (fun a -> a.Args |> List.forall (arrowArgIndexLike env))
                         // The function reading's int-valued rule, said at the
                         // argument that brought the function.
@@ -3797,7 +3929,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                         match IR.stripUnits (env.Subst.Resolve arg.Type) with
                         | IRTInfer _ -> None
                         | FuncElem _ as t when slotClash ->
-                            Some (i, ArgTypeMismatch (i + 1, desc, arrowExpectation nArgs, ppIRType t))
+                            Some (i, ArgTypeMismatch (i + 1, desc, expectArrow, ppIRType t))
                         | ArrayElem _ | FuncElem _ ->
                             // An array binds at its SHAPE, not its length: the
                             // lambda is one body, and a later call with another
@@ -3822,9 +3954,18 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                             | Ok () ->
                                 for a in apps do
                                     env.PendingArrowApps.RemoveAll(fun x -> obj.ReferenceEquals(x, a)) |> ignore
-                                apps |> List.tryPick (fun a ->
+                                let rec settle (depth: int) (a: ArrowApplication) =
+                                    // The rest of a chain (`c(0)(1)`), taken
+                                    // while this link's result is still open.
+                                    let children = if depth < 16 then arrowChainChildren env a else []
+                                    env.PendingArrowApps.RemoveAll(fun x -> obj.ReferenceEquals(x, a)) |> ignore
                                     match dischargeArrowApp env a with
+                                    | Error _ when depth > 0 && indexShaped ->
+                                        Some (i, ArgTypeMismatch (i + 1, desc, expectArrow, ppIRType (env.Subst.Resolve arg.Type)))
                                     | Error e -> Some (i, e)
+                                    // A chained link's result is what the next
+                                    // link applies: a view, or a function.
+                                    | Ok () when not children.IsEmpty -> children |> List.tryPick (settle (depth + 1))
                                     | Ok () ->
                                         // The body consumed the application as
                                         // ONE VALUE while the head was open (its
@@ -3836,13 +3977,14 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                         | ArrayElem _ | IRTArrow _ ->
                                             let expectation =
                                                 if indexShaped then
-                                                    arrowExpectation nArgs + " and reading a single value from it"
+                                                    expectArrow + (if groups.Length > 1 then "" else " and reading a single value from it")
                                                 else "a function returning a single value"
                                             Some (i, ArgTypeMismatch (i + 1, desc, expectation, ppIRType (env.Subst.Resolve arg.Type)))
-                                        | _ -> None)
+                                        | _ -> None
+                                apps |> List.tryPick (settle 0)
                         | t ->
                             let expectation =
-                                if indexShaped then arrowExpectation nArgs
+                                if indexShaped then expectArrow
                                 else "a function (the body applies it to arguments)"
                             Some (i, ArgTypeMismatch (i + 1, desc, expectation, ppIRType t))
                 | _ -> None)
@@ -4823,10 +4965,24 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
     // This used to fall to the catch-all below, which added no evidence: the
     // head zonked to Float64, so an array argument was refused ("expects a
     // scalar") and a scalar one died in g++ calling a double (BL9002).
+    //   * The RESULT of such an application of the declaration's own
+    //     parameter, applied again -- `c(0)(1)`: dimensional currying makes it
+    //     the read `c(0, 1)` of a rank-2 array, or a call of the function
+    //     `c(0)` returns. The application is recorded with its head the first
+    //     one's result, so the two are ONE CHAIN of `c`'s obligations
+    //     (settleDeclArrowApps), judged per call as a whole
+    //     (arrowObligationClash). Its result is generic like the first's.
+    //     (It used to fall to the catch-all below: a fresh result nothing
+    //     ever typed, so `let x: Bool = cc(v)` checked.) Recorded whatever
+    //     the arguments: a non-index argument (`c(0)(2.0)`) leaves the array
+    //     reading to be refused by the obligation's subscript rule.
     | IRTInfer vid when not (List.isEmpty tArgs)
                         && (env.Subst.GetArityConstraint vid).IsNone
-                        && (isCurrentDeclParam env vid || not (env.Subst.IsPolymorphicId vid)) ->
+                        && (isCurrentDeclParam env vid
+                            || not (env.Subst.IsPolymorphicId vid)
+                            || isOwnArrowChainResult env 0 vid) ->
         let ownParam = isCurrentDeclParam env vid
+        let chainLink = not ownParam && env.Subst.IsPolymorphicId vid && isOwnArrowChainResult env 0 vid
         let indexLike = tArgs |> List.forall (arrowArgIndexLike env)
         if ownParam && not indexLike then
             let arrow = mkFuncArrow (tArgs |> List.map (_.Type)) (env.Subst.Fresh())
@@ -4837,14 +4993,14 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                 | t -> Error (InvalidApplication t))
         else
             let r = env.Subst.Fresh()
-            if ownParam then
+            if ownParam || chainLink then
                 // Generic: kept open by zonk and instantiated per call.
                 env.Subst.MarkPolymorphic vid
                 (match r with IRTInfer rid -> env.Subst.MarkPolymorphic rid | _ -> ())
             if indexLike then
                 for a in tArgs do
                     match env.Subst.Resolve a.Type with
-                    | IRTInfer aid when ownParam && isCurrentDeclParam env aid ->
+                    | IRTInfer aid when (ownParam || chainLink) && isCurrentDeclParam env aid ->
                         env.Subst.MarkPolymorphic aid
                     | IRTInfer aid when (env.Subst.GetLiteralDefault aid).IsNone
                                         && not (env.Subst.IsPolymorphicId aid) ->
@@ -4936,10 +5092,26 @@ let internal settleDeclArrowApps (env: TypeEnv) (funcVarId: IRId) (paramTypes: I
         | IRTInfer r -> Some r
         | _ -> None
     let paramRoots = paramTypes |> List.choose rootOf |> Set.ofList
+    // ...and every application CHAINED on one of those (`c(0)(1)`: the second
+    // application's head is the first's result), transitively. Kept in the
+    // pending order, which is parent first (an application's head is typed
+    // before it is recorded).
     let mine =
-        env.PendingArrowApps |> List.ofSeq |> List.filter (fun app ->
+        let pending = env.PendingArrowApps |> List.ofSeq
+        let rec close (heads: Set<int>) =
+            let more =
+                pending
+                |> List.filter (fun app ->
+                    match rootOf app.Head.Type with
+                    | Some h -> heads.Contains h
+                    | None -> false)
+                |> List.choose (fun app -> rootOf app.Result)
+                |> List.filter (fun r -> not (heads.Contains r))
+            if more.IsEmpty then heads else close (Set.union heads (Set.ofList more))
+        let heads = close paramRoots
+        pending |> List.filter (fun app ->
             match rootOf app.Head.Type with
-            | Some h -> paramRoots.Contains h
+            | Some h -> heads.Contains h
             | None -> false)
     for app in mine do
         env.PendingArrowApps.RemoveAll(fun a -> obj.ReferenceEquals(a, app)) |> ignore

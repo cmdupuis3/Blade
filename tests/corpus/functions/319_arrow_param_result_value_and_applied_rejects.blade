@@ -1,0 +1,8 @@
+// TEST: An arrow application read as a value and applied again (rejects)
+// ERROR: BL3001 @ 7:11
+// ============================================================================
+// `c(0)` alone is read as ONE value, `c(0)(1)` as a chain: no array fits both
+// (a matrix's `c(0)` is a row), and no function does either.
+function f(c) = c(0) + c(0)(1)
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let a = f(m)

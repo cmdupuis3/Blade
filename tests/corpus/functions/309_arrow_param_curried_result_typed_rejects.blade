@@ -1,0 +1,6 @@
+// TEST: A chained arrow application's result is the array's element (rejects)
+// ERROR: BL3001 @ 5:18
+// ============================================================================
+function cc(c) = c(0)(1)
+let m = [[1.0, 2.0], [3.0, 4.0]]
+let x: Bool = cc(m)

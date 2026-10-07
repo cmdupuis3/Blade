@@ -1,0 +1,9 @@
+// TEST: A compact group cannot be read a coordinate at a time (rejects)
+// ERROR: BL3001 @ 8:12
+// ============================================================================
+// `S(0)` of a SymIdx<2, n> lands inside the group: no residual class (the
+// partial read dispatch refuses), so the chain's first link has no view.
+function cc(c) = c(0)(1)
+type S = SymIdx<2, 3>
+let s: Array<Float64 like S> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+let r = cc(s)

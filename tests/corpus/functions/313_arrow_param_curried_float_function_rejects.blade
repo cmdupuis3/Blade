@@ -1,0 +1,10 @@
+// TEST: A curried function whose second parameter is not an integer (rejects)
+// ERROR: BL3001 @ 9:12
+// ============================================================================
+// The second application passes an index; a function of a Float64 is not
+// an arrow over an index (a call never converts).
+function cc(c) = c(0)(1)
+function g0(x: Float64) = x
+function g1(x: Float64) = x + 1.0
+function pickx(i: Int64) = if i == 0 then g0 else g1
+let r = cc(pickx)

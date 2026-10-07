@@ -807,6 +807,24 @@ let ub = u(lambda(i) -> 10.0 * Float64(i))
 // EXPECT: ub = 1
 ```
 
+An application of such an application's result (`c(i)(j)`) continues the same
+arrow: dimensional currying makes it the read `c(i, j)` of an array of rank 2
+(each application reads a view, the last one value), or two calls of a function
+returning a function. A call judges the whole chain at once, so a vector, a
+rank-3 array, a function returning a value and a function of two parameters
+(the body calls it with one) are refused at the argument.
+
+```blade
+function cc(c) = c(0)(1)
+function f0(j: Int64) = Float64(j)
+function f1(j: Int64) = 10.0 + Float64(j)
+function pick(i: Int64) = if i == 0 then f0 else f1
+let a = cc([[1.0, 2.0], [3.0, 4.0]])
+let b = cc(pick)
+// EXPECT: a = 2
+// EXPECT: b = 1
+```
+
 **Lambda arguments.** A lambda literal passed where the callee DECLARES a
 function type is checked against that type: its unannotated parameters take
 the declared parameter types before its body is typed (for a generic
@@ -817,6 +835,18 @@ lambda was typed at its binding: a parameter its body left open is bound by the
 first declared slot or arrow parameter it reaches -- if the body only applied
 it. One the body used as a value (`lambda(v) -> v * 2.0`) was typed as a single
 value, and an array or function slot refuses it: annotate the parameter.
+
+A function type's parenthesized list is its PARAMETER list: `(A, B) -> C` takes
+two arguments -- the type a two-parameter function or lambda has as a value --
+and `A -> B -> C` is the curried function returning a function. A function of
+ONE tuple writes the tuple as its one parameter: `((A, B)) -> C`, or
+`Tuple<A, B> -> C` (section 2.8).
+
+```blade
+function ap2(f: (Float64^1, Float64) -> Float64, x: Float64^1, s: Float64) = f(x, s)
+let t = ap2(lambda(v, k) -> reduce(v, (+)) * k, [1.0, 2.0], 3.0)
+// EXPECT: t = 9
+```
 
 ```blade
 function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
