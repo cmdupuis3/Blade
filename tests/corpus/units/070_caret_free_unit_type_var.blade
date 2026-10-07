@@ -28,8 +28,8 @@ let ts: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
 let k: Float<second> = 2.0
 let areaFree: Float<second^2> = scaledFree(ts, k)
 let areaCaret: Float<second^2> = scaledCaret(ts, k)
-// EXPECT: areaFree = 12
-// EXPECT: areaCaret = 12
+// EXPECT: areaFree = 12.0
+// EXPECT: areaCaret = 12.0
 
 // DEFAULTED parameter -- the shape the motivating program writes
 // (`t_zero: T<time> = 0.0`) and the one that forced the implementation's key
@@ -44,24 +44,24 @@ let baseFree = shiftedFree(ts)
 let baseCaret = shiftedCaret(ts)
 let offFree = shiftedFree(ts, k)
 let offCaret = shiftedCaret(ts, k)
-// EXPECT: baseFree = 6
-// EXPECT: baseCaret = 6
-// EXPECT: offFree = 8
-// EXPECT: offCaret = 8
+// EXPECT: baseFree = 6.0
+// EXPECT: baseCaret = 6.0
+// EXPECT: offFree = 8.0
+// EXPECT: offCaret = 8.0
 
 // RETURN-type position.
 function idFree(v: T<second>) -> T<second> = v
 function idCaret(v: T<second>^0) -> T<second>^0 = v
 let rFree: Float<second> = idFree(k)
 let rCaret: Float<second> = idCaret(k)
-// EXPECT: rFree = 2
-// EXPECT: rCaret = 2
+// EXPECT: rFree = 2.0
+// EXPECT: rCaret = 2.0
 
 // A head that names a REAL type keeps its ordinary meaning -- the rule reads
 // the head, not the shape of the application.
 type Alias = Float64
 let plain: Alias = 5.0
-// EXPECT: plain = 5
+// EXPECT: plain = 5.0
 
 // The motivating program's own signature shape: a component-typed tuple whose
 // components use the caret spelling, plus a caret-FREE defaulted scalar.
@@ -75,4 +75,4 @@ let sig: Array<Float64 like Idx<3>> = [1.0, 1.0, 1.0]
 let tim: Array<Float<second> like Idx<3>> = [1.0, 2.0, 3.0]
 let om: Array<Float<second> like Idx<3>> = [1.0, 1.0, 1.0]
 let lv = lsdft((sig, tim), om)
-// EXPECT: lv = 27
+// EXPECT: lv = 27.0

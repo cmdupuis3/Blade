@@ -16,8 +16,8 @@ let res = (real <@> z2) |> compute
 let ims = (imag <@> z2) |> compute
 // A real magnitude still multiplies with a plain Float array.
 let scaled = (mags * C2) |> compute
-// EXPECT: z2 = [(3,4), (0,2), (-1,0)]
-// EXPECT: mags = [5, 2, 1]
-// EXPECT: res = [3, 0, -1]
-// EXPECT: ims = [4, 2, 0]
-// EXPECT: scaled = [15, 0, -1]
+// EXPECT: z2 = [(3.0,4.0), (0.0,2.0), (-1.0,0.0)]
+// EXPECT: mags = [5.0, 2.0, 1.0]
+// EXPECT: res = [3.0, 0.0, -1.0]
+// EXPECT: ims = [4.0, 2.0, 0.0]
+// EXPECT: scaled = [15.0, 0.0, -1.0]

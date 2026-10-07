@@ -48,18 +48,18 @@ function rot_loose(x: Array<Float like PgIrrepsIdx<C4, EC>>)
     [0.0 - x(1), x(0)]
 
 let y = rot([3.0, 4.0])
-// EXPECT: y = [-4, 3]
+// EXPECT: y = [-4.0, 3.0]
 
 // PROPOSE ⊆ CHECK-ACCEPT, as a value pin: the suggested function and its
 // pinned twin are the same map, so the warning changes nothing.
 let yl = rot_loose([3.0, 4.0])
-// EXPECT: yl = [-4, 3]
+// EXPECT: yl = [-4.0, 3.0]
 
 // THE C4 SHADOW. ρ(r) on an E copy is (a, b) ↦ (−b, a), so the rotated input
 // is (−4, 3) and the rotated output is ρ(r)(−4, 3) = (−3, −4). Exact, because
 // every generator entry lies in {0, ±1}.
 let yr = rot([0.0 - 4.0, 3.0])
-// EXPECT: yr = [-3, -4]
+// EXPECT: yr = [-3.0, -4.0]
 
 // --- 2. A CUBIC, WHICH NO LINEAR LAYER CAN SPELL ----------------------------
 // (x, y) ↦ (x² + y²)·(x, y): an invariant radial factor times the vector. The
@@ -75,11 +75,11 @@ function radial3(x: Array<Float like PgIrrepsIdx<C4, EC>>)
 
 // |(3, 4)|² = 25, so the output is (75, 100).
 let c = radial3([3.0, 4.0])
-// EXPECT: c = [75, 100]
+// EXPECT: c = [75.0, 100.0]
 // ρ(r)(3, 4) = (−4, 3), whose radial cube is 25·(−4, 3) = (−100, 75) —
 // which is ρ(r)(75, 100). The certificate's conclusion, pinned as a value.
 let cr = radial3([0.0 - 4.0, 3.0])
-// EXPECT: cr = [-100, 75]
+// EXPECT: cr = [-100.0, 75.0]
 
 // --- 3. A LINEAR COMBINATION, TO PIN THE ARRAY ARMS -------------------------
 // Whole-array + and invariant·array are in the fragment, so a hand-written
@@ -94,10 +94,10 @@ function twist(x: Array<Float like PgIrrepsIdx<C4, EC>>, s: Float)
 
 // 2·(3, 4) + J(3, 4) = (6, 8) + (−4, 3) = (2, 11).
 let t = twist([3.0, 4.0], 2.0)
-// EXPECT: t = [2, 11]
+// EXPECT: t = [2.0, 11.0]
 // ρ(r)(3, 4) = (−4, 3): 2·(−4, 3) + J(−4, 3) = (−8, 6) + (−3, −4) = (−11, 2),
 // which is ρ(r)(2, 11). The invariant `s` is held fixed throughout — that is
 // the hypothesis the Inv classification records, and the atom the engine
 // carries through its coefficients untouched.
 let tr = twist([0.0 - 4.0, 3.0], 2.0)
-// EXPECT: tr = [-11, 2]
+// EXPECT: tr = [-11.0, 2.0]

@@ -27,14 +27,14 @@ let gk = group_keys(region)
 let grouped = group_by(vals, gk)
 
 let sums_omp = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)) |> compute
-// EXPECT: sums_omp = [11, 7, 3]
+// EXPECT: sums_omp = [11.0, 7.0, 3.0]
 let sums_serial = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
-// EXPECT: sums_serial = [11, 7, 3]
+// EXPECT: sums_serial = [11.0, 7.0, 3.0]
 
 // A bare `where omp` (no depths) is the licenseUnresolved fallback: it licenses
 // the outermost level, which at a peel IS the row loop.
 let sums_bare = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) where omp -> reduce(g, (+)) |> compute
-// EXPECT: sums_bare = [11, 7, 3]
+// EXPECT: sums_bare = [11.0, 7.0, 3.0]
 
 // SAME-KEYS co-iteration (tryGroupedZipPeel): k row params peeled at the same
 // __g, so one licence covers the shared row loop.
@@ -46,12 +46,12 @@ let ga = group_by(vals, gk)
 let gb = group_by(other, gk)
 
 let dots_omp = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) where omp(ra: 1) -> prodsum(ra, rb) |> compute
-// EXPECT: dots_omp = [530, 290, 90]
+// EXPECT: dots_omp = [530.0, 290.0, 90.0]
 let dots_serial = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
-// EXPECT: dots_serial = [530, 290, 90]
+// EXPECT: dots_serial = [530.0, 290.0, 90.0]
 
 // The licence on the SECOND operand licenses the same shared row loop: there is
 // no per-argument level ownership to distinguish when every operand peels at
 // the same __g (IR.coIterLicense's "most permissive wins").
 let dots_rb = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) where omp(rb: 1) -> prodsum(ra, rb) |> compute
-// EXPECT: dots_rb = [530, 290, 90]
+// EXPECT: dots_rb = [530.0, 290.0, 90.0]

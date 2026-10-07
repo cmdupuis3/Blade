@@ -55,6 +55,6 @@ function jitter_tight(x: Array<Float like IrrepsIdx<S>>)
 let xv = [2.0, 1.0, 0.0 - 3.0, 5.0]
 
 let jl = jitter_loose(xv)
-// EXPECT: jl = [8, 4, -12, 20]
+// EXPECT: jl = [8.0, 4.0, -12.0, 20.0]
 let jt = jitter_tight(xv)
-// EXPECT: jt = [8, 4, -12, 20]
+// EXPECT: jt = [8.0, 4.0, -12.0, 20.0]

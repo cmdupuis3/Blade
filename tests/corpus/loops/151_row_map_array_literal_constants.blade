@@ -19,13 +19,13 @@ let ts: Array<Float64 like Idx<4>> = [10.0, 20.0, 30.0, 40.0]
 
 // Every row is the same constant vector.
 let g = (ts <@> lambda(t) -> [1.0, 2.5, 4.0]) |> compute
-// EXPECT: g = [[1, 2.5, 4], [1, 2.5, 4], [1, 2.5, 4], [1, 2.5, 4]]
+// EXPECT: g = [[1.0, 2.5, 4.0], [1.0, 2.5, 4.0], [1.0, 2.5, 4.0], [1.0, 2.5, 4.0]]
 
 // Width 1: the degenerate row, which still raises the rank.
 let one = (ts <@> lambda(t) -> [7.0]) |> compute
-// EXPECT: one = [[7], [7], [7], [7]]
+// EXPECT: one = [[7.0], [7.0], [7.0], [7.0]]
 
 // The rank-raised result is an ordinary array -- fold it back down the
 // leading axis to prove the storage is laid out the way its type says.
 let cols = reduce(g, lambda(a: T^1, b: T^1) -> a + b)
-// EXPECT: cols = [4, 10, 16]
+// EXPECT: cols = [4.0, 10.0, 16.0]

@@ -13,5 +13,5 @@ let presid = jv - f(1.2)
 let h = 0.000001
 let fd = (f(1.2 + h) - f(1.2 - h)) / (2.0 * h)
 let agree = abs(fd - jt) < 0.000001 * (abs(jt) + 1.0)
-// EXPECT: presid = 0
+// EXPECT: presid = 0.0
 // EXPECT: agree = true

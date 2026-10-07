@@ -9,5 +9,5 @@ let A = [1.0, 2.0, 3.0]
 let p = method_for(A, A) <@> lambda(x, y) where comm(x, y) -> x * conj(y) |> compute
 let p01 = p(0, 1)
 let p10 = p(1, 0)
-// EXPECT: p01 = 2
-// EXPECT: p10 = 2
+// EXPECT: p01 = 2.0
+// EXPECT: p10 = 2.0

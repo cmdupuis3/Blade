@@ -32,6 +32,6 @@ let comomentLoop = object_for(comoment_generator)
 let covariance = comomentLoop <@> (A, A) |> compute
 // EXPECT: covariance = [0.666666666666667, 1.33333333333333, 2.66666666666667]
 let coskewness = comomentLoop <@> (A, A, A) |> compute
-// EXPECT: coskewness = [0, 0, 0, 0]
+// EXPECT: coskewness = [0.0, 0.0, 0.0, 0.0]
 let cokurtosis = comomentLoop <@> (A, A, A, A) |> compute
 // EXPECT: cokurtosis = [0.666666666666667, 1.33333333333333, 2.66666666666667, 5.33333333333333, 10.6666666666667]

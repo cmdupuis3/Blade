@@ -17,15 +17,15 @@ let s_empty = s == ""
 // EXPECT: s_empty = true
 let t: (Float64, Int64, String) = zero
 let t0 = t[0]
-// EXPECT: t0 = 0
+// EXPECT: t0 = 0.0
 let t1 = t[1]
 // EXPECT: t1 = 0
 let t2 = t[2] == ""
 // EXPECT: t2 = true
 let pts: Array<Pt like Idx<3>> = zero
 let px = pts[2].x
-// EXPECT: px = 0
+// EXPECT: px = 0.0
 let py = pts[0].y
-// EXPECT: py = 0
+// EXPECT: py = 0.0
 let ptag = pts[1].tag == ""
 // EXPECT: ptag = true

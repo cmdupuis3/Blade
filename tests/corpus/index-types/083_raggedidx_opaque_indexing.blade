@@ -5,4 +5,4 @@
 // IRIndex post-hoc. Both should produce equivalent output.
 let r = [[10.0, 20.0, 30.0], [40.0, 50.0], [60.0, 70.0]]
 let firsts = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> g(0) |> compute
-// EXPECT: firsts = [10, 40, 60]
+// EXPECT: firsts = [10.0, 40.0, 60.0]

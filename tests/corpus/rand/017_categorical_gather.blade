@@ -31,5 +31,5 @@ let meanPreserved = abs(mean - 31.25) < 0.6
 let head = r.categorical(101, W, 6)
 let headVals = method_for(head) <@> lambda(i) -> V[i] |> compute
 // EXPECT: head = [3, 3, 2, 1, 0, 3]
-// EXPECT: headVals = [40, 40, 30, 20, 10, 40]
+// EXPECT: headVals = [40.0, 40.0, 30.0, 20.0, 10.0, 40.0]
 // EXPECT: meanPreserved = true

@@ -57,7 +57,7 @@ let cokurt = m <@> (data, data, data, data) |> compute   // SymIdx<4, 3>, 24x
 let var0 = cov(0, 0)
 let skew0 = coskew(0, 0, 0)
 // EXPECT: var0 = 5.25
-// EXPECT: skew0 = 6
+// EXPECT: skew0 = 6.0
 ```
 
 ## 3. SELECT ... WHERE ... ORDER BY
@@ -73,7 +73,7 @@ let out = sort(hot, lambda(t) -> -t)           // stable, key-based, dense resul
 
 let count = extents(hot)                       // COUNT(*) WHERE ...
 let total = reduce(hot)                        // SUM   (default kernel (+))
-// EXPECT: out = [30.5, 28, 26, 26]
+// EXPECT: out = [30.5, 28.0, 26.0, 26.0]
 // EXPECT: count = 4
 // EXPECT: total = 110.5
 ```
@@ -96,9 +96,9 @@ let grouped = group_by(temps, gk)        // rank-2 ragged array
 let sums   = method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute
 let sizes  = method_for(grouped) <@> lambda(g) -> extents(g)     |> compute
 let grand  = reduce(sums)                // SUM ... then total
-// EXPECT: sums = [36, 42]
+// EXPECT: sums = [36.0, 42.0]
 // EXPECT: sizes = [3, 2]
-// EXPECT: grand = 78
+// EXPECT: grand = 78.0
 ```
 
 Uneven group sizes are fine — `grouped` is genuinely ragged. Elementwise maps
@@ -166,7 +166,7 @@ clause: identity is still required.
 type Cells = Idx<6>
 let A: Array<Float64 like Cells> = [0.0, 4.0, 8.0, 4.0, 0.0, 4.0]
 let smoothed = method_for(halo<Cells, [-1, 0, 1]>) <@> lambda(w) -> 0.25 * A(w(-1)) + 0.5 * A(w(0)) + 0.25 * A(w(1)) |> compute
-// EXPECT: smoothed = [4, 6, 4, 2]
+// EXPECT: smoothed = [4.0, 6.0, 4.0, 2.0]
 ```
 
 The kernel receives a window `w`; `w(o)` is the index at offset `o`. The
@@ -191,7 +191,7 @@ let sst = compound(sst_dense, ocean_mask)   // only ocean points stored
 let n_ocean = extents(sst)                  // cardinality = number of ocean points
 let mean_sst = reduce(sst) / Float64(n_ocean)
 // EXPECT: n_ocean = 4
-// EXPECT: mean_sst = 17
+// EXPECT: mean_sst = 17.0
 ```
 
 A compound axis indexes flat and full-arity, like `SymIdx` (`sst(lat, lon)`,
@@ -212,7 +212,7 @@ let w = sparse(weights, edges)                // one value per key, in key order
 let e21 = w((2, 1))                           // O(1) hash lookup on the full key
 let into1 = w((_, 1))                         // every edge INTO node 1: a plain Idx<n_matching>
 // EXPECT: e21 = 1.5
-// EXPECT: into1 = [1.5, 4]
+// EXPECT: into1 = [1.5, 4.0]
 ```
 
 Where a compound's validity derives from a mask over a grid, a sparse index
@@ -243,10 +243,10 @@ let ss = (L <@> demean) @>> (L <@> sumsq) |> compute
 // fills where the guarded side is zero):
 let enough = extents(data(0)) >= 10
 let est = guard(enough, L <@> variance) <|> (L <@> mean) |> compute
-// EXPECT: means = [2.5, 2]
-// EXPECT: vars = [1.25, 0]
-// EXPECT: ss = [5, 0]
-// EXPECT: est = [2.5, 2]
+// EXPECT: means = [2.5, 2.0]
+// EXPECT: vars = [1.25, 0.0]
+// EXPECT: ss = [5.0, 0.0]
+// EXPECT: est = [2.5, 2.0]
 ```
 
 ## 10. Interop: compact to dense and back
@@ -263,7 +263,7 @@ let g10 = D(1, 0)
 let Z = [[complex(1.0, 1.0), complex(0.0, 2.0)], [complex(3.0, 0.0), complex(1.0, -1.0)]]
 let Gh = gram(Z, Z)                       // complex input: HermitianIdx storage
 let Zh = hermitian(Z)                     // adjoint; conj(x) elementwise
-// EXPECT: g10 = 11
+// EXPECT: g10 = 11.0
 ```
 
 `decompact` on an `AntisymIdx` axis reconstructs signs; chaining it across
@@ -319,7 +319,7 @@ let values: Array<Float64 like StationIdx> = [10.0, 20.0, 30.0, 40.0]
 
 // Weighted per-station values: deref the FK inside the kernel
 let weighted = method_for(zip(station_region, values)) <@> lambda(r, v) -> v * region_weight(r) |> compute
-// EXPECT: weighted = [10, 40, 30, 20]
+// EXPECT: weighted = [10.0, 40.0, 30.0, 20.0]
 ```
 
 The key column holds `RegionIdx` labels, and `region_weight(r)` reads the

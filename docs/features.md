@@ -327,8 +327,8 @@ let s1 = reduce(xs, lambda(a, b) where omp -> a + b)                         // 
 let s2 = reduce(xs, lambda(a, b) where comm(a, b), omp -> a + b + a * b)     // declared comm
 function myAdd(a: Float64, b: Float64) where comm(a, b), omp -> Float64 = a + b
 let s3 = reduce(xs, myAdd)                                                   // named, same rule
-// EXPECT: s1 = 10
-// EXPECT: s3 = 10
+// EXPECT: s1 = 10.0
+// EXPECT: s3 = 10.0
 ```
 
 `omp` here is the **bare** form (no parentheses): a fold walks one axis, so

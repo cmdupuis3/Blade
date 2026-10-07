@@ -25,7 +25,7 @@ function f(c: Float) -> Float = {
 }
 
 let (fv, ft) = ad.jvp(f)(2.0, 1.0)
-// EXPECT: fv = 7
+// EXPECT: fv = 7.0
 // EXPECT: ft = 3.5
 
 // The same recurrence with the prefix pattern variable named `w`, which is
@@ -43,8 +43,8 @@ function g(w: Array<Float like S>, c: Float) -> Float = {
 
 let direct = g([10.0, 20.0, 30.0, 40.0], 2.0)
 let (gv, gt) = ad.jvp(g)([10.0, 20.0, 30.0, 40.0], 2.0, [0.0, 0.0, 0.0, 0.0], 1.0)
-// EXPECT: direct = 7
-// EXPECT: gv = 7
+// EXPECT: direct = 7.0
+// EXPECT: gv = 7.0
 // EXPECT: gt = 3.5
 
 // Control: the prefix read is OUTSIDE the branch (the fragment walker saw it

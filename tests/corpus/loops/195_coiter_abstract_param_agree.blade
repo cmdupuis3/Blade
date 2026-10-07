@@ -33,7 +33,7 @@ function wsum(a: T^1) -> T^0 =
     reduce(method_for(zip(a, weights)) <@> lambda(x, y) -> x * y, (+))
 let wsum_p = wsum(p)
 
-// EXPECT: sum_pr = 66
-// EXPECT: sum_pp = 12
-// EXPECT: sum_fwd = 66
-// EXPECT: wsum_p = 6
+// EXPECT: sum_pr = 66.0
+// EXPECT: sum_pp = 12.0
+// EXPECT: sum_fwd = 66.0
+// EXPECT: wsum_p = 6.0

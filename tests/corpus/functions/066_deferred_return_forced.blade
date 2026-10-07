@@ -44,7 +44,7 @@ let bare = f(a)
 let folded = reduce(f(a), (+))
 let viaLet = chained(a, 2.0)
 
-// EXPECT: forced = [2, 4, 6, 8]
-// EXPECT: bare = [2, 4, 6, 8]
-// EXPECT: folded = 20
-// EXPECT: viaLet = [6, 12, 18, 24]
+// EXPECT: forced = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: bare = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: folded = 20.0
+// EXPECT: viaLet = [6.0, 12.0, 18.0, 24.0]

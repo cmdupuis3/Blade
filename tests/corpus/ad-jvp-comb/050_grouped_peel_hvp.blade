@@ -32,11 +32,11 @@ let (hp, ht) = ad.jvp(ad.grad(loss))(v0, c0, gv, gc, [0.0, 0.0, 0.0, 0.0, 0.0], 
 // the gradient legs are unchanged by the tangent seed
 // EXPECT: hp = 228.333333333333
 // EXPECT: gv = [0.666666666666667, 2.5, 0.666666666666667, 0.666666666666667, 2.5]
-// EXPECT: gc = [26.6666666666667, 35]
+// EXPECT: gc = [26.6666666666667, 35.0]
 // d2L/dc0 dv = 1/n_0 on group 0's rows, 0 elsewhere
-// EXPECT: tgv = [0.333333333333333, 0, 0.333333333333333, 0.333333333333333, 0]
+// EXPECT: tgv = [0.333333333333333, 0.0, 0.333333333333333, 0.333333333333333, 0.0]
 // L is linear in cw, so the weight-weight block is exactly zero
-// EXPECT: tgc = [0, 0]
+// EXPECT: tgc = [0.0, 0.0]
 // and the tangent of the primal is <dL/dc, seed> = mean of group 0
 // EXPECT: ht = 26.6666666666667
 // WARN: BL3020  (the implicit int->float promotion here is deliberate)

@@ -8,4 +8,4 @@ let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> g(0) + reduce(g, (+)) |> compute
 // First elements [20, 25, 30] + sums [42, 52, 62] = [62, 77, 92]
-// EXPECT: result = [62, 77, 92]
+// EXPECT: result = [62.0, 77.0, 92.0]

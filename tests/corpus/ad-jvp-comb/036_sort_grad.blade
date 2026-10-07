@@ -20,17 +20,17 @@ function f(a: Array<Float like I>) -> Float = {
 
 let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
 let gv = ad.grad(f)([3.0, 1.0, 4.0, 1.5, 2.0], da)
-// EXPECT: gv = 42
-// EXPECT: da = [4, 1, 5, 2, 3]
+// EXPECT: gv = 42.0
+// EXPECT: da = [4.0, 1.0, 5.0, 2.0, 3.0]
 
 // The differential gate: a directional derivative built from the reverse
 // gradient must equal the forward tangent along the same seed, exactly.
 let (jv, jt) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
 let dirderiv = da(0) * 0.1 + da(1) * (-0.2) + da(2) * 0.3 + da(3) * 0.05 + da(4) * (-0.15)
 let resid = jt - dirderiv
-// EXPECT: jv = 42
+// EXPECT: jv = 42.0
 // EXPECT: jt = 1.35
-// EXPECT: resid = 0
+// EXPECT: resid = 0.0
 
 // Forward-over-reverse composes through a sort: `ad.jvp(ad.grad(g))` re-runs
 // the pre-pass over a body this pass already expanded, so the plumbing must
@@ -53,6 +53,6 @@ function g(a: Array<Float like J>) -> Float = {
 let mut gg = [0.0, 0.0, 0.0, 0.0]
 let mut tgg = [0.0, 0.0, 0.0, 0.0]
 let (hp, ht) = ad.jvp(ad.grad(g))([3.0, 1.0, 4.0, 2.0], gg, [0.0, 1.0, 0.0, 0.0], tgg)
-// EXPECT: hp = 30
-// EXPECT: gg = [3, 2, 4, 2]
-// EXPECT: tgg = [0, 2, 0, 0]
+// EXPECT: hp = 30.0
+// EXPECT: gg = [3.0, 2.0, 4.0, 2.0]
+// EXPECT: tgg = [0.0, 2.0, 0.0, 0.0]

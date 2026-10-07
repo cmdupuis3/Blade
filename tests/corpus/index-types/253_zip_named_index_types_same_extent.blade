@@ -19,15 +19,15 @@ let seed = [1.0, 0.0, -2.0, 3.0, 0.5, 0.25]
 let a = v * seed
 let b = seed * v
 let dot = reduce(a, (+))
-// EXPECT: a = [10, 0, -60, 120, 25, 15]
-// EXPECT: b = [10, 0, -60, 120, 25, 15]
-// EXPECT: dot = 110
+// EXPECT: a = [10.0, 0.0, -60.0, 120.0, 25.0, 15.0]
+// EXPECT: b = [10.0, 0.0, -60.0, 120.0, 25.0, 15.0]
+// EXPECT: dot = 110.0
 
 // The SAME name on both sides is the other accepting case: nominal agreement
 // is equality, not distinctness.
 let w: Array<Float64 like R> = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]
 let c = v + w
-// EXPECT: c = [11, 21, 31, 42, 52, 62]
+// EXPECT: c = [11.0, 21.0, 31.0, 42.0, 52.0, 62.0]
 
 // Two anonymous operands of equal extent: no names to disagree, and the extent
 // check is what stands between this and the out-of-bounds walk of
@@ -35,4 +35,4 @@ let c = v + w
 let p = [1.0, 2.0, 3.0]
 let q = [10.0, 20.0, 30.0]
 let d = p + q
-// EXPECT: d = [11, 22, 33]
+// EXPECT: d = [11.0, 22.0, 33.0]

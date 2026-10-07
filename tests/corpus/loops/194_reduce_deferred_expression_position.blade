@@ -13,21 +13,21 @@ let b: Array<Float64 like Idx<5>> = [2.0, 3.0, 4.0, 5.0, 6.0]
 
 // Element position: two folds in one literal (the `signal_ceiling` shape).
 let pair = [reduce(a * b, (+)), reduce(b * b, (+))]
-// EXPECT: pair = [70, 90]
+// EXPECT: pair = [70.0, 90.0]
 
 // Element position inside a NESTED literal -- the walker must still measure
 // rank 2, so only the scalar leaf is hoisted.
 let grid = [[reduce(a * b, (+)), 1.0], [2.0, 3.0]]
-// EXPECT: grid = [[70, 1], [2, 3]]
+// EXPECT: grid = [[70.0, 1.0], [2.0, 3.0]]
 
 // `if` CONDITION. Evaluated exactly once whatever the select does, so the
 // hoist is unconditional and changes no work.
 let picked = if reduce(a * b, (+)) > 80.0 then 1.0 else 2.0
-// EXPECT: picked = 2
+// EXPECT: picked = 2.0
 
 // The positions that always worked, kept here so a regression shows up beside
 // the new ones: binding RHS, and a fold inside larger inline arithmetic.
 let dot = reduce(a * b, (+))
-// EXPECT: dot = 70
+// EXPECT: dot = 70.0
 let scaled = reduce(a * b, (+)) / 5.0 + reduce(b * b, (+))
-// EXPECT: scaled = 104
+// EXPECT: scaled = 104.0

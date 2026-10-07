@@ -37,10 +37,10 @@ let d0 = K <@> (A, B) |> compute
 let d1 = K <@> P |> compute
 let d2 = K <@> Q |> compute
 let d3 = K <@> R |> compute
-// EXPECT: d0 = [[10, 20, 30], [20, 40, 60]]
-// EXPECT: d1 = [[10, 20, 30], [20, 40, 60]]
-// EXPECT: d2 = [[10, 20, 30], [20, 40, 60]]
-// EXPECT: d3 = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: d0 = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
+// EXPECT: d1 = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
+// EXPECT: d2 = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
+// EXPECT: d3 = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
 
 // M4, the LEFT-hand mirror at depth ZERO. The implicit-former arm matched the
 // UNTYPED `ExprTuple`, so it did not follow bindings at all and the two sides
@@ -48,8 +48,8 @@ let d3 = K <@> R |> compute
 // now go through the same leaf expansion in `inferMethodFor`.
 let e0 = (A, B) <@> lambda(x, y) -> x * y |> compute
 let e1 = P <@> lambda(x, y) -> x * y |> compute
-// EXPECT: e0 = [[10, 20, 30], [20, 40, 60]]
-// EXPECT: e1 = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: e0 = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
+// EXPECT: e1 = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
 
 // M5: a tuple written INSIDE `method_for`'s own comma list. `parseMethodFor`
 // parses its own list, so the inner parens made ONE operand of tuple type --
@@ -57,7 +57,7 @@ let e1 = P <@> lambda(x, y) -> x * y |> compute
 // an undeclared temp). Leaf expansion makes the parens inert, as ruling 2 says
 // they must be.
 let f0 = method_for((A, B)) <@> lambda(a, b) -> a * b |> compute
-// EXPECT: f0 = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: f0 = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
 
 // A FLAT pack of three is three operands. Nesting is NOT equivalent to this
 // under the adopted depth ruling (6c): `(A, (B, C))` is two nodes, and an
@@ -72,7 +72,7 @@ let f0 = method_for((A, B)) <@> lambda(a, b) -> a * b |> compute
 // CONDITIONALLY, licensed by a `Tuple<2>` annotation, in tuples/010.
 let C: Array<Float64 like Idx<2>> = [5.0, 6.0]
 let g0 = object_for(lambda(a, b, c) -> a + b + c) <@> (A, B, C) |> compute
-// EXPECT: g0 = [16, 17, 26, 27, 36, 37, 17, 18, 27, 28, 37, 38]
+// EXPECT: g0 = [16.0, 17.0, 26.0, 27.0, 36.0, 37.0, 17.0, 18.0, 27.0, 28.0, 37.0, 38.0]
 // The 2*3*2 = 12 cells are the COUNT half of the pin: under-arity used to run
 // and produce a plausible array of the wrong length (3.4), so a width claim
 // that is only about values would not catch the bug this file guards.

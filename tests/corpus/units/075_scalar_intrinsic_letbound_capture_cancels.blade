@@ -53,5 +53,5 @@ let tz: Float<time> = 1.0
 let a = viaLet(fs, tz)
 let b = inline_(fs, tz)
 // cos(0) = 1; cos(2pi * 0.25 * 1) = cos(pi/2) = 0 to rounding
-// EXPECT: a = [1, 6.12323399573677e-17]
-// EXPECT: b = [1, 6.12323399573677e-17]
+// EXPECT: a = [1.0, 6.12323399573677e-17]
+// EXPECT: b = [1.0, 6.12323399573677e-17]

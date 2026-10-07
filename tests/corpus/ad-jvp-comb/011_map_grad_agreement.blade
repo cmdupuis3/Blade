@@ -26,6 +26,6 @@ let (vl, tl) = ad.jvp(viaLoop)([1.0, 2.0, 3.0], [1.0, 0.5, 0.25])
 let vresid = vm - vl
 let tresid = tm - tl
 // WARN: BL4003
-// EXPECT: vm = 42
-// EXPECT: vresid = 0
-// EXPECT: tresid = 0
+// EXPECT: vm = 42.0
+// EXPECT: vresid = 0.0
+// EXPECT: tresid = 0.0

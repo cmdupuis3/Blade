@@ -25,4 +25,4 @@ let total = reduce(power, (+))
 // The complex square is untouched: (3+4i)^2 = -7+24i.
 let sq = (zs <@> lambda(w) -> w * w) |> compute
 let sq0 = sq(0)
-// EXPECT: sq0 = (-7,24)
+// EXPECT: sq0 = (-7.0,24.0)

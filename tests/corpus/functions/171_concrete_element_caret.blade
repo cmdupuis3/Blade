@@ -9,7 +9,7 @@
 // ============================================================================
 function total(xs: Float64^1) -> Float64 = reduce(xs, (+))
 let a = total([1.0, 2.0, 3.0])
-// EXPECT: a = 6
+// EXPECT: a = 6.0
 // One function, two extents.
 let b = total([0.5, 0.5, 0.5, 0.5, 0.5])
 // EXPECT: b = 2.5

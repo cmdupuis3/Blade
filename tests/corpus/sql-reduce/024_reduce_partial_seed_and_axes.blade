@@ -10,25 +10,25 @@
 // ============================================================================
 let grid: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]]
 let seededRows = reduce(grid, (+), 100.0)
-// EXPECT: seededRows = [106, 160]
+// EXPECT: seededRows = [106.0, 160.0]
 let seededTotal = reduce(grid, (+), 100.0, axes = 2)
-// EXPECT: seededTotal = 166
+// EXPECT: seededTotal = 166.0
 // axes = rank is the full fold: the same answer the pre-2026-08-09 default
 // gave for a rank-k operand (sql-reduce/021's numbers).
 let total = reduce(grid, (+), axes = 2)
-// EXPECT: total = 66
+// EXPECT: total = 66.0
 // ...and it agrees with folding the rows and then folding the row vector,
 // because (+) is associative and its identity seed is 0.
 let viaTwoSteps = reduce(reduce(grid, (+)), (+))
-// EXPECT: viaTwoSteps = 66
+// EXPECT: viaTwoSteps = 66.0
 // A lambda kernel through the partial form: max per row.
 let rowMax = reduce(grid, lambda(a, x) -> if x > a then x else a, 0.0)
-// EXPECT: rowMax = [3, 30]
+// EXPECT: rowMax = [3.0, 30.0]
 // Rank-3, every rung of the ladder.
 let cube: Array<Float64 like Idx<2>, Idx<2>, Idx<2>> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
 let c1 = reduce(cube, (+))
-// EXPECT: c1 = [[3, 7], [11, 15]]
+// EXPECT: c1 = [[3.0, 7.0], [11.0, 15.0]]
 let c2 = reduce(cube, (+), axes = 2)
-// EXPECT: c2 = [10, 26]
+// EXPECT: c2 = [10.0, 26.0]
 let c3 = reduce(cube, (+), axes = 3)
-// EXPECT: c3 = 36
+// EXPECT: c3 = 36.0

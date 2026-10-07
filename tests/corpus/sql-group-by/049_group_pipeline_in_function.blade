@@ -22,7 +22,7 @@ function mean_by(k: Array<Int64 like Row>, v: Array<Float64 like Row>) = {
 let keys: Array<Int64 like Row> = [7, 3, 7, 9, 3, 7]
 let vals: Array<Float64 like Row> = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
 let m = mean_by(keys, vals)
-// EXPECT: m = [33.3333333333333, 35, 40]
+// EXPECT: m = [33.3333333333333, 35.0, 40.0]
 
 // ---- The bucket map is the ungroup: reading the grouped array at
 // (bucket(i), rank(i)) returns row i (040's round trip), with BOTH halves of the
@@ -39,4 +39,4 @@ function ungroup(k: Array<Int64 like Row>, v: Array<Float64 like Row>,
 
 let ranks: Array<Int64 like Row> = [0, 0, 1, 0, 1, 2]
 let recon = ungroup(keys, vals, ranks)
-// EXPECT: recon = [10, 20, 30, 40, 50, 60]
+// EXPECT: recon = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]

@@ -16,19 +16,19 @@ type Speed = Float<mps>
 function top(vs: Speed^1) -> Speed = reduce(vs, (+))
 let v: Array<Float<mps> like Idx<3>> = [1.0, 2.0, 3.0]
 let t = top(v)
-// EXPECT: t = 6
+// EXPECT: t = 6.0
 
 struct P { x: Float64, y: Float64 }
 function sum_x(ps: P^1) -> Float64 = ps(0).x + ps(1).x
 let ps = [P { x = 1.0, y = 2.0 }, P { x = 3.0, y = 4.0 }]
 let sx = sum_x(ps)
-// EXPECT: sx = 4
+// EXPECT: sx = 4.0
 
 let sq: Float<area> = 4.0
 let ar: Float<meters^2> = sq
-// EXPECT: ar = 4
+// EXPECT: ar = 4.0
 let rate: Float<seconds^-1> = 2.0
-// EXPECT: rate = 2
+// EXPECT: rate = 2.0
 
 let static N = 3
 type Sq = Idx<N^2>

@@ -13,4 +13,4 @@ let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
 function total(v: Array<Float64 like Idx<5>>) -> Float64 = { reduce(v, (+)) }
 let L: Array<Float64 like LeafIdx<crystal>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let s = total(L)
-// EXPECT: s = 15
+// EXPECT: s = 15.0

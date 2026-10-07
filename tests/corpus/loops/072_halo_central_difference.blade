@@ -6,4 +6,4 @@
 // offset — so central difference over a 5-element array yields 3 interior cells.
 let A: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
 let d = method_for(halo<Idx<5>, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute
-// EXPECT: d = [3, 5, 7]
+// EXPECT: d = [3.0, 5.0, 7.0]

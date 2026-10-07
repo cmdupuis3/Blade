@@ -16,4 +16,4 @@ function mul2(x: Float64) -> Float64 = x * 2.0
 function sub1(x: Float64) -> Float64 = x - 1.0
 let funcs: Array<(Float64 -> Float64) like Idx<3>> = [add1, mul2, sub1]
 let r = funcs(1)(5.0)
-// EXPECT: r = 10
+// EXPECT: r = 10.0

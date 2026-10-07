@@ -8,4 +8,4 @@ let L = method_for(A, B)
 let f = lambda(x, y) -> (x + y) * scale + offset
 let result = L <@> f |> compute
 // result[i][j] = (A[i]+B[j])*2.5 + 1
-// EXPECT: result = [13.5, 16, 18.5, 16, 18.5, 21, 18.5, 21, 23.5]
+// EXPECT: result = [13.5, 16.0, 18.5, 16.0, 18.5, 21.0, 18.5, 21.0, 23.5]

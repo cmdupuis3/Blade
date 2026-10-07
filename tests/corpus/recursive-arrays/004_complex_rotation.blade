@@ -11,4 +11,4 @@ let rec z: Array<Complex128 like Step> =
     | zero -> zero
     | zero :: s -> zero :: complex(1.0, 0.0)
     | prefix :: n -> prefix :: prefix(n - 1) * complex(0.0, 1.0)
-// EXPECT: z = [(1, 0), (0, 1), (-1, 0), (-0, -1)]
+// EXPECT: z = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (-0.0, -1.0)]

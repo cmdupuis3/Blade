@@ -14,4 +14,4 @@ let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let result = transpose(A, [0, 1])
 // A row-major:        1 2 3 4 5 6
 // result is 3x2: [[1,4],[2,5],[3,6]] -> row-major 1 4 2 5 3 6
-// EXPECT: result = [1, 4, 2, 5, 3, 6]
+// EXPECT: result = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]

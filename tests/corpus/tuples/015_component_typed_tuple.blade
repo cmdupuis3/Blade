@@ -27,7 +27,7 @@ function sumEnds(p: Tuple<Array<Float64 like I3>, Array<Float64 like I3>>) -> Fl
 let A: Array<Float64 like I3> = [1.0, 2.0, 3.0]
 let B: Array<Float64 like I3> = [4.0, 5.0, 6.0]
 let s = sumEnds((A, B))
-// EXPECT: s = 7
+// EXPECT: s = 7.0
 
 // NESTED, with a projection CHAIN. `012` had to write this type out in full
 // (`((Float64, Float64), (Float64, Float64))`) precisely because the
@@ -36,24 +36,24 @@ let s = sumEnds((A, B))
 function outer(r: Tuple<Tuple<Float64, Float64>, Tuple<Float64, Float64>>) -> Float64 =
     r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
 let deep = outer(((1.0, 2.0), (3.0, 4.0)))
-// EXPECT: deep = 4321
+// EXPECT: deep = 4321.0
 
 // Component types are ordinary TypeExprs: mixed scalars are as fine here as
 // under `Tuple<3>`, and the width still comes from the LIST length.
 function mixed(t: Tuple<Float64, Int64, Float64>) -> Float64 = t[0] + t[2]
 let m = mixed((1.5, 7, 2.5))
-// EXPECT: m = 4
+// EXPECT: m = 4.0
 
 // RETURN-type position, like the width-only spelling.
 function mkPair(u: Float64) -> Tuple<Float64, Float64> = (u, u + 1.0)
 let r = mkPair(10.0)
 let rv = r[0] + r[1]
-// EXPECT: rv = 21
+// EXPECT: rv = 21.0
 
 // LAMBDA parameter position.
 let lam = lambda(q: Tuple<Float64, Float64>) -> q[0] * q[1]
 let lv = lam((3.0, 4.0))
-// EXPECT: lv = 12
+// EXPECT: lv = 12.0
 
 // WIDTH SCHEMA (6c): a component-typed parameter is a schema node of width k,
 // exactly like `Tuple<k>` -- `declaredTupleWidth` counts a written `TyTuple`
@@ -64,7 +64,7 @@ let Q: Array<Float64 like Idx<2>> = [3.0, 4.0]
 let R: Array<Float64 like Idx<2>> = [5.0, 6.0]
 let g = object_for(lambda(x, y: Tuple<Float64, Float64>) -> x + y[0] * y[1])
           <@> (P, (Q, R)) |> compute
-// EXPECT: g = [16, 19, 21, 25, 17, 20, 22, 26]
+// EXPECT: g = [16.0, 19.0, 21.0, 25.0, 17.0, 20.0, 22.0, 26.0]
 
 // ...and a NAMED FUNCTION kernel, which reaches the seam through
 // etaExpandFunctionKernel's `IRTTuple -> Tuple<k>` re-spelling and then has
@@ -72,4 +72,4 @@ let g = object_for(lambda(x, y: Tuple<Float64, Float64>) -> x + y[0] * y[1])
 // arrow.
 function addPair(t: Tuple<Float64, Float64>) -> Float64 = t[0] + t[1]
 let h = object_for(addPair) <@> (P, Q) |> compute
-// EXPECT: h = [[4, 5], [5, 6]]
+// EXPECT: h = [[4.0, 5.0], [5.0, 6.0]]

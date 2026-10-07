@@ -13,4 +13,4 @@ let wb = method_for(b) <@> lambda(q) -> if q > 0.5 then 1.0 else 0.0
 let both = intersect(wa, wb)
 let result = method_for(both) <@> lambda(x) -> x |> compute
 // wa = [0, 1, 1], wb = [0, 1, 1] -> unique values in both, A-order
-// EXPECT: result = [0, 1]
+// EXPECT: result = [0.0, 1.0]

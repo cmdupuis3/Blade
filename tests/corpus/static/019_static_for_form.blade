@@ -8,4 +8,4 @@
 static function rep(x, k) = if k == 1 then x else (x, rep(x, k - 1))
 let A = [2.0, 3.0]
 let sf = static for (rep(A, 2)) <@> lambda(x, y) -> x * y |> compute
-// EXPECT: sf = [4, 6, 6, 9]
+// EXPECT: sf = [4.0, 6.0, 6.0, 9.0]

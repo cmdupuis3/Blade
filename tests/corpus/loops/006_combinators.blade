@@ -10,5 +10,5 @@ let f = lambda(x, y) -> x + y
 // Parallel composition
 let parallel = (L1 <@> f) <&> (L2 <@> f)
 // parallel is deferred (no |> compute); the input arrays print
-// EXPECT: A = [1, 2]
-// EXPECT: B = [3, 4]
+// EXPECT: A = [1.0, 2.0]
+// EXPECT: B = [3.0, 4.0]

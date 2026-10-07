@@ -23,14 +23,14 @@ let gb = group_by(b, gk)
 // Identical values to 025's RaggedIdx<_> spelling: group 0 = 1*10 + 3*30,
 // group 1 = 2*20 + 4*40.
 let dots = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> prodsum(ra, rb) |> compute
-// EXPECT: dots = [100, 200]
+// EXPECT: dots = [100.0, 200.0]
 
 // The body FORWARDS both rows into a call rather than consuming them here, so
 // no structural array use is visible in the kernel at all -- the annotation is
 // the only signal, and it has to be enough.
 function rowdot(t: T^1, s: U^1) = prodsum(t, s)
 let viaCall = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> rowdot(ra, rb) |> compute
-// EXPECT: viaCall = [100, 200]
+// EXPECT: viaCall = [100.0, 200.0]
 
 // Forwarded as a TYPED TUPLE component -- the shape a Welch taper call takes.
 function rowdotT(ts: Tuple<T^1, U^1>) = {
@@ -38,13 +38,13 @@ function rowdotT(ts: Tuple<T^1, U^1>) = {
     prodsum(t, s)
 }
 let viaTuple = method_for(zip(ga, gb)) <@> lambda(ra: T^1, rb: U^1) -> rowdotT((ra, rb)) |> compute
-// EXPECT: viaTuple = [100, 200]
+// EXPECT: viaTuple = [100.0, 200.0]
 
 // A concrete rank-1 array annotation is a rank-1 annotation too.
 let viaConcrete = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>, rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
-// EXPECT: viaConcrete = [100, 200]
+// EXPECT: viaConcrete = [100.0, 200.0]
 
 // UNANNOTATED parameters still bind ELEMENTS, so a single grouped operand keeps
 // its elementwise reading -- the row rule must not swallow that form.
 let sums = method_for(ga) <@> lambda(r: T^1) -> reduce(r, (+)) |> compute
-// EXPECT: sums = [4, 6]
+// EXPECT: sums = [4.0, 6.0]

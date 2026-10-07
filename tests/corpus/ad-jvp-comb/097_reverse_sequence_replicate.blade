@@ -38,30 +38,30 @@ function facc(x: Array<Float like I>) -> Float = {
 let mut dx = [0.0, 0.0]
 let mut dy = [0.0, 0.0]
 let sv = ad.grad(fseq)([1.0, 2.0], [3.0, 4.0], dx, dy)
-// EXPECT: sv = 23
-// EXPECT: dx = [3, 0]
-// EXPECT: dy = [0, 5]
+// EXPECT: sv = 23.0
+// EXPECT: dx = [3.0, 0.0]
+// EXPECT: dy = [0.0, 5.0]
 
 let mut rx = [0.0, 0.0]
 let rv = ad.grad(frep)([1.0, 2.0], rx)
-// EXPECT: rv = 13
-// EXPECT: rx = [3, 5]
+// EXPECT: rv = 13.0
+// EXPECT: rx = [3.0, 5.0]
 
 let mut ax = [0.0, 0.0]
 let av = ad.grad(facc)([1.0, 2.0], ax)
-// EXPECT: av = 10
-// EXPECT: ax = [10, 0]
+// EXPECT: av = 10.0
+// EXPECT: ax = [10.0, 0.0]
 
 // forward agreement: the tangent is the gradient contracted with the seed
 let (js, ts) = ad.jvp(fseq)([1.0, 2.0], [3.0, 4.0], [1.0, 0.0], [0.0, 1.0])
 let sresid = ts - (dx(0) + dy(1))
-// EXPECT: js = 23
-// EXPECT: sresid = 0
+// EXPECT: js = 23.0
+// EXPECT: sresid = 0.0
 let (jr, tr) = ad.jvp(frep)([1.0, 2.0], [1.0, 1.0])
 let rresid = tr - (rx(0) + rx(1))
-// EXPECT: jr = 13
-// EXPECT: rresid = 0
+// EXPECT: jr = 13.0
+// EXPECT: rresid = 0.0
 let (ja, ta) = ad.jvp(facc)([1.0, 2.0], [1.0, 0.0])
 let aresid = ta - ax(0)
-// EXPECT: ja = 10
-// EXPECT: aresid = 0
+// EXPECT: ja = 10.0
+// EXPECT: aresid = 0.0

@@ -6,4 +6,4 @@ let A = [1.0, 2.0, 3.0]
 let L = method_for(A, A)
 let f = lambda(x, y) where comm(x, y) -> square(x) + square(y)
 let result = L <@> f |> compute
-// EXPECT: result = [2, 5, 10, 8, 13, 18]
+// EXPECT: result = [2.0, 5.0, 10.0, 8.0, 13.0, 18.0]

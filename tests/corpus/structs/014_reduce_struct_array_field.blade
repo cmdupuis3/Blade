@@ -13,4 +13,4 @@ struct Trace {
 }
 let t = Trace { samples = [10.0, 20.0, 30.0] }
 let total = reduce(t.samples, (+))
-// EXPECT: total = 60
+// EXPECT: total = 60.0

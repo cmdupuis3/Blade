@@ -32,4 +32,4 @@ let B: Array<Float64 like Y, X> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
 let P = method_for(zip(A, B)) <@> lambda(ra: Array<Float64 like X>, rb: Array<Float64 like X>) -> ra * rb |> compute
 
 // Elementwise per row -- NOT (sum ra)(sum rb), which would be [360, 2250].
-// EXPECT: P = [[10, 40, 90], [160, 250, 360]]
+// EXPECT: P = [[10.0, 40.0, 90.0], [160.0, 250.0, 360.0]]

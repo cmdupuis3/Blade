@@ -17,7 +17,7 @@ let temps = [21.0, 30.5, 26.0, 18.0, 28.0]
 let m   = mask(temps, lambda(t) -> t > 25.0)
 let hot = compound(temps, m)
 let out = sort(hot, lambda(t) -> -t)
-// EXPECT: out = [30.5, 28, 26]
+// EXPECT: out = [30.5, 28.0, 26.0]
 ```
 
 | SQL | Blade |
@@ -352,7 +352,7 @@ let sums  = method_for(group_by(temps, gk)) <@> lambda(g) -> reduce(g, (+)) |> c
 let sizes = extents(gk)                      // Array<Int64 like GroupOuter>
 let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / Float64(n)) |> compute
 // EXPECT: sizes = [2, 2, 1]
-// EXPECT: means = [21, 26, 30]
+// EXPECT: means = [21.0, 26.0, 30.0]
 ```
 
 Sizes are `offsets[g+1] - offsets[g]`, so **nothing is gathered** — a count-only
@@ -489,7 +489,7 @@ let temps   = [20.0, 25.0, 22.0, 30.0, 27.0]
 let gk      = group_keys(region)
 let grouped = group_by(temps, gk)
 let sums = method_for(grouped) <@> lambda(g) -> reduce(g, (+)) |> compute   // SUM ... GROUP BY
-// EXPECT: sums = [42, 52, 30]
+// EXPECT: sums = [42.0, 52.0, 30.0]
 ```
 
 - Each kernel argument `g` is a per-group sub-array; group size via `extents(g)`.
@@ -520,7 +520,7 @@ let gb = group_by(b, gk)
 let dots = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_>>,
                                               rb: Array<Float64 like RaggedIdx<_>>) -> prodsum(ra, rb) |> compute
 // per-group dot product
-// EXPECT: dots = [7, 17, 8]
+// EXPECT: dots = [7.0, 17.0, 8.0]
 ```
 
 One offsets table drives the whole walk, so this is the ordinary ragged peel with
@@ -579,7 +579,7 @@ default**. A rank-k operand yields a rank-(k−n) result, so
 ```blade
 let rows = reduce([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], (+))   // rank 1
 let left = reduce([1, 2, 3, 4], lambda(a, b) -> a - b)
-// EXPECT: rows = [6, 60]
+// EXPECT: rows = [6.0, 60.0]
 // EXPECT: left = -8
 ```
 
@@ -592,10 +592,10 @@ let r1  = reduce(M, (+))                      // 1 axis  (default)
 let r1s = reduce(M, (+), 100.0)               // 1 axis, seeded (per row)
 let r2  = reduce(M, (+), axes = 2)            // 2 axes
 let r2s = reduce(M, (+), 100.0, axes = 2)     // 2 axes, seeded (once)
-// EXPECT: r1 = [6, 60]
-// EXPECT: r1s = [106, 160]
-// EXPECT: r2 = 66
-// EXPECT: r2s = 166
+// EXPECT: r1 = [6.0, 60.0]
+// EXPECT: r1s = [106.0, 160.0]
+// EXPECT: r2 = 66.0
+// EXPECT: r2s = 166.0
 ```
 
 It is a NAMED slot, not a fourth positional one, because the third positional
@@ -714,7 +714,7 @@ lookups are ordinary captured-array indexing.
 let region  = [0, 1, 0, 2, 1]                  // FK: station -> region id
 let weights = [5.0, 6.0, 4.0]                  // one weight per region
 let deref = method_for(region) <@> lambda(r) -> weights(r) |> compute
-// EXPECT: deref = [5, 6, 5, 4, 6]
+// EXPECT: deref = [5.0, 6.0, 5.0, 4.0, 6.0]
 ```
 
 - Cross-reference (`weights(region(i))`), co-iteration via `zip`, outer products

@@ -34,18 +34,18 @@ let cx: Array<Complex128 like Idx<3>> = [
 
 // (1) plain inference -- the `unify` seam
 let z1 = prodsum(re, cx)
-// EXPECT: z1 = (7,2)
+// EXPECT: z1 = (7.0,2.0)
 
 // (2) let-ascription -- the ascription seam
 let z2: Complex128 = prodsum(re, cx)
-// EXPECT: z2 = (7,2)
+// EXPECT: z2 = (7.0,2.0)
 
 // (3) generic caret param + direct application -- the `lsdft` shape, and the
 //     one that used to bind the callee's own `T` to Complex128
 function mix(x: T^1, e: Array<Complex128 like Idx<3>>) = prodsum(x, e)
 let z3 = mix(re, cx)
-// EXPECT: z3 = (7,2)
+// EXPECT: z3 = (7.0,2.0)
 
 // (4) operand order reversed
 let z4 = prodsum(cx, re)
-// EXPECT: z4 = (7,2)
+// EXPECT: z4 = (7.0,2.0)

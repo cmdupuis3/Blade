@@ -9,4 +9,4 @@ let a = method_for(range<I>) <@> lambda(i) -> Float64(i) |> compute
 let b = method_for(range<I>) <@> lambda(i) -> Float64(i) + 1.0 |> compute
 
 let s = reduce(a * b + a, (+))
-// EXPECT: s = 50
+// EXPECT: s = 50.0

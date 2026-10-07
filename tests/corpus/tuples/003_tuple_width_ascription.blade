@@ -12,16 +12,16 @@ let c = 2.0
 let t: Tuple<2> = b, c
 let t0 = t[0]
 let t1 = t[1]
-// EXPECT: t0 = 1
-// EXPECT: t1 = 2
+// EXPECT: t0 = 1.0
+// EXPECT: t1 = 2.0
 
 let u: Tuple<2> = (c, b)
 let u0 = u[0]
-// EXPECT: u0 = 2
+// EXPECT: u0 = 2.0
 
 let w: Tuple<3> = 1.0, 2.0, 4.0
 let ws = w[0] + w[1] + w[2]
-// EXPECT: ws = 7
+// EXPECT: ws = 7.0
 
 // Heterogeneous elements: only the width is declared, so nothing forces the
 // slots to agree.
@@ -36,4 +36,4 @@ function inBlock(x: Float64) -> Float64 = {
     q[0] + q[1]
 }
 let blockv = inBlock(5.0)
-// EXPECT: blockv = 11
+// EXPECT: blockv = 11.0

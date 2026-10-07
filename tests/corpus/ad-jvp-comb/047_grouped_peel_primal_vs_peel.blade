@@ -33,7 +33,7 @@ let rm = method_for(rg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduc
 // having been accumulated group by group.
 let rmd: Array<Float64 like G> = [rm(0), rm(1), rm(2)]
 let rL = reduce(rmd * c0, (+))
-// EXPECT: rm = [33.3333333333333, 35, 40]
+// EXPECT: rm = [33.3333333333333, 35.0, 40.0]
 // EXPECT: rL = 201.666666666667
 
 // WARN: BL4003

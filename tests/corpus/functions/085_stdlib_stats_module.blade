@@ -13,7 +13,7 @@ from stats import mean, variance, stddev
 
 let x = [1.0, 2.0, 3.0]
 let m = mean(x)
-// EXPECT: m = 2
+// EXPECT: m = 2.0
 let v = variance(x)
 // EXPECT: v = 0.666666666666667
 let s = stddev(x)
@@ -21,7 +21,7 @@ let s = stddev(x)
 
 let B = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
 let rowmeans = method_for(B) <@> mean |> compute
-// EXPECT: rowmeans = [2, 4]
+// EXPECT: rowmeans = [2.0, 4.0]
 let rowvars = method_for(B) <@> variance |> compute
 // EXPECT: rowvars = [0.666666666666667, 2.66666666666667]
 

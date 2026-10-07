@@ -26,7 +26,7 @@ let r2 = {
     let b = total(ys)
     a + Float64(b)
 }
-// EXPECT: r2 = 13
+// EXPECT: r2 = 13.0
 
 // A rank-polymorphic `T^k` body called at two ranks.
 let r3 = {
@@ -35,7 +35,7 @@ let r3 = {
     let w = twice(M)
     u(2) + w(1, 1)
 }
-// EXPECT: r3 = 14
+// EXPECT: r3 = 14.0
 
 // Capture of a block-local value.
 let r4 = {
@@ -43,7 +43,7 @@ let r4 = {
     function addk(x: T) -> T = x + k
     addk(2.0) + addk(3.0)
 }
-// EXPECT: r4 = 25
+// EXPECT: r4 = 25.0
 
 // Self-recursion, generic.
 let r5 = {

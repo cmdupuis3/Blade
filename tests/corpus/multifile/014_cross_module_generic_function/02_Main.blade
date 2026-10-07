@@ -35,9 +35,9 @@ from Stats import mean, centered
 let x = [1.0, 2.0, 3.0]
 
 let m = Stats.mean(x)
-// EXPECT: m = 2
+// EXPECT: m = 2.0
 let c = centered(x)
-// EXPECT: c = [-1, 0, 1]
+// EXPECT: c = [-1.0, 0.0, 1.0]
 
 // A local generic whose return type IS the imported generic's return: fix (2).
 function spread(row: T^1) -> T^0 = Stats.mean(centered(row) * centered(row))
@@ -53,4 +53,4 @@ let wrapped = spread(x)
 // test is about -- the selective import is the spelling that works today.
 let B = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0]]
 let rowmeans = method_for(B) <@> mean |> compute
-// EXPECT: rowmeans = [2, 4]
+// EXPECT: rowmeans = [2.0, 4.0]

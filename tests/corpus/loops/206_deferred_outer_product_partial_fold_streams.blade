@@ -27,7 +27,7 @@ let z = reduce(method_for(q, k) <@> lambda(a, b) -> exp(score(a, b)), (+))
 let W = (method_for(q, k) <@> lambda(a, b) -> exp(score(a, b)) |> compute)
 let zr = reduce(W, (+))
 let dz = z - zr
-// EXPECT: dz = [0, 0, 0, 0, 0, 0, 0]
+// EXPECT: dz = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 // A seeded lambda kernel: the row maximum.
 let mx = reduce(method_for(q, k) <@> lambda(a, b) -> score(a, b),
@@ -35,13 +35,13 @@ let mx = reduce(method_for(q, k) <@> lambda(a, b) -> score(a, b),
 let mxr = reduce(method_for(q, k) <@> lambda(a, b) -> score(a, b) |> compute,
                  lambda(x, y) -> if x > y then x else y, -1.0e300)
 let dm = mx - mxr
-// EXPECT: dm = [0, 0, 0, 0, 0, 0, 0]
+// EXPECT: dm = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 // (*) over integer-valued float data.
 let p = reduce(method_for(q, w) <@> lambda(a, b) -> Float64(floor(a * 3.0)) + b, (*))
 let pr = reduce(method_for(q, w) <@> lambda(a, b) -> Float64(floor(a * 3.0)) + b |> compute, (*))
 let dp = p - pr
-// EXPECT: dp = [0, 0, 0, 0, 0, 0, 0]
+// EXPECT: dp = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 // Int64 cells.
 let s = reduce(method_for(ia, ib) <@> lambda(a, b) -> a * b + 1, (+))

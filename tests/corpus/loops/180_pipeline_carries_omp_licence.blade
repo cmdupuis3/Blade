@@ -14,4 +14,4 @@ let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0
 let stage1 = object_for(lambda(g: Array<Float64 like RaggedIdx<_>>) where omp(g: 1) -> reduce(g, (+)))
 let stage2 = object_for(lambda(s) -> s * 2.0)
 let piped = (stage1 >>@ stage2) <@> r |> compute
-// EXPECT: piped = [12, 18, 60]
+// EXPECT: piped = [12.0, 18.0, 60.0]

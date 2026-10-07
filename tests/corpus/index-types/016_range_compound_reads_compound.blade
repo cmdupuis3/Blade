@@ -15,5 +15,5 @@ let B = compound(dense, m)
 let R = method_for(range<CompoundIdx<m>>) <@> lambda(i, j) -> B(i, j) * 2.0 |> compute
 let y1 = R(0, 2)
 let y2 = R(1, 1)
-// EXPECT: y1 = 6
-// EXPECT: y2 = 10
+// EXPECT: y1 = 6.0
+// EXPECT: y2 = 10.0

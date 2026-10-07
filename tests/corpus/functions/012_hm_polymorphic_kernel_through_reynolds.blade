@@ -9,4 +9,4 @@ let B: Array<Float64 like Idx<2>> = [1.0, 2.0]
 let kern = lambda(x, y) -> x - y
 let result = method_for(A, B) <@> reynolds(kern) |> compute
 let r = result(0, 0)
-// EXPECT: r = 0
+// EXPECT: r = 0.0

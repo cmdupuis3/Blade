@@ -19,5 +19,5 @@ function f(a: Array<Float like J>) -> Float = {
 }
 
 let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
-// EXPECT: v = 100
-// EXPECT: t = 60
+// EXPECT: v = 100.0
+// EXPECT: t = 60.0

@@ -60,6 +60,6 @@ function dead_generic(st: Tuple<U^1, T<time>^1>, freqs: T<frequency>^1, t_zero: 
 // Nothing calls dead_generic. The module must still compile and run, and the
 // bindings below must be unaffected.
 let probe = 6.0
-// EXPECT: probe = 6
+// EXPECT: probe = 6.0
 let live = reduce([1.0, 2.0, 3.0], (+))
-// EXPECT: live = 6
+// EXPECT: live = 6.0

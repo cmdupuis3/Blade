@@ -51,4 +51,4 @@ let region: Array<RegionIdx like StationIdx> = [0, 1, 2, 0, 1, 2]
 let region_avg: Array<Float64 like RegionIdx> = [10.0, 20.0, 30.0]
 let temps: Array<Float64 like StationIdx> = [11.0, 19.0, 31.0, 12.0, 21.0, 29.0]
 let deltas = method_for(range<StationIdx>) <@> lambda(s) -> temps(s) - region_avg(region(s)) |> compute
-// EXPECT: deltas = [1, -1, 1, 2, 1, -1]
+// EXPECT: deltas = [1.0, -1.0, 1.0, 2.0, 1.0, -1.0]

@@ -191,13 +191,13 @@ function c4_layer(x: Array<Float like PgIrrepsIdx<C4, R1>>, w: Array<Float like 
 // two-dimensional End_C4(E) = C with J = R90, (a, b) -> (-b, a). At
 // w = [2, 0, 1] the E half is pure J.
 let y = c4_layer([1.0, 3.0, 4.0], [2.0, 0.0, 1.0])
-// EXPECT: y = [2, -4, 3]
+// EXPECT: y = [2.0, -4.0, 3.0]
 
 // THE C4 SHADOW, exact because every generator entry lies in {0, +-1}:
 // rho(r) = [1] (+) R90 sends [x0, x1, x2] to [x0, -x2, x1]. Feeding the rotated
 // input must rotate the output.
 let yr = c4_layer([1.0, 0.0 - 4.0, 3.0], [2.0, 0.0, 1.0])
-// EXPECT: yr = [2, -3, -4]
+// EXPECT: yr = [2.0, -3.0, -4.0]
 
 // --- 5. THE INVARIANT CELL OF THE RESTRICTED MODULE -------------------------
 // Scaling only the trivial-label cell is C4-equivariant, and it is the map
@@ -211,8 +211,8 @@ function scale_invariant(x: Array<Float like PgIrrepsIdx<C4, R1>>)
     [2.0 * x(0), x(1), x(2)]
 
 let s = scale_invariant([1.0, 3.0, 4.0])
-// EXPECT: s = [2, 3, 4]
+// EXPECT: s = [2.0, 3.0, 4.0]
 
 // rho(r)[1, 3, 4] = [1, -4, 3], and the output rotates with it.
 let sr = scale_invariant([1.0, 0.0 - 4.0, 3.0])
-// EXPECT: sr = [2, -4, 3]
+// EXPECT: sr = [2.0, -4.0, 3.0]

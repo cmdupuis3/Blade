@@ -12,4 +12,4 @@ let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
 let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 let d = method_for(r) <@> lambda(e) -> e * 10.0 |> compute
 let sums = method_for(d) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
-// EXPECT: sums = [60, 90, 60]
+// EXPECT: sums = [60.0, 90.0, 60.0]

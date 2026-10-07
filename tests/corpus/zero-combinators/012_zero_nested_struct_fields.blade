@@ -21,19 +21,19 @@ struct Outer {
 }
 let o: Outer = zero
 let oa = o.a
-// EXPECT: oa = 0
+// EXPECT: oa = 0.0
 let on = o.n
 // EXPECT: on = 0
 let oname = o.name == ""
 // EXPECT: oname = true
 let ow = o.inner.w
-// EXPECT: ow = (0,0)
+// EXPECT: ow = (0.0,0.0)
 let oflag = o.inner.flag
 // EXPECT: oflag = false
 let olabel = o.inner.label == ""
 // EXPECT: olabel = true
 let os = o.samples
-// EXPECT: os = [0, 0, 0]
+// EXPECT: os = [0.0, 0.0, 0.0]
 let og = o.grid
 // EXPECT: og = [[0, 0], [0, 0]]
 
@@ -41,7 +41,7 @@ function z(x: T) -> T = zero
 let full = Outer { a = 1.5, n = 3, name = "x", inner = Inner { w = complex(1.0, 2.0), flag = true, label = "y" }, samples = [1.0, 2.0, 3.0], grid = [[1, 2], [3, 4]] }
 let g = z(full)
 let gs = g.samples
-// EXPECT: gs = [0, 0, 0]
+// EXPECT: gs = [0.0, 0.0, 0.0]
 let gflag = g.inner.flag
 // EXPECT: gflag = false
 let glabel = g.inner.label == ""

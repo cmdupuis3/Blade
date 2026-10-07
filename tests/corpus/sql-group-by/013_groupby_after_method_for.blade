@@ -11,4 +11,4 @@ let doubled = method_for(temps) <@> lambda(t) -> t * 2.0 |> compute
 let gk = group_keys(region)
 let grouped = group_by(doubled, gk)
 let result = method_for(grouped) <@> lambda(g) -> g(0) |> compute
-// EXPECT: result = [40, 50, 60]
+// EXPECT: result = [40.0, 50.0, 60.0]

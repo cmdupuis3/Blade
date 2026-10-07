@@ -15,6 +15,6 @@ function f(x: Float, y: Float) -> Float = {
 }
 
 let (p, gx, gy) = ad.grad(f)(3.0, 1.0)
-// EXPECT: p = 4
-// EXPECT: gx = 4
-// EXPECT: gy = 0
+// EXPECT: p = 4.0
+// EXPECT: gx = 4.0
+// EXPECT: gy = 0.0

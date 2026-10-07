@@ -19,12 +19,12 @@ let grouped = group_by(temps, gk)
 
 // The named function AS the kernel (eta position).
 let gsums = method_for(grouped) <@> rowsum |> compute
-// EXPECT: gsums = [80, 70]
+// EXPECT: gsums = [80.0, 70.0]
 
 // The named function FORWARDED through an annotated lambda -- this is the shape
 // that puts `rowsum` in a std::function<> capture slot.
 let gvia = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> rowsum(g) |> compute
-// EXPECT: gvia = [80, 70]
+// EXPECT: gvia = [80.0, 70.0]
 
 // --- ragged literal source: rows are __raggedidx (a different IxKind through
 // the same wrapper chooser) ---
@@ -32,7 +32,7 @@ let lens = [3, 2, 1]
 let r: Array<Float64 like Idx<3>, RaggedIdx<lens>> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 
 let rsums = method_for(r) <@> rowsum |> compute
-// EXPECT: rsums = [6, 9, 6]
+// EXPECT: rsums = [6.0, 9.0, 6.0]
 
 let rvia = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> rowsum(g) |> compute
-// EXPECT: rvia = [6, 9, 6]
+// EXPECT: rvia = [6.0, 9.0, 6.0]

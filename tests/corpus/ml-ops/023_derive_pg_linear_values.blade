@@ -96,16 +96,16 @@ let static WED = ml.pg_hom_dim("D4", ED, ED)
 let xd: Array<Float like PgIrrepsIdx<D4, SD>> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let wd = [2.0, 3.0, 0.0 - 1.0, 0.5, 4.0]
 let yd = ml.derive_pg_linear(D4, SD, SD, xd, wd)
-// EXPECT: yd = [2, 2, 4, 17, 21.5]
+// EXPECT: yd = [2.0, 2.0, 4.0, 17.0, 21.5]
 let twin = [wd(0) * xd(0),
             wd(1) * xd(1) + wd(2) * xd(3),
             wd(1) * xd(2) + wd(2) * xd(4),
             wd(3) * xd(1) + wd(4) * xd(3),
             wd(3) * xd(2) + wd(4) * xd(4)]
-// EXPECT: twin = [2, 2, 4, 17, 21.5]
+// EXPECT: twin = [2.0, 2.0, 4.0, 17.0, 21.5]
 let dtw = yd - twin
 let sq_tw = reduce(dtw * dtw, (+))
-// EXPECT: sq_tw = 0
+// EXPECT: sq_tw = 0.0
 
 // --- 3. THE e = 2 PATH: out += w_Id * x + w_J * (J x) -----------------------
 // At C4 the E cells carry two scalars each, and the emitted pair of terms is
@@ -124,7 +124,7 @@ let wc = [2.0,
           0.0 - 2.0, 1.5,
           0.25, 0.0 - 3.0]
 let yc = ml.derive_pg_linear(C4, SC, SC, xc, wc)
-// EXPECT: yc = [2, -9, 25.5, 7.5, -13.75]
+// EXPECT: yc = [2.0, -9.0, 25.5, 7.5, -13.75]
 
 // --- 4. THE E-PLANE ANCHOR --------------------------------------------------
 // SIN = SOUT = [("E", 1)] at C4: the whole equivariant family is
@@ -133,7 +133,7 @@ let xe: Array<Float like PgIrrepsIdx<C4, EC>> = [3.0, 4.0]
 
 // (w1, w2) = (1, 0): the identity.
 let e_id = ml.derive_pg_linear(C4, EC, EC, xe, [1.0, 0.0])
-// EXPECT: e_id = [3, 4]
+// EXPECT: e_id = [3.0, 4.0]
 
 // (w1, w2) = (0, 1): THE OUTPUT IS THE 90-DEGREE ROTATION OF THE INPUT.
 // J = R90 = [[0, -1], [1, 0]], so J(3, 4) = (-4, 3) — pinned exactly. This is
@@ -141,24 +141,24 @@ let e_id = ml.derive_pg_linear(C4, EC, EC, xe, [1.0, 0.0])
 // weight buys a genuine rotation of the plane, and it exists ONLY because
 // End_{C4}(E) is C rather than R.
 let e_rot = ml.derive_pg_linear(C4, EC, EC, xe, [0.0, 1.0])
-// EXPECT: e_rot = [-4, 3]
+// EXPECT: e_rot = [-4.0, 3.0]
 
 // J^2 = -Id, at the value level: rotating twice negates.
 let e_rot2 = ml.derive_pg_linear(C4, EC, EC, e_rot, [0.0, 1.0])
-// EXPECT: e_rot2 = [-3, -4]
+// EXPECT: e_rot2 = [-3.0, -4.0]
 
 // A general weight setting is the corresponding complex scalar:
 // (2 - i)(3 + 4i) = 10 + 5i.
 let e_gen = ml.derive_pg_linear(C4, EC, EC, xe, [2.0, 0.0 - 1.0])
-// EXPECT: e_gen = [10, 5]
+// EXPECT: e_gen = [10.0, 5.0]
 
 // The same plane at D4 has ONE weight, and it can only scale — there is no
 // rotation to buy, because the mirror rules it out.
 let xed: Array<Float like PgIrrepsIdx<D4, ED>> = [3.0, 4.0]
 let ed_id = ml.derive_pg_linear(D4, ED, ED, xed, [1.0])
-// EXPECT: ed_id = [3, 4]
+// EXPECT: ed_id = [3.0, 4.0]
 let ed_scale = ml.derive_pg_linear(D4, ED, ED, xed, [0.0 - 2.0])
-// EXPECT: ed_scale = [-6, -8]
+// EXPECT: ed_scale = [-6.0, -8.0]
 
 // --- 5. EQUIVARIANCE, AS EXACT FLOAT EQUALITY -------------------------------
 // The claim the synthesis makes is f(rho(g) x) = rho(g) f(x) for every g, and
@@ -172,11 +172,11 @@ let ed_scale = ml.derive_pg_linear(D4, ED, ED, xed, [0.0 - 2.0])
 let rxc = [xc(0), 0.0 - xc(2), xc(1), 0.0 - xc(4), xc(3)]
 let f_rxc = ml.derive_pg_linear(C4, SC, SC, rxc, wc)
 let r_fxc = [yc(0), 0.0 - yc(2), yc(1), 0.0 - yc(4), yc(3)]
-// EXPECT: f_rxc = [2, -25.5, -9, 13.75, 7.5]
-// EXPECT: r_fxc = [2, -25.5, -9, 13.75, 7.5]
+// EXPECT: f_rxc = [2.0, -25.5, -9.0, 13.75, 7.5]
+// EXPECT: r_fxc = [2.0, -25.5, -9.0, 13.75, 7.5]
 let dc = f_rxc - r_fxc
 let sq_c = reduce(dc * dc, (+))
-// EXPECT: sq_c = 0
+// EXPECT: sq_c = 0.0
 
 // D4 has TWO generators, so its certificate needs both. r first (same shape):
 let rxd = [xd(0), 0.0 - xd(2), xd(1), 0.0 - xd(4), xd(3)]
@@ -184,18 +184,18 @@ let f_rxd = ml.derive_pg_linear(D4, SD, SD, rxd, wd)
 let r_fxd = [yd(0), 0.0 - yd(2), yd(1), 0.0 - yd(4), yd(3)]
 let dr = f_rxd - r_fxd
 let sq_dr = reduce(dr * dr, (+))
-// EXPECT: sq_dr = 0
+// EXPECT: sq_dr = 0.0
 
 // then the mirror s: trivial -> 1, each E copy -> diag(1, -1), i.e.
 //     [x0, x1, x2, x3, x4] -> [x0, x1, -x2, x3, -x4]
 let sxd = [xd(0), xd(1), 0.0 - xd(2), xd(3), 0.0 - xd(4)]
 let f_sxd = ml.derive_pg_linear(D4, SD, SD, sxd, wd)
 let s_fxd = [yd(0), yd(1), 0.0 - yd(2), yd(3), 0.0 - yd(4)]
-// EXPECT: f_sxd = [2, 2, -4, 17, -21.5]
-// EXPECT: s_fxd = [2, 2, -4, 17, -21.5]
+// EXPECT: f_sxd = [2.0, 2.0, -4.0, 17.0, -21.5]
+// EXPECT: s_fxd = [2.0, 2.0, -4.0, 17.0, -21.5]
 let ds = f_sxd - s_fxd
 let sq_ds = reduce(ds * ds, (+))
-// EXPECT: sq_ds = 0
+// EXPECT: sq_ds = 0.0
 
 // The mirror is exactly what the C4 map does NOT respect: applying the same
 // s-flip to the C4 layer above moves the answer, which is the value-level
@@ -205,7 +205,7 @@ let f_sxc = ml.derive_pg_linear(C4, SC, SC, sxc, wc)
 let s_fxc = [yc(0), yc(1), 0.0 - yc(2), yc(3), 0.0 - yc(4)]
 let dsc = f_sxc - s_fxc
 let sq_sc = reduce(dsc * dsc, (+))
-// EXPECT: sq_sc = 2705
+// EXPECT: sq_sc = 2705.0
 
 // --- 6. grad() DIFFERENTIATES THE EMITTED KERNEL ----------------------------
 // The emitted nest is accumulate-only into a zero-initialized `out`, so
@@ -220,8 +220,8 @@ function ploss(w: Array<Float like Idx<2>>) -> Float = {
 let w0 = [2.0, 0.0 - 1.0]
 let mut dw = [0.0, 0.0]
 let lv = ad.grad(ploss)(w0, dw)
-// EXPECT: lv = 125
-// EXPECT: dw = [100, -50]
+// EXPECT: lv = 125.0
+// EXPECT: dw = [100.0, -50.0]
 
 // The finite-difference cross-check a user would write. Central differences
 // are the FD-LIMITED comparison — normally accurate to about sqrt(eps) — but
@@ -229,7 +229,7 @@ let lv = ad.grad(ploss)(w0, dw)
 // central difference is the derivative exactly and the residual is 0.
 let fd_a = (ploss([2.5, 0.0 - 1.0]) - ploss([1.5, 0.0 - 1.0])) / 1.0
 let fd_b = (ploss([2.0, 0.0 - 0.5]) - ploss([2.0, 0.0 - 1.5])) / 1.0
-// EXPECT: fd_a = 100
-// EXPECT: fd_b = -50
+// EXPECT: fd_a = 100.0
+// EXPECT: fd_b = -50.0
 let fd_res = (dw(0) - fd_a) * (dw(0) - fd_a) + (dw(1) - fd_b) * (dw(1) - fd_b)
-// EXPECT: fd_res = 0
+// EXPECT: fd_res = 0.0

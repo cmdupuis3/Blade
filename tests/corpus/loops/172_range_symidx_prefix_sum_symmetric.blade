@@ -15,25 +15,25 @@
 //                     (2,2)=25
 let v = [2.0, 3.0, 5.0]
 let sym = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> v(p0) * v(p0 + p1) |> compute
-// EXPECT: sym = [[4, 6, 10], [9, 15], [25]]
+// EXPECT: sym = [[4.0, 6.0, 10.0], [9.0, 15.0], [25.0]]
 
 // The trap, for contrast: row 1 gets v(1)*v(0) = 6 where 9 belongs, and
 // row 2 gets v(2)*v(0) = 10 where 25 belongs.
 let naive = method_for(range<SymIdx<2, 3>>) <@> lambda(p0, p1) -> v(p0) * v(p1) |> compute
-// EXPECT: naive = [[4, 6, 10], [6, 9], [10]]
+// EXPECT: naive = [[4.0, 6.0, 10.0], [6.0, 9.0], [10.0]]
 
 // The result is a genuine SYMMETRIC array, not merely a triangle of numbers:
 // reads at mirrored coordinates agree, and the below-diagonal read (2, 0)
 // resolves through the packed skeleton to the same stored cell as (0, 2).
 let g02 = sym(0, 2)
 let g20 = sym(2, 0)
-// EXPECT: g02 = 10
-// EXPECT: g20 = 10
+// EXPECT: g02 = 10.0
+// EXPECT: g20 = 10.0
 let g12 = sym(1, 2)
 let g21 = sym(2, 1)
-// EXPECT: g12 = 15
-// EXPECT: g21 = 15
+// EXPECT: g12 = 15.0
+// EXPECT: g21 = 15.0
 // The diagonal is stored (SymIdx is the inclusive i <= j form, cf.
 // index-types/051), so it reads back directly.
 let g11 = sym(1, 1)
-// EXPECT: g11 = 9
+// EXPECT: g11 = 9.0

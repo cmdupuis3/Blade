@@ -31,17 +31,17 @@ function pairs(ts: T^1) = method_for(ts) <@> lambda(t) -> [t, 2.0 * t]
 
 let tim = (method_for(range<Idx<8>>) <@> lambda(i) -> 1.0 * i) |> compute
 let cells = pairs(tim) |> compute
-// EXPECT: cells = [[0, 0], [1, 2], [2, 4], [3, 6], [4, 8], [5, 10], [6, 12], [7, 14]]
+// EXPECT: cells = [[0.0, 0.0], [1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0], [5.0, 10.0], [6.0, 12.0], [7.0, 14.0]]
 
 // Innermost-axis fold: t + 2t = 3t per row.
 let rows = reduce(cells, (+))
-// EXPECT: rows = [0, 3, 6, 9, 12, 15, 18, 21]
+// EXPECT: rows = [0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0]
 
 // Leading-axis fold over the same operand: column sums over t = 0..7, so
 // sum(t) = 28 and sum(2t) = 56.
 let cols = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
-// EXPECT: cols = [28, 56]
+// EXPECT: cols = [28.0, 56.0]
 
 // And the partial index, 155's witness read through an abstract-param callee.
 let row3 = cells(3)
-// EXPECT: row3 = [3, 6]
+// EXPECT: row3 = [3.0, 6.0]

@@ -154,13 +154,13 @@ function d4_layer(x: Array<Float like PgIrrepsIdx<D4, R1>>, w: Array<Float like 
 // NOT the O(3) order (m = -1, 0, +1), which would put the axis component in the
 // middle. Weights [A2, E]: each label scales.
 let y = d4_layer([1.0, 3.0, 4.0], [2.0, 3.0])
-// EXPECT: y = [2, 9, 12]
+// EXPECT: y = [2.0, 9.0, 12.0]
 
 // BOTH SHADOWS, exact. rho(r) = [+1] (+) R90 sends [x0, x1, x2] to
 // [x0, -x2, x1]; rho(s) = [-1] (+) diag(1, -1) sends it to [-x0, x1, -x2]. A
 // D4 certificate answers to both generators, which is what makes it strictly
 // stronger than the C4 one on the same plane.
 let yr = d4_layer([1.0, 0.0 - 4.0, 3.0], [2.0, 3.0])
-// EXPECT: yr = [2, -12, 9]
+// EXPECT: yr = [2.0, -12.0, 9.0]
 let ys = d4_layer([0.0 - 1.0, 3.0, 0.0 - 4.0], [2.0, 3.0])
-// EXPECT: ys = [-2, 9, -12]
+// EXPECT: ys = [-2.0, 9.0, -12.0]

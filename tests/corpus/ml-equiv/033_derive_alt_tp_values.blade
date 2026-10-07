@@ -51,12 +51,12 @@ let x: Array<Float like IrrepsIdx<SA>> = [1.0, 2.0, -0.5, 0.25]
 let y: Array<Float like IrrepsIdx<SA>> = [-0.75, 0.5, 1.5, -2.0]
 let wa = [0.6, -1.4, 0.8]
 let a: Array<Float like IrrepsIdx<TPS>> = ml.derive_alt_tp(SA, x, y, wa)
-// EXPECT: a = [0, 0, 0.353553390593274, 2.33345237791561, 1.83847763108502, 1.2, 0.675, -1.0875, -2.8, -1.575, 2.5375, 0, 0, 0, 0, 0]
+// EXPECT: a = [0.0, 0.0, 0.353553390593274, 2.33345237791561, 1.83847763108502, 1.2, 0.675, -1.0875, -2.8, -1.575, 2.5375, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 // the alt packed buffer hand-embedded into the 10-slot dense layout
 let wdense = [0.0, 0.0, 0.6, -1.4, -0.6, 1.4, 0.0, 0.0, 0.8, 0.0]
 let d: Array<Float like IrrepsIdx<TPS>> = ml.derive_tp(SA, SA, x, y, wdense)
-// EXPECT: d = [0, 0, 0.353553390593274, 2.33345237791561, 1.83847763108502, 1.2, 0.675, -1.0875, -2.8, -1.575, 2.5375, 0, 0, 0, 0, 0]
+// EXPECT: d = [0.0, 0.0, 0.353553390593274, 2.33345237791561, 1.83847763108502, 1.2, 0.675, -1.0875, -2.8, -1.575, 2.5375, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 let diff = a - d
 let sq_diff = reduce(diff * diff, (+))
@@ -64,6 +64,6 @@ let sq_diff = reduce(diff * diff, (+))
 
 // antisymmetry: F(x, x) = 0 for every weight setting
 let zz: Array<Float like IrrepsIdx<TPS>> = ml.derive_alt_tp(SA, x, x, wa)
-// EXPECT: zz = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+// EXPECT: zz = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 let zz_sq = reduce(zz * zz, (+))
 // EXPECT: zz_sq = 0.0

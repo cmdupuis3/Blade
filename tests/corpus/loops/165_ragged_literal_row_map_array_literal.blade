@@ -26,7 +26,7 @@ let cells = method_for(r) <@> lambda(row: T^1) -> {
     let s = reduce(row, (+))
     [s, s * s]
 } |> compute
-// EXPECT: cells = [[6, 36], [9, 81], [30, 900]]
+// EXPECT: cells = [[6.0, 36.0], [9.0, 81.0], [30.0, 900.0]]
 
 let total = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
-// EXPECT: total = [45, 1017]
+// EXPECT: total = [45.0, 1017.0]

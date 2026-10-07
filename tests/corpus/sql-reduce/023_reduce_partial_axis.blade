@@ -11,22 +11,22 @@
 // ============================================================================
 let grid: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]]
 let rows = reduce(grid, (+))
-// EXPECT: rows = [6, 60]
+// EXPECT: rows = [6.0, 60.0]
 // The 1-arg sugar defaults the kernel to (+) and keeps the 1-axis default.
 let rowsSugar = reduce(grid)
-// EXPECT: rowsSugar = [6, 60]
+// EXPECT: rowsSugar = [6.0, 60.0]
 // `axes = 1` is the default spelled out.
 let rowsExplicit = reduce(grid, (+), axes = 1)
-// EXPECT: rowsExplicit = [6, 60]
+// EXPECT: rowsExplicit = [6.0, 60.0]
 // The documented row-wise idiom, same answer.
 let viaRowIdiom = method_for(grid) <@> lambda(row) -> reduce(row, (+)) |> compute
-// EXPECT: viaRowIdiom = [6, 60]
+// EXPECT: viaRowIdiom = [6.0, 60.0]
 // A rank-2 mapped through a named scalar function, then bare-reduced: the
 // per-row fold of a DEFERRED computation (examples/lswosa.blade's shape).
 function mag2(z: Float64) -> Float64 = z * z
 let power = reduce(grid <@> mag2, (+))
-// EXPECT: power = [14, 1400]
+// EXPECT: power = [14.0, 1400.0]
 // Rank-3 peels exactly one axis per bare reduce.
 let cube: Array<Float64 like Idx<2>, Idx<2>, Idx<2>> = [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]
 let faces = reduce(cube, (+))
-// EXPECT: faces = [[3, 7], [11, 15]]
+// EXPECT: faces = [[3.0, 7.0], [11.0, 15.0]]

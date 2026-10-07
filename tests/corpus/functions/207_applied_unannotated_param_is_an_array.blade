@@ -17,33 +17,33 @@ let mm = [[1.0, 2.0], [3.0, 4.0]]
 
 function first(c) = c(0) + 1.0
 let a1 = first(v)
-// EXPECT: a1 = 2
+// EXPECT: a1 = 2.0
 let a2 = first(iv)
-// EXPECT: a2 = 5
+// EXPECT: a2 = 5.0
 
 // The element flows out unchanged, per element type.
 function head(c) = c(0)
 let h1 = head(v)
-// EXPECT: h1 = 1
+// EXPECT: h1 = 1.0
 let h2 = head(iv)
 // EXPECT: h2 = 4
 
 // Two subscripts: a rank-2 parameter.
 function at2(m) = m(1, 0) * 10.0
 let r = at2(mm)
-// EXPECT: r = 30
+// EXPECT: r = 30.0
 
 // A parameter used only as a subscript is the index.
 function pick(c, i) = c(i)
 let p = pick(v, 2)
-// EXPECT: p = 3
+// EXPECT: p = 3.0
 
 // Applied inside a kernel the body builds.
 function dbl(c) = method_for(0..3) <@> lambda(i) -> c(i) * 2.0 |> compute
 let d1 = dbl(v)
-// EXPECT: d1 = [2, 4, 6]
+// EXPECT: d1 = [2.0, 4.0, 6.0]
 
 // Applied and folded: both demands agree on the array.
 function both(c) = c(1) + reduce(c, (+))
 let s = both(v)
-// EXPECT: s = 8
+// EXPECT: s = 8.0

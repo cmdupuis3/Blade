@@ -19,14 +19,14 @@ function f(a: Array<Float like I>) -> Float = {
 
 let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
 let gv = ad.grad(f)([3.0, 1.0, 4.0, 1.5, 2.0], da)
-// EXPECT: gv = 27
-// EXPECT: da = [2, 5, 1, 4, 3]
+// EXPECT: gv = 27.0
+// EXPECT: da = [2.0, 5.0, 1.0, 4.0, 3.0]
 
 // The differential gate: the reverse gradient contracted with a seed must
 // equal the forward tangent along it, exactly.
 let (jv, jt) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
 let dirderiv = da(0) * 0.1 + da(1) * (-0.2) + da(2) * 0.3 + da(3) * 0.05 + da(4) * (-0.15)
 let resid = jt - dirderiv
-// EXPECT: jv = 27
+// EXPECT: jv = 27.0
 // EXPECT: jt = -0.75
-// EXPECT: resid = 0
+// EXPECT: resid = 0.0

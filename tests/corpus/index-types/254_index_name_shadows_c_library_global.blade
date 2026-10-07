@@ -16,7 +16,7 @@ type j0 = Idx<3>
 
 let hours: Array<Float64 like time> = [0.0, 6.0, 12.0, 18.0]
 let day = reduce(hours, (+))
-// EXPECT: day = 36
+// EXPECT: day = 36.0
 
 // The named index type still governs indexing and rank the way any other does.
 let grid: Array<Float64 like time, j0> = [[1.0, 2.0, 3.0],
@@ -24,13 +24,13 @@ let grid: Array<Float64 like time, j0> = [[1.0, 2.0, 3.0],
                                           [7.0, 8.0, 9.0],
                                           [10.0, 11.0, 12.0]]
 let rows = reduce(grid, (+))
-// EXPECT: rows = [6, 15, 24, 33]
+// EXPECT: rows = [6.0, 15.0, 24.0, 33.0]
 let total = reduce(grid, (+), axes = 2)
-// EXPECT: total = 78
+// EXPECT: total = 78.0
 
 // A binding may carry a colliding name too -- that one lands in a function body
 // and legally shadows the library declaration, so it is emitted verbatim.
 let remove = 2.0
-// EXPECT: remove = 2
+// EXPECT: remove = 2.0
 let scaled = hours * remove
-// EXPECT: scaled = [0, 12, 24, 36]
+// EXPECT: scaled = [0.0, 12.0, 24.0, 36.0]

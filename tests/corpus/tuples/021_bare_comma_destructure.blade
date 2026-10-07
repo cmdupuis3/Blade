@@ -13,27 +13,27 @@
 let t = 1.0, 2.0
 let a, b = t
 let s = a + b
-// EXPECT: s = 3
+// EXPECT: s = 3.0
 
 // CONSTRUCTION ON THE RIGHT, DESTRUCTURING ON THE LEFT, in one statement.
 let c = 10.0
 let d = 20.0
 let e, f = c, d
 let s2 = e * 100.0 + f
-// EXPECT: s2 = 1020
+// EXPECT: s2 = 1020.0
 
 // Components at full expression precedence on both sides of the `=`: two
 // CALLS, not one call of arity two.
 function dbl(v: Float64) -> Float64 = v * 2.0
 let p, q = dbl(3.0), dbl(4.0)
 let s3 = p * 100.0 + q
-// EXPECT: s3 = 608
+// EXPECT: s3 = 608.0
 
 // Width 3, and the parenthesized form for comparison -- same program.
 let g1, g2, g3 = 1.0, 2.0, 3.0
 let (h1, h2, h3) = (1.0, 2.0, 3.0)
 let s4 = g1 * 100.0 + g2 * 10.0 + g3 + h1 * 100.0 + h2 * 10.0 + h3
-// EXPECT: s4 = 246
+// EXPECT: s4 = 246.0
 
 // BLOCK statement position (Parser.parseLetStmt), the second of the three
 // shared let sites.
@@ -42,7 +42,7 @@ function inBlock(x: Float64) -> Float64 = {
     u + v
 }
 let blockSum = inBlock(3.0)
-// EXPECT: blockSum = 9
+// EXPECT: blockSum = 9.0
 
 // A bare comma still parses inside a block when it is CONSTRUCTION only --
 // the LHS change cannot have eaten it, because a single pattern followed by
@@ -52,7 +52,7 @@ function inBlock2(x: Float64) -> Float64 = {
     w[0] + w[1]
 }
 let blockSum2 = inBlock2(2.0)
-// EXPECT: blockSum2 = 8
+// EXPECT: blockSum2 = 8.0
 
 // A tuple-typed PARAMETER destructured with the bare comma -- the shape the
 // component-typed annotation was added for (`015`).
@@ -61,7 +61,7 @@ function pairSum(p: Tuple<Float64, Float64>) -> Float64 = {
     l * 10.0 + r
 }
 let ps = pairSum((7.0, 8.0))
-// EXPECT: ps = 78
+// EXPECT: ps = 78.0
 
 // FLAT destructuring is unchanged by the new spelling: a tuple pattern binds
 // one name per component, or one per FLATTENED leaf, and the parenthesized
@@ -69,4 +69,4 @@ let ps = pairSum((7.0, 8.0))
 let nested = (1.0, 2.0), 3.0
 let n1, n2, n3 = nested
 let s5 = n1 * 100.0 + n2 * 10.0 + n3
-// EXPECT: s5 = 123
+// EXPECT: s5 = 123.0

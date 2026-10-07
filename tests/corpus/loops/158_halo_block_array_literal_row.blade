@@ -21,7 +21,7 @@ let segv = method_for(halo<Idx<5>, [0, 1]>) <@> lambda(w) -> {
     let y = A(w(1)) * 2.0
     [x + y, x - y, x * y]
 } |> compute
-// EXPECT: segv = [[6, -2, 8], [11, -5, 24], [19, -9, 70], [30, -14, 176]]
+// EXPECT: segv = [[6.0, -2.0, 8.0], [11.0, -5.0, 24.0], [19.0, -9.0, 70.0], [30.0, -14.0, 176.0]]
 
 // Same shape nested inside a frequency lambda inside a function -- the
 // grid materializes per outer iteration and is indexed in the same body.

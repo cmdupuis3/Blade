@@ -10,17 +10,17 @@ let r = {
     let f = lambda(x: Float64) -> x * 10.0
     f(1.0)
 }
-// EXPECT: r = 10
+// EXPECT: r = 10.0
 function g(a: Float64) -> Float64 = {
     function f(z: Float64) -> Float64 = z * 3.0
     f(a)
 }
 let s = g(2.0)
-// EXPECT: s = 6
+// EXPECT: s = 6.0
 let t = f(1.0)
-// EXPECT: t = 3
+// EXPECT: t = 3.0
 let u = {
     let k = lambda(x: Float64, y: Float64 = 5.0) -> x - y
     k(1.0)
 }
-// EXPECT: u = -4
+// EXPECT: u = -4.0

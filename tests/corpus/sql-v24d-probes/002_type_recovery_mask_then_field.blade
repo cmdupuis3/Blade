@@ -15,4 +15,4 @@ let pairs: Array<Pair like Idx<3>> = [
 let f = compound(pairs, mask(pairs, lambda(p) -> p.a > 1.5))
 let elem = f(1)
 let r = elem.a
-// EXPECT: r = 2
+// EXPECT: r = 2.0

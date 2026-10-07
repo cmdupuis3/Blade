@@ -17,7 +17,7 @@ let RV = method_for(reverse<Idx<3>>) <@> lambda(i: Int64) -> 0.5 * (i - 1) |> co
 // Signed division truncates toward zero: -3/2 = -1, -2/2 = -1, -1/2 = 0.
 // Unsigned division of the wrapped operand gave ~4.6e18 quotients.
 let QD = method_for(range<Idx<3>>) <@> lambda(i: Int64) -> (i - 3) / 2 |> compute
-// EXPECT: QD = [-1.0, -1.0, 0.0]
+// EXPECT: QD = [-1, -1, 0]
 // Recursive-array step ordinal: same signedness rule. The prefix sum
 // FIacc(n) = FIacc(n-1) + 0.5 * ((n-1) - 1) accumulates 0.5*(k-1) for
 // k=0..3, so the read at the last element is sum 0.5*(k-1) -> 1.0. The
@@ -28,7 +28,7 @@ let rec FIacc: Array<Float like Idx<5>> =
     | zero -> zero
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + 0.5 * ((n - 1) - 1)
-// EXPECT: FIacc = [0, -0.5, -0.5, 0, 1]
+// EXPECT: FIacc = [0.0, -0.5, -0.5, 0.0, 1.0]
 let FI = FIacc(4)
 // EXPECT: FI = 1.0
 // WARN: BL3020  (the implicit int->float promotion here is deliberate)

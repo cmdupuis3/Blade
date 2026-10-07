@@ -29,8 +29,8 @@ function doubled(x: Array<Float like I>) -> Float = {
 let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
 let t = twice(a)
 let d = doubled(a)
-// EXPECT: t = 42
-// EXPECT: d = 112
+// EXPECT: t = 42.0
+// EXPECT: d = 112.0
 // A body with an assignment declines CSE wholesale: both folds run, and the
 // second sees the mutated array.
 function mutated(x: Array<Float like I>) -> Float = {
@@ -41,4 +41,4 @@ function mutated(x: Array<Float like I>) -> Float = {
     s2 - s1
 }
 let m = mutated(a)
-// EXPECT: m = 98
+// EXPECT: m = 98.0

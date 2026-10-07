@@ -14,13 +14,13 @@ let b = 4.0
 
 // GREEDY: y prefers the tuple node t1, then z takes the next node.
 let greedy = f(t1, a)
-// EXPECT: greedy = 321
+// EXPECT: greedy = 321.0
 
 // The regroup arm, same signature, no tuple node in sight: y takes the two
 // plain nodes. This is the pairing that makes `f(t1, a)` and `f(1.0, 2.0, a)`
 // the same call.
 let regrouped = f(1.0, 2.0, a)
-// EXPECT: regrouped = 321
+// EXPECT: regrouped = 321.0
 
 // `f(t1, a, b)` is an ERROR under the greedy rule -- y takes t1, z takes a, and
 // b is left over. Pinned in diagnostics/064, not here.
@@ -32,4 +32,4 @@ let regrouped = f(1.0, 2.0, a)
 function g(y: ((Float64, Float64), Float64), z: Float64) -> Float64 =
     y[0][0] + y[0][1] * 10.0 + y[1] * 100.0 + z * 1000.0
 let grouped = g((t1, a), b)
-// EXPECT: grouped = 4321
+// EXPECT: grouped = 4321.0

@@ -16,7 +16,7 @@ function func(a: Float64, b: Float64) -> Float64 = a * b
 let loop = object_for(func)
 let result = loop <@> (A, B) |> compute     // rank 4: every (A cell, B cell) pair
 let r = result(1, 0, 0, 1)                  // A(1, 0) * B(0, 1)
-// EXPECT: r = 60
+// EXPECT: r = 60.0
 ```
 
 This happens seamlessly — but what's happening to the indices? A `method_for`
@@ -41,8 +41,8 @@ let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let B: Array<Float64 like M, N> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
 let viaRange = method_for(range<M, N>) <@> lambda(i, j) -> A(i, j) * B(i, j) |> compute
 let direct = A * B
-// EXPECT: viaRange = [[1, 0, 3], [0, 5, 0]]
-// EXPECT: direct = [[1, 0, 3], [0, 5, 0]]
+// EXPECT: viaRange = [[1.0, 0.0, 3.0], [0.0, 5.0, 0.0]]
+// EXPECT: direct = [[1.0, 0.0, 3.0], [0.0, 5.0, 0.0]]
 ```
 
 The range pipeline recreates how for-loops work in most languages — not the
@@ -56,7 +56,7 @@ from the center — so neighbor reads are spelled through the window:
 ```blade
 let A: Array<Float64 like Idx<5>> = [1.0, 2.0, 4.0, 7.0, 11.0]
 let d = method_for(halo<Idx<5>, [-1, 0, 1]>) <@> lambda(w) -> A(w(1)) - A(w(-1)) |> compute
-// EXPECT: d = [3, 5, 7]
+// EXPECT: d = [3.0, 5.0, 7.0]
 ```
 
 Three central differences from five cells: the `[-1, 0, 1]` window shrinks the
@@ -69,7 +69,7 @@ descending):
 type I = Idx<4>
 let A: Array<Float64 like I> = [1.0, 2.0, 3.0, 4.0]
 let backwards = method_for(reverse<I>) <@> lambda(i) -> A(i) |> compute
-// EXPECT: backwards = [4, 3, 2, 1]
+// EXPECT: backwards = [4.0, 3.0, 2.0, 1.0]
 ```
 
 Because index values carry their source index type as a tag (`i : Nat<LatIdx>`),
@@ -107,8 +107,8 @@ let loop1 = for (A, B)                 // method_for(A, B)
 let result1 = loop1 <@> f |> compute
 let loop2 = for f                      // object_for(f)
 let result2 = loop2 <@> (A, B) |> compute
-// EXPECT: result1 = [[3, 4, 5], [6, 8, 10]]
-// EXPECT: result2 = [[3, 4, 5], [6, 8, 10]]
+// EXPECT: result1 = [[3.0, 4.0, 5.0], [6.0, 8.0, 10.0]]
+// EXPECT: result2 = [[3.0, 4.0, 5.0], [6.0, 8.0, 10.0]]
 ```
 
 Virtual arrays join via `in`, which co-iterates the operands with the index
@@ -121,7 +121,7 @@ let A: Array<Float64 like M, N> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let B: Array<Float64 like M, N> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
 let loop = for (A, B) in range<M, N>
 let result = loop <@> lambda(a, b, i, j) -> a * b + Float64(i) |> compute
-// EXPECT: result = [[1, 0, 3], [1, 6, 1]]
+// EXPECT: result = [[1.0, 0.0, 3.0], [1.0, 6.0, 1.0]]
 ```
 
 The kernel receives the operands' cells first -- `a` is already `A(i, j)` --
@@ -166,7 +166,7 @@ the iteration structure — S-dimensions from the arrays, no T-dimensions:
 let A = [[1.0, 2.0], [3.0, 4.0]]
 let z1 = method_for(A) <@> zero |> compute      // zeros shaped like A
 let z2 = object_for(zero) <@> (A, A) |> compute // 2x2x2x2 zeros, dense
-// EXPECT: z1 = [[0, 0], [0, 0]]
+// EXPECT: z1 = [[0.0, 0.0], [0.0, 0.0]]
 ```
 
 `zero` carries no commutativity claim, so `object_for(zero) <@> (A, A)` is a
@@ -188,7 +188,7 @@ function comoment_prod(a: Poly<T^1>) where comm(a) -> T^1 = {
 let x = [1.0, 2.0, 3.0]
 let y = [2.0, 4.0, 6.0]
 let centered = comoment_prod(x, y)
-// EXPECT: centered = [2, 0, 2]
+// EXPECT: centered = [2.0, 0.0, 2.0]
 ```
 
 There is also `guard`, which turns a condition into structure-preserving
@@ -199,9 +199,9 @@ let c = [1.0, 2.0]
 let kept = guard(true, c) |> compute              // c if the condition holds
 let dropped = guard(false, c) |> compute          // zeros of c's shape otherwise
 let fallback = guard(false, c) <|> [5.0, 6.0] |> compute   // choice: left if non-zero, else right
-// EXPECT: kept = [1, 2]
-// EXPECT: dropped = [0, 0]
-// EXPECT: fallback = [5, 6]
+// EXPECT: kept = [1.0, 2.0]
+// EXPECT: dropped = [0.0, 0.0]
+// EXPECT: fallback = [5.0, 6.0]
 ```
 
 These satisfy clean algebraic laws (they form a MonadPlus with `zero`), so
@@ -334,8 +334,8 @@ let f = lambda(x) -> x + 1.0
 let g = lambda(x) -> x * 2.0
 let lhs = (object_for(f) >>@ object_for(g)) <@> A |> compute
 let rhs = (method_for(A) <@> f) @>> (method_for(A) <@> g) |> compute
-// EXPECT: lhs = [4, 6, 8]
-// EXPECT: rhs = [4, 6, 8]
+// EXPECT: lhs = [4.0, 6.0, 8.0]
+// EXPECT: rhs = [4.0, 6.0, 8.0]
 ```
 
 While Blade guarantees performance for a single kernel and array tuple, these
@@ -376,9 +376,9 @@ let s = stack(A, B)            // rank 3: s(0) is A, s(1) is B
 let joined = join(A, B, 0)     // 4 x 2
 let t = transpose(A, [1, 0])
 let s1 = s(1)
-// EXPECT: s1 = [[1, 0], [0, 1]]
-// EXPECT: joined = [[1, 2], [3, 4], [1, 0], [0, 1]]
-// EXPECT: t = [[1, 3], [2, 4]]
+// EXPECT: s1 = [[1.0, 0.0], [0.0, 1.0]]
+// EXPECT: joined = [[1.0, 2.0], [3.0, 4.0], [1.0, 0.0], [0.0, 1.0]]
+// EXPECT: t = [[1.0, 3.0], [2.0, 4.0]]
 ```
 
 Not built yet (see [plans/plan-subset-split.md](plans/plan-subset-split.md)):
@@ -395,7 +395,7 @@ Relational operations (`mask`, `compound`, `group_by`, `sort`, `unique`,
 let temps = [21.0, 30.5, 26.0, 18.0, 28.0]
 let hot = compound(temps, mask(temps, lambda(t) -> t > 25.0))
 let ordered = sort(hot, lambda(t) -> -t)
-// EXPECT: ordered = [30.5, 28, 26]
+// EXPECT: ordered = [30.5, 28.0, 26.0]
 ```
 
 ## Arity Polymorphism Semantics
@@ -424,7 +424,7 @@ singleton groups. `comm` licenses symmetry only within a group.
 ```blade
 function first(args: Poly<T^0>) -> T^0 = args[0]
 let x = first(4.0, 5.0)
-// EXPECT: x = 4
+// EXPECT: x = 4.0
 ```
 
 **Speedups.** Each comm-ed identity group of size g contributes g!; distinct
@@ -486,9 +486,9 @@ let det = method_for(x, x, x) <@> reynolds(vand, Antisymmetric) |> compute
 let d012 = det(0, 1, 2)      // (2-1)(3-1)(3-2)
 let d102 = det(1, 0, 2)      // one transposition: negated
 let d001 = det(0, 0, 1)      // repeated index: zero
-// EXPECT: d012 = 2
-// EXPECT: d102 = -2
-// EXPECT: d001 = 0
+// EXPECT: d012 = 2.0
+// EXPECT: d102 = -2.0
+// EXPECT: d001 = 0.0
 ```
 
 Reynolds wraps scalar-argument lambdas; partial symmetrization over a subset
@@ -512,7 +512,7 @@ let static S = [(0, 0, 2), (1, 1, 1)]      // two scalars and one vector: 5 cell
 function f(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Array<Float like IrrepsIdx<S>> =
     x + x
 let out = f([1.0, 2.0, 3.0, 4.0, 5.0])
-// EXPECT: out = [2, 4, 6, 8, 10]
+// EXPECT: out = [2.0, 4.0, 6.0, 8.0, 10.0]
 ```
 
 Mistakes are compile errors with domain-language messages — the elementwise

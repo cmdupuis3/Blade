@@ -40,33 +40,33 @@ function drift(v: Array<Float like Idx<3>>, w: Array<Float like Idx<3>>,
 
 // d = (3, 4, 0), sum 7, weight 2 -> 14.
 let r = drift([4.0, 5.0, 1.0], [1.0, 1.0, 1.0], [2.0])
-// EXPECT: r = [14]
+// EXPECT: r = [14.0]
 
 // THE GALILEAN SHADOW: boost every node's speed by the same U0 = 10. Both
 // arguments shift, the difference does not, and the readout is bit-identical.
 let rb = drift([14.0, 15.0, 11.0], [11.0, 11.0, 11.0], [2.0])
 let dboost = r(0) - rb(0)
-// EXPECT: dboost = 0
+// EXPECT: dboost = 0.0
 
 // THE PERMUTATION SHADOW: relabel the three nodes (0 1 2) -> (2 0 1), applied
 // to BOTH arguments as one relabelling of the node set. The readout is an
 // S_3-invariant of the difference, so it does not move.
 let rp = drift([1.0, 4.0, 5.0], [1.0, 1.0, 1.0], [2.0])
 let dperm = r(0) - rp(0)
-// EXPECT: dperm = 0
+// EXPECT: dperm = 0.0
 
 // BOTH AT ONCE: boost and relabel. Each certificate covers one axis of the
 // change; together they cover the composite, which is the point of stacking
 // conjuncts rather than widening one lattice.
 let rbp = drift([11.0, 14.0, 15.0], [11.0, 11.0, 11.0], [2.0])
 let dboth = r(0) - rbp(0)
-// EXPECT: dboth = 0
+// EXPECT: dboth = 0.0
 
 // The weight really is free: a different readout weight scales the invariant,
 // and every shadow above holds for it too (the theorem is about the map, not
 // about one parameter setting).
 let r5 = drift([4.0, 5.0, 1.0], [1.0, 1.0, 1.0], [0.0 - 5.0])
 let r5p = drift([1.0, 4.0, 5.0], [1.0, 1.0, 1.0], [0.0 - 5.0])
-// EXPECT: r5 = [-35]
+// EXPECT: r5 = [-35.0]
 let d5 = r5(0) - r5p(0)
-// EXPECT: d5 = 0
+// EXPECT: d5 = 0.0

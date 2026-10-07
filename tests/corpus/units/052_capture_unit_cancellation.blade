@@ -13,5 +13,5 @@ let ws: Array<Float<1/day> like Idx<3>> = [0.0, 0.0, 0.0]
 let tz: Float<day> = 2.0
 let out = (ws <@> lambda(w) -> cos(w * tz)) |> compute
 let out2 = (ws <@> lambda(w) -> cos(tz * w)) |> compute
-// EXPECT: out = [1, 1, 1]
-// EXPECT: out2 = [1, 1, 1]
+// EXPECT: out = [1.0, 1.0, 1.0]
+// EXPECT: out2 = [1.0, 1.0, 1.0]

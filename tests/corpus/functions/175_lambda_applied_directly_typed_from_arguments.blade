@@ -18,12 +18,12 @@ let xs = [1.5, 2.5, 3.5]
 
 // A generic function argument, specialized at the use the body makes.
 let r1 = (lambda(f, x) -> f(x))(idg, 2.0)
-// EXPECT: r1 = 2
+// EXPECT: r1 = 2.0
 let r2 = (lambda(f, x) -> f(x))(idg, 7)
-// EXPECT: r2 = 7
+// EXPECT: r2 = 7.0
 // A non-generic function argument (worked before; the control).
 let r3 = (lambda(f, x) -> f(x))(sq, 3.0)
-// EXPECT: r3 = 9
+// EXPECT: r3 = 9.0
 // A block-local alias of the generic function, passed the same way.
 let r4 = {
     let g = idg
@@ -36,4 +36,4 @@ let r5 = (lambda(f, x) -> f(x))(xs, 1)
 let r6 = (lambda(a) -> a)(xs)
 // EXPECT: r6 = [1.5, 2.5, 3.5]
 let r7 = (lambda(a, k) -> reduce(a, (+)) * k)(xs, 2.0)
-// EXPECT: r7 = 15
+// EXPECT: r7 = 15.0

@@ -14,5 +14,5 @@ function f(x: Float) -> Float = {
 }
 
 let (fv, ft) = ad.jvp(f)(3.0, 1.0)
-// EXPECT: fv = 36
-// EXPECT: ft = 24
+// EXPECT: fv = 36.0
+// EXPECT: ft = 24.0

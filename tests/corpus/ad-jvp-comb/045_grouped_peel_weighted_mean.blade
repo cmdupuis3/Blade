@@ -28,13 +28,13 @@ let mut dv = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 let mut dc = [0.0, 0.0, 0.0]
 let gv = ad.grad(loss)(v0, kk, c0, dv, dc)
 // EXPECT: gv = 201.666666666667
-// EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, -1, 2.5, 0.666666666666667]
-// EXPECT: dc = [33.3333333333333, 35, 40]
+// EXPECT: dv = [0.666666666666667, 2.5, 0.666666666666667, -1.0, 2.5, 0.666666666666667]
+// EXPECT: dc = [33.3333333333333, 35.0, 40.0]
 
 let seed: Array<Float64 like R> = [1.0, 0.0, -2.0, 3.0, 0.5, 0.25]
 let (jp, jt) = ad.jvp(loss)(v0, kk, c0, seed, [0.0, 0.0, 0.0])
 let dot = reduce(dv * seed, (+))
 let resid = jt - dot
 // EXPECT: jp = 201.666666666667
-// EXPECT: resid = 0
+// EXPECT: resid = 0.0
 // WARN: BL3020  (the implicit int->float promotion here is deliberate)

@@ -46,5 +46,5 @@ let grid = method_for(zip(ga, gb)) <@> lambda(ra: Array<Float64 like RaggedIdx<_
 // Rank 2, so a two-axis transpose is well-formed at all (the M-C3 BL4004).
 let tg = transpose(grid, [0, 1])
 
-// EXPECT: grid = [(100, 1), (200, 2), (200, 1), (400, 2)]
-// EXPECT: tg = [(100, 1), (200, 1), (200, 2), (400, 2)]
+// EXPECT: grid = [(100.0, 1.0), (200.0, 2.0), (200.0, 1.0), (400.0, 2.0)]
+// EXPECT: tg = [(100.0, 1.0), (200.0, 1.0), (200.0, 2.0), (400.0, 2.0)]

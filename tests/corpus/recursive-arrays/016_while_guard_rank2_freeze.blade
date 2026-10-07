@@ -15,8 +15,8 @@ let rec f: Array<Float like Sweep, Row, Col> =
     | zero -> zero
     | zero :: s -> zero :: [[8.0, 4.0], [2.0, 1.0]]
     | prefix :: n while prefix(n - 1, 0, 0) > 1.0 -> prefix :: [[prefix(n - 1, 0, 0) * 0.5, prefix(n - 1, 0, 1) * 0.5], [prefix(n - 1, 1, 0) * 0.5, prefix(n - 1, 1, 1) * 0.5]]
-// EXPECT: f = [8, 4, 2, 1, 4, 2, 1, 0.5, 2, 1, 0.5, 0.25, 1, 0.5, 0.25, 0.125, 1, 0.5, 0.25, 0.125, 1, 0.5, 0.25, 0.125]
+// EXPECT: f = [8.0, 4.0, 2.0, 1.0, 4.0, 2.0, 1.0, 0.5, 2.0, 1.0, 0.5, 0.25, 1.0, 0.5, 0.25, 0.125, 1.0, 0.5, 0.25, 0.125, 1.0, 0.5, 0.25, 0.125]
 let probe = f((5 : Sweep), (0 : Row), (0 : Col))
-// EXPECT: probe = 1
+// EXPECT: probe = 1.0
 let corner = f((5 : Sweep), (1 : Row), (1 : Col))
 // EXPECT: corner = 0.125

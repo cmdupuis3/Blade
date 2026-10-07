@@ -13,7 +13,7 @@ let c = method_for(range<I>) <@> lambda(i) -> Float64(i) * 2.0 |> compute
 let d = method_for(range<I>) <@> lambda(i) -> Float64(i) - 3.0 |> compute
 
 let r = a + b * c - d
-// EXPECT: r = [3, 6.5, 14, 25.5, 41, 60.5]
+// EXPECT: r = [3.0, 6.5, 14.0, 25.5, 41.0, 60.5]
 
 let s = reduce(r, (+))
 // EXPECT: s = 150.5

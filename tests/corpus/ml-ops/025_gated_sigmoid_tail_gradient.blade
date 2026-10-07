@@ -24,10 +24,10 @@ let tail_grad_finite = dx(0) == dx(0)
 // EXPECT: tail_grad_finite = true
 let tail_grad = dx(0)
 let mid_grad = dx(1)
-// EXPECT: tail_grad = 0
+// EXPECT: tail_grad = 0.0
 // EXPECT: mid_grad = 1.0907842487848955
 
 let (jv0, jt0) = ad.jvp(act_sum)(xs, [1.0, 0.0, 0.0])
 let (jv1, jt1) = ad.jvp(act_sum)(xs, [0.0, 1.0, 0.0])
-// EXPECT: jt0 = 0
+// EXPECT: jt0 = 0.0
 // EXPECT: jt1 = 1.0907842487848955

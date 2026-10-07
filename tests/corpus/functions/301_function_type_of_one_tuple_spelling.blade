@@ -8,12 +8,12 @@
 function sum2(p: (Float64, Float64)) = p[0] + p[1]
 function apt(f: ((Float64, Float64)) -> Float64, p: (Float64, Float64)) = f(p)
 let a = apt(sum2, (1.0, 2.0))
-// EXPECT: a = 3
+// EXPECT: a = 3.0
 function apw(f: Tuple<Float64, Float64> -> Float64, p: (Float64, Float64)) = f(p) * 10.0
 let b = apw(sum2, (3.0, 4.0))
-// EXPECT: b = 70
+// EXPECT: b = 70.0
 function widthOnly(p: Tuple<2>) = p[0] * p[1]
 let c = apt(widthOnly, (5.0, 6.0))
-// EXPECT: c = 30
+// EXPECT: c = 30.0
 let d = apt(lambda(p: Tuple<2>) -> p[0] - p[1], (9.0, 4.0))
-// EXPECT: d = 5
+// EXPECT: d = 5.0

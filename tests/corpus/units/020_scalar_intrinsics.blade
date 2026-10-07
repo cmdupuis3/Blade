@@ -15,14 +15,14 @@ let vy: Float<velocity> = 4.0
 let speed = sqrt(vx * vx + vy * vy)
 let vcap: Float<velocity> = 10.0
 let margin = vcap - speed
-// EXPECT: speed = 5
-// EXPECT: margin = 5
+// EXPECT: speed = 5.0
+// EXPECT: margin = 5.0
 
 let d: Float<meters> = -3.0
 let a = abs(d)
 let m: Float<meters> = 1.0
 let s = a + m
-// EXPECT: s = 4
+// EXPECT: s = 4.0
 
 // The rejecting direction of floor/ceil is only half the rule: DIVIDING by a
 // reference quantity is the sanctioned way to get the count, and the resulting
@@ -33,12 +33,12 @@ let dist: Float<meters> = 7.5
 let step: Float<meters> = 2.0
 let whole = floor(dist / step)
 let atleast = ceil(dist / step)
-// EXPECT: whole = 3
-// EXPECT: atleast = 4
+// EXPECT: whole = 3.0
+// EXPECT: atleast = 4.0
 
 // A reciprocal-unit value composes like any other signature:
 // hz * seconds is dimensionless-compatible arithmetic against velocity/velocity.
 let f: Float<hz> = 2.0
 let t: Float<seconds> = 3.0
 let cycles = f * t
-// EXPECT: cycles = 6
+// EXPECT: cycles = 6.0

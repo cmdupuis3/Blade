@@ -10,4 +10,4 @@ let r: Array<Float64 like DepIdx<Idx<3>, lambda(i) -> Idx<3 - i>>> = [
 ]
 let row_sums = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
 let total = reduce(row_sums, (+))
-// EXPECT: total = 21
+// EXPECT: total = 21.0

@@ -11,4 +11,4 @@
 // (0,0) (0,1) (0,2) (1,0) (1,1) (2,0), printed here as 10*p0 + p1.
 // The last row is empty: at canonical i = 3 there is no j > i.
 let A2 = method_for(range<AntisymIdx<2, 4>>) <@> lambda(p0, p1) -> 10.0 * p0 + 1.0 * p1 |> compute
-// EXPECT: A2 = [[0, 1, 2], [10, 11], [20], []]
+// EXPECT: A2 = [[0.0, 1.0, 2.0], [10.0, 11.0], [20.0], []]

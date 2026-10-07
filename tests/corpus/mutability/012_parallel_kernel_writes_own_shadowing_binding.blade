@@ -10,5 +10,5 @@ let r = A <@> lambda(x) where omp(x: 1) -> {
     acc * 2.0
 } |> compute
 let a0 = acc
-// EXPECT: r = [2, 4, 6]
-// EXPECT: a0 = 100
+// EXPECT: r = [2.0, 4.0, 6.0]
+// EXPECT: a0 = 100.0

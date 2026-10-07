@@ -20,9 +20,9 @@ let t = b, c
 let flat = addPair(b, c)
 let paren = addPair((b, c))
 let bound = addPair(t)
-// EXPECT: flat = 3
-// EXPECT: paren = 3
-// EXPECT: bound = 3
+// EXPECT: flat = 3.0
+// EXPECT: paren = 3.0
+// EXPECT: bound = 3.0
 
 // MIXED schema at a direct call: the fold is per-parameter, so a width-1
 // parameter beside a width-2 one slices 1 + 2 out of the flat list.
@@ -32,16 +32,16 @@ let u = c, d
 let m0 = mix(b, c, d)
 let m1 = mix(b, (c, d))
 let m2 = mix(b, u)
-// EXPECT: m0 = 123
-// EXPECT: m1 = 123
-// EXPECT: m2 = 123
+// EXPECT: m0 = 123.0
+// EXPECT: m1 = 123.0
+// EXPECT: m2 = 123.0
 
 // The fully written tuple type is the same schema entry as the width-only one.
 function written(p: (Float64, Float64)) -> Float64 = p[0] + p[1]
 let w0 = written(3.0, 4.0)
 let w1 = written((3.0, 4.0))
-// EXPECT: w0 = 7
-// EXPECT: w1 = 7
+// EXPECT: w0 = 7.0
+// EXPECT: w1 = 7.0
 
 // CURRYING IS NOT DISTURBED, and this is the reason the regrouping is
 // deliberately ONE-DIRECTIONAL. The reverse rewrite -- expanding a tuple
@@ -53,4 +53,4 @@ let w1 = written((3.0, 4.0))
 function two(x: Float64, y: Float64) -> Float64 = x + y
 let partial = two(1.0)
 let applied = partial(2.0)
-// EXPECT: applied = 3
+// EXPECT: applied = 3.0

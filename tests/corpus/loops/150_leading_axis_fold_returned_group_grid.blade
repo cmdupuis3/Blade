@@ -90,18 +90,18 @@ let kk = (method_for(range<Idx<4>>) <@> lambda(f) -> 1.0 * f) |> compute
 // The fold's loop bound and its output allocation both read the RETURNED
 // grid's extents. Pre-fix this is where the crash landed.
 let r = fold_cols(tim, vv)
-// EXPECT: r = [570, 1140, 1710, 2280]
+// EXPECT: r = [570.0, 1140.0, 1710.0, 2280.0]
 let ra = fold_cols_agnostic(tim, vv, kk)
-// EXPECT: ra = [570, 1140, 1710, 2280]
+// EXPECT: ra = [570.0, 1140.0, 1710.0, 2280.0]
 
 // The grids themselves, printed across the same boundary: a dangling table
 // shows up here as a wrong row/column count rather than a wrong value.
 let g = family_grid(tim, vv)
-// EXPECT: g = [[14, 28, 42, 56], [77, 154, 231, 308], [194, 388, 582, 776]]
+// EXPECT: g = [[14.0, 28.0, 42.0, 56.0], [77.0, 154.0, 231.0, 308.0], [194.0, 388.0, 582.0, 776.0]]
 let ga = family_grid_agnostic(tim, vv, kk)
-// EXPECT: ga = [[14, 28, 42, 56], [77, 154, 231, 308], [194, 388, 582, 776]]
+// EXPECT: ga = [[14.0, 28.0, 42.0, 56.0], [77.0, 154.0, 231.0, 308.0], [194.0, 388.0, 582.0, 776.0]]
 
 let dots = group_dots(tim, vv)
-// EXPECT: dots = [8, 62, 170]
+// EXPECT: dots = [8.0, 62.0, 170.0]
 let sums = group_sums(tim, vv)
-// EXPECT: sums = [6, 15, 24]
+// EXPECT: sums = [6.0, 15.0, 24.0]

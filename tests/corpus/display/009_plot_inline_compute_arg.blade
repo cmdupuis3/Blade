@@ -30,4 +30,4 @@ let grid = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j)) |> 
 let bound = plot.heatmap(x, y, grid, "scan 0": title)
 // EXPECT: direct = true
 // EXPECT: bound = true
-// EXPECT: grid = [[0, 1, 2.25], [3, 4, 5.5]]
+// EXPECT: grid = [[0.0, 1.0, 2.25], [3.0, 4.0, 5.5]]

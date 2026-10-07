@@ -22,6 +22,6 @@ let b = method_for(range<Idx<3>>) <@> twice |> compute
 // 3. unit-annotated argument through a direct call
 let q: Nat<charge> = 5
 let c = twice(q)
-// EXPECT: a = [0, 2, 4]
-// EXPECT: b = [0, 2, 4]
-// EXPECT: c = 10
+// EXPECT: a = [0.0, 2.0, 4.0]
+// EXPECT: b = [0.0, 2.0, 4.0]
+// EXPECT: c = 10.0

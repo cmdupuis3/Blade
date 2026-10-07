@@ -8,5 +8,5 @@ function inc(x: Float64) -> Float64 = { x + 1.0 }
 function dbl(x: Float64) -> Float64 = { x * 2.0 }
 let piped = (object_for(inc) >>@ object_for(dbl)) <@> A |> compute
 let direct = A * 2.0 + 2.0
-// EXPECT: piped = [[4, 6], [8, 10]]
-// EXPECT: direct = [[4, 6], [8, 10]]
+// EXPECT: piped = [[4.0, 6.0], [8.0, 10.0]]
+// EXPECT: direct = [[4.0, 6.0], [8.0, 10.0]]

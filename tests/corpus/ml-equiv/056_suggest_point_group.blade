@@ -70,6 +70,6 @@ function mixed_tight(v: Array<Float like IrrepsIdx<SH1>>,
 // norm here is 5. q = J(3, 4) = (-4, 3), so the pg layer contributes the fixed
 // factor q(0) = -4 and the readout is -20, exactly.
 let m = mixed_loose([1.0, 0.0, 3.0, 4.0], [3.0, 4.0], wv)
-// EXPECT: m = -20
+// EXPECT: m = -20.0
 let mt = mixed_tight([1.0, 0.0, 3.0, 4.0], [3.0, 4.0], wv)
-// EXPECT: mt = -20
+// EXPECT: mt = -20.0

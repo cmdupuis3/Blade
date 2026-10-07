@@ -44,28 +44,28 @@ let tim = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i) |> compute
 let vv = (method_for(range<Sample>) <@> lambda(i) -> 1.0 * i + 1.0) |> compute
 
 let cells = cell_stats(tim, vv) |> compute
-// EXPECT: cells = [[6, 10, 20], [22, 26, 148]]
+// EXPECT: cells = [[6.0, 10.0, 20.0], [22.0, 26.0, 148.0]]
 
 // The result is an ordinary rank-2, so it feeds the ordinary consumers --
 // which is what proves the row literal landed in the storage its type
 // describes rather than merely printing plausibly.
 let rows = reduce(cells, (+))
-// EXPECT: rows = [36, 196]
+// EXPECT: rows = [36.0, 196.0]
 // Leading-axis fold: the accumulator totals, which must equal the eager
 // whole-range statistics pinned below.
 let totals = reduce(cells, lambda(a: T^1, b: T^1) -> a + b)
-// EXPECT: totals = [28, 36, 168]
+// EXPECT: totals = [28.0, 36.0, 168.0]
 let c0 = cells(0)
-// EXPECT: c0 = [6, 10, 20]
+// EXPECT: c0 = [6.0, 10.0, 20.0]
 let c02 = cells(0, 2)
-// EXPECT: c02 = 20
+// EXPECT: c02 = 20.0
 let c12 = cells(1, 2)
-// EXPECT: c12 = 148
+// EXPECT: c12 = 148.0
 
 // Independent check of the same three statistics over the whole range.
 let ta = reduce(tim, (+))
-// EXPECT: ta = 28
+// EXPECT: ta = 28.0
 let tb = reduce(vv, (+))
-// EXPECT: tb = 36
+// EXPECT: tb = 36.0
 let tc = prodsum(tim, vv)
-// EXPECT: tc = 168
+// EXPECT: tc = 168.0

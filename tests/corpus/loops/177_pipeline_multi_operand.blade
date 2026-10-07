@@ -9,4 +9,4 @@ let B = [10.0, 20.0, 30.0]
 let g = lambda(x) -> x * 2.0
 let k2 = lambda(x, y) -> x * y
 let multi = (object_for(k2) >>@ object_for(g)) <@> (A, B) |> compute
-// EXPECT: multi = [[20, 40, 60], [40, 80, 120], [60, 120, 180]]
+// EXPECT: multi = [[20.0, 40.0, 60.0], [40.0, 80.0, 120.0], [60.0, 120.0, 180.0]]

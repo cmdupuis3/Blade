@@ -41,4 +41,4 @@ struct PointType {
 function ident(p: PointType) -> PointType = p
 let p = ident(PointType { x = 3.0, y = 4.0 })
 let r = p.x
-// EXPECT: r = 3
+// EXPECT: r = 3.0

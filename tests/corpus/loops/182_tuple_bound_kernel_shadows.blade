@@ -24,9 +24,9 @@ function apply_single(a: Array<Float like I>) -> Array<Float like I> = {
 let data = [1.0, 2.0, 3.0]
 let tup = apply_local(data)
 let sing = apply_single(data)
-// EXPECT: tup = [10, 20, 30]
-// EXPECT: sing = [10, 20, 30]
+// EXPECT: tup = [10.0, 20.0, 30.0]
+// EXPECT: sing = [10.0, 20.0, 30.0]
 
 // And the module kernel itself still fuses where nothing shadows it.
 let plain = inc <$> data |> compute
-// EXPECT: plain = [2, 3, 4]
+// EXPECT: plain = [2.0, 3.0, 4.0]

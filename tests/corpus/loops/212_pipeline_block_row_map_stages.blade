@@ -22,22 +22,22 @@ function row_ss(x: T^1) -> T^0 = { reduce(x * x, (+)) }
 
 // both stages row maps, the first block-bodied (the reported shape)
 let Z = (object_for(center) >>@ object_for(unit_scale)) <@> R |> compute
-// EXPECT: Z = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+// EXPECT: Z = [[-0.5, -0.5, -0.5, -0.5, 2.0], [2.0, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2.0, 0.5, 0.5]]
 
 // the same pipeline with expression bodies fuses into ONE row kernel
 let fused = (object_for(center_expr) >>@ object_for(unit_scale)) <@> R |> compute
-// EXPECT: fused = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+// EXPECT: fused = [[-0.5, -0.5, -0.5, -0.5, 2.0], [2.0, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2.0, 0.5, 0.5]]
 
 // row map, then a block-bodied CELL kernel: stage 2 sweeps every cell
 let row_then_cell = (object_for(center) >>@ object_for(dbl_blocky)) <@> R |> compute
-// EXPECT: row_then_cell = [[-2, -2, -2, -2, 8], [8, -2, -2, -2, -2], [2, 2, -8, 2, 2]]
+// EXPECT: row_then_cell = [[-2.0, -2.0, -2.0, -2.0, 8.0], [8.0, -2.0, -2.0, -2.0, -2.0], [2.0, 2.0, -8.0, 2.0, 2.0]]
 
 // block-bodied cell kernel, then a row map: stage 1 sweeps every cell
 let cell_then_row = (object_for(dbl_blocky) >>@ object_for(center)) <@> R |> compute
-// EXPECT: cell_then_row = [[-2, -2, -2, -2, 8], [8, -2, -2, -2, -2], [2, 2, -8, 2, 2]]
+// EXPECT: cell_then_row = [[-2.0, -2.0, -2.0, -2.0, 8.0], [8.0, -2.0, -2.0, -2.0, -2.0], [2.0, 2.0, -8.0, 2.0, 2.0]]
 
 // a row REDUCTION as the last stage changes the rank: one value per asset
 let ss = (object_for(center) >>@ object_for(row_ss)) <@> R |> compute
-// EXPECT: ss = [20, 20, 20]
+// EXPECT: ss = [20.0, 20.0, 20.0]
 let ss_direct = object_for(row_ss) <@> (object_for(center) <@> R |> compute) |> compute
-// EXPECT: ss_direct = [20, 20, 20]
+// EXPECT: ss_direct = [20.0, 20.0, 20.0]

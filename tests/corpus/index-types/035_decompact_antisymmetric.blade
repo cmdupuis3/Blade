@@ -9,4 +9,4 @@ let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let anti = L <@> reynolds(g, Antisymmetric) |> compute
 let result = decompact(anti, 0)
 // M = [[0,-1,-2],[1,0,-1],[2,1,0]] -> row-major
-// EXPECT: result = [0, -1, -2, 1, 0, -1, 2, 1, 0]
+// EXPECT: result = [0.0, -1.0, -2.0, 1.0, 0.0, -1.0, 2.0, 1.0, 0.0]

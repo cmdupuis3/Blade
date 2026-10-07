@@ -47,13 +47,13 @@ let pw = [2.0,
           0.25, 0.0 - 3.0]
 let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
 let r = drift(xs, pw, [4.0, 5.0], [1.0, 1.0])
-// EXPECT: r = 50
+// EXPECT: r = 50.0
 
 // THE GALILEAN SHADOW: boost both velocities by the same U0 = (10, 10). The
 // difference does not move, and the readout is bit-identical.
 let rb = drift(xs, pw, [14.0, 15.0], [11.0, 11.0])
 let d_boost = r - rb
-// EXPECT: d_boost = 0
+// EXPECT: d_boost = 0.0
 
 // THE POINT-GROUP SHADOW: apply rho(r) to the crystal features. On
 // [A x 1, E x 2] that is [x0, x1, x2, x3, x4] -> [x0, -x2, x1, -x4, x3]. The
@@ -61,11 +61,11 @@ let d_boost = r - rb
 // move either.
 let rp = drift([1.0, 0.0 - 3.0, 2.0, 0.0 - 5.0, 4.0], pw, [4.0, 5.0], [1.0, 1.0])
 let d_rot = r - rp
-// EXPECT: d_rot = 0
+// EXPECT: d_rot = 0.0
 
 // BOTH AT ONCE: boost and rotate. Each certificate covers one axis of the
 // change; together they cover the composite, which is the point of stacking
 // conjuncts rather than widening one lattice.
 let rbp = drift([1.0, 0.0 - 3.0, 2.0, 0.0 - 5.0, 4.0], pw, [14.0, 15.0], [11.0, 11.0])
 let d_both = r - rbp
-// EXPECT: d_both = 0
+// EXPECT: d_both = 0.0

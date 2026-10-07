@@ -15,5 +15,5 @@ type CrystalIdx = TreeIdx<crystal>
 let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let R = method_for(range<LeafIdx<crystal>>) <@> lambda(i) -> Float64(i) * 10.0 |> compute
 let s = reduce(leaves(T), (+))
-// EXPECT: R = [0, 10, 20, 30, 40]
-// EXPECT: s = 15
+// EXPECT: R = [0.0, 10.0, 20.0, 30.0, 40.0]
+// EXPECT: s = 15.0

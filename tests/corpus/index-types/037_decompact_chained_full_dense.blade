@@ -21,4 +21,4 @@ let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
 let sym = L <@> f |> compute
 let step1 = decompact(sym, 0)
 let result = decompact(step1, 1)
-// EXPECT: result = [1, 2, 3, 2, 4, 6, 3, 6, 9, 2, 4, 6, 4, 8, 12, 6, 12, 18, 3, 6, 9, 6, 12, 18, 9, 18, 27]
+// EXPECT: result = [1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0, 2.0, 4.0, 6.0, 4.0, 8.0, 12.0, 6.0, 12.0, 18.0, 3.0, 6.0, 9.0, 6.0, 12.0, 18.0, 9.0, 18.0, 27.0]

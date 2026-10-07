@@ -10,9 +10,9 @@ import ad as ad
 function bp(p: Float64) -> Float64 = ppl.logpdf(bernoulli(p), 1.0)
 let (bpv, bpg) = ad.grad(bp)(1.0)
 let (bjv, bjt) = ad.jvp(bp)(1.0, 1.0)
-// EXPECT: bpv = 0
-// EXPECT: bpg = 1
-// EXPECT: bjt = 1
+// EXPECT: bpv = 0.0
+// EXPECT: bpg = 1.0
+// EXPECT: bjt = 1.0
 
 function gx(x: Float64) -> Float64 = ppl.logpdf(gamma(2.0, 1.0), x)
 let (giv, gig) = ad.grad(gx)(1.5)
@@ -24,25 +24,25 @@ let (gov, gog) = ad.grad(gx)(-1.0)
 let (gojv, gojt) = ad.jvp(gx)(-1.0, 1.0)
 let gamma_off_value_neg_inf = gov == log(0.0)
 // EXPECT: gamma_off_value_neg_inf = true
-// EXPECT: gog = 0
-// EXPECT: gojt = 0
+// EXPECT: gog = 0.0
+// EXPECT: gojt = 0.0
 
 function ex(x: Float64) -> Float64 = ppl.logpdf(exponential(2.0), x)
 let (eiv, eig) = ad.grad(ex)(0.5)
 let (eov, eog) = ad.grad(ex)(-3.0)
 let (eojv, eojt) = ad.jvp(ex)(-3.0, 1.0)
-// EXPECT: eig = -2
-// EXPECT: eog = 0
-// EXPECT: eojt = 0
+// EXPECT: eig = -2.0
+// EXPECT: eog = 0.0
+// EXPECT: eojt = 0.0
 
 // loglik over a certain outcome: the sum's derivative in p is n / p = 3.
 let ones: Array<Float64 like Idx<3>> = [1.0, 1.0, 1.0]
 function ber_sum(p: Float64) -> Float64 = ppl.loglik(bernoulli(p), ones)
 let (bsv, bsg) = ad.grad(ber_sum)(1.0)
 let (bsjv, bsjt) = ad.jvp(ber_sum)(1.0, 1.0)
-// EXPECT: bsv = 0
-// EXPECT: bsg = 3
-// EXPECT: bsjt = 3
+// EXPECT: bsv = 0.0
+// EXPECT: bsg = 3.0
+// EXPECT: bsjt = 3.0
 
 // The other support shapes: poisson's integer test (a floor in the guard
 // CONDITION, which neither sweep reads), lognormal's and beta's open ends.

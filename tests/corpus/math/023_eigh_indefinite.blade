@@ -6,5 +6,5 @@
 import math as m
 let S: Array<Float64 like Idx<2>, Idx<2>> = [[0.0, 2.0], [2.0, 0.0]]
 let (Q, LAM) = m.eigh(S)
-// EXPECT: LAM = [2, -2]
+// EXPECT: LAM = [2.0, -2.0]
 // EXPECT: Q = [0.7071067811865475, 0.7071067811865475, 0.7071067811865475, -0.7071067811865475]

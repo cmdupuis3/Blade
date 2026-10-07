@@ -23,11 +23,11 @@ function f(a: Array<Float like I>) -> Float = {
 }
 
 let (v, t) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
-// EXPECT: v = 42
+// EXPECT: v = 42.0
 // EXPECT: t = 1.35
 
 // A single-slot seed reads off one column of the Jacobian: seeding a(2)
 // (the largest value, which lands last) must surface weight 5.
 let (v2, t2) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.0, 0.0, 1.0, 0.0, 0.0])
-// EXPECT: v2 = 42
-// EXPECT: t2 = 5
+// EXPECT: v2 = 42.0
+// EXPECT: t2 = 5.0

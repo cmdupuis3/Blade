@@ -10,6 +10,6 @@
 let A: Array<Float32 like Idx<1>, Idx<3>> = [[16777216.0, 1.0, -16777216.0]]
 let B: Array<Float32 like Idx<1>, Idx<3>> = [[1.0, 1.0, 1.0]]
 let G = gram(A, B)
-// EXPECT: A = [[16777216, 1, -16777216]]
-// EXPECT: B = [[1, 1, 1]]
-// EXPECT: G = [[0]]
+// EXPECT: A = [[16777216.0, 1.0, -16777216.0]]
+// EXPECT: B = [[1.0, 1.0, 1.0]]
+// EXPECT: G = [[0.0]]

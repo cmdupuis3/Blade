@@ -35,12 +35,12 @@ let blocked = method_for(x) <@> lambda(e) -> {
 
 // A fold kernel is called through a wrapper closure: ((1 + 2*6) + 3*6) + 6*6.
 let folded = reduce(x, lambda(a, b) -> a + b * scale(x))
-// EXPECT: folded = 67
+// EXPECT: folded = 67.0
 
 // Two main-local callees in one kernel.
 function bump(e: Float64) -> Float64 = e * two
 let bumped = method_for(x) <@> lambda(e) -> bump(e) + scale(x * x) |> compute
-// EXPECT: bumped = [27, 29, 31, 37]
+// EXPECT: bumped = [27.0, 29.0, 31.0, 37.0]
 
 // The kernel bound to a name first.
 let k = lambda(e) -> e / scale(x * x)

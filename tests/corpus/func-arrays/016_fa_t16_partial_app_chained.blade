@@ -13,6 +13,6 @@ let r2 = add3(100.0)(20.0, 3.0)
 
 function mk_row(s: Float64) -> Array<Float64 like Idx<3>> = [s, s * 2.0, s * 3.0]
 let r3 = mk_row(2.0, 1)
-// EXPECT: r1 = 123
-// EXPECT: r2 = 123
-// EXPECT: r3 = 4
+// EXPECT: r1 = 123.0
+// EXPECT: r2 = 123.0
+// EXPECT: r3 = 4.0

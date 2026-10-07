@@ -172,8 +172,8 @@ let za1_0 = {
     let m = mag2 <@> QH0_A1 |> compute
     half_mean2(m)
 }
-// EXPECT: ea1_0 = 1
-// EXPECT: za1_0 = 4
+// EXPECT: ea1_0 = 1.0
+// EXPECT: za1_0 = 4.0
 
 let QHT_A1: CF = {
     cflAcc = 0.0
@@ -215,8 +215,8 @@ let rossby_ok = if rossby_err < 1.0e-6 then 1.0 else 0.0
 let a1drift = ea1_T / ea1_0 - 1.0
 let a1_energy_ok = if abs(a1drift) < 0.001 then 1.0 else 0.0
 // EXPECT: rossby_err = 2.13979544470527e-09
-// EXPECT: rossby_ok = 1
-// EXPECT: a1_energy_ok = 1
+// EXPECT: rossby_ok = 1.0
+// EXPECT: a1_energy_ok = 1.0
 
 // ===========================================================================
 // Part A2 — McWilliams decaying turbulence: beta = 0, dt = 0.005, 1500 steps.
@@ -267,8 +267,8 @@ let qa2_p1 = QF2(33: Y, 47: X)
 
 let a2_energy_ok = if ea2_T > 0.8 * ea2_0 then 1.0 else 0.0
 let a2_enstrophy_ok = if za2_T < 0.2 * za2_0 then 1.0 else 0.0
-// EXPECT: a2_energy_ok = 1
-// EXPECT: a2_enstrophy_ok = 1
+// EXPECT: a2_energy_ok = 1.0
+// EXPECT: a2_enstrophy_ok = 1.0
 
 // ===========================================================================
 // Part B — two-layer baroclinic instability.
@@ -374,5 +374,5 @@ let qb_p1 = QF3(50: Y, 3: X)
 
 let b_growth_ok = if ke1_end > 4.0 * ke1_mid then 1.0 else 0.0
 let cfl_ok = if cfl_a1 < 1.0 && cfl_a2 < 1.0 && cfl_b < 1.0 then 1.0 else 0.0
-// EXPECT: b_growth_ok = 1
-// EXPECT: cfl_ok = 1
+// EXPECT: b_growth_ok = 1.0
+// EXPECT: cfl_ok = 1.0

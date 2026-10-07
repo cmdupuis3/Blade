@@ -70,11 +70,11 @@ let out = readout([1.0, 2.0, -3.0, 4.0], [2.0, 0.0 - 1.0], [2.0], [1.0])
 let xt: Array<Float like Idx<4>> = [1.0, 2.0, -3.0, 4.0]
 let st = reduce(xt, (+))
 let ht = 2.0 * xt - st
-// EXPECT: ht = [-2, 0, -10, 4]
+// EXPECT: ht = [-2.0, 0.0, -10.0, 4.0]
 let sf = ht / (1.0 + ht * ht)
 let twin = 2.0 * reduce(sf, (+)) + 1.0
 let dtwin = out(0) - twin
-// EXPECT: dtwin = 0
+// EXPECT: dtwin = 0.0
 
 // THE CERTIFICATE, shadowed: relabel the four nodes and the readout does not
 // move. The pin is a squared difference rather than exact equality only because

@@ -30,10 +30,10 @@ let t = B, C
 let u = t
 let s3 = K <@> (A, t) |> compute
 let s4 = K <@> (A, u) |> compute
-// EXPECT: s0 = [111, 211, 121, 221, 112, 212, 122, 222]
-// EXPECT: s1 = [111, 211, 121, 221, 112, 212, 122, 222]
-// EXPECT: s3 = [111, 211, 121, 221, 112, 212, 122, 222]
-// EXPECT: s4 = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: s0 = [111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0]
+// EXPECT: s1 = [111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0]
+// EXPECT: s3 = [111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0]
+// EXPECT: s4 = [111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0]
 
 // PARENS NOW MEAN SOMETHING (6c rule 4). Nesting the OTHER pair needs the
 // annotation to move with it -- `((A, B), C)` against this same K is an error,
@@ -42,8 +42,8 @@ let s4 = K <@> (A, u) |> compute
 let M = object_for(lambda(p: Tuple<2>, z) -> p[0] + p[1] + z)
 let s7 = M <@> ((A, B), C) |> compute
 let s8 = M <@> (A, B, C) |> compute
-// EXPECT: s7 = [111, 211, 121, 221, 112, 212, 122, 222]
-// EXPECT: s8 = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: s7 = [111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0]
+// EXPECT: s8 = [111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0]
 // (Equal to s0 here only because `+` is associative and commutative over these
 // operands -- the point is that BOTH groupings are now WRITEABLE, which under
 // 6b they were not: every parenthesization collapsed to one program.)
@@ -52,13 +52,13 @@ let s8 = M <@> (A, B, C) |> compute
 // list, not a trailing-rest rule.
 let L = object_for(lambda(y: Tuple<2>, x) -> y[0] * 10.0 + y[1] + x)
 let s5 = L <@> (A, B, C) |> compute
-// EXPECT: s5 = [120, 220, 130, 230, 130, 230, 140, 240]
+// EXPECT: s5 = [120.0, 220.0, 130.0, 230.0, 130.0, 230.0, 140.0, 240.0]
 
 // A width-3 parameter absorbing the WHOLE pack -- ruling 2's "`lambda(r:
 // Tuple<4>)` also legal", one arity down.
 let M3 = object_for(lambda(p: Tuple<3>) -> p[0] + p[1] + p[2])
 let s6 = M3 <@> (A, B, C) |> compute
-// EXPECT: s6 = [111, 211, 121, 221, 112, 212, 122, 222]
+// EXPECT: s6 = [111.0, 211.0, 121.0, 221.0, 112.0, 212.0, 122.0, 222.0]
 // Identical to s0, as it must be: same three leaves, same grid, and
 // `x + y[0] + y[1]` and `p[0] + p[1] + p[2]` are the same sum. Only the
 // SLICING of the schema differs, and slicing is not supposed to be observable

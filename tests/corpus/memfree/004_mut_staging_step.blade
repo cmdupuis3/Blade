@@ -23,6 +23,6 @@ let rec acc: Array<Float like Steps> =
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + stepf(n)
 let sfinal = acc((4 : Steps))
-// EXPECT: STG = [8, 9, 10, 11]
-// EXPECT: acc = [0, 7, 18, 33, 52]
-// EXPECT: sfinal = 52
+// EXPECT: STG = [8.0, 9.0, 10.0, 11.0]
+// EXPECT: acc = [0.0, 7.0, 18.0, 33.0, 52.0]
+// EXPECT: sfinal = 52.0

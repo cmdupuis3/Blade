@@ -7,4 +7,4 @@ let C: Array<Float32 like Idx<1>, Idx<2>> = [[1.0, 2.0]]
 let D: Array<Float64 like Idx<1>, Idx<2>> = [[3.0, 4.0]]
 let Cd = Float64(C)
 let H = gram(Cd, D)
-// EXPECT: H = [[11]]
+// EXPECT: H = [[11.0]]

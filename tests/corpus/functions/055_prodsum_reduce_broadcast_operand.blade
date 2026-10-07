@@ -36,7 +36,7 @@ function sumsq(x: T^1) = {
     prodsum(x - m, x - m)
 }
 let s = sumsq([1.0, 2.0, 3.0, 4.0])
-// EXPECT: s = 5
+// EXPECT: s = 5.0
 
 // The reduce operand slot has the same shape; deviations sum to zero.
 function devsum(x: T^1) = {
@@ -45,5 +45,5 @@ function devsum(x: T^1) = {
     reduce(x - m, (+))
 }
 let d = devsum([1.0, 2.0, 3.0, 4.0])
-// EXPECT: d = 0
+// EXPECT: d = 0.0
 // WARN: BL3020  (the implicit int->float promotion here is deliberate)

@@ -12,5 +12,5 @@ function boost(v: Float<speed>, dv: Float<speed> = 1.0) -> Float<speed> = v + dv
 let v0 = 4.0: speed
 let b1 = boost(v0)
 let b2 = boost(v0, (2.5 : speed))
-// EXPECT: b1 = 5
+// EXPECT: b1 = 5.0
 // EXPECT: b2 = 6.5

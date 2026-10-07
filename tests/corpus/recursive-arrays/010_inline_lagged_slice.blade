@@ -27,7 +27,7 @@ let rec viahelper: Array<Float like Step, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0]
     | prefix :: n -> prefix :: blend(prefix(n - 1), prefix(n - 3))
-// EXPECT: viahelper = [1, 2, 3, 0.5, 1, 1.5, 0.25, 0.5, 0.75, 0.625, 1.25, 1.875, 0.5625, 1.125, 1.6875, 0.40625, 0.8125, 1.21875]
+// EXPECT: viahelper = [1.0, 2.0, 3.0, 0.5, 1.0, 1.5, 0.25, 0.5, 0.75, 0.625, 1.25, 1.875, 0.5625, 1.125, 1.6875, 0.40625, 0.8125, 1.21875]
 
 // --- the direct spelling: two lagged reads, one guarded, combined inline ----
 let rec inlined: Array<Float like Step, C> =
@@ -35,7 +35,7 @@ let rec inlined: Array<Float like Step, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0]
     | prefix :: n -> prefix :: 0.5 * prefix(n - 1) + 0.5 * prefix(n - 3)
-// EXPECT: inlined = [1, 2, 3, 0.5, 1, 1.5, 0.25, 0.5, 0.75, 0.625, 1.25, 1.875, 0.5625, 1.125, 1.6875, 0.40625, 0.8125, 1.21875]
+// EXPECT: inlined = [1.0, 2.0, 3.0, 0.5, 1.0, 1.5, 0.25, 0.5, 0.75, 0.625, 1.25, 1.875, 0.5625, 1.125, 1.6875, 0.40625, 0.8125, 1.21875]
 
 // --- the minimal trigger: ONE guarded read, scaled -------------------------
 // Rows 1, 2, 4 and 5 read before the prefix and are zero by 7.5; row 3 is the
@@ -45,7 +45,7 @@ let rec lone: Array<Float like Step, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0]
     | prefix :: n -> prefix :: 0.5 * prefix(n - 3)
-// EXPECT: lone = [1, 2, 3, 0, 0, 0, 0, 0, 0, 0.5, 1, 1.5, 0, 0, 0, 0, 0, 0]
+// EXPECT: lone = [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 // --- both reads UNGUARDED: `prefix(0)` is inside the prefix at every step ---
 // No select is formed here, so this arm pins the path that always worked.
@@ -54,4 +54,4 @@ let rec unguarded: Array<Float like Step, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0]
     | prefix :: n -> prefix :: 0.5 * prefix(n - 1) + 0.5 * prefix(0)
-// EXPECT: unguarded = [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]
+// EXPECT: unguarded = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0]

@@ -14,4 +14,4 @@ let rec zs: Array<Float like It> =
     | prefix :: n -> prefix :: (if prefix(n - 1) < 1000000.0 then prefix(n - 1) * 2.0 else prefix(n - 1))
 
 let top = zs((7 : It))
-// EXPECT: top = 128
+// EXPECT: top = 128.0

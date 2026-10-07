@@ -14,21 +14,21 @@ let xi = [1, 2]
 
 function firstsum(P: Poly<T^1>) -> T^0 = P[0](0) + P[1](0)
 let fs = firstsum(x, y)
-// EXPECT: fs = 11
+// EXPECT: fs = 11.0
 let fi = firstsum(xi, xi)
 // EXPECT: fi = 2
 
 // Arity 3, three extents.
 function ends(P: Poly<T^1>) -> T^0 = P[0](0) + P[2](0)
 let en = ends(x, y, z)
-// EXPECT: en = 101
+// EXPECT: en = 101.0
 
 // A fold of each element, extents differing (3 and 5 cells).
 function total0(P: Poly<T^1>) -> T^0 = reduce(P[0], (+)) + reduce(P[1], (+))
 let t0 = total0(x, y)
-// EXPECT: t0 = 156
+// EXPECT: t0 = 156.0
 
 // Unannotated return, and an in-range read past the first element's length.
 function third_of_first(P: Poly<T^1>) = P[0](3)
 let tf = third_of_first(y, x)
-// EXPECT: tf = 40
+// EXPECT: tf = 40.0

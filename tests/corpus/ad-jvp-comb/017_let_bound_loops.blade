@@ -23,7 +23,7 @@ function f2(a: Array<Float like I>) -> Float = {
 
 let (v1, t1) = ad.jvp(f1)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
 let (v2, t2) = ad.jvp(f2)([1.0, 2.0, 3.0], [1.0, 1.0, 1.0])
-// EXPECT: v1 = 7
-// EXPECT: t1 = 3
-// EXPECT: v2 = 14
-// EXPECT: t2 = 12
+// EXPECT: v1 = 7.0
+// EXPECT: t1 = 3.0
+// EXPECT: v2 = 14.0
+// EXPECT: t2 = 12.0

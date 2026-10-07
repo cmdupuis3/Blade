@@ -15,9 +15,9 @@ function f(w: Array<Float like Idx<3>>) -> Float = {
 
 let mut dw = [0.0, 0.0, 0.0]
 let gv = ad.grad(f)([2.0, 3.0, 4.0], dw)
-// EXPECT: gv = 10
-// EXPECT: dw = [3, 2, 1]
+// EXPECT: gv = 10.0
+// EXPECT: dw = [3.0, 2.0, 1.0]
 let (jv, jt) = ad.jvp(f)([2.0, 3.0, 4.0], [1.0, 0.0, 0.0])
 let resid = jt - dw(0)
-// EXPECT: jv = 10
-// EXPECT: resid = 0
+// EXPECT: jv = 10.0
+// EXPECT: resid = 0.0

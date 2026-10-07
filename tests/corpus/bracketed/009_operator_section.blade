@@ -7,12 +7,12 @@ let B = [10.0, 20.0, 30.0]
 // Apply (+) as a kernel to method_for - creates pairwise sums
 let loop = method_for(A, B)
 let sums = loop <@> (+) |> compute
-// EXPECT: sums = [11, 21, 31, 12, 22, 32, 13, 23, 33]
+// EXPECT: sums = [11.0, 21.0, 31.0, 12.0, 22.0, 32.0, 13.0, 23.0, 33.0]
 
 // Apply (*) as a kernel - creates pairwise products  
 let prods = loop <@> (*) |> compute
-// EXPECT: prods = [10, 20, 30, 20, 40, 60, 30, 60, 90]
+// EXPECT: prods = [10.0, 20.0, 30.0, 20.0, 40.0, 60.0, 30.0, 60.0, 90.0]
 
 // Inline usage - pairwise differences
 let result = method_for(A, B) <@> (-) |> compute
-// EXPECT: result = [-9, -19, -29, -8, -18, -28, -7, -17, -27]
+// EXPECT: result = [-9.0, -19.0, -29.0, -8.0, -18.0, -28.0, -7.0, -17.0, -27.0]

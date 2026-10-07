@@ -15,6 +15,6 @@ let ps: Array<Probe like Idx<2>> = [
     Probe { id = 2, samples = [3.0, 4.0, 5.0], grid = [[5, 6], [7, 8]] }
 ]
 let s1 = ps[1].samples[2]
-// EXPECT: s1 = 5
+// EXPECT: s1 = 5.0
 let g0 = ps[0].grid[1][0]
 // EXPECT: g0 = 3

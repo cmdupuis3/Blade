@@ -28,6 +28,6 @@ let v: Array<Float64 like C> = [1.0, 2.0, 3.0]
 let t1 = make_t(A)
 let d1 = make_d(v)
 // A row-major 1 2 3 4 5 6; the 3x2 transpose reads column-first.
-// EXPECT: t1 = [1, 4, 2, 5, 3, 6]
+// EXPECT: t1 = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
 // reynolds(2p+q) = 3(p+q); dense 3x3 is [[6,9,12],[9,12,15],[12,15,18]]
-// EXPECT: d1 = [6, 9, 12, 9, 12, 15, 12, 15, 18]
+// EXPECT: d1 = [6.0, 9.0, 12.0, 9.0, 12.0, 15.0, 12.0, 15.0, 18.0]

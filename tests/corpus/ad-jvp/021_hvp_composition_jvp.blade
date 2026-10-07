@@ -23,13 +23,13 @@ let mut g2 = [0.0, 0.0]
 let mut tg2 = [0.0, 0.0]
 let (p2, tp2) = ad.jvp(ad.grad(f))([1.0, 2.0], g2, [0.0, 1.0], tg2)
 // (1) analytic: H columns and <grad, seed>
-// EXPECT: tg1 = [4, 2]
-// EXPECT: tg2 = [2, 12]
-// EXPECT: tp1 = 4
-// EXPECT: tp2 = 13
+// EXPECT: tg1 = [4.0, 2.0]
+// EXPECT: tg2 = [2.0, 12.0]
+// EXPECT: tp1 = 4.0
+// EXPECT: tp2 = 13.0
 // (2) symmetry, no reference value needed
 let symresid = tg2(0) - tg1(1)
-// EXPECT: symresid = 0
+// EXPECT: symresid = 0.0
 // (3) FD of the gradient along v = [1, 0]
 let mut ga = [0.0, 0.0]
 let pa = ad.grad(f)([1.000001, 2.0], ga)

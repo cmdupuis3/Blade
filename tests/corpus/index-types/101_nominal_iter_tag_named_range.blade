@@ -28,4 +28,4 @@
 type Lat = Idx<3>
 let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
 let r = method_for(range<Lat>) <@> lambda(i) -> A(i) * 2.0 |> compute
-// EXPECT: r = [20, 40, 60]
+// EXPECT: r = [20.0, 40.0, 60.0]

@@ -12,4 +12,4 @@ let A: Array<Float64 like Y, X> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let B: Array<Float64 like Y, X> = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
 let P = method_for(zip(A, B)) <@> lambda(ra: Array<Float64 like X>, rb: Array<Float64 like X>) -> prodsum(ra, rb) |> compute
 
-// EXPECT: P = [140, 770]
+// EXPECT: P = [140.0, 770.0]

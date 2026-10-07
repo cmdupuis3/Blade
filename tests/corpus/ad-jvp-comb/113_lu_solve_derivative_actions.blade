@@ -45,39 +45,39 @@ let w: Array<Float64 like N> = [2.0, 0.0, 1.0]
 let mut da: Array<Float64 like N, N> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 let mut db: Array<Float64 like N> = [0.0, 0.0, 0.0]
 let gv = ad.grad(solve_loss)(A, b, da, db)
-// EXPECT: gv = 5
-// EXPECT: da = [[-12, -24, -36], [3, 6, 9], [4, 8, 12]]
-// EXPECT: db = [12, -3, -4]
+// EXPECT: gv = 5.0
+// EXPECT: da = [[-12.0, -24.0, -36.0], [3.0, 6.0, 9.0], [4.0, 8.0, 12.0]]
+// EXPECT: db = [12.0, -3.0, -4.0]
 
 // forward, array-valued
 let (x, dx) = ad.jvp(solve_fn)(A, b, sA, sb)
-// EXPECT: x = [1, 2, 3]
-// EXPECT: dx = [8, -3, -5]
+// EXPECT: x = [1.0, 2.0, 3.0]
+// EXPECT: dx = [8.0, -3.0, -5.0]
 
 // reverse, seeded
 let mut da2: Array<Float64 like N, N> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 let mut db2: Array<Float64 like N> = [0.0, 0.0, 0.0]
 let xv = ad.vjp(solve_fn)(A, b, w, da2, db2)
-// EXPECT: xv = [1, 2, 3]
-// EXPECT: da2 = [[-12, -24, -36], [3, 6, 9], [4, 8, 12]]
-// EXPECT: db2 = [12, -3, -4]
+// EXPECT: xv = [1.0, 2.0, 3.0]
+// EXPECT: da2 = [[-12.0, -24.0, -36.0], [3.0, 6.0, 9.0], [4.0, 8.0, 12.0]]
+// EXPECT: db2 = [12.0, -3.0, -4.0]
 let lhs = reduce(w * dx, (+))
 let rhs = reduce(reduce(da2 * sA, (+)), (+)) + reduce(db2 * sb, (+))
-// EXPECT: lhs = 11
-// EXPECT: rhs = 11
+// EXPECT: lhs = 11.0
+// EXPECT: rhs = 11.0
 
 // the transposed solve, both directions
 let bt: Array<Float64 like N> = [8.0, 9.0, 9.0]
 let (xt, dxt) = ad.jvp(solve_t_fn)(A, bt, sA, sb)
-// EXPECT: xt = [1, 2, 3]
-// EXPECT: dxt = [11, -3, -5]
+// EXPECT: xt = [1.0, 2.0, 3.0]
+// EXPECT: dxt = [11.0, -3.0, -5.0]
 let mut da3: Array<Float64 like N, N> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 let mut db3: Array<Float64 like N> = [0.0, 0.0, 0.0]
 let xtv = ad.vjp(solve_t_fn)(A, bt, w, da3, db3)
-// EXPECT: xtv = [1, 2, 3]
-// EXPECT: da3 = [[-13, 5, 6], [-26, 10, 12], [-39, 15, 18]]
-// EXPECT: db3 = [13, -5, -6]
+// EXPECT: xtv = [1.0, 2.0, 3.0]
+// EXPECT: da3 = [[-13.0, 5.0, 6.0], [-26.0, 10.0, 12.0], [-39.0, 15.0, 18.0]]
+// EXPECT: db3 = [13.0, -5.0, -6.0]
 let lhs_t = reduce(w * dxt, (+))
 let rhs_t = reduce(reduce(da3 * sA, (+)), (+)) + reduce(db3 * sb, (+))
-// EXPECT: lhs_t = 17
-// EXPECT: rhs_t = 17
+// EXPECT: lhs_t = 17.0
+// EXPECT: rhs_t = 17.0

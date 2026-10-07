@@ -43,9 +43,9 @@ let uni_b = ppl.logpdf(uniform(0.0, 2.0), 2.0)
 let ber_1_1 = ppl.logpdf(bernoulli(1.0), 1.0)
 let ber_0_0 = ppl.logpdf(bernoulli(0.0), 0.0)
 let poi_l0_k0 = ppl.logpdf(poisson(0.0), 0.0)
-// EXPECT: ber_1_1 = 0
-// EXPECT: ber_0_0 = 0
-// EXPECT: poi_l0_k0 = 0
+// EXPECT: ber_1_1 = 0.0
+// EXPECT: ber_0_0 = 0.0
+// EXPECT: poi_l0_k0 = 0.0
 
 // ---- interior: unchanged (dump-logpdf pins) ----
 let gau_in = ppl.logpdf(gaussian(0.0, 1.0), 40.0)
@@ -54,7 +54,7 @@ let bet_in = ppl.logpdf(beta(2.0, 3.0), 0.25)
 let poi_in = ppl.logpdf(poisson(2.0), 3.0)
 let ber_in = ppl.logpdf(bernoulli(0.3), 1.0)
 // EXPECT: gau_in = -800.91893853320467
-// EXPECT: gam_in = -1
+// EXPECT: gam_in = -1.0
 // EXPECT: bet_in = 0.52324814376454531
 // EXPECT: poi_in = -1.7123179275482193
 // EXPECT: ber_in = -1.2039728043259361

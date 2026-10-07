@@ -26,7 +26,7 @@ let rec a: Array<Float like Draw> =
     | zero -> zero
     | zero :: s -> zero :: 1.0
     | prefix :: n -> prefix :: prefix(n - 3)
-// EXPECT: a = [1, 0, 0, 1, 0, 0]
+// EXPECT: a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 
 // --- the same stream amplified by 1e300 ------------------------------------
 // The distinguisher: a denormal or heap-metadata bit pattern scales into a
@@ -36,7 +36,7 @@ let rec b: Array<Float like D2> =
     | zero -> zero
     | zero :: s -> zero :: 1.0
     | prefix :: n -> prefix :: prefix(n - 3) * 1.0e300
-// EXPECT: b = [1, 0, 0, 1e+300, 0, 0]
+// EXPECT: b = [1.0, 0.0, 0.0, 1e+300, 0.0, 0.0]
 
 // --- integer elements ------------------------------------------------------
 // c(1) = c(-1) + 1 = 1, c(3) = c(1) + 1 = 2.
@@ -54,7 +54,7 @@ let rec z: Array<Complex128 like CStep> =
     | zero -> zero
     | zero :: s -> zero :: complex(2.0, 3.0)
     | prefix :: n -> prefix :: prefix(n - 2)
-// EXPECT: z = [(2,3), (0,0), (2,3), (0,0), (2,3)]
+// EXPECT: z = [(2.0,3.0), (0.0,0.0), (2.0,3.0), (0.0,0.0), (2.0,3.0)]
 
 // --- rank 2: an out-of-prefix read yields a zero SLICE ---------------------
 // row(n) = row(n-1) + row(n-3), so rows 1 and 2 just carry the seed forward
@@ -67,4 +67,4 @@ let rec m: Array<Float like Step, C> =
     | zero -> zero
     | zero :: s -> zero :: [1.0, 2.0, 3.0]
     | prefix :: n -> prefix :: addrows(prefix(n - 1), prefix(n - 3))
-// EXPECT: m = [1, 2, 3, 1, 2, 3, 1, 2, 3, 2, 4, 6, 3, 6, 9, 4, 8, 12]
+// EXPECT: m = [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0, 4.0, 8.0, 12.0]

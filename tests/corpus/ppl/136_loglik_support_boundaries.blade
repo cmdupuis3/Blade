@@ -14,9 +14,9 @@ let neg: Array<Float64 like Idx<3>> = [1.0, -2.0, 3.0]
 let ll_ber_certain = ppl.loglik(bernoulli(1.0), ones)
 let ll_ber_never = ppl.loglik(bernoulli(0.0), zeros)
 let ll_poi_zero = ppl.loglik(poisson(0.0), zeros)
-// EXPECT: ll_ber_certain = 0
-// EXPECT: ll_ber_never = 0
-// EXPECT: ll_poi_zero = 0
+// EXPECT: ll_ber_certain = 0.0
+// EXPECT: ll_ber_never = 0.0
+// EXPECT: ll_poi_zero = 0.0
 
 let ll_uni_off = ppl.loglik(uniform(0.0, 1.0), bad)
 let ll_gam_off = ppl.loglik(gamma(2.0, 1.0), neg)
@@ -32,5 +32,5 @@ let off_all_neg_inf = ll_uni_off == ninf && ll_gam_off == ninf && ll_exp_off == 
 // sample; uniform(0, 4) over in-range data is -n log 4.
 let ll_gam_on = ppl.loglik(gamma(2.0, 1.0), ones)
 let ll_uni_on = ppl.loglik(uniform(0.0, 4.0), bad)
-// EXPECT: ll_gam_on = -3
+// EXPECT: ll_gam_on = -3.0
 // EXPECT: ll_uni_on = -4.1588830833596715

@@ -21,15 +21,15 @@ let B: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
 
 let tup = method_for(zip(A, B)) <@> lambda(p: Tuple<2>) -> p[0] * p[1] |> compute
 let flat = method_for(zip(A, B)) <@> lambda(a, b) -> a * b |> compute
-// EXPECT: tup = [10, 40, 90]
-// EXPECT: flat = [10, 40, 90]
+// EXPECT: tup = [10.0, 40.0, 90.0]
+// EXPECT: flat = [10.0, 40.0, 90.0]
 
 // Same two readings with the OTHER orientation of the operator, so the
 // annotation is not a property of one apply arm.
 let otup = object_for(lambda(p: Tuple<2>) -> p[0] + p[1]) <@> zip(A, B) |> compute
 let oflat = object_for(lambda(a, b) -> a + b) <@> zip(A, B) |> compute
-// EXPECT: otup = [11, 22, 33]
-// EXPECT: oflat = [11, 22, 33]
+// EXPECT: otup = [11.0, 22.0, 33.0]
+// EXPECT: oflat = [11.0, 22.0, 33.0]
 
 // A NAMED function with the tuple parameter, in both orientations. The
 // kernel-position eta wrapper re-spells the callee's tuple parameter as
@@ -39,12 +39,12 @@ let oflat = object_for(lambda(a, b) -> a + b) <@> zip(A, B) |> compute
 function addp(p: Tuple<2>) -> Float64 = p[0] + p[1]
 let n0 = method_for(zip(A, B)) <@> addp |> compute
 let n1 = object_for(addp) <@> zip(A, B) |> compute
-// EXPECT: n0 = [11, 22, 33]
-// EXPECT: n1 = [11, 22, 33]
+// EXPECT: n0 = [11.0, 22.0, 33.0]
+// EXPECT: n1 = [11.0, 22.0, 33.0]
 
 // The FULLY WRITTEN tuple type says the same thing as the width-only spelling
 // (3.6's M6, which used to be a g++ failure: "could not convert
 // '__fp_A[__fk]' from 'const double' to 'std::tuple<double, double>'").
 function addw(p: (Float64, Float64)) -> Float64 = p[0] + p[1]
 let w0 = method_for(zip(A, B)) <@> addw |> compute
-// EXPECT: w0 = [11, 22, 33]
+// EXPECT: w0 = [11.0, 22.0, 33.0]

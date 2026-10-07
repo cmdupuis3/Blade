@@ -24,8 +24,8 @@ let b: Array<Float64 like Idx<3>> = [10.0, 20.0, 30.0]
 function scaleRow(x: Float64) -> Array<Float64 like Idx<3>> = (b <@> lambda(y) -> x * y) |> compute
 let a: Array<Float64 like Idx<2>> = [1.0, 2.0]
 let g = method_for(a) <@> lambda(x) -> scaleRow(x) |> compute
-// EXPECT: g = [[10, 20, 30], [20, 40, 60]]
+// EXPECT: g = [[10.0, 20.0, 30.0], [20.0, 40.0, 60.0]]
 
 let m: Array<Float like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let p = method_for(m) <@> lambda(row: Array<Float like Idx<3>>) -> row |> compute
-// EXPECT: p = [[1, 2, 3], [4, 5, 6]]
+// EXPECT: p = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]

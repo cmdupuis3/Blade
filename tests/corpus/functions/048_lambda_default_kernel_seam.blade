@@ -9,6 +9,6 @@ let scaled = method_for(A) <@> lambda(x, s = 2.0) -> x * s |> compute
 let f = lambda(x, s = 3.0) -> x * s
 let g = f(5.0)
 let h = f(5.0, 10.0)
-// EXPECT: scaled = [2, 4, 6]
-// EXPECT: g = 15
-// EXPECT: h = 50
+// EXPECT: scaled = [2.0, 4.0, 6.0]
+// EXPECT: g = 15.0
+// EXPECT: h = 50.0

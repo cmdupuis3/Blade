@@ -28,7 +28,7 @@
 function outer(r: ((Float64, Float64), (Float64, Float64))) -> Float64 =
     r[0][0] + r[0][1] * 10.0 + r[1][0] * 100.0 + r[1][1] * 1000.0
 let deep = outer(((1.0, 2.0), (3.0, 4.0)))
-// EXPECT: deep = 4321
+// EXPECT: deep = 4321.0
 
 // Rule 3 precedence (a) on its own, at width-only: a single 2-tuple argument
 // against a single `Tuple<2>` parameter binds the PAIR. It is not spliced into
@@ -36,7 +36,7 @@ let deep = outer(((1.0, 2.0), (3.0, 4.0)))
 // is tried first. Scalar elements, so the element slots resolve.
 function pr(p: Tuple<2>) -> Float64 = p[0] * 10.0 + p[1]
 let bound = pr((3.0, 4.0))
-// EXPECT: bound = 34
+// EXPECT: bound = 34.0
 
 // OPERAND position, pair of pairs: two `Tuple<2>` parameters each direct-bind
 // one node, so the loop iterates all four arrays and each parameter sees its
@@ -52,4 +52,4 @@ let g = object_for(lambda(p: Tuple<2>, q: Tuple<2>) -> p[0] * p[1] + q[0] * q[1]
 // g is rank 4 and prints as ONE flat row-major run (the auto-printer's single
 // rank regime; the per-block `g[i][j] = [...]` grid lines this pin group used
 // to ride are retired). Blocks in order: g[0][0], g[0][1], g[1][0], g[1][1].
-// EXPECT: g = [38, 43, 45, 51, 39, 44, 46, 52, 41, 46, 48, 54, 43, 48, 50, 56]
+// EXPECT: g = [38.0, 43.0, 45.0, 51.0, 39.0, 44.0, 46.0, 52.0, 41.0, 46.0, 48.0, 54.0, 43.0, 48.0, 50.0, 56.0]

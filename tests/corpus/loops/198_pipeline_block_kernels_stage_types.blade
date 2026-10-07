@@ -10,5 +10,5 @@ function half(x: Int64) -> Float64 = { Float64(x) / 2.0 }
 function double_it(x: Float64) -> Float64 = { x * 2.0 }
 let piped = (object_for(half) >>@ object_for(double_it)) <@> A |> compute
 let direct = method_for(A) <@> lambda(x) -> double_it(half(x)) |> compute
-// EXPECT: piped = [1, 2, 3]
-// EXPECT: direct = [1, 2, 3]
+// EXPECT: piped = [1.0, 2.0, 3.0]
+// EXPECT: direct = [1.0, 2.0, 3.0]

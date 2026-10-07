@@ -156,7 +156,7 @@ function myFunc(a: Int64, b: Int64, c: Float64, d: Float64) -> Float64 =
 let f1 = myFunc(5)        // Int64 -> Float64 -> Float64 -> Float64
 let f2 = myFunc(5)(3)     // Float64 -> Float64 -> Float64
 let r = f2(2.0, 0.5)
-// EXPECT: r = 8
+// EXPECT: r = 8.0
 ```
 
 With array indexing, currying means you index *in order*. To index a
@@ -196,8 +196,8 @@ function bump(v: mut Array<Float64 like Idx<3>>) -> Float64 = {
 }
 let first = bump(xs)
 let after = xs
-// EXPECT: first = 11
-// EXPECT: after = [11, 2, 3]
+// EXPECT: first = 11.0
+// EXPECT: after = [11.0, 2.0, 3.0]
 ```
 
 The opposite end is `let static` (a compile-time value, immutable
@@ -216,7 +216,7 @@ Anonymous functions use `lambda`, and are values like any other:
 ```blade
 let addTen = lambda(x: Float64) -> x + 10.0
 let twelve = addTen(2.0)
-// EXPECT: twelve = 12
+// EXPECT: twelve = 12.0
 ```
 
 ## 5. Structure-First Math
@@ -236,7 +236,7 @@ function add(a: T^0, b: T^0) -> T^0 = a + b
 
 ```blade
 let elementwise = add(A, B)       // A(i,j) + B(i,j): same as A + B
-// EXPECT: elementwise = [[11, 22], [33, 44]]
+// EXPECT: elementwise = [[11.0, 22.0], [33.0, 44.0]]
 ```
 
 To visit *every pair* of elements instead — every element of `A` against every
@@ -247,7 +247,7 @@ with the bracketed operator `[+]`:
 let pairs1 = method_for(A, B) <@> add |> compute    // T^2 -> T^2 -> T^4
 let pairs2 = A [+] B
 let pick = pairs2(0, 1, 1, 0)                       // A(0,1) + B(1,0)
-// EXPECT: pick = 32
+// EXPECT: pick = 32.0
 ```
 
 These aren't two spellings of one operation. They differ in *which pairs of
@@ -265,7 +265,7 @@ consume. A kernel may take the co-iterated pair as one `Tuple<2>`:
 ```blade
 function addPair(p: Tuple<2>) = p[0] + p[1]
 let zipped = method_for(zip(A, B)) <@> addPair |> compute
-// EXPECT: zipped = [[11, 22], [33, 44]]
+// EXPECT: zipped = [[11.0, 22.0], [33.0, 44.0]]
 ```
 
 So why would we ever want the bracketed operators?
@@ -476,7 +476,7 @@ let different = cov <@> (B, D) |> compute    // rectangular: dense 3 x 3, even w
 let s01 = sameArray(0, 1)
 let d01 = different(0, 1)
 // EXPECT: s01 = -0.75
-// EXPECT: d01 = -1
+// EXPECT: d01 = -1.0
 ```
 
 Commutativity without identity buys nothing, and vice versa. The compiler detects identity from the call site and commutativity from the kernel, which is why Blade has exactly the two loop combinators `method_for` and `object_for`. Each of them detect one property and defer the other.
@@ -546,7 +546,7 @@ let time = 2.0: Time
 ```blade
 let speed3 = dist / time                      // meters/seconds = mps: OK
 let avg = (speed1 + speed2 + speed3) / 3.0
-// EXPECT: avg = 3
+// EXPECT: avg = 3.0
 ```
 
 ```blade rejects
@@ -567,8 +567,8 @@ let s: Salinity = 35.0
 function freshen(x: Salinity, dilution: Float<psu>) -> Salinity = x - dilution
 let fresher = freshen(s, 5.0)        // freshen(s, 40.0) would stop with BL8001
 let mixed = (fresher + 2.0) : Salinity   // (fresher - 40.0) : Salinity would too
-// EXPECT: fresher = 30
-// EXPECT: mixed = 32
+// EXPECT: fresher = 30.0
+// EXPECT: mixed = 32.0
 ```
 
 ---

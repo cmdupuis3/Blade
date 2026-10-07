@@ -15,4 +15,4 @@ let K = 1.0
 function countdown(n: Float64) -> Float64 = if n <= 0.0 then K else n + countdown(n - 1.0)
 let r = countdown(4.0)
 // 4 + 3 + 2 + 1 + K
-// EXPECT: r = 11
+// EXPECT: r = 11.0

@@ -29,9 +29,9 @@ let peeled = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> ex
 // over the same grouping -- here turning a sum into a mean without a second
 // traversal.
 let sums = method_for(g) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
-// EXPECT: sums = [100, 70, 40]
+// EXPECT: sums = [100.0, 70.0, 40.0]
 let means = (method_for(zip(sums, sizes)) <@> lambda(s, n) -> s / n) |> compute
-// EXPECT: means = [33.3333333333333, 35, 40]
+// EXPECT: means = [33.3333333333333, 35.0, 40.0]
 
 // Rows a negative key dropped belong to no group, so they are counted nowhere:
 // the totals fall short of the source length by exactly the dropped rows.

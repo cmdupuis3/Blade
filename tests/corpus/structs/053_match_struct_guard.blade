@@ -22,14 +22,14 @@ let p = Point { x = 3.0, y = 4.0 }
 let r = match p with
     | Point { x, y } if x > 10.0 -> x + y
     | Point { x, y } -> x - y
-// EXPECT: r = -1
+// EXPECT: r = -1.0
 
 // FIELD ORDER IS THE POINT: `{ y, x }` lists the declaration's second field
 // first. Positionally that reads y = 3 and x = 4 and answers 1; by name it
 // reads y = 4 and x = 3 and answers -1.
 let ordered = match p with
     | Point { y, x } -> x - y
-// EXPECT: ordered = -1
+// EXPECT: ordered = -1.0
 
 // A field pattern may be a literal, which makes the struct arm refutable
 // -- the test rides the field ACCESS, so it has to name the field too.
@@ -53,4 +53,4 @@ struct Segment {
 let seg = Segment { head = Point { x = 1.0, y = 2.0 }, tail = Point { x = 5.0, y = 7.0 } }
 let dx = match seg with
     | Segment { head: Point { x: ax, y: ay }, tail: Point { x: bx, y: by } } -> (bx - ax) + (by - ay)
-// EXPECT: dx = 9
+// EXPECT: dx = 9.0

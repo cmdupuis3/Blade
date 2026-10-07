@@ -35,6 +35,6 @@ let b0: Array<Float64 like I, K> = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
 let gd = make_g(a0, b0)
 let gs = make_gg(a0)
 // gd[i][j] = sum_k a0[i][k] * b0[j][k]
-// EXPECT: gd = [4, 2, 10, 5]
+// EXPECT: gd = [4.0, 2.0, 10.0, 5.0]
 // gs is triangular: (0,0)=14 (0,1)=32 (1,1)=77
-// EXPECT: gs = [14, 32, 77]
+// EXPECT: gs = [14.0, 32.0, 77.0]

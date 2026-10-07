@@ -17,4 +17,4 @@ function f10(x: Float64) -> Float64 = x + 10.0
 function f11(x: Float64) -> Float64 = x + 11.0
 let grid: Array<(Float64 -> Float64) like Idx<2>, Idx<2>> = [[f00, f01], [f10, f11]]
 let r = grid(1, 0)(5.0)
-// EXPECT: r = 15
+// EXPECT: r = 15.0

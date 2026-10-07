@@ -31,11 +31,11 @@ function biased(x: Array<Float like PgIrrepsIdx<C4, SD>>)
     [x(0) + 2.0, x(1), x(2)]
 
 let b0 = biased([1.0, 3.0, 4.0])
-// EXPECT: b0 = [3, 3, 4]
+// EXPECT: b0 = [3.0, 3.0, 4.0]
 // ρ(r) fixes the A cell and rotates the E plane: (1, 3, 4) ↦ (1, −4, 3). The
 // bias rides along untouched, which is what "trivial-label supported" means.
 let b1 = biased([1.0, 0.0 - 4.0, 3.0])
-// EXPECT: b1 = [3, -4, 3]
+// EXPECT: b1 = [3.0, -4.0, 3.0]
 
 // --- THREE DEGREES AT ONCE --------------------------------------------------
 // Degree 0: the A-cell bias. Degree 1: the E plane, scaled by an invariant.
@@ -50,11 +50,11 @@ function graded(x: Array<Float like PgIrrepsIdx<C4, SD>>, s: Float)
 
 // r² = 25, so the A cell is 1 + 25 + 2 = 28, and the E plane doubles.
 let g0 = graded([1.0, 3.0, 4.0], 2.0)
-// EXPECT: g0 = [28, 6, 8]
+// EXPECT: g0 = [28.0, 6.0, 8.0]
 // ρ(r): (1, 3, 4) ↦ (1, −4, 3). The A cell is unmoved (28) and the plane is
 // the rotation of (6, 8), i.e. (−8, 6).
 let g1 = graded([1.0, 0.0 - 4.0, 3.0], 2.0)
-// EXPECT: g1 = [28, -8, 6]
+// EXPECT: g1 = [28.0, -8.0, 6.0]
 
 // --- A CONSTANT MAY ALSO BE AN INVARIANT ATOM -------------------------------
 // The degree-0 obligation is about the GROUP ACTION, not about literals: an
@@ -66,6 +66,6 @@ function biased_atom(x: Array<Float like PgIrrepsIdx<C4, SD>>, s: Float)
     [x(0) + s, x(1), x(2)]
 
 let p0 = biased_atom([1.0, 3.0, 4.0], 5.0)
-// EXPECT: p0 = [6, 3, 4]
+// EXPECT: p0 = [6.0, 3.0, 4.0]
 let p1 = biased_atom([1.0, 0.0 - 4.0, 3.0], 5.0)
-// EXPECT: p1 = [6, -4, 3]
+// EXPECT: p1 = [6.0, -4.0, 3.0]

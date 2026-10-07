@@ -13,4 +13,4 @@ function shift_up(x: Float64) -> Array<Float64 like Idx<3>> = [x + 1.0, x + 2.0,
 function shift_dn(x: Float64) -> Array<Float64 like Idx<3>> = [x - 1.0, x - 2.0, x - 3.0]
 let funcs: Array<(Float64 -> Array<Float64 like Idx<3>>) like Idx<2>> = [shift_up, shift_dn]
 let r = funcs(0)(10.0)(1)
-// EXPECT: r = 12
+// EXPECT: r = 12.0

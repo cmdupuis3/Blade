@@ -11,4 +11,4 @@ let temps =  [10.0, 11.0, 20.0, 21.0, 12.0, 13.0]
 let gk = group_keys(region, year)
 let grouped = group_by(temps, gk)
 let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
-// EXPECT: result = [22, 24, 20, 21]
+// EXPECT: result = [22.0, 24.0, 20.0, 21.0]

@@ -25,6 +25,6 @@ let rec xs: Array<Float like It> =
     | prefix :: n -> prefix :: (if tick(counter) then prefix(n - 1) + 1.0 else prefix(n - 1))
 
 let last = xs((7 : It))
-// EXPECT: last = 6
+// EXPECT: last = 6.0
 let calls = counter((0 : C))
-// EXPECT: calls = 7
+// EXPECT: calls = 7.0

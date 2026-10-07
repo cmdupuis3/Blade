@@ -37,12 +37,12 @@ let again = r.uniform_at(12345, 7, 0, 12)
 let stream_differs = reduce(method_for(zip(whole, other_stream)) <@> lambda(a, b) -> if a == b then 1.0 else 0.0 |> compute, (+))
 let key_differs = reduce(method_for(zip(whole, other_key)) <@> lambda(a, b) -> if a == b then 1.0 else 0.0 |> compute, (+))
 let same_again = reduce(method_for(zip(whole, again)) <@> lambda(a, b) -> if a == b then 1.0 else 0.0 |> compute, (+))
-// EXPECT: stream_differs = 0
-// EXPECT: key_differs = 0
-// EXPECT: same_again = 12
+// EXPECT: stream_differs = 0.0
+// EXPECT: key_differs = 0.0
+// EXPECT: same_again = 12.0
 // Every draw lies in [0, 1).
 let in_range = reduce(method_for(whole) <@> lambda(u) -> if u >= 0.0 && u < 1.0 then 1.0 else 0.0 |> compute, (+))
-// EXPECT: in_range = 12
+// EXPECT: in_range = 12.0
 // A rank-2 shape addresses its cells in row-major order: cell (i, j) of a
 // [3, 4] fill is sample 4 i + j, the same as the flat fill's.
 let grid = r.uniform_at(12345, 7, 0, [3, 4])

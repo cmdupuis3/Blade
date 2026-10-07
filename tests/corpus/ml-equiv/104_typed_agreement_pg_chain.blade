@@ -68,10 +68,10 @@ function spin_twice_tight(x: Array<Float like PgIrrepsIdx<C4, EC>>, w: Array<Flo
 let wv = [0.0, 1.0]
 
 let s1 = spin_loose([3.0, 4.0], wv)
-// EXPECT: s1 = [-4, 3]
+// EXPECT: s1 = [-4.0, 3.0]
 let s2 = spin_twice_loose([3.0, 4.0], wv)
-// EXPECT: s2 = [-3, -4]
+// EXPECT: s2 = [-3.0, -4.0]
 let t1 = spin_tight([3.0, 4.0], wv)
-// EXPECT: t1 = [-4, 3]
+// EXPECT: t1 = [-4.0, 3.0]
 let t2 = spin_twice_tight([3.0, 4.0], wv)
-// EXPECT: t2 = [-3, -4]
+// EXPECT: t2 = [-3.0, -4.0]

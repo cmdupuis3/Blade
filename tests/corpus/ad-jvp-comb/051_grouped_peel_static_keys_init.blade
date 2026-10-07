@@ -30,17 +30,17 @@ let pgk = group_keys(sk)
 let pg = group_by(vv, pgk)
 let pm = method_for(pg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 7.0) |> compute
 let pL = reduce(pm, (+))
-// EXPECT: pm = [67, 7, 47]
-// EXPECT: pL = 121
+// EXPECT: pm = [67.0, 7.0, 47.0]
+// EXPECT: pL = 121.0
 
 let mut dv = [0.0, 0.0, 0.0, 0.0]
 let gv = ad.grad(loss)(vv, sk, dv)
 // 100 of data + 3 groups x 7.0 of init, matching the peel exactly
-// EXPECT: gv = 121
-// EXPECT: dv = [1, 1, 1, 1]
+// EXPECT: gv = 121.0
+// EXPECT: dv = [1.0, 1.0, 1.0, 1.0]
 let agree = gv - pL
-// EXPECT: agree = 0
+// EXPECT: agree = 0.0
 
 let (jp, jt) = ad.jvp(loss)(vv, sk, [1.0, 1.0, 1.0, 1.0])
-// EXPECT: jp = 121
-// EXPECT: jt = 4
+// EXPECT: jp = 121.0
+// EXPECT: jt = 4.0

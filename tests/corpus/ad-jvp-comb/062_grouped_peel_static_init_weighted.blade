@@ -32,17 +32,17 @@ let pg = group_by(vv, pgk)
 let pm = method_for(pg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+), 7.0) |> compute
 let pmd: Array<Float64 like GK> = [pm(0), pm(1), pm(2)]
 let pL = reduce(pmd * c0, (+))
-// EXPECT: pm = [67, 7, 47]
-// EXPECT: pL = 122
+// EXPECT: pm = [67.0, 7.0, 47.0]
+// EXPECT: pL = 122.0
 
 // WARN: BL4003
 let mut dv = [0.0, 0.0, 0.0, 0.0]
 let mut dc = [0.0, 0.0, 0.0]
 let gv = ad.grad(loss)(vv, sk, c0, dv, dc)
-// EXPECT: gv = 122
+// EXPECT: gv = 122.0
 let agree = gv - pL
-// EXPECT: agree = 0
+// EXPECT: agree = 0.0
 // each row carries its group's weight
-// EXPECT: dv = [-1, 2, -1, 2]
+// EXPECT: dv = [-1.0, 2.0, -1.0, 2.0]
 // and each weight carries its group's seeded sum -- the EMPTY group's is the init
-// EXPECT: dc = [67, 7, 47]
+// EXPECT: dc = [67.0, 7.0, 47.0]

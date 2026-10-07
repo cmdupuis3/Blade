@@ -10,4 +10,4 @@ let vals: Array<R like NIdx> = [R { v = 1.0 }, R { v = 2.0 }, R { v = 3.0 }, R {
 let gk = group_keys(keys)
 let grouped = group_by(vals, gk)
 let firsts = method_for(grouped) <@> lambda(g: Array<R like RaggedIdx<_>>) -> g(0).v |> compute
-// EXPECT: firsts = [1, 2]
+// EXPECT: firsts = [1.0, 2.0]

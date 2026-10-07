@@ -8,5 +8,5 @@ Unit levels: 1
 function label(x: Float, t: String<title> = "none", n: Float<levels> = 1.0) -> Float = if t == "K" then x * n else x * 100.0
 let r1 = label(2.0, 5.0: levels, "K": title)
 let r2 = label(2.0)
-// EXPECT: r1 = 10
-// EXPECT: r2 = 200
+// EXPECT: r1 = 10.0
+// EXPECT: r2 = 200.0

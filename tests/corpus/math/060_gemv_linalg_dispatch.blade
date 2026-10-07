@@ -36,5 +36,5 @@ let S = method_for(a3, a3) <@> outerProd |> compute
 let D = decompact(S, 0)
 let sv = method_for(D) <@> lambda(row: Array<Float64 like M>) -> prodsum(row, a3) |> compute
 
-// EXPECT: yv = [30, 70, 110]
-// EXPECT: sv = [14, 28, 42]
+// EXPECT: yv = [30.0, 70.0, 110.0]
+// EXPECT: sv = [14.0, 28.0, 42.0]

@@ -17,13 +17,13 @@ let h3 = head(lambda(i) -> i + 7)
 // A parameter used only as the subscript is generic with it.
 let pick = lambda(c, i) -> c(i)
 let p1 = pick([1.0, 2.0, 3.0], 2)
-// EXPECT: p1 = 3
+// EXPECT: p1 = 3.0
 let p2 = pick(lambda(k) -> Float64(k) * 3.0, 2)
-// EXPECT: p2 = 6
+// EXPECT: p2 = 6.0
 
 // Applied to its own result: a function, at a Float64 and at an Int64.
 let twice = lambda(f, x) -> f(f(x))
 let t1 = twice(lambda(y) -> y * 2.0, 3.0)
-// EXPECT: t1 = 12
+// EXPECT: t1 = 12.0
 let t2 = twice(lambda(y) -> y + 1, 3)
 // EXPECT: t2 = 5

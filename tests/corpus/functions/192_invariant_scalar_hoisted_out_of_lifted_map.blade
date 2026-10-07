@@ -32,7 +32,7 @@ function rms_normalize(x: T^1) -> T^1 = x / sqrt(mean(x * x))
 
 let x = [1.0, 2.0, 3.0, 6.0]
 let centered = center(x)
-// EXPECT: centered = [-2, -1, 0, 3]
+// EXPECT: centered = [-2.0, -1.0, 0.0, 3.0]
 let normalized = rms_normalize(x)
 // EXPECT: normalized = [0.282842712474619, 0.565685424949238, 0.848528137423857, 1.69705627484771]
 
@@ -55,12 +55,12 @@ let n_centered_common = extents(center(common))
 
 // Module level, where the extent is a literal and no guard is needed.
 let top_level = x - mean(x)
-// EXPECT: top_level = [-2, -1, 0, 3]
+// EXPECT: top_level = [-2.0, -1.0, 0.0, 3.0]
 
 // A hand-written kernel has the same shape. The occurrence under the branch
 // reads the hoisted value too (the condition already evaluated it).
 let above = method_for(x) <@> lambda(e) -> if e > mean(x) then e - mean(x) else 0.0 |> compute
-// EXPECT: above = [0, 0, 0, 3]
+// EXPECT: above = [0.0, 0.0, 0.0, 3.0]
 
 // A product stays in the kernel (binding it would end the multiply-add
 // adjacency g++ contracts); the call under it still moves out.
@@ -75,9 +75,9 @@ let damped = x * exp(-decay)
 
 // The fused reduction terminal forces its apply just the same.
 let sum_sq = reduce(method_for(x) <@> lambda(e) -> (e - mean(x)) ^ 2, (+))
-// EXPECT: sum_sq = 14
+// EXPECT: sum_sq = 14.0
 
 // A row kernel: the mean of each ROW is invariant in that row's map.
 let M: Array<Float64 like Idx<2>, Idx<4>> = [[1.0, 2.0, 3.0, 6.0], [2.0, 4.0, 6.0, 8.0]]
 let rows_centered = method_for(M) <@> lambda(row: T^1) -> row - mean(row) |> compute
-// EXPECT: rows_centered = [[-2, -1, 0, 3], [-3, -1, 1, 3]]
+// EXPECT: rows_centered = [[-2.0, -1.0, 0.0, 3.0], [-3.0, -1.0, 1.0, 3.0]]

@@ -30,7 +30,7 @@ let rec a: Array<Float like Draw> =
     | zero -> zero
     | zero :: s -> zero :: 1.0
     | prefix :: n -> prefix :: prefix(n - 3)
-// EXPECT: a = [1, 0, 0, 1, 0, 0]
+// EXPECT: a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
 
 // The same stream amplified: an exact zero stays zero, garbage does not.
 let rec b: Array<Float like D2> =
@@ -38,4 +38,4 @@ let rec b: Array<Float like D2> =
     | zero -> zero
     | zero :: s -> zero :: 1.0
     | prefix :: n -> prefix :: prefix(n - 3) * 1.0e300
-// EXPECT: b = [1, 0, 0, 1e+300, 0, 0]
+// EXPECT: b = [1.0, 0.0, 0.0, 1e+300, 0.0, 0.0]

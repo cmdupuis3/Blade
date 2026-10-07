@@ -36,10 +36,10 @@ plain
 // The generic still specializes at a real call site (values as loops/168).
 let B: Array<Float like Idx<3>, Idx<3>> = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 3.0, 5.0]]
 let cv = object_for(covariance) <@> (B, B) |> compute
-// EXPECT: cv = [1, 0, 1, 2, 0, 2, 2, 0, 2, 4, 0, 4, 4, 0, 4, 4, 0, 4]
+// EXPECT: cv = [1.0, 0.0, 1.0, 2.0, 0.0, 2.0, 2.0, 0.0, 2.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0]
 
 // ...and so does the imported generic the dropped binding had transitively kept alive.
 let m = mean([1.0, 2.0, 3.0])
-// EXPECT: m = 2
+// EXPECT: m = 2.0
 let doubled = plain(21.0)
-// EXPECT: doubled = 42
+// EXPECT: doubled = 42.0

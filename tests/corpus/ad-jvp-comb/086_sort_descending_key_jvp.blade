@@ -22,13 +22,13 @@ function f(a: Array<Float like I>) -> Float = {
 // slot 0 and collects weight 1. The argsort-of-values bug reported 5 (the
 // weight of the slot it would have taken ascending).
 let (v, t) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.0, 0.0, 1.0, 0.0, 0.0])
-// EXPECT: v = 27
-// EXPECT: t = 1
+// EXPECT: v = 27.0
+// EXPECT: t = 1.0
 
 // Full seed d = [0.1, -0.2, 0.3, 0.05, -0.15]; ds = d o perm, so
 // t2 = 1*0.3 + 2*0.1 + 3*(-0.15) + 4*0.05 + 5*(-0.2) = -0.75  (bug: 1.35).
 let (v2, t2) = ad.jvp(f)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
-// EXPECT: v2 = 27
+// EXPECT: v2 = 27.0
 // EXPECT: t2 = -0.75
 
 // A key that is not a bare parameter read at all: sorting by the SQUARE puts
@@ -39,5 +39,5 @@ function g(a: Array<Float like I>) -> Float = {
     s(0) * 1.0 + s(1) * 2.0 + s(2) * 3.0 + s(3) * 4.0 + s(4) * 5.0
 }
 let (v3, t3) = ad.jvp(g)([3.0, 1.0, 4.0, 1.5, 2.0], [0.0, 0.0, 1.0, 0.0, 0.0])
-// EXPECT: v3 = 42
-// EXPECT: t3 = 5
+// EXPECT: v3 = 42.0
+// EXPECT: t3 = 5.0

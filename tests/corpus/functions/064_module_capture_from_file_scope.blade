@@ -23,14 +23,14 @@ function scaled(x: Float64) = {
     g(x)
 }
 let s = scaled(5.0)
-// EXPECT: s = 10
+// EXPECT: s = 10.0
 
 // (2) read directly by a kernel body inlined into a function's loop nest.
 let k = 3.0
 function triple(x: Array<Float like Idx<4>>) = (x <@> lambda(t) -> t * k) |> compute
 let a: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 let t3 = triple(a)
-// EXPECT: t3 = [3, 6, 9, 12]
+// EXPECT: t3 = [3.0, 6.0, 9.0, 12.0]
 
 // (3) an ARRAY module binding captured by a kernel inside a function: the
 // promoted declaration is the `Array<T,N>` wrapper, and main() still runs the
@@ -39,12 +39,12 @@ let ts: Array<Float like Idx<4>> = [1.0, 2.0, 3.0, 4.0]
 function weighted(ws: Array<Float like Idx<3>>) = (ws <@> lambda(w) -> w * prodsum(ts, ts)) |> compute
 let b: Array<Float like Idx<3>> = [1.0, 2.0, 3.0]
 let wsum = weighted(b)
-// EXPECT: wsum = [30, 60, 90]
+// EXPECT: wsum = [30.0, 60.0, 90.0]
 
 // (4) the promoted binding's RHS need not be a literal: a reduce emits an
 // accumulator loop, and only its leading definition line moves.
 let tot = reduce(ts, (+))
 function byTotal(ws: Array<Float like Idx<3>>) = (ws <@> lambda(w) -> w * tot) |> compute
 let scaledTot = byTotal(b)
-// EXPECT: tot = 10
-// EXPECT: scaledTot = [10, 20, 30]
+// EXPECT: tot = 10.0
+// EXPECT: scaledTot = [10.0, 20.0, 30.0]

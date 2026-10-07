@@ -154,7 +154,7 @@ let backward_V = if p2fB < p1B then "FIXED_SHOT2_MOVED_BACKWARD" else "NO"
 
 // the design surface follows the posterior; the probe retunes; renewal is
 // exact; adaptation wins 110x on identical noise:
-// EXPECT: unity_c0 = 1
+// EXPECT: unity_c0 = 1.0
 // EXPECT: Dp1 = 0.223077864791015
 // EXPECT: Dp4 = 0.73535956026074
 // EXPECT: design_prior_V = "PRIOR_DESIGN_WANTS_THE_COARSE_PAIR"
@@ -170,7 +170,7 @@ let backward_V = if p2fB < p1B then "FIXED_SHOT2_MOVED_BACKWARD" else "NO"
 // EXPECT: pa3 = 1.27743158698646
 // EXPECT: afinA = 0.00172464500069422
 // EXPECT: afinB = 0.998275354999307
-// EXPECT: asum = 1
+// EXPECT: asum = 1.0
 // EXPECT: apostvar = [0.000154950354028571]
 // EXPECT: ffinA = 0.190151626227127
 // EXPECT: ffinB = 0.809848373772873

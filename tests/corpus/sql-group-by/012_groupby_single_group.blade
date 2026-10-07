@@ -8,4 +8,4 @@ let temps = [1.0, 2.0, 3.0, 4.0]
 let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let result = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
-// EXPECT: result = [10]
+// EXPECT: result = [10.0]

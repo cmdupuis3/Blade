@@ -14,6 +14,6 @@ function f(x: Float<meters>) -> Float<m2> = x * x
 
 let (fv, ft) = ad.jvp(f)(3.0, 1.0)
 let chk: Float<m2> = ft
-// EXPECT: fv = 9
-// EXPECT: ft = 6
-// EXPECT: chk = 6
+// EXPECT: fv = 9.0
+// EXPECT: ft = 6.0
+// EXPECT: chk = 6.0

@@ -6,4 +6,4 @@
 let x = [1.0, 3.0, 2.0]
 let c = [1.0, 0.0, 1.0]
 let y = (method_for(zip(c, ((method_for(x) <@> lambda(v) -> lgamma(v)) |> compute))) <@> lambda(k, g) -> k + g) |> compute
-// EXPECT: y = [1, 0.693147180559946, 1]
+// EXPECT: y = [1.0, 0.693147180559946, 1.0]

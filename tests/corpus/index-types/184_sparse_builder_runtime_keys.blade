@@ -9,5 +9,5 @@ let vals: Array<Float64 like Idx<4>> = [21.0, 3.0, 10.0, 41.0]
 let S = sparse(vals, keys)
 let y0 = S((4, 1))
 let g = S((_, 1))
-// EXPECT: y0 = 41
-// EXPECT: g = [21, 41]
+// EXPECT: y0 = 41.0
+// EXPECT: g = [21.0, 41.0]

@@ -11,7 +11,7 @@ function sq(x: Float64) -> Float64 = x * x
 function idg(a: T^0) -> T^0 = a
 let h = sq >> idg
 let hv = h(3.0)
-// EXPECT: hv = 9
+// EXPECT: hv = 9.0
 
 function pick(a: T^0, b: T^0) -> T^0 = a + b
 let pw = pick(2.5, Float64(3))

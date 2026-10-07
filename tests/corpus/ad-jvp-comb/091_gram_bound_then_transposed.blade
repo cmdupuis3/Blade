@@ -29,9 +29,9 @@ let b0 = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
 let mut da = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 let mut db = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
 let gv = ad.grad(floss)(a0, b0, da, db)
-// EXPECT: gv = 22
-// EXPECT: da = [[0, 1, 0], [2, 0, 2]]
-// EXPECT: db = [[8, 10, 12], [1, 2, 3]]
+// EXPECT: gv = 22.0
+// EXPECT: da = [[0.0, 1.0, 0.0], [2.0, 0.0, 2.0]]
+// EXPECT: db = [[8.0, 10.0, 12.0], [1.0, 2.0, 3.0]]
 
 // The differential gate: forward tangent along a seed must equal the reverse
 // gradient contracted with it, exactly.
@@ -41,5 +41,5 @@ let (jp, jt) = ad.jvp(floss)(a0, b0, sa, sb)
 let dot1 = reduce(reduce(da * sa, (+)), (+))
 let dot2 = reduce(reduce(db * sb, (+)), (+))
 let resid = jt - (dot1 + dot2)
-// EXPECT: jp = 22
-// EXPECT: resid = 0
+// EXPECT: jp = 22.0
+// EXPECT: resid = 0.0

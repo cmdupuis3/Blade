@@ -36,7 +36,7 @@ let static NB = ml.pg_irreps_len("C4", PS)
 type CS = PgIrrepsIdx<C4, PS>
 
 let x: Array<Float like PgIrrepsIdx<C4, PS>> = [1.0, 2.0, 3.0, 4.0, 5.0]
-// EXPECT: x = [1, 2, 3, 4, 5]
+// EXPECT: x = [1.0, 2.0, 3.0, 4.0, 5.0]
 let first = x(0)
 let last = x(4)
 // EXPECT: first = 1.0
@@ -45,11 +45,11 @@ let last = x(4)
 // Anonymous -> alias: compatible (the alias name is nominative but an
 // ANONYMOUS pg identity of the same (group, spec) adopts either alias).
 let y: Array<Float like CS> = x
-// EXPECT: y = [1, 2, 3, 4, 5]
+// EXPECT: y = [1.0, 2.0, 3.0, 4.0, 5.0]
 
 // Kernel iteration over the alias-named index space.
 let r = method_for(range<CS>) <@> lambda(i) -> y(i) * 2.0 |> compute
-// EXPECT: r = [2, 4, 6, 8, 10]
+// EXPECT: r = [2.0, 4.0, 6.0, 8.0, 10.0]
 
 // Alias -> anonymous parameter: the other direction of the same rule.
 function head_plus_tail(v: Array<Float like PgIrrepsIdx<C4, PS>>) -> Float = {

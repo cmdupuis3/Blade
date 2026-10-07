@@ -5,4 +5,4 @@ let B = [10.0, 20.0, 30.0]
 let f = lambda(a, b) -> a + b
 let O = object_for(f)
 let result = O <@> zip(A, B) |> compute
-// EXPECT: result = [11, 22, 33]
+// EXPECT: result = [11.0, 22.0, 33.0]

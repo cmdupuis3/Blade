@@ -11,4 +11,4 @@ let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let sym = L <@> reynolds(g)
 let result = decompact(sym, 0)
 // M = [[6,9,12],[9,12,15],[12,15,18]] -> row-major
-// EXPECT: result = [6, 9, 12, 9, 12, 15, 12, 15, 18]
+// EXPECT: result = [6.0, 9.0, 12.0, 9.0, 12.0, 15.0, 12.0, 15.0, 18.0]

@@ -16,5 +16,5 @@ function f(a: Array<Float like H>) -> Float = {
 let a0: Array<Float like H> = [1.0, 2.0, 4.0, 8.0, 16.0]
 let mut da: Array<Float like H> = [0.0, 0.0, 0.0, 0.0, 0.0]
 let fv = ad.grad(f)(a0, da)
-// EXPECT: fv = 84
-// EXPECT: da = [4, 8, 17, 2, 4]
+// EXPECT: fv = 84.0
+// EXPECT: da = [4.0, 8.0, 17.0, 2.0, 4.0]

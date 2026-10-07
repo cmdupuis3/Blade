@@ -248,9 +248,9 @@ let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]   // one value
 let cell = T((1, 2))                     // a static whole-path read
 let total = reduce(T, (+))
 let scaled = method_for(leaves(T)) <@> lambda(x) -> x * 10.0 |> compute   // bulk work: the leaf axis
-// EXPECT: cell = 5
-// EXPECT: total = 15
-// EXPECT: scaled = [10, 20, 30, 40, 50]
+// EXPECT: cell = 5.0
+// EXPECT: total = 15.0
+// EXPECT: scaled = [10.0, 20.0, 30.0, 40.0, 50.0]
 ```
 
 This is the only form the type carries, and it is sufficient: `size`, `off`,

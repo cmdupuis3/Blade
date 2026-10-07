@@ -7,4 +7,4 @@ let lens: Array<Int64 like Idx<3>> = [3, 2, 1]
 type Ragged3 = RaggedIdx<lens>
 let r: Array<Float64 like Idx<3>, Ragged3> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
 let v = r(0)(0)
-// EXPECT: v = 1
+// EXPECT: v = 1.0

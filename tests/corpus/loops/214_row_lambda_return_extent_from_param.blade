@@ -37,7 +37,7 @@ function demean(A: T^2) -> T^2 = {
     Z
 }
 let D = demean(R)
-// EXPECT: D = [[-1, -1, -1, -1, 4], [4, -1, -1, -1, -1], [1, 1, -4, 1, 1]]
+// EXPECT: D = [[-1.0, -1.0, -1.0, -1.0, 4.0], [4.0, -1.0, -1.0, -1.0, -1.0], [1.0, 1.0, -4.0, 1.0, 1.0]]
 
 // (1) the fused expression-bodied pipeline over a generic parameter
 function standardize(A: T^2) -> T^2 = {
@@ -45,11 +45,11 @@ function standardize(A: T^2) -> T^2 = {
     Z
 }
 let Zs = standardize(R)
-// EXPECT: Zs = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+// EXPECT: Zs = [[-0.5, -0.5, -0.5, -0.5, 2.0], [2.0, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2.0, 0.5, 0.5]]
 
 // (2) a lambda over calls of length-preserving generics, at top level
 let W = object_for(lambda(x) -> unit_scale(center_e(x))) <@> R |> compute
-// EXPECT: W = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+// EXPECT: W = [[-0.5, -0.5, -0.5, -0.5, 2.0], [2.0, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2.0, 0.5, 0.5]]
 
 // (2) the same, inside a generic body
 function standardize_calls(A: T^2) -> T^2 = {
@@ -57,8 +57,8 @@ function standardize_calls(A: T^2) -> T^2 = {
     Z
 }
 let Wg = standardize_calls(R)
-// EXPECT: Wg = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+// EXPECT: Wg = [[-0.5, -0.5, -0.5, -0.5, 2.0], [2.0, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2.0, 0.5, 0.5]]
 
 // a length-CHANGING callee keeps its own extent (2, not the row's 5)
 let M = object_for(lambda(x) -> stats2(center_e(x))) <@> R |> compute
-// EXPECT: M = [[0, 4], [0, 4], [0, 4]]
+// EXPECT: M = [[0.0, 4.0], [0.0, 4.0], [0.0, 4.0]]

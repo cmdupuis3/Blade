@@ -6,12 +6,12 @@
 // binding is checked as the equivalent `function` (functions/219).
 let u = lambda(c) -> c(0) + 1.0
 let w = u(lambda(i) -> Float64(i))
-// EXPECT: w = 1
+// EXPECT: w = 1.0
 
 // Applied to a Float64, which cannot be an index: only a function fits.
 let hh = lambda(f) -> f(2.0) + 1.0
 let q = hh(lambda(x) -> x * 3.0)
-// EXPECT: q = 7
+// EXPECT: q = 7.0
 
 // Never applied: nothing reaches `c`, so it is read as a function of an Int64
 // (the safer bet) -- emitted and compiled as one, never a double applied.

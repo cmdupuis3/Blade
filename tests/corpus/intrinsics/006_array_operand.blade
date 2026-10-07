@@ -19,24 +19,24 @@ let A: Array<Float64 like Idx<3>> = [0.0, 1.0, 2.0]
 
 let lifted = exp(A)
 let manual = (method_for(A) <@> lambda(x) -> exp(x)) |> compute
-// EXPECT: lifted = [1, 2.71828182845905, 7.38905609893065]
-// EXPECT: manual = [1, 2.71828182845905, 7.38905609893065]
+// EXPECT: lifted = [1.0, 2.71828182845905, 7.38905609893065]
+// EXPECT: manual = [1.0, 2.71828182845905, 7.38905609893065]
 
 // `|>` is application, so the pipe spelling is the same node and lifts too.
 // This is what makes a left-to-right pipeline read as one.
 let piped = A |> exp
-// EXPECT: piped = [1, 2.71828182845905, 7.38905609893065]
+// EXPECT: piped = [1.0, 2.71828182845905, 7.38905609893065]
 
 // The complex accessors lift over a complex array.
 let Z: Array<Complex128 like Idx<2>> = [complex(3.0, 4.0), complex(0.0, 1.0)]
 let re = real(Z)
 let im = Z |> imag
-// EXPECT: re = [3, 0]
-// EXPECT: im = [4, 1]
+// EXPECT: re = [3.0, 0.0]
+// EXPECT: im = [4.0, 1.0]
 
 // abs lifts over both element classes, staying real-valued over complex.
 let signed: Array<Float64 like Idx<3>> = [-1.0, 2.0, -3.0]
 let mag_real = abs(signed)
 let mag_cplx = abs(Z)
-// EXPECT: mag_real = [1, 2, 3]
-// EXPECT: mag_cplx = [5, 1]
+// EXPECT: mag_real = [1.0, 2.0, 3.0]
+// EXPECT: mag_cplx = [5.0, 1.0]

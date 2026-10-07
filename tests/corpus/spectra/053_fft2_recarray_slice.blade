@@ -20,4 +20,4 @@ let acc = {
         | prefix :: n -> prefix :: prefix(n - 1) + Float64(n) * dcbin(sp.fft2(f))
     acc_arr((3 : Steps))
 }
-// EXPECT: acc = 720
+// EXPECT: acc = 720.0

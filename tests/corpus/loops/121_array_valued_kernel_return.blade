@@ -44,5 +44,5 @@ let gridCall = method_for(m) <@> lambda(r: Array<Float like Idx<3>>) -> spec(r, 
 let gridInline = method_for(m) <@> lambda(r: Array<Float like Idx<3>>) ->
     (fs <@> lambda(x) -> x * prodsum(r, r)) |> compute
 
-// EXPECT: gridCall = [[14, 28, 42, 56], [77, 154, 231, 308]]
-// EXPECT: gridInline = [[14, 28, 42, 56], [77, 154, 231, 308]]
+// EXPECT: gridCall = [[14.0, 28.0, 42.0, 56.0], [77.0, 154.0, 231.0, 308.0]]
+// EXPECT: gridInline = [[14.0, 28.0, 42.0, 56.0], [77.0, 154.0, 231.0, 308.0]]

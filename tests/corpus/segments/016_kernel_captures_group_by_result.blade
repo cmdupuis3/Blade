@@ -18,7 +18,7 @@ let totals = method_for(range<K>) <@> lambda(k) -> {
     let s = method_for(g) <@> lambda(r) -> reduce(r, (+)) |> compute
     reduce(s, (+)) + Float64(k)
 } |> compute
-// EXPECT: totals = [55, 56, 57]
+// EXPECT: totals = [55.0, 56.0, 57.0]
 
 let B = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 let keys = [0, 0, 1, 1, 2, 2, 0, 1, 2, 0]
@@ -28,4 +28,4 @@ let counted = method_for(range<K>) <@> lambda(k) -> {
     let n = method_for(h) <@> lambda(r) -> Float64(extents(r)) |> compute
     reduce(n, (+)) * Float64(k + 1)
 } |> compute
-// EXPECT: counted = [10, 20, 30]
+// EXPECT: counted = [10.0, 20.0, 30.0]

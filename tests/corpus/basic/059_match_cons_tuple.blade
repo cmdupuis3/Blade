@@ -13,25 +13,25 @@
 let t = (1.0, 2.0, 3.0)
 let head_only = match t with
     | h :: rest -> h
-// EXPECT: head_only = 1
+// EXPECT: head_only = 1.0
 
 // The remainder taken apart in the same pattern: two more slots, so the
 // tail is a 2-tuple and destructures.
 let all = match t with
     | h :: (a, b) -> h + a * 10.0 + b * 100.0
-// EXPECT: all = 321
+// EXPECT: all = 321.0
 
 // Nested cons: peel twice. The second peel leaves ONE slot, which is the
 // bare element -- `c` is a Float64, not a 1-tuple.
 let peeled = match t with
     | a :: b :: c -> a * 100.0 + b * 10.0 + c
-// EXPECT: peeled = 123
+// EXPECT: peeled = 123.0
 
 // The pair case, where the remainder degrades: `rest` is the second element.
 let pair = (4.0, 5.0)
 let sum2 = match pair with
     | h :: rest -> h + rest
-// EXPECT: sum2 = 9
+// EXPECT: sum2 = 9.0
 
 // A literal HEAD makes the cons arm refutable, so the fall-through is real.
 // (Integers -- float patterns are not parser-reachable.)

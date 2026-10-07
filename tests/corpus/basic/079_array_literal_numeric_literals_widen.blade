@@ -4,5 +4,5 @@
 // Int64 and fail in g++.
 let xs = [1, 2.5, 3]
 let s = reduce(xs, (+))
-// EXPECT: xs = [1, 2.5, 3]
+// EXPECT: xs = [1.0, 2.5, 3.0]
 // EXPECT: s = 6.5

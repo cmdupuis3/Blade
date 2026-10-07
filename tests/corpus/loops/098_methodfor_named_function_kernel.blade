@@ -4,4 +4,4 @@
 // "requires method_for ... but got TExprMethodFor" red-herring diagnostic.
 function shift(m: Int64) -> Float64 = if m < 2 then Float64(m) else Float64(m) - 4.0
 let s = method_for(range<Idx<4>>) <@> shift |> compute
-// EXPECT: s = [0, 1, -2, -1]
+// EXPECT: s = [0.0, 1.0, -2.0, -1.0]

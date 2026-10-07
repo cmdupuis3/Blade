@@ -107,33 +107,33 @@ let ru = [3.0, 2.0, 0.0 - 1.0]
 let rv = [6.0, 5.0, 0.0 - 4.0]
 
 let d0 = dot3(u, v)
-// EXPECT: d0 = 32
+// EXPECT: d0 = 32.0
 let d1 = dot3(ru, rv)
-// EXPECT: d1 = 32
+// EXPECT: d1 = 32.0
 
 let c0 = cross3(u, v)
-// EXPECT: c0 = [-3, 6, -3]
+// EXPECT: c0 = [-3.0, 6.0, -3.0]
 // ρ(R)·cross(u, v) = (−3, 6, −3) ↦ (−3, 6, 3), and cross(ρ(R)u, ρ(R)v) is the
 // same vector: the certificate's conclusion, as an exact value.
 let c1 = cross3(ru, rv)
-// EXPECT: c1 = [-3, 6, 3]
+// EXPECT: c1 = [-3.0, 6.0, 3.0]
 
 // Propose ⊆ Check-accept, as a value: the suggested twin is the same map.
 let cl = cross_loose(u, v)
-// EXPECT: cl = [-3, 6, -3]
+// EXPECT: cl = [-3.0, 6.0, -3.0]
 
 let t0 = triple(u, v, w)
-// EXPECT: t0 = [-3]
+// EXPECT: t0 = [-3.0]
 // −I: three odd factors, so the pseudoscalar flips. ρ(−I) on an (l=0, odd)
 // block is multiplication by −1, and the value agrees.
 let t1 = triple([0.0 - 1.0, 0.0 - 2.0, 0.0 - 3.0], [0.0 - 4.0, 0.0 - 5.0, 0.0 - 6.0],
                 [0.0 - 7.0, 0.0 - 8.0, 0.0 - 10.0])
-// EXPECT: t1 = [3]
+// EXPECT: t1 = [3.0]
 
 let q = [1.0, 2.0, 3.0, 4.0, 5.0]
 let rq = [0.0 - 1.0, 4.0, 3.0, 0.0 - 2.0, 0.0 - 5.0]
 let g0 = radial(q)
-// EXPECT: g0 = [55, 110, 165, 220, 275]
+// EXPECT: g0 = [55.0, 110.0, 165.0, 220.0, 275.0]
 // ρ(R)·radial(q) = (−55, 220, 165, −110, −275) = radial(ρ(R)q).
 let g1 = radial(rq)
-// EXPECT: g1 = [-55, 220, 165, -110, -275]
+// EXPECT: g1 = [-55.0, 220.0, 165.0, -110.0, -275.0]

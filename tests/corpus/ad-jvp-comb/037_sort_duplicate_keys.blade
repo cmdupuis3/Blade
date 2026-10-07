@@ -27,15 +27,15 @@ function f(a: Array<Float like I>) -> Float = {
 
 let mut da = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 let gv = ad.grad(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], da)
-// EXPECT: gv = 54
-// EXPECT: da = [4, 1, 5, 2, 3, 6]
+// EXPECT: gv = 54.0
+// EXPECT: da = [4.0, 1.0, 5.0, 2.0, 3.0, 6.0]
 
 // Forward agrees tie-for-tie: seeding one member of a tie group must pick
 // out that member's own slot weight, not an average over the group.
 let (v0, t0) = ad.jvp(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 let (v2, t2) = ad.jvp(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], [0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
 let (v5, t5) = ad.jvp(f)([3.0, 1.0, 3.0, 1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
-// EXPECT: v0 = 54
-// EXPECT: t0 = 4
-// EXPECT: t2 = 5
-// EXPECT: t5 = 6
+// EXPECT: v0 = 54.0
+// EXPECT: t0 = 4.0
+// EXPECT: t2 = 5.0
+// EXPECT: t5 = 6.0

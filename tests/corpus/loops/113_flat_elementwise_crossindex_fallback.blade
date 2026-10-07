@@ -8,4 +8,4 @@ let A = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]
 let L = method_for(range<Idx<3>>, range<Idx<3>>)
 let T = L <@> lambda(i, j) -> A(j, i) |> compute
 // EXPECT is FLAT: rank-2 results print flattened row-major.
-// EXPECT: T = [1, 4, 7, 2, 5, 8, 3, 6, 9]
+// EXPECT: T = [1.0, 4.0, 7.0, 2.0, 5.0, 8.0, 3.0, 6.0, 9.0]

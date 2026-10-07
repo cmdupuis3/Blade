@@ -7,10 +7,10 @@
 // ============================================================================
 function r(x: T^0) -> Float64 = sqrt(x) * 2.0
 let a = r(4)
-// EXPECT: a = 4
+// EXPECT: a = 4.0
 function q(x: T^0) = Float64(sqrt(x))
 let b = q(9)
-// EXPECT: b = 3
+// EXPECT: b = 3.0
 function e(x: T^0) = exp(x) > 0.5
 let c = e(1)
 // EXPECT: c = true

@@ -10,6 +10,6 @@ let g = mk_half(7)
 // Two closures from separate calls each keep their own `i`.
 let r2 = f(1) + g(5)
 let r3 = mk(9)(9) - f(0)
-// EXPECT: r = 23
+// EXPECT: r = 23.0
 // EXPECT: r2 = 116.5
-// EXPECT: r3 = 59
+// EXPECT: r3 = 59.0

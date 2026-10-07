@@ -12,4 +12,4 @@ let wb = method_for(b) <@> lambda(q) -> if q > 3.5 then 3.0 else 2.0
 let u = union(wa, wb)
 let result = method_for(u) <@> lambda(x) -> x |> compute
 // wa = [0, 1, 1], wb = [2, 2, 3] -> unique values, A-first order
-// EXPECT: result = [0, 1, 2, 3]
+// EXPECT: result = [0.0, 1.0, 2.0, 3.0]

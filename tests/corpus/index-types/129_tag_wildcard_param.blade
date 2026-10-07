@@ -20,5 +20,5 @@ function wrap(m: Nat<_>) -> Float64 = if m < 2 then 1.0 * m else 1.0 * m - 10.0
 
 let r = method_for(range<Row>) <@> wrap |> compute
 let c = method_for(range<Col>) <@> wrap |> compute
-// EXPECT: r = [0, 1, -8, -7]
-// EXPECT: c = [0, 1, -8]
+// EXPECT: r = [0.0, 1.0, -8.0, -7.0]
+// EXPECT: c = [0.0, 1.0, -8.0]

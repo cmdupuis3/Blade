@@ -44,8 +44,8 @@ function shift(a: Float64, b: Float64) -> Float64 = a * 3.0 - b
 
 let xs  = (method_for(range<K>) <@> lambda(k) -> 1.0 * k) |> compute
 let frs = (method_for(range<F>) <@> lambda(j) -> 1.0 * j) |> compute
-// EXPECT: xs = [0, 1, 2, 3, 4, 5]
-// EXPECT: frs = [0, 1, 2]
+// EXPECT: xs = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+// EXPECT: frs = [0.0, 1.0, 2.0]
 
 // Two deep: frequency kernel -> halo kernel -> named call.
 // inner(f) = sum over the 5 windows of (2*xs[i] + f) = 20 + 5f.
@@ -54,7 +54,7 @@ let out = frs <@> lambda(f) -> {
         scale(xs(w(0)), f) |> compute
     reduce(inner, (+))
 } |> compute
-// EXPECT: out = [20, 25, 30]
+// EXPECT: out = [20.0, 25.0, 30.0]
 
 // Same shape, concrete callee, reading the window's FAR end.
 // inner2(f) = sum over xs[1..5] of (3*x - f) = 45 - 5f.
@@ -63,9 +63,9 @@ let out2 = frs <@> lambda(f) -> {
         shift(xs(w(1)), f) |> compute
     reduce(inner2, (+))
 } |> compute
-// EXPECT: out2 = [45, 40, 35]
+// EXPECT: out2 = [45.0, 40.0, 35.0]
 
 // One level: the latent case. The capture used to form here too and simply
 // never got spelled.
 let out1 = xs <@> lambda(v) -> scale(v, 3.0) |> compute
-// EXPECT: out1 = [3, 5, 7, 9, 11, 13]
+// EXPECT: out1 = [3.0, 5.0, 7.0, 9.0, 11.0, 13.0]

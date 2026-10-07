@@ -26,7 +26,7 @@ let b = group_bucket(gk)
 // the half that cannot be read off the source.
 let ranks: Array<Int64 like Row> = [0, 0, 1, 0, 1, 2]
 let recon = method_for(zip(b, ranks)) <@> lambda(bb, kk) -> gv(bb, kk) |> compute
-// EXPECT: recon = [10, 20, 30, 40, 50, 60]
+// EXPECT: recon = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]
 
 // Cross-check from the other side: grouping the ROW INDICES by the same gk
 // gives the permutation as data, and the per-group sums confirm which rows
@@ -36,7 +36,7 @@ let gr = group_by(rows, gk)
 let rowsums = method_for(gr) <@> lambda(r: Array<Int64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
 // EXPECT: rowsums = [7, 5, 3]
 let valsums = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
-// EXPECT: valsums = [100, 70, 40]
+// EXPECT: valsums = [100.0, 70.0, 40.0]
 
 // ---- The bucket map answers for every bucketing regime, because it inverts
 // the CSR tables rather than re-reading the keys.

@@ -5,5 +5,5 @@ import math as m
 let X: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let M0 = m.unfold(X, 0)
 let M1 = m.unfold(X, 1)
-// EXPECT: M0 = [1, 2, 3, 4, 5, 6]
-// EXPECT: M1 = [1, 4, 2, 5, 3, 6]
+// EXPECT: M0 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+// EXPECT: M1 = [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]

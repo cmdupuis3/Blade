@@ -48,6 +48,6 @@ let wv = [2.0, 0.5]
 let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
 
 let rl = residual_loose(xv, wv)
-// EXPECT: rl = [3, 6, -3, 9]
+// EXPECT: rl = [3.0, 6.0, -3.0, 9.0]
 let rt = residual_tight(xv, wv)
-// EXPECT: rt = [3, 6, -3, 9]
+// EXPECT: rt = [3.0, 6.0, -3.0, 9.0]

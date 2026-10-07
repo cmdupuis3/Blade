@@ -15,5 +15,5 @@ let gk = group_keys(region)
 let grouped = group_by(temps, gk)
 let sums = method_for(grouped) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
 let grand = reduce(sums, (+))
-// EXPECT: sums = [80, 70]
-// EXPECT: grand = 150
+// EXPECT: sums = [80.0, 70.0]
+// EXPECT: grand = 150.0

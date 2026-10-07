@@ -30,7 +30,7 @@ function bumped(a: Array<Float64 like R, C>) -> Array<Float64 like R, C> = {
 let A: Array<Float64 like R, C> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
 let n1 = neg(A)
 let c1 = bumped(A)
-// EXPECT: n1 = [-1, -2, -3, -4, -5, -6]
-// EXPECT: c1 = [99, 2, 3, 4, 5, 6]
+// EXPECT: n1 = [-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]
+// EXPECT: c1 = [99.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 // The source is a value, not a view: the helper's write cannot reach it.
-// EXPECT: A = [1, 2, 3, 4, 5, 6]
+// EXPECT: A = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]

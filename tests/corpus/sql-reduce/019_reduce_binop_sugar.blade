@@ -22,6 +22,6 @@ let dot_explicit = reduce(method_for(zip(A, B)) <@> lambda(x, y) -> x * y, (+))
 let scaled = reduce(A * B, (+)) / 2.0
 // EXPECT: selfdot = 14.0
 // EXPECT: dot = 32.0
-// EXPECT: prod = [4, 10, 18]
+// EXPECT: prod = [4.0, 10.0, 18.0]
 // EXPECT: dot_explicit = 32.0
 // EXPECT: scaled = 16.0

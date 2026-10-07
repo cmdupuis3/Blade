@@ -6,4 +6,4 @@ let L = method_for(A, A, B)
 let f = lambda(x, y, z) where comm(x, y, z) -> x * y * z
 let result = L <@> f |> compute
 // Triangular on A,A (i<=j), full on B (k=0..2)
-// EXPECT: result = [4, 5, 6, 8, 10, 12, 12, 15, 18, 16, 20, 24, 24, 30, 36, 36, 45, 54]
+// EXPECT: result = [4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 12.0, 15.0, 18.0, 16.0, 20.0, 24.0, 24.0, 30.0, 36.0, 36.0, 45.0, 54.0]

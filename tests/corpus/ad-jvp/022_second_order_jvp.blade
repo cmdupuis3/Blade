@@ -10,7 +10,7 @@ import ad as ad
 function f(x: Float) -> Float = x * x * x
 
 let (p, t, tp, tt) = ad.jvp(ad.jvp(f))(2.0, 1.0, 1.0, 0.0)
-// EXPECT: p = 8
-// EXPECT: t = 12
-// EXPECT: tp = 12
-// EXPECT: tt = 12
+// EXPECT: p = 8.0
+// EXPECT: t = 12.0
+// EXPECT: tp = 12.0
+// EXPECT: tt = 12.0

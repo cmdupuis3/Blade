@@ -28,9 +28,9 @@ let rec traj: Array<Float like Steps, C> =
     | prefix :: n -> prefix :: center(prefix(n - 1))
 let fin = traj((4 : Steps))
 let mass = reduce(fin, (+))
-// EXPECT: SRC = [1, 2, 3, 4]
+// EXPECT: SRC = [1.0, 2.0, 3.0, 4.0]
 // EXPECT: topc = [0.35, 0.95, 1.55, 2.15]
-// EXPECT: topmass = 5
-// EXPECT: traj = [1, 2, 3, 4, 0.35, 0.95, 1.55, 2.15, 0.085, 0.445, 0.805, 1.165, -0.0115, 0.2045, 0.4205, 0.6365, -0.03815, 0.09145, 0.22105, 0.35065]
+// EXPECT: topmass = 5.0
+// EXPECT: traj = [1.0, 2.0, 3.0, 4.0, 0.35, 0.95, 1.55, 2.15, 0.085, 0.445, 0.805, 1.165, -0.0115, 0.2045, 0.4205, 0.6365, -0.03815, 0.09145, 0.22105, 0.35065]
 // EXPECT: fin = [-0.03815, 0.09145, 0.22105, 0.35065]
 // EXPECT: mass = 0.625

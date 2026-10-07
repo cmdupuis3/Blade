@@ -13,7 +13,7 @@ let vel: Array<Float<meters / seconds> like I> = method_for(range<I>) <@> lambda
 let dt: Float<seconds> = 3.0
 
 let moved = pos + vel * dt
-// EXPECT: moved = [0, 3.5, 7, 10.5]
+// EXPECT: moved = [0.0, 3.5, 7.0, 10.5]
 
 let tot = reduce(moved, (+))
-// EXPECT: tot = 21
+// EXPECT: tot = 21.0

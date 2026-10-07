@@ -21,4 +21,4 @@
 // so firsts = [6, 9]. Exact integers in binary floating point.
 let r = [[1.0, 2.0, 3.0], [4.0, 5.0]]
 let firsts = method_for(r) <@> lambda(g: Array<Float64 like RaggedIdx<_>>) -> reduce(g, (+)) |> compute
-// EXPECT: firsts = [6, 9]
+// EXPECT: firsts = [6.0, 9.0]

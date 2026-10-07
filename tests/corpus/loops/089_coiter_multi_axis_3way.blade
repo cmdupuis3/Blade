@@ -9,4 +9,4 @@ let B: Array<Float64 like Lat, Lon> = [[10.0, 10.0, 10.0], [2.0, 2.0, 2.0]]
 let C: Array<Float64 like Lat, Lon> = [[100.0, 100.0, 100.0], [200.0, 200.0, 200.0]]
 let F = for (A, B, C) in range<Lat, Lon> <@> lambda(a, b, c) -> a * b + c |> compute
 
-// EXPECT: F = [110, 120, 130, 208, 210, 212]
+// EXPECT: F = [110.0, 120.0, 130.0, 208.0, 210.0, 212.0]

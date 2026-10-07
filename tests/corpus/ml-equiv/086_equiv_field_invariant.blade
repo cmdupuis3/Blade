@@ -36,6 +36,6 @@ function blend(x: Array<Float like IrrepsIdx<S>>) where ml.equiv(O3) -> Float =
     (x(0) * G.hi) + (G.lo * G.hi)
 
 let a = score([2.0, 1.0, 1.0, 1.0])
-// EXPECT: a = 4
+// EXPECT: a = 4.0
 let b = blend([2.0, 1.0, 1.0, 1.0])
-// EXPECT: b = 12
+// EXPECT: b = 12.0

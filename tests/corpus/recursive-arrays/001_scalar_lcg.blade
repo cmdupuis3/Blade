@@ -12,4 +12,4 @@ let rec lcg: Array<Float like Draw> =
     | zero -> zero
     | zero :: s -> zero :: 7.0
     | prefix :: n -> prefix :: prefix(n - 1) * 48271.0 - floor(prefix(n - 1) * 48271.0 / 2147483647.0) * 2147483647.0
-// EXPECT: lcg = [7, 337897, 1278240558, 449829614]
+// EXPECT: lcg = [7.0, 337897.0, 1278240558.0, 449829614.0]

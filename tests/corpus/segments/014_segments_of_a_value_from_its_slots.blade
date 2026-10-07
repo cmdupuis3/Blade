@@ -13,14 +13,14 @@ let nb = extents(sb)
 // EXPECT: nb = [4, 4, 2]
 let gb = group_by(b, sb)
 let sums = method_for(gb) <@> lambda(r) -> reduce(r, (+)) |> compute
-// EXPECT: sums = [10, 26, 19]
+// EXPECT: sums = [10.0, 26.0, 19.0]
 let a: Array<Float like C0, C1> = method_for(range<I0>, range<I1>) <@> lambda(i, j) -> Float64(i) * 10.0 + Float64(j) |> compute
 let ta = segments(a)
 let na = extents(ta)
 // EXPECT: na = [12, 12, 12, 12, 6, 6]
 let ga = group_by(a, ta)
 let firsts = method_for(ga) <@> lambda(r) -> r(0) |> compute
-// EXPECT: firsts = [0, 3, 40, 43, 80, 83]
+// EXPECT: firsts = [0.0, 3.0, 40.0, 43.0, 80.0, 83.0]
 let back = ungroup(ga)
 let dev = reduce(back - a, (+), axes = 2)
-// EXPECT: dev = 0
+// EXPECT: dev = 0.0

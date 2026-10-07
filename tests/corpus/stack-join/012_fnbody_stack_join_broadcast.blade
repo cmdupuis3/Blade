@@ -37,7 +37,7 @@ let jm = scale_join(a, b)
 // The same two shapes at MODULE scope, which failed identically.
 let sm_top = stack(a, b) * 2.0
 let jm_top = join(a, b, 0) * 2.0
-// EXPECT: sm = [2, 4, 6, 8]
-// EXPECT: jm = [2, 4, 6, 8]
-// EXPECT: sm_top = [2, 4, 6, 8]
-// EXPECT: jm_top = [2, 4, 6, 8]
+// EXPECT: sm = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: jm = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: sm_top = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: jm_top = [2.0, 4.0, 6.0, 8.0]

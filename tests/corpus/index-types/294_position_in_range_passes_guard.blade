@@ -5,4 +5,4 @@
 type X = Idx<5>
 let u: Array<Float64 like X> = [1.0, 2.0, 4.0, 7.0, 11.0]
 let d = method_for(range<X>) <@> lambda(i) -> if i < 4 then u(i + 1) - u(i) else 0.0 |> compute
-// EXPECT: d = [1, 2, 3, 4, 0]
+// EXPECT: d = [1.0, 2.0, 3.0, 4.0, 0.0]

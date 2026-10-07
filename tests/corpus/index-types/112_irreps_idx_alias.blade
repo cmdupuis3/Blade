@@ -12,7 +12,7 @@ let static spec2 = [(0, 0, 1), (1, 1, 1)]
 type Feat = IrrepsIdx<spec2>
 let a: Array<Float like Feat> = [1.0, 2.0, 3.0, 4.0]
 let r = method_for(range<Feat>) <@> lambda(i) -> a(i) * 2.0 |> compute
-// EXPECT: r = [2, 4, 6, 8]
+// EXPECT: r = [2.0, 4.0, 6.0, 8.0]
 function f(v: Array<Float like IrrepsIdx<spec2>>) -> Float = {
     v(0) + v(3)
 }

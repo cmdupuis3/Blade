@@ -41,15 +41,15 @@ let cells = method_for(gt) <@> lambda(row: T^1) -> {
     let s, q = object_for(<&!>) <@> (reduce(row, (+)), prodsum(row, row))
     [s, q, Float64(extents(row))]
 } |> compute
-// EXPECT: cells = [[6, 14, 4], [22, 126, 4], [38, 366, 4]]
+// EXPECT: cells = [[6.0, 14.0, 4.0], [22.0, 126.0, 4.0], [38.0, 366.0, 4.0]]
 
 // Adjacent cells combine into overlapping windows.
 let windows = method_for(halo<Idx<3>, [0, 1]>) <@> lambda(w) ->
     [cells(w(0), 0) + cells(w(1), 0),
      cells(w(0), 1) + cells(w(1), 1),
      cells(w(0), 2) + cells(w(1), 2)] |> compute
-// EXPECT: windows = [[28, 140, 8], [60, 492, 8]]
+// EXPECT: windows = [[28.0, 140.0, 8.0], [60.0, 492.0, 8.0]]
 
 // Fold the LEADING (window) axis: an array-valued kernel combines whole rows.
 let total = reduce(windows, lambda(a: T^1, b: T^1) -> a + b)
-// EXPECT: total = [88, 632, 16]
+// EXPECT: total = [88.0, 632.0, 16.0]

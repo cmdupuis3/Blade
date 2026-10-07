@@ -35,19 +35,19 @@ function spec(r: Array<Float64 like Idx<3>>, f: Array<Float64 like Idx<4>>) = {
 }
 
 let grid = method_for(m) <@> lambda(r: Array<Float64 like Idx<3>>) -> spec(r, fs) |> compute
-// EXPECT: grid = [[14, 28, 42, 56], [77, 154, 231, 308]]
+// EXPECT: grid = [[14.0, 28.0, 42.0, 56.0], [77.0, 154.0, 231.0, 308.0]]
 
 function sq(z: Float64) = z * z
 
 // THE POINT: a named scalar kernel over the rank-2 result stays rank 2.
 let mg = (grid <@> sq) |> compute
-// EXPECT: mg = [[196, 784, 1764, 3136], [5929, 23716, 53361, 94864]]
+// EXPECT: mg = [[196.0, 784.0, 1764.0, 3136.0], [5929.0, 23716.0, 53361.0, 94864.0]]
 
 let rowsum = reduce(mg, (+)) |> compute
-// EXPECT: rowsum = [5880, 177870]
+// EXPECT: rowsum = [5880.0, 177870.0]
 
 let total = reduce(rowsum, (+))
-// EXPECT: total = 183750
+// EXPECT: total = 183750.0
 
 let tg = transpose(grid, [0, 1])
-// EXPECT: tg = [[14, 77], [28, 154], [42, 231], [56, 308]]
+// EXPECT: tg = [[14.0, 77.0], [28.0, 154.0], [42.0, 231.0], [56.0, 308.0]]

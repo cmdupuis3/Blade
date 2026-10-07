@@ -14,7 +14,7 @@ let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
 
 function total(row: T^1) -> T^0 = reduce(row, (+))
 let tf = total([1.5, 2.5, 3.0])
-// EXPECT: tf = 7
+// EXPECT: tf = 7.0
 let ti = total([1, 2, 3])
 // EXPECT: ti = 6
 
@@ -31,9 +31,9 @@ let i32 = ident32(21)
 
 function at(i: Nat<Lat>) -> Float64 = A(i)
 let a1 = at(1)
-// EXPECT: a1 = 20
+// EXPECT: a1 = 20.0
 let viaTag = method_for(range<Lat>) <@> lambda(i) -> at(i) |> compute
-// EXPECT: viaTag = [10, 20, 30]
+// EXPECT: viaTag = [10.0, 20.0, 30.0]
 
 function twice(k: Int64) -> Int64 = k * 2
 let plainFromTag = method_for(range<Lat>) <@> lambda(i) -> twice(i) |> compute
@@ -42,4 +42,4 @@ let plainFromTag = method_for(range<Lat>) <@> lambda(i) -> twice(i) |> compute
 function add3(a: Float64, b: Float64, c: Float64) -> Float64 = a + b + c
 let part = add3(1.0)
 let pv = part(2.0, 3.0)
-// EXPECT: pv = 6
+// EXPECT: pv = 6.0

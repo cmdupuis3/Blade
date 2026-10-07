@@ -19,5 +19,5 @@ function scale_by_norm(y: Array<Float like Idx<3>>) -> Array<Float like Idx<3>> 
 }
 let out = scale_by_head([2.0, 3.0, 4.0])
 let out2 = scale_by_norm([2.0, 3.0, 4.0])
-// EXPECT: out = [4, 6, 8]
-// EXPECT: out2 = [4, 6, 8]
+// EXPECT: out = [4.0, 6.0, 8.0]
+// EXPECT: out2 = [4.0, 6.0, 8.0]

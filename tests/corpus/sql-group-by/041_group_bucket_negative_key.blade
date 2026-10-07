@@ -17,14 +17,14 @@ let gv = group_by(vals, gk)
 let b = group_bucket(gk)
 // EXPECT: b = [0, -1, 0, 1, -1, 1]
 let sums = method_for(gv) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
-// EXPECT: sums = [40, 100]
+// EXPECT: sums = [40.0, 100.0]
 
 // The dropped rows are dropped from the GROUPING, not from the bucket map's
 // index space: `b` still spans every source row, which is what lets it
 // co-iterate with the array that was grouped. Marking the survivors and
 // summing shows the -1 rows carrying no value into any bucket.
 let kept = (method_for(zip(b, vals)) <@> lambda(bb, v) -> if bb >= 0 then v else 0.0) |> compute
-// EXPECT: kept = [10, 0, 30, 40, 0, 60]
+// EXPECT: kept = [10.0, 0.0, 30.0, 40.0, 0.0, 60.0]
 
 // Positional buckets (Idx<N> keys) take the same rule.
 type RegionIdx = Idx<2>

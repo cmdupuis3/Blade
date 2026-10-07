@@ -10,5 +10,5 @@ let c = method_for(A) <@> lambda(x) -> x * 2.0
 type W = Idx<2>
 let ws: Array<Float64 like W> = [1.0, 10.0]
 let out = ws <@> lambda(w) -> w * reduce(c, (+)) |> compute
-// EXPECT: c = [2, 4, 6, 8]
-// EXPECT: out = [20, 200]
+// EXPECT: c = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: out = [20.0, 200.0]

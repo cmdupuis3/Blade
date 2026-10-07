@@ -16,36 +16,36 @@ let c = 2.0
 // A BOUND tuple as the argument.
 let p = b, c
 let fromBound = addPair(p)
-// EXPECT: fromBound = 3
+// EXPECT: fromBound = 3.0
 
 // A LITERAL tuple as the argument -- ruling 3: a literal `(a, b)` in argument
 // position is a tuple value, it needn't be let-bound, and the two spellings
 // agree by value.
 let fromLiteral = addPair((b, c))
-// EXPECT: fromLiteral = 3
+// EXPECT: fromLiteral = 3.0
 
 // Width 3, and element types that are NOT all the same: the annotation
 // constrains only the width, so a (Float64, Int64) pair is fine as long as
 // the body's use of each slot types.
 function mixed(t: Tuple<3>) -> Float64 = t[0] + t[2]
 let m = mixed((1.5, 7, 2.5))
-// EXPECT: m = 4
+// EXPECT: m = 4.0
 
 // RETURN-type position takes the annotation too.
 function mkPair(u: Float64) -> Tuple<2> = (u, u + 1.0)
 let r = mkPair(10.0)
 let rv = r[0] + r[1]
-// EXPECT: rv = 21
+// EXPECT: rv = 21.0
 
 // LAMBDA parameter position, with the projection inside the lambda BODY.
 let lam = lambda(q: Tuple<2>) -> q[0] * q[1]
 let lv = lam((3.0, 4.0))
-// EXPECT: lv = 12
+// EXPECT: lv = 12.0
 
 // The bare-comma construction feeds an annotated parameter directly, which is
 // the pairing Design C is built around.
 let lv2 = addPair(p)
-// EXPECT: lv2 = 3
+// EXPECT: lv2 = 3.0
 
 // KNOWN LIMIT, deliberately not pinned here (it is a check-OK / g++-fail, the
 // same class as plan 3.9): a `Tuple<N>` whose elements are ARRAYS does not

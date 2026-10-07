@@ -39,7 +39,7 @@ let comp_direct = grid_total((method_for(range<Y, X>) <@> lambda(i, j) -> R((0 :
 // The same pipeline, let-bound first.
 let comp = (method_for(range<Y, X>) <@> lambda(i, j) -> R((0 : Scan), i, j)) |> compute
 let comp_bound = grid_total(comp)
-// EXPECT: view_direct = 51
-// EXPECT: view_bound = 51
+// EXPECT: view_direct = 51.0
+// EXPECT: view_bound = 51.0
 // EXPECT: comp_direct = 15.75
 // EXPECT: comp_bound = 15.75

@@ -33,26 +33,26 @@ function annotated(ts: Array<Float64 like Idx<4>>) -> Array<Float64 like Idx<4>,
 let small = (method_for(range<Idx<4>>) <@> lambda(i) -> 1.0 * i) |> compute
 
 let pg = plain(small)
-// EXPECT: pg = [[0, 0, 0], [1, 2, 3], [2, 4, 6], [3, 6, 9]]
+// EXPECT: pg = [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [3.0, 6.0, 9.0]]
 
 // The read that used to be typed as a scalar.
 let prow = pg(1)
-// EXPECT: prow = [1, 2, 3]
+// EXPECT: prow = [1.0, 2.0, 3.0]
 // The FULL index was always right; pinned so a fix cannot trade one for the other.
 let pcell = pg(1, 2)
-// EXPECT: pcell = 3
+// EXPECT: pcell = 3.0
 
 // Annotated return: the spelling that hid the defect.
 let ag = annotated(small)
 let arow = ag(2)
-// EXPECT: arow = [2, 4, 6]
+// EXPECT: arow = [2.0, 4.0, 6.0]
 
 // Annotated BINDING over the deduced-return callee: the other spelling that hid it.
 let bg: Array<Float64 like Idx<4>, Idx<3>> = plain(small)
 let brow = bg(3)
-// EXPECT: brow = [3, 6, 9]
+// EXPECT: brow = [3.0, 6.0, 9.0]
 
 // A row read straight back down to a scalar, so the row view is not merely
 // well-typed but actually addresses the right cells.
 let rsum = reduce(prow, (+))
-// EXPECT: rsum = 6
+// EXPECT: rsum = 6.0

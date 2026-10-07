@@ -9,4 +9,4 @@ let w = method_for(vals) <@> lambda(q) -> if q > 1.5 then 1.0 else 0.0
 let u = unique(w)
 let result = method_for(u) <@> lambda(x) -> x |> compute
 // w = [1, 0, 1, 1] -> unique, first-occurrence order
-// EXPECT: result = [1, 0]
+// EXPECT: result = [1.0, 0.0]

@@ -13,7 +13,7 @@ function f(x: Float) -> Float = {
 
 let (hi, thi) = ad.jvp(f)(2.0, 1.0)
 let (lo, tlo) = ad.jvp(f)(0.5, 1.0)
-// EXPECT: hi = 4
-// EXPECT: thi = 4
+// EXPECT: hi = 4.0
+// EXPECT: thi = 4.0
 // EXPECT: lo = 1.5
-// EXPECT: tlo = 3
+// EXPECT: tlo = 3.0

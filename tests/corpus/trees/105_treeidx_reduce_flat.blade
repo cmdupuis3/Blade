@@ -12,4 +12,4 @@ let static crystal = [2, 2, 0, 0, 3, 0, 0, 0]
 type CrystalIdx = TreeIdx<crystal>
 let T: Array<Float64 like CrystalIdx> = [1.0, 2.0, 3.0, 4.0, 5.0]
 let total = reduce(T, (+))
-// EXPECT: total = 15
+// EXPECT: total = 15.0

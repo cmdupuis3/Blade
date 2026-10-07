@@ -35,6 +35,6 @@ function loss(y: Float, arr: Array<Float like I>) -> Float = helper(y, arr)
 // `__` buffer, and the note is not raised.)
 let mut darr = [0.0, 0.0, 0.0]
 let (lv, dly) = ad.grad(loss)(2.0, [1.0, 2.0, 3.0], darr)
-// EXPECT: lv = 12
-// EXPECT: dly = 6
-// EXPECT: darr = [2, 2, 2]
+// EXPECT: lv = 12.0
+// EXPECT: dly = 6.0
+// EXPECT: darr = [2.0, 2.0, 2.0]

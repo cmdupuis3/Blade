@@ -15,8 +15,8 @@ let sq = method_for(xs) <@> lambda(x) -> if (x |> abs) > 1.5 then x |> abs else 
 // A pipe in a NON-final match arm is fenced by the next `|` and stays in it.
 let ks = [0, 1, 2]
 let arm = method_for(ks) <@> lambda(k) -> match k with | 0 -> 1.0 |> sqrt | _ -> 2.0 |> compute
-// EXPECT: E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-// EXPECT: pos = [1, 0, 3]
-// EXPECT: tr = 4
-// EXPECT: sq = [0, 2, 3]
-// EXPECT: arm = [1, 2, 2]
+// EXPECT: E = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+// EXPECT: pos = [1.0, 0.0, 3.0]
+// EXPECT: tr = 4.0
+// EXPECT: sq = [0.0, 2.0, 3.0]
+// EXPECT: arm = [1.0, 2.0, 2.0]

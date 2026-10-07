@@ -12,13 +12,13 @@
 let t = ((1.0, 2.0), 3.0)
 let r = match t with
     | ((a, b), c) -> a + b + c
-// EXPECT: r = 6
+// EXPECT: r = 6.0
 
 // Nested on the RIGHT, and three deep -- the leaf must ride two projections.
 let u = (1.0, (2.0, (3.0, 4.0)))
 let s = match u with
     | (a, (b, (c, d))) -> a + b * 10.0 + c * 100.0 + d * 1000.0
-// EXPECT: s = 4321
+// EXPECT: s = 4321.0
 
 // A nested LITERAL makes the outer pattern refutable: the test rides the
 // same recursion the binders do, so arm one must be skipped for arm two.
@@ -32,4 +32,4 @@ let v = match ti with
 // A nested wildcard binds nothing and must not shift the slots beside it.
 let w = match u with
     | (_, (b, (_, d))) -> b + d
-// EXPECT: w = 6
+// EXPECT: w = 6.0

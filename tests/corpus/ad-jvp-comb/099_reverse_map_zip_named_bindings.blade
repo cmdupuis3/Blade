@@ -67,24 +67,24 @@ let mut dx = [0.0, 0.0, 0.0, 0.0]
 let mut dy = [0.0, 0.0, 0.0, 0.0]
 let lv = ad.grad(loss)(x0, y0, dx, dy)
 // EXPECT: lv = 33.5
-// EXPECT: dx = [2, 0, 8, -0.5]
-// EXPECT: dy = [2, 0, 8, -5]
+// EXPECT: dx = [2.0, 0.0, 8.0, -0.5]
+// EXPECT: dy = [2.0, 0.0, 8.0, -5.0]
 
 let mut kx = [0.0, 0.0, 0.0, 0.0]
 let mut ky = [0.0, 0.0, 0.0, 0.0]
 let kv = ad.grad(loss_k)(x0, y0, kx, ky)
 let kvresid = kv - lv
 let kgresid = reduce(abs(kx - dx), (+)) + reduce(abs(ky - dy), (+))
-// EXPECT: kvresid = 0
-// EXPECT: kgresid = 0
+// EXPECT: kvresid = 0.0
+// EXPECT: kgresid = 0.0
 
 let mut rx = [0.0, 0.0, 0.0, 0.0]
 let mut ry = [0.0, 0.0, 0.0, 0.0]
 let rv = ad.grad(loss_rec)(x0, y0, rx, ry)
 let rvresid = rv - lv
 let rgresid = reduce(abs(rx - dx), (+)) + reduce(abs(ry - dy), (+))
-// EXPECT: rvresid = 0
-// EXPECT: rgresid = 0
+// EXPECT: rvresid = 0.0
+// EXPECT: rgresid = 0.0
 
 let h = 0.000001
 let fdx2 = (loss([1.0, 2.0, 3.0 + h, 4.0], y0) - loss([1.0, 2.0, 3.0 - h, 4.0], y0)) / (2.0 * h)

@@ -23,10 +23,10 @@ function outer(a: Array<Float like I>) -> Float = {
 
 let mut da = [0.0, 0.0, 0.0, 0.0, 0.0]
 let gv = ad.grad(outer)([3.0, 1.0, 4.0, 1.5, 2.0], da)
-// EXPECT: gv = 84
-// EXPECT: da = [8, 2, 10, 4, 6]
+// EXPECT: gv = 84.0
+// EXPECT: da = [8.0, 2.0, 10.0, 4.0, 6.0]
 let (jv, jt) = ad.jvp(outer)([3.0, 1.0, 4.0, 1.5, 2.0], [0.1, -0.2, 0.3, 0.05, -0.15])
 let dirderiv = da(0) * 0.1 + da(1) * (-0.2) + da(2) * 0.3 + da(3) * 0.05 + da(4) * (-0.15)
 let resid = jt - dirderiv
-// EXPECT: jv = 84
-// EXPECT: resid = 0
+// EXPECT: jv = 84.0
+// EXPECT: resid = 0.0

@@ -45,10 +45,10 @@ function readout(x: Array<Float like Idx<4>>, w1: Array<Float like Idx<W1>>,
 // s = 1.75, t(0) = 3, g(0) = 1  ->  scale = 5.75, hs = [-92, -69, -46, -23].
 // out = w2(0) * sum(hs) = 1.5 * -230.
 let out = readout([1.0, 2.0, 3.0, 4.0], [2.0, 0.0 - 1.0], [1.5])
-// EXPECT: out = [-345]
+// EXPECT: out = [-345.0]
 
 // THE CERTIFICATE, shadowed: relabel the four nodes and the invariant readout
 // does not move.
 let out_r = readout([3.0, 1.0, 4.0, 2.0], [2.0, 0.0 - 1.0], [1.5])
 let d = out(0) - out_r(0)
-// EXPECT: d = 0
+// EXPECT: d = 0.0

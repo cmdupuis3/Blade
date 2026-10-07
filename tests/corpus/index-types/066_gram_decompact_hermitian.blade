@@ -9,4 +9,4 @@ let A: Array<Complex128 like Idx<2>, Idx<3>> = [
 ]
 let H = gram(A, A)
 let result = decompact(H, 0)
-// EXPECT: result = [(7, 0), (4, 2), (4, -2), (19, 0)]
+// EXPECT: result = [(7.0, 0.0), (4.0, 2.0), (4.0, -2.0), (19.0, 0.0)]

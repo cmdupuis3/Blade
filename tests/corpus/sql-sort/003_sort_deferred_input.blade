@@ -14,5 +14,5 @@ let result = method_for(s) <@> lambda(x) -> x |> compute
 let s2 = sort(w, lambda(x) -> x)
 let result2 = method_for(s2) <@> lambda(x) -> x |> compute
 // w = [1, 0, 1] -> sorted ascending by identity key
-// EXPECT: result = [0, 1, 1]
-// EXPECT: result2 = [0, 1, 1]
+// EXPECT: result = [0.0, 1.0, 1.0]
+// EXPECT: result2 = [0.0, 1.0, 1.0]

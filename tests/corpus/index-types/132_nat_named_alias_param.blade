@@ -19,4 +19,4 @@ let A: Array<Float64 like Lat> = [10.0, 20.0, 30.0]
 function look(i: Nat<Lat>) -> Float64 = A(i) + 1.0
 
 let r = method_for(range<Lat>) <@> look |> compute
-// EXPECT: r = [11, 21, 31]
+// EXPECT: r = [11.0, 21.0, 31.0]

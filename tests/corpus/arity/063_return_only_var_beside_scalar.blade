@@ -21,5 +21,5 @@ function moment(a: Poly<T^1>) where comm(a) -> T^0 = {
 let m1 = moment <@> (A) |> compute
 let m2 = moment <@> (A, A) |> compute
 let p01 = m2(0, 1)
-// EXPECT: m1 = [3.5, 1, 4]
+// EXPECT: m1 = [3.5, 1.0, 4.0]
 // EXPECT: p01 = 3.5

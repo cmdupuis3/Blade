@@ -14,17 +14,17 @@ import Util
 import Util2
 
 let c = Util.scale + Util2.scale
-// EXPECT: c = 9
+// EXPECT: c = 9.0
 
 let scale = 5.0
 let d = Util.scale + scale
-// EXPECT: d = 7
+// EXPECT: d = 7.0
 
 function f(scale: Float64) -> Float64 = scale + Util.scale
 let e = f(1.0)
-// EXPECT: e = 3
+// EXPECT: e = 3.0
 
 // The imported bindings print qualified, so they never collide with main's.
-// EXPECT: Util.scale = 2
-// EXPECT: Util2.scale = 7
-// EXPECT: scale = 5
+// EXPECT: Util.scale = 2.0
+// EXPECT: Util2.scale = 7.0
+// EXPECT: scale = 5.0

@@ -19,19 +19,19 @@ function dist(t: Float<seconds>, v: Float<mps>) -> Float<meters> = v * t
 let (d, dd_dt, dd_dv) = ad.grad(dist)(2.0, 3.0)
 let chk_t: Float<mps> = dd_dt
 let chk_v: Float<seconds> = dd_dv
-// EXPECT: d = 6
-// EXPECT: dd_dt = 3
-// EXPECT: dd_dv = 2
-// EXPECT: chk_t = 3
-// EXPECT: chk_v = 2
+// EXPECT: d = 6.0
+// EXPECT: dd_dt = 3.0
+// EXPECT: dd_dv = 2.0
+// EXPECT: chk_t = 3.0
+// EXPECT: chk_v = 2.0
 
 function energy(x: Array<Float<meters> like Idx<3>>) -> Float<m2> =
     reduce([x(0) * x(0), x(1) * x(1), x(2) * x(2)], (+))
 let x0: Array<Float<meters> like Idx<3>> = [1.0, 2.0, 3.0]
 let mut dx: Array<Float<meters> like Idx<3>> = [0.0, 0.0, 0.0]
 let e = ad.grad(energy)(x0, dx)
-// EXPECT: e = 14
-// EXPECT: dx = [2, 4, 6]
+// EXPECT: e = 14.0
+// EXPECT: dx = [2.0, 4.0, 6.0]
 
 // A two-level chain whose intermediate carries a unit DIFFERENT from the
 // loss's: y = x*x (m2), loss = y*y (m4). The intermediate cotangent must be
@@ -45,9 +45,9 @@ function quart(x: Float<meters>) -> Float<m4> = {
 }
 let (q, dq) = ad.grad(quart)(2.0)
 let chk_q: Float<meters * meters * meters> = dq
-// EXPECT: q = 16
-// EXPECT: dq = 32
-// EXPECT: chk_q = 32
+// EXPECT: q = 16.0
+// EXPECT: dq = 32.0
+// EXPECT: chk_q = 32.0
 
 // A dimensionless loss over unit-carrying parameters: each cotangent is
 // 1/<parameter>. d(a/b)/da = 1/b, d(a/b)/db = -a/b^2, at (3, 2).

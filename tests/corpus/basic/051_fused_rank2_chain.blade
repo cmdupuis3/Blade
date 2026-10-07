@@ -10,4 +10,4 @@ let n = method_for(range<Y>, range<X>) <@> lambda(y, x) -> Float64(y) + Float64(
 
 let w = m + n * m - n
 let t = reduce(w, (+), axes = 2)
-// EXPECT: t = 446
+// EXPECT: t = 446.0

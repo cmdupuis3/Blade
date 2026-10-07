@@ -9,6 +9,6 @@ function plot(x: Float, n: Float<levels> = 10.0, c: Float<cmap> = 0.0) -> Float 
 let d = plot(1.0)(2.0: levels)(3.0: cmap)
 let e = plot(1.0)(3.0: cmap, 2.0: levels)
 let f = plot(1.0, 2.0: levels)(3.0: cmap)
-// EXPECT: d = 222
-// EXPECT: e = 222
-// EXPECT: f = 222
+// EXPECT: d = 222.0
+// EXPECT: e = 222.0
+// EXPECT: f = 222.0

@@ -37,6 +37,6 @@ let rec outer: Array<Float like Steps, C> =
     | prefix :: n -> prefix :: evolve(prefix(n - 1))
 let fin = outer((3 : Steps))
 let mass = reduce(fin, (+))
-// EXPECT: outer = [[8, 16, 24], [1, 2, 3], [0.125, 0.25, 0.375], [0.015625, 0.03125, 0.046875]]
+// EXPECT: outer = [[8.0, 16.0, 24.0], [1.0, 2.0, 3.0], [0.125, 0.25, 0.375], [0.015625, 0.03125, 0.046875]]
 // EXPECT: fin = [0.015625, 0.03125, 0.046875]
 // EXPECT: mass = 0.09375

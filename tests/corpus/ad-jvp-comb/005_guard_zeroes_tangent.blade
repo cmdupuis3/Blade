@@ -9,7 +9,7 @@ function off(x: Float) -> Float = guard(false, x * x)
 
 let (von, ton) = ad.jvp(on)(3.0, 1.0)
 let (voff, toff) = ad.jvp(off)(3.0, 1.0)
-// EXPECT: von = 9
-// EXPECT: ton = 6
-// EXPECT: voff = 0
-// EXPECT: toff = 0
+// EXPECT: von = 9.0
+// EXPECT: ton = 6.0
+// EXPECT: voff = 0.0
+// EXPECT: toff = 0.0

@@ -32,7 +32,7 @@ let mg = group_by(vals, gk)
 let msizes = method_for(mg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> extents(r) |> compute
 let msums = method_for(mg) <@> lambda(r: Array<Float64 like RaggedIdx<_>>) -> reduce(r, (+)) |> compute
 // EXPECT: msizes = [3, 2, 1]
-// EXPECT: msums = [100, 70, 40]
+// EXPECT: msums = [100.0, 70.0, 40.0]
 
 // Both spellings and the direct one agree, elided or not.
 let direct = extents(gk)
@@ -44,7 +44,7 @@ let other: Array<Float64 like Row> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 let za = group_by(vals, gk)
 let zb = group_by(other, gk)
 let zs = method_for(zip(za, zb)) <@> lambda(ra: T^1, rb: T^1) -> reduce(ra, (+)) + reduce(rb, (+)) |> compute
-// EXPECT: zs = [110, 77, 44]
+// EXPECT: zs = [110.0, 77.0, 44.0]
 
 // ---- Nothing but the auto-print consumes `ug`, and the print reads its rows.
 // (This pin used to read `ug = [[], [], []]`: the compiled printer walked the
@@ -52,7 +52,7 @@ let zs = method_for(zip(za, zb)) <@> lambda(ra: T^1, rb: T^1) -> reduce(ra, (+))
 // grouped array printed empty rows. The interpreter printed them empty to
 // match -- except through an alias, where it printed the real rows.)
 let ug = group_by(vals, gk)
-// EXPECT: ug = [[10, 30, 60], [20, 50], [40]]
+// EXPECT: ug = [[10.0, 30.0, 60.0], [20.0, 50.0], [40.0]]
 
 // ---- A dropped row is gathered by nobody either way, so elision and the
 // negative-key rule compose without interacting.

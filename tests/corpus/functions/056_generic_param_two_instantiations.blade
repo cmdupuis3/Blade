@@ -19,8 +19,8 @@ let b = idf(7)
 function sumOf(v: T^1) = reduce(v, (+))
 let c = sumOf([2.5, 3.5])
 let e = sumOf([1.0, 2.0, 3.0])
-// EXPECT: c = 6
-// EXPECT: e = 6
+// EXPECT: c = 6.0
+// EXPECT: e = 6.0
 
 // ============================================================================
 // TWO ELEMENT TYPES THROUGH ONE `T^1`, at a body that MATERIALIZES the param.
@@ -56,7 +56,7 @@ let ccx: Array<Complex128 like Idx<4>> = [complex(1.0, 1.0), complex(2.0, 0.0), 
 let dre = centre(cre)
 let dcx = centre(ccx)
 // EXPECT: dre = [-1.5, -0.5, 0.5, 1.5]
-// EXPECT: dcx = [(-1.5,1), (-0.5,0), (0.5,-1), (1.5,0)]
+// EXPECT: dcx = [(-1.5,1.0), (-0.5,0.0), (0.5,-1.0), (1.5,0.0)]
 
 // The same two instantiations through a body with NO array demand at all: the
 // map is the only thing that gives `T` its shape, and it now supplies it in a
@@ -65,11 +65,11 @@ let dcx = centre(ccx)
 function dbl(xs: T^1) = (xs <@> lambda(x) -> x + x) |> compute
 let ddr = dbl(cre)
 let ddc = dbl(ccx)
-// EXPECT: ddr = [2, 4, 6, 8]
-// EXPECT: ddc = [(2,2), (4,0), (6,-2), (8,0)]
+// EXPECT: ddr = [2.0, 4.0, 6.0, 8.0]
+// EXPECT: ddc = [(2.0,2.0), (4.0,0.0), (6.0,-2.0), (8.0,0.0)]
 
 // The numeric tower is ONE class: an Int64 literal in a Float64 slot stays
 // legal, which is the coarseness the check depends on.
 function addOne(x: Float64) -> Float64 = x + 1.0
 let d = addOne(4)
-// EXPECT: d = 5
+// EXPECT: d = 5.0

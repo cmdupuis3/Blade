@@ -45,6 +45,6 @@ let x = m.solve(A, b)
 // missing evaluate-once lift, say) would show up here and not in `x`.
 let r0 = 12.0 * x(0) + 1.0 * x(1) - 2.0 * x(2) + 0.5 * x(3) + 1.0 * x(4) - 15.0
 let r4 = -2.0 * x(0) + 1.0 * x(1) + 0.5 * x(2) - 3.0 * x(3) + 14.0 * x(4) - 59.5
-// EXPECT: x = [1, 2, 3, 4, 5]
-// EXPECT: r0 = 0
-// EXPECT: r4 = 0
+// EXPECT: x = [1.0, 2.0, 3.0, 4.0, 5.0]
+// EXPECT: r0 = 0.0
+// EXPECT: r4 = 0.0

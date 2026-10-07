@@ -14,7 +14,7 @@ let rec x: Array<Float like Step> =
     | zero -> zero
     | zero :: s -> zero :: 1.0
     | prefix :: n -> prefix :: prefix(n - 1) * 0.5 + 1.0
-// EXPECT: x = [1, 1.5, 1.75, 1.875, 1.9375, 1.96875]
+// EXPECT: x = [1.0, 1.5, 1.75, 1.875, 1.9375, 1.96875]
 let total = reduce(x, (+))
 // EXPECT: total = 10.03125
 let last = x((5 : Step))

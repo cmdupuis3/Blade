@@ -31,5 +31,5 @@ let C = mm(A, B)
 let M: Array<Float64 like R, R> = [[2.0, 1.0], [1.0, 3.0]]
 let rhs: Array<Float64 like R> = [5.0, 10.0]
 let x = sv(M, rhs)
-// EXPECT: C = [58, 64, 139, 154]
-// EXPECT: x = [1, 3]
+// EXPECT: C = [58.0, 64.0, 139.0, 154.0]
+// EXPECT: x = [1.0, 3.0]

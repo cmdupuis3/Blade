@@ -14,4 +14,4 @@ let dot = reduce(method_for(zip(A, A)) <@> lambda(x, y) -> x * y, (+))
 let sq = method_for(zip(A, A)) <@> lambda(x, y) -> x * y |> compute
 // self dot product: 1 + 4 + 9
 // EXPECT: dot = 14.0
-// EXPECT: sq = [1, 4, 9]
+// EXPECT: sq = [1.0, 4.0, 9.0]

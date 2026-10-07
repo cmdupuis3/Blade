@@ -23,7 +23,7 @@ function demean(A: T^2) -> T^2 = {
     Z
 }
 let S = demean(R)
-// EXPECT: S = [[-1, -1, -1, -1, 4], [4, -1, -1, -1, -1], [1, 1, -4, 1, 1]]
+// EXPECT: S = [[-1.0, -1.0, -1.0, -1.0, 4.0], [4.0, -1.0, -1.0, -1.0, -1.0], [1.0, 1.0, -4.0, 1.0, 1.0]]
 
 // the same, staged through a block-bodied `>>@` pipeline
 function standardize(A: T^2) -> T^2 = {
@@ -31,7 +31,7 @@ function standardize(A: T^2) -> T^2 = {
     Z
 }
 let Zs = standardize(R)
-// EXPECT: Zs = [[-0.5, -0.5, -0.5, -0.5, 2], [2, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2, 0.5, 0.5]]
+// EXPECT: Zs = [[-0.5, -0.5, -0.5, -0.5, 2.0], [2.0, -0.5, -0.5, -0.5, -0.5], [0.5, 0.5, -2.0, 0.5, 0.5]]
 
 // an annotated inline row lambda over the generic parameter
 function demean_inline(A: T^2) -> T^2 = {
@@ -39,4 +39,4 @@ function demean_inline(A: T^2) -> T^2 = {
     Z
 }
 let Si = demean_inline(R)
-// EXPECT: Si = [[-1, -1, -1, -1, 4], [4, -1, -1, -1, -1], [1, 1, -4, 1, 1]]
+// EXPECT: Si = [[-1.0, -1.0, -1.0, -1.0, 4.0], [4.0, -1.0, -1.0, -1.0, -1.0], [1.0, 1.0, -4.0, 1.0, 1.0]]

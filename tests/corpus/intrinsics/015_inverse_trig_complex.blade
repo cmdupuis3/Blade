@@ -27,6 +27,6 @@ let wc = acos(w)
 
 // wc's imaginary part prints as `-0` (std::acos of a real-valued complex
 // lands on negative zero); the pin compares numerically, where -0.0 = 0.0.
-// EXPECT: za = (0, 0.549306144334055)
-// EXPECT: ws = (0.523598775598299, 0)
-// EXPECT: wc = (1.0471975511966, 0)
+// EXPECT: za = (0.0, 0.549306144334055)
+// EXPECT: ws = (0.523598775598299, 0.0)
+// EXPECT: wc = (1.0471975511966, 0.0)

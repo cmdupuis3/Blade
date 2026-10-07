@@ -28,5 +28,5 @@ function f(a: Array<Float like I>) -> Float = {
 let (v, t) = ad.jvp(f)([1.0, 2.0, 3.0], [1.0, 0.0, 0.0])
 // The suggestion lands on the WRAPPER's `(x, y)` here, not on the pack.
 // WARN: BL4010
-// EXPECT: v = 10
-// EXPECT: t = 6
+// EXPECT: v = 10.0
+// EXPECT: t = 6.0

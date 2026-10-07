@@ -9,13 +9,13 @@
 function idg(a: T^0) -> T^0 = a
 function apply(g: (Float64) -> Float64, x: Float64) -> Float64 = g(x)
 let r = apply(idg, 2.0)
-// EXPECT: r = 2
+// EXPECT: r = 2.0
 function applyS(g: (String) -> String, x: String) -> String = g(x)
 let s = applyS(idg, "a")
 // EXPECT: s = "a"
 function sq(x: Float64) -> Float64 = x * x
 let u = apply(sq, 3.0)
-// EXPECT: u = 9
+// EXPECT: u = 9.0
 function twice(g: (T) -> T, x: T) -> T = g(g(x))
 let t2 = twice(idg, 2.5)
 // EXPECT: t2 = 2.5

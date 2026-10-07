@@ -29,8 +29,8 @@ let total = reduce(fibre, lambda(a, b) -> a + b)
 // prints as ONE flat row-major run (the auto-printer's single rank regime;
 // the per-plane `D[i][j] = [...]` grid lines these pins used to ride are
 // retired), so the D pin is the four planes in (0,0) (0,1) (1,0) (1,1) order.
-// EXPECT: S = [1, 2, 4]
-// EXPECT: W = [2, 3, 5, 4, 6, 8]
-// EXPECT: D = [2, 3, 3, 5, 3, 4, 4, 6, 3, 4, 4, 6, 5, 6, 6, 8]
-// EXPECT: fibre = [5, 6]
-// EXPECT: total = 11
+// EXPECT: S = [1.0, 2.0, 4.0]
+// EXPECT: W = [2.0, 3.0, 5.0, 4.0, 6.0, 8.0]
+// EXPECT: D = [2.0, 3.0, 3.0, 5.0, 3.0, 4.0, 4.0, 6.0, 3.0, 4.0, 4.0, 6.0, 5.0, 6.0, 6.0, 8.0]
+// EXPECT: fibre = [5.0, 6.0]
+// EXPECT: total = 11.0

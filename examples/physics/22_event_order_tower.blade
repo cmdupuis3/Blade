@@ -93,8 +93,8 @@ let finish_V = if abs(gap12) < 0.05 then "PHOTO_FINISH" else "SEPARATED"
 
 // P-matrix first moments; AB1 vs BC1 the coin flip, BC2 always last:
 // EXPECT: P12 = 0.368
-// EXPECT: P23 = 1
-// EXPECT: P13 = 1
+// EXPECT: P23 = 1.0
+// EXPECT: P13 = 1.0
 // EXPECT: P21 = 0.632
 // causal witness inside [1,2]; the triangle facet strictly interior:
 // EXPECT: W = 1.368

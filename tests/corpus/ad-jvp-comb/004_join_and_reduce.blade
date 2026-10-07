@@ -13,5 +13,5 @@ function f(a: Array<Float like Idx<2>>, b: Array<Float like Idx<2>>) -> Float = 
 }
 
 let (v, t) = ad.jvp(f)([2.0, 3.0], [4.0, 5.0], [1.0, 0.0], [0.0, 0.0])
-// EXPECT: v = 24
-// EXPECT: t = 6
+// EXPECT: v = 24.0
+// EXPECT: t = 6.0

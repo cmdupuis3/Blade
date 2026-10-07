@@ -48,8 +48,8 @@ function shift(u: Array<Float like Idx<3>>, k: Float) -> Array<Float like Idx<3>
 function peek(x: Array<Float like IrrepsIdx<S>>) -> Float = x(2) * x(2)
 
 let h = halve(3.0, 5.0)
-// EXPECT: h = 4
+// EXPECT: h = 4.0
 let s = shift([1.0, 2.0, 3.0], 10.0)
-// EXPECT: s = [11, 12, 13]
+// EXPECT: s = [11.0, 12.0, 13.0]
 let p = peek([1.0, 2.0, 3.0, 4.0])
-// EXPECT: p = 9
+// EXPECT: p = 9.0

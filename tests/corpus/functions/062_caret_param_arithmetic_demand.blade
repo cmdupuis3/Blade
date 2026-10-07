@@ -23,5 +23,5 @@ function h(s: U^1) = (s * 2.0) |> compute
 let b: Array<Float64 like Idx<3>> = [4.0, 5.0, 6.0]
 let sw = h(b)
 let q = prodsum(sw, sw)
-// EXPECT: sw = [8, 10, 12]
-// EXPECT: q = 308
+// EXPECT: sw = [8.0, 10.0, 12.0]
+// EXPECT: q = 308.0

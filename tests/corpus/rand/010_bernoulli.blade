@@ -19,6 +19,6 @@ let meanOk = abs(mean - 0.3) < 0.03
 let dev = method_for(x) <@> lambda(q) -> q * (1.0 - q) |> compute
 let devs = reduce(dev, (+))
 let binaryOnly = abs(devs) < 0.0000001
-// EXPECT: b = [1, 1, 0, 1, 0, 1]
+// EXPECT: b = [1.0, 1.0, 0.0, 1.0, 0.0, 1.0]
 // EXPECT: meanOk = true
 // EXPECT: binaryOnly = true

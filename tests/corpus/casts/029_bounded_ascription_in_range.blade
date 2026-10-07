@@ -4,8 +4,8 @@
 Unit psu
 type Salinity = Float<psu, min=0.0>
 let t = 30.0 : Salinity
-// EXPECT: t = 30
+// EXPECT: t = 30.0
 let u = (t + 5.0) : Salinity
-// EXPECT: u = 35
+// EXPECT: u = 35.0
 let w = 2.5 : Float64
 // EXPECT: w = 2.5

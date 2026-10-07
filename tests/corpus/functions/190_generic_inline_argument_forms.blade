@@ -14,9 +14,9 @@ function idg(x: T^0) -> T^0 = x
 function twice(x: T^0) -> T^0 = x + x
 
 let c = idg(complex(1.0, 2.0))
-// EXPECT: c = (1,2)
+// EXPECT: c = (1.0,2.0)
 let c2 = twice(complex(1.5, -0.5))
-// EXPECT: c2 = (3,-1)
+// EXPECT: c2 = (3.0,-1.0)
 let f32 = twice(Float32(1.25))
 // EXPECT: f32 = 2.5
 let i = twice(3 * 4)
@@ -26,20 +26,20 @@ let sum = idg(1.0 + 2.5)
 let neg = idg(-2.5)
 // EXPECT: neg = -2.5
 let root = idg(sqrt(16.0))
-// EXPECT: root = 4
+// EXPECT: root = 4.0
 let n = 3
 let mag = twice(abs(n - 5))
 // EXPECT: mag = 4
 let re = idg(real(complex(7.0, 8.0)))
-// EXPECT: re = 7
+// EXPECT: re = 7.0
 let lt = idg(1 < 2)
 // EXPECT: lt = true
 let pick = idg(if n > 2 then 1.5 else 2.5)
 // EXPECT: pick = 1.5
 let blk = idg({ let t = 2.0; t * 3.0 })
-// EXPECT: blk = 6
+// EXPECT: blk = 6.0
 let fused = idg(fma(2.0, 3.0, 1.0))
-// EXPECT: fused = 7
+// EXPECT: fused = 7.0
 
 // A tuple literal recursed componentwise already; a complex COMPONENT was the
 // part that went unlearned.

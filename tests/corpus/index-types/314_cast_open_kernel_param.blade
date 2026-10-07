@@ -27,10 +27,10 @@ let tail = method_for(range<Part>) <@> lambda(k) -> s((k + 4 : State)) |> comput
 let viaint = method_for(range<Part>) <@> lambda(k) -> s((Int64(k) : State)) |> compute
 // a same-tag ascription still type-checks, and its guard is elided
 let same = method_for(range<State>) <@> lambda(k) -> s((k : State)) * 2.0 |> compute
-// EXPECT: w1 = [10, 11, 12, 13]
-// EXPECT: w2 = [14, 15]
-// EXPECT: packed = [10, 11, 12, 13, 14, 15, 0.5]
-// EXPECT: r = [10, 11, 12]
-// EXPECT: tail = [14, 15, 16]
-// EXPECT: viaint = [10, 11, 12]
-// EXPECT: same = [20, 22, 24, 26, 28, 30, 32]
+// EXPECT: w1 = [10.0, 11.0, 12.0, 13.0]
+// EXPECT: w2 = [14.0, 15.0]
+// EXPECT: packed = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 0.5]
+// EXPECT: r = [10.0, 11.0, 12.0]
+// EXPECT: tail = [14.0, 15.0, 16.0]
+// EXPECT: viaint = [10.0, 11.0, 12.0]
+// EXPECT: same = [20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0]

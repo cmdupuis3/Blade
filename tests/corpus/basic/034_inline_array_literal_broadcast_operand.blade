@@ -10,5 +10,5 @@ let yr = [10.0, -4.0]
 let dr = yr - [2.0, -14.0]
 function shift(v: Array<Float like Idx<2>>) -> Array<Float like Idx<2>> = v - [2.0, -14.0]
 let dr2 = shift([10.0, -4.0])
-// EXPECT: dr = [8, 10]
-// EXPECT: dr2 = [8, 10]
+// EXPECT: dr = [8.0, 10.0]
+// EXPECT: dr2 = [8.0, 10.0]

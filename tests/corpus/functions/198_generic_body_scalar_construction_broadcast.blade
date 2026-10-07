@@ -23,7 +23,7 @@ let rx = rms_normalize(x)
 // A scalar binop between two late-typed calls: (x - 3)^2 + 9.
 function centered_square_plus(v: T^1, u: T^1) -> T^1 = (v - lmean(v)) * (u - lmean(u)) + lmean(v) * lmean(u)
 let tx = centered_square_plus(x, x)
-// EXPECT: tx = [13, 10, 9, 18]
+// EXPECT: tx = [13.0, 10.0, 9.0, 18.0]
 
 // The scalar on the LEFT.
 function scaled(v: T^1) -> T^1 = sqrt(lmean(v * v)) * v
@@ -34,9 +34,9 @@ let sx = scaled(x)
 function negmean(v: T^1) -> T^1 = v * (-lmean(v))
 let xf: Array<Float32 like Idx<3>> = [Float32(1.0), Float32(2.0), Float32(3.0)]
 let nf = negmean(xf)
-// EXPECT: nf = [-2, -4, -6]
+// EXPECT: nf = [-2.0, -4.0, -6.0]
 let nx = negmean(x)
-// EXPECT: nx = [-3, -6, -9, -18]
+// EXPECT: nx = [-3.0, -6.0, -9.0, -18.0]
 
 // An integer instance: `lmean` divides as Int64 (10 / 4 = 2), `abs` of an
 // Int64 stays Int64 -- the value hoisted out of the loop keeps that type.
@@ -45,19 +45,19 @@ let xi = [1, 2, 3, 4]
 let si = shifted(xi)
 // EXPECT: si = [9, 10, 11, 12]
 let sf = shifted(x)
-// EXPECT: sf = [10, 11, 12, 15]
+// EXPECT: sf = [10.0, 11.0, 12.0, 15.0]
 
 // A conditional scalar.
 function pick(v: T^1, c: Bool) -> T^1 = v - (if c then lmean(v) else lsum(v))
 let px = pick(x, true)
-// EXPECT: px = [-2, -1, 0, 3]
+// EXPECT: px = [-2.0, -1.0, 0.0, 3.0]
 
 // A unit-carrying element: the scalar is `Float64<m>`.
 Unit m
 let d: Array<Float64<m> like Idx<3>> = [1.0, 2.0, 6.0]
 function center(v: T^1) -> T^1 = v - lmean(v)
 let cd = center(d)
-// EXPECT: cd = [-2, -1, 3]
+// EXPECT: cd = [-2.0, -1.0, 3.0]
 
 // A row empty only at run time: the scalar is never evaluated (its fold of an
 // empty row would be BL8003), as for every array/scalar map.

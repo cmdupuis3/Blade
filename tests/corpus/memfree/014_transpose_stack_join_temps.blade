@@ -38,7 +38,7 @@ let rec acc: Array<Float like Steps> =
     | zero :: s -> zero :: 0.0
     | prefix :: n -> prefix :: prefix(n - 1) + mixt(n) * 0.001
 let sfinal = acc((4 : Steps))
-// EXPECT: toprs = [3, 6, 9]
+// EXPECT: toprs = [3.0, 6.0, 9.0]
 // EXPECT: topmix = 20.016
-// EXPECT: acc = [0, 0.020016, 0.05004, 0.090072, 0.140112]
+// EXPECT: acc = [0.0, 0.020016, 0.05004, 0.090072, 0.140112]
 // EXPECT: sfinal = 0.140112

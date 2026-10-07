@@ -26,19 +26,19 @@ let a = 1.0 / 3.0
 let p = a * 3.0
 let e = fma(a, 3.0, 0.0 - p)
 let twoprod = [p, e]
-// EXPECT: twoprod = [1, -5.55111512312578e-17]
+// EXPECT: twoprod = [1.0, -5.55111512312578e-17]
 
 // Exact when the answer is representable.
 let plain = fma(2.0, 3.0, 4.0)
-// EXPECT: plain = 10
+// EXPECT: plain = 10.0
 
 // In a kernel, over an array: the map is ordinary; only the node is fused.
 type I4 = Idx<4>
 let xs: Array<Float64 like I4> = [0.1, 0.2, 0.3, 0.4]
 let ys = method_for(xs) <@> lambda(x) -> fma(x, 10.0, -1.0) |> compute
-// EXPECT: ys = [5.55111512312578e-17, 1, 2, 3]
+// EXPECT: ys = [5.55111512312578e-17, 1.0, 2.0, 3.0]
 
 // A user function named fma shadows the intrinsic, like abs/complex.
 function fma(u: Float64, v: Float64) -> Float64 = u - v
 let shadowed = fma(5.0, 2.0)
-// EXPECT: shadowed = 3
+// EXPECT: shadowed = 3.0

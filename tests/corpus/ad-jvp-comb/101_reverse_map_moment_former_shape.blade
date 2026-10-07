@@ -112,9 +112,9 @@ let (rv, rdbeta) = ad.grad(loss_rec)(r0, r1, 1.5, g0, g1)
 let lane_vresid = rv - lv
 let lane_bresid = rdbeta - dbeta
 let lane_gresid = reduce(abs(g0 - d0), (+)) + reduce(abs(g1 - d1), (+))
-// EXPECT: lane_vresid = 0
-// EXPECT: lane_bresid = 0
-// EXPECT: lane_gresid = 0
+// EXPECT: lane_vresid = 0.0
+// EXPECT: lane_bresid = 0.0
+// EXPECT: lane_gresid = 0.0
 
 // The 5. stance: with the learnable pre-transform at the IDENTITY, the
 // gradient through the former must equal the Phase-A fixed-featurization
@@ -129,8 +129,8 @@ let fixed_v = ad.grad(loss_fixed)(r0, r1, f0, f1)
 let ident_vresid = ident_v - fixed_v
 let ident_gresid = reduce(abs(e0 - f0), (+)) + reduce(abs(e1 - f1), (+))
 // EXPECT: ident_v = 32.4375
-// EXPECT: ident_vresid = 0
-// EXPECT: ident_gresid = 0
+// EXPECT: ident_vresid = 0.0
+// EXPECT: ident_gresid = 0.0
 // EXPECT: ident_db = 64.875
 
 // Central differences on the primal: the independent route.

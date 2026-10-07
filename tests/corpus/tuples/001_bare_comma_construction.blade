@@ -20,13 +20,13 @@ let c = 2.0
 let t = b, c
 let t0 = t[0]
 let t1 = t[1]
-// EXPECT: t0 = 1
-// EXPECT: t1 = 2
+// EXPECT: t0 = 1.0
+// EXPECT: t1 = 2.0
 
 // Width 3. Nothing about the rule is 2-specific.
 let a3 = 10.0, 20.0, 30.0
 let s3 = a3[0] + a3[1] + a3[2]
-// EXPECT: s3 = 60
+// EXPECT: s3 = 60.0
 
 // PRECEDENCE. Each component parses at full expression precedence and stops
 // at the comma, so this is a 2-tuple of two CALLS, not the single call
@@ -35,15 +35,15 @@ let s3 = a3[0] + a3[1] + a3[2]
 function dbl(v: Float64) -> Float64 = v * 2.0
 let pc = dbl(3.0), dbl(4.0)
 let pcv = pc[0] + pc[1]
-// EXPECT: pcv = 14
+// EXPECT: pcv = 14.0
 
 // Operators inside a component, for the same reason: `+` binds tighter than
 // the comma, so this is (3, 30), not 3 + (2, 30).
 let po = b + 2.0, c * 15.0
 let po0 = po[0]
 let po1 = po[1]
-// EXPECT: po0 = 3
-// EXPECT: po1 = 30
+// EXPECT: po0 = 3.0
+// EXPECT: po1 = 30.0
 
 // BLOCK let (Parser.parseLetStmt), the second of the three sites.
 function inBlock(x: Float64) -> Float64 = {
@@ -51,10 +51,10 @@ function inBlock(x: Float64) -> Float64 = {
     p[0] + p[1]
 }
 let blockSum = inBlock(3.0)
-// EXPECT: blockSum = 9
+// EXPECT: blockSum = 9.0
 
 // The parenthesized literal is unchanged and produces the SAME node
 // (ExprTuple), so the two spellings are one program from the checker down.
 let paren = (4.0, 5.0)
 let parenv = paren[0] + paren[1]
-// EXPECT: parenv = 9
+// EXPECT: parenv = 9.0

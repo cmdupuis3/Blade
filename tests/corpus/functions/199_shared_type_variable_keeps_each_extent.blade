@@ -18,30 +18,30 @@ let y = [10.0, 20.0, 30.0, 40.0, 50.0]
 // mean(y) = 30
 function shift(v: T^1, w: T^1) -> T^1 = v - lmean(w)
 let out = shift(x, y)
-// EXPECT: out = [-29, -28, -27]
+// EXPECT: out = [-29.0, -28.0, -27.0]
 
 // Both orders, and the agreeing call (mean 2 + mean 2).
 function both(v: T^1, w: T^1) -> T^0 = lmean(v) + lmean(w)
 let a = both(x, y)
-// EXPECT: a = 32
+// EXPECT: a = 32.0
 let b = both(y, x)
-// EXPECT: b = 32
+// EXPECT: b = 32.0
 let c = both(x, x)
-// EXPECT: c = 4
+// EXPECT: c = 4.0
 
 // Three parameters, three extents.
 function weighted(p: T^1, q: T^1, r: T^1) -> T^0 = lmean(p) + lmean(q) * 10.0 + lmean(r) * 100.0
 let wsum = weighted(x, y, [7.0])
-// EXPECT: wsum = 1002
+// EXPECT: wsum = 1002.0
 
 // The result shaped like the SECOND parameter.
 function doubled_second(v: T^1, w: T^1) -> T^1 = w * 2.0
 let ds = doubled_second(x, y)
-// EXPECT: ds = [20, 40, 60, 80, 100]
+// EXPECT: ds = [20.0, 40.0, 60.0, 80.0, 100.0]
 
 // Rank 2, disagreeing on the inner axis only.
 function total2(A: T^2, B: T^2) -> T^0 = reduce(reduce(A, (+)), (+)) + reduce(reduce(B, (+)), (+))
 let P = [[1.0, 2.0], [3.0, 4.0]]
 let Q = [[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]
 let t2 = total2(P, Q)
-// EXPECT: t2 = 19
+// EXPECT: t2 = 19.0

@@ -31,21 +31,21 @@ let sa = [[0.5, -1.0], [0.25, 2.0], [0.0, -0.5]]
 let sb = [[1.0, 1.0], [0.0, -1.0], [2.0, 0.5], [-1.0, 3.0]]
 let sx = [1.0, -2.0, 0.5, 1.5]
 let (y, dy) = ad.jvp(fwd)(a0, b0, x0, sa, sb, sx)
-// EXPECT: y = [30, 72, 114]
-// EXPECT: dy = [29.5, 93.5, 108]
+// EXPECT: y = [30.0, 72.0, 114.0]
+// EXPECT: dy = [29.5, 93.5, 108.0]
 
 let w = [2.0, 0.0, 1.0]
 let mut da = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
 let mut db = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
 let mut dx = [0.0, 0.0, 0.0, 0.0]
 let yv = ad.vjp(fwd)(a0, b0, x0, w, da, db, dx)
-// EXPECT: yv = [30, 72, 114]
-// EXPECT: da = [[24, 18], [0, 0], [12, 9]]
-// EXPECT: db = [[7, 10], [14, 20], [21, 30], [28, 40]]
-// EXPECT: dx = [7, 10, 17, 24]
+// EXPECT: yv = [30.0, 72.0, 114.0]
+// EXPECT: da = [[24.0, 18.0], [0.0, 0.0], [12.0, 9.0]]
+// EXPECT: db = [[7.0, 10.0], [14.0, 20.0], [21.0, 30.0], [28.0, 40.0]]
+// EXPECT: dx = [7.0, 10.0, 17.0, 24.0]
 
 // The transpose identity, exactly.
 let lhs = reduce(w * dy, (+))
 let rhs = reduce(reduce(da * sa, (+)), (+)) + reduce(reduce(db * sb, (+)), (+)) + reduce(dx * sx, (+))
-// EXPECT: lhs = 167
-// EXPECT: rhs = 167
+// EXPECT: lhs = 167.0
+// EXPECT: rhs = 167.0

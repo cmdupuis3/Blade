@@ -16,7 +16,7 @@ let x = [1.0, 2.0, 3.0, 6.0]
 
 // [2, 6], in x's order
 let ci = center(intersect(x, [2.0, 6.0, 9.0]))
-// EXPECT: ci = [-2, 2]
+// EXPECT: ci = [-2.0, 2.0]
 
 // [1, 2, 3, 6, 9]: mean 4.2
 let cu = center(union(x, [9.0, 1.0]))
@@ -24,18 +24,18 @@ let cu = center(union(x, [9.0, 1.0]))
 
 // [3, 1, 5]
 let cq = center(unique([3.0, 1.0, 3.0, 5.0]))
-// EXPECT: cq = [0, -2, 2]
+// EXPECT: cq = [0.0, -2.0, 2.0]
 
 // Nested, and an Int64 element.
 let cn = center(unique(intersect(x, [6.0, 2.0, 6.0])))
-// EXPECT: cn = [-2, 2]
+// EXPECT: cn = [-2.0, 2.0]
 let xi = [4, 8, 8, 12]
 let ciq = center(unique(xi))
 // EXPECT: ciq = [-4, 0, 4]
 
 // Straight into the T^0 helper.
 let m = lmean(intersect(x, [2.0, 6.0, 9.0]))
-// EXPECT: m = 4
+// EXPECT: m = 4.0
 
 // An empty result: the specialization reads the run-time length.
 let n_empty = extents(center(intersect(x, [100.0])))

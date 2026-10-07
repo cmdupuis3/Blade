@@ -12,4 +12,4 @@ let g = lambda(x, y) where comm(x, y) -> 2.0 * x + y
 let anti = L <@> reynolds(g, Antisymmetric)
 let result = transpose(anti, [0, 1])
 // anti canonicals (0,1)=-1 (0,2)=-2 (1,2)=-1 -> negated
-// EXPECT: result = [1, 2, 1]
+// EXPECT: result = [1.0, 2.0, 1.0]

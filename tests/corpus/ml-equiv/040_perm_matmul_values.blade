@@ -28,11 +28,11 @@ let b3: Array<Float like Idx<9>> = [1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 3.0, 0.0, 1.0]
 
 // A*B = [[10, 2, 5], [22, 5, 14], [34, 8, 23]] -- by hand, row by row.
 let ab = ml.perm_matmul(3, a3, b3)
-// EXPECT: ab = [10, 2, 5, 22, 5, 14, 34, 8, 23]
+// EXPECT: ab = [10.0, 2.0, 5.0, 22.0, 5.0, 14.0, 34.0, 8.0, 23.0]
 
 // Not commutative, and the pin says so: B*A = [[15, 18, 21], [4, 5, 6], [10, 14, 18]]
 let ba = ml.perm_matmul(3, b3, a3)
-// EXPECT: ba = [15, 18, 21, 4, 5, 6, 10, 14, 18]
+// EXPECT: ba = [15.0, 18.0, 21.0, 4.0, 5.0, 6.0, 10.0, 14.0, 18.0]
 
 // The identity matrix is the unit on both sides -- the loop nest's own sanity.
 let id3: Array<Float like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
@@ -41,7 +41,7 @@ let ra = ml.perm_matmul(3, a3, id3)
 let dl = la - a3
 let dr = ra - a3
 let sq_id = reduce(dl * dl, (+)) + reduce(dr * dr, (+))
-// EXPECT: sq_id = 0
+// EXPECT: sq_id = 0.0
 
 // The trace of the product, through the derived S_n layer at K = 2, L = 0:
 // slot 0 of ml.derive_perm_linear(2, 0, N, ., .) is the DIAGONAL indicator
@@ -49,7 +49,7 @@ let sq_id = reduce(dl * dl, (+)) + reduce(dr * dr, (+))
 let static TW = ml.perm_weight_dim(2, 0, 3)
 // EXPECT: TW = 2
 let tr = ml.derive_perm_linear(2, 0, 3, ab, [1.0, 0.0])
-// EXPECT: tr = [38]
+// EXPECT: tr = [38.0]
 
 // ============================================================================
 // INSIDE A CERTIFIED BODY: two Pow 2 in, one Pow 2 out.
@@ -67,7 +67,7 @@ function ppgn(a: Array<Float like Idx<9>>, b: Array<Float like Idx<9>>)
 
 // (A*B) elementwise* A = [[10, 4, 15], [88, 25, 84], [238, 64, 207]]
 let p = ppgn(a3, b3)
-// EXPECT: p = [10, 4, 15, 88, 25, 84, 238, 64, 207]
+// EXPECT: p = [10.0, 4.0, 15.0, 88.0, 25.0, 84.0, 238.0, 64.0, 207.0]
 
 // THE CERTIFICATE, shadowed exactly. Relabel the three nodes by
 // p: 0 -> 1, 1 -> 2, 2 -> 0, i.e. A'[i][j] = A[p(i)][p(j)]:
@@ -77,11 +77,11 @@ let p = ppgn(a3, b3)
 let a3p: Array<Float like Idx<9>> = [5.0, 6.0, 4.0, 8.0, 9.0, 7.0, 2.0, 3.0, 1.0]
 let b3p: Array<Float like Idx<9>> = [1.0, 0.0, 0.0, 0.0, 1.0, 3.0, 0.0, 2.0, 1.0]
 let pp = ppgn(a3p, b3p)
-// EXPECT: pp = [25, 84, 88, 64, 207, 238, 4, 15, 10]
+// EXPECT: pp = [25.0, 84.0, 88.0, 64.0, 207.0, 238.0, 4.0, 15.0, 10.0]
 let want: Array<Float like Idx<9>> = [25.0, 84.0, 88.0, 64.0, 207.0, 238.0, 4.0, 15.0, 10.0]
 let ppd = pp - want
 let sq_equiv = reduce(ppd * ppd, (+))
-// EXPECT: sq_equiv = 0
+// EXPECT: sq_equiv = 0.0
 
 // Composing the two node-axis ops inside one certificate: Pow 2 -> Pow 2 ->
 // Pow 0. The readout weight buffer is Bell(2) = 2 slots, not a power of 3, so
@@ -96,10 +96,10 @@ function ppgn_trace(a: Array<Float like Idx<9>>, b: Array<Float like Idx<9>>,
 // trace slot only: 38, as above. Total-sum slot only: 10+2+5+22+5+14+34+8+23 = 123.
 let t1 = ppgn_trace(a3, b3, [1.0, 0.0])
 let t2 = ppgn_trace(a3, b3, [0.0, 1.0])
-// EXPECT: t1 = [38]
-// EXPECT: t2 = [123]
+// EXPECT: t1 = [38.0]
+// EXPECT: t2 = [123.0]
 // and both are invariant under the relabelling, exactly (integer data).
 let t1p = ppgn_trace(a3p, b3p, [1.0, 0.0])
 let t2p = ppgn_trace(a3p, b3p, [0.0, 1.0])
 let dt = (t1(0) - t1p(0)) * (t1(0) - t1p(0)) + (t2(0) - t2p(0)) * (t2(0) - t2p(0))
-// EXPECT: dt = 0
+// EXPECT: dt = 0.0

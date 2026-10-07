@@ -121,12 +121,12 @@ let lattV = if devD < 1.0e-10 then "DAMPED_LATTICE_EXACT" else "NO"
 let dispV = if abs(red8 + 0.3) < 1.0e-10 && abs(imd8) < 1.0e-12 then "INVARIANT_DISPLACED_TO_MINUS_2GAMMA" else "NO"
 
 // the ladder, the kernel, the lattice, the displacement:
-// EXPECT: imc0 = 3
-// EXPECT: imc2 = 2
-// EXPECT: imc4 = 1
-// EXPECT: imc6 = 1
+// EXPECT: imc0 = 3.0
+// EXPECT: imc2 = 2.0
+// EXPECT: imc4 = 1.0
+// EXPECT: imc6 = 1.0
 // EXPECT: rec8 = -1.30620433196725e-17
-// EXPECT: imc8 = 0
+// EXPECT: imc8 = 0.0
 // EXPECT: maxreC = 3.75567632548979e-16
 // EXPECT: devL = 3.99680288865056e-15
 // EXPECT: ladderV = "IMAGINARY_LADDER_MEASURED"
@@ -138,7 +138,7 @@ let dispV = if abs(red8 + 0.3) < 1.0e-10 && abs(imd8) < 1.0e-12 then "INVARIANT_
 // EXPECT: red6 = -0.150000000000001
 // EXPECT: imd6 = 0.988685996664263
 // EXPECT: red8 = -0.299999999999994
-// EXPECT: imd8 = 0
+// EXPECT: imd8 = 0.0
 // EXPECT: devD = 2.56739074444567e-14
 // EXPECT: lattV = "DAMPED_LATTICE_EXACT"
 // EXPECT: dispV = "INVARIANT_DISPLACED_TO_MINUS_2GAMMA"

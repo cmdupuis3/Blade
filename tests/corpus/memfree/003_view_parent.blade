@@ -22,6 +22,6 @@ let rec traj: Array<Float like Steps, C> =
     | prefix :: n -> prefix :: vbump(prefix(n - 1), n)
 let fin = traj((4 : Steps))
 let mass = reduce(fin, (+))
-// EXPECT: traj = [1, 2, 3, 4, 1.13, 2.26, 3.39, 4.52, 1.39, 2.65, 3.91, 5.17, 1.78, 3.17, 4.56, 5.95, 2.3, 3.82, 5.34, 6.86]
+// EXPECT: traj = [1.0, 2.0, 3.0, 4.0, 1.13, 2.26, 3.39, 4.52, 1.39, 2.65, 3.91, 5.17, 1.78, 3.17, 4.56, 5.95, 2.3, 3.82, 5.34, 6.86]
 // EXPECT: fin = [2.3, 3.82, 5.34, 6.86]
 // EXPECT: mass = 18.32

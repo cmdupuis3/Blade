@@ -12,4 +12,4 @@ let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 let evens = mask(xs, lambda(x) -> x > 2.0)
 let ev = compound(xs, evens)
 let total = reduce(ev, (+))
-// EXPECT: total = 18
+// EXPECT: total = 18.0

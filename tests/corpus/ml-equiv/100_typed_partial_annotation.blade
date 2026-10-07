@@ -62,6 +62,6 @@ function twice_tight(x: Array<Float like IrrepsIdx<S>>)
 let xv = [1.0, 4.0, 0.0 - 2.0, 6.0]
 
 let p = twice_partial(xv)
-// EXPECT: p = [2, 8, -4, 12]
+// EXPECT: p = [2.0, 8.0, -4.0, 12.0]
 let t = twice_tight(xv)
-// EXPECT: t = [2, 8, -4, 12]
+// EXPECT: t = [2.0, 8.0, -4.0, 12.0]

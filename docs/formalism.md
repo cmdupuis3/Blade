@@ -848,16 +848,16 @@ application nothing ever reaches is read as a function.
 function first(c) = c(0) + 1.0
 let a = first([1.0, 2.0, 3.0])
 let b = first(lambda(i) -> 10.0 * Float64(i))
-// EXPECT: a = 2
-// EXPECT: b = 1
+// EXPECT: a = 2.0
+// EXPECT: b = 1.0
 ```
 
 ```blade
 let u = lambda(c) -> c(0) + 1.0
 let ua = u([1.0, 2.0, 3.0])
 let ub = u(lambda(i) -> 10.0 * Float64(i))
-// EXPECT: ua = 2
-// EXPECT: ub = 1
+// EXPECT: ua = 2.0
+// EXPECT: ub = 1.0
 ```
 
 An application of such an application's result (`c(i)(j)`) continues the same
@@ -874,8 +874,8 @@ function f1(j: Int64) = 10.0 + Float64(j)
 function pick(i: Int64) = if i == 0 then f0 else f1
 let a = cc([[1.0, 2.0], [3.0, 4.0]])
 let b = cc(pick)
-// EXPECT: a = 2
-// EXPECT: b = 1
+// EXPECT: a = 2.0
+// EXPECT: b = 1.0
 ```
 
 **Lambda arguments.** A lambda literal passed where the callee DECLARES a
@@ -898,7 +898,7 @@ ONE tuple writes the tuple as its one parameter: `((A, B)) -> C`, or
 ```blade
 function ap2(f: (Float64^1, Float64) -> Float64, x: Float64^1, s: Float64) = f(x, s)
 let t = ap2(lambda(v, k) -> reduce(v, (+)) * k, [1.0, 2.0], 3.0)
-// EXPECT: t = 9
+// EXPECT: t = 9.0
 ```
 
 ```blade
@@ -906,8 +906,8 @@ function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
 let r = ap(lambda(v) -> reduce(v * 2.0, (+)), [1.0, 2.0])
 let g = lambda(v) -> v(0) + v(1)
 let s = ap(g, [3.0, 4.0])
-// EXPECT: r = 6
-// EXPECT: s = 7
+// EXPECT: r = 6.0
+// EXPECT: s = 7.0
 ```
 
 **Poly-indexing** **(planned)**: `A(indices)` with a tuple of length rank(A);

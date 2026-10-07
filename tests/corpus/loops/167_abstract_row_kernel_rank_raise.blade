@@ -27,10 +27,10 @@ let B: Array<Float like Idx<3>, Idx<5>> = [[1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 4.0,
 
 // Row in, row out: means are 3, 6 and 2.8.
 let centered = method_for(B) <@> lambda(r: T^1) -> r - mean(r) |> compute
-// EXPECT: centered = [[-2, -1, 0, 1, 2], [-4, -2, 0, 2, 4], [0.2, -1.8, 1.2, -1.8, 2.2]]
+// EXPECT: centered = [[-2.0, -1.0, 0.0, 1.0, 2.0], [-4.0, -2.0, 0.0, 2.0, 4.0], [0.2, -1.8, 1.2, -1.8, 2.2]]
 
 // The same kernel as a NAMED function, which reaches the seam through a
 // different arm (eta-surfaced rather than an inline lambda) and must agree.
 function center(r: T^1) -> T^1 = r - mean(r)
 let centered2 = method_for(B) <@> center |> compute
-// EXPECT: centered2 = [[-2, -1, 0, 1, 2], [-4, -2, 0, 2, 4], [0.2, -1.8, 1.2, -1.8, 2.2]]
+// EXPECT: centered2 = [[-2.0, -1.0, 0.0, 1.0, 2.0], [-4.0, -2.0, 0.0, 2.0, 4.0], [0.2, -1.8, 1.2, -1.8, 2.2]]

@@ -26,7 +26,7 @@ let n_centered_none = extents(centered_none)
 
 let x = [1.0, 2.0, 3.0, 6.0]
 let centered = center(x)
-// EXPECT: centered = [-2, -1, 0, 3]
+// EXPECT: centered = [-2.0, -1.0, 0.0, 3.0]
 
 // A row whose emptiness only RUN TIME knows (no element of `x` is in `far`):
 // here the body is not specialized on a literal extent, so it is the guard
@@ -37,7 +37,7 @@ let n_centered_common = extents(center(common))
 // EXPECT: n_centered_common = 0
 let some = intersect(x, [2.0, 6.0, 9.0])
 let centered_some = center(some)
-// EXPECT: centered_some = [-2, 2]
+// EXPECT: centered_some = [-2.0, 2.0]
 
 // The array operand a CALL (its type is known at lowering, so this is the
 // second late rewrite): the call is bound first, the mean under ITS extent.
@@ -46,12 +46,12 @@ function shifted(v: T^1) -> T^1 = doubled(v) - lmean(v)
 let n_shifted_common = extents(shifted(common))
 // EXPECT: n_shifted_common = 0
 let shifted_some = shifted(some)
-// EXPECT: shifted_some = [0, 8]
+// EXPECT: shifted_some = [0.0, 8.0]
 
 // The scalar on the LEFT of the operator.
 function reflect(v: T^1) -> T^1 = lmean(v) - v
 let reflected = reflect(x)
-// EXPECT: reflected = [2, 1, 0, -3]
+// EXPECT: reflected = [2.0, 1.0, 0.0, -3.0]
 let n_reflected_none = extents(reflect(none))
 // EXPECT: n_reflected_none = 0
 
@@ -64,10 +64,10 @@ let c = cov(x, w)
 // An invariant holding a late broadcast of its own.
 function twice_centered(v: T^1) -> T^1 = v - lmean(v - lmean(v))
 let twice = twice_centered(x)
-// EXPECT: twice = [1, 2, 3, 6]
+// EXPECT: twice = [1.0, 2.0, 3.0, 6.0]
 
 // Reached through a kernel, where the row's extent is not a literal: the
 // guard is a run-time test of the row being mapped.
 let M: Array<Float64 like Idx<2>, Idx<4>> = [[1.0, 2.0, 3.0, 6.0], [2.0, 4.0, 6.0, 8.0]]
 let rows_centered = method_for(M) <@> center |> compute
-// EXPECT: rows_centered = [[-2, -1, 0, 3], [-3, -1, 1, 3]]
+// EXPECT: rows_centered = [[-2.0, -1.0, 0.0, 3.0], [-3.0, -1.0, 1.0, 3.0]]

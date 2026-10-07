@@ -9,9 +9,9 @@
 // per kind (functions/213), in both lanes.
 let u = lambda(c) -> c(0) + 1.0
 let w = u([5.0, 6.0])
-// EXPECT: w = 6
+// EXPECT: w = 6.0
 let w2 = u(lambda(i) -> Float64(i))
-// EXPECT: w2 = 1
+// EXPECT: w2 = 1.0
 // A third call, an array of another length: the array instance again.
 let w3 = u([7.0, 8.0, 9.0])
-// EXPECT: w3 = 8
+// EXPECT: w3 = 8.0

@@ -12,6 +12,6 @@ let a2 = amp(3.0, 10.0: gain)
 function span(len: Float<meter>, pad: Float<meter> = 0.5) -> Float<meter> = len + pad
 let L: Float<meter> = 2.0
 let s = span(L)
-// EXPECT: a1 = 9
-// EXPECT: a2 = 13
+// EXPECT: a1 = 9.0
+// EXPECT: a2 = 13.0
 // EXPECT: s = 2.5

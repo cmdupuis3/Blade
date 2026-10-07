@@ -9,6 +9,6 @@
 let g = lambda(i) -> 10.0 * Float64(i)
 function first(c) = c(0) + 1.0
 let d = first(g)
-// EXPECT: d = 1
+// EXPECT: d = 1.0
 let e = first(lambda(i) -> 10.0 * Float64(i + 2))
-// EXPECT: e = 21
+// EXPECT: e = 21.0

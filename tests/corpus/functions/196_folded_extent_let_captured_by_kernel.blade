@@ -12,7 +12,7 @@ function fold_plus_n(x: T^1) -> Float64 = {
     reduce(x, lambda(a, b) -> a + b + Float64(n))
 }
 let r = fold_plus_n([1.0, 2.0, 3.0, 4.0])
-// EXPECT: r = 22
+// EXPECT: r = 22.0
 
 // The same capture reached through a centered map (functions/055's shape),
 // where the mean's fold leaves the nest in a helper that captures `n`.
@@ -21,4 +21,4 @@ function centered_sum_sq(x: T^1) = {
     prodsum(x - reduce(x, (+)) / n, x - reduce(x, (+)) / n)
 }
 let ss = centered_sum_sq([1.0, 2.0, 3.0, 4.0])
-// EXPECT: ss = 5
+// EXPECT: ss = 5.0

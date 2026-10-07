@@ -8,22 +8,22 @@
 // let-bound lambda fit the same slot.
 function ap2(f: (Float64^1, Float64) -> Float64, x: Float64^1, s: Float64) = f(x, s)
 let r = ap2(lambda(v, k) -> reduce(v, (+)) * k, [1.0, 2.0], 3.0)
-// EXPECT: r = 9
+// EXPECT: r = 9.0
 let ra = ap2(lambda(v: Float64^1, k: Float64) -> reduce(v, (+)) * k, [1.0, 2.0], 3.0)
-// EXPECT: ra = 9
+// EXPECT: ra = 9.0
 function mul(v: Float64^1, k: Float64) = reduce(v, (+)) * k
 let rn = ap2(mul, [1.0, 2.0], 4.0)
-// EXPECT: rn = 12
+// EXPECT: rn = 12.0
 let g = lambda(v, k) -> v(0) - k
 let rl = ap2(g, [10.0, 2.0], 4.0)
-// EXPECT: rl = 6
+// EXPECT: rl = 6.0
 
 // Three slots, generic over the element type.
 function ap3(f: (T, T, T) -> T, a: T, b: T, c: T) -> T = f(a, b, c)
 let r3 = ap3(lambda(x, y, z) -> x - y - z, 10, 2, 3)
 // EXPECT: r3 = 5
 let r3f = ap3(lambda(x, y, z) -> x - y - z, 10.0, 2.0, 3.0)
-// EXPECT: r3f = 5
+// EXPECT: r3f = 5.0
 
 // A curried arrow is written as one: `A -> B -> C`.
 function apc(f: Int64 -> Int64 -> Float64, i: Int64, j: Int64) = f(i)(j)
@@ -31,4 +31,4 @@ function neg(j: Int64) = -Float64(j)
 function twice(j: Int64) = 2.0 * Float64(j)
 function pickf(i: Int64) = if i == 0 then neg else twice
 let rc = apc(pickf, 1, 7)
-// EXPECT: rc = 14
+// EXPECT: rc = 14.0
