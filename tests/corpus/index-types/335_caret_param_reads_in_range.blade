@@ -1,0 +1,37 @@
+// TEST: Caret parameter reads in range, named and anonymous callers
+// The in-range side of index-types/330-334: every shape reads the right cell
+// through its array instance (a named axis) or the generic declaration (an
+// anonymous one), and the same function serves both kinds of caller.
+type L = Idx<3>
+type K = Idx<2>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+let M: Array<Float64 like L, K> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let v = [10.0, 20.0, 30.0, 40.0]
+
+function g(m: T^1, k: Int64) = m(k)
+function g2(m: T^2, i: Int64, j: Int64) = m(i, j)
+function gc(m: Float64^1, k: Int64) = m(k)
+function h(m: T^1, k: Int64) = g(m, k) + 1.0
+function pk(Q: Poly<T^1>) -> T^0 = Q[0](extents(Q[1]) - 1)
+// A kernel inside the body: `k + j` is a position, guarded in the instance.
+function window(m: T^1, k: Int64) = method_for(0..2) <@> lambda(j) -> m(k + j)
+
+let a = g(A, 2)
+// EXPECT: a = 3
+let b = g2(M, 2, 1)
+// EXPECT: b = 6
+let c = gc(A, 0)
+// EXPECT: c = 1
+let d = h(A, 1)
+// EXPECT: d = 3
+let e = pk(v, A)
+// EXPECT: e = 30
+let e2 = pk(A, M(0))
+// EXPECT: e2 = 2
+let f = g(v, 3)
+// EXPECT: f = 40
+let w = window(A, 1) |> compute
+// EXPECT: w = [2, 3]
+let rr = method_for(range<L>) <@> lambda(i) -> g(A, Int64(i))
+let tt = reduce(rr, (+))
+// EXPECT: tt = 6

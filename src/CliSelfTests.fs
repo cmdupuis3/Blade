@@ -3529,6 +3529,12 @@ and internal dispatchTestClean (rest: string list) : int =
         // Pure lowering + codegen, no toolchain.
         let failed = (Blade.Tests.FlatPathTests.runFlatPathTests ()).Failed
         if failed = 0 then 0 else 1
+    | [ "instance-guards" ] | [ "instanceguards" ] ->
+        // Which caret-parameter reads carry a BL8006 guard: the array
+        // instance at a named axis does, a proven position and an anonymous
+        // caller do not. Pure lowering + codegen, no toolchain.
+        let failed = (Blade.Tests.IndexTypes.runInstanceGuardEmissionTests ()).Failed
+        if failed = 0 then 0 else 1
     | [ "access" ] ->
         // The halo access record and the reverse-mode halo route
         // differential: gather vs scatter, byte-for-byte on the same

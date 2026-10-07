@@ -1,0 +1,14 @@
+// TEST: A position computed from another index type is an integer
+// `(k * 8) / 4` over range<Half> is a POSITION (formalism 3.10): a plain
+// integer, though its node took Nat<Half> from the open kernel parameter.
+// Into f64's Src slot it was refused as a foreign index (BL4003 "slot
+// expects 'Src' but argument has type 'Half'"); it is the untagged integer
+// it is -- the advice warning, and a run-time guard against Src. The same
+// read through a generic `Array<T like Idx<n>>` parameter (functions/121) is
+// judged so in the parameter's array instance at f64's type.
+// WARN: BL4003
+type Half = Idx<4>
+type Src = Idx<8>
+let f64: Array<Float64 like Src> = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
+let y = (method_for(range<Half>) <@> lambda(k) -> f64((k * 8) / 4)) |> compute
+// EXPECT: y = [0.5, 2.5, 4.5, 6.5]

@@ -15758,6 +15758,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
     // are re-minted as this declaration's own (generic, minted after
     // sigVarLo), so the instance is generic in them exactly as a `T^k`
     // parameter is.
+    let fixedInst = System.Collections.Generic.Dictionary<int, IRType>()
     let fixedErr =
         fixedParams |> Map.toList |> List.tryPick (fun (i, t) ->
             if i >= paramTypes.Length then None
@@ -15777,9 +15778,23 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                          | _ -> ())
                         (v, f))
                     |> Map.ofList
-                match unify env.Subst paramTypes.[i] (substInferVars mapping t) with
-                | Ok () -> None
+                let inst = substInferVars mapping t
+                match unify env.Subst paramTypes.[i] inst with
+                | Ok () ->
+                    fixedInst.[i] <- inst
+                    None
                 | Error e -> Some e)
+    // The fixed parameter IS the array: a declared array type with an
+    // unnamed axis (`m: Float64^1`) unifies with the argument's named one
+    // without becoming it, and the instance exists to read the NAMED axis.
+    let paramTypes =
+        paramTypes |> List.mapi (fun i p ->
+            match fixedInst.TryGetValue i with
+            | true, inst ->
+                (match p with
+                 | IRTInfer _ -> p          // bound to the array by the unify
+                 | _ -> inst)
+            | _ -> p)
     if fixedErr.IsSome then
         env.Subst.PopTypeVarScope(savedScope)
         Error fixedErr.Value
@@ -16156,9 +16171,16 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             settleDeclArrowApps env funcVarId paramTypes |> Result.bind (fun () ->
             // ...and its ARRAY INSTANCES are checked from this source, in
             // this environment (checkArrowVariant); an instance's own entry
-            // is re-pointed at its origin there.
+            // is re-pointed at its origin there. So are those of a
+            // declaration reading an UNNAMED axis of an array parameter at a
+            // computed position (noteAxisSubscriptParams): a call passing a
+            // NAMED axis there is the call of such an instance, whose read is
+            // guarded or proven against the name.
+            if funcDecl.IsStatic then env.FuncAxisSubscriptParams.Remove funcVarId |> ignore
+            else noteAxisSubscriptParams env funcVarId typedParams tBody
             env.ArrowDeclSources.Remove funcVarId |> ignore
-            if env.FuncArrowObligations.ContainsKey funcVarId then
+            if env.FuncArrowObligations.ContainsKey funcVarId
+               || env.FuncAxisSubscriptParams.ContainsKey funcVarId then
                 env.ArrowDeclSources.[funcVarId] <- (funcDecl, envWithFunc, fixedParams, funcVarId)
             pinSubscriptParams env (funcDecl.Params |> List.map (fun p -> p.Type.IsNone)) typedParams tBody
             unify env.Subst tBody.Type retType |> Result.bind (fun () ->

@@ -1,0 +1,12 @@
+// TEST: Caret parameter forwarded to a reading function is guarded (aborts)
+// h never subscripts `m` itself: it hands it to g, which does. h is recorded
+// as reading m's axis through g, so `h(A, 5)` calls h's array instance at
+// A's type, whose call `g(m, k)` passes the named axis on and calls g's
+// instance in turn -- the read inside g is guarded against L. (Without the
+// forwarding rule it read past A and printed garbage + 1.)
+// ABORT: index out of bounds: a position outside L
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function g(m: T^1, k: Int64) = m(k)
+function h(m: T^1, k: Int64) = g(m, k) + 1.0
+let s = h(A, 5)

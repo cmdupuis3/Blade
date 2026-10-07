@@ -1,0 +1,10 @@
+// TEST: Concrete-element caret parameter read past a named axis (aborts)
+// `m: Float64^1` fixes the element but not the axis: the same anonymous axis
+// as `T^1` (index-types/330). Its array instance takes the argument's type
+// as the parameter's -- a declared unnamed axis meets a named one without
+// becoming it -- so the read is guarded against L.
+// ABORT: index out of bounds: a position outside L
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function g(m: Float64^1, k: Int64) = m(k)
+let s = g(A, 5)

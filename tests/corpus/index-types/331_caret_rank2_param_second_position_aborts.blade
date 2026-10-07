@@ -1,0 +1,10 @@
+// TEST: Caret rank-2 parameter read past its second named axis (aborts)
+// The rank-2 twin of index-types/330: `m: T^2` read at two computed
+// positions, the first in range, the second past K. Each position is guarded
+// against its own axis in the array instance of g at M's type.
+// ABORT: index out of bounds: a position outside K
+type L = Idx<3>
+type K = Idx<2>
+let M: Array<Float64 like L, K> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+function g(m: T^2, i: Int64, j: Int64) = m(i, j)
+let s = g(M, 1, 7)

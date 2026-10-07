@@ -585,7 +585,19 @@ type TypeEnv = {
     /// (ArrowObligation), judged and typed per call. Keyed by id like
     /// FuncSigVarRange. Shared by reference.
     FuncArrowObligations: System.Collections.Generic.Dictionary<IRId, ArrowObligation list>
-    /// Function BINDER ID (of a declaration with ArrowObligations) -> what its
+    /// Function BINDER ID -> the positions of its ARRAY parameters whose
+    /// UNNAMED axes (a `T^k` or `Float64^k` caret's, an anonymous `Idx<n>`)
+    /// the body subscripts at a computed position -- directly, or by handing
+    /// the parameter to such a position of another declaration. Inside the
+    /// generic body that read is into an anonymous axis, which no guard
+    /// covers (formalism 3.10); a call passing an array with a NAMED axis
+    /// there is the call of an ARRAY INSTANCE (ArrowVariant) instead,
+    /// checked with the parameter typed as that array, so the read is a
+    /// subscript into the named axis: proven, or guarded (BL8006). Keyed by
+    /// id like FuncSigVarRange. Shared by reference.
+    FuncAxisSubscriptParams: System.Collections.Generic.Dictionary<IRId, Set<int>>
+    /// Function BINDER ID (of a declaration with ArrowObligations, or with
+    /// FuncAxisSubscriptParams) -> what its
     /// array instances are checked from: the SOURCE declaration, the
     /// environment it was checked in (its own name bound), the parameter types
     /// already fixed (an array instance's own instances keep its arrays), and
@@ -729,7 +741,8 @@ let emptyEnv () = {
     CurrentGenericObligations = None
     PendingArrowApps = ResizeArray<ArrowApplication>()
     FuncArrowObligations = System.Collections.Generic.Dictionary<IRId, ArrowObligation list>()
-    ArrowDeclSources = System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * Map<int, IRType> * IRId>()
+    FuncAxisSubscriptParams = System.Collections.Generic.Dictionary<IRId, Set<int>>()
+    ArrowDeclSources =System.Collections.Generic.Dictionary<IRId, FunctionDecl * TypeEnv * Map<int, IRType> * IRId>()
     ArrowVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
     ArrowVariantDecls = ResizeArray<IRId * TypedDecl>()
     ArrowRetargets = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)

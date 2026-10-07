@@ -1551,7 +1551,19 @@ let internal checkArrayIndexTags (env: TypeEnv) (tArr: TypedExpr) (arrTy: IRArra
                && ((subscriptStaticExtent env idxType).IsSome || (compactCoordExtent idxType).IsSome) then None else
             match idxType.Tag with
             | Some tagName when not (tagName.StartsWith("__")) ->
-                match env.Subst.Resolve tArg.Type with
+                // A POSITION (arithmetic on an index value) is a plain integer,
+                // whatever tag its node took from an open kernel parameter
+                // (`lambda(k) -> a((k * na) / 4)` over range<Half>, `a` over
+                // Src): judged as the untagged integer it is, and guarded at
+                // run time (Zonk), never refused as a foreign index. (One
+                // carrying the slot's own tag stays as it was: guarded, no
+                // advice.)
+                let argTy =
+                    match env.Subst.Resolve tArg.Type with
+                    | IRTIdxTagged (inner, IRefNamed n)
+                        when n <> tagName && isIndexPositionExpr tArg -> inner
+                    | t -> t
+                match argTy with
                 | IRTIdxTagged (_, IRefNamed argName)
                     when argName = tagName -> None
                 | IRTIdxTagged (_, IRefNamed argName) ->
@@ -3491,6 +3503,92 @@ let internal arrowInstanceKey (subst: Subst) (origin: IRId) (fixedTys: Map<int, 
     let parts = fixedTys |> Map.toList |> List.map (fun (i, t) -> $"{i}=%A{norm t}")
     $"""{origin}|{String.concat ";" parts}"""
 
+/// A slot of a user-NAMED plain index type: the slots whose computed
+/// subscripts zonk guards (formalism 3.10).
+let internal namedPlainAxis (ix: IRIndexType) =
+    match ix.Tag with
+    | Some t -> not (t.StartsWith "__") && ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1
+    | None -> false
+
+/// The ARRAY PARAMETERS of a declaration whose UNNAMED axes its body reads at
+/// a COMPUTED position (TypeEnv.FuncAxisSubscriptParams), recorded once the
+/// body is typed. Inside the generic body such a read is into an anonymous
+/// axis -- `function g(m: T^1, k: Int64) = m(k)` -- which nothing guards;
+/// the IR specializations that later give the axis a caller's NAME do not
+/// place guards. So a call handing that parameter an array with a named axis
+/// is the call of an ARRAY INSTANCE (arrowArrayArgs), the declaration checked
+/// again with the parameter typed as that array: the read is then a subscript
+/// into the named axis, proven or guarded (BL8006) like any other. A
+/// parameter is recorded when
+///   * the body subscripts it (or a partial read of it) at an unnamed plain
+///     slot with anything but a literal or a wildcard -- a literal is already
+///     checked against the array's own extent at run time (formalism 3.10
+///     rule 3), and a proven position stays proven in the instance, where
+///     zonk places no guard on it;
+///   * the body hands it (or a partial read of it) to a parameter of another
+///     declaration that is recorded so -- the instance of THIS declaration
+///     then makes that call with a named array, which makes the callee's
+///     instance in turn.
+/// Positions the body applies as ARROWS are FuncArrowObligations' business.
+let internal noteAxisSubscriptParams (env: TypeEnv) (funcVarId: IRId) (parms: TypedParam list) (body: TypedExpr) : unit =
+    let byVar = parms |> List.map (fun p -> (p.VarId, p.Index)) |> Map.ofList
+    let rec rootParam (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (_, vid, _) -> Map.tryFind vid byVar
+        | TExprIndex (a, _, _) -> rootParam a
+        | _ -> None
+    let found = System.Collections.Generic.HashSet<int>()
+    let isLiteral (a: TypedExpr) =
+        match a.Kind with
+        | TExprLit (Blade.Ast.LitInt _) -> true
+        | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt _) }) -> true
+        | _ -> false
+    let rec walk (e: TypedExpr) =
+        (match e.Kind with
+         | TExprIndex (arr, idxs, _) ->
+             (match rootParam arr, env.Subst.Resolve arr.Type with
+              | Some i, ArrayElem at when not (idxs |> List.exists (fun a -> a.Kind.IsTExprTuple)) ->
+                  let computedIntoUnnamed =
+                      subscriptSlotPairs at idxs
+                      |> List.exists (fun (a, ix) ->
+                          ix.Tag.IsNone && ix.IxKind = IxKPlain && ix.Symmetry = SymNone
+                          && not (isLiteral a) && not a.Kind.IsTExprWildcard)
+                  if computedIntoUnnamed then found.Add i |> ignore
+              | _ -> ())
+         | TExprApp (f, args) ->
+             (match calleeDeclId env f with
+              | Some fid ->
+                  (match env.FuncAxisSubscriptParams.TryGetValue fid with
+                   | true, ps ->
+                       args |> List.iteri (fun j a ->
+                           if ps.Contains j then
+                               match rootParam a with
+                               | Some i -> found.Add i |> ignore
+                               | None -> ())
+                   | _ -> ())
+              | None -> ())
+         | _ -> ())
+        typedExprChildren e |> List.iter walk
+    walk body
+    // Only a parameter that is an ARRAY with an unnamed plain axis can meet a
+    // named one at a call -- or a `T^k` caret the body never shaped itself
+    // (it only forwards it), still its arity-k variable.
+    let recorded =
+        found |> Seq.filter (fun i ->
+            match parms |> List.tryFind (fun p -> p.Index = i) with
+            | Some p ->
+                (match IR.stripUnits (env.Subst.Resolve p.Type) with
+                 | ArrayElem at ->
+                     at.IndexTypes |> List.exists (fun ix ->
+                         ix.Tag.IsNone && ix.IxKind = IxKPlain && ix.Symmetry = SymNone)
+                 | IRTInfer vid -> env.Subst.GetArityConstraint vid |> Option.exists (fun k -> k >= 1)
+                 | _ -> false)
+            | None -> false)
+        |> Set.ofSeq
+    env.FuncAxisSubscriptParams.Remove funcVarId |> ignore
+    if not recorded.IsEmpty then
+        env.FuncAxisSubscriptParams.[funcVarId] <- recorded
+
 /// The ARRAY INSTANCE a call needs: the callee's arrow parameters
 /// (TypeEnv.FuncArrowObligations) this call hands an ARRAY, each with its
 /// argument's type. None when there is none, or -- with `settled` -- when such
@@ -3501,9 +3599,12 @@ let internal arrowArrayArgs (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr 
                             : (IRId * Map<int, IRType>) option =
     match calleeDeclId env tFunc with
     | None -> None
+    | Some fid when not (env.ArrowDeclSources.ContainsKey fid) -> None
     | Some fid ->
-    match env.FuncArrowObligations.TryGetValue fid with
-    | true, obs when not obs.IsEmpty && env.ArrowDeclSources.ContainsKey fid ->
+    let obs = match env.FuncArrowObligations.TryGetValue fid with | true, obs -> obs | _ -> []
+    let axisParams = match env.FuncAxisSubscriptParams.TryGetValue fid with | true, s -> s | _ -> Set.empty
+    if obs.IsEmpty && axisParams.IsEmpty then None
+    else
         let subst = env.Subst
         let rootOf (t: IRType) =
             match subst.Resolve t with
@@ -3520,12 +3621,26 @@ let internal arrowArrayArgs (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr 
                 paramTys |> List.tryFindIndex (fun p -> h.IsSome && rootOf p = h))
             |> List.distinct
             |> List.filter (fun i -> i < tArgs.Length)
-        let arrays =
+        let arrowArrays =
             positions |> List.choose (fun i ->
                 let t = subst.Resolve (List.item i tArgs).Type
                 match IR.stripUnits t with
                 | ArrayElem _ -> Some (i, t)
                 | _ -> None)
+        // An array parameter whose unnamed axis the body subscripts at a
+        // computed position (FuncAxisSubscriptParams), handed an array with a
+        // NAMED axis: only such an argument needs the instance -- an
+        // anonymous one keeps the generic declaration (an anonymous axis is
+        // not guarded, formalism 3.10).
+        let axisArrays =
+            axisParams |> Set.toList
+            |> List.filter (fun i -> i < tArgs.Length && not (List.contains i positions))
+            |> List.choose (fun i ->
+                let t = subst.Resolve (List.item i tArgs).Type
+                match IR.stripUnits t with
+                | ArrayElem at when at.IndexTypes |> List.exists namedPlainAxis -> Some (i, t)
+                | _ -> None)
+        let arrays = arrowArrays @ axisArrays
         let unsettled =
             settled
             && arrays |> List.exists (fun (_, t) ->
@@ -3533,7 +3648,6 @@ let internal arrowArrayArgs (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr 
                 |> Set.exists (fun v -> not (subst.IsPolymorphicId v) && (subst.GetLiteralDefault v).IsNone))
         if arrays.IsEmpty || unsettled then None
         else Some (fid, Map.ofList arrays)
-    | _ -> None
 
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.

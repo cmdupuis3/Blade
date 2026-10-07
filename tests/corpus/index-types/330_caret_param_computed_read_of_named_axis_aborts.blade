@@ -1,0 +1,13 @@
+// TEST: Caret parameter computed read of a named axis is guarded (aborts)
+// `m: T^1` is generic: inside g its axis is anonymous, and an anonymous axis
+// is not guarded (formalism 3.10). The call hands it A, whose axis is the
+// NAMED L -- and the specialization that gave the axis L's name placed no
+// guard, so `g(A, 5)` read past A and printed garbage. A call passing a named
+// axis to a parameter the body reads at a computed position is the call of an
+// ARRAY INSTANCE of g, checked with `m` typed as A: the read is a subscript
+// into L, and the Int64 position is guarded (BL8006), in both lanes.
+// ABORT: index out of bounds: a position outside L
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function g(m: T^1, k: Int64) = m(k)
+let s = g(A, 5)

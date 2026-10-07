@@ -390,6 +390,22 @@ let private enumKeyOrdinal (ix: IRIndexType) (a: TypedExpr) : TypedExpr option =
         | _ -> None
     | _ -> None
 
+/// An element of a parameter pack, `P[0]` with `P: Poly<..>`.
+let private isPackElement (arr: TypedExpr) =
+    match arr.Kind with
+    | TExprTupleIndex ({ Kind = TExprVar _; Type = pt }, { Kind = TExprLit (Blade.Ast.LitInt _) }) ->
+        (match IR.stripUnits pt with
+         | IRTPoly _ -> true
+         | _ -> false)
+    | _ -> false
+
+/// A subscript some guard already covers -- an emitted index cast or guard --
+/// or a halo window read (isProvenIndex's non-variable cases).
+let private guardedOrHaloIndex (a: TypedExpr) =
+    match a.Kind with
+    | TExprVar _ | TExprLit _ -> false
+    | _ -> isProvenIndex None a
+
 /// Wrap the unproven subscripts of one (zonked) read in their guards.
 let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
     let synthetic = match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> false
@@ -433,6 +449,24 @@ let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr 
                                      && (runtimeExtent a k).IsSome ->
                 let shown = match ix.Tag with Some t -> $"{t} (its extent)" | None -> "the array's extent"
                 guardIndex a (runtimeExtent a k).Value $"a literal position outside {shown}"
+            // A COMPUTED position into an element of a parameter PACK
+            // (`P[0](k)`, `P: Poly<T^1>`). The element's axis is unnamed here,
+            // but the arity specialization hands it each caller's array --
+            // a NAMED axis included, whose reads formalism 3.10 guarantees --
+            // and no guard is placed after zonk. A plain declaration's
+            // parameter gets an ARRAY INSTANCE per named axis instead
+            // (TypeEnv.FuncAxisSubscriptParams); a pack's elements cannot be
+            // fixed one by one, so the read is checked against the element's
+            // own extent for every caller, named or anonymous alike.
+            | IxKPlain, SymNone when ix.Rank <= 1
+                                     && ix.Tag.IsNone
+                                     && isPackElement arr
+                                     && not (isLiteralIndex a)
+                                     && not a.Kind.IsTExprWildcard
+                                     && not (mentionsReservedName a)
+                                     && not (guardedOrHaloIndex a)
+                                     && (runtimeExtent a k).IsSome ->
+                guardIndex a (runtimeExtent a k).Value "a position outside the pack element's extent"
             | _ ->
             match guardableSlot ix with
             | Some tag when not a.Kind.IsTExprWildcard

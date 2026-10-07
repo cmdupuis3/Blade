@@ -703,7 +703,14 @@ DATA, including a kernel parameter the loop feeds from such an array) -- is
 checked. A string key subscripting a string `EnumIdx` slot is mapped to its
 label's ordinal, a key that is no label stopping with BL8006. The checks
 are what the BL4003 untagged-integer advice points at: iterating with `range<I>` (or `halo<I, ...>` for neighbors)
-removes them. Not covered: a computed subscript into an ANONYMOUS index slot
+removes them. The guarantee follows a named array into a generic parameter:
+an array parameter whose UNNAMED axis (`m: T^1`, `Float64^1`, an anonymous
+`Idx<n>`) the body reads at a computed position -- or hands to a parameter
+that does -- is checked again for each call passing a NAMED axis there, as
+an ARRAY INSTANCE (§4.3) with the parameter typed as the argument, so the
+read is judged, proven or guarded against the name; a parameter pack's
+element (`P[0](k)`) is checked against its own extent for every caller. Not
+covered: a computed subscript into an ANONYMOUS index slot
 (an array without a named index type) is not checked -- name the index type
 to get the guarantee; compact, compound, sparse and ragged slots keep their
 own disciplines (a compact group's LITERAL coordinates are range-checked at

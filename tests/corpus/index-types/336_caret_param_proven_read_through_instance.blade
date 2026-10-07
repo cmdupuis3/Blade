@@ -1,0 +1,18 @@
+// TEST: Caret parameter read at a proven index of its named axis
+// `k: Nat<L>` read into `m: T^1`: in the array instance at A's type the
+// read is into L at a parameter of exactly L -- PROVEN, no guard (the
+// caller's argument went through the call's own check: an iteration index
+// of range<L> here, a compile-time-checked literal below). `Nat<_>` accepts
+// any index type, so its read is guarded; in range, the values agree.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+function g(m: T^1, k: Nat<L>) = m(k)
+function gw(m: T^1, k: Nat<_>) = m(k)
+let r = method_for(range<L>) <@> lambda(i) -> g(A, i)
+let t = reduce(r, (+))
+// EXPECT: t = 6
+let u = g(A, 2)
+// EXPECT: u = 3
+let r2 = method_for(range<L>) <@> lambda(i) -> gw(A, i)
+let t2 = reduce(r2, (+))
+// EXPECT: t2 = 6

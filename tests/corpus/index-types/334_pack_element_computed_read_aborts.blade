@@ -1,0 +1,14 @@
+// TEST: Pack element computed read past its extent (aborts)
+// `Q[0](k)` over `Q: Poly<T^1>`: the element's axis is anonymous in the
+// body, and the arity specialization hands it each caller's array -- here
+// A, over the NAMED L. A pack's elements cannot be fixed one at a time the
+// way a plain parameter's array instance fixes it (index-types/330), so a
+// computed read of a pack element is checked against the element's own
+// extent for every caller. `extents(Q[1]) - 1` is 4 here: past A.
+// ABORT: index out of bounds: a position outside the pack element's extent
+type L = Idx<3>
+type K = Idx<5>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+let B: Array<Float64 like K> = [1.0, 2.0, 3.0, 4.0, 5.0]
+function pk(Q: Poly<T^1>) -> T^0 = Q[0](extents(Q[1]) - 1)
+let s = pk(A, B)

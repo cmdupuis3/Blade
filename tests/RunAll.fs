@@ -379,6 +379,13 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
     // see the decision, since eliding and gathering print the same numbers.
     // Pure codegen string checks — no toolchain — so it runs unconditionally.
     let gatherElision = Blade.Tests.Sqlish.runGatherElisionTests ()
+    // Array-instance subscript guards: a caret parameter read at a computed
+    // position is guarded in its instance at a NAMED axis, and only there --
+    // never at a proven position, never for an anonymous caller. The values
+    // and aborts are corpus-pinned (index-types/330-339); which reads carry
+    // a guard only the emission shows. Pure codegen string checks, no
+    // toolchain. (Also `blade test instance-guards`.)
+    let instanceGuards = Blade.Tests.IndexTypes.runInstanceGuardEmissionTests ()
     // Eigensolver dispatch (Phase 6 / Round B2): verifies `math.eigh` reaches
     // `blade_lapack::blade_eigh_*` gate-on (right precision AND right symmetry
     // family), that a complex operand's tuple is Q-complex/LAM-REAL, that the
@@ -535,7 +542,7 @@ let runAllTestsFullWith (extraBlocks: (unit -> Blade.Tests.TestHarness.BlockResu
         [ yield r1; yield r2; yield attrs; yield subst
           yield normalize; yield unify; yield validateArrow; yield displayFrames; yield grRender
           yield shape; yield oracles; yield orbRank; yield treeRank; yield wigner; yield symPower; yield polyOracle; yield lieTables; yield permSpec; yield permOracle; yield structIdxSpec; yield structIdxOracle; yield pointSpec; yield pgOracle; yield cartBridge; yield spans; yield diagCore; yield diagCorpus; yield certSuggest; yield repDiff; yield repCheck; yield repReject; yield alloc; yield orbWreath
-          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
+          yield ompPragma; yield linalgEmit; yield linalgProbe; yield blasTier; yield doctorBlock; yield setupBlock; yield factoryFlat; yield closureCapture; yield gatherElision; yield instanceGuards; yield lapackEmit; yield shapeSpec; yield flatPath; yield optimizeLayer; yield randMirror; yield accessLayer; yield moduleResolve; yield providerDesugar; yield runRecord
           match omp with Some b -> yield b | None -> ()
           match ompReduce with Some b -> yield b | None -> ()
           yield bufType

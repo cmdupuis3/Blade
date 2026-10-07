@@ -1,0 +1,11 @@
+// TEST: Caret parameter read with another named index type (rejects)
+// Inside the generic g a `Nat<K>` subscript into `m: T^1`'s anonymous axis
+// passes, so `g(A, ...)` with A over L used to compile and read A at K
+// positions -- past its 3 cells at 3 and 4. The array instance at A's type
+// reads L with a K index: the nominal refusal (formalism 3.10 rule 2).
+// ERROR: BL4003 @ 8:35
+type L = Idx<3>
+type K = Idx<5>
+function g(m: T^1, k: Nat<K>) = m(k)
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+let t = g(A, (2 : K))
