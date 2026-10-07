@@ -162,7 +162,8 @@ Requirements: .NET 10 SDK (F# 10); MSYS2 **ucrt64** g++ on PATH for anything tha
 One `.blade` file per test; pins are comments (grammar documented in `tests/corpus/README.md`):
 
 - `// TEST: <name>` — required first line; a `(rejects)` suffix is semantically load-bearing.
-- `// EXPECT: <var> = <value>` — pins a printed value.
+- `// EXPECT: <var> = <value>` — pins a printed value. Numbers are spelled as their type prints:
+  `2.0` for a float, `2` for an int (the harness checks the spelling class as well as the value).
 - `// ERROR: BLxxxx [@ l:c[-l:c]]`, `// ERROR-CONTAINS: <substring>`, `// ABORT: <substring>`,
   `// REJECT-AT: lower|codegen`.
 - `// WARN: BLxxxx` and `// WARN-CODEGEN: <substring>` are **strict in both directions**: an
