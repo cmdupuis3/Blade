@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <atomic>
 #include <type_traits>
+#include <locale>
 #if !defined(__CUDA_ARCH__)
 // ---- libm, evaluated at RUN TIME (docs/formalism.md section 2.4) ----------
 //
@@ -317,6 +318,70 @@ namespace blade_rt {
   // symbol the shadow-frame analysis cannot follow, so it keeps its frame.
   [[noreturn]] inline void dll_panic(const char* code, const char* msg) {
     panic(code, msg, nullptr, 0);
+  }
+
+  // ---- Typed float spelling: a floating value prints with a decimal point.
+  // `cout << 2.0` under setprecision(15) writes "2", the spelling of the
+  // Int64 2; Blade, like F#, keeps the decimal as the float/int
+  // differentiator in output as in source, so a defaultfloat rendering that
+  // is a bare digit run gains ".0" (`2.0`, `-3.0`, `0.0`, `-0.0`). Exponent
+  // forms (`1e+20`) and `nan`/`inf` cannot be an integer's spelling and pass
+  // through unchanged. Installed on cout by every generated main
+  // (typed_float_print) as a num_put facet, so EVERY double reaching cout
+  // gets it -- scalar bindings, array cells, struct fields, and each
+  // std::complex component (operator<< for complex formats through a stream
+  // imbued with cout's locale); a float promotes to double before reaching
+  // the facet. Other streams (display-frame JSON, provider writers) are not
+  // imbued and keep their own number rules. The interpreter's twin is
+  // src/Interp/CppFormat.fs markFloat; the LLVM lane's is blade_fmt_f64.
+  struct float_put : std::num_put<char> {
+    using base = std::num_put<char>;
+    using iter_type = base::iter_type;
+    using base::do_put;  // keep the integral/bool/pointer overloads visible
+  protected:
+    // A fixed sink for one rendering; overflow (never reached at the
+    // precisions marked here) leaves the iterator failed and the text cut.
+    struct sink : std::streambuf {
+      char b[128];
+      sink() { setp(b, b + sizeof b); }
+      std::size_t size() const { return static_cast<std::size_t>(pptr() - pbase()); }
+    };
+    template <class F>
+    iter_type put_marked(iter_type out, std::ios_base& io, char fill, F v) const {
+      // Only the defaultfloat layout drops the point; fixed/scientific/
+      // hexfloat and showpoint keep theirs, and a huge precision is left
+      // to the base facet rather than the fixed sink.
+      if ((io.flags() & (std::ios_base::floatfield | std::ios_base::showpoint)) != 0
+          || io.precision() > 64)
+        return base::do_put(out, io, fill, v);
+      const std::streamsize w = io.width(0);
+      sink s;
+      base::do_put(iter_type(&s), io, fill, v);
+      std::size_t n = s.size();
+      std::size_t i = (n > 0 && (s.b[0] == '-' || s.b[0] == '+')) ? 1 : 0;
+      bool bare = n > i;
+      for (std::size_t k = i; k < n; ++k)
+        if (s.b[k] < '0' || s.b[k] > '9') { bare = false; break; }
+      if (bare) { s.b[n++] = '.'; s.b[n++] = '0'; }
+      // Re-apply the width the rendering was taken without.
+      std::size_t pad = w > static_cast<std::streamsize>(n) ? static_cast<std::size_t>(w) - n : 0;
+      const auto adjust = io.flags() & std::ios_base::adjustfield;
+      std::size_t k = 0;
+      if (pad && adjust == std::ios_base::internal && i == 1) *out++ = s.b[k++];
+      if (pad && adjust != std::ios_base::left) for (; pad; --pad) *out++ = fill;
+      for (; k < n; ++k) *out++ = s.b[k];
+      for (; pad; --pad) *out++ = fill;
+      return out;
+    }
+    iter_type do_put(iter_type out, std::ios_base& io, char fill, double v) const override {
+      return put_marked(out, io, fill, v);
+    }
+    iter_type do_put(iter_type out, std::ios_base& io, char fill, long double v) const override {
+      return put_marked(out, io, fill, v);
+    }
+  };
+  inline void typed_float_print(std::ostream& os) {
+    os.imbue(std::locale(os.getloc(), new float_put));
   }
 
   // ---- The arithmetic contract's FAULTS (docs/formalism.md section 2.4,

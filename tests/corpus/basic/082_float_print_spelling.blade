@@ -1,0 +1,46 @@
+// TEST: Float print spelling carries the decimal point
+// ============================================================================
+// The decimal point tells a float from an integer in OUTPUT as in source
+// (docs/formalism.md 3.9): a whole-valued Float64/Float32, and each component
+// of a complex, prints with ".0"; an Int64 prints bare. Exponent forms and
+// nan/inf already read as floats and print unmarked. The numeric EXPECT
+// comparison cannot see a spelling, so these pins are QUOTED: a quoted pin
+// compares the printed text byte for byte.
+// ============================================================================
+function addone(a: T^1) -> T^1 = a + 1.0
+let y = 2.0
+let neg = -3.0
+let fzero = 0.0
+let negzero = -0.0
+let frac = 2.5
+let tenth = 0.1
+let big = 1e20
+let small = 1e-7
+let wide = 123456789012345.0
+let n = 2
+let a = addone([1.0, 2.0])
+let ai = [2, 3]
+let m = [[1.0, 0.0], [0.0, 3.0]]
+let c = complex(1.0, -2.0)
+let cs = [complex(3.0, 0.0), complex(0.5, 4.0)]
+let f32 = Float32(4.0)
+let inf = 1.0 / fzero
+let notnum = fzero / fzero
+// EXPECT: y = "2.0"
+// EXPECT: neg = "-3.0"
+// EXPECT: fzero = "0.0"
+// EXPECT: negzero = "-0.0"
+// EXPECT: frac = "2.5"
+// EXPECT: tenth = "0.1"
+// EXPECT: big = "1e+20"
+// EXPECT: small = "1e-07"
+// EXPECT: wide = "123456789012345.0"
+// EXPECT: n = "2"
+// EXPECT: a = "[2.0, 3.0]"
+// EXPECT: ai = "[2, 3]"
+// EXPECT: m = "[[1.0, 0.0], [0.0, 3.0]]"
+// EXPECT: c = "(1.0,-2.0)"
+// EXPECT: cs = "[(3.0,0.0), (0.5,4.0)]"
+// EXPECT: f32 = "4.0"
+// EXPECT: inf = "inf"
+// EXPECT: notnum = "nan"

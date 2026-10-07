@@ -460,7 +460,7 @@ let runCliSmokeTests () : TH.BlockResult =
             if capabilities.Value.HasGpp then
                 let (code, out, err) = spawn dir [ "run"; Path.Combine("sub", "p.blade") ]
                 recordCase "provider paths: `run` from another directory folds and runs"
-                    (code = 0 && out.Contains "s = 10") (out + err)
+                    (code = 0 && out.Contains "s = 10.0") (out + err)
         finally
             try Directory.Delete(dir, true) with _ -> ()
 

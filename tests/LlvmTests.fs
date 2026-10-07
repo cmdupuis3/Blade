@@ -103,14 +103,24 @@ let private parseNum (t: string) : float option =
 ///
 /// ZERO IS EXCLUDED FROM THE TOLERANCE on purpose. `0` and `-0` are one ULP
 /// apart and would pass any absolute test, but the two lanes print them
-/// DIFFERENTLY by design (the printer census pins `-0.0` to "-0"), so a signed
+/// DIFFERENTLY by design (the printer census pins `-0.0` to "-0.0"), so a signed
 /// zero divergence is exactly the kind of printer drift this block exists to
 /// catch. Both-zero therefore demands identical text, which the fast path
 /// above already granted when it is true.
+///
+/// THE FLOAT MARKER IS NOT TOLERATED EITHER. A floating value prints with a
+/// decimal point (`2.0`; CppFormat.markFloat), an integer as a bare digit run
+/// (`2`), so `2` against `2.0` is a TYPE divergence between the lanes, not a
+/// near-equal pair: one lane lost the marker.
+let private isBareInt (t: string) : bool =
+    let start = if t.StartsWith "-" then 1 else 0
+    t.Length > start && t |> Seq.skip start |> Seq.forall Char.IsAsciiDigit
+
 let private tokenEq (a: string) (b: string) : bool =
     if String.Equals(a, b, StringComparison.Ordinal) then true
     else
         match parseNum a, parseNum b with
+        | Some _, Some _ when isBareInt a <> isBareInt b -> false   // Int vs Float spelling
         | Some x, Some y when x = 0.0 && y = 0.0 -> false   // signed zero: text decides
         | Some x, Some y ->
             let scale = max (abs x) (abs y)
@@ -187,20 +197,24 @@ let runLlvmCompareRuleTests () : BlockResult =
     // The wall-clock line differs on every single run and must be invisible.
     check "timing line ignored" "p completed in 1e-07s\nx = 1" "p completed in 9.5s\nx = 1" true
     // Relative tolerance: 1e-10 apart passes, 1e-3 apart does not.
-    check "relative 1e-10 apart" "x = 1" "x = 1.0000000001" true
-    check "relative 1e-3 apart" "x = 1" "x = 1.001" false
+    check "relative 1e-10 apart" "x = 1.0" "x = 1.0000000001" true
+    check "relative 1e-3 apart" "x = 1.0" "x = 1.001" false
     // The real near-equal this lane produces: the C++ oracle's FMA residual
     // against the llvm lane's exact zero (corpus loops/143). Absolute floor.
-    check "fma residual vs exact zero" "d = -3.5527136788005e-15" "d = 0" true
+    check "fma residual vs exact zero" "d = -3.5527136788005e-15" "d = 0.0" true
     check "absolute floor respected" "d = 1e-9" "d = 2e-9" false
+    // The float marker is part of the value's spelling: an Int against the
+    // same Float is a lane disagreeing about the TYPE.
+    check "int vs float spelling differs" "x = 2" "x = 2.0" false
+    check "float vs int array cell differs" "x = [1.0, 2.0]" "x = [1.0, 2]" false
     // Non-finite tokens compare as TEXT, never as arithmetic.
     check "nan equals nan" "x = nan" "x = nan" true
-    check "nan differs from zero" "x = nan" "x = 0" false
+    check "nan differs from zero" "x = nan" "x = 0.0" false
     check "inf differs from -inf" "x = inf" "x = -inf" false
     check "inf equals inf" "x = inf" "x = inf" true
     // Signed zero is a printer fact, not a numeric one: the census pins -0.0
-    // to "-0", so the two lanes disagreeing here is a real regression.
-    check "signed zero is a difference" "x = 0" "x = -0" false
+    // to "-0.0", so the two lanes disagreeing here is a real regression.
+    check "signed zero is a difference" "x = 0.0" "x = -0.0" false
     // Structure: element values, element COUNT, and non-numeric text.
     check "array element differs" "x = [1, 2, 3]" "x = [1, 9, 3]" false
     check "array length differs" "x = [1, 2, 3]" "x = [1, 2]" false

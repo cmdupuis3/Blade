@@ -689,8 +689,8 @@ let back = ungroup(g)
                       | Ok (0, runOut) ->
                           let has (line: string) = runOut.Contains line
                           check "inherited segmentation: sizes = [4, 4, 2]" (has "sizes = [4, 4, 2]") runOut
-                          check "inherited segmentation: per-segment sums" (has "sums = [10, 26, 19]") runOut
-                          check "inherited segmentation: ungroup restores the axis" (has "back = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]") runOut
+                          check "inherited segmentation: per-segment sums" (has "sums = [10.0, 26.0, 19.0]") runOut
+                          check "inherited segmentation: ungroup restores the axis" (has "back = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]") runOut
                       | Ok (code, out) -> check "inherited segmentation: runs" false ($"exit {code}: {out}")
                       | Error e -> check "inherited segmentation: runs" false e)
                  | Error e ->
@@ -775,12 +775,12 @@ let back = ungroup(gs)
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           let has (line: string) = runOut.Contains line
-                          check "file level: the tiled variable" (has "a = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]") runOut
+                          check "file level: the tiled variable" (has "a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]") runOut
                           check "file level: files(T) sizes = [6, 4]" (has "fsizes = [6, 4]") runOut
                           check "file level: segments(T) sizes = [3, 3, 2, 2] (per-file chunk grids)" (has "ssizes = [3, 3, 2, 2]") runOut
-                          check "file level: per-file sums" (has "fsums = [21, 34]") runOut
-                          check "file level: per-chunk sums" (has "ssums = [6, 15, 15, 19]") runOut
-                          check "file level: ungroup of the chunk grouping restores the axis" (has "back = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]") runOut
+                          check "file level: per-file sums" (has "fsums = [21.0, 34.0]") runOut
+                          check "file level: per-chunk sums" (has "ssums = [6.0, 15.0, 15.0, 19.0]") runOut
+                          check "file level: ungroup of the chunk grouping restores the axis" (has "back = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]") runOut
                       | Ok (code, out) -> check "file level: runs" false ($"exit {code}: {out}")
                       | Error e -> check "file level: runs" false e)
                  | Error e ->
@@ -857,7 +857,7 @@ let counts = method_for(g) <@> lambda(r) -> extents(r) |> compute
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           let has (line: string) = runOut.Contains line
-                          check "per-segment stream: per-run sums" (has "sums = [10, 26, 19]") runOut
+                          check "per-segment stream: per-run sums" (has "sums = [10.0, 26.0, 19.0]") runOut
                           check "per-segment stream: per-run counts" (has "counts = [4, 4, 2]") runOut
                       | Ok (code, out) -> check "per-segment stream: runs" false ($"exit {code}: {out}")
                       | Error e -> check "per-segment stream: runs" false e)
@@ -934,7 +934,7 @@ let total = run_sums(0)
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           check "per-segment stream in a function body: total of the per-run sums"
-                              (runOut.Contains "total = 55") runOut
+                              (runOut.Contains "total = 55.0") runOut
                       | Ok (code, out) -> check "per-segment stream in a function body: runs" false ($"exit {code}: {out}")
                       | Error e -> check "per-segment stream in a function body: runs" false e)
                  | Error e ->
@@ -1008,7 +1008,7 @@ let totals = method_for(range<K>) <@> lambda(k) -> {
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           check "per-segment stream, grouped outside a kernel: per-iteration totals"
-                              (runOut.Contains "totals = [55, 56, 57]") runOut
+                              (runOut.Contains "totals = [55.0, 56.0, 57.0]") runOut
                       | Ok (code, out) -> check "per-segment stream, grouped outside a kernel: runs" false ($"exit {code}: {out}")
                       | Error e -> check "per-segment stream, grouped outside a kernel: runs" false e)
                  | Error e ->
@@ -1069,7 +1069,7 @@ let totals = method_for(range<K>) <@> lambda(k) -> t + Float64(k) |> compute
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           check "streamed fold at top level, used in a kernel: totals"
-                              (runOut.Contains "totals = [55, 56, 57]") runOut
+                              (runOut.Contains "totals = [55.0, 56.0, 57.0]") runOut
                       | Ok (code, out) -> check "streamed fold at top level, used in a kernel: runs" false ($"exit {code}: {out}")
                       | Error e -> check "streamed fold at top level, used in a kernel: runs" false e)
                  | Error e ->
@@ -1124,9 +1124,9 @@ let sizes = extents(seg)
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           let has (line: string) = runOut.Contains line
-                          check "streamed fold: builtin (+) = 55" (has "total = 55") runOut
-                          check "streamed fold: lambda max = 10" (has "biggest = 10") runOut
-                          check "streamed fold: seeded (+) = 155" (has "shifted = 155") runOut
+                          check "streamed fold: builtin (+) = 55" (has "total = 55.0") runOut
+                          check "streamed fold: lambda max = 10" (has "biggest = 10.0") runOut
+                          check "streamed fold: seeded (+) = 155" (has "shifted = 155.0") runOut
                           check "streamed fold: segments(A) off the annotation" (has "sizes = [4, 4, 2]") runOut
                       | Ok (code, out) -> check "streamed fold: runs" false ($"exit {code}: {out}")
                       | Error e -> check "streamed fold: runs" false e)
@@ -1177,8 +1177,8 @@ let d2 = method_for(halo<CX, [-2, 0, 2]>) <@> lambda(w) -> A(w(2)) * A(w(-2)) - 
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           let has (line: string) = runOut.Contains line
-                          check "stencil over segments: central difference" (has "d = [2, 2, 2, 2, 2, 2, 2, 2]") runOut
-                          check "stencil over segments: reach-2 kernel" (has "d2 = [-4, -4, -4, -4, -4, -4]") runOut
+                          check "stencil over segments: central difference" (has "d = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]") runOut
+                          check "stencil over segments: reach-2 kernel" (has "d2 = [-4.0, -4.0, -4.0, -4.0, -4.0, -4.0]") runOut
                       | Ok (code, out) -> check "stencil over segments: runs" false ($"exit {code}: {out}")
                       | Error e -> check "stencil over segments: runs" false e)
                  | Error e ->
@@ -1234,9 +1234,9 @@ let scaled = method_for(zip(A, m)) <@> lambda(x, w) -> x * w |> compute
                      (match runExecutable exePath with
                       | Ok (0, runOut) ->
                           let has (line: string) = runOut.Contains line
-                          check "elementwise stream: map" (has "doubled = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]") runOut
-                          check "elementwise stream: scalar broadcast" (has "shifted = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]") runOut
-                          check "elementwise stream: zip with a materialized array" (has "scaled = [0.5, 1, 1.5, 2, 2.5, 12, 14, 16, 18, 20]") runOut
+                          check "elementwise stream: map" (has "doubled = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]") runOut
+                          check "elementwise stream: scalar broadcast" (has "shifted = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]") runOut
+                          check "elementwise stream: zip with a materialized array" (has "scaled = [0.5, 1.0, 1.5, 2.0, 2.5, 12.0, 14.0, 16.0, 18.0, 20.0]") runOut
                       | Ok (code, out) -> check "elementwise stream: runs" false ($"exit {code}: {out}")
                       | Error e -> check "elementwise stream: runs" false e)
                  | Error e ->
@@ -1308,9 +1308,9 @@ let dev = reduce(back - T, (+), axes = 2)
                       | Ok (0, runOut) ->
                           let has (line: string) = runOut.Contains line
                           check "rank-2 stream: tile sizes" (has "tsizes = [12, 12, 12, 12]") runOut
-                          check "rank-2 stream: per-tile sums" (has "tsums = [138, 186, 498, 546]") runOut
-                          check "rank-2 stream: elementwise by row bands" (has "doubled = [[0, 2, 4, 6, 8, 10, 12, 14], [20, 22, 24, 26, 28, 30, 32, 34]") runOut
-                          check "rank-2 stream: ungroup of the tiles restores the variable (zip with the stream)" (has "dev = 0") runOut
+                          check "rank-2 stream: per-tile sums" (has "tsums = [138.0, 186.0, 498.0, 546.0]") runOut
+                          check "rank-2 stream: elementwise by row bands" (has "doubled = [[0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0], [20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0]") runOut
+                          check "rank-2 stream: ungroup of the tiles restores the variable (zip with the stream)" (has "dev = 0.0") runOut
                       | Ok (code, out) -> check "rank-2 stream: runs" false ($"exit {code}: {out}")
                       | Error e -> check "rank-2 stream: runs" false e)
                  | Error e ->

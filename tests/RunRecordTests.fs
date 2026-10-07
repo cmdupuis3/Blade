@@ -274,7 +274,7 @@ let runRunRecordTests () : BlockResult =
          withRecord (Some recPath) (fun () ->
              match runExecutable exe with
              | Ok (0, out) ->
-                 check "record: run exits 0 with the pin set" (out.Contains "rowsum = [6, 15]") out
+                 check "record: run exits 0 with the pin set" (out.Contains "rowsum = [6.0, 15.0]") out
                  if not (File.Exists recPath) then check "record: file written" false recPath
                  else
                      let js = File.ReadAllText recPath

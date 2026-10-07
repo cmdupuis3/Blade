@@ -322,7 +322,7 @@ let static V = m.vars.data |> c.read
          check "interp: dense reads run (exit ok)"
              (r.ExitCode = Blade.Interp.Run.ExitOk) (sprintf "%A: %s" r.ExitCode r.Stderr)
          check "interp: label subscript value (t1 = 16.5)" (r.Stdout.Contains "t1 = 16.5") r.Stdout
-         check "interp: matrix row sums" (r.Stdout.Contains "rowsum = [6, 15]") r.Stdout
+         check "interp: matrix row sums" (r.Stdout.Contains "rowsum = [6.0, 15.0]") r.Stdout
      | Error e -> check "interp: dense reads run" false e)
     (let writeSource = sprintf """
 import csv as c
@@ -361,7 +361,7 @@ let _ = c.write("%s", V)
                    check "e2e: runs (exit 0)" true ""
                    check "e2e: label subscript t1 = 16.5" (runOut.Contains "t1 = 16.5") runOut
                    check "e2e: rank-1 row sums (2-D EXPECTs are unchecked — reduce instead)"
-                       (runOut.Contains "rowsum = [6, 15]") runOut
+                       (runOut.Contains "rowsum = [6.0, 15.0]") runOut
                    // NESTED, not flat: every rank-2 array prints through
                    // genPrintNested2 (CodeGen), which landed in 7ac4d3a
                    // (2026-08-03) and is the intended shape -- a rank-2
@@ -373,7 +373,7 @@ let _ = c.write("%s", V)
                    // there caught the drift; a raw substring check like this
                    // one has no such tolerance and must name the real shape.
                    check "e2e: headered payload (header skipped)"
-                       (runOut.Contains "obs = [[0, 14, 101.2], [1, 16.5, 101], [2, 18, 100.8]]") runOut
+                       (runOut.Contains "obs = [[0.0, 14.0, 101.2], [1.0, 16.5, 101.0], [2.0, 18.0, 100.8]]") runOut
                    // Runtime shape drift: the exe baked 3 data rows; append a
                    // 4th to the RUNTIME copy and expect a loud abort.
                    let runtimeFix = Path.Combine(e2eDir, fixFile "lw_obs.csv")
@@ -581,7 +581,7 @@ let _ = c.write("%s", final)
                    // Labels keep the SOURCE spelling; only the C++ identifier
                    // is mangled. A corpus EXPECT pin reads these lines.
                    check "kw-name: print labels keep the source name"
-                       (runOut.Contains "final = [[2, 4], [6, 0.5]]" && runOut.Contains "class = 2") runOut
+                       (runOut.Contains "final = [[2.0, 4.0], [6.0, 0.5]]" && runOut.Contains "class = 2.0") runOut
                    let kwOut = Path.Combine(e2eDir, fixFile "wr_kw_out.csv")
                    (match readVarData kwOut "data" with
                     | Ok { DimLengths = [2; 2]; Payload = Blade.ProviderRegistry.PFloats xs } ->
@@ -770,8 +770,8 @@ let static B = b.vars.data |> c.read
          let r = Blade.Interp.Run.runProgram ir "csv_agree_interp" Blade.Interp.Value.defaultLimits
          check "agree: interpreter runs the blank / out-of-range reads"
              (r.ExitCode = Blade.Interp.Run.ExitOk) (sprintf "%A: %s" r.ExitCode r.Stderr)
-         check "agree: interpreter values (wsum = 10, big = 1e+20, ksum = 10)"
-             (r.Stdout.Contains "wsum = 10" && r.Stdout.Contains "big = 1e+20" && r.Stdout.Contains "ksum = 10") r.Stdout
+         check "agree: interpreter values (wsum = 10.0, big = 1e+20, ksum = 10)"
+             (r.Stdout.Contains "wsum = 10.0" && r.Stdout.Contains "big = 1e+20" && r.Stdout.Contains "ksum = 10") r.Stdout
          let (cppCode, _) = CodeGen.genSelfContainedProgramFromIR ir "csv_agree_e2e"
          CodeGen.deployRuntimeHeaders e2eDir
          let cppFile = Path.Combine(e2eDir, "csv_agree_e2e.cpp")
@@ -780,8 +780,8 @@ let static B = b.vars.data |> c.read
           | Ok exePath ->
               (match runExecutable exePath with
                | Ok (0, runOut) ->
-                   check "agree: compiled values match the interpreter (wsum = 10, big = 1e+20, ksum = 10)"
-                       (runOut.Contains "wsum = 10" && runOut.Contains "big = 1e+20" && runOut.Contains "ksum = 10") runOut
+                   check "agree: compiled values match the interpreter (wsum = 10.0, big = 1e+20, ksum = 10)"
+                       (runOut.Contains "wsum = 10.0" && runOut.Contains "big = 1e+20" && runOut.Contains "ksum = 10") runOut
                    // The Int64 table's file changes under the exe to hold a
                    // cell strtoll cannot represent: a loud abort, not the
                    // saturated 9223372036854775807 it used to read.

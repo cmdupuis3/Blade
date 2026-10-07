@@ -20,6 +20,8 @@
  *     iostreams do and what printf does NOT (it emits "-nan" for a negative
  *     NaN) -- hence the explicit isnan arm.
  *   - +/-infinity print "inf" / "-inf"; -0.0 prints "-0" (printf already does).
+ *   - a double whose "%.15g" text is a bare digit run gains ".0" ("2.0",
+ *     "-0.0"): the typed float spelling, blade_rt::float_put in the C++ lane.
  *   - bool prints "true"/"false" (boolalpha).
  *   - int64 prints plain decimal, INT64_MIN included.
  *
@@ -223,7 +225,17 @@ double blade_now(void) {
 static void blade_fmt_f64(char *buf, size_t cap, double v) {
     if (isnan(v)) { snprintf(buf, cap, "nan"); return; }
     if (isinf(v)) { snprintf(buf, cap, v < 0.0 ? "-inf" : "inf"); return; }
-    snprintf(buf, cap, "%.15g", v);
+    int n = snprintf(buf, cap, "%.15g", v);
+    /* Typed float spelling: a bare digit run ("2", "-0") is an integer's
+     * spelling, so a double gains ".0" -- the C++ lane's blade_rt::float_put
+     * facet and the interpreter's CppFormat.markFloat apply the same rule. */
+    if (n > 0 && (size_t)n + 3 <= cap) {
+        int i = (buf[0] == '-') ? 1 : 0;
+        int bare = n > i;
+        for (int k = i; k < n; ++k)
+            if (buf[k] < '0' || buf[k] > '9') { bare = 0; break; }
+        if (bare) { buf[n] = '.'; buf[n + 1] = '0'; buf[n + 2] = '\0'; }
+    }
 }
 
 void blade_print_i64(const char *name, long long v) {

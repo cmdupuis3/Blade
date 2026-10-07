@@ -17,7 +17,8 @@
 //     scientific iff the decimal exponent X < -4 or X >= 15, else fixed; trailing
 //     zeros and a bare trailing '.' are stripped; exponent is e+dd / e-dd with a
 //     minimum of two digits (three when needed, e.g. e-323).
-//   * -0.0 prints "-0"; +0.0 prints "0".
+//   * -0.0 prints "-0"; +0.0 prints "0" (then the float marker below makes
+//     them "-0.0" / "0.0").
 //   * +inf -> "inf", -inf -> "-inf".
 //   * every NaN prints "nan" -- ucrt iostreams never emit a sign or payload, so
 //     the sign bit and the mantissa payload are irrelevant (0x7FF8.., 0xFFF8..,
@@ -28,6 +29,15 @@
 //     component via the same float formatting ((-0,3), (inf,nan), ...).
 //   * cout << bool with boolalpha -> "true"/"false".
 //   * cout << char prints the character glyph (not its numeric code).
+//
+// TYPED FLOAT SPELLING. A floating value always prints with a decimal point,
+// F#-style: when the %.15g text is a bare digit run (`2`, `-3`, `0`, `-0`) it
+// gains ".0" (`2.0`, `-3.0`, `0.0`, `-0.0`), so `[2, 3]` is only ever an Int
+// array and `[2.0, 3.0]` a Float one. Exponent forms (`1e+20`, `1e-07`) and
+// `nan` / `inf` can never be an integer's spelling -- the lexer reads `1e+20`
+// as a float literal -- and print unchanged. The C++ lane installs the same
+// rule as a num_put facet on cout (blade_rt::float_put, blade_runtime.hpp);
+// the LLVM lane's shim applies it in blade_fmt_f64 (blade_llvm_shim.c).
 module Blade.Interp.CppFormat
 
 open System
@@ -73,9 +83,18 @@ let private assemble (sign: string) (digits: string) (x: int) : string =
         let frac = (leadingZeros + digits).TrimEnd('0')
         sign + "0." + frac
 
-/// Byte-exact mirror of `cout << setprecision(15) << x` (defaultfloat) for a
-/// double == printf "%.15g" as rendered by ucrt64 iostreams.
-let formatFloat15 (x: float) : string =
+/// Append the float marker ".0" to a rendering that is a bare (optionally
+/// signed) digit run -- the one spelling a float shares with an integer. See
+/// TYPED FLOAT SPELLING in the header.
+let markFloat (s: string) : string =
+    let start = if s.Length > 0 && (s.[0] = '-' || s.[0] = '+') then 1 else 0
+    let mutable bare = s.Length > start
+    for i in start .. s.Length - 1 do
+        if not (Char.IsAsciiDigit s.[i]) then bare <- false
+    if bare then s + ".0" else s
+
+/// printf "%.15g" as rendered by ucrt64 iostreams, before the float marker.
+let private render15 (x: float) : string =
     if Double.IsNaN x then "nan"
     elif Double.IsPositiveInfinity x then "inf"
     elif Double.IsNegativeInfinity x then "-inf"
@@ -95,6 +114,12 @@ let formatFloat15 (x: float) : string =
         let x10 = Int32.Parse(s.Substring(eidx + 1), NumberStyles.Integer, inv)
         let digits = mantStr.Replace(".", "")   // exactly 15 significant digits
         assemble sign digits x10
+
+/// Byte-exact mirror of `cout << setprecision(15) << x` (defaultfloat) for a
+/// double: printf "%.15g" as rendered by ucrt64 iostreams, plus the float
+/// marker (`2.0`, never `2`).
+let formatFloat15 (x: float) : string =
+    markFloat (render15 x)
 
 /// Layout of the shortest-digit rendering: "%.17g" conventions (fixed notation
 /// for decimal exponents in [-4, 17), scientific otherwise) applied to a digit
@@ -157,7 +182,8 @@ let formatFloat32 (x: float32) : string =
     formatFloat15 (float x)
 
 /// Byte-exact mirror of `cout << std::complex<double>(re, im)`:
-/// "(re,im)" with no spaces, each component via formatFloat15.
+/// "(re,im)" with no spaces, each component via formatFloat15 -- so a
+/// whole-valued component carries its marker too: `(1.0,-2.0)`.
 let formatComplex (re: float) (im: float) : string =
     "(" + formatFloat15 re + "," + formatFloat15 im + ")"
 

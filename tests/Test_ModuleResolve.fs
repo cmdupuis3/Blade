@@ -366,7 +366,7 @@ let runModuleResolveTests () : BlockResult =
                 match runExecutable exe with
                 | Error e -> check "units_SI_program_computes_the_right_values" false ($"run: {e}")
                 | Ok (_, output) ->
-                    let want = [ "force = 6"; "total = 10" ]
+                    let want = [ "force = 6.0"; "total = 10.0" ]
                     let missing = want |> List.filter (fun w -> not (output.Contains w))
                     check "units_SI_program_computes_the_right_values"
                         missing.IsEmpty

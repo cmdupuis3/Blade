@@ -3079,6 +3079,7 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
             [ "int main(int argc, char** argv) {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
+              "    blade_rt::typed_float_print(cout);"
               (if mpiThreaded then
                   "    { int __blade_mpi_prov; MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &__blade_mpi_prov); if (__blade_mpi_prov < MPI_THREAD_FUNNELED) { std::cerr << \"error[BL8004]: MPI thread support below MPI_THREAD_FUNNELED\" << std::endl; MPI_Abort(MPI_COMM_WORLD, 14); } }"
                else
@@ -3091,6 +3092,7 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
             [ "int main() {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
+              "    blade_rt::typed_float_print(cout);"
               "    auto start = TIME;"
               "" ]
     let timing =
@@ -3151,6 +3153,7 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
             [ "int main(int argc, char** argv) {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
+              "    blade_rt::typed_float_print(cout);"
               (if mpiThreaded then
                   "    { int __blade_mpi_prov; MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &__blade_mpi_prov); if (__blade_mpi_prov < MPI_THREAD_FUNNELED) { std::cerr << \"error[BL8004]: MPI thread support below MPI_THREAD_FUNNELED\" << std::endl; MPI_Abort(MPI_COMM_WORLD, 14); } }"
                else
@@ -3163,6 +3166,7 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
             [ "int main() {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
+              "    blade_rt::typed_float_print(cout);"
               "    auto start = TIME;"
               "" ]
     let setupTiming =

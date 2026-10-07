@@ -629,6 +629,16 @@ rank 1 is already one level of brackets and ranks ≥ 3 stay flat. The REPL
 additionally shows only the first five entries per level and elides the rest
 as `...`; that cap is the echo's alone, and `blade run` prints every cell.
 
+Printing also agrees with the literal's TYPE. As in source, the decimal point
+is what tells a float from an integer: a `Float64`/`Float32` value, and each
+component of a `Complex128`/`Complex64`, prints with one — `2.0`, `-0.0`,
+`[2.0, 3.0]`, `(1.0,-2.0)` — while an `Int64` prints bare, so `[2, 3]` is only
+ever an integer array. Otherwise a float keeps its 15-significant-digit
+rendering (`0.1`, `2.5`); the exponent forms (`1e+20`, `1e-07`) read back as
+float literals already and print unmarked, as do `nan`, `inf` and `-inf`. Every
+lane prints the same bytes (the compiled program, the interpreter, the LLVM
+back end, and the REPL/notebook echo, which shows the program's own output).
+
 ### 3.10 Index values and nominal typing
 
 Iteration emits values tagged with their source index type as a **unit**:
