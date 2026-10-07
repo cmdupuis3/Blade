@@ -34,6 +34,10 @@ open Blade.Tests.Corpus
 /// tuple-guard binding, grouped row-map literal kernels, named-kernel capture
 /// hygiene, rec-array prefix-alias zero history) or a corpus program that
 /// changed since the pin (loops "Pipe Compute After If Kernel").
+/// The later 2026-10-07 re-pin (master 0c495f3d) absorbed the polymorphic
+/// exponent: Float ^ Int squares in the base's type instead of calling pow,
+/// which moves last bits (basic/500 `big`) and underflows a huge negative
+/// power to 0.0 (`tiny`); the old oracle also still warned BL3020 on `x ^ n`.
 let denseSlice = [ "basic"; "loops"; "guards"; "recursive-arrays"; "stack-join" ]
 
 /// Corrected-semantics slice: corpus tests whose values INTENTIONALLY
