@@ -223,6 +223,16 @@ type GenericObligation =
     /// literal); an integer instance would hand a T-typed result a Float64
     /// value (a silent truncation), so it is refused at the call.
     | GOPromotion of var: int * op: string * partner: ElemType * literal: bool
+    /// `a * k` (any arithmetic op) between a generic ARRAY parameter whose
+    /// element is a signature variable (`a: T^1`) and a concrete scalar
+    /// `partner`: the broadcast's kernel is typed while the element is open,
+    /// so its cells are typed `result` (the partner's class). Exact wherever
+    /// promoting the instance's element with the partner gives `result` back
+    /// (an Int64 or Float64 row times a Float64 is Float64 -- stats.variance's
+    /// `row - m` over an Int64 row); a complex row times 0.5, or a Float64 row
+    /// times a Float32, would put the wider value in `result` cells (g++
+    /// refused it, BL9002), so that instance is refused at the call.
+    | GOBroadcastElem of var: int * op: string * partner: ElemType * result: ElemType
     /// `a + b` (any arithmetic op) between values of TWO generic parameter
     /// variables that cannot be made one variable at the declaration -- a
     /// caret `T^k` (the whole array is the variable, `a: T^1, b: U^1`) or a

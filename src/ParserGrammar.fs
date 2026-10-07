@@ -1357,29 +1357,102 @@ and parseParenExpr (tokens: Token list) : ParseResult<Expr> =
                 let line, col = currentPos tokens
                 error $"Unknown operator in section: {op}" line col
         | _ ->
-            parseExprImpl tokens >>= fun first afterFirst ->
-            match peek afterFirst with
-            | Some TokRParen ->
-                success first (advance afterFirst)
-            | Some TokComma ->
-                advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
-                expect TokRParen afterRest >>= fun _ remaining ->
-                success (mkE tokens remaining (ExprTuple (first :: rest))) remaining
-            | _ ->
-                let line, col = currentPos afterFirst
-                errorC "BL1001" "Expected ')' or ',' in parenthesized expression" line col
+            match parseParenBody tokens with
+            | Ok r -> Ok r
+            | Error e ->
+                // `(* s)`: a RIGHT operand section. Tried only once the
+                // ordinary parse has failed, so nothing that parsed before
+                // changes meaning -- in particular `(- s)` stays negation.
+                let right =
+                    match stringToBinOp op with
+                    | Some binOp ->
+                        match parseExprImpl afterOp with
+                        | Ok (operand, afterOperand) when peek afterOperand = Some TokRParen ->
+                            let remaining = advance afterOperand
+                            Some (success (mkOperandSection (rangeSpan tokens remaining) binOp operand false) remaining)
+                        | _ -> None
+                    | None -> None
+                match right with
+                | Some r -> r
+                | None ->
+                    // `(- s +)`: a left section whose operand opens with a
+                    // prefix operator.
+                    match tryLeftOperandSection tokens with
+                    | Some r -> r
+                    | None -> Error e
     | _ ->
-        parseExprImpl tokens >>= fun first afterFirst ->
-        match peek afterFirst with
-        | Some TokRParen ->
-            success first (advance afterFirst)
-        | Some TokComma ->
-            advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
-            expect TokRParen afterRest >>= fun _ remaining ->
-            success (mkE tokens remaining (ExprTuple (first :: rest))) remaining
-        | _ ->
-            let line, col = currentPos afterFirst
-            errorC "BL1001" "Expected ')' or ',' in parenthesized expression" line col
+        match parseParenBody tokens with
+        | Ok r -> Ok r
+        | Error e ->
+            match tryLeftOperandSection tokens with
+            | Some r -> r
+            | None -> Error e
+
+/// The ordinary parenthesized form: `(e)` or the tuple `(a, b, ...)`.
+/// `tokens` starts after the `(`.
+and parseParenBody (tokens: Token list) : ParseResult<Expr> =
+    parseExprImpl tokens >>= fun first afterFirst ->
+    match peek afterFirst with
+    | Some TokRParen ->
+        success first (advance afterFirst)
+    | Some TokComma ->
+        advance afterFirst |> sepBy parseExprImpl TokComma >>= fun rest afterRest ->
+        expect TokRParen afterRest >>= fun _ remaining ->
+        success (mkE tokens remaining (ExprTuple (first :: rest))) remaining
+    | _ ->
+        let line, col = currentPos afterFirst
+        errorC "BL1001" "Expected ')' or ',' in parenthesized expression" line col
+
+/// `(s +)`: a LEFT operand section, `lambda(x) -> s + x`. `tokens` starts
+/// after the `(`; the section is recognized when the token right before the
+/// matching `)` is a scalar binary operator. Tried only after the ordinary
+/// parse failed (`(v : Idx<4>)` also ends in `>` and must keep parsing as an
+/// ascription). The operand is parsed from the tokens before the operator,
+/// closed by a copy of the `)` carrying the operator's stream index so the
+/// operand's span stops at its own last token.
+and tryLeftOperandSection (tokens: Token list) : ParseResult<Expr> option =
+    let rec scan depth (acc: Token list) (toks: Token list) =
+        match toks with
+        | [] -> None
+        | t :: rest ->
+            match t.Kind with
+            | TokLParen | TokLBracket | TokLBrace -> scan (depth + 1) (t :: acc) rest
+            | TokRParen when depth = 0 -> Some (List.rev acc, t, rest)
+            | TokRParen | TokRBracket | TokRBrace ->
+                if depth = 0 then None else scan (depth - 1) (t :: acc) rest
+            | TokEOF -> None
+            | _ -> scan depth (t :: acc) rest
+    match scan 0 [] tokens with
+    | Some (inner, rparen, afterRParen) when List.length inner >= 2 ->
+        let opTok = List.last inner
+        match opTok.Kind with
+        | TokOp op ->
+            match stringToBinOp op with
+            | Some binOp ->
+                let operandToks = List.truncate (List.length inner - 1) inner
+                let closer = { rparen with Index = opTok.Index }
+                match parseExprImpl (operandToks @ [ closer ]) with
+                | Ok (operand, [ c ]) when c.Kind = TokRParen && c.Index = opTok.Index ->
+                    let sp = rangeSpan tokens afterRParen
+                    Some (success (mkOperandSection sp binOp operand true) afterRParen)
+                | _ -> None
+            | None -> None
+        | _ -> None
+    | _ -> None
+
+/// An operand section desugars to the lambda it abbreviates, so it captures
+/// exactly as a lambda does (formalism §5.2): `(s +)` is `lambda(x) -> s + x`,
+/// `(* s)` is `lambda(x) -> x * s`. The operand is an ordinary free variable
+/// of the body -- copied into an escaping closure, and a reassigned local
+/// refused at the escape (BL4005), the same rules a hand-written lambda gets.
+and mkOperandSection (sp: Span) (binOp: BinOp) (operand: Expr) (operandOnLeft: bool) : Expr =
+    let pname = "__section_x"
+    let parm : LambdaParam = { Name = pname; Type = None; Default = None; NameSpan = sp }
+    let x = mkExpr sp (ExprVar pname)
+    let body =
+        if operandOnLeft then mkExpr sp (ExprBinOp (Elementwise, binOp, operand, x))
+        else mkExpr sp (ExprBinOp (Elementwise, binOp, x, operand))
+    mkExpr sp (ExprLambda ([ parm ], None, body))
 
 /// Convert operator string to BinOp
 /// The section table shared by `(op)` and `object_for(op)`: the COMBINATOR

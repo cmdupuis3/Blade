@@ -1341,9 +1341,10 @@ and lowerTypedPartialApp env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcT
     // Inlines argExpr into the lifted kernel with NO captures -- only safe
     // when argExpr is a literal or references module-level ids. The
     // array<->scalar broadcast path hoists computed scalars into a let and
-    // threads them as captures instead (lowerTypedBinOp); explicit
-    // partial-app sections (`(s +)`) with function-local operands still
-    // share this inline hazard.
+    // threads them as captures instead (lowerTypedBinOp). Source operand
+    // sections (`(s +)`, `(* s)`) never reach here: the parser desugars them
+    // to the lambda they abbreviate (ParserGrammar.mkOperandSection), which
+    // captures like every lambda, so nothing produces TExprPartialApp.
     lowerTypedPartialAppWith env op argExpr isLeft funcTy []
 
 and lowerTypedPartialAppWith env (op: BinOp) (argExpr: IRExpr) (isLeft: bool) (funcTy: IRType) (captures: CaptureInfo list) : IRExpr =

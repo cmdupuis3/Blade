@@ -1276,16 +1276,7 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
         // not itself a declared function is a USE: typed at an instantiated
         // copy of its signature (see the dispatch below).
         let instantiateGenericUses (tArgs: TypedExpr list) : TypedExpr list =
-            tArgs |> List.map (fun (a: TypedExpr) ->
-                match a.Kind with
-                | TExprVar _ ->
-                    let quantified, closed = calleeQuantifier env a
-                    if not closed then a
-                    else
-                        match instantiateOpenVars env.Subst quantified [a.Type] with
-                        | [ copy ], ids when not (Set.isEmpty ids) -> { a with Type = copy }
-                        | _ -> a
-                | _ -> a)
+            tArgs |> List.map (instantiateGenericValueUse env)
         // A LAMBDA LITERAL APPLIED DIRECTLY -- `(lambda(f, x) -> f(x))(g, 2.0)`
         // -- is typed from its ARGUMENTS first: an unannotated parameter that
         // receives a function or an array takes the argument's type before
@@ -1557,15 +1548,30 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                     // fixes it and IR monomorphization specializes `idg` at
                     // the head's parameter type (IRMono.hmValueRefRewrite).
                     // A declared head keeps the call judgment, which
-                    // instantiates its own signature and never binds an
-                    // argument's.
+                    // instantiates its own signature and judges a generic
+                    // argument against a FUNCTION-typed parameter
+                    // (`twice(g: (T) -> T, x: T)`) there. A parameter that is
+                    // a bare VARIABLE (`function keep(f) = f`) judges
+                    // nothing: it passed the argument's DECLARATION variables
+                    // out into the call's result, where no later use could
+                    // fix them (`keep(dbl)(4)` died BL6001). Such an argument
+                    // is a use too, typed at an instantiated copy the
+                    // result's uses fix; monomorphization specializes the
+                    // reference at the copy's type (IRMono.hmValueRefRewrite).
                     let tArgs =
                         let headIsDeclared =
                             match calleeDeclId env tFunc with
                             | Some fid -> env.FuncSigVarRange.ContainsKey fid
                             | None -> false
-                        if headIsDeclared then tArgs
-                        else instantiateGenericUses tArgs
+                        if not headIsDeclared then instantiateGenericUses tArgs
+                        else
+                            match env.Subst.Resolve tFunc.Type with
+                            | FuncElem (paramTys, _) ->
+                                tArgs |> List.mapi (fun i a ->
+                                    match List.tryItem i paramTys |> Option.map (fun p -> IR.stripUnits (env.Subst.Resolve p)) with
+                                    | Some (IRTInfer _) -> instantiateGenericValueUse env a
+                                    | _ -> a)
+                            | _ -> tArgs
                     // ARITY LIFT before dispatch: a call that mixes arrays
                     // and scalars across ONE rank-0 signature variable is
                     // re-synthesized as the map it means. Declines fall
@@ -3455,7 +3461,24 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
     | Some result -> result
     | None ->
     inferExpr env array |> Result.bind (fun tArr ->
-    inferExpr env kernel |> Result.bind (fun tKernel ->
+    inferExpr env kernel |> Result.bind (fun tKernelDecl ->
+    // A declared GENERIC function as the fold kernel (`reduce(xs, add)`) is a
+    // USE, typed at an instantiated copy of its signature exactly as a call or
+    // a `<@>` kernel is: unifying the kernel's parameters with the element
+    // below must fix THIS use's instance, not bind the declaration's own
+    // variables (which refused every later use at another element type --
+    // `reduce([1.5, 2.5], add)` after `reduce([1, 2, 3], add)` -- and fixed
+    // `add` for its callers too). IRMono.hmValueRefRewrite specializes the
+    // kernel reference at the instance; its generic obligations (casts) are
+    // judged against it once the fold has fixed it.
+    let tKernel = instantiateGenericValueUse env tKernelDecl
+    let judgeKernelUse (r: TypeResult<TypedExpr>) : TypeResult<TypedExpr> =
+        match r with
+        | Ok _ when not (obj.ReferenceEquals (tKernelDecl, tKernel)) ->
+            (match genericValueObligationClash env tKernelDecl (env.Subst.Resolve tKernel.Type) with
+             | Some e -> Error e
+             | None -> r)
+        | _ -> r
     (match init with
      | Some e -> inferExpr env e |> Result.map Some
      | None -> Ok None) |> Result.bind (fun tInitOpt ->
@@ -3474,7 +3497,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
         // seed with their identity; any other kernel REQUIRES the 3-arg
         // init: a fused nest cannot seed-with-first like the array fold.
         match tryInferReduceCompute env tArr tKernel tInitOpt with
-        | Some result -> result
+        | Some result -> judgeKernelUse result
         | None ->
         // Drive type inference for unannotated kernel parameters: when the
         // array argument is an unconstrained inference variable (e.g.
@@ -3609,7 +3632,7 @@ and inferReduceCore (env: TypeEnv) array kernel (init: Expr option) (axes: Expr 
                     // Sound only because the check above established that the
                     // kernel preserves the element's unit signature.
                     let resultType = arrTy.ElemType
-                    Ok (mkTyped (TExprReduce (tArr, tKernel, tInitOpt)) resultType))))
+                    judgeKernelUse (Ok (mkTyped (TExprReduce (tArr, tKernel, tInitOpt)) resultType)))))
         | ArrayElem at ->
             // Reached only by a FULL fold (n = rank) that the rank-k nest
             // above declined -- non-dense axes, non-static extents, or a
@@ -6390,6 +6413,35 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 // this works in any expression position -- see inferDistBinOp).
                 inferDistBinOp env op left right lRes0 rRes0
             else
+            // Two CARET parameters of DIFFERENT ranks (`a + b` over `a: T^1,
+            // b: U^2`) meet elementwise: no instance can zip them -- the
+            // operands' ranks are the carets', fixed by the declaration -- the
+            // same refusal `A + B` gets over a concrete rank-1 and rank-2
+            // array. Both stayed unshaped variables (neither pins the other),
+            // so the declaration checked clean and every call reached g++
+            // (BL9002).
+            let caretRankOf (t: IRType) =
+                match IR.stripUnits t with
+                | IRTInfer v ->
+                    (match env.Subst.GetArityConstraint v with
+                     | Some k when k >= 1 -> Some k
+                     | _ -> None)
+                | _ -> None
+            let caretRankClash =
+                match op with
+                | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret
+                | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe
+                | OpAnd | OpOr when mode = Elementwise ->
+                    (match caretRankOf lRes0, caretRankOf rRes0 with
+                     | Some k, Some j when k <> j -> Some (k, j)
+                     | _ -> None)
+                | _ -> None
+            match caretRankClash with
+            | Some (k, j) ->
+                Error (Other ("elementwise operators on multi-axis arrays require both operands to have matching plain-dense index shapes (same axis tags and extents); mixed dense/packed or mismatched shapes are not zip-able"
+                              + $": the left operand is a rank-{k} parameter (`^{k}`) and the right operand a rank-{j} one, so no call can give them one shape. "
+                              + "For every pair of cells, use the outer operator (`a [+] b`); to combine a row with each row of a matrix, map over the matrix's rows."))
+            | None ->
             // S1 SEAM 1 (docs/plan-kernel-body-materialization.md, M-B).
             // Both array-producing arms below -- the two-array zip and the
             // array/scalar broadcast -- are gated on an operand RESOLVING to
@@ -6634,7 +6686,40 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
                         mkExpr sp (ExprMethodFor [arrExpr]),
                         mkExpr sp (ExprLambda ([{ Name = "__bx"; Type = elemAnn; Default = None; NameSpan = noSpan }], None, body))))))
-                inferExpr env synth |> Result.map (stampElemUnits env resUnits)
+                inferExpr env synth |> Result.map (fun tSynth ->
+                    // A GENERIC array (`a: T^1`, element a signature variable)
+                    // beside a concrete scalar (`a * 0.5`): the kernel was typed
+                    // while the element was open, so its cells took the
+                    // partner's class. Record what each call must keep true
+                    // (GOBroadcastElem): an Int64 or Float64 row times 0.5 is
+                    // Float64 cells, exact; a complex row (or a Float64 row
+                    // times a Float32) is refused at the call instead of
+                    // reaching g++ (BL9002).
+                    (if not env.InLambdaBody then
+                        match env.CurrentGenericObligations with
+                        | Some acc ->
+                            let arrTy, scalTe = if arrayOnLeft then lRes, tR else rRes, tL
+                            match arrTy, IR.stripUnits (env.Subst.Resolve scalTe.Type), IR.stripUnits (env.Subst.Resolve tSynth.Type) with
+                            | ArrayElem arr, IRTScalar partner, ArrayElem resArr ->
+                                (match env.Subst.Resolve arr.ElemType |> IR.stripUnits,
+                                       env.Subst.Resolve resArr.ElemType |> IR.stripUnits with
+                                 | IRTInfer eid, IRTScalar result
+                                        when env.Subst.IsPolymorphicId eid && partner <> ETBool && partner <> ETString ->
+                                     let opName =
+                                         match op with
+                                         | OpAdd -> "+" | OpSub -> "-" | OpMul -> "*" | OpDiv -> "/"
+                                         | OpMod -> "%" | OpCaret -> "^"
+                                         | OpEq -> "==" | OpNeq -> "!=" | OpLt -> "<" | OpLe -> "<="
+                                         | OpGt -> ">" | OpGe -> ">=" | _ -> "an operator"
+                                     let isCmp =
+                                         match op with
+                                         | OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr -> true
+                                         | _ -> false
+                                     if not isCmp then acc.Add(GOBroadcastElem (eid, opName, partner, result))
+                                 | _ -> ())
+                            | _ -> ()
+                        | None -> ())
+                    stampElemUnits env resUnits tSynth)
             | _ ->
             // FLOAT LITERALS ARE WIDTH-POLYMORPHIC. A bare float literal beside
             // a Float32 or Complex64 partner adopts Float32 (the complex
@@ -6967,6 +7052,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                 | TExprLit (LitFloat _)
                                 | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitFloat _) }) -> true
                                 | _ -> false
+                            let scalarResult (vid: int) () =
+                                match IR.getUnits resTy0 with
+                                | Some u -> IRTUnitAnnotated (IRTInfer vid, u)
+                                | None -> IRTInfer vid
                             match sigVar lRes, realScalar tR, sigVar rRes, realScalar tL with
                             | Some vid, Some et, _, _ -> Some (vid, et, isFloatLit tR)
                             | _, _, Some vid, Some et -> Some (vid, et, isFloatLit tL)
@@ -10474,9 +10563,26 @@ and buildApplyInfo (env: TypeEnv)
         | Some rows ->
             // Use resolved types so the unify call sees the same shape we used
             // to compute kRank. (Reading param.Type directly could be stale.)
+            // An INDEX VALUE fed to a parameter declared a plain INTEGER is
+            // the integer position it is (formalism 3.10) -- the rule a call
+            // already applies (`lambda(i) -> g(i)` over `range<I>` with
+            // `g(i: Int64)`). Unifying `Int64` with `Nat<I>` refused the same
+            // program spelled `method_for(range<I>) <@> g` (the named kernel
+            // is eta-wrapped with its signature's parameter types) or with an
+            // annotated `lambda(i: Int64)`. Only where `unify` refuses exactly
+            // that pair (every pairing it accepts keeps its binding), and only
+            // the tag is dropped: a float or a bool row is still refused.
+            let indexMeetsIntParam (paramTy: IRType) (row: IRType) =
+                match env.Subst.Resolve paramTy, env.Subst.Resolve row with
+                | IRTScalar (ETInt64 | ETInt32),
+                  (IRTNat _ | IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _)) -> true
+                | _ -> false
             (List.zip resolvedParamTypes rows)
             |> List.fold (fun acc (paramTy, row) ->
-                acc |> Result.bind (fun () -> unify env.Subst paramTy row))
+                acc |> Result.bind (fun () ->
+                    match unify env.Subst paramTy row with
+                    | Error _ when indexMeetsIntParam paramTy row -> Ok ()
+                    | r -> r))
                 (Ok ())
         | None when hasPolyParam || lambdaInfo.Params.IsEmpty || expandedRows.IsEmpty ->
             Ok ()
@@ -13257,8 +13363,24 @@ and inferRecArray (env: TypeEnv) (annot: TypeExpr) (annotTy: IRType) (def: RecAr
 and bindLetPatVar (env: TypeEnv) (name: string) (identity: ArrayIdentity option)
                   (assign: Assignability) (tValue: TypedExpr) : IRId * TypeEnv =
     let varId = env.Builder.FreshId()
+    // VALUE RESTRICTION for function values: a FUNCTION computed by an
+    // application (`let gd = keep(dbl)`, `keep(lambda(x) -> x * 2)`) is ONE
+    // runtime value with one emitted body, so its open variables are decided by
+    // its uses, not quantified away from them. Generalized, every `gd(n)`
+    // instantiated a private copy and the value's own variables fell to zonk's
+    // Float64 default: `gd(4)` over `dbl(x) = x * 2` printed the Float64 8.0.
+    // A lambda literal and a name keep their existing paths (a let-bound
+    // lambda is decided by its first use; an alias of a declared function is
+    // transparent to the call judgment).
+    let expansiveFunction =
+        match tValue.Kind with
+        | TExprLambda _ | TExprVar _ | TExprSection _ -> false
+        | _ ->
+            match env.Subst.Resolve tValue.Type with
+            | FuncElem _ -> true
+            | _ -> false
     let scheme =
-        if assign <> ReadOnly then None
+        if assign <> ReadOnly || expansiveFunction then None
         else
             let s = generalize env.Subst env.Variables tValue.Type
             if s.QuantifiedVars.IsEmpty then None else Some s
@@ -16632,7 +16754,8 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                     // lands, not only at the return: `let y = x + 1.0` is a
                     // T-typed local an integer instance would truncate. Kept
                     // while the variable is still open.
-                    | GOPromotion (v, _, _, _) ->
+                    | GOPromotion (v, _, _, _)
+                    | GOBroadcastElem (v, _, _, _) ->
                         (match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
                          | IRTInfer _ -> true
                          | _ -> false)

@@ -414,9 +414,14 @@ let hmValueRefRewrite (hmFuncMap: Map<IRId, IRFuncDef>)
             let args' =
                 List.zip args ps |> List.map (fun (a, pTy) ->
                     match a with
-                    | IRVar (id, _) when hmFuncMap.ContainsKey id ->
-                        (match pTy with
-                         | FuncElem _ -> onRef id (learn hmFuncMap.[id] pTy) |> Option.defaultValue a
+                    | IRVar (id, ownTy) when hmFuncMap.ContainsKey id ->
+                        (match pTy, ownTy with
+                         | FuncElem _, _ -> onRef id (learn hmFuncMap.[id] pTy) |> Option.defaultValue a
+                         // A parameter that does not NAME a function type
+                         // (`function keep(f) = f`'s open `T`): the checker
+                         // typed the reference at an instantiated copy its
+                         // result's uses fixed, so its own type is the use.
+                         | _, FuncElem _ -> onRef id (learn hmFuncMap.[id] ownTy) |> Option.defaultValue a
                          | _ -> a)
                     | _ -> a)
             if List.forall2 (fun (x: IRExpr) y -> obj.ReferenceEquals (x, y)) args args' then e
@@ -445,6 +450,19 @@ let hmValueRefRewrite (hmFuncMap: Map<IRId, IRFuncDef>)
                  | _ -> l)
             | _ -> l
         if obj.ReferenceEquals (l, l') && obj.ReferenceEquals (r, r') then e else IRCompose (l', r')
+    // A FOLD KERNEL (`reduce(xs, add)`): the checker typed the reference at an
+    // instantiated copy of the signature, which the fold's element fixed
+    // (TypeCheckInfer.inferReduceCore), so the reference's own type IS the use
+    // type. Inside a still-generic body that type is open and the bindings
+    // learned are not concrete; the fixpoint revisits the substituted spec body.
+    | IRReduce (arr, IRVar (kid, (FuncElem _ as kTy)), init) when hmFuncMap.ContainsKey kid ->
+        (match onRef kid (learn hmFuncMap.[kid] kTy) with
+         | Some k' -> IRReduce (arr, k', init)
+         | None -> e)
+    | IRReduceCompute (comp, IRVar (kid, (FuncElem _ as kTy)), seed) when hmFuncMap.ContainsKey kid ->
+        (match onRef kid (learn hmFuncMap.[kid] kTy) with
+         | Some k' -> IRReduceCompute (comp, k', seed)
+         | None -> e)
     | _ -> e
 
 /// `let g = total` -- a module-level ALIAS of an HM-polymorphic function. The
@@ -707,6 +725,10 @@ let specializeHMFunction (func: IRFuncDef) (keyBindings: Map<int, IRType>) (buil
                     match a with
                     | IRVar (id, _) -> acc.Add id |> ignore
                     | _ -> ()
+            // ...and a FOLD KERNEL (`reduce(xs, add)` in a generic body), which
+            // hmValueRefRewrite specializes at its use type the same way.
+            | IRReduce (_, IRVar (id, _), _)
+            | IRReduceCompute (_, IRVar (id, _), _) -> acc.Add id |> ignore
             | _ -> ()) body
         acc
     let needsClone (appliedIds: System.Collections.Generic.HashSet<IRId>)

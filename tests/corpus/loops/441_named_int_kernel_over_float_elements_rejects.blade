@@ -1,0 +1,6 @@
+// TEST: a named Int64 kernel over Float64 elements (rejects)
+// ERROR: BL3001 @ 5:26
+// Only an INDEX value passes as an integer: a Float64 element meeting the
+// kernel's `Int64` parameter is still the mismatch it always was.
+function g(i: Int64) = i * 2
+let d = method_for([1.5, 2.5]) <@> g |> compute

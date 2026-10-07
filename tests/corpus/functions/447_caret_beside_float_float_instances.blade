@@ -1,0 +1,16 @@
+// TEST: a caret parameter beside a float at real instances
+// `a * 0.5` over `a: T^1` types its cells at the promoted element, Float64, so
+// every real row computes exactly: a Float64 row, a Float32 one, and an Int64
+// one -- the same Float64 arithmetic stdlib stats.variance's `row - m` relies
+// on over integer rows (functions/158); the result is a Float64 array, so
+// nothing truncates. The scalar on the left too.
+function half(a: T^1) = a * 0.5
+function shift(a: T^1) = 1.0 + a
+let r1 = half([1.0, 3.0])
+let r2 = half([Float32(1.0), Float32(5.0)])
+let r3 = half([1, 2, 3])
+let r4 = shift([0.5, 1.5])
+// EXPECT: r1 = [0.5, 1.5]
+// EXPECT: r2 = [0.5, 2.5]
+// EXPECT: r3 = [0.5, 1.0, 1.5]
+// EXPECT: r4 = [1.5, 2.5]

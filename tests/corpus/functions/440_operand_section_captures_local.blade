@@ -1,0 +1,47 @@
+// TEST: operand sections capture their function-local operand
+// `(s +)` is `lambda(x) -> s + x` and `(* s)` is `lambda(x) -> x * s`: the
+// operand is captured like any lambda's free variable, so a section that
+// escapes its function (returned, stored in an array) keeps the value it was
+// made with. `(- s)` stays negation; `(s -)` is the left section.
+function adder() = {
+    let s = 3.0
+    let add_s = (s +)
+    add_s
+}
+function scaler(k: Float64) = {
+    let s = k * 2.0
+    (* s)
+}
+function pair(a: Float64, b: Float64) = {
+    let lo = a - 1.0
+    [(lo -), (/ b)]
+}
+function count_up(n: Int64) = {
+    let base = n * 10
+    (base +)
+}
+let f = adder()
+let r1 = f(1.0)
+let g = scaler(3.0)
+let r2 = g(2.0)
+let fs = pair(10.0, 4.0)
+let r3 = fs[0](1.0)
+let r4 = fs[1](9.0)
+let c = count_up(4)
+let r5 = c(2)
+let neg = (- 2.0)
+let lt3 = (< 3)
+let r6 = lt3(2)
+let pow2 = (^ 2)
+let r7 = pow2(5)
+let m = 10.0
+let mapped = method_for([1.0, 2.0, 3.0]) <@> (m *) |> compute
+// EXPECT: r1 = 4.0
+// EXPECT: r2 = 12.0
+// EXPECT: r3 = 8.0
+// EXPECT: r4 = 2.25
+// EXPECT: r5 = 42
+// EXPECT: neg = -2.0
+// EXPECT: r6 = true
+// EXPECT: r7 = 25
+// EXPECT: mapped = [10.0, 20.0, 30.0]

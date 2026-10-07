@@ -1,0 +1,33 @@
+// TEST: a generic named function as a fold kernel is instantiated per use
+// `reduce(xs, add)` names `add` as a VALUE; like a call, each use gets its own
+// instance. The first use used to fix `add` for the whole program, so the
+// Float64 fold after the Int64 one was refused (BL3001) and `add`'s callers
+// were retyped. Also inside a generic body, over rank 2 (row folds), the
+// fused terminal, and next to `<@>` / `object_for` kernel uses at two types.
+function add(a, b) = a + b
+function dbl(x) = x * 2
+function total(xs) = reduce(xs, add)
+let s1 = reduce([1, 2, 3], add)
+let s2 = reduce([1.5, 2.5], add)
+let direct = add(2, 3)
+let t1 = total([4, 5, 6])
+let t2 = total([0.5, 0.25])
+let rows = reduce([[1, 2], [3, 4]], add)
+let frows = reduce([[0.5, 1.5], [2.5, 3.0]], add)
+let fused = reduce(method_for([1.0, 2.0]) <@> lambda(x) -> x * 3.0, add, 0.0)
+let m1 = method_for([1, 2, 3]) <@> dbl |> compute
+let m2 = method_for([1.5, 2.5]) <@> dbl |> compute
+let o1 = object_for(add) <@> ([1, 2], [3, 4]) |> compute
+let o2 = object_for(add) <@> ([0.5], [0.25]) |> compute
+// EXPECT: s1 = 6
+// EXPECT: s2 = 4.0
+// EXPECT: direct = 5
+// EXPECT: t1 = 15
+// EXPECT: t2 = 0.75
+// EXPECT: rows = [3, 7]
+// EXPECT: frows = [2.0, 5.5]
+// EXPECT: fused = 9.0
+// EXPECT: m1 = [2, 4, 6]
+// EXPECT: m2 = [3.0, 5.0]
+// EXPECT: o1 = [[4, 5], [5, 6]]
+// EXPECT: o2 = [[0.75]]

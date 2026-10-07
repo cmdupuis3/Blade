@@ -1,0 +1,40 @@
+// TEST: function values through an unannotated pass-through parameter
+// `keep(f) = f` is generic per call, so whatever function it is handed comes
+// back out at that function's own type: a lambda, a named function, a
+// closure, a GENERIC named function (instantiated by the result's uses -- it
+// used to die BL6001), and through two pass-throughs. The returned value is
+// one function, so its uses decide its open parameter: Int64 calls stay Int64.
+function keep(f) = f
+function inc(x: Int64) -> Int64 = x + 1
+function dbl(x) = x * 2
+function make_adder(n: Int64) = {
+    let m = n * 10
+    keep(lambda(x: Int64) -> x + m)
+}
+let g = keep(lambda(x: Int64) -> x + 1)
+let r1 = g(2)
+let h = keep(inc)
+let r2 = h(10)
+let k = 5
+let cl = keep(lambda(x: Int64) -> x + k)
+let r3 = cl(1)
+let two = keep(keep(inc))
+let r4 = two(7)
+let gd = keep(dbl)
+let r5 = gd(4)
+let gf = keep(keep(dbl))
+let r6 = gf(1.25)
+let gl = keep(lambda(x) -> x * 3)
+let r7 = gl(4)
+let ad = make_adder(2)
+let r8 = ad(1)
+let v = keep(3.5)
+// EXPECT: r1 = 3
+// EXPECT: r2 = 11
+// EXPECT: r3 = 6
+// EXPECT: r4 = 8
+// EXPECT: r5 = 8
+// EXPECT: r6 = 2.5
+// EXPECT: r7 = 12
+// EXPECT: r8 = 21
+// EXPECT: v = 3.5

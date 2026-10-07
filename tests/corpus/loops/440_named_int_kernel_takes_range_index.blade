@@ -1,0 +1,22 @@
+// TEST: a named function as the kernel over range<I> takes the index as an integer
+// An iteration index `Nat<I>` is an integer position (formalism 3.10), so it
+// passes to a parameter declared `Int64` -- as the eta-expanded
+// `lambda(i) -> g(i)` always accepted. The named-kernel spelling (and an
+// annotated `lambda(i: Int64)`) were refused BL3001 "expected Int64, got
+// Nat<I>". A `Nat<I>` parameter and an unannotated one take it as the index.
+type I = Idx<4>
+function g(i: Int64) = i * 2
+function gn(i: Nat<I>) = i
+function gu(i) = i + 1
+let a = method_for(range<I>) <@> g |> compute
+let a_eta = method_for(range<I>) <@> lambda(i) -> g(i) |> compute
+let a_ann = method_for(range<I>) <@> lambda(i: Int64) -> i * 2 |> compute
+let b = method_for(range<I>) <@> gn |> compute
+let c = method_for(range<I>) <@> gu |> compute
+let d = method_for([5, 6, 7]) <@> g |> compute
+// EXPECT: a = [0, 2, 4, 6]
+// EXPECT: a_eta = [0, 2, 4, 6]
+// EXPECT: a_ann = [0, 2, 4, 6]
+// EXPECT: b = [0, 1, 2, 3]
+// EXPECT: c = [1, 2, 3, 4]
+// EXPECT: d = [10, 12, 14]

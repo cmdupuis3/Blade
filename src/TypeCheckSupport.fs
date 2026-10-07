@@ -2414,7 +2414,8 @@ let internal castLegality (name: string) (target: ElemType) (src: ElemType) (rou
 /// first; its second is read by the judgment itself).
 let internal genericObligationVar (ob: GenericObligation) : int =
     match ob with
-    | GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) | GOElemAgree (v, _, _) -> v
+    | GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) | GOElemAgree (v, _, _)
+    | GOBroadcastElem (v, _, _, _) -> v
 
 /// The GENERIC OBLIGATIONS of a callee (TypeEnv.GenericObligation), judged
 /// against one instance: `instanceOf v` is the concrete element the call
@@ -2462,6 +2463,24 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                                        + $"{ppIRType (IRTScalar partner)}, typing the result as the parameter's type, and this "
                                        + $"call makes that type {srcS}: {what}. Convert the argument first -- Float64(x), or "
                                        + "Float64(xs) for an array."))
+            | GOBroadcastElem (_, opName, partner, result) ->
+                (match IR.promoteElemType src partner with
+                 | Some r when r = result -> None
+                 | r ->
+                    let srcS = ppIRType (IRTScalar src)
+                    let resS = ppIRType (IRTScalar result)
+                    let what =
+                        match r with
+                        | Some r -> $"{srcS} {opName} {ppIRType (IRTScalar partner)} is {ppIRType (IRTScalar r)}, which the result's {resS} cells cannot hold"
+                        | None -> $"{opName} is not defined between {srcS} and {ppIRType (IRTScalar partner)}"
+                    let advice =
+                        if src = ETComplex64 || src = ETComplex128 then
+                            "Pass a real array -- project a real component first, real(zs) or abs(zs) -- or write a separate complex function."
+                        else
+                            $"Convert the argument at the call, {resS}(xs), or give the scalar the element's type."
+                    Some (InvalidCast ($"'{fname}' applies {opName} between the elements of its generic array parameter and a "
+                                       + $"{ppIRType (IRTScalar partner)}, typing the result's elements {resS}, and this call makes "
+                                       + $"the parameter's element type {srcS}: {what}. {advice}")))
             | GOElemAgree (_, other, opName) ->
                 match rootOf other |> Option.bind instanceOf with
                 | Some src2 when src2 <> src ->
@@ -2561,11 +2580,38 @@ let internal genericValueObligationClash (env: TypeEnv) (fnRef: TypedExpr) (useT
                  | FuncElem (pps, pr), FuncElem (aps, ar) when pps.Length = aps.Length ->
                      learn pr ar (List.fold2 (fun m pt at -> learn pt at m) m pps aps)
                  | _ -> m
-             let inst = learn fnRef.Type useTy Map.empty
+             // Read against the DECLARATION's signature, not the reference's
+             // own type: a value use is typed at an instantiated copy
+             // (instantiateGenericValueUse) whose fresh variables the
+             // obligations, recorded against the declaration's, never name.
+             let declTy =
+                 match lookupVar fname env with
+                 | Some vi -> vi.Type
+                 | None -> fnRef.Type
+             let inst = learn declTy useTy Map.empty
              judgeGenericObligations env fname obs (fun r ->
                  Map.tryFind r inst |> Option.bind (concreteElemOf env.Subst))
          | _ -> None)
     | _ -> None
+
+/// A declared GENERIC function named as a VALUE (not called): the reference is
+/// typed at an INSTANTIATED copy of its signature, so the position it sits in
+/// fixes one instance instead of binding the declaration's own variables (which
+/// would pin the function to its first value use for every later caller). IR
+/// monomorphization specializes the reference at that instance
+/// (IRMono.hmValueRefRewrite). Any other expression -- a lambda, a parameter,
+/// a recursive reference inside the unfinished declaration -- is returned
+/// unchanged.
+let internal instantiateGenericValueUse (env: TypeEnv) (a: TypedExpr) : TypedExpr =
+    match a.Kind with
+    | TExprVar _ ->
+        let quantified, closed = calleeQuantifier env a
+        if not closed then a
+        else
+            match instantiateOpenVars env.Subst quantified [a.Type] with
+            | [ copy ], ids when not (Set.isEmpty ids) -> { a with Type = copy }
+            | _ -> a
+    | _ -> a
 
 /// A generic body calling a generic callee with its OWN signature variables:
 /// the callee's obligations are then the caller's too (`function r2(x: T^0)
@@ -2606,6 +2652,8 @@ let internal propagateGenericObligations (env: TypeEnv) (tFunc: TypedExpr)
                      callerVar v |> Option.iter (fun c -> acc.Add(GOFractionalMath (c, nm)))
                  | GOPromotion (v, o, p, lit) ->
                      callerVar v |> Option.iter (fun c -> acc.Add(GOPromotion (c, o, p, lit)))
+                 | GOBroadcastElem (v, o, p, r) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GOBroadcastElem (c, o, p, r)))
                  | GOElemAgree (v, w, o) ->
                      match callerVar v, callerVar w with
                      | Some c, Some d when c <> d -> acc.Add(GOElemAgree (c, d, o))
@@ -4823,11 +4871,17 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     // Only a plain variable (never a signature variable, a
                     // literal's or a subscript's), and only a scalar argument:
                     // an array would re-shape a body already typed as a value.
+                    // The same holds for a function value an APPLICATION
+                    // computed (`let gd = keep(dbl)`): one runtime value, whose
+                    // open parameter (an instantiated copy of `dbl`'s, or a
+                    // passed lambda's) only its calls can decide -- it used to
+                    // fall to the Float64 default, so `gd(4)` printed 8.0.
                     let lambdaHead =
                         match tFunc.Kind with
                         | TExprVar (name, _, _) ->
                             (match lookupVar name env with
                              | Some { TypedValue = Some { Kind = TExprLambda _ } } -> true
+                             | Some { TypedValue = Some { Kind = TExprApp _ }; Scheme = None } -> true
                              | _ -> false)
                         | _ -> false
                     if lambdaHead then

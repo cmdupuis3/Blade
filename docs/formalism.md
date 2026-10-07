@@ -1025,8 +1025,10 @@ Under `reynolds(...)` the clause is an iteration license, not a claim about
 the bare kernel, and is never refuted (§5.3).
 
 Sections and partial application: operator sections `(+)`, `(*)`, ... as
-kernels, and single-wildcard `f(_, y, z)` (multiple wildcards rejected — use a
-lambda). A function applied to fewer arguments than it declares is curried
+kernels; operand sections `(s +)` and `(* s)`, which ARE the lambdas
+`lambda(x) -> s + x` and `lambda(x) -> x * s` (the operand captured as that
+lambda captures it, the escape rule above included; `(- s)` stays negation); and
+single-wildcard `f(_, y, z)` (multiple wildcards rejected — use a lambda). A function applied to fewer arguments than it declares is curried
 (`f(5)` of a 4-parameter `f` awaits the other three).
 
 ### 5.3 Reynolds operators

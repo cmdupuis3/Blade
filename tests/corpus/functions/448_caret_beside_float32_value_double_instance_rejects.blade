@@ -1,0 +1,10 @@
+// TEST: a caret parameter beside a Float32 value at a Float64 instance (rejects)
+// ERROR: BL3019 @ 9:12
+// ERROR-CONTAINS: Float64 * Float32 is Float64
+// `a * k` with a typed Float32 `k` types the cells Float32; a Float64 row's
+// product is Float64, which Float32 cells would narrow (g++ refused it, BL9002).
+// A Float32 row keeps them Float32.
+let k: Float32 = Float32(2.0)
+function sc(a: T^1) = a * k
+let ok = sc([Float32(1.5)])
+let g = sc([1.5, 2.5])

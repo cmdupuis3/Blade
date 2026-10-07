@@ -1,0 +1,8 @@
+// TEST: caret parameters of different ranks meet elementwise (rejects)
+// ERROR: BL3999 @ 6:37
+// ERROR-CONTAINS: the left operand is a rank-1 parameter
+// `A + B` over a concrete rank-1 and rank-2 array is refused (no shared
+// elementwise shape); the generic spelling is the same program for every call,
+// so it is refused at the declaration -- it used to check clean and die in g++.
+function addr(a: T^1, b: U^2) = a + b
+let r = addr([1.0, 2.0], [[10.0, 20.0], [30.0, 40.0]])

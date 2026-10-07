@@ -1,0 +1,9 @@
+// TEST: a caret parameter beside a float at a complex instance (rejects)
+// ERROR: BL3019 @ 8:14
+// ERROR-CONTAINS: Complex128 * Float64 is Complex128
+// `a * 0.5` over `a: T^1` types its cells at the promoted element while `T`
+// is open -- Float64 -- which every real row keeps (functions/447). A complex
+// row's product is Complex128, which Float64 cells cannot hold: the call is
+// refused at its argument instead of reaching g++ (it was BL9002).
+function half(a: T^1) = a * 0.5
+let z = half([complex(1.0, 2.0), complex(3.0, 4.0)])

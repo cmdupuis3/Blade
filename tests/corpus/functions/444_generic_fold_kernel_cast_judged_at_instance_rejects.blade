@@ -1,0 +1,9 @@
+// TEST: a fold-kernel use of a generic function is judged at its instance (rejects)
+// ERROR: BL3019 @ 8:29
+// `reduce(xs, f)` instantiates `f` at the element type, so `f`'s cast of its
+// generic parameter is judged there, as at a call: the Int64 fold is fine,
+// the Float64 one would make `Int64(a + b)` truncate a float -- refused at the
+// kernel reference rather than left to the instance's emitted body.
+function f(a, b) = Int64(a + b)
+let ok = reduce([1, 2, 3], f)
+let r2 = reduce([1.5, 2.5], f)

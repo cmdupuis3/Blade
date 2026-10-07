@@ -1,0 +1,12 @@
+// TEST: a returned operand section over a local its scope reassigns (rejects)
+// ERROR: BL4005 @ 9:5
+// `(n +)` is `lambda(x) -> n + x`: it reads `n`, the scope writes `n` after the
+// section is made, so the section shares `n` rather than copying it -- and so
+// cannot outlive the frame that owns it, the rule every lambda follows.
+function reader(start: Int64) = {
+    let mut n = start
+    let peek = (n +)
+    n = n * 2
+    peek
+}
+let p = reader(10)
