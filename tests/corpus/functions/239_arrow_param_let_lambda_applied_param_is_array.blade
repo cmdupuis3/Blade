@@ -1,0 +1,17 @@
+// TEST: An arrow parameter handed a let-bound lambda whose parameter is only applied
+// ============================================================================
+// The value-test sibling of functions/223. `ap(f, x) = f(x)` with `x` an
+// array: the passed lambda's open `v` must be an array. In 223 the lambda's
+// body used `v` as a VALUE (`v * 2.0`, typed before the call), so it cannot
+// be made one and stays refused. Here the body only APPLIES `v`; those
+// applications were recorded while it was open and are typed as array reads
+// once it is bound, so it is legal. The lambda is one body, so a second call
+// passes an array again (any length: bound at its shape).
+function ap(f, x) = f(x)
+let g = lambda(v) -> v(0) * 2.0 + v(1)
+let t = ap(g, [1.0, 2.0])
+let t2 = ap(g, [5.0, 6.0, 7.0])
+let i = ap(lambda(k) -> k * 3, 4)
+// EXPECT: t = 4.0
+// EXPECT: t2 = 16.0
+// EXPECT: i = 12

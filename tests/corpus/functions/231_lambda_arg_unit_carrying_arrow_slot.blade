@@ -1,0 +1,11 @@
+// TEST: A lambda argument meets a unit-carrying array slot
+// ============================================================================
+// The slot's parameter carries the unit, so `v` is a `Float64<u>` array and
+// the lambda's result a `Float64<u>`, as the declared return demands.
+Unit u
+function apu(f: (Float64<u>^1) -> Float64<u>, x: Float64<u>^1) -> Float64<u> = f(x)
+let xs: Array<Float64<u> like Idx<3>> = [1.0, 2.0, 3.0]
+let total = apu(lambda(v) -> reduce(v, (+)), xs)
+let firstv = apu(lambda(v) -> v(0) * 2.0, xs)
+// EXPECT: total = 6.0
+// EXPECT: firstv = 2.0

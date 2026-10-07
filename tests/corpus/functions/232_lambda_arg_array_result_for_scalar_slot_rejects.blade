@@ -1,0 +1,8 @@
+// TEST: A lambda argument returning an array where the slot returns a scalar (rejects)
+// ERROR: BL3001 @ 7:12
+// ============================================================================
+// Checked against the slot, `v` is an array and `v * 2.0` one too, so the
+// lambda is `(Float64^1) -> Float64^1`, not the declared `-> Float64`. It
+// used to typecheck (`v` a scalar) and die in g++ (BL9002).
+function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
+let r = ap(lambda(v) -> v * 2.0, [1.0, 2.0])

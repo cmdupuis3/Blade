@@ -1,0 +1,19 @@
+// TEST: A lambda argument meets a generic arrow slot at this call's instance
+// ============================================================================
+// `(T^1) -> T`: the lambda's `v` is a rank-1 array whose element the call's
+// other argument decides -- typed first, so `reduce(v, (+)) * 3` over Int64
+// cells is integer arithmetic, not a Float64 default (g++ used to be handed
+// an `Array<long long>` for a `std::function<double(Array<double, 1>)>`).
+// A let-bound lambda's open parameter links to the same instance.
+function apg(f: (T^1) -> T, x: T^1) -> T = f(x)
+let g1 = apg(lambda(v) -> reduce(v * 2.0, (+)), [1.0, 2.0])
+let g2 = apg(lambda(v) -> reduce(v, (+)) * 3, [1, 2, 3])
+let g3 = apg(lambda(v) -> v(1), [7.0, 8.0, 9.0])
+let g4 = apg(lambda(v) -> v(2), [7, 8, 9])
+let h = lambda(v) -> v(1)
+let g5 = apg(h, [7, 8, 9])
+// EXPECT: g1 = 6.0
+// EXPECT: g2 = 18
+// EXPECT: g3 = 8.0
+// EXPECT: g4 = 9
+// EXPECT: g5 = 8

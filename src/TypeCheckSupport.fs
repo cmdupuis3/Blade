@@ -2946,6 +2946,122 @@ let internal arrowExpectation (n: int) : string =
     let args = if n = 1 then "an integer index" else $"{n} integer indices"
     $"an array of rank {n} or a function of {args} (the body applies it to {args})"
 
+/// Structural child enumerator for a typed expression: the immediate
+/// sub-expressions of a node, total over TExpr kinds. Shared by the
+/// tag-check revalidation walk and the wildcard-escape scan so the two
+/// never drift.
+// Public: Ide.fs walks the zonked typed tree with this to collect builtin
+// call-site instantiations (calls[] in `ide check --json`).
+let typedExprChildren (expr: TypedExpr) : TypedExpr list =
+        match expr.Kind with
+        | TExprLit _ | TExprVar _ | TExprQualified _ | TExprSection _
+        | TExprWildcard
+        | TExprZero | TExprRange _ | TExprReverse _ | TExprArity _ -> []
+        | TExprUnaryOp (_, e) -> [e]
+        | TExprBinOp (_, _, l, r) -> [l; r]
+        | TExprApp (f, args) -> f :: args
+        | TExprTupleIndex (t, i) -> [t; i]
+        | TExprPolyTail (p, _) -> [p]
+        | TExprField (e, _, _) -> [e]
+        | TExprLambda info -> [info.Body]
+        | TExprLet (_, _, v, b) -> [v; b]
+        | TExprMatch (s, cases) ->
+            s :: (cases |> List.collect (fun c ->
+                c.Body :: (Option.toList c.Guard)))
+        | TExprIf (c, t, e) -> [c; t; e]
+        | TExprTuple es | TExprArrayLit (es, _) | TExprZip es | TExprStack es
+        | TExprSequence es -> es
+        | TExprJoin (es, _) -> es
+        | TExprComplexLit (re, im) -> [re; im]
+        | TExprFma (a, b, c) -> [a; b; c]
+        | TExprMethodFor info -> info.Arrays
+        | TExprObjectFor info -> [info.Kernel]
+        | TExprApply info -> info.Loop :: info.Kernel :: info.Arrays
+        | TExprBind (a, b) | TExprParallel (a, b) | TExprFusion (a, b)
+        | TExprChoice (a, b) -> [a; b]
+        | TExprFallback (a, b) -> [a; b]
+        | TExprFunctorMap (f, c) -> [f; c]
+        | TExprCompose (_, l, r) -> [l; r]
+        | TExprDotDot (lo, hi) -> [lo; hi]
+        | TExprPure e | TExprCompute e | TExprRead e | TExprFillRandom e | TExprRank e
+        | TExprExtents e | TExprReynolds (e, _) -> [e]
+        | TExprRandGen (_, key, pars, weights, address, _) -> (key :: pars) @ (address |> Option.map (fun (s, o) -> [s; o]) |> Option.defaultValue []) @ (weights |> Option.map fst |> Option.toList)
+        | TExprGuard (c, b) -> [c; b]
+        | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
+        | TExprGroupBy (a, p) | TExprSort (a, p)
+        | TExprCompound (a, p) | TExprSparse (a, p) -> [a; p]
+        | TExprReduce (a, p, i) -> [a; p] @ Option.toList i
+        | TExprProdSum args -> args
+        | TExprUnique a -> [a]
+        | TExprTranspose (a, _, _) -> [a]
+        | TExprDecompact (a, _) -> [a]
+        | TExprGram (l, r, _) -> [l; r]
+        | TExprGramApply (l, r, x) -> [l; r; x]
+        | TExprMatmul (l, r) -> [l; r]
+        | TExprEigh a -> [a]
+        | TExprLu a -> [a]
+        | TExprLuSolve (l, p, b, _) -> [l; p; b]
+        | TExprSolve (a, b) -> [a; b]
+        | TExprArrayNegate a -> [a]
+        | TExprArrayConjugate a -> [a]
+        | TExprContains (a, v) -> [a; v]
+        | TExprDisplayEmit (_, _, d, _, idOpt) -> d :: Option.toList idOpt
+        | TExprDisplayJson (_, d) -> [d]
+        | TExprDisplayNum d -> [d]
+        | TExprDisplayStr d -> [d]
+        | TExprGroupKeys keys -> keys
+        | TExprGroupBucket gk -> [gk]
+        | TExprSegments _ -> []
+        | TExprUngroup (g, _) -> [g]
+        | TExprUngroupRows (rows, _, _) -> rows
+        | TExprSegmentsGrid _ -> []
+        | TExprUngroupGrid (g, _, _) -> [g]
+        | TExprStruct (_, fields) -> fields |> List.map snd
+        | TExprIndex (arr, idxs, _) -> arr :: idxs
+        | TExprBlock (stmts, final) ->
+            let rec stmtExprsOf (s: TypedStmt) : TypedExpr list =
+                match s with
+                | TStmtLet b -> [b.Value]
+                | TStmtAssign (l, r) -> [l; r]
+                | TStmtExpr e -> [e]
+                | TStmtForIn (_, _, lo, hi, body) ->
+                    lo :: hi :: (body |> List.collect stmtExprsOf)
+            (stmts |> List.collect stmtExprsOf) @ Option.toList final
+        | TExprAssign (l, r) -> [l; r]
+        | TExprConstraintCheck (c, _, _) -> [c]
+        | TExprBreakIf c -> [c]
+        | TExprReplicate (c, b) -> [c; b]
+        | TExprAlign (es, _) -> es
+        | TExprPartialApp (_, a, _) -> [a]
+
+/// The LAMBDA an argument is -- a literal, or a `let`-bound one named by the
+/// argument (the binding the name RESOLVES to) -- if it is one.
+let internal argLambdaInfo (env: TypeEnv) (arg: TypedExpr) : TypedLambdaInfo option =
+    match arg.Kind with
+    | TExprLambda li -> Some li
+    | TExprVar (name, vid, _) ->
+        match lookupVar name env with
+        | Some vi when vi.VarId = vid ->
+            (match vi.TypedValue with
+             | Some { Kind = TExprLambda li } -> Some li
+             | _ -> None)
+        | _ -> None
+    | _ -> None
+
+/// Does a lambda body use the parameter `pv` ONLY as the head of an
+/// application (`v(0)`, recorded while it was open -- TypeEnv.ArrowApplication),
+/// or not at all? Such a parameter can still become an array or a function: the
+/// applications are typed when it is bound. Any other use (`v * 2.0`, `v` as an
+/// argument or the result) was typed while it was open as a single VALUE, and
+/// the body would not be re-typed.
+let internal lambdaParamOnlyApplied (pv: IRId) (body: TypedExpr) : bool =
+    let rec ok (e: TypedExpr) =
+        match e.Kind with
+        | TExprApp ({ Kind = TExprVar (_, id, _) }, args) when id = pv -> args |> List.forall ok
+        | TExprVar (_, id, _) when id = pv -> false
+        | _ -> typedExprChildren e |> List.forall ok
+    ok body
+
 /// AN ARROW PARAMETER AT A CALL: the callee's ArrowObligations
 /// (TypeEnv.FuncArrowObligations), typed against the call judgment's
 /// instantiation (`copyMap`, declaration variable -> copy). The argument decides
@@ -3081,19 +3197,48 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                     | None ->
                         let copyIds =
                             mapping |> Map.toSeq |> Seq.choose (fun (_, t) -> match t with IRTInfer c -> Some c | _ -> None) |> Set.ofSeq
+                        let lambdaArg =
+                            if pos < tArgs.Length then argLambdaInfo env (List.item pos tArgs) else None
                         let slotErr =
-                            List.zip slots argInsts |> List.tryPick (fun (slot, argTy) ->
+                            List.zip slots argInsts |> List.indexed |> List.tryPick (fun (j, (slot, argTy)) ->
                                 match IR.stripUnits (subst.Resolve argTy) with
                                 // Neither this call's copy nor a literal: the
                                 // declaration's own, never bound by a call.
                                 | IRTInfer aid when (subst.GetLiteralDefault aid).IsNone && not (copyIds.Contains aid) -> None
                                 // An OPEN slot (an unannotated lambda parameter)
-                                // is never made an array or a function here: the
-                                // lambda's body was typed while it was open, as
-                                // a value, and would not be re-typed.
+                                // is made an array or a function here only when
+                                // the lambda's body used it as nothing but an
+                                // application head (lambdaParamOnlyApplied): its
+                                // applications are still pending and are typed
+                                // against it once it is bound. Any other use was
+                                // typed while it was open, as a value, and would
+                                // not be re-typed.
                                 | ArrayElem _ | IRTArrow _ as a when (match IR.stripUnits (subst.Resolve slot) with
                                                                       | IRTInfer _ -> true
                                                                       | _ -> false) ->
+                                    let onlyApplied =
+                                        lambdaArg |> Option.exists (fun li ->
+                                            match List.tryItem j li.Params with
+                                            | Some p ->
+                                                subst.Resolve p.Type = subst.Resolve slot
+                                                && lambdaParamOnlyApplied p.VarId li.Body
+                                            | None -> false)
+                                    // Bound at its SHAPE, as arrowBindErr binds a
+                                    // lambda's arrow parameter: an unnamed literal
+                                    // axis becomes an unknown one.
+                                    let shape =
+                                        match a with
+                                        | ArrayElem at ->
+                                            mkArrayLike { at with
+                                                            IndexTypes =
+                                                                at.IndexTypes |> List.map (fun ix ->
+                                                                    match ix.Tag, ix.Extent with
+                                                                    | None, IRLit (IRLitInt _) when ix.IxKind = IxKPlain && ix.Symmetry = SymNone ->
+                                                                        { ix with Extent = mkAbstractAxisExtent (env.Builder.FreshId()) }
+                                                                    | _ -> ix) }
+                                        | t -> t
+                                    if onlyApplied && (unify subst (IR.stripUnits (subst.Resolve slot)) shape).IsOk then None
+                                    else
                                     Some ($"a function whose parameter is declared {ppIRType a} (it is applied to "
                                           + $"one here; annotate the passed function's parameter -- an unannotated one is typed as a single value)")
                                 | _ ->
@@ -4086,7 +4231,108 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                     let copied, copyIds, copyMap = instantiateOpenVarsWithMap env.Subst quantified (paramTys @ [retTy])
                     let pCopies = List.truncate paramTys.Length copied
                     let retCopy = List.last copied
+                    // A FUNCTION ARGUMENT'S OPEN PARAMETER MEETS ITS DECLARED
+                    // SLOT -- `let g = lambda(v) -> v(0) * 2.0; ap(g, xs)` with
+                    // `ap(f: (Float64^1) -> Float64, ..)`. A lambda literal
+                    // written AT the call is checked against the slot before its
+                    // body is typed (ExprApp seeds it); a `let`-bound one was
+                    // typed at its binding, and a parameter its body left open
+                    // is the caller's to bind: the HM application rule, as for
+                    // an open argument (below), one level in. Without it the
+                    // judgment compared only what was concrete, the open
+                    // parameter kept its zonk default (or its applications the
+                    // function reading), and g++ was handed a lambda of the
+                    // wrong type (BL9002). The lambda is one body, so this use
+                    // decides for every later one. Only a plain monomorphic
+                    // variable is bound (never a declaration's signature
+                    // variable, a literal's, or a subscript's), units stripped
+                    // as everywhere in the judgment (they are unitClash's). A
+                    // generic slot (`(T^1) -> T`) binds it to this call's copy,
+                    // which the other arguments then decide -- so a seeded
+                    // literal's own copy is linked to the judgment's too.
+                    //
+                    // A slot that is (or may become) an ARRAY or a FUNCTION binds
+                    // it only when the body used it as nothing but an
+                    // application head (lambdaParamOnlyApplied): any other use
+                    // (`lambda(v) -> v * 2.0`) was typed as a single value while
+                    // it was open, so a declared array slot is refused at the
+                    // argument -- annotate the parameter -- and an argument that
+                    // is not a recognizable lambda is left as before.
+                    let openSlotRefusal : (int * TypeError) option ref = ref None
+                    let openSlotVars =
+                        appArgPairs pCopies (tArgs |> List.map (_.Type))
+                        |> List.collect (fun (i, pTy, aTy) ->
+                            match env.Subst.Resolve pTy, env.Subst.Resolve aTy with
+                            | FuncElem (pSlots, _), FuncElem (aSlots, _) when pSlots.Length = aSlots.Length ->
+                                let li = argLambdaInfo env (List.item i tArgs)
+                                List.zip pSlots aSlots |> List.indexed |> List.choose (fun (j, (ps, a)) ->
+                                    match env.Subst.Resolve a with
+                                    | IRTInfer aid when not (env.Subst.IsPolymorphicId aid)
+                                                       && (env.Subst.GetLiteralDefault aid).IsNone
+                                                       && not (env.Subst.IsIndexDefault aid) ->
+                                        let target = stripUnitsDeep env.Subst (env.Subst.Resolve ps)
+                                        // The lambda parameter this slot is, if the
+                                        // argument is a lambda we can see: is it
+                                        // used only as an application head?
+                                        let onlyApplied =
+                                            li |> Option.bind (fun li ->
+                                                List.tryItem j li.Params
+                                                |> Option.filter (fun p -> env.Subst.Resolve p.Type = IRTInfer aid)
+                                                |> Option.map (fun p -> lambdaParamOnlyApplied p.VarId li.Body))
+                                        // Some true: an array or a function; Some
+                                        // false: open, so it may become one.
+                                        let shaped =
+                                            match target with
+                                            | ArrayElem _ | IRTArrow _ -> Some true
+                                            | IRTInfer t when (env.Subst.GetArityConstraint t |> Option.exists (fun k -> k >= 1))
+                                                              || (env.Subst.GetRankLowerBound t |> Option.exists (fun k -> k >= 1)) -> Some true
+                                            | IRTInfer _ -> Some false
+                                            | _ -> None
+                                        let bind () =
+                                            if target = IRTInfer aid then None
+                                            else
+                                                // Its recorded applications, taken
+                                                // while it is still the head's root.
+                                                let apps =
+                                                    env.PendingArrowApps |> List.ofSeq |> List.filter (fun app ->
+                                                        match env.Subst.Resolve app.Head.Type with
+                                                        | IRTInfer h -> h = aid
+                                                        | _ -> false)
+                                                match unify env.Subst (IRTInfer aid) target with
+                                                | Ok () -> Some (i, apps)
+                                                | Error _ -> None
+                                        match shaped, onlyApplied with
+                                        | None, _ -> bind ()
+                                        | Some _, Some true -> bind ()
+                                        | Some true, Some false ->
+                                            if openSlotRefusal.Value.IsNone then
+                                                let desc =
+                                                    match tFunc.Kind with
+                                                    | TExprVar (name, _, _) -> $"'{name}'"
+                                                    | _ -> "this function"
+                                                // A generic slot reads as its rank,
+                                                // not as a bare type variable.
+                                                let slotDesc =
+                                                    match target with
+                                                    | IRTInfer t ->
+                                                        let k =
+                                                            env.Subst.GetArityConstraint t
+                                                            |> Option.orElse (env.Subst.GetRankLowerBound t)
+                                                            |> Option.defaultValue 1
+                                                        $"an array of rank {k}"
+                                                    | t -> ppIRType t
+                                                openSlotRefusal.Value <-
+                                                    Some (i, ArgTypeMismatch (i + 1, desc,
+                                                            $"a function whose parameter {j + 1} is {slotDesc} (the passed lambda's "
+                                                            + "unannotated parameter is used as a single value in its body, which was typed "
+                                                            + "before this call: annotate the parameter)",
+                                                            ppIRType (env.Subst.Resolve aTy)))
+                                            None
+                                        | _ -> None
+                                    | _ -> None)
+                            | _ -> [])
                     let clash =
+                        openSlotRefusal.Value |> Option.orElse (
                         appArgPairs pCopies (tArgs |> List.map (_.Type))
                         |> List.tryPick (fun (i, pTy, aTy) ->
                             let arg = List.item i tArgs
@@ -4107,6 +4353,25 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                 if i >= pCopies.Length then None
                                 else genericValueObligationClash env a (List.item i pCopies)
                                      |> Option.map (fun e -> (i, e))))
+                        // ...and the applications a bound open parameter's body
+                        // recorded on it while it was open
+                        // (TypeEnv.ArrowApplication), typed now that the
+                        // arguments have decided it, refused at this argument.
+                        // One still open (a generic slot no argument reached)
+                        // stays pending for the body end.
+                        |> Option.orElse (
+                            openSlotVars |> List.tryPick (fun (i, recorded) ->
+                                let apps =
+                                    recorded |> List.filter (fun app ->
+                                        match IR.stripUnits (env.Subst.Resolve app.Head.Type) with
+                                        | IRTInfer _ -> false
+                                        | _ -> env.PendingArrowApps.Exists(fun x -> obj.ReferenceEquals(x, app)))
+                                for app in apps do
+                                    env.PendingArrowApps.RemoveAll(fun x -> obj.ReferenceEquals(x, app)) |> ignore
+                                apps |> List.tryPick (fun app ->
+                                    match dischargeArrowApp env app with
+                                    | Error e -> Some (i, e)
+                                    | Ok () -> None))))
                     propagateGenericObligations env tFunc paramTys tArgs
                     // Extents are NOT part of type identity, and a `T^1` shared
                     // by two parameters admits arrays of different lengths
@@ -4530,94 +4795,6 @@ let internal settleDeclArrowApps (env: TypeEnv) (funcVarId: IRId) (paramTypes: I
     | (span, e) :: _ ->
         setCurrentExprSpan span
         Error e
-
-/// Structural child enumerator for a typed expression: the immediate
-/// sub-expressions of a node, total over TExpr kinds. Shared by the
-/// tag-check revalidation walk and the wildcard-escape scan so the two
-/// never drift.
-// Public: Ide.fs walks the zonked typed tree with this to collect builtin
-// call-site instantiations (calls[] in `ide check --json`).
-let typedExprChildren (expr: TypedExpr) : TypedExpr list =
-        match expr.Kind with
-        | TExprLit _ | TExprVar _ | TExprQualified _ | TExprSection _
-        | TExprWildcard
-        | TExprZero | TExprRange _ | TExprReverse _ | TExprArity _ -> []
-        | TExprUnaryOp (_, e) -> [e]
-        | TExprBinOp (_, _, l, r) -> [l; r]
-        | TExprApp (f, args) -> f :: args
-        | TExprTupleIndex (t, i) -> [t; i]
-        | TExprPolyTail (p, _) -> [p]
-        | TExprField (e, _, _) -> [e]
-        | TExprLambda info -> [info.Body]
-        | TExprLet (_, _, v, b) -> [v; b]
-        | TExprMatch (s, cases) ->
-            s :: (cases |> List.collect (fun c ->
-                c.Body :: (Option.toList c.Guard)))
-        | TExprIf (c, t, e) -> [c; t; e]
-        | TExprTuple es | TExprArrayLit (es, _) | TExprZip es | TExprStack es
-        | TExprSequence es -> es
-        | TExprJoin (es, _) -> es
-        | TExprComplexLit (re, im) -> [re; im]
-        | TExprFma (a, b, c) -> [a; b; c]
-        | TExprMethodFor info -> info.Arrays
-        | TExprObjectFor info -> [info.Kernel]
-        | TExprApply info -> info.Loop :: info.Kernel :: info.Arrays
-        | TExprBind (a, b) | TExprParallel (a, b) | TExprFusion (a, b)
-        | TExprChoice (a, b) -> [a; b]
-        | TExprFallback (a, b) -> [a; b]
-        | TExprFunctorMap (f, c) -> [f; c]
-        | TExprCompose (_, l, r) -> [l; r]
-        | TExprDotDot (lo, hi) -> [lo; hi]
-        | TExprPure e | TExprCompute e | TExprRead e | TExprFillRandom e | TExprRank e
-        | TExprExtents e | TExprReynolds (e, _) -> [e]
-        | TExprRandGen (_, key, pars, weights, address, _) -> (key :: pars) @ (address |> Option.map (fun (s, o) -> [s; o]) |> Option.defaultValue []) @ (weights |> Option.map fst |> Option.toList)
-        | TExprGuard (c, b) -> [c; b]
-        | TExprMask (a, p) | TExprIntersect (a, p) | TExprUnion (a, p)
-        | TExprGroupBy (a, p) | TExprSort (a, p)
-        | TExprCompound (a, p) | TExprSparse (a, p) -> [a; p]
-        | TExprReduce (a, p, i) -> [a; p] @ Option.toList i
-        | TExprProdSum args -> args
-        | TExprUnique a -> [a]
-        | TExprTranspose (a, _, _) -> [a]
-        | TExprDecompact (a, _) -> [a]
-        | TExprGram (l, r, _) -> [l; r]
-        | TExprGramApply (l, r, x) -> [l; r; x]
-        | TExprMatmul (l, r) -> [l; r]
-        | TExprEigh a -> [a]
-        | TExprLu a -> [a]
-        | TExprLuSolve (l, p, b, _) -> [l; p; b]
-        | TExprSolve (a, b) -> [a; b]
-        | TExprArrayNegate a -> [a]
-        | TExprArrayConjugate a -> [a]
-        | TExprContains (a, v) -> [a; v]
-        | TExprDisplayEmit (_, _, d, _, idOpt) -> d :: Option.toList idOpt
-        | TExprDisplayJson (_, d) -> [d]
-        | TExprDisplayNum d -> [d]
-        | TExprDisplayStr d -> [d]
-        | TExprGroupKeys keys -> keys
-        | TExprGroupBucket gk -> [gk]
-        | TExprSegments _ -> []
-        | TExprUngroup (g, _) -> [g]
-        | TExprUngroupRows (rows, _, _) -> rows
-        | TExprSegmentsGrid _ -> []
-        | TExprUngroupGrid (g, _, _) -> [g]
-        | TExprStruct (_, fields) -> fields |> List.map snd
-        | TExprIndex (arr, idxs, _) -> arr :: idxs
-        | TExprBlock (stmts, final) ->
-            let rec stmtExprsOf (s: TypedStmt) : TypedExpr list =
-                match s with
-                | TStmtLet b -> [b.Value]
-                | TStmtAssign (l, r) -> [l; r]
-                | TStmtExpr e -> [e]
-                | TStmtForIn (_, _, lo, hi, body) ->
-                    lo :: hi :: (body |> List.collect stmtExprsOf)
-            (stmts |> List.collect stmtExprsOf) @ Option.toList final
-        | TExprAssign (l, r) -> [l; r]
-        | TExprConstraintCheck (c, _, _) -> [c]
-        | TExprBreakIf c -> [c]
-        | TExprReplicate (c, b) -> [c; b]
-        | TExprAlign (es, _) -> es
-        | TExprPartialApp (_, a, _) -> [a]
 
 /// An UNANNOTATED function parameter that its body uses directly as a
 /// SUBSCRIPT (`function g(i) = A(i)`) and that nothing else pinned is an

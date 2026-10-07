@@ -1,0 +1,17 @@
+// TEST: A let-bound lambda's open parameter is bound by the declared slot it is passed to
+// ============================================================================
+// `h` is typed at its binding, where `v` is only APPLIED -- its kind still
+// open. Passed to `ap`, the declared `(Float64^1) -> Float64` slot binds it
+// (the lambda is one body, so this first use decides) and the applications
+// its body recorded are typed as array reads. It used to keep the function
+// reading and reach g++ as a `std::function<double(long long)>` (BL9002).
+// Later calls, direct or through `ap`, see the array parameter; a different
+// length is fine (the slot's axis is an unknown one).
+function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
+let h = lambda(v) -> v(0) + v(2)
+let k1 = ap(h, [1.0, 2.0, 3.0])
+let k2 = ap(h, [10.0, 20.0, 30.0, 40.0])
+let k3 = h([5.0, 6.0, 7.0])
+// EXPECT: k1 = 4.0
+// EXPECT: k2 = 40.0
+// EXPECT: k3 = 12.0

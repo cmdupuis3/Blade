@@ -786,6 +786,26 @@ let b = first(lambda(i) -> 10.0 * Float64(i))
 // EXPECT: b = 1
 ```
 
+**Lambda arguments.** A lambda literal passed where the callee DECLARES a
+function type is checked against that type: its unannotated parameters take
+the declared parameter types before its body is typed (for a generic
+declaration, this call's instance of them, which the call's other arguments
+teach first). An annotated parameter keeps its annotation, and a conflict, or a
+parameter count other than the slot's, is refused at the lambda. A `let`-bound
+lambda was typed at its binding: a parameter its body left open is bound by the
+first declared slot or arrow parameter it reaches -- if the body only applied
+it. One the body used as a value (`lambda(v) -> v * 2.0`) was typed as a single
+value, and an array or function slot refuses it: annotate the parameter.
+
+```blade
+function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
+let r = ap(lambda(v) -> reduce(v * 2.0, (+)), [1.0, 2.0])
+let g = lambda(v) -> v(0) + v(1)
+let s = ap(g, [3.0, 4.0])
+// EXPECT: r = 6
+// EXPECT: s = 7
+```
+
 **Poly-indexing** **(planned)**: `A(indices)` with a tuple of length rank(A);
 `all_indices(A)` iterates all valid tuples respecting structure. Use for rank-polymorphic
 operations (trace, sum-all); for standard arrays prefer curried/loop access to

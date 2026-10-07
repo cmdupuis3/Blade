@@ -1420,7 +1420,95 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                 unify env.Subst tLam.Type (mkFuncArrow (List.truncate residual.Length pinTys) (List.last pinTys))
                 |> Result.map (fun () -> tLam))
         | _ ->
-            args |> List.map (inferExpr env) |> sequenceResults |> Result.bind (fun tArgs ->
+            // A LAMBDA LITERAL MEETS A DECLARED ARROW SLOT -- `ap(lambda(v) ->
+            // reduce(v * 2.0, (+)), xs)` against `ap(f: (Float64^1) -> Float64,
+            // ..)`. The lambda is CHECKED against the slot, not inferred and
+            // compared afterwards: its unannotated parameters take the slot's
+            // parameter types before its body is typed (inferLambdaSeeded), as
+            // a directly applied lambda's take its arguments'. In the other
+            // order `v` was an open variable while the body was typed, so
+            // whatever the body did to it decided its kind: arithmetic made it
+            // a scalar (`reduce(v * 2.0, ..)` refused, `v * 2.0` emitted as a
+            // `double` lambda g++ could not pass as the declared
+            // `std::function<double(Array<double, 1>)>`), and an application
+            // `v(0)` fell to the function reading. The slot types come from an
+            // INSTANTIATED copy of the callee's signature (one per call, shared
+            // by every lambda argument of it), as at every call, so a generic
+            // `(T^1) -> T` is never bound to this one use. The call's OTHER
+            // arguments are typed first and a fully known one teaches the copy
+            // (`apg(lambda(v) -> reduce(v, (+)), [1, 2, 3])` makes `T` Int64
+            // before the lambda's body is typed, not after it zonk-defaulted to
+            // Float64). An annotated parameter keeps its annotation
+            // (inferLambdaFull ignores its seed), and a lambda whose parameter
+            // count differs from the slot's is seeded by position: its body
+            // types as far as it can, and the call judgment refuses the
+            // mismatch at the argument, naming the declared arrow.
+            let slotCopies : IRType list option =
+                let synthesized =
+                    match func.Kind with
+                    | ExprKind.ExprVar fname -> fname.StartsWith "__"
+                    | _ -> false
+                let hasLambdaArg = args |> List.exists (fun a -> a.Kind.IsExprLambda)
+                match env.Subst.Resolve tFunc.Type with
+                | FuncElem (paramTys, _)
+                        when hasLambdaArg && not synthesized && not (hasPolyParam paramTys)
+                             && args.Length <= paramTys.Length
+                             && not (paramTys |> List.exists (fun t -> (env.Subst.Resolve t).IsIRTTuple)) ->
+                    let quantified, _ = calleeQuantifier env tFunc
+                    Some (fst (instantiateOpenVars env.Subst quantified paramTys))
+                | _ -> None
+            let lambdaSeeds (copies: IRType list) (i: int) : IRType option list =
+                match List.tryItem i copies |> Option.map env.Subst.Resolve with
+                | Some (FuncElem (slots, _)) ->
+                    slots |> List.map (fun s ->
+                        match env.Subst.Resolve s with
+                        // An open slot says nothing a fresh variable would
+                        // not -- unless it is a `T^k` (an exact rank: the
+                        // parameter is an array).
+                        | IRTInfer id
+                        | IRTUnitAnnotated (IRTInfer id, _) ->
+                            (match env.Subst.GetArityConstraint id with
+                             | Some k when k >= 1 -> Some s
+                             | _ -> None)
+                        | _ -> Some s)
+                | _ -> []
+            let seededLambda (copies: IRType list) (i: int) (a: Expr) =
+                match a.Kind with
+                | ExprKind.ExprLambda (parms, whereClause, body) ->
+                    let seeds = lambdaSeeds copies i
+                    if seeds |> List.exists Option.isSome then
+                        if a.Span.StartLine > 0 then setCurrentExprSpan a.Span
+                        inferLambdaSeeded env parms whereClause body seeds
+                        |> Result.map (fun te ->
+                            if te.Span.StartLine = 0 && a.Span.StartLine > 0 then { te with Span = a.Span } else te)
+                    else inferExpr env a
+                | _ -> inferExpr env a
+            let inferredArgs : TypeResult<TypedExpr list> =
+                match slotCopies with
+                | None -> args |> List.map (inferExpr env) |> sequenceResults
+                | Some copies ->
+                    let others =
+                        args |> List.mapi (fun i a ->
+                            if a.Kind.IsExprLambda then Ok None
+                            else inferExpr env a |> Result.map Some)
+                        |> sequenceResults
+                    others |> Result.bind (fun others ->
+                        // Only a CLOSED argument teaches its copy: unifying
+                        // binds nothing but this call's fresh copy variables.
+                        // (The judgment still judges every pair.)
+                        List.zip others (List.truncate others.Length copies)
+                        |> List.iter (fun (o, c) ->
+                            match o with
+                            | Some ta when Set.isEmpty (freeInferVars env.Subst (env.Subst.Resolve ta.Type)) ->
+                                unify env.Subst c ta.Type |> ignore
+                            | _ -> ())
+                        List.zip args others
+                        |> List.mapi (fun i (a, o) ->
+                            match o with
+                            | Some ta -> Ok ta
+                            | None -> seededLambda copies i a)
+                        |> sequenceResults)
+            inferredArgs |> Result.bind (fun tArgs ->
                 // Call-site constraint DISCHARGE: if the callee declared custom
                 // where-clause conjuncts (e.g. PPL's `indep(a, b)`), the caller
                 // must prove them for the actual arguments -- each registered

@@ -1,0 +1,6 @@
+// TEST: A lambda argument whose annotation conflicts with the declared slot (rejects)
+// ERROR: BL3001 @ 5:12
+// ============================================================================
+// The annotation wins over the slot's seed, and the call refuses the pair.
+function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
+let r = ap(lambda(v: Float64) -> v * 2.0, [1.0, 2.0])

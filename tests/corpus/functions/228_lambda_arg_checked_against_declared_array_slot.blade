@@ -1,0 +1,31 @@
+// TEST: A lambda argument is checked against the callee's declared arrow slot
+// ============================================================================
+// `Float64^1` is a concrete rank-1 Float64 array, so `f` takes an array. The
+// passed lambda's unannotated `v` takes that type BEFORE its body is typed.
+// It used to be inferred on its own: `v` was an open variable, so
+// `reduce(v * 2.0, (+))` was refused (BL3999 "requires an array"), an
+// application `v(0)` took the function reading, and `v * 2.0` made `v` a
+// scalar -- the last two reached g++ as a lambda that is no
+// `std::function<double(Array<double, 1>)>` (BL9002).
+function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
+let r = ap(lambda(v) -> reduce(v * 2.0, (+)), [1.0, 2.0])
+let r2 = ap(lambda(v) -> v(0) * 2.0 + v(1) * 2.0, [1.0, 2.0])
+function amap(f: (Float64^1) -> Float64^1, x: Float64^1) = f(x)
+let r3 = amap(lambda(v) -> v * 2.0, [1.0, 2.0])
+let r4 = amap(lambda(v) -> amap(lambda(w) -> w + 1.0, v), [1.0, 2.0])
+// A scalar slot is checked the same way, as before.
+function aps(f: (Float64) -> Float64, x: Float64) = f(x)
+let s = aps(lambda(v) -> v * 2.0, 3.0)
+// Two lambda arguments, each against its own slot.
+function both(f: (Float64^1) -> Float64, g: (Float64^1) -> Float64, x: Float64^1) = f(x) + g(x)
+let d = both(lambda(v) -> reduce(v, (+)), lambda(w) -> w(0), [3.0, 4.0])
+// A lambda-typed head declares its slot too.
+let app = lambda(f: (Float64^1) -> Float64, x: Float64^1) -> f(x)
+let b = app(lambda(v) -> reduce(v, (+)), [1.0, 2.0, 4.0])
+// EXPECT: r = 6.0
+// EXPECT: r2 = 6.0
+// EXPECT: r3 = [2.0, 4.0]
+// EXPECT: r4 = [2.0, 3.0]
+// EXPECT: s = 6.0
+// EXPECT: d = 10.0
+// EXPECT: b = 7.0

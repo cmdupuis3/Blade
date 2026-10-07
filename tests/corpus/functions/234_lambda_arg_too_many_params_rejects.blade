@@ -1,0 +1,6 @@
+// TEST: A lambda argument with more parameters than the declared slot (rejects)
+// ERROR: BL3001 @ 5:12
+// ============================================================================
+// Seeded by position (`v` is the array), refused at the lambda.
+function ap(f: (Float64^1) -> Float64, x: Float64^1) = f(x)
+let r = ap(lambda(v, w) -> reduce(v, (+)) + w, [1.0, 2.0])
