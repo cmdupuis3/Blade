@@ -1,0 +1,10 @@
+// TEST: Two caret variables with Int32 and Int64 elements (rejects)
+// ERROR: BL3019 @ 9:17
+// ERROR-CONTAINS: Int32 and Int64
+// The Int32 sum typed as `T` would WRAP the Int64 operand's values silently
+// (no g++ diagnostic for an integer narrowing). Refused like any other
+// element disagreement: `adda(Int64(a), b)`.
+function adda(a: T^1, b: U^1) = a + b
+let a: Array<Int32 like Idx<2>> = [1, 2]
+let b: Array<Int64 like Idx<2>> = [5000000000, 6000000000]
+let r = adda(a, b)

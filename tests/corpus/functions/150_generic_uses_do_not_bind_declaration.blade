@@ -4,8 +4,9 @@
 // generic on the right (`sq >> idg`) still type-checks and runs now that the
 // composition's unify result is CHECKED rather than discarded, and the second
 // teaching of a shared signature variable -- now judged against the first --
-// still WIDENS a scalar (`pick(2.5, 3)`), which the monomorph's C++ call
-// performs.
+// agrees with it once the caller converts (`pick(2.5, Float64(3))`): arguments
+// sharing a variable agree exactly (formalism 2.4), so the implicit widening
+// `pick(2.5, 3)` this used to pin is refused (functions/401).
 function sq(x: Float64) -> Float64 = x * x
 function idg(a: T^0) -> T^0 = a
 let h = sq >> idg
@@ -13,5 +14,5 @@ let hv = h(3.0)
 // EXPECT: hv = 9
 
 function pick(a: T^0, b: T^0) -> T^0 = a + b
-let pw = pick(2.5, 3)
+let pw = pick(2.5, Float64(3))
 // EXPECT: pw = 5.5

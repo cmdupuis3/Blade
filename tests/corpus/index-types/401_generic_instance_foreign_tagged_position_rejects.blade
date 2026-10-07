@@ -1,0 +1,13 @@
+// TEST: A generic body's foreign-tagged position into a named argument (rejects)
+// Inside `stride2` the read `a((k * na) / 4)` is into `a`'s anonymous axis,
+// but the call with f64 (over Src) checks an ARRAY INSTANCE with `a` typed as
+// f64 (formalism 3.10), where the position carrying Half meets a Src slot:
+// the nominal refusal, as written directly (index-types/338). functions/121
+// spells the conversion, `a(((k * na) / 4 : Src))`.
+// ERROR: BL4003 @ 10:17
+type Half = Idx<4>
+type Src = Idx<8>
+function stride2(a: Array<T like Idx<n>>, na: Int64) -> Array<T like Half> =
+    (method_for(range<Half>) <@> lambda(k) -> a((k * na) / 4)) |> compute
+let f64: Array<Float64 like Src> = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
+let df = stride2(f64, 8)

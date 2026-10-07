@@ -1,9 +1,0 @@
-// TEST: A position computed from another index type past the extent (aborts)
-// The out-of-range side of index-types/338: `(k * 8) / 2` reaches 8, past
-// Src's 8 cells, at k = 2. A position into a named slot is guarded.
-// WARN: BL4003
-// ABORT: index out of bounds: a position outside Src
-type Half = Idx<4>
-type Src = Idx<8>
-let f64: Array<Float64 like Src> = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
-let y = (method_for(range<Half>) <@> lambda(k) -> f64((k * 8) / 2)) |> compute

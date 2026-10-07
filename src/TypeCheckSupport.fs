@@ -1552,19 +1552,13 @@ let internal checkArrayIndexTags (env: TypeEnv) (tArr: TypedExpr) (arrTy: IRArra
                && ((subscriptStaticExtent env idxType).IsSome || (compactCoordExtent idxType).IsSome) then None else
             match idxType.Tag with
             | Some tagName when not (tagName.StartsWith("__")) ->
-                // A POSITION (arithmetic on an index value) is a plain integer,
-                // whatever tag its node took from an open kernel parameter
-                // (`lambda(k) -> a((k * na) / 4)` over range<Half>, `a` over
-                // Src): judged as the untagged integer it is, and guarded at
-                // run time (Zonk), never refused as a foreign index. (One
-                // carrying the slot's own tag stays as it was: guarded, no
-                // advice.)
-                let argTy =
-                    match env.Subst.Resolve tArg.Type with
-                    | IRTIdxTagged (inner, IRefNamed n)
-                        when n <> tagName && isIndexPositionExpr tArg -> inner
-                    | t -> t
-                match argTy with
+                // A POSITION (arithmetic on an index value, `a((k * na) / 4)`
+                // with `k` fed by range<Half>) keeps its operand's tag here:
+                // into a slot of ANOTHER named index type it is the nominal
+                // mismatch, refused like the bare index (formalism 3.10) --
+                // the conversion is the caller's to spell, `((k * na) / 4 : Src)`.
+                // (One carrying the slot's own tag is guarded, no advice.)
+                match env.Subst.Resolve tArg.Type with
                 | IRTIdxTagged (_, IRefNamed argName)
                     when argName = tagName -> None
                 | IRTIdxTagged (_, IRefNamed argName) ->
@@ -1934,15 +1928,18 @@ let firstArgRankClash (subst: Subst) (paramTys: IRType list) (argTys: IRType lis
 /// "the specializer would lose this binding" and "the typechecker refuses"
 /// are one predicate rather than two that can drift apart.
 ///
-/// COMPATIBILITY is judged by what the emitted monomorph would accept, not by
-/// type equality: the specialization is built from the FIRST teaching, so a
-/// later argument is fine exactly when it flows into that signature without
-/// conversion. Equal types, and scalars that WIDEN -- `add0(2.5, 3)` is
-/// `double add0(double, double)` fed an int64, which C++ promotes and which
-/// works today; `add0(3, 2.5)` is `int64 add0(int64, int64)` fed a double,
-/// which `-Werror=float-conversion` rejects, and so does this. Anything not
-/// determined here (an argument still open, a shape this walk does not model)
-/// stands down rather than guessing, the same discipline as its neighbours.
+/// COMPATIBILITY is EXACT agreement of the element (formalism 2.4: arguments
+/// sharing one type variable agree exactly; the caller converts). Neither
+/// order converts: `add0(3, 2.5)` and `add0(2.5, 3)` are both refused at the
+/// second argument -- a literal's type is its spelling, so the fix is
+/// `Float64(3)` or `3.0`. (The latter used to be accepted because the
+/// monomorph built from argument 1 WIDENS an int64 silently; the order of the
+/// arguments decided whether a call typed.) Units and index tags are peeled:
+/// they are judged by their own rules. Arrays agree in rank and element;
+/// their extents and index structure are not part of the variable's identity
+/// (functions/199). Anything not determined here (an argument still open, a
+/// shape this walk does not model) stands down rather than guessing, the same
+/// discipline as its neighbours.
 ///
 /// Reported as (first teaching's position, conflicting position, first type,
 /// conflicting type), all 0-based.
@@ -1968,7 +1965,7 @@ let firstAbstractVarConflict (subst: Subst) (paramTys: IRType list) (argTys: IRT
             // A rank disagreement is the g++-fatal one: an `Array<double, 1>`
             // parameter cannot be handed a `double`, in either direction.
             | ArrayElem _, _ | _, ArrayElem _ -> false
-            | IRTScalar fe, IRTScalar le -> promoteElemType fe le = Some fe
+            | IRTScalar fe, IRTScalar le -> fe = le
             // Not determined here, or a shape this walk does not model.
             | _ -> true
     // Same two stand-downs as `firstArgRankClash`, for the same reasons: a
@@ -2021,8 +2018,32 @@ let abstractVarConflictMessage (subst: Subst) (callee: string)
     let rankOf t = concreteRankOf subst t |> Option.defaultValue -1
     let r1 = rankOf firstTy
     let r2 = rankOf conflictTy
+    let rec elemOf (t: IRType) =
+        match IR.stripUnits (subst.Resolve t) with
+        | IRTScalar et -> Some et
+        | IRTIdxTagged (inner, _) -> elemOf inner
+        | ArrayElem arr -> elemOf arr.ElemType
+        | _ -> None
+    let elemClash =
+        match elemOf firstTy, elemOf conflictTy with
+        | Some a, Some b when a <> b -> Some (a, b)
+        | _ -> None
     let tail =
-        if r1 >= 1 && r2 >= 1 then
+        if elemClash.IsSome && not (r1 >= 1 && r2 >= 1 && r1 <> r2) then
+            let a, b = elemClash.Value
+            let conv =
+                match promoteElemType a b with
+                | Some target when target = a || target = b ->
+                    let src = if target = a then b else a
+                    let tn = ppIRType (IRTScalar target)
+                    $"convert the {ppIRType (IRTScalar src)} argument with the type in call position, "
+                    + $"`{tn}(x)` (`{tn}(xs)` for an array, elementwise), or spell a literal as the type "
+                    + "it means (`1.0`, not `1`)."
+                | _ -> "convert one of them with the type in call position (`Float64(x)`)."
+            "arguments that share a type variable must agree EXACTLY: no argument is converted "
+            + "implicitly, in either order, and a literal's type is its spelling (`1` is an Int64, "
+            + "`1.0` a Float64) -- " + conv
+        elif r1 >= 1 && r2 >= 1 then
             "two arrays of different ranks share no iteration space, so nothing here can deduce the "
             + "output rank -- reshape one of them, or spell the iteration you want with "
             + "`method_for(...) <@> ...`."
@@ -2389,6 +2410,12 @@ let internal castLegality (name: string) (target: ElemType) (src: ElemType) (rou
               + $"{name}(floor(x)) or {name}(ceil(x)).")
     | _ -> None
 
+/// The declaration variable an obligation is filed under (GOElemAgree's
+/// first; its second is read by the judgment itself).
+let internal genericObligationVar (ob: GenericObligation) : int =
+    match ob with
+    | GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) | GOElemAgree (v, _, _) -> v
+
 /// The GENERIC OBLIGATIONS of a callee (TypeEnv.GenericObligation), judged
 /// against one instance: `instanceOf v` is the concrete element the call
 /// gives declaration variable `v` (None = still open: not judged here).
@@ -2400,7 +2427,7 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
         | _ -> None
     let isInt = function ETInt32 | ETInt64 -> true | _ -> false
     obligations |> List.tryPick (fun ob ->
-        let vid = match ob with GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) -> v
+        let vid = genericObligationVar ob
         match rootOf vid |> Option.bind instanceOf with
         | None -> None
         | Some src ->
@@ -2434,7 +2461,27 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                     Some (InvalidCast ($"'{fname}' applies {opName} between a value of its generic parameter type and a "
                                        + $"{ppIRType (IRTScalar partner)}, typing the result as the parameter's type, and this "
                                        + $"call makes that type {srcS}: {what}. Convert the argument first -- Float64(x), or "
-                                       + "Float64(xs) for an array.")))
+                                       + "Float64(xs) for an array."))
+            | GOElemAgree (_, other, opName) ->
+                match rootOf other |> Option.bind instanceOf with
+                | Some src2 when src2 <> src ->
+                    let s1 = ppIRType (IRTScalar src)
+                    let s2 = ppIRType (IRTScalar src2)
+                    let conv =
+                        match IR.promoteElemType src src2 with
+                        | Some t when t = src || t = src2 ->
+                            let from = if t = src then s2 else s1
+                            let tn = ppIRType (IRTScalar t)
+                            $"convert the {from} argument with the type in call position, {tn}(xs) for an array "
+                            + $"(elementwise) or {tn}(x) for a scalar."
+                        | _ -> "convert one of them with the type in call position, Float64(xs)."
+                    // BL3019, the generic-obligation family's code (GOPromotion's).
+                    Some (InvalidCast ($"'{fname}' applies {opName} between values of two of its generic parameter types, "
+                                       + $"and this call gives their elements two types, {s1} and {s2}: arguments whose "
+                                       + "elements meet through arithmetic must agree EXACTLY -- no argument is converted "
+                                       + "implicitly, and a literal's type is its spelling (`1` is an Int64, `1.0` a "
+                                       + "Float64). To compute in one type, " + conv))
+                | _ -> None)
 
 /// The element a (resolved) type carries, when it is concrete -- an array's
 /// own element included: a generic obligation on `x: T` judges the ELEMENT an
@@ -2474,14 +2521,19 @@ let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys:
             obs |> List.tryPick (fun ob ->
                 judgeGenericObligations env fname [ob] instanceOf
                 |> Option.map (fun e ->
-                    let vid = match ob with GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) -> v
-                    let pos =
+                    let posOf vid =
                         match env.Subst.Resolve (IRTInfer vid) |> IR.stripUnits with
                         | IRTInfer root ->
                             paramTys
                             |> List.tryFindIndex (fun p -> (freeInferVars env.Subst (env.Subst.Resolve p)).Contains root)
                             |> Option.defaultValue 0
                         | _ -> 0
+                    // Two variables meeting: the LATER argument is the one
+                    // that disagrees with what the earlier one decided.
+                    let pos =
+                        match ob with
+                        | GOElemAgree (a, b, _) -> max (posOf a) (posOf b)
+                        | _ -> posOf (genericObligationVar ob)
                     (pos, e)))
         | _ -> None
 
@@ -2554,6 +2606,10 @@ let internal propagateGenericObligations (env: TypeEnv) (tFunc: TypedExpr)
                      callerVar v |> Option.iter (fun c -> acc.Add(GOFractionalMath (c, nm)))
                  | GOPromotion (v, o, p, lit) ->
                      callerVar v |> Option.iter (fun c -> acc.Add(GOPromotion (c, o, p, lit)))
+                 | GOElemAgree (v, w, o) ->
+                     match callerVar v, callerVar w with
+                     | Some c, Some d when c <> d -> acc.Add(GOElemAgree (c, d, o))
+                     | _ -> ()
          | _ -> ())
     | _ -> ()
 

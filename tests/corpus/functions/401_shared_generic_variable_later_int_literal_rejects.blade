@@ -1,0 +1,10 @@
+// TEST: A later Int64 literal does not adapt to a shared Float64 variable (rejects)
+// ERROR: BL3999 @ 9:18
+// ERROR-CONTAINS: must agree EXACTLY
+// `add(2.5, 1)` used to compute 3.5: the monomorph built from argument 1 was
+// `double add(double, double)`, and the Int64 widened into it -- while
+// `add(1, 2.5)` was refused (functions/402). Which order typed decided which
+// call compiled. Arguments sharing a variable agree exactly (formalism 2.4);
+// the caller writes `add(2.5, 1.0)` or `add(2.5, Float64(n))`.
+function add(x, y) = x + y
+let d = add(2.5, 1)

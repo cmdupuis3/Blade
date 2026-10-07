@@ -1,0 +1,7 @@
+// TEST: Three arguments sharing one variable, the third disagrees (rejects)
+// ERROR: BL3999 @ 6:24
+// ERROR-CONTAINS: arguments 1 and 3 of 'add3' disagree
+// `x + y + z` makes all three one variable; the refusal is at the argument
+// that disagrees with what the earlier ones decided.
+function add3(x, y, z) = x + y + z
+let g = add3(1.5, 2.5, 1)

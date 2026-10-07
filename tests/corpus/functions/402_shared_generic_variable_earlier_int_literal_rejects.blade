@@ -1,0 +1,6 @@
+// TEST: An earlier Int64 literal and a later Float64 disagree (rejects)
+// ERROR: BL3999 @ 5:16
+// ERROR-CONTAINS: argument 1 makes it Int64 while argument 2 makes it Float64
+// The other order of functions/401, through a declared `x: T, y: T`.
+function add(x: T, y: T) = x + y
+let e = add(1, 2.5)

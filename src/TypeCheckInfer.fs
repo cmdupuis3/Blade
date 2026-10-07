@@ -131,6 +131,16 @@ let internal tryArityLiftCall (env: TypeEnv) (func: Expr) (args: Expr list)
             elif not (List.zip ids ranks
                       |> List.groupBy fst
                       |> List.exists (fun (_, g) -> (g |> List.map snd |> List.distinct).Length > 1)) then None
+            // ... and the positions sharing a variable must agree on their
+            // ELEMENT exactly (formalism 2.4: no argument converts implicitly):
+            // `add0([0.5, 0.5], 1)` is refused at the `1` by the call
+            // judgment's firstAbstractVarConflict, not lifted into a kernel
+            // whose `add0(__x, 1)` would retype the array's elements.
+            elif (let elems = tArgs |> List.map (fun a -> concreteElemOf env.Subst a.Type)
+                  List.zip ids elems
+                  |> List.groupBy fst
+                  |> List.exists (fun (_, g) ->
+                      (g |> List.choose snd |> List.distinct).Length > 1)) then None
             else
                 let sp = args |> List.fold (fun acc (a: Expr) -> mergeSpan acc a.Span) func.Span
                 let uid = env.Builder.FreshId()
@@ -6668,9 +6678,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // over `x: T, y: U` (or two unannotated parameters), so an
             // instance `T = Int64, U = Float64` typed the Float64 sum Int64
             // (g++ refused the narrowing, BL9002, or the value truncated).
-            // Unifying them makes each call give both operands one type: a
-            // later literal argument adapts (`add(2.5, 1)` is 3.5), two typed
-            // arguments of different types are refused at the call. Only
+            // Unifying them makes each call give both operands one type, and
+            // the arguments must agree EXACTLY (firstAbstractVarConflict):
+            // `add(2.5, 1)` and `add(1, 2.5)` are both refused at the call,
+            // literals included -- the caller converts. Only
             // bare generic variables that an instance makes scalars or
             // arrays alike (no caret, no rank bound -- those are shaped by
             // the paths above) and no literal's own variable; a comparison
@@ -6692,6 +6703,38 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 if isArithOp then
                     match genVar tL.Type, genVar tR.Type with
                     | Some a, Some b when a <> b -> unify env.Subst (IRTInfer a) (IRTInfer b) |> ignore
+                    | _ ->
+                    // Two generic variables the arm above cannot make one --
+                    // a caret `T^k` stands for its whole array, so `a + b`
+                    // over `a: T^1, b: U^1` keeps two variables (their extents
+                    // and index structure may differ) and is typed as the
+                    // LEFT one. Their ELEMENTS still meet, and must agree
+                    // exactly at every call (GOElemAgree): an Int64 and a
+                    // Float64 array typed the Float64 sum Int64 (BL9002), an
+                    // Int32 and an Int64 one wrapped. Recorded only while the
+                    // declaration's body is checked, for parameter variables
+                    // (polymorphic, no literal's own).
+                    // A variable a PARAMETER is declared as (CurrentSignature
+                    // ends with the return type, which is no argument).
+                    let paramTop (vid: int) =
+                        let sigTys =
+                            env.CurrentSignature
+                            |> List.map (fun t -> env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits)
+                        let paramTys = if sigTys.IsEmpty then [] else List.take (sigTys.Length - 1) sigTys
+                        paramTys |> List.exists (fun t -> match t with IRTInfer r -> r = vid | _ -> false)
+                    let anyGenVar (t: IRType) =
+                        match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
+                        | IRTInfer vid when env.Subst.IsPolymorphicId vid
+                                            && (env.Subst.GetLiteralDefault vid).IsNone
+                                            && paramTop vid -> Some vid
+                        | _ -> None
+                    match env.CurrentGenericObligations, anyGenVar tL.Type, anyGenVar tR.Type with
+                    | Some acc, Some a, Some b when a <> b ->
+                        let opName =
+                            match op with
+                            | OpAdd -> "+" | OpSub -> "-" | OpMul -> "*" | OpDiv -> "/"
+                            | OpMod -> "%" | _ -> "^"
+                        acc.Add(GOElemAgree (a, b, opName))
                     | _ -> ())
             // env.Builder: inferArithType mints fresh index-type ids for a
             // synthesized outer-product result (same allocator deduceOutputType
@@ -16592,6 +16635,13 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                     | GOPromotion (v, _, _, _) ->
                         (match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
                          | IRTInfer _ -> true
+                         | _ -> false)
+                    // Two variables still distinct and open: a call can still
+                    // give them two elements.
+                    | GOElemAgree (v, w, _) ->
+                        (match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits,
+                               env.Subst.Resolve (IRTInfer w) |> IR.stripUnits with
+                         | IRTInfer a, IRTInfer b -> a <> b
                          | _ -> false)
                     | GOFractionalMath (v, _) ->
                         match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with

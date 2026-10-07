@@ -1,0 +1,9 @@
+// TEST: Float32 and Float64 arguments sharing a variable (rejects)
+// ERROR: BL3999 @ 8:18
+// ERROR-CONTAINS: argument 1 makes it Float64 while argument 2 makes it Float32
+// Exact agreement holds within a class too: `add(2.0, f)` was accepted (the
+// Float32 widened into the Float64 monomorph) while `add(f, 2.0)` was
+// refused. Both are refused; write `add(Float64(f), 2.0)` or `add(f, Float32(2.0))`.
+function add(x: T, y: T) = x + y
+let f: Float32 = 1.5
+let b = add(2.0, f)

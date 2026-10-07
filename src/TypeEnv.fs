@@ -223,6 +223,15 @@ type GenericObligation =
     /// literal); an integer instance would hand a T-typed result a Float64
     /// value (a silent truncation), so it is refused at the call.
     | GOPromotion of var: int * op: string * partner: ElemType * literal: bool
+    /// `a + b` (any arithmetic op) between values of TWO generic parameter
+    /// variables that cannot be made one variable at the declaration -- a
+    /// caret `T^k` (the whole array is the variable, `a: T^1, b: U^1`) or a
+    /// variable some use already knows to be an array -- typed as the LEFT
+    /// one. Their ELEMENTS meet, so each call must give them the same element
+    /// exactly (formalism 2.4: no argument converts implicitly); an Int64 and a
+    /// Float64 array would type the Float64 sum Int64 (g++ refused the
+    /// narrowing, BL9002; an Int32/Int64 mix wrapped silently).
+    | GOElemAgree of var: int * other: int * op: string
 
 /// AN ARROW APPLICATION (formalism 4.3): `c(0)` whose head `c` was a still-open
 /// variable when the application was typed -- an unannotated parameter of a

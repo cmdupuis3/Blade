@@ -1,0 +1,47 @@
+// TEST: Arguments sharing a generic variable agree exactly
+// ============================================================================
+// `x + y` over two generic parameters makes them ONE variable (formalism 2.4,
+// 5.1), and arguments sharing a variable must agree EXACTLY: no argument is
+// converted implicitly, in either order, literals included -- `1` is an
+// Int64, `1.0` a Float64. These are the calls that keep working: agreeing
+// arguments of either class, and a disagreement the caller converts with the
+// type in call position. The refusals are functions/401-405 and 410.
+// ============================================================================
+function add(x, y) = x + y
+let a = add(1, 2)
+let b = add(1.0, 2.5)
+let c = add(2.5, Float64(1))
+let n = 1
+let d = add(Float64(n), 2.5)
+// EXPECT: a = 3
+// EXPECT: b = 3.5
+// EXPECT: c = 3.5
+// EXPECT: d = 3.5
+
+// The declared spelling is the same rule.
+function addt(x: T, y: T) = x + y
+let e = addt(1, 2)
+let f = addt(2.5, 1.0)
+// EXPECT: e = 3
+// EXPECT: f = 3.5
+
+// Three parameters, one variable.
+function add3(x, y, z) = x + y + z
+let g = add3(1.5, 2.5, 1.0)
+let h = add3(1, 2, 3)
+// EXPECT: g = 5
+// EXPECT: h = 6
+
+// Arrays: the elements agree, or the caller converts the array elementwise.
+let i = add([1.0, 2.0], [0.5, 0.5])
+let j = add(Float64([1, 2]), [0.5, 0.5])
+let k = add([1, 2], [10, 20])
+// EXPECT: i = [1.5, 2.5]
+// EXPECT: j = [1.5, 2.5]
+// EXPECT: k = [11, 22]
+
+// Float32 throughout stays Float32.
+let p: Float32 = 1.5
+let q: Float32 = 2.0
+let r = addt(p, q)
+// EXPECT: r = 3.5

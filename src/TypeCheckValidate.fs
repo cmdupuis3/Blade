@@ -744,14 +744,6 @@ let internal declMutCaptureRoots (decl: TypedDecl) : (string option * TypedExpr)
 /// or a non-integer value, meeting an index parameter.
 let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : CompileError list =
     let subst = env.Subst
-    // The subscript zonk's guard (Zonk.guardIndex) wrapped: `{ check; a }`
-    // or `{ let __subN = a; check; __subN }`.
-    let unguarded (a: TypedExpr) =
-        match a.Kind with
-        | TExprBlock ([ TStmtLet tb; TStmtExpr { Kind = TExprConstraintCheck (_, "BL8006", _) } ], Some _)
-            when tb.Name.StartsWith "__sub" -> tb.Value
-        | TExprBlock ([ TStmtExpr { Kind = TExprConstraintCheck (_, "BL8006", _) } ], Some f) -> f
-        | _ -> a
     let mkErr (span: Span) (e: TypeError) : CompileError =
         { Error = e; Span = span; Context = []; Code = None }
     let judgeSubscripts (arr: TypedExpr) (arrTy: IRArrayType) (args: TypedExpr list) =
@@ -763,11 +755,7 @@ let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : Compi
             | None ->
                 match ix.Tag, IR.stripUnits (subst.Resolve a.Type) with
                 | Some tag, IRTIdxTagged (_, IRefNamed argTag)
-                    when not (tag.StartsWith "__") && argTag <> tag && not (slotIsEnumIdx env ix)
-                         // a POSITION is an integer, whatever tag its node
-                         // took from an open operand (checkArrayIndexTags) --
-                         // seen through the BL8006 guard zonk wrapped it in
-                         && not (isIndexPositionExpr (unguarded a)) ->
+                    when not (tag.StartsWith "__") && argTag <> tag && not (slotIsEnumIdx env ix) ->
                     Some (mkErr a.Span (IndexTagMismatchNamed (tag, argTag)))
                 | _ -> None)
         |> Option.toList

@@ -1,0 +1,11 @@
+// TEST: T^0 call whose later argument is converted explicitly
+// The accepted side of 043's rule. Arguments sharing one variable agree
+// EXACTLY (formalism 2.4): `add0(2.5, 3)` used to be accepted here because
+// the monomorph built from argument 1 (`double add0(double, double)`) widened
+// the Int64 silently, while `add0(3, 2.5)` was refused -- the argument order
+// decided. Both orders are refused now (functions/401, 402); the caller
+// converts with the type in call position.
+function add0(a: T^0, b: T^0) -> T^0 = a + b
+
+let r = add0(2.5, Float64(3))
+// EXPECT: r = 5.5

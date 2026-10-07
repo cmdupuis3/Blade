@@ -194,7 +194,13 @@ signature; the same letter denotes the same type. There is no promotion TYPE
 in signatures: where two type variables would mix, the caller converts one
 with the target type in call position, so the signature names one variable
 (arithmetic between two bare variables -- `x + y` over `x: T, y: U` -- makes
-them that one variable, §5.1, rather than typing the result as the left one):
+them that one variable, §5.1, rather than typing the result as the left one).
+Arguments sharing a variable agree EXACTLY: neither order converts and no
+literal adapts across them (`add(2.5, 1)` is refused like `add(1, 2.5)`; a
+literal's type is its spelling), and the same holds for two caret
+variables whose ELEMENTS meet through arithmetic (`a + b` over `a: T^1, b:
+U^1` refuses an Int64 and a Float64 array at the call). The caller converts
+with the type in call position:
 
 ```blade sketch
 function add(a: A^0, b: A^0) -> A^0
@@ -670,10 +676,17 @@ Iteration emits values tagged with their source index type as a **unit**:
    same way, with one exception: `-1`, group_by's "excluded" key. A string
    `EnumIdx` literal must be one of the type's labels.
 
-**Positions and casts.** Arithmetic on an index value yields a *position*: a
-plain `Int64`, never an index value (`i + 1` is not proved to lie in `I`). An
+**Positions and casts.** Arithmetic on an index value yields a *position*:
+never a PROVEN index value (`i + 1` is not proved to lie in `I`). An
 annotated index operand refuses the arithmetic outright; an unannotated
-kernel parameter's arithmetic (`lambda(i) -> u(i + 3)`) is a position.
+kernel parameter's arithmetic (`lambda(i) -> u(i + 3)`) is a position, which
+keeps its operand's index type for the nominal rule: into a slot of that
+same type it is checked at run time (BL8006), and into a slot of a
+DIFFERENT named index type it is refused (BL4003) exactly as the bare index
+is -- two named tags that disagree are a type error, whether or not
+arithmetic intervened. `lambda(k) -> a((k * 8) / 4)` over `range<Half>`,
+with `a` over `Src`, is refused; the conversion is spelled,
+`a(((k * 8) / 4 : Src))`.
 `(e : I)` is the one door from integers into `I`: a literal is range-checked
 at compile time, a computed integer is a CHECKED conversion (run-time guard
 `0 <= e < extent(I)`, BL8006; it needs `I`'s static extent). A plain integer
@@ -681,8 +694,9 @@ passed to a `Nat<I>` parameter goes through the same door. The cast
 constrains its RESULT, never its operand: an unannotated kernel parameter
 keeps the type its feed gives it, so `lambda(k) -> s((k : State))` over
 `range<Idx<91>>` or `0..91` converts `k`, and `(W1 + k : State)` converts a
-position. An index value of a DIFFERENT named index type is not an integer
-and is refused (BL4003, nominal); a deliberate re-tagging says so,
+position, whatever index type its operand carried. A bare index value of a
+DIFFERENT named index type is not an integer and the cast refuses it too
+(BL4003, nominal); a deliberate re-tagging says so,
 `(Int64(j) : I)`, and is checked like any other integer.
 
 **What is guaranteed.** A read or write of a slot whose index type is NAMED
@@ -934,9 +948,11 @@ quotient 1, while `inc(2.5)` is 3.5. Everything §2.4 says of `x: T` holds:
 beside a float (`x + 1.0`) an Int64 argument is refused at that argument
 (BL3019; the caller writes `3.0` or `Float64(n)`). Two generic variables mixed
 by arithmetic are ONE variable -- there is no promotion type -- so `function
-add(x, y) = x + y` takes one type per call, decided by its first argument: a
-later literal adapts to it (`add(2.5, 1)` is 3.5) but never narrows it
-(`add(1, 2.5)` is refused, as is an Int64 and a Float64 variable). A
+add(x, y) = x + y` takes one type per call, and its arguments must agree
+EXACTLY: no argument converts implicitly, in either order and literals
+included, so `add(2.5, 1)` and `add(1, 2.5)` are both refused at the second
+(BL3999), as is an Int64 and a Float64 variable -- the caller writes
+`add(2.5, 1.0)` or `add(2.5, Float64(n))`. A
 parameter the body uses as a subscript is pinned to that index (§3.10), one it
 applies is an arrow (§4.3); a top-level `let` of a lambda that is only applied
 is the declaration, and a lambda used as a value is one body whose first call
@@ -947,7 +963,7 @@ function inc(x) = x + 1
 let a = inc(6) / 4
 let b = inc(2.5)
 function add(x, y) = x + y
-let c = add(2.5, 1)
+let c = add(2.5, Float64(1))
 // EXPECT: a = 1
 // EXPECT: b = 3.5
 // EXPECT: c = 3.5

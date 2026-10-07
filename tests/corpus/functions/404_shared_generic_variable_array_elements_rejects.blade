@@ -1,0 +1,7 @@
+// TEST: Array arguments sharing a variable must agree on the element (rejects)
+// ERROR: BL3999 @ 6:21
+// ERROR-CONTAINS: must agree EXACTLY
+// The arrays agree in rank; their elements do not. (The refusal used to say
+// two arrays "of different ranks" share no iteration space.) `Float64([1, 2])`.
+function add(x, y) = x + y
+let a = add([1, 2], [0.5, 0.5])

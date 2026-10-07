@@ -4,7 +4,7 @@
 // shape `stdlib/plot.blade`'s decimation ladder is built from:
 //
 //     function f(a: Array<T like Idx<n>>, na: Int64) -> Array<T like Half> =
-//         (method_for(range<Half>) <@> lambda(k) -> a((k * na) / 4)) |> compute
+//         (method_for(range<Half>) <@> lambda(k) -> a(((k * na) / 4 : Src))) |> compute
 //
 // The body types as the signature var `T` (unresolved on purpose --
 // monomorphization fills it per call site), and the map's OUTPUT element
@@ -24,11 +24,16 @@
 // Every sample is an ORIGINAL datum at an evenly strided position -- index
 // k reads (k * na) / 4 -- so the values also pin that no conversion or
 // interpolation happens on the way out.
+//
+// The position `(k * na) / 4` carries k's index type Half, and each call's
+// instance reads `a` over Src: two named tags that disagree are a type error
+// (formalism 3.10, BL4003), so the conversion into Src is spelled with the
+// cast -- a checked conversion, guarded against Src's extent at run time.
 // ============================================================================
 type Half = Idx<4>
 type Src = Idx<8>
 function stride2(a: Array<T like Idx<n>>, na: Int64) -> Array<T like Half> =
-    (method_for(range<Half>) <@> lambda(k) -> a((k * na) / 4)) |> compute
+    (method_for(range<Half>) <@> lambda(k) -> a(((k * na) / 4 : Src))) |> compute
 let f64: Array<Float64 like Src> = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
 let i64: Array<Int64 like Src> = [10, 20, 30, 40, 50, 60, 70, 80]
 let f32: Array<Float32 like Src> = [0.25, 1.25, 2.25, 3.25, 4.25, 5.25, 6.25, 7.25]

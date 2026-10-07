@@ -1,0 +1,6 @@
+// TEST: Two rank-2 caret variables with Float64 and Int64 elements (rejects)
+// ERROR: BL3019 @ 5:41
+// ERROR-CONTAINS: Float64 and Int64
+// The rank-2 twin of functions/407, the Float64 argument first.
+function adda2(a: T^2, b: U^2) = a - b
+let r = adda2([[1.5, 2.5], [3.5, 4.5]], [[1, 2], [3, 4]])

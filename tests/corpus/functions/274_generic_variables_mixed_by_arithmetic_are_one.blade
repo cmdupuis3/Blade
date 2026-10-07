@@ -4,27 +4,28 @@
 // sum as an Int64 (g++ refused the narrowing, BL9002). There is no promotion
 // type in a signature (formalism 2.4): where two variables would mix, the
 // signature names one, and the caller converts. So arithmetic between two
-// bare generic variables -- declared or unannotated -- makes them one: a
-// literal argument adapts to the other (`add(2.5, 1)`), two different typed
-// arguments are refused (functions/275).
+// bare generic variables -- declared or unannotated -- makes them one, and
+// its arguments agree exactly: two different argument types are refused,
+// literals included (functions/275, 401-405); the caller converts.
 // ============================================================================
 function add(x: T, y: U) = x + y
-let s: Float64 = add(2.5, 1)
+let s: Float64 = add(2.5, Float64(1))
 let si: Int64 = add(3, 4)
 // EXPECT: s = 3.5
 // EXPECT: si = 7
 
 function addu(x, y) = x + y
-let u: Float64 = addu(2.5, 1)
+let u: Float64 = addu(2.5, 1.0)
 let ui: Int64 = addu(3, 4)
 let ua = addu([1.0, 2.0], [0.5, 0.5])
 // EXPECT: u = 3.5
 // EXPECT: ui = 7
 // EXPECT: ua = [1.5, 2.5]
 
-// `^` too: an integer power stays exact, a real one is real.
+// `^` too: an integer power stays exact, a real one is real (and its
+// exponent is the base's type: `pw(2.0, 3)` is refused, write `3.0`).
 function pw(x, n) = x ^ n
 let p1: Int64 = pw(2, 10)
-let p2: Float64 = pw(2.0, 3)
+let p2: Float64 = pw(2.0, 3.0)
 // EXPECT: p1 = 1024
 // EXPECT: p2 = 8

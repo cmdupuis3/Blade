@@ -1,0 +1,21 @@
+// TEST: A position of another index type converted into the slot's type
+// ============================================================================
+// Two named index tags that disagree are a type error at a subscript
+// (index-types/338); the conversion into the slot's type is spelled with the
+// cast `(e : Src)`, a CHECKED conversion (339 aborts past the extent). A
+// position converts whatever index type its operand carried; a BARE foreign
+// index is re-tagged through an integer, `(Int64(k) : Src)`.
+// ============================================================================
+type Half = Idx<4>
+type Src = Idx<8>
+let f64: Array<Float64 like Src> = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
+let y = (method_for(range<Half>) <@> lambda(k) -> f64(((k * 8) / 4 : Src))) |> compute
+let z = (method_for(range<Half>) <@> lambda(k) -> f64((Int64(k) : Src))) |> compute
+let w = (method_for(range<Half>) <@> lambda(k) -> f64((Int64(k) * 2 + 1 : Src))) |> compute
+// EXPECT: y = [0.5, 2.5, 4.5, 6.5]
+// EXPECT: z = [0.5, 1.5, 2.5, 3.5]
+// EXPECT: w = [1.5, 3.5, 5.5, 7.5]
+
+// A position of the slot's OWN index type needs no conversion (it is guarded).
+let v = (method_for(range<Src>) <@> lambda(k) -> f64((k + 3) % 8)) |> compute
+// EXPECT: v = [3.5, 4.5, 5.5, 6.5, 7.5, 0.5, 1.5, 2.5]

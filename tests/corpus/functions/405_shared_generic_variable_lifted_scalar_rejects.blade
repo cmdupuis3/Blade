@@ -1,0 +1,9 @@
+// TEST: A scalar beside an array of another element is not lifted (rejects)
+// ERROR: BL3999 @ 8:26
+// ERROR-CONTAINS: must agree EXACTLY
+// `add0(A, s)` lifts the scalar over the array (arity/036). With an Int64
+// scalar beside Float64 elements the lift used to retype the kernel and
+// refuse at the array's first element ("expected Int64, got Float64"); the
+// lift declines and the call is refused at the disagreeing argument.
+function add0(a: T^0, b: T^0) -> T^0 = a + b
+let a = add0([0.5, 0.5], 1)

@@ -1,0 +1,34 @@
+// TEST: Two caret variables meeting by arithmetic, agreeing elements
+// ============================================================================
+// `a + b` over `a: T^1, b: U^1` keeps two variables (each stands for its
+// whole array, extents and index structure included) and is typed as the
+// left one, so their ELEMENTS must agree at every call (functions/407-409
+// refuse a disagreement). These agree, or the caller converts.
+// ============================================================================
+function adda(a: T^1, b: U^1) = a + b
+let r = adda([1, 2], [3, 4])
+let s = adda([1.0, 2.0], [0.5, 0.5])
+let t = adda(Float64([1, 2]), [0.5, 0.5])
+// EXPECT: r = [4, 6]
+// EXPECT: s = [1.5, 2.5]
+// EXPECT: t = [1.5, 2.5]
+
+// Different named axes of one extent and an anonymous one: the variables
+// stay two, only their elements meet.
+type L = Idx<3>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0]
+let u = adda(A, [0.5, 0.5, 0.5])
+// EXPECT: u = [1.5, 2.5, 3.5]
+
+// Rank 2.
+function adda2(a: T^2, b: U^2) = a * b
+let m = adda2([[1, 2], [3, 4]], [[2, 2], [2, 2]])
+let f = adda2([[1.0, 2.0], [3.0, 4.0]], [[0.5, 0.5], [0.5, 0.5]])
+// EXPECT: m = [[2, 4], [6, 8]]
+// EXPECT: f = [[0.5, 1.0], [1.5, 2.0]]
+
+// Float32 elements on both sides stay Float32.
+let p: Array<Float32 like Idx<2>> = [1.5, 2.5]
+let q: Array<Float32 like Idx<2>> = [0.5, 0.5]
+let v = adda(p, q)
+// EXPECT: v = [2.0, 3.0]

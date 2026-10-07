@@ -1,0 +1,9 @@
+// TEST: Two caret variables meeting by arithmetic, Int64 and Float64 elements (rejects)
+// ERROR: BL3019 @ 8:22
+// ERROR-CONTAINS: must agree EXACTLY
+// `a + b` was typed as `T`, so this instance typed the Float64 sum Int64 and
+// g++ refused the narrowing (BL9002, an internal error) -- the unification
+// that makes two bare generic variables one skips carets. The elements meet,
+// so they must agree; the caller writes `adda(Float64([1, 2]), ...)`.
+function adda(a: T^1, b: U^1) = a + b
+let r = adda([1, 2], [0.5, 0.5])
