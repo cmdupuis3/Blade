@@ -4376,13 +4376,15 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
         // through the consumed leading dims and the extents pointer shifts past
         // them, e.g. `Array<double,1> r0 = { A.data[0L], A.extents + 1 };`.
         //
-        // Scoped to fully plain-dense rectangular arrays (every axis IxKPlain /
-        // SymNone / arity-1) so the consumed-dims count equals the
-        // subscript count and the extents shift is exact. Compound partial reads
-        // take the IRTuple arm in producesWrapper; ragged/dep-idx rows take
-        // raggedRowSubview above; and a flat single-subscript into PACKED
-        // symmetric storage returns a row pointer under compact semantics that
-        // must NOT be re-wrapped here -- all excluded by the axis predicate.
+        // Scoped by subviewAxesOk: consumed axes plain rank-1 (so the
+        // consumed-dims count equals the subscript count and the extents shift
+        // is exact), residual axes plain or WHOLE compact groups (`T(r)` of
+        // `Idx<m>, SymIdx<2, n>` is the packed row a standalone group holds; it
+        // used to fall to the raw path and bind a `promote<>::type` pointer,
+        // BL9002). Compound partial reads take the IRTuple arm in
+        // producesWrapper; ragged/dep-idx rows take raggedRowSubview above; and
+        // a subscript INTO a compact group is refused at typecheck
+        // (compactCoordWalk) -- all excluded by the axis predicate.
         // NOT gated on `ix.Kind = SDimension` -- Kind describes one apply, not
         // the value's storage (see densePartialSubviewExpr's note; both twins
         // must answer identically or a let-bound slice and an inline slice
@@ -4392,15 +4394,10 @@ let genScalarBinding (ctx: CodeGenContext) (name: string) (value: IRExpr) (ty: I
             | IRIndex (arr, indices, _), ArrayElem residTy
                     when not (List.isEmpty indices)
                          && indices |> List.forall (function IRTuple _ -> false | _ -> true) ->
+                // Residual axes may also be WHOLE compact groups
+                // (subviewAxesOk, shared with densePartialSubviewExpr).
                 match inferExprType arr with
-                | ArrayElem arrTy
-                        when arrTy.IndexTypes.Length > indices.Length
-                             && arrTy.IndexTypes |> List.mapi (fun d ix -> (d, ix))
-                                |> List.forall (fun (d, ix) ->
-                                    (ix.IxKind = IxKPlain
-                                     || (d < indices.Length && ix.IxKind = IxKGroupOuter))
-                                    && ix.Symmetry = SymNone
-                                    && ix.Rank = 1) ->
+                | ArrayElem arrTy when subviewAxesOk arrTy indices.Length ->
                     let arrStr = exprToCppCtx ctx arr
                     let subscripts =
                         indices

@@ -1668,3 +1668,43 @@ let internal fpReassocSimdOp (callable: IRCallable) (elemStr: string) : string o
 /// not amortize. Small N is fine (the loop is at its worst there).
 let packedGemmWorth (m: int64) (k: int64) (n: int64) : bool =
     m >= 18L && k >= 16L && m * n * k >= 32768L
+
+
+/// Can `A(i1, ..., ik)` -- `consumed` positional subscripts, fewer than A's
+/// records -- be emitted as the sub-view aggregate
+/// `Array<T, R>{ A.data[i1]...[ik], A.extents + k }`? The ONE predicate both
+/// twins ask (the let-binding arm in CodeGenLoopNest and the expression arm in
+/// CodeGenExpr); they must answer identically or a let-bound slice and an
+/// inline slice diverge in shape.
+///
+/// CONSUMED records (the subscripted-through leading ones) must be plain
+/// rank-1 positions -- or group-outer, whose grid is a dense pool with the
+/// group count in extents[0] -- so the subscript count IS the coordinate
+/// count the data pointer steps through and the extents shift past.
+///
+/// RESIDUAL records are plain rank-1 axes or WHOLE compact groups (SymIdx /
+/// AntisymIdx / HermitianIdx, rank >= 2). The packed skeleton allocate<> builds
+/// shrinks a row only INSIDE a group (`extents[d] - lastIndex`, the lastIndex
+/// threaded from the group's previous coordinate), and a plain record before
+/// the group threads nothing, so `A.data[i]` of `Idx<m>, SymIdx<2, n>` is
+/// exactly the skeleton a standalone `Array<T like SymIdx<2, n>>` holds, at the
+/// same coordinate extents: the view shares the pool and every compact read of
+/// it (canon_fold / canon_left_justify / canon_transform) addresses it as it
+/// would the stored group. A partially-read group, or a group completed with
+/// slots after it, is refused at typecheck (TypeCheckSupport.compactCoordWalk);
+/// ragged/dep-idx/compound/sparse/wreath residuals keep their own read paths.
+let internal subviewAxesOk (arrTy: IRArrayType) (consumed: int) : bool =
+    let plainAxis (ix: IRIndexType) = ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+    let compactGroup (ix: IRIndexType) =
+        ix.IxKind = IxKPlain && ix.Rank >= 2
+        && (match ix.Symmetry with
+            | SymSymmetric | SymAntisymmetric | SymHermitian -> true
+            | SymNone | SymWreath -> false)
+    consumed > 0
+    && arrTy.IndexTypes.Length > consumed
+    && arrTy.IndexTypes |> List.mapi (fun d ix -> (d, ix))
+       |> List.forall (fun (d, ix) ->
+            if d < consumed then
+                (ix.IxKind = IxKPlain || ix.IxKind = IxKGroupOuter)
+                && ix.Symmetry = SymNone && ix.Rank = 1
+            else plainAxis ix || compactGroup ix)

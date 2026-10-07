@@ -1,0 +1,31 @@
+// TEST: A Row Of An Antisymmetric Group Keeps Its Signs And Empty Diagonal
+// ============================================================================
+// `K(1)` of `Idx<2>, AntisymIdx<2, 3>` is a view of row 1's strict triangle
+// (no stored diagonal: the last packed row is empty). A mirrored read of the
+// view negates, a diagonal read is zero, exactly as reading K itself does --
+// in both element types, and through a function taking the group.
+// ============================================================================
+type A = AntisymIdx<2, 3>
+let K: Array<Int64 like Idx<2>, A> = [[[1, 2], [3], []], [[4, 5], [6], []]]
+let krow = K(1)
+let k12 = krow(1, 2)
+let k21 = krow(2, 1)
+let k11 = krow(1, 1)
+let k_direct = K(1, 2, 1)
+let F: Array<Float64 like Idx<2>, A> = method_for(range<Idx<2>, A>) <@> lambda(r, i, j) -> Float64(r * 100 + i * 10 + j) |> compute
+let frow = F(1)
+let f02 = frow(0, 2)
+let f20 = frow(2, 0)
+let f22 = frow(2, 2)
+function swept(m: Array<Float64 like A>) -> Float64 = m(2, 0) + m(1, 2)
+let s = swept(frow)
+// EXPECT: krow = [[4, 5], [6], []]
+// EXPECT: k12 = 6
+// EXPECT: k21 = -6
+// EXPECT: k11 = 0
+// EXPECT: k_direct = -6
+// EXPECT: frow = [[100.0, 101.0], [110.0], []]
+// EXPECT: f02 = 101.0
+// EXPECT: f20 = -101.0
+// EXPECT: f22 = 0.0
+// EXPECT: s = 9.0

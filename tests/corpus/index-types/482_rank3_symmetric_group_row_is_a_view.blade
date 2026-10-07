@@ -1,0 +1,20 @@
+// TEST: A Row Of A Rank-3 Symmetric Group Is A View
+// ============================================================================
+// `T(1)` of `Idx<2>, SymIdx<3, 3>` leaves the rank-3 group whole: a view of
+// row 1's packed tetrahedron, read in any coordinate order (canonicalized).
+// ============================================================================
+type S3 = SymIdx<3, 3>
+let T: Array<Float64 like Idx<2>, S3> = method_for(range<Idx<2>, S3>) <@> lambda(r, i, j, k) -> Float64(r * 1000 + i * 100 + j * 10 + k) |> compute
+let row = T(1)
+let a = row(0, 1, 2)
+let b = row(2, 1, 0)
+let c = row(1, 2, 1)
+let d = T(1, 1, 1, 2)
+function trace3(m: Array<Float64 like S3>) -> Float64 = m(0, 0, 0) + m(1, 1, 1) + m(2, 2, 2)
+let tr = trace3(row)
+// EXPECT: row = [1000.0, 1001.0, 1002.0, 1010.0, 1011.0, 1020.0, 1100.0, 1101.0, 1110.0, 1200.0]
+// EXPECT: a = 1011.0
+// EXPECT: b = 1011.0
+// EXPECT: c = 1101.0
+// EXPECT: d = 1101.0
+// EXPECT: tr = 3300.0

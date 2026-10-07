@@ -1,0 +1,37 @@
+// TEST: A Row Of A Symmetric Group Is A View Of The Packed Row
+// ============================================================================
+// `T` is `Idx<2>, SymIdx<2, 3>`: one plain record, then a compact group. `T(1)`
+// subscripts through the plain record only, so the group survives WHOLE and
+// the read is an `Array<Float64 like S>` -- the packed skeleton below a plain
+// record is exactly the one a standalone symmetric array holds, so the view
+// shares T's storage. The C++ lane used to bind it as a raw row pointer
+// (`promote<double, 2>::type row = T[1L]`, no `.extents`) and g++ refused the
+// program (BL9002); it now binds `Array<double, 2>{ T.data[1L], T.extents + 1 }`
+// like a dense row. Both mirrored reads of the view answer T's own cell; the
+// view passes to a function over `S`, let-bound or inline, and decompacts.
+// (The kernel's (i, j) are packed storage coordinates -- loops/170 -- which is
+// why `row` prints as written below; the pins compare the view to T itself.)
+// ============================================================================
+type S = SymIdx<2, 3>
+let T: Array<Float64 like Idx<2>, S> = method_for(range<Idx<2>, S>) <@> lambda(r, i, j) -> Float64(r * 100 + i * 10 + j) |> compute
+let row = T(1)
+let a = row(0, 2)
+let b = row(2, 0)
+let t102 = T(1, 0, 2)
+let e = T(0)(2, 1)
+function corner(m: Array<Float64 like S>) -> Float64 = m(2, 0) + m(0, 2)
+let f = corner(row)
+let g = corner(T(0))
+let full = decompact(row, 0)
+let total = reduce(full, (+), axes = 2)
+let shifted = row + 1.0
+// EXPECT: row = [[100.0, 101.0, 102.0], [110.0, 111.0], [120.0]]
+// EXPECT: a = 102.0
+// EXPECT: b = 102.0
+// EXPECT: t102 = 102.0
+// EXPECT: e = 11.0
+// EXPECT: f = 204.0
+// EXPECT: g = 4.0
+// EXPECT: full = [[100.0, 101.0, 102.0], [101.0, 110.0, 111.0], [102.0, 111.0, 120.0]]
+// EXPECT: total = 958.0
+// EXPECT: shifted = [[101.0, 102.0, 103.0], [111.0, 112.0], [121.0]]

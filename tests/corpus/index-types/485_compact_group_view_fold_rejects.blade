@@ -1,0 +1,12 @@
+// TEST: Folding A Compact Group View Is Refused Like Folding The Group (rejects)
+// ERROR: BL3999 @ 11:26
+// ERROR-CONTAINS: folding the canonical cells and folding the logical (mirrored) cells differ
+// ============================================================================
+// `T(1)` is an `Array<Float64 like SymIdx<2, 3>>` view, so `reduce` over it
+// meets the same refusal as over a stored symmetric array (docs/plans/
+// plan-compact-sym-folds.md P6): the canonical and the mirrored fold differ.
+// `decompact(row, 0)` first is the logical fold (index-types/480).
+// ============================================================================
+type S = SymIdx<2, 3>
+let T: Array<Float64 like Idx<2>, S> = method_for(range<Idx<2>, S>) <@> lambda(r, i, j) -> Float64(r * 100 + i * 10 + j) |> compute
+let total = reduce(T(1), (+))

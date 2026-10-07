@@ -587,8 +587,31 @@ subscripts; a partial (sub-array) read of a wreath pool has no residual class"
                               (Blade.IR.ppOrbitLevels (Blade.IR.orbitLevelsOf ix)) totalRank))
     elif hasSymmetry arr.IndexTypes then
         let totalRank = arr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+        // A partial read through PLAIN leading records only (`T(r)` of
+        // `Idx<m>, SymIdx<2, n>`): the residual keeps every compact group
+        // whole, and allocCompact's skeleton below a plain record threads no
+        // lastIndex, so the peeled child IS the skeleton a standalone
+        // `Array<T like SymIdx<2, n>>` holds -- the view the C++ lane binds
+        // (`{ T.data[r], T.extents + 1 }`, CodeGenExprSupport.subviewAxesOk).
+        // Any other partial count (inside a group, or completing one with
+        // slots left) is refused at typecheck; this stays the backstop.
+        let plainLead =
+            arr.IndexTypes
+            |> List.takeWhile (fun ix -> ix.Symmetry = SymNone && max 1 ix.Rank = 1)
+            |> List.length
         if indices.Length = totalRank then
             readCompact arr (indices |> List.map toI64v)
+        elif indices.Length > 0 && indices.Length <= plainLead then
+            let rec peel (cur: Value) (idxs: Value list) : Value =
+                match idxs, cur with
+                | [], _ -> cur
+                | iv :: rest, VArray a ->
+                    let i = toI64v iv
+                    if i < 0L || a.Extents.Length < 1 || i >= a.Extents.[0] then
+                        raise (InterpPanic ("BL8006", "index out of bounds", None, 0))
+                    peel (peelDim a i) rest
+                | _ -> raise (InterpPanic ("BL8003", "indexing a non-array value", None, 0))
+            peel (VArray arr) indices
         else
             raise (ArrayOpUnsupported "index: partial (sub-array) read of a compact symmetric array (M3+)")
     else

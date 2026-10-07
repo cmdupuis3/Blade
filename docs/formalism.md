@@ -465,6 +465,15 @@ proofs.md §Binomial).
   `SymIdx<2,n> ≅ DepIdx<Idx<n>, λi. BoundedIdx<i,n>>` holds but r > 2 is not
   expressible as nested DepIdx (scope of recursive bounds) — SymIdx is
   primitive.
+- Partial reads as implemented: subscripts count COORDINATES (a rank-k group
+  takes k). Subscripting only through plain records BEFORE a group
+  (`T(r)` of `Idx<m>, SymIdx<2, n>`) leaves every group whole and is a view
+  of the same packed storage, an `Array<T like SymIdx<2, n>>` that reads,
+  maps, decompacts and passes to functions like a stored one (and is refused
+  by `reduce` the way a stored one is). A count that stops inside a group, or
+  completes a group with records after it left unread, has no residual class
+  and is refused (BL3999); `decompact(A, d)` first. The `S(i)` remainder above
+  is the spec-level reading, not a value today.
 
 **Nested/mixed symmetry** (spec level, **(planned)**): `NestedSymIdx<n>` (symmetric pairs of
 symmetric pairs; S = n(n+1)/2, cardinality S(S+1)/2; elasticity tensors),

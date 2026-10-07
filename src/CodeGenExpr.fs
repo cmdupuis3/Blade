@@ -872,10 +872,10 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
     // residual is consumed as an array. Emit the same sub-view aggregate the
     // BINDING path builds (densePartialSubview) as a prvalue instead: data
     // steps through the consumed leading dims, extents shifts past them.
-    // Same scoping as the binding path -- fully plain-dense rectangular
-    // (IxKPlain/SymNone/arity-1); compound reads go through
-    // compoundRead above, and ragged/packed-symmetric row pointers must NOT be
-    // re-wrapped (their axes fail the predicate).
+    // Same scoping as the binding path (subviewAxesOk): plain consumed axes,
+    // residual axes plain or WHOLE compact groups; compound reads go through
+    // compoundRead above, and ragged rows / a subscript into a compact group
+    // must NOT be re-wrapped (their axes fail the predicate).
     //
     // Deliberately NOT gated on `ix.Kind = SDimension`: an index record's Kind
     // is a statement about ONE apply (S = this apply's grid iterates it, T =
@@ -894,15 +894,11 @@ and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : s
         if List.isEmpty indices
            || indices |> List.exists (_.IsIRTuple) then None
         else
+            // Residual axes may also be WHOLE compact groups (subviewAxesOk):
+            // `T(r)` of `Idx<m>, SymIdx<2, n>` is the packed row the group's
+            // own reads address.
             match inferExprType arr with
-            | ArrayElem arrTy
-                    when arrTy.IndexTypes.Length > indices.Length
-                         && arrTy.IndexTypes |> List.mapi (fun d ix -> (d, ix))
-                            |> List.forall (fun (d, ix) ->
-                                (ix.IxKind = IxKPlain
-                                 || (d < indices.Length && ix.IxKind = IxKGroupOuter))
-                                && ix.Symmetry = SymNone
-                                && ix.Rank = 1) ->
+            | ArrayElem arrTy when subviewAxesOk arrTy indices.Length ->
                 let residTy = { arrTy with IndexTypes = List.skip indices.Length arrTy.IndexTypes }
                 let subscripts =
                     indices

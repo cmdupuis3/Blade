@@ -1,0 +1,17 @@
+// TEST: A Row Of A Hermitian Group Is A View That Conjugates
+// ============================================================================
+// `Z(1)` of `Idx<2>, HermitianIdx<2>`: the view's mirrored read comes back
+// conjugated, as Z's own does.
+// ============================================================================
+let Z: Array<Complex128 like Idx<2>, HermitianIdx<2>> = [
+    [[complex(1.0, 0.0), complex(2.0, 3.0)], [complex(4.0, 0.0)]],
+    [[complex(5.0, 0.0), complex(6.0, 7.0)], [complex(8.0, 0.0)]]
+]
+let row = Z(1)
+let a = row(0, 1)
+let b = row(1, 0)
+let z = Z(1, 1, 0)
+// EXPECT: row = [[(5,0), (6,7)], [(8,0)]]
+// EXPECT: a = (6,7)
+// EXPECT: b = (6,-7)
+// EXPECT: z = (6,-7)
