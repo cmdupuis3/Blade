@@ -59,7 +59,7 @@ stdlib/                    Blade-source stdlib (units/SI.blade, stats.blade, plo
                            An edit can still outrun the BINARY by using a compiler feature it
                            predates; `blade doctor`'s stdlib row names the root that answered
                            and flags a diverging copy.
-examples/                  9 numbered worked programs plus lsdft.blade / lswosa.blade /
+examples/                  10 numbered worked programs plus lsdft.blade / lswosa.blade /
                            lseof.bladenb — the best source of idiomatic Blade; physics/ is
                            a second, self-contained 47-program corpus with its own README.
 docs/                      formalism.md (canonical semantics), features.md (feature census),
