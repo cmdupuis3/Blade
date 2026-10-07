@@ -1,0 +1,24 @@
+// TEST: Array pow lifts elementwise by exponent kind
+// ============================================================================
+// `^` lifts over arrays like every arithmetic operator, and the exponent rule
+// (docs/formalism.md section 2.4) holds cell by cell: a Float64 array to an
+// integer power stays Float64 (squaring), an Int64 array stays Int64, a
+// floating exponent is libm pow, and two arrays co-iterate -- a Float64 base
+// array against an Int64 exponent array squares each cell.
+// ============================================================================
+let xs = [1.5, 2.0, 3.0]
+let n = 3
+let es = [3, 2, -1]
+let is = [2, 3, 4]
+let a = xs ^ 2
+let b = xs ^ n
+let c = is ^ 3
+let d = xs ^ 0.5
+let e = xs ^ es
+let f = [2.0, 3.0] ^ [0.5, 2.0]
+// EXPECT: a = [2.25, 4.0, 9.0]
+// EXPECT: b = [3.375, 8.0, 27.0]
+// EXPECT: c = "[8, 27, 64]"
+// EXPECT: d = [1.22474487139159, 1.4142135623731, 1.73205080756888]
+// EXPECT: e = [3.375, 4.0, 0.333333333333333]
+// EXPECT: f = [1.4142135623731, 9.0]

@@ -1,0 +1,8 @@
+// TEST: a generic pow at a Float32 base and a Float64 exponent (rejects)
+// ERROR: BL3019 @ 7:12
+// ERROR-CONTAINS: Float32 ^ Float64 is a Float64 power
+// A Float32 base with a typed Float64 exponent computes a Float64 power, which
+// the base-typed (Float32) result would narrow: refused at the base. Any
+// integer exponent keeps a Float32 base Float32 (functions/500).
+function pw(x: T, n: U) = x ^ n
+let r = pw(Float32(2.0), 0.5)

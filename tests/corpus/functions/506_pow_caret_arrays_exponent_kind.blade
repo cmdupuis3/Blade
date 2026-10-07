@@ -1,0 +1,14 @@
+// TEST: caret arrays to a caret exponent array by kind
+// ============================================================================
+// `a ^ b` over `a: T^1, b: U^1` does not ask the elements to agree (`a + b`
+// does, GOElemAgree): the exponent is polymorphic (docs/formalism.md section
+// 2.4), so a Float64 row to an Int64 row squares each cell and an Int64 row to
+// an Int64 row is exact.
+// ============================================================================
+function pa(a: T^1, b: U^1) = a ^ b
+let r1 = pa([2.0, 3.0], [3, 2])
+let r2 = pa([2, 3], [2, 2])
+let r3 = pa([4.0, 9.0], [0.5, 0.5])
+// EXPECT: r1 = [8.0, 9.0]
+// EXPECT: r2 = "[4, 9]"
+// EXPECT: r3 = [2.0, 3.0]

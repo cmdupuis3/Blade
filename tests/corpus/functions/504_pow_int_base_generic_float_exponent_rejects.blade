@@ -1,0 +1,8 @@
+// TEST: an Int64 base to a generic Float64 exponent (rejects)
+// ERROR: BL3019 @ 7:13
+// ERROR-CONTAINS: Int64 ^ Float64 is a Float64 power
+// `2 ^ n` is typed as its Int64 base, so a Float64 exponent would truncate the
+// floating power: refused at the exponent, the only generic operand. The body
+// writes `2.0 ^ n` for a floating power (functions/503).
+function itw(n) = 2 ^ n
+let r = itw(0.5)

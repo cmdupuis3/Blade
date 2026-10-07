@@ -223,6 +223,47 @@ namespace blade_arith {
   // Rounded ONCE to float: the Float32 `^` (a double pow stored straight into a
   // float was an implicit narrowing, -Werror=float-conversion).
   inline float fpowf(double x, double e) { return static_cast<float>(fpow(x, e)); }
+  // Real or complex base `^` an INTEGER exponent (formalism 2.4: the exponent
+  // of `^` is polymorphic -- an integer one keeps the base's type and is
+  // computed by repeated squaring, never by libm pow). libgcc's __powidf2 /
+  // libstdc++'s pow(complex, int) algorithm over a 64-bit exponent: the
+  // product starts at x for an odd exponent (else 1), and each later set bit
+  // multiplies in the running square; a negative exponent is the reciprocal of
+  // the positive power (1 / y, so 2.0 ^ -1074 is 1 / inf = 0). The SAME
+  // sequence of IEEE multiplies in every lane -- Numerics.realPowInt /
+  // complexPowInt in the interpreter, blade_fpowi in the LLVM shim,
+  // StaticEval.floatPowInt at compile time -- so the lanes agree bit for bit
+  // (no fast-math reassociation exists to reorder it). A literal exponent
+  // constant-propagates to the multiply chain (`x ^ 2` is x * x).
+  inline double fpowi(double x, int64_t e) {
+    uint64_t n = e < 0 ? 0ULL - static_cast<uint64_t>(e) : static_cast<uint64_t>(e);
+    double y = (n & 1ULL) ? x : 1.0;
+    while ((n >>= 1) != 0) {
+      x = x * x;
+      if (n & 1ULL) y = y * x;
+    }
+    return e < 0 ? 1.0 / y : y;
+  }
+  // Float32 base: evaluated in double and rounded ONCE to float, the fpowf rule.
+  inline float fpowif(double x, int64_t e) { return static_cast<float>(fpowi(x, e)); }
+  // Complex base: the same squaring over std::complex's multiply (libgcc's
+  // __muldc3 semantics, which the interpreter's complexMul ports) and the
+  // reciprocal through its divide (__divdc3, the interpreter's complexDiv).
+  inline std::complex<double> cpowi(std::complex<double> x, int64_t e) {
+    uint64_t n = e < 0 ? 0ULL - static_cast<uint64_t>(e) : static_cast<uint64_t>(e);
+    std::complex<double> y = (n & 1ULL) ? x : std::complex<double>(1.0, 0.0);
+    while ((n >>= 1) != 0) {
+      x = x * x;
+      if (n & 1ULL) y = y * x;
+    }
+    return e < 0 ? std::complex<double>(1.0, 0.0) / y : y;
+  }
+  // Complex64: evaluated as Complex128, each component rounded once (the
+  // blade_libm complex<float> rule).
+  inline std::complex<float> cpowi(std::complex<float> x, int64_t e) {
+    std::complex<double> r = cpowi(std::complex<double>(x), e);
+    return std::complex<float>(static_cast<float>(r.real()), static_cast<float>(r.imag()));
+  }
   // NON-template entry points are what codegen emits: the shadow-frame scan
   // (CodeGen.scanBodyCalls) reads `f<T>(` as a call through a value, which
   // would cost the kernel its frame elision.

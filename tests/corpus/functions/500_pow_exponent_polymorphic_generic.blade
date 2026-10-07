@@ -1,0 +1,33 @@
+// TEST: the exponent of a generic pow is polymorphic
+// ============================================================================
+// docs/formalism.md section 2.4: `x ^ n` never makes the exponent share the
+// base's variable (`x + n` would, functions/274). The power is typed as the
+// base, so each call computes by its own exponent kind: Float64 ^ Int64
+// squares (8.0, a Float64), Float64 ^ Float64 is libm pow, Int64 ^ Int64 the
+// exact integer power, Complex ^ Int the complex squaring, an array base
+// lifts. The declared spelling `x: T, n: U` is the same function.
+// ============================================================================
+function pw(x, n) = x ^ n
+function pwt(x: T, n: U) = x ^ n
+let a = pw(2.0, 3)
+let b = pw(2.0, 0.5)
+let c = pw(2, 3)
+let d = pw(2.0, -2)
+let e = pw(Float32(1.5), 2)
+let f = pw(complex(0.0, 1.0), 2)
+let g = pw([1.0, 2.0], 3)
+let h = pw([1, 2], 3)
+let t1 = pwt(1.5, 2)
+let t2 = pwt(9.0, 0.5)
+let t3 = pwt(3, 4)
+// EXPECT: a = "8.0"
+// EXPECT: b = 1.4142135623731
+// EXPECT: c = "8"
+// EXPECT: d = 0.25
+// EXPECT: e = 2.25
+// EXPECT: f = "(-1.0,0.0)"
+// EXPECT: g = [1.0, 8.0]
+// EXPECT: h = "[1, 8]"
+// EXPECT: t1 = 2.25
+// EXPECT: t2 = "3.0"
+// EXPECT: t3 = "81"

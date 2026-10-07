@@ -2415,7 +2415,25 @@ let internal castLegality (name: string) (target: ElemType) (src: ElemType) (rou
 let internal genericObligationVar (ob: GenericObligation) : int =
     match ob with
     | GOCast (v, _, _, _) | GOFractionalMath (v, _) | GOPromotion (v, _, _, _) | GOElemAgree (v, _, _)
-    | GOBroadcastElem (v, _, _, _) -> v
+    | GOBroadcastElem (v, _, _, _) | GOPowExponent (v, _) | GOPowBase (v, _) -> v
+
+/// `^`'s exponent rule (formalism 2.4): the power is typed as the BASE, which
+/// is exact for any integer exponent (repeated squaring in the base's type)
+/// and for a floating or complex exponent the base already promotes into.
+/// None = exact; Some msg = the reason the base-typed result would not hold it.
+let internal powExponentClash (baseElem: ElemType) (expElem: ElemType) : string option =
+    match expElem with
+    | ETInt32 | ETInt64 -> None
+    | _ ->
+        match IR.promoteElemType baseElem expElem with
+        | Some r when r = baseElem -> None
+        | r ->
+            let bS = ppIRType (IRTScalar baseElem)
+            let eS = ppIRType (IRTScalar expElem)
+            match r with
+            | Some r ->
+                Some $"{bS} ^ {eS} is a {ppIRType (IRTScalar r)} power, which the {bS}-typed result would truncate"
+            | None -> Some $"^ is not defined between {bS} and {eS}"
 
 /// The GENERIC OBLIGATIONS of a callee (TypeEnv.GenericObligation), judged
 /// against one instance: `instanceOf v` is the concrete element the call
@@ -2481,6 +2499,27 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                     Some (InvalidCast ($"'{fname}' applies {opName} between the elements of its generic array parameter and a "
                                        + $"{ppIRType (IRTScalar partner)}, typing the result's elements {resS}, and this call makes "
                                        + $"the parameter's element type {srcS}: {what}. {advice}")))
+            | GOPowExponent (_, exponent) ->
+                (match rootOf exponent |> Option.bind instanceOf with
+                 | Some expElem ->
+                     powExponentClash src expElem
+                     |> Option.map (fun what ->
+                         let bS = ppIRType (IRTScalar src)
+                         InvalidCast ($"'{fname}' raises a value of one generic parameter type to a power of another's, "
+                                      + $"typing the power as the base's type, and this call makes the base {bS} and the "
+                                      + $"exponent {ppIRType (IRTScalar expElem)}: {what}. An integer exponent keeps the "
+                                      + "base's type; a floating exponent needs a base of its class -- convert the base "
+                                      + "argument with the type in call position, Float64(x) (Float64(xs) for an array), "
+                                      + "or write a float literal (`2.0`, not `2`)."))
+                 | None -> None)
+            | GOPowBase (_, baseElem) ->
+                powExponentClash baseElem src
+                |> Option.map (fun what ->
+                    InvalidCast ($"'{fname}' raises its {ppIRType (IRTScalar baseElem)} base to a power of its generic parameter "
+                                 + $"type, typing the power as the base's type, and this call makes the exponent "
+                                 + $"{ppIRType (IRTScalar src)}: {what}. An integer exponent keeps the base's type; "
+                                 + "for a floating power give the base that class (a float literal, `2.0`, or "
+                                 + "Float64(...) in the body)."))
             | GOElemAgree (_, other, opName) ->
                 match rootOf other |> Option.bind instanceOf with
                 | Some src2 when src2 <> src ->
@@ -2537,8 +2576,32 @@ let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys:
             let fname = match tFunc.Kind with TExprVar (n, _, _) -> n | _ -> "the callee"
             let instanceOf r =
                 Map.tryFind r mapping |> Option.bind (fun copy -> concreteElemOf env.Subst (IRTInfer copy))
+            // The SHAPE half of `^`'s judgment: the power is typed as its
+            // base, so an exponent the call makes an ARRAY beside a SCALAR
+            // base (`2.0 ^ n` at `n = [1, 2]`) has no shape to land in --
+            // refused here rather than emitted as a scalar the body computes
+            // as an array (BL9002). An array base lifts and is fine.
+            let instShape (vid: int) =
+                match env.Subst.Resolve (IRTInfer vid) |> IR.stripUnits with
+                | IRTInfer r ->
+                    Map.tryFind r mapping
+                    |> Option.map (fun copy -> env.Subst.Resolve (IRTInfer copy) |> IR.stripUnits)
+                | t -> Some t
+            let isArr t = match t with Some (ArrayElem _) -> true | _ -> false
+            let isScalarTy t = match t with Some (IRTScalar _) -> true | _ -> false
+            let powShapeClash (ob: GenericObligation) =
+                let refuse () =
+                    InvalidCast ($"'{fname}' raises a scalar base to a power of its generic parameter type, and this "
+                                 + "call makes that exponent an ARRAY: the power is typed as its base (the exponent of `^` "
+                                 + "never decides its type), so there is no array for the cells to land in. Make the "
+                                 + "base an array, or map the call over the exponents.")
+                match ob with
+                | GOPowBase (v, _) when isArr (instShape v) -> Some (refuse ())
+                | GOPowExponent (b, e) when isArr (instShape e) && isScalarTy (instShape b) -> Some (refuse ())
+                | _ -> None
             obs |> List.tryPick (fun ob ->
                 judgeGenericObligations env fname [ob] instanceOf
+                |> Option.orElse (powShapeClash ob)
                 |> Option.map (fun e ->
                     let posOf vid =
                         match env.Subst.Resolve (IRTInfer vid) |> IR.stripUnits with
@@ -2552,6 +2615,8 @@ let internal genericObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys:
                     let pos =
                         match ob with
                         | GOElemAgree (a, b, _) -> max (posOf a) (posOf b)
+                        // The array-exponent refusal is the EXPONENT's.
+                        | GOPowExponent (b, e2) when isArr (instShape e2) && isScalarTy (instShape b) -> posOf e2
                         | _ -> posOf (genericObligationVar ob)
                     (pos, e)))
         | _ -> None
@@ -2654,6 +2719,27 @@ let internal propagateGenericObligations (env: TypeEnv) (tFunc: TypedExpr)
                      callerVar v |> Option.iter (fun c -> acc.Add(GOPromotion (c, o, p, lit)))
                  | GOBroadcastElem (v, o, p, r) ->
                      callerVar v |> Option.iter (fun c -> acc.Add(GOBroadcastElem (c, o, p, r)))
+                 | GOPowBase (v, b) ->
+                     callerVar v |> Option.iter (fun c -> acc.Add(GOPowBase (c, b)))
+                 | GOPowExponent (v, w) ->
+                     // Each side the caller passes its own variable to stays
+                     // an obligation; a side it passes a concrete element
+                     // decides that half here.
+                     let concrete (x: int) =
+                         match env.Subst.Resolve (IRTInfer x) |> IR.stripUnits with
+                         | IRTInfer r -> Map.tryFind r inst |> Option.bind (concreteElemOf env.Subst)
+                         | _ -> None
+                     (match callerVar v, callerVar w with
+                      | Some c, Some d when c <> d -> acc.Add(GOPowExponent (c, d))
+                      | None, Some d -> concrete v |> Option.iter (fun be -> acc.Add(GOPowBase (d, be)))
+                      | Some c, None ->
+                          // A concrete exponent: only a floating one demands
+                          // anything of the base (GOPromotion's rule).
+                          (match concrete w with
+                           | Some ((ETFloat32 | ETFloat64) as p) -> acc.Add(GOPromotion (c, "^", p, false))
+                           | Some ((ETComplex64 | ETComplex128) as p) -> acc.Add(GOPromotion (c, "^", p, false))
+                           | _ -> ())
+                      | _ -> ())
                  | GOElemAgree (v, w, o) ->
                      match callerVar v, callerVar w with
                      | Some c, Some d when c <> d -> acc.Add(GOElemAgree (c, d, o))

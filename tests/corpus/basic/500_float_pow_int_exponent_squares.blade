@@ -1,0 +1,36 @@
+// TEST: Float ^ Int keeps the base's type and squares
+// ============================================================================
+// The exponent of `^` is polymorphic (docs/formalism.md section 2.4): an
+// INTEGER exponent is not converted -- the power is the base's type, computed
+// by repeated squaring (libgcc's __powidf2 order over a 64-bit exponent), and
+// a negative one is the reciprocal of the positive power (no panic). It used
+// to convert the exponent and call libm pow. No BL3020 for `x ^ n`: nothing
+// is converted.
+// ============================================================================
+let x = 1.1
+let n = 7
+let a = x ^ 3
+let b = x ^ n
+let c = 2.0 ^ 10
+let d = 2.0 ^ -2
+let e = x ^ (0 - n)
+let g = 0.5 ^ 0
+let h = (0.0 - 2.0) ^ 3
+let tiny = 2.0 ^ -1074
+let k: Int32 = Int32(5)
+let m = 2.0 ^ k
+let s32 = Float32(1.5) ^ 3
+// A large exponent: squaring accumulates its own roundings, so this is NOT
+// libm's pow(1.0000001, 1e7) = 2.71828169413208.
+let big = 1.0000001 ^ 10000000
+// EXPECT: a = 1.331
+// EXPECT: b = 1.9487171
+// EXPECT: c = "1024.0"
+// EXPECT: d = 0.25
+// EXPECT: e = 0.513158118230706
+// EXPECT: g = "1.0"
+// EXPECT: h = "-8.0"
+// EXPECT: tiny = 0.0
+// EXPECT: m = "32.0"
+// EXPECT: s32 = 3.375
+// EXPECT: big = 2.71828169398037

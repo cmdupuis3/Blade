@@ -145,11 +145,12 @@ fold refuses at compile time instead):
 | Int `+` `-` `*` | two's complement modulo 2³² / 2⁶⁴ — WRAPS (interpreter: unchecked .NET integers; C++: `-fwrapv`; LLVM: no `nsw`). `x + 1 > x` is `false` at the maximum, and a wrapped sum still carries the true value modulo 2⁶⁴ (`proofs/BladeNumericContract.v`, `int64_observation_exact`) |
 | Int `/` `%` | truncate toward zero. A zero divisor PANICS **BL8013** (`integer division by zero` / `integer modulo by zero`). `MIN / -1` wraps to `MIN` and `MIN % -1` is `0` (C++ UB, an x86 trap, a .NET exception — defined here) |
 | Int `^` Int | EXACT, wrapping like `*` (square-and-multiply modulo 2ʷ); `0 ^ 0 = 1`; a negative exponent PANICS **BL8013** (`integer power with a negative exponent`) — convert to Float64 first for a real power |
-| Real `^` | `x * x` when the exponent is exactly 2, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double |
+| Real or complex `^` Int | the exponent is NOT converted: the power is the BASE's type, computed by repeated squaring over a 64-bit exponent in one fixed order (libgcc's `__powidf2`, libstdc++'s `pow(complex, int)`: start at `x` for an odd exponent, else 1; each later set bit multiplies in the running square). A negative exponent is the reciprocal of the positive power, `1 / x^|n|` -- no panic (`2.0 ^ -2` is `0.25`; `2.0 ^ -1074` is `1 / ∞ = 0.0`). Float32 / Complex64 evaluate in double / Complex128 and round once. Never libm `pow`, so the value is exact-order IEEE arithmetic every lane (and a compile-time fold) reproduces bit for bit |
+| Real `^` Real | `x * x` when the exponent is exactly 2.0, otherwise the platform libm's `pow` in double; a Float32 result is rounded once from the double. An Int base beside a floating exponent promotes like any mix (BL3020 for a non-literal base) |
 | float → int cast (`Int64(floor(x))`) | truncation of a value the target can hold; NaN, ±∞, or anything outside `[-2ʷ⁻¹, 2ʷ⁻¹)` PANICS **BL8014** — never a saturated value or a platform sentinel |
 | Int64 → Int32 cast | wraps (two's complement) |
 | transcendental intrinsics (`exp log log10 sin cos tan sinh cosh tanh asin acos atan atan2`, and `pow`) | the PLATFORM libm's value, computed AT RUN TIME — never folded at compile time, so a literal argument and the same value read from an array agree. A Float32 operand is evaluated by the double function and rounded once to Float32; an integer operand widens to double |
-| complex transcendental intrinsics (`exp log sqrt sin cos tan sinh cosh tanh asin acos atan` on a complex operand) and complex `^` | the PLATFORM C library's complex functions (`cexp clog csqrt csin ccos ctan csinh ccosh ctanh casin cacos catan cpow` — libmingwex's on Windows), computed AT RUN TIME under the same barrier, so a constant operand and a run-time one agree bit for bit. Complex `^` is libstdc++'s algorithm over those functions: complex ^ complex is `cpow`; complex ^ real (an integer exponent is cast to the component type) is `pow(re, y)` for a positive real base, else `polar(exp(y · log(z).re), y · log(z).im)`; real ^ complex is `polar(pow(x, w.re), w.im · log(x))` for `x > 0`, else `cpow`. A Complex64 operand is evaluated by the Complex128 function and each component rounded once to Float32 |
+| complex transcendental intrinsics (`exp log sqrt sin cos tan sinh cosh tanh asin acos atan` on a complex operand) and complex `^` | the PLATFORM C library's complex functions (`cexp clog csqrt csin ccos ctan csinh ccosh ctanh casin cacos catan cpow` — libmingwex's on Windows), computed AT RUN TIME under the same barrier, so a constant operand and a run-time one agree bit for bit. Complex `^` a floating or complex exponent (an integer one squares, above) is libstdc++'s algorithm over those functions: complex ^ complex is `cpow`; complex ^ real is `pow(re, y)` for a positive real base, else `polar(exp(y · log(z).re), y · log(z).im)`; real ^ complex is `polar(pow(x, w.re), w.im · log(x))` for `x > 0`, else `cpow`. A Complex64 operand is evaluated by the Complex128 function and each component rounded once to Float32 |
 | `sqrt` `floor` `ceil` `abs` `fma` (real operand) | IEEE correctly rounded (so a compile-time fold is the run-time value); Float32 operands use the float operation |
 | integer literals | exact, including array-literal leaves (never routed through a double) |
 
@@ -205,7 +206,16 @@ Arguments sharing a variable agree EXACTLY: neither order converts and no
 literal adapts across them (`add(2.5, 1)` is refused like `add(1, 2.5)`; a
 literal's type is its spelling), and the same holds for two caret
 variables whose ELEMENTS meet through arithmetic (`a + b` over `a: T^1, b:
-U^1` refuses an Int64 and a Float64 array at the call). The caller converts
+U^1` refuses an Int64 and a Float64 array at the call). `^` is the exception:
+its EXPONENT is polymorphic and never shares the base's variable. `x ^ n` over
+`x: T, n: U` is typed `T`, and each call is judged: any integer exponent keeps
+the base's type (Float ^ Int is Float by squaring, Int ^ Int is Int, Complex ^
+Int is Complex), a floating or complex exponent is accepted where the base
+already has its class (Float ^ Float, Complex ^ Float), and an exponent that
+would promote the base away -- Int ^ Float, Float32 ^ Float64, Float ^ Complex
+-- is refused at the base argument (BL3019), where the caller converts it
+(`pw(Float64(k), 0.5)`). A concrete base beside a generic exponent (`2.0 ^ n`)
+is judged the same way at the exponent. The caller converts
 with the type in call position:
 
 ```blade sketch
@@ -967,7 +977,11 @@ add(x, y) = x + y` takes one type per call, and its arguments must agree
 EXACTLY: no argument converts implicitly, in either order and literals
 included, so `add(2.5, 1)` and `add(1, 2.5)` are both refused at the second
 (BL3999), as is an Int64 and a Float64 variable -- the caller writes
-`add(2.5, 1.0)` or `add(2.5, Float64(n))`. A
+`add(2.5, 1.0)` or `add(2.5, Float64(n))`. The one exception is `^`, whose
+exponent is polymorphic (§2.4): `function pw(x, n) = x ^ n` keeps two
+variables and is typed as its base, so `pw(2.0, 3)` is the squared-out 8.0,
+`pw(2.0, 0.5)` a floating pow and `pw(2, 3)` the Int64 8, while `pw(2, 0.5)`
+is refused at the base (BL3019: a Float64 power of an Int64 base). A
 parameter the body uses as a subscript is pinned to that index (§3.10), one it
 applies is an arrow (§4.3); a top-level `let` of a lambda that is only applied
 is the declaration, and a lambda used as a value is one body whose first call
@@ -979,9 +993,14 @@ let a = inc(6) / 4
 let b = inc(2.5)
 function add(x, y) = x + y
 let c = add(2.5, Float64(1))
+function pw(x, n) = x ^ n
+let d = pw(2.0, 3)
+let e = pw(2, 3)
 // EXPECT: a = 1
 // EXPECT: b = 3.5
 // EXPECT: c = 3.5
+// EXPECT: d = 8.0
+// EXPECT: e = 8
 ```
 
 ### 5.2 Lambdas

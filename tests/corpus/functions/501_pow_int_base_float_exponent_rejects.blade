@@ -1,0 +1,9 @@
+// TEST: a generic pow at an Int64 base and a Float64 exponent (rejects)
+// ERROR: BL3019 @ 8:12
+// ERROR-CONTAINS: Int64 ^ Float64 is a Float64 power
+// `pw(x, n) = x ^ n` is typed as its base: an Int64 base with a Float64
+// exponent would put the Float64 power in an Int64 result. Conversions are
+// explicit (docs/formalism.md section 2.4), so the call is refused at the BASE
+// -- the caller writes `pw(2.0, 0.5)` or `pw(Float64(k), 0.5)` (functions/500).
+function pw(x, n) = x ^ n
+let r = pw(2, 0.5)

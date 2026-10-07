@@ -330,12 +330,16 @@ let private intLiteralOf (e: IRExpr) : int64 option =
 ///     non-literal exponent may be negative, which panics (blade_rt::ipow).
 ///     It used to emit `pow(b, e)` -- a double, so 3^39 came back rounded and
 ///     an Int64 binding of it failed -Werror=float-conversion.
-///   * real `^`        : blade_arith::fpow (x*x at exponent 2, else libm pow),
+///   * real or complex `^` an INTEGER : blade_arith::fpowi / fpowif / cpowi,
+///     repeated squaring in the base's type (a negative exponent is the
+///     reciprocal of the positive power) -- never libm pow.
+///   * real `^` real   : blade_arith::fpow (x*x at exponent 2, else libm pow),
 ///     rounded ONCE to Float32 when that is the node's type (pow(float, long)
 ///     is a double; storing it in a float was an implicit narrowing).
 ///
-///   * complex `^`     : blade_libm::pow, libstdc++'s algorithm over the
-///     run-time library functions (never folded at compile time).
+///   * complex `^` a floating or complex exponent : blade_libm::pow,
+///     libstdc++'s algorithm over the run-time library functions (never
+///     folded at compile time).
 ///
 /// None = the caller's ordinary rendering. The CUDA device dialect keeps the
 /// old `pow(l, r)` / infix spelling: device bodies cannot reach blade_rt or
@@ -363,13 +367,23 @@ let renderContractBinOp
             // integer computes in float (a literal exponent adapts, `s ^ 2`
             // over a Float32 `s` is a Float32), exactly as `s * 2` does.
             let isReal et = match et with ETFloat32 | ETFloat64 | ETInt32 | ETInt64 -> true | _ -> false
-            // Complex `^`: blade_libm::pow, the libstdc++ algorithm over the
+            // AN INTEGER EXPONENT keeps the base's type and is computed by
+            // repeated squaring (formalism 2.4: the exponent of `^` is
+            // polymorphic) -- blade_arith::fpowi / fpowif / cpowi, never libm
+            // pow. An Int32 exponent widens to the int64_t parameter
+            // implicitly (exact; no cast spelled -- `static_cast<T>(` reads as
+            // a call through a value to the shadow-frame scan).
+            if isInt re && (isComplexElem le || le = ETFloat64 || le = ETFloat32) then
+                let e = rStr
+                if isComplexElem le then Some $"blade_arith::cpowi({lStr}, {e})"
+                elif le = ETFloat64 then Some $"blade_arith::fpowi({lStr}, {e})"
+                else Some $"blade_arith::fpowif({lStr}, {e})"
+            // Complex `^` with a FLOATING (or complex) exponent:
+            // blade_libm::pow, the libstdc++ algorithm over the
             // no-fold barrier functions (blade_runtime.hpp). A real operand
-            // is cast to the component type first -- where libstdc++'s
-            // __promote_2 overload sent an integer exponent anyway -- so the
-            // call lands on one of the three (complex|real, complex|real)
-            // overloads exactly.
-            if isComplexElem le || isComplexElem re then
+            // is cast to the component type first so the call lands on one
+            // of the three (complex|real, complex|real) overloads exactly.
+            elif isComplexElem le || isComplexElem re then
                 match promoteElemType le re with
                 | Some ((ETComplex64 | ETComplex128) as resElem) ->
                     Some $"blade_libm::pow({(coerceComplexOperand resElem le lStr)}, {(coerceComplexOperand resElem re rStr)})"

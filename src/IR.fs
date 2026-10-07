@@ -3638,6 +3638,13 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
               // `^` is left alone off the all-Float64 case: an integer power's
               // result class is not the plain promotion rule's to state.
               | IRCaret when e1 = ETFloat64 && e2 = ETFloat64 -> Some (IRTScalar ETFloat64)
+              // An INTEGER exponent keeps the base's type (formalism 2.4:
+              // the exponent of `^` is polymorphic), whatever the base.
+              | IRCaret when (e2 = ETInt32 || e2 = ETInt64)
+                             && (match e1 with
+                                 | ETInt32 | ETInt64 | ETFloat32 | ETFloat64
+                                 | ETComplex64 | ETComplex128 -> true
+                                 | _ -> false) -> Some (IRTScalar e1)
               | IRCaret -> None
               | IRAdd | IRSub | IRMul | IRDiv | IRMod ->
                   promoteElemType e1 e2 |> Option.map IRTScalar)

@@ -388,6 +388,27 @@ let maxDepth = 4_096
 /// Ordinary `let static` folding: the whole budget, for one declaration.
 let defaultBudget = { Steps = maxSteps; Depth = maxDepth }
 
+/// A REAL base `^` an INTEGER exponent (docs/formalism.md section 2.4): the
+/// exponent of `^` is polymorphic, and an integer one keeps the base's type and
+/// is computed by REPEATED SQUARING -- libgcc's __powidf2 algorithm over a
+/// 64-bit exponent: the product starts at `x` for an odd exponent (else 1.0),
+/// each later set bit multiplies in the running square, and a negative
+/// exponent is the reciprocal of the positive power. Only IEEE multiplies and
+/// one divide, in a fixed order, so this compile-time fold IS the run-time
+/// value. The ONE definition every F# lane runs (the interpreter's
+/// Numerics.realPowInt calls it); its C twins are blade_arith::fpowi
+/// (src/cpp/blade_runtime.hpp) and blade_fpowi (src/cpp/blade_llvm_shim.c).
+let floatPowInt (x0: float) (e: int64) : float =
+    let mutable n = if e < 0L then 0UL - uint64 e else uint64 e
+    let mutable x = x0
+    let mutable y = if n &&& 1UL <> 0UL then x0 else 1.0
+    n <- n >>> 1
+    while n <> 0UL do
+        x <- x * x
+        if n &&& 1UL <> 0UL then y <- y * x
+        n <- n >>> 1
+    if e < 0L then 1.0 / y else y
+
 /// The constrained-index counting layer's PER-CELL budget, spent afresh on
 /// every conjunct at every box cell (StructIdxFence.evalConjunctsAtCell).
 ///
@@ -843,6 +864,12 @@ and private evalBuiltin env fuel depth (name: string) (args: Expr list) : Result
 
 /// Evaluate binary operations with type promotion
 and evalBinOp (op: BinOp) (lv: StaticValue) (rv: StaticValue) : Result<StaticValue, string> =
+    match op, lv, rv with
+    // Float ^ Int: the exponent is NOT promoted (formalism 2.4) -- repeated
+    // squaring, the run-time algorithm, so the fold is the run-time value.
+    // (Float ^ Float is libm pow, never folded: it falls to the refusal below.)
+    | OpCaret, SVFloat a, SVInt b -> Ok (SVFloat (floatPowInt a b))
+    | _ ->
     // Promote int to float if mixed
     let lv', rv' =
         match lv, rv with

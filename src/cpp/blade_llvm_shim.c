@@ -109,6 +109,22 @@ long long blade_ipow(long long b, long long e, const char *file, long long line)
 /* Real `^`: x * x at an exponent of exactly 2, else the platform pow. */
 double blade_fpow(double x, double e) { return e == 2.0 ? x * x : pow(x, e); }
 
+/* Real `^` an INTEGER exponent: repeated squaring, the twin of
+ * blade_arith::fpowi (blade_runtime.hpp) and StaticEval.floatPowInt -- the
+ * same multiplies in the same order, so the lanes agree bit for bit. NOT
+ * llvm.powi: its multiplication order is unspecified, its exponent is i32,
+ * and on x86_64-w64-mingw32 clang lowers a run-time-exponent powi to a call
+ * of libm pow (measured: it differs from this loop in most cases). */
+double blade_fpowi(double x, long long e) {
+    unsigned long long n = e < 0 ? 0ULL - (unsigned long long)e : (unsigned long long)e;
+    double y = (n & 1ULL) ? x : 1.0;
+    while ((n >>= 1) != 0) {
+        x = x * x;
+        if (n & 1ULL) y = y * x;
+    }
+    return e < 0 ? 1.0 / y : y;
+}
+
 /* Float -> Int64: truncation of a value the target holds; NaN / +-inf / out
  * of [-2^63, 2^63) panics (fptosi would be poison). Exact comparisons: both
  * bounds are powers of two. */

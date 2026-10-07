@@ -509,6 +509,16 @@ let mut dst = [0.0, 0.0, 0.0]
 let r = accumulate_into(src, dst)
 """
 
+/// `^` at each exponent kind (formalism 2.4): Float ^ Int, Float ^ Float,
+/// Int ^ Int, all with run-time operands so no literal shortcut applies.
+let private powKindsSource = """
+let x = 1.1
+let n = 7
+let a = x ^ n
+let b = x ^ 2.5
+let i = n ^ n
+"""
+
 /// Drop `;` comment lines before asserting on emitted text. The module banner
 /// NAMES the knobs it documents ("per-instruction `contract`"), so a bare
 /// substring search over the whole file would find `contract` in a module that
@@ -627,6 +637,19 @@ let runLlvmFactTests () : BlockResult =
         [ "BLADE_FP_REASSOC", Some "1"; "BLADE_FP_CONTRACT", Some "fast"
           "BLADE_LLVM_FACTS", Some "fmf:off" ] licensedFoldSource
         [ "fadd double" ] [ "reassoc"; "contract" ]
+
+    printSubHeader "the arithmetic contract: `^` by exponent kind"
+    // docs/formalism.md 2.4: the exponent of `^` is polymorphic. Float ^ Int
+    // is the shim's repeated squaring (blade_fpowi, the twin of
+    // blade_arith::fpowi) -- NEVER llvm.powi, whose multiply order LangRef
+    // leaves unspecified, whose exponent is i32, and which clang lowers to a
+    // libm pow call on x86_64-w64-mingw32 (it differed from the squaring loop
+    // in most of a 300k-case sweep). Float ^ Float stays libm (blade_fpow);
+    // Int ^ Int stays the exact blade_ipow. The VALUES are pinned bit for bit
+    // by corpus basic/501, which the differential below sweeps.
+    check "float ^ int squares in the shim, float ^ float is libm" [] powKindsSource
+        [ "call double @blade_fpowi("; "call double @blade_fpow("; "call i64 @blade_ipow(" ]
+        [ "llvm.powi"; "@pow(" ]
 
     printSubHeader "the whole switch"
     // FACTS=off must return the lane to the shape that passed its differential

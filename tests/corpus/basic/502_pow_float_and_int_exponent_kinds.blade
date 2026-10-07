@@ -1,0 +1,31 @@
+// TEST: Pow by exponent kind -- floating pow, integer squaring, int base
+// ============================================================================
+// docs/formalism.md section 2.4. A FLOATING exponent is libm pow (x * x at
+// exactly 2.0); an INTEGER one keeps the base's type. Int ^ Int is the exact
+// integer power; an Int base beside a floating exponent promotes like any mix
+// (a literal silently, a variable with BL3020). Complex ^ Int squares over the
+// complex multiply -- (1 + i) ^ 2 is exactly 2i -- where Complex ^ Float is
+// the libm port's polar form (its real part is a rounding residue).
+// ============================================================================
+let x = 2.0
+let fp = x ^ 0.5
+let fsq = x ^ 2.0
+let f3 = x ^ 3.0
+let i3 = 2 ^ 3
+let ilit = 2 ^ 0.5
+let m = 2
+let ivar = m ^ 0.5
+let z = complex(1.0, 1.0)
+let zi = z ^ 2
+let zinv = z ^ -1
+let zf = z ^ 2.0
+// EXPECT: fp = 1.4142135623731
+// EXPECT: fsq = 4.0
+// EXPECT: f3 = "8.0"
+// EXPECT: i3 = "8"
+// EXPECT: ilit = 1.4142135623731
+// EXPECT: ivar = 1.4142135623731
+// EXPECT: zi = "(0.0,2.0)"
+// EXPECT: zinv = "(0.5,-0.5)"
+// EXPECT: zf = "(1.22464679914735e-16,2.0)"
+// WARN: BL3020

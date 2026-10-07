@@ -5697,7 +5697,7 @@ list to share, and a wreath's nest is the segment-peeled orb_visit traversal)" o
 /// and stays silent: the scalar-complex product is ordinary math notation.
 /// Width CREEP -- Complex64 dragged to Complex128, Float32 to Float64, any
 /// int converted at all -- warns.
-and warnImplicitNumericMix (env: TypeEnv) (lSpan: Span) (rSpan: Span) (tL: TypedExpr) (tR: TypedExpr) : unit =
+and warnImplicitNumericMix (env: TypeEnv) (op: BinOp) (lSpan: Span) (rSpan: Span) (tL: TypedExpr) (tR: TypedExpr) : unit =
     let elemOf (t: TypedExpr) =
         match IR.stripUnits (env.Subst.Resolve t.Type) with
         | IRTScalar et -> Some et
@@ -5742,7 +5742,9 @@ and warnImplicitNumericMix (env: TypeEnv) (lSpan: Span) (rSpan: Span) (tL: Typed
                          + $"{castNameOf join} by mixed-type promotion; write {castNameOf join}(...) around it "
                          + "to make the conversion explicit (or convert the other operand instead)")
             warnSide tL le lSpan
-            warnSide tR re rSpan
+            // `^`'s INTEGER exponent is not converted (formalism 2.4: it keeps
+            // the base's type and squares), so there is nothing to report.
+            if not (op = OpCaret && isIntElem re) then warnSide tR re rSpan
         | None -> ()
     | _ -> ()
 
@@ -6771,10 +6773,40 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
             // arrays alike (no caret, no rank bound -- those are shaped by
             // the paths above) and no literal's own variable; a comparison
             // mixes nothing into its Bool result.
-            (if mode = Elementwise then
+            //
+            // NOT `^`: its exponent is POLYMORPHIC (formalism 2.4) -- an
+            // integer exponent keeps the base's type (repeated squaring), a
+            // floating one is a floating pow -- so `pw(x, n) = x ^ n` keeps two
+            // variables, is typed as the base's, and each call is judged by
+            // GOPowExponent (an exponent that would promote the base away --
+            // a Float64 exponent of an Int64 base -- is refused at the base).
+            (if mode = Elementwise && op = OpCaret then
+                let genVar (t: IRType) =
+                    match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
+                    | IRTInfer vid when env.Subst.IsPolymorphicId vid
+                                        && (env.Subst.GetLiteralDefault vid).IsNone -> Some vid
+                    | _ -> None
+                // A CONCRETE base beside a generic exponent (`2.0 ^ n`): typed
+                // as the base, so the exponent must not promote it.
+                let concreteElem (t: IRType) =
+                    match IR.stripUnits (env.Subst.Resolve t) with
+                    | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 as et) -> Some et
+                    | ArrayElem arr ->
+                        (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                         | IRTScalar (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 as et) -> Some et
+                         | _ -> None)
+                    | _ -> None
+                match env.CurrentGenericObligations with
+                | Some acc when not env.InLambdaBody ->
+                    (match genVar tL.Type, genVar tR.Type, concreteElem tL.Type with
+                     | Some b, Some e, _ when b <> e -> acc.Add(GOPowExponent (b, e))
+                     | None, Some e, Some be -> acc.Add(GOPowBase (e, be))
+                     | _ -> ())
+                | _ -> ()
+             elif mode = Elementwise then
                 let isArithOp =
                     match op with
-                    | OpAdd | OpSub | OpMul | OpDiv | OpMod | OpCaret -> true
+                    | OpAdd | OpSub | OpMul | OpDiv | OpMod -> true
                     | _ -> false
                 let genVar (t: IRType) =
                     match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
@@ -6839,7 +6871,7 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 // implicitly. Warn only once the op has typed successfully,
                 // so a real error is never accompanied by advice about a
                 // program that doesn't compile anyway.
-                warnImplicitNumericMix env left.Span right.Span tL tR
+                warnImplicitNumericMix env op left.Span right.Span tL tR
                 // S1 SEAM 2 (docs/plan-kernel-body-materialization.md, M-B, the
                 // concrete-operand triple). One operand is a real array, the
                 // other an UNRESOLVED inference var -- the shape an enclosing
@@ -7058,6 +7090,10 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                 | None -> IRTInfer vid
                             match sigVar lRes, realScalar tR, sigVar rRes, realScalar tL with
                             | Some vid, Some et, _, _ -> Some (vid, et, isFloatLit tR)
+                            // `2.0 ^ n`: the EXPONENT never types `^` (formalism
+                            // 2.4) -- the result is the real base's; GOPowBase
+                            // judges the exponent each call makes.
+                            | _, _, Some _, Some _ when op = OpCaret -> None
                             | _, _, Some vid, Some et -> Some (vid, et, isFloatLit tL)
                             | _ -> None
                     match genericBesideReal with
@@ -16755,13 +16791,22 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                     // T-typed local an integer instance would truncate. Kept
                     // while the variable is still open.
                     | GOPromotion (v, _, _, _)
-                    | GOBroadcastElem (v, _, _, _) ->
+                    | GOBroadcastElem (v, _, _, _)
+                    | GOPowBase (v, _) ->
                         (match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits with
                          | IRTInfer _ -> true
                          | _ -> false)
                     // Two variables still distinct and open: a call can still
                     // give them two elements.
                     | GOElemAgree (v, w, _) ->
+                        (match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits,
+                               env.Subst.Resolve (IRTInfer w) |> IR.stripUnits with
+                         | IRTInfer a, IRTInfer b -> a <> b
+                         | _ -> false)
+                    // Base and exponent both still open: a call decides both.
+                    // (One side settled by the body itself -- `Float64(x) ^ n`
+                    // -- is no longer this obligation's shape.)
+                    | GOPowExponent (v, w) ->
                         (match env.Subst.Resolve (IRTInfer v) |> IR.stripUnits,
                                env.Subst.Resolve (IRTInfer w) |> IR.stripUnits with
                          | IRTInfer a, IRTInfer b -> a <> b

@@ -893,6 +893,7 @@ let private shimTable : Map<string, ShimFn> =
           "blade_ipow", { Ret = "i64"; RetAttrs = ""; Args = [ "i64"; "i64"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_f2i64", { Ret = "i64"; RetAttrs = ""; Args = [ "double"; "ptr"; "i64" ]; Group = grpShimArith }
           "blade_fpow", io "double" [ "double"; "double" ]
+          "blade_fpowi", io "double" [ "double"; "i64" ]
           "blade_out_str", io "void" [ "ptr" ]
           "blade_out_i64", io "void" [ "i64" ]
           "blade_out_f64", io "void" [ "double" ]
@@ -2451,6 +2452,18 @@ and private emitBinOp (c: Ctx) (op: IRBinOp) (l: IRExpr) (r: IRExpr) (loc: SrcLo
                         acc <- { Reg = dest; Ty = ScI64 }
                     acc
             | _ -> callShim c "blade_ipow" ScI64 ([ ScI64, a.Reg; ScI64, b.Reg ] @ faultLocArgs c loc)
+        elif a0.Ty = ScF64 && b0.Ty = ScI64 then
+            // Float ^ Int: the exponent is NOT converted (formalism 2.4) --
+            // repeated squaring, blade_fpowi, the twin of blade_arith::fpowi.
+            // Not llvm.powi (unspecified multiply order, an i32 exponent, and
+            // lowered to libm pow on this target). A literal 2 is the same
+            // single product the loop computes (1.0 * (x * x)).
+            match r with
+            | IRLit (IRLitInt 2L) ->
+                let dest = freshReg c
+                ln c (renderBin { Dest = dest; Opcode = "fmul"; Flags = fmfFor c ScF64; Ty = ScF64; Lhs = a0.Reg; Rhs = a0.Reg })
+                { Reg = dest; Ty = ScF64 }
+            | _ -> callShim c "blade_fpowi" ScF64 [ ScF64, a0.Reg; ScI64, b0.Reg ]
         else
             let a = coerce c ScF64 a0
             let b = coerce c ScF64 b0

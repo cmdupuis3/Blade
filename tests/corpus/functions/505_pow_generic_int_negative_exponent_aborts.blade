@@ -1,0 +1,12 @@
+// TEST: a generic Int64 pow with a negative exponent aborts (aborts)
+// ============================================================================
+// Int ^ Int has no integer answer at a negative exponent: BL8013 in every lane
+// (docs/formalism.md section 2.4), through a generic function as directly. A
+// Float64 base at the same exponent is the reciprocal (functions/500).
+// ============================================================================
+function pw(x, n) = x ^ n
+let xs: Array<Int64 like Idx<2>> = [1, -3]
+let e = reduce(xs, (+))
+let ok = pw(2.0, e)
+let p = pw(2, e)
+// ABORT: error[BL8013]: integer power with a negative exponent

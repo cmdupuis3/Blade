@@ -1,0 +1,7 @@
+// TEST: caret Int64 row to a Float64 exponent row (rejects)
+// ERROR: BL3019 @ 6:12
+// ERROR-CONTAINS: Int64 ^ Float64 is a Float64 power
+// The power is typed as the base row (`T`); an Int64 row to a Float64 row is a
+// Float64 power its Int64 cells cannot hold. Refused at the base argument.
+function pa(a: T^1, b: U^1) = a ^ b
+let r = pa([2, 3], [0.5, 0.5])

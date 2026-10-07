@@ -242,6 +242,20 @@ type GenericObligation =
     /// Float64 array would type the Float64 sum Int64 (g++ refused the
     /// narrowing, BL9002; an Int32/Int64 mix wrapped silently).
     | GOElemAgree of var: int * other: int * op: string
+    /// `x ^ n` between values of two generic parameter variables -- the BASE
+    /// `var` and the EXPONENT `exponent` -- which are NOT one variable: the
+    /// exponent of `^` is polymorphic (formalism 2.4), and the power is typed
+    /// as the base. Exact wherever the exponent's element keeps the base's
+    /// (any integer exponent -- repeated squaring in the base's type -- or a
+    /// floating/complex one the base already promotes into); a floating
+    /// exponent of an integer base (or a Float64 one of a Float32 base, a
+    /// complex one of a real base) would hand the base-typed result a wider
+    /// value, so the call is refused at the base.
+    | GOPowExponent of var: int * exponent: int
+    /// `b ^ n` with a CONCRETE base element `baseElem` and a generic exponent
+    /// variable `var`: typed as the base, so the same judgment, refused at the
+    /// exponent (the only generic operand).
+    | GOPowBase of var: int * baseElem: ElemType
 
 /// AN ARROW APPLICATION (formalism 4.3): `c(0)` whose head `c` was a still-open
 /// variable when the application was typed -- an unannotated parameter of a

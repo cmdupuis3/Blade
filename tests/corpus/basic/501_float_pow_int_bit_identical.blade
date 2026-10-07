@@ -1,0 +1,33 @@
+// TEST: Float ^ Int is one exact multiply order in every lane
+// ============================================================================
+// docs/formalism.md section 2.4: Float ^ Int is repeated squaring in ONE
+// fixed order, so the compiled lane, the interpreter, the LLVM lane and a
+// compile-time fold agree BIT FOR BIT. Each residual below is the power minus
+// that algorithm's exact double, scaled by 1e16 so a one-ulp disagreement --
+// what libm pow gives at these exponents (1.1 ^ 13 is ...038 there, 1.3 ^ 159
+// is ...51e18) -- prints as a visible number instead of hiding under the
+// printer's 15 digits. The LLVM differential sweeps this file.
+// ============================================================================
+let x = 1.1
+let y = 1.3
+let k = 13
+let p13 = x ^ k
+let p159 = y ^ 159
+let pm23 = x ^ -23
+let r13 = (p13 - 3.4522712143931029) * 1.0e16
+let r159 = (p159 - 1.3091608722537971e18) * 1.0e16
+let rm23 = (pm23 - 0.11167815779424752) * 1.0e16
+// A `let static` folds the same algorithm at compile time (Float ^ Float,
+// libm, is never folded).
+let static sc = 1.5 ^ 3
+let static sn = 1.1 ^ 13
+let rs = (sn - 3.4522712143931029) * 1.0e16
+// EXPECT: r13 = 0.0
+// EXPECT: r159 = 0.0
+// EXPECT: rm23 = 0.0
+// EXPECT: sc = 3.375
+// EXPECT: rs = 0.0
+// EXPECT: p13 = 3.4522712143931
+// EXPECT: p159 = 1.3091608722538e+18
+// EXPECT: pm23 = 0.111678157794248
+// EXPECT: sn = 3.4522712143931

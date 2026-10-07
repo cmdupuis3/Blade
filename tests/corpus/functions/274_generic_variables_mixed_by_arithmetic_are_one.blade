@@ -22,10 +22,11 @@ let ua = addu([1.0, 2.0], [0.5, 0.5])
 // EXPECT: ui = 7
 // EXPECT: ua = [1.5, 2.5]
 
-// `^` too: an integer power stays exact, a real one is real (and its
-// exponent is the base's type: `pw(2.0, 3)` is refused, write `3.0`).
+// NOT `^`: its exponent is polymorphic (formalism 2.4) and never shares
+// the base's variable -- an integer power of a Float64 base squares out in
+// the base's type (functions/500-505).
 function pw(x, n) = x ^ n
 let p1: Int64 = pw(2, 10)
-let p2: Float64 = pw(2.0, 3.0)
+let p2: Float64 = pw(2.0, 3)
 // EXPECT: p1 = 1024
 // EXPECT: p2 = 8.0

@@ -1,0 +1,17 @@
+// TEST: a concrete base to a generic exponent is typed as the base
+// ============================================================================
+// `2.0 ^ n` is a Float64 whatever the exponent's kind (docs/formalism.md
+// section 2.4): an Int64 exponent squares, a Float64 one is libm pow. It used
+// to be typed as the EXPONENT's variable (the arithmetic rule for `2.0 + n`),
+// so an Int64 call was refused. `2 ^ n` at an Int64 exponent is exact.
+// ============================================================================
+function tw(n) = 2.0 ^ n
+function itw(n) = 2 ^ n
+let a = tw(3)
+let b = tw(0.5)
+let c = tw(-1)
+let d = itw(10)
+// EXPECT: a = "8.0"
+// EXPECT: b = 1.4142135623731
+// EXPECT: c = 0.5
+// EXPECT: d = "1024"

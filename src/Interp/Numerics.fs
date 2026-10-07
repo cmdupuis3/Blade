@@ -496,6 +496,10 @@ let intPow32At (loc: SrcLoc) (b: int32) (e: int32) : int32 =
 let realPow (b: float) (e: float) : float =
     if e = 2.0 then b * b else mathPow b e
 
+/// Real `^` an INTEGER exponent: repeated squaring (blade_arith::fpowi), the
+/// one algorithm every lane runs -- StaticEval.floatPowInt is the definition.
+let realPowInt (b: float) (e: int64) : float = Blade.StaticEval.floatPowInt b e
+
 /// Float -> integer conversion: truncation toward zero of a value the target
 /// can hold; NaN / +-inf / out of [-2^(w-1), 2^(w-1)) panics BL8014
 /// (blade_rt::f2i). Both bounds are powers of two, so the tests are exact.
@@ -1033,6 +1037,30 @@ let complexMath (name: string) (re: float) (im: float) : float * float =
 /// Elsewhere the old best-effort exp(w * log z) (NOT bit-verified).
 let private complexCaret (l: Value) (r: Value) : Value =
     let isC (v: Value) = match v with VComplex _ -> true | _ -> false
+    match l, r with
+    // Complex ^ an INTEGER exponent: repeated squaring over the complex
+    // multiply (blade_arith::cpowi -- libstdc++'s pow(complex, int) over a
+    // 64-bit exponent), every platform: complexMul is libgcc's __muldc3 and
+    // the reciprocal is __divdc3 of (1, 0) by the power.
+    | VComplex (zr, zi), (VInt _ | VInt32 _) ->
+        let e = asI64 r
+        let mutable n = if e < 0L then 0UL - uint64 e else uint64 e
+        let mutable xr = zr
+        let mutable xi = zi
+        let mutable yr = if n &&& 1UL <> 0UL then zr else 1.0
+        let mutable yi = if n &&& 1UL <> 0UL then zi else 0.0
+        n <- n >>> 1
+        while n <> 0UL do
+            let (sr, si) = complexMul xr xi xr xi
+            xr <- sr
+            xi <- si
+            if n &&& 1UL <> 0UL then
+                let (pr, pi) = complexMul yr yi xr xi
+                yr <- pr
+                yi <- pi
+            n <- n >>> 1
+        if e < 0L then VComplex (complexDiv 1.0 0.0 yr yi) else VComplex (yr, yi)
+    | _ ->
     if onWindows () then
         match isC l, isC r with
         | true, true ->
@@ -1110,7 +1138,15 @@ let private evalArith (loc: SrcLoc) (op: IRBinOp) (l: Value) (r: Value) : Value 
                 // to go through a double, so 3^35 printed ...704 for ...707);
                 // anything real is realPow in double, then rounded once to the
                 // node type (Float32 for a Float32 base).
-                (match cppArithElem le re with
+                // A REAL base ^ an INTEGER exponent keeps the base's type and
+                // is repeated squaring (blade_arith::fpowi / fpowif): Float32
+                // evaluates in double and rounds once.
+                let isIntE = match re with ETInt32 | ETInt64 -> true | _ -> false
+                (match le with
+                 | ETFloat64 when isIntE -> VFloat (realPowInt (asF64 l) (asI64 r))
+                 | ETFloat32 when isIntE -> convertTo resElem (VFloat32 (float32 (realPowInt (asF64 l) (asI64 r))))
+                 | _ ->
+                 match cppArithElem le re with
                  | ETInt64 -> VInt (intPow64At loc (asI64 l) (asI64 r))
                  | ETInt32 -> VInt32 (intPow32At loc (asI32 l) (asI32 r))
                  | ETFloat32 ->
