@@ -1,0 +1,23 @@
+// TEST: a generic cast converts the element only and keeps the shape
+// ============================================================================
+// `VType(e)` is e's type with its element replaced (formalism 2.4), also
+// where the operand's rank is open: `Float64(row)` over `row: T^1` is a
+// rank-1 Float64 array of row's shape, and `Float64(x)` over `x: T` is a
+// scalar at a scalar instance, a vector at a vector instance and a matrix at
+// a matrix instance.
+// ============================================================================
+function half(row: T^1) = Float64(row) * 0.5
+function half0(x: T) = Float64(x) * 0.5
+
+let h1 = half([1, 2, 3])
+// EXPECT: h1 = [0.5, 1.0, 1.5]
+let s0 = half0(3)
+// EXPECT: s0 = 1.5
+let s1 = half0([1, 2, 4])
+// EXPECT: s1 = [0.5, 1.0, 2.0]
+let s2 = half0([[1, 2], [3, 4]])
+// EXPECT: s2 = [[0.5, 1.0], [1.5, 2.0]]
+let r2 = rank(s2)
+// EXPECT: r2 = 2
+let f1 = half0([1.0, 3.0])
+// EXPECT: f1 = [0.5, 1.5]

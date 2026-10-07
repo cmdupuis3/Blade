@@ -111,8 +111,15 @@ exactly what the cast cannot say; project with `real`/`imag`/`abs`/`arg` —
 and a float source into an int target unless the rounding is visible at the
 cast site, `Int64(floor(x))` / `Int64(ceil(x))`, so truncation is always
 spelled (a rounded value bound to a name and cast later refuses on
-purpose). Array operands lift elementwise like `cos(A)`; `Int64(floor(A))`
-fuses the rounding and the cast into one kernel. A cast of a value whose type
+purpose). A cast converts the VALUE TYPE only: `VType(e)` is `e`'s type with
+its element replaced by `VType` -- shape, rank, index types (symmetry
+included) and units are kept, so array operands lift elementwise like
+`cos(A)` (`Float64(S)` over a `SymIdx` array is a `SymIdx` array of Float64),
+and `Int64(floor(A))` fuses the rounding and the cast into one kernel. This
+holds where the operand's rank is not known yet: in a generic body,
+`Float64(x)` over `x: T` is "`T` with element Float64" -- a scalar at a
+scalar instance, a matrix at a matrix instance -- and `Float64(row)` over
+`row: T^1` is a rank-1 Float64 array of `row`'s shape. A cast of a value whose type
 is a function's own type variable (`Float64(reduce(row, (+)))` over
 `row: T^1`) is a GENERIC cast: its legality depends on the instance, so it is
 judged at every call against the type the call gives `T` (and again after
@@ -120,19 +127,19 @@ monomorphization) -- `stats.mean` casts this way, so an Int64 row averages in
 Float64 and a complex row is refused at the call. Likewise a generic body that
 returns `sqrt(x)` (or another complex-preserving math intrinsic) AS `x`'s own
 type is refused at an integer instance, where the Float64 result would be
-truncated. Arithmetic between a bare parameter variable and a real scalar
+truncated. Arithmetic between a bare parameter variable and a scalar
 (`function addone(x: T) = x + 1.0`) is typed `T`: `T` may be an array, which
 the scalar broadcasts against, so `addone([1.0, 2.0])` is `[2.0, 3.0]` and
-`addone(3.0)` is `4.0`. That is exact for every instance whose element the
-scalar promotes into (Float64, complex, Float32 beside a float literal); an
-instance it would promote away (an integer element, or Float32 beside a
-Float64 value) is refused at the call (BL3019): the conversion is the
-caller's to spell, with the type in call position (`addone(Float64(n))`,
-`addone(Float64(xs))`).
-(`x: T^0` is the same variable as `x: T`.) A variable that is only ever a
-scalar -- an array's element, the `reduce(row, (+))` of a `row: T^1` --
-keeps the promotion rules' scalar result, so an Int64 row's sum plus `0.5`
-is a Float64.
+`addone(3.0)` is `4.0`. Each instance is judged by the mixing rule below, at
+its call (BL3019): an instance whose element the scalar does not meet exactly
+(an integer element beside `1.0`, a Float64 element beside the integer
+literal `1`, Float32 beside a Float64 value) is refused, and the conversion is
+the caller's to spell, with the type in call position (`addone(Float64(n))`,
+`addone(Float64(xs))`). (`x: T^0` is the same variable as `x: T`.) The same
+judgment covers a variable that is only ever a scalar -- an array's element,
+the `reduce(row, (+))` of a `row: T^1` -- so an Int64 row's sum plus `0.5` is
+refused at the call; a body that means Float64 arithmetic converts first,
+`Float64(reduce(row, (+))) + 0.5`.
 
 **Arithmetic semantics — one contract, every lane.** The compiled program
 (g++), the interpreter (`src/Interp/Numerics.fs`), the LLVM lane
@@ -187,14 +194,30 @@ compiler without asm labels (MSVC, the nvcc host pass: `blade_libm::`
 forwards to `std::` there), and `lgamma`/`digamma`, which are Blade's own
 series on both sides (BL8008 outside `x > 0`).
 
-Mixed-type arithmetic still promotes — float beats int, wider beats
-narrower within a category, complex promotes componentwise, and a mixed
-int/float op computes at the float operand's width (`Int64 × Float32 →
-Float32`, C++'s usual arithmetic conversions) — but the conversion of a
-NON-literal operand now warns (BL3020), naming the explicit cast. Literals
-adapt silently by design (`a32 * 1.0` stays Float32), as does the exact
-same-component-width real→complex embedding (`w * z` over Float64 and
-Complex128).
+**The mixing rule: nothing converts implicitly.** `1` is an Int64 and `1.0`
+a Float64 -- the decimal point is the type, as in F#. An arithmetic operator
+(`+ - * / %`) or a comparison (`== != < <= > >=`) whose operands' elements
+(scalars, or array elements: the rule is elementwise) are an integer and a
+float or complex is a type error (BL3020), whether either operand is a
+literal or a variable: `2.5 + 1`, `x * 2` over a Float64 `x`, `n * 0.5` over
+an Int64 `n` and `A * 2` over a Float64 array are all refused at the integer
+operand -- write `2.0`, or convert with the type in call position,
+`Float64(n)` / `Float64(xs)`. Within one class, two widths (Float32 and
+Float64, Int32 and Int64, Complex64 and Complex128) are refused too unless
+one side is a LITERAL, which adapts to its partner's width (`a32 * 1.0` is
+Float32, `i32 + 1` is Int32: the literal says the class, its partner the
+width). A real beside a complex is the exact embedding when the real is the
+complex's component width (`w * z` over Float64 and Complex128, Float32 with
+Complex64) or a float literal (`2.0 * z`); any other width is refused, and an
+integer beside a complex is refused like an integer beside a float. The
+exponent of `^` is the one polymorphic position (`x ^ 2` over a Float64 `x`
+uses the integer-exponent algorithm). The same rule holds where a value meets
+a declared type: an integer -- literal or variable -- is no argument for a
+`Float64` parameter and no value for a `Float64`-annotated binding (`let x:
+Float64 = 1` is refused; `1.0` is the float spelling), as a float is none for
+an integer one (BL3019's cast-site rounding is the only way down). A call
+still widens WITHIN a class (a Float32 argument into a Float64 parameter, an
+Int64 into an Int32 one), and a real into a complex parameter.
 
 Type variables (single capitals) are universally quantified within a
 signature; the same letter denotes the same type. There is no promotion TYPE
@@ -969,7 +992,9 @@ anonymous type variable -- `function inc(x) = x + 1` is `function inc(x: T) =
 x + 1` -- so each call's argument decides its type (one monomorphized body per
 instance), never a default. A literal's type is its spelling (`1` is an Int64,
 `1.0` a Float64), so `inc(6)` is the Int64 7 and `inc(6) / 4` is the integer
-quotient 1, while `inc(2.5)` is 3.5. Everything §2.4 says of `x: T` holds:
+quotient 1, while `inc(2.5)` is refused at the argument (BL3019: the body's
+`1` meets a Float64 instance -- `x + 1.0` is the Float64 increment, and
+`x + x` needs no literal at all). Everything §2.4 says of `x: T` holds:
 beside a float (`x + 1.0`) an Int64 argument is refused at that argument
 (BL3019; the caller writes `3.0` or `Float64(n)`). Two generic variables mixed
 by arithmetic are ONE variable -- there is no promotion type -- so `function
@@ -990,7 +1015,8 @@ decides its open parameters.
 ```blade
 function inc(x) = x + 1
 let a = inc(6) / 4
-let b = inc(2.5)
+function incf(x) = x + 1.0
+let b = incf(2.5)
 function add(x, y) = x + y
 let c = add(2.5, Float64(1))
 function pw(x, n) = x ^ n

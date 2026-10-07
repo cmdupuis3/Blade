@@ -1,0 +1,8 @@
+// TEST: an integer literal argument to a Float64 parameter is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// `3` is an Int64 literal, and an integer literal never means a float:
+// write `half(3.0)`.
+// ============================================================================
+function half(x: Float64) -> Float64 = x / 2.0
+let h = half(3)

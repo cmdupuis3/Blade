@@ -1,0 +1,9 @@
+// TEST: an integer literal beside a float is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// The mixing rule (formalism 2.4): nothing converts implicitly. `2` is an
+// Int64 and `2.0` a Float64 -- the decimal point is the type -- so `x * 2`
+// over a Float64 `x` is refused at the integer literal. Write `x * 2.0`.
+// ============================================================================
+let x = 2.5
+let y = x * 2

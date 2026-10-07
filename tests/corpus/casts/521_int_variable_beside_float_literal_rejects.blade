@@ -1,0 +1,8 @@
+// TEST: an Int64 variable beside a float literal is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// `n * 0.5` over an Int64 `n` would convert `n` implicitly; the conversion is
+// spelled with the type in call position, `Float64(n) * 0.5`.
+// ============================================================================
+let n = 3
+let h = n * 0.5

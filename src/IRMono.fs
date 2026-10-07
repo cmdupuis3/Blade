@@ -639,6 +639,32 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
                              if not (acc.ContainsKey k) && concrete v then acc <- Map.add k v acc)
                  | _ -> ())
             | _ -> ()) (substTypeInIRExpr b func.Body)
+        // A TYPE ONLY THE BODY DECIDES: a variable no argument mentions that
+        // types a let-bound value or the function's result -- the element
+        // cast `Float64(x)` over `x: T` (formalism 2.4), "T with element
+        // Float64", whose shape is the instance's. Once the bindings above
+        // make the value's type known (exprTypeIfKnown: a cast of a known
+        // array is that array of the target), the variable is that type.
+        let bodyNow = substTypeInIRExpr acc func.Body
+        let learnFrom (declTy: IRType) (value: IRExpr) =
+            if not (concrete declTy) then
+                match exprTypeIfKnown value with
+                | Some t when concrete t ->
+                    unifyParamWithArg declTy t Map.empty
+                    |> Map.iter (fun k v ->
+                        if not (acc.ContainsKey k) && concrete v then acc <- Map.add k v acc)
+                | _ -> ()
+        learnFrom (substTypeInIRType acc func.RetType) bodyNow
+        iterIRExpr (fun e ->
+            match e with
+            | IRLet (id, value, body) ->
+                let refTy : IRType option ref = ref None
+                iterIRExpr (fun x ->
+                    match x with
+                    | IRVar (vid, t) when vid = id && refTy.Value.IsNone && not (concrete t) -> refTy.Value <- Some t
+                    | _ -> ()) body
+                refTy.Value |> Option.iter (fun t -> learnFrom t value)
+            | _ -> ()) bodyNow
         acc
     let rec fix (b: Map<int, IRType>) (fuel: int) =
         let b' = pass b

@@ -1,0 +1,9 @@
+// TEST: an Int64 row's sum plus 0.5 in a generic body is refused at the call (rejects)
+// ERROR: BL3019
+// ============================================================================
+// `reduce(row, (+))` over a `row: T^1` is a scalar of the row's element; at
+// an Int64 row, `+ 0.5` would convert it implicitly. The body that means
+// Float64 arithmetic converts first: `Float64(reduce(row, (+))) + 0.5`.
+// ============================================================================
+function f(row: T^1) = reduce(row, (+)) + 0.5
+let v = f([1, 2])

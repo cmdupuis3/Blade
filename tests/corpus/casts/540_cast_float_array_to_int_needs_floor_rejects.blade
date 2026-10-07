@@ -1,0 +1,8 @@
+// TEST: an elementwise float-to-int cast needs the rounding spelled (rejects)
+// ERROR: BL3019
+// ============================================================================
+// `Int64(xs)` over a Float64 array would truncate every cell; spell the
+// rounding at the cast site: `Int64(floor(xs))`.
+// ============================================================================
+let xs = [1.5, 2.5]
+let n = Int64(xs)

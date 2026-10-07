@@ -265,7 +265,7 @@ let rec internal adjointOf (rc: RevCtx) (e: Expr) (cot: Expr) : Result<NStmt lis
         // so a negative base still differentiates. At b = 0 the exponent
         // term is its limit 0, not 0 * log 0 = NaN (powExpPartial).
         let pre, c = bindCot rc cot
-        adjointOf rc b (mul c (mul e (pow b (sub e (fLit 1.0))))) |> Result.bind (fun sb ->
+        adjointOf rc b (mul c (mul (asF64 e) (pow b (sub (asF64 e) (fLit 1.0))))) |> Result.bind (fun sb ->
         adjointOf rc e (mul c (powExpPartial b e)) |> Result.map (fun se ->
             pre @ sb @ se))
     | ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) ->
@@ -858,7 +858,7 @@ let rec internal tangentOfExpr (rc: RevCtx) (e: Expr) : Result<Expr, string> =
         // term when the exponent is inactive (see the builder note above).
         tangentOfExpr rc bb |> Result.bind (fun tb ->
         tangentOfExpr rc ee |> Result.map (fun te ->
-            addZ (mulZ (mul ee (pow bb (sub ee (fLit 1.0)))) tb)
+            addZ (mulZ (mul (asF64 ee) (pow bb (sub (asF64 ee) (fLit 1.0)))) tb)
                  (mulZ (powExpPartial bb ee) te)))
     | { Kind = ExprKind.ExprBinOp (_, (OpEq | OpNeq | OpLt | OpLe | OpGt | OpGe | OpAnd | OpOr), _, _) } ->
         Ok (fLit 0.0)   // boolean-valued: no tangent

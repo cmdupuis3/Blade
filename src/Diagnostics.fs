@@ -298,12 +298,12 @@ module Codes =
             // non-numeric operand, an operand whose type is not yet known,
             // or a wrong arity.
             "BL3019", "invalid numeric cast"
-            // BL3020: WARNING. Mixed-elem-type arithmetic silently converts
-            // one operand (Int64 beside Float64 goes to float; Float32
-            // beside Float64 drags the op to Float64; narrow complex widens).
-            // Literals adapt silently by design -- this fires only when a
-            // NON-literal operand is converted, and names the explicit cast
-            // that says it out loud.
+            // BL3020: an ERROR (formalism 2.4, the mixing rule). Nothing
+            // converts implicitly: an integer beside a float or complex in
+            // arithmetic or a comparison, an integer into a float parameter
+            // or binding, two non-literal widths of one class, an integer
+            // base beneath a float exponent. A literal adapts within its
+            // class only (`a32 * 1.0` is Float32; `2` is never a float).
             "BL3020", "implicit numeric conversion"
             // BL3021: a `match` on a specialization index (`arity(p)` over a
             // pack param, `rank(p)` over an abstract/caret param) carries an

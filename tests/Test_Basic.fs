@@ -12,7 +12,7 @@ let basicTests = category "basic"
 let intrinsicsTests = category "intrinsics"
 
 /// Explicit numeric casts (Float32(x)/Int64(floor(x))/...) and the BL3020
-/// implicit-conversion warning
+/// mixing rule (nothing converts implicitly)
 let castsTests = category "casts"
 
 /// grad() — reverse-mode AD source transform (Grad.fs)

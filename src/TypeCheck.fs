@@ -581,6 +581,19 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
             zonked.Decls |> List.collect declExprs
                          |> List.collect (collectSubscriptErrors currentEnv)
         else []
+    // The mixing rule's post-zonk half (collectNumericMixErrors): operators
+    // whose operands were open when inferBinOp met them, judged now that no
+    // kernel parameter is. Same cascade suppression as the rank sweep; one
+    // error per declaration (the first offender is the root cause).
+    let mixErrors =
+        if List.isEmpty errors && List.isEmpty staticAssertErrors && List.isEmpty subscriptErrors then
+            // On the UNZONKED tree: a variable nothing pinned (a returned
+            // section's parameter) is still open there, where zonk's
+            // Float64 default would invent a mix nobody wrote.
+            typedModule.Decls |> List.collect declExprs
+                              |> List.collect (collectNumericMixErrors currentEnv)
+                         |> List.truncate 1
+        else []
     // Misplaced provider writes: structural, inference-independent (an
     // unresolved receiver simply fails the IRTNamed match), so unlike the rank
     // sweep it runs even when the module already has errors.
@@ -598,7 +611,7 @@ let checkModule (env: TypeEnv) (modul: ModuleDecl) : TypedModule * TypeEnv * Com
     let mutCaptureErrors =
         zonked.Decls |> List.collect declMutCaptureRoots
                      |> List.collect (fun (pos, e) -> collectMutCaptureEscapes currentEnv.Subst pos e)
-    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ writeErrors @ groupKeysErrors @ mutCaptureErrors)
+    (zonked, currentEnv, staticAssertErrors @ List.rev errors @ rankErrors @ treeArgErrors @ subscriptErrors @ mixErrors @ writeErrors @ groupKeysErrors @ mutCaptureErrors)
 
 let checkProgram (program: Program) : TypedProgram * IRBuilder * CompileError list * string list =
     let env = emptyEnv ()

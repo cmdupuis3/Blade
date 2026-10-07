@@ -5686,68 +5686,6 @@ and internal wreathLeafRefusal (opName: string) (leaves: TypedExpr list) : TypeE
                                  sprintf "%s over a wreath-producing leaf (nest merging needs a level \
 list to share, and a wreath's nest is the segment-peeled orb_visit traversal)" opName))
 
-/// BL3020: mixed-elem-type arithmetic converts one operand implicitly (the
-/// binop promotion rules in inferArithType). Literals adapt silently by
-/// design -- adaptFloatLit and the flexible literal vars are how `a32 * 1.0`
-/// stays Float32 -- so only a NON-literal converted operand warns, naming the
-/// explicit cast. Int-with-int width mixes are excluded: bareResult performs
-/// no int widening (the left operand's type stands), so there is no
-/// conversion to report. A float embedding into the SAME-component-width
-/// complex (Float64 beside Complex128, Float32 beside Complex64) is exact
-/// and stays silent: the scalar-complex product is ordinary math notation.
-/// Width CREEP -- Complex64 dragged to Complex128, Float32 to Float64, any
-/// int converted at all -- warns.
-and warnImplicitNumericMix (env: TypeEnv) (op: BinOp) (lSpan: Span) (rSpan: Span) (tL: TypedExpr) (tR: TypedExpr) : unit =
-    let elemOf (t: TypedExpr) =
-        match IR.stripUnits (env.Subst.Resolve t.Type) with
-        | IRTScalar et -> Some et
-        | ArrayElem arr ->
-            (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
-             | IRTScalar et -> Some et
-             | _ -> None)
-        | _ -> None
-    let numeric = function
-        | ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 -> true
-        | _ -> false
-    let isIntElem = function ETInt32 | ETInt64 -> true | _ -> false
-    let rec literalish (k: TypedExprKind) =
-        match k with
-        | TExprLit _ -> true
-        | TExprUnaryOp (OpNeg, inner) -> literalish inner.Kind
-        | _ -> false
-    match elemOf tL, elemOf tR with
-    | Some le, Some re when le <> re && numeric le && numeric re && not (isIntElem le && isIntElem re) ->
-        // The ACTUAL result element, mirroring inferArithType's bareResult
-        // (NOT bare promoteElemType: `Int64 * Float32` computes and types
-        // Float32 -- C++'s usual arithmetic conversions -- while the
-        // promotion table would claim Float64; only the complex mixes take
-        // the table's answer, because the typed result at 5983-5985 and the
-        // operand coercions both do).
-        let actualJoin =
-            match IR.promoteElemType le re with
-            | Some (ETComplex64 | ETComplex128 as c) -> Some c
-            | _ ->
-                if le = ETFloat64 || re = ETFloat64 then Some ETFloat64
-                elif le = ETFloat32 || re = ETFloat32 then Some ETFloat32
-                else None
-        match actualJoin with
-        | Some join ->
-            let exactEmbed (src: ElemType) =
-                (src = ETFloat64 && join = ETComplex128) || (src = ETFloat32 && join = ETComplex64)
-            let warnSide (t: TypedExpr) (src: ElemType) (surfaceSpan: Span) =
-                if src <> join && not (literalish t.Kind) && not (exactEmbed src) then
-                    let span = if t.Span = noSpan then surfaceSpan else t.Span
-                    emitWarning env "BL3020" span
-                        ($"implicit numeric conversion: this {castNameOf src} operand is converted to "
-                         + $"{castNameOf join} by mixed-type promotion; write {castNameOf join}(...) around it "
-                         + "to make the conversion explicit (or convert the other operand instead)")
-            warnSide tL le lSpan
-            // `^`'s INTEGER exponent is not converted (formalism 2.4: it keeps
-            // the base's type and squares), so there is nothing to report.
-            if not (op = OpCaret && isIntElem re) then warnSide tR re rSpan
-        | None -> ()
-    | _ -> ()
-
 /// ---- Explicit numeric casts: Float32(x), Int64(floor(x)), Complex64(z) ----
 /// A scalar type name in CALL position converts one numeric value -- the
 /// explicit spelling of the conversions the language performs nowhere
@@ -5802,6 +5740,18 @@ and inferNumericCast (env: TypeEnv) (span: Span) (name: string) (target: ElemTyp
             | IRTInfer _, Some et -> unify env.Subst tArg.Type (IRTScalar et)
             | _ -> Ok ()
         bindLit |> Result.bind (fun () ->
+        // A CARET operand (`row: T^1`) in a generic body is a rank-k array by
+        // declaration: give it its array shape (the demand every array
+        // intrinsic issues, materializeArityVar -- index and element
+        // variables stay the declaration's own), so the cast lifts
+        // elementwise like any array's and its result keeps the operand's
+        // shape (formalism 2.4: a cast converts the value type only).
+        (match IR.stripUnits (env.Subst.Resolve tArg.Type) with
+         | IRTInfer vid when env.InCallableBody && not env.InLambdaBody && env.Subst.IsPolymorphicId vid ->
+             (match env.Subst.GetArityConstraint vid with
+              | Some k when k >= 1 -> materializeArityVar env tArg name
+              | _ -> ())
+         | _ -> ())
         let resolved = env.Subst.Resolve tArg.Type
         let mkCast (resTy: IRType) =
             Ok (mkTypedSpan (TExprUnaryOp (OpCast name, tArg)) resTy span)
@@ -5834,6 +5784,19 @@ and inferNumericCast (env: TypeEnv) (span: Span) (name: string) (target: ElemTyp
                 inferExpr env (mkExpr sp (ExprCompute (mkExpr sp (ExprBinOp (Elementwise, OpApply,
                     mkExpr sp (ExprMethodFor [source]),
                     mkExpr sp (ExprLambda ([param], None, body)))))))
+            // A GENERIC element (a caret parameter's cells, `row: T^1`): the
+            // class is the instance's, so the legality is judged per call
+            // (GOCast), as for a generic scalar below.
+            (match elemBare with
+             | IRTInfer eid when env.InCallableBody && not env.InLambdaBody && env.Subst.IsPolymorphicId eid ->
+                 let rounded =
+                     match arg.Kind with
+                     | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar ("floor" | "ceil") }, [_]) -> true
+                     | _ -> isRoundedOperand tArg
+                 (match env.CurrentGenericObligations with
+                  | Some acc -> acc.Add(GOCast (eid, name, target, rounded))
+                  | None -> ())
+             | _ -> ())
             match elemBare with
             | IRTScalar (ETBool | ETString | ETUnit) ->
                 Error (InvalidCast $"{name}() expects numeric elements; got an array of {ppIRType elemBare} elements.")
@@ -5884,10 +5847,40 @@ and inferNumericCast (env: TypeEnv) (span: Span) (name: string) (target: ElemTyp
                 // (IRValidate's cast sweep) for the seams no call judgment
                 // sees (eta-wrapped kernels). The result is the target,
                 // carrying the operand's unit like every cast.
+                //
+                // SHAPE: a cast converts the VALUE TYPE only (formalism 2.4).
+                // A variable a PARAMETER is declared as (`x: T`, which an
+                // array instantiates as readily as a scalar) or an earlier
+                // cast's open result has no rank here, so the result is the
+                // element-cast variable "T with element `target`" (Subst.
+                // ElemCastVar), which each instance resolves to its own shape
+                // -- `Float64(x)` over an Int64 matrix is a Float64 matrix. A
+                // variable that is only ever a scalar (an array's element,
+                // `reduce(row, (+))`) keeps the scalar target.
+                let paramTopVar =
+                    let sigTys =
+                        env.CurrentSignature
+                        |> List.map (fun t -> env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits)
+                    let paramTys = if sigTys.IsEmpty then [] else List.take (sigTys.Length - 1) sigTys
+                    paramTys |> List.exists (fun t -> match t with IRTInfer r -> r = vid | _ -> false)
+                match env.Subst.GetElemCast vid with
+                | Some (_, earlier) ->
+                    // A cast of a cast: the source element is the earlier
+                    // target, known here.
+                    (match castLegality name target earlier (isRoundedOperand tArg) with
+                     | Some msg -> Error (InvalidCast msg)
+                     | None ->
+                         let r = env.Subst.ElemCastVar(vid, target)
+                         mkCast (match units with Some u -> IRTUnitAnnotated (r, u) | None -> r))
+                | None ->
                 (match env.CurrentGenericObligations with
                  | Some acc -> acc.Add(GOCast (vid, name, target, isRoundedOperand tArg))
                  | None -> ())
-                mkCast (scalarResult units)
+                if paramTopVar then
+                    let r = env.Subst.ElemCastVar(vid, target)
+                    mkCast (match units with Some u -> IRTUnitAnnotated (r, u) | None -> r)
+                else
+                    mkCast (scalarResult units)
             | IRTInfer _ ->
                 Error (InvalidCast ($"{name}() needs a concretely-typed operand, and this one's type is not "
                                     + "determined here -- annotate the value (or the parameter it came from) "
@@ -6517,6 +6510,35 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
              | _ -> ())
             let lRes = env.Subst.Resolve tL.Type
             let rRes = env.Subst.Resolve tR.Type
+            // THE MIXING RULE (formalism 2.4): an arithmetic op or comparison
+            // converts nothing implicitly -- an integer beside a float or a
+            // complex is refused (literals included: `1` is an Int64, `1.0` a
+            // Float64), and so are two widths of one class unless one side is
+            // a literal (which adapts). Judged here on the operands' ELEMENTS,
+            // array or scalar, before any broadcast/zip synthesis, so the
+            // refusal is anchored at the operand the conversion would touch.
+            // Operands still open (a kernel parameter) are judged by the
+            // post-zonk sweep (TypeCheckValidate.collectNumericMixErrors);
+            // a generic body's own variables, per instance (GOPromotion /
+            // GOBroadcastElem / GOElemAgree).
+            let mixRefusal =
+                // An index-typed operand (`Nat<I>`) beside a float is the
+                // nominal rule's refusal (inferArithType's indexArithErr),
+                // which keeps its own code; the mixing rule judges the rest.
+                let idxTagged (t: IRType) =
+                    match IR.stripUnits t with
+                    | IRTIdxTagged (_, r) -> r <> IRefAny
+                    | _ -> false
+                if (mode = Elementwise || mode = Outer) && not (idxTagged lRes || idxTagged rRes) then
+                    judgeNumericMix env op tL tR
+                    |> Option.map (fun (leftOff, msg) -> ((if leftOff then left.Span else right.Span), msg))
+                else None
+            match mixRefusal with
+            | Some (sp, msg) ->
+                if sp.StartLine > 0 then setCurrentExprSpan sp
+                Error (ImplicitNumericMix msg)
+            | None ->
+            recordGenericMixObligation env op tL tR
             // Elementwise op on TWO ARRAYS: re-synthesize as the zip
             // co-iteration pipeline -- method_for(zip(l, r)) <@>
             // lambda(u, w) -> u op w |> compute -- and re-infer
@@ -6758,6 +6780,30 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                     | _ -> lit
             let tL = adaptFloatLit tL tR
             let tR = adaptFloatLit tR tL
+            // INTEGER LITERALS likewise: beside an Int32 partner (scalar or
+            // array element) a bare integer literal IS an Int32 (`i32 + 1`
+            // and `1 + i32` both compute and type Int32), the width half of
+            // the mixing rule's literal adaptation.
+            let adaptIntLit (lit: TypedExpr) (partner: TypedExpr) : TypedExpr =
+                let partnerI32 =
+                    match IR.stripUnits (env.Subst.Resolve partner.Type) with
+                    | IRTScalar ETInt32 -> true
+                    | ArrayElem arr ->
+                        (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+                         | IRTScalar ETInt32 -> true
+                         | _ -> false)
+                    | _ -> false
+                if not partnerI32 then lit
+                else
+                    match lit.Kind with
+                    | TExprLit (LitInt _) when lit.Type = IRTScalar ETInt64 -> { lit with Type = IRTScalar ETInt32 }
+                    | TExprUnaryOp (OpNeg, ({ Kind = TExprLit (LitInt _) } as inner)) when lit.Type = IRTScalar ETInt64 ->
+                        { lit with
+                            Kind = TExprUnaryOp (OpNeg, { inner with Type = IRTScalar ETInt32 })
+                            Type = IRTScalar ETInt32 }
+                    | _ -> lit
+            let tL = adaptIntLit tL tR
+            let tR = adaptIntLit tR tL
             // TWO GENERIC VARIABLES MIXED BY ARITHMETIC are ONE variable
             // (formalism 2.4: there is no promotion type in signatures, so
             // the signature names one variable and the caller converts).
@@ -6867,11 +6913,8 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                 if mode = Outer then env.Subst.Resolve tL.Type, env.Subst.Resolve tR.Type
                 else tL.Type, tR.Type
             inferArithType env.Builder mode op lArith rArith (Some tR) |> Result.bind (fun resTy0 ->
-                // BL3020: a mixed-elem-type op converts a NON-literal operand
-                // implicitly. Warn only once the op has typed successfully,
-                // so a real error is never accompanied by advice about a
-                // program that doesn't compile anyway.
-                warnImplicitNumericMix env op left.Span right.Span tL tR
+                // (A mixed-elem-type op was refused above -- BL3020, the
+                // mixing rule -- so no implicit conversion reaches here.)
                 // S1 SEAM 2 (docs/plan-kernel-body-materialization.md, M-B, the
                 // concrete-operand triple). One operand is a real array, the
                 // other an UNRESOLVED inference var -- the shape an enclosing
@@ -7066,6 +7109,27 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                 List.exists isTop paramTys
                                 && sigTys |> List.forall (fun t ->
                                     isTop t || not ((freeInferVars env.Subst t).Contains vid))
+                            // ...or a parameter array's ELEMENT variable (the
+                            // `reduce(xs, (+))` of an `xs: T^1`): a scalar at
+                            // every instance, and under the mixing rule
+                            // (formalism 2.4) beside a real scalar it computes
+                            // in its own type at every instance a call admits
+                            // (GOPromotion refuses the rest) -- the promotion
+                            // table's Float64 answer was wrong at a complex
+                            // row (`reduce(zs, (+)) / Float64(n)`).
+                            let paramElem (vid: int) =
+                                let sigTys =
+                                    env.CurrentSignature
+                                    |> List.map (fun t -> env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits)
+                                let paramTys =
+                                    if sigTys.IsEmpty then [] else List.take (sigTys.Length - 1) sigTys
+                                paramTys |> List.exists (fun t ->
+                                    match t with
+                                    | ArrayElem arr ->
+                                        (match env.Subst.Resolve (IR.stripUnits arr.ElemType) |> IR.stripUnits with
+                                         | IRTInfer r -> r = vid
+                                         | _ -> false)
+                                    | _ -> false)
                             let sigVar (t: IRType) =
                                 match env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits with
                                 | IRTInfer vid when env.Subst.IsPolymorphicId vid
@@ -7073,17 +7137,25 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                                                     && (match env.Subst.GetRankLowerBound vid with
                                                         | Some k -> k < 1
                                                         | None -> true)
-                                                    && sigTop vid -> Some vid
+                                                    // ...or an element cast of one
+                                                    // (`Float64(x) * 0.5`): the
+                                                    // same open shape, its element
+                                                    // the cast's target.
+                                                    && (sigTop vid || (env.Subst.GetElemCast vid).IsSome
+                                                        || paramElem vid) -> Some vid
                                 | _ -> None
                             let realScalar (te: TypedExpr) =
                                 match IR.stripUnits (env.Subst.Resolve te.Type) with
+                                // An integer partner too (`x + 1`): the result is
+                                // `T` whatever the partner, and the mixing rule
+                                // judges each instance (an integer literal beside
+                                // a Float64 instance is refused at the call).
                                 | IRTScalar (ETFloat64 | ETFloat32 as et) -> Some et
+                                // (not `^`: its integer exponent is legal with
+                                // any base -- powpoly's GOPowExponent judges it)
+                                | IRTScalar (ETInt64 | ETInt32 as et) when op <> OpCaret -> Some et
                                 | _ -> None
-                            let isFloatLit (te: TypedExpr) =
-                                match te.Kind with
-                                | TExprLit (LitFloat _)
-                                | TExprUnaryOp (OpNeg, { Kind = TExprLit (LitFloat _) }) -> true
-                                | _ -> false
+                            let isFloatLit (te: TypedExpr) = isNumericLiteralOperand te
                             let scalarResult (vid: int) () =
                                 match IR.getUnits resTy0 with
                                 | Some u -> IRTUnitAnnotated (IRTInfer vid, u)
@@ -10773,6 +10845,29 @@ and buildApplyInfo (env: TypeEnv)
         match findBadDeferredCast lambdaInfo.Body with
         | Some err -> Error err
         | None ->
+        // (3c) THE MIXING RULE over the kernel body, now that apply-site
+        //     unification has bound its parameters (formalism 2.4): an
+        //     operator whose operand was an open parameter when the body was
+        //     typed (`lambda(x) -> x * 2` over a Float64 array) is judged on
+        //     the bound element -- refused when concrete, recorded as a
+        //     generic obligation when the element is the enclosing
+        //     declaration's own variable.
+        let rec findImplicitMix (e: TypedExpr) : (Span * string) option =
+            let here =
+                match e.Kind with
+                | TExprBinOp ((Elementwise | Outer), op, l, r) ->
+                    recordGenericMixObligation env op l r
+                    judgeNumericMix env op l r
+                    |> Option.map (fun (leftOff, msg) -> ((if leftOff then l.Span else r.Span), msg))
+                | _ -> None
+            match here with
+            | Some _ -> here
+            | None -> typedExprChildren e |> List.tryPick findImplicitMix
+        match findImplicitMix lambdaInfo.Body with
+        | Some (sp, msg) ->
+            if sp.StartLine > 0 then setCurrentExprSpan sp
+            Error (ImplicitNumericMix msg)
+        | None ->
         // A kernel PARAMETER applied to arguments, now that apply-site
         // unification has bound it: `lambda(i, j, a, b) -> a(i, j)` over
         // `for (A, B) in range<M, N>` binds `a` to the M index (cells come
@@ -11945,13 +12040,14 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         match et with
         | ETInt32 | ETInt64 ->
             Ok (mkTyped (TExprLit lit) (IRTScalar et))
-        | ETFloat32 | ETFloat64 ->
-            // F#-style type-directed widening: an int LITERAL in an explicitly
-            // float-typed position adopts the float type (`let x: Float64 = 1`
-            // is 1.0, `complex(0, 0)` works). Literals only -- an int-typed
-            // VALUE still never flows to a float position implicitly.
-            // lowerLiteralValued reconciles the value (emits IRLitFloat).
-            Ok (mkTyped (TExprLit lit) (IRTScalar et))
+        | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128 ->
+            // THE MIXING RULE (formalism 2.4), at a typed position: an
+            // integer literal is an Int64 and never means a float -- the
+            // decimal point is the type (`let x: Float64 = 1.0`), as in F#.
+            let n = match lit with LitInt v -> string v | _ -> "1"
+            Error (ImplicitNumericMix
+                       ($"implicit numeric conversion: the integer literal `{n}` stands where a {ppIRType resolved} is expected, "
+                        + $"and Blade converts nothing implicitly -- `{n}` is an Int64 and `{n}.0` the float literal: write `{n}.0`."))
         | _ ->
             Error (TypeMismatch (resolved, IRTScalar ETInt64))
     | ExprKind.ExprLit (LitInt v as lit), IRTIdxTagged (IRTScalar (ETInt32 | ETInt64), _) ->
@@ -16780,7 +16876,12 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // operand's variable still appears in the resolved return -- or the
             // return is still open at all (a generic call's declared return,
             // through which a propagated demand flows).
-            let retVars = freeInferVars env.Subst (env.Subst.Resolve resolvedRet)
+            // An ELEMENT-CAST result (`Float64(sqrt(x))` over `x: T`) is open
+            // only in its shape; its element is the cast's target, so it
+            // carries no T-typed value to the return.
+            let retVars =
+                freeInferVars env.Subst (env.Subst.Resolve resolvedRet)
+                |> Set.filter (fun v -> (env.Subst.GetElemCast v).IsNone)
             let kept =
                 genericObligations
                 |> Seq.filter (fun ob ->

@@ -1,0 +1,11 @@
+// TEST: two float widths, neither a literal, do not mix (rejects)
+// ERROR: BL3020
+// ============================================================================
+// Float32 beside Float64 would convert the Float32 operand implicitly.
+// Convert one side with the type in call position: `Float64(s) * t` or
+// `s * Float32(t)`. (A LITERAL adapts to its partner's width instead:
+// `s * 2.0` is Float32.)
+// ============================================================================
+let s: Float32 = 1.5
+let t: Float64 = 2.0
+let u = s * t

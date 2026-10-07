@@ -1,0 +1,7 @@
+// TEST: a Float64 array times an integer literal is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// `A * 2` over a Float64 array: the literal `2` is an Int64. Write `A * 2.0`.
+// ============================================================================
+let A = [1.5, 2.5, 3.5]
+let B = A * 2

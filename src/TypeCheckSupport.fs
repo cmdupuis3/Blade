@@ -2316,6 +2316,11 @@ let internal instantiateOpenVarsWithMap (subst: Subst) (quantified: int -> bool)
                     subst.CopyLiteralDefault(v, fid)
                     (v, fid)
                 | _ -> failwith "unreachable: Subst.Fresh returns IRTInfer")
+        // An element-cast result (`Float64(x)` over `x: T`) is the cast of
+        // the CALL's copy of its source.
+        let copyOf = Map.ofList pairs
+        for (v, fid) in pairs do
+            subst.CopyElemCast(v, fid, fun s -> Map.tryFind s copyOf |> Option.defaultValue s)
         let mapping = pairs |> List.map (fun (v, fid) -> (v, IRTInfer fid)) |> Map.ofList
         (resolved |> List.map (substInferVars mapping), pairs |> List.map snd |> Set.ofList, Map.ofList pairs)
 
@@ -2391,6 +2396,209 @@ let internal calleeQuantifier (env: TypeEnv) (tFunc: TypedExpr) : (int -> bool) 
          | _ -> (fun _ -> false), false)
     | _ -> (fun _ -> false), false
 
+/// THE MIXING RULE (formalism 2.4): which operand of a binary arithmetic op
+/// or comparison over the elements `le` and `re` would be converted
+/// IMPLICITLY -- None when nothing is. Blade converts nothing implicitly:
+///   * an integer beside a float or a complex is refused, literal or not
+///     (`1` is an Int64, `1.0` a Float64 -- the decimal point is the type);
+///   * two widths of one class (Float32 / Float64, Int32 / Int64,
+///     Complex64 / Complex128) are refused unless one side is a LITERAL,
+///     which adapts to its partner's width (`a32 * 1.0` is Float32,
+///     `i32 + 1` is Int32);
+///   * a real beside a complex is the exact embedding when the real is the
+///     complex's component width (Float64 with Complex128, Float32 with
+///     Complex64) or a float literal; any other width is refused.
+/// `lLit` / `rLit`: the operand is a numeric literal (optionally negated).
+/// Answers `Some true` when the LEFT operand is the converted one (the one
+/// the refusal is anchored at), `Some false` for the right.
+let internal numericMixOffender (le: ElemType) (lLit: bool) (re: ElemType) (rLit: bool) : bool option =
+    let cls = function
+        | ETInt32 | ETInt64 -> Some 0
+        | ETFloat32 | ETFloat64 -> Some 1
+        | ETComplex64 | ETComplex128 -> Some 2
+        | _ -> None
+    let narrow = function ETInt32 | ETFloat32 | ETComplex64 -> true | _ -> false
+    if le = re then None
+    else
+        match cls le, cls re with
+        | Some lc, Some rc ->
+            if lc = rc then
+                if lLit || rLit then None
+                else Some (narrow le)
+            elif lc = 0 then Some true
+            elif rc = 0 then Some false
+            else
+                // A real beside a complex.
+                let realIsLeft = (lc = 1)
+                let realE, realLit, cplxE = if realIsLeft then le, lLit, re else re, rLit, le
+                let exact = (realE = ETFloat64 && cplxE = ETComplex128) || (realE = ETFloat32 && cplxE = ETComplex64)
+                if exact || realLit then None
+                elif narrow realE then Some realIsLeft
+                else Some (not realIsLeft)
+        | _ -> None
+
+/// A numeric literal operand (`2`, `2.5`, `-1`).
+let internal isNumericLiteralOperand (e: TypedExpr) : bool =
+    let rec go (k: TypedExprKind) =
+        match k with
+        | TExprLit (LitInt _ | LitFloat _) -> true
+        | TExprUnaryOp (OpNeg, inner) -> go inner.Kind
+        | _ -> false
+    go e.Kind
+
+/// The refusal message of the mixing rule, anchored at `offender` (element
+/// `oe`) beside a partner of element `pe`. `opName` is the operator as
+/// written; the advice names the operand when it is a plain variable.
+let internal numericMixMessage (opName: string) (offender: TypedExpr) (oe: ElemType) (offIsArray: bool)
+                               (pe: ElemType) : string =
+    let oS = ppIRType (IRTScalar oe)
+    let pS = ppIRType (IRTScalar pe)
+    let isInt = function ETInt32 | ETInt64 -> true | _ -> false
+    let rec litText (k: TypedExprKind) =
+        match k with
+        | TExprLit (LitInt n) -> Some (string n)
+        | TExprLit (LitFloat f) -> Some (f.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+        | TExprUnaryOp (OpNeg, inner) -> litText inner.Kind |> Option.map (fun s -> "-" + s)
+        | _ -> None
+    let operandName =
+        match offender.Kind with
+        | TExprVar (n, _, _) when not (n.StartsWith "__") -> n
+        | _ -> if offIsArray then "xs" else "x"
+    let article (s: string) = if s.StartsWith "I" then "an" else "a"
+    let what =
+        match litText offender.Kind with
+        | Some lit -> $"the {oS} literal `{lit}`"
+        | None -> if offIsArray then $"an array of {oS} elements" else $"{article oS} {oS} value"
+    let head = $"implicit numeric conversion: {what} meets {article pS} {pS} operand in `{opName}`, and Blade converts nothing implicitly"
+    match litText offender.Kind with
+    | Some lit when isInt oe && not (isInt pe) ->
+        let fl = lit + ".0"
+        $"{head} -- `{lit}` is an integer literal and `{fl}` the float one: write `{fl}`."
+    | Some lit ->
+        $"{head}: write the literal in the other operand's type, or convert the other operand with the type in call position, {oS}(...)."
+    | None when isInt oe && not (isInt pe) ->
+        $"{head} (`1` is an Int64, `1.0` a Float64). Convert it with the type in call position -- {pS}({operandName}) -- or, for integer arithmetic, convert the other operand (Int64(floor(x)))."
+    | None ->
+        $"{head}. Convert one of them with the type in call position -- {pS}({operandName}) -- or the other operand to {oS}."
+
+/// The operators the mixing rule judges, as written: arithmetic (except `^`,
+/// whose exponent is polymorphic) and the comparisons.
+let internal binOpMixName (op: BinOp) : string option =
+    match op with
+    | OpAdd -> Some "+" | OpSub -> Some "-" | OpMul -> Some "*" | OpDiv -> Some "/" | OpMod -> Some "%"
+    | OpEq -> Some "==" | OpNeq -> Some "!=" | OpLt -> Some "<" | OpLe -> Some "<="
+    | OpGt -> Some ">" | OpGe -> Some ">="
+    | _ -> None
+
+/// The ELEMENT an operand contributes to the mixing rule, and whether the
+/// operand is an array: a scalar's own type, an array's element, or the
+/// target of an element cast whose shape is still open (`Float64(x)` over a
+/// generic `x: T` -- its element is known even where its rank is not). None
+/// for anything else (an open variable, an index value, a tuple...).
+let internal operandMixElem (env: TypeEnv) (t: IRType) : (ElemType * bool) option =
+    match IR.stripUnits (env.Subst.Resolve t) with
+    | IRTScalar et -> Some (et, false)
+    // A count (`extents(a)`) is an integer, and so is a position of a named
+    // index type (a `range<I>` kernel parameter): `Float64(i)` reads it out.
+    | IRTNat _ -> Some (ETInt64, false)
+    | IRTIdxTagged (inner, _) ->
+        (match IR.stripUnits (env.Subst.Resolve inner) with
+         | IRTScalar et -> Some (et, false)
+         | _ -> None)
+    | ArrayElem arr ->
+        (match IR.stripUnits (env.Subst.Resolve arr.ElemType) with
+         | IRTScalar et -> Some (et, true)
+         | _ -> None)
+    | IRTInfer v -> env.Subst.GetElemCast v |> Option.map (fun (_, tgt) -> (tgt, false))
+    | _ -> None
+
+/// The mixing rule's GENERIC half: an operand whose element is a signature
+/// variable of the declaration being checked (`x: T`, a `row: T^1`'s cells,
+/// `reduce(row, (+))`) meets a CONCRETE numeric partner. The element class is
+/// the instance's, so the judgment is recorded (GOPromotion) and made at
+/// every call against the element the call gives the variable
+/// (judgeGenericObligations). Nothing is recorded outside a generic body.
+let internal recordGenericMixObligation (env: TypeEnv) (op: BinOp) (tL: TypedExpr) (tR: TypedExpr) : unit =
+    match env.CurrentGenericObligations, binOpMixName op with
+    | Some acc, Some opName ->
+        let genericElemVar (t: IRType) =
+            let polyVar (u: IRType) =
+                match IR.stripUnits (env.Subst.Resolve u) with
+                | IRTInfer v when env.Subst.IsPolymorphicId v
+                                  && (env.Subst.GetLiteralDefault v).IsNone
+                                  && (env.Subst.GetElemCast v).IsNone -> Some v
+                | _ -> None
+            match IR.stripUnits (env.Subst.Resolve t) with
+            | ArrayElem arr -> polyVar arr.ElemType
+            | u -> polyVar u
+        let concretePartner (te: TypedExpr) =
+            match operandMixElem env te.Type with
+            | Some (et, _) when et <> ETBool && et <> ETString && et <> ETUnit -> Some et
+            | _ -> None
+        // A math intrinsic over a generic value (`exp(x)`, `sqrt(x)`) is typed
+        // as `T` but computes in double at an integer instance (its own
+        // obligation, GOFractionalMath, guards where that reaches a T-typed
+        // result), so its comparison or arithmetic with a float is no mix.
+        let fractional (te: TypedExpr) =
+            match te.Kind with
+            | TExprUnaryOp (OpMath _, _) | TExprBinOp (_, OpMath2 _, _, _) -> true
+            | _ -> false
+        let genericElemVarOf (te: TypedExpr) = if fractional te then None else genericElemVar te.Type
+        match genericElemVarOf tL, concretePartner tR, genericElemVarOf tR, concretePartner tL with
+        | Some v, Some pe, _, _ -> acc.Add(GOPromotion (v, opName, pe, isNumericLiteralOperand tR))
+        | _, _, Some v, Some pe -> acc.Add(GOPromotion (v, opName, pe, isNumericLiteralOperand tL))
+        | _ -> ()
+    | _ -> ()
+
+/// THE MIXING RULE over one typed operator node: `Some (leftIsOffender,
+/// message)` when it would convert an operand implicitly. The arithmetic
+/// operators and comparisons go through `numericMixOffender`; `^` keeps its
+/// polymorphic exponent (any integer exponent is legal with any base) but an
+/// INTEGER BASE beneath a float or complex exponent (`2 ^ 0.5`, `n ^ 0.5`)
+/// would be converted, so it is refused at the base like `2 + 0.5`.
+let internal judgeNumericMix (env: TypeEnv) (op: BinOp) (l: TypedExpr) (r: TypedExpr) : (bool * string) option =
+    // The checked index conversion's own range guard (`0 <= v < n`,
+    // checkedIndexConversion) is the compiler's: a non-integer operand there
+    // is the conversion's class refusal (BL3001, the subscript sweep), not a mix.
+    let idxCastVar (e: TypedExpr) =
+        match e.Kind with
+        | TExprVar (n, _, _) -> n.StartsWith indexCastBindingPrefix
+        | _ -> false
+    if idxCastVar l || idxCastVar r then None else
+    match op with
+    | OpCaret ->
+        (match operandMixElem env l.Type, operandMixElem env r.Type with
+         | Some ((ETInt32 | ETInt64) as be, bArr), Some ((ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) as ee, _) ->
+             let bS = ppIRType (IRTScalar be)
+             let eS = ppIRType (IRTScalar ee)
+             let advice =
+                 match l.Kind with
+                 | TExprLit (LitInt n) -> $"write the base as a float literal, `{n}.0 ^ ...`"
+                 | TExprVar (n, _, _) when not (n.StartsWith "__") -> $"convert the base with the type in call position, `{eS}({n}) ^ ...`"
+                 | _ -> $"convert the base with the type in call position, `{eS}(...) ^ ...`"
+             let what = if bArr then $"an array of {bS} elements" else $"an {bS} base"
+             Some (true, $"implicit numeric conversion: {what} is raised to a {eS} exponent in `^`, which would convert the base, and Blade converts nothing implicitly (an INTEGER exponent is legal with any base; a {eS} one needs a {eS} base) -- {advice}.")
+         | _ -> None)
+    | _ ->
+        match binOpMixName op with
+        | None -> None
+        | Some opName ->
+            match operandMixElem env l.Type, operandMixElem env r.Type with
+            | Some (le, lArr), Some (re, rArr) ->
+                // A compile-time constant (`let static CAP = 10`) adapts its
+                // WIDTH like the literal it folds to: `i32 < CAP` over an
+                // `Int` (Int32) is no conversion. Its class never adapts.
+                let constLike (e: TypedExpr) =
+                    isNumericLiteralOperand e
+                    || (match e.Kind with
+                        | TExprVar (n, _, _) -> Map.containsKey n env.StaticValues
+                        | _ -> false)
+                (match numericMixOffender le (constLike l) re (constLike r) with
+                 | Some true -> Some (true, numericMixMessage opName l le lArr re)
+                 | Some false -> Some (false, numericMixMessage opName r re rArr le)
+                 | None -> None)
+            | _ -> None
+
 /// The numeric CAST legality rule (formalism 2.4), over a concrete source
 /// element: None = legal, Some message = the BL3019 refusal. The shared rule
 /// behind the generic-cast judgments (a cast whose operand is a declaration's
@@ -2464,23 +2672,38 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                                    + "for an array."))
             | GOFractionalMath _ -> None
             | GOPromotion (_, opName, partner, literal) ->
-                // A float LITERAL adapts to a narrow partner (inferBinOp's
-                // adaptFloatLit): `x32 + 1.0` stays Float32, `z64 * 2.0`
-                // stays Complex64. A typed partner promotes as written.
-                let partner' =
-                    if literal && (src = ETFloat32 || src = ETComplex64) then ETFloat32 else partner
-                match IR.promoteElemType src partner' with
-                | Some r when r = src -> None
-                | r ->
+                // THE MIXING RULE (formalism 2.4) at the instance: the
+                // instance's element meets the partner exactly, or the
+                // partner is a LITERAL of the element's class (which adapts:
+                // `x32 + 1.0` is Float32, `i32 + 1` Int32), or a float meets
+                // a complex at its component width. Anything else would be an
+                // implicit conversion -- an integer instance beside 0.5, a
+                // Float64 instance beside the integer literal 2.
+                match numericMixOffender src false partner literal with
+                | None -> None
+                | Some _ ->
                     let srcS = ppIRType (IRTScalar src)
+                    let partS = ppIRType (IRTScalar partner)
+                    let partDesc = if literal then $"{partS} literal" else partS
                     let what =
-                        match r with
-                        | Some r -> $"{srcS} {opName} {ppIRType (IRTScalar partner')} is {ppIRType (IRTScalar r)}, which the {srcS}-typed result would truncate"
-                        | None -> $"{opName} is not defined between {srcS} and {ppIRType (IRTScalar partner')}"
-                    Some (InvalidCast ($"'{fname}' applies {opName} between a value of its generic parameter type and a "
-                                       + $"{ppIRType (IRTScalar partner)}, typing the result as the parameter's type, and this "
-                                       + $"call makes that type {srcS}: {what}. Convert the argument first -- Float64(x), or "
-                                       + "Float64(xs) for an array."))
+                        match IR.promoteElemType src partner with
+                        | Some r -> $"{srcS} {opName} {partS} is {ppIRType (IRTScalar r)}, an implicit conversion"
+                        | None -> $"{opName} is not defined between {srcS} and {partS}"
+                    let advice =
+                        match src, partner with
+                        | (ETInt32 | ETInt64), _ ->
+                            "Convert the argument first -- Float64(x), or Float64(xs) for an array."
+                        | _, (ETInt32 | ETInt64) when literal ->
+                            "Write the literal in the body with a decimal point (`2.0`), or pass an integer argument."
+                        | _, (ETInt32 | ETInt64) ->
+                            $"Convert the integer operand in the body with the type in call position -- "
+                            + $"{srcS}(extents(row)), say -- or pass an integer argument."
+                        | _ ->
+                            $"Convert the argument first -- {partS}(x), or {partS}(xs) for an array."
+                    let article = if partDesc.StartsWith "I" then "an" else "a"
+                    Some (InvalidCast ($"'{fname}' applies {opName} between a value of its generic parameter type and {article} "
+                                       + $"{partDesc}, and this call makes that type {srcS}: {what}, and Blade converts "
+                                       + $"nothing implicitly (`1` is an Int64, `1.0` a Float64). {advice}"))
             | GOBroadcastElem (_, opName, partner, result) ->
                 (match IR.promoteElemType src partner with
                  | Some r when r = result -> None
@@ -2776,7 +2999,7 @@ let internal numericLiteralKind (a: TypedExpr) : ElemType option =
         match e.Kind with
         | TExprLit (LitInt _) -> Some ETInt64
         | TExprLit (LitFloat _) -> Some ETFloat64
-        | TExprUnaryOp (_, inner) -> go inner
+        | TExprUnaryOp (OpNeg, inner) -> go inner
         | _ -> None
     go a
 
@@ -2903,8 +3126,26 @@ let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (l
     | _, IRTIdxTagged (ai, _) -> recur widen litKind p ai
     | IRTScalar pe, IRTScalar ae ->
         let isInt e = (e = ETInt32 || e = ETInt64)
+        let isNumeric e = (e <> ETBool && e <> ETString && e <> ETUnit)
         if pe = ae then None
-        elif widen && promoteElemType ae pe = Some pe then None
+        // THE MIXING RULE at a call (formalism 2.4): an integer -- a literal
+        // included -- never meets a float or complex parameter; the caller
+        // converts with the type in call position.
+        elif widen && isInt ae && isNumeric pe && not (isInt pe) then
+            let what =
+                match litKind with
+                | ALLeaf _ -> "an integer literal"
+                | _ -> $"an {ppIRType (IRTScalar ae)} value"
+            let advice =
+                match litKind with
+                | ALLeaf _ -> "write the literal with a decimal point (`2.0`, not `2`)"
+                | _ -> $"convert it with the type in call position, {ppIRType (IRTScalar pe)}(n)"
+            Some (ImplicitNumericMix
+                      ($"implicit numeric conversion: {what} is passed where a {ppIRType (IRTScalar pe)} is expected, "
+                       + $"and Blade converts nothing implicitly -- {advice}."))
+        // Widening WITHIN a class (Float32 -> Float64, Complex64 ->
+        // Complex128) and the exact real -> complex embedding stay licensed.
+        elif widen && promoteElemType ae pe = Some pe && literalMayMean ae pe then None
         // Integer to integer in either width: the emitted call converts
         // implicitly (no -Werror covers it), and a recurrence index (Int64)
         // handed to an `i: Int` (Int32) parameter is an established idiom.
@@ -2912,7 +3153,7 @@ let rec internal argPairClash (subst: Subst) (copies: Set<int>) (widen: bool) (l
         elif widen && isInt pe && isInt ae then None
         else
             match litKind, pe with
-            | ALLeaf ETInt64, (ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
+            | ALLeaf ETInt64, (ETInt32 | ETInt64) when widen -> None
             | ALLeaf ETFloat64, (ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) when widen -> None
             | _ -> mismatch ()
     | ArrayElem pa, ArrayElem aa ->
@@ -3459,6 +3700,14 @@ let internal arrowObligationClash (env: TypeEnv) (tFunc: TypedExpr) (paramTys: I
                     subst.CopyLiteralDefault(v, c)
                     mapping <- Map.add v (IRTInfer c) mapping
                 | _ -> ()
+        let remapVar (s: int) =
+            match Map.tryFind s mapping with
+            | Some (IRTInfer c) -> c
+            | _ -> s
+        for KeyValue (v, c) in mapping do
+            match c with
+            | IRTInfer cid -> subst.CopyElemCast(v, cid, remapVar)
+            | _ -> ()
         let inst (t: IRType) = substInferVars mapping (subst.Resolve t)
         // An instance argument still open as a declaration literal: read at its
         // default (an integer literal subscript is an Int64).
@@ -5320,7 +5569,7 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                      Error (IndexRankMismatch ($"argument {i + 1}, {site}", pTy, pr, aTy, ar))
                  // ...and an arrow parameter's refusal (arrowObligationClash),
                  // which already names the argument and what it had to be.
-                 | ExtentArgMismatch _ | InvalidCast _ | ArgTypeMismatch _ | ArgRankMismatch _ -> Error e
+                 | ExtentArgMismatch _ | InvalidCast _ | ImplicitNumericMix _ | ArgTypeMismatch _ | ArgRankMismatch _ -> Error e
                  | _ ->
                      // An open declared parameter (`T^1`) reads as a
                      // variable id; show what THIS call's instance of it was

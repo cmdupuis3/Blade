@@ -394,10 +394,10 @@
     },
     "BL3020": {
       "title": "implicit numeric conversion",
-      "explanation": "A WARNING, not an error. Mixed-element-type arithmetic still promotes -- an Int64 beside a Float64 computes in double, a Float32 beside a Float64 drags the operation to Float64, a narrow complex widens -- but the conversion of a NON-literal operand is no longer silent: this warning names the operand that is converted and the type it becomes. Literals stay exempt (a literal adapting to its context is typing, not a runtime conversion: `a32 * 1.0` still computes in Float32 with no warning), and so does the exact same-component-width real->complex embedding (`w * z` over Float64 and Complex128), which loses nothing.",
-      "fix": "Wrap the converted operand in the explicit cast the message names -- `sum / Float64(n)` instead of `sum / n` -- or convert the other operand instead if the narrow width was the intent (`Float32(x) * a32`). In a test that deliberately exercises the promotion, pin it with `// WARN: BL3020`.",
+      "explanation": "An ERROR: Blade converts nothing implicitly (formalism 2.4). `1` is an Int64 and `1.0` a Float64 -- the decimal point is the type, as in F#. An arithmetic operator (`+ - * / %`) or a comparison whose operands' elements -- scalars, or array elements, elementwise -- are an integer and a float or complex is refused at the integer operand, whether it is a literal (`x * 2` over a Float64 `x`) or a variable (`n * 0.5` over an Int64 `n`). Two widths of one class (Float32 and Float64, Int32 and Int64, Complex64 and Complex128) are refused unless one side is a literal, which adapts to its partner's width (`a32 * 1.0` is Float32). A real beside a complex is the exact embedding at the complex's component width (`w * z` over Float64 and Complex128) or as a float literal. The same rule refuses an integer -- literal or variable -- passed to a Float64 parameter or bound to a Float64-annotated name. The exponent of `^` is the one polymorphic position.",
+      "fix": "Write the literal in its type (`2.0`, not `2`), or convert with the type in call position -- `Float64(n)` for a scalar, `Float64(xs)` for an array (a cast converts the element only and keeps the shape) -- or convert the other operand if integer arithmetic was meant (`Int64(floor(x))`).",
       "examples": [
-        "tests/corpus/casts/014_implicit_warning.blade"
+        "tests/corpus/casts/520_int_float_mix_rejects.blade"
       ],
       "docs": []
     },

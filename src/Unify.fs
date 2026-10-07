@@ -408,6 +408,12 @@ type TypeError =
     /// an operand whose type is not yet known, or a wrong arity. Payload is
     /// the complete message.
     | InvalidCast of message: string
+    /// BL3020. Ordinary arithmetic or a comparison mixes an integer with a
+    /// float/complex (or two widths of one class, neither a literal), or an
+    /// integer value meets a float position: formalism 2.4 converts nothing
+    /// implicitly -- `1` is an Int64, `1.0` a Float64, and the conversion is
+    /// spelled with the type in call position. Payload is the complete message.
+    | ImplicitNumericMix of message: string
     /// BL3021. A `match` whose scrutinee is a SPECIALIZATION INDEX --
     /// `arity(p)` over a pack param, or `rank(p)` over an abstract/caret
     /// param -- selects its arm when the specialization is cloned, not at
@@ -635,6 +641,41 @@ type TypeResult<'T> = Result<'T, TypeError>
 
 // 1. Unification Infrastructure
 
+/// Two elements of one numeric class (int / float / complex), or equal.
+let sameNumericClass (a: ElemType) (b: ElemType) : bool =
+    let cls = function
+        | ETInt32 | ETInt64 -> 0
+        | ETFloat32 | ETFloat64 -> 1
+        | ETComplex64 | ETComplex128 -> 2
+        | _ -> -1
+    a = b || (cls a >= 0 && cls a = cls b)
+
+/// May a literal of natural element `lit` (Int64 for `1`, Float64 for
+/// `1.0`) stand for a `target`? Within its class at any width, and a float
+/// literal as a complex (the exact real embedding); an integer literal is
+/// never a float or a complex (formalism 2.4 -- the decimal point is the type).
+let literalMayMean (lit: ElemType) (target: ElemType) : bool =
+    sameNumericClass lit target
+    || ((lit = ETFloat32 || lit = ETFloat64) && (target = ETComplex64 || target = ETComplex128))
+
+/// The type of `VType(e)` for an `e` of (resolved) type `t`: `t` with its
+/// ELEMENT replaced by `target` -- shape, rank, index types (symmetry
+/// included) and units kept (formalism 2.4: a cast converts the value type
+/// only). A Nat / index-tagged scalar reads out as the plain integer. None
+/// while `t`'s shape is still open (a variable), or for a non-numeric shape.
+let rec elemCastResultType (t: IRType) (target: ElemType) : IRType option =
+    match t with
+    | IRTUnitAnnotated (inner, u) ->
+        elemCastResultType inner target |> Option.map (fun r -> IR.unitAnnotate r u)
+    | IRTScalar _ | IRTNat _ | IRTIdxTagged _ -> Some (IRTScalar target)
+    | ArrayElem arr ->
+        let elem =
+            match IR.getUnits arr.ElemType with
+            | Some u -> IRTUnitAnnotated (IRTScalar target, u)
+            | None -> IRTScalar target
+        Some (mkArrayLike { arr with ElemType = elem; Identity = None; IsVirtual = false })
+    | _ -> None
+
 /// Mutable substitution mapping inference variable IDs to resolved types.
 type Subst() =
     let mutable map : Map<int, IRType> = Map.empty
@@ -675,6 +716,17 @@ type Subst() =
     /// kernel's row may still bind the var to `Nat<I>` later. The first
     /// parameter met wins; travels on var-to-var binds.
     let mutable paramDefaults : Map<int, ElemType> = Map.empty
+    /// ELEMENT CASTS of a generic value whose RANK is open (formalism 2.4):
+    /// `Float64(x)` over `x: T` is "T with its element replaced by Float64",
+    /// a type no constructor spells while `T` is a variable. The cast's
+    /// result is a fresh variable `r` recorded here as `r -> (T, Float64)`;
+    /// `Resolve` binds `r` the moment `T` resolves to something with a
+    /// shape (a scalar, an array), so every instance -- a call's copy of the
+    /// pair, see CopyElemCast -- types its cast at that instance's shape.
+    let mutable elemCasts : Map<int, int * ElemType> = Map.empty
+    /// The memo of `elemCasts`: one result variable per (source, target), so
+    /// `Float64(x) - Float64(x)` meets ONE variable.
+    let mutable elemCastMemo : Map<int * ElemType, int> = Map.empty
 
     member _.Fresh() =
         let id = nextId
@@ -706,6 +758,14 @@ type Subst() =
         (match ty, Map.tryFind id paramDefaults with
          | IRTInfer id2, Some et when not (Map.containsKey id2 paramDefaults) ->
              paramDefaults <- Map.add id2 et paramDefaults
+         | _ -> ())
+        // An element-cast variable deferring to another variable hands its
+        // relation to the survivor (an unannotated return variable unified
+        // with `Float64(x)`'s result), or the relation is lost behind the bind.
+        (match ty, Map.tryFind id elemCasts with
+         | IRTInfer id2, Some rel when id2 <> id && not (Map.containsKey id2 elemCasts) ->
+             elemCasts <- Map.add id2 rel elemCasts
+             elemCastMemo <- Map.add rel id2 elemCastMemo
          | _ -> ())
         map <- Map.add id ty map
 
@@ -778,6 +838,53 @@ type Subst() =
     /// type at exactly the moment its shape becomes known.
     member _.MarkPolymorphic(id: int) =
         polymorphicIds <- Set.add id polymorphicIds
+
+    /// The result variable of `target(e)` over an `e` whose type is the open
+    /// variable `src` (see `elemCasts`): one per (src, target), polymorphic
+    /// exactly when `src` is, so zonk keeps it open beside its source and a
+    /// call's instantiation copies the pair.
+    member this.ElemCastVar(src: int, target: ElemType) : IRType =
+        match Map.tryFind (src, target) elemCastMemo with
+        | Some r when (this.TryFind r).IsNone -> IRTInfer r
+        | _ ->
+            match this.Fresh() with
+            | IRTInfer r ->
+                elemCasts <- Map.add r (src, target) elemCasts
+                elemCastMemo <- Map.add (src, target) r elemCastMemo
+                if Set.contains src polymorphicIds then polymorphicIds <- Set.add r polymorphicIds
+                IRTInfer r
+            | t -> t
+
+    /// `Some (source, target)` when `id` is an element-cast result variable.
+    member _.GetElemCast(id: int) : (int * ElemType) option =
+        Map.tryFind id elemCasts
+
+    /// Instantiation: `toId` (the copy of `fromId`) is the element cast of
+    /// `remap source` -- the call's copy of the source variable.
+    member _.CopyElemCast(fromId: int, toId: int, remap: int -> int) =
+        match Map.tryFind fromId elemCasts with
+        | Some (src, tgt) ->
+            let src' = remap src
+            elemCasts <- Map.add toId (src', tgt) elemCasts
+            if not (Map.containsKey (src', tgt) elemCastMemo) then
+                elemCastMemo <- Map.add (src', tgt) toId elemCastMemo
+        | None -> ()
+
+    /// An UNBOUND element-cast variable whose source now has a shape is bound
+    /// here, lazily, to the source's type with the element replaced.
+    member private this.SettleElemCast(id: int) : IRType option =
+        match Map.tryFind id elemCasts with
+        | Some (src, tgt) ->
+            (match this.Resolve (IRTInfer src) with
+             | IRTInfer _ -> None
+             | IRTUnitAnnotated (IRTInfer _, _) -> None
+             | srcTy ->
+                 match elemCastResultType srcTy tgt with
+                 | Some r ->
+                     map <- Map.add id r map
+                     Some r
+                 | None -> None)
+        | None -> None
 
     member _.CopyPolymorphic(fromId: int, toId: int) =
         if Set.contains fromId polymorphicIds then
@@ -866,7 +973,11 @@ type Subst() =
             | Some next -> this.WalkInferChain(next, hops + 1)
             | None ->
                 PerfCounters.resolveChain hops
-                t
+                if elemCasts.IsEmpty then t
+                else
+                    match this.SettleElemCast id with
+                    | Some r -> this.Resolve r
+                    | None -> t
         | other ->
             PerfCounters.resolveChain hops
             this.Resolve other
@@ -880,7 +991,12 @@ type Subst() =
             if PerfCounters.enabled then this.WalkInferChain(ty, 0) else
             match this.TryFind id with
             | Some ty' -> this.Resolve ty'
-            | None -> ty
+            | None ->
+                if elemCasts.IsEmpty then ty
+                else
+                    match this.SettleElemCast id with
+                    | Some r -> this.Resolve r
+                    | None -> ty
         | IRTTuple ts -> IRTTuple (ts |> List.map this.Resolve)
         | IRTComputation t -> IRTComputation (this.Resolve t)
         | IRTLoop lt ->
@@ -1194,16 +1310,22 @@ let rec unify (subst: Subst) (t1: IRType) (t2: IRType) : TypeResult<unit> =
                     | IRTInfer id2 ->
                         match subst.GetLiteralDefault(id2) with
                         | Some litE2 ->
-                            // Two literal vars: the survivor's kind is the wider.
+                            // Two literal vars: the survivor's kind is the wider
+                            // -- within ONE numeric class (formalism 2.4: an
+                            // integer literal never means a float).
                             match promoteElemType litE litE2 with
-                            | Some p -> subst.Bind(id, ty); subst.SetLiteralDefault(id2, p); Ok ()
-                            | None -> Error (TypeMismatch (t1, t2))
+                            | Some p when sameNumericClass litE litE2 ->
+                                subst.Bind(id, ty); subst.SetLiteralDefault(id2, p); Ok ()
+                            | _ -> Error (TypeMismatch (t1, t2))
                         | None ->
                             // Defer to a plain var; carry the seed to the survivor.
                             subst.Bind(id, ty); subst.CopyLiteralDefault(id, id2); Ok ()
                     | IRTScalar targetE ->
                         match promoteElemType litE targetE with
-                        | Some p when p = targetE -> subst.Bind(id, ty); Ok ()  // widen-only
+                        // widen-only, and never across classes: an integer
+                        // literal is no float (formalism 2.4); a float one
+                        // embeds in a complex.
+                        | Some p when p = targetE && literalMayMean litE targetE -> subst.Bind(id, ty); Ok ()
                         | _ -> Error (TypeMismatch (t1, t2))                    // narrow / incompatible
                     | _ ->
                         // arrays (-> fill coercion), tuples, funcs, idx/nat, strings...

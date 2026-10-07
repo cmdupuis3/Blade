@@ -1,0 +1,9 @@
+// TEST: a comparison mixing an integer and a float is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// Comparisons follow the same rule as arithmetic (formalism 2.4): `x > 0`
+// over a Float64 `x` would compare after an implicit conversion of the
+// literal. Write `x > 0.0`.
+// ============================================================================
+let x = 2.5
+let positive = x > 0

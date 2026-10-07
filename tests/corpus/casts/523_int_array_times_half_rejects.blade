@@ -1,0 +1,9 @@
+// TEST: an Int64 array times a float is refused elementwise (rejects)
+// ERROR: BL3020
+// ============================================================================
+// The mixing rule is elementwise: an Int64 array's cells beside 0.5 would be
+// converted implicitly. Convert the array -- `Float64(a) * 0.5`, a cast that
+// keeps the array's shape -- or scale by an integer.
+// ============================================================================
+let a = [1, 2, 3]
+let b = a * 0.5

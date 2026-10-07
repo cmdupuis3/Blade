@@ -1,0 +1,8 @@
+// TEST: an Int64 variable base beneath a float exponent is refused (rejects)
+// ERROR: BL3020 @ 7:9
+// ============================================================================
+// `n ^ 0.5` over an Int64 `n` would convert `n` implicitly; spell it
+// `Float64(n) ^ 0.5`.
+// ============================================================================
+let n = 9
+let r = n ^ 0.5

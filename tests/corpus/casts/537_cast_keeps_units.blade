@@ -1,0 +1,16 @@
+// TEST: a cast of a unit-carrying array keeps its unit
+// ============================================================================
+// The cast converts the element only: a Float64<meters> array becomes a
+// Float32<meters> array, which still adds to a Float32<meters> value (a
+// dropped unit would make the sum a unit mismatch) -- concretely and through
+// a generic body whose rank is open.
+// ============================================================================
+Unit meters
+let d: Array<Float<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let e = Float32(d)
+let off: Float<meters> = 0.5
+let moved = e + Float32(off)
+// EXPECT: moved = [1.5, 2.5, 3.5]
+function narrow(x: T) = Float32(x)
+let g = narrow(d) + Float32(off)
+// EXPECT: g = [1.5, 2.5, 3.5]

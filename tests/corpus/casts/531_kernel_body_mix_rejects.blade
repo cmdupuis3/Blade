@@ -1,0 +1,9 @@
+// TEST: an int/float mix inside a kernel body is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// The kernel's parameter is open while its body is typed; once the apply
+// binds it to the array's Float64 element, `x * 2` is judged like any other
+// mix and refused at the integer literal.
+// ============================================================================
+let A = [1.0, 2.0, 3.0]
+let B = A <@> lambda(x) -> x * 2 |> compute

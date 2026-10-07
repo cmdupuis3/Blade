@@ -1,0 +1,40 @@
+// TEST: the mixing rule admits explicit conversions and literal adaptation
+// ============================================================================
+// Formalism 2.4: a conversion is spelled with the type in call position, and
+// a LITERAL adapts within its class to its partner's width (Float32 beside
+// `2.0`, Int32 beside `1`). A real meets a complex at the complex's component
+// width, or as a float literal. Generic bodies are exact at instances whose
+// element the partner meets.
+// ============================================================================
+let a: Int64 = 5
+let w = 5.0 * Float64(a)
+// EXPECT: w = 25.0
+let s: Float32 = 1.5
+let u = s * 2.0
+// EXPECT: u = 3.0
+let i: Int32 = 4
+let j = i + 1
+// EXPECT: j = 5
+let k = 1 + i
+// EXPECT: k = 5
+let z = complex(1.0, 2.0)
+let z2 = 2.0 * z
+let r = 3.0
+let z3 = r * z
+let re2 = real(z2) + real(z3)
+// EXPECT: re2 = 5.0
+let cmp = s > 1.0
+// EXPECT: cmp = true
+let ints = [1, 2, 3]
+let halves = Float64(ints) * 0.5
+// EXPECT: halves = [0.5, 1.0, 1.5]
+let doubled = ints * 2
+// EXPECT: doubled = [2, 4, 6]
+function inc(x: T) = x + 1
+let i2 = inc(2)
+// EXPECT: i2 = 3
+function scale(x: T) = x * 2.0
+let s1 = scale(1.5)
+// EXPECT: s1 = 3.0
+let s2 = scale([1.0, 2.0])
+// EXPECT: s2 = [2.0, 4.0]

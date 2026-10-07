@@ -1,0 +1,20 @@
+// TEST: integer arithmetic stays integer, float arithmetic stays float
+// ============================================================================
+// `1` is an Int64 and `1.0` a Float64 (formalism 2.4): arithmetic within one
+// class needs no conversion, and a mixed computation converts with the type
+// in call position.
+// ============================================================================
+let n = 7
+let m = n * 2 + 1
+// EXPECT: m = 15
+let q = n / 2
+// EXPECT: q = 3
+let x = 7.0
+let y = x * 2.0 + 1.0
+// EXPECT: y = 15.0
+let half = Float64(n) / 2.0
+// EXPECT: half = 3.5
+let back = Int64(floor(x / 2.0))
+// EXPECT: back = 3
+let mean = Float64(n + m) / Float64(2)
+// EXPECT: mean = 11.0

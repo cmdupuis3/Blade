@@ -116,6 +116,15 @@ let internal mul a b = syn (ExprBinOp (Elementwise, OpMul, a, b))
 let internal div a b = syn (ExprBinOp (Elementwise, OpDiv, a, b))
 let internal pow a b = syn (ExprBinOp (Elementwise, OpCaret, a, b))
 let internal neg a = syn (ExprUnaryOp (OpNeg, a))
+/// `Float64(e)` -- the explicit conversion the mixing rule (formalism 2.4)
+/// requires where a rule's coefficient may be an integer: the power rule's
+/// `e * b^(e - 1)` over an Int exponent `k` is `Float64(k) * b^(Float64(k) - 1.0)`.
+/// The identity on a Float64 value; AD differentiates a float-target cast as
+/// the identity map (GradSweeps' cast arm). A float literal needs no cast.
+let internal asF64 (e: Expr) =
+    match e.Kind with
+    | ExprKind.ExprLit (LitFloat _) -> e
+    | _ -> syn (ExprApp (syn (ExprVar "Float64"), [e]))
 let internal call name args = syn (ExprApp (v name, args))
 
 /// d(b^e)/de = b^e * log(b), with the b = 0 case at its limit 0 (for e > 0;
@@ -123,10 +132,11 @@ let internal call name args = syn (ExprApp (v name, args))
 /// `guard` rather than if/else so the emitted derivative stays inside both
 /// sweeps (ad.jvp(ad.grad(f)) re-differentiates it); a ternary in both
 /// lanes, so the untaken b^e * log(b) is never evaluated. The guard sits
-/// OUTSIDE the product so an Int base only ever meets the literal 0.0 (a
-/// comparison, which adapts silently) -- `b + guard(.., 1.0)` would be an
-/// int/float mix (BL3020) in generated code. A NaN base is != 0 and stays
-/// NaN. A literal base needs no guard.
+/// OUTSIDE the product so the base only ever meets the literal 0.0 -- an
+/// active (float) exponent has a float base, since an integer base beneath a
+/// float exponent is refused by the mixing rule (BL3020, formalism 2.4)
+/// before AD runs. A NaN base is != 0 and stays NaN. A literal base needs no
+/// guard.
 let internal powExpPartial (b: Expr) (e: Expr) : Expr =
     let partial = mul (pow b e) (call "log" [b])
     match b.Kind with

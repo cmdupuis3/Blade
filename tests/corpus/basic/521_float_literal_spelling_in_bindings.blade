@@ -1,0 +1,13 @@
+// TEST: a Float64 binding takes a float literal
+// ============================================================================
+// An annotated Float64 binding, a Float64 parameter and a Float32 one take a
+// float literal (it adapts to the width); an Int32 one takes an integer.
+// ============================================================================
+let x: Float64 = 1.0
+let y: Float32 = 2.0
+let k: Int32 = 3
+function f(a: Float64, b: Float32, c: Int32) -> Float64 = a + Float64(b) + Float64(c)
+let v = f(x, y, k)
+// EXPECT: v = 6.0
+let w = f(1.0, 2.0, 3)
+// EXPECT: w = 6.0

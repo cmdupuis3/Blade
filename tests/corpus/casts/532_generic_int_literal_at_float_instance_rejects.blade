@@ -1,0 +1,10 @@
+// TEST: a generic body's integer literal at a Float64 instance is refused (rejects)
+// ERROR: BL3019
+// ============================================================================
+// `inc(x) = x + 1` is typed `T`; at an Int64 argument it is exact, at a
+// Float64 one the literal `1` would be converted implicitly, so the call is
+// refused (the generic-obligation family's code). Write the body over the
+// class it means, or convert the argument.
+// ============================================================================
+function inc(x: T) = x + 1
+let a = inc(2.5)

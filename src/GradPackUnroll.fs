@@ -661,7 +661,9 @@ let internal lowerGroupedPeels (ctx: Ctx) (fd: FunctionDecl) (body: Expr) : Expr
     // zeroed everything that flows through it -- `0 / n_0` and `+= 0` are the
     // right answers -- and it costs a select, not a branch.
     let bIx = syn (ExprGuard (inRange, bAt))
-    let nAt = syn (ExprApp (v gnName, [bIx]))
+    // The Int64 group count meets the Float64 values: converted explicitly
+    // (formalism 2.4 converts nothing implicitly).
+    let nAt = asF64 (syn (ExprApp (v gnName, [bIx])))
     let vAt = syn (ExprApp (v vName, [v giName]))
     let wAt = weight |> Option.map (fun we -> syn (ExprApp (we, [bIx])))
     let phi =

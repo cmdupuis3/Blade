@@ -214,7 +214,7 @@ let mut y = 2                    // reassignable; `mut` params are ARRAY-only (e
 
 function add1(array: T^2) -> T^2 = { array + 1 }
 
-function mean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)   // or: from stats import mean
+function mean(row: T^1) -> T^0 = reduce(row, (+)) / Float64(extents(row))   // or: from stats import mean
 function covariance(a: T^1, b: T^1) where comm(a, b) =
     mean((a - mean(a)) * (b - mean(b)))
 
@@ -293,7 +293,7 @@ first-class construct:
 | index generation | `0..8` anonymous range (a first-class rank-1 array), or `range<I>` when the named tag should flow | materialized iota; `method_for(range) <@> lambda(i) -> i \|> compute` |
 | coordinate axis / linspace | `x0 + dx * Float64(0..n)` — implicit lifting over the range | `method_for(range<I>) <@> lambda(j) -> x0 + dx * Float64(j)` for a body that is just affine in the index |
 | sum/product of an index range | `reduce(0..n, (+))` | wrapping the range in a map first |
-| numeric width/class conversion | `Float64(n)`, `Float32(x)`, `Int64(floor(x))` — scalar type name in call position; arrays lift elementwise | `* 1.0` fudges; implicit int→float mixes (warn BL3020); bare `Int64(x)` on a float (BL3019 — the rounding must be visible at the cast site) |
+| numeric width/class conversion | `Float64(n)`, `Float32(x)`, `Int64(floor(x))` — scalar type name in call position; it converts the element only (arrays, generic `T`, `T^k` keep their shape, symmetry and units). `1` is Int64, `1.0` Float64: write `x * 2.0` over a float | `* 1.0` fudges; any implicit int/float mix — `x * 2`, `n * 0.5`, `let y: Float64 = 1`, an Int64 into a Float64 parameter — is an error (BL3020); bare `Int64(x)` on a float (BL3019 — the rounding must be visible at the cast site) |
 | pipeline of stages | compose values: `object_for(f) >>@ object_for(g)`, apply with `<@>`, materialize with `\|> compute` | eager temporaries per stage |
 | recurrence / time-stepping / running state | `let rec` recursive array (see below) | `let mut` + a loop |
 | iterate to convergence (trip count not known up front) | the inductive arm's `while` guard over a BUDGET extent: `\| prefix :: n while <cond> -> prefix :: <step>` — frozen once the guard goes false, runtime BL8010 if the budget runs out with it still true | a `while` loop; running the full budget unconditionally and hoping |

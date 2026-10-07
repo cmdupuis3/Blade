@@ -1,0 +1,7 @@
+// TEST: an integer literal and a float literal do not mix (rejects)
+// ERROR: BL3020
+// ============================================================================
+// Literals adapt WITHIN their class only: `2.5 + 1` is refused like any
+// other int/float mix. Write `2.5 + 1.0`.
+// ============================================================================
+let z = 2.5 + 1

@@ -1,0 +1,9 @@
+// TEST: a generic cast at a complex array instance is refused at the call (rejects)
+// ERROR: BL3019
+// ============================================================================
+// `Float64(x)` over `x: T` is legal per instance; a complex array instance
+// would project nothing, so the call is refused.
+// ============================================================================
+function asf(x: T) = Float64(x)
+let zs = [complex(1.0, 2.0), complex(3.0, 4.0)]
+let r = asf(zs)

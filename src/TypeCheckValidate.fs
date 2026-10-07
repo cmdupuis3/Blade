@@ -833,6 +833,28 @@ let rec internal collectSubscriptErrors (env: TypeEnv) (expr: TypedExpr) : Compi
         | _ -> []
     here @ (typedExprChildren expr |> List.collect (collectSubscriptErrors env))
 
+/// THE MIXING RULE's post-zonk half (formalism 2.4): every arithmetic
+/// operator and comparison whose operands' elements are now known is judged
+/// by `numericMixOffender` -- the operators whose operand was an open
+/// variable when inferBinOp met them (a lambda kernel's parameter outside
+/// the apply seam, a let-bound lambda) included. One error per expression
+/// tree: the innermost offender is the root cause.
+let rec internal collectNumericMixErrors (env: TypeEnv) (expr: TypedExpr) : CompileError list =
+    let here =
+        match expr.Kind with
+        | TExprBinOp ((Elementwise | Outer), op, l, r) ->
+            (match judgeNumericMix env op l r with
+             | Some (leftOff, msg) ->
+                 let o = if leftOff then l else r
+                 [ { Error = ImplicitNumericMix msg
+                     Span = (if o.Span.StartLine > 0 then o.Span else expr.Span)
+                     Context = []; Code = None } ]
+             | None -> [])
+        | _ -> []
+    match typedExprChildren expr |> List.collect (collectNumericMixErrors env) with
+    | [] -> here
+    | inner -> List.truncate 1 inner
+
 /// Every expression a zonked declaration carries, for the sweep above.
 let internal declExprs (decl: TypedDecl) : TypedExpr list =
     let ofFunc (f: TypedFunctionDecl) = [f.Body]

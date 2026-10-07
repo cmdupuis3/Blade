@@ -1,0 +1,20 @@
+// TEST: the power operator's exponent rules under the mixing rule
+// ============================================================================
+// An integer exponent is legal with any base (Float ^ Int squares in the
+// base's type, Int ^ Int is exact); a float exponent takes a float base, so an
+// integer base is converted explicitly first.
+// ============================================================================
+let x = 1.5
+let n = 9
+let a = x ^ 2
+// EXPECT: a = 2.25
+let b = n ^ 2
+// EXPECT: b = 81
+let c = Float64(n) ^ 0.5
+// EXPECT: c = 3.0
+let d = 4.0 ^ 0.5
+// EXPECT: d = 2.0
+let e = [1, 2, 3] ^ 2
+// EXPECT: e = [1, 4, 9]
+let f = Float64([1, 4, 9]) ^ 0.5
+// EXPECT: f = [1.0, 2.0, 3.0]

@@ -1,0 +1,11 @@
+// TEST: an Int64 argument to a Float64 parameter is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// A call converts nothing across classes: `half(n)` with an Int64 `n` and a
+// `Float64` parameter is refused at the argument. Write `half(Float64(n))`.
+// (Within a class a call still widens: a Float32 argument meets a Float64
+// parameter.)
+// ============================================================================
+function half(x: Float64) -> Float64 = x / 2.0
+let n: Int64 = 7
+let h = half(n)

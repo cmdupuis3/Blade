@@ -1,0 +1,6 @@
+// TEST: an integer literal bound to a Float64 annotation is refused (rejects)
+// ERROR: BL3020
+// ============================================================================
+// `let x: Float64 = 1` -- the literal is an Int64; the float spelling is `1.0`.
+// ============================================================================
+let x: Float64 = 1

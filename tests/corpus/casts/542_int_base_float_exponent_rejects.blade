@@ -1,0 +1,9 @@
+// TEST: an integer literal base beneath a float exponent is refused (rejects)
+// ERROR: BL3020 @ 8:9
+// ============================================================================
+// `^`'s exponent is polymorphic -- an INTEGER exponent is legal with any base
+// -- but a float exponent needs a float base: `2 ^ 0.5` would convert the
+// integer base implicitly, exactly like `2 + 0.5`. Write `2.0 ^ 0.5`.
+// ============================================================================
+let ok = 2.0 ^ 0.5
+let r = 2 ^ 0.5
