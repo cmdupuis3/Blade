@@ -1,0 +1,25 @@
+// TEST: A return-only variable beside a scalar keeps the scalar product
+// ============================================================================
+// docs/quickstart-2.md's moment: unction moment(a: Poly<T^1>) where comm(a)
+// -> T^0, recursing mean(head) * moment(tail) with a 1.0 base. The
+// generic-parameter rule (functions/228: x + 1.0 over x: T is typed T)
+// read the RETURN's T^0 as a parameter variable -- CurrentSignature ends
+// with the return -- so the recursive product was typed as the return
+// variable itself, and the pack instances left it open: BL6001 "unresolved
+// type variable T?N in declared type" on m2. Only a variable a PARAMETER
+// is declared as can be instantiated by an array; one only the return names
+// takes the scalar product, as before.
+// ============================================================================
+from stats import mean
+let A = [[1.0, 2.0, 4.0, 7.0], [2.0, 1.0, 0.0, 1.0], [3.0, 3.0, 5.0, 5.0]]
+function moment(a: Poly<T^1>) where comm(a) -> T^0 = {
+    match arity(a) with
+    | 0 -> 1.0
+    | _ -> let head :: tail = a
+           mean(head) * moment(tail)
+}
+let m1 = moment <@> (A) |> compute
+let m2 = moment <@> (A, A) |> compute
+let p01 = m2(0, 1)
+// EXPECT: m1 = [3.5, 1, 4]
+// EXPECT: p01 = 3.5

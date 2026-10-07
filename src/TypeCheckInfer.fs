@@ -6841,12 +6841,23 @@ and inferBinOp env mode op left right : TypeResult<TypedExpr> =
                             // are scalars whatever the instance, and keep the
                             // promotion rules' scalar answer -- an Int64
                             // element plus 1.0 is a Float64 there.
+                            //
+                            // A PARAMETER's: CurrentSignature ends with the
+                            // return type, and a variable only the RETURN
+                            // names (`-> T^0` beside `a: Poly<T^1>`) is no
+                            // parameter's type. Reading it as one typed the
+                            // recursive `mean(head) * moment(tail)` as the
+                            // return variable itself, which the base arm's
+                            // `1.0` then never pinned in the pack instances
+                            // (BL6001 unresolved type variable in the caller).
                             let sigTop (vid: int) =
                                 let sigTys =
                                     env.CurrentSignature
                                     |> List.map (fun t -> env.Subst.Resolve (IR.stripUnits t) |> IR.stripUnits)
+                                let paramTys =
+                                    if sigTys.IsEmpty then [] else List.take (sigTys.Length - 1) sigTys
                                 let isTop t = match t with IRTInfer r -> r = vid | _ -> false
-                                List.exists isTop sigTys
+                                List.exists isTop paramTys
                                 && sigTys |> List.forall (fun t ->
                                     isTop t || not ((freeInferVars env.Subst t).Contains vid))
                             let sigVar (t: IRType) =
