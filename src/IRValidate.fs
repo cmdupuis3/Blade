@@ -245,7 +245,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
 
     // --- Check 1b: No unresolved IRTInfer in function types ---
     for f in modul.Functions do
-        let ctx = $"in function '{f.Name}'"
+        let ctx = $"in function '{f.SourceName}'"
         match containsInfer f.RetType with
         | Some id -> addError ctx $"unresolved type variable T?{id} in return type"
         | None -> ()
@@ -296,9 +296,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     for b in modul.Bindings do checkCasts $"in binding '{b.Name}'" b.Value
     // A specialization's C++ name (`toint_HM_10000_double`) is not a name the
     // program wrote: the message names the declaration it was cloned from.
-    let sourceName (n: string) =
-        System.Text.RegularExpressions.Regex.Replace(n, "_HM_.*$", "")
-    for f in modul.Functions do checkCasts $"in function '{sourceName f.Name}'" f.Body
+    for f in modul.Functions do checkCasts $"in function '{f.SourceName}'" f.Body
 
     // --- Check 2: No dangling VarId references ---
     // Scope threads through every binder via BinderShape (IRLet's body,
@@ -333,7 +331,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
         cumulativeScope <- Set.add b.Id cumulativeScope
 
     for f in modul.Functions do
-        let ctx = $"in function '{f.Name}'"
+        let ctx = $"in function '{f.SourceName}'"
         let paramIds = f.Params |> List.map _.VarId |> Set.ofList
         // Lifted lambdas live in module.Functions with their captures in
         // `f.Captures` (separate from `f.Params`). The captures' Ids
@@ -437,7 +435,7 @@ let validateModule (externalIds: Set<IRId>) (modul: IRModule) : IRValidationErro
     for b in modul.Bindings do
         everyNode $"in binding '{b.Name}'" b.Value
     for f in modul.Functions do
-        everyNode $"in function '{f.Name}'" f.Body
+        everyNode $"in function '{f.SourceName}'" f.Body
 
     // Restore the prior AnalysisContext so the validator doesn't
     // leak its installed CallablesTable to subsequent passes.

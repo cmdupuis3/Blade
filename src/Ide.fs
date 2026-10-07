@@ -1754,8 +1754,13 @@ let private collectBinders (prog: Ast.Program) (tp: TypedProgram) (lines: string
 
 /// Every variable USE with a live source span, bucketed by the IRId it
 /// resolved to. `TExprVar` carries both the identifier's exact span and the
-/// binder's id, so this is a plain walk -- no name matching anywhere.
-let private collectVarUses (prog: Ast.Program) (tp: TypedProgram) : Dictionary<IRId, ResizeArray<Span>> =
+/// binder's id, so this is a plain walk -- no name matching anywhere. A call
+/// of an arrow parameter's ARRAY INSTANCE names the instance's id; it is a use
+/// of the declaration the instance was made from (`instanceOrigins`,
+/// TypedAst.arrayInstanceOrigins), whose binder `tp` -- instances dropped --
+/// holds.
+let private collectVarUses (prog: Ast.Program) (tp: TypedProgram) (instanceOrigins: Map<IRId, IRId>)
+                           : Dictionary<IRId, ResizeArray<Span>> =
     // The eight elaborators build their nodes through `Ast.syn`, which stamps
     // the ambient `synthSpan` -- the span of the WHOLE declaration being
     // expanded -- onto every one of them. So a synthesized variable reference
@@ -1770,7 +1775,8 @@ let private collectVarUses (prog: Ast.Program) (tp: TypedProgram) : Dictionary<I
     let seen = HashSet<IRId * (int * int * int * int)>()
     let rec walk (te: TypedExpr) =
         (match te.Kind with
-         | TExprVar (name, varId, _) when te.Span.StartLine > 0 && not (name.StartsWith "__") ->
+         | TExprVar (name, varId0, _) when te.Span.StartLine > 0 && not (name.StartsWith "__") ->
+             let varId = defaultArg (Map.tryFind varId0 instanceOrigins) varId0
              let key = clampSpan te.Span
              if not (declSpans.Contains key) && seen.Add((varId, key)) then
                  match acc.TryGetValue varId with
@@ -1797,8 +1803,9 @@ let private collectVarUses (prog: Ast.Program) (tp: TypedProgram) : Dictionary<I
 /// binding (no name span reaches this far yet), or a compiler-generated binder.
 /// None of them can answer go-to-definition, and a rename over them would edit
 /// text the compiler never agreed was one symbol.
-let private collectReferences (prog: Ast.Program) (tp: TypedProgram) (lines: string[]) : RefInfo list =
-    let uses = collectVarUses prog tp
+let private collectReferences (prog: Ast.Program) (tp: TypedProgram) (instanceOrigins: Map<IRId, IRId>)
+                              (lines: string[]) : RefInfo list =
+    let uses = collectVarUses prog tp instanceOrigins
     // A use is kept only when the SOURCE TEXT at its span IS the binder's name.
     // Two things make that check earn its keep: the parser gives a
     // parenthesized reference `(A)` the parens' span, which is narrowed here to
@@ -1967,11 +1974,17 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             else { program with Modules = depModules @ program.Modules }
         /// The entry module's slice of a typed program checked over the whole
         /// resolved set. Identity when nothing was resolved.
+        /// And as the PROGRAM wrote it: an arrow parameter's array instance
+        /// (`walk__arrow1`) is its origin's declaration, not a second one, so
+        /// no binding, reference or call entry is collected from it
+        /// (TypedAst.withoutArrayInstances). The full tier lowers the whole
+        /// typed program, instances included.
         let entryOnly (tp: TypedProgram) =
-            if List.isEmpty depModules then tp
-            else match tp.Modules with
-                 | [] -> tp
-                 | ms -> { tp with Modules = [ List.last ms ] }
+            withoutArrayInstances (
+                if List.isEmpty depModules then tp
+                else match tp.Modules with
+                     | [] -> tp
+                     | ms -> { tp with Modules = [ List.last ms ] })
         // Fresh provider-module registry (the load site records into it
         // during typeCheck; collectProviderStores reads it), and with it the
         // icechunk axis mint table -- both are per-compilation AsyncLocal
@@ -2091,7 +2104,7 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
                 providers <- (try collectProviderStores program with _ -> [])
                 calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
                 kernels <- (try collectKernels () with _ -> [])
-                references <- (try collectReferences program typedProg sourceLines with _ -> [])
+                references <- (try collectReferences program typedProg (arrayInstanceOrigins fullTyped) sourceLines with _ -> [])
             | None -> ()
         | Ok (fullTyped, builder, _) ->
             drainWarningChannels ()
@@ -2103,7 +2116,7 @@ let ideCheckSourceWith (env: Envelope) (upgrade: FullTierUpgrade option)
             providers <- (try collectProviderStores program with _ -> [])
             calls <- (try collectCalls typedProg @ collectFormerCalls program typedProg with _ -> [])
             kernels <- (try collectKernels () with _ -> [])
-            references <- (try collectReferences program typedProg sourceLines with _ -> [])
+            references <- (try collectReferences program typedProg (arrayInstanceOrigins fullTyped) sourceLines with _ -> [])
             // FULL tier, last: everything above is read off the typed AST, so
             // running monomorphization only after they're collected keeps the
             // fast payload identical whether or not the upgrade runs (or throws).

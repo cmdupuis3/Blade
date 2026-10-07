@@ -2285,7 +2285,7 @@ let fuseElementwiseChainsModule (modul: IRModule) (builder: IRBuilder) (programF
         match info.Kernel with
         | IRVar (kid, _) ->
             (match callables.TryGetValue kid with
-             | true, k -> k.Name
+             | true, k -> k.SourceName
              | _ -> $"kernel#{kid}")
         | _ -> "<inline kernel>"
     let kernelId (info: ApplyInfo) =
@@ -2727,7 +2727,7 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
             let n = aritiesArr.[slotIdx]
             let elems = if n = 0 then "the pack is empty" else $"elements 0 .. {n - 1}"
             raise (Blade.Diagnostics.BladeDiagnosticException (Blade.Diagnostics.Codes.backendRefusal Blade.Ast.noSpan (
-                $"'{func.Name}' reads element {idx} of a {n}-element pack ({elems}). If the read is recursion over the pack, the recursion reaches arity {n} with no arm for it (recursion without a base case is planned, not built): add a base arm, e.g. `| {n} -> <the identity>` in the `match arity(...)`; otherwise the index itself is out of range at this call's arity.")))
+                $"'{func.SourceName}' reads element {idx} of a {n}-element pack ({elems}). If the read is recursion over the pack, the recursion reaches arity {n} with no arm for it (recursion without a base case is planned, not built): add a base arm, e.g. `| {n} -> <the identity>` in the `match arity(...)`; otherwise the index itself is out of range at this call's arity.")))
         | None -> ()
 
         // Second pass: unroll IRForRange with literal bounds. This handles
@@ -2908,6 +2908,8 @@ let specializeFunction (func: IRFuncDef) (arities: int list) (funcMap: Map<IRId,
 
         { Id = builder.FreshId()
           Name = $"{func.Name}_arity_{arityTag}"
+          // The same declaration at a concrete arity: it prints as written.
+          SourceName = func.SourceName
           Params = expandedParams
           RetType = newRetType
           Body = newBody

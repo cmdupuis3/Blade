@@ -1,0 +1,14 @@
+// TEST: A panic inside a generic function's specialization names the declaration (aborts)
+// ABORT: BL8013
+// ABORT: at divide
+// ============================================================================
+// `divide` is specialized per element type (emitted `divide_HM_<id>_double`,
+// `divide_HM_<id>_int64`), and the frame trace printed that emitted name. A
+// specialization is the declaration at a concrete type: the Int64 division by
+// zero's frame names `divide`, in both lanes. (A pin is a substring;
+// `blade test cli` asserts the frame line is exactly `at divide`.)
+function divide(x: T^0, y: T^0) = x / y
+let a = divide(4.0, 2.0)
+let i: Int64 = 1
+let z: Int64 = 0
+let b = divide(i, z)

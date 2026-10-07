@@ -1214,9 +1214,13 @@ let private shadowFrameOpen (funcDef: IRFuncDef) (bodyInd: string) : string list
     let forced =
         (funcDef.Params |> List.exists (fun p -> match p.Type with FuncElem _ -> true | _ -> false))
         || (funcDef.Captures |> List.exists (fun c -> match c.Type with FuncElem _ -> true | _ -> false))
+    // The marker carries the emitted name (the reachability analysis joins
+    // it against call sites); the FRAME says the name the program wrote --
+    // a specialization or an array instance prints as its declaration
+    // (IRCallable.SourceName), exactly as the interpreter's frame does.
     [ sprintf "%s%s %s %d BLADE_FRAME(\"%s\", nullptr, 0);"
         bodyInd frameMarkBegin (sanitizeCppName funcDef.Name)
-        (if forced then 1 else 0) (cppStrEscape funcDef.Name) ]
+        (if forced then 1 else 0) (cppStrEscape funcDef.SourceName) ]
 
 /// Close a marked body. Delimiting the body explicitly keeps the scan exact:
 /// without it a body would run to the next marker and pick up the following
@@ -2050,13 +2054,13 @@ let genModule (modul: IRModule) (builder: IRBuilder) : string list * string list
         allItems |> List.fold (fun c (_, item) ->
             match item with
             | Choice1Of2 binding ->
-                setCurrentCodegenDecl binding.Name
+                setCurrentCodegenDecl binding.Name binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
                 bindLines.AddRange code
                 bindLines.Add ""
                 c'
             | Choice2Of2 funcDef ->
-                setCurrentCodegenDecl funcDef.Name
+                setCurrentCodegenDecl funcDef.Name funcDef.SourceName
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     let (code, c') = genFuncDefAsLambda c builder funcDef
                     bindLines.AddRange code
@@ -2154,7 +2158,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     match onlyBinding with
                     | Some target -> seen || binding.Name = target
                     | None -> seen || isComputeBinding binding
-                setCurrentCodegenDecl binding.Name
+                setCurrentCodegenDecl binding.Name binding.Name
                 let (code, c') = genModuleBinding c binding builder hoistIds
                 if nowCompute then
                     computeLines.AddRange code
@@ -2165,7 +2169,7 @@ let genModuleSplit (modul: IRModule) (builder: IRBuilder) : string list * string
                     setupLines.Add ""
                     (false, c')
             | Choice2Of2 funcDef ->
-                setCurrentCodegenDecl funcDef.Name
+                setCurrentCodegenDecl funcDef.Name funcDef.SourceName
                 if Set.contains funcDef.Id mainLocalFuncIds then
                     // Lambda-as-binding (closure definition): follows the
                     // current phase -- setup if before the first compute, else

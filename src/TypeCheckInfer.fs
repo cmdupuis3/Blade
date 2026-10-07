@@ -15570,7 +15570,7 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
                             let effects = effectsOfBody env' (Some funcVarId) tBody
                             env'.FuncEffects.[funcVarId] <- effects
                             let tf : TypedFunctionDecl = {
-                                Name = mangledName; FuncId = funcVarId
+                                Name = mangledName; SourceName = mangledName; FuncId = funcVarId
                                 TypeParams = method.TypeParams
                                 Params = typedParams; ReturnType = tBody.Type
                                 WhereClause = method.WhereClause; Body = tBody
@@ -15708,15 +15708,21 @@ and checkDecl (env: TypeEnv) (decl: Decl) : TypeResult<TypedDecl * TypeEnv> =
         Ok (TDeclImport (qname, style), env')
 
 and checkFunctionDecl (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
-    checkFunctionDeclWith Map.empty (fun _ _ -> ()) env funcDecl
+    checkFunctionDeclWith Map.empty (fun _ _ -> ()) None env funcDecl
 
 /// checkFunctionDecl, with some parameters' types FIXED (`fixedParams`,
 /// position -> type) -- an ARRAY INSTANCE of an arrow-parameter declaration
 /// (TypeEnv.ArrowVariant, checkArrowVariant) -- and `onBound` told the binder
 /// id and function type once they exist, before the body is checked (so the
-/// instance is reachable from its own recursive calls).
+/// instance is reachable from its own recursive calls). `instanceOf` is an
+/// array instance's ORIGIN name: the instance checks under its unique internal
+/// name (`funcDecl.Name` -- the name-keyed callee tables below must not
+/// overwrite the origin's entries), but it is the origin's declaration, so
+/// every message names the origin and so does the result's SourceName.
 and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRType -> unit)
+                          (instanceOf: string option)
                           (env: TypeEnv) (funcDecl: FunctionDecl) : TypeResult<TypedDecl * TypeEnv> =
+    let shownName = defaultArg instanceOf funcDecl.Name
     // Fresh type variable scope for this function's type annotations.
     let savedScope = env.Subst.PushTypeVarScope()
     // Every inference variable minted from here on is THIS declaration's
@@ -15778,14 +15784,14 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
         env.Subst.PopTypeVarScope(savedScope)
         Error fixedErr.Value
     elif (paramTypes |> List.exists irTypeHasRaggedNoPrior) || irTypeHasRaggedNoPrior retType then
-        Error (RaggedIdxNeedsPrior funcDecl.Name)
+        Error (RaggedIdxNeedsPrior shownName)
     elif (paramTypes |> List.exists irTypeHasBadDistOrder) || irTypeHasBadDistOrder retType then
-        Error (DistOrderCompileTime funcDecl.Name)
+        Error (DistOrderCompileTime shownName)
     // Parameters are exactly where the wildcard belongs, so only the RETURN
     // type is scanned here (irTypeHasTagWildcard likewise skips a functional
     // parameter's own slots, keeping `f: (Nat<_>) -> Float64` legal).
     elif irTypeHasTagWildcard retType then
-        Error (TagWildcardNotParam $"function '{funcDecl.Name}' return type")
+        Error (TagWildcardNotParam $"function '{shownName}' return type")
     else
     let badAxis = (paramTypes @ [retType]) |> List.tryPick irTypeUnknownAxisPath
     if badAxis.IsSome then
@@ -15793,15 +15799,15 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
     else
     let badIrreps = (paramTypes @ [retType]) |> List.tryPick irTypeBadIrrepsDetail
     if badIrreps.IsSome then
-        Error (IrrepsIdxSpecFn (funcDecl.Name, badIrreps.Value))
+        Error (IrrepsIdxSpecFn (shownName, badIrreps.Value))
     else
     let badPgIrreps = (paramTypes @ [retType]) |> List.tryPick irTypeBadPgIrrepsDetail
     if badPgIrreps.IsSome then
-        Error (PgIrrepsIdxSpecFn (funcDecl.Name, badPgIrreps.Value))
+        Error (PgIrrepsIdxSpecFn (shownName, badPgIrreps.Value))
     else
     let badTree = (paramTypes @ [retType]) |> List.tryPick irTypeBadTreeDetail
     if badTree.IsSome then
-        Error (TreeIdxShapeFn (funcDecl.Name, badTree.Value))
+        Error (TreeIdxShapeFn (shownName, badTree.Value))
     else
     // NO tree door here as of P5, where it was deleted. P3/P4 kept it on an ABI
     // argument -- "the shape rides the CALLER's Tag, and the signature does not
@@ -15824,7 +15830,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
     // handled -- a caller would have had to allocate it.)
     let wreath = (paramTypes @ [retType]) |> List.tryPick irTypeWreathLevels
     if wreath.IsSome then
-        Error (OrbitStorageUnsupported (wreath.Value, $"function '{funcDecl.Name}'"))
+        Error (OrbitStorageUnsupported (wreath.Value, $"function '{shownName}'"))
     else
     // Bounded PARAMETERS and RETURNS are unguarded today (synthesizeBoundChecks
     // is let-annotation-only), so a bounded aggregate here is silently dropped
@@ -15833,9 +15839,9 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
     // that is refused.
     let badBound =
         (funcDecl.Params |> List.tryPick (fun p ->
-            p.Type |> Option.bind (boundedAggregateError env $"parameter '{p.Name}' of function '{funcDecl.Name}'")))
+            p.Type |> Option.bind (boundedAggregateError env $"parameter '{p.Name}' of function '{shownName}'")))
         |> Option.orElseWith (fun () ->
-            funcDecl.ReturnType |> Option.bind (boundedAggregateError env $"the return type of function '{funcDecl.Name}'"))
+            funcDecl.ReturnType |> Option.bind (boundedAggregateError env $"the return type of function '{shownName}'"))
     if badBound.IsSome then
         Error badBound.Value
     else
@@ -15883,7 +15889,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                 let i = funcDecl.Params |> List.findIndex (fun q -> q.Name = p.Name)
                 match env.Subst.Resolve paramTypes.[i] with
                 | ArrayElem _ -> None
-                | _ -> Some (MutParamNotArray (funcDecl.Name, p.Name))
+                | _ -> Some (MutParamNotArray (shownName, p.Name))
             else None)
     match mutParamErr with
     | Some e ->
@@ -15901,7 +15907,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             | Some t ->
                 match mutualMemberNamesIn env t with
                 | [] -> None
-                | n :: _ -> Some (MutualParamMemberType (funcDecl.Name, p.Name, n))
+                | n :: _ -> Some (MutualParamMemberType (shownName, p.Name, n))
             | None -> None)
     match mutualParamErr with
     | Some e ->
@@ -15936,7 +15942,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                 // hint; the vocabulary list shows the module spelling.
                 let bare = match cname.Split('.') with [| _; n |] -> n | _ -> cname
                 if (Blade.Constraints.lookupConstraint ("__ppl_" + bare)).IsSome then
-                    Some (PplConstraintNeedsImport (funcDecl.Name, bare))
+                    Some (PplConstraintNeedsImport (shownName, bare))
                 else
                 let known =
                     Blade.Constraints.registeredConstraintNames ()
@@ -15945,9 +15951,9 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                         elif n.StartsWith "__ml_" then "ml." + n.Substring 5
                         else n)
                 let vocab = if known.IsEmpty then "none registered" else String.concat ", " known
-                Some (UnknownWhereConstraint (funcDecl.Name, cname, vocab))
+                Some (UnknownWhereConstraint (shownName, cname, vocab))
             | Some h ->
-                match h.Validate funcDecl.Name paramNames cargs with
+                match h.Validate shownName paramNames cargs with
                 | Ok () -> None
                 | Error msg -> Some (Other msg))
     match conjunctErr with
@@ -16010,7 +16016,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                 |> List.mapi (fun i p -> (i, p))
                 |> List.tryPick (fun (i, p) ->
                     if i > fd && p.Default.IsNone
-                    then Some (DefaultParamOrder ($"function '{funcDecl.Name}'", p.Name, firstDefaultedName))
+                    then Some (DefaultParamOrder ($"function '{shownName}'", p.Name, firstDefaultedName))
                     else None)
             match orderErr with
             | Some e -> Some e
@@ -16024,7 +16030,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                         | Some d ->
                             let bad = Set.intersect (collectFreeVars Set.empty d) defaultedNames
                             if Set.isEmpty bad then None
-                            else Some (DefaultParamScope ($"function '{funcDecl.Name}'", p.Name, Set.minElement bad))
+                            else Some (DefaultParamScope ($"function '{shownName}'", p.Name, Set.minElement bad))
                         | None -> None)
                 match scopeErr with
                 | Some e -> Some e
@@ -16050,7 +16056,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                     |> List.tryPick (fun (q, members) ->
                         match members with
                         | (_, p1) :: (_, p2) :: _ ->
-                            Some (FactoryDupQuantityDecl ($"function '{funcDecl.Name}'", q, p1, p2))
+                            Some (FactoryDupQuantityDecl ($"function '{shownName}'", q, p1, p2))
                         | _ -> None)
                 match dupQuantityErr with
                 | Some e -> Some e
@@ -16107,7 +16113,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
         // clause silently mean nothing.
         if funcDecl.IsStatic
            && (funcDecl.WhereClause |> Option.map (_.Repro) |> Option.defaultValue false) then
-            Error (Other $"function '{funcDecl.Name}': `where repro` cannot apply to a `static function` -- a static function evaluates at compile time (in the compiler's own arithmetic), so there is no emitted body for the reproducibility attribute to govern")
+            Error (Other $"function '{shownName}': `where repro` cannot apply to a `static function` -- a static function evaluates at compile time (in the compiler's own arithmetic), so there is no emitted body for the reproducibility attribute to govern")
         else
         // When a return type is annotated, drive the body bidirectionally
         // via checkExpr. This pushes the expected type into literal and
@@ -16169,7 +16175,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             match irTypeWreathLevels (env.Subst.Resolve retType) with
             | Some levels ->
                 Error (OrbitStorageUnsupported
-                         (levels, $"function '{funcDecl.Name}' returns a deduced wreath class"))
+                         (levels, $"function '{shownName}' returns a deduced wreath class"))
             | None ->
             // Declared-return introduce-site: wrap the body so the joint
             // check fires at the return (the single verification point).
@@ -16228,12 +16234,12 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                 env.FuncFoldBuiltin.[funcDecl.Name] <- true
             // An `omp(v: n)` naming no parameter is silently dropped downstream.
             checkOmpVarNames env (funcDecl.Params |> List.map (_.Name))
-                             funcDecl.WhereClause $"function '{funcDecl.Name}'"
+                             funcDecl.WhereClause $"function '{shownName}'"
             // ... and an `omp(p: n)` read as a licence for a loop this body
             // builds over `p` itself licenses nothing (the clause is about the
             // EXTERNAL S-dims `p` contributes to a CALLER's nest).
             checkOmpInternalLoop env (funcDecl.Params |> List.map (_.Name))
-                                 funcDecl.WhereClause $"function '{funcDecl.Name}'"
+                                 funcDecl.WhereClause $"function '{shownName}'"
                                  tBody
             // Stage 3 (symmetry deduction, early tier): summarize the
             // adjacent-pair swap parity of this fixed-arity function's body
@@ -16522,12 +16528,13 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
             // Bounded PARAMETERS and RETURN (`x: Sal`, `-> Float64<min=0.0>`,
             // through aliases too): runtime guards at entry and at the return,
             // the same BL8001 guards a bounded `let` gets. Wrapped LAST, after
-            // every deduction has read the unguarded body.
-            match wrapBoundedSignatureChecks bodyEnv funcDecl tBody with
+            // every deduction has read the unguarded body. A guard's run-time
+            // message names the function as the program wrote it.
+            match wrapBoundedSignatureChecks bodyEnv { funcDecl with Name = shownName } tBody with
             | Error e -> Error e
             | Ok tBodyGuarded ->
             let tf : TypedFunctionDecl = {
-                Name = funcDecl.Name; FuncId = funcVarId
+                Name = funcDecl.Name; SourceName = shownName; FuncId = funcVarId
                 TypeParams = funcDecl.TypeParams
                 Params = resolvedParams; ReturnType = resolvedRet
                 WhereClause = funcDecl.WhereClause; Body = tBodyGuarded
@@ -16581,10 +16588,20 @@ and checkArrowVariant (env: TypeEnv) (fid: IRId) (arrays: Map<int, IRType>) : Ty
     let warningLog0 = Blade.TypeEnv.WarningLog.get ()
     let pins0 = Blade.TypeCheckIde.PinSuggestions.get ()
     let facts0 = Blade.TypeEnv.DeducedFacts.get ()
+    // The editor's deduction side channel (kernel rows, deduced pairs): the
+    // instance's body is the origin's source, already recorded by the
+    // origin's check, so the instance adds nothing an editor would see.
+    let idePairs0 = IdeDeductions.pairs.Value
+    let idePacks0 = IdeDeductions.packs.Value
+    let ideKernels0 = IdeDeductions.kernels.Value
+    // Checked under its unique internal name (the C++ definition's), but it
+    // is the origin's declaration: its messages and its SourceName say the
+    // origin's name (TypedFunctionDecl.SourceName).
     let checkedR =
         checkFunctionDeclWith fixedTys
             (fun vid fty ->
                 env.ArrowVariants.[key] <- { DeclName = declName; VarId = vid; FuncType = fty; Origin = origin })
+            (Some srcDecl.Name)
             srcEnv { srcDecl with Name = declName }
     env.Warnings.RemoveRange(warnings0, env.Warnings.Count - warnings0)
     Blade.TypeEnv.WarningLog.reset ()
@@ -16593,6 +16610,9 @@ and checkArrowVariant (env: TypeEnv) (fid: IRId) (arrays: Map<int, IRType>) : Ty
     for (m, sp) in pins0 do Blade.TypeCheckIde.PinSuggestions.add m sp
     Blade.TypeEnv.DeducedFacts.reset ()
     for (f, sp) in facts0 do Blade.TypeEnv.DeducedFacts.add f sp
+    IdeDeductions.pairs.Value <- idePairs0
+    IdeDeductions.packs.Value <- idePacks0
+    IdeDeductions.kernels.Value <- ideKernels0
     match checkedR with
     | Error e ->
         env.ArrowVariants.Remove key |> ignore

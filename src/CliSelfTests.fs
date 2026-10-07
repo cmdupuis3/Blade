@@ -499,6 +499,116 @@ let runCliSmokeTests () : TH.BlockResult =
                 | Ok () -> record label TH.Fail "no pins found"
                 | Error errs -> record label TH.Fail (String.concat "; " errs + " | " + r.Stdout)
 
+    // --- An arrow parameter's array instance prints as its declaration ---
+    //
+    // A call handing an arrow parameter an array calls the declaration's ARRAY
+    // INSTANCE, emitted as `walk__arrow1`; a generic declaration's
+    // specialization is emitted as `divide_HM_<id>_<type>`. Neither is a name
+    // the program wrote (formalism 4.3: the instance IS the declaration), so no
+    // user-facing surface shows one: a panic's frames in either lane, `blade
+    // plan`, the editor payload, the REPL's session names. The corpus pins the
+    // frame by substring (functions/259-260, `// ABORT: at walk`), which
+    // `at walk__arrow1` contains too -- the absence is asserted here.
+    // The detail (a whole JSON payload, a panic) is shown only on failure.
+    let expectCase name cond (detail: string) = recordCase name cond (if cond then "" else detail)
+    let internalName (s: string) = s.Contains "__arrow" || s.Contains "_HM_"
+    let frameLines (s: string) =
+        s.Replace("\r\n", "\n").Split('\n')
+        |> Array.filter (fun l -> l.StartsWith "  at ")
+        |> Array.map (fun l -> l.TrimEnd())
+        |> List.ofArray
+    let arrowAbort =
+        "type L = Idx<3>\n"
+        + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
+        + "function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)\n"
+        + "function outer(m: T^1) = walk(m, 5)\n"
+        + "let s = outer(A)\n"
+    let hmAbort =
+        "function divide(x: T^0, y: T^0) = x / y\n"
+        + "let a = divide(4.0, 2.0)\n"
+        + "let i: Int64 = 1\n"
+        + "let z: Int64 = 0\n"
+        + "let b = divide(i, z)\n"
+    let expectedFrames = [ ("arrow", arrowAbort, [ "  at walk"; "  at outer" ]); ("hm", hmAbort, [ "  at divide" ]) ]
+    for (tag, src, frames) in expectedFrames do
+        let shown = frames |> List.map (fun l -> l.Trim()) |> String.concat "; "
+        let label = $"names: the interpreter's {tag} panic frames name the declaration ({shown})"
+        match Blade.Lowering.lowerCaptured src with
+        | Error e, _ -> record label TH.Fail e
+        | Ok ir, _ ->
+            let r = Blade.Interp.Run.runProgram ir $"names_{tag}" Blade.Interp.Value.defaultLimits
+            expectCase label (frameLines r.Stderr = frames && not (internalName r.Stderr)) r.Stderr
+    if not capabilities.Value.HasGpp || selfExe.IsNone then
+        record "names: compiled panic frames name the declaration" TH.Skip "requires g++ and the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_names_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            for (tag, src, frames) in expectedFrames do
+                File.WriteAllText(Path.Combine(dir, $"{tag}.blade"), src)
+                let (code, out, err) = spawn dir [ "run"; $"{tag}.blade" ]
+                let shown = frames |> List.map (fun l -> l.Trim()) |> String.concat "; "
+                expectCase $"names: the compiled {tag} panic frames name the declaration ({shown})"
+                    // `run` relays the program's stderr on its own stdout.
+                    (code <> 0 && frameLines (out + err) = frames && not (internalName (out + err))) (out + err)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // `blade plan`: a decision made inside an array instance is the origin's.
+    if selfExe.IsNone then
+        record "names: plan subjects name the declaration" TH.Skip "requires the Blade executable"
+    else
+        let dir = Path.Combine(Path.GetTempPath(), "blade_cli_names_plan_" + Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory dir |> ignore
+        try
+            File.WriteAllText(Path.Combine(dir, "p.blade"),
+                "type L = Idx<3>\n"
+                + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
+                + "function centered(c) = {\n"
+                + "    let m = (c(0) + c(1) + c(2)) / 3.0\n"
+                + "    let m2 = (c(0) + c(1) + c(2)) / 3.0\n"
+                + "    method_for(range<L>) <@> lambda(j) -> c(j) - m - m2\n"
+                + "}\n"
+                + "let r = centered(A) |> compute\n")
+            let (code, out, err) = spawn dir [ "plan"; "p.blade" ]
+            expectCase "names: a plan decision inside an array instance names the declaration"
+                (code = 0 && out.Contains "[cse v2] centered:" && not (internalName (out + err))) (out + err)
+        finally
+            try Directory.Delete(dir, true) with _ -> ()
+    // The editor payload and the REPL: the instance is the same declaration,
+    // so it is no extra binding, reference, call or session name.
+    (let src =
+        "type L = Idx<3>\n"
+        + "let A: Array<Float64 like L> = [1.0, 2.0, 3.0]\n"
+        + "let v = [10.0, 20.0, 30.0, 40.0]\n"
+        + "function walk(c, n: Int64) -> Float64 = if n == 0 then c(0) else c(n) + walk(c, n - 1)\n"
+        + "let s = walk(A, 2)\n"
+        + "let sv = walk(v, 3)\n"
+        + "let sf = walk(lambda(i) -> Float64(i), 3)\n"
+        + "function twice(c) = reduce(method_for(range<L>) <@> lambda(j) -> walk(c, 1) * Float64(j), (+))\n"
+        + "let tw = twice(A)\n"
+     let occurrences (needle: string) (hay: string) = hay.Split([| needle |], StringSplitOptions.None).Length - 1
+     let (json, code) = Blade.Ide.ideCheckSource (Path.Combine(Path.GetTempPath(), "names_ide.blade")) src
+     expectCase "names: ide check lists no array instance (no `__arrow` binding, reference or call)"
+         (code = 0 && not (internalName json)) json
+     expectCase "names: ide check lists the declaration once, as a binding and as a reference"
+         (occurrences "{\"name\":\"walk\",\"kind\":\"function\"," json = 2
+          && occurrences "{\"name\":\"twice\",\"kind\":\"function\"," json = 2) json
+     // A call that targets an instance (`walk(A, 2)`, `twice(A)`) is a use of
+     // the declaration: find-references and rename see every call site.
+     let refEntry (name: string) =
+         let start = json.IndexOf("{\"name\":\"" + name + "\",\"kind\":\"function\",\"def\"")
+         if start < 0 then "" else json.Substring(start, json.IndexOf("]}", start) - start)
+     let walkRefs, twiceRefs = refEntry "walk", refEntry "twice"
+     expectCase "names: a call of an array instance is a reference to the declaration"
+         (walkRefs.Contains "{\"line\":5,\"col\":9," && walkRefs.Contains "{\"line\":6,\"col\":10,"
+          && walkRefs.Contains "{\"line\":7,\"col\":10," && twiceRefs.Contains "{\"line\":9,\"col\":10,")
+         (walkRefs + " | " + twiceRefs)
+     let session = Blade.ReplSession.ReplTypes.sessionInfo src
+     expectCase "names: the REPL's session names are the declarations, no array instance"
+         (session.ContainsKey "walk" && session.ContainsKey "twice"
+          && not (session |> Map.exists (fun k _ -> internalName k)))
+         (session |> Map.toList |> List.map fst |> String.concat ", "))
+
     let count o = results |> Seq.filter (fun (_, r) -> r = o) |> Seq.length
     let passed, failed, skipped = count TH.Pass, count TH.Fail, count TH.Skip
     let failedNames = results |> Seq.filter (fun (_, r) -> r = TH.Fail) |> Seq.map fst |> List.ofSeq

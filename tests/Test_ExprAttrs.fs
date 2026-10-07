@@ -431,7 +431,7 @@ let private crossProcCallee : IRCallable =
         IRBinOp (IRElementwise, IRAdd,
             IRContains (IRVar (77, intTy), IRVar (78, intTy)),
             IRVar (55, intTy), SrcLoc.Nowhere)
-    { Id = 99; Name = "f"
+    { Id = 99; Name = "f"; SourceName = "f"
       Params = [arrP; xP]; RetType = boolTy; Body = fBody
       IsStatic = false
       IsCommutative = false; CommGroups = []; AntisymGroups = []

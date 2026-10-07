@@ -2659,9 +2659,9 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
              | Some cl -> cl
              | None -> refuse "a call to a function the module does not define (indirect or higher-order)")
         | _ -> refuse "an indirect / higher-order call"
-    if callable.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{callable.Name}'")
+    if callable.IsArityPoly then refuse ($"a call to the arity-polymorphic function '{callable.SourceName}'")
     if callable.IsCudaKernel || callable.IsMpiParallel then
-        refuse ($"a call to '{callable.Name}', which carries a cuda/mpi strategy")
+        refuse ($"a call to '{callable.SourceName}', which carries a cuda/mpi strategy")
     // An `omp` clause is a LICENCE to parallelize, not a demand: emitting the
     // serial body answers the same values. (Licensed reassociation is a
     // separate question and stays off -- see the numeric policy above.)
@@ -2672,7 +2672,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
     // re-entered inline refuses rather than looping.
     if not (List.isEmpty callable.Captures) then
         if not (c.Inlining.Add callable.Id) then
-            refuse ($"a recursive call to '{callable.Name}', which captures enclosing bindings")
+            refuse ($"a recursive call to '{callable.SourceName}', which captures enclosing bindings")
         try
             let kargs =
                 List.zip callable.Params args
@@ -2685,7 +2685,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
         finally c.Inlining.Remove callable.Id |> ignore
     else
     if List.length callable.Params <> List.length args then
-        refuse ($"a partial application of '{callable.Name}' ({(List.length args)} of {(List.length callable.Params)} arguments)")
+        refuse ($"a partial application of '{callable.SourceName}' ({(List.length args)} of {(List.length callable.Params)} arguments)")
     let sym = ensureFunction c callable
     // An array argument crosses as its POOL POINTER, which is also what makes
     // `mut` work: the callee's element writes land in the caller's storage
@@ -2698,7 +2698,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
             | Some (elem, groups) ->
                 let av = materializeExpr c a
                 if av.Elem <> elem || av.Groups <> groups then
-                    refuse ($"argument shape disagrees with parameter '{p.Name}' of '{callable.Name}'")
+                    refuse ($"argument shape disagrees with parameter '{p.Name}' of '{callable.SourceName}'")
                 (match av.Src with
                  | APool ptr -> [ (ScStr, ptr) ]
                  | _ -> refuse "an unmaterialized array argument")
@@ -2714,9 +2714,9 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
                          let tp = match table with RtStatic (_, sym) -> sym | RtDynamic reg -> reg
                          [ (ScStr, ptr); (ScStr, tp) ]
                      | _ ->
-                         refuse ($"argument shape disagrees with ragged parameter '{p.Name}' of '{callable.Name}'"))
+                         refuse ($"argument shape disagrees with ragged parameter '{p.Name}' of '{callable.SourceName}'"))
                 | None ->
-                    let sc = requireScalar ($"parameter '{p.Name}' of '{callable.Name}'") p.Type
+                    let sc = requireScalar ($"parameter '{p.Name}' of '{callable.SourceName}'") p.Type
                     let v = coerce c sc (emitExpr c a)
                     [ (sc, v.Reg) ])
     match arrayShapeOf callable.RetType with
@@ -2735,7 +2735,7 @@ and private emitCall (c: Ctx) (func: IRExpr) (args: IRExpr list) : Val =
             c.PoolScopes.[c.PoolScopes.Count - 1].Pools.Add(dest, slot)
         { Reg = dest; Ty = ScStr }
     | None ->
-    let retTy = requireScalar ($"the return type of '{callable.Name}'") callable.RetType
+    let retTy = requireScalar ($"the return type of '{callable.SourceName}'") callable.RetType
     if retTy = ScVoid then
         ln c (renderCall { Dest = None; RetTy = ScVoid; Callee = sym; Args = argVals })
         { Reg = ""; Ty = ScVoid }

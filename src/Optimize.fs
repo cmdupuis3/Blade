@@ -577,18 +577,18 @@ let planPoolReuse (modul: IRModule) : unit =
             if pairs.Count > 0 && not (poolReuseEnabled ()) then
                 // The escape hatch: the plan is computed (so the A/B names
                 // what it would have done) and not one pair reaches codegen.
-                decide f.Name (Blade.Effects.Declined "disabled by BLADE_POOL_REUSE")
+                decide f.SourceName (Blade.Effects.Declined "disabled by BLADE_POOL_REUSE")
                     (pairs |> List.ofSeq |> List.map (fun (k, r) -> $"{nameOf k} would take {nameOf r}'s dead pool ({bytesOf k} B)"))
             elif pairs.Count > 0 then
                 for (k, r) in pairs do
                     match idAt k with
                     | Some id -> Blade.Types.PoolReuseTable.record id (idAt r).Value
                     | None -> Blade.Types.PoolReuseTable.recordReturn f.Id (idAt r).Value
-                decide f.Name Blade.Effects.Applied
+                decide f.SourceName Blade.Effects.Applied
                     ((pairs |> List.ofSeq |> List.map (fun (k, r) -> $"{nameOf k} takes {nameOf r}'s dead pool ({bytesOf k} B)"))
                      @ [ $"pools {candidates.Length} -> {pools.Count}; peak live pool bytes {before} -> {after} (literal extents only)" ])
             else
-                decide f.Name (Blade.Effects.Declined "no candidate pool is both dead and unaliased when a pool of the same shape is allocated")
+                decide f.SourceName (Blade.Effects.Declined "no candidate pool is both dead and unaliased when a pool of the same shape is allocated")
                     [ $"{candidates.Length} candidate pools, peak live pool bytes {before}" ]
 
 /// A kernel reference resolved through the module's own function table
@@ -756,6 +756,7 @@ let cseModule (modul: IRModule) : IRModule =
         { f with
             Id = 0
             Name = ""
+            SourceName = ""
             Params = f.Params |> List.mapi (fun i p -> { p with Name = ""; VarId = -(i + 1) })
             Body = body }
     let repOf = System.Collections.Generic.Dictionary<IRId, IRId>()
@@ -886,7 +887,7 @@ let cseModule (modul: IRModule) : IRModule =
             elif not enabled then
                 Blade.Effects.Decisions.record
                     { Blade.Effects.Rule = "cse"; Version = 2
-                      Span = Blade.Ast.noSpan; Subject = f.Name
+                      Span = Blade.Ast.noSpan; Subject = f.SourceName
                       Outcome = Blade.Effects.Declined "disabled by BLADE_CSE"
                       Evidence = pairs |> Seq.map (fun (j, i) -> $"__v{j} is the same repeatable value as __v{i}: left as written") |> List.ofSeq }
                 f
@@ -900,7 +901,7 @@ let cseModule (modul: IRModule) : IRModule =
                 for (j, i) in pairs do moduleSubst.[j] <- i
                 Blade.Effects.Decisions.record
                     { Blade.Effects.Rule = "cse"; Version = 2
-                      Span = Blade.Ast.noSpan; Subject = f.Name
+                      Span = Blade.Ast.noSpan; Subject = f.SourceName
                       Outcome = Blade.Effects.Applied
                       Evidence = pairs |> Seq.map (fun (j, i) -> $"__v{j} is the same repeatable value as __v{i}: dropped, its reads go to __v{i}") |> List.ofSeq }
                 { f with Body = body' }
@@ -1278,7 +1279,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                     if decided.Add kid then
                         Blade.Effects.Decisions.record
                             { Blade.Effects.Rule = "invariant-hoist"; Version = 1
-                              Span = Blade.Ast.noSpan; Subject = k.Name
+                              Span = Blade.Ast.noSpan; Subject = k.SourceName
                               Outcome = Blade.Effects.Declined "disabled by BLADE_HOIST"
                               Evidence = found |> Seq.map (fun s -> $"`{show k s}` does not read the element: left in the kernel, evaluated per cell") |> List.ofSeq }
                     None
@@ -1377,7 +1378,7 @@ let hoistKernelInvariantsModule (builder: IRBuilder) (programFuncs: IRCallable l
                     if decided.Add kid then
                         Blade.Effects.Decisions.record
                             { Blade.Effects.Rule = "invariant-hoist"; Version = 1
-                              Span = Blade.Ast.noSpan; Subject = k.Name
+                              Span = Blade.Ast.noSpan; Subject = k.SourceName
                               Outcome = Blade.Effects.Applied
                               Evidence = List.ofSeq evidence }
                     Some (operandLets @ List.ofSeq lets, { info with Arrays = arrays; Kernel = kernel'; Loop = loop' })

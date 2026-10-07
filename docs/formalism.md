@@ -780,8 +780,13 @@ ARRAY INSTANCE of it -- the declaration checked with the parameter typed as
 that array -- whose application is an ordinary subscript, checked like any
 other (section 3.10): an unproven position into a named axis is guarded
 (BL8006), a literal is judged against a known extent, and an unannotated
-parameter used as the subscript is pinned to the axis's index type. A
-top-level `let` of a lambda that applies such a parameter IS that declaration
+parameter used as the subscript is pinned to the axis's index type. An array
+instance is not a second declaration: whatever names it -- a run-time panic's
+frames in either lane, a diagnostic, `blade plan`, the editor's bindings and
+references, the REPL -- names the declaration as written, so the arrow reading
+surfaces only as the call's implicit equivalence of the parameter with the
+array it is given (a generic declaration's per-type specializations are named
+the same way). A top-level `let` of a lambda that applies such a parameter IS that declaration
 when nothing can tell them apart -- the program only ever APPLIES it, and it
 has no `mut`, annotation, `where` clause or parameter defaults, and captures no
 binding that is ever assigned -- and is generic likewise. Any other lambda (one

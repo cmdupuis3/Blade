@@ -1570,7 +1570,10 @@ let lowerTypedFuncDecl (env: TypedLowerEnv) (decl: TypedFunctionDecl) : IRFuncDe
                      | None -> false)
                 // The effect summary, from the same typed declaration -- the
                 // shared legality fact fusion's splice reads (IRMono.pureBody).
-                Effects = decl.Effects }
+                Effects = decl.Effects
+                // What it prints as: an array instance (`walk__arrow1`) is
+                // its origin's declaration and says the origin's name.
+                SourceName = decl.SourceName }
 
     let env' = bindTypedVar decl.Name decl.FuncId env
     (funcDef, env')

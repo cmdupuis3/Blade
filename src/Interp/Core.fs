@@ -99,7 +99,7 @@ and InterpState = {
     // `BLADE_FRAME("<blade-name>", nullptr, 0)` at every user function/lambda
     // body entry (CodeGen.fs:9342, 9392) -- file/line always nullptr/0, so a
     // frame prints only its name, pushed/popped in evalCall with the same
-    // string CodeGen pushes (IRCallable.Name == IRFuncDef.Name). `FrameNames`
+    // string CodeGen pushes (IRCallable.SourceName). `FrameNames`
     // holds the outermost 64 (header caps storage at `if (depth < 64) store`);
     // `FrameDepth` keeps counting past 64, so the panic-time `min(depth, 64)`
     // slice matches the header byte-for-byte.
@@ -1053,7 +1053,9 @@ and evalCall (st: InterpState) (callable: IRCallable) (captures: Map<IRId, Value
     // frame) and NOT popped on an exception path: an escaping InterpPanic must
     // leave this frame live so Run.fs's formatPanic can print it, matching
     // blade_rt::panic reading the stack before exit.
-    pushFrame st callable.Name
+    // The name the program wrote (IRCallable.SourceName): a specialization or
+    // an array instance prints as its declaration, as CodeGen's frame does.
+    pushFrame st callable.SourceName
     // Chain the frame to the module-global scope: function bodies may read
     // module-level bindings directly (main-local capturing lambdas in C++).
     // Globally-unique IRIds make this exact -- no accidental shadowing.

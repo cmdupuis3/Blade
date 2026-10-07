@@ -361,7 +361,18 @@ type IRExpr =
 /// reference, preserving OCaml-style capture semantics.
 and IRCallable = {
     Id: IRId
+    /// The emitted (C++) name, unique in the program: a specialization's
+    /// `_HM_`/`_arity_`/`_shape_` clone name, a module-prefixed name, an
+    /// array instance's `<origin>__arrow<n>`.
     Name: string
+    /// The name the PROGRAM wrote -- what every user-facing surface prints
+    /// (a runtime panic's `at <name>` frame in both lanes, `blade plan`
+    /// subjects, diagnostics naming a function). Set once, from the typed
+    /// declaration (TypedFunctionDecl.SourceName, which names an array
+    /// instance by its origin) or the callable's own name, and never touched
+    /// again: every renaming above is a `{ f with Name = .. }` copy, so it
+    /// keeps this.
+    SourceName: string
     Params: IRParam list
     RetType: IRTypeG<IRExpr>
     Body: IRExpr
@@ -1844,9 +1855,13 @@ let mkCallable
     (isMpiParallel: bool)
     : IRCallable =
     let id = match opts.IdOverride with Some i -> i | None -> builder.FreshId()
+    let name = match opts.NameOverride with Some n -> n | None -> $"__lambda_{id}"
     {
         Id = id
-        Name = match opts.NameOverride with Some n -> n | None -> $"__lambda_{id}"
+        Name = name
+        // A source function's (an array instance's origin's) is grafted by
+        // Lowering.lowerTypedFuncDecl; everything else prints as it is named.
+        SourceName = name
         Params = parms
         RetType = retType
         Body = body

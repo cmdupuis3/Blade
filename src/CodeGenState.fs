@@ -189,7 +189,41 @@ let currentDeclCell () : string ref =
         fresh
     else v
 
-let setCurrentCodegenDecl (name: string) : unit = (currentDeclCell ()).Value <- name
+/// Emitted declaration name -> the name the PROGRAM wrote, for the emitted
+/// functions whose two differ (IRCallable.SourceName: a specialization clone,
+/// an arrow parameter's array instance `walk__arrow1`). Per program.
+let internal declShownNamesStorage = System.Threading.AsyncLocal<Map<string, string> ref>()
+
+let private declShownNamesCell () : Map<string, string> ref =
+    let v = declShownNamesStorage.Value
+    if isNull (box v) then
+        let fresh = ref Map.empty
+        declShownNamesStorage.Value <- fresh
+        fresh
+    else v
+
+/// Enter the emission of declaration `name` (its emitted name), which the
+/// program wrote as `shown` -- a binding's name, or a function's SourceName.
+let setCurrentCodegenDecl (name: string) (shown: string) : unit =
+    (currentDeclCell ()).Value <- name
+    if shown <> name then
+        let c = declShownNamesCell ()
+        c.Value <- Map.add name shown c.Value
+
+/// What a diagnostic or a `blade plan` row says for the emitted declaration
+/// `name`: the name the program wrote (setCurrentCodegenDecl's `shown`).
+let shownDeclName (name: string) : string =
+    match Map.tryFind name (declShownNamesCell ()).Value with
+    | Some s -> s
+    | None -> name
+
+/// The source span of the emitted declaration `name`: its own recorded span
+/// (IR.recordDeclSpan keys a module's functions by their emitted, prefixed
+/// name), else its source declaration's -- an array instance or a
+/// specialization clone is spanned at the declaration it was made from.
+let emittedDeclSpan (name: string) : Blade.Ast.Span =
+    let s = IR.declSpanOf name
+    if s.StartLine > 0 then s else IR.declSpanOf (shownDeclName name)
 
 /// `blade plan`'s CODEGEN half. The cost-only passes record during
 /// lowering; the decisions only emission makes -- storage and iteration shape,
@@ -197,7 +231,7 @@ let setCurrentCodegenDecl (name: string) : unit = (currentDeclCell ()).Value <- 
 /// jammed / packed microkernels -- record here, attributed to the declaration
 /// being emitted. A no-op unless a collector is installed
 /// (Blade.Effects.Decisions.start), so ordinary compiles pay one AsyncLocal read.
-let decisionSpan () : Blade.Ast.Span = IR.declSpanOf (currentDeclCell ()).Value
+let decisionSpan () : Blade.Ast.Span = emittedDeclSpan (currentDeclCell ()).Value
 
 let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effects.DecisionOutcome) (evidence: string list) : unit =
     if Blade.Effects.Decisions.active () then
@@ -206,10 +240,10 @@ let recordCodegenDecision (rule: string) (subject: string) (outcome: Blade.Effec
         // else the declaration being emitted (a function, a nested nest).
         let span =
             let s = IR.declSpanOf subject
-            if s.StartLine > 0 then s else IR.declSpanOf decl
+            if s.StartLine > 0 then s else emittedDeclSpan decl
         Blade.Effects.Decisions.record
             { Rule = rule; Version = 1; Span = span
-              Subject = (if subject = "" then decl else subject)
+              Subject = shownDeclName (if subject = "" then decl else subject)
               Outcome = outcome; Evidence = evidence }
 
 /// Module-level expression warnings collector: exprToCpp is pure (returns a
@@ -1256,8 +1290,8 @@ let takeUnhandledIRNodeDiagnostics () : Blade.Diagnostics.Diagnostic list =
     let entries = cell.Value
     cell.Value <- []
     entries |> List.map (fun (what, declName) ->
-        let where = if declName = "" then "" else $" (while emitting '{declName}')"
-        Blade.Diagnostics.Codes.backendLimit (IR.declSpanOf declName)
+        let where = if declName = "" then "" else $" (while emitting '{shownDeclName declName}')"
+        Blade.Diagnostics.Codes.backendLimit (emittedDeclSpan declName)
             ($"code generation has no rule for {what}{where}")
         |> Blade.Diagnostics.withNote
             "this is a gap in the C++ back end, not an error in your program -- \
@@ -1316,8 +1350,8 @@ let takeCodegenRefusalDiagnostics (cppCode: string) : Blade.Diagnostics.Diagnost
        || not (cppCode.Contains "#error" || cppCode.Contains "BLADE_CODEGEN_ERROR_") then []
     else
         entries |> List.map (fun (msg, declName) ->
-            let where = if declName = "" then "" else $" (while emitting '{declName}')"
-            Blade.Diagnostics.Codes.backendRefusal (IR.declSpanOf declName)
+            let where = if declName = "" then "" else $" (while emitting '{shownDeclName declName}')"
+            Blade.Diagnostics.Codes.backendRefusal (emittedDeclSpan declName)
                 ($"{msg}{where}"))
 
 // STREAMED VALUES NEVER REACH C++.
@@ -1382,6 +1416,7 @@ let resetProgramStateCells () : unit =
     freshCell unhandledNodesStorage []
     freshCell codegenRefusalsStorage []
     freshCell currentDeclStorage ""
+    freshCell declShownNamesStorage Map.empty
     freshCell forcedDeferredIdsStorage Set.empty
     cudaKernelDefsStorage.Value <- DeclCollector()
     symmDeclsStorage.Value <- DeclCollector()

@@ -471,7 +471,16 @@ and DestructureShape =
     | DSConsRest
 
 and TypedFunctionDecl = {
+    /// The declaration's EMITTED name, unique in the program.
     Name: string
+    /// The name the PROGRAM wrote, the one every user-facing surface shows.
+    /// Equal to `Name`, except on an ARRAY INSTANCE of an arrow-parameter
+    /// declaration (TypeEnv.ArrowVariant): its `Name` is the internal
+    /// `<origin>__arrow<n>`, this is the origin's name (formalism 4.3 -- the
+    /// instance is the same declaration, not a second one). Carried onto the
+    /// IR callable (IRCallable.SourceName); `isArrayInstance` tells the two
+    /// kinds apart.
+    SourceName: string
     FuncId: IRId
     TypeParams: string list
     Params: TypedParam list
@@ -528,6 +537,52 @@ type TypedModule = {
 type TypedProgram = {
     Modules: TypedModule list
 }
+
+/// An ARRAY INSTANCE of an arrow-parameter declaration (TypeEnv.ArrowVariant,
+/// TypedFunctionDecl.SourceName): the origin re-checked with an arrow
+/// parameter fixed to an array. It is the SAME declaration as far as the
+/// program is concerned -- its body is the origin's source, its spans the
+/// origin's -- so a surface listing what the program declares skips it.
+let isArrayInstance (f: TypedFunctionDecl) : bool = f.Name <> f.SourceName
+
+/// Each array instance's binder id -> its ORIGIN declaration's, for the
+/// instances whose origin is in `tp` (the declaration of the instance's
+/// SourceName at the instance's own name span -- the instance is checked from
+/// the origin's source, so the two share it). A call that targets an instance
+/// (`walk(A, 2)` names the instance's id) is a use of the origin.
+let arrayInstanceOrigins (tp: TypedProgram) : Map<IRId, IRId> =
+    let funcs =
+        [ for m in tp.Modules do
+            for d in m.Decls do
+                match d with
+                | TDeclFunction f -> yield f
+                | _ -> () ]
+    let origins =
+        funcs
+        |> List.filter (isArrayInstance >> not)
+        |> List.map (fun f -> ((f.Name, f.NameSpan), f.FuncId))
+        |> Map.ofList
+    funcs
+    |> List.filter isArrayInstance
+    |> List.choose (fun f ->
+        Map.tryFind (f.SourceName, f.NameSpan) origins |> Option.map (fun o -> (f.FuncId, o)))
+    |> Map.ofList
+
+/// The typed program as the PROGRAM wrote it: every array instance dropped
+/// (isArrayInstance). What the editor-facing collectors (Ide.fs) and the
+/// REPL's session listing read; lowering keeps the instances. A use of an
+/// instance elsewhere in the program still names the instance's id --
+/// arrayInstanceOrigins maps it back to the declaration.
+let withoutArrayInstances (tp: TypedProgram) : TypedProgram =
+    { tp with
+        Modules =
+            tp.Modules |> List.map (fun m ->
+                { m with
+                    Decls =
+                        m.Decls |> List.filter (fun d ->
+                            match d with
+                            | TDeclFunction f -> not (isArrayInstance f)
+                            | _ -> true) }) }
 
 /// Create a typed expression with a given kind and type
 let mkTyped kind ty : TypedExpr = 

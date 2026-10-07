@@ -111,6 +111,9 @@ module ReplTypes =
                     acc <- Map.add b.Name (RVal ty) acc
                     for (n, _, t) in b.SubBindings do
                         acc <- Map.add n (RVal (valTy n t)) acc
+                // An arrow parameter's array instance (`walk__arrow1`) is its
+                // origin's declaration, not a session name of its own.
+                | TDeclFunction f when isArrayInstance f -> ()
                 | TDeclFunction f ->
                     acc <- Map.add f.Name
                                (RFunc (funcSig (Map.tryFind f.Name srcFuncs) f)) acc
