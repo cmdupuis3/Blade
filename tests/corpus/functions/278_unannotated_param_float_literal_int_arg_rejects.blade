@@ -2,7 +2,7 @@
 // ERROR: BL3019 @ 9:16
 // ERROR-CONTAINS: Int64 + Float64 is Float64
 // ============================================================================
-// `x` is an anonymous `T` (functions/259), so `x + 1.0` is typed `T`, and the
+// `x` is an anonymous `T` (functions/269), so `x + 1.0` is typed `T`, and the
 // Int64 instance `addone(3)` would truncate the Float64 sum -- the same
 // refusal as the spelled `x: T` (functions/229). `3` is an Int64 literal;
 // write `addone(3.0)`.

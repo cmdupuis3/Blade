@@ -2,7 +2,7 @@
 // ============================================================================
 // A top-level `let inc = lambda(x) -> x + 1` that is only ever applied IS
 // `function inc(x) = x + 1` (TypeCheck.generalizeArrowLetLambdas), whose
-// unannotated parameter is generic (functions/259): each call decides.
+// unannotated parameter is generic (functions/269): each call decides.
 // ============================================================================
 let inc = lambda(x) -> x + 1
 let a: Int64 = inc(6) / 4

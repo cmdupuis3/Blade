@@ -1,7 +1,7 @@
 // TEST: An Int64 arrow read beside a Float64 argument is refused, never truncated (rejects)
 // ERROR: BL3001 @ 8:19
 // ============================================================================
-// `c(0) + x` makes the read and `x` one type variable (functions/261), and the
+// `c(0) + x` makes the read and `x` one type variable (functions/271), and the
 // Int64 array decides it first: the Float64 `2.5` would have to narrow into
 // it, which a call never does. It used to compile `x` as a defaulted Float64
 // beside an Int64 read typed as the result -- a truncation g++ refused.

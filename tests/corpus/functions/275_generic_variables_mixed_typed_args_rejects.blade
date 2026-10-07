@@ -2,7 +2,7 @@
 // ERROR: BL3999 @ 9:16
 // ERROR-CONTAINS: argument 1 makes it Int64 while argument 2 makes it Float64
 // ============================================================================
-// `x + y` makes `T` and `U` one variable (functions/264), so an Int64 and a
+// `x + y` makes `T` and `U` one variable (functions/274), so an Int64 and a
 // Float64 argument disagree about it: the Int64 sum would truncate the 2.5.
 // Convert one: `add(Float64(n), 2.5)`.
 function add(x: T, y: U) = x + y

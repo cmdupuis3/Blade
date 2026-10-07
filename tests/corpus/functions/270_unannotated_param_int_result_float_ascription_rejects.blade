@@ -1,7 +1,7 @@
 // TEST: An Int64 call of an unannotated-parameter function is not a Float64 (rejects)
 // ERROR: BL3001 @ 7:22
 // ============================================================================
-// `inc(6)` is the Int64 instance of `inc` (functions/259), so its result is
+// `inc(6)` is the Int64 instance of `inc` (functions/269), so its result is
 // an Int64 VALUE, and a value is not converted by an ascription -- only a
 // literal adapts. It was a Float64 when `x` defaulted to Float64.
 function inc(x) = x + 1

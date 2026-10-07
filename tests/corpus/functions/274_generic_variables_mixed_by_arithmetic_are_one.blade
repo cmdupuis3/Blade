@@ -6,7 +6,7 @@
 // signature names one, and the caller converts. So arithmetic between two
 // bare generic variables -- declared or unannotated -- makes them one: a
 // literal argument adapts to the other (`add(2.5, 1)`), two different typed
-// arguments are refused (functions/265).
+// arguments are refused (functions/275).
 // ============================================================================
 function add(x: T, y: U) = x + y
 let s: Float64 = add(2.5, 1)
