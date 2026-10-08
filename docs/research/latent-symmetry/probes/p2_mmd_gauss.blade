@@ -1,0 +1,48 @@
+// TEST: p2 Gaussian-kernel MMD^2, differentiable in L (Y = Z L), sigma^2 = 2
+// d_ij = |a_i|^2 + |b_j|^2 - 2 <a_i, b_j>, K = exp(-d / (2 sigma^2))
+import ad as ad
+type N = Idx<5>
+type D = Idx<3>
+
+let X: Array<Float64 like N, D> = [[0.5, -1.0, 0.25], [1.0, 0.5, -0.5], [-0.75, 0.25, 1.0], [0.0, 1.5, -0.25], [0.3, -0.2, 0.8]]
+let Z: Array<Float64 like N, D> = [[1.0, 0.0, -0.5], [0.25, 0.75, 0.5], [-0.5, 1.0, 0.0], [0.6, -0.4, 0.2], [-1.0, 0.3, 0.7]]
+let L0: Array<Float64 like D, D> = [[1.0, 0.2, 0.0], [0.1, 0.9, 0.3], [0.0, -0.2, 1.1]]
+let static s2 = 2.0
+
+// squared norms come from the Gram diagonals: |x_i|^2 = gxx(i, i)
+function mmd2g(x: Array<Float64 like N, D>, z: Array<Float64 like N, D>, l: Array<Float64 like D, D>) -> Float64 = {
+    let lt = transpose(l, [0, 1])
+    let y = gram(z, lt)
+    let gxx = gram(x, x)
+    let gyy = gram(y, y)
+    let gxy = gram(x, y)
+    let kxx = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> exp(-(gxx(i, i) + gxx(j, j) - 2.0 * gxx(i, j)) / (2.0 * s2)) |> compute
+    let kyy = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> exp(-(gyy(i, i) + gyy(j, j) - 2.0 * gyy(i, j)) / (2.0 * s2)) |> compute
+    let kxy = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> exp(-(gxx(i, i) + gyy(j, j) - 2.0 * gxy(i, j)) / (2.0 * s2)) |> compute
+    let rxx = reduce(kxx, (+))
+    let ryy = reduce(kyy, (+))
+    let rxy = reduce(kxy, (+))
+    let sxx = reduce(rxx, (+))
+    let syy = reduce(ryy, (+))
+    let sxy = reduce(rxy, (+))
+    (sxx + syy - 2.0 * sxy) / 25.0
+}
+
+let v0 = mmd2g(X, Z, L0)
+// numpy reference: 0.037017006611409754
+let v_ok = abs(v0 - 0.037017006611409754) < 0.000000000001
+// EXPECT: v_ok = true
+let mut dX: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dZ: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dL: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let gv = ad.grad(mmd2g)(X, Z, L0, dX, dZ, dL)
+let h = 0.000001
+let E21: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+let fd21 = (mmd2g(X, Z, L0 + h * E21) - mmd2g(X, Z, L0 - h * E21)) / (2.0 * h)
+let ad21 = dL(2, 1)
+let fd_ok = abs(fd21 - ad21) < 0.000001 * (abs(ad21) + 1.0)
+// EXPECT: fd_ok = true
+let zND: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (jp, jt) = ad.jvp(mmd2g)(X, Z, L0, zND, zND, E21)
+let jvp_ok = abs(jt - ad21) < 0.000000000001
+// EXPECT: jvp_ok = true

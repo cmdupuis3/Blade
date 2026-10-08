@@ -1,0 +1,30 @@
+// TEST: p7b reverse over forward: ad.grad of a scalar loss whose body calls ad.jvp(f)
+import ad as ad
+type D = Idx<3>
+type E = Idx<2>
+function f(x: Array<Float64 like D>) -> Array<Float64 like E> = {
+    let y = [x(0) * x(1) + x(2), x(0) * x(0) - x(1) * x(2)]
+    y
+}
+let x: Array<Float64 like D> = [0.5, -1.0, 2.0]
+let A: Array<Float64 like D, D> = [[0.0, 0.4, -0.2], [-0.4, 0.0, 0.3], [0.2, -0.3, 0.0]]
+let B: Array<Float64 like E, E> = [[0.1, 0.5], [-0.5, 0.2]]
+
+function lie_loss(a: Array<Float64 like D, D>, b: Array<Float64 like E, E>) -> Float64 = {
+    let ax = method_for(range<D>) <@> lambda(i: D) -> a(i, 0) * x(0) + a(i, 1) * x(1) + a(i, 2) * x(2) |> compute
+    let t = ad.jvp(f)(x, ax)
+    let fx = t[0]
+    let jax = t[1]
+    let r0 = jax(0) - (b(0, 0) * fx(0) + b(0, 1) * fx(1))
+    let r1 = jax(1) - (b(1, 0) * fx(0) + b(1, 1) * fx(1))
+    r0 * r0 + r1 * r1
+}
+let lv0 = lie_loss(A, B)
+// hand: r = [0.125, -0.9] -> 0.015625 + 0.81 = 0.825625
+// EXPECT: lv0 = 0.825625
+let mut dA: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dB: Array<Float64 like E, E> = [[0.0, 0.0], [0.0, 0.0]]
+let lv = ad.grad(lie_loss)(A, B, dA, dB)
+// hand: dL/dA = 2 (J^T r) x^T (see p7), dL/dB = -2 r f^T
+// EXPECT: dA = [[-1.025, 2.05, -4.1], [1.8625, -3.725, 7.45], [-0.775, 1.55, -3.1]]
+// EXPECT: dB = [[-0.375, -0.5625], [2.7, 4.05]]

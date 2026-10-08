@@ -1,0 +1,8 @@
+// TEST: p6y indexed RNG draw written directly in a let rec arm (top-level let rec)
+import rand as r
+type Epochs = Idx<5>
+let rec walk: Array<Float64 like Epochs> =
+    match walk with
+    | zero -> zero
+    | zero :: n -> zero :: 0.0
+    | prefix :: n -> prefix :: prefix(n - 1) + r.normal_at(7, 3, n, 1)(0)

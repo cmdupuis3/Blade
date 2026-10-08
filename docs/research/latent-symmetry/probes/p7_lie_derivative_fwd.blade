@@ -1,0 +1,46 @@
+// TEST: p7 Lie-derivative residual via forward mode: r = J_f(x) (A x) - rho(A) f(x), and J^T r via ad.vjp
+import ad as ad
+type D = Idx<3>
+type E = Idx<2>
+
+// encoder f: R^3 -> R^2 (polynomial)
+function f(x: Array<Float64 like D>) -> Array<Float64 like E> = {
+    let y = [x(0) * x(1) + x(2), x(0) * x(0) - x(1) * x(2)]
+    y
+}
+
+let x: Array<Float64 like D> = [0.5, -1.0, 2.0]
+let A: Array<Float64 like D, D> = [[0.0, 0.4, -0.2], [-0.4, 0.0, 0.3], [0.2, -0.3, 0.0]]
+let B: Array<Float64 like E, E> = [[0.1, 0.5], [-0.5, 0.2]]
+
+// A x as a gram_apply against the identity (module level: plain code)
+let Id3: Array<Float64 like D, D> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+let Ax = gram_apply(A, Id3, x)
+// forward mode: (f(x), J (A x))
+let (fx, jAx) = ad.jvp(f)(x, Ax)
+let Id2: Array<Float64 like E, E> = [[1.0, 0.0], [0.0, 1.0]]
+let Bf = gram_apply(B, Id2, fx)
+let r = jAx - Bf
+// hand: f = [1.5, 2.25], J = [[x1, x0, 1], [2 x0, -x2, -x1]] = [[-1, 0.5, 1], [1, -2, 1]]
+// A x = [-0.8, 0.4, 0.4], J A x = [1.4, -1.2], B f = [1.275, -0.3], r = [0.125, -0.9]
+// EXPECT: fx = [1.5, 2.25]
+// EXPECT: jAx = [1.4, -1.2]
+
+// reverse: J^T r accumulated into a buffer by the seeded vjp
+let mut jtr: Array<Float64 like D> = [0.0, 0.0, 0.0]
+let fv = ad.vjp(f)(x, r, jtr)
+// hand: J^T r = [-1*0.125 + 1*(-0.9), 0.5*0.125 - 2*(-0.9), 0.125 - 0.9] = [-1.025, 1.8625, -0.775]
+// EXPECT: jtr = [-1.025, 1.8625, -0.775]
+
+// dL/dA for L = |r|^2 = 2 (J^T r) x^T : outer product through gram of two (3 x 1) columns
+let U: Array<Float64 like D, Idx<1>> = [[jtr(0)], [jtr(1)], [jtr(2)]]
+let Xc: Array<Float64 like D, Idx<1>> = [[x(0)], [x(1)], [x(2)]]
+let G = gram(U, Xc)
+let dLdA = 2.0 * G
+// the same outer product with the all-pairs operator
+let dLdA2 = 2.0 * (jtr [*] x)
+// NOTE: `dLdA - dLdA2` is refused BL3999 -- gram's result axes are UNNAMED, [*]'s are (D, D)
+let outer_agree = abs(dLdA(0, 0) - dLdA2(0, 0)) + abs(dLdA(1, 2) - dLdA2(1, 2)) + abs(dLdA(2, 1) - dLdA2(2, 1))
+// EXPECT: outer_agree = 0.0
+// hand: 2 (J^T r) x^T row 1 = 2 * 1.8625 * [0.5, -1, 2] = [1.8625, -3.725, 7.45]
+// EXPECT: dLdA2 = [[-1.025, 2.05, -4.1], [1.8625, -3.725, 7.45], [-0.775, 1.55, -3.1]]

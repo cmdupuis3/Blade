@@ -1,0 +1,55 @@
+// TEST: p3a expm by scaling-and-squaring Taylor (degree 6, s = 3), unrolled gram chain
+// A = [[0, t], [-t, 0]] -> expm(A) = [[cos t, sin t], [-sin t, cos t]], t = 0.5
+import ad as ad
+type I = Idx<2>
+
+// P Q as gram(P, Q^T)
+function mm(p: Array<Float64 like I, I>, q: Array<Float64 like I, I>) -> Array<Float64 like I, I> = {
+    let qt = transpose(q, [0, 1])
+    let r = gram(p, qt)
+    r
+}
+
+function expm6(a: Array<Float64 like I, I>) -> Array<Float64 like I, I> = {
+    let id = [[1.0, 0.0], [0.0, 1.0]]
+    let b = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> a(i, j) / 8.0 |> compute
+    let b2 = mm(b, b)
+    let b3 = mm(b2, b)
+    let b4 = mm(b3, b)
+    let b5 = mm(b4, b)
+    let b6 = mm(b5, b)
+    let t = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> id(i, j) + b(i, j) + b2(i, j) / 2.0 + b3(i, j) / 6.0 + b4(i, j) / 24.0 + b5(i, j) / 120.0 + b6(i, j) / 720.0 |> compute
+    let t2 = mm(t, t)
+    let t4 = mm(t2, t2)
+    let t8 = mm(t4, t4)
+    t8
+}
+
+// scalar readout for grad: 2 E(0, 1) + E(1, 1)
+function loss(a: Array<Float64 like I, I>) -> Float64 = {
+    let e = expm6(a)
+    2.0 * e(0, 1) + e(1, 1)
+}
+
+let A: Array<Float64 like I, I> = [[0.0, 0.5], [-0.5, 0.0]]
+let E = expm6(A)
+let err_cos = abs(E(0, 0) - cos(0.5)) + abs(E(1, 1) - cos(0.5))
+let err_sin = abs(E(0, 1) - sin(0.5)) + abs(E(1, 0) + sin(0.5))
+// degree-6 / s=3 truncation error is ~5e-12 per entry (numpy, same algorithm:
+// E - expm(A) = [[-2.548e-12, 5.336e-12], [-5.336e-12, -2.548e-12]]), so 1e-12 is too tight
+let val_ok = err_cos + err_sin < 0.0000000001
+// EXPECT: val_ok = true
+// the exact algorithm value: numpy t6 loss = 1.8364336391069036
+let alg_ok = abs(2.0 * E(0, 1) + E(1, 1) - 1.8364336391069036) < 0.00000000000001
+// EXPECT: alg_ok = true
+
+let mut dA: Array<Float64 like I, I> = [[0.0, 0.0], [0.0, 0.0]]
+let lv = ad.grad(loss)(A, dA)
+let h = 0.000001
+let E10: Array<Float64 like I, I> = [[0.0, 0.0], [1.0, 0.0]]
+let fd10 = (loss(A + h * E10) - loss(A - h * E10)) / (2.0 * h)
+let grad_fd_ok = abs(fd10 - dA(1, 0)) < 0.000001 * (abs(dA(1, 0)) + 1.0)
+// EXPECT: grad_fd_ok = true
+let (jp, jt) = ad.jvp(loss)(A, E10)
+let jvp_ok = abs(jt - dA(1, 0)) < 0.000000000001
+// EXPECT: jvp_ok = true

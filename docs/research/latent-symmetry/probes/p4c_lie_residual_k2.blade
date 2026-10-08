@@ -1,0 +1,34 @@
+// TEST: p4c derivation-action residual on the second moment: R = A M + M A^T, loss = |R|_F^2, grad wrt A
+import ad as ad
+type N = Idx<5>
+type D = Idx<3>
+let Zt: Array<Float64 like D, N> = [[1.0, 0.25, -0.5, 0.6, -1.0], [0.0, 0.75, 1.0, -0.4, 0.3], [-0.5, 0.5, 0.0, 0.2, 0.7]]
+
+function m2k(a: Array<Float64 like N>, b: Array<Float64 like N>) where comm(a, b) -> Float64 =
+    reduce(a * b, (+)) / 5.0
+let M2s = method_for(Zt, Zt) <@> m2k |> compute
+// the moment is SymIdx<2, D>-stored; the differentiated function takes it DENSE
+let M2: Array<Float64 like D, D> = decompact(M2s, 0)
+
+function lie_loss(a: Array<Float64 like D, D>, m: Array<Float64 like D, D>) -> Float64 = {
+    let am = gram(a, m)
+    let ma = gram(m, a)
+    let r = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> (am(i, j) + ma(i, j)) * (am(i, j) + ma(i, j)) |> compute
+    let rs = reduce(r, (+))
+    let s = reduce(rs, (+))
+    s
+}
+
+// a generator: so(3) part + a small symmetric part (so the residual is nonzero)
+let A0: Array<Float64 like D, D> = [[0.1, 0.4, -0.2], [-0.4, 0.0, 0.3], [0.2, -0.3, -0.1]]
+let lv0 = lie_loss(A0, M2)
+// numpy: 0.17602054500000003, dA = 4 R M
+// EXPECT: lv0 = 0.176020545
+let mut dA: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dM: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let lv = ad.grad(lie_loss)(A0, M2, dA, dM)
+let h = 0.000001
+let E02: Array<Float64 like D, D> = [[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let fd02 = (lie_loss(A0 + h * E02, M2) - lie_loss(A0 - h * E02, M2)) / (2.0 * h)
+let fd_ok = abs(fd02 - dA(0, 2)) < 0.000001 * (abs(dA(0, 2)) + 1.0)
+// EXPECT: fd_ok = true

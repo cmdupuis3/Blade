@@ -1,0 +1,9 @@
+// TEST: p4c-x gram with a SymIdx-stored operand (outside AD)
+type N = Idx<5>
+type D = Idx<3>
+let Zt: Array<Float64 like D, N> = [[1.0, 0.25, -0.5, 0.6, -1.0], [0.0, 0.75, 1.0, -0.4, 0.3], [-0.5, 0.5, 0.0, 0.2, 0.7]]
+function m2k(a: Array<Float64 like N>, b: Array<Float64 like N>) where comm(a, b) -> Float64 =
+    reduce(a * b, (+)) / 5.0
+let M2s = method_for(Zt, Zt) <@> m2k |> compute
+let A0: Array<Float64 like D, D> = [[0.1, 0.4, -0.2], [-0.4, 0.0, 0.3], [0.2, -0.3, -0.1]]
+let am = gram(A0, M2s)

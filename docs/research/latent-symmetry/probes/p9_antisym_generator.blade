@@ -1,0 +1,43 @@
+// TEST: p9 antisymmetric generator storage AntisymIdx<2, Idx<4>>: literal, signed reads, matvec, decompact, gram
+type I = Idx<4>
+type G = AntisymIdx<2, I>
+// strict-upper rows: (0,1) (0,2) (0,3) | (1,2) (1,3) | (2,3) | [] (the empty last row is required)
+let L: Array<Float64 like G> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0], []]
+let l01 = L(0, 1)
+let l10 = L(1, 0)
+let l32 = L(3, 2)
+let l22 = L(2, 2)
+// EXPECT: l01 = 1.0
+// EXPECT: l10 = -1.0
+// EXPECT: l32 = -6.0
+// EXPECT: l22 = 0.0
+
+let v: Array<Float64 like I> = [1.0, -1.0, 2.0, 0.5]
+// matvec y(i) = sum_j L(i, j) v(j), inner reduce over a nested range map
+let y = method_for(range<I>) <@> lambda(i: I) -> reduce(method_for(range<I>) <@> lambda(j: I) -> L(i, j) * v(j) |> compute, (+)) |> compute
+// hand: dense L = [[0,1,2,3],[-1,0,4,5],[-2,-4,0,6],[-3,-5,-6,0]]
+//   y = [0 - 1 + 4 + 1.5, -1 + 0 + 8 + 2.5, -2 + 4 + 0 + 3, -3 + 5 - 12 + 0] = [4.5, 9.5, 5.0, -10.0]
+// EXPECT: y = [4.5, 9.5, 5.0, -10.0]
+
+// decompact to a dense 4 x 4
+let Ld = decompact(L, 0)
+// EXPECT: Ld = [[0.0, 1.0, 2.0, 3.0], [-1.0, 0.0, 4.0, 5.0], [-2.0, -4.0, 0.0, 6.0], [-3.0, -5.0, -6.0, 0.0]]
+
+// compact L is refused as a gram/gram_apply operand (BL3007 / BL3999) and has no partial row view (BL3999);
+// the decompacted dense Ld is an ordinary matrix:
+let Id4: Array<Float64 like I, I> = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+let y2 = gram_apply(Ld, Id4, v)
+// EXPECT: y2 = [4.5, 9.5, 5.0, -10.0]
+let LLt = gram(Ld, Ld)
+// L L^T diagonal = row norms^2: [14, 42, 56, 70]
+let llt00 = LLt(0, 0)
+let llt33 = LLt(3, 3)
+// EXPECT: llt00 = 14.0
+// EXPECT: llt33 = 70.0
+
+// producing compact antisym storage from a DENSE matrix: skew part over range<G>.
+// TRAP: strict-simplex kernel params are prefix offsets, canonical (i, j) = (p0, p0 + p1 + 1)
+let W: Array<Float64 like I, I> = [[0.0, 3.0, 1.0, 2.0], [1.0, 0.0, 6.0, 4.0], [-3.0, -2.0, 0.0, 8.0], [-4.0, -6.0, -4.0, 0.0]]
+let Sk = method_for(range<G>) <@> lambda(p0, p1) -> (W(p0, p0 + p1 + 1) - W(p0 + p1 + 1, p0)) / 2.0 |> compute
+// hand: (W - W^T)/2 strict upper = (0,1) 1, (0,2) 2, (0,3) 3, (1,2) 4, (1,3) 5, (2,3) 6
+// EXPECT: Sk = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0], []]

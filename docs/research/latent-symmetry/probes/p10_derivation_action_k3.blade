@@ -1,0 +1,21 @@
+// TEST: p10 derivation action rho_3(A) M over SymIdx<3, D> storage vs the dense formula
+type N = Idx<5>
+type D = Idx<3>
+type S3 = SymIdx<3, D>
+let Zt: Array<Float64 like D, N> = [[1.0, 0.25, -0.5, 0.6, -1.0], [0.0, 0.75, 1.0, -0.4, 0.3], [-0.5, 0.5, 0.0, 0.2, 0.7]]
+function m3k(a: Array<Float64 like N>, b: Array<Float64 like N>, c: Array<Float64 like N>) where comm(a, b, c) -> Float64 =
+    reduce(a * b * c, (+)) / 5.0
+let M3 = method_for(Zt, Zt, Zt) <@> m3k |> compute
+let M3d = decompact(decompact(M3, 0), 1)
+let A: Array<Float64 like D, D> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+// slot-s contraction read through mirrored reads of the compact M3; summed over the three slots
+function slot(i: Int64, j: Int64, l: Int64) -> Float64 =
+    A(i, 0) * M3(0, j, l) + A(i, 1) * M3(1, j, l) + A(i, 2) * M3(2, j, l)
+// canonical-tuple range: params are PREFIX OFFSETS, the tuple is (p0, p0+p1, p0+p1+p2)
+let R = method_for(range<S3>) <@> lambda(p0, p1, p2) -> slot(p0, p0 + p1, p0 + p1 + p2) + slot(p0 + p1, p0, p0 + p1 + p2) + slot(p0 + p1 + p2, p0, p0 + p1) |> compute
+let Rd = decompact(decompact(R, 0), 1)
+// dense reference over all 27 cells from the dense tensor
+let Rref = method_for(range<D>, range<D>, range<D>) <@> lambda(i: D, j: D, l: D) -> (A(i, 0) * M3d(0, j, l) + A(i, 1) * M3d(1, j, l) + A(i, 2) * M3d(2, j, l)) + (A(j, 0) * M3d(i, 0, l) + A(j, 1) * M3d(i, 1, l) + A(j, 2) * M3d(i, 2, l)) + (A(l, 0) * M3d(i, j, 0) + A(l, 1) * M3d(i, j, 1) + A(l, 2) * M3d(i, j, 2)) |> compute
+let E = method_for(range<D>, range<D>, range<D>) <@> lambda(i: D, j: D, l: D) -> (Rd(i, j, l) - Rref(i, j, l)) * (Rd(i, j, l) - Rref(i, j, l)) |> compute
+let err = reduce(E, (+), axes = 3)
+// EXPECT: err = 0.0

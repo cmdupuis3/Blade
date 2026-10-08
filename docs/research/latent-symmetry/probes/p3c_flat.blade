@@ -1,0 +1,34 @@
+// TEST: p3c workaround: the action recurrence flattened to a rank-1 scalar-slice let rec
+// cell n = 3 k + i holds x_k(i); seed rows via a static table, 1/k via a static table
+import ad as ad
+type D = Idx<3>
+type F = Idx<54>
+
+let w: Array<Float64 like D> = [1.0, 2.0, -1.0]
+let seed = method_for(range<F>) <@> lambda(n: F) -> if n == 0 then 1.0 else if n == 1 then -0.5 else if n == 2 then 0.25 else 0.0 |> compute
+let invk = method_for(range<F>) <@> lambda(n: F) -> if n < 3 then 0.0 else 1.0 / Float64(n / 3) |> compute
+
+function lossf(a: Array<Float64 like D, D>) -> Float64 = {
+    let rec xs: Array<Float64 like F> =
+        match xs with
+        | zero -> zero
+        | zero :: s -> zero :: 1.0
+        | prefix :: n -> prefix :: seed(n) + invk(n) * (a(n % 3, 0) * prefix(n - 3 - n % 3) + a(n % 3, 1) * prefix(n - 2 - n % 3) + a(n % 3, 2) * prefix(n - 1 - n % 3))
+    let wx = method_for(range<F>) <@> lambda(n: F) -> w(n % 3) * xs(n) |> compute
+    let s = reduce(wx, (+))
+    s
+}
+
+let A3: Array<Float64 like D, D> = [[0.0, 0.3, -0.2], [-0.3, 0.0, 0.4], [0.2, -0.4, 0.1]]
+let lc = lossf(A3)
+let val_ok = abs(lc - (-1.1083507058635789)) < 0.000000000001
+// EXPECT: val_ok = true
+let mut dA: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let lv = ad.grad(lossf)(A3, dA)
+// scipy FD row 1: [2.00224439, -1.2652934, 1.05222991]
+let grad_ok = abs(dA(1, 0) - 2.00224439) + abs(dA(1, 1) + 1.2652934) + abs(dA(1, 2) - 1.05222991) < 0.0000001
+// EXPECT: grad_ok = true
+let S: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (jp, jt) = ad.jvp(lossf)(A3, S)
+let jvp_ok = abs(jt - dA(1, 0)) < 0.000000000001
+// EXPECT: jvp_ok = true

@@ -1,0 +1,36 @@
+// TEST: r2 (ACCEPTED) reduce(k, (+), axes = 2) over a range-map local under ad.grad, vs the nested fold
+import ad as ad
+type N = Idx<5>
+type D = Idx<3>
+let X: Array<Float64 like N, D> = [[0.5, -1.0, 0.25], [1.0, 0.5, -0.5], [-0.75, 0.25, 1.0], [0.0, 1.5, -0.25], [0.3, -0.2, 0.8]]
+let Z: Array<Float64 like N, D> = [[1.0, 0.0, -0.5], [0.25, 0.75, 0.5], [-0.5, 1.0, 0.0], [0.6, -0.4, 0.2], [-1.0, 0.3, 0.7]]
+let L0: Array<Float64 like D, D> = [[1.0, 0.2, 0.0], [0.1, 0.9, 0.3], [0.0, -0.2, 1.1]]
+let mut dX: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dZ: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dL: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+function f(x: Array<Float64 like N, D>, z: Array<Float64 like N, D>, l: Array<Float64 like D, D>) -> Float64 = {
+    let lt = transpose(l, [0, 1])
+    let y = gram(z, lt)
+    let g = gram(x, y)
+    let k = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> g(i, j) * g(i, j) |> compute
+    let s = reduce(k, (+), axes = 2)
+    s
+}
+let v = ad.grad(f)(X, Z, L0, dX, dZ, dL)
+function f2(x: Array<Float64 like N, D>, z: Array<Float64 like N, D>, l: Array<Float64 like D, D>) -> Float64 = {
+    let lt = transpose(l, [0, 1])
+    let y = gram(z, lt)
+    let g = gram(x, y)
+    let k = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> g(i, j) * g(i, j) |> compute
+    let rs = reduce(k, (+))
+    let s = reduce(rs, (+))
+    s
+}
+let mut eX: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut eZ: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut eL: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let v2 = ad.grad(f2)(X, Z, L0, eX, eZ, eL)
+let agree = abs(v - v2) + reduce(reduce(abs(dL - eL), (+)), (+))
+// (summation order differs: agree is ~1.8e-15, not 0)
+let agree_ok = agree < 0.000000000001
+// EXPECT: agree_ok = true

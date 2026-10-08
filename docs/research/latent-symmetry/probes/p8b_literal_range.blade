@@ -1,0 +1,40 @@
+// TEST: p8b the rank-3 assembly spelled with literal range<Idx<3>, Idx<3>, Idx<3>> and untyped lambda params
+import math as m
+type G = Idx<3>
+type V = Idx<3>
+let Lx: Array<Float64 like V, V> = [[0.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
+let Ly: Array<Float64 like V, V> = [[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+let Lz: Array<Float64 like V, V> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+
+// matrix product P Q = gram(P, Q^T); bracket [P, Q] = PQ - QP
+function mm(p: Array<Float64 like V, V>, q: Array<Float64 like V, V>) -> Array<Float64 like V, V> = gram(p, transpose(q, [0, 1]))
+function br(p: Array<Float64 like V, V>, q: Array<Float64 like V, V>) -> Array<Float64 like V, V> = {
+    let pq = mm(p, q)
+    let qp = mm(q, p)
+    let d = pq - qp
+    d
+}
+// Frobenius inner product: reduce of the elementwise product (dense operands)
+function fip(p: Array<Float64 like V, V>, q: Array<Float64 like V, V>) -> Float64 = reduce(reduce(p * q, (+)), (+))
+
+let Bxy = br(Lx, Ly)
+let Bzx = br(Lz, Lx)
+// EXPECT: Bxy = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+
+// stack the basis on a leading generator axis, then c(i, j, k) = <[Li, Lj], Lk> / <Lk, Lk> over range<G, G, G>
+let Ls = stack(Lx, Ly, Lz)
+let c = method_for(range<Idx<3>, Idx<3>, Idx<3>>) <@> lambda(i, j, k) -> fip(br(Ls(i), Ls(j)), Ls(k)) / fip(Ls(k), Ls(k)) |> compute
+// so(3): c(i, j, k) = epsilon_ijk
+let c012 = c(0, 1, 2)
+let c021 = c(0, 2, 1)
+let c120 = c(1, 2, 0)
+// EXPECT: c012 = 1.0
+// EXPECT: c021 = -1.0
+// EXPECT: c120 = 1.0
+
+// Killing form K(i, j) = sum_{k, l} c(i, k, l) c(j, l, k): a rank-4 product, folded twice (innermost l, then k)
+let T4 = method_for(range<G, G, G, G>) <@> lambda(i: G, j: G, k: G, l: G) -> c(i, k, l) * c(j, l, k) |> compute
+let K: Array<Float64 like G, G> = reduce(reduce(T4, (+)), (+))
+// EXPECT: K = [[-2.0, 0.0, 0.0], [0.0, -2.0, 0.0], [0.0, 0.0, -2.0]]
+let (Qk, LAMk) = m.eigh(K)
+// EXPECT: LAMk = [-2.0, -2.0, -2.0]

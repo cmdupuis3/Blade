@@ -1,0 +1,41 @@
+// TEST: p5 nullspace by SVD and by eigh of the Gram; m.eig on a non-symmetric 3x3
+import math as m
+type R = Idx<12>
+type Cc = Idx<4>
+
+// column 3 duplicates column 0, so null(C) = span{(1, 0, 0, -1)/sqrt 2}
+let C: Array<Float64 like R, Cc> = method_for(range<R, Cc>) <@> lambda(r: R, c: Cc) -> cos(0.7 * Float64(r) * ((if c == 3 then 0.0 else Float64(c)) + 1.0) + 0.3 * (if c == 3 then 0.0 else Float64(c))) |> compute
+
+// (a) SVD: A = U diag(S) V^T, S descending, so the null vector is V's LAST column V(:, 3)
+let (U, S, V) = m.svd(C)
+let s_min = S(3)
+let v0 = V(0, 3)
+let v1 = V(1, 3)
+let v2 = V(2, 3)
+let v3 = V(3, 3)
+// up to sign: |v0| = |v3| = 1/sqrt 2, v0 = -v3, v1 = v2 = 0
+let svd_ok = abs(abs(v0) - 0.7071067811865476) + abs(v0 + v3) + abs(v1) + abs(v2) < 0.000000001 && s_min < 0.000000001
+// EXPECT: svd_ok = true
+
+// (b) eigh of C^T C: gram over the transposed rows
+let Ct = transpose(C, [0, 1])
+let G = gram(Ct, Ct)
+let Gd: Array<Float64 like Cc, Cc> = decompact(G, 0)
+let (Q, LAM) = m.eigh(Gd)
+// LAM is DESCENDING, so the null eigenvector is Q's last column
+let eigh_ok = abs(abs(Q(0, 3)) - 0.7071067811865476) + abs(Q(0, 3) + Q(3, 3)) + abs(Q(1, 3)) + abs(Q(2, 3)) < 0.000000001 && abs(LAM(3)) < 0.000000001
+// EXPECT: eigh_ok = true
+
+// (c) m.eig on a non-symmetric 3x3: ad(Lz) on so(3) in the basis (Lx, Ly, Lz):
+// [Lz, Lx] = Ly, [Lz, Ly] = -Lx, [Lz, Lz] = 0  ->  eigenvalues +i, -i, 0
+let adLz: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (RE, IM) = m.eig(adLz)
+// EXPECT: RE = [0.0, 0.0, 0.0]
+// EXPECT: IM = [1.0, -1.0, 0.0]
+// a generic non-normal 3x3 (companion of (x - 0.5)(x^2 - x + 0.625), corpus math/053): 0.5 +- i sqrt(0.375), 0.5
+let Acomp: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.3125, -1.125, 1.5]]
+let (RE2, IM2) = m.eig(Acomp)
+let re0 = RE2(0)
+let im0 = IM2(0)
+let eig_ok = abs(re0 - 0.5) < 0.000000001 && abs(im0 - 0.6123724356957945) < 0.000000001
+// EXPECT: eig_ok = true

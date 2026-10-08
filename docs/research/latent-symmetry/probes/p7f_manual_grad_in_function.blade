@@ -1,0 +1,23 @@
+// TEST: p7f the hand-assembled gradient dL/dA = 2 (J^T r) x^T computed INSIDE a (non-differentiated) function
+import ad as ad
+type D = Idx<3>
+type E = Idx<2>
+function f(x: Array<Float64 like D>) -> Array<Float64 like E> = {
+    let y = [x(0) * x(1) + x(2), x(0) * x(0) - x(1) * x(2)]
+    y
+}
+let x: Array<Float64 like D> = [0.5, -1.0, 2.0]
+let A: Array<Float64 like D, D> = [[0.0, 0.4, -0.2], [-0.4, 0.0, 0.3], [0.2, -0.3, 0.0]]
+let B: Array<Float64 like E, E> = [[0.1, 0.5], [-0.5, 0.2]]
+
+function lie_grad_a(a: Array<Float64 like D, D>, b: Array<Float64 like E, E>, xs: Array<Float64 like D>) -> Array<Float64 like D, D> = {
+    let ax = method_for(range<D>) <@> lambda(i: D) -> a(i, 0) * xs(0) + a(i, 1) * xs(1) + a(i, 2) * xs(2) |> compute
+    let (fx, jax) = ad.jvp(f)(xs, ax)
+    let r = method_for(range<E>) <@> lambda(k: E) -> jax(k) - (b(k, 0) * fx(0) + b(k, 1) * fx(1)) |> compute
+    let mut jtr: Array<Float64 like D> = [0.0, 0.0, 0.0]
+    let fv = ad.vjp(f)(xs, r, jtr)
+    let g = 2.0 * (jtr [*] xs)
+    g
+}
+let dA = lie_grad_a(A, B, x)
+// EXPECT: dA = [[-1.025, 2.05, -4.1], [1.8625, -3.725, 7.45], [-0.775, 1.55, -3.1]]

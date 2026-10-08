@@ -1,0 +1,22 @@
+// TEST: p6c block arm WITHOUT ad.grad: the same descent with the hand gradient 4 (L L^T - I) L
+import rand as r
+type Epochs = Idx<20>
+type State = Idx<4>
+let noise = r.normal_at(7, 3, 0, 20)
+let traj_out = {
+    let rec traj: Array<Float64 like Epochs, State> =
+        match traj with
+        | zero -> zero
+        | zero :: n -> zero :: [1.2, 0.3, -0.2, 0.9]
+        | prefix :: n -> prefix :: {
+            let s = prefix(n - 1)
+            let e00 = s(0) * s(0) + s(1) * s(1) - 1.0
+            let e01 = s(0) * s(2) + s(1) * s(3)
+            let e11 = s(2) * s(2) + s(3) * s(3) - 1.0
+            let eta = 0.05 * (1.0 + 0.1 * noise(n))
+            [s(0) - eta * 4.0 * (e00 * s(0) + e01 * s(2)), s(1) - eta * 4.0 * (e00 * s(1) + e01 * s(3)), s(2) - eta * 4.0 * (e01 * s(0) + e11 * s(2)), s(3) - eta * 4.0 * (e01 * s(1) + e11 * s(3))]
+        }
+    traj(19)
+}
+let traj_ok = abs(traj_out(0) - 0.9728119093455324) + abs(traj_out(1) - 0.23162235009006824) + abs(traj_out(2) + 0.23161908170214515) + abs(traj_out(3) - 0.9728021041817632) < 0.000000000001
+// EXPECT: traj_ok = true

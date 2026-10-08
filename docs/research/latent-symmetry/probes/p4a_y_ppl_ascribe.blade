@@ -1,0 +1,7 @@
+// TEST: p4a-y ascribe the ppl moment result as SymIdx<2, D>
+import ppl as ppl
+type N = Idx<5>
+type D = Idx<3>
+let Zt: Array<Float64 like D, N> = [[1.0, 0.25, -0.5, 0.6, -1.0], [0.0, 0.75, 1.0, -0.4, 0.3], [-0.5, 0.5, 0.0, 0.2, 0.7]]
+let M2: Array<Float64 like SymIdx<2, D>> = ppl.moments(Zt, 2)
+let m10 = M2(1, 0)

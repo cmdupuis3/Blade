@@ -1,0 +1,38 @@
+// TEST: p6x indexed RNG draw inside the step function (refused)
+import ad as ad
+import rand as r
+type I = Idx<2>
+type Epochs = Idx<20>
+type State = Idx<4>
+
+// orthogonality loss |L L^T - I|_F^2 ; gram(l, l) is SymIdx-stored, read through a range map
+// (if/else is refused in reverse mode -- BL5500 -- so the identity is a literal local)
+function oloss(l: Array<Float64 like I, I>) -> Float64 = {
+    let id = [[1.0, 0.0], [0.0, 1.0]]
+    let g = gram(l, l)
+    let e = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> (g(i, j) - id(i, j)) * (g(i, j) - id(i, j)) |> compute
+    let rs = reduce(e, (+))
+    let s = reduce(rs, (+))
+    s
+}
+
+// one step: reconstitute L, draw w at address (key 7, stream 3, sample n), grad, descend with a noisy rate
+function sgd_step(s: Array<Float64 like State>, n: Int64) -> Array<Float64 like State> = {
+    let l = [[s(0), s(1)], [s(2), s(3)]]
+    let w = r.normal_at(7, 3, n, 1)
+    let mut dl = [[0.0, 0.0], [0.0, 0.0]]
+    let lv = ad.grad(oloss)(l, dl)
+    let eta = 0.05 * (1.0 + 0.1 * w(0))
+    [s(0) - eta * dl(0, 0), s(1) - eta * dl(0, 1), s(2) - eta * dl(1, 0), s(3) - eta * dl(1, 1)]
+}
+
+let traj_out = {
+    let rec traj: Array<Float64 like Epochs, State> =
+        match traj with
+        | zero -> zero
+        | zero :: n -> zero :: [1.2, 0.3, -0.2, 0.9]
+        | prefix :: n -> prefix :: sgd_step(prefix(n - 1), n)
+    traj(19)
+}
+let final_loss = oloss([[traj_out(0), traj_out(1)], [traj_out(2), traj_out(3)]])
+let noise = r.normal_at(7, 3, 0, 20)

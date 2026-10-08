@@ -1,0 +1,32 @@
+// TEST: p6b the same training loop with the step written as a { } BLOCK arm (no helper function)
+import ad as ad
+import rand as r
+type I = Idx<2>
+type Epochs = Idx<20>
+type State = Idx<4>
+function oloss(l: Array<Float64 like I, I>) -> Float64 = {
+    let id = [[1.0, 0.0], [0.0, 1.0]]
+    let g = gram(l, l)
+    let e = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> (g(i, j) - id(i, j)) * (g(i, j) - id(i, j)) |> compute
+    let rs = reduce(e, (+))
+    let s = reduce(rs, (+))
+    s
+}
+let noise = r.normal_at(7, 3, 0, 20)
+let traj_out = {
+    let rec traj: Array<Float64 like Epochs, State> =
+        match traj with
+        | zero -> zero
+        | zero :: n -> zero :: [1.2, 0.3, -0.2, 0.9]
+        | prefix :: n -> prefix :: {
+            let s = prefix(n - 1)
+            let l = [[s(0), s(1)], [s(2), s(3)]]
+            let mut dl = [[0.0, 0.0], [0.0, 0.0]]
+            let lv = ad.grad(oloss)(l, dl)
+            let eta = 0.05 * (1.0 + 0.1 * noise(n))
+            [s(0) - eta * dl(0, 0), s(1) - eta * dl(0, 1), s(2) - eta * dl(1, 0), s(3) - eta * dl(1, 1)]
+        }
+    traj(19)
+}
+let traj_ok = abs(traj_out(0) - 0.9728119093455324) + abs(traj_out(1) - 0.23162235009006824) + abs(traj_out(2) + 0.23161908170214515) + abs(traj_out(3) - 0.9728021041817632) < 0.000000000001
+// EXPECT: traj_ok = true

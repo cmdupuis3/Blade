@@ -1,0 +1,13 @@
+// TEST: r11 if/else in a range-map kernel inside an ad.grad'ed function
+import ad as ad
+type I = Idx<2>
+function f(l: Array<Float64 like I, I>) -> Float64 = {
+    let g = gram(l, l)
+    let e = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> g(i, j) - (if i == j then 1.0 else 0.0) |> compute
+    let rs = reduce(e, (+))
+    let s = reduce(rs, (+))
+    s
+}
+let L0: Array<Float64 like I, I> = [[1.2, 0.3], [-0.2, 0.9]]
+let mut dl: Array<Float64 like I, I> = [[0.0, 0.0], [0.0, 0.0]]
+let v = ad.grad(f)(L0, dl)

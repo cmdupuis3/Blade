@@ -1,0 +1,11 @@
+// TEST: p5x m.eigh handed the SymIdx-stored gram(Ct, Ct) directly
+import math as m
+type R = Idx<12>
+type Cc = Idx<4>
+
+// column 3 duplicates column 0, so null(C) = span{(1, 0, 0, -1)/sqrt 2}
+let C: Array<Float64 like R, Cc> = method_for(range<R, Cc>) <@> lambda(r: R, c: Cc) -> cos(0.7 * Float64(r) * ((if c == 3 then 0.0 else Float64(c)) + 1.0) + 0.3 * (if c == 3 then 0.0 else Float64(c))) |> compute
+
+let Ct = transpose(C, [0, 1])
+let G = gram(Ct, Ct)
+let (Q, LAM) = m.eigh(G)

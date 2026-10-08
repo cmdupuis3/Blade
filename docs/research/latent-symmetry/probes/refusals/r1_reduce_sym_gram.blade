@@ -1,0 +1,11 @@
+// TEST: r1 reduce over SymIdx-stored gram(X, X)
+import ad as ad
+type N = Idx<5>
+type D = Idx<3>
+let X: Array<Float64 like N, D> = [[0.5, -1.0, 0.25], [1.0, 0.5, -0.5], [-0.75, 0.25, 1.0], [0.0, 1.5, -0.25], [0.3, -0.2, 0.8]]
+let Z: Array<Float64 like N, D> = [[1.0, 0.0, -0.5], [0.25, 0.75, 0.5], [-0.5, 1.0, 0.0], [0.6, -0.4, 0.2], [-1.0, 0.3, 0.7]]
+let L0: Array<Float64 like D, D> = [[1.0, 0.2, 0.0], [0.1, 0.9, 0.3], [0.0, -0.2, 1.1]]
+let mut dX: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dZ: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dL: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let s = reduce(gram(X, X), (+))

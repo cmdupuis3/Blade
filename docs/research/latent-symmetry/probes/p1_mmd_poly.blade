@@ -1,0 +1,54 @@
+// TEST: p1 polynomial-kernel MMD^2, differentiable in L (Y = Z L)
+// k(a, b) = (1 + <a, b> / 3)^3 ; MMD^2 = mean(Kxx) + mean(Kyy) - 2 mean(Kxy)
+import ad as ad
+type N = Idx<5>
+type D = Idx<3>
+
+let X: Array<Float64 like N, D> = [[0.5, -1.0, 0.25], [1.0, 0.5, -0.5], [-0.75, 0.25, 1.0], [0.0, 1.5, -0.25], [0.3, -0.2, 0.8]]
+let Z: Array<Float64 like N, D> = [[1.0, 0.0, -0.5], [0.25, 0.75, 0.5], [-0.5, 1.0, 0.0], [0.6, -0.4, 0.2], [-1.0, 0.3, 0.7]]
+let L0: Array<Float64 like D, D> = [[1.0, 0.2, 0.0], [0.1, 0.9, 0.3], [0.0, -0.2, 1.1]]
+
+// (a) plain (non-AD) fold over a symmetric-stored gram: decompact first
+let Gxx = gram(X, X)
+let Kxx_sum = reduce(decompact((1.0 + Gxx / 3.0) ^ 3, 0), (+), axes = 2)
+
+// (b) differentiable MMD^2. X, Z, L are all PARAMETERS: a module-captured array
+// as a gram operand has no static dims in the reverse pass (BL5500).
+function mmd2(x: Array<Float64 like N, D>, z: Array<Float64 like N, D>, l: Array<Float64 like D, D>) -> Float64 = {
+    let lt = transpose(l, [0, 1])
+    let y = gram(z, lt)
+    let gxx = gram(x, x)
+    let gyy = gram(y, y)
+    let gxy = gram(x, y)
+    let kxx = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> (1.0 + gxx(i, j) / 3.0) ^ 3 |> compute
+    let kyy = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> (1.0 + gyy(i, j) / 3.0) ^ 3 |> compute
+    let kxy = method_for(range<N>, range<N>) <@> lambda(i: N, j: N) -> (1.0 + gxy(i, j) / 3.0) ^ 3 |> compute
+    let rxx = reduce(kxx, (+))
+    let ryy = reduce(kyy, (+))
+    let rxy = reduce(kxy, (+))
+    let sxx = reduce(rxx, (+))
+    let syy = reduce(ryy, (+))
+    let sxy = reduce(rxy, (+))
+    (sxx + syy - 2.0 * sxy) / 25.0
+}
+
+let v0 = mmd2(X, Z, L0)
+// numpy reference: 0.16097763005601962
+let v_ok = abs(v0 - 0.16097763005601962) < 0.000000000001
+// EXPECT: v_ok = true
+let mut dX: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dZ: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dL: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let gv = ad.grad(mmd2)(X, Z, L0, dX, dZ, dL)
+// central finite difference of entry (1, 2)
+let h = 0.000001
+let E12: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]
+let fd12 = (mmd2(X, Z, L0 + h * E12) - mmd2(X, Z, L0 - h * E12)) / (2.0 * h)
+let ad12 = dL(1, 2)
+let fd_ok = abs(fd12 - ad12) < 0.000001 * (abs(ad12) + 1.0)
+// EXPECT: fd_ok = true
+// forward-mode leg: tangent along E12 (zero seeds on X, Z) must equal dL(1, 2)
+let zND: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (jp, jt) = ad.jvp(mmd2)(X, Z, L0, zND, zND, E12)
+let jvp_ok = abs(jt - ad12) < 0.000000000001
+// EXPECT: jvp_ok = true

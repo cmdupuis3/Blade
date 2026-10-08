@@ -1,0 +1,22 @@
+// TEST: p4c-z workaround: so(3) generator parametrized by a dense 3-vector, built as an array literal in the loss
+import ad as ad
+type D = Idx<3>
+type P3 = Idx<3>
+let M2: Array<Float64 like D, D> = [[0.5345, -0.1705, -0.191], [-0.1705, 0.3625, 0.101], [-0.191, 0.101, 0.206]]
+function lie_loss_t(t: Array<Float64 like P3>, m: Array<Float64 like D, D>) -> Float64 = {
+    let a = [[0.0, t(0), t(1)], [0.0 - t(0), 0.0, t(2)], [0.0 - t(1), 0.0 - t(2), 0.0]]
+    let am = gram(a, m)
+    let ma = gram(m, a)
+    let r = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> (am(i, j) + ma(i, j)) * (am(i, j) + ma(i, j)) |> compute
+    let rs = reduce(r, (+))
+    let s = reduce(rs, (+))
+    s
+}
+let th: Array<Float64 like P3> = [0.4, -0.2, 0.3]
+let mut dth: Array<Float64 like P3> = [0.0, 0.0, 0.0]
+let mut dM: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let lv = ad.grad(lie_loss_t)(th, M2, dth, dM)
+// numpy: loss 0.15348375, d/dtheta = [0.3359048, -0.327731, 0.3568646]
+// EXPECT: lv = 0.15348375
+let g_ok = abs(dth(0) - 0.3359048) + abs(dth(1) + 0.327731) + abs(dth(2) - 0.3568646) < 0.000000001
+// EXPECT: g_ok = true

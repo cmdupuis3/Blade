@@ -1,0 +1,17 @@
+// TEST: p4c-y an AntisymIdx<2, D>-typed generator as an ad.grad parameter
+import ad as ad
+type D = Idx<3>
+type G = AntisymIdx<2, D>
+let M2: Array<Float64 like D, D> = [[0.5345, -0.1705, -0.191], [-0.1705, 0.3625, 0.101], [-0.191, 0.101, 0.206]]
+function lie_loss_g(a: Array<Float64 like G>, m: Array<Float64 like D, D>) -> Float64 = {
+    let r = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> a(i, 0) * m(0, j) + a(i, 1) * m(1, j) + a(i, 2) * m(2, j) + m(i, 0) * a(j, 0) + m(i, 1) * a(j, 1) + m(i, 2) * a(j, 2) |> compute
+    let r2 = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> r(i, j) * r(i, j) |> compute
+    let rs = reduce(r2, (+))
+    let s = reduce(rs, (+))
+    s
+}
+let Ag: Array<Float64 like G> = [[0.4, -0.2], [0.3], []]
+let lv0 = lie_loss_g(Ag, M2)
+let mut dAg: Array<Float64 like G> = [[0.0, 0.0], [0.0], []]
+let mut dM: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let lv = ad.grad(lie_loss_g)(Ag, M2, dAg, dM)

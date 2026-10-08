@@ -1,0 +1,33 @@
+// TEST: p4b hand-spelled third moment M(i,j,k) = mean_n z_i z_j z_k
+type N = Idx<5>
+type D = Idx<3>
+let Zt: Array<Float64 like D, N> = [[1.0, 0.25, -0.5, 0.6, -1.0], [0.0, 0.75, 1.0, -0.4, 0.3], [-0.5, 0.5, 0.0, 0.2, 0.7]]
+
+// (b1) fully commutative 3-way kernel over three copies of the SAME array -> SymIdx<3, 3> storage
+function m3k(a: Array<Float64 like N>, b: Array<Float64 like N>, c: Array<Float64 like N>) where comm(a, b, c) -> Float64 =
+    reduce(a * b * c, (+)) / 5.0
+let M3 = method_for(Zt, Zt, Zt) <@> m3k |> compute
+let m012 = M3(0, 1, 2)
+let m210 = M3(2, 1, 0)
+let m112 = M3(1, 1, 2)
+let m121 = M3(1, 2, 1)
+// ppl.moments(Zt, 3) packed: (0,1,2) = 0.06065*... see p4a: (0,1,2) -> -0.03285, (1,1,2) -> 0.07525
+// EXPECT: m012 = -0.03285
+// EXPECT: m210 = -0.03285
+// EXPECT: m112 = 0.07525
+// EXPECT: m121 = 0.07525
+
+// (b2) the same tensor by iterating the symmetric index domain directly. TRAP: the kernel
+// receives PREFIX OFFSETS (p0, p1, p2), canonical (i, j, k) = (p0, p0 + p1, p0 + p1 + p2)
+let M3r = method_for(range<SymIdx<3, 3>>) <@> lambda(p0, p1, p2) -> reduce(Zt(p0) * Zt(p0 + p1) * Zt(p0 + p1 + p2), (+)) / 5.0 |> compute
+let r012 = M3r(0, 1, 2)
+let r121 = M3r(1, 2, 1)
+// EXPECT: r012 = -0.03285
+// EXPECT: r121 = 0.07525
+
+// logical fold over all 27 cells: decompact twice (SymIdx<3> -> Idx x SymIdx<2> -> dense)
+let M3d1 = decompact(M3, 0)
+let M3dense = decompact(M3d1, 1)
+let s27 = reduce(M3dense, (+), axes = 3)
+// hand: sum over all 27 logical cells = mean_n (sum_i z_i)^3 = (0.125 + 3.375 + 0.125 + 0.064 + 0) / 5
+// EXPECT: s27 = 0.7378

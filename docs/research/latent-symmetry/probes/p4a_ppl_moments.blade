@@ -1,0 +1,18 @@
+// TEST: p4a module-level ppl moment formers at order 3 (and comoments at 2/3)
+import ppl as ppl
+type N = Idx<5>
+type D = Idx<3>
+// ppl formers take (variables, samples): rows are variables, the trailing axis is the sample axis
+let Zt: Array<Float64 like D, N> = [[1.0, 0.25, -0.5, 0.6, -1.0], [0.0, 0.75, 1.0, -0.4, 0.3], [-0.5, 0.5, 0.0, 0.2, 0.7]]
+let M3 = ppl.moments(Zt, 3)
+let M2 = ppl.moments(Zt, 2)
+let C2 = ppl.comoments(Zt, 2)
+// a flat 1-subscript read of the packed cells, and a plain reduce over them (canonical cells, not the 27 logical ones)
+let m3_first = M3(0)
+let m3_last = M3(9)
+let s3_canonical = reduce(M3, (+))
+// ppl.moments(Zt, 3) is typed Array<Float64 like Idx<10>>: a FLAT list of the 10 canonical cells in
+// (0,0,0) (0,0,1) (0,0,2) (0,1,1) (0,1,2) (0,2,2) (1,1,1) (1,1,2) (1,2,2) (2,2,2) order; M3(0, 1, 2) is BL3002.
+// EXPECT: M3 = [0.021325, 0.090575, 0.06065, -0.070675, -0.03285, -0.0307, 0.276975, 0.07525, 0.0637, 0.0702]
+// reduce folds the 10 CANONICAL cells (no BL3999 -- the type is plain); the 27-cell logical sum is 0.7378 (p4b)
+// EXPECT: s3_canonical = 0.52445

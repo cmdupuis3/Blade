@@ -1,0 +1,40 @@
+// TEST: p3c workaround: expm(A) x action as an UNROLLED chain of gram_apply (A x = gram_apply(A, I, x))
+import ad as ad
+type D = Idx<3>
+let x0: Array<Float64 like D> = [1.0, -0.5, 0.25]
+let w: Array<Float64 like D> = [1.0, 2.0, -1.0]
+let Id3: Array<Float64 like D, D> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+function lossu(a: Array<Float64 like D, D>, id: Array<Float64 like D, D>, x: Array<Float64 like D>) -> Float64 = {
+    let x1 = gram_apply(a, id, x)
+    let x2 = gram_apply(a, id, x1)
+    let x3 = gram_apply(a, id, x2)
+    let x4 = gram_apply(a, id, x3)
+    let x5 = gram_apply(a, id, x4)
+    let x6 = gram_apply(a, id, x5)
+    let x7 = gram_apply(a, id, x6)
+    let x8 = gram_apply(a, id, x7)
+    let x9 = gram_apply(a, id, x8)
+    let x10 = gram_apply(a, id, x9)
+    let x11 = gram_apply(a, id, x10)
+    let x12 = gram_apply(a, id, x11)
+    let y = method_for(range<D>) <@> lambda(i: D) -> x(i) + x1(i) + x2(i) / 2.0 + x3(i) / 6.0 + x4(i) / 24.0 + x5(i) / 120.0 + x6(i) / 720.0 + x7(i) / 5040.0 + x8(i) / 40320.0 + x9(i) / 362880.0 + x10(i) / 3628800.0 + x11(i) / 39916800.0 + x12(i) / 479001600.0 |> compute
+    w(0) * y(0) + w(1) * y(1) + w(2) * y(2)
+}
+
+let A3: Array<Float64 like D, D> = [[0.0, 0.3, -0.2], [-0.3, 0.0, 0.4], [0.2, -0.4, 0.1]]
+let lc = lossu(A3, Id3, x0)
+let val_ok = abs(lc - (-1.1083507058635789)) < 0.000000000001
+// EXPECT: val_ok = true
+let mut dA: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dI: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dx: Array<Float64 like D> = [0.0, 0.0, 0.0]
+let lv = ad.grad(lossu)(A3, Id3, x0, dA, dI, dx)
+// scipy FD row 1: [2.00224439, -1.2652934, 1.05222991]
+let grad_ok = abs(dA(1, 0) - 2.00224439) + abs(dA(1, 1) + 1.2652934) + abs(dA(1, 2) - 1.05222991) < 0.0000001
+// EXPECT: grad_ok = true
+let zDD: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let S: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (jp, jt) = ad.jvp(lossu)(A3, Id3, x0, S, zDD, [0.0, 0.0, 0.0])
+let jvp_ok = abs(jt - dA(1, 0)) < 0.000000000001
+// EXPECT: jvp_ok = true

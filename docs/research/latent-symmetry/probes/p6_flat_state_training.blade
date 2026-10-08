@@ -1,0 +1,44 @@
+// TEST: p6 flat-state SGD over a let rec epoch axis: a 2x2 matrix parameter, ad.grad in the arm, indexed RNG drawn at top level
+import ad as ad
+import rand as r
+type I = Idx<2>
+type Epochs = Idx<20>
+type State = Idx<4>
+
+// orthogonality loss |L L^T - I|_F^2 ; gram(l, l) is SymIdx-stored, read through a range map
+// (if/else is refused in reverse mode -- BL5500 -- so the identity is a literal local)
+function oloss(l: Array<Float64 like I, I>) -> Float64 = {
+    let id = [[1.0, 0.0], [0.0, 1.0]]
+    let g = gram(l, l)
+    let e = method_for(range<I>, range<I>) <@> lambda(i: I, j: I) -> (g(i, j) - id(i, j)) * (g(i, j) - id(i, j)) |> compute
+    let rs = reduce(e, (+))
+    let s = reduce(rs, (+))
+    s
+}
+
+// rand draws are legal ONLY as a top-level let value (BL6002 inside a function or a rec arm):
+// draw the whole epoch stream up front; cell n is logical sample n of (key 7, stream 3)
+let noise = r.normal_at(7, 3, 0, 20)
+
+// one step: reconstitute L, read w = noise(n), grad, descend with a noisy rate
+function sgd_step(s: Array<Float64 like State>, n: Int64) -> Array<Float64 like State> = {
+    let l = [[s(0), s(1)], [s(2), s(3)]]
+    let mut dl = [[0.0, 0.0], [0.0, 0.0]]
+    let lv = ad.grad(oloss)(l, dl)
+    let eta = 0.05 * (1.0 + 0.1 * noise(n))
+    [s(0) - eta * dl(0, 0), s(1) - eta * dl(0, 1), s(2) - eta * dl(1, 0), s(3) - eta * dl(1, 1)]
+}
+
+let traj_out = {
+    let rec traj: Array<Float64 like Epochs, State> =
+        match traj with
+        | zero -> zero
+        | zero :: n -> zero :: [1.2, 0.3, -0.2, 0.9]
+        | prefix :: n -> prefix :: sgd_step(prefix(n - 1), n)
+    traj(19)
+}
+let final_loss = oloss([[traj_out(0), traj_out(1)], [traj_out(2), traj_out(3)]])
+// numpy replay with the printed noise: L_19 = [0.9728119093455324, 0.23162235009006824, -0.23161908170214515, 0.9728021041817632],
+// final loss 2.1895135223554248e-10
+let traj_ok = abs(traj_out(0) - 0.9728119093455324) + abs(traj_out(1) - 0.23162235009006824) + abs(traj_out(2) + 0.23161908170214515) + abs(traj_out(3) - 0.9728021041817632) < 0.000000000001
+// EXPECT: traj_ok = true

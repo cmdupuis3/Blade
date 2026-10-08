@@ -1,0 +1,40 @@
+// TEST: p3c expm(A) x by the Taylor action: x_0 = x, x_k = A x_{k-1} / k, expm(A) x = sum_k x_k
+import ad as ad
+type D = Idx<3>
+type K = Idx<18>
+
+let x0: Array<Float64 like D> = [1.0, -0.5, 0.25]
+let w: Array<Float64 like D> = [1.0, 2.0, -1.0]
+
+function matvec_k(a: Array<Float64 like D, D>, v: Array<Float64 like D>, k: Int64) -> Array<Float64 like D> = {
+    let r = method_for(range<D>) <@> lambda(i: D) -> (a(i, 0) * v(0) + a(i, 1) * v(1) + a(i, 2) * v(2)) / Float64(k) |> compute
+    r
+}
+
+function expm_x(a: Array<Float64 like D, D>) -> Array<Float64 like D> = {
+    let rec xs: Array<Float64 like K, D> =
+        match xs with
+        | zero -> zero
+        | zero :: s -> zero :: x0
+        | prefix :: n -> prefix :: matvec_k(a, prefix(n - 1), n)
+    let y = reduce(transpose(xs, [0, 1]), (+))
+    y
+}
+
+// scalar loss w . expm(A) x
+function lossc(a: Array<Float64 like D, D>) -> Float64 = {
+    let y = expm_x(a)
+    w(0) * y(0) + w(1) * y(1) + w(2) * y(2)
+}
+
+let A3: Array<Float64 like D, D> = [[0.0, 0.3, -0.2], [-0.3, 0.0, 0.4], [0.2, -0.4, 0.1]]
+let y = expm_x(A3)
+// scipy expm(A3) @ x0 = [0.73802726, -0.57498032, 0.69641733]; loss = -1.1083507058635789
+let lc = lossc(A3)
+let val_ok = abs(lc - (-1.1083507058635789)) < 0.000000000001
+// EXPECT: val_ok = true
+let S: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (jp, jt) = ad.jvp(lossc)(A3, S)
+// scipy FD: d loss / d A(1, 0) = 2.00224439
+let jvp_ok = abs(jt - 2.00224439) < 0.00000001
+// EXPECT: jvp_ok = true

@@ -1,0 +1,16 @@
+// TEST: p7e forward over reverse, ad.jvp(ad.grad(g)) (the blessed HVP route), for contrast
+import ad as ad
+type D = Idx<3>
+function g(x: Array<Float64 like D>) -> Float64 = {
+    let s = x(0) * x(1) + x(2) * x(2)
+    s
+}
+let x: Array<Float64 like D> = [0.5, -1.0, 2.0]
+let v: Array<Float64 like D> = [1.0, 0.0, 0.0]
+let mut dx: Array<Float64 like D> = [0.0, 0.0, 0.0]
+let mut tdx: Array<Float64 like D> = [0.0, 0.0, 0.0]
+let res = ad.jvp(ad.grad(g))(x, dx, v, tdx)
+// Hessian column 0 of x0 x1 + x2^2 is [0, 1, 0]
+// gradient [x1, x0, 2 x2] and H v
+// EXPECT: dx = [-1.0, 0.5, 4.0]
+// EXPECT: tdx = [0.0, 1.0, 0.0]

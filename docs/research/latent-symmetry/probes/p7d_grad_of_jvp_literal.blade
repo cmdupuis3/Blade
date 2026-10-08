@@ -1,0 +1,12 @@
+// TEST: p7d the literal composition ad.grad(ad.jvp(g)) on a SCALAR g (the order docs do not bless; jvp(grad) is the HVP route)
+import ad as ad
+type D = Idx<3>
+function g(x: Array<Float64 like D>) -> Float64 = {
+    let s = x(0) * x(1) + x(2) * x(2)
+    s
+}
+let x: Array<Float64 like D> = [0.5, -1.0, 2.0]
+let v: Array<Float64 like D> = [1.0, 0.0, 0.0]
+let mut dx: Array<Float64 like D> = [0.0, 0.0, 0.0]
+let mut dv: Array<Float64 like D> = [0.0, 0.0, 0.0]
+let res = ad.grad(ad.jvp(g))(x, v, dx, dv)

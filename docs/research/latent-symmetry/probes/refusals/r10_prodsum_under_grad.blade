@@ -1,0 +1,12 @@
+// TEST: r10 prodsum inside an ad.grad'ed function
+import ad as ad
+type N = Idx<5>
+type D = Idx<3>
+function f(x: Array<Float64 like N, D>) -> Float64 = {
+    let nx = method_for(range<N>) <@> lambda(i: N) -> prodsum(x(i), x(i)) |> compute
+    let s = reduce(nx, (+))
+    s
+}
+let X: Array<Float64 like N, D> = [[0.5, -1.0, 0.25], [1.0, 0.5, -0.5], [-0.75, 0.25, 1.0], [0.0, 1.5, -0.25], [0.3, -0.2, 0.8]]
+let mut dX: Array<Float64 like N, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let g = ad.grad(f)(X, dX)
