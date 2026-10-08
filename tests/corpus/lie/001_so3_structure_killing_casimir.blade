@@ -36,6 +36,14 @@ let (Qn, kappa_n) = m.eigh(Kn)
 // an algebra element from coordinates: comb(w, L) = sum_a w_a L_a
 let w: Array<Float64 like G> = [0.5, -1.0, 2.0]
 let Lw = lie.comb(w, Ls)
+// casimir on a NON-symmetric stack, so the matrix orientation is pinned (an
+// antisymmetric stack's sum of squares is symmetric and would hide a transpose):
+// [[1, 2], [3, 4]]^2 = [[7, 10], [15, 22]], plus a zero matrix
+type D2 = Idx<2>
+let P: Array<Float64 like D2, D2> = [[1.0, 2.0], [3.0, 4.0]]
+let Z: Array<Float64 like D2, D2> = [[0.0, 0.0], [0.0, 0.0]]
+let Lpz: Array<Float64 like G2, D2, D2> = stack(P, Z)
+let CasP: Array<Float64 like D2, D2> = lie.casimir(Lpz)
 // EXPECT: c012 = 1.0
 // EXPECT: c102 = -1.0
 // EXPECT: c201 = 1.0
@@ -46,3 +54,4 @@ let Lw = lie.comb(w, Ls)
 // EXPECT: defect_pair = 2.0
 // EXPECT: kappa_n = [-1.0, -1.0, -1.0]
 // EXPECT: Lw = [[0.0, -2.0, -1.0], [2.0, 0.0, -0.5], [1.0, 0.5, 0.0]]
+// EXPECT: CasP = [[7.0, 10.0], [15.0, 22.0]]

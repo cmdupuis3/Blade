@@ -63,8 +63,11 @@ function killing(c: T^3) -> T^2 =
 /// [L_x, L_y] = L_z it is −l(l+1)·I on the spin-l block).
 function casimir(L: T^3) -> T^2 = {
     let sq = method_for(L) <@> lambda(a: T^2) -> mm(a, a) |> compute
+    // fold the generator axis: move it innermost (which transposes the matrix
+    // axes -- sqt(j, i, a) = sq(a, i, j)), fold, and transpose back
     let sqt = transpose(sq, [0, 2])
-    let s = reduce(sqt, (+))
+    let st = reduce(sqt, (+))
+    let s = transpose(st, [0, 1])
     s
 }
 
