@@ -1,10 +1,30 @@
 # Latent symmetry learning — discovery as deduction over data
 
-Status: PLANNED 2026-10-08 (Fable + two Opus passes: a 46-program probe campaign
+Status: P0 + the additive bits BUILT 2026-10-08 on `feat/lie-stdlib-p0` (unmerged) —
+the build note after this paragraph says what; D4 (`lie/007`) and P3 onward are not
+built. Originally PLANNED 2026-10-08 (Fable + two Opus passes: a 46-program probe campaign
 against the 2026-10-07 binary, §2, and a rigor review with numerical checks, §3 —
 both preserved under [`docs/research/latent-symmetry/`](../research/latent-symmetry/))
-— nothing built. The exact-discovery half (P0) needs no compiler work; the learning
-half's compiler items are small and sized in §6. Two compiler bugs the campaign
+— nothing built at that point. The exact-discovery half (P0) needed no compiler work;
+the learning half's compiler items are small and sized in §6.
+
+**Build note (2026-10-08, `feat/lie-stdlib-p0`).** `stdlib/lie.blade` carries the §4.2
+helpers that are generic over extents (`mm`, `bracket`, `frob`, `structure_constants`,
+`killing`, `casimir`, `comb`, `closure_defect`, `derivation2`/`annihilation2`) plus the
+P1 statistics (`mmd2_poly_u`, `mmd2_gauss_u`, `gauss_hessian_pair`); the nullspace and
+eigen steps need a declared operand shape and are spelled per program. Corpus
+`tests/corpus/lie/`: `001` so(3) structure/Killing/Casimir, `002` the derivation action at
+orders 2 and 3, `003` cell D1 (isotropic vs cubic order-4 tensors: nullity 3/3/0, pinned
+singular values), `004` cell D6 (the Lorentz form's stabilizer so(2,1), Killing eigenvalues
+(1, 1, −1)), `005` the U-statistic MMDs and the Gaussian Hessian form, `006` the whitening
+theorem (K = 2 gives all of so(3), six singular values exactly 2) — all green in both lanes.
+`m.expm` is a new synthesized math op (Taylor-18 scaling-and-squaring, `math/092`–`093`),
+and a let-bound `m.matmul` inside a differentiated body is normalized to the `gram` form the
+sweeps own, so it differentiates in reverse and forward mode (`ad/043`). Two spelling rules
+the build added to §2.2's list: a function body cannot read a tuple-destructured module
+binding (unvec nullspace vectors at module level from `transpose(V, [0, 1])`), and index
+arithmetic lives in `Int64` helpers over ANONYMOUS-axis arrays (a named tag refuses
+arithmetic and warns on untagged reads). Two compiler bugs the campaign
 surfaced: an `AntisymIdx` parameter under `ad.grad` corrupted memory — FIXED
 2026-10-08 (element writes into compact storage now fold to the canonical cell in
 both lanes, formalism §3.4; corpus `index-types/486`, `ad/041`–`042`); `ppl.moments`
@@ -431,8 +451,8 @@ ordinary Blade so `ad.grad` differentiates through it and codegen is unchanged.
 
 | Item | Why | Shape |
 |---|---|---|
-| `m.expm(A)` forward | finite group elements for augmentation, Haar sampling, the finite-`t` check | Taylor-18 scaling-and-squaring (§3.6) as a synthesized `__math_N` function in the `svdDecl` style (`MathElaborate.fs`), the squarings `gram` products, `(m, s)` fixed at elaboration from a static `‖A‖₁` bound or chosen at run time by a `while`-guarded budget; oracle pins from an F# replay |
-| `m.matmul` adjoint | today BL5500 under `ad.grad`; `gram(a, lt)` with a bound transpose is the spelling that differentiates | route the `__math_matmul` marker through the `gram` adjoint (both adjoints are matmuls, BLAS-routed) — a `GradSweeps` arm beside `__math_lu_solve`. Optional: the Gram spelling is adequate |
+| `m.expm(A)` forward — BUILT 2026-10-08 (`math/092`–`093`) | finite group elements for augmentation, Haar sampling, the finite-`t` check | Taylor-18 scaling-and-squaring (§3.6) as a synthesized `__math_N` function in the `svdDecl` style (`MathElaborate.fs`), the squarings `gram` products, `(m, s)` fixed at elaboration from a static `‖A‖₁` bound or chosen at run time by a `while`-guarded budget; oracle pins from an F# replay |
+| `m.matmul` adjoint — BUILT 2026-10-08 (`ad/043`) | was BL5500 under `ad.grad` | the AD normalizer rewrites a let-bound `__math_matmul(a, b)` to `let __mt = transpose(b, [0, 1])`, `gram(a, __mt)` before the sweeps, so the existing gram rules carry both modes; a matmul anywhere but a let initializer keeps its refusal |
 | `m.expm` derivative (v2) | joint generator training | AD through the synthesized body if grad can inline `__math_N` bodies (§7 D7), else the explicit `L(Aᵀ, G)` rule; the block-triangular identity is the corpus check |
 | `eigh` jvp/vjp (v2) | spectral regularizers inside a loss | closed form for distinct eigenvalues; a refusal (not a NaN) below a gap tolerance |
 | reverse-over-forward (v2) | training `φ` against the Lie-derivative residual | a `grad` rule for `__jvp` calls, or the hand-assembled `2Jᵀr xᵀ` adjoint as a named-call rule |
@@ -613,9 +633,9 @@ rows remove it.
 
 | phase | deliverable | compiler work | gate |
 |---|---|---|---|
-| P0 discovery lane, Blade source | `stdlib/lie.blade` v0 (algebra ops, derivation action, the three quadratic forms, `eigh`/`svd` solve, decomposition, classification, `canonicalize_so3`); corpus `lie/` with pins from a new oracle verb (`oracles/ml`: `lie` dump — Killing, Casimir, canonicalization against `blockGenerator`, in plain F#); cells D1–D6, N2 | none expected (§2) | D1–D6 pins green; `blade test interp lie` agrees |
-| P1 the statistics | `mmd2_poly_u`, `mmd2_gauss_u`, `hess_poly`, `hess_gauss`, `G_ψ`; cells M1–M2; the factor-2 and pairing-trap identities as corpus pins; jvp-vs-grad residual pins on both MMDs (`ad-jvp-comb` style) | optional `m.matmul` adjoint | M1–M2 green |
-| P2 `m.expm` + sampling | synthesized Taylor-18 `expm`; oracle pins (rotation, nilpotent, the block-triangular identity at 1e-12 even though v1 never differentiates it, the `so(2)` closed form); Haar sampler on `SO(3)` | one `MathElaborate` declaration in the `svdDecl` shape | `math/` pins across the `‖A‖₁` scaling thresholds |
+| P0 discovery lane, Blade source — BUILT 2026-10-08 (D4 cell pending) | `stdlib/lie.blade` v0 (algebra ops, derivation action, the three quadratic forms, `eigh`/`svd` solve, decomposition, classification, `canonicalize_so3`); corpus `lie/` with pins from a new oracle verb (`oracles/ml`: `lie` dump — Killing, Casimir, canonicalization against `blockGenerator`, in plain F#); cells D1–D6, N2 | none expected (§2) | D1–D6 pins green; `blade test interp lie` agrees |
+| P1 the statistics — BUILT 2026-10-08 (`lie/005`; the Hessian form is the per-pair term plus a two-range map) | `mmd2_poly_u`, `mmd2_gauss_u`, `hess_poly`, `hess_gauss`, `G_ψ`; cells M1–M2; the factor-2 and pairing-trap identities as corpus pins; jvp-vs-grad residual pins on both MMDs (`ad-jvp-comb` style) | optional `m.matmul` adjoint | M1–M2 green |
+| P2 `m.expm` — BUILT 2026-10-08 (`math/092`–`093`; the Haar sampler and the oracle's derivative pins remain) | synthesized Taylor-18 `expm`; oracle pins (rotation, nilpotent, the block-triangular identity at 1e-12 even though v1 never differentiates it, the `so(2)` closed form); Haar sampler on `SO(3)` | one `MathElaborate` declaration in the `svdDecl` shape | `math/` pins across the `‖A‖₁` scaling thresholds |
 | P3 Mode B trainer | cell T1 on the dynamics data, compiled lane (`blade compile` + run the exe — the 120 s `run` ceiling), `plot.stream` channels for the objective and the ladder per round | whatever it surfaces (expected: literal extents in grad code, census #29/#36; the rec-arm `ad` quirk) | T1 pins |
 | P4 the bridge | `canonicalize_so3` proposal printout, the `U` store, cell T2 | none — `IrrepsIdx`, `ml.derive_*`, the discharger untouched | T2: certificate accepted, invariance to 1e-13 |
 | P5 research | Mode C + the geometric regularizers (N1 as the control); joint generator training (needs the `expm` derivative); training `φ` against the Lie-derivative residual (needs reverse-over-forward); the multiplicity parity search; non-roster soft equivariance (D6) | §4.1 rows 3–5 | each its own plan row when scheduled |

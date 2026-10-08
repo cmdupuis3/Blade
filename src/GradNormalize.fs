@@ -559,6 +559,37 @@ let internal preNormalizeBody (fname: string) (ctx: Ctx) (fd0: FunctionDecl) : R
         match fd.Body.Kind with
         | ExprKind.ExprBlock (ss, fe) -> ss, fe
         | _ -> [], Some fd.Body
+    // A let-bound `m.matmul(a, b)` (the elaborated `__math_matmul` marker,
+    // which has no derivative rule of its own) becomes the gram form the
+    // sweeps already own: `let __mt = transpose(b, [0, 1])`, `let x = gram(a, __mt)`
+    // -- gram(A, B) = A·Bᵀ, so gram(a, bᵀ) = a·b -- with a non-name operand
+    // bound first, since the gram rules read NAMED operands. Both adjoints are
+    // then the gram rule's two matmuls (dA = G·B, dB = Aᵀ·G), BLAS-routed like
+    // gram's, in reverse AND forward mode. A matmul anywhere other than a let
+    // initializer keeps the refusal it always had.
+    let stmts0 =
+        stmts0 |> List.collect (fun st ->
+            // Surface statements arrive StmtSpanned; match through the wrapper and
+            // keep the let's span on the rewritten binding.
+            let respan (s: Stmt) = match st with StmtSpanned (_, sp) -> StmtSpanned (s, sp) | _ -> s
+            match unwrapStmt st with
+            | StmtLet ({ Pattern = { Kind = PatternKind.PatVar _ } } as b) ->
+                (match b.Value.Kind with
+                 | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar "__math_matmul" }, [ aE; bE ]) ->
+                     let nameOf (e: Expr) (prefix: string) : Stmt list * Expr =
+                         match e.Kind with
+                         | ExprKind.ExprVar _ -> [], e
+                         | _ ->
+                             let t = fresh ctx prefix
+                             [ respan (StmtLet { Pattern = synPat (PatVar t); Type = None; Value = e; Mutability = BindLet }) ], v t
+                     let preA, aN = nameOf aE "__ma"
+                     let preB, bN = nameOf bE "__mb"
+                     let bt = fresh ctx "__mt"
+                     preA @ preB
+                     @ [ respan (StmtLet { Pattern = synPat (PatVar bt); Type = None; Value = syn (ExprTranspose (bN, 0, 1)); Mutability = BindLet })
+                         respan (StmtLet { b with Value = syn (ExprGram (aN, v bt)) }) ]
+                 | _ -> [ st ])
+            | _ -> [ st ])
     // C7: rank-1 index types per named array, for the sort expansion's
     // `range<I>` and gather-lambda annotations. Seeded from the parameters
     // and extended by ANNOTATED locals -- the index type has to be declared

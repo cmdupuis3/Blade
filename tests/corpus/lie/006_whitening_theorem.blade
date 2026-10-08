@@ -1,0 +1,44 @@
+// TEST: lie: after sample whitening the order-2 symmetry algebra is all of so(3)
+// RIGOR.md B1.4 consequence 1, as data: with M2 = I exactly, the k = 2
+// operator A -> A M2 + M2 A^T is A -> A + A^T, whose kernel on gl(3) is the
+// antisymmetric matrices -- three singular values at zero -- and whose other
+// six singular values are exactly 2 (each symmetric direction is doubled). So
+// K <= 2 carries a single fact, "the symmetry is orthogonal in the whitened
+// frame", and every selection happens at K >= 3 (lie/003). Whitening is
+// W = Q diag(lam^-1/2) Q^T from `m.eigh` of the sample covariance of eight
+// 3-vectors; the whitened covariance is I to 1e-30.
+import math as m
+import lie
+type D = Idx<3>
+type N = Idx<8>
+type C9 = Idx<9>
+let Z: Array<Float64 like D, N> = [[1.0, 0.25, -0.5, 0.6, -1.0, 0.3, 0.9, -0.7], [0.0, 0.75, 1.0, -0.4, 0.3, -0.8, 0.2, 0.5], [-0.5, 0.5, 0.0, 0.2, 0.7, 0.4, -0.9, 0.1]]
+let G2 = gram(Z, Z)
+let M2: Array<Float64 like D, D> = decompact(G2, 0) / 8.0
+let (Q, lam) = m.eigh(M2)
+let Qs: Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, k: D) -> Q(i, k) / sqrt(lam(k)) |> compute
+let W: Array<Float64 like D, D> = gram(Qs, Q)
+let Zw: Array<Float64 like D, N> = lie.mm(W, Z)
+let G2w = gram(Zw, Zw)
+let M2w: Array<Float64 like D, D> = decompact(G2w, 0) / 8.0
+let I3: Array<Float64 like D, D> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+let dev = lie.frob(M2w - I3, M2w - I3)
+let whitened = dev < 1e-28
+// the k = 2 operator on gl(3): column c = E_pq, row r = 3 i + j of vec(A M2w + M2w A^T)
+function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
+function egl(c: Int64) -> Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, c / 3) * delta(j, c % 3) |> compute
+let Ma: Array<Float64 like Idx<3>, Idx<3>> = M2w
+function act2(c: Int64, r: Int64) -> Float64 = {
+    let A: Array<Float64 like Idx<3>, Idx<3>> = egl(c)
+    let Rm = lie.derivation2(A, Ma)
+    Rm(r / 3, r % 3)
+}
+let Cop: Array<Float64 like C9, C9> = method_for(range<C9>, range<C9>) <@> lambda(r: C9, c: C9) -> act2(c, r) |> compute
+let (U, S, V) = m.svd(Cop)
+let nullity = reduce(method_for(S) <@> lambda(s: T^0) -> if s < 1e-12 then 1 else 0 |> compute, (+))
+let twos = reduce(method_for(S) <@> lambda(s: T^0) -> if abs(s - 2.0) < 1e-12 then 1 else 0 |> compute, (+))
+let s_top = S(0)
+// EXPECT: whitened = true
+// EXPECT: nullity = 3
+// EXPECT: twos = 6
+// EXPECT: s_top = 2.0

@@ -1,0 +1,48 @@
+// TEST: lie: so(3) structure constants, Killing form and Casimir from the stdlib helpers
+// stdlib/lie.blade's generic helpers on the standard 3x3 rotation generators
+// (L_a)_jk = -eps_ajk: [L_x, L_y] = L_z and cyclic, so the structure constants
+// are the Levi-Civita symbol, the Killing form kappa_ij = sum_kl c_ikl c_jlk is
+// -2 I, and the Casimir sum_a L_a^2 is -l(l+1) I = -2 I on l = 1. A
+// Frobenius-orthonormal rescaling (L/sqrt 2) halves c and quarters... no: c
+// scales by 1/sqrt 2, kappa by 1/2, so kappa = -I there -- the basis-
+// independent eigenvalues the discovery lane pins (plan §3.4 vii).
+import lie
+import math as m
+type D = Idx<3>
+type G = Idx<3>
+let Lx: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
+let Ly: Array<Float64 like D, D> = [[0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]
+let Lz: Array<Float64 like D, D> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let Ls: Array<Float64 like G, D, D> = stack(Lx, Ly, Lz)
+let c = lie.structure_constants(Ls)
+let c012 = c(0, 1, 2)
+let c102 = c(1, 0, 2)
+let c201 = c(2, 0, 1)
+let c001 = c(0, 0, 1)
+let K: Array<Float64 like G, G> = lie.killing(c)
+let Cas: Array<Float64 like D, D> = lie.casimir(Ls)
+let defect = lie.closure_defect(Ls)
+// a non-closed pair: [E01, E12] = E02 lies outside span(E01, E12), squared distance 1 per ordered pair
+let E01: Array<Float64 like D, D> = [[0.0, 1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let E12: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]
+type G2 = Idx<2>
+let Lp: Array<Float64 like G2, D, D> = stack(E01, E12)
+let defect_pair = lie.closure_defect(Lp)
+// the Frobenius-orthonormal rescaling and its Killing eigenvalues
+let Ln: Array<Float64 like G, D, D> = Ls / sqrt(2.0)
+let cn = lie.structure_constants(Ln)
+let Kn: Array<Float64 like G, G> = lie.killing(cn)
+let (Qn, kappa_n) = m.eigh(Kn)
+// an algebra element from coordinates: comb(w, L) = sum_a w_a L_a
+let w: Array<Float64 like G> = [0.5, -1.0, 2.0]
+let Lw = lie.comb(w, Ls)
+// EXPECT: c012 = 1.0
+// EXPECT: c102 = -1.0
+// EXPECT: c201 = 1.0
+// EXPECT: c001 = 0.0
+// EXPECT: K = [[-2.0, 0.0, 0.0], [0.0, -2.0, 0.0], [0.0, 0.0, -2.0]]
+// EXPECT: Cas = [[-2.0, 0.0, 0.0], [0.0, -2.0, 0.0], [0.0, 0.0, -2.0]]
+// EXPECT: defect = 0.0
+// EXPECT: defect_pair = 2.0
+// EXPECT: kappa_n = [-1.0, -1.0, -1.0]
+// EXPECT: Lw = [[0.0, -2.0, -1.0], [2.0, 0.0, -0.5], [1.0, 0.5, 0.0]]

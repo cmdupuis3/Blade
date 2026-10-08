@@ -51,7 +51,7 @@ oracles/{math,ml,ppl,sgs,spectra}/
                            Run: dotnet run --project oracles/<domain>.
 tests/                     harness compiled into Blade.fsproj (no xunit). Corpus tests live
                            in tests/corpus/<category>/*.blade, one test per file.
-stdlib/                    Blade-source stdlib (units/SI.blade, stats.blade, plot.blade), beside
+stdlib/                    Blade-source stdlib (units/SI.blade, stats.blade, plot.blade, lie.blade), beside
                            the binary; BLADE_STDLIB adds a search root. Read at RUN time, so
                            edits need no rebuild: in a CHECKOUT the resolver prefers this
                            directory over the deployed copy (ModuleResolve's Blade.fsproj

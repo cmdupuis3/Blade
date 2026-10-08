@@ -1,0 +1,38 @@
+// TEST: Reverse and forward mode through m.matmul via the gram normalization
+// `m.matmul(a, b)` inside a differentiated body used to be refused (BL5500: no
+// derivative rule for the `__math_matmul` marker). The AD normalizer now
+// rewrites a let-bound product `let c = m.matmul(a, b)` into the gram form
+// the sweeps already own -- `let __mt = transpose(b, [0, 1])`, `let c = gram(a, __mt)`
+// (gram(A, B) = A B^T, so gram(a, b^T) = a b) -- and both adjoints are the two
+// matmuls dA = 2 C B^T, dB = 2 A^T C of the loss ||A B||_F^2, BLAS-routed like
+// gram's. numpy: C = [[-1, 8], [0.5, 17]], L = 354.25, dA = [[-2, 15, 34],
+// [1, 34.5, 67]], dB = [[2, 152], [1, 202], [0, 252]]; the jvp lane along a
+// uniform 0.1 seed on A (tangent = 0.1 * sum dA = 14.95) pins the same
+// gradient from the other side.
+import ad as ad
+import math as m
+type I = Idx<2>
+type K = Idx<3>
+type J = Idx<2>
+function floss(a: Array<Float64 like I, K>, b: Array<Float64 like K, J>) -> Float64 = {
+    let c = m.matmul(a, b)
+    let sq = method_for(range<I>, range<J>) <@> lambda(i: I, j: J) -> c(i, j) * c(i, j) |> compute
+    let rs = reduce(sq, (+))
+    let s = reduce(rs, (+))
+    s
+}
+let A0: Array<Float64 like I, K> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let B0: Array<Float64 like K, J> = [[1.0, 0.0], [0.5, 1.0], [-1.0, 2.0]]
+let l0 = floss(A0, B0)
+let mut dA: Array<Float64 like I, K> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let mut dB: Array<Float64 like K, J> = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+let lv = ad.grad(floss)(A0, B0, dA, dB)
+let sA: Array<Float64 like I, K> = [[0.1, 0.1, 0.1], [0.1, 0.1, 0.1]]
+let zB: Array<Float64 like K, J> = [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+let (jp, jt) = ad.jvp(floss)(A0, B0, sA, zB)
+// EXPECT: l0 = 354.25
+// EXPECT: lv = 354.25
+// EXPECT: dA = [[-2.0, 15.0, 34.0], [1.0, 34.5, 67.0]]
+// EXPECT: dB = [[2.0, 152.0], [1.0, 202.0], [0.0, 252.0]]
+// EXPECT: jp = 354.25
+// EXPECT: jt = 14.95

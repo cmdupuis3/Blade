@@ -206,9 +206,9 @@ let private ensureT (st: ElabState) (key: string) (make: string -> FunctionDecl)
 // Op elaboration
 
 let private opNames =
-    Set.ofList [ "matmul"; "solve"; "lu"; "lu_solve"; "lu_solve_t"; "svd"; "eigh"; "eig"; "unfold"; "mode_product"; "hosvd" ]
+    Set.ofList [ "matmul"; "solve"; "lu"; "lu_solve"; "lu_solve_t"; "svd"; "eigh"; "eig"; "expm"; "unfold"; "mode_product"; "hosvd" ]
 
-let private opList = "matmul, solve, lu, lu_solve, lu_solve_t, svd, eigh, eig, unfold, mode_product, hosvd"
+let private opList = "matmul, solve, lu, lu_solve, lu_solve_t, svd, eigh, eig, expm, unfold, mode_product, hosvd"
 
 /// Optional trailing SWEEPS argument shared by svd/eigh.
 let private sweepsArg (statics: StaticEnv) (what: string) (rest: Expr list) : Result<int, string> =
@@ -281,6 +281,17 @@ let private elabOp (st: ElabState) (ctx: Ctx) (scope: Scope) (op: string) (args:
         Ok (syn (ExprApp (v marker, [luE; pivE; bE])))
     | ("lu_solve" | "lu_solve_t"), _ ->
         Error $"{op}: expected {op}(f, b) with f = lu(A), or {op}(LU, piv, b) -- b a length-n vector, returning x"
+    | "expm", [aE] ->
+        // Synthesized like svd/eigh (a plain Blade body: scaled Taylor-18 Horner plus squarings), so the interpreter
+        // runs it unchanged and a later grad rule can inline it; the shape is the fingerprint.
+        arrayShape ctx scope "expm" aE |> Result.bind (fun (_, dims) ->
+            match dims with
+            | [n; n2] when n = n2 ->
+                ensure st (fingerprint "expm" (box n)) (fun nm -> Ok (expmDecl nm n))
+                |> Result.map (fun nm -> syn (ExprApp (v nm, [aE])))
+            | [n; n2] -> Error $"expm: the argument must be square (got {n}x{n2})"
+            | _ -> Error "expm: the argument must be rank-2 (Array<Float64 like Idx<n>, Idx<n>>)")
+    | "expm", _ -> Error "expm: expected expm(A) with A a square Float64 matrix"
     | "svd", (aE :: rest) ->
         sweepsArg ctx.Statics "svd" rest |> Result.bind (fun sweeps ->
         arrayShape ctx scope "svd" aE |> Result.bind (fun (_, dims) ->

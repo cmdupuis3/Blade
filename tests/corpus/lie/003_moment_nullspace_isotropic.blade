@@ -1,0 +1,75 @@
+// TEST: lie: the order-4 moment-annihilation nullspace is so(3) for an isotropic tensor and empty for a cubic one
+// Lighthouse cell D1 (plan §5) as a theorem: the symmetry algebra of a law is the
+// kernel of A -> rho_4(A) M4 (RIGOR.md B1.2, a Lie subalgebra by construction).
+// For the isotropic tensor E[z x4] of z uniform on S^2 -- (dd + dd + dd)/15 --
+// the kernel on gl(3) is exactly so(3): three singular values at machine zero,
+// six away from it (5 at the same value, 1 larger); on the so(3) unknowns all
+// three vanish. For the cubic tensor sum_a e_a x4 / 3 (the octahedral class of
+// examples/matched_moments.bladenb) the stabilizer is finite, so no singular
+// value on so(3) is zero. Dense 81-cell storage is used for the Sym^4 rows, so
+// no symmetric-storage row scaling is needed (B1.5); flat row index
+// r = 27 i + 9 j + 3 k + l. Index arithmetic happens in Int64 helpers over
+// anonymous arrays (a named tag refuses arithmetic and warns on untagged reads).
+import math as m
+type D = Idx<3>
+type R = Idx<81>
+type C9 = Idx<9>
+type C3 = Idx<3>
+function delta(i: Int64, j: Int64) -> Float64 = if i == j then 1.0 else 0.0
+function iso4(r: Int64) -> Float64 = {
+    let i = r / 27
+    let j = (r / 9) % 3
+    let k = (r / 3) % 3
+    let l = r % 3
+    (delta(i, j) * delta(k, l) + delta(i, k) * delta(j, l) + delta(i, l) * delta(j, k)) / 15.0
+}
+function octa4(r: Int64) -> Float64 = {
+    let i = r / 27
+    let j = (r / 9) % 3
+    let k = (r / 3) % 3
+    let l = r % 3
+    (delta(i, j) * delta(j, k) * delta(k, l)) / 3.0
+}
+let M4iso: Array<Float64 like Idx<81>> = method_for(range<R>) <@> lambda(r: R) -> iso4(r) |> compute
+let M4oct: Array<Float64 like Idx<81>> = method_for(range<R>) <@> lambda(r: R) -> octa4(r) |> compute
+// rho_4(A) M at flat cell r: the four slot contractions
+function act4(A: Array<Float64 like Idx<3>, Idx<3>>, M: Array<Float64 like Idx<81>>, r: Int64) -> Float64 = {
+    let i = r / 27
+    let j = (r / 9) % 3
+    let k = (r / 3) % 3
+    let l = r % 3
+    let s0 = A(i, 0) * M(9 * j + 3 * k + l) + A(i, 1) * M(27 + 9 * j + 3 * k + l) + A(i, 2) * M(54 + 9 * j + 3 * k + l)
+    let s1 = A(j, 0) * M(27 * i + 3 * k + l) + A(j, 1) * M(27 * i + 9 + 3 * k + l) + A(j, 2) * M(27 * i + 18 + 3 * k + l)
+    let s2 = A(k, 0) * M(27 * i + 9 * j + l) + A(k, 1) * M(27 * i + 9 * j + 3 + l) + A(k, 2) * M(27 * i + 9 * j + 6 + l)
+    let s3 = A(l, 0) * M(27 * i + 9 * j + 3 * k) + A(l, 1) * M(27 * i + 9 * j + 3 * k + 1) + A(l, 2) * M(27 * i + 9 * j + 3 * k + 2)
+    s0 + s1 + s2 + s3
+}
+// basis element E_pq of gl(3) at column c = 3p + q; so(3) basis E_il - E_li at (i, l) = (0, 1), (0, 2), (1, 2)
+function egl(c: Int64) -> Array<Float64 like D, D> = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, c / 3) * delta(j, c % 3) |> compute
+function eso(a: Int64) -> Array<Float64 like D, D> = {
+    let p = if a == 2 then 1 else 0
+    let q = if a == 0 then 1 else 2
+    method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> delta(i, p) * delta(j, q) - delta(i, q) * delta(j, p) |> compute
+}
+let Cgl_iso: Array<Float64 like R, C9> = method_for(range<R>, range<C9>) <@> lambda(r: R, c: C9) -> act4(egl(c), M4iso, r) |> compute
+let Cso_iso: Array<Float64 like R, C3> = method_for(range<R>, range<C3>) <@> lambda(r: R, a: C3) -> act4(eso(a), M4iso, r) |> compute
+let Cso_oct: Array<Float64 like R, C3> = method_for(range<R>, range<C3>) <@> lambda(r: R, a: C3) -> act4(eso(a), M4oct, r) |> compute
+let (U1, S_gl_iso, V1) = m.svd(Cgl_iso)
+let (U2, S_so_iso, V2) = m.svd(Cso_iso)
+let (U3, S_so_oct, V3) = m.svd(Cso_oct)
+function count_zero(s: T^1) -> Int64 = reduce(method_for(s) <@> lambda(v: T^0) -> if v < 1e-12 then 1 else 0 |> compute, (+))
+let nullity_gl_iso = count_zero(S_gl_iso)
+let nullity_so_iso = count_zero(S_so_iso)
+let nullity_so_oct = count_zero(S_so_oct)
+let s_top = S_gl_iso(0)
+let s_mid = S_gl_iso(1)
+let s_mid5 = S_gl_iso(5)
+let s_oct = S_so_oct(0)
+// EXPECT: nullity_gl_iso = 3
+// EXPECT: nullity_so_iso = 3
+// EXPECT: nullity_so_oct = 0
+// EXPECT: s_top = 1.03279555898864
+// EXPECT: s_mid = 0.864098759787715
+// EXPECT: s_mid5 = 0.864098759787714
+// EXPECT: s_oct = 0.942809041582063
+// EXPECT: S_so_oct = [0.942809041582063, 0.942809041582063, 0.942809041582063]

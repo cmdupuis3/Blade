@@ -1,0 +1,33 @@
+// TEST: lie: U-statistic kernel MMDs and the Gaussian Hessian form of a generator
+// The stdlib's `mmd2_poly_u` / `mmd2_gauss_u` (diagonal pairs excluded, so
+// the paired statistic is unbiased -- RIGOR.md B2.6) on two small sample sets,
+// pinned against a numpy replay; and q_G(A) of RIGOR.md B2.5 -- the Hessian at
+// the identity of t -> MMD^2(P, exp(tA)_# P) for the Gaussian kernel -- summed
+// from the stdlib's per-pair term over a two-range map, pinned the same way.
+// A rotation generator on an isotropic sample set would make q_G vanish; this
+// A is not antisymmetric and the set is not isotropic, so q_G > 0.
+import lie
+type D = Idx<3>
+type N = Idx<4>
+let X: Array<Float64 like N, D> = [[1.0, 0.0, -0.5], [0.25, 0.75, 0.5], [-0.5, 1.0, 0.0], [0.6, -0.4, 0.2]]
+let Y: Array<Float64 like N, D> = [[-1.0, 0.3, 0.7], [0.1, -0.2, 0.9], [0.4, 0.4, -0.3], [-0.6, 0.8, 0.1]]
+let mp = lie.mmd2_poly_u(X, Y, 1.0, 3)
+let mg = lie.mmd2_gauss_u(X, Y, 1.5)
+let mp_self = lie.mmd2_poly_u(X, X, 1.0, 3)
+let mg_self = lie.mmd2_gauss_u(X, X, 1.5)
+// q_G(A): rows of A·x are gram(X, Aᵀ); the pair loop reads its own sample rows
+let A: Array<Float64 like D, D> = [[0.0, -1.0, 0.5], [1.0, 0.0, 0.2], [-0.5, -0.2, 0.0]]
+let At = transpose(A, [0, 1])
+let AX: Array<Float64 like N, D> = gram(X, At)
+let s2 = 1.5 * 1.5
+let terms = method_for(range<N>, range<N>) <@> lambda(a: N, b: N) -> lie.gauss_hessian_pair(X(a), AX(a), X(b), AX(b), s2) |> compute
+let qg = reduce(reduce(terms, (+)), (+)) / 16.0
+// A set against ITSELF is not zero under the U-statistic: the within terms drop
+// the n diagonal pairs while the cross term keeps them, so MMD^2_U(X, X) < 0 --
+// the price of unbiasedness (the V-statistic would give 0 here and prefer the
+// identity transform everywhere else).
+// EXPECT: mp = -0.654213843750001
+// EXPECT: mg = -0.0348935618185169
+// EXPECT: mp_self = -3.33990030729167
+// EXPECT: mg_self = -0.171450759571411
+// EXPECT: qg = 0.0962854605228829

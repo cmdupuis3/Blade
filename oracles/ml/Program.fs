@@ -18,6 +18,13 @@ let main argv =
         // (fit-derived, Wigner-consistent) for the sgs corpus tests.
         OracleDump.dumpCartesian ()
         0
+    | [| "dump-lie" |] ->
+        // Print the Lie-algebra pins (so(3) tables certified against the
+        // fit Wigner D, Killing/Casimir, small-algebra invariants, moment
+        // annihilation, the d = 12 canonicalization lighthouse, the
+        // functional lane) for the tests/corpus/lie/ corpus.
+        OracleDump.dumpLie ()
+        0
     | _ ->
         printfn "BladeML reference implementation -- equivariant ML module tests"
         printfn ""

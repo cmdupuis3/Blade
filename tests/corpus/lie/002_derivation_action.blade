@@ -1,0 +1,48 @@
+// TEST: lie: the derivation action on order-2 and order-3 moment tensors
+// rho_k(A) M = sum over slots of A acting in that slot (RIGOR.md B1.1): at k = 2
+// it is A M + M A^T (stdlib `derivation2`); at k = 3 it is the sum of the three
+// slot contractions, spelled here as a kernel over the canonical-tuple range
+// of the SymIdx<3, D> storage (params are PREFIX OFFSETS, the tuple is
+// (p0, p0+p1, p0+p1+p2)) and checked against the dense 27-cell formula. For
+// M = I the k = 2 action vanishes exactly on antisymmetric A (the whitened
+// K <= 2 theorem: all of so(d) survives order 2) and not on a symmetric one.
+import lie
+type N = Idx<5>
+type D = Idx<3>
+type S3 = SymIdx<3, D>
+let Lz: Array<Float64 like D, D> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let Ssym: Array<Float64 like D, D> = [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let I3: Array<Float64 like D, D> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+let res_anti = lie.annihilation2(Lz, I3)
+let res_sym = lie.annihilation2(Ssym, I3)
+// an anisotropic second moment: only its own stabilizer survives
+let M2: Array<Float64 like D, D> = [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+let res_anti_aniso = lie.annihilation2(Lz, M2)
+let Lx: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]
+let res_x_aniso = lie.annihilation2(Lx, M2)
+// order 3: the raw third moment of a small sample set (variables x samples), comm-kernel spelling;
+// the variable axis is anonymous so the Int64 slot reads below carry no tag warning
+let Zt: Array<Float64 like Idx<3>, N> = [[1.0, 0.25, -0.5, 0.6, -1.0], [0.0, 0.75, 1.0, -0.4, 0.3], [-0.5, 0.5, 0.0, 0.2, 0.7]]
+function m3k(a: Array<Float64 like N>, b: Array<Float64 like N>, c: Array<Float64 like N>) where comm(a, b, c) -> Float64 =
+    reduce(a * b * c, (+)) / 5.0
+let M3 = method_for(Zt, Zt, Zt) <@> m3k |> compute
+let M3d = decompact(decompact(M3, 0), 1)
+let A: Array<Float64 like Idx<3>, Idx<3>> = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+function slot(i: Int64, j: Int64, l: Int64) -> Float64 =
+    A(i, 0) * M3(0, j, l) + A(i, 1) * M3(1, j, l) + A(i, 2) * M3(2, j, l)
+let R = method_for(range<S3>) <@> lambda(p0, p1, p2) -> slot(p0, p0 + p1, p0 + p1 + p2) + slot(p0 + p1, p0, p0 + p1 + p2) + slot(p0 + p1 + p2, p0, p0 + p1) |> compute
+let Rd = decompact(decompact(R, 0), 1)
+let Rref = method_for(range<D>, range<D>, range<D>) <@> lambda(i: D, j: D, l: D) -> (A(i, 0) * M3d(0, j, l) + A(i, 1) * M3d(1, j, l) + A(i, 2) * M3d(2, j, l)) + (A(j, 0) * M3d(i, 0, l) + A(j, 1) * M3d(i, 1, l) + A(j, 2) * M3d(i, 2, l)) + (A(l, 0) * M3d(i, j, 0) + A(l, 1) * M3d(i, j, 1) + A(l, 2) * M3d(i, j, 2)) |> compute
+let E = method_for(range<D>, range<D>, range<D>) <@> lambda(i: D, j: D, l: D) -> (Rd(i, j, l) - Rref(i, j, l)) * (Rd(i, j, l) - Rref(i, j, l)) |> compute
+let err = reduce(E, (+), axes = 3)
+let agree = err < 1e-28
+let r001 = R(0, 0, 1)
+let r010 = R(0, 1, 0)
+// EXPECT: res_anti = 0.0
+// EXPECT: res_sym = 8.0
+// EXPECT: res_anti_aniso = 2.0
+// EXPECT: res_x_aniso = 0.0
+// EXPECT: agree = true
+// EXPECT: r001 = 0.162675
+// EXPECT: r010 = 0.162675
+// EXPECT: R = [-0.271725, 0.162675, 0.0657, -0.095825, -0.0146, -0.0637, -0.212025, -0.0657, -0.0307, 0.0]

@@ -1,0 +1,160 @@
+// Lie-algebra helpers over matrices stacked along a leading generator axis, as
+// Blade source. The forward half of docs/plans/plan-latent-symmetry-learning.md
+// §4.2 (P0): everything here is generic over extents and runs on dense rank-2
+// generators; the nullspace / eigen steps (`m.svd`, `m.eigh`) need a DECLARED
+// operand shape and therefore live in the program that knows its extents --
+// the corpus directory tests/corpus/lie/ shows each of them spelled out.
+//
+//     import lie
+//     let Ls: Array<Float64 like G, D, D> = stack(Lx, Ly, Lz)
+//     let c = lie.structure_constants(Ls)        // c(i, j, k): [L_i, L_j] = Σ_k c(i, j, k) L_k
+//     let K: Array<Float64 like G, G> = lie.killing(c)   // ascribe, then m.eigh(K)
+//
+// CONVENTIONS. A generator stack is `Array<T like G, D, D>`: `L(a)` is the a-th
+// matrix by dimensional currying. Products are `gram(p, qᵀ)` (p·q), the one
+// matrix product the AD lane differentiates (`m.matmul` is forward-only today).
+// `structure_constants` divides by ‖L_k‖²_F, so it is exact for a
+// Frobenius-ORTHOGONAL basis -- what `m.svd` / `m.eigh` return -- and only a
+// projection for a general one; `closure_defect` makes the same assumption.
+// Results of the kernels below carry ANONYMOUS axes: ascribe them
+// (`let K: Array<Float64 like G, G> = ...`) before `m.eigh` / `m.svd` or before
+// mixing them with named-axis arrays (BL3999 otherwise).
+//
+// STATISTICS. `mmd2_poly_u` / `mmd2_gauss_u` are the U-statistic (diagonal
+// excluded) kernel two-sample distances of §3.2 of the plan, spelled as sample
+// × sample outer products (`method_for(x, y)` over rows) so they stay generic;
+// at large n the three-`gram` spelling is the BLAS route -- see the corpus.
+// The paired V-statistic is biased toward the identity transform (RIGOR.md
+// B2.6), which is why only the U forms are offered.
+module lie
+
+/// p·q for rank-2 p, q (Gram against the transpose).
+function mm(p: T^2, q: T^2) -> T^2 = {
+    let qt = transpose(q, [0, 1])
+    let r = gram(p, qt)
+    r
+}
+
+/// The commutator [p, q] = p·q − q·p.
+function bracket(p: T^2, q: T^2) -> T^2 = {
+    let pq = mm(p, q)
+    let qp = mm(q, p)
+    let d = pq - qp
+    d
+}
+
+/// Frobenius inner product ⟨p, q⟩ = Σ_ij p(i, j) q(i, j).
+function frob(p: T^2, q: T^2) -> T^0 = reduce(reduce(p * q, (+)), (+))
+
+/// Structure constants of a Frobenius-orthogonal generator stack:
+/// c(i, j, k) = ⟨[L_i, L_j], L_k⟩ / ⟨L_k, L_k⟩, so [L_i, L_j] = Σ_k c(i, j, k) L_k
+/// exactly when the stack is closed and orthogonal.
+function structure_constants(L: T^3) -> T^3 =
+    method_for(L, L, L) <@> lambda(a: T^2, b: T^2, c: T^2) -> frob(bracket(a, b), c) / frob(c, c) |> compute
+
+/// The Killing form κ(i, j) = tr(ad_i ad_j) = Σ_kl c(i, k, l) c(j, l, k).
+/// Semisimple ⟺ nondegenerate; compact semisimple ⟺ negative definite
+/// (Cartan); its signature is basis-independent, its eigenvalues are so for
+/// a Frobenius-orthonormal basis.
+function killing(c: T^3) -> T^2 =
+    method_for(c, c) <@> lambda(ci: T^2, cj: T^2) -> frob(ci, transpose(cj, [0, 1])) |> compute
+
+/// Σ_a L(a)·L(a): the Casimir of a (−κ/2)-orthonormal basis (for so(3) with
+/// [L_x, L_y] = L_z it is −l(l+1)·I on the spin-l block).
+function casimir(L: T^3) -> T^2 = {
+    let sq = method_for(L) <@> lambda(a: T^2) -> mm(a, a) |> compute
+    let sqt = transpose(sq, [0, 2])
+    let s = reduce(sqt, (+))
+    s
+}
+
+/// Σ_k cv(k) L(k): the matrix of the algebra element with coordinates cv
+/// (e.g. a random draw `w` for `exp(Σ w_a L_a)`).
+function comb(cv: T^1, L: T^3) -> T^2 = {
+    let Lt = transpose(L, [0, 2])
+    let r = method_for(Lt) <@> lambda(row: T^1) -> prodsum(row, cv) |> compute
+    let rt = transpose(r, [0, 1])
+    rt
+}
+
+/// Closure defect of a Frobenius-ORTHOGONAL stack: Σ_ij ‖[L_i, L_j] − proj_span(L)[L_i, L_j]‖²_F,
+/// zero iff the span is a Lie algebra. The projection is written out
+/// (‖X‖² − Σ_k ⟨X, L_k⟩²/‖L_k‖²) rather than as a rank-4 difference.
+function closure_defect(L: T^3) -> T^0 = {
+    let per_pair = method_for(L, L) <@> lambda(a: T^2, b: T^2) -> {
+        let br = bracket(a, b)
+        let proj = reduce(method_for(L) <@> lambda(lk: T^2) -> frob(br, lk) * frob(br, lk) / frob(lk, lk) |> compute, (+))
+        frob(br, br) - proj
+    } |> compute
+    reduce(reduce(per_pair, (+)), (+))
+}
+
+/// The derivation (Leibniz) action of A on an order-2 moment tensor:
+/// ρ₂(A) M = A·M + M·Aᵀ. Zero for every A in the symmetry algebra of the law
+/// whose second moment is M; for M = I exactly the antisymmetric A.
+function derivation2(A: T^2, M: T^2) -> T^2 = {
+    let am = mm(A, M)
+    let ma = mm(M, transpose(A, [0, 1]))
+    let r = am + ma
+    r
+}
+
+/// ‖ρ₂(A) M‖²_F -- the order-2 term of the moment-annihilation quadratic form.
+function annihilation2(A: T^2, M: T^2) -> T^0 = {
+    let r = derivation2(A, M)
+    frob(r, r)
+}
+
+/// Squared row norms of a sample set (rows = samples).
+function sqnorms(x: T^2) -> T^1 = method_for(x) <@> lambda(row: T^1) -> prodsum(row, row) |> compute
+
+/// Unbiased (U-statistic) polynomial-kernel MMD² between two sample sets,
+/// kernel (c + ⟨a, b⟩)^k: equals Σ_j binom(k, j) c^{k−j} ‖M_j(x) − M_j(y)‖²_F,
+/// the order-k moment-matching distance (RIGOR.md B2.1), with the diagonal
+/// pairs dropped (B2.6).
+function mmd2_poly_u(x: T^2, y: T^2, c: T^0, k: Int64) -> T^0 = {
+    let n = Float64(extents(x)[0])
+    let m = Float64(extents(y)[0])
+    let kxx = method_for(x, x) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let kyy = method_for(y, y) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let kxy = method_for(x, y) <@> lambda(a: T^1, b: T^1) -> (c + prodsum(a, b)) ^ k |> compute
+    let sxx = reduce(reduce(kxx, (+)), (+))
+    let syy = reduce(reduce(kyy, (+)), (+))
+    let sxy = reduce(reduce(kxy, (+)), (+))
+    let dxx = reduce(method_for(sqnorms(x)) <@> lambda(v: T^0) -> (c + v) ^ k |> compute, (+))
+    let dyy = reduce(method_for(sqnorms(y)) <@> lambda(v: T^0) -> (c + v) ^ k |> compute, (+))
+    (sxx - dxx) / (n * (n - 1.0)) + (syy - dyy) / (m * (m - 1.0)) - 2.0 * sxy / (n * m)
+}
+
+/// The Gaussian kernel exp(−‖a − b‖² / 2σ²) on two rows, from inner products.
+function gauss_kernel(a: T^1, b: T^1, s2: T^0) -> T^0 =
+    exp(-(prodsum(a, a) + prodsum(b, b) - 2.0 * prodsum(a, b)) / (2.0 * s2))
+
+/// Unbiased (U-statistic) Gaussian-kernel MMD² between two sample sets. The
+/// Gaussian kernel is characteristic: the population MMD is zero iff the two
+/// laws are equal (RIGOR.md B2.5); the diagonal terms k(x, x) = 1 are dropped.
+function mmd2_gauss_u(x: T^2, y: T^2, sigma: T^0) -> T^0 = {
+    let n = Float64(extents(x)[0])
+    let m = Float64(extents(y)[0])
+    let s2 = sigma * sigma
+    let kxx = method_for(x, x) <@> lambda(a: T^1, b: T^1) -> gauss_kernel(a, b, s2) |> compute
+    let kyy = method_for(y, y) <@> lambda(a: T^1, b: T^1) -> gauss_kernel(a, b, s2) |> compute
+    let kxy = method_for(x, y) <@> lambda(a: T^1, b: T^1) -> gauss_kernel(a, b, s2) |> compute
+    let sxx = reduce(reduce(kxx, (+)), (+))
+    let syy = reduce(reduce(kyy, (+)), (+))
+    let sxy = reduce(reduce(kxy, (+)), (+))
+    (sxx - n) / (n * (n - 1.0)) + (syy - m) / (m * (m - 1.0)) - 2.0 * sxy / (n * m)
+}
+
+/// One pair's term of the Gaussian-kernel Hessian form q_G(A) (RIGOR.md B2.5,
+/// Gram form): with xa, xb two samples and axa = A·xa, axb = A·xb,
+///     k(xa, xb) · [ ⟨axa, axb⟩/σ² − ⟨u, axa⟩⟨u, axb⟩/σ⁴ ],  u = xa − xb.
+/// Summed over all ordered pairs and divided by n², the result is q̂_G(A),
+/// whose population kernel is exactly sym(P). The pair loop is the caller's
+/// (a two-range map reading its own sample rows): a zip of (x, A·x) cannot yet
+/// be one operand of a multi-array loop.
+function gauss_hessian_pair(xa: T^1, axa: T^1, xb: T^1, axb: T^1, s2: T^0) -> T^0 = {
+    let kab = gauss_kernel(xa, xb, s2)
+    let u = xa - xb
+    kab * (prodsum(axa, axb) / s2 - prodsum(u, axa) * prodsum(u, axb) / (s2 * s2))
+}

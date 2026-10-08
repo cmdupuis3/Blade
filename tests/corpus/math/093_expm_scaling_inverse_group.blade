@@ -1,0 +1,35 @@
+// TEST: Math expm: a dense input through four squarings, the inverse identity and the one-parameter group law
+// ||B||_1 = 10.5 > theta, so the body halves four times (s = 4) before the
+// Horner polynomial and squares four times after; the entries run to ~800
+// and scipy agrees to the printed digits. The two identities every matrix
+// exponential satisfies are then pinned as residuals: e^A e^-A = I, and the
+// group law e^(sA) e^(tA) = e^((s+t)A) (commuting arguments) -- the property
+// that makes exp of a random algebra element a GROUP element (plan §3.6).
+import math as m
+import lie
+type I3 = Idx<3>
+let B: Array<Float64 like I3, I3> = [[1.0, 4.0, -2.0], [0.5, -3.0, 2.5], [-1.5, 2.0, 6.0]]
+let EB = m.expm(B)
+let eb22 = EB(2, 2)
+let eb02 = EB(0, 2)
+let A: Array<Float64 like I3, I3> = [[0.3, -0.8, 0.1], [0.8, 0.3, -0.4], [-0.1, 0.4, 0.3]]
+let An: Array<Float64 like I3, I3> = A * (-1.0)
+let EA = m.expm(A)
+let EAn = m.expm(An)
+let I3m: Array<Float64 like I3, I3> = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+let P: Array<Float64 like I3, I3> = lie.mm(EA, EAn)
+let inv_resid = lie.frob(P - I3m, P - I3m)
+let inverse_ok = inv_resid < 1e-28
+let As: Array<Float64 like I3, I3> = A * 0.4
+let At: Array<Float64 like I3, I3> = A * 1.1
+let Ast: Array<Float64 like I3, I3> = A * 1.5
+let EAs = m.expm(As)
+let EAt = m.expm(At)
+let Q: Array<Float64 like I3, I3> = lie.mm(EAs, EAt)
+let G: Array<Float64 like I3, I3> = m.expm(Ast)
+let grp_resid = lie.frob(Q - G, Q - G)
+let group_ok = grp_resid < 1e-28
+// EXPECT: eb22 = 804.912627244141
+// EXPECT: eb02 = -141.508572362752
+// EXPECT: inverse_ok = true
+// EXPECT: group_ok = true

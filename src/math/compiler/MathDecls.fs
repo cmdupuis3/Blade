@@ -319,6 +319,70 @@ let eighDecl (name: string) (n: int) (sweeps: int) : FunctionDecl =
     mkFunc name [ ("a", tyFloatMat n n) ]
         (TyTuple [ tyFloatMat n n; tyFloatArr n ]) body
 
+// expm (scaling and squaring over the degree-18 Taylor polynomial)
+
+/// Matrix exponential e^A for a fixed n, solve-free: scale X = 2^-s A so that ||X||_1 <= theta_18 = 1.0909, evaluate
+/// the degree-18 Taylor polynomial by Horner (Y <- I + X Y / k, k = 18 .. 1), square s times. In exact arithmetic
+/// T_18(2^-s A)^(2^s) = e^(A + dA) with ||dA||_1 <= u ||A||_1 (Higham 2005's backward-error argument transplanted to
+/// Taylor; theta_18 computed with exact rational coefficients -- docs/research/latent-symmetry/RIGOR.md B6.2). s is the
+/// smallest s >= 0 with ||A||_1 / 2^s <= theta, found by a 64-step bounded halving loop with if-EXPRESSION updates
+/// (no statement-level control flow in generated bodies; 64 halvings cover ||A||_1 up to theta * 2^64) and drives a
+/// runtime-bounded squaring loop. The squaring phase can lose accuracy for highly non-normal A (Al-Mohy & Higham
+/// 2010); it is benign for the near-antisymmetric generators the symmetry-discovery lane exponentiates. Plain products
+/// throughout, so forward mode / a later reverse rule differentiate the algorithm itself -- the Fréchet derivative of
+/// the computed approximant (B6.3).
+let expmDecl (name: string) (n: int) : FunctionDecl =
+    let xAt = flat "x" n
+    let yAt = flat "y" n
+    let tAt = flat "t" n
+    let theta = 1.0909
+    // t <- p * q (flat n x n operands; one accumulator seeded at +0.0, ascending kk -- the matmul convention)
+    let product (p: Expr -> Expr -> Expr) (q: Expr -> Expr -> Expr) =
+        sFor "i" 0 n
+            [ sFor "j" 0 n
+                [ sAssign (v "acc") (fLit 0.0)
+                  sFor "kk" 0 n [ sAccum (v "acc") (mul (p (v "i") (v "kk")) (q (v "kk") (v "j"))) ]
+                  sAssign (tAt (v "i") (v "j")) (v "acc") ] ]
+    let copyTToY = sFor "i" 0 n [ sFor "j" 0 n [ sAssign (yAt (v "i") (v "j")) (tAt (v "i") (v "j")) ] ]
+    // one Horner step: y <- I + (x y) / k
+    let hornerStep (k: int) =
+        [ product xAt yAt
+          sFor "i" 0 n
+            [ sFor "j" 0 n
+                [ sAssign (yAt (v "i") (v "j"))
+                          (add (ifE (cmp OpEq (v "i") (v "j"), fLit 1.0, fLit 0.0))
+                               (divE (tAt (v "i") (v "j")) (fLit (float k)))) ] ] ]
+    let body =
+        blockE (
+            [ sLetMut "x" (zerosLit (n * n))
+              sFor "i" 0 n [ sFor "j" 0 n [ sAssign (xAt (v "i") (v "j")) (idx2 "a" (v "i") (v "j")) ] ]
+              // ||A||_1 = the largest column sum of |entries|
+              sLetMut "nrm" (fLit 0.0)
+              sLetMut "cs" (fLit 0.0)
+              sFor "j" 0 n
+                [ sAssign (v "cs") (fLit 0.0)
+                  sFor "i" 0 n [ sAccum (v "cs") (absE (xAt (v "i") (v "j"))) ]
+                  sAssign (v "nrm") (ifE (cmp OpGt (v "cs") (v "nrm"), v "cs", v "nrm")) ]
+              // s squarings and the scale 2^-s, by bounded halving
+              sLetMut "s" (iLit 0)
+              sLetMut "scale" (fLit 1.0)
+              sFor "h" 0 64
+                [ sLet "need" (cmp OpGt (mul (v "nrm") (v "scale")) (fLit theta))
+                  sAssign (v "scale") (ifE (v "need", mul (v "scale") (fLit 0.5), v "scale"))
+                  sAssign (v "s") (ifE (v "need", add (v "s") (iLit 1), v "s")) ]
+              sFor "i" 0 n [ sFor "j" 0 n [ sAssign (xAt (v "i") (v "j")) (mul (xAt (v "i") (v "j")) (v "scale")) ] ]
+              // Horner from y = I
+              sLetMut "y" (zerosLit (n * n))
+              sFor "i" 0 n [ sAssign (yAt (v "i") (v "i")) (fLit 1.0) ]
+              sLetMut "t" (zerosLit (n * n))
+              sLetMut "acc" (fLit 0.0) ]
+            @ (List.concat [ for k in 18 .. -1 .. 1 -> hornerStep k ])
+            @ [ // s squarings: y <- y y
+                sForE "q" (iLit 0) (v "s") [ product yAt yAt; copyTToY ]
+                sLet "r" (nestedFromFlat "y" n n) ],
+            Some (v "r"))
+    mkFunc name [ ("a", tyFloatMat n n) ] (tyFloatMat n n) body
+
 // eig (general non-symmetric: Hessenberg + Francis double-shift QR)
 
 /// General real eigenvalues for a fixed (n, maxIter): (LRE, LIM) sorted by DESCENDING modulus, conjugate pairs adjacent with

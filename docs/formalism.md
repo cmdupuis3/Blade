@@ -1176,7 +1176,8 @@ domain library), `sum`/`mean` (rank-reducing, equivariance-preserving),
 exist only in static evaluation). What exists today: `reduce` (§6.4),
 `prodsum(a, b)` (the fused dot product), `gram`/`gram_apply`, the standard
 library's `stats.mean`/`variance`/`stddev`, and `import math as m` for
-`m.matmul`, `m.solve`, `m.lu`/`m.lu_solve`, `m.eigh`. Equivariance signatures live in the ML module
+`m.matmul`, `m.solve`, `m.lu`/`m.lu_solve`, `m.eigh`, `m.expm` (scaling-and-squaring Taylor-18, synthesized
+as plain Blade; corpus `math/092`–`093`). Equivariance signatures live in the ML module
 ([features/equivariant-nn.md](features/equivariant-nn.md)); the core carries
 the annotation hook only.
 

@@ -1,0 +1,28 @@
+// TEST: Math expm: rotation generator, nilpotent and diagonal inputs against closed forms
+// m.expm synthesizes a scaling-and-squaring Taylor-18 body (MathDecls.expmDecl,
+// theta = 1.0909): below the threshold no squaring happens and the result is
+// the degree-18 polynomial, which at ||A||_1 = 0.7 is e^A to the ulp. The
+// rotation generator t J gives [[cos t, -sin t], [sin t, cos t]]; a strictly
+// upper-triangular N is nilpotent so e^N = I + N + N^2/2 exactly; and a
+// diagonal matrix exponentiates entrywise (scipy: e^2 = 7.38905609893065,
+// e^-3 = 0.049787068367863944) -- its ||A||_1 = 3 forces two squarings.
+import math as m
+type I2 = Idx<2>
+type I3 = Idx<3>
+let J: Array<Float64 like I2, I2> = [[0.0, -0.7], [0.7, 0.0]]
+let R = m.expm(J)
+let c = R(0, 0)
+let s = R(1, 0)
+let N: Array<Float64 like I3, I3> = [[0.0, 1.0, 2.0], [0.0, 0.0, 3.0], [0.0, 0.0, 0.0]]
+let EN = m.expm(N)
+let Dg: Array<Float64 like I2, I2> = [[2.0, 0.0], [0.0, -3.0]]
+let ED = m.expm(Dg)
+let e2 = ED(0, 0)
+let em3 = ED(1, 1)
+let off = ED(0, 1) + ED(1, 0)
+// EXPECT: c = 0.764842187284488
+// EXPECT: s = 0.644217687237691
+// EXPECT: EN = [[1.0, 1.0, 3.5], [0.0, 1.0, 3.0], [0.0, 0.0, 1.0]]
+// EXPECT: e2 = 7.38905609893065
+// EXPECT: em3 = 0.0497870683678639
+// EXPECT: off = 0.0
