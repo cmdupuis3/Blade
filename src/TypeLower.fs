@@ -941,6 +941,45 @@ and symPowerIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
     | SymBaseIndex baseTy ->
         let baseRec = lowerIndexType env 0 baseTy
         { baseRec with Id = id; Rank = rank; Symmetry = symmetry }
+    | SymBaseProduct factorTys ->
+        productFrameIndexRecord env id rank symmetry factorTys
+
+/// The index record for `SymIdx<k, <I1, ..., Id>>` / `AntisymIdx<k, <...>>`:
+/// the k-th symmetric power of a PRODUCT FRAME (formalism 3.2's
+/// `<Idx<N>, Idx<M>>` row, 8.4's compound S-tuple). Extent = the product of
+/// the factor extents (literal when every factor's is), Tag = the product
+/// tag carrying the factors' names and static extents, IxKind = IxKPlain --
+/// field for field what `IRLoopStructure.deduceOutputType` builds for a comm
+/// group over a multi-dimensional array, so the written and the deduced type
+/// are the same type by construction (the two compare by `Unify`'s
+/// product-frame arm: factor names, nominatively).
+///
+/// Admitted factors are exactly what fusion admits (`fuseJointSLevels`):
+/// rank-1 dense records -- `Idx<n>`, a named alias of one, an irreps space --
+/// with no dependencies. A compact, compound, sparse, ragged or dependent
+/// factor has no row-major position to fold to and is refused (BL4003).
+and productFrameIndexRecord env (id: IRId) (rank: int) (symmetry: SymmetryClass)
+                            (factorTys: TypeExpr list) : IRIndexType =
+    let factors = factorTys |> List.map (lowerIndexType env 0)
+    let admissible (r: IRIndexType) =
+        r.Rank = 1 && r.Symmetry = SymNone && List.isEmpty r.Dependencies
+        && (match r.IxKind with
+            | IxKPlain | IxKIrreps -> true
+            | _ -> false)
+    match factors |> List.tryFind (admissible >> not) with
+    | Some bad -> raise (TypeErrorRaised (SymProductFactorNotDense (ppIndexType bad), None))
+    | None ->
+        let extent =
+            factors |> List.map _.Extent
+            |> List.reduce (fun a b ->
+                match a, b with
+                | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
+                | _ -> IRBinOp (IRElementwise, IRMul, a, b, SrcLoc.Nowhere))
+        let tag =
+            mkProductTag (factors |> List.map (fun f ->
+                productFactorNameOf f.Tag, tryEvalIntIR f.Extent))
+        { Id = id; Rank = rank; Extent = extent; Symmetry = symmetry
+          Tag = Some tag; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
 
 /// The index record for `OrbIdx<[(r1,s1), ..., (rd,sd)], base>`, the twin of
 /// `symPowerIndexRecord`, shared by index-position and value-position
@@ -972,7 +1011,10 @@ and orbitIndexRecord env (id: IRId) (levels: (int * bool) list)
          | SymBaseIndex baseTy ->
              // The base index type verbatim (rank 1, no symmetry) -- its own
              // identity, which is what `OrbIdx<[], Idx<n>>` should mean.
-             { lowerIndexType env 0 baseTy with Id = id; Rank = 1; Symmetry = SymNone })
+             { lowerIndexType env 0 baseTy with Id = id; Rank = 1; Symmetry = SymNone }
+         | SymBaseProduct factorTys ->
+             // The flat product axis itself (rank 1, no symmetry).
+             productFrameIndexRecord env id 1 SymNone factorTys)
     | OrbNfDepth1 (r, isPlus) ->
         symPowerIndexRecord env id r (if isPlus then SymSymmetric else SymAntisymmetric) baseIdx
     | OrbNfWreath normalized ->
@@ -984,6 +1026,9 @@ and orbitIndexRecord env (id: IRId) (levels: (int * bool) list)
             match baseIdx with
             | SymBaseExtent extent -> lowerExtentExpr env extent
             | SymBaseIndex baseTy -> (lowerIndexType env 0 baseTy).Extent
+            // Deferred like the block-spec base: only the product EXTENT
+            // survives under a wreath class (the record's Tag is "__orbidx").
+            | SymBaseProduct factorTys -> (productFrameIndexRecord env id 1 SymNone factorTys).Extent
         mkWreathIndexRecord id normalized baseExtent
 
 /// Resolve a SparseIdx keys expression to its (source, rank). Shared by the

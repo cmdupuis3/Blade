@@ -112,6 +112,7 @@ let rec internal substArityInTy (resolve: Ident -> int option) (unresolved: Resi
         match b with
         | SymBaseExtent e -> SymBaseExtent (ex e)
         | SymBaseIndex it -> SymBaseIndex (ty it)
+        | SymBaseProduct its -> SymBaseProduct (its |> List.map ty)
     match t with
     | TyInt32 | TyInt64 | TyFloat32 | TyFloat64 | TyComplex64 | TyComplex128
     | TyBool | TyString | TyChar | TyUnit | TyTupleWidth _ | TyVar _

@@ -373,9 +373,17 @@ type TypeExpr =
 ///     identity (extent, nominal tag, index kind) is inherited by the
 ///     symmetric-power record; only Rank and Symmetry are re-stamped. This
 ///     is what makes `Sym^k` of an irreps space a writable type.
+///   - `SymBaseProduct tys`: the base is a PRODUCT FRAME, a bracketed list of
+///     index types -- `SymIdx<3, <XIdx, YIdx>>` (formalism 3.2's
+///     `<Idx<N>, Idx<M>>` row, 8.4's compound S-tuple): the symmetric power
+///     of the row-major product space, each position a whole d-tuple. This
+///     is what deduction produces for a `comm` group over a multi-dimensional
+///     array; writing it down names the deduced type. At least two factors
+///     (a single factor is spelled bare).
 and SymIdxBase =
     | SymBaseExtent of Expr
     | SymBaseIndex of TypeExpr
+    | SymBaseProduct of TypeExpr list
 
 /// The live spellings of CnComm/CnAntisymm are WhereClause.Commutativity /
 /// Antisymmetry (the parser records where-clause conjuncts as data on the

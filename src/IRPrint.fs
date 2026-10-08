@@ -116,12 +116,13 @@ and ppIndexType (idx: IRIndexType) =
     // stands for the whole slot when the record is dense, and fills the
     // extent slot of a compact class, whose Tag names its COMPONENT space.
     let extentStr =
-        match userIndexName idx, idx.Extent with
-        | Some name, _ -> name
-        | None, IRLit (IRLitInt n) -> string n
-        | None, IRVar (id, _) -> $"v{id}"
-        | None, IRParam (name, _, _) -> name
-        | None, _ -> "?"
+        match userIndexName idx, productFrameOf idx, idx.Extent with
+        | Some name, _, _ -> name
+        | None, Some factors, _ -> ppProductFactors factors
+        | None, None, IRLit (IRLitInt n) -> string n
+        | None, None, IRVar (id, _) -> $"v{id}"
+        | None, None, IRParam (name, _, _) -> name
+        | None, None, _ -> "?"
     match idx with
     | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered
@@ -158,6 +159,27 @@ and userIndexName (idx: IRIndexType) : string option =
     match idx.Tag with
     | Some t when t <> "" && not (t.StartsWith "__") -> Some t
     | _ -> None
+
+/// The product frame a COMPACT record carries -- `SymIdx<r, <I1, ..., Id>>`,
+/// the compound-symmetric output of a comm group over a multi-dimensional
+/// array (docs/formalism.md 8.4): its factors, when the Tag is a product tag
+/// and the record is a rank >= 2 compact group. A rank-1 record under the
+/// same tag (the flat position axis `decompact` frees) prints by its extent:
+/// one coordinate of it is a compound POSITION, not a tuple.
+and productFrameOf (idx: IRIndexType) : (string option * int64 option) list option =
+    match idx.Tag with
+    | Some (ProductTag factors) when idx.Rank >= 2 && idx.Symmetry <> SymNone -> Some factors
+    | _ -> None
+
+/// `<XIdx, YIdx>` / `<Idx<2>, Idx<3>>`: the surface spelling of a product
+/// frame's factors, the one `Parser.parseSymIdxBase` reads back.
+and ppProductFactors (factors: (string option * int64 option) list) : string =
+    let one (name: string option, ext: int64 option) =
+        match name, ext with
+        | Some n, _ -> displayTagName n
+        | None, Some e -> $"Idx<{e}>"
+        | None, None -> "Idx<?>"
+    "<" + (factors |> List.map one |> String.concat ", ") + ">"
 
 /// The extent-slot rendering shared by both index printers: the small set of
 /// extent shapes a diagnostic can name, "?" for everything else. Factored out
@@ -224,12 +246,13 @@ and ppIndexTypeIn (names: Map<IRId, string>) (idx: IRIndexType) =
     let ownName = userIndexName idx
     let nominal = Map.tryFind idx.Id names |> Option.orElse ownName
     let extentStr =
-        match nominal with
-        | Some name -> name
+        match nominal, productFrameOf idx with
+        | Some name, _ -> name
+        | None, Some factors -> ppProductFactors factors
         // A wreath record's extent is one level down, inside the IROrbitClass
         // marker; `orbitBaseExtent` is the identity on every other record, so
         // this one call covers both.
-        | None -> ppExtentOf (orbitBaseExtent idx)
+        | None, None -> ppExtentOf (orbitBaseExtent idx)
     match idx with
     | IrrepsIdxLike rendered -> ppIrrepsPower idx rendered
     | PgIrrepsIdxLike rendered -> ppIrrepsPower idx rendered

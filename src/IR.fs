@@ -737,6 +737,43 @@ let extentsAgree (a: IRExpr) (b: IRExpr) : bool =
     | IRParam ("?", _, _), IRParam ("?", _, _) -> true
     | _ -> a = b
 
+/// The product frame a COMPACT record carries -- `SymIdx<r, <I1, ..., Id>>`,
+/// the compound-symmetric output of a comm group over a multi-dimensional
+/// array (docs/formalism.md 8.4; `Types.mkProductTag`) -- as rank-1 dense
+/// records, one per factor: the factor's name as its Tag and its STATIC
+/// extent when the tag recorded one (a symbolic placeholder otherwise; the
+/// typecheck and zonk consumers refine a named factor's extent from its
+/// declaration). None for every record that is not a rank >= 2 compact group
+/// over a product tag. Ids are the group's own: these records are judged
+/// and read, never stored.
+let productFrameFactorsOf (ix: IRIndexType) : IRIndexType list option =
+    match ix.Tag with
+    | Some (ProductTag factors) when ix.Rank >= 2 && ix.Symmetry <> SymNone && factors.Length >= 2 ->
+        factors
+        |> List.map (fun (name, ext) ->
+            { Id = ix.Id; Rank = 1
+              Extent = (match ext with
+                        | Some n -> IRLit (IRLitInt n)
+                        | None -> IRParam ((defaultArg name "?"), 0, IRTNat None))
+              Symmetry = SymNone; Tag = name; IxKind = ixKindOfTag name
+              Kind = SDimension; Dependencies = [] })
+        |> Some
+    | _ -> None
+
+/// Subscript arities of an index list. FLAT: one coordinate per component of
+/// every record (k for a rank-k compact group). PER-DIMENSION: a
+/// product-framed compact group of rank k over d factors takes k * d -- each
+/// of its positions is a whole d-tuple (formalism 3.2). The two coincide
+/// when no record is product-framed.
+let flatSubscriptArity (ixs: IRIndexType list) : int =
+    ixs |> List.sumBy (fun ix -> max 1 ix.Rank)
+
+let perDimSubscriptArity (ixs: IRIndexType list) : int =
+    ixs |> List.sumBy (fun ix ->
+        match productFrameFactorsOf ix with
+        | Some fs -> ix.Rank * fs.Length
+        | None -> max 1 ix.Rank)
+
 /// Level-1 placement classification of a full index type. Today this derives
 /// purely from the symmetry class (placementClassOf); it is the seam where
 /// tabulated detection (CompoundIdx / SparseIdx, from the index type's typedef)

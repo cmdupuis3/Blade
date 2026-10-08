@@ -406,6 +406,91 @@ let private guardedOrHaloIndex (a: TypedExpr) =
     | TExprVar _ | TExprLit _ -> false
     | _ -> isProvenIndex None a
 
+/// PER-DIMENSION SUBSCRIPTS of a product-framed compact group, folded to
+/// their compound positions (docs/formalism.md 3.2/8.4): `G3(x1, y1, x2, y2,
+/// x3, y3)` over `SymIdx<3, <XIdx, YIdx>>` becomes `G3(p1, p2, p3)` with
+/// p = x * extent(YIdx) + y, every non-literal coordinate guarded
+/// `0 <= c < extent(factor)` FIRST (BL8006 -- guarding the folded position
+/// instead would let (0, 2) over a 2-wide YIdx alias into position (1, 0)).
+///
+/// The typed tree keeps the per-dimension spelling until here, on purpose:
+/// the subscript judgment's post-unification half judges every coordinate
+/// against ITS factor (`Nat<DayIdx>` into an XIdx factor is BL4003), which
+/// the eager check cannot see when the coordinate is a kernel parameter
+/// whose type arrives with the iteration. After this fold both back ends see
+/// the flat read and canonicalize it exactly as the flat spelling.
+///
+/// Factor extents: the tag's recorded literal, else the named factor's
+/// declared extent. The typecheck arm (dispatchAppOrIndex's product read)
+/// refused the read when neither is static, so a miss here is an internal
+/// error, not a user one.
+let private foldProductSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
+    match arr.Type with
+    | ArrayElem at when idxs.Length > Blade.IR.flatSubscriptArity at.IndexTypes
+                        && idxs.Length = Blade.IR.perDimSubscriptArity at.IndexTypes
+                        && not (idxs |> List.exists (fun a -> a.Kind.IsTExprWildcard)) ->
+        let intTy = IRTScalar ETInt64
+        let litOf (e: TypedExpr) =
+            match e.Kind with
+            | TExprLit (Blade.Ast.LitInt v) -> Some v
+            | TExprUnaryOp (Blade.Ast.OpNeg, { Kind = TExprLit (Blade.Ast.LitInt v) }) -> Some (-v)
+            | _ -> None
+        let extentOf (f: IRIndexType) : int64 =
+            match Blade.IRPrint.tryEvalIntIR f.Extent with
+            | Some n -> n
+            | None ->
+                let declared =
+                    match f.Tag, subscriptGuardCtx.Value with
+                    | Some tag, Some ctx -> ctx.IndexExtent tag
+                    | _ -> None
+                match declared with
+                | Some n -> n
+                | None ->
+                    failwith (sprintf "internal: a per-dimension subscript reached zonk with factor %s of no static extent; the typecheck arm (dispatchAppOrIndex) should have refused it" (Blade.IRPrint.ppIndexType f))
+        let foldTuple (factors: IRIndexType list) (coords: TypedExpr list) : TypedExpr =
+            let span = (List.head coords).Span
+            let mk k ty = mkTypedSpan k ty span
+            let ns = factors |> List.map extentOf
+            let lits = coords |> List.map litOf
+            if lits |> List.forall Option.isSome then
+                // Every coordinate a literal (each judged in range at
+                // typecheck): a literal position, so codegen sees exactly the
+                // flat spelling `G3(p1, p2, p3)`.
+                let pos =
+                    List.zip lits ns
+                    |> List.tail
+                    |> List.fold (fun acc (c, n) -> acc * n + c.Value) (List.head lits).Value
+                mk (TExprLit (Blade.Ast.LitInt pos)) intTy
+            else
+                let lit (n: int64) = mk (TExprLit (Blade.Ast.LitInt n)) intTy
+                let coordExprs =
+                    List.zip3 coords factors ns
+                    |> List.map (fun (c, f, n) ->
+                        match litOf c with
+                        | Some v -> lit v
+                        | None -> guardIndex c (lit n) $"a coordinate outside {Blade.IRPrint.ppIndexType f} (0 .. {n - 1L})")
+                let mul a b = mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpMul, a, b)) intTy
+                let add a b = mk (TExprBinOp (Blade.Ast.Elementwise, Blade.Ast.OpAdd, a, b)) intTy
+                List.zip (List.tail coordExprs) (List.tail ns)
+                |> List.fold (fun acc (c, n) -> add (mul acc (lit n)) c) (List.head coordExprs)
+        let rec walk (args: TypedExpr list) (slots: IRIndexType list) (acc: TypedExpr list) =
+            match args, slots with
+            | [], _ | _, [] -> List.rev acc @ args
+            | _, ix :: rest ->
+                match Blade.IR.productFrameFactorsOf ix with
+                | Some factors ->
+                    let need = ix.Rank * factors.Length
+                    let positions =
+                        List.truncate need args
+                        |> List.chunkBySize factors.Length
+                        |> List.map (foldTuple factors)
+                    walk (List.skip need args) rest (List.rev positions @ acc)
+                | None ->
+                    let span = max 1 ix.Rank
+                    walk (List.skip span args) rest (List.rev (List.truncate span args) @ acc)
+        walk idxs at.IndexTypes []
+    | _ -> idxs
+
 /// Wrap the unproven subscripts of one (zonked) read in their guards.
 let private guardSubscripts (arr: TypedExpr) (idxs: TypedExpr list) : TypedExpr list =
     let synthetic = match arr.Kind with TExprVar (n, _, _) -> n.StartsWith "__" | _ -> false
@@ -645,7 +730,10 @@ let rec zonkExpr (subst: Subst) (expr: TypedExpr) : TypedExpr =
         | TExprPolyTail (p, drop) -> TExprPolyTail (z p, drop)
         | TExprIndex (arr, idxs, id) ->
             let arr' = z arr
-            TExprIndex (arr', guardSubscripts arr' (zs idxs), id)
+            // Per-dimension coordinates of a product-framed compact group
+            // fold to compound positions here, after the judgment has seen
+            // every coordinate against its factor; then the ordinary guards.
+            TExprIndex (arr', guardSubscripts arr' (foldProductSubscripts arr' (zs idxs)), id)
         | TExprField (obj, fld, idx) -> TExprField (z obj, fld, idx)
         // Collections
         | TExprTuple es -> TExprTuple (zs es)

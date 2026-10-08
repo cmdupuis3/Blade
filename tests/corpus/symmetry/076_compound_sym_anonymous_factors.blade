@@ -1,0 +1,15 @@
+// TEST: Per-dimension read over anonymous factors
+// The 2D pair of 012: a comm kernel over two copies of a 2 x 3 literal is
+// SymIdx<2, <Idx<2>, Idx<3>>> -- anonymous factors keep their extents in the
+// frame, so the per-dimension spelling folds (i, j) to i * 3 + j and reads
+// the same canonical cell as the flat positions.
+let A: Array<Float64 like Idx<2>, Idx<3>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let L = method_for(A, A)
+let f = lambda(x, y) where comm(x, y) -> x * y
+let result = L <@> f |> compute
+let r = result(1, 2, 0, 1)
+// EXPECT: r = 12.0
+let r_flat = result(5, 1)
+// EXPECT: r_flat = 12.0
+let s = result(1, 1, 0, 0)
+// EXPECT: s = 5.0

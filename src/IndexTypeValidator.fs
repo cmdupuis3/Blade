@@ -257,7 +257,7 @@ let checkIndexTypeRules (env: AliasEnv) (declName: string) (span: Span)
 /// and a compact group has rank >= 1 (`SymIdx<0, 3>` reached g++). Only
 /// what is visible syntactically is judged here; an extent computed by a
 /// `let static` is judged where it folds (TypeCheck's index-type registration).
-let extentShapeErrors (declName: string) (span: Span) (ty: TypeExpr) : ValidationError list =
+let rec extentShapeErrors (declName: string) (span: Span) (ty: TypeExpr) : ValidationError list =
     let mkErr msg = [{ Message = msg; Span = span; DeclName = declName }]
     let extentErr (what: string) (e: Expr) =
         match e.Kind with
@@ -274,6 +274,8 @@ let extentShapeErrors (declName: string) (span: Span) (ty: TypeExpr) : Validatio
         match b with
         | SymBaseExtent e -> extentErr what e
         | SymBaseIndex _ -> []
+        // Each factor of a product frame is judged as the index type it is.
+        | SymBaseProduct factors -> factors |> List.collect (extentShapeErrors declName span)
     match ty with
     | TyIdx e -> extentErr "Idx<...>" e
     | TyHermitianIdx e -> extentErr "HermitianIdx<...>" e

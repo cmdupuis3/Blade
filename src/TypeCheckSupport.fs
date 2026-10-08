@@ -1346,7 +1346,7 @@ let internal subscriptStaticExtent (env: TypeEnv) (ix: IRIndexType) : int64 opti
     // A `__`-tagged (compiler-kind) slot's extent may be a placeholder that
     // folds later (an anonymous `0..n` range reads 0 while typed), so only a
     // user-visible slot is range-checked.
-    let synthetic = match ix.Tag with Some t -> t.StartsWith "__" | None -> false
+    let synthetic = match ix.Tag with Some t -> isKindSentinelTag t | None -> false
     if ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank <= 1 && not (slotIsEnumIdx env ix)
        && not synthetic
     then Blade.IRPrint.tryEvalIntIR ix.Extent
@@ -1359,7 +1359,7 @@ let internal subscriptStaticExtent (env: TypeEnv) (ix: IRIndexType) : int64 opti
 /// run-time guarded (formalism 3.10: compact slots keep their own
 /// discipline), so a literal coordinate is judged here instead.
 let internal compactCoordExtent (ix: IRIndexType) : int64 option =
-    let synthetic = match ix.Tag with Some t -> t.StartsWith "__" | None -> false
+    let synthetic = match ix.Tag with Some t -> isKindSentinelTag t | None -> false
     match ix.Symmetry with
     | SymSymmetric | SymAntisymmetric | SymHermitian when ix.Rank >= 2 && ix.IxKind = IxKPlain && not synthetic ->
         Blade.IRPrint.tryEvalIntIR ix.Extent
@@ -1418,7 +1418,7 @@ let internal subscriptClassOrRangeError (env: TypeEnv) (synthetic: bool) (ix: IR
         | None ->
             match subscriptLiteralValue tArg with
             | Some v when v < 0L && ix.IxKind = IxKPlain
-                          && not (match ix.Tag with Some t -> t.StartsWith "__" | None -> false) ->
+                          && not (match ix.Tag with Some t -> isKindSentinelTag t | None -> false) ->
                 Some (SubscriptOutOfRange (v, None, ppIndexType ix))
             | Some v ->
                 (match subscriptStaticExtent env ix |> Option.orElse (compactCoordExtent ix) with
@@ -1526,11 +1526,19 @@ let internal subscriptSlotPairs (arrTy: IRArrayType) (args: TypedExpr list) : (T
         // taking k of them -- for a full read and for a read that stops at a
         // record boundary inside the coordinate count alike.
         let flatCompact = args.Length > ixs.Length
+        // A PER-DIMENSION read of a product-framed compact group (the typed
+        // tree keeps that spelling until zonk folds it): each coordinate
+        // pairs with ITS factor, k copies of the d factors per group.
+        let perDim =
+            args.Length > flatSubscriptArity ixs && args.Length = perDimSubscriptArity ixs
         let slots =
             ixs |> List.collect (fun ix ->
-                if ix.IxKind = IxKCompound then List.replicate (max 1 ix.Rank) ix
-                elif flatCompact && isCompact ix then List.replicate ix.Rank ix
-                else [ ix ])
+                match (if perDim then productFrameFactorsOf ix else None) with
+                | Some factors -> List.replicate ix.Rank factors |> List.concat
+                | None ->
+                    if ix.IxKind = IxKCompound then List.replicate (max 1 ix.Rank) ix
+                    elif flatCompact && isCompact ix then List.replicate ix.Rank ix
+                    else [ ix ])
         zipTrunc args slots
 
 let internal checkArrayIndexTags (env: TypeEnv) (tArr: TypedExpr) (arrTy: IRArrayType) (tArgs: TypedExpr list) : TypeResult<unit> =
@@ -4210,6 +4218,24 @@ let internal polyCallShape (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType l
             | Some err -> Error err
             | None -> Ok paramTys
 
+/// The product frame a COMPACT record carries (`IR.productFrameFactorsOf`:
+/// `SymIdx<k, <I1, ..., Id>>`, the compound-symmetric output of a comm group
+/// over a multi-dimensional array), with each NAMED factor's static extent
+/// refined from its declaration when the tag did not record a literal --
+/// what the per-dimension read's literal range rule and zonk's fold need.
+let internal productFrameFactors (env: TypeEnv) (ix: IRIndexType) : IRIndexType list option =
+    productFrameFactorsOf ix
+    |> Option.map (List.map (fun f ->
+        match f.Extent, f.Tag with
+        | IRParam _, Some tag ->
+            (match Map.tryFind tag env.TypeDefs with
+             | Some (TDIIndexType (_, idx, _)) ->
+                 (match tryEvalIntIR idx.Extent with
+                  | Some n -> { f with Extent = IRLit (IRLitInt n) }
+                  | None -> f)
+             | _ -> f)
+        | _ -> f))
+
 let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr list) : TypeResult<TypedExpr> =
     // MATCH ON THE RESOLVED HEAD, when the head is a bare inference var.
     //
@@ -4379,6 +4405,68 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
              // path fold, which is a residual-view shape -- later, with the
              // partial paths.
              Error (TreeIdxUnsupported (rendered, "an array subscript of a tree slot combined with other index slots")))
+    // PER-DIMENSION READ OF A PRODUCT-FRAMED COMPACT GROUP (formalism 3.2,
+    // 8.4). `SymIdx<k, <I1, ..., Id>>` is the k-th symmetric power of a
+    // product frame: each of its k positions is a whole d-tuple, so the
+    // full-arity spelling is k * d coordinates -- `G3(x1, y1, x2, y2, x3, y3)`
+    // over `SymIdx<3, <XIdx, YIdx>>`. Each coordinate is judged against ITS
+    // factor (class, literal range, nominal tag: a `Nat<XIdx>` flows, a
+    // `Nat<ZIdx>` is refused -- here eagerly, and again once a kernel
+    // parameter's type has arrived with the iteration, via
+    // revalidateBodyTagChecks / subscriptSlotPairs, which is why the
+    // per-dimension spelling STAYS in the typed tree). Zonk then guards every
+    // non-literal coordinate against its factor's static extent (BL8006) and
+    // folds each d-tuple to its row-major compound position
+    // (Zonk.foldProductSubscripts), so both back ends see the flat read and
+    // canonicalize it exactly as `G3(p1, p2, p3)` does.
+    //
+    // THE COUNT RULE: the flat full arity keeps its meaning (the next arm);
+    // the per-dimension full arity is this read; a count between the two is
+    // refused (inside a group it is no read, on a boundary it would be a
+    // partial read of the group, which compactCoordWalk refuses for the
+    // flat spelling too); a larger count is over-indexing (IndexOverApplied,
+    // further down this dispatch).
+    | ArrayElem arrTy when
+        not (List.isEmpty tArgs)
+        && not (tArgs |> List.exists _.Kind.IsTExprWildcard)
+        && tArgs.Length > flatSubscriptArity arrTy.IndexTypes
+        && tArgs.Length <= perDimSubscriptArity arrTy.IndexTypes
+        && arrTy.IndexTypes |> List.exists (fun ix -> (productFrameFactors env ix).IsSome) ->
+        let got = tArgs.Length
+        let flatArity = flatSubscriptArity arrTy.IndexTypes
+        let perDimArity = perDimSubscriptArity arrTy.IndexTypes
+        if got <> perDimArity then
+            Error (SubscriptArity (ppIRType headTy, flatArity, perDimArity, got))
+        else
+        // Every factor's extent must be static: zonk folds the d-tuples to
+        // compound positions with it, and guards each coordinate against it.
+        let noStatic =
+            arrTy.IndexTypes |> List.tryPick (fun ix ->
+                match productFrameFactors env ix with
+                | Some factors ->
+                    factors
+                    |> List.tryFind (fun f -> (tryEvalIntIR f.Extent).IsNone)
+                    |> Option.map (fun f -> (ix, f))
+                | None -> None)
+        match noStatic with
+        | Some (ix, f) -> Error (ProductSubscriptNoStaticExtent (ppIndexType ix, ppIndexType f))
+        | None ->
+        // The per-dimension slot list: every product-framed group expanded to
+        // k copies of its d factors, every other record as itself -- a dense
+        // view whose records pair 1:1 with the coordinates, so the subscript
+        // judgment sees each coordinate against its own factor.
+        let perDimSlots =
+            arrTy.IndexTypes |> List.collect (fun ix ->
+                match productFrameFactors env ix with
+                | Some factors -> List.replicate ix.Rank factors |> List.concat
+                | None -> List.replicate (max 1 ix.Rank) ix)
+        let view = { arrTy with IndexTypes = perDimSlots }
+        foldEnumIdxLabels env view tArgs
+        |> Result.bind (fun tArgs ->
+        checkArrayIndexTags env tFunc view tArgs
+        |> Result.map (fun () ->
+            let identity = match tFunc.Kind with TExprVar (_, _, id) -> id | _ -> None
+            mkTyped (TExprIndex (tFunc, tArgs, identity)) arrTy.ElemType))
     // FULL-ARITY READ OF A COMPACT GROUP -- same hole the wreath arm above
     // closes. A rank-k compact slot (SymIdx/AntisymIdx/HermitianIdx) is ONE
     // index record spanning k dims and takes k FLAT subscripts, so `A(i,j)`
@@ -6423,7 +6511,14 @@ let rec internal revalidateBodyTagChecks (env: TypeEnv) (expr: TypedExpr) : Type
         match expr.Kind with
         | TExprIndex (arr, args, _) ->
             match env.Subst.Resolve arr.Type with
-            | ArrayElem at when args.Length <= at.IndexTypes.Length ->
+            | ArrayElem at when args.Length <= at.IndexTypes.Length
+                                // A per-dimension read of a product-framed
+                                // group: its coordinates pair with their
+                                // factors (subscriptSlotPairs), and this is
+                                // the half of the judgment that sees a kernel
+                                // parameter's iteration tag.
+                                || (args.Length > flatSubscriptArity at.IndexTypes
+                                    && args.Length = perDimSubscriptArity at.IndexTypes) ->
                 checkArrayIndexTags env arr at args
                 |> Result.mapError (fun e ->
                     // Located at the subscript, as the eager check would

@@ -371,6 +371,8 @@ let B: Array<Float64 like X, Y, Time> = [[[1.0, 2.0, 4.0, 7.0], [0.0, 1.0, 0.0, 
 let calc = cov <@> (B, B) |> compute
 let c00 = calc(0, 0)     // flat compound positions p = x·2 + y: the variance of the series at (0, 0)
 // EXPECT: c00 = 5.25
+let c00_xy = calc(0, 0, 0, 0)   // the same cell, spelled as one (x, y) pair per position
+// EXPECT: c00_xy = 5.25
 ```
 
 `cov` consumes the time dimension from each copy; each copy contributes its
@@ -378,7 +380,7 @@ two spatial dimensions; commutativity symmetrizes the two *compound* spatial
 positions jointly — six grid points, so 21 stored pairs instead of 36:
 
 ```
-calc : Array<Float64 like SymIdx<2, 6>>      // pairs over the compound (X, Y) space
+calc : Array<Float64 like SymIdx<2, <X, Y>>>   // pairs over the compound (X, Y) space
 ```
 
 ## 8. Loop Objects

@@ -1,0 +1,29 @@
+// TEST: Per-dimension coordinate guarded at run time (aborts)
+// A computed coordinate is checked 0 <= y < extent(YIdx) BEFORE the fold to
+// the compound position: y = 2 over a 2-wide YIdx would otherwise alias into
+// position (1, 0) and read a plausible wrong cell. The untagged integer earns
+// the usual BL4003 advice.
+// WARN: BL4003
+// ABORT: error[BL8006]
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+let ys = [1, 2]
+let y = ys(1)
+let bad = G3(0, y, 0, 0, 0, 0)

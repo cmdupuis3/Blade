@@ -1,0 +1,31 @@
+// TEST: Full reads of a compound symmetric output with a trailing axis
+// P2 is SymIdx<2, <XIdx, YIdx>>, DayIdx: the flat spelling takes the two
+// compound positions and the day, the per-dimension spelling the two (x, y)
+// pairs and the day -- five coordinates -- and both name the same cell.
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+function prod2(a: T^1, b: T^1) where comm(a, b) -> T^1 = a * b
+let P2 = object_for(prod2) <@> (G, G) |> compute
+let c_flat = P2(1, 2, 3)
+// EXPECT: c_flat = 0.4
+let c_xy = P2(0, 1, 1, 0, 3)
+// EXPECT: c_xy = 0.4
+let c_mirror = P2(1, 0, 0, 1, 3)
+// EXPECT: c_mirror = 0.4

@@ -78,7 +78,7 @@ corpus wins.
 | Simple index type | `Idx<n: Nat>` | Core | Index type of length `n` |
 | Enumerated index type | `EnumIdx<S: Enum>` | Core | enumerated categories; string/sparse key domains. Also drives `group_keys` case 2 |
 | Bounded index type | `BoundedIdx<l: Nat, u: Nat>` | Core | Internal use only. Erases to runtime bounds |
-| Symmetric index type | `SymIdx<r:Nat, n:Nat>` | Core | `r` mutually symmetric dimensions of length `n` |
+| Symmetric index type | `SymIdx<r:Nat, n:Nat>`, `SymIdx<r, <I₁, …, I_d>>` | Core | `r` mutually symmetric dimensions of length `n`; over a product frame `<I₁, …, I_d>` (what a `comm` group over a d-dimensional array deduces, formalism §8.4) each position is a whole d-tuple: read with r·d per-dimension coordinates or r flat compound positions (formalism §3.2), nominative in its factors |
 | Antisymmetric index type | `AntisymIdx<r, n>` | Core | `r` sign-tracked mutually antisymmetric dimensions |
 | Hermitian index type | `HermitianIdx<n>` | Core | 2-D Hermitian index type. `A(i,j) = conj(A(j,i))` |
 | Compound index type | `CompoundIdx<mask: bool^r>` | Core | `r`-dimensional sorted (lex-enumerated) semi-dense index type ideal for relatively dense grids; inherits dimensions from the `mask` array. |

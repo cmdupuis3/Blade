@@ -12937,8 +12937,10 @@ and inferLetBindingValueCore (env: TypeEnv) (binding: Binding) : TypeResult<Type
             let slotSurface (idx: IRIndexType) : TypeExpr option =
                 if idx.Rank <> 1 || idx.IxKind <> IxKPlain then None else
                 match idx.Tag with
-                | Some tag -> Some (TyNamed (tag, []))
-                | None ->
+                | Some tag when not (tag.StartsWith "__") -> Some (TyNamed (tag, []))
+                // A `__` tag (a kind sentinel, a product frame's flat position
+                // axis) is no name a range<> slot can resolve: use the extent.
+                | _ ->
                     match idx.Extent with
                     | IRLit (IRLitInt n) -> Some (TyIdx (mkExpr sp (ExprKind.ExprLit (LitInt n))))
                     | _ -> None

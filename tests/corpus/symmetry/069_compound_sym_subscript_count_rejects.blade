@@ -1,0 +1,26 @@
+// TEST: A subscript count between the flat and per-dimension arities (rejects)
+// SymIdx<3, <XIdx, YIdx>> takes three flat compound positions or six
+// per-dimension coordinates; four lands inside the group. It used to reach
+// the dispatch's catch-all, type at a fresh variable, and die in g++.
+// ERROR: BL4003
+// ERROR-CONTAINS: 4 subscript(s)
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+let bad = G3(0, 0, 0, 1)

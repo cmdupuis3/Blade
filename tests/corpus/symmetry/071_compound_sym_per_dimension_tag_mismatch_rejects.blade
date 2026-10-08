@@ -1,0 +1,28 @@
+// TEST: Per-dimension coordinate of another index type (rejects)
+// The x coordinate of SymIdx<3, <XIdx, YIdx>> is an XIdx position; a DayIdx
+// iteration index is refused by the subscript judgment's nominal rule -- in
+// its post-unification half, since the kernel parameter's type arrives with
+// the iteration (the per-dimension spelling stays in the typed tree until
+// zonk folds it, so that half can see each coordinate against its factor).
+// ERROR: BL4003
+// ERROR-CONTAINS: slot expects 'XIdx'
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+let bad = method_for(range<DayIdx>) <@> lambda(d) -> G3(d, 0, 0, 0, 0, 0) |> compute

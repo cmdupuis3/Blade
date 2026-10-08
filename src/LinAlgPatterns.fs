@@ -966,7 +966,7 @@ let private isPlainDenseAxis (ix: IRIndexType) =
     && ix.Symmetry = SymNone
     && ix.IxKind = IxKPlain
     && ix.Dependencies.IsEmpty
-    && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
+    && (match ix.Tag with Some t -> not (isKindSentinelTag t) | None -> true)
 
 /// Classify `eigh(S)` -- the symmetric/Hermitian eigendecomposition -- on the
 /// OPERAND'S TYPE alone. Symmetry is the axis that picks the routine FAMILY:
@@ -1506,7 +1506,7 @@ let (|BlasL3|_|) ((streamedCount, ompRequested, operandTypes, cg): int * bool * 
                             // "square" a fact rather than an assumption, and a
                             // spurious decline costs only the optimisation.
                             && extentsAgree ix.Extent l0.Extent
-                            && (match ix.Tag with Some t -> not (t.StartsWith "__") | None -> true)
+                            && (match ix.Tag with Some t -> not (isKindSentinelTag t) | None -> true)
                         | _ -> false)
                 | _ -> false
             if not outOk then None else

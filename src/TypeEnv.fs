@@ -1077,6 +1077,23 @@ compiler refuses here rather than compute an address it cannot compute. \
 The depth-1 spellings work through the existing compact machinery instead: OrbIdx<[(r,+)], n> is \
 exactly SymIdx<r, n>, OrbIdx<[(r,-)], n> is exactly AntisymIdx<r, n>, and OrbIdx<[], n> is exactly \
 Idx<n>." where_ levels
+    | SubscriptArity (arrayTy, flat, perDim, got) ->
+        sprintf "%d subscript(s) into %s, which takes %d flat coordinate(s)%s. %s" got arrayTy flat
+            (if perDim > flat then
+                 sprintf " or %d per-dimension coordinates (each position of a product-framed \
+SymIdx<k, <I1, ..., Id>> group is a whole d-tuple, read as A(x1, y1, x2, y2, ...))" perDim
+             else "")
+            (if got > perDim then "The extra subscripts index nothing: the element is not an array."
+             else "A count between the two lands inside a group or leaves records after it free; a compact \
+group is read whole, by one spelling or the other -- decompact(A, d) first to read a freed axis.")
+    | ProductSubscriptNoStaticExtent (slot, factor) ->
+        sprintf "a per-dimension subscript of %s folds each (x1, ..., xd) tuple to its row-major compound \
+position, which needs every factor's STATIC extent; %s has none here. Read the group by flat compound \
+position instead (p = x * extent(Y) + y)." slot factor
+    | SymProductFactorNotDense factor ->
+        sprintf "SymIdx<k, <...>>: every factor of a product frame must be a rank-1 dense index type \
+(`Idx<n>`, a named alias of one, or an irreps space); %s is not. A compact, compound, sparse, ragged or \
+dependent factor has no row-major position to fold to." factor
     | OrbitSubscriptArity (levels, axes, got) ->
         sprintf "OrbIdx<%s, n> acts on %d raw axes, so a subscript of it takes exactly %d flat \
 coordinates (W(i0, ..., i%d)) -- the same flat spelling a rank-k SymIdx group takes; got %d. \
@@ -1545,6 +1562,7 @@ let diagnosticOfCompileError (e: CompileError) : Blade.Diagnostics.Diagnostic =
             // served. Not BL7001 ("not yet supported by THIS BACKEND") --
             // both backends refuse, in the front end.
             | OrbitStorageUnsupported _ | OrbitSubscriptArity _
+            | SubscriptArity _ | ProductSubscriptNoStaticExtent _ | SymProductFactorNotDense _
             | OrbitDecompactPartial _ | OrbitFoldUnsupported _
             | TreeIdxUnsupported _ | TreeIdxPath _
             | IrrepsIdxSpec _ | IrrepsIdxSpecFn _

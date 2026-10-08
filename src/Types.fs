@@ -318,6 +318,82 @@ let (|TreeTag|_|) (tag: string) : (string option * int list) option =
                     Some ((if name = "" then None else Some name), List.map Option.get entries)
                 else None
 
+// Product-frame tag encoding. A COMPACT record deduced over one identity
+// group of a MULTI-DIMENSIONAL array (`object_for(comoment) <@> (G, G, G)`
+// with `G: Array<Float64 like XIdx, YIdx, DayIdx>`) is `SymIdx<3, <XIdx,
+// YIdx>>`: the three interchangeable positions are whole (x, y) TUPLES,
+// stored at their row-major compound position (docs/formalism.md 3.2, 8.4,
+// 12.4). The record's Extent is the product of the factor extents --
+// allocation, iteration and the flat read need only that -- and the FACTORS
+// ride in the Tag, so that
+//   * the type displays and parses as the program spells it
+//     (`SymIdx<3, <XIdx, YIdx>>`, not an anonymous `SymIdx<3, 4>`);
+//   * unification is nominative in the factors: an ascription to an
+//     unrelated `SymIdx<3, P>` with `P = Idx<4>` is refused, while two
+//     products over the same named factors are one space;
+//   * a per-dimension subscript `G3(x1, y1, x2, y2, x3, y3)` can be folded
+//     to the flat positions (TypeCheckSupport's product-read arm), each
+//     coordinate judged against ITS factor.
+// Format: "__prod|<f1>|<f2>|...", each factor "<name>=<extent>" -- <name> the
+// factor's user tag ("" when anonymous), <extent> its static extent ("" when
+// not a literal). `|`, `=` and `%` inside a name are percent-escaped (a
+// provider axis name may contain any of them). `__`-prefixed so the seams
+// that read a Tag as a user-written NAME leave it alone; `ixKindOfTag` maps
+// it to IxKPlain (the record is a plain simplex pool, like every SymIdx).
+
+let productTagPrefix = "__prod|"
+
+let private escapeProductName (s: string) =
+    s.Replace("%", "%25").Replace("|", "%7C").Replace("=", "%3D")
+
+let private unescapeProductName (s: string) =
+    s.Replace("%7C", "|").Replace("%3D", "=").Replace("%25", "%")
+
+/// Serialize a product frame's factors (user name, static extent) into its
+/// canonical Tag.
+let mkProductTag (factors: (string option * int64 option) list) : string =
+    let one (name: string option, ext: int64 option) =
+        let n = match name with Some n -> escapeProductName n | None -> ""
+        let e = match ext with Some v -> string v | None -> ""
+        $"{n}={e}"
+    productTagPrefix + (factors |> List.map one |> String.concat "|")
+
+/// Parse a product Tag back into its factors. Total: any string not produced
+/// by mkProductTag yields None.
+let (|ProductTag|_|) (tag: string) : (string option * int64 option) list option =
+    if not (tag.StartsWith productTagPrefix) then None
+    else
+        let body = tag.Substring productTagPrefix.Length
+        if body = "" then None
+        else
+            let entries =
+                body.Split '|' |> Array.toList
+                |> List.map (fun entry ->
+                    match entry.IndexOf '=' with
+                    | -1 -> None
+                    | sep ->
+                        let name = entry.Substring(0, sep)
+                        let ext = entry.Substring(sep + 1)
+                        let nameOpt = if name = "" then None else Some (unescapeProductName name)
+                        if ext = "" then Some (nameOpt, None)
+                        else
+                            match System.Int64.TryParse ext with
+                            | true, v -> Some (nameOpt, Some v)
+                            | _ -> None)
+            if List.forall Option.isSome entries then Some (List.map Option.get entries) else None
+
+/// Does this Tag carry a product frame?
+let isProductTag (tag: string) : bool = tag.StartsWith productTagPrefix
+
+
+/// A `__` Tag that is a compiler KIND SENTINEL or placeholder (`__anon`,
+/// `__raggedidx`, `__halowin|...`, a provider's provenance key) -- as opposed
+/// to a product frame, which is a real index space with a static extent and
+/// user-visible factors. The subscript judgment's extent rules read this: a
+/// product-framed group's coordinates are range-checked like a named slot's,
+/// where a sentinel's placeholder extent is not trusted.
+let isKindSentinelTag (tag: string) : bool = tag.StartsWith "__" && not (isProductTag tag)
+
 // Halo window tag encoding. Like IrrepsIdx, the payload rides IN the Tag:
 // "__halowin|<k>:<innerName>|<o1,o2,..>", <k> = 'd' (dense inner) or 'c'
 // (compound inner: ordinals walk PRESENT cells), <innerName> = wrapped
@@ -517,6 +593,15 @@ let providerAxisTagPrefix = "__icaxis|"
 /// exempt; they are sentinels, and comparing them would refuse sound code.
 let isProviderAxisTag (tag: string) : bool =
     tag.StartsWith providerAxisTagPrefix || isProviderPoolTag tag
+
+/// The name a factor record contributes to a product frame (`mkProductTag`):
+/// its user-written tag, or a provider axis identity (a name the STORE
+/// wrote); a kind sentinel (`__anon`, ...) contributes none -- the factor is
+/// anonymous. Sits here, after `isProviderAxisTag`, which it reads.
+let productFactorNameOf (tag: string option) : string option =
+    match tag with
+    | Some t when t <> "" && (not (t.StartsWith "__") || isProviderAxisTag t) -> Some t
+    | _ -> None
 
 // ---------------------------------------------------------------------------
 // Provider seams that the DIAGNOSTIC layer needs (icechunk review pass)

@@ -1,0 +1,50 @@
+// TEST: Per-dimension read of a compound symmetric output
+// A comm group over a multi-dimensional array is jointly symmetric over the
+// COMPOUND (XIdx, YIdx) frame: the output is SymIdx<3, <XIdx, YIdx>>
+// (formalism 3.2, 8.4). Each of its three positions is a whole (x, y) pair,
+// so the full-arity spelling is six coordinates, G3(x1, y1, x2, y2, x3, y3):
+// every pair folds to its row-major compound position p = x * 2 + y and the
+// three positions canonicalize exactly as the flat spelling G3(p1, p2, p3),
+// which stays available. A coordinate is judged against ITS factor -- a
+// literal past the factor (068), a kernel index of another type (071) --
+// and a computed one is guarded at run time (072). The six-subscript read
+// used to pass the typecheck and die in g++ (BL9002, a raw
+// G3[0][0][0][1][1][0] subscript).
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+let g = G3(0, 0, 0, 1, 1, 0)
+// EXPECT: g = 0.308333333333333
+let g_flat = G3(0, 1, 2)
+// EXPECT: g_flat = 0.308333333333333
+let g_mirror = G3(1, 0, 0, 1, 0, 0)
+// EXPECT: g_mirror = 0.308333333333333
+let g_diag = G3(1, 1, 1, 1, 1, 1)
+// EXPECT: g_diag = 0.0
+let g_mid = G3(1, 0, 0, 1, 1, 1)
+// EXPECT: g_mid = 0.0347222222222222
+let ys = [1, 0]
+let y = ys(1)
+let g_cast = G3(0, (y : YIdx), 1, 1, 0, 0)
+// EXPECT: g_cast = -0.145833333333333
+let H: Array<Float64 like SymIdx<3, <XIdx, YIdx>>> = G3
+let h = H(0, 0, 0, 1, 1, 0)
+// EXPECT: h = 0.308333333333333
+let diag = method_for(range<XIdx, YIdx>) <@> lambda(x, y) -> G3(x, y, x, y, x, y) |> compute
+// EXPECT: diag = [[-0.75, -0.0174074074074074], [0.0, 0.0]]

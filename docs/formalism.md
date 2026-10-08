@@ -455,6 +455,20 @@ the hash-based sparse type's regime. (Supersedes the earlier tuple-form
 compound convention: with full-arity-only reads, the two-slots ambiguity that
 motivated it is gone.)
 
+A COMPACT group over a product frame, `SymIdx<k, <I₁, ..., I_d>>` (the output
+of a `comm` group over a d-dimensional array, §8.4), takes either spelling:
+k·d **per-dimension** coordinates, one whole d-tuple per position
+(`G3(x₁, y₁, x₂, y₂, x₃, y₃)`), each judged against its own factor (class,
+literal range, nominal tag; a computed coordinate is guarded
+`0 ≤ c < extent(I_j)` at run time, BL8006) and folded to its row-major
+compound position before the k positions canonicalize; or k **flat** compound
+positions (`G3(p₁, p₂, p₃)`, p = x·|I₂| + y), which name the same cell. Any
+other count is refused at type checking, as is a read that leaves records free after
+a compact group: a compact read yields the canonical cell's value, not a row
+(`decompact` first). The frame is nominative in its factors: the deduced type
+displays and parses as `SymIdx<k, <I₁, ..., I_d>>`, and an unrelated
+`SymIdx<k, P>` of the same extent does not unify with it.
+
 ### 3.3 Base index types
 
 | Type | Signature | Description | Hashable |
@@ -1592,7 +1606,11 @@ Given `object_for(kernel) <@> (A₁, ..., Aₙ)` with `kernel(a: Poly<T^k>) -> T
    - no `comm` or g = 1 → the group's S-dim types repeated g times (dense);
    - `comm` and g > 1 → **`SymIdx<g, I₁ × ... × I_s>` over the compound
      S-tuple**: the g whole index *tuples* are interchangeable. When s = 1
-     this is the familiar `SymIdx<g, I₁>`.
+     this is the familiar `SymIdx<g, I₁>`. The record carries its factors:
+     the type prints and parses as written here, can be ascribed back
+     (`let H: Array<Float like SymIdx<3, <Idx<M>, Idx<N>>>> = ...`), is
+     nominative in them (an unrelated `SymIdx<3, P>` of the same extent is
+     refused), and is read per dimension or by flat compound position (§3.2).
 4. **Concatenate** group contributions in order (concatenation, not
    broadcasting).
 5. **T-dims of output**: from the kernel's `T^m` (and `tdim` spec).
@@ -1934,9 +1952,11 @@ whole argument slots of its own group. Reynolds adds its own factor (§5.3).
 **Implementation status**: the v7 prototype implements the corrected lowering
 (rewrite Phase 5, arc 1): a comm-covered identity group's plain-dense S-block
 is fused into one compound loop level (`IR.fuseJointSLevels`), grouped jointly,
-stored as `SymIdx<r, prod(n_j)>`, with per-dim coordinates decoded row-major inside
-the loop; nominal index-space matching was removed as a symmetry license.
-Value-pinned by `tests/corpus/symmetry/012-016`; the differential harness
+stored as `SymIdx<r, <I₁, ..., I_d>>` over the product extent `prod(n_j)` (the
+factors ride the index record; §3.2 gives the two read spellings), with per-dim
+coordinates decoded row-major inside the loop; nominal index-space matching was
+removed as a symmetry license. Value-pinned by `tests/corpus/symmetry/012-016`
+and `067-076`; the differential harness
 asserts intentional divergence from pre-correction builds
 (`DiffOracle.correctedSlice`).
 

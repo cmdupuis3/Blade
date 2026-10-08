@@ -1,0 +1,26 @@
+// TEST: A product frame with one factor (rejects)
+// SymIdx<k, <...>> lists at least two factor index types; a single factor is
+// spelled bare. The error is HARD (BL1004) so it surfaces as itself rather
+// than being swallowed by the annotation backtrack and re-reported as
+// "Expected '=' but got ':'" at the binding.
+// ERROR: BL1004
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+let H: Array<Float64 like SymIdx<3, <XIdx>>> = G3

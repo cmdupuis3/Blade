@@ -145,6 +145,20 @@ type TypeError =
     /// A TUPLE subscript into a positional slot (a SymIdx over a compound
     /// S-tuple, say): such slots index FLAT; tuples are SparseIdx keys.
     | SubscriptTupleForm of slot: string
+    /// More subscripts than an array has coordinates, or a count that lands
+    /// inside an index group: every array takes as many coordinates as its
+    /// records span -- k for a rank-k compact group, k * d for a
+    /// product-framed one read per dimension -- and an element that is not
+    /// itself indexable takes none beyond. Used to fall through to the
+    /// dispatch's catch-all, mint a fresh variable, and reach g++ (BL9002).
+    | SubscriptArity of arrayTy: string * flat: int * perDim: int * got: int
+    /// A per-dimension subscript of a product-framed compact group whose
+    /// factor extents are not all static: the d-tuples cannot be folded to
+    /// their compound positions.
+    | ProductSubscriptNoStaticExtent of slot: string * factor: string
+    /// `SymIdx<k, <I1, ..., Id>>` written with a factor that is not a rank-1
+    /// dense index type.
+    | SymProductFactorNotDense of factor: string
     | CrossNominalIndexArith of left: string * right: string
     | CrossAnonIndexArith of left: int * right: int
     | IndexTypeArithForbidden of name: string
@@ -1135,7 +1149,11 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
     /// the route by which a user can still assert two diverged axes are one.
     /// Provider-vs-other-`__` stays compatible too: those are kind sentinels,
     /// and gating them would refuse sound code.
-    let gatesNominally (t: string) = not (isSyntheticTag t) || isProviderAxisTag t
+    /// A PRODUCT FRAME gates too: `SymIdx<r, <XIdx, YIdx>>` is a space
+    /// (the compound-symmetric output over XIdx x YIdx), not a sentinel, so
+    /// it refuses a user-named `SymIdx<r, P>` of the same extent exactly as
+    /// `XIdx` refuses `P`. Product-vs-product has its own arm below.
+    let gatesNominally (t: string) = not (isSyntheticTag t) || isProviderAxisTag t || isProductTag t
     // The wreath arm, ahead of everything but the rank check. Rank +
     // Symmetry alone are NOT sufficient: OrbIdx<[(2,+),(2,+)], n> and
     // OrbIdx<[(2,-),(2,-)], n> are both Rank 4, SymWreath, share the
@@ -1174,6 +1192,23 @@ let indexPairIncompatible (i1: IRIndexType) (i2: IRIndexType) : bool =
         d1 <> d2 || (match n1, n2 with
                      | Some a, Some b -> a <> b
                      | _ -> false)
+    // PRODUCT FRAMES (`SymIdx<r, <I1, ..., Id>>`, the compound-symmetric
+    // output of a comm group over a multi-dimensional array): identity is
+    // the factor list, nominative per factor -- `<XIdx, YIdx>` is neither
+    // `<XIdx, ZIdx>` nor a bare `P = Idx<4>` (that pair takes the generic arm
+    // below, where a product tag gates like a user name) -- while an
+    // anonymous factor matches any factor at its position, the way an
+    // untagged slot matches any slot, and extents are not compared, as
+    // nowhere else here. Ahead of the generic arm because two DIFFERENT
+    // product tags over the same names (one recording a factor's literal
+    // extent, one not) are one space.
+    | Some (ProductTag f1), Some (ProductTag f2) ->
+        f1.Length <> f2.Length
+        || List.exists2 (fun (n1: string option, _) (n2: string option, _) ->
+               match n1, n2 with
+               | Some a, Some b -> a <> b
+               | _ -> false) f1 f2
+        || (i1.Symmetry <> i2.Symmetry && i1.Symmetry <> SymNone && i2.Symmetry <> SymNone)
     | Some t1, Some t2 when t1 <> t2
                             && gatesNominally t1
                             && gatesNominally t2 -> true

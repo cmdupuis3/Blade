@@ -1,0 +1,30 @@
+// TEST: A partial read of a compact group with a trailing axis (rejects)
+// prod2 keeps the Day fiber, so P2 is SymIdx<2, <XIdx, YIdx>>, DayIdx. A
+// compact read yields the canonical cell's VALUE, not a row, so leaving
+// DayIdx free after the group has no layout in either lane: it used to pass
+// the typecheck and die in g++ asking a double* for .extents. The full read
+// P2(1, 2, 3) is fine (075).
+// ERROR: BL3999
+// ERROR-CONTAINS: leaves the 1 index slot(s) after it unread
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+function prod2(a: T^1, b: T^1) where comm(a, b) -> T^1 = a * b
+let P2 = object_for(prod2) <@> (G, G) |> compute
+let row = P2(1, 2)

@@ -522,6 +522,30 @@ and parseSymIdxBase (tokens: Token list) : ParseResult<SymIdxBase> =
     match peek tokens with
     | Some (TokKeyword KwIrrepsIdx) | Some (TokKeyword KwIdx) ->
         parseIndexType tokens >>= fun ty afterTy -> success (SymBaseIndex ty) afterTy
+    // `SymIdx<k, <I1, ..., Id>>`: the k-th symmetric power of a PRODUCT FRAME
+    // (formalism 3.2's `<Idx<N>, Idx<M>>` row, 8.4's compound S-tuple) --
+    // the type deduction gives a `comm` group over a multi-dimensional array,
+    // so a program can name it. Each factor is an index type: a named alias
+    // or an inline `Idx<n>` (TypeLower.productFrameIndexRecord admits exactly
+    // the rank-1 dense ones). The bracket cannot start an extent expression,
+    // so no existing program changes meaning. Before this arm the spelling
+    // was a BL1001 whose message named the WRONG expectation.
+    // BL1004 is a HARD parse error (isHardParseError): the bracket has
+    // committed the parse, and a soft error here was swallowed by the
+    // annotation backtrack and re-reported as "Expected '=' but got ':'" at
+    // the binding -- the misleading message this arm replaces.
+    | Some (TokOp "<") ->
+        let line, col = currentPos tokens
+        advance tokens |> sepBy parseIndexType TokComma >>= fun factors afterFactors ->
+        match peek afterFactors with
+        | Some (TokOp ">") | Some (TokOp ">>") ->
+            expectGt afterFactors >>= fun _ remaining ->
+            if factors.Length < 2 then
+                errorC "BL1004" "SymIdx<k, <...>>: a product frame lists at least two factor index types (`<XIdx, YIdx>`); a single factor is spelled bare (`SymIdx<k, XIdx>`)" line col
+            else success (SymBaseProduct factors) remaining
+        | _ ->
+            let l2, c2 = currentPos afterFactors
+            errorC "BL1004" "SymIdx<k, <...>>: a product frame is a comma-separated list of index types (`<XIdx, YIdx>`, `<Idx<2>, Idx<3>>`) closed by `>`" l2 c2
     | _ ->
         parseSimpleExpr tokens >>= fun extent afterExtent -> success (SymBaseExtent extent) afterExtent
 

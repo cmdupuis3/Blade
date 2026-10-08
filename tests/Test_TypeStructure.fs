@@ -692,9 +692,16 @@ let private checkFusedOutput (name: string) (src: string) (wantExtent: int64) =
               (ix.Symmetry = SymSymmetric), sprintf "Symmetry = %A, want SymSymmetric" ix.Symmetry
               (ix.Extent = IRLit (IRLitInt wantExtent)),
                 sprintf "Extent = %A, want IRLit %d (the literal product)" ix.Extent wantExtent
-              (ix.Tag = None), sprintf "Tag = %A, want None (the compound axis is anonymous)" ix.Tag
+              // The compound axis is a PRODUCT FRAME: its Tag names the two
+              // factors (`Types.mkProductTag`; an irreps factor contributes
+              // no name, only its extent), so the type displays and parses
+              // as `SymIdx<2, <I1, I2>>` and takes the per-dimension read.
+              (match ix.Tag with
+               | Some (Blade.Types.ProductTag factors) -> factors.Length = 2
+               | _ -> false),
+                sprintf "Tag = %A, want the product tag over 2 factors" ix.Tag
               (ix.IxKind = IxKPlain),
-                sprintf "IxKind = %A, want IxKPlain — a Tag=None/IxKIrreps record violates Tag<->IxKind agreement" ix.IxKind
+                sprintf "IxKind = %A, want IxKPlain — a product-tag/IxKIrreps record violates Tag<->IxKind agreement" ix.IxKind
               (ix.Dependencies = []), sprintf "Dependencies = %A, want []" ix.Dependencies ]
         match checks |> List.tryFind (fst >> not) with
         | Some (_, why) -> (name, false, why)
@@ -703,7 +710,7 @@ let private checkFusedOutput (name: string) (src: string) (wantExtent: int64) =
 // Stage 4 (c): the OUTPUT record for a mixed plain x irreps array under comm.
 let private test_fused_output_plain_x_irreps () =
     checkFusedOutput
-        "stage4 batch x IrrepsIdx output = SymIdx<2, 6>, Tag None, IxKPlain"
+        "stage4 batch x IrrepsIdx output = SymIdx<2, 6>, product tag, IxKPlain"
         ("let static spec = [(1, 1, 1)]\n" +
          "let A: Array<Float64 like Idx<2>, IrrepsIdx<spec>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +
          "let L = method_for(A, A)\n" +
@@ -715,7 +722,7 @@ let private test_fused_output_plain_x_irreps () =
 // leading factor is irreps, i.e. the one that actually trips the hazard.
 let private test_fused_output_irreps_x_irreps () =
     checkFusedOutput
-        "stage4 IrrepsIdx x IrrepsIdx output = SymIdx<2, 6>, Tag None, IxKPlain"
+        "stage4 IrrepsIdx x IrrepsIdx output = SymIdx<2, 6>, product tag, IxKPlain"
         ("let static sA = [(0, 0, 2)]\n" +
          "let static sB = [(1, 1, 1)]\n" +
          "let A: Array<Float64 like IrrepsIdx<sA>, IrrepsIdx<sB>> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]\n" +

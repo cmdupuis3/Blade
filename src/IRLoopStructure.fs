@@ -157,9 +157,10 @@ let fuseJointSLevels
                     List.isEmpty r.Dependencies)
             if not isVirtual && lvls.Length >= 2 && hasIdentityPartner arrIdx && allPlainDense then
                 let rep = List.head lvls
-                // The fused axis is ANONYMOUS: Tag = None (and, on the output
-                // record deduceOutputType builds from these factors,
-                // IxKind = IxKPlain). A batch x irreps product is NOT an irreps
+                // The fused LOOP LEVEL is anonymous: Tag = None. The OUTPUT
+                // record deduceOutputType builds from these factors carries
+                // the product tag (its factors' names and extents) over
+                // IxKind = IxKPlain. A batch x irreps product is NOT an irreps
                 // space: the compound coordinate mixes a representation index
                 // with a non-representation one, so no spec describes it.
                 [ { rep with
@@ -760,22 +761,37 @@ provably sign-odd in tied argument %d; the typecheck seam should have refused th
                                         match a, b with
                                         | IRLit (IRLitInt x), IRLit (IRLitInt y) -> IRLit (IRLitInt (x * y))
                                         | _ -> IRBinOp (IRElementwise, IRMul, a, b, SrcLoc.Nowhere))
-                        // The compound axis is ANONYMOUS and PLAIN: Tag =
-                        // None AND IxKind = IxKPlain must BOTH be stamped,
-                        // not inherited from the template factor -- IxKIrreps
-                        // is an admissible factor kind, so a template-
-                        // inherited IxKIrreps beside Tag = None would break
-                        // the Tag<->IxKind agreement the validator enforces.
-                        // A batch x irreps product is NOT an irreps space:
-                        // the joint coordinate ranges over tuples with no
-                        // single-space representation structure. Dependencies
-                        // are empty by fusion eligibility.
+                        // The compound axis is a PRODUCT FRAME over PLAIN
+                        // storage: Tag = the product tag (the factors' names
+                        // and static extents, `Types.mkProductTag`) AND
+                        // IxKind = IxKPlain must BOTH be stamped, not
+                        // inherited from the template factor -- IxKIrreps is
+                        // an admissible factor kind, so a template-inherited
+                        // IxKIrreps would break the Tag<->IxKind agreement
+                        // the validator enforces. A batch x irreps product is
+                        // NOT an irreps space: the joint coordinate ranges
+                        // over tuples with no single-space representation
+                        // structure. The product tag is what lets the type
+                        // display and parse as `SymIdx<r, <I1, ..., Id>>`
+                        // (IRPrint / TypeLower.productFrameIndexRecord),
+                        // unify nominatively in its factors (Unify), and
+                        // take the per-dimension subscript
+                        // (TypeCheckSupport's product-read arm). A factor's
+                        // static extent is recorded when it is a literal
+                        // (fusion folds literal products, so it usually is);
+                        // a named factor's is recoverable from its
+                        // declaration at the read site. Dependencies are
+                        // empty by fusion eligibility.
                         let template = List.head factors
+                        let productTag =
+                            Blade.Types.mkProductTag (factors |> List.map (fun f ->
+                                Blade.Types.productFactorNameOf f.Tag,
+                                (match f.Extent with IRLit (IRLitInt n) -> Some n | _ -> None)))
                         result <- result @ [{ template with
                                                 Extent = prodExtent
                                                 Rank = groupRank
                                                 Symmetry = groupSymmetry
-                                                Tag = None
+                                                Tag = Some productTag
                                                 IxKind = IxKPlain
                                                 Id = builder.FreshId() }]
                     | Some factors ->

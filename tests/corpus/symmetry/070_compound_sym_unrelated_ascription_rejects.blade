@@ -1,0 +1,28 @@
+// TEST: Ascribing a compound symmetric output to an unrelated base (rejects)
+// The deduced type carries its factors -- SymIdx<3, <XIdx, YIdx>> -- and is
+// nominative in them: a SymIdx<3, P> over an unrelated P = Idx<4> of the same
+// extent is a different space (it used to be accepted, the factors lost as an
+// anonymous SymIdx<3, 4>). The deduced spelling itself is writable: 067.
+// ERROR: BL3001
+// ERROR-CONTAINS: SymIdx<3, <XIdx, YIdx>>
+from stats import mean
+
+type XIdx = Idx<2>
+type YIdx = Idx<2>
+type DayIdx = Idx<6>
+let G: Array<Float64 like XIdx, YIdx, DayIdx> = [
+    [[1.0, -2.0, 3.0, 0.5, -1.5, 2.0], [0.5, 0.8, -0.2, 0.4, 0.1, 0.6]],
+    [[2.0, 1.0, 0.0, 1.0, 3.0, -1.0], [-1.0, 0.0, 1.5, 2.5, 0.5, 1.0]]]
+function centered_prod(xs: Poly<T^1>) -> T^1 = {
+    match arity(xs) with
+    | 1 ->
+        let head :: tail = xs
+        head - mean(head)
+    | _ ->
+        let head :: tail = xs
+        (head - mean(head)) * centered_prod(tail)
+}
+function comoment(xs: Poly<T^1>) where comm(xs) -> T^0 = mean(centered_prod(xs))
+let G3 = object_for(comoment) <@> (G, G, G) |> compute
+type P = Idx<4>
+let H: Array<Float64 like SymIdx<3, P>> = G3
