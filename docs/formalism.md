@@ -504,6 +504,13 @@ proofs.md §Binomial).
 - `make_antisym` sorts and returns the permutation sign; access through
   non-canonical coordinates applies the sign (`transform`); diagonals are
   implicit zeros (not stored).
+- Element writes mirror reads: `A(t) = v` through non-canonical coordinates
+  stores `transform(v)` (negated / conjugated on odd parity) at the canonical
+  cell, so `A(t)` reads back `v`; a write to an implicit zero (an antisymmetric
+  diagonal) has no stored effect — the cell is not a degree of freedom. This is
+  the rule that makes the reverse-mode scatter `__g_A(t) += δ` of a compact
+  parameter the exact adjoint of the signed read (both lanes; corpus
+  `index-types/486`, `ad/041`–`042`).
 - `HermitianIdx` stores the full matrix with conjugation semantics
   (`canonical` returns a needs-conj flag); a rectangular variant exists for
   factor storage.

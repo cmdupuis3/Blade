@@ -562,6 +562,16 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
         // would bind it to no loop) -- statement position only, by refusal.
         exprError "break_if (a rec-array while guard) in expression position"
     | IRAssign (target, value) ->
+        // A compact-group target (SymIdx / AntisymIdx / HermitianIdx) folds to
+        // its canonical cell first -- the write twin of renderIndexExpr's lazy
+        // read. A raw `arr[i][j]` on packed storage lands in the wrong cell or
+        // past a shrunken row (the reverse sweep's `__g_a(t) += d` scatter
+        // corrupted the heap this way).
+        match (match target with
+               | LVIndex (arr, idxs) -> renderIndexStore subst names arr idxs (exprToCppCore subst names value)
+               | _ -> None) with
+        | Some store -> store
+        | None ->
         let targetStr =
             match target with
             | LVVar id -> Map.tryFind id names |> Option.defaultValue ($"__v{id}")
@@ -603,6 +613,89 @@ let rec exprToCppCore (subst: SubstMap) (names: Map<IRId, string>) (expr: IRExpr
 /// other shapes emit a BLADE_CODEGEN_ERROR sentinel. Fix would be a thin wrapper
 /// around genApplyCombinator's statement output (`[&]() { <statements>; return
 /// <name>; }()`), deferred since no current test exercises it.
+
+/// The WRITE twin of `renderIndexExpr`'s lazy compact read: an element store
+/// `A(t) = v` whose indices fully cover an index list holding at least one
+/// compact group (Symmetric / Antisymmetric / Hermitian, arity >= 2). Emitted
+/// as a void IIFE: evaluate the value, fold each group (sort + swap parity +
+/// strict zero-guard), left-justify to storage coords, push the value through
+/// the group's transform -- the read transforms are involutions (identity /
+/// negate / conjugate), so the same policy is its own inverse -- and store at
+/// the canonical cell. A tuple on a strict diagonal (an antisymmetric implicit
+/// zero) stores NOTHING: the cell is not a degree of freedom (formalism 3.4).
+/// That rule is exactly what makes the reverse sweep's scatter `__g_a(t) += d`
+/// on a compact parameter the adjoint of the signed read -- the sign rides the
+/// transform and structural zeros drop -- where the raw subscript wrote the
+/// wrong cell or past the end of a shrunken row (heap corruption, ad/041).
+/// None for every shape the read subscripts raw (plain arrays, partial
+/// covers), so both IRAssign arms fall through to the raw target.
+and renderIndexStore (subst: SubstMap) (names: Map<IRId, string>) arr indices (valueStr: string) : string option =
+    match inferExprType arr with
+    | ArrayElem arrTy ->
+        let slots = arrTy.IndexTypes
+        let totalRank = slots |> List.sumBy (fun s -> max 1 s.Rank)
+        let anyCompact = slots |> List.exists (fun s -> s.Symmetry <> SymNone && (max 1 s.Rank) >= 2)
+        if anyCompact && indices.Length = totalRank then
+            // canon_fold<r> has no per-level spelling (see the read's backstop):
+            // a write into a wreath pool is refused here rather than emitted
+            // as a plain-multiset fold.
+            (match slots |> List.tryFind (fun s -> s.Symmetry = SymWreath) with
+             | Some ix -> failwith (orbitStorageUnsupported "element write into a wreath pool (renderIndexStore)" (orbitLevelsOf ix))
+             | None -> ())
+            let arrStr = exprToCppCore subst names arr
+            let elemTypeStr = irTypeToCpp arrTy.ElemType
+            let idxStrs = indices |> List.map (fun i -> exprToCppCore subst names i) |> Array.ofList
+            let sb = System.Text.StringBuilder()
+            let mutable cursor = 0
+            let mutable groupNum = 0
+            let mutable storeParts = []      // C++ subscript pieces in slot order
+            let mutable transforms = []      // (parityVar, tfStr) per compact group
+            for s in slots do
+                let a = max 1 s.Rank
+                let these = [ for j in 0 .. a - 1 -> idxStrs.[cursor + j] ]
+                cursor <- cursor + a
+                if s.Symmetry <> SymNone && a >= 2 then
+                    let beh = behaviorFor s.Symmetry
+                    let strictArg =
+                        match beh.Canonicalize () with
+                        | CanonSortStrict -> "true"
+                        | CanonSort | CanonNone -> "false"
+                        | CanonWreathFold ->
+                            failwith (orbitStorageUnsupported "element write (canon_fold emission)" (orbitLevelsOf s))
+                    let tf =
+                        match beh.ReadTransform () with
+                        | TfIdentity -> "nested_array_utilities::ReadTransform::Identity"
+                        | TfNegateOnSwap -> "nested_array_utilities::ReadTransform::NegateOnSwap"
+                        | TfConjugateOnSwap -> "nested_array_utilities::ReadTransform::ConjugateOnSwap"
+                    let g = groupNum
+                    groupNum <- groupNum + 1
+                    let coords = these |> List.map (fun c -> $"(size_t)({c})")
+                    sb.Append($$"""std::array<size_t,{{a}}> __g{{g}} = { {{(String.concat ", " coords)}} }; """) |> ignore
+                    sb.Append($"bool __z{g}; int __p{g} = nested_array_utilities::canon_fold<{a}>(__g{g}, {strictArg}, __z{g}); ") |> ignore
+                    sb.Append($"if (__z{g}) return; ") |> ignore
+                    sb.Append($"auto __c{g} = nested_array_utilities::canon_left_justify<{a}>(__g{g}, {strictArg}); ") |> ignore
+                    for j in 0 .. a - 1 do
+                        storeParts <- storeParts @ [ $"[__c{g}[{j}]]" ]
+                    transforms <- transforms @ [ ($"__p{g}", tf) ]
+                else
+                    // arity-1 compact (SymIdx<1> = Idx) or plain slot(s): raw coordinate.
+                    for t in these do storeParts <- storeParts @ [ $"[{t}]" ]
+            let body = System.Text.StringBuilder()
+            // The value first: an accumulate `A(t) = A(t) + d` reads the same
+            // (canonicalized) cell, and C++ evaluates an assignment's RHS before
+            // its store either way.
+            body.Append($"{elemTypeStr} __w = {valueStr}; ") |> ignore
+            body.Append(sb.ToString()) |> ignore
+            let mutable prev = "__w"
+            transforms |> List.iteri (fun i (pv, tf) ->
+                let outv = $"__tw{i}"
+                body.Append($"{elemTypeStr} {outv} = nested_array_utilities::canon_transform<{elemTypeStr}>({prev}, {pv}, {tf}); ") |> ignore
+                prev <- outv)
+            let store = String.concat "" storeParts
+            body.Append($"{arrStr}{store} = {prev};") |> ignore
+            Some ($$"""([&]() -> void { {{(body.ToString())}} }())""")
+        else None
+    | _ -> None
 
 and renderIndexExpr (subst: SubstMap) (names: Map<IRId, string>) arr indices : string =
     let arrStr = exprToCppCore subst names arr

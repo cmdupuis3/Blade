@@ -1,0 +1,44 @@
+// TEST: Reverse mode through an AntisymIdx parameter scatters into the canonical cell
+// The loss reads the antisymmetric parameter at every (i, k) -- canonical,
+// mirrored AND diagonal tuples -- so the reverse sweep's `__g_a(i, k) += d`
+// scatters hit all three kinds. The cotangent buffer is packed strict storage
+// (no diagonal, each row one shorter): a raw subscript wrote past the rows
+// (heap corruption) or into the wrong cell, printing dAg = [[-0.06, -0.028],
+// [0.062], []] on the runs that survived. The canonical store (formalism 3.4)
+// applies the swap sign and drops the diagonal, which is exactly the adjoint
+// of the signed read: dL/da_c = sum over tuples t with canon(t) = c of
+// sign(t) * dL/dA(t). Loss = ||A M + M A^T||_F^2 with M symmetric; the dense
+// gradient is 4 R M, and the free-entry gradient is its antisymmetric part --
+// numpy: (0.3359048, -0.327731, 0.3568646), central differences agree to 1e-10.
+// The jvp lane, which never had the hole, pins the same numbers from the
+// other side.
+import ad as ad
+type D = Idx<3>
+type G = AntisymIdx<2, D>
+let M2: Array<Float64 like D, D> = [[0.5345, -0.1705, -0.191], [-0.1705, 0.3625, 0.101], [-0.191, 0.101, 0.206]]
+function lie_loss_g(a: Array<Float64 like G>, m: Array<Float64 like D, D>) -> Float64 = {
+    let r = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> a(i, 0) * m(0, j) + a(i, 1) * m(1, j) + a(i, 2) * m(2, j) + m(i, 0) * a(j, 0) + m(i, 1) * a(j, 1) + m(i, 2) * a(j, 2) |> compute
+    let r2 = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> r(i, j) * r(i, j) |> compute
+    let rs = reduce(r2, (+))
+    let s = reduce(rs, (+))
+    s
+}
+let Ag: Array<Float64 like G> = [[0.4, -0.2], [0.3], []]
+let lv0 = lie_loss_g(Ag, M2)
+let mut dAg: Array<Float64 like G> = [[0.0, 0.0], [0.0], []]
+let mut dM: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let lv = ad.grad(lie_loss_g)(Ag, M2, dAg, dM)
+// EXPECT: lv0 = 0.15348375
+// EXPECT: lv = 0.15348375
+// EXPECT: dAg = [[0.3359048, -0.327731], [0.3568646], []]
+// forward mode along each free entry: the same three numbers
+let E01: Array<Float64 like G> = [[1.0, 0.0], [0.0], []]
+let E02: Array<Float64 like G> = [[0.0, 1.0], [0.0], []]
+let E12: Array<Float64 like G> = [[0.0, 0.0], [1.0], []]
+let zM: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (p01, t01) = ad.jvp(lie_loss_g)(Ag, M2, E01, zM)
+let (p02, t02) = ad.jvp(lie_loss_g)(Ag, M2, E02, zM)
+let (p12, t12) = ad.jvp(lie_loss_g)(Ag, M2, E12, zM)
+// EXPECT: t01 = 0.3359048
+// EXPECT: t02 = -0.327731
+// EXPECT: t12 = 0.3568646

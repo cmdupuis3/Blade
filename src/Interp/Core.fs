@@ -1170,12 +1170,13 @@ and evalAssign (st: InterpState) (env: Env) (target: IRExpr) (v: Value) : unit =
         | _ -> raise (InterpUnsupported "assignment to non-struct field target")
     | LVIndex (arrExpr, indices) ->
         // Array element assignment: force the target array to concrete form, then
-        // write through the coordinate path (ArrayOps.writeCell mutates in place --
-        // the C++ `arr[i][j]... = v` store).
+        // write through the coordinate path (ArrayOps.writeIndexed mutates in
+        // place -- the C++ `arr[i][j]... = v` store for a dense target, the
+        // canonical fold-then-store of CodeGen.renderIndexStore for a compact one).
         (match forceValue st env (evalExpr st env arrExpr) with
          | VArray ba ->
              let coords = indices |> List.map (fun e -> toI64 (evalExpr st env e))
-             ArrayOps.writeCell ba coords v
+             ArrayOps.writeIndexed ba coords v
          | _ -> raise (InterpUnsupported "IRAssign to non-array index target"))
     | LVOther _ -> raise (InterpUnsupported "IRAssign to non-lvalue target")
 

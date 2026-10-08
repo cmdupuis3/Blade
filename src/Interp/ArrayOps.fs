@@ -561,6 +561,52 @@ other index slots (readCompact)"
         let raw = readCell arr (List.ofSeq storage)
         transforms |> List.fold (fun v (p, sym) -> applyReadTransform sym p v) raw
 
+/// The WRITE twin of readCompact (CodeGen.renderIndexStore's mirror): given a
+/// FULL logical coordinate list, fold each compact group, left-justify to
+/// storage coords, push the value through the group transforms (each read
+/// transform is an involution, so it is its own inverse) and write the
+/// canonical cell. A tuple on a strict diagonal (an antisymmetric implicit
+/// zero) writes NOTHING -- the cell is not a degree of freedom (formalism 3.4),
+/// which is what makes the reverse sweep's `__g_a(t) += d` scatter on a compact
+/// parameter exact (sign applied, structural zeros dropped).
+let writeCompact (arr: BladeArray) (logicalCoords: int64 list) (v: Value) : unit =
+    arr.IndexTypes |> List.iter (fun ix ->
+        if ix.Symmetry = SymWreath then
+            failwith (Blade.IR.orbitStorageUnsupported "element write into a wreath pool (writeCompact)"
+                                                       (Blade.IR.orbitLevelsOf ix)))
+    let coords = Array.ofList logicalCoords
+    let storage = ResizeArray<int64>()
+    let mutable transforms = []          // (parity, sym) per compact group, slot order
+    let mutable isZero = false
+    let mutable cursor = 0
+    for ix in arr.IndexTypes do
+        let a = max 1 ix.Rank
+        let these = Array.sub coords cursor a
+        cursor <- cursor + a
+        if ix.Symmetry <> SymNone && a >= 2 then
+            let (sorted, parity, z) = canonFold ix.Symmetry these
+            if z then isZero <- true
+            let strict = ix.Symmetry = SymAntisymmetric
+            for c in canonLeftJustify sorted strict do storage.Add c
+            transforms <- transforms @ [ (parity, ix.Symmetry) ]
+        else
+            for c in these do storage.Add c
+    if not isZero then
+        let w = transforms |> List.fold (fun v (p, sym) -> applyReadTransform sym p v) v
+        writeCell arr (List.ofSeq storage) w
+
+/// Element write through a logical coordinate list: a compact (symmetric /
+/// antisymmetric / Hermitian / wreath) target with FULL coverage routes through
+/// writeCompact; everything else -- dense arrays, and the partial-coordinate
+/// shapes the typechecker gates for compact ones -- is the raw writeCell (the
+/// C++ `arr[i][j]... = v` store).
+let writeIndexed (arr: BladeArray) (coords: int64 list) (v: Value) : unit =
+    let totalRank = arr.IndexTypes |> List.sumBy (fun ix -> max 1 ix.Rank)
+    if (hasSymmetry arr.IndexTypes || hasWreath arr.IndexTypes) && coords.Length = totalRank then
+        writeCompact arr coords v
+    else
+        writeCell arr coords v
+
 /// Plain dense random read through an index list: chained peels (row-major).
 /// A full index list yields a scalar; a partial list yields a sub-array view.
 /// Out-of-range indices panic BL8006, the out-of-bounds code the emitted guards use.

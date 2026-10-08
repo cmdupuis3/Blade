@@ -1,0 +1,54 @@
+// TEST: Compact element writes fold to the canonical cell (formalism 3.4)
+// An element write through NON-CANONICAL coordinates stores the transformed
+// value at the canonical cell -- negated for an antisymmetric swap, as-is for a
+// symmetric one -- so the write reads back through either spelling; a write to
+// an antisymmetric diagonal (an implicit zero, not stored) has no effect. Both
+// the `+=` accumulate and the plain overwrite go through the same store. Before
+// the fold, the accumulate rendered the read lambda as an lvalue (a g++
+// rejection, BL9002) and the reverse sweep's scatter wrote raw subscripts into
+// the packed rows (heap corruption, ad/041).
+type D = Idx<3>
+type G = AntisymIdx<2, D>
+type H = SymIdx<2, D>
+let mut Sa: Array<Float64 like G> = [[0.0, 0.0], [0.0], []]
+let mut Ss: Array<Float64 like H> = [[1.0, 2.0, 3.0], [4.0, 5.0], [6.0]]
+function bump(a: mut Array<Float64 like G>, s: mut Array<Float64 like H>) -> Float64 = {
+    a(1, 0) += 2.0
+    a(0, 2) += 3.0
+    a(2, 1) += 5.0
+    a(1, 1) += 7.0
+    a(2, 0) = 11.0
+    s(1, 0) += 10.0
+    s(2, 0) += 20.0
+    s(2, 2) = 60.0
+    s(1, 2) = 50.0
+    1.0
+}
+let r = bump(Sa, Ss)
+let a10 = Sa(1, 0)
+let a01 = Sa(0, 1)
+let a02 = Sa(0, 2)
+let a20 = Sa(2, 0)
+let a21 = Sa(2, 1)
+let a11 = Sa(1, 1)
+let s10 = Ss(1, 0)
+let s01 = Ss(0, 1)
+let s02 = Ss(0, 2)
+let s22 = Ss(2, 2)
+let s21 = Ss(2, 1)
+// EXPECT: r = 1.0
+// a(1,0) += 2 stores -2 at (0,1); a(2,0) = 11 overwrote (0,2) with -11; a(1,1) was dropped
+// EXPECT: a10 = 2.0
+// EXPECT: a01 = -2.0
+// EXPECT: a02 = -11.0
+// EXPECT: a20 = 11.0
+// EXPECT: a21 = 5.0
+// EXPECT: a11 = 0.0
+// EXPECT: s10 = 12.0
+// EXPECT: s01 = 12.0
+// EXPECT: s02 = 23.0
+// EXPECT: s22 = 60.0
+// EXPECT: s21 = 50.0
+// the packed rows hold the SIGNED stored cells: (1,2) holds -5 so that a(2,1) reads 5
+// EXPECT: Sa = [[-2.0, -11.0], [-5.0], []]
+// EXPECT: Ss = [[1.0, 12.0, 23.0], [4.0, 50.0], [60.0]]

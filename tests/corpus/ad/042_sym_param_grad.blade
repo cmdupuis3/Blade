@@ -1,0 +1,33 @@
+// TEST: Reverse mode through a SymIdx parameter accumulates both mirrored reads into one cell
+// The symmetric twin of ad/041: a stored off-diagonal cell is read through both
+// spellings s(i, j) and s(j, i), so its cotangent is the SUM of both scatters
+// (no sign), and the diagonal is a stored cell (one scatter). Loss =
+// ||S M + M S^T||_F^2; dense gradient 4 R M; numpy per stored cell, row-major
+// over the packed rows: (0.8639225, -1.6572632, 0.4775696, 0.8868255,
+// 0.2146048, -0.4382716). The jvp lane pins two of them from the other side.
+import ad as ad
+type D = Idx<3>
+type H = SymIdx<2, D>
+let M2: Array<Float64 like D, D> = [[0.5345, -0.1705, -0.191], [-0.1705, 0.3625, 0.101], [-0.191, 0.101, 0.206]]
+function lie_loss_s(s: Array<Float64 like H>, m: Array<Float64 like D, D>) -> Float64 = {
+    let r = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> s(i, 0) * m(0, j) + s(i, 1) * m(1, j) + s(i, 2) * m(2, j) + m(i, 0) * s(j, 0) + m(i, 1) * s(j, 1) + m(i, 2) * s(j, 2) |> compute
+    let r2 = method_for(range<D>, range<D>) <@> lambda(i: D, j: D) -> r(i, j) * r(i, j) |> compute
+    let rs = reduce(r2, (+))
+    let t = reduce(rs, (+))
+    t
+}
+let S0: Array<Float64 like H> = [[0.4, -0.2, 0.3], [0.5, 0.1], [-0.6]]
+let lv0 = lie_loss_s(S0, M2)
+let mut dS: Array<Float64 like H> = [[0.0, 0.0, 0.0], [0.0, 0.0], [0.0]]
+let mut dM: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let lv = ad.grad(lie_loss_s)(S0, M2, dS, dM)
+// EXPECT: lv0 = 0.774064355
+// EXPECT: lv = 0.774064355
+// EXPECT: dS = [[0.8639225, -1.6572632, 0.4775696], [0.8868255, 0.2146048], [-0.4382716]]
+let E01: Array<Float64 like H> = [[0.0, 1.0, 0.0], [0.0, 0.0], [0.0]]
+let E11: Array<Float64 like H> = [[0.0, 0.0, 0.0], [1.0, 0.0], [0.0]]
+let zM: Array<Float64 like D, D> = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+let (p01, t01) = ad.jvp(lie_loss_s)(S0, M2, E01, zM)
+let (p11, t11) = ad.jvp(lie_loss_s)(S0, M2, E11, zM)
+// EXPECT: t01 = -1.6572632
+// EXPECT: t11 = 0.8868255

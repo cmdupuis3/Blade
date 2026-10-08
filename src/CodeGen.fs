@@ -243,11 +243,20 @@ let private genFuncBodyScoped
             currentNames <- Map.add id varName currentNames
             code
         | IRAssign (target, v) ->
+            currentNames <- Map.add id varName currentNames
+            // A compact-group target folds to its canonical cell (the write
+            // twin of the lazy read, `renderIndexStore`); rendering the target
+            // through `exprToCpp` would spell the READ lambda, which is no
+            // lvalue, and a raw subscript lands in the wrong packed cell.
+            match (match target with
+                   | LVIndex (arr, idxs) -> renderIndexStore emptySubst currentNames arr idxs (exprToCpp currentNames v)
+                   | _ -> None) with
+            | Some store -> [$"{indent}{store};"]
+            | None ->
             let targetStr =
                 match target with
                 | LVVar tid -> Map.tryFind tid currentNames |> Option.defaultValue ($"__v{tid}")
                 | _ -> exprToCpp currentNames target
-            currentNames <- Map.add id varName currentNames
             // Copy-in-place (see exprToCppCore's IRAssign arm): sole-owner mut keeps
             // ONE pool; the RHS temp stays iteration-owned and its scope frees it.
             match copyInPlaceAssign target v with
