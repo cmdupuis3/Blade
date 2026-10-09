@@ -1007,7 +1007,7 @@ let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
     // must still decompose it (that is how the next variant gets A/B'd).
     let bigSym = """
 type Bx = Idx<97>
-let v = method_for(range<Bx>) <@> lambda(i) -> 1.0 * i |> compute
+let v = method_for(range<Bx>) <@> lambda(i) -> Float64(i) |> compute
 let s = method_for(v, v) <@> lambda(x, y) where comm(x, y) -> x * y |> compute
 """
     let emitBrick knob name src = emitUnder [ "BLADE_LLVM_BRICKS", knob ] name src
