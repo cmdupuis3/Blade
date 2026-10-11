@@ -461,9 +461,24 @@ module CppNetcdf =
                     yield! mismatch $"has dimension {d} of length \" << {v}_{tag}_dimlen_{d} << \" at run time; the program was compiled against \" << {expected.[d]}"
                     yield "}" ])
 
+    /// The provider bakes every extent as a literal read from the store at compile
+    /// time. A runtime extent has no literal to bake -- emitting a placeholder
+    /// (`= /* dynamic */;`, or NC_UNLIMITED in a writer whose `nc_put_var` then
+    /// writes zero records) is invalid C++ or a silently empty file. Refuse it.
+    let private refuseDynamicExtent (what: string) (varName: string) (slot: int) : string =
+        raise (Blade.Diagnostics.BladeDiagnosticException
+                (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan
+                    $"NetCDF {what} of '{varName}': dimension {slot} has a runtime extent, and this provider bakes every extent as a literal read from the store at compile time -- runtime NetCDF extents are not supported"))
+
     /// Generate C++ code to open a NetCDF file and read a variable
     let genReadVar (filePath: string) (varName: string) (cppVarName: string) (arrType: IRArrayType) : string list =
         let rank = arrType.IndexTypes.Length
+        // Rank 0 has no flat index to build and would emit `new T[];` -- an
+        // empty extent product is not valid C++. Refuse rather than emit it.
+        if rank = 0 then
+            raise (Blade.Diagnostics.BladeDiagnosticException
+                    (Blade.Diagnostics.Codes.backendLimit Blade.Ast.noSpan
+                        $"NetCDF read of '{varName}': scalar (rank-0) variables are not supported -- read a dimensioned variable"))
         // NetCDF only supports primitive numeric types; non-primitive
         // elements are unsupported here (would need new NetCDF machinery).
         let primElem =
@@ -483,7 +498,7 @@ module CppNetcdf =
             |> List.mapi (fun i idx ->
                 match idx.Extent with
                 | IRLit (IRLitInt n) -> $"size_t {cppVarName}_extent_{i} = {n};"
-                | _ -> $"size_t {cppVarName}_extent_{i} = /* dynamic */;")
+                | _ -> refuseDynamicExtent "read" varName i)
 
         let extentNames =
             arrType.IndexTypes |> List.mapi (fun i _ -> $"{cppVarName}_extent_{i}")
@@ -600,7 +615,7 @@ module CppNetcdf =
             |> List.mapi (fun i idx ->
                 match idx.Extent with
                 | IRLit (IRLitInt n) -> $"size_t {cppVarName}_extent_{i} = {n};"
-                | _ -> $"size_t {cppVarName}_extent_{i} = /* dynamic */;")
+                | _ -> refuseDynamicExtent "compound read" varName i)
         let extentNames =
             varArrType.IndexTypes |> List.mapi (fun i _ -> $"{cppVarName}_extent_{i}")
         let v = cppVarName
@@ -689,7 +704,7 @@ module CppNetcdf =
                 let extent =
                     match idx.Extent with
                     | IRLit (IRLitInt n) -> string n
-                    | _ -> "0 /* unlimited */"
+                    | _ -> refuseDynamicExtent "write" varName i
                 ncChecked cppVarName $"defining dimension '{dimName}' in '{filePath}'"
                     ($"nc_def_dim({cppVarName}_ncid, \"{dimName}\", {extent}, &{cppVarName}_dimids[{i}])"))
             |> List.concat

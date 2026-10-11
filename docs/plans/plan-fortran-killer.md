@@ -32,7 +32,7 @@ never-silent / fastest-way-is-the-only-way invariant is violated**: same computa
 spellings, 3x apart (fusion, anon-range); licences silently dropped (omp on materialized
 folds, wreaths, LLVM-lane lambdas); flagship features silently at war (units disable BLAS).
 The `plan-fastest-way-principles` framework (T1 SAME-EMIT gate, T2 decision census; authored
-2026-08-28, on a branch, not in this tree) would have caught most of these — this audit is
+2026-08-28; DESIGN, nothing built) would have caught most of these — this audit is
 its concrete case list.
 
 Where Blade already beats Fortran, today, with no work:
@@ -298,7 +298,7 @@ Arc 3's LAPACK routing extends `LinAlgPatterns.fs`'s existing table; its diff-te
 doctrine is `blade_lapack.hpp:19-30`. Arc 4's slab math reuses the existing mpi prologue;
 GPU defers to `plan-mlir-backend.md`. Arc 5's runtime-shape half is
 `plan-llvm-runtime-shapes.md`'s arc — don't duplicate. The enforcement framework for the
-whole invariant-violation class is the fastest-way-principles plan (on its branch).
+whole invariant-violation class is the fastest-way-principles plan.
 
 Audit note: the graft index covers only `protocol/` JS/TS + two Python files — the F#
 compiler is unindexed. All four agents discovered this independently and fell back to

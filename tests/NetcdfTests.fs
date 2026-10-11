@@ -907,6 +907,54 @@ let _ = nc.write("out.nc", A)
      | Ok names -> check name (names = ["dim0"; "dim1"]) (sprintf "got %A" names)
      | Error e -> check name false e)
 
+    // A non-literal extent cannot reach these emitters today -- every extent this
+    // provider produces is a literal from ncDimToNamedIndexType. The arms that
+    // used to handle one emitted placeholder C++ (an empty initializer; an
+    // unlimited dimension in the writer, which nc_put_var fills with zero
+    // records). Assert they are refusals, so a future runtime-shapes arc has to
+    // add real support instead of silently reviving a placeholder.
+    let dynBuilder = IRBuilder()
+    let dynIdx : IRIndexType =
+        { Id = dynBuilder.FreshId(); Rank = 1
+          Extent = IRVar (dynBuilder.FreshId(), IRTScalar ETInt64)
+          Symmetry = SymNone; Tag = None; IxKind = IxKPlain; Kind = SDimension; Dependencies = [] }
+    let dynArr : IRArrayType =
+        { ElemType = IRTScalar ETFloat64; IndexTypes = [dynIdx; dynIdx]
+          IsVirtual = false; Identity = Some (AIDVariable "D") }
+    let refusalOf (f: unit -> string list) =
+        try
+            f () |> ignore
+            Error "emitted code instead of refusing"
+        with
+        | Blade.Diagnostics.BladeDiagnosticException d -> Ok (d.Code, d.Message)
+        | ex -> Error $"{ex.GetType().Name}: {ex.Message}"
+    let refusesWith (label: string) (f: unit -> string list) =
+        let outcome = refusalOf f
+        check $"{label}: a runtime extent is refused (BL7001), not emitted"
+            (match outcome with
+             | Ok (code, msg) -> code = "BL7001" && msg.Contains "runtime NetCDF extents are not supported"
+             | Error _ -> false)
+            $"%A{outcome}"
+    refusesWith "genReadVar" (fun () ->
+        NetcdfProvider.CppNetcdf.genReadVar "f.nc" "D" "D" dynArr)
+    refusesWith "genReadCompoundVar" (fun () ->
+        NetcdfProvider.CppNetcdf.genReadCompoundVar "f.nc" "D" "D_mask" "D" dynArr dynArr)
+    refusesWith "genWriteVar" (fun () ->
+        NetcdfProvider.CppNetcdf.genWriteVar "f.nc" "D" "D" dynArr ["a"; "b"])
+
+    // Rank 0 is the other shape this emitter cannot express: the flat index has
+    // no leading component and `new T[]` (an empty extent product) is not valid
+    // C++. It used to raise IndexOutOfRangeException from inside the emitter.
+    let rank0Arr : IRArrayType =
+        { ElemType = IRTScalar ETFloat64; IndexTypes = []
+          IsVirtual = false; Identity = Some (AIDVariable "S") }
+    let rank0Outcome = refusalOf (fun () -> NetcdfProvider.CppNetcdf.genReadVar "f.nc" "S" "S" rank0Arr)
+    check "genReadVar: a scalar (rank-0) variable is refused (BL7001), not emitted"
+        (match rank0Outcome with
+         | Ok (code, msg) -> code = "BL7001" && msg.Contains "rank-0"
+         | Error _ -> false)
+        $"%A{rank0Outcome}"
+
     // genReadCompoundVar: load_compound's materializer. Reads the dense var and
     // the integer mask, converts nonzero -> bool, builds compound_index_t, and
     // scatters into a compact buffer (verified against the real cpp/ runtime).

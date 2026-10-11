@@ -112,6 +112,36 @@ Single-sweep, fused sufficient-statistic pipelines over a compile-time-shaped
 array. The **last declared index of the source array is always the sample
 (fiber) axis**; its static extent is `N`, the estimator's normalizer.
 
+One exception to "single sweep", and it is the point: when a real-element array's
+whole demand in a module is order-2 `moments`/`comoments` (nothing asks it for
+order 3+, and no `cumulants`/`free_cumulants`/`mstate` reads it), the pair block
+is spelled as a `gram` instead of `d(d+1)/2` fused accumulators: `gram(A, A)/N`
+for the raw `moments(A, 2)`, and `gram(Ac, Ac)/N` for `comoments(A, 2)`, where
+`Ac` stacks the central pool's rows already shifted by their means -- so the
+covariance keeps the no-cancellation guarantee of the central pool (a raw gram
+corrected by `N c_i c_j` would reintroduce exactly the cancellation centering
+removes). The block IS that contraction, so this is a lowering choice, not an
+approximation, and where it is a contraction the compiler's own BLAS gate
+(`OPENBLAS_DIR` / `BLADE_BLAS`) routes it to `syrk` into the same packed upper
+triangle the cells read. Only the `O(d N)` singles stay a sweep. The condition is
+derived from the statistic demand rather than a size threshold: the fused sweep
+is better when a higher order shares its power sums, but it does not scale on its
+own -- `d(d+1)/2` accumulators in one tuple join exceed g++'s template
+instantiation depth near `d = 41`, so wide covariance blocks had no lowering at
+all without this route (`tests/corpus/ppl/140_comoments_wide_contraction.blade`
+pins a 44-variable block). Complex elements keep the sweep: the complex `gram` is
+Hermitian (`x_i · conj x_j`), a different tensor from the raw comoment.
+
+Measured when the route was first built (2026-08-14, OpenBLAS 0.3.34, chrono
+around the contraction; the non-BLAS path is already OMP-parallel):
+`d=300, n=3000` 8.63 ms -> 2.51 ms, `d=700, n=3000` 38.8 ms -> 7.39 ms; at
+`d=96, n=60000` a wash (bandwidth-bound, ~6 flops/byte). The remaining cost is
+compile time: each packed cell is still assembled as its own read, about 8 ms of
+g++ per cell (8.6 s at `d=48`, 92 s at `d=150`). Emitting the block as one
+elementwise `gram/N` would delete the assembly -- the former's flat packed layout
+is already `gram`'s storage -- and wants a rank-2-symmetric to flat-rank-1
+reinterpret.
+
 | Former | Signature (informal) | What it computes |
 |---|---|---|
 | `moments(A, k)` | `Array<T like I..., N> -> Array<T like SymIdx<k, D>>` | raw (non-central) order-`k` comoment tensor, packed symmetric over the fused leading axes |

@@ -153,11 +153,13 @@ let private poolMean (pool: PoolInfo) (i: int) : Expr =
 /// point -- at [1e8, 1e8+1, 1e8+2] the binary64 variance P_ii/N - (P_i/N)^2 is 2, not 2/3 -- while the sums about a
 /// shift that tracks the data carry a relative error independent of the mean's magnitude (the shifted-moment
 /// reduction, proofs/BladeShiftedMoments.v + proofs/reals/BladeShiftedRounding.v: any shift, a rounded mean included).
+let private poolRowName (uniq: string) (i: int) = $"__ppl_row_{uniq}_{i}"
+
 let private poolDecls (span: Span) (uniq: string) (center: bool) (rows: Expr list)
     (needed: int list list) (n: float) : Located<Decl> list * PoolInfo =
     let mkDecl name value =
         { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
-    let rowName i = $"__ppl_row_{uniq}_{i}"
+    let rowName i = poolRowName uniq i
     let shiftName i = $"__ppl_c_{uniq}_{i}"
     let rowDecls =
         if center then
@@ -200,6 +202,14 @@ let private poolDecls (span: Span) (uniq: string) (center: bool) (rows: Expr lis
 /// Row slices of a single-leading-axis array: A(0) .. A(d-1).
 let private rowSlices (aName: string) (d: int) : Expr list =
     [ for i in 0 .. d - 1 -> appE (v aName) [iLit i] ]
+
+/// `gram(A, A)` contracts x_i . x_j over the sample fiber WITHOUT conjugation only for REAL elements; the complex
+/// instance is Hermitian (x_i . conj x_j), a different tensor from the raw comoment P_ij, so the contraction route is
+/// real-only.
+let private isRealElem (elem: TypeExpr) : bool =
+    match elem with
+    | TyNamed (("Float" | "Float64" | "Float32"), []) -> true
+    | _ -> false
 
 /// The order-r cumulant cell at `labels`: Sum over set partitions pi of [r]: (-1)^(|pi|-1)(|pi|-1)! * Prod_B E[Prod x_B].
 let private cumulantCellExpr (pool: PoolInfo) (labels: int[]) (r: int) : Expr =
@@ -391,7 +401,26 @@ type private Ctx = {
     /// Pool-path former outputs that are FLAT lex SymIdx<2, d>-shaped tensors (binding name -> variable-axis extent d); consumers
     /// like comoments_merge switch to cell-wise flat reads for these.
     FlatDims: Map<string, int> ref
+    /// Source arrays whose whole second-order demand is a CONTRACTION: read only by moments/comoments, never above
+    /// order 2, real elements. Their pair block is emitted as a `gram` so codegen's own BLAS gate can route it (syrk
+    /// into the packed upper triangle the cells read), and so width is not bounded by one d(d+1)/2-accumulator tuple
+    /// join (g++ template depth refuses it near d = 41); only the O(d n) singles stay a sweep. Derived from the
+    /// module's statistic demand, not a size threshold.
+    GramArrays: Set<string>
+    /// Raw `gram(A, A)` bindings for `moments(A, 2)` (source array name -> binding name).
+    Grams: Map<string, string> ref
+    /// Central `gram(Ac, Ac)` bindings for `comoments(A, 2)`, Ac = A's rows shifted by their means (source array name ->
+    /// binding name). Centered, not raw-and-corrected: the raw gram minus N c_i c_j is exactly the cancellation the
+    /// central pool exists to avoid.
+    CentralGrams: Map<string, string> ref
 }
+
+/// Does this array's order-2 block go through the gram contraction?
+let private gramRoute (ctx: Ctx) (aName: string) : bool = Set.contains aName ctx.GramArrays
+
+/// The pair moment P_ij / N read off a packed gram block.
+let private gramMoment (gName: string) (n: float) (i: int) (j: int) : Expr =
+    divE (appE (v gName) [iLit i; iLit j]) (fLit n)
 
 /// The module's pool for a single-axis source array: reuse if already emitted, else emit ONE maximal sweep (sizes 1..max over
 /// every former that reads this array) at the first former's position and cache it.
@@ -400,7 +429,10 @@ let private acquirePool (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: flo
     match Map.tryFind aName ctx.Pools.Value with
     | Some pool -> ([], pool)
     | None ->
-        let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
+        // On the gram route the pair sums come from the contraction, so the sweep shrinks to the singles.
+        let maxR =
+            if gramRoute ctx aName then 1
+            else max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
         let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
         let (pd, pool) = poolDecls span aName false (rowSlices aName d) needed n
         ctx.Pools.Value <- Map.add aName pool ctx.Pools.Value
@@ -413,11 +445,42 @@ let private acquireCentralPool (ctx: Ctx) (span: Span) (aName: string) (d: int) 
     match Map.tryFind aName ctx.CentralPools.Value with
     | Some pool -> ([], pool)
     | None ->
-        let maxR = max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
+        let maxR =
+            if gramRoute ctx aName then 1
+            else max selfMax (Map.tryFind aName ctx.PoolMax |> Option.defaultValue selfMax)
         let needed = [ for p in 1 .. maxR do yield! canonicalTuples d p ]
         let (pd, pool) = poolDecls span $"{aName}_c" true (rowSlices aName d) needed n
         ctx.CentralPools.Value <- Map.add aName pool ctx.CentralPools.Value
         (pd, pool)
+
+/// The module's raw `gram(A, A)` binding: emitted once at the first `moments(A, 2)`, then reused.
+let private acquireGram (ctx: Ctx) (span: Span) (aName: string) : Located<Decl> list * string =
+    match Map.tryFind aName ctx.Grams.Value with
+    | Some g -> ([], g)
+    | None ->
+        let gName = $"__ppl_gram_{aName}"
+        let decl = { Value = DeclLet { Pattern = pvar gName; Type = None
+                                       Value = syn (ExprGram (v aName, v aName))
+                                       Mutability = BindLet }; Span = span }
+        ctx.Grams.Value <- Map.add aName gName ctx.Grams.Value
+        ([decl], gName)
+
+/// The module's CENTRAL gram: `gram(Ac, Ac)` over the central pool's shifted rows, stacked into one array so both
+/// operands are the same binding (the identity syrk and packed storage need). Returns the decls (the central singles
+/// pool first, if not yet emitted), the gram binding, and that pool, whose P_i / N is the ~0 residue of each mean.
+let private acquireCentralGram (ctx: Ctx) (span: Span) (aName: string) (d: int) (n: float)
+    : Located<Decl> list * string * PoolInfo =
+    let (pd, pool) = acquireCentralPool ctx span aName d n 2
+    match Map.tryFind aName ctx.CentralGrams.Value with
+    | Some g -> (pd, g, pool)
+    | None ->
+        let cName = $"__ppl_cen_{aName}"
+        let gName = $"__ppl_cgram_{aName}"
+        let mkDecl name value =
+            { Value = DeclLet { Pattern = pvar name; Type = None; Value = value; Mutability = BindLet }; Span = span }
+        let stacked = arrLitE [ for i in 0 .. d - 1 -> v (poolRowName $"{aName}_c" i) ]
+        ctx.CentralGrams.Value <- Map.add aName gName ctx.CentralGrams.Value
+        (pd @ [ mkDecl cName stacked; mkDecl gName (syn (ExprGram (v cName, v cName))) ], gName, pool)
 
 let private indepKey (a: string) (b: string) = if a <= b then (a, b) else (b, a)
 
@@ -449,8 +512,18 @@ let private elabMoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bind
         arrayShape ctx "moments" aName |> Result.map (fun (elem, leading, fiber, n) ->
             match leading with
             | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
-                // Single-pass path: mu_S = P_S / N from the shared pool sweep.
                 let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
+                if k = 2 && gramRoute ctx aName then
+                    // Contraction path: the raw order-2 block IS A.A^T / N over the sample fiber.
+                    let (gd, gName) = acquireGram ctx span aName
+                    let cells =
+                        [ for labels in canonicalTuples d 2 ->
+                            match labels with
+                            | [i; j] -> gramMoment gName (float n) i j
+                            | _ -> fLit 0.0 ]
+                    gd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
+                else
+                // Single-pass path: mu_S = P_S / N from the shared pool sweep.
                 let (pd, pool) = acquirePool ctx span aName d (float n) k
                 let cells = [ for labels in canonicalTuples d k -> poolMoment pool labels ]
                 pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
@@ -496,14 +569,21 @@ let private elabComoments (ctx: Ctx) (span: Span) (outName: string) (binding: Bi
             arrayShape ctx "comoments" aName |> Result.map (fun (elem, leading, fiber, n) ->
                 match leading with
                 | [ix] when (resolveExtent ctx.Aliases ctx.Statics ix).IsSome ->
-                    // Single-pass path: C_ij = P_ij/N - (P_i/N)(P_j/N) off the shared pool.
+                    // C_ij = P_ij/N - (P_i/N)(P_j/N) about the row means. The pair block is the O(d^2 n) contraction:
+                    // gram(Ac, Ac) over the centered rows on the gram route, else the shared central pool sweep.
                     let d = (resolveExtent ctx.Aliases ctx.Statics ix).Value
-                    let (pd, pool) = acquireCentralPool ctx span aName d (float n) 2
+                    let (pd, rawPair, pool) =
+                        if gramRoute ctx aName then
+                            let (gd, gName, pool) = acquireCentralGram ctx span aName d (float n)
+                            (gd, (fun i j -> gramMoment gName (float n) i j), pool)
+                        else
+                            let (pd, pool) = acquireCentralPool ctx span aName d (float n) 2
+                            (pd, (fun i j -> poolMoment pool [i; j]), pool)
                     ctx.FlatDims.Value <- Map.add outName d ctx.FlatDims.Value
                     let cells =
                         [ for labels in canonicalTuples d 2 ->
                             match labels with
-                            | [i; j] -> subE (poolMoment pool labels) (mulE (poolMoment pool [i]) (poolMoment pool [j]))
+                            | [i; j] -> subE (rawPair i j) (mulE (poolMoment pool [i]) (poolMoment pool [j]))
                             | _ -> fLit 0.0 ]
                     pd @ [ { Value = DeclLet { binding with Value = arrLitE cells }; Span = span } ]
                 | _ ->
@@ -4402,8 +4482,29 @@ let private expandModuleCore (decls: Located<Decl> list) : Result<Located<Decl> 
                      | _ -> None)
                 | _ -> None)
             |> List.fold (fun m (a, k) -> Map.add a (max k (defaultArg (Map.tryFind a m) 0)) m) Map.empty
+        // Arrays some OTHER single-array former reads: cumulants/free_cumulants/mstate consume the whole multiset
+        // lattice off one central sweep, so an array they touch keeps its fused pool (its pair sums are already a
+        // byproduct -- a gram would duplicate them).
+        let poolOther =
+            rest |> List.choose (fun d ->
+                match d.Value with
+                | DeclLet { Value = { Kind = ExprKind.ExprApp ({ Kind = ExprKind.ExprVar f }, ({ Kind = ExprKind.ExprVar a } :: _)) } }
+                    when (List.contains f ["cumulants"; "free_cumulants"; "mstate"]) && active f -> Some a
+                | _ -> None)
+            |> Set.ofList
+        // The contraction route: everything this array is asked for is an order-2 (or order-1) moments/comoments
+        // block over real elements, so its pair block is exactly a gram and belongs in the intrinsic.
+        let gramArrays =
+            poolMax
+            |> Map.toSeq
+            |> Seq.filter (fun (a, k) ->
+                k = 2 && not (Set.contains a poolOther)
+                && (match Map.tryFind a arrays with Some (elem, _) -> isRealElem elem | None -> false))
+            |> Seq.map fst
+            |> Set.ofSeq
         let ctx = { Arrays = arrays; Aliases = aliases; Statics = statics; Indep = indep
-                    Pools = ref Map.empty; CentralPools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty }
+                    Pools = ref Map.empty; CentralPools = ref Map.empty; PoolMax = poolMax; FlatDims = ref Map.empty
+                    GramArrays = gramArrays; Grams = ref Map.empty; CentralGrams = ref Map.empty }
         // Pass 1.5: expression-position logpdf/loglik inside top-level
         // function bodies (the density-form model layer, plan section 4) --
         // each site becomes a block of statement lets, so `function

@@ -216,7 +216,7 @@ Seam map (agent-verified):
   mold) + statement-level emission, or surface elaboration into two
   statements (PplElaborate already synthesizes ExprRecArray statements).
   Plain intrinsic name, not a keyword. Refuses on unguarded rec arrays.
-- **P2 — window riding**: composes with the rec-array ring/snapshot branch;
+- **P2 — window riding**: composes with the rec-array ring/snapshot design (`plan-rec-array-windowing.md`, unmerged branch);
   under a K+1 ring "freeze" must be redefined (no full trajectory to fill).
   Do not start before P0's interp parity is green.
 
