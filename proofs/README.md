@@ -28,7 +28,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (1362 theorems total)
+## Contents (1908 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -786,6 +786,111 @@ run it with `-Check` to verify the numbers below and the headline in
   unchanged, with the shift as a GHOST beside it -- ANY starting shift,
   e.g. a rounded mean); shifted_run_is_shifted_sums (what the rounding
   analysis compares against).
+- BladeObject.v (40): NEW -- THE ONE MODEL: the DMWF is the quotient
+  (docs/plans/plan-one-model-surface-calculus.md, item 1).  The tower's
+  four models (index universe, materialized values, oracle programs, free
+  terms) are projections of one object: the DMWF with its quotient
+  property explicit.  canonical_iff_nondecr (canonical = dense and
+  nondecreasing); the transversal theorem -- enum_hits_every_orbit,
+  enum_hits_each_orbit_once, isort_fibres_are_orbits, enum_is_quotient
+  (enum r l u is the image of the dense box under insertion sort, fibres
+  = S_r-orbits), orbit_count (C(u-l+r-1, r) counts orbits); blockwise for
+  shapes under the Young action (block_perm, shape_box, scanon_in_shape,
+  scanon_block_perm, enumShape_hits_each_orbit_once,
+  scanon_fibres_are_orbits, enumShape_is_quotient, shape_box_length vs
+  shapeCard_is_orbit_count); arrays on the quotient (qread = the
+  canonicalizing read: qread_invariant, qread_fixes_transversal,
+  qread_is_storage, veval_one_per_orbit); the object as a program
+  (object_prog, object_prog_run = veval, object_prog_trace = the
+  transversal, object_work = shapeCard, young_prog_is_object_prog,
+  object_is_optimal with uniform_optimality_young_nat).
+- BladeSurface.v (68): NEW -- THE SURFACE CALCULUS (plan item 2): the
+  structure-first core over a top-level binding environment (identity by
+  name).  kernel/kwf (Fun-Intro's metadata premise: comm only when the
+  body is invariant under every perm_pair); expr/ty/has_ty (13.2) with
+  out_shape = identity groups (rle) and, under comm, a group of g rank-1
+  operands as the ONE DMWF record (g, l, u); cvalue/value/step (14.4);
+  progress, preservation, step_size, normalizes; den into the object,
+  step_den (on the nose), eval_sound, eval_veval; typed_app_is_quotient
+  (the typed output is out_shape, every dense cell is recovered by qread,
+  one cell per orbit = object_work), via apply_kernel_canon /
+  group_quotient / groups_quotient and BladeOptimal's Ksym_Kcls;
+  comm_license_needed, covariance_shape (+ covariance_cells_5 = 15),
+  aba_unlicensed, swidth_out_shape, method_vs_zip_rank;
+  deduced_comm_is_licence (BladeDeduceExact's teq of the swap gives a
+  kwf comm kernel: deduction is a licence source), perm_pair_2,
+  eval_local.  Scope in-file: rank-0 kernels, rank-1 identity groups,
+  nat values, no local let, no folds, no let rec.
+- BladeTransport.v (103): functoriality of the quotient through every
+  combinator (plan item 3).  A shape is the group data
+  (enumShape_is_quotient).  <*>: rle_app / out_shape_app_clean (identity
+  groups glued at the seam; concatenation when clean), block_perm_app,
+  shapeCard_product_seam (count <= product, = when clean).  zip_transport
+  (operands' common group).  pipe_transport.  Pair layer for <&> / <&!>:
+  par_group_product (sigma1 x sigma2), fuse_meet, fuse_is_par,
+  fuse_object_prog (one traversal of the meet), fusion_evaluations (never
+  saves evaluations; 50 vs 40 on mismatched licences), pair_sound.  Orbit
+  work of a pipeline: pipeline_attains_orbit_work, stage_is_surface (every
+  stage is a typed surface term; group_of reads its shape),
+  two_node_translation (the calculus's program is a free-model program
+  meeting BladeOrbitWork's bound n + C(n+1,2)).  Scope pins: D1 not built
+  (16 vs 10), typed work not optimal (12 vs 9).
+- BladeAttain.v (115): NEW -- THE ORBIT BOUND AT PROPER SUBGROUPS (plan
+  item 4, partial).  Klab: kernels commutative only in declared blocks
+  (fb in Kblock [2;1], not in Ksym 3).  The MEET of kernel blocks and
+  binding arrays: meet_lower_bound / meet_storage_bound force shapeCard s,
+  meet_attained / meet_prog_is_object_prog attain it (scanon reads);
+  uniform_optimality_subgroup closed; block nest (one array) and Young
+  nest (margs_id_is_shargs) as instances; meet_ex_forced: 400 at blocks
+  [3;2] over (A,A,B,B,B).  Surface: out_shape is the meet
+  (surface_comm_optimal, distinct-name groups), surface_den_is_call_site
+  ties den to the call site, surface_nocomm_optimal; (A,B,A): n^3 stored,
+  n*C(n+1,2) forced and sufficient, strictly smaller for n >= 2.  Signed
+  at every r: Kalt (adjacent swaps) = full sign character
+  (Kalt_sign_character), alt_vanishes, C(n,r) forced and attained with a
+  computing signed read (alt_read_pin, Vandermonde).
+- BladeInduction.v (82): NEW -- THE INDUCTIVE SIDE (plan item 5): let rec
+  as the structural induction along the leading axis.
+  letrec_is_wf_fixpoint, letrec_fixpoint_self + letrec_unique (rec_build
+  is the unique solution of the zero-extended recurrence),
+  letrec_prefix_stable, letrec_zero_history (unconditional prefix(n - j) =
+  the guarded form; integer reads).  Work: letrec_work (N ordered
+  questions), letrec_lower_bound / letrec_work_optimal (N forced for every
+  R-local class), letrec_work_shape(_lower_bound, _optimal) (N * shapeCard
+  s, one per (ordinal, orbit), forced and attained).  Composition: traj
+  over mkIx 1 0 N :: s; block_perm_lead (leading ordinal never permuted);
+  dense_agrees_with_quotient (orbit-invariant steps: quotient = dense
+  recurrence); letrec_commutes_with_quotient.  while guard: gbuf_spec,
+  letrec_guard_total/_prefix_agrees/_frozen/_budget (BL8010),
+  letrec_seeded_guard.  rec_arr / letrec_veval: the object an ERec
+  denotes.
+- BladeLicence.v (87): NEW -- NUMERICS AS A PARAMETER (plan item 6): the
+  licence is a declared relation R.  invariant_under_R / Ksym_R / Kcls_R /
+  kwf_R, with R = eq giving the tower exactly.  has_ty_R (has_ty with
+  kwf_R in the kernel rules), has_ty_R_eq_iff, progress_R /
+  preservation_R / eval_sound_R; typed_app_is_quotient_R (R reflexive +
+  transitive) from a has_ty_R derivation.  licensed_not_exact (v0 + 3 v1:
+  refused by has_ty, typed by has_ty_R Rmod2).  Reduce:
+  fold_perm_invariant (exact), fold_perm_invariant_R (reordering,
+  congruence), reassoc_licence / tree_reduce_R (any bracketing, with e an
+  R-identity).  Rounding at every p >= 2: kfold_opr_not_kwf (arity 3),
+  rounded_fold2_exact (arity 2, representable data, exact),
+  rounded_licence_coarse / assoc_congruence_collapses (a float licence
+  relates 2^p and 2^p + 2).  Only attainment is restated up to R.
+- BladeBoundary.v (51): the scope boundary of the orbit bound (plan item
+  7).  support_lower_bound (width-w orbit bound; perturbable_is_sperturbable,
+  orbit_bound_from_support: w = 1).  free_on / Ksym_free /
+  free_class_bound restate orbit_lower_bound for any law class;
+  indicator_closed(_free), Ksym_indicator_closed; canonical_task_attained.
+  Separable kernels Ksep (g a + g b): Ksep_Ksym, sep_determined,
+  separable_nowhere_free / separable_not_free / Ksep_not_indicator_closed;
+  sep_prog answers the dense square with n queries
+  (structured_kernel_beats_bound) but the opaque-cell store still needs
+  C(n+1, 2) (sep_storage_bound).  Query count: worst case exactly n
+  (shift_exists, sep_positive_lower_bound, sep_query_complexity); per
+  kernel >= n/2, ceil(n/2) at zero (nat artefact).  orbit_bound_boundary
+  packages it (converse open); genericity_two_sides pairs it with
+  nongeneric_data_beats_bound.  Pins 6 vs 3, 15 vs 5.
 
 ## Outside the tower: conditional on Coq's Reals axioms
 

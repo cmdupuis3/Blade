@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**1362 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
+**1908 theorems**, Coq 8.18 / Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -47,6 +47,8 @@ Rules of this document:
 | Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
 | Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain, BladeProuhet, BladeNewton, BladeNumericContract, BladeReduceCompiler, BladeReductionAD, BladeShiftedMoments | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`); and the closure refusal against EVERY update function at every degree and order, by Prouhet–Tarry–Escott collisions; Newton's identities over any commutative ring, and the theorem that turns one bumped coefficient into an ideal pair; the numerical contract (wrapping integers and rationals are exact fragments, rounded arithmetic is not one at any precision, and a reassociation license is not a distributivity license); a model source fragment with a complete zero test, a classifier that never answers Unknown, a generated reduced program and the compiler theorem at every extent; and the forward and reverse rules of `Grad*.fs` modelled, the reverse sweep over a stored trajectory as the transpose of the tangent run, and reduction commuting with both modes; and the same reduction in shifted coordinates, where the update is a pure rescaling |
 | Optimality | BladeOptimal, BladeOrbitWork | the orbit bound on kernel work and storage against ANY program (oracle adversary), attained by canonical enumeration at H = S_R for every binding and at the sign character r = 2; the pipeline form — one question per subterm class modulo the laws, attained by the memoized evaluator, with the orbit work formula checked on a two-node pipeline |
+| The one model, and the surface calculus | BladeObject, BladeSurface | the DMWF IS the quotient: its enumeration is the image of the dense box under canonical form, with fibres exactly the orbits (one record, then every shape under the Young action); arrays as functions on the transversal with canonicalizing access = the storage lookup; the object as the program that asks one question per orbit, which is BladeOptimal's attaining program read through the data. The structure-first core as a calculus: progress, preservation, normalization; a denotation into the object that every step preserves on the nose; and the quotient as a theorem about TYPING DERIVATIONS — the typed output of `L <@> f` is `out_shape`, every dense cell is recovered from it by canonicalizing access, and it holds one cell per orbit; nothing is quotiented without `comm`; a deduced swap-symmetry (BladeDeduceExact's `teq`) is a licence |
+| The theory's remaining items (plan items 3–7) | BladeTransport, BladeAttain, BladeInduction, BladeLicence, BladeBoundary | the licence group through every combinator (`<*>` glues identity groups at the seam, so the typed output of a product is a quotient of the product; zip, pipe, `<&>`, `<&!>` with fusion's one-traversal cost and its evaluation cost on mismatched licences; the orbit work of a pipeline attained by the composed object program and bridged program-level to BladeOrbitWork's free-model bound on the two-node schema); the orbit bound at proper subgroups (block licences composed with the binding's cut — the meet — forced and attained; the sign character at every r from adjacent anti-invariance alone; the neighbour rule of §8.3 proved sound but not optimal at (A, B, A)); the inductive side (`let rec` as the unique solution of the zero-extended recurrence on the leading axis, its work N × orbits forced and attained, the quotient surviving on the remaining axes, the `while` guard); numerics as a parameter (typing, soundness and the quotient theorem relative to a declared relation R; reordering needs a congruence, re-bracketing an identity too; a rounded reduce's licence is necessarily coarse); the scope boundary (the bound holds on every free class; separable kernels beat the query bound with n questions but not the storage bound; the converse is open) |
 | AD seam | BladeJacobian | symbolic differentiation: renaming equivariance, the Jacobian symmetry transfer, joint-pair-swap tangent symmetry, the accumulation multiplicity rule |
 | ML seam | BladeSymPower, BladePartition, BladePointGroup | the S₂ partition of a self-tensor weight space; the Sym^k/Λ^k composition-sector counts (Vandermonde, both flavours); set partitions as restricted growth strings — Bell/Stirling counts, RGS-lex extends refinement, the unitriangular witness certificate; the C₄/D₄ point-group registry — table closure, computed Frobenius–Schur indicators, the J identities, the e-weighted Hom count |
 
@@ -1291,6 +1293,380 @@ modelled; BladeDeduce covers their soundness and nothing here speaks to their
 completeness. Associativity is deliberately not a law: it is not licensed for
 floating point, and the free model agrees.
 
+## BladeObject.v (40 theorems) — the one model: the DMWF is the quotient
+
+The tower had four models, each the right one for its file: the index universe
+and its enumeration (BladeDMWF, BladeArrow, BladeShape); the materialized-value
+semantics `Arr U = Shape × (list nat → U)` with `veval` (BladeCompute,
+BladeMonad); the oracle model of adaptive programs (BladeOptimal); and the free
+term model (BladeOrbitWork, BladeDeduceExact). This file
+(`docs/plans/plan-one-model-surface-calculus.md`, item 1) states the object
+they are all about and proves that the first three are its projections; the
+fourth is the licence bridge in BladeSurface.
+
+The object is the DMWF itself, with its quotient property made explicit. The
+feedback of the Double Metamorphism — the emitted index becoming the residual's
+lower bound — enumerates exactly one representative of every orbit of the
+symmetric group on the dense box. The feedback *is* the group action, computed.
+
+- `canonical_iff_nondecr`: the DMWF's canonical tuples are exactly the dense
+  tuples (`dense_tuple`, enumerated by `box`) that are nondecreasing.
+- The transversal theorem. The orbit relation of S_r on tuples is list
+  `Permutation`; the canonical form is BladeOptimal's insertion sort.
+  `enum_hits_every_orbit` (every dense tuple is a permutation of a canonical
+  one), `enum_hits_each_orbit_once` (two canonical tuples in one orbit are
+  equal), `isort_fibres_are_orbits` (the canonical-form map's fibres are the
+  orbits), and `enum_is_quotient`: `enum r l u` is the image of `box r l u`
+  under `isort`. `orbit_count` reads BladeBinomial's `C(u − l + r − 1, r)` as
+  the number of orbits. `isort_canonical_of_dense` is the general-`l` form of
+  BladeOptimal's `isort_canon`.
+- Blockwise, for shapes: the Young action permutes within each record's block
+  (`block_perm`), the dense box of a shape is `shape_box` / `shape_dense`, and
+  BladeOptimal's `scanon` is the blockwise canonical form. `scanon_in_shape`,
+  `scanon_block_perm`, `enumShape_hits_each_orbit_once`,
+  `scanon_fibres_are_orbits`, `enumShape_is_quotient` restate the transversal
+  theorem for every shape; `shape_box_length` counts dense cells
+  (∏ (u − l)^r) against `shapeCard_is_orbit_count`.
+- Arrays on the quotient (projection 1). An `Arr U` is a function on the
+  transversal; `qread A t = snd A (scanon (fst A) t)` is the canonicalizing read
+  of formalism §3.9 and §12.2 (`cov(3, 1)` IS `cov(1, 3)`). `qread_invariant`
+  (constant on orbits), `qread_fixes_transversal` (the identity on canonical
+  tuples), `qread_is_storage` (equal to the lookup at the canonical tuple's
+  position in `veval` — storage, iteration and access as one object),
+  `veval_one_per_orbit`.
+- The object as a program (projection 2). `object_prog s = ask_all (enumShape s)`:
+  `object_prog_run` (its result is `veval`), `object_prog_trace` (its questions
+  are the transversal), `object_work` (it asks exactly `shapeCard s`
+  questions), `young_prog_is_object_prog` (BladeOptimal's attaining program for
+  the Young nest is the object's program read through the data), and
+  `object_is_optimal`, which with `uniform_optimality_young_nat` closes the
+  circle: the orbit count is forced by every correct program and attained by
+  the object.
+
+## BladeSurface.v (68 theorems) — the surface calculus: progress, preservation, and the quotient as a theorem about typing derivations
+
+The structure-first core of Blade (formalism §7, §8, §10, §13, §14), closed over
+a global binding environment — Blade's top level, where identity is by name
+(§8.3). Plan item 2. Arrays `EArr`, names `EVar`, loop objects from either side
+(`EMethod` = the outer product, `EZip` = co-iteration, `EObject`), application
+`EAppM` / `EAppO` (`<@>` from either side, §7.1), `ECompute`, and the
+elementwise `EPipe` (`>>@`). A `kernel` is an arity, a body over
+position-indexed values and a `comm` flag; `kwf` is Fun-Intro's "metadata
+well-formed" premise: locality, and `comm` only when the body is invariant under
+every permutation of its positions (BladeLowering's `invariant_under` over
+BladeCompleteness's `perm_pair`; `kwf_Ksym` ties it to BladeOptimal's law
+class).
+
+The licence lives in the typing rule for application. `out_shape` groups
+neighbouring equal names (`rle`, §8.3) and, under `comm`, replaces a group of
+`g` rank-1 operands over `[l, u)` by the ONE DMWF record `(g, l, u)`
+(`group_shape`) — §8.4 step 3 at `s = 1`, §11.2's `H ∩ Stab` as a function of
+the derivation. That is the only place structure is introduced, and what it
+introduces is exactly a DMWF record: the sense in which the DMWF is the core.
+
+- Type soundness: `progress`, `preservation`, `step_size` (a size measure
+  strictly decreases), `normalizes` — under `env_ok G rho`. Canonical forms
+  (`canon_loop`, `canon_zip`, `canon_obj`, `value_arr`, `value_comp`) and the
+  inversion of the three application typings (`ty_appM_method`, `ty_appM_zip`,
+  `ty_appO`).
+- Denotation into the one object: `den rho e : Arr nat`; `step_den` (every step
+  preserves it on the nose — no extensionality anywhere); `eval_sound` and
+  `eval_veval` (every well-typed array term evaluates to an `EArr` carrying its
+  denotation, so `veval` of the denotation IS what the program computes: the
+  materialized-value semantics is the calculus's).
+- `typed_app_is_quotient`: for a well-typed `L <@> f`, the typed output shape is
+  `out_shape`; every cell of the DENSE output (what a collection-first system
+  computes) satisfies `shape_dense` of the typed shape and is recovered from the
+  typed array by `qread`; and the typed array has exactly one cell per orbit of
+  the identity-group action, which is what the object's program asks. The
+  discharge is `apply_kernel_canon`, by induction over the identity groups
+  (`group_quotient`, `groups_quotient`): sorting a group's index segment
+  permutes the kernel's value list (`vals_repeat1`, `Permutation_map`), and
+  BladeOptimal's `Ksym_Kcls` turns the declared position-invariance into
+  constancy on the sorted value tabulation — the position permutation the sort
+  induces is never constructed.
+- `comm_license_needed`: with `comm` off the typed shape is the dense one.
+  `covariance_shape` / `covariance_cells_5`: `method_for(A, A) <@> f` over
+  `Idx<n>` types at `SymIdx<2, n>`, `C(n + 1, 2)` cells, 15 at `n = 5`.
+  `aba_unlicensed`: `(A, B, A)` is three singleton groups. `swidth_out_shape`:
+  grouping never changes the output RANK, only which tuples are stored;
+  `method_vs_zip_rank`: the outer product and co-iteration of the same operands
+  differ in output rank (the documented bug class).
+- The free-model bridge, `deduced_comm_is_licence`: a binary kernel whose body
+  is a term equal modulo the declared laws to its own swap (BladeDeduceExact's
+  `teq`, what `src/Deduce.fs`'s mirror walk decides) is a well-formed `comm`
+  kernel under every interpretation respecting the laws (`perm_pair_2`,
+  `eval_local`, `teq_sound`) — deduction is a licence source.
+
+Scope, stated in-file: rank-0 kernels (no T-dimensions, no `irank` slices);
+identity groups quotiented over rank-1 operands only (§8.4's `s = 1`; the
+compound group is plan item 3 / decision D1); values are `nat`; no local `let`
+(expressions are closed over the top-level environment); no folds; no `let rec`
+(plan item 5). Each is a listed item of the plan, not a hole in the argument.
+
+## BladeTransport.v (103 theorems) — functoriality of the quotient; the orbit work of a pipeline
+
+A shape IS the group data (`BladeObject.enumShape_is_quotient`), so the group
+of a computation is the shape its derivation assigns. This file (plan item 3)
+states how that shape is transported through each combinator (formalism
+§10.2–10.5) and what a composed computation costs.
+
+- *`<*>`.* `rle_app`: the identity groups of `method_for(xs1 ++ xs2)` are the
+  factors' encodings glued at the seam. `out_shape_app_clean`: with distinct
+  boundary names the typed shape is the concatenation of the factors'
+  out_shapes; `block_perm_app`: the orbit relation of `s1 ++ s2` is the
+  product; `shapeCard_product_clean`: the count multiplies.
+  `shapeCard_product_seam`: in general the glued group is larger and the count
+  never exceeds the product (`seam_merge_pin`: 15 vs 25). `dense_shape_app`:
+  the dense loop always splits.
+- *zip.* `zip_transport`: the operands' own (common) group, arity-independent;
+  the canonical read is the diagonal of the operands' reads. The pullback is
+  trivial: `T_Zip` refuses mismatched shapes.
+- *`>>@`.* `pipe_transport`: the first stage's group; `qread` commutes with the
+  stage; `pipe_object_prog`: no new traversal step (Part E counts its one
+  kernel application per orbit).
+- *`<&>` / `<&!>`* (a pair layer above BladeSurface: `has_ty2`, `den2`,
+  `step2`, `pair_sound`). `par_group_product`: σ(C₁ <&> C₂) = σ₁ × σ₂.
+  `fuse_meet`: both outputs carry the out_shape of the conjunction of the
+  licences (necessary: `meet_necessary_pin`); `fuse_is_par`: cellwise equal to
+  the separate applications. `fusion_one_traversal` / `fuse_object_prog`: the
+  fused object program visits each cell of the meet once and its run is
+  `den2`'s pair; with agreeing licences the unfused pair takes twice the
+  traversal steps. `fusion_traversals_never_cost`, but `fusion_evaluations`:
+  fusion never saves kernel evaluations and costs some when licences disagree
+  (`fusion_mismatch_pin`: 50 vs 40).
+- *Orbit work.* `orbit_work` sums `shapeCard` over a pipeline's stages.
+  `pipeline_attains_orbit_work`: the composed object program (each stage
+  materialized once, read back from storage) asks exactly `orbit_work`
+  questions and every stored stage is `veval` of its denotation.
+  `stage_is_surface`: every stage, `Prev` sources included, IS the surface
+  term `method_for(names) <@> k` over its local operand environment; under
+  `pipe_ok` (kwf, arity) it is typed, `group_of` reads off its shape, and it
+  is the quotient of its dense stage. `two_node_translation`: for
+  `g(h(A i), h(A j))`, g comm, the calculus's program relabelled to
+  BladeOrbitWork's symbols is a free-model program correct for every oracle in
+  the law class, asking exactly `n + C(n+1, 2)` — the free-model lower bound
+  applies to it and it attains it (`pipe_prog_shape_only`: bodies live in the
+  oracle).
+- *`group_of`.* The group as a function on the syntax of `expr`;
+  `group_of_den`, `group_of_laws`.
+- Pins: `three_stage_orbit_work` (35 / 55), `three_stage_run`,
+  `fused_work_pin`, and the scope pins `d1_not_built_pin` (16 vs D1's 10),
+  `typed_work_not_optimal_pin` (12 vs the free model's 9).
+
+Scope: compound identity groups and groups of symmetric operands are NOT
+quotiented (D1 not built; such stages count densely). Values nat; folds out
+(Ensemble Computation). A general schema-to-free-model translation would give
+free lower bound ≤ orbit_work, with equality only when each comm stage's typed
+group is its whole licence; the program-level bridge is built on the two-node
+schema only. The stage language is untyped (attainment needs no premise); the
+pair layer's meet is all-or-nothing. Parts C/D count traversal steps, Part E
+kernel applications.
+
+## BladeAttain.v (115 theorems) — the orbit bound at proper subgroups (plan item 4, partial)
+
+BladeOptimal attains the orbit bound at `H = S_R` and at the sign character for
+`r = 2`. This file attains it at proper subgroups (block licences composed with
+the binding's cut: the meet) and at the full sign character for every `r` over
+one array. It reuses BladeOptimal's oracle model (`orbit_lower_bound`,
+`perturbable`, `ask_all`, `isort`, `scanon`, `svals`, `sgrp`, `cD`).
+
+- *Block kernels.* `Klab R lab`: local, and invariant under every position
+  permutation that keeps each position in its declared block.
+  `Klab_Klcls`/`Klcls_Klab`: equal to "constant on the sorted label-tagged
+  tabulation"; Cantor tags turn a list permutation into a block-preserving
+  position permutation. `Kblock bs` lists blocks by size.
+  `Kblock_single_is_Ksym`: one block is `Ksym`. Members: `fb_in_Kblock`,
+  `fb_not_Ksym` (`(v0+v1)·1000 + v2` is in `Kblock [2;1]` and not in
+  `Ksym 3`).
+- *The meet.* A shape `s` whose record `j` reads array `arr j` inside kernel
+  block `kb j`; `meet_inj` says the pair names the record, i.e. H ∩ Stab's
+  classes are contiguous runs. `meet_lower_bound` / `meet_storage_bound`:
+  `shapeCard s` is forced. `meet_attained` / `meet_prog_is_object_prog`: the
+  object's program attains it and serves every dense cell via `scanon`.
+  Separation needs no global decoder (`svals_sep_gen`). Instances:
+  `uniform_optimality_block(_nat)` (the kernel cut alone, one array, forced
+  count `prod_j C(n+b_j-1, b_j)`; pin: blocks [2;1] at n = 4 give 40);
+  `uniform_optimality_subgroup` (the meet, closed with generic data);
+  `meet_full_kernel_is_Ksym` + `margs_id_is_shargs` (the data cut alone is
+  BladeOptimal's Young nest, same class and same call site);
+  `meet_ex_forced` (blocks [3;2] bound to (A,A,B,B,B) at n = 4: 400 forced).
+- *The surface rule.* `out_shape_is_meet`, `surface_comm_optimal`: under
+  comm, BladeSurface's `out_shape` is the meet, so its card is forced and
+  attained when the rle groups have distinct names. `surface_data_bridge` /
+  `surface_den_is_call_site`: with Cantor data, `apply_kernel` (hence `den` of
+  a well-typed `L <@> f`) is the kernel at exactly that call site.
+  `surface_nocomm_optimal`: without comm, the dense shape is forced and
+  attained for all local kernels.
+- *The boundary (A, B, A).* `aba_beats_surface_rule`, `aba_orbit_count_forced`,
+  `aba_gap_strict`, `aba_args_is_call_site`. Under a comm kernel the neighbour
+  rule (formalism §8.3/§11.1) stores n³ cells; soundness of that store is
+  BladeSurface's. Here, n·C(n+1, 2) questions suffice on every dense cell,
+  that count is forced, and it is strictly smaller for n ≥ 2.
+- *Signed, general r.* `Kalt r` is anti-invariance under adjacent
+  transpositions only. `Kalt_sign_character`: this is the full sign character,
+  f(v∘s) = (−1)^inv(s)·f(v) for every position permutation. `alt_vanishes`:
+  zero on any tuple with two equal entries. `antisym_lower_bound_r` /
+  `antisym_storage_bound_r`: C(n, r) forced, with BladeArrow's strict arrow as
+  transversal (`strict_length`). `alt_sort_sign`: insertion sort is a product
+  of adjacent swaps, and its swap count is the inversion count
+  (`isort_sw_inv`). `antisym_attained_r`: sort, look up, multiply by the
+  parity; a repeated index answers 0. The test is the transparent `nodupb`, so
+  the read computes (`alt_read_pin`, Vandermonde `vdm_in_Kalt`).
+  `Kalt_2_is_Kanti` recovers r = 2.
+
+Scope: not covered are general split classes (e.g. `comm(a, c)` over
+(A, B, A)), which need a position-permuted layout; signed kernels over several
+arrays; mixed symmetric/antisymmetric blocks; Hermitian conjugation; pipelines
+with arity > 2 (prose); and folds (overlapping-fibre sharing is Ensemble
+Computation, NP-complete; see BladeOrbitWork).
+
+## BladeInduction.v (82 theorems) — the inductive side: recursive arrays (plan item 5)
+
+An index type is a finite set with a group action **and** a well-founded order
+on its leading axis; a `let rec` is the structural induction along that order
+(formalism §7.5). Built on the one object (D3), not on `BladeReduceCompiler`'s
+fragment.
+
+- **Semantics.** A step `nat -> (Z -> V) -> V` gets the ordinal and the prefix
+  read; `lr_buf` is the one buffer, one slice appended per ordinal (TRMC);
+  `zread` is a bounds test on the ordinal, zero outside `[0, n)`.
+  `letrec_is_wf_fixpoint` (close to definitional: the prefix is the family at
+  extent n; its content is coherence of extents); `letrec_fixpoint_self`:
+  `rec_build N` solves the self-referential, zero-extended recurrence;
+  `letrec_unique` (induction on `lt_wf`): it is the only solution;
+  `letrec_prefix_stable`: extents agree on their common prefix.
+- **Implicit zero history.** `letrec_respects_zero_history`,
+  `letrec_zero_history`: an unconditional `prefix(n - j)` builds what the
+  hand-guarded form builds (the AB3 law). Reads are integer-indexed: a nat read
+  would truncate `n - 3` to slice 0. (Zero past the declared extent is only
+  `nth`'s default; external reads there are BL8006.)
+- **Work.** In BladeOptimal's oracle model, `letrec_work`: the sweep asks the
+  step N times, ordinals in order, each with its prefix; `letrec_lower_bound` /
+  `letrec_work_optimal`: N is forced for every R-local class (causal,
+  windowed, Markov, all) and attained. With slices over a shape,
+  `letrec_work_shape(_lower_bound, _optimal)`: `N * shapeCard s`, one question
+  per (ordinal, orbit), forced for orbit-invariant steps and attained by the
+  sweep. The bounds re-prove the adversary argument over
+  `prog/run/trace/run_agree` rather than instantiate `orbit_lower_bound`: the
+  output at n depends on earlier answers, so they need `lr_buf_agree_below`
+  (perturbing ordinal n leaves the prefix below n untouched).
+- **Composition with the quotient.** `traj` is defined with the recursion axis
+  leading (`mkIx 1 0 N :: s`), slices stored one cell per orbit and read
+  through `qread`. The theorems: a rank-1 leading record is never permuted
+  (`block_perm_lead`); and for an orbit-invariant step reading its prefix at
+  dense tuples, the quotient agrees with the DENSE recurrence (`dbuf`, slices
+  on all tuples, no canonicalization) at every dense cell
+  (`dense_agrees_with_quotient`). `letrec_commutes_with_quotient` packages it:
+  storage `N * shapeCard s`, agreement, storage lookup, the canonicalizing read
+  equal to the plain read (`qread_traj_is_plain_read`), and each dense slice
+  symmetric on the remaining axes. `orb_inv_needed_pin` shows that without
+  invariance the two reads differ.
+- **`while` guard.** `gbuf_spec` (closed form of the guarded sweep),
+  `letrec_guard_total`, `letrec_guard_prefix_agrees` (stops only early),
+  `letrec_guard_frozen` (last written slice, zero at stop 0),
+  `letrec_guard_budget` (BL8010 iff the guard never fails),
+  `letrec_seeded_guard` (with a seed arm the guard is not consulted at 0).
+- **Calculus hook.** `rec_arr` is the object an `ERec` would denote;
+  `letrec_veval`, `letrec_scalar_is_shape_nil` (scalar = shape `[]` instance).
+
+Scope: values nat / Arr nat; the storage policy (rolling window), nested
+`let rec`, AD through recurrences and the `ERec` constructor itself are not
+modelled.
+
+## BladeLicence.v (87 theorems) — numerics as a parameter (plan item 6)
+
+The group acts on indices and promises nothing about values; Blade's
+bit-changing choices (`omp` on a `reduce`, `BLADE_FP_REASSOC`) are *licences*:
+the result need only equal the canonical one up to a declared relation `R`.
+This file restates the law class, Fun-Intro's premise, the typing relation and
+the quotient theorem relative to `R` (values stay `nat`, decision D2).
+
+- `invariant_under_R`, `Ksym_R`, `Kcls_R`, `kwf_R`: the tower's definitions
+  with `R` for `=`; `Ksym_R_iff_Kcls_R` adapts `Ksym_Kcls`; `Ksym_eq_iff`,
+  `kwf_eq_iff`.
+- `has_ty_R R`: BladeSurface's `has_ty` with `kwf_R R` in the three kernel
+  rules. `has_ty_R_eq_iff` (`R = eq` is `has_ty`), `has_ty_has_ty_R`;
+  `progress_R`, `preservation_R`, `normalizes_R`, `eval_sound_R` (copied,
+  since they never consult `kwf`).
+- `typed_app_is_quotient_R` / `typed_appO_is_quotient_R`: for a `has_ty_R R`
+  derivation of `L <@> f`, the canonical read is the dense value up to `R` on
+  every dense cell, one cell per orbit; `R` need only be reflexive and
+  transitive. `typed_app_is_quotient_eq` recovers BladeSurface's theorem from
+  `has_ty`.
+- `licensed_not_exact`: `v0 + 3 v1` declared comm is `kwf` up to parity, not
+  `kwf`; `has_ty` refuses it (`not_kwf_untypable`), `has_ty_R Rmod2` types it,
+  and the quotient theorem applies to that derivation.
+- Reduce: `fold_perm_invariant` (an associative-commutative `op` folds
+  identically in every order); `fold_perm_invariant_R`, `kfold_kwf_R`,
+  `kfold_quotient_R` (the same up to a congruence: reordering);
+  `fold_split_R`, `fold_chunks_R`, `tree_reduce_R`, `reassoc_licence` (with
+  `e` an `R`-identity: every bracketing of every reordering, which is the
+  omp-on-reduce licence; `fold_split_needs_identity` shows the premise is
+  needed).
+- Rounding (BladeNumericContract's `fadd`, every p ≥ 2):
+  `rounded_fold_not_exact`, `kfold_opr_not_kwf` (arity 3, data (2^p, 1, 1):
+  2^p vs 2^p + 2); `rounded_fold2_not_exact` (arity 2 needs
+  non-representable data) and `rounded_fold2_exact` (arity 2 on representable
+  data is exact); `rounded_licence_coarse`, `assoc_congruence_collapses` (any
+  licence, or any `R` under which `fadd` is associative, relates 2^p and
+  2^p + 2; with the congruence at p = 2, 4 and 24). So a float licence is
+  declared as `kwf_R`, not derived from `op`'s algebra.
+- The `R` of the reduce theorems relates one `op` to no second operation: it
+  licenses reordering and re-bracketing, never distributing
+  (BladeNumericContract's `no_ordering_recovers_the_reduced_value`).
+
+Scope: `R` is a parameter, not an IEEE model; the error bounds are
+`proofs/reals/`, not imported; a tolerance `|x - y| <= eps` is not transitive
+and is not a licence here. Only attainment is restated up to `R`; the orbit
+lower bound is not (it would need `R` to separate perturbed values). Rank-0
+kernels, s = 1 groups.
+
+## BladeBoundary.v (51 theorems) — the scope boundary of the orbit bound (plan item 7)
+
+The orbit bound is for KERNEL-GENERIC programs; this file states where it
+stops.
+
+- `support_lower_bound` generalizes `orbit_lower_bound` to queries touching up
+  to `w` classes: distinct, separately movable targets cost `1/w` query each
+  (`perturbable_is_sperturbable`, `orbit_bound_from_support`: the orbit bound
+  is `w = 1`).
+- Part C is mostly `orbit_lower_bound` re-read: `free_on` is its
+  perturbability hypothesis under a name, `Ksym_free` re-exports
+  `sym_perturbable`, `free_class_bound` restates it for any law class `K` (the
+  count is the S_r orbit count on the canonical-cell task, not K's own tight
+  count when K's law is finer), and `canonical_task_attained` attains it for
+  any kernel. `indicator_closed` (K closed under adding a class indicator) is
+  an intrinsic freeness implying `free_on` (`indicator_closed_free`,
+  `Ksym_indicator_closed`).
+- The structured counterexample: separable kernels `Ksep` (`f(a,b) = g a + g b`)
+  are symmetric (`Ksep_Ksym`) but tie orbits together (`sep_determined`), and
+  are free on no class at all (`separable_nowhere_free`, `separable_not_free`,
+  `Ksep_not_indicator_closed`). `sep_prog` asks the `n` diagonal tuples and
+  answers every dense cell (`sep_prog_correct`, `sep_prog_trace`),
+  `n < C(n+1, 2)` (`separable_beats_orbit_bound`), and is necessarily wrong on
+  some symmetric kernel (`sep_prog_not_sym_correct`):
+  `structured_kernel_beats_bound`.
+- Only the QUERY bound (T1) is beaten: a single-cell opaque store still needs
+  `C(n+1, 2)` cells for `Ksep` (`sep_storage_bound`, via
+  `sep_canonical_separate`). The witness moves work into its reader (halve and
+  add two answers), which the oracle model does not count.
+- The `Ksep` query count: worst case exactly `n` (`shift_exists` by constraint
+  elimination; `sep_positive_lower_bound` at every kernel with `g >= 1`,
+  `sep_worst_case_lower_bound`, `sep_query_complexity`); `>= n/2` at every
+  kernel (`sep_lower_bound`), with `ceil(n/2)` attained at the zero kernel
+  (`sep_lower_bound_attained_at_zero`) — a nat-domain artefact (`g >= 0` is
+  itself an inequality law), not a property of separability.
+- `orbit_bound_boundary` packages it; `genericity_two_sides` (at n = 3) pairs
+  the data side (`nongeneric_data_beats_bound`: distinct classes fail) with
+  the kernel side (perturbability fails). Pins: `C 4 2 = 6` vs 3,
+  `C 6 2 = 15` vs 5.
+
+Scope: one-directional — the converse is open (an inequality law between
+orbits blocks perturbation without saving worst-case queries: prose). The FFT
+is an analogy only; the plan's FFT witness is replaced by the separable kernel.
+r = 2, nat values.
+
 ## BladeSummary.v (41 theorems) — exact recurrence reduction: the certificate calculus
 
 Mechanizes the abstract half of the research draft
@@ -1980,8 +2356,20 @@ values: these do not depend on `-ffp-contract`.
 
 ## What remains unproved
 
-Still open: surface-calculus progress/preservation (the one missing species —
-deliberately sequenced after the rewrite settles surface syntax), general-r
+Still open, from `docs/plans/plan-one-model-surface-calculus.md`: the surface
+calculus beyond its structure-first fragment (T-dimensions and `irank` slices,
+local `let`, an `ERec` constructor — BladeInduction gives the object it would
+denote); compound identity groups (§8.4 at s > 1) and groups of symmetric
+operands, which the typing rule leaves dense (decision D1 not built;
+`d1_not_built_pin`, 16 vs 10); the free-model pipeline lower bound beyond the
+two-node schema (a general translation gives ≤ `orbit_work`, equality only when
+each stage's typed group is its whole licence); general split identity classes
+(`comm(a, c)` over (A, B, A) needs a position-permuted layout), signed kernels
+over several arrays, mixed symmetric/antisymmetric blocks and Hermitian
+conjugation; the orbit lower bound relative to a value relation R (only
+attainment is restated); the converse of the boundary theorem (not-free does
+not imply beatable); the storage policy of recursive arrays, nested `let rec`
+and AD through recurrences; general-r
 verified offsets, the storage dichotomy at general r (r = 3 closed in both
 directions by BladeDichotomy; the general minimal-width-r! statement and its
 (3,2,2) tie-breaking exception are prose), k-slot structure, typed-path
@@ -2051,3 +2439,21 @@ itself unmechanized · **CORRECTED** = v10 claim refuted/amended by the tower.
 | CompoundIdx denotation | `compoundk_denotation`, `compound_arrow_denotes_mask`, `compoundk_lex_sorted` | FULL (every rank) |
 | Affine/strict storage | `dlj/dunlj_correct` + δ-corollaries | FULL |
 | V ⊣ P adjunction | round trip + monoid hom + non-injectivity | CORE; adjunction proper conjectural |
+| 2.7 / 3.9 the DMWF is the quotient (the feedback IS the group action) | `enum_is_quotient`, `isort_fibres_are_orbits`, `enumShape_is_quotient`, `scanon_fibres_are_orbits`, `orbit_count` | FULL (one record, and every shape under the Young action) |
+| 3.9 / 12.2 canonicalizing access = storage | `qread_invariant`, `qread_fixes_transversal`, `qread_is_storage` | FULL |
+| 13.2 typing rules; 14.4 compute | `progress`, `preservation`, `normalizes`, `step_den`, `eval_sound` | CORE (the structure-first fragment: rank-0 kernels, rank-1 identity groups, top-level binding) |
+| 8.4 step 3 / 11.2 as a function of the derivation | `typed_app_is_quotient`, `comm_license_needed`, `covariance_shape`, `aba_unlicensed` | FULL at `s = 1`; compound groups (`s > 1`) are plan item 3 |
+| 9.19/9.20 deduced commutativity is a licence | `deduced_comm_is_licence` | INSTANCE (binary kernels; general arity via `deduced_group_largest` open) |
+| 10.2/10.5 combinator symmetry laws (σ(C₁<&>C₂)=σ₁×σ₂, `<*>` = shape concatenation, zip common shape, `>>@` first stage, `<&!>` same loop / meet) | `BladeTransport.out_shape_app_clean`, `block_perm_app`, `shapeCard_product_seam`, `zip_transport`, `pipe_transport`, `par_group_product`, `fuse_meet`, `fuse_is_par`, `group_of_laws` | FULL for rank-1 identity groups; `<*>` concatenation is a fact about the LOOP, the typed output glues the seam (`out_shape_app`); compound and symmetric-operand groups left dense (D1 not built) |
+| Orbit work formula W = Σ ω(G_v, X_v) for map pipelines; fusion cost | `BladeTransport.pipeline_attains_orbit_work`, `stage_is_surface`, `two_node_translation`, `fuse_object_prog`, `fusion_evaluations` + BladeOrbitWork's lower bound | Attainment for every pipeline; free-model bound bridged program-level on the two-node schema; typed W exceeds the free count when the type rule under-quotients (12 vs 9); folds out |
+| Orbit bound attained at proper subgroups H < S_R: comm on declared blocks composed with the binding (the meet) | `BladeAttain.uniform_optimality_subgroup`, `meet_lower_bound`, `meet_attained`, `uniform_optimality_block_nat`, `meet_ex_forced`, `surface_comm_optimal`, `surface_den_is_call_site` | FULL when H ∩ Stab's classes are contiguous; one split instance (A, B, A); general split classes open |
+| 8.3 neighbour rule: sound, not optimal | `BladeSurface.aba_unlicensed` (sound) + `BladeAttain.aba_beats_surface_rule`, `aba_orbit_count_forced`, `aba_gap_strict` | **CORRECTED** at (A, B, A): the rule stores n³ where n·C(n+1, 2) is forced and attained; see §8.3's new remark and decision E14 |
+| Signed orbit bound C(n, r) at every r | `BladeAttain.Kalt_sign_character`, `antisym_lower_bound_r`, `alt_vanishes`, `antisym_attained_r`, `alt_read_pin` | FULL (one array; several arrays, mixed characters, Hermitian open) |
+| 7.5 recursive arrays: one-buffer fixpoint, unique solution, implicit zero history, work N × orbits | `BladeInduction.letrec_is_wf_fixpoint`, `letrec_fixpoint_self`, `letrec_unique`, `letrec_zero_history`, `letrec_work(_shape)(_optimal)` | FULL (values nat / Arr nat; storage policy not modelled) |
+| Recursion axis leads; the quotient survives on the remaining axes | `BladeInduction.block_perm_lead`, `dense_agrees_with_quotient`, `letrec_commutes_with_quotient` | FULL for orbit-invariant steps reading the prefix at dense tuples |
+| 7.5.1 `while` guard: defined to the first false guard, frozen after, BL8010 on budget exhaustion, seed arm unguarded | `BladeInduction.gbuf_spec`, `letrec_guard_prefix_agrees`, `letrec_guard_frozen`, `letrec_guard_budget`, `letrec_seeded_guard` | FULL |
+| Bit-changing optimizations (`omp` on reduce, FP_REASSOC) are licences up to a declared relation; typing, soundness and the quotient theorem hold relative to it | `BladeLicence.has_ty_R`, `typed_app_is_quotient_R`, `progress_R`/`preservation_R`, `reassoc_licence` | FULL for a parameter R (reflexive + transitive; congruence + identity for re-bracketing); attainment only, not the lower bound |
+| Rounded reduction needs a declared, necessarily coarse licence | `BladeLicence.kfold_opr_not_kwf`, `rounded_licence_coarse`, `assoc_congruence_collapses`, `rounded_fold2_exact`, BladeNumericContract | FULL (integer-data rounding model, every p ≥ 2) |
+| The orbit bound holds on law classes free on the orbits (kernel genericity) | `BladeBoundary.free_class_bound`, `canonical_task_attained`, `orbit_bound_boundary` | One direction (holds and is attained on every free class); converse open |
+| Structured kernels beat the query bound, not the storage bound | `BladeBoundary.structured_kernel_beats_bound`, `sep_query_complexity`, `sep_storage_bound`, `genericity_two_sides` | FULL (separable class, r = 2: n queries vs C(n+1, 2); storage still C(n+1, 2)) |
+| "The fastest way is the only way", measured | `docs/research/orbit-work-measurements.md` | Blade's kernel-call and cell counts equal the orbit count on every row with distinct-name groups (28/66/276/1035 at n = 7/11/23/45, and the rank-3 and two-group rows); NumPy is dense on every row; BLAS `dsyrk` writes C(n+1, 2) cells; the (A, B, A) row shows the compiler's by-name quotient with a reindexing DEFECT (wrong reads, a crash at mixed extents) |

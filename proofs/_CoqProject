@@ -44,3 +44,10 @@ BladeNumericContract.v
 BladeReduceCompiler.v
 BladeReductionAD.v
 BladeShiftedMoments.v
+BladeObject.v
+BladeSurface.v
+BladeTransport.v
+BladeAttain.v
+BladeInduction.v
+BladeLicence.v
+BladeBoundary.v
