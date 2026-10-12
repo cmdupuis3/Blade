@@ -14,10 +14,12 @@ count of its licence group. This page records:
   machine.
 
 Five of six Blade row families match the prediction at every extent measured. The
-sixth, `(A, B, A)` with `comm`, does not. The compiler takes a larger quotient than
-the surface calculus licenses. Its output-type deduction moves B's axis to the
-end, and in source coordinates the returned array breaks the symmetry the user
-declared (section 4).
+sixth, `(A, B, A)` with `comm`, did not at the measured build. The compiler took a
+larger quotient than the surface calculus licenses. Its output-type deduction moved
+B's axis to the end, and in source coordinates the returned array broke the
+symmetry the user declared (section 4). **Fixed on master 2026-10-12** (section 4,
+"After the fix"): the row now measures n³ with a BL4010 advisory, matching the
+prediction.
 
 ## 1. The prediction
 
@@ -275,13 +277,36 @@ into anonymous arrays unchecked, so no BL8006 fires.
 **No row was refused**, and no counter program drew a BLxxxx diagnostic.
 
 ```blade sketch
-// sketch: measured defect (section 4), kept unchecked until the regrouping rule is decided
+// sketch: the measured defect as it stood at the measured build (kept as the record)
 let A = 1.0 + Float64(0..4)
 let B = 10.0 + Float64(0..6)
 let f = lambda(x, y, z) where comm(x, z) -> x * y + z * y
-let result = method_for(A, B, A) <@> f |> compute     // typed SymIdx<2, 4>, Idx<6>
-let r = result(0, 5, 3)                                 // no-comm twin: 75.0; this: access violation
+let result = method_for(A, B, A) <@> f |> compute     // was typed SymIdx<2, 4>, Idx<6>
+let r = result(0, 5, 3)                                 // no-comm twin: 75.0; this crashed
 ```
+
+**After the fix (master, 2026-10-12).** The paper plan's decision D9 was taken:
+identity groups are runs of NEIGHBOURING identical operands, as formalism 8.3
+says. `rawAxisGroups.mergesWith.acrossArray` and `fuseJointSLevels`'s partner
+test in `src/IRLoopStructure.fs` now require the partner to be the adjacent
+operand, so `(A, B, A)` is three singleton groups, stored dense in operand
+order, and the apply seam emits a BL4010 advisory naming the adjacent spelling
+(`method_for(A, A, B) <@> lambda(x, z, y) where comm(x, z)`). Re-measured with
+that build, from the same counted programs:
+
+| Row | n = 7 | predicted |
+|---|---|---|
+| R4a `comm(x, y, z)` | 343 calls, 343 cells | 343 |
+| R4b `comm(x, z)` | 343 calls, 343 cells | 343 |
+| R4c no `comm` | 343 | 343 |
+
+The reads are positional again: `result(0, 1, 2)` = 33.0, `result(2, 1, 0)` =
+33.0, `result(0, 2, 1)` = 24.0 for `x * y * z`; the mixed-extent read
+`result(0, 5, 3)` = 75.0; `blade plan` declines the packed storage with the
+reason "the repeated array's slots are not adjacent". Pinned as
+`tests/corpus/symmetry/077`–`079`. Presenting the by-name quotient (the optimal
+count) in source axis order remains open; it needs a position-permuted storage
+layout.
 
 ## 5. NumPy, measured
 
@@ -454,7 +479,7 @@ not on the theory.
 | R1 `(A, A)` comm | C(n+1,2) | C(n+1,2) at 7, 11, 23, 45 | n^2 (the orbit count only with hand-written indices) | BLAS `dsyrk` (k = 1): C(n+1,2) cells written, n^2 returned; work C(n+1,2)·k documented, not measured | match |
 | R2 `(A, A, A)` comm, Poly and lambda | C(n+2,3) | C(n+2,3) | n^3 | — | match |
 | R3 `(A, A, B, B)` two comm groups | C(n+1,2)·C(m+1,2) | same | n^2 m^2 | — | match |
-| R4 `(A, B, A)` comm(x,y,z) / comm(x,z) | n^3 | C(n+1,2)·n; type reorders the axes to (A, A, B) | n^3 | SySTeC S4 specified, not run | **mismatch**; declared symmetry broken in source coordinates (both lanes); access violation at mixed extents |
+| R4 `(A, B, A)` comm(x,y,z) / comm(x,z) | n^3 | at the measured build: C(n+1,2)·n, type reordered to (A, A, B); after the 2026-10-12 fix: n^3 with a BL4010 advisory | n^3 | SySTeC S4 specified, not run | **mismatch at the measured build** (declared symmetry broken in source coordinates, both lanes; access violation at mixed extents) — **fixed**, now a match |
 | R4c `(A, B, A)` no comm | n^3 | n^3 | n^3 | — | match |
 | R5 `(A, A)` no comm | n^2 | n^2, BL4010 warning | n^2 | — | match (no undeclared quotient) |
 | R6 `(A, B)` comm | n^2 | n^2, plan declines with reason | n^2 | — | match |

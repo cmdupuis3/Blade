@@ -365,8 +365,10 @@ its extent must be static. The same shape scales to RK4 time-stepping and DP tab
   no manual BLAS calls. Declare `comm`/`anticomm`/`omp` and use array identity at the call
   site; the compiler derives triangular storage/iteration (r! savings), pragma placement,
   and BLAS routing. Symmetric output storage is *only* licensed when the SAME array occupies
-  the commuting positions — two different arrays over the same index space get nothing, and
-  that refusal is proved correct.
+  ADJACENT commuting positions — two different arrays over the same index space get nothing,
+  and a non-adjacent repeat (`method_for(A, B, A)` with `comm(x, z)`) is stored dense in
+  operand order with a BL4010 naming the adjacent spelling (formalism §8.3); both refusals
+  are proved correct, and the second is proved sound-but-not-optimal.
 - **Named runtime functions can self-recurse; mutual recursion is rejected (BL2001)** — a
   body sees only names bound before it. Restructure into one function, or make both
   `static function`s (compile-time, may mutually recurse).

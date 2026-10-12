@@ -1934,6 +1934,18 @@ let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
             match info.Identities with
             | a :: rest -> rest |> List.forall (sameIdentity a)
             | [] -> false
+        // A repeat that is not ADJACENT (`(A, B, A)`): the same array fills
+        // two commuting slots, but identity groups are runs of neighbouring
+        // operands (formalism 8.3), so it licenses nothing -- the apply seam
+        // already advised the reorder (BL4010). Name that reason, not
+        // "different arrays".
+        let nonAdjacentRepeat =
+            not sameArray &&
+            (let ids = info.Identities
+             ids |> List.indexed |> List.exists (fun (i, a) ->
+                 ids |> List.indexed |> List.exists (fun (j, b) ->
+                     j > i + 1 && sameIdentity a b &&
+                     not ([ i .. j - 1 ] |> List.forall (fun k -> sameIdentity ids.[k] ids.[k + 1])))))
         match packed with
         | _ :: _ ->
             recordCodegenDecision "symmetric-storage" name Blade.Effects.Applied
@@ -1941,7 +1953,9 @@ let private recordApplyStructure (name: string) (info: ApplyInfo) : unit =
                  @ [ $"operands: {operands}" ])
         | [] when declared ->
             let why =
-                if not sameArray then
+                if nonAdjacentRepeat then
+                    $"the repeated array's slots are not adjacent ({operands}); identity groups are runs of NEIGHBOURING identical operands (formalism 8.3), so the repeat licenses nothing here -- put the repeats side by side (BL4010 names the spelling)"
+                elif not sameArray then
                     $"the commuting positions hold different arrays ({operands}); packed storage is licensed only when the SAME array fills them"
                 else $"no commuting level survived deduction (symcom states: {states})"
             recordCodegenDecision "symmetric-storage" name (Blade.Effects.Declined why) [ $"operands: {operands}" ]

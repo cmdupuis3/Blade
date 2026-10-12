@@ -568,12 +568,13 @@
     },
     "BL4010": {
       "title": "confirm-and-pin storage suggestion",
-      "explanation": "A WARNING, not an error. The deduction proved a symmetry (or another storage-changing property) that you have not declared, and proposes the pin. Storage stays DENSE and nothing changes until you write the annotation in source -- the compiler proposes, the program decides. `--strict-pins` promotes every outstanding suggestion to a build error, which is the CI spelling of forcing the decision into source.",
-      "fix": "Add the suggested `where` clause if the property is intended -- that is what licenses the triangular storage and the r! saving -- or leave it and accept dense storage. Do not silence it by restructuring the kernel.",
+      "explanation": "A WARNING, not an error. The deduction proved a symmetry (or another storage-changing property) that you have not declared, and proposes the pin. Storage stays DENSE and nothing changes until you write the annotation in source -- the compiler proposes, the program decides. `--strict-pins` promotes every outstanding suggestion to a build error, which is the CI spelling of forcing the decision into source. The same code also carries two plain ADVISORIES that `--strict-pins` leaves alone: a constrained domain that was tabled rather than enumerated in closed form, and a `comm` clause whose two slots hold the same array but are not ADJACENT (`method_for(A, B, A) <@> lambda(x, y, z) where comm(x, z)`) -- identity groups are runs of neighbouring identical operands (formalism 8.3), so the pair licenses nothing, the result is stored dense in operand order, and the warning names the adjacent spelling that would compact it.",
+      "fix": "Add the suggested `where` clause if the property is intended -- that is what licenses the triangular storage and the r! saving -- or leave it and accept dense storage. Do not silence it by restructuring the kernel. For the non-adjacent-repeat advisory: put the repeated operands side by side and move the kernel's commuting parameters with them, then read the result in that order; or keep the operand order and accept dense storage.",
       "examples": [
         "tests/corpus/arity/022_comoment_covariance_matrix.blade",
         "tests/corpus/arity/025_deferred_named_former.blade",
-        "tests/corpus/arity/026_multi_arity_dedup.blade"
+        "tests/corpus/arity/026_multi_arity_dedup.blade",
+        "tests/corpus/symmetry/077_nonadjacent_repeat_stays_dense.blade"
       ],
       "docs": [
         "docs/features.md"

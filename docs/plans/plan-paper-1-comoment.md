@@ -175,14 +175,17 @@ theorem (appendix, `two_node_orbit_work`) counts.
 invariant under G = H ∩ Stab(B). By formalism §8.3 the grant is comm blocks
 intersected with runs of neighbouring identical arguments, a subgroup of G, so
 that `f(A, B, A)` stays dense although G contains the (0 2) swap. **The
-compiler does not do this (E14, verified 2026-10-05):** `rawAxisGroups`
-(`src/IRLoopStructure.fs:192`) merges a level with ANY prior level of the same
-array in the same comm group, and `buildLoopLevelStructure` reorders the nest
-so the group is contiguous. For `(R, S, R)` the nest runs (R, R, S), the type
-is `SymIdx<2, AssetIdx>, AssetIdx`, and `K(i, j, k)` returns f(Rᵢ, S_k, Rⱼ).
-The paper cannot be frozen until the language picks one: dense in operand
-order (the formalism), a refusal with a "reorder to (A, A, B)" hint, or
-regrouping with a documented axis order.
+compiler did not do this until 2026-10-12 (E14, verified 2026-10-05):**
+`rawAxisGroups` (`src/IRLoopStructure.fs`) merged a level with ANY prior level
+of the same array in the same comm group, and `buildLoopLevelStructure`
+reordered the nest so the group was contiguous. For `(R, S, R)` the nest ran
+(R, R, S), the type was `SymIdx<2, AssetIdx>, AssetIdx`, and `K(i, j, k)`
+returned f(Rᵢ, S_k, Rⱼ) — and ran off the pool when the extents differed.
+**Decided and fixed per D9:** the partner test requires the ADJACENT operand,
+the result stays dense in operand order, and a BL4010 advisory names the
+adjacent spelling (`tests/corpus/symmetry/077`–`079`; formalism §8.3 carries the
+remark; `proofs/BladeAttain.v` proves the rule sound and not optimal at
+(A, B, A), the by-name quotient being the forced count).
 
 **The adjacency discipline is a design decision, not a gap, and the paper
 presents it that way.** Two reasons (author, 2026-10-05):
@@ -453,7 +456,8 @@ listing or a claim.
 | E15 | a six-subscript read `G3(x₁, y₁, x₂, y₂, x₃, y₃)` into a compound symmetric output passes `blade check` and is BL9002 at g++; the three-subscript flat read works | L2′ can only be shown with flat grid positions | P1 bug |
 
 Status 2026-10-05: E1, E2, E3, E5 fixed on master (`76c1714a`, `9de90481`,
-`4fe4e1a4`); E4 open (D3); E14, E15 new.
+`4fe4e1a4`); E4 open (D3); E14, E15 new. 2026-10-12: E14 FIXED on master per D9
+(dense in operand order + BL4010 advisory; corpus symmetry/077–079).
 
 **Doc corrections to land with or before the paper:** quickstart-1 lines
 521–523 (asymptotic labels at n = 3); formalism §12.4 item 4 ("r ≥ 3: open",
@@ -492,7 +496,7 @@ Amarasinghe; STUR is Ghorbani, Huot, Hashemian, Shaikhha; Dex's title ends
 | D5 | Priority wording | the sentence in §8.3: independent and earlier for the same-array commutativity mechanism (2019), nothing claimed for the 2026 layers, the older observation credited |
 | D6 | PPL formers (`ppl.moments`, `ppl.cumulants`) | one sentence: library sugar over the same mechanism; `ppl.comoments(R, 3)` is BL5100 today, so they cannot be the r ≥ 3 baseline |
 | D7 | Title | "One Function, Every Comoment: Index Types, Loop Objects and Arity Polymorphism in Blade" |
-| D9 | E14: what `f(A, B, A)` means | match the formalism (three singleton groups, dense, axes in operand order) and add a BL4010-style hint to reorder; it is the written spec, it keeps `<*>` a shape concatenation, and it is the rule the author's two reasons (§4) argue for |
+| D9 | E14: what `f(A, B, A)` means | DECIDED AND BUILT 2026-10-12: match the formalism (three singleton groups, dense, axes in operand order) and a BL4010 advisory naming the adjacent spelling; it is the written spec, it keeps `<*>` a shape concatenation, and it is the rule the author's two reasons (§4) argue for. The by-name quotient presented in source axis order stays open as an optimization |
 | D8 | How to present the lineage and the AI-assisted 2026 work | a short "history" paragraph in §7 of the paper: a 2019 C++ template library and pragma preprocessor, rewritten as a compiler in 2026 with AI assistance, disclosed per the venue's policy |
 
 ---

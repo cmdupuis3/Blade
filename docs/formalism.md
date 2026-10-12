@@ -1609,12 +1609,15 @@ array identity alone, so `(A, B, A)` under a kernel commutative in its first
 and third positions has orbit count n·C(n+1, 2), which a program that
 reorders the positions attains, where this rule stores n³. The rule is optimal
 exactly when the identity groups have pairwise distinct names. The compiler
-currently takes the by-name quotient (it counts n·C(n+1, 2)) but presents the
-output with the group axes concatenated, (A, A, B), so subscripts in source
-order read the wrong cells — a defect measured in
-`docs/research/orbit-work-measurements.md` §4, tracked as the open decision
-E14 of `docs/plans/plan-paper-1-comoment.md`: either this rule (with a BL4010
-advising the reorder) or the by-name quotient presented in source axis order.
+implements this rule (decision D9 of `docs/plans/plan-paper-1-comoment.md`,
+2026-10-12): a non-adjacent repeat is stored dense in operand order and earns a
+BL4010 advisory naming the adjacent spelling (`tests/corpus/symmetry/077`–
+`079`). Until then it took the by-name quotient silently and typed the output
+with the group axes concatenated, (A, A, B), so source-order subscripts read
+the wrong cells (`docs/research/orbit-work-measurements.md` §4). Presenting
+the by-name quotient in source axis order — the optimal count without the
+reorder — needs a position-permuted storage layout and is the open
+optimization, not a semantics question.
 
 ### 8.4 Output type deduction
 

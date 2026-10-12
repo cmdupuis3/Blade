@@ -1,0 +1,20 @@
+// TEST: a comm pair on non-adjacent parameters over one array stays dense
+// WARN: BL4010
+// `comm(x, z)` on lambda(x, y, z) over (A, A, A): the identity group is the
+// whole run, but the licence joins only ADJACENT slots (the chain 0-1, 1-2),
+// and slots 0 and 2 are not neighbours in the clause. Compacting the (x, z)
+// pair would again need a reordered nest and a reordered output; the result
+// stays dense in operand order and the BL4010 advises `comm(x, y)` on an
+// adjacent pair instead. The adjacent control `comm(x, y)` is symmetry/005.
+let A = 1.0 + Float64(0..3)
+let f = lambda(x, y, z) where comm(x, z) -> (x + z) * y
+let result = method_for(A, A, A) <@> f |> compute
+let r012 = result(0, 1, 2)
+let r210 = result(2, 1, 0)
+let r120 = result(1, 2, 0)
+let total = reduce(result, (+), axes = 3)
+// EXPECT: r012 = 8.0
+// EXPECT: r210 = 8.0
+// EXPECT: r120 = 9.0
+// sum over the cube of (a_i + a_k) * a_j = 2 * (sum A)^2 * 3 = 2 * 36 * 3
+// EXPECT: total = 216.0

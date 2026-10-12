@@ -465,10 +465,12 @@ From items 3–8 (each confirmed by the file's reviewer):
 - D3 — RESOLVED by item 5: built on this calculus and the one object
   (`BladeInduction.rec_arr` is the object an `ERec` would denote); not on
   `BladeReduceCompiler`.
-- D4 — OPEN (= decision E14 of `plan-paper-1-comoment.md`). The identity-group rule for
-  non-adjacent repeats: formalism §8.3 (neighbours only; sound, proved not optimal by
-  `BladeAttain.aba_beats_surface_rule`) versus the by-name quotient (the compiler's
-  count; optimal by `aba_orbit_count_forced`; today presented with the group axes
-  concatenated, which is the measured defect). Either refuse/advise the reorder (BL4010)
-  and keep §8.3, or keep the by-name quotient and present the output in SOURCE axis
-  order. The theory accommodates both; the calculus follows §8.3 until decided.
+- D4 — RESOLVED 2026-10-12 as the paper plan's D9 (= E14): the compiler now implements
+  formalism §8.3 — a non-adjacent repeat is stored dense in operand order and earns a
+  BL4010 advisory naming the adjacent spelling (`src/IRLoopStructure.fs`
+  `rawAxisGroups.mergesWith.acrossArray` and `fuseJointSLevels.hasIdentityPartner`
+  require adjacency; `tests/corpus/symmetry/077`–`079`). The calculus's `out_shape`
+  and the compiler agree again (`aba_unlicensed`). The by-name quotient is the optimal
+  count (`BladeAttain.aba_orbit_count_forced`); presenting it in SOURCE axis order needs
+  a position-permuted storage layout and stays open as an optimization, the same open
+  piece as item 4's "general split classes".

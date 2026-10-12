@@ -9860,6 +9860,78 @@ and buildApplyInfo (env: TypeEnv)
         lambdaInfo.AntisymGroups
         |> List.iter (report "anticomm" "AntisymIdx" "strict-triangular pool (no stored diagonal)"))
 
+    // NON-ADJACENT REPEAT: the same array in two commuting slots that are not
+    // neighbours (`method_for(A, B, A) <@> lambda(x, y, z) where comm(x, z)`).
+    // Identity groups are runs of NEIGHBOURING identical arguments
+    // (docs/formalism.md 8.3), so this pair licenses nothing and the result
+    // is stored dense in operand order -- correct, and exactly what the
+    // reader's `K(i, j, k)` means. The by-name quotient would be the optimal
+    // count (proofs/BladeAttain.v `aba_orbit_count_forced`: n*C(n+1,2) cells
+    // against n^3) and the user can have it by making the repeats adjacent;
+    // until 2026-10-12 the compiler took it silently and typed the result in
+    // the regrouped axis order, so source-order subscripts read the wrong
+    // cells. ADVISORY (BL4010, the storage-suggestion channel; not a pin
+    // suggestion, so `--strict-pins` leaves it alone): the program is right,
+    // a faster spelling exists, and restructuring the user's operand list is
+    // the user's call (plan-fastest-way-principles P3: advise, never rewrite).
+    (if not isReynolds && not isCoIterApply
+        && lambdaInfo.Params.Length = identities.Length then
+        let nameOf i =
+            if i >= 0 && i < lambdaInfo.Params.Length then lambdaInfo.Params.[i].Name
+            else $"#{i}"
+        let operandName i =
+            if i < 0 || i >= identities.Length then $"#{i + 1}"
+            else
+                match identities.[i] with
+                | AIDVariable n -> n
+                | AIDParameter (n, _) -> n
+                | AIDDerived (AIDVariable n, _) -> n
+                | AIDDerived (AIDParameter (n, _), _) -> n
+                | _ -> $"operand {i + 1}"
+        let real k = k >= 0 && k < identities.Length
+                     && not (k < arrayTypes.Length && arrayTypes.[k].IsVirtual)
+        // p and q (p < q) merge iff every step p..q-1 is an adjacent pair of
+        // identical operands inside the same comm group -- the chain
+        // rawAxisGroups.mergesWith.acrossArray builds.
+        let inSameGroup (g: int list) a b = List.contains a g && List.contains b g
+        let chained (g: int list) p q =
+            [ p .. q - 1 ] |> List.forall (fun i ->
+                inSameGroup g i (i + 1) && real i && real (i + 1)
+                && sameIdentity identities.[i] identities.[i + 1])
+        let splitPair (g: int list) =
+            let slots = g |> List.filter real |> List.distinct |> List.sort
+            slots |> List.tryPick (fun p ->
+                slots |> List.tryPick (fun q ->
+                    if p < q && sameIdentity identities.[p] identities.[q] && not (chained g p q)
+                    then Some (p, q) else None))
+        match commGroups |> List.tryPick splitPair with
+        | None -> ()
+        | Some (p, q) ->
+            let span = if tKernel.Span = noSpan then tLoop.Span else tKernel.Span
+            let operands = [ 0 .. identities.Length - 1 ] |> List.map operandName
+            let shown = operands |> String.concat ", "
+            // The suggested order: move operand q to right after operand p;
+            // the kernel's parameters follow the same move.
+            let moved (xs: string list) =
+                let x = xs.[q]
+                let without = xs |> List.indexed |> List.filter (fun (i, _) -> i <> q) |> List.map snd
+                let before, after = List.splitAt (p + 1) without
+                before @ [ x ] @ after
+            let reordered = moved operands |> String.concat ", "
+            let paramIdx = [ 0 .. lambdaInfo.Params.Length - 1 ]
+            let reparams = moved (paramIdx |> List.map nameOf) |> String.concat ", "
+            // The clause as it reads after the move: the group's members in
+            // the moved parameter order.
+            let group = commGroups |> List.find (fun g -> inSameGroup g p q)
+            let reclause =
+                moved (paramIdx |> List.map string)
+                |> List.map int
+                |> List.filter (fun i -> List.contains i group)
+                |> List.map nameOf |> String.concat ", "
+            emitWarning env "BL4010" span (sprintf
+                "`where comm` pairs `%s` with `%s` (operands %d and %d, both `%s`), but a commuting pair compacts only when its two slots are ADJACENT -- in the operand list and in the parameter list (formalism 8.3: identity groups are runs of neighbouring identical operands) -- so `method_for(%s)` is stored dense in operand order. The compact form stores one cell per orbit (n*C(n+1, 2) cells instead of n^3 for three rank-1 operands): put the pair side by side -- `method_for(%s) <@> lambda(%s) where comm(%s)` -- and read the result in that order."
+                (nameOf p) (nameOf q) (p + 1) (q + 1) (operandName p) shown reordered reparams reclause))
+
     // Dropped-parallel-clause guard. This is the apply seam -- the ONE place a
     // loop and a kernel meet -- so it is where "the kernel declared `omp(...)`"
     // and "the lambda reaching the loop carries it" can be compared at all.
