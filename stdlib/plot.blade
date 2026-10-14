@@ -186,6 +186,10 @@ Unit plotid: 1
 /// simply ignores an extra layout entry. Empty (the default) emits no entry,
 /// keeping the layout byte-identical to the pre-slot module.
 Unit camera: 1
+/// Trace drawing mode for the multi-series factories (`lines`, `groups`):
+/// 0 = lines, 1 = markers, 2 = lines+markers. Anything else takes the
+/// factory's own default, like an out-of-table `cmap`.
+Unit mode: 1
 
 // ---- Decimation budgets ----
 //
@@ -448,6 +452,58 @@ function scatter(x: X^1, y: Y^1,
     let trace = "{\"type\":\"scatter\",\"mode\":\"markers\",\"x\":" + d.json_array(x) + ",\"y\":" + d.json_array(y) + "}"
     __emit_fig(trace, __layout(t, xl, yl, ("" : camera)), b)
 }
+
+// ---- Multi-series factories -----------------------------------------------
+//
+// `lines` and `groups` draw SEVERAL traces in one figure, one per entry of
+// their `names` array, so every series gets its own colour (plotly's
+// colorway, GR's palette slot) and its own legend entry. The trace list is
+// assembled by a self-recursive helper -- one trace string per step, joined
+// with commas -- because the number of series is a runtime extent and a
+// figure's `data` array is just their concatenation.
+
+/// The plotly `mode` string for mode index `m`, or `dflt` off the table.
+function __mode_name(m: Int64<mode>, dflt: String) -> String =
+    if m == 0 then "lines" else if m == 1 then "markers" else if m == 2 then "lines+markers" else dflt
+
+/// One named scatter-type trace, led by its separator unless it is the first.
+function __named_trace(md: String, name: String, xj: String, yj: String, k: Int64) -> String = {
+    let sep = if k == 0 then "" else ","
+    sep + "{\"type\":\"scatter\",\"mode\":\"" + md + "\",\"name\":" + d.json_string(name) + ",\"x\":" + xj + ",\"y\":" + yj + "}"
+}
+
+/// Traces k..m-1 of `lines`: row k of `ys` against `x`, named `names(k)`.
+function __line_traces(x: X^1, ys: Array<Y like Idx<nr>, Idx<nc>>, names: Array<String like Idx<nn>>,
+                       md: String, k: Int64, m: Int64) -> String =
+    if k >= m then "" else __named_trace(md, names(k), d.json_array(x), d.json_array(ys(k)), k) + __line_traces(x, ys, names, md, k + 1, m)
+
+/// Several series against one x axis: row k of `ys` is series k, labelled
+/// `names(k)`. One trace per NAME -- `ys` needs at least that many rows.
+function lines(x: X^1, ys: Array<Y like Idx<nr>, Idx<nc>>, names: Array<String like Idx<nn>>,
+               md: Int64<mode> = 0,
+               t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+               b: Int64<backend> = 0) -> Bool =
+    __emit_fig(__line_traces(x, ys, names, __mode_name(md, "lines"), 0, extents(names)), __layout(t, xl, yl, ("" : camera)), b)
+
+/// `y` with every point outside group `k` blanked to NaN (serialized as
+/// `null`, which both renderers skip). Its own function because a kernel
+/// former may not sit directly in an `if` branch (BL7004).
+function __group_mask(y: Y^1, g: Array<Int64 like Idx<ng>>, k: Int64) -> Array<Float64 like Idx<ng>> =
+    method_for(zip(y, g)) <@> lambda(v, gi) -> (if gi == k then Float64(v) else 0.0 / 0.0) |> compute
+
+/// Traces k..m-1 of `groups`.
+function __group_traces(x: X^1, y: Y^1, g: Array<Int64 like Idx<ng>>, names: Array<String like Idx<nn>>,
+                        md: String, k: Int64, m: Int64) -> String =
+    if k >= m then "" else __named_trace(md, names(k), d.json_array(x), d.json_array(__group_mask(y, g, k)), k) + __group_traces(x, y, g, names, md, k + 1, m)
+
+/// Scatter plot of y against x, coloured by group: point i belongs to group
+/// `g(i)` (0-based), and group k is drawn as its own trace named `names(k)`.
+/// Points whose group has no name are not drawn.
+function groups(x: X^1, y: Y^1, g: Array<Int64 like Idx<ng>>, names: Array<String like Idx<nn>>,
+                md: Int64<mode> = 1,
+                t: String<title> = "", xl: String<xlabel> = "", yl: String<ylabel> = "",
+                b: Int64<backend> = 0) -> Bool =
+    __emit_fig(__group_traces(x, y, g, names, __mode_name(md, "markers"), 0, extents(names)), __layout(t, xl, yl, ("" : camera)), b)
 
 // ---- Live plot streaming --------------------------------------------------
 //

@@ -1,0 +1,38 @@
+// TEST: Plot Multi-Series Factories
+// ============================================================================
+// `plot.lines(x, ys, names)` and `plot.groups(x, y, g, names)`: the two
+// factories that put SEVERAL traces in one figure, one per entry of `names`.
+//
+//   * `lines` draws row k of a rank-2 `ys` against the shared `x`, as a trace
+//     named names(k). One trace per NAME: `d` below names two of the three
+//     rows and gets exactly two traces.
+//   * `groups` draws group k of a scatter as its own trace: every point whose
+//     g(i) is not k is blanked to NaN, which serializes as `null` and which
+//     both renderers skip. A group with no name (`gg` has no group 3) is not
+//     drawn at all.
+//   * `mode` routes by nominal like every other slot: 0 lines, 1 markers,
+//     2 lines+markers, anything else the factory's default (lines for
+//     `lines`, markers for `groups`).
+//
+// Through `blade test interp display`, the interpreter and the compiled
+// binary put byte-identical frames on stdout -- the recursive trace assembly
+// and the NaN blanking included.
+// ============================================================================
+import plot
+
+let xs = [0.0, 1.0, 2.0, 3.0]
+let ys: Array<Float like Idx<3>, Idx<4>> = [[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.5, 0.25], [0.0, 0.5, 1.0, 1.5]]
+let gx = [0.0, 1.0, 2.0, 3.0, 4.0]
+let gy = [1.0, 3.0, 2.0, 5.0, 4.0]
+let gg: Array<Int64 like Idx<5>> = [0, 1, 0, 3, 1]
+
+let a = plot.lines(xs, ys, ["K0", "K<=2", "+K3"], "three series": title, "step": xlabel)
+let b = plot.groups(gx, gy, gg, ["sc", "fcc", "bcc"], "by class": title, "l4": xlabel, "K3": ylabel)
+let c = plot.lines(xs, ys, ["a", "b", "c"], 2: mode)
+let d = plot.lines(xs, ys, ["first", "second"], 7: mode)
+let e = plot.groups(gx, gy, gg, ["sc", "fcc"], 2: mode, 1: backend)
+// EXPECT: a = true
+// EXPECT: b = true
+// EXPECT: c = true
+// EXPECT: d = true
+// EXPECT: e = true
