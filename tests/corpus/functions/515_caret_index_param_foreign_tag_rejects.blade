@@ -4,7 +4,7 @@
 // `Nat<L>`; the kernel's `i` is a position of M. Index provenance is part of
 // the type (equal extents do not make M an L), so the call is refused at the
 // argument, as `g(A, (2 : M))` is -- it used to be accepted with a run-time
-// range check (functions/512).
+// range check (functions/514).
 type L = Idx<4>
 type M = Idx<4>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0, 4.0]

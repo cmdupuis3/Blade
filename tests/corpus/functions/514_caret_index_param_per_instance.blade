@@ -3,9 +3,9 @@
 // call of g's array instance, where `k` is `Nat<L>`. A kernel lambda's index
 // over `range<L>` stays proven (no BL8006 guard) -- it used to be bound to the
 // generic body's `Int64` while still open, so the proof was dropped for a
-// checked conversion and a foreign `range<M>` slipped through (functions/513).
+// checked conversion and a foreign `range<M>` slipped through (functions/515).
 // A plain Int64 position (a row of integers, a variable) is converted with
-// the checked cast (functions/514), a literal is judged at compile time, and
+// the checked cast (functions/516), a literal is judged at compile time, and
 // an anonymous array keeps the generic body.
 type L = Idx<4>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0, 4.0]

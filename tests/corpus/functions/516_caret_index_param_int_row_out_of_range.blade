@@ -1,7 +1,7 @@
 // TEST: an Int64 kernel row past the named axis, through a caret function's index parameter (aborts)
 // ABORT: BL8006
 // The Int64 row reaches `k: Nat<L>` of g's array instance through the
-// checked conversion (functions/512): position 4 is outside L, a run-time
+// checked conversion (functions/514): position 4 is outside L, a run-time
 // refusal rather than a read past A.
 type L = Idx<4>
 let A: Array<Float64 like L> = [1.0, 2.0, 3.0, 4.0]
