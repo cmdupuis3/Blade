@@ -1,0 +1,12 @@
+// TEST: a kernel index over a foreign axis handed to a caret function's index parameter (rejects)
+// ERROR: BL3001 @ 11:53
+// `g(A, i)` over A's axis L is the call of g's array instance, whose `k` is
+// `Nat<L>`; the kernel's `i` is a position of M. Index provenance is part of
+// the type (equal extents do not make M an L), so the call is refused at the
+// argument, as `g(A, (2 : M))` is -- it used to be accepted with a run-time
+// range check (functions/512).
+type L = Idx<4>
+type M = Idx<4>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0, 4.0]
+function g(m: T^1, k) = m(k)
+let r = (method_for(range<M>) <@> lambda(i) -> g(A, i)) |> compute

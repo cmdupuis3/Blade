@@ -651,6 +651,13 @@ type TypeEnv = {
     /// (SubscriptGuardCtx.Retargets), so the replacement is what the guards
     /// see. Shared by reference.
     ArrowRetargets: System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>
+    /// ARGUMENTS still OPEN when their call was judged against a CONCRETE
+    /// parameter (by reference): a lambda's parameter passed on
+    /// (`lambda(x) -> g(x)` with `g(i: Int64)`), which the judgment cannot
+    /// bind -- the kernel's row decides it, and may bring `Nat<I>` or a
+    /// Float64. Their calls are judged again once the arguments are known
+    /// (TypeCheckSupport.retargetArrowCalls). Shared by reference.
+    OpenCallArgs: System.Collections.Generic.HashSet<TypedExpr>
     /// ARROW APPLICATIONS whose head turned out an ARRAY, keyed by their HEAD
     /// node (by reference -- each written application has its own; the
     /// application node itself may be rebuilt around it after typing): the
@@ -779,6 +786,7 @@ let emptyEnv () = {
     ArrowVariants = System.Collections.Generic.Dictionary<string, ArrowVariant>()
     ArrowVariantDecls = ResizeArray<IRId * TypedDecl>()
     ArrowRetargets = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
+    OpenCallArgs = System.Collections.Generic.HashSet<TypedExpr>(HashIdentity.Reference)
     ArrowSubscripts = System.Collections.Generic.Dictionary<TypedExpr, TypedExpr>(HashIdentity.Reference)
     CurrentSignature = []
     FuncRepSigs = System.Collections.Generic.Dictionary<IRId, Blade.DeduceRep.RepSigT>()

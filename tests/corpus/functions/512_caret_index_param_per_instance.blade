@@ -1,0 +1,24 @@
+// TEST: an unannotated index parameter of a caret function is decided per call
+// `g(m: T^1, k) = m(k)`: handed an array over a NAMED axis L, the call is the
+// call of g's array instance, where `k` is `Nat<L>`. A kernel lambda's index
+// over `range<L>` stays proven (no BL8006 guard) -- it used to be bound to the
+// generic body's `Int64` while still open, so the proof was dropped for a
+// checked conversion and a foreign `range<M>` slipped through (functions/513).
+// A plain Int64 position (a row of integers, a variable) is converted with
+// the checked cast (functions/514), a literal is judged at compile time, and
+// an anonymous array keeps the generic body.
+type L = Idx<4>
+let A: Array<Float64 like L> = [1.0, 2.0, 3.0, 4.0]
+function g(m: T^1, k) = m(k)
+let r = (method_for(range<L>) <@> lambda(i) -> g(A, i)) |> compute
+let p = (method_for([3, 0, 1]) <@> lambda(i) -> g(A, i)) |> compute
+let s = g(A, 2)
+let n = 3
+let t = g(A, n)
+let u = g([5, 6, 7], 1)
+// EXPECT: r = [1.0, 2.0, 3.0, 4.0]
+// EXPECT: p = [4.0, 1.0, 2.0]
+// EXPECT: s = 3.0
+// EXPECT: n = 3
+// EXPECT: t = 4.0
+// EXPECT: u = 6

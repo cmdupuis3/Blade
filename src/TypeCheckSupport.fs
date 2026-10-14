@@ -5642,15 +5642,24 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                     // parameter's type becomes its DEFAULT
                                     // (Subst.paramDefaults), what zonk gives it
                                     // if nothing else does.
+                                    // Nor is it left unjudged: the call is judged
+                                    // again once the row decided it
+                                    // (TypeEnv.OpenCallArgs) -- a Float64 row into
+                                    // `i: Int64` is the mismatch it would have been
+                                    // written directly, a foreign `Nat<M>` into
+                                    // `Nat<L>` too.
                                     appArgPairs pCopies (tArgs |> List.map (_.Type))
-                                    |> List.iter (fun (_, pTy, aTy) ->
+                                    |> List.iter (fun (i, pTy, aTy) ->
                                         match env.Subst.Resolve aTy, IR.stripUnits (env.Subst.Resolve pTy) with
-                                        | IRTInfer aid, IRTScalar et
+                                        | IRTInfer aid, (IRTScalar _ | IRTIdxTagged (IRTScalar _, IRefNamed _) as p)
                                                 when not (env.Subst.IsPolymorphicId aid)
                                                      && (env.Subst.GetLiteralDefault aid).IsNone
                                                      && (env.Subst.GetArityConstraint aid).IsNone
                                                      && (env.Subst.GetRankLowerBound aid).IsNone ->
-                                            env.Subst.MarkParamDefault(aid, et)
+                                            (match p with
+                                             | IRTScalar et -> env.Subst.MarkParamDefault(aid, et)
+                                             | _ -> ())
+                                            env.OpenCallArgs.Add (List.item i tArgs) |> ignore
                                         | _ -> ())
                                     false
                                 elif env.CurrentGenericObligations.IsSome then
@@ -5659,11 +5668,30 @@ let rec internal dispatchAppOrIndex (env: TypeEnv) (tFunc: TypedExpr) (tArgs: Ty
                                         linkOwn pTy aTy || acc) false
                                 else
                                     appArgPairs pCopies (tArgs |> List.map (_.Type))
-                                    |> List.fold (fun acc (_, pTy, aTy) ->
+                                    |> List.fold (fun acc (i, pTy, aTy) ->
                                         match env.Subst.Resolve aTy with
                                         | IRTInfer aid when not (env.Subst.IsPolymorphicId aid)
                                                            && (env.Subst.GetLiteralDefault aid).IsNone
                                                            && not (env.Subst.IsIndexDefault aid) ->
+                                            // A CONCRETE scalar parameter -- no copy in
+                                            // it, so binding links nothing -- is not
+                                            // bound either, as for a closed signature
+                                            // (above): the argument's default, judged
+                                            // again once known. An unannotated index
+                                            // parameter pinned `Int64` in the generic
+                                            // body (`g(m: T^1, k) = m(k)`) is re-pinned
+                                            // `Nat<L>` by an array instance this very
+                                            // call may become; binding a kernel's
+                                            // parameter Int64 here dropped the proof a
+                                            // `range<L>` row brings (a BL8006 guard)
+                                            // and let a foreign `range<M>` through.
+                                            match IR.stripUnits (env.Subst.Resolve pTy) with
+                                            | IRTScalar et when (env.Subst.GetArityConstraint aid).IsNone
+                                                                && (env.Subst.GetRankLowerBound aid).IsNone ->
+                                                env.Subst.MarkParamDefault(aid, et)
+                                                env.OpenCallArgs.Add (List.item i tArgs) |> ignore
+                                                true
+                                            | _ ->
                                             (match unify env.Subst (IRTInfer aid) (stripUnitsDeep env.Subst pTy) with
                                              | Ok () -> true
                                              | Error _ -> acc)
@@ -6102,6 +6130,35 @@ let internal retargetArrowCalls (env: TypeEnv) (roots: TypedExpr list) : (Span *
                       |> Result.bind (fun t -> unify env.Subst t.Type e.Type |> Result.map (fun () -> t))
                   match r with
                   | Ok t -> env.ArrowRetargets.[e] <- t
+                  | Error err ->
+                      let at = currentExprSpan ()
+                      errors.Add((if at.StartLine > 0 then at else e.Span), err)
+              // A call judged while an argument was still OPEN against a
+              // concrete parameter (TypeEnv.OpenCallArgs), the argument known
+              // now: judged again, exactly as if it had been written with
+              // that type -- refused at the call, or (an Int64 position into
+              // a `Nat<L>` parameter) re-built with the checked conversion,
+              // which replaces the call like a re-target does.
+              | None when args |> List.exists env.OpenCallArgs.Contains
+                          && args |> List.forall (fun a ->
+                                 not (env.OpenCallArgs.Contains a)
+                                 || (match env.Subst.Resolve a.Type with
+                                     | IRTInfer _ -> false
+                                     | _ -> true)) ->
+                  resetCurrentStmtSpan ()
+                  setCurrentExprSpan e.Span
+                  let r =
+                      dispatchAppOrIndex env f args
+                      |> Result.bind (fun t -> unify env.Subst t.Type e.Type |> Result.map (fun () -> t))
+                  match r with
+                  | Ok t ->
+                      let same =
+                          match t.Kind with
+                          | TExprApp (f2, args2) ->
+                              obj.ReferenceEquals(f2, f) && args2.Length = args.Length
+                              && List.forall2 (fun (x: TypedExpr) y -> obj.ReferenceEquals(x, y)) args2 args
+                          | _ -> false
+                      if not same then env.ArrowRetargets.[e] <- t
                   | Error err ->
                       let at = currentExprSpan ()
                       errors.Add((if at.StartLine > 0 then at else e.Span), err)
