@@ -1,0 +1,22 @@
+// TEST: Helper In A Function's Kernel Reads Module Arrays
+// A helper that reads module-level arrays, called from a kernel inside a
+// function that takes an array parameter. The kernel captures that parameter,
+// so it is emitted at namespace scope, and so is everything it calls -- but a
+// module binding is a local of main(), and `sq` named `xs` and `ys` there
+// (g++: 'xs' was not declared, BL9002). A namespace-scope function's own
+// reads of module bindings now promote their declarations, as its callees'
+// captures already did.
+let xs: Array<Float like Idx<5>, Idx<4>> = [[1.0, 0.0, 2.0, 1.0], [0.5, 1.0, 0.0, 2.0], [1.5, 2.0, 1.0, 0.0], [0.0, 0.5, 0.5, 1.0], [2.0, 1.0, 1.0, 1.0]]
+let ys: Array<Float like Idx<5>> = [1.0, 2.0, 3.0, 1.0, 2.0]
+function sq(w: Array<Float like Idx<4>>, n: Int64) -> Float = {
+    let d = w(0) * xs(n, 0) - ys(n)
+    d * d
+}
+function loss(w: Array<Float like Idx<4>>) -> Float = {
+    let e = method_for(range<Idx<5>>) <@> lambda(n) -> sq(w, n) |> compute
+    reduce(e, (+))
+}
+let v = loss([0.1, 0.2, 0.3, 0.4])
+// EXPECT: v = 16.975
+// EXPECT: xs = [[1.0, 0.0, 2.0, 1.0], [0.5, 1.0, 0.0, 2.0], [1.5, 2.0, 1.0, 0.0], [0.0, 0.5, 0.5, 1.0], [2.0, 1.0, 1.0, 1.0]]
+// EXPECT: ys = [1.0, 2.0, 3.0, 1.0, 2.0]

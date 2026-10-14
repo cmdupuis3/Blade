@@ -1822,6 +1822,13 @@ let private computeModuleCaptureHoistIds
         |> Set.toList
         |> List.collect (fun rid ->
             if rid = f.Id then []
+            // The body's OWN read of a module binding. A function that reads
+            // one is normally main-local, but not when it is reachable from a
+            // kernel that captures an enclosing function's parameter
+            // (`cannotBeMainLocal` in computeMainLocalFuncIds): then it is a
+            // namespace-scope function spelling a main() local --
+            // `sq(w, n)` reading `xs` from the kernel inside `loss(w)`.
+            elif Set.contains rid moduleBindingIds && not (Set.contains rid nameable) then [ rid ]
             else
                 match Map.tryFind rid byId with
                 | Some c ->
