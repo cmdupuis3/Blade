@@ -1918,11 +1918,42 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
     | ExprKind.ExprDotDot (lo, hi) ->
         inferExpr env lo |> Result.bind (fun tLo ->
         inferExpr env hi |> Result.bind (fun tHi ->
-            let extentExpr =
-                match tLo.Kind, tHi.Kind with
-                | TExprLit (LitInt 0L), TExprLit (LitInt n) -> IRLit (IRLitInt n)
-                | TExprLit (LitInt a), TExprLit (LitInt b) -> IRLit (IRLitInt (b - a))
-                | _ -> IRLit (IRLitInt 0L)  // placeholder -- Lowering computes actual extent
+            // The extent under the full static contract (literals, `let static`
+            // names, static calls): `0..N` with `let static N = 5` is an
+            // Idx<5>. A bound that is not static leaves the extent UNKNOWN
+            // (lowerExtentExpr's give-up), read at run time from the range
+            // Lowering builds -- never a literal 0, which every consumer of the
+            // TYPE believed: `Float64(0..N)` came out empty, `extents(0..N)`
+            // was 0 and `reduce(0..n, (+))` was refused as statically empty.
+            // StaticEval reads statics by NAME, so a bound is folded only when
+            // every name in it still resolves to the `let static` itself (a
+            // static binds ReadOnly with its value; a parameter or local of
+            // the same spelling shadows it and is a runtime bound).
+            let staticallyBound (e: Expr) =
+                collectFreeVars Set.empty e
+                |> Set.forall (fun n ->
+                    match lookupVar n env with
+                    | Some vi -> vi.Assign = ReadOnly && vi.TypedValue.IsSome && env.StaticValues.ContainsKey n
+                    | None -> true)
+            // Integer bounds only (the evaluators truncate a float literal),
+            // and a literal keeps its full Int64 value.
+            let foldBound (e: Expr) (t: TypedExpr) : int64 option =
+                match env.Subst.Resolve t.Type with
+                | IRTScalar (ETInt64 | ETInt32) when staticallyBound e ->
+                    (match e.Kind with
+                     | ExprKind.ExprLit (LitInt n) -> Some n
+                     | _ -> evalStaticIntExpr env e |> Option.map int64)
+                | _ -> None
+            // A folded range also hands Lowering its bounds as LITERALS, so the
+            // range it builds carries the same literal extent and offset the
+            // type does: `L..H` lowered to `H - L` over the static names, which
+            // codegen cannot evaluate (`extents(L..H)` refused BL7004).
+            let literalOf (t: TypedExpr) (v: int64) =
+                { t with Kind = TExprLit (LitInt v); Type = IRTScalar ETInt64 }
+            let (extentExpr, tLo, tHi) =
+                match foldBound lo tLo, foldBound hi tHi with
+                | Some a, Some b -> (IRLit (IRLitInt (b - a)), literalOf tLo a, literalOf tHi b)
+                | _ -> (IRParam ("?", 0, IRTNat None), tLo, tHi)
             let idx = {
                 Id = env.Builder.FreshId()
                 Rank = 1

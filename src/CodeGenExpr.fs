@@ -1623,10 +1623,18 @@ and renderExtentExpr (subst: SubstMap) (names: Map<IRId, string>) arr dim : stri
         // statically evaluable ones (Idx<11>, Idx<n_seg + 1> with n_seg
         // `let static`) emit as literals. A genuinely runtime slot extent has
         // no object either, so it stays a deliberate refusal.
+        // An anonymous `lo..hi` with runtime bounds is the exception: its
+        // extent is `hi - lo` over values in scope, so it renders as that.
+        let rec namesOnlyInScope (e: IRExpr) =
+            match e with
+            | IRParam _ -> false
+            | ExprShape (children, _) -> children |> List.forall namesOnlyInScope
         match arr with
         | IRRange (idxTys, _) when dim < idxTys.Length ->
             (match tryEvalIntIR idxTys.[dim].Extent with
              | Some n -> $"{n}L"
+             | None when namesOnlyInScope idxTys.[dim].Extent ->
+                 $"(int64_t)({exprToCppCore subst names idxTys.[dim].Extent})"
              | None -> exprError "extents(range<...>): the range's extent is not statically evaluable, and a virtual range has no runtime object to read it from -- take extents of a materialized array instead")
         | _ ->
             // Should be unreachable -- typecheck rejects non-arrays. Surface a

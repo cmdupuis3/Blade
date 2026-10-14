@@ -454,6 +454,33 @@ let private loweringIce (span: Span) (message: string) : 'a =
     raise (Blade.Diagnostics.BladeDiagnosticException
             ({ Blade.Diagnostics.Codes.ice message with Code = "BL9003"; Span = span }))
 
+/// A `lo..hi` operand with a runtime bound: typecheck recorded its axis with
+/// the anonymous unknown extent, and Lowering built the range itself with
+/// `hi - lo`. The loop levels take their extent from the RECORDED operand
+/// types, where the unknown names nothing to evaluate -- so carry the range's
+/// own extent onto every recorded index type with that axis's id (the
+/// operand's type and the shared co-iteration records alike).
+let private alignRangeOperandExtents (arrays: IRExpr list) (arrayTypes: IRArrayType list)
+                                     (shared: IRIndexType list) : IRArrayType list * IRIndexType list =
+    let byId =
+        if arrays.Length <> arrayTypes.Length then Map.empty
+        else
+            List.zip arrays arrayTypes
+            |> List.choose (fun (a, at) ->
+                match a, at.IndexTypes with
+                | IRRange ([rix], _), [tix] when (match tix.Extent with IRParam ("?", 0, _) -> true | _ -> false) ->
+                    Some (tix.Id, rix.Extent)
+                | _ -> None)
+            |> Map.ofList
+    if Map.isEmpty byId then (arrayTypes, shared)
+    else
+        let fix (ix: IRIndexType) =
+            match Map.tryFind ix.Id byId with
+            | Some e -> { ix with Extent = e }
+            | None -> ix
+        (arrayTypes |> List.map (fun at -> { at with IndexTypes = at.IndexTypes |> List.map fix }),
+         shared |> List.map fix)
+
 /// Lower a TypedExpr to IRExpr
 let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     match texpr.Kind with
@@ -609,13 +636,15 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
         IRArrayLit (es, arrTy)
     
     | TExprMethodFor info ->
+        let arrays = info.Arrays |> List.map (lowerTypedExpr env)
+        let (arrayTypes, shared) = alignRangeOperandExtents arrays info.ArrayTypes info.SharedIndexTypes
         IRMethodFor {
-            Arrays = info.Arrays |> List.map (lowerTypedExpr env)
+            Arrays = arrays
             Identities = info.Identities
-            ArrayTypes = info.ArrayTypes
+            ArrayTypes = arrayTypes
             SDimsPerArray = info.SDimsPerArray
             TotalSDims = info.TotalSDims
-            SharedIndexTypes = info.SharedIndexTypes
+            SharedIndexTypes = shared
         }
     
     | TExprObjectFor info ->
@@ -661,13 +690,15 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
                     OutputRank = ofInfo.OutputRank
                 }
             | _ -> lowerTypedExpr env info.Loop
+        let arrays = info.Arrays |> List.map (lowerTypedExpr env)
+        let (arrayTypes, shared) = alignRangeOperandExtents arrays info.ArrayTypes info.SharedIndexTypes
         IRApplyCombinator {
             Loop = loweredLoop
             Kernel = loweredKernel
-            Arrays = info.Arrays |> List.map (lowerTypedExpr env)
+            Arrays = arrays
             Identities = info.Identities
-            ArrayTypes = info.ArrayTypes
-            SharedIndexTypes = info.SharedIndexTypes
+            ArrayTypes = arrayTypes
+            SharedIndexTypes = shared
             SymcomStates = info.SymcomStates
             TriangularLevels = info.TriangularLevels
             SDimsPerArray = info.SDimsPerArray
@@ -713,7 +744,12 @@ let rec lowerTypedExpr (env: TypedLowerEnv) (texpr: TypedExpr) : IRExpr =
     | TExprDotDot (lo, hi) ->
         let loIR = lowerTypedExpr env lo
         let hiIR = lowerTypedExpr env hi
-        let extentExpr = IRBinOp (IRElementwise, IRSub, hiIR, loIR, SrcLoc.Nowhere)
+        // Static bounds arrive as literals (inferExpr's ExprDotDot arm folds
+        // them), so the extent is a literal too.
+        let extentExpr =
+            match loIR, hiIR with
+            | IRLit (IRLitInt a), IRLit (IRLitInt b) -> IRLit (IRLitInt (b - a))
+            | _ -> IRBinOp (IRElementwise, IRSub, hiIR, loIR, SrcLoc.Nowhere)
         let idx = {
             Id = env.Builder.FreshId()
             Rank = 1

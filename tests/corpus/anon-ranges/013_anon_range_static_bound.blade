@@ -1,0 +1,33 @@
+// TEST: Anon Range Static Bound
+// A `let static` bound is a static extent: `0..N` is an Idx<5>, in its TYPE
+// as well as in the range Lowering builds. The type used to keep a literal 0
+// for any bound that was not itself a literal, and every consumer of the type
+// believed it: `Float64(0..N)` (the coordinate-axis idiom) came out EMPTY,
+// `extents(0..N)` was 0 while the bare `0..N` printed five elements, and
+// `reduce(0..N, (+))` was refused as statically empty (BL3007). A static
+// START folds too: `L..H` carries its literal extent and offset, where it
+// used to lower to `H - L` over the names (`extents(L..H)` refused BL7004).
+let static N = 5
+let static L = 2
+let static H = L + 4
+let x0 = 1.5
+let dx = 0.25
+let axis = x0 + dx * Float64(0..N)
+let casted = Float64(0..N)
+let sizes = [extents(casted), extents(0..N), extents(L..H)]
+let total = reduce(0..N, (+))
+let shifted = Float64(L..H)
+let tens = method_for(L..H) <@> lambda(i) -> i * 10 |> compute
+let shifted_total = reduce(L..H, (+))
+// EXPECT: axis = [1.5, 1.75, 2.0, 2.25, 2.5]
+// EXPECT: casted = [0.0, 1.0, 2.0, 3.0, 4.0]
+// EXPECT: sizes = [5, 5, 4]
+// EXPECT: total = 10
+// EXPECT: shifted = [2.0, 3.0, 4.0, 5.0]
+// EXPECT: tens = [20, 30, 40, 50]
+// EXPECT: shifted_total = 14
+// EXPECT: N = 5
+// EXPECT: L = 2
+// EXPECT: H = 6
+// EXPECT: x0 = 1.5
+// EXPECT: dx = 0.25

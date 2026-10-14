@@ -1277,8 +1277,11 @@ compose in one loop:
 kernels receive indices without breaking index anonymity.
 
 **Anonymous ranges.** `m..n` (half-open, Int64 elements) is a virtual array
-equivalent to `range<Idx<n-m>> + m`: `0..5` enumerates `0,1,2,3,4`. Bounds
-must be static (a `let static` name folds). The index type is anonymous, so
+equivalent to `range<Idx<n-m>> + m`: `0..5` enumerates `0,1,2,3,4`. Static
+bounds (literals, `let static` names, static calls) give a static extent:
+`0..N` with `let static N = 5` is an `Idx<5>`. A bound known only at run time
+(a parameter, a plain `let`) leaves the extent unknown in the type; it is read
+from the bounds when the range runs. The index type is anonymous, so
 its elements index any plain-`Idx` slot without a tag cast — which makes it
 the natural spelling for index generation feeding *arithmetic*, where
 `range<I>` would tag the result and demand `(k : I)` casts downstream.

@@ -2792,7 +2792,44 @@ let genApplyCombinator (ctx: CodeGenContext) (name: string) (info: ApplyInfo) (b
                  | _ ->
                      preCode <- preCode @ codegenError ctx ind "range<SparseIdx<keys>, ...>: a sparse range slot cannot be combined with other index types in one range<> (not yet supported)")
                 (rname, arr)
-            | IRRange _ -> ($"__range{i}_{name}", arr)
+            | IRRange (idxTys, offset) ->
+                // A virtual range has no C++ object, so a level whose extent is
+                // not static (`0..n` with a runtime n) read `<rname>.extents[k]`
+                // off nothing (g++: not declared), and a runtime start (`lo..hi`)
+                // was rendered without a name map (`__v<id>`). Give such a range
+                // a holder: its extents and start, evaluated here where the
+                // names are in scope. The loop bound and the output-extents fill
+                // read `.extents` exactly as they read an array operand; the
+                // element binding reads `.offset`.
+                let rname = $"__range{i}_{name}"
+                let plainSlots =
+                    idxTys |> List.forall (fun ix ->
+                        ix.IxKind = IxKPlain && ix.Rank = 1
+                        && (match ix.Tag with Some t -> not (t.StartsWith haloWinTagPrefix) | None -> true))
+                let runtimeExtent = idxTys |> List.exists (fun ix -> (tryEvalIntIR ix.Extent).IsNone)
+                let runtimeOffset = offset |> Option.exists (fun o -> (tryEvalIntIR o).IsNone)
+                // Only values in scope (the `hi - lo` of an anonymous range): a
+                // symbolic type-level extent (IRParam) names no C++ value here.
+                let rec valuesInScope (e: IRExpr) =
+                    match e with
+                    | IRParam _ -> false
+                    | ExprShape (children, _) -> children |> List.forall valuesInScope
+                let renderable =
+                    (idxTys |> List.forall (fun ix -> valuesInScope ix.Extent))
+                    && (offset |> Option.forall valuesInScope)
+                if plainSlots && renderable && (runtimeExtent || runtimeOffset) then
+                    let exts =
+                        idxTys |> List.map (fun ix ->
+                            match tryEvalIntIR ix.Extent with
+                            | Some n -> string n
+                            | None -> $"(size_t)({exprToCppCtx tempCtx ix.Extent})")
+                    let offStr = offset |> Option.map (exprToCppCtx tempCtx) |> Option.defaultValue "0"
+                    preCode <- preCode @ [ $"""{ind}const struct {{ size_t extents[{idxTys.Length}]; int64_t offset; }} {rname} = {{ {{ {String.concat ", " exts} }}, (int64_t)({offStr}) }};""" ]
+                    let arr' =
+                        if runtimeOffset then IRRange (idxTys, Some (IRParam ($"{rname}.offset", 0, IRTScalar ETInt64)))
+                        else arr
+                    (rname, arr')
+                else (rname, arr)
             | IRVirtualReverse _ -> ($"__rev{i}", arr)
             | IRMask _ | IRIntersect _ | IRUnion _ | IRUnique _ ->
                 // Auto-materialize: when a method_for receives an inline form

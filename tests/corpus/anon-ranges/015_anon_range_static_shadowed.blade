@@ -1,0 +1,15 @@
+// TEST: Anon Range Static Shadowed
+// A bound folds statically only while its name still IS the `let static`: a
+// parameter of the same spelling shadows it and is a runtime bound. The
+// static evaluator reads statics by name, so without that check `g(3)` would
+// build a range typed by the static's 7.
+let static n = 7
+function g(n: Int64) -> Int64 = {
+    let xs = Float64(0..n)
+    extents(xs)
+}
+let inner = g(3)
+let outer = extents(Float64(0..n))
+// EXPECT: n = 7
+// EXPECT: inner = 3
+// EXPECT: outer = 7
