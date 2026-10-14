@@ -1,0 +1,42 @@
+// TEST: Deferred Binding Over An Inline Operand
+// A deferred binding whose loop operand is written INLINE -- a partial read
+// `T(0)`, an array literal -- has that operand hoisted into a let by the lift
+// pass, so the binding's value is a let chain ending in the deferred apply.
+// It must behave exactly like the spelling with a named operand:
+//   * it stays DEFERRED: no print line for `mapped` / `pr` / `L` (the print
+//     pass used to print it while the C++ declared nothing -- BL9002 "'mapped'
+//     was not declared"; the interpreter forced and printed it);
+//   * a consumer reads it as the deferred computation it is: a fused
+//     `reduce(pr, add, 0.0)` with a named kernel and an init, a forcing
+//     consumer (`sort`, which then prints it), `|> compute`;
+//   * a reduction join over a let-bound loop object with an inline literal
+//     operand (`let L = method_for([..])`) sees a bare apply at every leaf
+//     (it was BL7004 "requires unforced method_for/object_for applications at
+//     every leaf").
+type I = Idx<2>
+type J = Idx<3>
+let T: Array<Float64 like I, J> = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+let mapped = method_for(T(0)) <@> lambda(x) -> x * 2.0
+let mapped_c = mapped |> compute
+let row_total = reduce(mapped, (+))
+
+function add(a, b) = a + b
+let pr = method_for([1.0, 2.0]) <@> lambda(x) -> x * 3.0
+let fused = reduce(pr, add, 0.0)
+let fused_i = reduce(method_for([1, 2]) <@> lambda(x) -> x * 3, add, 0)
+
+let forced = method_for([3.0, 1.0, 2.0]) <@> lambda(x) -> x + 0.5
+let sorted = sort(forced, lambda(x) -> x)
+
+function sq(x: Float64) -> Float64 = x * x
+let L = method_for([1.0, 2.0, 3.0])
+let (s, ss) = reduce((L <@> sq) <&!> (L <@> lambda(x) -> x), (+))
+// EXPECT: T = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+// EXPECT: mapped_c = [2.0, 4.0, 6.0]
+// EXPECT: row_total = 12.0
+// EXPECT: fused = 9.0
+// EXPECT: fused_i = 9
+// EXPECT: forced = [3.5, 1.5, 2.5]
+// EXPECT: sorted = [1.5, 2.5, 3.5]
+// EXPECT: s = 14.0
+// EXPECT: ss = 6.0

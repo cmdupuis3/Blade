@@ -984,8 +984,27 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
         wrapLets peeled (IRCompute inner)
     | IRReynolds (e, a) -> IRReynolds (liftExpr builder e, a)
     | IRBind (c, k) -> IRBind (liftExpr builder c, liftExpr builder k)
-    | IRParallel (a, b, d) -> IRParallel (liftExpr builder a, liftExpr builder b, d)
-    | IRFusion (a, b) -> IRFusion (liftExpr builder a, liftExpr builder b)
+    // A join / parallel tree's legs are deferred applies that every consumer
+    // walks LEAF BY LEAF (genReduceComputeBinding's collectLeaves, the
+    // interpreter's forceReduceCompute, genFusionTree) and recognizes only as
+    // bare combinators. A leg whose operand the arms below hoisted --
+    // `L <@> k` over `let L = method_for([1.0, 2.0])`, whose literal the loop
+    // object carries into every leg -- comes back as `let v = [..] in apply`,
+    // which no leaf walker recognizes (BL7004 "requires unforced
+    // method_for/object_for applications at every leaf"). FLOAT those lets
+    // above the tree (ids are unique, the values are pure materializations),
+    // so the tree keeps its canonical shape and the chain sits where every
+    // consumer already peels it: a binding's let chain, or the IRLet prelude
+    // genReduceComputeBinding / forceReduceCompute peel off a fold's
+    // computation.
+    | IRParallel (a, b, d) ->
+        let (la, fa) = peelLetChain (liftExpr builder a)
+        let (lb, fb) = peelLetChain (liftExpr builder b)
+        wrapLets (la @ lb) (IRParallel (fa, fb, d))
+    | IRFusion (a, b) ->
+        let (la, fa) = peelLetChain (liftExpr builder a)
+        let (lb, fb) = peelLetChain (liftExpr builder b)
+        wrapLets (la @ lb) (IRFusion (fa, fb))
     | IRChoice (a, b) -> IRChoice (liftExpr builder a, liftExpr builder b)
     | IRFallback (a, b) -> IRFallback (liftExpr builder a, liftExpr builder b)
     | IRArrayProduct (a, b) -> IRArrayProduct (liftExpr builder a, liftExpr builder b)

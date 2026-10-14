@@ -4388,17 +4388,26 @@ let private emitArrayPrint (c: Ctx) (label: string) (a: ArrVal) : unit =
 /// eager one -- that is what `Ctx.Forced` records.
 let private deferredBindingIds (bindings: IRBinding list) : HashSet<IRId> =
     let ids = HashSet<IRId>()
-    let isDeferredExpr (e: IRExpr) =
-        match e with
-        | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _
-        | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _
-        | IRSequence _ -> true
-        | IRVar (id, _) -> ids.Contains id
-        | _ -> false
-    for b in bindings do
-        let resultIsArray = match Blade.IR.stripUnits b.Type with ArrayElem _ -> true | _ -> false
-        let deferred =
-            match b.Value with
+    let rec deferredValue (inner: Set<IRId>) (ty: IRType) (value: IRExpr) : bool =
+        let isDeferredExpr (e: IRExpr) =
+            match e with
+            | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _
+            | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _
+            | IRSequence _ -> true
+            | IRVar (id, _) -> ids.Contains id || Set.contains id inner
+            | _ -> false
+        let resultIsArray = match Blade.IR.stripUnits ty with ArrayElem _ -> true | _ -> false
+        match value with
+        // A let chain defers when its final value does (computeDeferredIds'
+        // IRLet arm): IRLift hoists an inline operand of a deferred binding.
+        | IRLet _ ->
+            let (lets, finalExpr) = Blade.IRLift.peelLetChain value
+            let inner' =
+                lets |> List.fold (fun acc (id, lty, v) ->
+                    if deferredValue acc lty v then Set.add id acc else acc) inner
+            deferredValue inner' ty finalExpr
+        | _ ->
+            match value with
             | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
             | IRZip _ | IRComposeObj _ | IRFallback _ -> true
             | IRBind (comp, _) -> resultIsArray || isDeferredExpr comp
@@ -4408,10 +4417,11 @@ let private deferredBindingIds (bindings: IRBinding list) : HashSet<IRId> =
             | IRGuard (_, body) -> resultIsArray || isDeferredExpr body
             | IRSequence elems -> resultIsArray || (elems |> List.exists isDeferredExpr)
             | IRTuple elems -> elems |> List.forall isDeferredExpr
-            | IRTupleProj (IRVar (pid, _), _, _) -> ids.Contains pid
-            | IRVar (srcId, _) -> ids.Contains srcId
+            | IRTupleProj (IRVar (pid, _), _, _) -> ids.Contains pid || Set.contains pid inner
+            | IRVar (srcId, _) -> ids.Contains srcId || Set.contains srcId inner
             | _ -> false
-        if deferred then ids.Add b.Id |> ignore
+    for b in bindings do
+        if deferredValue Set.empty b.Type b.Value then ids.Add b.Id |> ignore
     ids
 
 /// `|> compute` of a deferred combinator is a forced materialization and

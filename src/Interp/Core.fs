@@ -176,7 +176,14 @@ let makeState (modul: IRModule) (limits: InterpLimits) : InterpState =
         // Reference identity, deliberately: the SAME Value node stored into a
         // root VDeferred must hit; a structurally-equal node elsewhere must not.
         let d = Dictionary<IRExpr, IRId>(HashIdentity.Reference)
-        for b in modul.Bindings do d.[b.Value] <- b.Id
+        for b in modul.Bindings do
+            d.[b.Value] <- b.Id
+            // A let-chain binding that defers holds its FINAL value as the
+            // payload (evalBinding's letChainDefers arm), the node
+            // peelLetChain returns by reference -- index that one too.
+            match b.Value with
+            | IRLet _ -> d.TryAdd(snd (peelLetChain b.Value), b.Id) |> ignore
+            | _ -> ()
         d
       ForcedDeferred = HashSet<IRId>() }
 
@@ -339,11 +346,14 @@ let private litMatches (lit: IRLit) (v: Value) : bool =
 /// `isDeferred ids e` (a combinator/compose/parallel/... form, or an IRVar
 /// whose bound cell already holds a VDeferred). By induction over
 /// module-ordered bindings this coincides with `Set.contains id deferredIds`.
-let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
+/// `inner` names the deferred lets of an enclosing let CHAIN that are not yet
+/// bound in `env` (letChainDefers); it is empty for a plain binding.
+let private isDeferredOperandIn (inner: Set<IRId>) (env: Env) (e: IRExpr) : bool =
     match e with
     | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _
     | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _
     | IRBind _ | IRZip _ | IRSequence _ -> true
+    | IRVar (id, _) when Set.contains id inner -> true
     | IRVar (id, _) ->
         match envTryFind env id with
         | Some cell -> cell.V.IsVDeferred
@@ -355,7 +365,11 @@ let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
 /// `shouldDefer` (CodeGen.fs:9865-9886), so a binding is VDeferred iff Print
 /// would skip it. IRMethodFor/IRObjectFor are NOT deferred here (evalBinding
 /// treats them as loop objects -- VLoopObj -- before consulting this).
-let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
+let private isDeferredOperand (env: Env) (e: IRExpr) : bool =
+    isDeferredOperandIn Set.empty env e
+
+let private shouldDeferBindingIn (inner: Set<IRId>) (env: Env) (ty: IRType) (value: IRExpr) : bool =
+    let isDeferredOperand (env: Env) (e: IRExpr) = isDeferredOperandIn inner env e
     // Mirror computeDeferredIds' resultIsArray rule: an array-typed combinator is a
     // deferred computation whatever its operands (materializes only at |> compute);
     // scalar `<|>` / guard stay eager ternaries.
@@ -383,14 +397,27 @@ let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
         resultIsArray || leafIsDeferred body
     | IRSequence elems -> resultIsArray || (elems |> List.exists (isDeferredOperand env))
     | IRTuple elems -> elems |> List.forall (isDeferredOperand env)
-    | IRTupleProj (IRVar (pid, _), _, _) ->
-        match envTryFind env pid with
-        | Some cell -> cell.V.IsVDeferred
-        | None -> false
-    | IRVar (srcId, _) ->
-        match envTryFind env srcId with
-        | Some cell -> cell.V.IsVDeferred
-        | None -> false
+    | IRTupleProj ((IRVar _ as parent), _, _) -> isDeferredOperand env parent
+    | IRVar _ -> isDeferredOperand env value
+    | _ -> false
+
+let private shouldDeferBinding (env: Env) (ty: IRType) (value: IRExpr) : bool =
+    shouldDeferBindingIn Set.empty env ty value
+
+/// A let CHAIN binding value (IRLift hoists an inline operand of a deferred
+/// binding into lets: `method_for(T(0)) <@> k` binds the row first) defers
+/// exactly when its FINAL value does, counting the chain's own deferred lets
+/// -- the twin of CodeGen.computeDeferredIds' IRLet arm, which mirrors
+/// genLetChainBinding (inner lets as temporaries, then the final value under
+/// the binding's name).
+let private letChainDefers (env: Env) (ty: IRType) (value: IRExpr) : bool =
+    match value with
+    | IRLet _ ->
+        let (lets, finalExpr) = peelLetChain value
+        let inner =
+            lets |> List.fold (fun acc (id, lty, v) ->
+                if shouldDeferBindingIn acc env lty v then Set.add id acc else acc) Set.empty
+        shouldDeferBindingIn inner env ty finalExpr
     | _ -> false
 
 /// Route a node Core classifies as loop/array *machinery* (the force, reductions,
@@ -1301,7 +1328,7 @@ let private checkArrayLitRowExtents (varName: string) (elements: IRExpr list) (a
 /// Run.execProgram calls this once per binding, in module order, so
 /// shouldDeferBinding sees every earlier binding's cell already populated,
 /// coinciding with computeDeferredIds' fold.
-let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
+let rec evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     match b.Value with
     | IRMethodFor _ | IRObjectFor _ ->
         VLoopObj { Provenance = b.Value; Captured = env }
@@ -1316,6 +1343,13 @@ let evalBinding (st: InterpState) (env: Env) (b: IRBinding) : Value =
     | IRSegmentsGrid bounds -> segmentsGridValue bounds
     | v when shouldDeferBinding env b.Type v ->
         VDeferred (b.Value, env)
+    // A let chain whose final value defers (CodeGen.genLetChainBinding emits
+    // the inner lets, then defers the final value under the binding's name):
+    // bind the inner lets, then classify the final value as the binding.
+    | v when letChainDefers env b.Type v ->
+        let (lets, finalExpr) = peelLetChain v
+        evalExpr st env (wrapLets lets (IRLit IRLitUnit)) |> ignore
+        evalBinding st env { b with Value = finalExpr }
     | _ ->
         // Force after eager evaluation: evalExpr's unconditional-defer arms
         // (e.g. a scalar `<|>` choice) can hand back VDeferred even when the

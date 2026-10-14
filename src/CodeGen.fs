@@ -2581,7 +2581,7 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
         | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ | IRFunctorMap _ | IRChoice _ | IRFallback _ | IRComposeObj _ | IRComposeMeth _ | IRBind _ | IRZip _ | IRSequence _ -> true
         | IRVar (id, _) -> Set.contains id ids
         | _ -> false
-    bindings |> List.fold (fun ids b ->
+    let rec shouldDeferValue (ids: Set<int>) (ty: IRType) (value: IRExpr) : bool =
         // A combinator whose RESULT TYPE is an array is a deferred computation
         // regardless of whether its operands are already deferred -- it materializes
         // only at |> compute, exactly like `<@>` (which always defers). Without this,
@@ -2589,9 +2589,25 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
         // fell through to `| _ -> false` and were eagerly materialized (and printed)
         // with no |> compute. Scalar `<|>` / guard stay eager ternaries (result type
         // is IRTScalar, so resultIsArray is false).
-        let resultIsArray = match IR.stripUnits b.Type with ArrayElem _ -> true | _ -> false
-        let shouldDefer =
-            match b.Value with
+        let resultIsArray = match IR.stripUnits ty with ArrayElem _ -> true | _ -> false
+        match value with
+        // A let CHAIN defers exactly when its final value does: genBinding
+        // routes it through genLetChainBinding, which emits the inner lets as
+        // temporaries and then genBinding's the final expression under the
+        // binding's own name. IRLift wraps a deferred binding this way when it
+        // hoists an inline operand -- `method_for(T(0)) <@> k`, `method_for([1.0,
+        // 2.0]) <@> k` lift the row / literal into a `__v<id>` let -- and the
+        // binding stays a deferred computation (only a comment in the C++),
+        // so it must not print ('mapped' was not declared, BL9002). An inner
+        // let that itself defers makes a final alias of it defer too.
+        | IRLet _ ->
+            let (lets, finalExpr) = IRLift.peelLetChain value
+            let inner =
+                lets |> List.fold (fun acc (id, lty, v) ->
+                    if shouldDeferValue acc lty v then Set.add id acc else acc) ids
+            shouldDeferValue inner ty finalExpr
+        | _ ->
+            match value with
             | IRApplyCombinator _ | IRComposeApply _ | IRParallel _ | IRFusion _ -> true
             | IRZip _ -> true
             | IRComposeObj _ -> true
@@ -2613,7 +2629,8 @@ let computeDeferredIds (bindings: IRBinding list) : Set<int> =
             | IRTupleProj (IRVar (pid, _), _, _) -> Set.contains pid ids
             | IRVar (srcId, _) -> Set.contains srcId ids
             | _ -> false
-        if shouldDefer then Set.add b.Id ids else ids
+    bindings |> List.fold (fun ids b ->
+        if shouldDeferValue ids b.Type b.Value then Set.add b.Id ids else ids
     ) Set.empty
 
 /// Top-level bindings that hold a FUNCTION -- a binding of function type
