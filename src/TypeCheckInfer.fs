@@ -2599,16 +2599,6 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                 | None ->
                     let et = match env.Subst.Resolve elem0 with AnyPrimElem e -> e | _ -> ETFloat64
                     (match tKernel.Kind with
-                     // An element still OPEN (a generic body's `reduce(row ^ 0,
-                     // (+))` over `row: T^1`) seeds with a typed `zero`, which
-                     // each instance resolves to its own literal
-                     // (IRMono.resolveTypedZerosModule): a `0.0` seeded the
-                     // Int64 instance with a double, and the interpreter
-                     // folded in doubles where the C++ converted silently.
-                     | TExprSection OpAdd when (match env.Subst.Resolve elem0 |> IR.stripUnits with
-                                                | IRTInfer _ -> true
-                                                | _ -> false) ->
-                        Ok (mkTyped TExprZero elem0)
                      | TExprSection OpAdd ->
                         // An element still OPEN here is a generic body's
                         // (`function f(v) = reduce(method_for(v) <@> k, (+))`):
