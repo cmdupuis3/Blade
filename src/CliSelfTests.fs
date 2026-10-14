@@ -2652,6 +2652,59 @@ let shown = d.emit(\"image/png\", \"AA==\")"
         | _ -> record name TH.Fail (sprintf "exit %d/%d, first %s, second %A"
                                         code code2 (frameOf firstRun) responses2)
 
+        // 31. A MIXED cell with a MID-CELL expression. The cell runs as
+        // `[a; it = a; b]` but commits `[a; b]`, so the next candidate never
+        // lined up with the run's own snippet list: the prefix test matched
+        // through `a`, called `b` dropped, and recomputed it -- measured at
+        // 20-25 s under the plot cell after a training cell. The memo now
+        // knows which of its snippets were transient and skips them, so `seed`,
+        // `a` and `b` are all adopted and only the new cell's binding runs.
+        let midCell = "let a = reduce(seed, (+))\na\nlet b = a * 2.0"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" midCell
+                    evalReq 3 "nb" "let c = b + 1.0"
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let evaluated = Blade.Interp.Run.lastMemoEvaluated
+        let name = "a mid-cell expression does not drop the cell's later bindings from the memo"
+        match responses with
+        | [_; _; last] when code = 0 && last.Contains "\"kept\":true" && adopted = 3 && evaluated = 1 ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, evaluated %d, responses: %A"
+                                        code adopted evaluated responses)
+
+        // ...and the adopted values are the ones the cell computed.
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" "let seed = [1.0, 2.0, 3.0]"
+                    evalReq 2 "nb" midCell
+                    evalReq 3 "nb" "let c = b + 1.0\nc"
+                    shutdownReq ]
+        let name = "bindings adopted past a mid-cell expression read back correctly"
+        match responses with
+        | [_; _; readback] when code = 0 && readback.Contains "\"value\":\"13.0\"" ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, responses: %A" code responses)
+
+        // ...and the line it must not cross: a mid-cell expression that WRITES
+        // through a `mut` parameter may have changed what a later binding
+        // read, so its run is not reusable and the memo goes, exactly as for
+        // any other dropped snippet that is not provably mutation-free.
+        let pokeCell =
+            "let mut buf = [0.0, 0.0, 0.0]\n"
+            + "function fill(out: mut Array<Float like Idx<3>>) = {\n"
+            + "    out(0) += 1.5\n}\nfill(buf)\nlet after = buf(0)"
+        let (code, responses, _) =
+            drive [ evalReq 1 "nb" pokeCell
+                    evalReq 2 "nb" "let d = after + 1.0"
+                    shutdownReq ]
+        let adopted = Blade.Interp.Run.lastMemoAdopted
+        let name = "a mid-cell expression that writes through mut still drops the memo"
+        match responses with
+        | [_; last] when code = 0 && last.Contains "\"kept\":true" && adopted = 0 ->
+            record name TH.Pass ""
+        | _ -> record name TH.Fail (sprintf "exit %d, adopted %d, responses: %A" code adopted responses)
+
         try Directory.Delete(tmpDir, true) with _ -> ()
     finally
         Directory.SetCurrentDirectory entryDir

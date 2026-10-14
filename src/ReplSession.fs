@@ -1027,6 +1027,18 @@ type ReplSession(runCwd: string) =
     /// fact, and there is nothing here that could tell whether they did.
     let mutable memoSnippets : string[] = [||]
     let mutable memo = Blade.Interp.Run.emptyMemo
+    /// Which positions of `memoSnippets` were TRANSIENT wrappers -- a bare
+    /// expression's or a mixed cell's, run and never committed. The prefix
+    /// test skips them: a mixed cell `[a; expr; b]` commits `[a; b]`, so the
+    /// next candidate never lines up with the run's own list, and without
+    /// this every binding after the mid-cell expression was dropped from the
+    /// memo and recomputed (measured: a 25 s training cell re-ran under the
+    /// plot cell after it).
+    let mutable memoTransients : Set<int> = Set.empty
+    /// Set by the caller immediately before `EvalCandidate`: the transient
+    /// positions of the candidate about to run. Consumed (reset) by it, so a
+    /// caller that does not know -- the interactive front end -- passes none.
+    member val NextTransients : Set<int> = Set.empty with get, set
 
     /// Where a COMPILED session executable runs. The interpreter lane ignores
     /// it; the g++ lane needs it so relative data paths resolve where the user
@@ -1045,6 +1057,7 @@ type ReplSession(runCwd: string) =
         snippets.Clear()
         // The cache describes a session that no longer exists.
         memoSnippets <- [||]
+        memoTransients <- Set.empty
         memo <- Blade.Interp.Run.emptyMemo
 
     /// Adopt a candidate as the new session. Only ever called for a candidate
@@ -1194,11 +1207,20 @@ type ReplSession(runCwd: string) =
         // snippet inside the cached range and drops the whole memo, which is
         // the conservative answer and the correct one: a redefinition splices
         // in place, so it is visible here as a changed element.
+        let transientsNow = this.NextTransients
+        this.NextTransients <- Set.empty
         let memoIn =
+            // The cached run's COMMITTED snippets, in order: its transient
+            // wrappers never reach the session, so the next candidate cannot
+            // contain them and the comparison skips them (memoTransients).
+            let kept = [| for i in 0 .. memoSnippets.Length - 1 do
+                            if not (Set.contains i memoTransients) then memoSnippets.[i] |]
+            let transients = [ for i in Set.toList memoTransients do
+                                 if i < memoSnippets.Length then memoSnippets.[i] ]
             let shared =
-                let n = min memoSnippets.Length candidate.Count
+                let n = min kept.Length candidate.Count
                 let mutable k = 0
-                while k < n && memoSnippets.[k] = candidate.[k] do k <- k + 1
+                while k < n && kept.[k] = candidate.[k] do k <- k + 1
                 k
             if shared = memoSnippets.Length then
                 // The cached run is a whole prefix of this one: adopt it all.
@@ -1218,7 +1240,12 @@ type ReplSession(runCwd: string) =
                 // rules out writes through a `let mut` array and the `assignRe`
                 // scan rules out a reassignment; anything left unproven drops
                 // the memo rather than guessing.
-                let dropped = [ for i in shared .. memoSnippets.Length - 1 -> memoSnippets.[i] ]
+                //
+                // A transient that ran BETWEEN two kept snippets is dropped
+                // under exactly the same two conditions, which are what make
+                // the later kept value independent of it: it names itself, and
+                // it could not have written anything the later snippet reads.
+                let dropped = [ for i in shared .. kept.Length - 1 -> kept.[i] ] @ transients
                 let names = dropped |> List.map topLevelBindingNames
                 let allNamed = names |> List.forall (List.isEmpty >> not)
                 let reassigns = dropped |> List.exists (fun s -> assignRe.IsMatch(s.Trim()))
@@ -1267,9 +1294,11 @@ type ReplSession(runCwd: string) =
                 // values it did produce are not a whole prefix's end state.
                 if r.ExitCode = Blade.Interp.Run.ExitOk then
                     memoSnippets <- candidate.ToArray()
+                    memoTransients <- transientsNow
                     memo <- { memoOut with MutationFree = mutationFreeSession lowered.Prog }
                 else
                     memoSnippets <- [||]
+                    memoTransients <- Set.empty
                     memo <- Blade.Interp.Run.emptyMemo
                 finish LaneInterp r.ExitCode r.Stdout r.Stderr
             | (Blade.Interp.Repl.InterpFellShort _, _) ->
@@ -1277,6 +1306,7 @@ type ReplSession(runCwd: string) =
                 // visible here, so the cache cannot describe the session state
                 // after it and must be dropped.
                 memoSnippets <- [||]
+                memoTransients <- Set.empty
                 memo <- Blade.Interp.Run.emptyMemo
                 notice "-- falling back to compiled evaluation for this input --"
                 match compiledLane with
@@ -1321,10 +1351,12 @@ type ReplSession(runCwd: string) =
                      (target: string option)
                      (reads: string list)
                      (wanted: Map<string, ReplTypes.Info> -> (string * string) list)
-                     (commit: ResizeArray<string> option) =
+                     (commit: ResizeArray<string> option)
+                     (transients: Set<int>) =
             // `reads` is the static superset of session names this lane can
             // resolve against the run's output lines; the target rides along.
             let printOnly = Some (Set.ofList (reads @ Option.toList target))
+            this.NextTransients <- transients
             ensureFailureDiagnostic (remapDiagnostic candidate placements) <|
             match this.EvalCandidate(candidate, target, printOnly, ignore) with
             | CandidateRejected (ds, _) ->
@@ -1391,8 +1423,8 @@ type ReplSession(runCwd: string) =
         if List.isEmpty segments then blank
         elif not (List.isEmpty (List.tail segments)) then
             let (candidate, slots) = this.MixedCandidate segments
+            let drop = slots |> List.filter _.Transient |> List.map _.Index |> Set.ofList
             let committed =
-                let drop = slots |> List.filter _.Transient |> List.map _.Index |> Set.ofList
                 let out = ResizeArray<string>()
                 for i in 0 .. candidate.Count - 1 do
                     if not (Set.contains i drop) then out.Add candidate.[i]
@@ -1432,7 +1464,7 @@ type ReplSession(runCwd: string) =
                 match lastExpr with
                 | Some s -> (s.Names |> List.map snd) @ Option.toList s.NamedIdent
                 | None -> []
-            evalWith candidate placements None reads report (Some committed)
+            evalWith candidate placements None reads report (Some committed) drop
         elif declRe.IsMatch head then
             let (candidate, idx) = this.DeclarationCandidate trimmed
             // Declarations are silent (see the mixed lane's display rule): the
@@ -1442,7 +1474,7 @@ type ReplSession(runCwd: string) =
             // declaration still EVALUATES exactly as before (effects and
             // `|> compute` are program semantics, not display).
             evalWith candidate [ { Index = idx; Prefix = 0; PrefixRow = 0; SubLine = leadPad + 1 } ]
-                     None [] (fun _ -> []) (Some candidate)
+                     None [] (fun _ -> []) (Some candidate) Set.empty
         elif assignRe.IsMatch head then
             let (candidate, idx, hidden, row) = this.AssignmentCandidate trimmed
             // A reassignment is a statement, not a value ask: silent, like a
@@ -1450,7 +1482,7 @@ type ReplSession(runCwd: string) =
             evalWith candidate
                      [ { Index = idx; Prefix = $"let {hidden} = ".Length
                          PrefixRow = row; SubLine = leadPad + 1 } ]
-                     None [] (fun _ -> []) (Some candidate)
+                     None [] (fun _ -> []) (Some candidate) Set.empty
         else
             // A bare identifier naming a session FUNCTION can't be let-bound
             // just to echo it; its signature comes straight from the
@@ -1485,7 +1517,7 @@ type ReplSession(runCwd: string) =
                                             | Some (ReplTypes.RFunc _) -> true
                                             | _ -> false) -> [ (n, n) ]
                              | _ -> [ ("", transient) ])
-                         None
+                         None (Set.singleton idx)
 
 // Whole-notebook assembly: many cells in, one source out.
 //
