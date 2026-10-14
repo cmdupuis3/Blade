@@ -12253,6 +12253,20 @@ and checkExprInner (env: TypeEnv) (expected: IRType) (expr: Expr) : TypeResult<T
         match et with
         | ETFloat32 | ETFloat64 -> Ok (mkTyped (TExprLit lit) (IRTScalar et))
         | _ -> Error (TypeMismatch (resolved, IRTScalar ETFloat64))
+    // A UNIT-CARRYING numeric position -- an array literal's cells against
+    // `Array<Float32<meters> like ..>`: the literal adapts within its class
+    // (`1.0` is a Float32 here, as above) and the unit attaches, as a bare
+    // value adopts the target unit everywhere. Without it the cell fell to
+    // inference, `1.0` met `Float32<meters>` as a Float64, and the literal
+    // was refused (BL3001) -- the Float64 spelling only passed because its
+    // width agreed. The mixing rule is the scalar arm's: an integer literal
+    // never stands for a float.
+    | ExprKind.ExprLit (LitFloat _ as lit), IRTUnitAnnotated (IRTScalar (ETFloat32 | ETFloat64), _) ->
+        Ok (mkTyped (TExprLit lit) resolved)
+    | ExprKind.ExprLit (LitInt _ as lit), IRTUnitAnnotated (IRTScalar (ETInt32 | ETInt64), _) ->
+        Ok (mkTyped (TExprLit lit) resolved)
+    | ExprKind.ExprLit (LitInt _), IRTUnitAnnotated ((IRTScalar (ETFloat32 | ETFloat64 | ETComplex64 | ETComplex128) as bare), _) ->
+        checkExprInner env bare expr
     | ExprKind.ExprLit (LitBool _ as lit), IRTScalar ETBool ->
         Ok (mkTyped (TExprLit lit) (IRTScalar ETBool))
     | ExprKind.ExprLit (LitBool _ as lit), IRTUnitAnnotated (IRTScalar ETBool, _) ->

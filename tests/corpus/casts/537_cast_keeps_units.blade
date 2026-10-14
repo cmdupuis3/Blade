@@ -14,3 +14,12 @@ let moved = e + Float32(off)
 function narrow(x: T) = Float32(x)
 let g = narrow(d) + Float32(off)
 // EXPECT: g = [1.5, 2.5, 3.5]
+// Widening, from a Float32<meters> literal (the literal adapts within its
+// class and the unit attaches -- refused BL3001 before): Float64(a32m) is
+// a Float64<meters> array, so it adds to a Float<meters> value.
+let a32m: Array<Float32<meters> like Idx<3>> = [1.0, 2.0, 3.0]
+let wide = Float64(a32m) + off
+// EXPECT: wide = [1.5, 2.5, 3.5]
+function widen(x: T) = Float64(x)
+let gw = widen(a32m) + off
+// EXPECT: gw = [1.5, 2.5, 3.5]

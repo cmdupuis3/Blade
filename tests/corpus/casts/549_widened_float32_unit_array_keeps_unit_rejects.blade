@@ -1,0 +1,10 @@
+// TEST: a widened Float32<meters> array still carries meters (rejects)
+// ERROR: BL3006 @ 9:27
+// casts/537's widening: `Float64(a32m)` converts the element only, so the
+// result is a Float64<meters> array, and adding seconds to it is the unit
+// mismatch it would be before the cast.
+Unit meters
+Unit seconds
+let a32m: Array<Float32<meters> like Idx<2>> = [1.0, 2.0]
+let s: Float<seconds> = 1.0
+let bad = Float64(a32m) + s
