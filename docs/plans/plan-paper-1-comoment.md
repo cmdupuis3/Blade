@@ -1,5 +1,11 @@
 # Paper 1 — introducing Blade through the comoment tensor
 
+**Status 2026-10-13: RELATED WORK EXTENDED** from a four-slice literature
+search (§8.1 "Added 2026-10-13"; entries in `docs/blade_literature_survey.md`):
+quotient containers, double-coset canonicalization, histomorphisms, Eberl's AFP
+oracle model. Two corrections: the model qualifier on Thm 5 (§6 item 6) and
+the DMWF name against Gibbons' metamorphism.
+
 **Status 2026-10-07: VENUE DECIDED, JFP** (author, 2026-10-07; ECOOP R2 stays the
 conference alternative). The author's framing note of the same day: symmetry
 tracking matters most under DOMAIN DECOMPOSITION of comoment problems, where the
@@ -273,7 +279,11 @@ and must not be cited for array currying.
    once".
 5. **Type soundness, or a proved rank deduction.** Neither exists; §13.2 has no
    Coq counterpart.
-6. **Optimal time.** Thm 5 counts kernel calls and cells under generic data.
+6. **Optimal time, or minimum arithmetic.** Thm 5 counts kernel calls and
+   cells under generic data, in a black-box oracle model. Solomonik and Demmel
+   (CMAM 2021) compute symmetric contractions with fewer multiplications than
+   orbits in the bilinear model (§8.1, correction 1): say "kernel
+   evaluations", never "operations".
 7. **1362 theorems.** Cite the pillar subset (about 541) and "Rocq 9.0.1";
    88 of the total are `Example` pins, about 415 back the recurrence research
    and about 202 the ML seams.
@@ -339,6 +349,72 @@ Obsidian, Accelerate, Lift, MDH for deferred arrays; Weirich–Casinghino and
 Strickland et al. for arity genericity; Sherman–Kolda (implicit moment
 tensors win asymptotically at large n and r) and Solomonik–Demmel–Hoefler
 (fewer operations can cost more communication) as honest limits.
+
+**Added 2026-10-13, from a four-slice literature search** (full entries in
+`docs/blade_literature_survey.md`). The verdict: no single ingredient is new;
+the combination and the mechanization are, as far as the web shows. Per pillar:
+
+- *Index types as sets with a group action.* Quotient containers (Abbott,
+  Altenkirch, Ghani, McBride, MPC 2004) and action containers (Joram and
+  Veltri, TYPES 2024) are the existing theory of "positions carry a group
+  action"; species (Joyal 1981; Yorgey's thesis 2014) the combinatorial one.
+  None has storage on a transversal, an enumeration order, or a compiler.
+  Concede the object; claim the layout theorem (enumeration = image of the box
+  under canonical form, fibres = orbits, canonicalizing access) as the first
+  statement of it about a compiler. Naperian functors (Gibbons, ESOP 2017)
+  and Mullin's Mathematics of Arrays (1988: partial index = subarray, layout
+  from a denotational normal form) are the "array = function on its index
+  type" and "layout derived, not authored" precedents; cite both beside Dex.
+- *The licence group.* H ∩ Stab is the same computation as double-coset
+  tensor canonicalization (Manssur and Portugal 2001; Butler 1984; xPerm 2008;
+  Cadabra; SymPy `tensor_can`): slot symmetry against a stabilizer. They use
+  it to decide equality of expressions; Blade uses it to license a quotient.
+  One sentence saying so satisfies the group-theory reader.
+- *The feedback arm.* `let rec` is a histomorphism / dynamorphism (Uustalu
+  and Vene 1999; Kabanov and Vene 2006; Hinze and Wu 2013) and, as a library
+  function, `Data.Vector.constructN`. Blade's own: the leading-axis type, the
+  static pre-allocated buffer, the implicit zero past the prefix, the `while`
+  guard, and the orbit-work theorem. Fusion and the multi-accumulator joins
+  are Meijer–Fokkinga–Paterson 1991, banana-split and stream fusion (Coutts et
+  al. 2007) over index types; cite, do not claim.
+- *The lower bound.* No published bound is stated in terms of orbits of a
+  group action; Ben-Or 1983 is the decision-tree paradigm and Eberl's AFP
+  sorting bound (2017) the nearest mechanized oracle model (the same shape as
+  `BladeOptimal`, with no group). Liu, Bernstein, Chlipala and Ragan-Kelley
+  (POPL 2022) verify array-compiler rewrites for correctness only. "No
+  mechanized optimality result for a symmetric-storage or iteration decision
+  was found" is the sentence the search supports; Thm 5's "no published
+  statement found" stands.
+- *Symmetric compilers.* SySTeC (§8.2), CTF, Schatz et al., LGen, DASTAC
+  (Ghorbani, Bauer, Grosser, Shaikhha, arXiv 2407.13726, which concedes its
+  layouts may be suboptimal) and Hirata's TCE (2003) all keep symmetry outside
+  the type system and prove nothing. Chapel domains are the nearest "iteration
+  space as a first-class typed object"; no symmetry quotient.
+
+Two corrections the search forces:
+
+1. **The model qualifier on Thm 5.** Solomonik and Demmel, "Fast Bilinear
+   Algorithms for Symmetric Tensor Contractions" (CMAM 2021), compute a
+   symmetric contraction with fewer multiplications than distinct output
+   cells, by a factor up to (s+t+v)!/(s!t!v!), forming products of sums and
+   subtracting the unwanted terms. Those products are not kernel evaluations
+   at index tuples, so the orbit bound stands in its model and not in theirs.
+   Every statement of Thm 5 must say "kernel evaluations in a black-box oracle
+   model" (§6 item 6), and `BladeBoundary`'s scope statement, which names
+   separable kernels as the way past the query bound, must name the bilinear
+   mechanism as a second way.
+2. **The DMWF name.** In Gibbons' usage (SCP 2007) a metamorphism is a fold
+   followed by an unfold. The DMWF is an unfold with a state-dependent
+   coalgebra, a fold, and a histomorphic feedback arm, which is closer to a
+   hylomorphism. Define the term against Gibbons' sense on first use, or
+   rename it; "double metamorphism" and "metamorphism with feedback" have no
+   prior use.
+
+Not checked by the search (full texts unavailable): Yorgey's thesis body, the
+quotient-containers PDF, Hinze–Wu–Gibbons on conjugate hylomorphisms (which
+might subsume a dependent-seed unfold), Knuth §7.2.1.3, Lean's Mathlib `Sym` /
+`Sym2`, and the polyhedral literature for the rectilinear-iff-constant-residual
+characterization.
 
 ### 8.2 What SySTeC states (arXiv 2406.09266 v2, read directly)
 
