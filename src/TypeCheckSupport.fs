@@ -4134,7 +4134,22 @@ let internal arrowArrayArgs (env: TypeEnv) (tFunc: TypedExpr) (tArgs: TypedExpr 
             && arrays |> List.exists (fun (_, t) ->
                 freeInferVars subst t
                 |> Set.exists (fun v -> not (subst.IsPolymorphicId v) && (subst.GetLiteralDefault v).IsNone))
-        if arrays.IsEmpty || unsettled then None
+        // The callee may already BE the instance this call needs: an instance
+        // registers as a declaration source too, and its body still reads an
+        // axis the argument leaves unnamed -- `z(0, j)` into the anonymous
+        // column of an array whose ROW is named -- so it records the same
+        // parameter again. Re-targeting it fetched itself from the cache, and
+        // the dispatch re-targeted that head forever (a stack overflow after
+        // minutes). The instance's own key is the cache-hit condition.
+        let alreadyThisInstance =
+            match env.ArrowDeclSources.TryGetValue fid with
+            | true, (_, _, baseFixed, origin) when not (Map.isEmpty baseFixed) ->
+                let wanted =
+                    arrays |> List.fold (fun acc (i, t) ->
+                        Map.add i (arrowInstanceParamType (fun () -> 0) (subst.Resolve t)) acc) baseFixed
+                arrowInstanceKey subst origin wanted = arrowInstanceKey subst origin baseFixed
+            | _ -> false
+        if arrays.IsEmpty || unsettled || alreadyThisInstance then None
         else Some (fid, Map.ofList arrays)
 
 /// The type of a halo WINDOW READ `w(o)` over a DENSE inner index: a position

@@ -515,11 +515,11 @@ final_loss
 // %%
 let loss_ep0 = method_for(range<Idx<25>>) <@> lambda(n) -> loss_curve(n) |> compute
 let loss_ep1 = method_for(range<Idx<25>>) <@> lambda(n) -> loss_curve(n + 25) |> compute
-let stream_ep0 = plot.stream("aspirin_loss", Float64(0..25), loss_ep0, 0: epoch,
+let stream_ep0 = plot.stream("aspirin_loss", Float64(0..NB), loss_ep0, 0: epoch,
                              "mini-batch loss (standardized energy)": title, "batch": xlabel, "mean squared error": ylabel)
-let stream_ep1 = plot.stream("aspirin_loss", 25.0 + Float64(0..25), loss_ep1, 1: epoch,
+let stream_ep1 = plot.stream("aspirin_loss", Float64(NB) + Float64(0..NB), loss_ep1, 1: epoch,
                              "mini-batch loss (standardized energy)": title, "batch": xlabel, "mean squared error": ylabel)
-let fig_loss = plot.line(Float64(0..50), loss_curve, "mini-batch loss (standardized energy)": title,
+let fig_loss = plot.line(Float64(0..NSTEP), loss_curve, "mini-batch loss (standardized energy)": title,
                          "batch": xlabel, "mean squared error": ylabel)
 
 // %% [markdown]

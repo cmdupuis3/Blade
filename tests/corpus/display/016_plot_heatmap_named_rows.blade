@@ -1,0 +1,44 @@
+// TEST: Plot Heatmap Named Rows
+// ============================================================================
+// A grid whose ROWS are a named index type. `blade check` used to hang on
+// this (a stack overflow after ~7 minutes), and an interpreter session died
+// with it. The grid helpers read `z` at computed positions into axes their
+// signature leaves unnamed, so a call handing them a NAMED axis is
+// re-targeted at the declaration's ARRAY INSTANCE (z typed as the argument,
+// so the read into the named axis is guarded). The instance registers as a
+// declaration too, and its body still reads the column -- unnamed in the
+// argument as well -- so the call re-targeted the instance at itself, fetched
+// it from the cache, and dispatched it again, without end.
+//
+// `first_row` is the shape with no plot module in it: a literal into the
+// named row, the loop index into the anonymous column. `a` is the full
+// heatmap, `b` the decimated one (maxdim 4: the 16-sample budget reads the
+// named rows at computed positions, guarded), `c` a contourf. The grids stay
+// block-local so the differential compares frames, not 104-number prints.
+// ============================================================================
+import plot
+type Piece = Idx<8>
+function first_row(z: Array<Float64 like Piece, Idx<13>>) -> Float64 = {
+    let w = method_for(range<Idx<4>>) <@> lambda(j) -> z(0, j) |> compute
+    reduce(w, (+))
+}
+let s = {
+    let g = method_for(range<Piece>, range<Idx<13>>) <@> lambda(p, q) -> Float64(q) |> compute
+    first_row(g)
+}
+let a = {
+    let g = method_for(range<Piece>, range<Idx<13>>) <@> lambda(p, q) -> Float64(p * 13 + q) |> compute
+    plot.heatmap(Float64(0..13), Float64(0..8), g, 4: cmap, "pieces": title)
+}
+let b = {
+    let g = method_for(range<Piece>, range<Idx<13>>) <@> lambda(p, q) -> Float64(p * 13 + q) |> compute
+    plot.heatmap(Float64(0..13), Float64(0..8), g, 4: maxdim)
+}
+let c = {
+    let g = method_for(range<Piece>, range<Idx<13>>) <@> lambda(p, q) -> Float64(p * 13 + q) |> compute
+    plot.contourf(Float64(0..13), Float64(0..8), g)
+}
+// EXPECT: s = 6.0
+// EXPECT: a = true
+// EXPECT: b = true
+// EXPECT: c = true

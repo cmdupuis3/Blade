@@ -293,7 +293,7 @@ let k2_var_total = reduce(k2_vars, (+))
 // Every shell's K2 l = 2 power (what the site symmetry forbids) beside its
 // K4 l = 4 power (what it allows): thirty decades apart, sample after sample.
 let blind_rows = method_for(range<Idx<2>>, range<Idx<NALL>>) <@> lambda(q, n) -> log(pw(n, 2 * q) + 0.000000000000000000000000000000000001) / log(10.0) |> compute
-let fig_blind = plot.lines(Float64(0..1104), blind_rows, ["K2 l=2 power (forbidden)", "K4 l=4 power (allowed)"], 1: mode,
+let fig_blind = plot.lines(Float64(0..NALL), blind_rows, ["K2 l=2 power (forbidden)", "K4 l=4 power (allowed)"], 1: mode,
                            "K <= 2 blindness on 1104 experimental shells": title, "sample (sc, fcc, bcc, tet blocks; train then test)": xlabel, "log10 power": ylabel)
 l2_power_max
 
@@ -629,7 +629,7 @@ let trajs = method_for(range<Idx<3>>) <@> lambda(rg) -> train(rg) |> compute
 // %%
 let final_losses = method_for(range<Idx<3>>) <@> lambda(rg) -> trajs(rg, NSTEP, 152) |> compute
 let loss_rows = method_for(range<Idx<3>>, range<Idx<NSTEP>>) <@> lambda(rg, n) -> trajs(rg, n + 1, 152) |> compute
-let fig_losses = plot.lines(Float64(0..120), loss_rows, ["K<=2 (the constant model)", "K2+K4 (even orders)", "+K3 (the full jet)"],
+let fig_losses = plot.lines(Float64(0..NSTEP), loss_rows, ["K<=2 (the constant model)", "K2+K4 (even orders)", "+K3 (the full jet)"],
                             "readout training, all three rungs": title, "step": xlabel, "one-vs-rest squared error": ylabel)
 final_losses
 

@@ -403,10 +403,9 @@ let fig_spin = plot.lines(angle, spin_table,
                            "pseudoscalar, chiral 1", "pseudoscalar, chiral 2"],
                           2: mode, "one full turn: what moves, and what cannot": title, "rotation angle (rad)": xlabel)
 
-// The O(3) fingerprint of every shape (the table runs over an anonymous Idx<8>
-// and casts its subscript into `Piece`).
-let fingerprint = method_for(range<Idx<8>>, range<Idx<13>>) <@> lambda(s, q) -> {
-    let f = h_pc((s : Piece))
+// The O(3) fingerprint of every shape.
+let fingerprint = method_for(range<Piece>, range<Idx<13>>) <@> lambda(s, q) -> {
+    let f = h_pc(s)
     if q < 12 then ev_of(f)(q) else od_of(f)(0)
 } |> compute
 let fig_fingerprint = plot.heatmap(Float64(0..13), Float64(0..8), fingerprint, 4: cmap,
@@ -501,7 +500,7 @@ let final_loss = final_row(NP2)
 final_loss
 
 // %%
-let fig_loss = plot.line(Float64(0..100), loss_curve, "readout training: one-vs-rest squared error": title,
+let fig_loss = plot.line(Float64(0..NSTEP), loss_curve, "readout training: one-vs-rest squared error": title,
                          "step": xlabel, "loss": ylabel)
 
 // %% [markdown]

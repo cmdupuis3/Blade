@@ -221,7 +221,7 @@ let sr_octa = sort(radii(100), lambda(x) -> x)
 let sr_tetra = sort(radii(200), lambda(x) -> x)
 let sr_heavy = sort(radii(300), lambda(x) -> x)
 let radial_rows = stack(sr_iso, sr_octa, sr_tetra, sr_heavy, ref_radii)
-let fig_radial = plot.lines(Float64(0..120), radial_rows, ["iso", "octa", "tetra", "heavy", "reference profile"],
+let fig_radial = plot.lines(Float64(0..NPT), radial_rows, ["iso", "octa", "tetra", "heavy", "reference profile"],
                             "sorted radii, one cloud per class": title, "rank": xlabel, "radius": ylabel)
 whitening_bad
 
@@ -698,7 +698,7 @@ let trajs = method_for(range<Idx<4>>) <@> lambda(rg) -> train(rg) |> compute
 // almost from the first step: the descent has nothing to descend.
 let final_losses = method_for(range<Idx<4>>) <@> lambda(rg) -> trajs(rg, NSTEP, 152) |> compute
 let loss_rows = method_for(range<Idx<4>>, range<Idx<NSTEP>>) <@> lambda(rg, n) -> trajs(rg, n + 1, 152) |> compute
-let fig_losses = plot.lines(Float64(0..120), loss_rows, ["K0 (occupancies)", "K<=2 (the constant model)", "+K3", "+K3+K4 (full jet)"],
+let fig_losses = plot.lines(Float64(0..NSTEP), loss_rows, ["K0 (occupancies)", "K<=2 (the constant model)", "+K3", "+K3+K4 (full jet)"],
                             "readout training, all four rungs": title, "step": xlabel, "one-vs-rest squared error": ylabel)
 final_losses
 
