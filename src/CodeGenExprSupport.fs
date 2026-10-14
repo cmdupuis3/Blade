@@ -1707,8 +1707,16 @@ let packedGemmWorth (m: int64) (k: int64) (n: int64) : bool =
 /// would the stored group. A partially-read group, or a group completed with
 /// slots after it, is refused at typecheck (TypeCheckSupport.compactCoordWalk);
 /// ragged/dep-idx/compound/sparse/wreath residuals keep their own read paths.
+///
+/// An IRREPS residual (IrrepsIdx / point-group irreps, rank 1) counts as plain:
+/// those spaces are dense by design (IR.placementClass), one flat axis of the
+/// spec's total dimension, so a row of `Array<T like I, IrrepsIdx<S>>` is the
+/// same `{ A.data[i], A.extents + 1 }` view a plain row is. It used to fall to
+/// the bare `A[i]` (a `T*`), which g++ refused to pass as an `Array<T, 1>`.
 let internal subviewAxesOk (arrTy: IRArrayType) (consumed: int) : bool =
-    let plainAxis (ix: IRIndexType) = ix.IxKind = IxKPlain && ix.Symmetry = SymNone && ix.Rank = 1
+    let plainAxis (ix: IRIndexType) =
+        (ix.IxKind = IxKPlain || ix.IxKind = IxKIrreps || ix.IxKind = IxKPgIrreps)
+        && ix.Symmetry = SymNone && ix.Rank = 1
     let compactGroup (ix: IRIndexType) =
         ix.IxKind = IxKPlain && ix.Rank >= 2
         && (match ix.Symmetry with

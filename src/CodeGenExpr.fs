@@ -1765,6 +1765,24 @@ and materializeInlineForm (subst: SubstMap) (names: Map<IRId, string>) (varName:
     // as IREigh above -- this arm must not force it).
     | IRRange (ixs, offset) ->
         materializeRangeForm subst names varName ixs offset
+    // A rank-1 ARRAY LITERAL bound inside a kernel block (`let z = [0.0, 0.0]`,
+    // or the literal operand `join` lifts to a let): every other let-site emits
+    // it through genArrayLiteral, but a kernel body renders its lets here, and
+    // there was no arm (BL7001 "no rule for IRArrayLit in expression
+    // position"). Nested (rank >= 2) literals keep that refusal.
+    | IRArrayLit (elems, arrTy) when arrTy.IndexTypes.Length = 1
+                                    && elems |> List.forall (fun e -> not e.IsIRArrayLit) ->
+        let elemStr = elemTypeToCpp arrTy.ElemType
+        let n = elems.Length
+        let (extentsDecl, ownedExtents) =
+            emitExtentsTable "" ($"{varName}_extents") 1 [(string n, true)]
+        let vals = elems |> List.map (fun e -> $"({elemStr})({exprToCppCore subst names e})") |> String.concat ", "
+        Some (
+            extentsDecl @ [
+                $$"""Array<{{elemStr}}, 1> {{varName}} = { new {{elemStr}}[{{max n 1}}]{ {{vals}} }, {{varName}}_extents };"""
+            ],
+            [MatRawData (varName, ownedExtents)]
+        )
     | _ -> None
 
 

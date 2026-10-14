@@ -136,7 +136,7 @@ let private groupKeysTypeInScope (id: IRId) (scope: IRExpr list) : IRType option
 /// deterministic-deallocation frame can be pushed and popped around it inside a
 /// `try ... finally` WITHOUT adding a closure layer over the mutable `currentNames`
 /// the fold threads (see setAllocOwner's note on that hazard).
-let private genFuncBodyScoped
+let rec private genFuncBodyScoped
         (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string)
         (lets: (IRId * IRExpr) list) (retExpr: IRExpr) : string list =
     let mutable currentNames = names
@@ -781,7 +781,8 @@ body-level let RHS of that shape in IRCompute; emitting nothing here would regis
             // The returned pool leaves with the value; free everything else.
             suppressAllocName retVarName
             stmts @ combCode @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
-        | (IRIf _ | IRMatch _) when branchingReturnMaterializes retExpr ->
+        | (IRIf _ | IRMatch _) when branchingReturnMaterializes retExpr
+                                    && not (retExpr.IsIRIf && (match inferExprType retExpr with IRTScalar _ -> true | _ -> false)) ->
             // A BRANCHING return whose arms each materialize an array
             // (`if flag then xs <@> k1 else xs <@> k2`). S4's return force
             // reaches these leaves, but the emitter cannot: every materializing
@@ -905,6 +906,25 @@ or return a scalar and materialize at the call site"
             let (retCode, _) = genBinding bodyCtx tempBinding builder
             suppressAllocsSince allocMark
             stmts @ retCode @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
+        | IRIf (cond, thenE, elseE)
+            when (match inferExprType retExpr with IRTScalar _ -> true | _ -> false)
+                 && not (kernelBodyIsExpressionShaped thenE && kernelBodyIsExpressionShaped elseE) ->
+            // A SCALAR branching return whose arm holds a statement-shaped node
+            // -- `if k > 0 then sqrt(reduce(d * d, (+))) else 0.0`, whose fused
+            // reduce the lift pass bound to a let INSIDE the arm (hoisting it
+            // past the branch would run reads the condition guards). A ternary
+            // has no room for that let, so each arm is emitted as a body of its
+            // own (the same generator, its own allocation scope) inside an
+            // immediately-invoked lambda, and the ternary picks one. A scalar
+            // needs no shared destination, which is what keeps array-valued
+            // arms refused above.
+            let retTy = irTypeToCpp (inferExprType retExpr)
+            let armIife (arm: IRExpr) =
+                let lines = genFuncBody { ctx with VarNames = currentNames; GroupedArrays = currentGrouped; TupleChildren = currentTupleChildren } builder currentNames "" arm
+                $"""[&]() -> {retTy} {{ {String.concat " " (lines |> List.map (fun l -> l.Trim()))} }}()"""
+            let retStr = $"(({exprToCpp currentNames cond}) ? {armIife thenE} : {armIife elseE})"
+            let retVarName = $"__ret{builder.FreshId()}"
+            stmts @ [$"{indent}{retTy} {retVarName} = {retStr};"] @ popAllocScopeFrees indent @ [$"{indent}return {retVarName};"]
         | _ ->
             // Return-extent ABI (supersedes the stage-2b guard): a
             // loop-materialized array CAN now be returned. The former guard
@@ -1034,7 +1054,7 @@ or return a scalar and materialize at the call site"
 /// deterministic-deallocation FUNCTION scope: every allocation the body emits
 /// registers into that frame and is freed immediately before the single exit,
 /// unless the escape analysis (or a return-name suppression) spares it.
-let genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
+and genFuncBody (ctx: CodeGenContext) (builder: IRBuilder) (names: Map<IRId, string>) (indent: string) (body: IRExpr) : string list =
     // Deep unroll: flatten all nested IRLet chains into a flat list
     let rec deepUnroll (expr: IRExpr) : (IRId * IRExpr) list * IRExpr =
         match expr with
@@ -3104,29 +3124,29 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
                   "    MPI_Init(&argc, &argv);")
               "    MPI_Comm_rank(MPI_COMM_WORLD, &__blade_mpi_rank);"
               "    MPI_Comm_size(MPI_COMM_WORLD, &__blade_mpi_size);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
         else
             [ "int main() {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
               "    blade_rt::typed_float_print(cout);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
     let timing =
         if mpi then
             [ ""
-              "    auto end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
-              $"    if (__blade_mpi_rank == 0) {{ cout << \"{testName} completed in \" << elapsed << \"s\" << endl; }}"
+              "    auto __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
+              $"    if (__blade_mpi_rank == 0) {{ cout << \"{testName} completed in \" << __blade_elapsed << \"s\" << endl; }}"
               ""
               "    // Print results for verification (rank 0 only)"
               "    if (__blade_mpi_rank == 0) {" ]
         else
             [ ""
-              "    auto end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
-              $"    cout << \"{testName} completed in \" << elapsed << \"s\" << endl;"
+              "    auto __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
+              $"    cout << \"{testName} completed in \" << __blade_elapsed << \"s\" << endl;"
               ""
               "    // Print results for verification" ]
     let finalizeLines = if netcdf then netcdfFinalizeLines else []
@@ -3178,37 +3198,37 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
                   "    MPI_Init(&argc, &argv);")
               "    MPI_Comm_rank(MPI_COMM_WORLD, &__blade_mpi_rank);"
               "    MPI_Comm_size(MPI_COMM_WORLD, &__blade_mpi_size);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
         else
             [ "int main() {"
               "    cout << std::setprecision(15);"
               "    cout << std::boolalpha;"
               "    blade_rt::typed_float_print(cout);"
-              "    auto start = TIME;"
+              "    auto __blade_t0 = TIME;"
               "" ]
     let setupTiming =
-        let line = $"cout << \"{testName} input allocation took \" << setup_elapsed << \"s\" << endl;"
+        let line = $"cout << \"{testName} input allocation took \" << __blade_setup_elapsed << \"s\" << endl;"
         [ ""
-          "    auto end = TIME;"
-          "    double setup_elapsed = 1e-9 * TIME_DIFF;"
+          "    auto __blade_t1 = TIME;"
+          "    double __blade_setup_elapsed = 1e-9 * TIME_DIFF;"
           (if mpi then $$"""    if (__blade_mpi_rank == 0) { {{line}} }""" else "    " + line)
           ""
-          "    start = TIME;" ]
+          "    __blade_t0 = TIME;" ]
     let computeTiming =
-        let line = $"cout << \"{testName} completed in \" << elapsed << \"s\" << endl;"
+        let line = $"cout << \"{testName} completed in \" << __blade_elapsed << \"s\" << endl;"
         if mpi then
             [ ""
-              "    end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
+              "    __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
               $$"""    if (__blade_mpi_rank == 0) { {{line}} }"""
               ""
               "    // Print results for verification (rank 0 only)"
               "    if (__blade_mpi_rank == 0) {" ]
         else
             [ ""
-              "    end = TIME;"
-              "    double elapsed = 1e-9 * TIME_DIFF;"
+              "    __blade_t1 = TIME;"
+              "    double __blade_elapsed = 1e-9 * TIME_DIFF;"
               "    " + line
               ""
               "    // Print results for verification" ]

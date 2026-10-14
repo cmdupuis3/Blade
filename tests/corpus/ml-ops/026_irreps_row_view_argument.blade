@@ -1,0 +1,13 @@
+// TEST: Irreps Row View Argument
+// A row of a table whose rows are IrrepsIdx-typed, passed straight to a
+// function: the row is the same dense `{ t.data[i], t.extents + 1 }` view a
+// plain row is. It used to be emitted as the bare `t[i]` (a `double*`), which
+// g++ refused to pass as an Array<double, 1> (BL9002).
+import ml as ml
+let static HS = [(0, 0, 1), (1, 1, 1)]
+function mk(i: Int64) -> Array<Float like IrrepsIdx<HS>> = [Float64(i), 1.0, 2.0, 2.0]
+function f(r: Array<Float like IrrepsIdx<HS>>) where ml.equiv(O3) -> Float = ml.norms(HS, r)(1)
+let t = method_for(range<Idx<3>>) <@> lambda(i) -> mk(i) |> compute
+let b = f(t(1))
+// EXPECT: t = [[0.0, 1.0, 2.0, 2.0], [1.0, 1.0, 2.0, 2.0], [2.0, 1.0, 2.0, 2.0]]
+// EXPECT: b = 3.0

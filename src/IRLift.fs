@@ -536,7 +536,19 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
     // Blessed positions: don't lift the value's top-level inline form; do
     // descend into both sides for nested cases.
     | IRLet (id, value, body) ->
-        IRLet (id, liftExpr builder value, liftExpr builder body)
+        // A value whose own operands were hoisted -- `let r = join([0.0], v, 0)`
+        // becomes `let r = (let t = [0.0] in join(t, v, 0))` -- is FLOATED:
+        // `let t = [0.0] in let r = join(t, v, 0) in ...`. Ids are unique, so
+        // nothing is captured. Only when the chain ends in a statement-shaped
+        // form: a kernel body's let renderer materializes such a form only when
+        // it is the let's value itself, and sent the nested chain to the
+        // expression emitter (BL7004 "join(...) must be bound to a let").
+        let value' = liftExpr builder value
+        let body' = liftExpr builder body
+        match peelLetChain value' with
+        | (hoisted, tail) when not hoisted.IsEmpty && isStatementShaped tail ->
+            wrapLets hoisted (IRLet (id, tail, body'))
+        | _ -> IRLet (id, value', body')
 
     // The inline forms themselves: descend into their sub-expressions
     // (which may contain further nested inline forms), but DO NOT lift
@@ -802,8 +814,15 @@ let rec liftExpr (builder: IRBuilder) (expr: IRExpr) : IRExpr =
                 (accB @ b, accA @ [a'])) ([], [])
         wrapLets binds (IRApp (fn', argsFinal, retTy))
     | IRJoin (arrs, dim) ->
+        // A LITERAL operand is hoisted too, as a call argument's is: the join
+        // materializer renders each operand as an expression, and inside a
+        // kernel body `join([0.0, 0.0], row(k), 0)` reached it as a bare
+        // IRArrayLit (BL7001 "no rule for IRArrayLit in expression position").
         let arrs' = arrs |> List.map (liftExpr builder)
-        let (binds, arrsFinal) = liftChildren builder arrs'
+        let (binds, arrsFinal) =
+            arrs' |> List.fold (fun (accB, accA) a ->
+                let (b, a') = liftChildIncludingArrayLit builder a
+                (accB @ b, accA @ [a'])) ([], [])
         wrapLets binds (IRJoin (arrsFinal, dim))
     | IRStack arrs ->
         let arrs' = arrs |> List.map (liftExpr builder)
@@ -1074,8 +1093,22 @@ let liftInlineFormsModule (modul: IRModule) (builder: IRBuilder) : IRModule =
     setStructFieldsCache modul.Types
     let liftedBindings =
         modul.Bindings |> List.map (fun b -> { b with Value = liftExpr builder b.Value })
+    // A KERNEL lambda whose whole body is a data-dependent form --
+    // `lambda(row) -> sort(row, k)` -- is inlined into the loop nest and its
+    // body rendered as an expression, where these forms have no rendering
+    // (BL7001 "no rule for IRSort in expression position"). Bound to a name it
+    // takes the let route the block spelling `{ let r = sort(..); r }` already
+    // took (materializeInlineForm). Named functions return through their own
+    // statement-shaped return arm, so only lambdas are rewritten.
+    let bindBareInlineBody (f: IRFuncDef) (body: IRExpr) =
+        match body with
+        | IRMask _ | IRSort _ | IRUnique _ | IRIntersect _ | IRUnion _ when f.Name.StartsWith "__lambda" ->
+            let id = builder.FreshId()
+            let ty = typeOf body
+            IRLet (id, body, IRVar (id, ty))
+        | _ -> body
     let liftedFunctions =
-        modul.Functions |> List.map (fun f -> { f with Body = liftExpr builder f.Body })
+        modul.Functions |> List.map (fun f -> { f with Body = bindBareInlineBody f (liftExpr builder f.Body) })
     // A `compound(dense, mask)` constructor keeps its operands OUTSIDE the
     // binding's value (which is a unit placeholder), so the map above never
     // sees them. A COMPUTED mask -- `compound(t, a && b && c)`, or one whose

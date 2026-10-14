@@ -2898,7 +2898,7 @@ let genIncludesExternal () : string list =
     @
     [""
      "#define TIME std::chrono::high_resolution_clock::now()"
-     "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()"
+     "#define TIME_DIFF std::chrono::duration_cast<std::chrono::nanoseconds>(__blade_t1 - __blade_t0).count()"
      ""]
 
 

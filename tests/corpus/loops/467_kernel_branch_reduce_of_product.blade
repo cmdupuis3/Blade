@@ -1,0 +1,22 @@
+// TEST: Kernel Branch Reduce Of Product
+// A fold over a deferred product inside an if-arm of a kernel block:
+// `if k > 0 then sqrt(reduce(d * d, (+))) else 0.0`. The fused reduce is a
+// statement, bound to a let INSIDE the arm (hoisting it past the branch would
+// run reads the condition guards), and a ternary has no room for it -- BL7004
+// "reduce over a deferred computation must be bound to a let". Each arm of a
+// scalar branching return is now a body of its own. `guarded` shows why the
+// let must stay in its arm: at k = 0 the arm reads pts(k - 1).
+let pts: Array<Float like Idx<3>, Idx<2>> = [[3.0, 4.0], [1.0, 0.0], [6.0, 8.0]]
+let norms = method_for(range<Idx<3>>) <@> lambda(k) -> {
+    let d = pts(k)
+    if k > 0 then sqrt(reduce(d * d, (+))) else 0.0
+} |> compute
+let guarded = method_for(range<Idx<3>>) <@> lambda(k) -> {
+    if k == 0 then -1.0 else {
+        let p = pts(k - 1)
+        reduce(p * p, (+))
+    }
+} |> compute
+// EXPECT: pts = [[3.0, 4.0], [1.0, 0.0], [6.0, 8.0]]
+// EXPECT: norms = [0.0, 1.0, 10.0]
+// EXPECT: guarded = [-1.0, 25.0, 1.0]

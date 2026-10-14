@@ -1,0 +1,17 @@
+// TEST: Kernel Body Array Literal
+// Array literals inside a kernel block: bound by a `let`, and written straight
+// into a `join`. Both reached the kernel's let renderer, which had no arm for a
+// literal (BL7001 "no rule for IRArrayLit in expression position"); the join
+// operand now hoists to a let first, as a call argument's does.
+let row: Array<Float like Idx<3>, Idx<2>> = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+let padded = method_for(range<Idx<3>>) <@> lambda(k) -> {
+    let r = join([0.0, 0.0], row(k), 0)
+    r
+} |> compute
+let weighted = method_for(range<Idx<3>>) <@> lambda(k) -> {
+    let w = [0.5, 2.0]
+    reduce(w * row(k), (+))
+} |> compute
+// EXPECT: row = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+// EXPECT: padded = [[0.0, 0.0, 1.0, 2.0], [0.0, 0.0, 3.0, 4.0], [0.0, 0.0, 5.0, 6.0]]
+// EXPECT: weighted = [4.5, 9.5, 14.5]

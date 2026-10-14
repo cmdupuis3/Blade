@@ -531,7 +531,12 @@ let rec private judge (ctx: Ctx) (env: Map<string, RepStatus>) (e: Expr)
     let j = judge ctx env
     match e.Kind with
     | ExprKind.ExprLit _ -> Ok (Inv InvScalar)
-    | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es ->
+    | ExprKind.ExprArrayLit es | ExprKind.ExprTuple es
+    // `join` / `stack` of invariant arrays is an invariant aggregate by the
+    // same rule as the literal spelling of it: `join(ml.norms(S, a),
+    // ml.norms(S, b), 0)` was "unclassifiable" (BL4008) while a literal of
+    // the same invariant values certified.
+    | ExprKind.ExprJoin (es, _) | ExprKind.ExprStack es ->
         // constants and invariant aggregates are invariant; anything rep-
         // valued inside an aggregate loses its rep structure -> reject.
         es
