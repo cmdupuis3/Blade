@@ -1495,6 +1495,20 @@ let resolveTypedZerosModule (structFields: string -> (string * IRType) list opti
             IRBinOp (mode, op, l, partnerZero l |> Option.defaultValue z, loc)
         | IRBinOp (mode, op, (IRZero ty as z), r, loc) when isOpen ty ->
             IRBinOp (mode, op, partnerZero r |> Option.defaultValue z, r, loc)
+        // A FOLD's seed still open (`reduce(row ^ 0, (+))` over `row: T^1`,
+        // whose mapped element the checker typed with a variable of its
+        // own): the accumulator is the specialized KERNEL's result, so the
+        // seed is that type's zero. The Float64 fallback seeded an Int64
+        // instance with 0.0 -- C++ converted it silently, the interpreter
+        // folded in doubles and printed a VFloat where an Int64 was typed.
+        | IRReduceCompute (comp, k, (IRZero ty as z)) when isOpen ty ->
+            let fromKernel =
+                match exprTypeIfKnown k with
+                | Some (FuncElem (_, ret)) -> zeroLiteralOf ret
+                | _ -> None
+            match fromKernel |> Option.orElse (partnerZero comp) with
+            | Some lit -> IRReduceCompute (comp, k, lit)
+            | None -> IRReduceCompute (comp, k, z)
         | _ -> e
     let bareArrayZero (e: IRExpr) : IRExpr =
         match e with
