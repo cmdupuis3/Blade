@@ -904,6 +904,15 @@ let private shimTable : Map<string, ShimFn> =
           "blade_print_str", io "void" [ "ptr"; "ptr" ]
           "blade_print_completed", io "void" [ "ptr"; "double" ] ]
 
+/// The shim symbols that can panic: the panic path itself and the
+/// arithmetic-contract helpers. Shadow-frame elision (`resolveFrames`) treats
+/// a call to one of these as reaching a panic; tests/LlvmTests.fs holds the
+/// shim source to this set.
+let shimPanicSymbols : Set<string> =
+    shimTable
+    |> Map.filter (fun _ f -> f.Group = grpShimPanic || f.Group = grpShimArith)
+    |> Map.keys |> Set.ofSeq
+
 /// Declare one shim symbol, decorated with whatever fact classes are on.
 let private needShim (c: Ctx) (name: string) : unit =
     let f =
@@ -989,6 +998,40 @@ let private stringGlobal (c: Ctx) (s: string) : string =
         c.Globals.Add($"{name} = private unnamed_addr constant [{bytes.Length + 1} x i8] c\"{(sb.ToString())}\"")
         c.StringPool.[s] <- name
         name
+
+// ---------------------------------------------------------------------------
+// Shadow frames (the twin of the C++ lane's BLADE_FRAME)
+// ---------------------------------------------------------------------------
+//
+// A panic prints the Blade call stack, innermost first: `  at <SourceName>`
+// per live frame, after the `-->` line. A frame opens at a function body's
+// entry and around every INLINED kernel application (this lane inlines
+// kernels and capturing callees instead of calling them, where the C++ lane
+// calls a framed function), so both lanes push the same callables.
+//
+// A frame is observable only while a panic is reachable under it, so one
+// that reaches none is dropped -- exactly CodeGen.resolveShadowFrames' rule,
+// and for the same reason: the frame sits in the hot loop of every inlined
+// kernel. Reachability is whole-module (a body panics through what it
+// calls), so emission writes MARKER lines and `resolveFrames` decides each
+// one from the emitted text once every function exists. Unlike the C++
+// scan, nothing here is Unknown: this lane refuses indirect calls, so every
+// call names a module function or a shim symbol, and the shim's panicking
+// symbols are the ones shimTable files under the panic and arithmetic groups.
+// (The allocator's out-of-memory exit is deliberately not one: the C++ lane's
+// `new` fails without a trace too, and counting it would frame every body
+// that allocates.)
+
+let private framePushMark = ";__BLADE_FRAME_PUSH__ "
+let private framePopMark = ";__BLADE_FRAME_POP__"
+
+/// Open a frame named `name` (an IRCallable.SourceName) at the body position.
+let private framePush (c: Ctx) (name: string) = c.Body.Add(framePushMark + name)
+
+/// Close the innermost open frame. Every push is matched by exactly one pop
+/// on the body's fall-through path; a panic leaves through `exit` and never
+/// pops.
+let private framePop (c: Ctx) = c.Body.Add framePopMark
 
 /// LLVM identifiers take [A-Za-z0-9_$.-]; Blade names are already tame but a
 /// module-qualified or generated name is not guaranteed to be.
@@ -3252,7 +3295,12 @@ and private applyKernel (c: Ctx) (cl: IRCallable) (args: KArg list) : Val =
     if List.length cl.Params <> List.length args then
         refuse ($"a kernel '{cl.Name}' applied to {(List.length args)} of its {(List.length cl.Params)} parameters")
     List.iter2 (bindKernelParam c) cl.Params args
-    emitExpr c cl.Body
+    // The inlined body is the callable the C++ lane would have called, so it
+    // gets that callable's frame (see Shadow frames).
+    framePush c cl.SourceName
+    let v = emitExpr c cl.Body
+    framePop c
+    v
 
 /// A `method_for(...) <@> kernel` map, as a PRODUCER.
 ///
@@ -4108,6 +4156,7 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     // pool can outlive the frame. The per-cell call was the arena model's
     // worst edge -- every temp a kernel-position callee materialized leaked
     // once per output cell.
+    framePush c cl.SourceName
     pushPoolScope c
     match arrayShapeOf cl.RetType with
     | Some (elem, groups) ->
@@ -4135,6 +4184,7 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
              if tracked then popPoolScope c (Some p) true
              elif isParam then popPoolScope c None true
              else popPoolScope c None false
+             framePop c
              ln c ($"ret ptr {p}")
          | _ -> refuse "an unmaterialized array return")
         [ yield $$"""define internal ptr {{sym}}({{signature}}){{fnAttrs}} {"""
@@ -4147,10 +4197,12 @@ let private emitFunctionBody (c: Ctx) (cl: IRCallable) (sym: string) : string li
     let result = emitExpr c cl.Body
     if retTy = ScVoid then
         popPoolScope c None true
+        framePop c
         ln c "ret void"
     else
         let result = coerce c retTy result
         popPoolScope c None true
+        framePop c
         ln c ($"ret {(llTy retTy)} {result.Reg}")
     [ yield $$"""define internal {{(llTy retTy)}} {{sym}}({{signature}}){{fnAttrs}} {"""
       yield "entry:"
@@ -4453,6 +4505,93 @@ let private emitMain (c: Ctx) (m: IRModule) (programName: string) : string list 
       yield! c.Body
       yield "}" ]
 
+/// Resolve every frame marker in the emitted bodies (`main` and each
+/// function, each a `define ... {` .. `}` line list): compute which module
+/// functions can reach a panic, then turn each push/pop pair whose region can
+/// into the shadow-stack stores the shim's panics read, and drop the rest.
+let private resolveFrames (c: Ctx) (bodies: string list list) : string list list =
+    let callRe = System.Text.RegularExpressions.Regex(@"@([A-Za-z0-9_$.\-]+)\(")
+    let panickers = shimPanicSymbols
+    let symOf (body: string list) =
+        match body with
+        | def :: _ -> (callRe.Match def).Groups.[1].Value
+        | [] -> ""
+    let syms = bodies |> List.map symOf |> Set.ofList
+    // Per line: does it call a panicking shim symbol directly, and which module
+    // functions does it call. The `define` line is the body's own symbol, not
+    // a call, so it is skipped.
+    let lineCalls (line: string) =
+        let ms = callRe.Matches line
+        [ for m in ms -> m.Groups.[1].Value ]
+    let directOf (line: string) = lineCalls line |> List.exists panickers.Contains
+    let calleesOf (line: string) = lineCalls line |> List.filter syms.Contains
+    let facts =
+        bodies
+        |> List.map (fun body ->
+            let rest = List.tail body
+            symOf body, (rest |> List.exists directOf, rest |> List.collect calleesOf |> Set.ofList))
+    // Least fixpoint of needs(f) = direct(f) || exists g in callees(f). needs(g):
+    // a function that only recurses into itself does not force its own frame.
+    let needs = HashSet<string>()
+    for (s, (direct, _)) in facts do
+        if direct then needs.Add s |> ignore
+    let mutable changed = true
+    while changed do
+        changed <- false
+        for (s, (_, callees)) in facts do
+            if not (needs.Contains s) && callees |> Set.exists needs.Contains then
+                needs.Add s |> ignore
+                changed <- true
+    let mutable anyFrame = false
+    let resolved =
+        bodies
+        |> List.map (fun body ->
+            let lines = List.toArray body
+            // hot.[k]: line k reaches a panic. A region needs its frame when
+            // any line inside it is hot; prefix sums answer that per pair.
+            let prefix = Array.zeroCreate (lines.Length + 1)
+            for k in 0 .. lines.Length - 1 do
+                let l = lines.[k]
+                let hot = k > 0 && (directOf l || calleesOf l |> List.exists needs.Contains)
+                prefix.[k + 1] <- prefix.[k] + (if hot then 1 else 0)
+            let keep = Array.create lines.Length false
+            let opened = Stack<int>()
+            for k in 0 .. lines.Length - 1 do
+                if lines.[k].StartsWith framePushMark then opened.Push k
+                elif lines.[k] = framePopMark then
+                    let i = opened.Pop()
+                    if prefix.[k] - prefix.[i + 1] > 0 then
+                        keep.[i] <- true
+                        keep.[k] <- true
+            if opened.Count > 0 then failwith "EmitLlvm.resolveFrames: an unmatched frame push"
+            [ for k in 0 .. lines.Length - 1 do
+                let l = lines.[k]
+                if l.StartsWith framePushMark then
+                    if keep.[k] then
+                        anyFrame <- true
+                        // blade_rt::Scope's branchless store: overflow frames
+                        // land in the sink slot 64, never a bounds branch.
+                        let name = stringGlobal c (l.Substring framePushMark.Length)
+                        let d, lt, ix, slot, d1 = freshReg c, freshReg c, freshReg c, freshReg c, freshReg c
+                        yield $"  {d} = load i32, ptr @blade_frame_depth"
+                        yield $"  {lt} = icmp slt i32 {d}, 64"
+                        yield $"  {ix} = select i1 {lt}, i32 {d}, i32 64"
+                        yield $"  {slot} = getelementptr inbounds [65 x ptr], ptr @blade_frame_stack, i64 0, i32 {ix}"
+                        yield $"  store ptr {name}, ptr {slot}"
+                        yield $"  {d1} = add i32 {d}, 1"
+                        yield $"  store i32 {d1}, ptr @blade_frame_depth"
+                elif l = framePopMark then
+                    if keep.[k] then
+                        let d, d1 = freshReg c, freshReg c
+                        yield $"  {d} = load i32, ptr @blade_frame_depth"
+                        yield $"  {d1} = add i32 {d}, -1"
+                        yield $"  store i32 {d1}, ptr @blade_frame_depth"
+                else yield l ])
+    if anyFrame then
+        c.Globals.Add "@blade_frame_depth = external global i32"
+        c.Globals.Add "@blade_frame_stack = external global [65 x ptr]"
+    resolved
+
 /// Emit the whole program as textual LLVM IR, or refuse it by name.
 ///
 /// `programName` is the label the timing line carries -- the C++ lane uses the
@@ -4494,6 +4633,10 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
                 let cl = c.Pending.Dequeue()
                 let sym = c.Emitted.[cl.Id]
                 c.Funcs.Add(emitFunctionBody c cl sym)
+            let mainLines, funcs =
+                match resolveFrames c (mainLines :: List.ofSeq c.Funcs) with
+                | m :: fs -> m, fs
+                | [] -> mainLines, []
             let sb = StringBuilder()
             let put (s: string) = sb.Append(s).Append('\n') |> ignore
             put "; Blade -- generated by the BLADE_LLVM lane (src/EmitLlvm.fs)."
@@ -4506,7 +4649,7 @@ let tryEmitProgramNamed (programName: string) (program: IRProgram) : Result<stri
             if c.Globals.Count > 0 then put ""
             for d in c.Externs do put d
             put ""
-            for f in c.Funcs do
+            for f in funcs do
                 for line in f do put line
                 put ""
             for line in mainLines do put line

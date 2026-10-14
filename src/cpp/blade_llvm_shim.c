@@ -52,23 +52,43 @@
 
 /* ---- failure ---------------------------------------------------------- */
 
+/* The shadow call stack: the twin of blade_rt::stack / depth. The EMITTED IR
+ * writes it -- inline loads and stores at each frame the emitter resolved as
+ * able to reach a panic (EmitLlvm.resolveFrames), so a kernel inlined into a
+ * hot loop pays a store, not a call -- and only the panics below read it.
+ * Plain globals, not _Thread_local: this lane has no threads (every function
+ * is `nosync`). 65 slots: 0..63 are the trace, slot 64 is the write-only sink
+ * the emitter's branchless clamp sends overflow frames to, exactly as in
+ * blade_rt::Scope. A frame is its source name; the C++ lane's file/line
+ * fields are always (nullptr, 0), so they print nothing there either. */
+const char *blade_frame_stack[65];
+int blade_frame_depth = 0;
+
+/* blade_rt::panic's trace, innermost first. */
+static void blade_print_frames(void) {
+    int d = blade_frame_depth < 64 ? blade_frame_depth : 64;
+    for (int i = d - 1; i >= 0; --i) fprintf(stderr, "  at %s\n", blade_frame_stack[i]);
+}
+
 /* Mirrors blade_rt::panic's shape: the caller passes the whole rendered
- * line ("error[BL8002]: ..."), it goes to stderr, and the process exits 1.
- * No shadow-frame trace: the LLVM lane emits no BLADE_FRAME scaffolding. */
+ * line ("error[BL8002]: ..."), it goes to stderr, then the frame trace, and
+ * the process exits 1. */
 BLADE_NORETURN void blade_panic(const char *msg) {
     fputs(msg ? msg : "error[BL8000]: blade: unknown failure", stderr);
     fputc('\n', stderr);
+    blade_print_frames();
     fflush(stderr);
     exit(1);
 }
 
 /* The located twin: blade_rt::panic's `  --> file:line` second line, when the
  * emitter knew where the faulting expression was (file null or line 0 when it
- * did not). Byte-identical to the C++ lane's rendering. */
+ * did not), before the trace. Byte-identical to the C++ lane's rendering. */
 BLADE_NORETURN static void blade_panic_at(const char *msg, const char *file, long long line) {
     fputs(msg, stderr);
     fputc('\n', stderr);
     if (file && line > 0) fprintf(stderr, "  --> %s:%lld\n", file, line);
+    blade_print_frames();
     fflush(stderr);
     exit(1);
 }

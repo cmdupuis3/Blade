@@ -651,6 +651,65 @@ let runLlvmFactTests () : BlockResult =
         [ "call double @blade_fpowi("; "call double @blade_fpow("; "call i64 @blade_ipow(" ]
         [ "llvm.powi"; "@pow(" ]
 
+    printSubHeader "shadow frames: kept where a panic is reachable, dropped elsewhere"
+    // The twin of the C++ lane's BLADE_FRAME elision (EmitLlvm.resolveFrames):
+    // a panic prints `  at <name>` per live frame, so a frame that can see a
+    // panic must be stored, and one that cannot is dead weight in a hot loop.
+    // Corpus functions/280 and 420-425 pin the printed traces.
+    let frameStore = "ptr @blade_frame_depth"
+    check "an Int64 division kernel keeps its frame, named as its binding" []
+        "let xs = [4, 2, 1]\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
+        [ frameStore; "@blade_frame_stack"; "c\"lambda in r\\00\"" ] [ "__BLADE_FRAME" ]
+    check "a Float64 division kernel reaches no panic and has no frame" []
+        "let xs = [4.0, 2.0, 1.0]\nlet r = reduce(xs, lambda(a, b) -> a / b)\n"
+        [ "fdiv double" ] [ frameStore; "lambda in r"; "__BLADE_FRAME" ]
+    check "a caller keeps its frame through a callee that panics" []
+        "function divide(x: Int64, y: Int64) -> Int64 = x / y\nfunction twice(x: Int64, y: Int64) -> Int64 = divide(x, y) * 2\nlet z: Int64 = 1\nlet b = twice(4, z)\n"
+        [ frameStore; "c\"divide\\00\""; "c\"twice\\00\"" ] [ "__BLADE_FRAME" ]
+    check "a literal nonzero divisor cannot fault, so no frame" []
+        "function half(x: Int64) -> Int64 = x / 2\nlet z: Int64 = 5\nlet b = half(z)\n"
+        [ "sdiv i64" ] [ frameStore; "c\"half\\00\""; "__BLADE_FRAME" ]
+    // Elision is only sound while EmitLlvm.shimPanicSymbols names every shim
+    // export that can reach blade_panic: a call to an unlisted one would look
+    // panic-free and lose its frames, silently dropping trace lines. The
+    // allocators are the one deliberate exception -- their out-of-memory exit
+    // goes untraced, as `new` does in the C++ lane.
+    (let name = "every shim export that can panic is in shimPanicSymbols"
+     let allocators = set [ "blade_alloc_cells"; "blade_alloc_f64"; "blade_alloc_i64" ]
+     let defRe =
+         System.Text.RegularExpressions.Regex(
+             @"^(?:BLADE_NORETURN\s+)?(static\s+)?[A-Za-z_][A-Za-z0-9_ \*]*?\b(blade_[a-z0-9_]+)\s*\([^;{]*\)\s*\{")
+     let lines = EmitLlvm.shimSourceText().Replace("\r\n", "\n").Split('\n')
+     // (name, exported, body text up to the next definition)
+     let defs = ResizeArray<string * bool * System.Text.StringBuilder>()
+     for l in lines do
+         let m = defRe.Match l
+         if m.Success then defs.Add((m.Groups.[2].Value, not m.Groups.[1].Success, System.Text.StringBuilder(l)))
+         elif defs.Count > 0 then
+             let (_, _, sb) = defs.[defs.Count - 1]
+             sb.Append('\n').Append(l) |> ignore
+     let panics = HashSet<string>([ "blade_panic" ])
+     let mutable changed = true
+     while changed do
+         changed <- false
+         for (n, _, sb) in defs do
+             let body = sb.ToString()
+             if not (panics.Contains n)
+                && (body.Contains "blade_panic" || panics |> Seq.exists (fun p -> body.Contains(p + "("))) then
+                 panics.Add n |> ignore
+                 changed <- true
+     let exportedPanickers =
+         defs |> Seq.filter (fun (n, exported, _) -> exported && panics.Contains n)
+         |> Seq.map (fun (n, _, _) -> n) |> Set.ofSeq
+     let unlisted = Set.difference (Set.difference exportedPanickers allocators) EmitLlvm.shimPanicSymbols
+     let stale = Set.difference EmitLlvm.shimPanicSymbols exportedPanickers
+     if defs.Count < 10 then fail name ($"the shim scan found only {defs.Count} definitions -- the pattern no longer matches")
+     elif not unlisted.IsEmpty then
+         fail name ($"""can panic but is not in shimPanicSymbols (its callers would lose their frames): {(String.concat ", " unlisted)}""")
+     elif not stale.IsEmpty then
+         fail name ($"""in shimPanicSymbols but the shim never panics there: {(String.concat ", " stale)}""")
+     else pass name ($"{exportedPanickers.Count} panicking exports, {defs.Count} definitions scanned"))
+
     printSubHeader "the whole switch"
     // FACTS=off must return the lane to the shape that passed its differential
     // before this layer existed -- the property that makes the switch a usable
