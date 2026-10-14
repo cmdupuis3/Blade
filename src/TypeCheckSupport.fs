@@ -2704,6 +2704,13 @@ let internal judgeGenericObligations (env: TypeEnv) (fname: string) (obligations
                                    + $"{name} of an integer is a Float64, which an {ppIRType (IRTScalar src)} result "
                                    + "would truncate. Convert the argument first -- Float64(x), or Float64(xs) "
                                    + "for an array."))
+            // A real-only intrinsic (floor, ceil, log10, ...) at a complex
+            // instance: no std::complex overload, as for a complex scalar.
+            | GOFractionalMath (_, name) when (src = ETComplex64 || src = ETComplex128)
+                                              && not (Blade.Grad.isComplexMathIntrinsic name) ->
+                Some (InvalidCast ($"'{fname}' applies {name}() to a value of its generic parameter type, and this "
+                                   + $"call makes that type {ppIRType (IRTScalar src)}: {name} is defined on real "
+                                   + "numbers only. Pass a real value -- project a component first, real(z) or abs(z)."))
             | GOFractionalMath _ -> None
             | GOPromotion (_, opName, partner, literal) ->
                 // THE MIXING RULE (formalism 2.4) at the instance: the

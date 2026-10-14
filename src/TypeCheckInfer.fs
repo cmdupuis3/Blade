@@ -454,6 +454,21 @@ and inferExprInner (env: TypeEnv) (expr: Expr) : TypeResult<TypedExpr> =
                      | Some acc -> acc.Add(GOFractionalMath (vid, name))
                      | None -> ())
                 Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
+            // The same in a named GENERIC body for the REAL-only intrinsics
+            // (floor/ceil/log10/lgamma/digamma): the operand is a signature
+            // variable, and an array instance lifts the intrinsic over its
+            // elements exactly as a concrete array operand does -- so it is
+            // not pinned to a Float64 scalar (that refused every array call
+            // of `f(x: T) = Int64(floor(x))`, while `Int64(floor(A))` keeps
+            // A's shape, casts/541). The result keeps the variable's type and
+            // each call judges the element (GOFractionalMath): an integer
+            // instance would truncate a Float64 result, and a complex one
+            // has no overload. The cast around it still sees the floor, so
+            // its rounding license flows through (castRoundingLicensed).
+            | IRTInfer vid when not env.InLambdaBody && env.Subst.IsPolymorphicId vid
+                                && env.CurrentGenericObligations.IsSome ->
+                env.CurrentGenericObligations.Value.Add(GOFractionalMath (vid, name))
+                Ok (mkTyped (TExprUnaryOp (OpMath name, tArg)) tArg.Type)
             | IRTInfer _ when not env.InLambdaBody ->
                 // floor/ceil/log10 have no complex overload -- the operand
                 // really is real; pin it to Float64, the intrinsic's natural
@@ -5837,21 +5852,33 @@ and inferNumericCast (env: TypeEnv) (span: Span) (name: string) (target: ElemTyp
                   | Some acc -> acc.Add(GOCast (eid, name, target, rounded))
                   | None -> ())
              | _ -> ())
+            // The direct spelling `Int64(floor(A))` fuses rounding and cast
+            // into ONE kernel over floor's own operand (one traversal, and
+            // the gate stays visible in the synthesized body).
+            let roundedCall =
+                match arg.Kind with
+                | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar rname }, [inner])
+                       when (rname = "floor" || rname = "ceil") && (lookupVar rname env).IsNone -> Some (rname, inner)
+                | _ -> None
+            let fusedRounding () =
+                roundedCall |> Option.map (fun (rname, inner) ->
+                    liftOver inner (fun v -> castOf (mkExpr v.Span (ExprApp (mkExpr v.Span (ExprVar rname), [v])))))
             match elemBare with
             | IRTScalar (ETBool | ETString | ETUnit) ->
                 Error (InvalidCast $"{name}() expects numeric elements; got an array of {ppIRType elemBare} elements.")
             | IRTScalar src when isComplexElem src && not (isComplexElem target) -> complexSourceErr ()
+            // A GENERIC element (`x: T^1`) rounded at the cast site: fused
+            // the same way, so the kernel's cast sees its floor (lifting the
+            // floor alone first typed its cells Float64 with no rounding in
+            // sight of the cast -- refused at the declaration). The
+            // instance's class is judged per call (GOCast, above).
+            | IRTInfer _ when isIntElem target && roundedCall.IsSome -> (fusedRounding ()).Value
             | IRTScalar src when isFloatElem src && isIntElem target ->
-                // Rounding gate, array flavor: the direct spelling
-                // `Int64(floor(A))` fuses rounding and cast into ONE kernel
-                // over floor's own operand (one traversal, and the gate
-                // stays visible in the synthesized body); anything else
-                // refuses with the kernel spelling.
-                (match arg.Kind with
-                 | ExprKind.ExprApp ({ Kind = ExprKind.ExprVar rname }, [inner])
-                        when (rname = "floor" || rname = "ceil") && (lookupVar rname env).IsNone ->
-                     liftOver inner (fun v -> castOf (mkExpr v.Span (ExprApp (mkExpr v.Span (ExprVar rname), [v]))))
-                 | _ ->
+                // Rounding gate, array flavor: the fused spelling above;
+                // anything else refuses with the kernel spelling.
+                (match fusedRounding () with
+                 | Some r -> r
+                 | None ->
                      Error (InvalidCast ($"{name}() would truncate float elements: spell the rounding at the "
                                          + $"cast site -- {name}(floor(A)) / {name}(ceil(A)) -- or put both in "
                                          + $"one kernel: method_for(A) <@> lambda(v) -> {name}(floor(v))")))

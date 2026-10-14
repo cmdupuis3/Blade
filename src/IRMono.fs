@@ -665,6 +665,14 @@ let private learnFromInnerCalls (func: IRFuncDef) (callables: Map<IRId, IRCallab
                          | None -> IRTScalar et
                      Some (mkArrayLike { at with ElemType = elem; Identity = None; IsVirtual = false })
                  | _ -> exprTypeIfKnown e)
+            // A math intrinsic lifted over an array instance keeps the
+            // array's shape (`Int64(floor(x))` over `x: T`: the cast's
+            // operand is the floor, whose shape is x's). Only the SHAPE is
+            // read off it -- the cast above replaces the element.
+            | IRUnaryOp (IRMath _, x) ->
+                (match bodyTypeIfKnown x with
+                 | Some (ArrayElem _ as t) -> Some t
+                 | _ -> exprTypeIfKnown e)
             | IRBinOp (IRElementwise, (IRAdd | IRSub | IRMul | IRDiv | IRMod), l, r, _) ->
                 (match bodyTypeIfKnown l, bodyTypeIfKnown r with
                  | Some ((ArrayElem at) as aty), Some (AnyPrimElem e)
@@ -1856,14 +1864,17 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
     // negation and conjugation take the checker's whole-array nodes; the
     // rest map a `lambda(__bx) -> op(__bx)` kernel over the one array, its
     // result element the scalar op's own type.
-    let liftUnary (uop: IRUnaryOp) (x: IRExpr) (xt: IRType) (la: IRArrayType) : IRExpr =
+    let rec liftUnary (uop: IRUnaryOp) (x: IRExpr) (xt: IRType) (la: IRArrayType) : IRExpr =
         match uop with
         | IRNeg -> IRArrayNegate x
         | IRConj -> IRArrayConjugate x
-        | _ ->
+        | _ -> liftUnaryKernel uop (fun v -> IRUnaryOp (uop, v)) x xt la
+    // `mkBody` builds the kernel body over the cell (one op, or the fused
+    // `Int64(floor(v))` -- see fuseRoundedCasts).
+    and liftUnaryKernel (uop: IRUnaryOp) (mkBody: IRExpr -> IRExpr) (x: IRExpr) (xt: IRType) (la: IRArrayType) : IRExpr =
             let elem = arrayBinOpKernelElem la.ElemType
             let xId = builder.FreshId()
-            let kbody = IRUnaryOp (uop, IRVar (xId, IRTScalar elem))
+            let kbody = mkBody (IRVar (xId, IRTScalar elem))
             let kernelRet = typeOf kbody
             let parms : IRParam list =
                 [ { Name = "__bx"; Type = IRTScalar elem; Index = 0; VarId = xId } ]
@@ -1974,7 +1985,23 @@ let lowerArrayBinOpsModule (modul: IRModule) (builder: IRBuilder) (programFuncs:
                 broadcastScalar op r rt ra l sElem true
             | _ -> e
         | _ -> e
-    let rewriteExpr expr = mapIRExpr rewrite expr
+    // A ROUNDED CAST over an operand the clone made an array --
+    // `Int64(floor(x))` over `x: T` at an array instance -- is lifted as ONE
+    // kernel, `lambda(v) -> Int64(floor(v))`, exactly as the checker fuses
+    // `Int64(floor(A))` over a concrete array. Lifted op by op (the rewrite
+    // below is bottom-up), the cast's kernel would read a plain cell with no
+    // floor in sight, which the post-monomorphization cast sweep refuses as
+    // a truncation (IRValidate, BL3019). Runs before that rewrite, so the
+    // floor is still the cast's direct operand.
+    let fuseRoundedCasts (e: IRExpr) : IRExpr =
+        match e with
+        | IRUnaryOp ((IRCast _ as c), (IRUnaryOp ((IRMath ("floor" | "ceil") as r), x))) ->
+            (match operandType x with
+             | Some ((ArrayElem la) as xt) ->
+                 liftUnaryKernel c (fun v -> IRUnaryOp (c, IRUnaryOp (r, v))) x xt la
+             | _ -> e)
+        | _ -> e
+    let rewriteExpr expr = mapIRExpr rewrite (mapIRExpr fuseRoundedCasts expr)
     let newFunctions =
         modul.Functions |> List.map (fun f ->
             scope <- Some f.SourceName

@@ -1,0 +1,33 @@
+// TEST: a generic rounded cast keeps an array argument's shape
+// ============================================================================
+// casts/541 through a generic function: `Int64(floor(x))` over `x: T` (or
+// `x: T^1`) converts only the ELEMENT, so an array call returns that array
+// of Int64 and a scalar call an Int64. floor used to pin its operand to a
+// Float64 scalar, so every array call was refused (BL3001, "expects a
+// scalar"); it is now generic over the element like sqrt -- each call judges
+// the element it is given (casts/548) -- and the cast still sees the floor
+// that licenses the rounding, at the array instance too (one fused kernel).
+// ============================================================================
+function f(x: T) = Int64(floor(x))
+function g(x: T^1) = Int64(ceil(x))
+function h(x: T) = floor(x)
+let A = [1.5, 2.5, -0.5]
+let r = f(A)
+// EXPECT: r = [1, 2, -1]
+let s = f(2.7)
+// EXPECT: s = 2
+let t = g(A)
+// EXPECT: t = [2, 3, 0]
+let u = h(A)
+// EXPECT: u = [1.0, 2.0, -1.0]
+let v = h(-1.25)
+// EXPECT: v = -2.0
+let x32: Array<Float32 like Idx<2>> = [Float32(1.5), Float32(-2.5)]
+let w = f(x32)
+// EXPECT: w = [1, -3]
+let M = [[0.5, 1.5], [2.5, -3.5]]
+let m = f(M)
+// EXPECT: m = [[0, 1], [2, -4]]
+// EXPECT: A = [1.5, 2.5, -0.5]
+// EXPECT: x32 = [1.5, -2.5]
+// EXPECT: M = [[0.5, 1.5], [2.5, -3.5]]

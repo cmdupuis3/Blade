@@ -1,0 +1,7 @@
+// TEST: a generic floor at a complex argument (rejects)
+// ERROR: BL3019 @ 6:11
+// floor has no complex overload; inside a generic body it is judged per call
+// (casts/547), so a complex argument is refused at the call, as `floor(z)`
+// over a complex `z` is.
+function h(x: T) = floor(x)
+let r = h([complex(1.0, 2.0)])
