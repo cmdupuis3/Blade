@@ -1243,6 +1243,32 @@ let materializeArityVar (env: TypeEnv) (tArg: TypedExpr) (opName: string) : unit
          | _ -> ())
     | _ -> ()
 
+/// A LOOP OPERAND that is a generic declaration's UNANNOTATED parameter
+/// (`function t(v) = method_for(v) <@> k`, `for (a, b) in range<I> <@> k`
+/// over `function co(a, b)`): its type is a bare signature var with no caret
+/// arity, so `loopOperandArrayType` fell to `getArrayType`'s fallback -- a
+/// rank-1 record with a FLOAT64 element, unlinked to the parameter. Every
+/// kernel the loop applies (a lambda, a generic named function in a join leg
+/// or a co-iteration) was then typed at Float64 once, for every instance:
+/// `t([1, 2, 3])` instantiated `t` at Array<Int64> around a `double` kernel
+/// and printed `14.0`, an implicit Int64 -> Float64 conversion nobody wrote.
+///
+/// The loop iterates the operand, so it is an array (rank >= 1 -- the rank
+/// the fallback already assumed); give the var that shape exactly as an
+/// array intrinsic over the same parameter does (`reduce(v, (+))`,
+/// `requireArrayArg`): the element becomes a POLYMORPHIC var, the function
+/// stays HM in it, and monomorphization instantiates the kernels per call --
+/// what `v: T^1` already did. A rank-2 argument, which reached g++ before
+/// (BL9002), is now a located rank mismatch at the call. Only a signature
+/// var is touched: an unannotated kernel parameter is monomorphic and is
+/// unified with the iterated row by `buildApplyInfo`. Errors are swallowed,
+/// as in materializeArityVar: a failure leaves the var to the existing path.
+let materializeGenericLoopOperand (env: TypeEnv) (tArg: TypedExpr) (opName: string) : unit =
+    match env.Subst.Resolve tArg.Type with
+    | IRTInfer vid when env.Subst.IsPolymorphicId vid && (env.Subst.GetArityConstraint vid).IsNone ->
+        requireArrayArgMinRank env tArg opName 1 |> ignore
+    | _ -> ()
+
 /// Tag-check helper: validate that each index argument's nominal tag (if any)
 /// agrees with the corresponding array slot's nominal tag. Slot tags starting
 /// with "__" are internal synthetic markers and skipped. Untagged ints into

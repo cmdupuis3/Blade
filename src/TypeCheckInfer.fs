@@ -2585,7 +2585,15 @@ and tryInferReduceCompute (env: TypeEnv) (tArr: TypedExpr) (tKernel: TypedExpr) 
                     let et = match env.Subst.Resolve elem0 with AnyPrimElem e -> e | _ -> ETFloat64
                     (match tKernel.Kind with
                      | TExprSection OpAdd ->
-                        let lit = match et with ETInt32 | ETInt64 -> TExprLit (LitInt 0L) | _ -> TExprLit (LitFloat 0.0)
+                        // An element still OPEN here is a generic body's
+                        // (`function f(v) = reduce(method_for(v) <@> k, (+))`):
+                        // a typed zero, which monomorphization makes each
+                        // instance's own zero (resolveTypedZerosModule) -- a
+                        // `0.0` seed was every instance's, so the Int64 one
+                        // folded into a Float64 accumulator.
+                        let lit =
+                            if isOpenElemType env elem0 then TExprZero
+                            else match et with ETInt32 | ETInt64 -> TExprLit (LitInt 0L) | _ -> TExprLit (LitFloat 0.0)
                         Ok (mkTyped lit elem0)
                      | TExprSection OpMul ->
                         let lit = match et with ETInt32 | ETInt64 -> TExprLit (LitInt 1L) | _ -> TExprLit (LitFloat 1.0)
@@ -2824,6 +2832,7 @@ and inferReductionJoin (env: TypeEnv) (legs: Expr list) (site: Expr) : TypeResul
                          | ETInt32 | ETInt64 -> TExprLit (LitInt 1L)
                          | _ -> TExprLit (LitFloat 1.0)
             match (resolveTypedExpr env tK).Kind with
+            | TExprSection OpAdd when isOpenElemType env elem -> Ok (mkTyped TExprZero elem)
             | TExprSection OpAdd -> Ok (mkTyped (lit ()) elem)
             | TExprSection OpMul -> Ok (mkTyped (one ()) elem)
             | TExprSection _ ->
@@ -8699,6 +8708,14 @@ and etaExpandFunctionKernel (env: TypeEnv) (kernelExpr: Expr) : TypeResult<Typed
 /// is rarely meaningful semantically (no obvious string identity for fold),
 /// but the literal kind must match the element type or codegen produces
 /// invalid C++.
+/// An element type still OPEN (a generic body's polymorphic element): the
+/// implicit `(+)` seed of a fused fold is then a typed TExprZero, not a
+/// literal of the Float64 default.
+and isOpenElemType (env: TypeEnv) (t: IRType) : bool =
+    match env.Subst.Resolve t with
+    | IRTInfer _ | IRTUnitAnnotated (IRTInfer _, _) -> true
+    | _ -> false
+
 and zeroLitForElem (env: TypeEnv) (et: ElemType) : TypedExprKind =
     match et with
     | ETInt32 | ETInt64 -> TExprLit (LitInt 0L)
@@ -8939,6 +8956,7 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
                 // operands and finds them resolved). Then resolve through the
                 // substitution, and fall back exactly as the non-zip path does.
                 arrays |> List.iter (fun a -> materializeArityVar env a "map")
+                arrays |> List.iter (fun a -> materializeGenericLoopOperand env a "map")
                 let arrTypes = arrays |> List.map (fun a ->
                     match env.Subst.Resolve a.Type with
                     | ArrayElem at -> reSDimOperand at
@@ -8983,6 +9001,9 @@ and inferApply (env: TypeEnv) (tLeft: TypedExpr) (tRight: TypedExpr) : TypeResul
         // the shape is supplied and the ELEMENT stays open, so the IR
         // monomorphizer still specializes per call site.
         flatArrays |> List.iter (fun arr -> materializeArityVar env arr "map")
+        // ...and a generic declaration's UNANNOTATED parameter, which has no
+        // caret to read (see materializeGenericLoopOperand).
+        flatArrays |> List.iter (fun arr -> materializeGenericLoopOperand env arr "map")
         // S1 SEAM 3, second half: `materializeArityVar` covers the operand that
         // still WEARS the caret-shorthand var, but an array-valued INTERMEDIATE
         // built from one (`let wt = w * t` over a `t: T^1` the binop seam
@@ -14596,6 +14617,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
                 match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
             // Resolved shape, defaulted element -- see loopOperandArrayType. This
             // is the arm a compound zip operand reaches (`(A - m) * (B - m)`).
+            tZipArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "method_for")
             let arrayTypes = tZipArrays |> List.mapi (fun i ta ->
                 loopOperandArrayType env (fun () -> getArrayType env zipExprs.[i]) ta.Type)
             // Shared iteration records. Single-record operands (dense rank-1 or
@@ -14718,6 +14740,7 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
             // No surface expr to fall back on (a node may have come out of a
             // tuple VALUE), so the defaulted-shape thunk stands in -- the same
             // one the let-bound-zip arm above uses for exactly this reason.
+            leafArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "method_for")
             let arrayTypes = leafArrays |> List.map (fun ta ->
                 loopOperandArrayType env
                     (fun () -> { ElemType = IRTScalar ETFloat64; IndexTypes = []; IsVirtual = false; Identity = None })
@@ -14742,6 +14765,9 @@ and inferMethodForOperands env arrays : TypeResult<TypedExpr> =
         // loopOperandArrayType takes its `fallback ()` branch and the loop
         // iterates a shape nobody declared. Supply the forced shape first.
         tArrays |> List.iter (fun ta -> materializeArityVar env ta "method_for")
+        // ...and a generic declaration's UNANNOTATED parameter (no caret to
+        // read): see materializeGenericLoopOperand.
+        tArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "method_for")
         // Same stale-IRTInfer hazard as the zip arms above.
         let arrayTypes = tArrays |> List.mapi (fun i ta ->
             loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)
@@ -15334,7 +15360,10 @@ and inferForExpr env source kernelOpt : TypeResult<TypedExpr> =
 
             let identities = arrays |> List.map (fun arr ->
                 match arr.Kind with ExprKind.ExprVar name -> AIDVariable name | _ -> AIDLiteral (env.Builder.FreshId()))
-            // For co-iteration, all arrays use the shared index space
+            // For co-iteration, all arrays use the shared index space. A
+            // generic declaration's unannotated parameter has no caret to
+            // read: see materializeGenericLoopOperand.
+            tArrays |> List.iter (fun ta -> materializeGenericLoopOperand env ta "for")
             let arrayTypes = tArrays |> List.mapi (fun i ta ->
                 loopOperandArrayType env (fun () -> getArrayType env arrays.[i]) ta.Type)
             // Real per-array S-dim counts (see the zip arms: the IRTInfer

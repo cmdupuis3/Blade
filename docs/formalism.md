@@ -1029,7 +1029,10 @@ variables and is typed as its base, so `pw(2.0, 3)` is the squared-out 8.0,
 `pw(2.0, 0.5)` a floating pow and `pw(2, 3)` the Int64 8, while `pw(2, 0.5)`
 is refused at the base (BL3019: a Float64 power of an Int64 base). A
 parameter the body uses as a subscript is pinned to that index (§3.10), one it
-applies is an arrow (§4.3); a top-level `let` of a lambda that is only applied
+applies is an arrow (§4.3), one a loop former iterates (`method_for(v)`,
+`for (a, b) in range<I>`) is a rank-1 array with a generic element -- it reads
+`v: T^1`, so the kernels the loop applies are instantiated per call, and a
+higher rank is written `v: T^k`; a top-level `let` of a lambda that is only applied
 is the declaration, and a lambda used as a value is one body whose first call
 decides its open parameters.
 

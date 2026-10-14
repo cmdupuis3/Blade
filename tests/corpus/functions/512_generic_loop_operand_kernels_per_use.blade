@@ -1,0 +1,47 @@
+// TEST: an unannotated generic parameter as a loop operand instantiates its kernels per use
+// `function stats(v) = { let L = method_for(v); ... }`: the loop iterates the
+// parameter, so the parameter is an array -- it is given the shape an array
+// intrinsic gives it (`reduce(v, (+))`), with a POLYMORPHIC element, exactly
+// as `v: T^1` reads. The kernels the loop applies -- a generic named
+// function in a reduction join's legs, in an `object_for(<&!>)` join, in a
+// `for (a, b) in range<..>` co-iteration, a lambda -- are then typed at the
+// instance's element. They used to be typed once at a Float64 default
+// unlinked to the parameter, so the Int64 instance ran a `double` kernel and
+// printed `50.0` (an Int -> Float conversion nobody wrote).
+function sq(x) = x * x
+function cube(x) = x * x * x
+function mul(a, b) = a * b
+function stats(v) = {
+    let L = method_for(v)
+    let (a, b) = reduce((L <@> sq) <&!> (L <@> cube), (+))
+    a + b
+}
+function stats2(v) = {
+    let w = method_for(v) <@> sq
+    let z, u = object_for(<&!>) <@> (reduce(w, (+)), prodsum(w, v))
+    u + z
+}
+function co(a, b) = {
+    let r = for (a, b) in range<Idx<3>> <@> mul |> compute
+    reduce(r, (+))
+}
+function sqsum(v) = {
+    let r = method_for(v) <@> lambda(x) -> x * x |> compute
+    reduce(r, (+))
+}
+let f1 = stats([1.0, 2.0, 3.0])
+let f2 = stats([1, 2, 3])
+let g1 = stats2([1.0, 2.0, 3.0])
+let g2 = stats2([1, 2, 3])
+let h1 = co([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])
+let h2 = co([1, 2, 3], [4, 5, 6])
+let k1 = sqsum([1.5, 2.5])
+let k2 = sqsum([3, 4])
+// EXPECT: f1 = 50.0
+// EXPECT: f2 = 50
+// EXPECT: g1 = 50.0
+// EXPECT: g2 = 50
+// EXPECT: h1 = 32.0
+// EXPECT: h2 = 32
+// EXPECT: k1 = 8.5
+// EXPECT: k2 = 25
