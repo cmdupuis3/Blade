@@ -126,6 +126,22 @@ let internal asF64 (e: Expr) =
     | ExprKind.ExprLit (LitFloat _) -> e
     | _ -> syn (ExprApp (syn (ExprVar "Float64"), [e]))
 let internal call name args = syn (ExprApp (v name, args))
+/// `e - 1` in the exponent's OWN numeric type: the power rule's base term
+/// `e * b^(e - 1)` must raise `b` by the same ALGORITHM the primal used, and
+/// `^` is polymorphic in its exponent (formalism 2.4): Float^Int is the
+/// squaring algorithm (`blade_arith::fpowi`), Float^Float is libm pow. The
+/// transform sees UNTYPED syntax, so it cannot pick `k - 1` or `e - 1.0`
+/// itself -- spelling `Float64(k) - 1.0` for an Int `k` (the old rule) sent
+/// every Int-exponent derivative through pow while its primal squared. `e ^ 0`
+/// is the one of e's type -- Int^Int is exact (1), Float^Int is fpowi(e, 0) =
+/// 1.0 for every e -- so `e - e ^ 0` IS `k - 1` (Int) or `e - 1.0` (Float),
+/// decided by the type checker that does know the type. A float literal
+/// keeps the plain `- 1.0` (its type is the spelling). Constant: `^` by the
+/// literal 0 differentiates to nothing, so a re-differentiation adds no term.
+let internal predOf (e: Expr) =
+    match e.Kind with
+    | ExprKind.ExprLit (LitFloat _) -> sub e (fLit 1.0)
+    | _ -> sub e (pow e (iLit 0L))
 
 /// d(b^e)/de = b^e * log(b), with the b = 0 case at its limit 0 (for e > 0;
 /// 0^e * log 0 is 0 * -inf = NaN otherwise): guard(b != 0, b^e * log(b)).

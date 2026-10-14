@@ -1,0 +1,35 @@
+// TEST: AD Power Int Exponent Derivative Squares Like The Primal
+import ad as ad
+// ============================================================================
+// `^` is polymorphic in its exponent (formalism 2.4): Float^Int is the
+// squaring algorithm, Float^Float is libm pow. The power rule's base term
+// e*b^(e-1) must use the SAME algorithm as the primal: for an Int exponent
+// `k` it is Float64(k) * x^(k - 1) with an INTEGER exponent. It used to be
+// spelled x^(Float64(k) - 1.0), libm pow under a squared primal -- at
+// x = 1.05, k = 7 those differ in the last place (9.380669484375 squared
+// vs ...003 through pow).
+//
+// Each derivative is pinned EXACTLY against the hand-written squaring form,
+// in reverse mode (ad.grad), forward mode (ad.jvp), and at a negative k
+// (reciprocal of the squared power). A Float exponent keeps the pow rule.
+// ============================================================================
+function q(x: Float, k: Int) -> Float = x ^ k
+let (qv, dqdx) = ad.grad(q)(1.05, 7)
+let by_hand = Float64(7) * 1.05 ^ 6
+let same_grad = dqdx == by_hand
+let (jv, jt) = ad.jvp(q)(1.05, 7, 1.0)
+let same_jvp = jt == by_hand
+let (nv, dndx) = ad.grad(q)(1.05, 0 - 3)
+let same_neg = dndx == Float64(0 - 3) * 1.05 ^ (0 - 4)
+let (zv, dzdx) = ad.grad(q)(1.05, 0)
+function p(x: Float, y: Float) -> Float = x ^ y
+let (pv, dpdx, dpdy) = ad.grad(p)(2.0, 3.0)
+let same_float = dpdx == 3.0 * 2.0 ^ 2.0
+// EXPECT: same_grad = true
+// EXPECT: same_jvp = true
+// EXPECT: same_neg = true
+// EXPECT: zv = 1.0
+// EXPECT: dzdx = 0.0
+// EXPECT: pv = 8.0
+// EXPECT: dpdx = 12.0
+// EXPECT: same_float = true
