@@ -1597,10 +1597,12 @@ fixed parameters takes either the argument in its place -- a parenthesized group
 `pk((a, b), k)` or a lone element `pk(a, k)` (a one-element pack) -- or, when
 there are more arguments than parameters, the surplus written flat in its place
 (`pk(a, b, k)`); several packs take one argument each, a group or a lone
-element. Anything else is refused at the call (`BL3002`): a group among flat
-elements, too few arguments, a flat list against two packs, and a pack passed as
-a tuple-typed variable (`let t = (a, b); pk(t, k)`) -- write the group out at
-the call.
+element. A tuple-typed VARIABLE in a pack's place is the group it names
+(§2.8: naming a pack does not change it) -- `let t = (a, b); pk(t, k)` is
+`pk((a, b), k)`. Anything else is refused at the call (`BL3002`): a group among
+flat elements, too few arguments, a flat list against two packs, and any other
+tuple-typed value in a pack's place (a call's tuple result) -- bind it to a
+variable, or write the group out at the call.
 
 ### 8.3 Identity groups
 

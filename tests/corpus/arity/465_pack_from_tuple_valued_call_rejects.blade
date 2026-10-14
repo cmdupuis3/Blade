@@ -1,0 +1,11 @@
+// TEST: A Pack Filled From A Tuple-Valued Call Is Refused (rejects)
+// ERROR: BL3002 @ 10:12
+// ERROR-CONTAINS: fills a Poly pack with a tuple-typed value
+// ============================================================================
+// A pack NAMED by a tuple-typed variable is the group it names (arity/464),
+// but a call's tuple result in the pack's place has no elements
+// monomorphization can read. Bind it first (`let p = mk(); pk(p, 1)`).
+// ============================================================================
+function mk() = (1.0, 2.0)
+function pk(xs: Poly<T^0>, s: Int64) -> T^0 = xs[0]
+let r = pk(mk(), 1)

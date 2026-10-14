@@ -2573,6 +2573,16 @@ let findPolyParamIndices (func: IRFuncDef) : int list =
 /// Returns None for unsupported shapes (mismatched arg count, the pack itself
 /// passed on unspecialized); TypeCheck.polyCallShape refuses at the call
 /// every user-written shape this cannot read.
+/// A pack NAMED by a tuple-typed variable (`let p = (a, b); pk(p, 1)`): its
+/// elements, as the projections `p[0], p[1], ..`. Naming a pack does not
+/// change what it means (formalism 2.8), so the call is read exactly as
+/// `pk((a, b), 1)`; a variable is re-readable, so projecting it per element
+/// evaluates nothing twice.
+let internal tupleVarPackElems (a: IRExpr) : IRExpr list option =
+    match a with
+    | IRVar (_, IRTTuple ts) -> Some [ for j in 0 .. ts.Length - 1 -> IRTupleProj (a, j, false) ]
+    | _ -> None
+
 let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
     let polyIndices = findPolyParamIndices func
     // A call passing a symbolic pack tail (`f(tail)` inside an un-specialized
@@ -2603,6 +2613,7 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
         if args.Length = func.Params.Length then
             match List.item pidx args with
             | IRTuple elems -> Some [elems.Length]
+            | IRVar (_, IRTTuple ts) -> Some [ts.Length]
             | IRVar (_, IRTPoly _) -> None
             | _ -> Some [1]
         elif args.Length > func.Params.Length then Some [args.Length - fixedCount]
@@ -2617,6 +2628,7 @@ let computePolyArity (func: IRFuncDef) (args: IRExpr list) : int list option =
                 polyIndices |> List.map (fun pidx ->
                     match List.item pidx args with
                     | IRTuple elems -> Some elems.Length
+                    | IRVar (_, IRTTuple ts) -> Some ts.Length
                     | IRVar (_, IRTPoly _) -> None
                     | _ -> Some 1)
             if perSlot |> List.forall Option.isSome then
@@ -2643,7 +2655,10 @@ let flattenAtPolyPosition (func: IRFuncDef) (args: IRExpr list) : IRExpr list =
                 if Set.contains i polySet then
                     match a with
                     | IRTuple elems -> elems
-                    | _ -> [a]  // shouldn't happen post-computePolyArity
+                    | _ ->
+                        match tupleVarPackElems a with
+                        | Some elems -> elems
+                        | None -> [a]  // a lone element: a one-element pack
                 else
                     [a])
             |> List.concat

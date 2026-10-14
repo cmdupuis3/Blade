@@ -4230,8 +4230,10 @@ let internal haloWindowReadType (env: TypeEnv) (tag: string) : IRType option =
 ///     flat in its place (`pk(a, b, k)`: the surplus is the pack);
 ///   * several packs: one argument per parameter, each pack a group or a
 ///     lone element (with two packs, a flat list has no split).
-/// A pack written as a tuple-typed VARIABLE (`let t = (a, b); pk(t, k)`) has
-/// no elements monomorphization can see, and a group among flat elements is
+/// A pack NAMED by a tuple-typed variable (`let t = (a, b); pk(t, k)`) is the
+/// group it names (formalism 2.8; monomorphization projects its elements). A
+/// pack slot holding any other tuple-typed value (a call's result) has no
+/// elements monomorphization can see, and a group among flat elements is
 /// both spellings at once; both are refused. Anything else reached
 /// monomorphization unread and surfaced as an internal BL6001.
 let internal polyCallShape (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType list) (tArgs: TypedExpr list)
@@ -4241,10 +4243,14 @@ let internal polyCallShape (env: TypeEnv) (tFunc: TypedExpr) (paramTys: IRType l
     let nP = paramTys.Length
     let name = match tFunc.Kind with TExprVar (n, _, _) -> $"'{n}'" | _ -> "this function"
     let isTupleValue (a: TypedExpr) = (env.Subst.Resolve a.Type).IsIRTTuple
-    // A pack slot's argument: a written group, or a lone (non-tuple) element.
+    // A pack slot's argument: a written group, a tuple-typed VARIABLE naming
+    // one (`let p = (a, b); pk(p, k)` is `pk((a, b), k)`, formalism 2.8:
+    // monomorphization projects its elements, IRMono.tupleVarPackElems), or
+    // a lone (non-tuple) element. Any other tuple-typed value (a call's
+    // result, a projection) has no elements monomorphization can read.
     let groupSlotError (i: int) =
         let a = List.item i tArgs
-        if isTupleValue a && not a.Kind.IsTExprTuple then
+        if isTupleValue a && not a.Kind.IsTExprTuple && not a.Kind.IsTExprVar then
             Some (i, KernelPackArity $"argument {i + 1} of {name} fills a Poly pack with a tuple-typed value: a pack's elements are written at the call, as a parenthesized group in the pack's place or (for a lone pack beside fixed parameters) flat, so monomorphization can see each one. Write the group out, as in ((a, b), ...).")
         else None
     match polyIdx with

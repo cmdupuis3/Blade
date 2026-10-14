@@ -3604,6 +3604,14 @@ let rec exprTypeIfKnown (expr: IRExpr) : IRType option =
         if comps |> List.forall Option.isSome then
             Some (IRTTuple (comps |> List.map Option.get))
         else None
+    // A STRUCTURAL PROJECTION of a tuple whose type is known: that component.
+    // A pack named by a tuple-typed variable reaches its specialization as
+    // the projections `p[0], p[1], ..` (IRMono.tupleVarPackElems), and each
+    // must teach the callee its element type as a written component does.
+    | IRTupleProj (e, i, false) ->
+        (match exprTypeIfKnown e with
+         | Some (IRTTuple ts) when i >= 0 && i < ts.Length -> Some ts.[i]
+         | _ -> None)
     // COMPUTATION WRAPPERS erase at the type level (they are `TypeVia`
     // pass-throughs): `xs |> compute` materializes a deferred computation
     // without changing WHAT it computes. Written inline in an argument slot --
