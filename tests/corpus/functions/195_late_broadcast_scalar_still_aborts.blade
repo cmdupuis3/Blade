@@ -5,7 +5,8 @@
 // late broadcast's guard is the emptiness of the array being MAPPED, never of
 // what the scalar itself reads. (functions/193 is the same probe on the
 // checker's path.)
-function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+// The count is taken in the row's own class (`row ^ 0`, functions/160).
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 function shift(v: T^1, w: U^1) -> T^1 = v - lmean(w)
 let x = [1.0, 2.0, 3.0]
 let none: Array<Float64 like Idx<0>> = []

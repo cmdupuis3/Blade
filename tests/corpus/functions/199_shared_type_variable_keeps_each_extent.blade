@@ -11,7 +11,8 @@
 // those extents symbolic (IRMono.mergeArrayExtents): each parameter reads its
 // own length at run time. Calls whose arguments agree still get the literal
 // extent baked in.
-function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+// The count is taken in the row's own class (`row ^ 0`, functions/160).
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 let x = [1.0, 2.0, 3.0]
 let y = [10.0, 20.0, 30.0, 40.0, 50.0]
 

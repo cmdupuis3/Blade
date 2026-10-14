@@ -2952,6 +2952,19 @@ let internal propagateGenericObligations (env: TypeEnv) (tFunc: TypedExpr)
                  match IR.stripUnits (env.Subst.Resolve p), IR.stripUnits (env.Subst.Resolve a) with
                  | IRTInfer r, at -> if m.ContainsKey r then m else Map.add r at m
                  | ArrayElem pa, ArrayElem aa -> learn pa.ElemType aa.ElemType m
+                 // A callee parameter its body SHAPED (`reduce(row, ..)`
+                 // made `row: T^1` an array whose element carries the
+                 // obligation), handed the caller's own `T^k` it only
+                 // forwards -- still its arity-k variable, never shaped
+                 // here (see the call judgment's linkOwn). The element
+                 // obligation is the caller's, filed under that variable:
+                 // the judgment reads an array instance's ELEMENT
+                 // (concreteElemOf). It used to be dropped, so
+                 // `outer(q: T^1) = halfsum(q)` over a complex row reached
+                 // g++ (BL9002) where `halfsum(zs)` is BL3019.
+                 | ArrayElem pa, (IRTInfer c as at)
+                         when (env.Subst.GetArityConstraint c) |> Option.exists (fun k -> k = pa.IndexTypes.Length) ->
+                     learn pa.ElemType at m
                  | IRTTuple pts, IRTTuple ats when pts.Length = ats.Length ->
                      List.fold2 (fun m pt at -> learn pt at m) m pts ats
                  | _ -> m

@@ -11,7 +11,10 @@
 // for 'operator/'"). The rewrite now types such a scalar by the checker's
 // own rules (IR.exprTypeIfKnown), read through a unit annotation too. Every
 // spelling below was BL9002 before.
-function lmean(row: T^1) -> T^0 = reduce(row, (+)) / extents(row)
+// The count is taken in the row's own class (`row ^ 0`, functions/160):
+// `/ extents(row)` mixes an Int64 into a Float64 row, refused at every call
+// (casts/546), including the ones these generic bodies forward.
+function lmean(row: T^1) -> T^0 = reduce(row, (+)) / reduce(row ^ 0, (+))
 function lsum(row: T^1) -> T^0 = reduce(row, (+))
 let x = [1.0, 2.0, 3.0, 6.0]
 

@@ -1,0 +1,15 @@
+// TEST: a generic row's sum beside a Float64, forwarded by a caret caller, at a complex row (rejects)
+// ERROR: BL3019 @ 14:15
+// ============================================================================
+// casts/545 through one more generic function: `outer(q: T^1)` only forwards
+// its row to `halfsum`, whose body shaped its own `row` (the reduce) and so
+// filed the element obligation under the row's ELEMENT variable, while
+// `outer`'s `q` is still its arity-1 variable. The obligation was not
+// carried to `outer`, so `outer` over a complex row reached g++ (BL9002).
+// It is now outer's, judged against the element its call gives `q`, and
+// refused at that argument as `halfsum(zs)` is. A real row still computes.
+// ============================================================================
+function halfsum(row: T^1) = reduce(row, (+)) / 2.0
+function outer(q: T^1) = halfsum(q)
+let ok = outer([1.0, 3.0])
+let z = outer([complex(1.0, 2.0), complex(3.0, 4.0)])
