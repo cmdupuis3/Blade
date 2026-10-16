@@ -51,7 +51,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (2017 theorems total)
+## Contents (2044 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -139,6 +139,16 @@ run it with `-Check` to verify the numbers below and the headline in
   division-free isotypic access rule through integer S_3 irrep
   matrices (6T = triv + sgn + 2*trace, Wedderburn 1+1+4 = 6); double-
   coset cell accounting = C(LM+2,3) pinned at extents 2 and 3.
+- BladeDichotomyTies.v (27): the dichotomy BELOW the free cell (extents
+  L or M < r, where a tie-breaking rule picks each tuple's sorter).  Of
+  the 4096 rules at (3,2,2) exactly 4 admit width 2 -- the parity-graded
+  ones (four_of_4096); a 001-type and a 011-type tuple sharing a sorter
+  refutes width 2 at extent (2,2) and width 3 at (2,3) over any ring
+  (lat_overlap_refutes_width2/3: 3x3 and 4x4 unitriangular determinant
+  certificates); explicit width-2 / width-3 schemes for the
+  parity-graded rules at both extents (scheme322_sound,
+  scheme323_sound).  Not an exception to r!, which needs a free cell; the
+  old "dies at (3,2,3)" was wrong.  Scripts: proofs/scripts/dichotomy-ties/.
 - BladeCompute.v (24): the computation model: materialized
   evaluation; V o P = id (counit identity / Theorem 2.1 core);
   non-faithfulness (12.7); compose-apply duality (12.1) via map_map;

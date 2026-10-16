@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**2017 theorems**, Rocq 9.0, stdlib only, verified by both `coqc`
+**2044 theorems**, Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -516,12 +516,60 @@ exhibited, never divided).
   `cauchy_cell_count`, pinned from the live enumerations.
 
 Honest scope: r = 3 — the load-bearing rank, where mixed Schur components
-first exist. The general-r statement (minimal width r!, and a genuine
-tie-breaking exception at (r,L,M) = (3,2,2), where exactly 4 of 4096
-tie-breaking rules admit width 2 — so the general theorem must quantify over
-tie-breaks) is the prose development; a general-r mechanization needs a
-ℚ[S_r] development, exactly as BladeWreath's general-r exactness. Schemes
-with wider stores or multi-cell reads are a different class, not refuted.
+first exist — at a FREE cell (extents L, M ≥ 3, so some cell has all its
+coordinates distinct). The general-r statement (minimal width r!, again at a
+free cell) is prose; a general-r mechanization needs a ℚ[S_r] development,
+exactly as BladeWreath's general-r exactness. Schemes with wider stores or
+multi-cell reads are a different class, not refuted.
+
+Below the free cell (L or M < r) every tuple has several sorting
+permutations and a TIE-BREAKING RULE picks one; BladeDichotomyTies.v (next
+section) settles that regime. The older prose called (3,2,2) a "genuine
+exception" that "dies at (3,2,3)" and concluded the general theorem must
+quantify over tie-breaks. Both conclusions were wrong: the r! theorem simply
+needs a free cell, and below it the binding bound is a different one, which
+the parity-graded rules attain at both extents.
+
+## BladeDichotomyTies.v (27 theorems) — the dichotomy below the free cell
+
+The model is BladeDichotomy's Part B with a tie-breaking rule: a rule picks
+one sorting permutation (sorter) per lat and per lon tuple, and a width-m
+scheme is m weight functions on S₃ × S₃ read at the picked sorters, with
+arbitrary per-tensor storage. At (r, L, M) = (3, 2, 2) the six non-constant
+tuples per dimension have two sorters each: 64 choices per dimension, 4096
+rules. (The original count fixed the constant tuples' sorters; these
+theorems quantify over them too.)
+
+- **The census** (`choices_count`, `disjoint_choices_are_parity_graded`,
+  `four_of_4096`, `parity_graded_sets`): exactly 2 of the 64 choices per
+  dimension keep the 001-type and 011-type sorter sets disjoint, and they
+  are the PARITY-GRADED ones (all sorters of 001-type tuples even and of
+  011-type tuples odd, or the reverse: the two cosets of A₃). So 4 of the
+  4096 rules.
+- **The negative half** (`lat_overlap_refutes_width2`,
+  `lat_overlap_refutes_width3`; any commutative ring with 1 ≠ 0, rule and
+  weights arbitrary functions): if a 001-type and a 011-type tuple share a
+  sorter, no two weight functions reconstruct every symmetric tensor at
+  extent (2, 2), and no three at extent (2, 3). A shared sorter puts one
+  weight row inside two cells' blocks; a 3×3 (4×4) unitriangular
+  evaluation matrix lies in a 2-span (3-span), killed by `det3_span2`
+  (new `det4_span3`).
+- **The positive half** (`scheme322_sound`, `scheme323_sound`; values in ℤ,
+  every constant-tuple sorter): for each parity-graded rule the explicit
+  scheme ε = (1, χ), χ the small-orbit indicator of the one block reading
+  each point, reconstructs every symmetric tensor at extent (2, 2); and a
+  parity-graded lat rule with ANY lon rule admits width 3 at extent (2, 3).
+
+So below the free cell the binding bound is max over cells of
+|Stab(a) \ S₃ / Stab(b)| (2 at (3,2,2), 3 at (3,2,3)), and the
+parity-graded rules attain it exactly at both extents: the "exception" does
+not die at (3,2,3). Not mechanized: the lon mirror of the negative half,
+and the widths of the non-attaining rules. Computed, not proved
+(`proofs/scripts/dichotomy-ties/`, exact rational and GF(p) arithmetic):
+at (3,2,2) the other rules need 3 (3036 rules), 4 (720) or 5 (48), with 288
+between 4 and 5; at (3,2,3) non-parity lat rules need 5; at (4,2,2) the
+bound ⌊4/2⌋ + 1 = 3 is attained by rules with disjoint sorter sets, none of
+them sign-graded.
 
 ## BladeMonad.v — monad and combinator laws
 
@@ -2509,8 +2557,9 @@ attainment is restated); the converse of the boundary theorem (not-free does
 not imply beatable); the storage policy of recursive arrays, nested `let rec`
 and AD through recurrences; general-r
 verified offsets, the storage dichotomy at general r (r = 3 closed in both
-directions by BladeDichotomy; the general minimal-width-r! statement and its
-(3,2,2) tie-breaking exception are prose), k-slot structure, typed-path
+directions by BladeDichotomy, and the regime below the free cell by
+BladeDichotomyTies; the general minimal-width-r! statement is prose), k-slot
+structure, typed-path
 combinator laws, the adjunction proper, the general-r Jacobian transfer /
 accumulation multiplicities (rank-2 forms: BladeJacobian), and — for uniform
 optimality — a proper subgroup H < S_R, the signed bound at general r,
