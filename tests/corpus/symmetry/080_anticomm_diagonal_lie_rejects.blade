@@ -1,0 +1,11 @@
+// TEST: anticomm claim false only on the diagonal (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: contradicts the kernel body on the DIAGONAL
+// `if x > y then 1.0 else -1.0` obeys the sign law at every OFF-diagonal
+// point (f(b, a) = -f(a, b) whenever a <> b), but f(a, a) = -1.0. Strict
+// AntisymIdx storage has no diagonal cell and answers every (i, i) read with
+// 0, so the clause also asserts a zero diagonal. The witness never sampled
+// a = b: the claim was trusted and R(1, 1) read 0.0 against the dense
+// -1.0 (row sums [-2, 0, 2] against [-3, -1, 1]). It now evaluates f(a, a).
+let A = [1.0, 2.0, 3.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> if x > y then 1.0 else -1.0 |> compute

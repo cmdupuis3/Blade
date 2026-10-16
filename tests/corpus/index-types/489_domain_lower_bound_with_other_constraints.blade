@@ -1,0 +1,27 @@
+// TEST: Enumerable Domain: A Lower Bound Combined With Other Constraints
+// The single-field lower bound (487) alongside a difference constraint on a
+// second field, and alongside an upper bound on the same field (a band).
+// Two: i in 3..9, j in 0..i -> sum over i of (i + 1) = 4 + ... + 10 = 49
+// cells; the sum of i over them is sum of i(i + 1) = 322.
+static struct Two {
+    i: Int<min=0, max=9>,
+    j: Int<min=0, max=9>
+} where i >= 3 && j <= i
+
+let static C2 = idx_card(Two)
+// EXPECT: C2 = 49
+let W = method_for(range<Two>) <@> lambda(i, j) -> i |> compute
+let wsum = reduce(W, (+))
+// EXPECT: wsum = 322
+let corner = W((3, 0))
+// EXPECT: corner = 3
+
+static struct Band {
+    i: Int<min=0, max=20>
+} where i >= 3 && i <= 7
+
+let static C3 = idx_card(Band)
+// EXPECT: C3 = 5
+let B = method_for(range<Band>) <@> lambda(i) -> i |> compute
+let bsum = reduce(B, (+))
+// EXPECT: bsum = 25

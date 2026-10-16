@@ -1,0 +1,20 @@
+// TEST: Enumerable Domain: A Lower Bound Above The Certification Cap
+// Above maxBoxCells (100000 cells) the closed-form plan is not cross-checked
+// against the counting layer, so a wrong plan runs silently. Before the fix
+// a single-field lower bound was dropped here and the loop visited all
+// 200001 cells of the box (n = 200001, and the first cell was i = 0). The
+// solution set is exactly i = 199999 and i = 200000.
+static struct Big {
+    i: Int<min=0, max=200000>
+} where i > 199998
+
+let R = method_for(range<Big>) <@> lambda(i) -> 1 |> compute
+let n = extents(R)
+// EXPECT: n = 2
+let s = reduce(R, (+))
+// EXPECT: s = 2
+let V = method_for(range<Big>) <@> lambda(i) -> i |> compute
+let vsum = reduce(V, (+))
+// EXPECT: vsum = 399999
+let last = V(200000)
+// EXPECT: last = 200000

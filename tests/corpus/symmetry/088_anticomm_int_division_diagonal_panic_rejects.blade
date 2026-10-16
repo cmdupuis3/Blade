@@ -1,0 +1,10 @@
+// TEST: anticomm whose diagonal panics (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: a panic (integer division by zero)
+// `6 / (x - y)` is PROVED sign-antisymmetric by the parity tables (invariant
+// over PNeg is PNeg), but its diagonal is an integer division by zero: the
+// dense program panics BL8013 there (formalism 2.4), while strict storage
+// would answer 0 without evaluating it. A proved pair skips the swap search,
+// never the diagonal check.
+let A = [1, 2, 3]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> 6 / (x - y) |> compute

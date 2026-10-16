@@ -1769,11 +1769,12 @@ let buildSparse (arrType: IRArrayType) (values: BladeArray) (keys: int64[][])
       Data = storeOfValues arrType.ElemType (Array.sub valueCells 0 (int card * int trail)) }
 
 /// linearize(tuple) -> rank via the structural hash (sparse_index_t::linearize
-/// = tuple_to_rank.at). A missing key is a program error (C++ .at() throws).
+/// = a tuple_to_rank lookup). A missing key is an out-of-domain read: BL8006
+/// in both lanes, with the same message.
 let sparseLinearize (sv: SparseValue) (coords: int64[]) : int =
     match sv.RankOf.TryGetValue coords with
     | true, r -> r
-    | _ -> raise (InterpPanic ("BL8003", "sparse read: key tuple not present in key set", None, 0))
+    | _ -> raise (InterpPanic ("BL8006", "index out of bounds: a key outside the sparse key set", None, 0))
 
 let private sparseTrailingIndexTypes (sv: SparseValue) : IRIndexType list =
     match sv.IndexTypes with _ :: t -> t | [] -> []

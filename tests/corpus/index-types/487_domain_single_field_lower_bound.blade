@@ -1,0 +1,41 @@
+// TEST: Enumerable Domain: A Single-Field Lower Bound Is Kept
+// A one-field conjunct `i > 5` is the form -i + 6 <= 0, a LOWER bound on i.
+// The projection stored it with the wrong sign (as -i <= 6, looser than the
+// box), so the closed-form plan enumerated the whole box: below the
+// counting layer's cap that surfaced as an internal error (BL9001, "closed-
+// form enumeration ... disagrees with the counting layer"), and above it
+// the wrong cells ran silently (488). Both spellings, `>` and `>=`, and a
+// negated form go through the same arm.
+static struct Low {
+    i: Int<min=0, max=10>
+} where i > 5
+
+let static CARD = idx_card(Low)
+// EXPECT: CARD = 5
+let R = method_for(range<Low>) <@> lambda(i) -> i |> compute
+let n = extents(R)
+// EXPECT: n = 5
+let total = reduce(R, (+))
+// EXPECT: total = 40
+let first = R(6)
+// EXPECT: first = 6
+
+static struct AtLeast {
+    k: Int<min=0, max=6>
+} where k >= 3
+
+let static CARD2 = idx_card(AtLeast)
+// EXPECT: CARD2 = 4
+let S = method_for(range<AtLeast>) <@> lambda(k) -> k * k |> compute
+let squares = reduce(S, (+))
+// EXPECT: squares = 86
+
+static struct Negated {
+    m: Int<min=0, max=9>
+} where -m <= -7
+
+let static CARD3 = idx_card(Negated)
+// EXPECT: CARD3 = 3
+let T = method_for(range<Negated>) <@> lambda(m) -> m |> compute
+let msum = reduce(T, (+))
+// EXPECT: msum = 24

@@ -608,7 +608,7 @@
     },
     "BL4013": {
       "title": "symmetry annotation contradicts body",
-      "explanation": "A declared `comm` over a provably antisymmetric pair (or `anticomm` over a provably invariant one). Split out of BL3007's generic bucket because this is not a bad builtin argument: it is an annotation the deduction can PROVE wrong.",
+      "explanation": "A declared `comm` over a provably antisymmetric pair (or `anticomm` over a provably invariant one), or a claim refuted by a concrete counterexample: the body evaluated (in formalism 2.4 arithmetic, captured scalars bound to sampled values) at a point and its swap, or -- for `anticomm` -- at a diagonal point where it is not 0, which strict-triangular storage would answer with 0. Split out of BL3007's generic bucket because this is not a bad builtin argument: it is an annotation the deduction can PROVE wrong.",
       "fix": "Remove the clause, or wrap the kernel in `reynolds(...)` -- symmetrization manufactures the commutative kernel you were claiming. Compare BL4016, where nothing is disproved and there is simply no licence to stand on.",
       "examples": [
         "tests/corpus/diagnostics/040_comm_contradicts_body.blade",

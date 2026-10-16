@@ -1,0 +1,16 @@
+// TEST: an honest Int64 anticomm kernel stays accepted and compact
+// `(x - y) * 3` is proved PNeg by the parity tables; its diagonal is exactly
+// 0 in wrapping Int64, so the diagonal check passes and the output is the
+// strict triangle (no diagonal cells printed), with mirrored reads negated
+// and the diagonal read 0.
+let A = [1, 2, 4]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) * 3 |> compute
+let r01 = R(0, 1)
+let r10 = R(1, 0)
+let r11 = R(1, 1)
+let r21 = R(2, 1)
+// EXPECT: R = [[-3, -9], [-6], []]
+// EXPECT: r01 = -3
+// EXPECT: r10 = 3
+// EXPECT: r11 = 0
+// EXPECT: r21 = 6

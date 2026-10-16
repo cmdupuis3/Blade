@@ -472,13 +472,20 @@ type TypeError =
     | ChainOpUndecidable of leftDesc: string * rightDesc: string
     | CommContradictsBody of param1: string * param2: string
     // `where comm(p1, p2)` on a body the checker DISPROVES by a concrete
-    // counterexample (Deduce.witnessSwapAsymmetry): the witness is rendered
+    // counterexample (Deduce.witnessSwapLawFailure): the witness is rendered
     // "f(a, b) = u but f(b, a) = v". Same code as CommContradictsBody (BL4013).
     | CommContradictsWitness of param1: string * param2: string * witness: string
     // `where anticomm(p1, p2)` on a body disproved the same way: a point where
     // f(b, a) is not -f(a, b) (Deduce.witnessSwapLawFailure, negate = true).
     // Same code (BL4013).
     | AnticommContradictsWitness of param1: string * param2: string * witness: string
+    // `where anticomm(p1, p2)` on a body whose DIAGONAL is not 0: strict
+    // `AntisymIdx` storage has no diagonal cell and answers every (i, i) read
+    // with 0, so the clause asserts f(a, a) = 0 -- which the sign law alone
+    // does not force (f(a, a) = -f(a, a) also holds at Int64.MinValue under
+    // wrap), and a body can obey the law off the diagonal and lie on it.
+    // Same code (BL4013).
+    | AnticommDiagonalNonzero of param1: string * param2: string * witness: string
     | AntisymmContradictsBody of param1: string * param2: string
     // The Hermitian third of the pair-swap contradiction family: the body
     // provably CONJUGATES under the swap (f(y,x) = conj(f(x,y)), deduced

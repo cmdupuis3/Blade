@@ -350,6 +350,21 @@ namespace blade_rt {
     std::fflush(nullptr);
     std::_Exit(1);
   }
+  // The generated main's catch-all for a C++ exception. A runtime header
+  // that must fail with a specific code (but may not call panic itself --
+  // see the shadow-frame elision note in tests/Test_Diagnostics.fs) throws
+  // a std exception whose what() starts "[BLnnnn] ": that code is reported
+  // with the rest of the message. Anything else is BL8005, as before.
+  [[noreturn]] inline void panic_exception(const std::exception& e) {
+    static char code[8];
+    const char* w = e.what();
+    if (w && w[0] == '[' && w[1] == 'B' && w[2] == 'L' && w[7] == ']' && w[8] == ' ') {
+      for (int i = 0; i < 6; ++i) code[i] = w[i + 1];
+      code[6] = '\0';
+      panic(code, w + 9, nullptr, 0);
+    }
+    panic("BL8005", w, nullptr, 0);
+  }
   // The entry point a Blade-built DLL fails through (blade_dll_panic.hpp).
   // The DLL is its own image and must not carry a second copy of this
   // header's state, so the host binds this function into it at static

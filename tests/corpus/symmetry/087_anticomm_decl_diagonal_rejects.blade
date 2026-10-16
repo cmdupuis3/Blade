@@ -1,0 +1,7 @@
+// TEST: anticomm on a function declaration, false only on the diagonal (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: at x = y = 2 the body is -1, not 0
+// The declaration seam runs the same witness as the lambda seam (080): the
+// sign law holds off the diagonal, but g(a, a) = -1, and strict storage would
+// answer every diagonal read with 0. Integer kernel: the value is exact.
+function g(x: Int64, y: Int64) where anticomm(x, y) -> Int64 = if x > y then 1 else -1

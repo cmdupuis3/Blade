@@ -1,0 +1,14 @@
+// TEST: Enumerable Domain: Reading A Key Outside The Domain Aborts (aborts)
+// A domain-shaped result stores only its solution keys, so reading a key
+// outside them is an out-of-domain read. The compiled lane used to let the
+// hash map's std::out_of_range escape (BL8005 "unordered_map::at") while
+// the interpreter reported BL8003, the empty-reduction code; both lanes
+// now abort with BL8006 and the same message.
+static struct Low {
+    i: Int<min=0, max=10>
+} where i > 5
+
+let R = method_for(range<Low>) <@> lambda(i) -> i |> compute
+let bad = R(2)
+// ABORT: BL8006
+// ABORT: a key outside the sparse key set

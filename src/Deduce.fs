@@ -834,7 +834,7 @@ let deduceAdjacentPairs (resolver: IRId -> SignParity list option)
         |> List.pairwise
         |> List.map (fun (a, b) -> parityOf resolver a.VarId b.VarId body)
 
-// WITNESSED ASYMMETRY -- the refutation twin of PInv.
+// WITNESSED LAW FAILURE -- the refutation twin of PInv / PNeg.
 //
 // `parityOf` answers PBottom for two very different bodies: one the analysis
 // cannot see through (`sqrt(x * y)` behind a call it has no summary for), and
@@ -847,138 +847,388 @@ let deduceAdjacentPairs (resolver: IRId -> SignParity list option)
 // The certificate is a CONCRETE COUNTEREXAMPLE: the body is evaluated at a few
 // sample points (a, b) and at their swap (b, a); a clear difference at one
 // point proves f(x, y) <> f(y, x) as a LAW. It is sound by construction -- a
-// symmetric body evaluates to the same value either way (up to rounding, which
-// the relative tolerance absorbs: every sample is a small dyadic number) -- and
-// complete for any body the evaluator can run. The evaluator is closed-world:
-// it runs only literals, the two swapped parameters, scalar arithmetic,
-// comparisons, logic, `if`, casts and the math intrinsics. Anything else -- a
-// captured value, another parameter, a call, an array read, a complex operand
-// -- answers "no evaluation", and no witness is claimed (the body stays
-// trusted exactly as before).
+// symmetric body evaluates to the same value either way (exactly over
+// integers; up to rounding over floats, which the relative tolerance absorbs:
+// every sample is a small dyadic number) -- and it refutes any false claim
+// whose failure shows at one of the samples. The evaluator is closed-world:
+// it runs only literals, the parameters, captured scalars (below), scalar
+// arithmetic, comparisons, logic, `if`, casts and the math intrinsics.
+// Anything else -- a call, an array read, a complex operand, a local binding
+// that could not be inlined -- answers "no evaluation", and no witness is
+// claimed (the body stays trusted exactly as before).
 //
-// `isInt` selects integer semantics (truncating `/` and `%`) for kernels over
-// integer elements, matching the emitted C++.
+// ARITHMETIC IS FORMALISM 2.4, the contract every lane runs: integer values
+// stay exact Int64 (Int32 nodes narrow to 32 bits), `+ - *` and negation WRAP,
+// `/` and `%` truncate (MIN / -1 wraps to MIN, MIN % -1 is 0), integer `^` is
+// exact modulo 2^64, and division/modulo by zero, a negative integer exponent
+// and a NaN/out-of-range float->int cast PANIC (src/Interp/Numerics.fs is the
+// reference). A float evaluator refuted TRUE claims under wrap (`(x - y) + c`
+// at c = Int64.MinValue is honestly sign-antisymmetric) and could accept false
+// ones. Each node's kind comes from its own type when that is concrete, else
+// from `isInt` (kernel parameters are still inference variables at the
+// lambda seam; the operand arrays decide).
 //
 // ARITY > 2. A claim on a pair of a wider kernel (`comm(x, y, z)` is the
 // claim on every pair the group's transpositions generate) is a law for
 // EVERY value of the remaining parameters, so it is disproved by a
 // counterexample at ANY fixed values of them: `others` are bound to
-// constants that stay fixed across the swap. Without them the evaluator met
-// `z` and answered "no evaluation", so every wider kernel's false claim --
-// `x + 2.0 * y + 3.0 * z` under `comm(x, y, z)` -- passed and was stored as
-// a simplex. (Each other parameter gets its own constant, so a body cannot
-// be accidentally symmetric because two of them coincide.)
+// constants that stay fixed across the swap. (Each other parameter gets its
+// own constant, so a body cannot be accidentally symmetric because two of
+// them coincide.)
+//
+// CAPTURED SCALARS are free inputs of the claim in the same way. A kernel
+// that reads a captured Int/Float variable declares a law for the body as
+// written, and nothing ties the clause to the one value the capture has at
+// this apply (the same kernel text is checked once, at its declaration or
+// its apply, before any value flows). So a capture is bound to a sampled
+// constant, fixed across the swap; a claim that holds only for the actual
+// captured value is refused -- conservatively -- rather than trusted. Before,
+// the evaluator gave up on a capture and the claim was trusted: `(x - y) + c`
+// with a captured c = Int64.MinValue was stored on the strict triangle and
+// its diagonal read as 0 against the dense -9223372036854775808.
 //
 // `negate` checks the ANTICOMMUTATIVE law instead: f(y, x) = -f(x, y), so a
-// witness is a point where f(b, a) is not -f(a, b).
-//
-// The result is (a, b, u, v, others' values) -- u = f(.., a, .., b, ..),
-// v = f(.., b, .., a, ..).
+// witness is a point where f(b, a) is not -f(a, b). It ALSO checks the
+// DIAGONAL: strict `AntisymIdx` storage has no diagonal cell and answers
+// every (i, i) read with 0, so `anticomm` asserts f(a, a) = 0. The sign law
+// alone does not force that -- f(a, a) = -f(a, a) has the solution
+// Int64.MinValue in wrapping Int64, and a body can satisfy the law off the
+// diagonal and lie on it (`if x > y then 1.0 else -1.0`, f(a, a) = -1). The
+// diagonal check runs even on a pair the parity tables PROVED (`skipSwap`):
+// a structural PNeg proof gives f(a, a) = 0 exactly in Int64 except where
+// the body panics there (`k / (x - y)`), and a panicking diagonal is not 0
+// either. A non-finite FLOAT diagonal (inf - inf, 0.0 / 0.0) is skipped, not
+// refused: that is the documented exception to the stored zero (formalism
+// 3.4), the same non-finite exclusion the swap samples make.
+
+/// One scalar of the witness evaluator: formalism 2.4 keeps integers and
+/// floats apart, so the evaluator does too.
+type WitnessVal =
+    | WInt of int64
+    | WFloat of float
+    | WBool of bool
+
+/// A 2.4 panic raised while evaluating a witness sample (the message names it).
+exception private WitnessPanic of string
+
+/// How a declared swap law failed at a concrete point.
+type LawFailure =
+    /// f(.., a, .., b, ..) = u, but f(.., b, .., a, ..) = v where the law
+    /// required `required` (u for comm, -u for anticomm). Values rendered.
+    | SwapLawFails of a: string * b: string * u: string * v: string * required: string
+    /// anticomm only: f(.., a, .., a, ..) is `value` (rendered; a panic reads
+    /// "a panic (...)"), not the 0 strict-triangular storage answers there.
+    | DiagonalNonzero of a: string * value: string
+
+/// A witnessed law failure with the values the other inputs were held at.
+type LawWitness =
+    { Failure: LawFailure
+      /// The other parameters' fixed values (binder id, rendered value).
+      Fixed: (IRId * string) list
+      /// The captured scalars the body read, with their sampled values (name, rendered).
+      Captured: (string * string) list }
+
+let private renderWitnessVal (v: WitnessVal) : string =
+    let inv = System.Globalization.CultureInfo.InvariantCulture
+    match v with
+    | WInt i -> i.ToString(inv)
+    | WFloat f -> f.ToString("G6", inv)
+    | WBool b -> if b then "true" else "false"
+
+/// The scalar kind a node's type pins, if it is concrete.
+let rec private witnessKindOf (t: IRType) : ElemType option =
+    match stripUnits t with
+    | IRTIdxTagged (inner, _) -> witnessKindOf inner
+    | IRTScalar ((ETInt32 | ETInt64 | ETFloat32 | ETFloat64 | ETBool) as et) -> Some et
+    | _ -> None
+
 let witnessSwapLawFailure (pi: IRId) (pj: IRId) (others: IRId list) (negate: bool)
-                          (isInt: bool) (body: TypedExpr)
-                          : (float * float * float * float * (IRId * float) list) option =
+                          (skipSwap: bool) (isInt: bool) (body: TypedExpr)
+                          : LawWitness option =
     let body = flattenBindings body
-    let fixedVals =
-        let pool = if isInt then [ 3.0; 5.0; -2.0; 7.0; 4.0; 6.0; -3.0; 8.0 ] else [ 0.75; 1.25; -0.5; 2.5; 3.25; -1.75; 1.5; 4.5 ]
-        others |> List.mapi (fun k id -> (id, pool.[k % pool.Length] + float (k / pool.Length)))
-    let fixedMap = Map.ofList fixedVals
-    let rec ev (x: float) (y: float) (e: TypedExpr) : float option =
+    // A sample seed is a float (the float pool has halves); an occurrence
+    // reads it at its own kind when that is concrete, else at `isInt`'s.
+    let seedVal (v: float) = if isInt then WInt (int64 v) else WFloat v
+    let paramVal (v: float) (e: TypedExpr) =
+        match witnessKindOf e.Type with
+        | Some (ETInt32 | ETInt64) -> WInt (int64 v)
+        | Some (ETFloat32 | ETFloat64) -> WFloat v
+        | _ -> seedVal v
+    // Fixed values of the other parameters: integers, rendered as the kind
+    // each occurrence reads them at (float pools were dyadic for a reason --
+    // exact in binary -- and the int pool's members are exact either way).
+    let othersPoolInt = [ 3L; 5L; -2L; 7L; 4L; 6L; -3L; 8L ]
+    let othersPoolFloat = [ 0.75; 1.25; -0.5; 2.5; 3.25; -1.75; 1.5; 4.5 ]
+    let otherVal (k: int) (asInt: bool) =
+        if asInt then WInt (othersPoolInt.[k % othersPoolInt.Length] + int64 (k / othersPoolInt.Length))
+        else WFloat (othersPoolFloat.[k % othersPoolFloat.Length] + float (k / othersPoolFloat.Length))
+    let fixedIdx = others |> List.mapi (fun k id -> (id, k)) |> Map.ofList
+    let fixedSeen = System.Collections.Generic.Dictionary<IRId, WitnessVal>()
+    // Captured scalars: sampled from pools disjoint from the parameter
+    // samples, assigned in first-read order (deterministic), stable across
+    // every evaluation of this call.
+    let capPoolInt = [ 11L; -5L; 13L; 9L; -7L; 17L ]
+    let capPoolFloat = [ 0.375; -2.25; 1.625; 5.5; -0.875; 2.125 ]
+    let captured = System.Collections.Generic.Dictionary<IRId, WitnessVal>()
+    let capturedOrder = System.Collections.Generic.List<string * IRId>()
+    let capture (name: string) (id: IRId) (e: TypedExpr) : WitnessVal option =
+        match captured.TryGetValue id with
+        | true, v -> Some v
+        | _ ->
+            let k = captured.Count
+            let v =
+                match witnessKindOf e.Type with
+                | Some (ETInt32 | ETInt64) -> Some (WInt capPoolInt.[k % capPoolInt.Length])
+                | Some (ETFloat32 | ETFloat64) -> Some (WFloat capPoolFloat.[k % capPoolFloat.Length])
+                | _ -> None   // bool, aggregate, function, unresolved: no evaluation
+            v |> Option.iter (fun v -> captured.[id] <- v; capturedOrder.Add((name, id)))
+            v
+    let panic msg = raise (WitnessPanic msg)
+    let asFloat (v: WitnessVal) =
+        match v with
+        | WInt i -> float i
+        | WFloat f -> f
+        | WBool b -> if b then 1.0 else 0.0
+    let truthy (v: WitnessVal) =
+        match v with
+        | WBool b -> b
+        | WInt i -> i <> 0L
+        | WFloat f -> f <> 0.0
+    // Integer `^`: exact modulo 2^64 (Numerics.intPow64At).
+    let intPow (b: int64) (e: int64) =
+        if e < 0L then panic "integer power with a negative exponent"
+        let mutable r = 1UL
+        let mutable x = uint64 b
+        let mutable n = uint64 e
+        while n <> 0UL do
+            if n &&& 1UL <> 0UL then r <- r * x
+            x <- x * x
+            n <- n >>> 1
+        int64 r
+    // Real `^` (Numerics.realPow / realPowInt): x * x at exactly 2, repeated
+    // squaring at an integer exponent, else pow.
+    let floatPowInt (b: float) (e: int64) =
+        let mutable r = 1.0
+        let mutable x = b
+        let mutable n = if e < 0L then uint64 (0L - e) else uint64 e
+        while n <> 0UL do
+            if n &&& 1UL <> 0UL then r <- r * x
+            x <- x * x
+            n <- n >>> 1
+        if e < 0L then 1.0 / r else r
+    let f2i (x: float) (target: ElemType) =
+        match target with
+        | ETInt32 ->
+            if not (x >= -2147483648.0 && x < 2147483648.0) then
+                panic "float-to-integer conversion of NaN or an out-of-range value"
+            int64 (int32 x)
+        | _ ->
+            if not (x >= -9223372036854775808.0 && x < 9223372036854775808.0) then
+                panic "float-to-integer conversion of NaN or an out-of-range value"
+            int64 x
+    let rec ev (x: float) (y: float) (e: TypedExpr) : WitnessVal option =
         let go = ev x y
-        let bool b = Some (if b then 1.0 else 0.0)
+        // Int32 nodes narrow (wrap) to 32 bits; every other int is Int64.
+        let narrow (v: int64) =
+            match witnessKindOf e.Type with
+            | Some ETInt32 -> int64 (int32 v)
+            | _ -> v
         match e.Kind with
-        | TExprLit (LitInt v) -> Some (float v)
-        | TExprLit (LitFloat v) -> Some v
-        | TExprLit (LitBool b) -> bool b
-        | TExprVar (_, id, _) when id = pi -> Some x
-        | TExprVar (_, id, _) when id = pj -> Some y
-        | TExprVar (_, id, _) when fixedMap.ContainsKey id -> Some fixedMap.[id]
+        | TExprLit (LitInt v) -> Some (WInt v)
+        | TExprLit (LitFloat v) -> Some (WFloat v)
+        | TExprLit (LitBool b) -> Some (WBool b)
+        | TExprVar (_, id, _) when id = pi -> Some (paramVal x e)
+        | TExprVar (_, id, _) when id = pj -> Some (paramVal y e)
+        | TExprVar (_, id, _) when fixedIdx.ContainsKey id ->
+            (match fixedSeen.TryGetValue id with
+             | true, v -> Some v
+             | _ ->
+                 let asInt =
+                     match witnessKindOf e.Type with
+                     | Some (ETInt32 | ETInt64) -> true
+                     | Some (ETFloat32 | ETFloat64) -> false
+                     | _ -> isInt
+                 let v = otherVal fixedIdx.[id] asInt
+                 fixedSeen.[id] <- v
+                 Some v)
+        // Every other variable the evaluator can reach is FREE in the body:
+        // it descends into no binding form (a surviving `let`, a block with
+        // statements, a match, a lambda all answer None below), so this is a
+        // capture, never a local.
+        | TExprVar (name, id, _) -> capture name id e
         | TExprBlock ([], Some f) -> go f
         // `|> compute` on a scalar is the identity (the parser binds a
         // trailing `|> compute` into the last branch of a kernel's `if`).
         | TExprCompute inner | TExprPure inner -> go inner
         | TExprBinOp (Elementwise, op, l, r) ->
-            // Integer semantics per NODE, from its own type when it is known:
-            // `x / 2.0` over integer elements is a floating division in C++.
-            let intNode =
-                match stripUnits e.Type with
-                | IRTScalar (ETInt32 | ETInt64) -> true
-                | IRTScalar (ETFloat32 | ETFloat64) -> false
-                | _ -> isInt
             (match go l, go r with
              | Some a, Some b ->
-                 match op with
-                 | OpAdd -> Some (a + b)
-                 | OpSub -> Some (a - b)
-                 | OpMul -> Some (a * b)
-                 | OpDiv ->
-                     if b = 0.0 then None
-                     elif intNode then Some (System.Math.Truncate (a / b))
-                     else Some (a / b)
-                 | OpMod ->
-                     if b = 0.0 then None
-                     elif intNode then Some (float (int64 a % int64 b))
-                     else Some (a - b * System.Math.Truncate (a / b))
-                 | OpCaret -> Some (System.Math.Pow (a, b))
-                 | OpMath2 "atan2" -> Some (System.Math.Atan2 (a, b))
-                 | OpEq -> bool (a = b)
-                 | OpNeq -> bool (a <> b)
-                 | OpLt -> bool (a < b)
-                 | OpLe -> bool (a <= b)
-                 | OpGt -> bool (a > b)
-                 | OpGe -> bool (a >= b)
-                 | OpAnd -> bool (a <> 0.0 && b <> 0.0)
-                 | OpOr -> bool (a <> 0.0 || b <> 0.0)
-                 | _ -> None
+                 match a, b, op with
+                 | WInt p, WInt q, _ ->
+                     match op with
+                     | OpAdd -> Some (WInt (narrow (p + q)))
+                     | OpSub -> Some (WInt (narrow (p - q)))
+                     | OpMul -> Some (WInt (narrow (p * q)))
+                     | OpDiv ->
+                         if q = 0L then panic "integer division by zero"
+                         elif q = -1L then Some (WInt (narrow (0L - p)))
+                         else Some (WInt (narrow (p / q)))
+                     | OpMod ->
+                         if q = 0L then panic "integer modulo by zero"
+                         elif q = -1L then Some (WInt 0L)
+                         else Some (WInt (narrow (p % q)))
+                     | OpCaret -> Some (WInt (narrow (intPow p q)))
+                     | OpMath2 "atan2" -> Some (WFloat (System.Math.Atan2 (float p, float q)))
+                     | OpEq -> Some (WBool (p = q))
+                     | OpNeq -> Some (WBool (p <> q))
+                     | OpLt -> Some (WBool (p < q))
+                     | OpLe -> Some (WBool (p <= q))
+                     | OpGt -> Some (WBool (p > q))
+                     | OpGe -> Some (WBool (p >= q))
+                     | OpAnd -> Some (WBool (p <> 0L && q <> 0L))
+                     | OpOr -> Some (WBool (p <> 0L || q <> 0L))
+                     | _ -> None
+                 | (WBool _, _, (OpAnd | OpOr | OpEq | OpNeq)) | (_, WBool _, (OpAnd | OpOr | OpEq | OpNeq)) ->
+                     (match op with
+                      | OpAnd -> Some (WBool (truthy a && truthy b))
+                      | OpOr -> Some (WBool (truthy a || truthy b))
+                      | OpEq -> Some (WBool (truthy a = truthy b))
+                      | _ -> Some (WBool (truthy a <> truthy b)))
+                 | _ ->
+                     // Real arithmetic (a mixed pair only arises from an
+                     // operand kind the checker could not pin; it promotes,
+                     // as the old all-float evaluator did).
+                     let p = asFloat a
+                     let q = asFloat b
+                     match op with
+                     | OpAdd -> Some (WFloat (p + q))
+                     | OpSub -> Some (WFloat (p - q))
+                     | OpMul -> Some (WFloat (p * q))
+                     | OpDiv -> Some (WFloat (p / q))
+                     | OpMod -> Some (WFloat (p - q * System.Math.Truncate (p / q)))
+                     | OpCaret ->
+                         (match b with
+                          | WInt n -> Some (WFloat (floatPowInt p n))
+                          | _ -> Some (WFloat (if q = 2.0 then p * p else System.Math.Pow (p, q))))
+                     | OpMath2 "atan2" -> Some (WFloat (System.Math.Atan2 (p, q)))
+                     | OpEq -> Some (WBool (p = q))
+                     | OpNeq -> Some (WBool (p <> q))
+                     | OpLt -> Some (WBool (p < q))
+                     | OpLe -> Some (WBool (p <= q))
+                     | OpGt -> Some (WBool (p > q))
+                     | OpGe -> Some (WBool (p >= q))
+                     | OpAnd -> Some (WBool (p <> 0.0 && q <> 0.0))
+                     | OpOr -> Some (WBool (p <> 0.0 || q <> 0.0))
+                     | _ -> None
              | _ -> None)
         | TExprUnaryOp (op, inner) ->
             (match go inner with
              | Some a ->
-                 match op with
-                 | OpNeg -> Some (-a)
-                 | OpNot -> bool (a = 0.0)
-                 | OpReal -> Some a
-                 | OpConj -> Some a
-                 | OpMath "exp" -> Some (exp a)
-                 | OpMath "log" -> Some (log a)
-                 | OpMath "sqrt" -> Some (sqrt a)
-                 | OpMath "sin" -> Some (sin a)
-                 | OpMath "cos" -> Some (cos a)
-                 | OpMath "tan" -> Some (tan a)
-                 | OpMath "tanh" -> Some (tanh a)
-                 | OpMath "abs" -> Some (abs a)
-                 | OpMath "floor" -> Some (floor a)
-                 | OpMath "ceil" -> Some (ceil a)
-                 | OpCast ("Float" | "Float64" | "Float32") -> Some a
+                 match op, a with
+                 | OpNeg, WInt i -> Some (WInt (narrow (0L - i)))
+                 | OpNeg, WFloat f -> Some (WFloat (-f))
+                 | OpNot, _ -> Some (WBool (not (truthy a)))
+                 | (OpReal | OpConj), (WInt _ | WFloat _) -> Some a
+                 | OpMath "abs", WInt i -> Some (WInt (narrow (if i < 0L then 0L - i else i)))
+                 | OpMath ("floor" | "ceil"), WInt _ -> Some a
+                 | OpMath name, (WInt _ | WFloat _) ->
+                     let f = asFloat a
+                     let r =
+                         match name with
+                         | "exp" -> Some (exp f)
+                         | "log" -> Some (log f)
+                         | "sqrt" -> Some (sqrt f)
+                         | "sin" -> Some (sin f)
+                         | "cos" -> Some (cos f)
+                         | "tan" -> Some (tan f)
+                         | "tanh" -> Some (tanh f)
+                         | "abs" -> Some (abs f)
+                         | "floor" -> Some (floor f)
+                         | "ceil" -> Some (ceil f)
+                         | _ -> None
+                     r |> Option.map WFloat
+                 | OpCast name, (WInt _ | WFloat _) ->
+                     (match Blade.Types.castTargetOf name, a with
+                      | Some ((ETInt32 | ETInt64) as t), WFloat f -> Some (WInt (f2i f t))
+                      | Some ETInt32, WInt i -> Some (WInt (int64 (int32 i)))
+                      | Some ETInt64, WInt _ -> Some a
+                      | Some (ETFloat32 | ETFloat64), _ -> Some (WFloat (asFloat a))
+                      | _ -> None)
                  | _ -> None
              | None -> None)
         | TExprIf (c, t, f) ->
             (match go c with
-             | Some cv -> if cv <> 0.0 then go t else go f
+             | Some cv -> if truthy cv then go t else go f
              | None -> None)
         | _ -> None
+    /// One evaluation: Ok value, Error panic message, or None (no evaluation).
+    let run (a: float) (b: float) : Result<WitnessVal, string> option =
+        try ev a b body |> Option.map Ok
+        with WitnessPanic msg -> Some (Error msg)
+    let finite (v: WitnessVal) =
+        match v with
+        | WFloat f -> System.Double.IsFinite f
+        | _ -> true
+    let negV (v: WitnessVal) =
+        match v with
+        | WInt i -> WInt (0L - i)   // the wrapping negation the law is stated in
+        | WFloat f -> WFloat (-f)
+        | b -> b
+    let lawHolds (expected: WitnessVal) (v: WitnessVal) =
+        match expected, v with
+        | WInt p, WInt q -> p = q
+        | WBool p, WBool q -> p = q
+        | _ ->
+            let p = asFloat expected
+            let q = asFloat v
+            abs (q - p) <= 1e-9 * (max 1.0 (max (abs p) (abs q)))
+    let render = renderWitnessVal
+    let witness (failure: LawFailure) =
+        { Failure = failure
+          Fixed = others |> List.choose (fun id ->
+                      match fixedSeen.TryGetValue id with
+                      | true, v -> Some (id, render v)
+                      | _ -> None)
+          Captured = capturedOrder |> Seq.map (fun (n, id) -> (n, render captured.[id])) |> List.ofSeq }
     let samples =
         if isInt then [ (2.0, 1.0); (1.0, 3.0); (3.0, 5.0); (-2.0, 7.0); (4.0, 9.0) ]
         else [ (2.0, 1.0); (1.0, 3.0); (0.5, 4.0); (-1.5, 2.5); (3.0, 5.0) ]
-    let usesPair = usesVar pi body || usesVar pj body
-    // Anticommutativity is a claim even about a body that ignores the pair:
-    // a constant c != 0 has f(y, x) = c, not -c.
-    if not usesPair && not negate then None
-    else
-        samples |> List.tryPick (fun (a, b) ->
-            match ev a b body, ev b a body with
-            | Some u, Some v when System.Double.IsFinite u && System.Double.IsFinite v ->
-                let expected = if negate then -u else u
-                if abs (v - expected) > 1e-9 * (max 1.0 (max (abs u) (abs v))) then
-                    Some (a, b, u, v, fixedVals)
-                else None
-            | _ -> None)
-
-/// The original two-parameter commutativity witness (no other parameters
-/// bound): kept for callers that have only the pair.
-let witnessSwapAsymmetry (pi: IRId) (pj: IRId) (isInt: bool) (body: TypedExpr)
-                         : (float * float * float * float) option =
-    witnessSwapLawFailure pi pj [] false isInt body
-    |> Option.map (fun (a, b, u, v, _) -> (a, b, u, v))
+    let diagonalSamples = if isInt then [ 2.0; -3.0; 5.0 ] else [ 2.0; -1.5; 0.5 ]
+    let swapFailure () =
+        let usesPair = usesVar pi body || usesVar pj body
+        // Anticommutativity is a claim even about a body that ignores the pair:
+        // a constant c != 0 has f(y, x) = c, not -c.
+        if skipSwap || (not usesPair && not negate) then None
+        else
+            samples
+            |> List.tryPick (fun (a, b) ->
+                match run a b, run b a with
+                | Some (Ok u), Some (Ok v) when finite u && finite v ->
+                    let expected = if negate then negV u else u
+                    if lawHolds expected v then None
+                    else
+                        let pa = render (seedVal a)
+                        let pb = render (seedVal b)
+                        Some (witness (SwapLawFails (pa, pb, render u, render v, render expected)))
+                | _ -> None)
+    let diagonalFailure () =
+        if not negate then None
+        else
+            diagonalSamples
+            |> List.tryPick (fun a ->
+                match run a a with
+                | Some (Ok v) ->
+                    let isZero =
+                        match v with
+                        | WInt i -> i = 0L
+                        | WBool _ -> true   // a boolean body has no sign law to store
+                        | WFloat f -> not (System.Double.IsFinite f) || abs f <= 1e-9 * (max 1.0 (abs a))
+                    if isZero then None
+                    else Some (witness (DiagonalNonzero (render (seedVal a), render v)))
+                | Some (Error msg) ->
+                    Some (witness (DiagonalNonzero (render (seedVal a), $"a panic ({msg})")))
+                | None -> None)
+    swapFailure () |> Option.orElseWith diagonalFailure
 
 // Late tier: arity-polymorphic (Poly-pack) kernels -- the all-arity
 // exchange law.

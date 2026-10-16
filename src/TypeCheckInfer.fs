@@ -9779,17 +9779,23 @@ and buildApplyInfo (env: TypeEnv)
                     let isComplex =
                         if ps.Length = arrayTypes.Length then slotElemIs complexElemT [ p; q ]
                         else slotElemIs complexElemT []
-                    if proved || isComplex then None
+                    // A PROVED pair skips the swap search, but an anticomm
+                    // pair still has its DIAGONAL checked: the sign law does
+                    // not force f(a, a) = 0 (see witnessSwapLawFailure).
+                    if isComplex || (proved && not negate) then None
                     else
                         let (a, b) = (ps.[p], ps.[q])
                         let others = ps |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
                         let isInt = [ p; q ] |> List.exists (fun k -> k < arrayTypes.Length && intElemT arrayTypes.[k].ElemType)
-                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate isInt lambdaInfo.Body
-                        |> Option.map (fun (x, y, u, v, fixedVals) ->
+                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate proved isInt lambdaInfo.Body
+                        |> Option.map (fun w ->
                             let named =
-                                fixedVals |> List.choose (fun (id, c) ->
+                                w.Fixed |> List.choose (fun (id, c) ->
                                     others |> List.tryFind (fun o -> o.VarId = id) |> Option.map (fun o -> (o.Name, c)))
-                            mk (a.Name, b.Name, swapWitnessText a.Name b.Name named negate x y u v)))
+                            let text = swapWitnessText a.Name b.Name named negate w
+                            match w.Failure with
+                            | Blade.Deduce.DiagonalNonzero _ -> AnticommDiagonalNonzero (a.Name, b.Name, text)
+                            | Blade.Deduce.SwapLawFails _ -> mk (a.Name, b.Name, text)))
     let commWitnessError () =
         swapWitnessError commGroups false Blade.Deduce.PInv CommContradictsWitness
         |> Option.orElseWith (fun () ->
@@ -9813,7 +9819,7 @@ and buildApplyInfo (env: TypeEnv)
           lambdaInfo.AntisymGroups, Blade.Deduce.PConj, true, (fun a b -> AntisymmContradictsConjBody (a, b)) ]
         |> List.tryPick (fun (g, wanted, needsComplexPair, mk) ->
                contradictsIn g wanted needsComplexPair mk)
-        // WITNESSED ASYMMETRY (see Deduce.witnessSwapAsymmetry): a declared
+        // WITNESSED ASYMMETRY (see Deduce.witnessSwapLawFailure): a declared
         // comm pair whose body the parity tables leave at PBottom may still
         // be DISPROVABLE by a concrete counterexample -- `x / y`, a lone `x`,
         // `x - 2.0 * y`. Same refusal, same stand-down under reynolds (where
@@ -16925,7 +16931,7 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                    else [])
                 |> List.tryPick (fun (g, wanted, mk) -> declContradiction g wanted mk)
                 // The witnessed-asymmetry twin of the lambda-kernel seam (see
-                // Deduce.witnessSwapAsymmetry): a declared comm pair the parity
+                // Deduce.witnessSwapLawFailure): a declared comm pair the parity
                 // tables leave unproved, disproved by a concrete counterexample.
                 // Real elements only (the evaluator has no complex numbers);
                 // a generic/unresolved element evaluates as Float.
@@ -16951,17 +16957,21 @@ and checkFunctionDeclWith (fixedParams: Map<int, IRType>) (onBound: IRId -> IRTy
                                 if p < 0 || q >= n || p = q then None
                                 else
                                     let proved = q = p + 1 && p < deducedPairs.Length && deducedPairs.[p] = provedLaw
-                                    if proved then None
+                                    // A proved anticomm pair still has its diagonal checked.
+                                    if proved && not negate then None
                                     else
                                         let (a, b) = (typedParams.[p], typedParams.[q])
                                         let others = typedParams |> List.indexed |> List.filter (fun (k, _) -> k <> p && k <> q) |> List.map snd
-                                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate
+                                        Blade.Deduce.witnessSwapLawFailure a.VarId b.VarId (others |> List.map (_.VarId)) negate proved
                                             (isIntTy a.Type && isIntTy b.Type) tBody
-                                        |> Option.map (fun (x, y, u, v, fixedVals) ->
+                                        |> Option.map (fun w ->
                                             let named =
-                                                fixedVals |> List.choose (fun (id, c) ->
+                                                w.Fixed |> List.choose (fun (id, c) ->
                                                     others |> List.tryFind (fun o -> o.VarId = id) |> Option.map (fun o -> (o.Name, c)))
-                                            mk (a.Name, b.Name, swapWitnessText a.Name b.Name named negate x y u v)))
+                                            let text = swapWitnessText a.Name b.Name named negate w
+                                            match w.Failure with
+                                            | Blade.Deduce.DiagonalNonzero _ -> AnticommDiagonalNonzero (a.Name, b.Name, text)
+                                            | Blade.Deduce.SwapLawFails _ -> mk (a.Name, b.Name, text)))
                         witness commGroups false Blade.Deduce.PInv CommContradictsWitness
                         |> Option.orElseWith (fun () ->
                             witness antisymGroups true Blade.Deduce.PNeg AnticommContradictsWitness))

@@ -1326,27 +1326,28 @@ let internal isSynthesizedIndex (tArg: TypedExpr) : bool =
         | _ -> false
     mentionsReserved tArg
 
-/// Render a swap counterexample from `Deduce.witnessSwapAsymmetry` for the
-/// BL4013 `CommContradictsWitness` message.
-let commWitnessText (p1: string) (p2: string) (x: float) (y: float) (u: float) (v: float) : string =
-    let g (f: float) = f.ToString("G6", System.Globalization.CultureInfo.InvariantCulture)
-    $"at {p1} = {g x}, {p2} = {g y} the body is {g u}, but with the two exchanged ({p1} = {g y}, {p2} = {g x}) it is {g v}"
-
-/// The arity-general rendering (Deduce.witnessSwapLawFailure): the other
-/// parameters' fixed values are named, and an anticomm witness says what the
-/// law required (the negation). `others` pairs each other parameter's NAME
-/// with its value. With no other parameters and `negate = false` this is
-/// exactly commWitnessText.
-let swapWitnessText (p1: string) (p2: string) (others: (string * float) list) (negate: bool)
-                    (x: float) (y: float) (u: float) (v: float) : string =
-    let g (f: float) = f.ToString("G6", System.Globalization.CultureInfo.InvariantCulture)
+/// Render a witnessed law failure (Deduce.witnessSwapLawFailure) for the
+/// BL4013 witness messages. `others` pairs each other parameter's NAME with
+/// its rendered fixed value; the witness's captured scalars are named with
+/// the value they were sampled at. Values are rendered in their own kind:
+/// exact integers for an integer kernel (formalism 2.4), G6 for floats.
+let swapWitnessText (p1: string) (p2: string) (others: (string * string) list) (negate: bool)
+                    (w: Blade.Deduce.LawWitness) : string =
     let fixedPart =
-        if List.isEmpty others then ""
-        else
-            let parts = others |> List.map (fun (n, c) -> $"{n} = {g c}") |> String.concat ", "
-            $" (with {parts})"
-    let required = if negate then $", not {g (-u)}" else ""
-    $"at {p1} = {g x}, {p2} = {g y}{fixedPart} the body is {g u}, but with the two exchanged ({p1} = {g y}, {p2} = {g x}) it is {g v}{required}"
+        let parts =
+            (others |> List.map (fun (n, c) -> $"{n} = {c}"))
+            @ (w.Captured |> List.map (fun (n, c) -> $"captured {n} sampled at {c}"))
+        let joined = String.concat ", " parts
+        if List.isEmpty parts then "" else $" (with {joined})"
+    let capturedNote =
+        if List.isEmpty w.Captured then ""
+        else ". A captured variable is a free input of the claim: the law must hold for every value it can take, not only the one it has here"
+    match w.Failure with
+    | Blade.Deduce.SwapLawFails (x, y, u, v, required) ->
+        let req = if negate then $", not {required}" else ""
+        $"at {p1} = {x}, {p2} = {y}{fixedPart} the body is {u}, but with the two exchanged ({p1} = {y}, {p2} = {x}) it is {v}{req}{capturedNote}"
+    | Blade.Deduce.DiagonalNonzero (x, value) ->
+        $"at {p1} = {p2} = {x}{fixedPart} the body is {value}, not 0{capturedNote}"
 
 /// The integer value of a LITERAL subscript: `3`, `-1`, and `(3 : I)` (the
 /// ascription retypes the literal node and leaves it a literal).

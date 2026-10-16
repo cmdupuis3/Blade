@@ -1,0 +1,12 @@
+// TEST: anticomm with an Int64.MinValue diagonal (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: the body is -9223372036854775808, not 0
+// Under formalism 2.4 Int64 WRAPS, and -MIN = MIN: `(x - y) + MIN` is
+// honestly sign-antisymmetric (f(b, a) = -(x - y) + MIN = -f(a, b)), yet its
+// diagonal is MIN, not 0 -- anti-invariance forces a zero diagonal only on a
+// carrier without 2-torsion. Strict storage would read 0 there. The witness
+// used to evaluate integer kernels in FLOAT, which refuted the TRUE sign law
+// (printing -9.22337E+18); it now runs exact wrapping Int64, accepts the sign
+// law, and refuses the diagonal, printing the exact integer.
+let A = [1, 2, 3]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) + (-9223372036854775807 - 1) |> compute

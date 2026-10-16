@@ -1,0 +1,23 @@
+// TEST: anticomm over a captured scale stays accepted and compact
+// The capture rule (084) costs a claim that holds for EVERY value of the
+// capture nothing: `(x - y) * k` is antisymmetric with a zero diagonal for
+// any k, so sampling k refutes nothing, in Int64 and in Float64 alike (the
+// float kernel is one the parity tables cannot prove, so the witness runs).
+let k = 5
+let s = 0.25
+let A = [1, 2, 4]
+let B = [1.0, 2.0, 4.0]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) * k |> compute
+let F = method_for(B, B) <@> lambda(x, y) where anticomm(x, y) -> if x > y then (x - y) * s else 0.0 - (y - x) * s |> compute
+let r12 = R(1, 2)
+let r21 = R(2, 1)
+let f02 = F(0, 2)
+let f20 = F(2, 0)
+let f11 = F(1, 1)
+// EXPECT: R = [[-5, -15], [-10], []]
+// EXPECT: r12 = -10
+// EXPECT: r21 = 10
+// EXPECT: F = [[-0.25, -0.75], [-0.5], []]
+// EXPECT: f02 = -0.75
+// EXPECT: f20 = 0.75
+// EXPECT: f11 = 0.0

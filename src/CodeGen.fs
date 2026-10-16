@@ -3184,12 +3184,13 @@ let genMainWrapper (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: strin
                 "    return 0;"
                 "}" ]
     // Wrap the whole body in try/catch so C++ exceptions (bad_alloc, etc.)
-    // route to blade_rt::panic (BL8005) instead of std::terminate. MPI
+    // route to blade_rt::panic_exception (BL8005, or the "[BLnnnn] " code a
+    // runtime header put at the front of what()) instead of std::terminate. MPI
     // init/finalize straddle the try; a panic exits without MPI_Finalize,
     // acceptable on a failure path. Success-path output is byte-identical.
     let tryLine = [ "    try {" ]
     let catchClose =
-        [ "    } catch (const std::exception& e) { blade_rt::panic(\"BL8005\", e.what(), nullptr, 0); }"
+        [ "    } catch (const std::exception& e) { blade_rt::panic_exception(e); }"
           "      catch (...) { blade_rt::panic(\"BL8005\", \"unknown exception\", nullptr, 0); }"
           "}" ]
     let footerBody = footer |> List.rev |> List.tail |> List.rev  // drop footer's closing "}"
@@ -3269,7 +3270,7 @@ let genMainWrapperSplit (mpi: bool, mpiThreaded: bool, netcdf: bool) (testName: 
     // See genMainWrapper: wrap the body in try/catch -> blade_rt::panic (BL8005).
     let tryLine = [ "    try {" ]
     let catchClose =
-        [ "    } catch (const std::exception& e) { blade_rt::panic(\"BL8005\", e.what(), nullptr, 0); }"
+        [ "    } catch (const std::exception& e) { blade_rt::panic_exception(e); }"
           "      catch (...) { blade_rt::panic(\"BL8005\", \"unknown exception\", nullptr, 0); }"
           "}" ]
     let footerBody = footer |> List.rev |> List.tail |> List.rev  // drop footer's closing "}"

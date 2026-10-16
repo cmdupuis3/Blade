@@ -196,7 +196,10 @@ let runInterpDiffTests (categories: string list) : BlockResult =
         printfn "Skipped: requires g++ (the compiled binary is the differential reference)."
         { Block = blockName; Passed = 0; Failed = 0; Skipped = 1; FailedNames = [] }
     else
-        let tmpRoot = Path.Combine(Path.GetTempPath(), "blade_interp_diff")
+        // Per PROCESS: a fixed name let two concurrent differentials (two
+        // worktrees, two binaries) delete and redeploy each other's runtime
+        // headers mid-run, so one side compiled against the other's headers.
+        let tmpRoot = Path.Combine(Path.GetTempPath(), $"blade_interp_diff_{System.Diagnostics.Process.GetCurrentProcess().Id}")
         (try Directory.Delete(tmpRoot, true) with _ -> ())
         Directory.CreateDirectory(tmpRoot) |> ignore
         // runFullTest generates the .cpp here but does NOT ship the runtime
@@ -529,6 +532,8 @@ let runInterpDiffTests (categories: string list) : BlockResult =
               $"{failed} failed"
               $"{unsupported} skip-unsupported"
               $"{skipped} skipped" ]
+        // The per-process scratch root would otherwise pile up, one per run.
+        (try Directory.Delete(tmpRoot, true) with _ -> ())
         // SKIP-UNSUPPORTED folds into the roll-up's Skipped bucket (it is not a
         // failure) but is surfaced distinctly in the footer/summary lines above.
         { Block = blockName

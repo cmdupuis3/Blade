@@ -503,7 +503,17 @@ proofs.md §Binomial).
 - `make_sym` sorts; `component(idx, k)` projects in nondecreasing order.
 - `make_antisym` sorts and returns the permutation sign; access through
   non-canonical coordinates applies the sign (`transform`); diagonals are
-  implicit zeros (not stored).
+  implicit zeros (not stored). The zero is a CARRIER CONDITION, not a
+  consequence of the sign law: f(a, a) = −f(a, a) forces f(a, a) = 0 only on
+  a carrier without 2-torsion, and wrapping Int64 (§2.4) has one
+  (−MIN = MIN). So a kernel `where anticomm(...)` that fills an `AntisymIdx`
+  output asserts BOTH the sign law and a zero diagonal, and the checker
+  refuses (BL4013) a body whose diagonal it can show is not 0 — a nonzero
+  value (`(x - y) + MIN`, `if x > y then 1.0 else -1.0`) or a panic
+  (`6 / (x - y)`) — §5.2. The one stored-zero exception is a NON-FINITE float
+  diagonal (`inf - inf`, `0.0 / 0.0` = NaN): a structurally antisymmetric
+  float body has f(a, a) = g(a, a) − g(a, a) = 0 exactly for every finite
+  g(a, a), and the stored 0 stands in for the NaN.
 - Element writes mirror reads: `A(t) = v` through non-canonical coordinates
   stores `transform(v)` (negated / conjugated on odd parity) at the canonical
   cell, so `A(t)` reads back `v`; a write to an implicit zero (an antisymmetric
@@ -1092,6 +1102,34 @@ decided, and REFUSED (BL4013) when it is refuted: by a proved sign law
 sample points and their swaps (`x / y` is 2 at (2, 1) and 0.5 at (1, 2)).
 Under `reynolds(...)` the clause is an iteration license, not a claim about
 the bare kernel, and is never refuted (§5.3).
+
+The counterexample evaluator runs §2.4 arithmetic: an integer kernel is
+evaluated in exact Int64 (wrapping `+ - *`, truncating `/ %`, the BL8013 and
+BL8014 panics), so it neither refutes a law that holds under wrap nor prints
+float approximations of integer values. A `where anticomm(x, y)` is checked
+for the sign law AND, at sampled diagonal points, for f(a, a) = 0 — the
+claim strict-triangular storage relies on (§3.4) — even when the parity
+tables proved the sign law. A body that reads a CAPTURED Int/Float scalar
+evaluates with that capture bound to a sampled value: the clause is a law
+about the body as written, so it must hold for every value of the capture,
+and a claim true only for the capture's actual value is refused
+(conservatively) rather than trusted. A capture of any other kind (an array,
+a function, a Bool) still makes the body unevaluable, and the claim stays
+trusted.
+
+**Symmetry deduction is exact-ring algebra.** The parity tables prove
+`x + y + z` commutative in every pair by associativity and commutativity of
+`+` over the reals, and a declared `comm`/`anticomm` stands on exactly that.
+Compact storage then evaluates the body ONCE per canonical (sorted) index
+tuple and serves every permutation of it from that one value, so over floats
+a permuted read can differ from evaluating the body in the permuted order —
+in the last bits, or by more under cancellation (`[1.0, 1e16, -1e16]`: the
+cell (0, 1, 2) computes 0.0 and answers the read at (1, 2, 0), where the
+body evaluated in that order gives 1.0; corpus `symmetry/086`). Without a
+`where` clause nothing is stored compactly, so this is a licence the
+declaration grants — the same kind of licence `BLADE_FP_REASSOC` grants a
+reassociated fold — not a deviation from the dense meaning the compiler
+takes on its own.
 
 Sections and partial application: operator sections `(+)`, `(*)`, ... as
 kernels; operand sections `(s +)` and `(* s)`, which ARE the lambdas
@@ -1889,6 +1927,11 @@ lower₂₁(H) = H ∩ Stab(A₁, ..., Aₙ),   Stab = {σ ∈ Sₙ : ∀j. A_σ
   accidentally more symmetric — remark, not hedge. (proofs.md §Completeness.)
 - Sign-tracked variant: kernel anti-invariance ⇒ output antisymmetry
   (Hermitian = same statement with neg := conjugation). (proofs.md §Lowering.)
+  Strict storage (`AntisymIdx`, no diagonal cell) additionally needs a ZERO
+  DIAGONAL, which anti-invariance yields only on a carrier without 2-torsion;
+  wrapping Int64 is not one (−MIN = MIN), so the declared clause carries the
+  zero-diagonal condition itself and the checker refutes it where it can
+  (§3.4, §5.2).
 
 Input array symmetry, dually, is CONSUMED on read (`lower₁₀` is trivial —
 index permutations become element identity); it does not propagate through

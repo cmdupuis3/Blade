@@ -216,7 +216,7 @@ Full semantics in [features/sql.md](features/sql.md). All implemented and tested
 |---------|--------|-----------------|
 | Symmetric output deduction: `comm` kernel + the SAME array in the commuting positions → `SymIdx` storage and triangular iteration (joint over the compound S-space; distinct groups multiply) | Core | formalism §8.4, §11.2 (the H ∩ Stab law, machine-checked); `corpus/symmetry`, `corpus/arity` |
 | `anticomm` → `AntisymIdx` (strict, sign-tracked, no stored diagonal) | Core | `corpus/symmetry`, `corpus/index-types` |
-| `comm` claims checked: a body refuted by a sign law or a concrete counterexample is refused | Core | BL4013; formalism §5.2 |
+| `comm` claims checked: a body refuted by a sign law or a concrete counterexample is refused (§2.4 arithmetic, captured scalars sampled; `anticomm` also needs f(a, a) = 0 on the diagonal) | Core | BL4013; formalism §5.2 |
 | Deduced-commutativity suggestions (`where comm(a, b)` pin proposals; storage stays dense until pinned) | Core | BL4010 warnings; `--strict-pins` makes them errors |
 | Reynolds symmetrization (`reynolds(g[, Antisymmetric])`) | Core | §7 above; `corpus/reynolds` |
 | Iterated-wreath (`OrbIdx`) deduction for repeated compact arguments | Partial | §5 above; BL4015 |

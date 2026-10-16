@@ -1,0 +1,14 @@
+// TEST: anticomm over a captured offset is checked, not trusted (rejects)
+// ERROR: BL4013
+// ERROR-CONTAINS: captured c sampled at
+// A captured scalar is a FREE INPUT of the claim: the witness binds it to a
+// sampled value (fixed across the swap) instead of giving up. Before, a body
+// reading a capture was never evaluated and the claim was trusted: with
+// c = Int64.MinValue this one is sign-antisymmetric under wrap but has the
+// diagonal MIN, which strict storage read as 0 (row sums differed in every
+// row). The law must hold for every value of c, and at any other value the
+// sign law itself fails -- a conservative refusal even for the one c where
+// it would hold off the diagonal.
+let c = -9223372036854775807 - 1
+let A = [1, 2, 3]
+let R = method_for(A, A) <@> lambda(x, y) where anticomm(x, y) -> (x - y) + c |> compute

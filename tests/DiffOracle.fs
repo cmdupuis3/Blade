@@ -120,7 +120,9 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
         let thisExe = Environment.ProcessPath
         printfn "current: %s" thisExe
         printfn "oracle:  %s" (Path.GetFullPath oracleExe)
-        let tmpRoot = Path.Combine(Path.GetTempPath(), "blade_diff_oracle")
+        // Per PROCESS, like the interp differential: a fixed name lets two
+        // concurrent runs delete each other's scratch mid-run.
+        let tmpRoot = Path.Combine(Path.GetTempPath(), $"blade_diff_oracle_{System.Diagnostics.Process.GetCurrentProcess().Id}")
         let mineDir = Path.Combine(tmpRoot, "mine")
         let theirsDir = Path.Combine(tmpRoot, "theirs")
         (try Directory.Delete(tmpRoot, true) with _ -> ())
@@ -173,4 +175,5 @@ let runDiffOracleTests (oracleExe: string) (categories: string list) : BlockResu
                         resultLine Skip name ($"oracle failed: {e}")
         printFooter blockName
             [ $"{passed} passed"; $"{failed} failed"; $"{skipped} skipped" ]
+        (try Directory.Delete(tmpRoot, true) with _ -> ())
         { Block = blockName; Passed = passed; Failed = failed; Skipped = skipped; FailedNames = failedNames }

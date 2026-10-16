@@ -8,6 +8,12 @@
 #include <utility>
 #include <stdexcept>
 
+/* A read of a tuple outside a hashed index type's key set. Runtime headers
+ * may not call the runtime panic (shadow-frame elision, tests/
+ * Test_Diagnostics.fs), so this throws; the "[BL8006] " prefix tells the
+ * generated main's exception handler (panic_exception) which code to report. */
+#define BLADE_OUT_OF_KEY_SET "[BL8006] index out of bounds: a key outside the sparse key set"
+
 /* array_hasher: a std::hash-style functor for std::array<size_t, RANK>.
  *
  * The standard library provides no hash for std::array, so this supplies the
@@ -113,9 +119,13 @@ struct abstract_hashed_idx_t : abstract_idx_t<RANK> {
 		return this->rank_to_tuple[index];
 	}
 
-	// tuple -> rank. O(1) amortized. Throws if the tuple was never inserted.
+	// tuple -> rank. O(1) amortized. A tuple never inserted is an
+	// out-of-domain read: BL8006, the interpreter's sparseLinearize twin.
 	size_t linearize(const IDX& tuple) const {
-		return this->tuple_to_rank.at(tuple);
+		auto it = this->tuple_to_rank.find(tuple);
+		if (it == this->tuple_to_rank.end())
+			throw std::out_of_range(BLADE_OUT_OF_KEY_SET);
+		return it->second;
 	}
 
 	// Grow-on-insert: returns the rank of `tuple`, assigning the next rank (and
@@ -197,8 +207,14 @@ struct abstract_sorted_hashed_idx_t : abstract_idx_t<RANK> {
 
 	// tuple -> rank. O(1) amortized via the reverse hash. The direction with
 	// no closed form for a tabulated type -- hence the map rather than a formula.
+	// A key outside the set is an out-of-domain read: BL8006, matching the
+	// interpreter (it used to escape as std::out_of_range, BL8005
+	// "unordered_map::at").
 	size_t linearize(const IDX& tuple) const {
-		return this->tuple_to_rank.at(tuple);
+		auto it = this->tuple_to_rank.find(tuple);
+		if (it == this->tuple_to_rank.end())
+			throw std::out_of_range(BLADE_OUT_OF_KEY_SET);
+		return it->second;
 	}
 };
 
