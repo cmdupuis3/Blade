@@ -1,7 +1,7 @@
 # Blade Proofs
 
 Prose mirror of the machine-checked proof tower in `/proofs/`:
-**2044 theorems**, Rocq 9.0, stdlib only, verified by both `coqc`
+**2121 theorems**, Rocq 9.0, stdlib only, verified by both `coqc`
 and `coqchk`.
 
 Build: `coq_makefile -f _CoqProject -o Makefile && make`.
@@ -42,7 +42,7 @@ Rules of this document:
 | 3: symmetry | BladeCore, BladeLowering, BladeCompleteness, BladeFusionDuality | group law both halves, H-and-Stab soundness AND exactness, sign-tracked variant, fusion ⇒ duality |
 | Trinity | BladeTrinity, BladeTrinityAsym | `<*>` = shape concatenation; generators + forced closure |
 | Computation | BladeCompute, BladeMonad, BladeSafety | materialized semantics, V∘P = id, 12.x laws, MonadPlus, verified offsets + bounds safety + buffer-elimination fusion |
-| Storage split | BladeCauchy, BladeDichotomy | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair |
+| Storage split | BladeCauchy, BladeDichotomy, BladeDichotomyTies, BladeDichotomyGeneral | the r = 2 Cauchy split; the r ≥ 3 dichotomy — witness, width-2 refutation over any ring, the r! isotypic repair; below the free cell, the parity-graded tie-break rules; minimal width r! at every rank |
 | Input symmetry + layout | BladeWreath, BladeLayout | wreath product S_r wr S_2 for repeated declared-symmetric inputs, block-product storage, exactness enumerated at r = 2 and r = 3; hyperoctahedral layout group B_d, striding-parity character, canonical-form guarantee |
 | Deduction exactness | BladeDeduceExact | uniform symmetry of a kernel body = its syntactic automorphism group modulo the declared laws (free-model faithfulness); `src/Deduce.fs`'s mirror walk and parity rule modelled and proved EXACT per transposition; the granted group is the largest contiguous-block Young subgroup; the precision gap this found in the shipped rule, and the two gaps that are by design |
 | Recurrence reduction (research; backs no shipped feature) | BladeSummary, BladeMomentClosure, BladeRankBound, BladeDescartes, BladeRankDomain, BladeProuhet, BladeNewton, BladeProuhetShift, BladeNumericContract, BladeReduceCompiler, BladeReductionAD, BladeShiftedMoments | a summary certificate preserves every prefix observation of every finite execution, under feedback, guards and budgets, over chains, dependency graphs and bounded lags; the affine moment tower closes at every order and extent over any commutative ring, and at the dual numbers that IS forward-mode compatibility; refusals by one collision (against every update function) and by formal Jacobian rank (against polynomial encodings); the chain of observable subalgebras that never stabilizes; and the polynomial rank bound at EVERY size without determinants, giving P4a at every r, P7 at every N and horizon, P8's refusal for pure powers at every d and r, and P10 to "not finitely generated"; Descartes' rule of signs over Z (Rolle is false over Q), the generalized Vandermonde kernel on both sides, and the rank of P7 and P4a at EVERY integer point; the algebra of P6 over any integral domain and the transfer of an integer rank to a characteristic-0 domain (the analysis half is outside the tower, in `proofs/reals/`); and the closure refusal against EVERY update function at every degree and order, by Prouhet–Tarry–Escott collisions; Newton's identities over any commutative ring, and the theorem that turns one bumped coefficient into an ideal pair; the numerical contract (wrapping integers and rationals are exact fragments, rounded arithmetic is not one at any precision, and a reassociation license is not a distributivity license); a model source fragment with a complete zero test, a classifier that never answers Unknown, a generated reduced program and the compiler theorem at every extent; and the forward and reverse rules of `Grad*.fs` modelled, the reverse sweep over a stored trajectory as the transpose of the tangent run, and reduction commuting with both modes; and the same reduction in shifted coordinates, where the update is a pure rescaling |
@@ -517,10 +517,12 @@ exhibited, never divided).
 
 Honest scope: r = 3 — the load-bearing rank, where mixed Schur components
 first exist — at a FREE cell (extents L, M ≥ 3, so some cell has all its
-coordinates distinct). The general-r statement (minimal width r!, again at a
-free cell) is prose; a general-r mechanization needs a ℚ[S_r] development,
-exactly as BladeWreath's general-r exactness. Schemes with wider stores or
-multi-cell reads are a different class, not refuted.
+coordinates distinct), over any commutative ring with 1 ≠ 0. The general-r
+statement is mechanized in BladeDichotomyGeneral (below): minimal width r! at
+every rank at a free cell, and it needs no ℚ[S_r]. What does need the group
+algebra is the isotypic reading of the r! numbers (`isotypic_access_r3` at
+general r), which stays r = 3 only. Schemes with wider stores or multi-cell
+reads are a different class, not refuted.
 
 Below the free cell (L or M < r) every tuple has several sorting
 permutations and a TIE-BREAKING RULE picks one; BladeDichotomyTies.v (next
@@ -570,6 +572,54 @@ at (3,2,2) the other rules need 3 (3036 rules), 4 (720) or 5 (48), with 288
 between 4 and 5; at (3,2,3) non-parity lat rules need 5; at (4,2,2) the
 bound ⌊4/2⌋ + 1 = 3 is attained by rules with disjoint sorter sets, none of
 them sign-graded.
+
+## BladeDichotomyGeneral.v (77 theorems) — the dichotomy at every rank
+
+The r! theorem at general r. The model is BladeDichotomy's Part B: an index
+is (i, j) with i ∈ [L]^r, j ∈ [M]^r as two lists, S_r acting diagonally on
+positions; a width-m scheme is m weight functions of the fiber point's two
+sorters, plus m stored scalars per tensor and cell that are an arbitrary
+function of the tensor, reconstructing T(s·a, t·b) = Σ_k ε_k(s, t)·P_k
+(`reconstructs`, `sound_at`, `sound`). Differences from Part B: two-argument
+tensors; the lower bound needs an integral domain with decidable equality
+(elimination), where Part B's determinant needed only a ring with 1 ≠ 0, so
+at r = 3 Part B stays the stronger statement; the upper bound holds at every
+cell, tied or free.
+
+- **Permutations** (`pact_id`, `pact_assoc`, `pact_inv_l` / `pact_inv_r`,
+  `pact_inj`; `perms_length`, `perms_NoDup`, `perms_spec`): image-list
+  permutations of [0, r) with composition, identity, inverse and
+  injectivity; the insertion list of all r! permutations, duplicate-free,
+  sound and complete.
+- **The lower bound** (`free_cell_needs_factorial`, `free_cell_width_bound`):
+  at the free cell a = b = (0, …, r−1), L, M ≥ r, the r! fiber points
+  ((0..r−1), g) lie in r! distinct diagonal orbits, whose indicator tensors
+  (`indic_sym`, `indic_fiber`) evaluate to the r! × r! identity. Soundness
+  factors it through m stored scalars; for m < r!,
+  `BladeRankDomain.homogeneous_has_solution_dom` gives a nonzero vector the
+  stored matrix kills, which the identity cannot. No group algebra, no
+  determinants; the hypothesis is over 0/1 tensors only.
+- **The upper bound** (`factorial_component_access`,
+  `factorial_scheme_sound`): store T(a, μ·b) for the r! permutations μ and
+  read T(s·a, t·b) as P_{s⁻¹t}(a, b): `six_component_access` at every r,
+  values in any type, every index; and the same as a width-r! scheme in the
+  model's shape, sound at every cell.
+- **The dichotomy** (`minimal_width_is_factorial`, `width2_iff_rank_le_2`,
+  `width2_refuted_at_every_rank_ge_3`; ℤ instances `minimal_width_over_Z`,
+  `width2_iff_rank_le_2_over_Z`): minimal width exactly r! at L, M ≥ r; two
+  scalars suffice iff r ≤ 2, which is BladeCauchy's split at r = 2 and
+  BladeDichotomy's refusal at r = 3, now at every r ≥ 3.
+- **Tie-back** (`part_b_hypothesis_refuted_via_general`): BladeDichotomy's
+  `width2_scalar_access_refuted` hypothesis, in its exact 6-list shape, is the
+  r = 3, m = 2, L = M = 3 instance, refuted through the general theorem.
+- **Cell accounting, general definitions** (`cell_accounting_general_3_3_3`,
+  `cell_accounting_4_2_2`, `cell_accounting_4_2_3`): the double-coset sum and
+  the orbit count, defined at general r, agree with each other and with
+  C(LM + r − 1, r): 165 at (3,3,3), 35 at (4,2,2), 126 at (4,2,3).
+
+Not mechanized: the general C(LM + r − 1, r) identity (pinned only); the
+isotypic rule at general r (needs ℚ[S_r]); a lower bound over rings with
+zero divisors.
 
 ## BladeMonad.v — monad and combinator laws
 
@@ -2556,10 +2606,11 @@ conjugation; the orbit lower bound relative to a value relation R (only
 attainment is restated); the converse of the boundary theorem (not-free does
 not imply beatable); the storage policy of recursive arrays, nested `let rec`
 and AD through recurrences; general-r
-verified offsets, the storage dichotomy at general r (r = 3 closed in both
-directions by BladeDichotomy, and the regime below the free cell by
-BladeDichotomyTies; the general minimal-width-r! statement is prose), k-slot
-structure, typed-path
+verified offsets, the storage dichotomy's remaining pieces (minimal width r!
+is proved at every rank by BladeDichotomyGeneral; open: the isotypic rule at
+general r, the general cell-count identity Σ|Stab(a)\S_r/Stab(b)| =
+C(LM + r − 1, r), pinned at r = 3, 4 only, and the lower bound over rings
+with zero divisors), k-slot structure, typed-path
 combinator laws, the adjunction proper, the general-r Jacobian transfer /
 accumulation multiplicities (rank-2 forms: BladeJacobian), and — for uniform
 optimality — a proper subgroup H < S_R, the signed bound at general r,

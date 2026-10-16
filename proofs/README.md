@@ -51,7 +51,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (2044 theorems total)
+## Contents (2121 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -705,6 +705,19 @@ run it with `-Check` to verify the numbers below and the headline in
   HYPOTHESES on K; nothing about order or completeness.  Written so that
   the file which needs axioms contains nothing but analysis.
 
+- BladeDichotomyGeneral.v (77): the storage dichotomy at EVERY rank: the
+  minimal width of a scalar-access per-dimension-canonical scheme at a free
+  cell (L, M >= r) is exactly r!, over any integral domain with decidable
+  equality (free_cell_needs_factorial, minimal_width_is_factorial); the r!
+  scheme reads T(s.a, t.b) as T(a, s^-1 t . b) at every index, values in
+  any type (factorial_component_access, factorial_scheme_sound); width 2
+  exists iff r <= 2 (width2_iff_rank_le_2).  No Q[S_r]: elimination on the
+  r! x r! identity of the orbit indicators (BladeRankDomain) plus index
+  algebra over image-list permutations (perms r: length r!, NoDup,
+  complete).  BladeDichotomy's Part B hypothesis is the r = 3 instance
+  (part_b_hypothesis_refuted_via_general).  Cell accounting through
+  general definitions pinned at (3,3,3), (4,2,2), (4,2,3); the general
+  identity is not proved.
 - BladeProuhet.v (37): NEW -- EXACT RECURRENCE REDUCTION, P8's refusal
   against EVERY update function, by Prouhet-Tarry-Escott collisions.  The
   draft refuses closure of q_r = (p_1 .. p_r) under a degree-d update by
