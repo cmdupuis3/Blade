@@ -42,6 +42,16 @@
 (*   compile_sound_unstripped  over ANY commutative ring when the zero   *)
 (*                             test stripped nothing -- wrapping machine *)
 (*                             integers, dual numbers;                   *)
+(*                             (all of these PREMISE wf P = true: compile *)
+(*                             itself does not check it, and accepts an  *)
+(*                             out-of-scope variable as zero -- see      *)
+(*                             compile_does_not_validate_wf);            *)
+(*   compile_checked,          THE CHECKED ENTRY POINT: validate wf,     *)
+(*   compile_checked_sound,    then compile.  Its soundness theorems     *)
+(*   compile_checked_          carry NO wf premise -- unconditional over *)
+(*     certificate             a characteristic-zero domain, and over    *)
+(*                             any ring given tailzero; the malformed    *)
+(*                             and rank-zero programs are refused;       *)
 (*   sstep_truncated           a refused program IS the degree-d update  *)
 (*                             the negative theorems speak about;        *)
 (*   compiler_runs,            the classifier and the generated program, *)
@@ -891,6 +901,73 @@ Section DomainSemantics.
 
 End DomainSemantics.
 
+(* --------------------------------------------------------------------- *)
+(* THE CHECKED ENTRY POINT.  compile itself does not run wf: an          *)
+(* out-of-scope variable reads as zero on the finite grid, so a          *)
+(* malformed program can come back Some (audit R01, pinned in Part E as  *)
+(* compile_does_not_validate_wf).  compile_checked validates first, so   *)
+(* its Some is a verified acceptance: the soundness theorems below carry *)
+(* NO wf premise.  compile stays as the internal unchecked function.     *)
+(* --------------------------------------------------------------------- *)
+
+Definition compile_checked (P : prog) : option (list (pexp Z)) :=
+  if wf P then compile P else None.
+
+Lemma compile_checked_some : forall P gs, compile_checked P = Some gs ->
+  wf P = true /\ compile P = Some gs.
+Proof.
+  intros P gs H. unfold compile_checked in H.
+  destruct (wf P) eqn:E; [split; [reflexivity | exact H] | discriminate].
+Qed.
+
+(* On well-formed input the checked entry IS compile; on malformed input *)
+(* it refuses.                                                           *)
+Lemma compile_checked_wf : forall P, wf P = true -> compile_checked P = compile P.
+Proof. intros P H. unfold compile_checked. rewrite H. reflexivity. Qed.
+
+Lemma compile_checked_malformed : forall P, wf P = false -> compile_checked P = None.
+Proof. intros P H. unfold compile_checked. rewrite H. reflexivity. Qed.
+
+(* Over any commutative ring: the certificate, premised only on the     *)
+(* zero test's exactness for this program (tailzero), never on wf.      *)
+Theorem compile_checked_certificate :
+  forall K k0 k1 (kadd kmul ksub : K -> K -> K) kopp,
+  ring_theory k0 k1 kadd kmul ksub kopp (@eq K) ->
+  forall P gs, compile_checked P = Some gs ->
+  tailzero K k0 k1 kadd kmul kopp P ->
+  forall N th,
+    certificate (sstep K k0 k1 kadd kmul kopp P th) (qr K k0 k1 kadd kmul (p_r P))
+                (sobs K k0 k1 kadd kmul kopp P th)
+                (fun xs => length xs = N)
+                (rstep K k0 k1 kadd kmul kopp gs (p_r P) (p_m P) N th)
+                (robs K k0 k1 kadd kmul kopp P N th).
+Proof.
+  intros K k0 k1 kadd kmul ksub kopp Kth P gs Hc Hz.
+  destruct (compile_checked_some P gs Hc) as [Hwf Hc'].
+  apply (compile_certificate K k0 k1 kadd kmul ksub kopp Kth); assumption.
+Qed.
+
+(* Over an integral domain of characteristic zero: UNCONDITIONAL.  Every *)
+(* Some returned by the checked entry is a sound reduction, with no      *)
+(* premise on P beyond the acceptance itself.                            *)
+Theorem compile_checked_sound :
+  forall K k0 k1 (kadd kmul ksub : K -> K -> K) kopp,
+  ring_theory k0 k1 kadd kmul ksub kopp (@eq K) ->
+  (forall a b, kmul a b = k0 -> a = k0 \/ b = k0) ->
+  (forall n, ofnat K k0 k1 kadd (S n) <> k0) ->
+  forall P gs, compile_checked P = Some gs ->
+  forall N th w xs, length xs = N ->
+    trace (sstep K k0 k1 kadd kmul kopp P th)
+          (sobs K k0 k1 kadd kmul kopp P th) w xs
+    = trace (rstep K k0 k1 kadd kmul kopp gs (p_r P) (p_m P) N th)
+            (robs K k0 k1 kadd kmul kopp P N th) w
+            (qr K k0 k1 kadd kmul (p_r P) xs).
+Proof.
+  intros K k0 k1 kadd kmul ksub kopp Kth Kint Kc0 P gs Hc.
+  destruct (compile_checked_some P gs Hc) as [Hwf Hc'].
+  apply (compile_sound K k0 k1 kadd kmul ksub kopp Kth Kint Kc0); assumption.
+Qed.
+
 (* ===================================================================== *)
 (* Part D.  What a refusal says about the source program, in a form the  *)
 (* negative theorems consume: the program IS the degree-d polynomial     *)
@@ -996,3 +1073,36 @@ Theorem compiled_affine_runs :
     (compile ex_affine)
   = Some [57%Z; 1181%Z].
 Proof. vm_compute. reflexivity. Qed.
+
+(* AUDIT R01 REGRESSION.  x' = p_2 with r = 1: variable 1 is out of      *)
+(* scope.  The unchecked compile accepts it -- the grid fills the        *)
+(* missing coordinate with 0 -- and its reduced run disagrees with the   *)
+(* source ([0] against [7] at theta_0 = 7, xs = [2]).  The checked entry  *)
+(* refuses it, as it refuses the rank-zero program.                       *)
+Definition escaped_variable : prog := mkprog 1 0 [PVar 1] (PVar 0).
+
+Example compile_does_not_validate_wf :
+  wf escaped_variable = false /\
+  sstep Z 0%Z 1%Z Z.add Z.mul Z.opp escaped_variable (fun _ => 7%Z) tt [2%Z]
+    = [7%Z] /\
+  option_map (fun gs => rstep Z 0%Z 1%Z Z.add Z.mul Z.opp gs 1 0 1
+                                (fun _ => 7%Z) tt [2%Z])
+             (compile escaped_variable) = Some [0%Z].
+Proof. vm_compute. repeat split; reflexivity. Qed.
+
+Example compile_checked_refuses_escaped : compile_checked escaped_variable = None.
+Proof. vm_compute. reflexivity. Qed.
+
+Definition rank_zero_prog : prog := mkprog 0 0 [] (PConst 0%Z).
+
+Example compile_checked_refuses_rank_zero :
+  wf rank_zero_prog = false /\ compile_checked rank_zero_prog = None.
+Proof. vm_compute. split; reflexivity. Qed.
+
+(* And it accepts exactly what compile accepts on the four run examples. *)
+Example compile_checked_runs :
+  compile_checked ex_affine = compile ex_affine /\
+  compile_checked ex_square = None /\
+  compile_checked ex_fake_square = compile ex_fake_square /\
+  compile_checked ex_special_value = None.
+Proof. vm_compute. repeat split; reflexivity. Qed.

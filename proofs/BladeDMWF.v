@@ -313,8 +313,9 @@ Qed.
 (* BRIDGE THEOREM 3 (anchor for Trinity Theorem 9.3): the residual seed  *)
 (* family is NOT a constant family -- the cardinality of the space      *)
 (* remaining after emitting i depends on i.  A non-dependent type        *)
-(* cannot express the residual; dimensional currying with dependent      *)
-(* index types is forced.                                                *)
+(* cannot express the residual PRECISELY; dimensional currying with      *)
+(* dependent index types is forced for an unboxed, uncast encoding.  (A  *)
+(* uniform representation carrying a bound plus data is not excluded.)   *)
 
 Lemma mscard1 : forall l u, mscard 1 l u = u - l.
 Proof.

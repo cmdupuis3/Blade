@@ -1,0 +1,84 @@
+# Blade proofs.
+#
+# Builds the Coq proof tower and its two lanes outside the tower, re-checks
+# the tower's compiled objects with the independent checker, runs
+# `Print Assumptions` on every counted tower result (all must be closed), and
+# verifies the theorem counts quoted in proofs/README.md and docs/proofs.md
+# and that every .v file is in its manifest.
+#
+# Until 2026-10-15 nothing in CI touched proofs/ (audit 2026-10-15, I01): a
+# change could merge with a broken proof, a new axiom, or a stale count. This
+# workflow is separate from ci.yml because it needs Coq and nothing else --
+# no .NET, no native toolchain -- and runs only when the proofs or their
+# counted documentation change.
+#
+# The three manifests:
+#   proofs/_CoqProject         the axiom-free tower (counted)
+#   proofs/reals/_CoqProject   Coq Reals axioms, outside the tower (uncounted)
+#   proofs/floats/_CoqProject  primitive floats, outside the tower (uncounted)
+#
+# Ubuntu 24.04's `coq` package is Coq 8.18, the version the sources name.
+
+name: Proofs
+
+on:
+  push:
+    paths:
+      - 'proofs/**'
+      - 'docs/proofs.md'
+      - '.github/workflows/proofs.yml'
+  pull_request:
+    paths:
+      - 'proofs/**'
+      - 'docs/proofs.md'
+      - '.github/workflows/proofs.yml'
+  workflow_dispatch:
+
+jobs:
+  proofs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Coq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends coq
+          coqc --version
+
+      - name: Build the tower
+        working-directory: proofs
+        run: |
+          coq_makefile -f _CoqProject -o Makefile.coq
+          make -f Makefile.coq -j2
+
+      - name: Independent check of the tower (coqchk)
+        working-directory: proofs
+        run: |
+          mods=$(grep -E '\.v$' _CoqProject | sed -E 's/\.v$//; s/^/Blade./')
+          coqchk -silent -o -Q . Blade $mods
+
+      - name: Every tower result is axiom-free (Print Assumptions)
+        shell: pwsh
+        run: ./proofs/check-assumptions.ps1
+
+      - name: Build the reals lane
+        working-directory: proofs/reals
+        run: |
+          for f in $(grep -E '\.v$' _CoqProject); do
+            echo "coqc $f"
+            coqc -Q .. Blade -Q . BladeReals "$f"
+          done
+
+      - name: Build the floats lane
+        working-directory: proofs/floats
+        run: |
+          for f in $(grep -E '\.v$' _CoqProject); do
+            echo "coqc $f"
+            coqc -Q . BladeFloats "$f"
+          done
+
+      - name: Theorem counts and manifest coverage
+        shell: pwsh
+        run: ./proofs/count-theorems.ps1 -Check

@@ -24,7 +24,12 @@
 (*                             raw formula Q / N - (S / N)^2 returns 2;  *)
 (*                             the central form returns 2/3, correctly   *)
 (*                             rounded (BladeShiftedMoments,             *)
-(*                             reals/BladeShiftedRounding.v).            *)
+(*                             reals/BladeShiftedRounding.v);            *)
+(*   binary64_two_pass_seed_first_moment     Part E: the two-pass seed   *)
+(*                             gives M_1 = 2 where the true M_1 is 0;    *)
+(*   binary64_zero_spread_normalization_nan, binary64_negative_radicand_ *)
+(*                             nan: g / sqrt(0) * 0 and sqrt(-1) are NaN *)
+(*                             in binary64, 0 in the totalized reals.    *)
 (*                                                                       *)
 (* Scope, stated once.  With a = 1 the product a x is exact, so a fused  *)
 (* multiply-add computes the same values: the first three witnesses do   *)
@@ -133,3 +138,31 @@ Definition central_var : float :=
 Theorem binary64_raw_moments_lose_the_variance :
   raw_var = 2 /\ central_var = 0x1.5555555555555p-1.
 Proof. split; reflexivity. Qed.
+
+(* ===================================================================== *)
+(* Part E.  WHERE THE REAL MODEL'S PREMISES FAIL (audit 2026-10-15).     *)
+(* (1) A two-pass seed is not relatively accurate at a zero moment: on   *)
+(* 3, -1e16, 1e16 (right-to-left fold) the mean is exactly 1, the true   *)
+(* first shifted sum about it is 0, and binary64 computes 2 -- the case  *)
+(* reals/BladeShiftedFeedback.v Part F and BladeShiftedVariance.v Part E *)
+(* handle with an absolute error.  (2) The totalized reals give / 0 = 0  *)
+(* and sqrt of a negative = 0; binary64 gives inf and NaN -- why         *)
+(* normalized_ensemble_bound_dom carries M_2 > 0.                        *)
+(* ===================================================================== *)
+
+Definition bigx : float := 10000000000000000.
+Definition mean3 : float := (3 + ((- bigx) + bigx)) / 3.
+Definition seeded_m1 : float :=
+  (3 - mean3) + (((- bigx) - mean3) + (bigx - mean3)).
+
+Theorem binary64_two_pass_seed_first_moment :
+  mean3 = 1 /\ seeded_m1 = 2.
+Proof. split; reflexivity. Qed.
+
+Theorem binary64_zero_spread_normalization_nan :
+  PrimFloat.is_nan ((1 / PrimFloat.sqrt 0) * 0) = true.
+Proof. reflexivity. Qed.
+
+Theorem binary64_negative_radicand_nan :
+  PrimFloat.is_nan (PrimFloat.sqrt (-1)) = true.
+Proof. reflexivity. Qed.

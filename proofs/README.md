@@ -18,6 +18,21 @@ the tower, in their `_CoqProject` order:
     cd reals  && coqc -Q .. Blade -Q . BladeReals <file>.v
     cd floats && coqc -Q . BladeFloats BladeBinary64Witness.v
 
+## Checks
+
+After building the tower:
+
+    pwsh -File count-theorems.ps1 -Check   # counts, and every .v in its manifest
+    pwsh -File check-assumptions.ps1       # every counted result axiom-free
+
+`check-assumptions.ps1` runs `Print Assumptions` on every counted result
+and fails unless each is "Closed under the global context".  It takes about
+2.5 minutes.  `coqchk -o` alone is not that check: it lists every axiom in
+the loaded environment, stdlib real axioms included.  CI runs all of this,
+plus `coqchk` on the tower, in `.github/workflows/proofs.yml` whenever
+`proofs/` or `docs/proofs.md` changes (added 2026-10-15; before that, no CI
+lane checked the proofs).
+
 ## Counting convention
 
 One item per `Lemma`, `Theorem`, `Corollary`, or `Example` that begins a
@@ -28,7 +43,7 @@ computed pins.  `count-theorems.ps1` is the mechanical implementation --
 run it with `-Check` to verify the numbers below and the headline in
 `docs/proofs.md`, which quotes the same total.
 
-## Contents (1908 theorems total)
+## Contents (2017 theorems total)
 
 - BladeCore.v (16): Group Law both halves (diagonal swap sound; per-dim
   product swap refuted), counting lemma (no lossless product layout),
@@ -87,7 +102,10 @@ run it with `-Check` to verify the numbers below and the headline in
   round trips proved once, instance corollaries recover both exactly.
 - BladeShape.v (3): NEW -- enumShape NoDup via fixed canonical lengths
   and unique app-splitting.
-- BladeCompound.v (7): rank-k Compound arrow.
+- BladeCompound.v (11): rank-k Compound arrow; compoundk_denotation at
+  positive rank, compound_enum_denotation at every rank (a rank-zero
+  wrapper that tests M []; compound_rank_zero_ignores_mask pins why it is
+  needed -- audit 2026-10-15, F05).
 - BladeSafety.v (9): NEW -- bounds safety with a failure model:
   verified triangular offset arithmetic (total, correct, in-range,
   injective; closed form checked), sigma-typed access where
@@ -153,15 +171,18 @@ run it with `-Check` to verify the numbers below and the headline in
   Neidinger 2005) and the SIZE formula ships in CTF's
   sy_packed_size; the composed bijection itself appears nowhere in
   the literature (2026 survey) -- this file is the named artifact.
-- BladeJacobian.v (41): the AD seam, at the level the compiler actually
+- BladeJacobian.v (47): the AD seam, at the level the compiler actually
   differentiates: SYMBOLIC differentiation over a small expression
   language (Grad.fs's derivRule table as a FORMAL derivative slot; no
   real analysis anywhere).  Differentiation is equivariant under
   renaming (d_ren_equivariant) and a congruence for the ring-law
   equivalence aceq (d_respects_aceq); the JACOBIAN SYMMETRY TRANSFER --
   a structurally symmetric primal has partials that are each other's
-  swap images (jacobian_symmetry_transfer), so canonical derivative
-  storage is lossless -- and the emitted jvp tangent is invariant under
+  swap images (jacobian_symmetry_transfer).  That is EQUIVARIANCE, not
+  per-partial symmetry (single_partial_not_symmetric: d/dx of x*y); the
+  pair of partials is stored losslessly through the channel-exchanging
+  chan_read (jpair_equivariant, channel_aware_round_trip; audit
+  2026-10-15, F02) -- and the emitted jvp tangent is invariant under
   the JOINT pair swap (tangent_joint_swap).  Refutation half: SEMANTIC
   primal symmetry alone does NOT transfer
   (semantic_hypothesis_insufficient), so the license must come from the
@@ -352,7 +373,7 @@ run it with `-Check` to verify the numbers below and the headline in
   confirmed only EXTERNALLY by exhaustive exact-integer witness
   enumeration -- evidence, not a Coq proof.  General-r exactness is
   still open.
-- BladeLayout.v (163): NEW -- STRIDING PARITY: the layout group and the
+- BladeLayout.v (173): NEW -- STRIDING PARITY: the layout group and the
   4-element character ceiling the H/Stab framework puts on it.  A layout
   assigns d axes to memory levels and a direction to each, so layouts are
   the hyperoctahedral group B_d = Z_2^d : S_d, order 2^d d! (orders 8, 48,
@@ -400,7 +421,11 @@ run it with `-Check` to verify the numbers below and the headline in
   enumerated EXHAUSTIVELY, and canonical form (minimum cost, lex tie-break)
   is proved to lie in that space and to be a cost minimizer of it at ANY d,
   ANY licensed group, ANY reference set (canonical_is_in_space,
-  canonical_is_cost_minimal), with uniqueness decided per instance and
+  canonical_is_cost_minimal), and the reported minimum best_cost (folded
+  from the first candidate; it used to be seeded with 99 and capped there,
+  audit 2026-10-15, S02) equals the canonical schedule's cost on every
+  nonempty space (best_cost_agrees_canon, best_cost_is_canon_cost; pin
+  best_cost_no_sentinel_cap = 100), with uniqueness decided per instance and
   is_canonical the decision procedure -- the layout analogue of asking
   whether an index tuple is sorted.  Worked case where the declaration is
   load-bearing: C[i,j] = A[i,j] A[j,i], where NO loop order reaches cost 0
@@ -688,8 +713,8 @@ run it with `-Check` to verify the numbers below and the headline in
   Prouhet-Tarry-Escott solution, known over Z only for small m, open in
   general; over R they exist for every m but only by analysis.  For
   coefficient POLYNOMIALS whose leading one vanishes at the Prouhet
-  point another collision point is needed, and "a_d not identically zero
-  gives one" is not proved.
+  point another collision point is needed; BladeProuhetShift.v supplies
+  it, and lowers the pure-power extent to 2^r.
 
 - BladeNewton.v (22): NEW -- EXACT RECURRENCE REDUCTION, Newton's
   identities and what they buy: the axiom-free half of the draft's P8
@@ -707,6 +732,33 @@ run it with `-Check` to verify the numbers below and the headline in
   their common extent).  Nothing here PRODUCES the second array; that a
   bumped polynomial still splits into real linear factors is analysis
   and lives in reals/.
+- BladeProuhetShift.v (52): NEW -- EXACT RECURRENCE REDUCTION, P8's
+  refusal at a smaller extent and for every polynomial leading
+  coefficient.  power_refused_translated (THE TRANSLATION LEMMA: for
+  x -> x^d a pair agreeing on p_0 .. p_r and disagreeing at SOME p_m,
+  r < m <= d r, refutes every G -- map both arrays by y -> t y + 1,
+  Delta p_(dr) of the images is sum_l C(dr, l) Delta p_l t^l
+  (dp_aff_poly), its t^m coefficient is nonzero, and a closing G would
+  make it vanish at t = 0 .. dr); power_never_closes_2r and _Z (every
+  d >= 2, r >= 1, N >= 2^r, was 2^(dr-1)); squaring_refused_at_3 and
+  ideal_pair_squared ((0,3,3) / (1,1,4) at r = d = 2, N = 3, computed);
+  prouhet_step / pgen / pgen_spec (Prouhet's step from ANY seed, exact
+  new disagreement -(m+1) Delta p_m); seed_closed_form (from (0,3,3) /
+  (1,1,4) the first disagreement at p_m is 2 (-1)^m m! at extent
+  3 2^(m-3)); power_never_closes_seeded and _Z (N >= 3 2^(r-2), r >= 2);
+  lead_forced_zero (a closing G forces a_d to vanish at every
+  collision); blocks_vanishing_is_identical (THE DESCENT: append w_k
+  copies of Prouhet's stage-(k+1) A_k and D - w_k of its partner B_k;
+  the summary moves along TRIANGULAR directions Delta(A_k, B_k), so a
+  polynomial of degree <= D vanishing at every grid choice w in
+  {0..D}^r vanishes at every r-vector, one coordinate at a time -- no
+  determinant, no algebraic independence); closure_refused_polynomial
+  (P8's refusal as the draft states it, axiom-free: a_d a polynomial in
+  the summary nonzero at SOME r-vector, the lower a_j arbitrary,
+  N >= 2^(dr-1) + deg(a_d) (2^r - 1), against every G).  The sharp
+  real/complex thresholds (Waring, Ritt) need the fundamental theorem
+  of algebra and are not here; the free-entries route pays
+  deg(a_d) (2^r - 1) entries, not r.
 - BladeNumericContract.v (39): NEW -- EXACT RECURRENCE REDUCTION, the
   numerical contract (the draft's 11.2): which arithmetic the certificate
   theorems may be run in.  Zm / Zm_ring_theory (integers modulo m as a
@@ -728,7 +780,7 @@ run it with `-Check` to verify the numbers below and the headline in
   Blade emits int64_t without -fwrapv, so signed overflow is undefined in
   the emitted C++ and the wrapping theorems describe it only where
   nothing overflows.
-- BladeReduceCompiler.v (54): NEW -- EXACT RECURRENCE REDUCTION, the
+- BladeReduceCompiler.v (63): NEW -- EXACT RECURRENCE REDUCTION, the
   draft's section-12 research target on P8's fragment: a source fragment
   (particles updated by x' = sum_j a_j x^j, the a_j integer-coefficient
   polynomial expressions in the moments and in run-constant parameters),
@@ -749,8 +801,16 @@ run it with `-Check` to verify the numbers below and the headline in
   compiled_affine_runs (the classifier and the generated program run by
   the kernel, including an identically-zero quadratic term and the
   draft's "special parameter value" case).  A MODEL fragment: nothing in
-  src/ implements or is checked against it.  That a refusal means no
-  reduced program exists is reals/BladeReduceClassification.v.
+  src/ implements or is checked against it.  That a refusal means the
+  FIXED summary (the first r power sums) does not close is
+  reals/BladeReduceClassification.v.  It does not mean no reduced program
+  exists: the classifier ignores the observer, and a squaring program with
+  a constant observer is refused yet has a one-state reduction (audit
+  2026-10-15, R02).  compile itself does not check wf
+  (compile_does_not_validate_wf: an escaped variable compiles to the wrong
+  summary); the checked entry compile_checked has compile_checked_sound /
+  compile_checked_certificate with NO wf premise and refuses the
+  escaped-variable and rank-zero programs (audit 2026-10-15, R01).
 - BladeReductionAD.v (24): NEW -- EXACT RECURRENCE REDUCTION, the AD
   contract (the draft's 11.4): the rules src/Grad*.fs applies, modelled on
   polynomial expressions.  tan / tan_is_dual (the forward rules compute
@@ -849,7 +909,7 @@ run it with `-Check` to verify the numbers below and the headline in
   at every r: Kalt (adjacent swaps) = full sign character
   (Kalt_sign_character), alt_vanishes, C(n,r) forced and attained with a
   computing signed read (alt_read_pin, Vandermonde).
-- BladeInduction.v (82): NEW -- THE INDUCTIVE SIDE (plan item 5): let rec
+- BladeInduction.v (101): NEW -- THE INDUCTIVE SIDE (plan item 5): let rec
   as the structural induction along the leading axis.
   letrec_is_wf_fixpoint, letrec_fixpoint_self + letrec_unique (rec_build
   is the unique solution of the zero-extended recurrence),
@@ -860,16 +920,27 @@ run it with `-Check` to verify the numbers below and the headline in
   s, one per (ordinal, orbit), forced and attained).  Composition: traj
   over mkIx 1 0 N :: s; block_perm_lead (leading ordinal never permuted);
   dense_agrees_with_quotient (orbit-invariant steps: quotient = dense
-  recurrence); letrec_commutes_with_quotient.  while guard: gbuf_spec,
+  recurrence); letrec_commutes_with_quotient.  Those need orb_inv (EVERY
+  reader) and rd_dense_ext (every tuple), which the file's own sym_step
+  fails (sym_step_not_orb_inv, sym_step_not_rd_dense_ext; audit
+  2026-10-15, S03).  Under the weaker orb_inv_sym / rd_dense_ext_sym
+  (orbit-invariant readers, dense tuples only):
+  dense_prefix_is_orbit_invariant, letrec_commutes_with_quotient_sym, and
+  sym_step_commutes_with_quotient (every record, every N, every ordinal).
+  while guard: gbuf_spec,
   letrec_guard_total/_prefix_agrees/_frozen/_budget (BL8010),
   letrec_seeded_guard.  rec_arr / letrec_veval: the object an ERec
   denotes.
-- BladeLicence.v (87): NEW -- NUMERICS AS A PARAMETER (plan item 6): the
+- BladeLicence.v (96): NEW -- NUMERICS AS A PARAMETER (plan item 6): the
   licence is a declared relation R.  invariant_under_R / Ksym_R / Kcls_R /
   kwf_R, with R = eq giving the tower exactly.  has_ty_R (has_ty with
   kwf_R in the kernel rules), has_ty_R_eq_iff, progress_R /
   preservation_R / eval_sound_R; typed_app_is_quotient_R (R reflexive +
-  transitive) from a has_ty_R derivation.  licensed_not_exact (v0 + 3 v1:
+  transitive) from a has_ty_R derivation -- direct application only: an
+  arbitrary post-pipe can break R (pipe_breaks_R_old; audit 2026-10-15,
+  S01).  has_ty_RC requires pipes to be R-congruent and gets
+  typed_is_quotient_RC over the full typed grammar (has_ty_RC_eq_iff,
+  has_ty_RC_has_ty_R).  licensed_not_exact (v0 + 3 v1:
   refused by has_ty, typed by has_ty_R Rmod2).  Reduce:
   fold_perm_invariant (exact), fold_perm_invariant_R (reordering,
   congruence), reassoc_licence / tree_reduce_R (any bracketing, with e an
@@ -986,7 +1057,7 @@ claim.
   central_moment_float_bound (the same against the TRUE central moment
   when started at the mean); shifted_moment_gamma_bound (radius
   n u / (1 - n u), n = k |w|).  Coefficients from the input.
-- reals/BladeShiftedFeedback.v (36): the float contract when the
+- reals/BladeShiftedFeedback.v (68): the float contract when the
   coefficient READS the summary -- computed by the float program from its
   own rounded moments.  Four axioms (the reals' three plus
   Classical_Prop.classic, through the stdlib's exp lemmas).  The moments
@@ -1001,8 +1072,17 @@ claim.
   the TRUE moments, b arbitrary); normalizing_coefficient_stable /
   normalized_ensemble_bound (x' = (g / sqrt M_2) x + b: L = 1/2,
   eps = 2 lu).  Coefficients reading the mean (the shift) are not
-  covered.
-- reals/BladeShiftedVariance.v (14): the VARIANCE in a float coefficient.
+  covered.  Part F (audit 2026-10-15, RF-1): mcl / mcl_step /
+  mixed_seed_input_bound / feedback_bound_read /
+  normalized_ensemble_bound_seed (a MIXED relative + absolute seed; only
+  the moments the coefficient reads need relative accuracy; the
+  [3, -1e16, 1e16] obstruction is pinned by seed_no_relative_radius).
+  Part G (RF-2, RF-3): normalized_exact_resets,
+  normalized_m2_radius_constant (6 lu, non-compounding),
+  normalized_particles_linear (linear in T), normalized_ensemble_bound_dom
+  (positive denominator and radicand); piter_length.  The geometric radius
+  is a conservative worst-case upper bound, not a lower bound.
+- reals/BladeShiftedVariance.v (39): the VARIANCE in a float coefficient.
   The same four axioms.  rcl_diff_dominant (SUBTRACTION WITH A DOMINANT
   MINUEND: 0 <= z <= rho y, rho < 1, operands at log-errors ly, lz give
   y - z to log-error -ln Lo, Lo = (exp(-ly) - exp(lz) rho)/(1 - rho),
@@ -1011,14 +1091,20 @@ claim.
   non-linear error rule and an invariant of the true run -- rho, by
   BladeShiftedMoments.rho_invariant); renormalized_by_stddev_bound
   (x' = (g / sd) x + b, sd the float standard deviation, against the TRUE
-  particle system).
+  particle system).  Audit 2026-10-15 additions: variance_rcl_mixed /
+  renormalized_by_stddev_mixed (an absolute M_1 error, squared at
+  rho = 0; RF-1); rho_certified_upper / stddev_admission_sound /
+  renormalized_by_stddev_(mixed_)admitted (a CERTIFIED run-time rho,
+  exp(2 l1 + l2) inflation; the raw ratio can underestimate,
+  uninflated_rho_fails_true_invariant; RF-4); vex_is_population_variance /
+  renormalized_particles_admitted (N = the particle count; RF-5).
 
 ## Outside the tower: trusting the kernel's primitive floats
 
 NOT counted above, NOT in `_CoqProject`.  `Print Assumptions` lists the
 primitive float type and operations; nothing else.
 
-- floats/BladeBinary64Witness.v (7): IEEE binary64 does not preserve the
+- floats/BladeBinary64Witness.v (10): IEEE binary64 does not preserve the
   reduction, checked by kernel evaluation.  binary64_original_inexact
   (a = b = 1, x = (2^53, -2^53): exact answer 2, original fold 1, reduced
   form 2) and binary64_reduced_inexact (the other way round);
@@ -1030,3 +1116,7 @@ primitive float type and operations; nothing else.
   -ffp-contract.  binary64_raw_moments_lose_the_variance: at 1e8, 1e8 + 1,
   1e8 + 2 the raw formula Q / N - (S / N)^2 returns 2 (1 when g++ contracts
   to FMA); the central form returns 2/3 correctly rounded.
+  binary64_two_pass_seed_first_moment (on [3, -1e16, 1e16] the two-pass
+  seed gives mean 1 and M_1 = 2 where the true M_1 is 0);
+  binary64_zero_spread_normalization_nan / binary64_negative_radicand_nan
+  (NaN where the totalized reals give 0).

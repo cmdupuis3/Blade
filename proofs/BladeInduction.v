@@ -90,6 +90,29 @@
 (*                           cell, reads by storage lookup, never moves  *)
 (*                           the ordinal, and each dense slice carries   *)
 (*                           the symmetry of the remaining axes          *)
+(*   CAVEAT: orb_inv asks invariance under EVERY prefix reader and       *)
+(*   rd_dense_ext quantifies over malformed tuples too; this file's own  *)
+(*   sym_step meets neither (sym_step_not_orb_inv,                       *)
+(*   sym_step_not_rd_dense_ext), so the theorems above do not apply to   *)
+(*   it.  The WEAKER premises, which they imply (orb_inv_gives_sym,      *)
+(*   rd_dense_ext_gives_sym):                                            *)
+(*   orb_inv_sym             invariance only for ORBIT-INVARIANT readers *)
+(*                           (inv_reader: symmetric on valid dense       *)
+(*                           tuples), at valid dense cells only          *)
+(*   rd_dense_ext_sym        at dense cells, invariant readers agreeing  *)
+(*                           on dense tuples give the same answer        *)
+(*   dense_prefix_is_orbit_invariant  under them, EVERY generated dense  *)
+(*                           prefix read is an orbit-invariant reader    *)
+(*                           and agrees with the stored prefix on dense  *)
+(*                           tuples (induction on the ordinal)           *)
+(*   dense_agrees_with_quotient_sym, letrec_commutes_with_quotient_sym   *)
+(*                           the same agreement and the same five-part   *)
+(*                           composition law under the weaker premises   *)
+(*   sym_step_commutes_with_quotient  sym_step meets them over ANY single *)
+(*                           record [mkIx r l u]: dense = quotient at    *)
+(*                           every N, ordinal and dense cell, slices     *)
+(*                           symmetric, every prefix orbit-invariant --  *)
+(*                           the pins below are instances                *)
 (*                                                                       *)
 (* PART D.  The while guard (7.5.1).  gbuf is the guarded sweep with a   *)
 (* running flag; gstop the first ordinal whose guard is false.           *)
@@ -138,8 +161,10 @@
 (* ERec constructor in BladeSurface (Part E shows the object it would    *)
 (* denote).  Hypotheses: ext_step (the step sees its read pointwise) is  *)
 (* assumed by letrec_fixpoint_self, letrec_unique and                    *)
-(* letrec_scalar_is_shape_nil; orb_inv and rd_dense_ext by the Part C    *)
-(* agreement theorems; nothing else assumes anything.                    *)
+(* letrec_scalar_is_shape_nil; orb_inv and rd_dense_ext by the original  *)
+(* Part C agreement theorems, the weaker orb_inv_sym and rd_dense_ext_sym *)
+(* by their _sym versions (discharged for sym_step); nothing else       *)
+(* assumes anything.                                                     *)
 (*                                                                       *)
 (* Imports BladeDMWF, BladeShape, BladeTrinityAsym, BladeBinomial,       *)
 (* BladeCompute, BladeMonad, BladeMixedRadix, BladeOptimal, BladeObject. *)
@@ -674,7 +699,9 @@ Section Shaped.
   (* side's law class.                                                   *)
 
   (* the step sees the cell only through its canonical form (a kernel    *)
-  (* invariant under the Young action on the remaining axes)             *)
+  (* invariant under the Young action on the remaining axes), for EVERY  *)
+  (* reader -- stronger than needed; orb_inv_sym below is the premise a   *)
+  (* prior-slice recurrence like sym_step actually meets                 *)
   Definition orb_inv (cs : cell_step) : Prop :=
     forall n t t' rd, scanon s t = scanon s t' -> cs n t rd = cs n t' rd.
 
@@ -789,6 +816,157 @@ Section Shaped.
     - intros n t t' Hn Hd Hd' Hb.
       rewrite (dense_agrees_with_quotient cs N Hinv Hext n t Hn Hd).
       rewrite (dense_agrees_with_quotient cs N Hinv Hext n t' Hn Hd').
+      apply qread_invariant.
+      + apply shape_dense_lead. split; assumption.
+      + apply shape_dense_lead. split; assumption.
+      + apply block_perm_lead. split; [reflexivity | exact Hb].
+  Qed.
+
+  (* --- THE WEAKER, CORRECT PREMISE (audit S03) ------------------------ *)
+  (* orb_inv above asks for invariance under EVERY prefix reader, and     *)
+  (* rd_dense_ext quantifies over EVERY cell tuple, malformed ones        *)
+  (* included.  This file's own sym_step meets neither (pinned below:     *)
+  (* sym_step_not_orb_inv, sym_step_not_rd_dense_ext): reading the        *)
+  (* previous slice at the reversed tuple is invariant only when the      *)
+  (* reader itself is symmetric.  The premise below asks exactly that:    *)
+  (* invariance for ORBIT-INVARIANT readers (symmetric on valid dense     *)
+  (* tuples), obligations at valid dense cell tuples only, and read-      *)
+  (* extensionality between orbit-invariant readers that agree on dense   *)
+  (* tuples.  The induction then proves that every generated dense prefix *)
+  (* IS such a reader (dense_prefix_is_orbit_invariant), so the premise   *)
+  (* is met where the step is actually applied.                           *)
+
+  Definition inv_reader (rd : Z -> list nat -> nat) : Prop :=
+    forall k u u', shape_dense s u -> shape_dense s u' -> block_perm s u u' ->
+      rd k u = rd k u'.
+
+  Definition dense_agree (rd rd' : Z -> list nat -> nat) : Prop :=
+    forall k u, shape_dense s u -> rd k u = rd' k u.
+
+  Definition orb_inv_sym (cs : cell_step) : Prop :=
+    forall n t t' rd, inv_reader rd -> shape_dense s t -> shape_dense s t' ->
+      block_perm s t t' -> cs n t rd = cs n t' rd.
+
+  Definition rd_dense_ext_sym (cs : cell_step) : Prop :=
+    forall n t rd rd', shape_dense s t -> inv_reader rd -> inv_reader rd' ->
+      dense_agree rd rd' -> cs n t rd = cs n t rd'.
+
+  (* the new premises are WEAKER: the old ones imply them *)
+  Lemma orb_inv_gives_sym : forall cs, orb_inv cs -> orb_inv_sym cs.
+  Proof.
+    intros cs H n t t' rd _ _ _ Hb. apply H. apply block_perm_scanon_eq. exact Hb.
+  Qed.
+
+  Lemma rd_dense_ext_gives_sym : forall cs, rd_dense_ext cs -> rd_dense_ext_sym cs.
+  Proof. intros cs H n t rd rd' _ _ _ Hag. apply H. exact Hag. Qed.
+
+  (* the stored (quotient) prefix is orbit-invariant by construction:    *)
+  (* cread sees the tuple only through its canonical form                *)
+  Lemma tprefix_inv_reader : forall cs n, inv_reader (tprefix cs n).
+  Proof.
+    intros cs n k u u' _ _ Hb. unfold tprefix, cread.
+    rewrite (block_perm_scanon_eq s u u' Hb). reflexivity.
+  Qed.
+
+  Lemma inv_reader_of_agree : forall rd rd', inv_reader rd' -> dense_agree rd rd' ->
+    inv_reader rd.
+  Proof.
+    intros rd rd' Hinv Hag k u u' Hu Hu' Hb.
+    rewrite (Hag k u Hu), (Hag k u' Hu'). apply Hinv; assumption.
+  Qed.
+
+  (* if every earlier dense slice is the stored slice's canonical read,  *)
+  (* the dense prefix agrees with the stored prefix on dense tuples      *)
+  Lemma prefix_agree_from : forall cs n,
+    (forall m t, m < n -> shape_dense s t ->
+       cs m t (dread (dbuf cs m) m) = cs m (scanon s t) (tprefix cs m)) ->
+    dense_agree (dread (dbuf cs n) n) (tprefix cs n).
+  Proof.
+    intros cs n IH k u Hu. unfold dread.
+    destruct ((0 <=? k)%Z && (k <? Z.of_nat n)%Z)%bool eqn:Ek.
+    - apply andb_true_iff in Ek as [E0 E1]. apply Z.leb_le in E0. apply Z.ltb_lt in E1.
+      rewrite (tprefix_is_qread cs n k u Hu (conj E0 E1)).
+      rewrite (dbuf_nth cs n (Z.to_nat k)) by lia. cbv beta.
+      rewrite (IH (Z.to_nat k) u ltac:(lia) Hu). reflexivity.
+    - unfold tprefix, cread. rewrite Ek. reflexivity.
+  Qed.
+
+  Lemma dense_is_canonical_sym : forall cs, orb_inv_sym cs -> rd_dense_ext_sym cs ->
+    forall n t, shape_dense s t ->
+      cs n t (dread (dbuf cs n) n) = cs n (scanon s t) (tprefix cs n).
+  Proof.
+    intros cs Hinv Hext n. induction n as [n IH] using lt_wf_ind. intros t Hd.
+    assert (Hag : dense_agree (dread (dbuf cs n) n) (tprefix cs n))
+      by (apply prefix_agree_from; intros m u Hm Hu; apply IH; assumption).
+    pose proof (tprefix_inv_reader cs n) as Htp.
+    rewrite (Hext n t _ _ Hd (inv_reader_of_agree _ _ Htp Hag) Htp Hag).
+    apply Hinv; [exact Htp | exact Hd | |].
+    - apply enumShape_shape_dense. apply scanon_in_shape. exact Hd.
+    - apply scanon_block_perm. exact Hd.
+  Qed.
+
+  (* EACH GENERATED PREFIX SUPPLIES AN ORBIT-INVARIANT READER: the dense  *)
+  (* prefix read the step is applied to is symmetric on dense tuples and  *)
+  (* agrees there with the stored (quotient) prefix.                      *)
+  Theorem dense_prefix_is_orbit_invariant : forall cs,
+    orb_inv_sym cs -> rd_dense_ext_sym cs -> forall n,
+      inv_reader (dread (dbuf cs n) n)
+      /\ dense_agree (dread (dbuf cs n) n) (tprefix cs n).
+  Proof.
+    intros cs Hinv Hext n.
+    assert (Hag : dense_agree (dread (dbuf cs n) n) (tprefix cs n)).
+    { apply prefix_agree_from. intros m t _ Hd.
+      apply dense_is_canonical_sym; assumption. }
+    split; [| exact Hag].
+    exact (inv_reader_of_agree _ _ (tprefix_inv_reader cs n) Hag).
+  Qed.
+
+  Theorem dense_agrees_with_quotient_sym : forall cs N,
+    orb_inv_sym cs -> rd_dense_ext_sym cs ->
+    forall n t, n < N -> shape_dense s t ->
+      nth n (dbuf cs N) (fun _ => 0) t = qread (traj cs N) (n :: t).
+  Proof.
+    intros cs N Hinv Hext n t Hn Hd. rewrite (dbuf_nth cs N n Hn). cbv beta.
+    rewrite (dense_is_canonical_sym cs Hinv Hext n t Hd). reflexivity.
+  Qed.
+
+  Corollary qread_traj_is_plain_read_sym : forall cs N, orb_inv_sym cs ->
+    forall n t, shape_dense s t -> qread (traj cs N) (n :: t) = snd (traj cs N) (n :: t).
+  Proof.
+    intros cs N Hinv n t Hd.
+    change (cs n (scanon s t) (tprefix cs n) = cs n t (tprefix cs n)).
+    symmetry. apply Hinv; [apply tprefix_inv_reader | exact Hd | |].
+    - apply enumShape_shape_dense. apply scanon_in_shape. exact Hd.
+    - apply scanon_block_perm. exact Hd.
+  Qed.
+
+  (* THE COMPOSITION LAW under the weaker premise: the same five         *)
+  (* conclusions as letrec_commutes_with_quotient.                       *)
+  Theorem letrec_commutes_with_quotient_sym : forall cs N,
+    orb_inv_sym cs -> rd_dense_ext_sym cs ->
+    length (veval (traj cs N)) = N * shapeCard s
+    /\ veval (traj cs N) = concat (tbuf cs N)
+    /\ (forall n t, n < N -> shape_dense s t ->
+          nth n (dbuf cs N) (fun _ => 0) t = qread (traj cs N) (n :: t)
+          /\ qread (traj cs N) (n :: t) = snd (traj cs N) (n :: t)
+          /\ nth (index_of (n :: scanon s t) (enumShape (fst (traj cs N))))
+                 (veval (traj cs N)) 0 = qread (traj cs N) (n :: t))
+    /\ (forall n n' t t', block_perm (fst (traj cs N)) (n :: t) (n' :: t') -> n = n')
+    /\ (forall n t t', n < N -> shape_dense s t -> shape_dense s t' -> block_perm s t t' ->
+          nth n (dbuf cs N) (fun _ => 0) t = nth n (dbuf cs N) (fun _ => 0) t').
+  Proof.
+    intros cs N Hinv Hext. split; [apply traj_storage |]. split; [apply traj_veval |].
+    split; [| split].
+    - intros n t Hn Hd.
+      split; [exact (dense_agrees_with_quotient_sym cs N Hinv Hext n t Hn Hd) |].
+      split; [exact (qread_traj_is_plain_read_sym cs N Hinv n t Hd) |].
+      rewrite <- (scanon_lead 0 N s n t).
+      apply (qread_is_storage nat (traj cs N) 0 (n :: t)).
+      apply shape_dense_lead. split; assumption.
+    - intros n n' t t' Hb. apply block_perm_lead in Hb. apply Hb.
+    - intros n t t' Hn Hd Hd' Hb.
+      rewrite (dense_agrees_with_quotient_sym cs N Hinv Hext n t Hn Hd).
+      rewrite (dense_agrees_with_quotient_sym cs N Hinv Hext n t' Hn Hd').
       apply qread_invariant.
       + apply shape_dense_lead. split; assumption.
       + apply shape_dense_lead. split; assumption.
@@ -1360,3 +1538,119 @@ Example sym_dense_pin :
   nth 3 (dbuf sym_step 4) (fun _ => 0) [2; 0] = 5
   /\ nth 3 (dbuf sym_step 4) (fun _ => 0) [0; 2] = 5.
 Proof. split; vm_compute; reflexivity. Qed.
+
+(* --- AUDIT S03 REGRESSION: sym_step under the old and new premises ---- *)
+(* Negative: sym_step is NOT orb_inv -- at n = 1 the tuples (0,1), (1,0)  *)
+(* share a canonical form, and the symmetry-breaking reader               *)
+(* rd k c = hd 0 c makes the step answer 2 and 1 -- and NOT rd_dense_ext: *)
+(* two readers agreeing on every valid two-coordinate tuple differ at the *)
+(* malformed tuple [], and the step at [] observes it.  So the general    *)
+(* agreement theorem under the old premises cannot be applied to it.     *)
+Example sym_step_not_orb_inv : ~ orb_inv [mkIx 2 0 3] sym_step.
+Proof.
+  intro H.
+  specialize (H 1 [0;1] [1;0] (fun _ c => hd 0 c)).
+  vm_compute in H. specialize (H eq_refl). discriminate.
+Qed.
+
+Example sym_step_not_rd_dense_ext : ~ rd_dense_ext [mkIx 2 0 3] sym_step.
+Proof.
+  intro H.
+  specialize (H 1 [] (fun _ _ => 0) (fun _ c => match c with [] => 1 | _ => 0 end)).
+  assert (Heq : forall (k : Z) (u : list nat), shape_dense [mkIx 2 0 3] u ->
+    0 = match u with [] => 1 | _ => 0 end).
+  { intros k u Hu. destruct u;
+      [unfold shape_dense, dense_tuple in Hu; simpl in Hu; intuition discriminate
+      | reflexivity]. }
+  specialize (H Heq). vm_compute in H. discriminate.
+Qed.
+
+(* Positive: over ANY single symmetric record [mkIx r l u], sym_step     *)
+(* meets the weaker premises, so the general agreement holds for EVERY   *)
+(* extent N, ordinal n and dense cell t -- not just the fixed pins.       *)
+
+Lemma ind_lsum_perm : forall l1 l2 : list nat, Permutation l1 l2 -> lsum l1 = lsum l2.
+Proof.
+  intros l1 l2 HP. induction HP; simpl; lia.
+Qed.
+
+Lemma single_dense : forall r l u t,
+  shape_dense [mkIx r l u] t <-> dense_tuple r l u t.
+Proof.
+  intros r l u t. simpl. unfold dense_tuple. split.
+  - intros [[HL HF] Hs].
+    assert (E : firstn r t = t).
+    { apply firstn_all2. pose proof (firstn_skipn r t) as FS.
+      rewrite Hs, app_nil_r in FS. rewrite <- FS, HL. lia. }
+    rewrite E in HL, HF. split; assumption.
+  - intros [HL HF]. rewrite <- HL, firstn_all, skipn_all.
+    split; [split; [reflexivity | exact HF] | reflexivity].
+Qed.
+
+Lemma single_block_perm : forall r l u t t',
+  dense_tuple r l u t -> dense_tuple r l u t' ->
+  (block_perm [mkIx r l u] t t' <-> Permutation t t').
+Proof.
+  intros r l u t t' [HL _] [HL' _]. simpl.
+  replace (firstn r t) with t by (rewrite <- HL; symmetry; apply firstn_all).
+  replace (skipn r t) with (@nil nat) by (rewrite <- HL; symmetry; apply skipn_all).
+  replace (firstn r t') with t' by (rewrite <- HL'; symmetry; apply firstn_all).
+  replace (skipn r t') with (@nil nat) by (rewrite <- HL'; symmetry; apply skipn_all).
+  split; [intros [HP _]; exact HP | intro HP; split; [exact HP | reflexivity]].
+Qed.
+
+Lemma dense_tuple_rev : forall r l u t, dense_tuple r l u t -> dense_tuple r l u (rev t).
+Proof.
+  intros r l u t [HL HF]. split; [rewrite rev_length; exact HL |].
+  rewrite Forall_forall in HF |- *. intros x Hx. apply HF. apply in_rev. exact Hx.
+Qed.
+
+Lemma sym_step_orb_inv_sym : forall r l u, orb_inv_sym [mkIx r l u] sym_step.
+Proof.
+  intros r l u n t t' rd Hrd Hd Hd' Hb.
+  apply single_dense in Hd. apply single_dense in Hd'.
+  apply (single_block_perm r l u t t' Hd Hd') in Hb.
+  destruct n as [|m]; simpl.
+  - apply ind_lsum_perm. exact Hb.
+  - f_equal. apply Hrd.
+    + apply single_dense. apply dense_tuple_rev. exact Hd.
+    + apply single_dense. apply dense_tuple_rev. exact Hd'.
+    + apply single_block_perm; [apply dense_tuple_rev; assumption
+                               | apply dense_tuple_rev; assumption |].
+      apply Permutation_trans with t; [apply Permutation_sym, Permutation_rev |].
+      apply Permutation_trans with t'; [exact Hb | apply Permutation_rev].
+Qed.
+
+Lemma sym_step_rd_dense_ext_sym : forall r l u, rd_dense_ext_sym [mkIx r l u] sym_step.
+Proof.
+  intros r l u n t rd rd' Hd _ _ Hag. destruct n as [|m]; simpl; [reflexivity |].
+  f_equal. apply Hag. apply single_dense. apply dense_tuple_rev.
+  apply single_dense. exact Hd.
+Qed.
+
+(* THE GENERAL AGREEMENT FOR sym_step: every record, extent, ordinal and *)
+(* dense cell (sym_traj_pin and sym_dense_pin are instances); each dense *)
+(* slice is symmetric; each generated dense prefix is orbit-invariant.   *)
+Theorem sym_step_commutes_with_quotient : forall r l u N,
+  length (veval (traj [mkIx r l u] sym_step N)) = N * shapeCard [mkIx r l u]
+  /\ (forall n t, n < N -> shape_dense [mkIx r l u] t ->
+        nth n (dbuf sym_step N) (fun _ => 0) t
+        = qread (traj [mkIx r l u] sym_step N) (n :: t))
+  /\ (forall n t t', n < N -> shape_dense [mkIx r l u] t -> shape_dense [mkIx r l u] t' ->
+        Permutation t t' ->
+        nth n (dbuf sym_step N) (fun _ => 0) t
+        = nth n (dbuf sym_step N) (fun _ => 0) t')
+  /\ (forall n, inv_reader [mkIx r l u] (dread (dbuf sym_step n) n)).
+Proof.
+  intros r l u N.
+  pose proof (sym_step_orb_inv_sym r l u) as Hinv.
+  pose proof (sym_step_rd_dense_ext_sym r l u) as Hext.
+  destruct (letrec_commutes_with_quotient_sym [mkIx r l u] sym_step N Hinv Hext)
+    as (Hlen & _ & Hag & _ & Hsym).
+  split; [exact Hlen |]. split; [| split].
+  - intros n t Hn Hd. apply (Hag n t Hn Hd).
+  - intros n t t' Hn Hd Hd' HP. apply Hsym; try assumption.
+    apply single_block_perm; [apply single_dense; exact Hd | apply single_dense; exact Hd' |].
+    exact HP.
+  - intro n. apply (dense_prefix_is_orbit_invariant [mkIx r l u] sym_step Hinv Hext n).
+Qed.

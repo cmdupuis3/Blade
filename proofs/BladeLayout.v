@@ -1550,9 +1550,69 @@ Definition sched_space (d : nat) (G : list (list nat))
   flat_map (fun rs => map (fun lo => (rs, lo)) (permsOf (seq 0 d)))
            (choices G refs).
 
+(* The least cost in the licensed space.  The fold is SEEDED BY THE FIRST    *)
+(* CANDIDATE, not by a sentinel: an earlier version seeded Nat.min with 99  *)
+(* and so reported min(costs, 99) -- a genuine minimum of 100 read as 99    *)
+(* (audit S02, pinned below as best_cost_no_sentinel_cap).  The empty space *)
+(* (only possible when G = [] and refs <> []) reports 0 by convention; every *)
+(* theorem about the reported value is stated on the nonempty space, where  *)
+(* it is proved equal to the cost of the canonical schedule                 *)
+(* (best_cost_agrees_canon below).                                          *)
+Definition min_from (c : nat) (cs : list nat) : nat := fold_right Nat.min c cs.
+
 Definition best_cost (d : nat) (G : list (list nat))
   (refs : list (list nat)) : nat :=
-  fold_right Nat.min 99 (map sched_cost (sched_space d G refs)).
+  match map sched_cost (sched_space d G refs) with
+  | [] => 0
+  | c :: cs => min_from c cs
+  end.
+
+Lemma min_from_le : forall cs c x, In x (c :: cs) -> min_from c cs <= x.
+Proof.
+  unfold min_from.
+  induction cs as [|y cs IH]; intros c x Hx; simpl in Hx |- *.
+  - destruct Hx as [E | []]. subst. lia.
+  - destruct Hx as [E | [E | Hx]].
+    + subst x. specialize (IH c c (or_introl eq_refl)). lia.
+    + subst x. lia.
+    + specialize (IH c x (or_intror Hx)). lia.
+Qed.
+
+Lemma min_from_in : forall cs c, In (min_from c cs) (c :: cs).
+Proof.
+  induction cs as [|y cs IH]; intro c; simpl.
+  - left. reflexivity.
+  - unfold min_from in IH |- *. simpl.
+    destruct (Nat.min_spec y (fold_right Nat.min c cs)) as [[_ E] | [_ E]];
+      rewrite E.
+    + right. left. reflexivity.
+    + destruct (IH c) as [E2 | E2]; [left; exact E2 | right; right; exact E2].
+Qed.
+
+(* best_cost is a lower bound of every licensed schedule's cost ...         *)
+Theorem best_cost_le : forall d G refs s,
+  In s (sched_space d G refs) -> best_cost d G refs <= sched_cost s.
+Proof.
+  intros d G refs s Hs. unfold best_cost.
+  assert (Hm : In (sched_cost s) (map sched_cost (sched_space d G refs)))
+    by (apply in_map; exact Hs).
+  destruct (map sched_cost (sched_space d G refs)) as [|c cs].
+  - destruct Hm.
+  - apply min_from_le. exact Hm.
+Qed.
+
+(* ... and, on a nonempty space, the cost of one of them (attained).        *)
+Theorem best_cost_attained : forall d G refs,
+  sched_space d G refs <> [] ->
+  exists s, In s (sched_space d G refs) /\ sched_cost s = best_cost d G refs.
+Proof.
+  intros d G refs Hne. unfold best_cost.
+  destruct (sched_space d G refs) as [|s0 rest] eqn:E; [contradiction |].
+  cbn [map]. pose proof (min_from_in (map sched_cost rest) (sched_cost s0)) as Hin.
+  change (sched_cost s0 :: map sched_cost rest) with (map sched_cost (s0 :: rest))
+    in Hin.
+  apply in_map_iff in Hin as (s & Hc & Hs). exists s. split; [exact Hs | exact Hc].
+Qed.
 
 (* --- minimum with a lexicographic tie-break, in general ---------------- *)
 
@@ -1652,6 +1712,64 @@ Proof.
   - destruct Hs.
   - exact (foldpick_min sched sched_cost sched_key rest s0 s Hs).
 Qed.
+
+(* The reported minimum IS the canonical schedule's cost, on every nonempty *)
+(* licensed space (any d, any group, any number of references): two         *)
+(* attained lower bounds of the same finite set coincide.                  *)
+Theorem best_cost_agrees_canon : forall d G refs,
+  sched_space d G refs <> [] ->
+  best_cost d G refs = sched_cost (canon_sched d G refs).
+Proof.
+  intros d G refs Hne.
+  pose proof (best_cost_le d G refs _ (canonical_is_in_space d G refs Hne)) as H1.
+  destruct (best_cost_attained d G refs Hne) as (s & Hs & Hc).
+  pose proof (canonical_is_cost_minimal d G refs s Hs) as H2. lia.
+Qed.
+
+(* The licensed space is nonempty whenever the group is: permsOf always     *)
+(* yields at least one loop order, and each reference has a licensed image. *)
+Lemma choices_nonempty : forall G refs, G <> [] -> choices G refs <> [].
+Proof.
+  intros G refs HG. induction refs as [|r rs IH]; simpl; [discriminate |].
+  destruct G as [|g G']; [contradiction |]. simpl.
+  destruct (choices (g :: G') rs) as [|c cs]; [contradiction |].
+  simpl. discriminate.
+Qed.
+
+Lemma permsOf_nonempty : forall l, permsOf l <> [].
+Proof.
+  induction l as [|x l IH]; simpl; [discriminate |].
+  destruct (permsOf l) as [|p ps]; [contradiction |].
+  simpl. destruct p; simpl; discriminate.
+Qed.
+
+Lemma sched_space_nonempty : forall d G refs,
+  G <> [] -> sched_space d G refs <> [].
+Proof.
+  intros d G refs HG. unfold sched_space.
+  pose proof (choices_nonempty G refs HG) as Hc.
+  pose proof (permsOf_nonempty (seq 0 d)) as Hp.
+  destruct (choices G refs) as [|c cs]; [contradiction |].
+  destruct (permsOf (seq 0 d)) as [|p ps]; [contradiction |].
+  simpl. discriminate.
+Qed.
+
+(* So the agreement holds outright for every nonempty licensed group.       *)
+Corollary best_cost_is_canon_cost : forall d G refs,
+  G <> [] -> best_cost d G refs = sched_cost (canon_sched d G refs).
+Proof.
+  intros d G refs HG. apply best_cost_agrees_canon, sched_space_nonempty, HG.
+Qed.
+
+(* --- AUDIT S02 REGRESSION: no sentinel cap ----------------------------- *)
+(* 100 copies of the transpose pair: every loop order pays 1 per copy, so   *)
+(* the true minimum is 100.  The old 99-seeded fold reported 99.            *)
+Definition tp_refs_100 : list (list nat) := concat (repeat [[0; 1]; [1; 0]] 100).
+
+Example best_cost_no_sentinel_cap :
+  best_cost 2 (trivG 2) tp_refs_100 = 100 /\
+  sched_cost (canon_sched 2 (trivG 2) tp_refs_100) = 100.
+Proof. split; vm_compute; reflexivity. Qed.
 
 (* Deciding canonicality: is this schedule THE representative of its        *)
 (* licensed orbit?  The layout analogue of asking whether an index tuple    *)

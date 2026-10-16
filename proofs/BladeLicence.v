@@ -47,6 +47,22 @@
 (*                            R = eq is BladeSurface's middle conjunct;  *)
 (*                            a has_ty derivation is a quotient up to    *)
 (*                            every reflexive transitive R               *)
+(*                            All of these are DIRECT-APPLICATION-ONLY:  *)
+(*                            has_ty_R's pipe rules accept any g, and an *)
+(*                            arbitrary g can break R (pipe_breaks_R_old: *)
+(*                            parity, then x / 2, still typed)           *)
+(*   has_ty_RC, typed_is_quotient_RC                                     *)
+(*                            has_ty_R with an R-congruence premise on   *)
+(*                            the two pipe rules (R x y -> R (g x)       *)
+(*                            (g y)); for it the quotient holds over the *)
+(*                            WHOLE typed grammar, at every type, on     *)
+(*                            every cell of qdom (the dense output cells *)
+(*                            of the underlying application, carried     *)
+(*                            through compute and pipes).                *)
+(*                            has_ty_RC_has_ty_R (a sub-judgment, so     *)
+(*                            progress_R .. eval_sound_R apply),         *)
+(*                            has_ty_RC_eq_iff (R = eq is has_ty);       *)
+(*                            pipe_refused_RC, congruent_pipe_keeps_R    *)
 (*   licensed_not_exact       the parameter is real: f v = v0 + 3 v1     *)
 (*                            declared comm is kwf up to parity (R x y   *)
 (*                            := x mod 2 = y mod 2) and NOT kwf; has_ty  *)
@@ -650,6 +666,164 @@ Proof.
 Qed.
 
 (* ===================================================================== *)
+(* PART B''.  PIPELINES UP TO R NEED AN R-CONGRUENCE (audit S01).        *)
+(* has_ty_R's TR_PipeC / TR_PipeA accept ANY post-pipe g, so the         *)
+(* quotient theorems above are DIRECT-APPLICATION-ONLY: an arbitrary g   *)
+(* can break R (pipe_breaks_R_old, in Part C2: parity, then x / 2).      *)
+(* has_ty_RC is has_ty_R with one more premise on the two pipe rules,    *)
+(* forall x y, R x y -> R (g x) (g y); for it the quotient holds over    *)
+(* the WHOLE typed grammar (typed_is_quotient_RC): at every cell of the  *)
+(* expression's quotient domain qdom -- the dense output cells of the    *)
+(* application(s) it is built from, carried through compute and pipes -- *)
+(* the canonical read is the dense value up to R.  has_ty_RC is a        *)
+(* sub-judgment of has_ty_R (has_ty_RC_has_ty_R), so progress_R ..       *)
+(* eval_sound_R apply to it, and at R = eq it is has_ty exactly          *)
+(* (has_ty_RC_eq_iff): every function preserves equality.                *)
+(* ===================================================================== *)
+
+Inductive has_ty_RC (R : nat -> nat -> Prop) (G : tenv) : expr -> ty -> Prop :=
+| TC_Arr : forall s k,
+    has_ty_RC R G (EArr s k) (TArr s)
+| TC_Var : forall x s,
+    lookup x G = Some s ->
+    has_ty_RC R G (EVar x) (TArr s)
+| TC_Method : forall xs b,
+    bind_names G xs = Some b ->
+    has_ty_RC R G (EMethod xs) (TLoop b)
+| TC_Zip : forall xs b s,
+    bind_names G xs = Some b -> b <> [] -> all_shape s b ->
+    has_ty_RC R G (EZip xs) (TZipLoop s (length b))
+| TC_Object : forall f,
+    kwf_R R f ->
+    has_ty_RC R G (EObject f) (TObj f)
+| TC_AppM : forall L b f,
+    has_ty_RC R G L (TLoop b) -> kwf_R R f -> k_arity f = length b ->
+    has_ty_RC R G (EAppM L f) (TComp (out_shape (k_comm f) b))
+| TC_AppZ : forall L s n f,
+    has_ty_RC R G L (TZipLoop s n) -> kwf_R R f -> k_arity f = n ->
+    has_ty_RC R G (EAppM L f) (TComp s)
+| TC_AppO : forall O f xs b,
+    has_ty_RC R G O (TObj f) -> bind_names G xs = Some b -> k_arity f = length b ->
+    has_ty_RC R G (EAppO O xs) (TComp (out_shape (k_comm f) b))
+| TC_Compute : forall c s,
+    has_ty_RC R G c (TComp s) ->
+    has_ty_RC R G (ECompute c) (TArr s)
+| TC_PipeC : forall c g s,
+    has_ty_RC R G c (TComp s) -> (forall x y, R x y -> R (g x) (g y)) ->
+    has_ty_RC R G (EPipe c g) (TComp s)
+| TC_PipeA : forall e g s,
+    has_ty_RC R G e (TArr s) -> (forall x y, R x y -> R (g x) (g y)) ->
+    has_ty_RC R G (EPipe e g) (TArr s).
+
+Theorem has_ty_RC_has_ty_R : forall R G e t, has_ty_RC R G e t -> has_ty_R R G e t.
+Proof.
+  intros R G e t H. induction H.
+  - apply TR_Arr.
+  - apply TR_Var; assumption.
+  - apply TR_Method; assumption.
+  - apply TR_Zip; assumption.
+  - apply TR_Object; assumption.
+  - apply TR_AppM; assumption.
+  - eapply TR_AppZ; eassumption.
+  - eapply TR_AppO; eassumption.
+  - apply TR_Compute; assumption.
+  - apply TR_PipeC; assumption.
+  - apply TR_PipeA; assumption.
+Qed.
+
+Theorem has_ty_RC_eq_iff : forall G e t, has_ty_RC eq G e t <-> has_ty G e t.
+Proof.
+  intros G e t. split; intro H; induction H.
+  - apply T_Arr.
+  - apply T_Var; assumption.
+  - apply T_Method; assumption.
+  - apply T_Zip; assumption.
+  - apply T_Object. apply kwf_eq_iff. assumption.
+  - apply T_AppM; [assumption | apply kwf_eq_iff; assumption | assumption].
+  - eapply T_AppZ; [eassumption | apply kwf_eq_iff; eassumption | eassumption].
+  - eapply T_AppO; eassumption.
+  - apply T_Compute; assumption.
+  - apply T_PipeC; assumption.
+  - apply T_PipeA; assumption.
+  - apply TC_Arr.
+  - apply TC_Var; assumption.
+  - apply TC_Method; assumption.
+  - apply TC_Zip; assumption.
+  - apply TC_Object. apply kwf_eq_iff. assumption.
+  - apply TC_AppM; [assumption | apply kwf_eq_iff; assumption | assumption].
+  - eapply TC_AppZ; [eassumption | apply kwf_eq_iff; eassumption | eassumption].
+  - eapply TC_AppO; eassumption.
+  - apply TC_Compute; assumption.
+  - apply TC_PipeC; [assumption | intros x y ->; reflexivity].
+  - apply TC_PipeA; [assumption | intros x y ->; reflexivity].
+Qed.
+
+(* the quotient domain of an expression: the dense output cells of the   *)
+(* method_for / object_for application it is built from, carried through *)
+(* compute and pipes; empty for bare arrays, loops, objects and zips     *)
+(* (whose cells are read where they are stored)                          *)
+Fixpoint qdom (G : tenv) (e : expr) : list (list nat) :=
+  match e with
+  | EAppM L _ =>
+      match L with
+      | EMethod xs =>
+          match bind_names G xs with Some b => enumShape (dense_shape b) | None => [] end
+      | _ => []
+      end
+  | EAppO Ob xs =>
+      match Ob with
+      | EObject _ =>
+          match bind_names G xs with Some b => enumShape (dense_shape b) | None => [] end
+      | _ => []
+      end
+  | ECompute c => qdom G c
+  | EPipe c _ => qdom G c
+  | _ => []
+  end.
+
+Lemma qread_pipe : forall (A : Arr nat) (g : nat -> nat) t,
+  qread (pipe A g) t = g (qread A t) /\ snd (pipe A g) t = g (snd A t).
+Proof. intros A g t. split; reflexivity. Qed.
+
+(* THE QUOTIENT OVER THE FULL TYPED GRAMMAR, up to R: for every          *)
+(* has_ty_RC derivation, at any type, the canonical read of the          *)
+(* denotation is the dense value up to R on every cell of qdom.  R need  *)
+(* only be reflexive and transitive.                                     *)
+Theorem typed_is_quotient_RC : forall (R : nat -> nat -> Prop),
+  (forall x, R x x) -> (forall x y z, R x y -> R y z -> R x z) ->
+  forall G rho e T,
+  env_ok G rho -> has_ty_RC R G e T ->
+  forall t, In t (qdom G e) -> R (qread (den rho e) t) (snd (den rho e) t).
+Proof.
+  intros R Hr Htr G rho e T Hok H. induction H; intros t Ht; simpl in Ht;
+    try contradiction.
+  - (* method_for application *)
+    inversion H; subst. simpl in Ht.
+    assert (Hty : has_ty_R R G (EAppM (EMethod xs) f) (TComp (out_shape (k_comm f) b))).
+    { apply TR_AppM; [apply TR_Method | |]; assumption. }
+    destruct (typed_app_is_quotient_R R Hr Htr G rho xs f _ Hok Hty)
+      as (b' & Hb' & _ & _ & Hq & _).
+    rewrite Hb' in Ht. exact (proj2 (Hq t Ht)).
+  - (* zip application: empty quotient domain *)
+    inversion H; subst. simpl in Ht. contradiction.
+  - (* object_for application *)
+    inversion H; subst. simpl in Ht.
+    assert (Hty : has_ty_R R G (EAppO (EObject f) xs) (TComp (out_shape (k_comm f) b))).
+    { eapply TR_AppO; [apply TR_Object | |]; eassumption. }
+    destruct (typed_appO_is_quotient_R R Hr Htr G rho xs f _ Hok Hty)
+      as (b' & Hb' & _ & _ & Hq).
+    rewrite Hb' in Ht. exact (proj2 (Hq t Ht)).
+  - (* compute *)
+    exact (IHhas_ty_RC t Ht).
+  - (* pipe on a computation: the congruence carries R through g *)
+    simpl den. rewrite (proj1 (qread_pipe _ g t)), (proj2 (qread_pipe _ g t)).
+    apply H0. exact (IHhas_ty_RC t Ht).
+  - (* pipe on an array *)
+    simpl den. rewrite (proj1 (qread_pipe _ g t)), (proj2 (qread_pipe _ g t)).
+    apply H0. exact (IHhas_ty_RC t Ht).
+Qed.
+
+(* ===================================================================== *)
 (* PART C.  INSTANCES: THE PARAMETER IS REAL.                            *)
 (* ===================================================================== *)
 
@@ -754,6 +928,71 @@ Proof.
     as (b' & Hb' & Es & H1 & H2 & _).
   rewrite Hb in Hb'. injection Hb' as <-.
   split; [exact H1 | exact H2].
+Qed.
+
+(* --- C2'. AUDIT S01 REGRESSION: an unrestricted pipe breaks R --------- *)
+(* A is the length-two identity array; kmod2 (x + 3 y, comm up to       *)
+(* parity) applied to (A, A) is R-licensed at [1; 0] (canonical read 3, *)
+(* dense 1).  Piping through x / 2 keeps the shape, and the OLD rules   *)
+(* type it, yet the reads become 1 and 0: not parity-related.  x / 2 is *)
+(* not an Rmod2-congruence, so has_ty_RC refuses the pipe at every type *)
+(* -- while a congruent pipe (x * 3 + 1) is typed and keeps R.           *)
+Definition s01_shape : Shape := [mkIx 1 0 2].
+Definition s01_G : tenv := [(0, s01_shape)].
+Definition s01_rho : venv := [(0, (s01_shape, fun t => hd 0 t))].
+Definition s01_app := EAppM (EMethod [0;0]) kmod2.
+Definition s01_pipe := EPipe s01_app (fun x => x / 2).
+
+Lemma s01_env_ok : env_ok s01_G s01_rho.
+Proof.
+  intros x s H. unfold s01_G, lookup in H.
+  destruct (x =? 0) eqn:E; try discriminate.
+  inversion H; subst. exists (fun t => hd 0 t).
+  unfold s01_rho, lookup. now rewrite E.
+Qed.
+
+Example pipe_breaks_R_old :
+  has_ty_R Rmod2 s01_G s01_pipe (TComp [mkIx 2 0 2]) /\
+  qread (den s01_rho s01_app) [1;0] = 3 /\
+  snd (den s01_rho s01_app) [1;0] = 1 /\
+  qread (den s01_rho s01_pipe) [1;0] = 1 /\
+  snd (den s01_rho s01_pipe) [1;0] = 0 /\
+  ~ Rmod2 (qread (den s01_rho s01_pipe) [1;0]) (snd (den s01_rho s01_pipe) [1;0]).
+Proof.
+  split.
+  - apply TR_PipeC.
+    change (has_ty_R Rmod2 s01_G s01_app
+      (TComp (out_shape (k_comm kmod2) [(0, s01_shape); (0, s01_shape)]))).
+    apply TR_AppM; [apply TR_Method; reflexivity | apply kmod2_kwf_R | reflexivity].
+  - repeat split; vm_compute; congruence.
+Qed.
+
+Lemma div2_not_Rmod2_congruent : ~ (forall x y, Rmod2 x y -> Rmod2 (x / 2) (y / 2)).
+Proof. intro H. specialize (H 1 3 eq_refl). vm_compute in H. discriminate. Qed.
+
+Example pipe_refused_RC : forall T, ~ has_ty_RC Rmod2 s01_G s01_pipe T.
+Proof.
+  intros T H. inversion H; subst; apply div2_not_Rmod2_congruent; assumption.
+Qed.
+
+Definition s01_good_pipe := EPipe s01_app (fun x => x * 3 + 1).
+
+Example congruent_pipe_keeps_R :
+  has_ty_RC Rmod2 s01_G s01_good_pipe (TComp [mkIx 2 0 2]) /\
+  forall t, In t (qdom s01_G s01_good_pipe) ->
+    Rmod2 (qread (den s01_rho s01_good_pipe) t) (snd (den s01_rho s01_good_pipe) t).
+Proof.
+  assert (Hty : has_ty_RC Rmod2 s01_G s01_good_pipe (TComp [mkIx 2 0 2])).
+  { apply TC_PipeC.
+    - change (has_ty_RC Rmod2 s01_G s01_app
+        (TComp (out_shape (k_comm kmod2) [(0, s01_shape); (0, s01_shape)]))).
+      apply TC_AppM; [apply TC_Method; reflexivity | apply kmod2_kwf_R | reflexivity].
+    - intros x y Hxy. unfold Rmod2 in *.
+      rewrite (Nat.add_mod (x * 3)), (Nat.add_mod (y * 3)), (Nat.mul_mod x),
+              (Nat.mul_mod y), Hxy by discriminate. reflexivity. }
+  split; [exact Hty |].
+  exact (typed_is_quotient_RC Rmod2 Rmod2_refl Rmod2_trans s01_G s01_rho _ _
+           s01_env_ok Hty).
 Qed.
 
 (* --- C3. the reassociation instance: a FOLD kernel ------------------ *)

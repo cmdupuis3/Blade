@@ -180,11 +180,16 @@ Section Reynolds.
   Qed.
 End Reynolds.
 
-(* Accounting note (informal, arithmetic checked in section 3): the
-   Reynolds object costs |coset| = r!^(d-1) kernel terms per cell over
-   n^(rd)/r!^d cells = n^(rd)/r! kernel evaluations total.  FLOP factor
-   r!, storage factor r!^d.  "(r!)^d is a storage theorem; r! is the
-   FLOP theorem; Reynolds bridges them." *)
+(* Accounting note (informal, LEADING ORDER for fixed r, d and growing
+   n): the Reynolds object costs |coset| = r!^(d-1) kernel terms per cell
+   over ~ n^(rd)/r!^d cells ~ n^(rd)/r! kernel evaluations total.  FLOP
+   factor ~ r!, storage factor ~ r!^d.  "(r!)^d is a storage theorem; r!
+   is the FLOP theorem; Reynolds bridges them."  These are NOT exact:
+   diagonal orbits are smaller, and the exact cell count is
+   C(n+r-1, r)^d (BladeBinomial / BladeCounting).  At r = d = n = 2 the
+   store has 9 cells, not 4, and the two-term Reynolds sum costs 18
+   kernel evaluations, not 8 (audit 2026-10-15, F06).  Section 3's
+   arithmetic does not check this work estimate. *)
 
 (* ===================================================================== *)
 (* 5. LEFT-JUSTIFIED COORDINATES ARE A STORAGE BIJECTION.                *)

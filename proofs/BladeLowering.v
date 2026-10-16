@@ -277,9 +277,13 @@ End DiagonalGroupLaw.
 (* ===================================================================== *)
 (* SIGN-TRACKED LOWERING: antisymmetric kernels over one identity group  *)
 (* (Hermitian is the same statement with neg := conjugation).  On the    *)
-(* diagonal, OutA i i = neg (OutA i i): with neg := opp over a group,    *)
-(* the diagonal vanishes -- stated here structurally, the vanishing      *)
-(* itself needs U's group structure.                                     *)
+(* diagonal, OutA i i = neg (OutA i i).  That is all that is proved.     *)
+(* Vanishing needs MORE than a group: it needs x = -x -> x = 0, i.e. no  *)
+(* nonzero 2-torsion.  It fails in the Boolean XOR group, and in Blade's *)
+(* own wrapping Int64, where x = -x also holds at x = Int64.MinValue     *)
+(* (audit 2026-10-15, F07).  Over Z (BladeCauchy) it holds.  Storage     *)
+(* that drops the diagonal of an antisymmetric result is sound only on   *)
+(* such a carrier.                                                       *)
 (* ===================================================================== *)
 
 Section AntisymmetricLowering.

@@ -379,7 +379,10 @@ Qed.
 
 (* --- C(i): the six-component scheme, abstract values ------------------ *)
 (* Store P_mu(a,b) = T(a ++ pact mu b) for the six mu; read T at any     *)
-(* index (pact s a ++ pact t b) as P_{pmul (pinv s) t}(a, b).  The       *)
+(* index (pact s a ++ pact t b) as P_{pmul t (pinv s)}(a, b) -- in that  *)
+(* order: S3 does not commute, and the reversed product pmul (pinv s) t  *)
+(* reads the wrong cell (audit 2026-10-15, F01: s = [1;0;2],             *)
+(* t = [1;2;0] gives 0 instead of 1 on a symmetric indicator).  The      *)
 (* identity below IS that scheme's soundness at every index, free or     *)
 (* tied, for values in ANY type: it is pure index algebra, the r = 3     *)
 (* instance of the document's Lemma 2.1 / Theorem 3.1 upper bound (the   *)

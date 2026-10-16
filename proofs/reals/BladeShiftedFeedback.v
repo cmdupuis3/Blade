@@ -40,14 +40,34 @@
 (*   feedback_particles,       coefficient is computed from the TRUE     *)
 (*   feedback_particles_rel    moments, b arbitrary;                     *)
 (*   normalized_ensemble_bound        instantiated: x' = (g / sqrt M_2)  *)
-(*                             x + b, renormalized by its own spread.    *)
+(*                             x + b, renormalized by its own spread;    *)
+(*   mcl, mcl_step,            Part F (audit 2026-10-15, RF-1): a MIXED  *)
+(*   mixed_seed_input_bound,   relative + absolute seed (input           *)
+(*   feedback_bound_read,      coefficients: the absolute part is        *)
+(*                             carried by |a_1 .. a_T|^k), and the       *)
+(*   normalized_ensemble_bound_seed   feedback theorem parameterized by  *)
+(*                             the moments the coefficient READS -- only *)
+(*                             those need a relative seed; the           *)
+(*                             [3, -1e16, 1e16] obstruction pinned       *)
+(*                             (seed_no_relative_radius);                *)
+(*   normalized_exact_resets,  Part G (RF-3, RF-2): under g / sqrt(M_2)  *)
+(*   normalized_m2_radius_constant,   the true M_2 is g^2 after every    *)
+(*   normalized_particles_linear,     step, the float M_2 stays within   *)
+(*   normalized_ensemble_bound_dom    6 lu of it (no compounding),       *)
+(*                             every other moment's radius is LINEAR in  *)
+(*                             T, and no divisor or radicand leaves its  *)
+(*                             domain;                                   *)
+(*   piter_length              the particle count is invariant (RF-5).   *)
 (*                                                                       *)
 (* Scope, stated once.  The coefficient may read the moments M_1 .. M_r, *)
-(* not the shift c (the mean).  Feedback amplifies: the radius grows     *)
-(* geometrically at rate 1 + r L, which is the price of a coefficient    *)
-(* that reads rounded data, not an artefact of the proof -- blade plan   *)
-(* must report it, and a program with large L T is outside any useful    *)
-(* contract.                                                             *)
+(* not the shift c (the mean).  The radius of feedback_bound grows       *)
+(* geometrically at rate 1 + r L.  That is a CONSERVATIVE WORST-CASE     *)
+(* UPPER BOUND under the abstract stability hypothesis alpha_stable, not *)
+(* a proved cost of feedback: it bounds the coefficient and the moment   *)
+(* it multiplies separately and discards their correlation.  No lower    *)
+(* bound is proved, and for g / sqrt(M_2) Part G proves the radius does  *)
+(* not compound at all.  blade plan must still report the generic        *)
+(* number when no sharper instance applies.                              *)
 (* ===================================================================== *)
 
 From Blade Require Import BladeBinomial BladeSummary BladeMomentClosure
@@ -441,7 +461,8 @@ Section Feedback.
 
   (* THE FEEDBACK BOUND.  Moments known to log-relative error l0 at the  *)
   (* seed stay within rad l0 T after T steps of the float program, whose *)
-  (* coefficient is computed from its OWN rounded moments.               *)
+  (* coefficient is computed from its OWN rounded moments.  rad is a     *)
+  (* conservative worst-case upper bound, not a lower bound (Part G).    *)
   Theorem feedback_bound : forall T l0 mh m, 0 <= l0 ->
     (forall k, (1 <= k)%nat -> (k <= r)%nat -> rcl l0 (mh k) (m k)) ->
     forall k, (1 <= k)%nat -> (k <= r)%nat ->
@@ -577,6 +598,12 @@ End Feedback.
 (* Part E.  The contract, instantiated: an ensemble RENORMALIZED by its  *)
 (* own spread each step, x' = (g / sqrt(M_2)) x + b, with the float      *)
 (* program computing the coefficient from its own rounded M_2.           *)
+(*                                                                       *)
+(* This corollary has no domain hypothesis: it holds over the TOTALIZED  *)
+(* reals (/ 0 = 0, sqrt of a negative = 0), so it says nothing about     *)
+(* whether an IEEE run stays finite.  normalized_ensemble_bound_dom      *)
+(* (Part G) adds M_2 > 0 and g <> 0 and proves both runs stay in the     *)
+(* domain at every step.                                                 *)
 (* ===================================================================== *)
 
 Corollary normalized_ensemble_bound : forall u rnd (g : R)
@@ -601,4 +628,659 @@ Proof.
     apply (normalizing_coefficient_stable u Hu rnd Hrnd g l mh1 m1 Hl).
     apply H; lia.
   - intros m m' H. rewrite (H 2%nat) by lia. reflexivity.
+Qed.
+
+(* ===================================================================== *)
+(* Part F.  A SEED THAT IS NOT RELATIVELY ACCURATE (audit 2026-10-15,    *)
+(* RF-1).  rcl l xh 0 forces xh = 0, so every theorem above needs the    *)
+(* seed EXACT at a zero moment.  A two-pass float seed is not: on        *)
+(* [3, -1e16, 1e16] binary64 gives the mean 1 exactly and M_1 = 2, while *)
+(* the true M_1 about that shift is 0 (seed_no_relative_radius below;    *)
+(* floats/BladeBinary64Witness.v Part E).  The fix has two halves:       *)
+(*                                                                       *)
+(*   mcl                       MIXED error, xh = th x + e, th            *)
+(*                             log-bounded by l and |e| <= d; d = 0 is   *)
+(*                             rcl (rcl_mcl, mcl_rcl);                   *)
+(*   mcl_step                  one float step keeps the form: the        *)
+(*                             relative part grows as before, the        *)
+(*                             absolute part is carried by |a|^k -- the  *)
+(*                             same factor that scales M_k itself;       *)
+(*   mixed_seed_input_bound    iterated over a word of INPUT             *)
+(*                             coefficients (BladeShiftedRounding's      *)
+(*                             setting): relative radius l + T k lu,     *)
+(*                             absolute exp(T k lu) |a_1..a_T|^k d;      *)
+(*   feedback_bound_read       the feedback theorem PARAMETERIZED BY THE *)
+(*                             MOMENTS THE COEFFICIENT READS (rd): only  *)
+(*                             those need a relative seed; every other   *)
+(*                             moment may carry an absolute error d_k,   *)
+(*                             which after T steps is at most            *)
+(*                             exp(rad T - l0) |aprod T|^k d_k, aprod    *)
+(*                             the product of the exact coefficients     *)
+(*                             (eiter_aprod: M_k(T) = aprod^k M_k(0));   *)
+(*   normalized_ensemble_bound_seed   instance: g / sqrt(M_2) reads only *)
+(*                             M_2, so M_1 (and every odd moment) may be *)
+(*                             seeded with an absolute error.            *)
+(* ===================================================================== *)
+
+(* xh approximates x with log-relative error l PLUS an absolute error at *)
+(* most d.                                                               *)
+Definition mcl (l d xh x : R) : Prop :=
+  exists th e, xh = th * x + e /\ exp (- l) <= th <= exp l /\ Rabs e <= d.
+
+Lemma rcl_mcl : forall l xh x, rcl l xh x -> mcl l 0 xh x.
+Proof.
+  intros l xh x [th [E B]]. exists th, 0.
+  split; [rewrite E; ring|]. split; [exact B|]. rewrite Rabs_R0. lra.
+Qed.
+
+Lemma mcl_rcl : forall l xh x, mcl l 0 xh x -> rcl l xh x.
+Proof.
+  intros l xh x [th [e [E [B D]]]].
+  assert (He : e = 0).
+  { destruct (Req_dec e 0) as [Z|Z]; [exact Z|].
+    pose proof (Rabs_pos_lt e Z). lra. }
+  exists th. split; [rewrite E, He; ring|exact B].
+Qed.
+
+Lemma mcl_abs : forall d xh x, Rabs (xh - x) <= d -> mcl 0 d xh x.
+Proof.
+  intros d xh x H. exists 1, (xh - x). split; [ring|].
+  rewrite Ropp_0, exp_0. split; [lra|exact H].
+Qed.
+
+Lemma mcl_d_nonneg : forall l d xh x, mcl l d xh x -> 0 <= d.
+Proof.
+  intros l d xh x [th [e [_ [_ D]]]]. pose proof (Rabs_pos e). lra.
+Qed.
+
+Lemma mcl_mono : forall l l' d d' xh x, l <= l' -> d <= d' ->
+  mcl l d xh x -> mcl l' d' xh x.
+Proof.
+  intros l l' d d' xh x Hl Hd [th [e [E [B D]]]]. exists th, e.
+  split; [exact E|]. split; [|lra].
+  pose proof (exp_le_mono (- l') (- l) ltac:(lra)).
+  pose proof (exp_le_mono l l' Hl). lra.
+Qed.
+
+(* Two log-bounded factors multiply into one.                            *)
+Lemma factor_mul : forall l1 l2 t1 t2,
+  exp (- l1) <= t1 <= exp l1 -> exp (- l2) <= t2 <= exp l2 ->
+  exp (- (l1 + l2)) <= t1 * t2 <= exp (l1 + l2).
+Proof.
+  intros l1 l2 t1 t2 B1 B2.
+  pose proof (exp_pos (- l1)). pose proof (exp_pos (- l2)).
+  rewrite Ropp_plus_distr, !exp_plus. split.
+  - apply Rmult_le_compat; lra.
+  - apply Rmult_le_compat; lra.
+Qed.
+
+Section MixedStep.
+  Variable u : R.
+  Hypothesis Hu : 0 <= u < 1.
+  Variable rnd : R -> R.
+  Hypothesis rnd_rel : forall x, Rabs (rnd x - x) <= u * Rabs x.
+
+  (* One float step M <- fl(fl(a^k) M) from a coefficient at log-error   *)
+  (* la: the relative part gains k la + k lu, the absolute part is       *)
+  (* scaled by |a|^k and by the same rounding factor.                    *)
+  Lemma mcl_step : forall l d la ah a xh x k, (1 <= k)%nat -> 0 <= la ->
+    mcl l d xh x -> rcl la ah a ->
+    mcl (l + (INR k * la + INR k * lu u))
+        (exp (INR k * la + INR k * lu u) * (Rabs a ^ k * d))
+        (rnd (fpow rnd ah k * xh)) (a ^ k * x).
+  Proof.
+    intros l d la ah a xh x k Hk Hla [th [e [E [B D]]]] Ha.
+    destruct (fpow_rcl u Hu rnd rnd_rel la ah a k Hk Hla Ha) as [tp [Ep Bp]].
+    destruct (rnd_rcl u Hu rnd rnd_rel (fpow rnd ah k * xh)) as [tr [Er Br]].
+    assert (Hls : lu u + (INR k * la + INR (k - 1) * lu u)
+                  = INR k * la + INR k * lu u).
+    { assert (INR (k - 1) + 1 = INR k) by (rewrite <- S_INR; f_equal; lia).
+      nra. }
+    pose proof (factor_mul _ _ _ _ Br Bp) as Btp. rewrite Hls in Btp.
+    pose proof (factor_mul _ _ _ _ Btp B) as Ball.
+    exists (tr * tp * th), (tr * tp * a ^ k * e). split.
+    { rewrite Er, Ep, E. ring. }
+    split.
+    - replace (l + (INR k * la + INR k * lu u))
+        with (INR k * la + INR k * lu u + l) by ring. exact Ball.
+    - assert (Htp0 : 0 < tr * tp)
+        by (pose proof (exp_pos (- (INR k * la + INR k * lu u))); lra).
+      replace (tr * tp * a ^ k * e) with ((tr * tp) * (a ^ k * e)) by ring.
+      rewrite Rabs_mult, (Rabs_right (tr * tp)) by lra.
+      rewrite Rabs_mult, <- RPow_abs.
+      pose proof (Rabs_pos e). pose proof (pow_le (Rabs a) k (Rabs_pos a)).
+      assert (Rabs a ^ k * Rabs e <= Rabs a ^ k * d)
+        by (apply Rmult_le_compat_l; lra).
+      assert (tr * tp * (Rabs a ^ k * Rabs e)
+              <= exp (INR k * la + INR k * lu u) * (Rabs a ^ k * Rabs e))
+        by (apply Rmult_le_compat_r; [apply Rmult_le_pos|]; lra).
+      assert (exp (INR k * la + INR k * lu u) * (Rabs a ^ k * Rabs e)
+              <= exp (INR k * la + INR k * lu u) * (Rabs a ^ k * d))
+        by (apply Rmult_le_compat_l; [left; apply exp_pos|]; lra).
+      nra.
+  Qed.
+
+  (* Coefficients FROM THE INPUT (a word of pairs, as in                 *)
+  (* BladeShiftedRounding, whose mex is mexw): a mixed seed stays mixed, *)
+  (* the relative part gaining k lu a step, the absolute part carried by *)
+  (* |a_1 ... a_T|^k -- so a zero moment needs no exact seed here either.*)
+  Fixpoint mflw (k : nat) (w : list (R * R)) (M : R) : R :=
+    match w with [] => M | (a, _) :: w' => mflw k w' (rnd (fpow rnd a k * M)) end.
+  Fixpoint mexw (k : nat) (w : list (R * R)) (M : R) : R :=
+    match w with [] => M | (a, _) :: w' => mexw k w' (a ^ k * M) end.
+  Fixpoint wprod (w : list (R * R)) : R :=
+    match w with [] => 1 | (a, _) :: w' => a * wprod w' end.
+
+  Theorem mixed_seed_input_bound : forall k w l d Mh M, (1 <= k)%nat ->
+    mcl l d Mh M ->
+    mcl (l + INR (length w) * (INR k * lu u))
+        (exp (INR (length w) * (INR k * lu u)) * (Rabs (wprod w) ^ k * d))
+        (mflw k w Mh) (mexw k w M).
+  Proof.
+    intros k w. induction w as [|[a b] w IH]; intros l d Mh M Hk Hm.
+    - cbn [mflw mexw wprod length]. replace (INR 0) with 0 by reflexivity.
+      rewrite Rmult_0_l, Rplus_0_r, exp_0, Rabs_R1, pow1, !Rmult_1_l. exact Hm.
+    - cbn [mflw mexw wprod length].
+      pose proof (mcl_step l d 0 a a Mh M k Hk (Rle_refl 0) Hm (rcl_refl a)) as S1.
+      rewrite Rmult_0_r, Rplus_0_l in S1.
+      pose proof (IH _ _ _ _ Hk S1) as B.
+      eapply mcl_mono; [| |exact B].
+      + rewrite S_INR. right. ring.
+      + right. rewrite S_INR, Rabs_mult, Rpow_mult_distr.
+        replace ((INR (length w) + 1) * (INR k * lu u))
+          with (INR (length w) * (INR k * lu u) + INR k * lu u) by ring.
+        rewrite exp_plus. ring.
+  Qed.
+
+End MixedStep.
+
+Section FeedbackRead.
+  Variable u : R.
+  Hypothesis Hu : 0 <= u < 1.
+  Variable rnd : R -> R.
+  Hypothesis rnd_rel : forall x, Rabs (rnd x - x) <= u * Rabs x.
+
+  Variable r : nat.
+  (* The moments the coefficient READS.                                  *)
+  Variable rd : nat -> Prop.
+  Variables alpha alphah : (nat -> R) -> R.
+  Variables L eps : R.
+  Hypothesis HL0 : 0 <= L.
+  Hypothesis He0 : 0 <= eps.
+  (* alpha_stable, asking relative accuracy only of the moments read.    *)
+  Hypothesis alpha_stable_read : forall l mh m, 0 <= l ->
+    (forall k, (1 <= k)%nat -> (k <= r)%nat -> rd k -> rcl l (mh k) (m k)) ->
+    rcl (L * l + eps) (alphah mh) (alpha m).
+
+  (* The product of the exact coefficients along the exact run.          *)
+  Fixpoint aprod (T : nat) (m : nat -> R) : R :=
+    match T with O => 1 | S T' => alpha m * aprod T' (estep alpha m) end.
+
+  Lemma eiter_aprod : forall T m k, eiter alpha T m k = aprod T m ^ k * m k.
+  Proof.
+    induction T as [|T IH]; intros m k.
+    - cbn [eiter aprod]. rewrite pow1. ring.
+    - cbn [eiter aprod]. rewrite IH. unfold estep.
+      rewrite Rpow_mult_distr. ring.
+  Qed.
+
+  Lemma step_read : forall l d mh m, 0 <= l ->
+    (forall k, (1 <= k)%nat -> (k <= r)%nat -> mcl l (d k) (mh k) (m k)) ->
+    (forall k, (1 <= k)%nat -> (k <= r)%nat -> rd k -> d k = 0) ->
+    forall k, (1 <= k)%nat -> (k <= r)%nat ->
+      mcl (step_l u r L eps l)
+          (exp (step_l u r L eps l - l) * (Rabs (alpha m) ^ k * d k))
+          (fstep rnd alphah mh k) (estep alpha m k).
+  Proof.
+    intros l d mh m Hl Hm Hd k Hk1 Hkr.
+    assert (Ha : rcl (L * l + eps) (alphah mh) (alpha m)).
+    { apply alpha_stable_read; [exact Hl|]. intros j Hj1 Hjr Hj.
+      apply mcl_rcl. rewrite <- (Hd j Hj1 Hjr Hj). exact (Hm j Hj1 Hjr). }
+    assert (Hla : 0 <= L * l + eps)
+      by (pose proof (Rmult_le_pos L l HL0 Hl); lra).
+    pose proof (mcl_step u Hu rnd rnd_rel _ _ _ _ _ _ _ k Hk1 Hla
+                  (Hm k Hk1 Hkr) Ha) as S1.
+    unfold fstep, estep.
+    assert (Hk : INR k <= INR r) by (apply le_INR; exact Hkr).
+    pose proof (lu_nonneg u Hu) as Hlu.
+    assert (A : INR k * (L * l + eps) + INR k * lu u
+                <= step_l u r L eps l - l).
+    { unfold step_l.
+      assert (INR k * (L * l + eps) <= INR r * (L * l + eps))
+        by (apply Rmult_le_compat_r; lra).
+      assert (INR k * lu u <= INR r * lu u)
+        by (apply Rmult_le_compat_r; lra).
+      nra. }
+    pose proof (mcl_d_nonneg _ _ _ _ (Hm k Hk1 Hkr)) as Hd0.
+    pose proof (pow_le (Rabs (alpha m)) k (Rabs_pos _)) as Hp.
+    eapply mcl_mono; [| |exact S1]; [lra|].
+    apply Rmult_le_compat_r; [apply Rmult_le_pos; lra|].
+    apply exp_le_mono. exact A.
+  Qed.
+
+  (* THE FEEDBACK BOUND FROM A MIXED SEED.  The moments read are seeded  *)
+  (* relatively (d_k = 0); every other moment may carry an absolute      *)
+  (* error d_k.  The relative radius is rad l0 T, as in feedback_bound;  *)
+  (* the absolute part is transported by the exact dynamics.             *)
+  Theorem feedback_bound_read : forall T l0 d mh m, 0 <= l0 ->
+    (forall k, (1 <= k)%nat -> (k <= r)%nat -> mcl l0 (d k) (mh k) (m k)) ->
+    (forall k, (1 <= k)%nat -> (k <= r)%nat -> rd k -> d k = 0) ->
+    forall k, (1 <= k)%nat -> (k <= r)%nat ->
+      mcl (rad u r L eps l0 T)
+          (exp (rad u r L eps l0 T - l0) * (Rabs (aprod T m) ^ k * d k))
+          (fiter rnd alphah T mh k) (eiter alpha T m k).
+  Proof.
+    induction T as [|T IH]; intros l0 d mh m Hl0 Hm Hd k Hk1 Hkr.
+    - cbn [rad aprod fiter eiter]. rewrite Rminus_diag, exp_0, Rabs_R1, pow1.
+      replace (1 * (1 * d k)) with (d k) by ring. exact (Hm k Hk1 Hkr).
+    - cbn [fiter eiter aprod]. rewrite rad_shift.
+      set (l1 := step_l u r L eps l0).
+      set (d1 := fun j => exp (l1 - l0) * (Rabs (alpha m) ^ j * d j)).
+      assert (Hl1 : 0 <= l1) by (apply step_l_nonneg; assumption).
+      pose proof (IH l1 d1 (fstep rnd alphah mh) (estep alpha m) Hl1) as B.
+      specialize (B (step_read l0 d mh m Hl0 Hm Hd)).
+      assert (Hd1 : forall j, (1 <= j)%nat -> (j <= r)%nat -> rd j -> d1 j = 0).
+      { intros j Hj1 Hjr Hj. unfold d1. rewrite (Hd j Hj1 Hjr Hj). ring. }
+      specialize (B Hd1 k Hk1 Hkr).
+      replace (exp (rad u r L eps l1 T - l0)
+               * (Rabs (alpha m * aprod T (estep alpha m)) ^ k * d k))
+        with (exp (rad u r L eps l1 T - l1)
+               * (Rabs (aprod T (estep alpha m)) ^ k * d1 k)).
+      + exact B.
+      + unfold d1.
+        replace (rad u r L eps l1 T - l0)
+          with ((rad u r L eps l1 T - l1) + (l1 - l0)) by ring.
+        rewrite exp_plus, Rabs_mult, Rpow_mult_distr. ring.
+  Qed.
+
+End FeedbackRead.
+
+(* The g / sqrt(M_2) normalization reads ONLY M_2: the exact coefficient *)
+(* and the one the float program computes.                               *)
+Definition alpha_n (g : R) (m : nat -> R) : R := g * / sqrt (m 2%nat).
+Definition alphah_n (rnd : R -> R) (g : R) (mh : nat -> R) : R :=
+  rnd (g * / rnd (sqrt (mh 2%nat))).
+
+(* normalized_ensemble_bound with a MIXED seed: M_2 relative (d_2 = 0),  *)
+(* every other moment -- M_1 in particular -- relative plus absolute.    *)
+Corollary normalized_ensemble_bound_seed : forall u rnd (g : R)
+    (beta : R -> (nat -> R) -> R) r l0 d mh c xs,
+  0 <= u < 1 -> (forall x, Rabs (rnd x - x) <= u * Rabs x) ->
+  (2 <= r)%nat -> 0 <= l0 ->
+  (forall k, (1 <= k)%nat -> (k <= r)%nat -> mcl l0 (d k) (mh k) (Smom c k xs)) ->
+  d 2%nat = 0 ->
+  forall T k, (1 <= k)%nat -> (k <= r)%nat ->
+    mcl (rad u r (/ 2) (2 * lu u) l0 T)
+        (exp (rad u r (/ 2) (2 * lu u) l0 T - l0)
+         * (Rabs (aprod (alpha_n g) T (smv c xs)) ^ k * d k))
+        (fiter rnd (alphah_n rnd g) T mh k)
+        (Smom (fst (piter (alpha_n g) beta T (c, xs))) k
+              (snd (piter (alpha_n g) beta T (c, xs)))).
+Proof.
+  intros u rnd g beta r l0 d mh c xs Hu Hrnd Hr Hl0 Hm Hd2 T k Hk1 Hkr.
+  change (Smom (fst (piter (alpha_n g) beta T (c, xs))) k
+               (snd (piter (alpha_n g) beta T (c, xs))))
+    with (smv (fst (piter (alpha_n g) beta T (c, xs)))
+              (snd (piter (alpha_n g) beta T (c, xs))) k).
+  rewrite (eiter_is_particles r (alpha_n g)).
+  - apply (feedback_bound_read u Hu rnd Hrnd r (fun j => j = 2%nat)
+             (alpha_n g) (alphah_n rnd g) (/ 2) (2 * lu u)); try assumption.
+    + left. apply Rinv_0_lt_compat. lra.
+    + pose proof (lu_nonneg u Hu). lra.
+    + intros l mh1 m1 Hl H. unfold alphah_n, alpha_n.
+      apply (normalizing_coefficient_stable u Hu rnd Hrnd g l mh1 m1 Hl).
+      apply H; [lia|lia|reflexivity].
+    + intros j _ _ Hj. subst j. exact Hd2.
+  - intros m m' H. unfold alpha_n. rewrite (H 2%nat) by lia. reflexivity.
+Qed.
+
+(* THE OBSTRUCTION, pinned.  [3, -1e16, 1e16] about the binary64 two-pass *)
+(* mean c = 1: the true M_1 is 0, binary64 computes 2 (floats/ Part E).   *)
+(* No relative radius covers it; the mixed predicate does, with d = 2,    *)
+(* and normalized_ensemble_bound_seed accepts it because M_1 is not read. *)
+Definition seed_xs : list R := [3; -10000000000000000; 10000000000000000].
+
+Example seed_true_first_moment_zero : Smom 1 1 seed_xs = 0.
+Proof. unfold seed_xs. cbn [smom psum rpow map rsum]. ring. Qed.
+
+Example seed_no_relative_radius : forall l, ~ rcl l 2 (Smom 1 1 seed_xs).
+Proof.
+  intros l [th [E _]]. rewrite seed_true_first_moment_zero in E. lra.
+Qed.
+
+Example seed_mixed_radius : mcl 0 2 2 (Smom 1 1 seed_xs).
+Proof.
+  apply mcl_abs. rewrite seed_true_first_moment_zero.
+  rewrite Rminus_0_r, Rabs_right by lra. lra.
+Qed.
+
+(* ===================================================================== *)
+(* Part G.  THE NORMALIZED SECOND MOMENT DOES NOT ACCUMULATE ERROR       *)
+(* (audit RF-3), and the normalization never leaves its domain (RF-2).   *)
+(*                                                                       *)
+(* The geometric radius of feedback_bound is a CONSERVATIVE WORST-CASE   *)
+(* UPPER BOUND under the abstract stability hypothesis: it bounds the    *)
+(* coefficient and the moment it multiplies separately, and so discards  *)
+(* their correlation.  For a = g / sqrt(M_2) the correlation is total:   *)
+(*                                                                       *)
+(*   normalized_second_moment_resets, normalized_exact_resets   exactly, *)
+(*                             (g / sqrt M_2)^2 M_2 = g^2, so M_2 = g^2  *)
+(*                             after every step, from ANY positive       *)
+(*                             start -- an incoming error is erased in   *)
+(*                             one step (normalized_seed_error_erased);  *)
+(*   normalized_m2_nongrowing, normalized_m2_radius_constant   rounded,  *)
+(*                             the float M_2 is within log-error 6 lu of *)
+(*                             g^2 = the true M_2 after EVERY step >= 1, *)
+(*                             whatever the seed error: a radius that    *)
+(*                             does not compound;                        *)
+(*   normalized_linear_bound, normalized_particles_linear   every other  *)
+(*                             moment then grows LINEARLY,               *)
+(*                             l0 + k (l2 / 2 + 3 lu) + 6 k lu T, from a *)
+(*                             mixed seed -- where the generic radius    *)
+(*                             compounds at rate 1 + r/2;                *)
+(*   normalized_domain, normalized_ensemble_bound_dom   RF-2: with       *)
+(*                             M_2 > 0 and g <> 0 every radicand is      *)
+(*                             positive and every divisor nonzero, in    *)
+(*                             both runs, at every step.                 *)
+(*                                                                       *)
+(* What the totalized model does at 0.  Coq's reals are total: / 0 = 0   *)
+(* (Rinv_0) and sqrt x = 0 for x <= 0 (sqrt_neg_0), and rcl_inv,         *)
+(* rcl_sqrt USE those cases.  So normalized_ensemble_bound holds even    *)
+(* for a zero-spread ensemble, where the real model's coefficient is 0   *)
+(* and IEEE binary64 gives +inf and then NaN (floats/ Part E).  The      *)
+(* standard model rnd cannot represent that run.  The _dom corollary     *)
+(* removes the reliance: under its hypotheses the totalized cases are    *)
+(* never reached, by either run.                                         *)
+(* ===================================================================== *)
+
+Lemma normalized_second_moment_resets : forall g x, 0 < x ->
+  (g * / sqrt x) ^ 2 * x = g ^ 2.
+Proof.
+  intros g x Hx.
+  assert (Hs : sqrt x <> 0)
+    by (apply Rgt_not_eq; apply sqrt_lt_R0; exact Hx).
+  pose proof (sqrt_sqrt x (Rlt_le _ _ Hx)) as Hsq.
+  replace ((g * / sqrt x) ^ 2 * x) with (g ^ 2 * (x / (sqrt x * sqrt x)))
+    by (field; exact Hs).
+  rewrite Hsq. field. lra.
+Qed.
+
+Lemma normalized_exact_step : forall g m, 0 < m 2%nat ->
+  estep (alpha_n g) m 2%nat = g ^ 2.
+Proof.
+  intros g m H. unfold estep, alpha_n. apply normalized_second_moment_resets.
+  exact H.
+Qed.
+
+Lemma sq_pos : forall g, g <> 0 -> 0 < g ^ 2.
+Proof.
+  intros g Hg. replace (g ^ 2) with (Rsqr g) by (unfold Rsqr; ring).
+  apply Rsqr_pos_lt. exact Hg.
+Qed.
+
+Theorem normalized_exact_resets : forall g T m, g <> 0 -> 0 < m 2%nat ->
+  eiter (alpha_n g) (S T) m 2%nat = g ^ 2.
+Proof.
+  intros g T. induction T as [|T IH]; intros m Hg Hm.
+  - cbn [eiter]. apply normalized_exact_step. exact Hm.
+  - change (eiter (alpha_n g) (S (S T)) m 2%nat)
+      with (eiter (alpha_n g) (S T) (estep (alpha_n g) m) 2%nat).
+    apply IH; [exact Hg|]. rewrite normalized_exact_step by exact Hm.
+    apply sq_pos. exact Hg.
+Qed.
+
+Corollary normalized_seed_error_erased : forall g mh m, g <> 0 ->
+  0 < mh 2%nat -> 0 < m 2%nat ->
+  eiter (alpha_n g) 1 mh 2%nat = eiter (alpha_n g) 1 m 2%nat.
+Proof.
+  intros g mh m Hg H1 H2.
+  rewrite !(normalized_exact_resets g 0) by assumption. reflexivity.
+Qed.
+
+(* After the reset the exact coefficient is g / |g| = +-1.               *)
+Lemma alpha_n_unit : forall g m, g <> 0 -> m 2%nat = g ^ 2 ->
+  Rabs (alpha_n g m) = 1.
+Proof.
+  intros g m Hg Hm. unfold alpha_n. rewrite Hm.
+  replace (g ^ 2) with (Rsqr g) by (unfold Rsqr; ring).
+  rewrite sqrt_Rsqr_abs, Rabs_mult, Rabs_inv, Rabs_Rabsolu.
+  apply Rinv_r. apply Rabs_no_R0. exact Hg.
+Qed.
+
+Section NormalizedRounded.
+  Variable u : R.
+  Hypothesis Hu : 0 <= u < 1.
+  Variable rnd : R -> R.
+  Hypothesis rnd_rel : forall x, Rabs (rnd x - x) <= u * Rabs x.
+
+  Lemma rnd_pos : forall y, 0 < y -> 0 < rnd y.
+  Proof.
+    intros y Hy. destruct (rnd_rcl u Hu rnd rnd_rel y) as [t [E [B _]]].
+    rewrite E. pose proof (exp_pos (- lu u)).
+    apply Rmult_lt_0_compat; lra.
+  Qed.
+
+  (* One rounded step: fl(fl(a_h^2) M_2h) with a_h = fl(g / fl(sqrt     *)
+  (* M_2h)) is g^2 times six rounding factors -- M_2h cancels.           *)
+  Lemma normalized_m2_step : forall g mh, g <> 0 -> 0 < mh 2%nat ->
+    rcl (6 * lu u) (fstep rnd (alphah_n rnd g) mh 2%nat) (g ^ 2)
+    /\ 0 < fstep rnd (alphah_n rnd g) mh 2%nat.
+  Proof.
+    intros g mh Hg Hm.
+    pose proof (normalizing_coefficient_stable u Hu rnd rnd_rel g 0 mh mh
+                  (Rle_refl 0) (rcl_refl _)) as Ha.
+    pose proof (lu_nonneg u Hu) as Hlu.
+    assert (Hla : 0 <= / 2 * 0 + 2 * lu u) by lra.
+    pose proof (fpow_rcl u Hu rnd rnd_rel _ _ _ 2 ltac:(lia) Hla Ha) as P.
+    pose proof (rcl_rnd u Hu rnd rnd_rel _ _ _
+                  (rcl_mul _ _ _ _ _ _ P (rcl_refl (mh 2%nat)))) as S1.
+    rewrite normalized_second_moment_resets in S1 by exact Hm.
+    assert (R6 : rcl (6 * lu u) (fstep rnd (alphah_n rnd g) mh 2%nat) (g ^ 2)).
+    { unfold fstep, alphah_n. eapply rcl_mono; [|exact S1].
+      replace (INR 2) with 2 by (simpl; ring).
+      replace (INR (2 - 1)) with 1 by (simpl; ring). lra. }
+    split; [exact R6|].
+    destruct R6 as [th [E [B1 B2]]]. rewrite E.
+    apply Rmult_lt_0_compat; [pose proof (exp_pos (- (6 * lu u))); lra|].
+    apply sq_pos. exact Hg.
+  Qed.
+
+  Theorem normalized_m2_nongrowing : forall g T mh, g <> 0 -> 0 < mh 2%nat ->
+    rcl (6 * lu u) (fiter rnd (alphah_n rnd g) (S T) mh 2%nat) (g ^ 2)
+    /\ 0 < fiter rnd (alphah_n rnd g) (S T) mh 2%nat.
+  Proof.
+    intros g T. induction T as [|T IH]; intros mh Hg Hm.
+    - cbn [fiter]. apply normalized_m2_step; assumption.
+    - change (fiter rnd (alphah_n rnd g) (S (S T)) mh 2%nat)
+        with (fiter rnd (alphah_n rnd g) (S T)
+                    (fstep rnd (alphah_n rnd g) mh) 2%nat).
+      apply IH; [exact Hg|]. apply (normalized_m2_step g mh Hg Hm).
+  Qed.
+
+  Corollary normalized_m2_radius_constant : forall g beta T mh c xs,
+    g <> 0 -> 0 < mh 2%nat -> 0 < Smom c 2 xs ->
+    rcl (6 * lu u) (fiter rnd (alphah_n rnd g) (S T) mh 2%nat)
+        (Smom (fst (piter (alpha_n g) beta (S T) (c, xs))) 2
+              (snd (piter (alpha_n g) beta (S T) (c, xs)))).
+  Proof.
+    intros g beta T mh c xs Hg Hmh Hm.
+    change (Smom (fst (piter (alpha_n g) beta (S T) (c, xs))) 2
+                 (snd (piter (alpha_n g) beta (S T) (c, xs))))
+      with (smv (fst (piter (alpha_n g) beta (S T) (c, xs)))
+                (snd (piter (alpha_n g) beta (S T) (c, xs))) 2%nat).
+    rewrite (eiter_is_particles 2 (alpha_n g)).
+    - rewrite normalized_exact_resets by assumption.
+      apply normalized_m2_nongrowing; assumption.
+    - intros m m' H. unfold alpha_n. rewrite (H 2%nat) by lia. reflexivity.
+  Qed.
+
+  Theorem normalized_domain : forall g T m mh, g <> 0 ->
+    0 < m 2%nat -> 0 < mh 2%nat ->
+    0 < eiter (alpha_n g) T m 2%nat
+    /\ 0 < sqrt (eiter (alpha_n g) T m 2%nat)
+    /\ 0 < fiter rnd (alphah_n rnd g) T mh 2%nat
+    /\ 0 < rnd (sqrt (fiter rnd (alphah_n rnd g) T mh 2%nat)).
+  Proof.
+    intros g T m mh Hg Hm Hmh.
+    assert (E : 0 < eiter (alpha_n g) T m 2%nat).
+    { destruct T as [|T]; [exact Hm|].
+      rewrite normalized_exact_resets by assumption. apply sq_pos. exact Hg. }
+    assert (F : 0 < fiter rnd (alphah_n rnd g) T mh 2%nat).
+    { destruct T as [|T]; [exact Hmh|].
+      apply (normalized_m2_nongrowing g T mh Hg Hmh). }
+    split; [exact E|]. split; [apply sqrt_lt_R0; exact E|].
+    split; [exact F|]. apply rnd_pos. apply sqrt_lt_R0. exact F.
+  Qed.
+
+  (* After the reset, every moment's radius grows LINEARLY: the          *)
+  (* coefficient is known to 3 lu + 2 lu at every step.                  *)
+  Lemma normalized_linear_tail : forall g k T l d mh m, (1 <= k)%nat ->
+    g <> 0 -> m 2%nat = g ^ 2 -> 0 < mh 2%nat ->
+    rcl (6 * lu u) (mh 2%nat) (m 2%nat) ->
+    mcl l d (mh k) (m k) ->
+    mcl (l + INR T * (6 * INR k * lu u))
+        (exp (INR T * (6 * INR k * lu u)) * d)
+        (fiter rnd (alphah_n rnd g) T mh k) (eiter (alpha_n g) T m k).
+  Proof.
+    intros g k T. induction T as [|T IH]; intros l d mh m Hk Hg Hm2 Hmh R2 Hm.
+    - cbn [fiter eiter]. replace (INR 0) with 0 by reflexivity.
+      rewrite Rmult_0_l, Rplus_0_r, exp_0, Rmult_1_l. exact Hm.
+    - cbn [fiter eiter].
+      pose proof (lu_nonneg u Hu) as Hlu.
+      pose proof (normalizing_coefficient_stable u Hu rnd rnd_rel g (6 * lu u)
+                    mh m ltac:(lra) R2) as Ha.
+      assert (Hla : 0 <= / 2 * (6 * lu u) + 2 * lu u) by lra.
+      pose proof (mcl_step u Hu rnd rnd_rel _ _ _ _ _ _ _ k Hk Hla Hm Ha) as S1.
+      fold (alpha_n g m) in S1.
+      rewrite (alpha_n_unit g m Hg Hm2), pow1, Rmult_1_l in S1.
+      replace (INR k * (/ 2 * (6 * lu u) + 2 * lu u) + INR k * lu u)
+        with (6 * INR k * lu u) in S1 by field.
+      assert (Hm2' : estep (alpha_n g) m 2%nat = g ^ 2).
+      { apply normalized_exact_step. rewrite Hm2. apply sq_pos. exact Hg. }
+      destruct (normalized_m2_step g mh Hg Hmh) as [R2' P2'].
+      assert (R2'' : rcl (6 * lu u) (fstep rnd (alphah_n rnd g) mh 2%nat)
+                         (estep (alpha_n g) m 2%nat))
+        by (rewrite Hm2'; exact R2').
+      pose proof (IH _ _ (fstep rnd (alphah_n rnd g) mh) (estep (alpha_n g) m)
+                    Hk Hg Hm2' P2' R2'' S1) as B.
+      eapply mcl_mono; [| |exact B].
+      + rewrite S_INR. lra.
+      + replace (exp (INR T * (6 * INR k * lu u)) * (exp (6 * INR k * lu u) * d))
+          with (exp (INR (S T) * (6 * INR k * lu u)) * d).
+        * lra.
+        * rewrite S_INR.
+          replace ((INR T + 1) * (6 * INR k * lu u))
+            with (INR T * (6 * INR k * lu u) + 6 * INR k * lu u) by ring.
+          rewrite exp_plus. ring.
+  Qed.
+
+  (* From a mixed seed: M_2 at log-error l2, M_k at (l0, d).  After      *)
+  (* T + 1 steps the radius is LINEAR in T.                              *)
+  Theorem normalized_linear_bound : forall g k T l0 l2 d mh m, (1 <= k)%nat ->
+    g <> 0 -> 0 < m 2%nat -> 0 <= l2 ->
+    rcl l2 (mh 2%nat) (m 2%nat) -> mcl l0 d (mh k) (m k) ->
+    mcl (l0 + INR k * (/ 2 * l2 + 3 * lu u) + INR T * (6 * INR k * lu u))
+        (exp (INR k * (/ 2 * l2 + 3 * lu u) + INR T * (6 * INR k * lu u))
+         * (Rabs (alpha_n g m) ^ k * d))
+        (fiter rnd (alphah_n rnd g) (S T) mh k) (eiter (alpha_n g) (S T) m k).
+  Proof.
+    intros g k T l0 l2 d mh m Hk Hg Hm2 Hl2 R2 Hm. cbn [fiter eiter].
+    pose proof (lu_nonneg u Hu) as Hlu.
+    assert (Hmh : 0 < mh 2%nat).
+    { destruct R2 as [th [E [B _]]]. rewrite E.
+      apply Rmult_lt_0_compat; [pose proof (exp_pos (- l2)); lra|exact Hm2]. }
+    pose proof (normalizing_coefficient_stable u Hu rnd rnd_rel g l2 mh m
+                  Hl2 R2) as Ha.
+    assert (Hla : 0 <= / 2 * l2 + 2 * lu u) by lra.
+    pose proof (mcl_step u Hu rnd rnd_rel _ _ _ _ _ _ _ k Hk Hla Hm Ha) as S1.
+    fold (alpha_n g m) in S1.
+    assert (Hm2' : estep (alpha_n g) m 2%nat = g ^ 2)
+      by (apply normalized_exact_step; exact Hm2).
+    destruct (normalized_m2_step g mh Hg Hmh) as [R2' P2'].
+    assert (R2'' : rcl (6 * lu u) (fstep rnd (alphah_n rnd g) mh 2%nat)
+                       (estep (alpha_n g) m 2%nat))
+      by (rewrite Hm2'; exact R2').
+    pose proof (normalized_linear_tail g k T _ _
+                  (fstep rnd (alphah_n rnd g) mh) (estep (alpha_n g) m)
+                  Hk Hg Hm2' P2' R2'' S1) as B.
+    eapply mcl_mono; [| |exact B].
+    - right. ring.
+    - right.
+      replace (INR k * (/ 2 * l2 + 3 * lu u) + INR T * (6 * INR k * lu u))
+        with (INR T * (6 * INR k * lu u)
+              + (INR k * (/ 2 * l2 + 2 * lu u) + INR k * lu u)) by ring.
+      rewrite !exp_plus. ring.
+  Qed.
+
+  Corollary normalized_particles_linear : forall g beta k T l0 l2 d mh c xs,
+    (1 <= k)%nat -> g <> 0 -> 0 < Smom c 2 xs -> 0 <= l2 ->
+    rcl l2 (mh 2%nat) (Smom c 2 xs) -> mcl l0 d (mh k) (Smom c k xs) ->
+    mcl (l0 + INR k * (/ 2 * l2 + 3 * lu u) + INR T * (6 * INR k * lu u))
+        (exp (INR k * (/ 2 * l2 + 3 * lu u) + INR T * (6 * INR k * lu u))
+         * (Rabs (alpha_n g (smv c xs)) ^ k * d))
+        (fiter rnd (alphah_n rnd g) (S T) mh k)
+        (Smom (fst (piter (alpha_n g) beta (S T) (c, xs))) k
+              (snd (piter (alpha_n g) beta (S T) (c, xs)))).
+  Proof.
+    intros g beta k T l0 l2 d mh c xs Hk Hg Hm2 Hl2 R2 Hm.
+    change (Smom (fst (piter (alpha_n g) beta (S T) (c, xs))) k
+                 (snd (piter (alpha_n g) beta (S T) (c, xs))))
+      with (smv (fst (piter (alpha_n g) beta (S T) (c, xs)))
+                (snd (piter (alpha_n g) beta (S T) (c, xs))) k).
+    rewrite (eiter_is_particles 2 (alpha_n g)).
+    - apply normalized_linear_bound; assumption.
+    - intros m m' H. unfold alpha_n. rewrite (H 2%nat) by lia. reflexivity.
+  Qed.
+
+  (* normalized_ensemble_bound WITH ITS DOMAIN (RF-2): the bound, and at *)
+  (* every step a positive true M_2, a positive float M_2 and a nonzero  *)
+  (* float divisor fl(sqrt M_2h).                                        *)
+  Corollary normalized_ensemble_bound_dom : forall g beta r l0 mh c xs,
+    (2 <= r)%nat -> 0 <= l0 -> g <> 0 -> 0 < Smom c 2 xs ->
+    (forall k, (1 <= k)%nat -> (k <= r)%nat -> rcl l0 (mh k) (Smom c k xs)) ->
+    forall T,
+      (forall k, (1 <= k)%nat -> (k <= r)%nat ->
+         rcl (rad u r (/ 2) (2 * lu u) l0 T)
+             (fiter rnd (alphah_n rnd g) T mh k)
+             (Smom (fst (piter (alpha_n g) beta T (c, xs))) k
+                   (snd (piter (alpha_n g) beta T (c, xs)))))
+      /\ 0 < Smom (fst (piter (alpha_n g) beta T (c, xs))) 2
+                  (snd (piter (alpha_n g) beta T (c, xs)))
+      /\ 0 < fiter rnd (alphah_n rnd g) T mh 2%nat
+      /\ 0 < rnd (sqrt (fiter rnd (alphah_n rnd g) T mh 2%nat)).
+  Proof.
+    intros g beta r l0 mh c xs Hr Hl0 Hg Hm2 Hm T.
+    assert (Hmh : 0 < mh 2%nat).
+    { destruct (Hm 2%nat ltac:(lia) ltac:(lia)) as [th [E [B _]]]. rewrite E.
+      apply Rmult_lt_0_compat; [pose proof (exp_pos (- l0)); lra|exact Hm2]. }
+    destruct (normalized_domain g T (smv c xs) mh Hg Hm2 Hmh)
+      as [E1 [_ [F1 F2]]].
+    split; [|split; [|split]].
+    - intros k Hk1 Hkr.
+      exact (normalized_ensemble_bound u rnd g beta r l0 mh c xs Hu rnd_rel
+               Hr Hl0 Hm T k Hk1 Hkr).
+    - change (Smom (fst (piter (alpha_n g) beta T (c, xs))) 2
+                   (snd (piter (alpha_n g) beta T (c, xs))))
+        with (smv (fst (piter (alpha_n g) beta T (c, xs)))
+                  (snd (piter (alpha_n g) beta T (c, xs))) 2%nat).
+      rewrite (eiter_is_particles 2 (alpha_n g)); [exact E1|].
+      intros m m' H. unfold alpha_n. rewrite (H 2%nat) by lia. reflexivity.
+    - exact F1.
+    - exact F2.
+  Qed.
+
+End NormalizedRounded.
+
+(* The particle iteration keeps the particle count (audit RF-5).         *)
+Lemma map_length_R : forall (f : R -> R) (xs : list R),
+  length (map f xs) = length xs.
+Proof. intros f xs. induction xs as [|x xs IH]; simpl; [reflexivity|]. lia. Qed.
+
+Lemma piter_length : forall alpha beta T c xs,
+  length (snd (piter alpha beta T (c, xs))) = length xs.
+Proof.
+  intros alpha beta T. induction T as [|T IH]; intros c xs; [reflexivity|].
+  cbn [piter]. destruct (pstep alpha beta (c, xs)) as [c' xs'] eqn:E.
+  rewrite IH. unfold pstep in E. cbn [fst snd] in E. injection E as _ E2.
+  subst xs'. apply map_length_R.
 Qed.

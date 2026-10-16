@@ -24,7 +24,14 @@
 (*                         SYMMETRY TRANSFER; the tangent-kernel joint   *)
 (*                         pair-swap symmetry (T2)                       *)
 (*   4. Evaluation      -- nat-semiring semantics; ACEq soundness;       *)
-(*                         semantic corollaries of T1/T2                 *)
+(*                         semantic corollaries of T1/T2.  The transfer  *)
+(*                         is EQUIVARIANCE (inputs and derivative        *)
+(*                         channel exchanged together), not symmetry of  *)
+(*                         each partial (single_partial_not_symmetric,   *)
+(*                         naive_scalar_read_wrong); the lossless        *)
+(*                         storage is the PAIR of partials read through  *)
+(*                         the channel-aware chan_read                   *)
+(*                         (jpair_equivariant, channel_aware_round_trip) *)
 (*   5. Refutation      -- in the formal-slot model, SEMANTIC primal     *)
 (*                         symmetry alone does NOT transfer: the         *)
 (*                         structural hypothesis is the right one        *)
@@ -454,11 +461,18 @@ Section Evaluation.
   Qed.
 
   (* The Jacobian transfer, semantically: the a-partial at the swapped   *)
-  (* environment IS the b-partial.  This is the classic form d_a k(y,x)  *)
-  (* = d_b k(x,y): the cotangent field over a symmetric primal is        *)
-  (* symmetric under the joint relabeling, so canonical (triangular)     *)
-  (* storage of derivative/cotangent buffers is lossless (access via     *)
-  (* BladeCore.access_exact / raise_1_2 as for any symmetric array).     *)
+  (* environment IS the b-partial -- the classic form d_a k(y,x) =       *)
+  (* d_b k(x,y).  This is EQUIVARIANCE, not per-partial symmetry: the    *)
+  (* swap exchanges the inputs AND the derivative channel.  A single     *)
+  (* partial is NOT a symmetric scalar field (x * y: d_x = y reads 3 at  *)
+  (* (2, 3) and 2 at (3, 2) -- single_partial_not_symmetric below), so   *)
+  (* ordinary canonical access (BladeCore.access_exact) does NOT apply   *)
+  (* to one partial's buffer.  What IS lossless is the PAIR of partials  *)
+  (* stored at canonical environments and read through chan_read, which  *)
+  (* exchanges the two channels when the canonical order swaps the       *)
+  (* inputs (channel_aware_round_trip below).  An incoming cotangent is  *)
+  (* a third, separate contract: it need not be symmetric at all, and    *)
+  (* section 6 sums cot(p,q) and cot(q,p) rather than doubling one.      *)
   Corollary jacobian_transfer_semantic : forall a b e,
     aceq (ren (swapIdx a b) e) e ->
     forall env,
@@ -469,6 +483,59 @@ Section Evaluation.
     transitivity (eval env (ren (swapIdx a b) (d dname a e))).
     - symmetry; apply eval_ren.
     - apply aceq_sound, jacobian_symmetry_transfer; exact H.
+  Qed.
+
+  Corollary jacobian_transfer_semantic_rl : forall a b e,
+    aceq (ren (swapIdx a b) e) e ->
+    forall env,
+      eval (fun x => env (swapIdx a b x)) (d dname b e)
+      = eval env (d dname a e).
+  Proof.
+    intros a b e H env.
+    transitivity (eval env (ren (swapIdx a b) (d dname b e))).
+    - symmetry; apply eval_ren.
+    - apply aceq_sound, jacobian_symmetry_transfer_rl; exact H.
+  Qed.
+
+  (* --- the CHANNEL-AWARE canonical read (audit F02) ------------------- *)
+  (* jpair: the two partials as one paired field.  Equivariance: the     *)
+  (* swapped environment yields the pair with its channels exchanged.    *)
+  Definition jpair (a b : nat) (e : expr) (env : nat -> nat) : nat * nat :=
+    (eval env (d dname a e), eval env (d dname b e)).
+
+  Theorem jpair_equivariant : forall a b e,
+    aceq (ren (swapIdx a b) e) e ->
+    forall env,
+      jpair a b e (fun x => env (swapIdx a b x))
+      = (snd (jpair a b e env), fst (jpair a b e env)).
+  Proof.
+    intros a b e H env. unfold jpair. simpl.
+    rewrite (jacobian_transfer_semantic a b e H env),
+            (jacobian_transfer_semantic_rl a b e H env).
+    reflexivity.
+  Qed.
+
+  (* storage consulted ONLY at canonical environments (env a <= env b); *)
+  (* off them, read the swapped (canonical) environment and EXCHANGE the *)
+  (* two channels                                                        *)
+  Definition chan_read (a b : nat) (store : (nat -> nat) -> nat * nat)
+    (env : nat -> nat) : nat * nat :=
+    if env a <=? env b then store env
+    else let p := store (fun x => env (swapIdx a b x)) in (snd p, fst p).
+
+  (* THE ROUND TRIP: any store that holds the pair of partials at the    *)
+  (* canonical environments reconstructs it at EVERY environment.        *)
+  Theorem channel_aware_round_trip : forall a b e store,
+    aceq (ren (swapIdx a b) e) e ->
+    (forall env, env a <= env b -> store env = jpair a b e env) ->
+    forall env, chan_read a b store env = jpair a b e env.
+  Proof.
+    intros a b e store Hsym Hst env. unfold chan_read.
+    destruct (Nat.leb_spec (env a) (env b)) as [Hle | Hgt].
+    - apply Hst. exact Hle.
+    - rewrite (Hst (fun x => env (swapIdx a b x))).
+      + rewrite (jpair_equivariant a b e Hsym env). reflexivity.
+      + rewrite swapIdx_l, swapIdx_r. lia.
   Qed.
 
   (* Plan claim (a), exactly: dk(a, da, b, db) = dk(b, db, a, da) --     *)
@@ -488,6 +555,36 @@ Section Evaluation.
     - apply aceq_sound, tangent_joint_swap; assumption.
   Qed.
 End Evaluation.
+
+(* AUDIT F02 REGRESSION.  e = x * y (structurally symmetric) has         *)
+(* d_x e = y: 3 at (x, y) = (2, 3) and 2 at the swapped (3, 2), so ONE   *)
+(* partial is not a symmetric scalar field, and a scalar canonical read  *)
+(* of its buffer returns the wrong value off the canonical order.  The   *)
+(* channel-aware read of the PAIR is right there.                        *)
+Definition jac_xy : expr := EMul (EVar 0) (EVar 1).
+Definition jac_env (i : nat) : nat := if i =? 0 then 2 else 3.
+Definition jac_P (_ x : nat) : nat := x.
+Definition jac_dn (m : nat) : nat := m.
+
+Example single_partial_not_symmetric :
+  eval jac_P jac_env (d jac_dn 0 jac_xy) = 3 /\
+  eval jac_P (fun i => jac_env (swapIdx 0 1 i)) (d jac_dn 0 jac_xy) = 2.
+Proof. split; reflexivity. Qed.
+
+Definition naive_read (a b : nat) (store : (nat -> nat) -> nat) (env : nat -> nat) : nat :=
+  if env a <=? env b then store env else store (fun x => env (swapIdx a b x)).
+
+Example naive_scalar_read_wrong :
+  naive_read 0 1 (fun env => eval jac_P env (d jac_dn 0 jac_xy))
+             (fun i => jac_env (swapIdx 0 1 i)) = 3 /\
+  eval jac_P (fun i => jac_env (swapIdx 0 1 i)) (d jac_dn 0 jac_xy) = 2.
+Proof. split; reflexivity. Qed.
+
+Example channel_read_correct :
+  chan_read 0 1 (jpair jac_dn jac_P 0 1 jac_xy) (fun i => jac_env (swapIdx 0 1 i))
+  = (2, 3) /\
+  jpair jac_dn jac_P 0 1 jac_xy (fun i => jac_env (swapIdx 0 1 i)) = (2, 3).
+Proof. split; reflexivity. Qed.
 
 (* ===================================================================== *)
 (* Worked hypothesis instances: the structural-symmetry premise is       *)

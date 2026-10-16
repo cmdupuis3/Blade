@@ -21,7 +21,14 @@
 (*                            enumerated (no nonemptiness needed)        *)
 (*   compoundk_NoDup          each exactly once                          *)
 (*   compoundk_denotation     the arrow enumerates EXACTLY the true      *)
-(*                            cells of the mask, at every rank           *)
+(*                            cells of the mask, at every POSITIVE rank  *)
+(*                            (at rank zero the bare arrow enumerates    *)
+(*                            [[]] even for the false mask --            *)
+(*                            compound_rank_zero_ignores_mask)           *)
+(*   compound_enum,           the rank-zero wrapper (tests M [] at no    *)
+(*   compound_enum_denotation dims, the arrow otherwise): exactly the    *)
+(*                            true cells at EVERY rank, zero included;   *)
+(*                            compound_enum_NoDup                        *)
 (*   rank2_subsumed           BladeArrow's concrete rank-2 instance is   *)
 (*                            the [n; m] case of this arrow              *)
 (*                                                                       *)
@@ -133,8 +140,9 @@ Section CompoundK.
     - apply NoDup_filter'. apply NoDup_seq.
   Qed.
 
-  (* THE DENOTATION THEOREM: at every rank, the Compound arrow           *)
-  (* enumerates exactly the true cells of the mask.                      *)
+  (* THE DENOTATION THEOREM: at every POSITIVE rank, the Compound arrow  *)
+  (* enumerates exactly the true cells of the mask (all ranks:           *)
+  (* compound_enum_denotation below).                                    *)
   Corollary compoundk_denotation : forall n dims t,
     In t (enumA ckSt ck_heads ck_step (length (n :: dims)) (n :: dims, []))
     <-> (in_bounds t (n :: dims) /\ M t = true).
@@ -147,7 +155,51 @@ Section CompoundK.
       apply (compoundk_complete (n :: dims) [] t HF).
       exact HM.
   Qed.
+
+  (* RANK ZERO.  At dims = [] the bare arrow enumerates [[]] whatever the *)
+  (* mask (enumA at rank 0), so compoundk_denotation is stated at         *)
+  (* positive rank only (compound_rank_zero_ignores_mask below).  The     *)
+  (* wrapper tests the mask on the one empty tuple at rank zero and is    *)
+  (* the arrow at every positive rank; its denotation theorem holds at    *)
+  (* EVERY rank, zero included.                                           *)
+  Definition compound_enum (dims : list nat) : list (list nat) :=
+    match dims with
+    | [] => if M [] then [[]] else []
+    | _ :: _ => enumA ckSt ck_heads ck_step (length dims) (dims, [])
+    end.
+
+  Theorem compound_enum_denotation : forall dims t,
+    In t (compound_enum dims) <-> (in_bounds t dims /\ M t = true).
+  Proof.
+    intros [|n dims] t.
+    - unfold compound_enum, in_bounds. split.
+      + destruct (M []) eqn:E; simpl; [| contradiction].
+        intros [<- | []]. split; [constructor | exact E].
+      + intros [HF HM]. inversion HF; subst. rewrite HM. left. reflexivity.
+    - exact (compoundk_denotation n dims t).
+  Qed.
+
+  Corollary compound_enum_NoDup : forall dims, NoDup (compound_enum dims).
+  Proof.
+    intros [|n dims]; unfold compound_enum.
+    - destruct (M []); [constructor; [intros [] | constructor] | constructor].
+    - apply compoundk_NoDup.
+  Qed.
+
+  (* at positive rank the wrapper IS the arrow *)
+  Lemma compound_enum_pos : forall n dims,
+    compound_enum (n :: dims)
+    = enumA ckSt ck_heads ck_step (length (n :: dims)) (n :: dims, []).
+  Proof. reflexivity. Qed.
 End CompoundK.
+
+(* AUDIT F05 REGRESSION: the bare arrow at rank zero ignores an          *)
+(* everywhere-false mask; the wrapper does not.                          *)
+Example compound_rank_zero_ignores_mask :
+  enumA ckSt (ck_heads (fun _ => false)) ck_step 0 ([], []) = [[]] /\
+  compound_enum (fun _ => false) [] = [] /\
+  compound_enum (fun _ => true) [] = [[]].
+Proof. repeat split. Qed.
 
 (* ===================================================================== *)
 (* SUBSUMPTION: BladeArrow's concrete rank-2 masked instance is the      *)
