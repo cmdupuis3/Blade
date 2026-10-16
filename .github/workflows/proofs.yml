@@ -71,12 +71,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The image puts Rocq in an opam switch under its user's home and only
+      # its login shell adds that to PATH; a container step's shell does not.
+      # In Rocq 9 `coqc` can be a symlink to `rocq`, so match links too.
       - name: Locate Rocq
         run: |
           if ! command -v coqc >/dev/null 2>&1; then
-            coqc_path=$(find / -path /proc -prune -o -name coqc -type f -print 2>/dev/null | head -n 1)
-            echo "found: $coqc_path"
-            dirname "$coqc_path" >> "$GITHUB_PATH"
+            bin=""
+            for d in /home/*/.opam/*/bin /root/.opam/*/bin; do
+              if [ -e "$d/coqc" ] || [ -e "$d/rocq" ]; then bin="$d"; break; fi
+            done
+            if [ -z "$bin" ]; then
+              hit=$(find / -path /proc -prune -o \( -name coqc -o -name rocq \) \( -type f -o -type l \) -print 2>/dev/null | head -n 1)
+              [ -n "$hit" ] && bin=$(dirname "$hit")
+            fi
+            if [ -z "$bin" ]; then
+              echo "no coqc or rocq anywhere in the image"; ls -la /home/* 2>/dev/null; exit 1
+            fi
+            echo "Rocq bin: $bin"; ls "$bin" | grep -E '^(coq|rocq)' || true
+            echo "$bin" >> "$GITHUB_PATH"
           fi
 
       - name: Rocq version
